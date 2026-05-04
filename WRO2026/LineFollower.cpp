@@ -47,6 +47,10 @@ void LineFollowerClass::update()
 
     if (!_tracer.isOnline())
     {
+        // Clear the D-term history so the first tick after reacquisition does not see a stale
+        // derivative computed against an old (possibly several-second-stale) error sample.
+        _lastErr = 0.0f;
+
         // Line lost beneath every channel. Dispatch on Config::LOST_LINE_ACTION.
         _lostLine = true;
 

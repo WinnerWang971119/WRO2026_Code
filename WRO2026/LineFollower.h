@@ -110,9 +110,12 @@ public:
 
     /**
      * @brief Most recent weighted error sample stored by the controller.
+     *
      * @return The last value returned by `MatrixLineTracer::getError()` while the line was
-     *         online (range `[-4.5, +4.5]`). Zero immediately after `begin()` or while the
-     *         line is lost.
+     *         online (range `[-4.5, +4.5]`). Reset to `0.0f` by `begin()`, by
+     *         `setEnabled(false)`, and on every entry to the lost-line branch of `update()` —
+     *         so a caller observing the value immediately after the line is dropped will see
+     *         `0.0f`, not a stale sample.
      * @note Useful as telemetry for OLED tuning views.
      */
     float getRawError() const;

@@ -168,8 +168,17 @@ uint8_t DriveClass::turnDeg(int16_t deg)
     const uint8_t rc =
         MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, true);
 
-    _heldYaw  = target;
-    _turnDone = false;
+    if (rc == 0x00)
+    {
+        _heldYaw  = target;
+        _turnDone = false;
+    }
+    else
+    {
+        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
+        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
+        _turnDone = true;
+    }
     return rc;
 }
 
@@ -181,8 +190,17 @@ uint8_t DriveClass::turnDegBlocking(int16_t deg)
     const uint8_t rc =
         MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, false);
 
-    _heldYaw  = target;
-    _turnDone = true;    // library already blocked until the lower MCU reported done.
+    if (rc == 0x00)
+    {
+        _heldYaw  = target;
+        _turnDone = true;    // library already blocked until the lower MCU reported done.
+    }
+    else
+    {
+        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
+        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
+        _turnDone = true;
+    }
     return rc;
 }
 
@@ -193,8 +211,17 @@ uint8_t DriveClass::turnToYaw(int16_t yaw)
     const uint8_t rc =
         MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, true);
 
-    _heldYaw  = target;
-    _turnDone = false;
+    if (rc == 0x00)
+    {
+        _heldYaw  = target;
+        _turnDone = false;
+    }
+    else
+    {
+        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
+        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
+        _turnDone = true;
+    }
     return rc;
 }
 
@@ -205,8 +232,17 @@ uint8_t DriveClass::turnToYawBlocking(int16_t yaw)
     const uint8_t rc =
         MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, false);
 
-    _heldYaw  = target;
-    _turnDone = true;
+    if (rc == 0x00)
+    {
+        _heldYaw  = target;
+        _turnDone = true;
+    }
+    else
+    {
+        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
+        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
+        _turnDone = true;
+    }
     return rc;
 }
 

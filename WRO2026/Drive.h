@@ -1,7 +1,6 @@
 /**
  * @file Drive.h
  * @brief Movement-primitive singleton wrapping `MiniR4.DriveDC` and `MiniR4.Motion`.
- * @author WRO 2026
  *
  * @details
  * `DriveClass` owns the differential-drive chassis. It is the single entry point every
@@ -25,7 +24,9 @@
  * @note The underlying `MiniR4.DriveDC` lower-MCU API exposes ONE task-done bit, so this
  *       class collapses move-done and turn-done into a single shared "task done" signal
  *       inside `update()`. Application code MUST NOT issue a bounded move and a turn
- *       concurrently — they would race for the same flag.
+ *       concurrently — they would race for the same flag. On a failed turn issue (non-zero
+ *       rc from TurnGyro), `_turnDone` is set/left `true` immediately so the caller is
+ *       unblocked even though no task is in flight on the lower MCU.
  *
  * @warning The `*Blocking` variants spin inside the underlying library's `delay(50)`-ish
  *          poll loop until the lower MCU reports the task is done. They MUST NOT be called
@@ -224,6 +225,9 @@ public:
      * @note Sets `_turnDone = false`. Updates `_heldYaw` to the post-turn target.
      *       Yaw wrap-around: `_normalizeYaw` keeps targets in `(-360, +360)`; do not
      *       pre-modulo to `[-180, 180]` — the example sketch shows ±270 working fine.
+     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
+     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
+     *       previous yaw lock is preserved.
      */
     uint8_t turnDeg(int16_t deg);
 
@@ -238,6 +242,9 @@ public:
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Returns with `_turnDone = true` (the underlying library already blocked until the
      *       lower MCU reported done). Updates `_heldYaw` to the post-turn target.
+     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
+     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
+     *       previous yaw lock is preserved.
      * @warning DO NOT call from inside any `update()` — see class-level warning.
      */
     uint8_t turnDegBlocking(int16_t deg);
@@ -251,6 +258,9 @@ public:
      * @note Sets `_turnDone = false`. Updates `_heldYaw` to the post-turn target.
      *       Yaw wrap-around: `_normalizeYaw` keeps targets in `(-360, +360)`; do not
      *       pre-modulo to `[-180, 180]` — the example sketch shows ±270 working fine.
+     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
+     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
+     *       previous yaw lock is preserved.
      */
     uint8_t turnToYaw(int16_t yaw);
 
@@ -260,6 +270,9 @@ public:
      * @param yaw Absolute yaw target in degrees.
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Returns with `_turnDone = true`. Updates `_heldYaw` to the post-turn target.
+     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
+     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
+     *       previous yaw lock is preserved.
      * @warning DO NOT call from inside any `update()` — see class-level warning.
      */
     uint8_t turnToYawBlocking(int16_t yaw);
