@@ -19,7 +19,7 @@
  *  2. Add the required `MiniR4.RC*` / `MiniR4.M*` calls inside each method body.
  *  3. Remove the Phase 3 `@todo` notes from this header once fully implemented.
  *
- * @note Do **not** add hardware calls here until the mechanism is finalized; premature
+ * @note Do **not** add hardware calls here until the mechanism is finalized(At least built); premature
  *       abstraction will be ripped out and rewritten anyway.
  */
 class ManipulatorClass

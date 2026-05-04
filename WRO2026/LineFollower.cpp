@@ -81,7 +81,6 @@ void LineFollowerClass::update()
     const float dErr = err - _lastErr;
     _lastErr         = err;
 
-    // P+D only — Phase 1 deliberately omits the integral term (Config::LINE_KI is unused).
     float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
 
     // Clamp the correction to the configured maximum.

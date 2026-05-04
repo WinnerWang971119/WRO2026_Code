@@ -16,7 +16,7 @@
  * behaviour is dispatched on `Config::LOST_LINE_ACTION`.
  *
  * The owned `MatrixLineTracer _tracer` instance is exposed through `getTracer()` so that the
- * Intersection module (T7) can read junction state from the *same* sensor without issuing
+ * Intersection module can read junction state from the *same* sensor without issuing
  * duplicate I2C transactions.
  *
  * Lifecycle:
