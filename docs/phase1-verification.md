@@ -120,8 +120,14 @@ Current branch: `phase1/drive-line-intersection`. No merges to `main`. 10 commit
 | AC12 | PASS-with-translation | TC11. Format directives upstream-identical; comments translated to traditional Chinese intentionally. |
 | AC13 | PASS | TC12 |
 
-## Open follow-ups (from per-task reviews, non-blocking)
+## Open follow-ups
 
-- **LineFollower W1** — under `Config::LOST_LINE_ACTION::CRAWL`, `_lastErr` is not zeroed during the crawl branch. Reacquisition will fire one D-term spike (bounded by `LINE_MAX_CORR = 40`). Two-line fix in `LineFollower.cpp::update()` lost-line branch when needed.
-- **LineFollower S2** — `Config::LostLineAction::CRAWL` doxygen says "last-known direction"; implementation is straight-only (no steering bias). Reconcile docs OR add the bias when the field is available.
+### Closed (commit `d5d21cf`)
+- **Drive C1** — Turn-fail flag-state deviation. All four turn methods now branch on `TurnGyro` return code; on non-zero rc, `_turnDone` is set `true` immediately to unblock callers, and `_heldYaw` is preserved (the chassis didn't move).
+- **LineFollower W1** — `_lastErr` is now zeroed at the top of the lost-line branch in `LineFollower::update()`, eliminating the D-term spike on reacquisition.
+- **LineFollower W2** — `getRawError()` doxygen updated to enumerate every reset point (`begin()`, `setEnabled(false)`, lost-line branch entry) and guarantees the "0.0f, not a stale sample" contract.
+
+### Still open (deferred, non-blocking)
+- **LineFollower S2** — `Config::LostLineAction::CRAWL` doxygen says "last-known direction"; implementation is straight-only (no steering bias). Reconcile docs OR add the bias when the practice strip is available for tuning.
+- **EventTrace W3** — implementation pushes `LINE LOST` whereas plan spec text mentioned `LINE OFFLINE`. Library's `isOnline()` semantics merge "no center detected" with "no I2C ack" into a single signal, so a single label is technically more accurate. Plan text is the candidate to update, not the code.
 - **EventTrace S2 (cosmetic)** — `_prevLineLost` updated inside the transition branch while `_prevTurnDone` updated unconditionally. Both correct; consistency is a style preference.
