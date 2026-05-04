@@ -20,10 +20,10 @@ Thanks!
  * value here is intended to be the only edit required to retune the robot — never duplicate any
  * of these constants in a `.cpp`/`.ino` or as a function-local literal.
  *
- * @note Define `MOTOR_PROFILE_TT` (either as a build flag or `#define MOTOR_PROFILE_TT` above the
- *       `#include "Config.h"` line) to switch the encoder PPR / nominal RPM and the closed-loop
- *       PID gains from the LEGO-motor defaults to the TT-motor profile used by the
- *       `MiniR4_DriveDC_Test` example.
+ * @note PID gains and motor specs target TT-motors (the chassis we are building). Values are
+ *       sourced from MatrixMiniR4's `MiniR4DriveDC.h` TT defaults (`setMoveSyncPID` /
+ *       `setMoveGyroPID` / `setTurnGyroPID` docstrings). If we ever switch motor families,
+ *       re-tune in this section, not via a compile-time flag.
  */
 namespace Config
 {
@@ -51,40 +51,14 @@ namespace Config
     constexpr bool MOTOR_RIGHT_REVERSE = false;
 
     // ---------------------------------------------------------------------------------------
-    // Motor profile + PID gains (LEGO motors are the default; #define MOTOR_PROFILE_TT to swap)
+    // Motor profile + PID gains (TT-motor)
     // ---------------------------------------------------------------------------------------
-
-#ifndef MOTOR_PROFILE_TT
-    // ---- LEGO-motor profile (default) ------------------------------------------------------
-
-    /** @brief Encoder pulses per output-shaft revolution for the LEGO motor. */
-    constexpr uint16_t MOTOR_PPR = 360;
-
-    /** @brief Nominal no-load RPM for the LEGO motor at full power. */
-    constexpr uint16_t MOTOR_RPM = 300;
-
-    /** @brief MoveSync (left/right encoder match) Kp. */
-    constexpr float MOVESYNC_KP = 0.002f;
-    /** @brief MoveSync Ki. */
-    constexpr float MOVESYNC_KI = 0.0f;
-    /** @brief MoveSync Kd. */
-    constexpr float MOVESYNC_KD = 0.004f;
-
-    /** @brief MoveGyro (straight-line yaw lock) Kp. */
-    constexpr float MOVEGYRO_KP = 0.52f;
-    /** @brief MoveGyro Ki. */
-    constexpr float MOVEGYRO_KI = 0.0f;
-    /** @brief MoveGyro Kd. */
-    constexpr float MOVEGYRO_KD = 0.15f;
-
-    /** @brief TurnGyro (in-place rotation) Kp. */
-    constexpr float TURNGYRO_KP = 22.75f;
-    /** @brief TurnGyro Ki. */
-    constexpr float TURNGYRO_KI = 0.02f;
-    /** @brief TurnGyro Kd. */
-    constexpr float TURNGYRO_KD = 1.54f;
-#else
-    // ---- TT-motor profile (enabled via -DMOTOR_PROFILE_TT) --------------------------------
+    //
+    // PID gains taken from MatrixMiniR4 `MiniR4DriveDC.h` TT defaults:
+    //   - setMoveSyncPID  TT: Kp=0.02,  Ki=0.00, Kd=0.04
+    //   - setMoveGyroPID  TT: Kp=6.01,  Ki=0.00, Kd=2.15
+    //   - setTurnGyroPID  TT: Kp=22.75, Ki=0.08, Kd=0.25
+    //
 
     /** @brief Encoder pulses per output-shaft revolution for the TT motor. */
     constexpr uint16_t MOTOR_PPR = 545;
@@ -92,27 +66,26 @@ namespace Config
     /** @brief Nominal no-load RPM for the TT motor at full power. */
     constexpr uint16_t MOTOR_RPM = 200;
 
-    /** @brief MoveSync (left/right encoder match) Kp — TT profile. */
+    /** @brief MoveSync (left/right encoder match) Kp. */
     constexpr float MOVESYNC_KP = 0.02f;
-    /** @brief MoveSync Ki — TT profile. */
+    /** @brief MoveSync Ki. */
     constexpr float MOVESYNC_KI = 0.0f;
-    /** @brief MoveSync Kd — TT profile. */
+    /** @brief MoveSync Kd. */
     constexpr float MOVESYNC_KD = 0.04f;
 
-    /** @brief MoveGyro (straight-line yaw lock) Kp — TT profile. */
+    /** @brief MoveGyro (straight-line yaw lock) Kp. */
     constexpr float MOVEGYRO_KP = 6.01f;
-    /** @brief MoveGyro Ki — TT profile. */
+    /** @brief MoveGyro Ki. */
     constexpr float MOVEGYRO_KI = 0.0f;
-    /** @brief MoveGyro Kd — TT profile. */
+    /** @brief MoveGyro Kd. */
     constexpr float MOVEGYRO_KD = 2.15f;
 
-    /** @brief TurnGyro (in-place rotation) Kp — TT profile. */
+    /** @brief TurnGyro (in-place rotation) Kp. */
     constexpr float TURNGYRO_KP = 22.75f;
-    /** @brief TurnGyro Ki — TT profile. */
+    /** @brief TurnGyro Ki. */
     constexpr float TURNGYRO_KI = 0.08f;
-    /** @brief TurnGyro Kd — TT profile. */
+    /** @brief TurnGyro Kd. */
     constexpr float TURNGYRO_KD = 0.25f;
-#endif
 
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
     constexpr float LINE_KP = 8.0f;
@@ -132,11 +105,50 @@ namespace Config
     constexpr float TRACK_MM = 150.0f;
 
     // ---------------------------------------------------------------------------------------
+    // Speed presets (consumed by the fluent Drive / LineFollower APIs)
+    // ---------------------------------------------------------------------------------------
+    //
+    // The fluent chassis API takes `SpeedPreset preset = SpeedPreset::NORMAL` as its default
+    // power source. Each preset maps to a PWM in the [-100, 100] DriveDC range below. Callers
+    // that need a non-preset value can still override via `.setPower(int16_t)` on the builder.
+    //
+
+    /**
+     * @brief Coarse speed selector for chassis movement primitives.
+     *
+     * Used by every fluent verb that takes a power: Drive.driveDist / driveTime /
+     * forwardGyro / turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
+     * `NORMAL`; pass `SLOW` for intersection approaches and tight corners, `FAST` for long
+     * straights.
+     */
+    enum class SpeedPreset : uint8_t
+    {
+        SLOW,
+        NORMAL,
+        FAST
+    };
+
+    /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
+    constexpr int16_t SPEED_SLOW = 30;
+
+    /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
+    constexpr int16_t SPEED_NORMAL = 50;
+
+    /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
+    constexpr int16_t SPEED_FAST = 80;
+
+    // ---------------------------------------------------------------------------------------
     // Cruise / line following
     // ---------------------------------------------------------------------------------------
 
-    /** @brief Forward cruise power for line following, in the [-100, 100] DriveDC range. */
-    constexpr int16_t CRUISE_SPEED = 50;
+    /**
+     * @brief Forward cruise power for line following, in the [-100, 100] DriveDC range.
+     *
+     * Kept as a named constant for back-compat with code that still references it directly;
+     * new callers should prefer `LineFollower.setPreset(SpeedPreset::NORMAL)` which resolves
+     * to `SPEED_NORMAL` (currently equal to this value).
+     */
+    constexpr int16_t CRUISE_SPEED = SPEED_NORMAL;
 
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
     constexpr int16_t LINE_MAX_CORR = 40;
