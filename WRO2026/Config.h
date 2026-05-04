@@ -191,6 +191,43 @@ namespace Config
 
     /** @brief Number of recent events kept in the EventTrace ring buffer for the OLED. */
     constexpr uint8_t EVENT_TRACE_CAPACITY = 4;
+
+    // =========================================================================================
+    // Motor-bias calibration (Strategy B from Phase 1.5 chassis-API research).
+    //
+    // TT-motors of the same model can vary 10-20% in RPM at the same PWM. Our
+    // raw-PWM Drive paths (setSpeed, driveDist, driveTime — all routed through
+    // MatrixMiniR4 Move/MoveDegs/MoveTime, which are open-loop) are the ones
+    // affected; Sync/Gyro variants close the loop on the STM32 and don't need it.
+    //
+    // Workflow: at first hardware bring-up, call Drive.calibrateMotorBias()
+    // once with the wheels free of the ground. The routine prints two scalars
+    // to Serial; copy them into MOTOR_BIAS_L / MOTOR_BIAS_R below. From then on,
+    // Drive.begin() applies them automatically via setMotorBias().
+    //
+    // 1.0f = no correction (default; safe before calibration).
+    //
+    // See DECISIONS.md "Motor-bias calibration (Strategy B)" for full rationale,
+    // including the on-shelf Strategy C (R4-side encoder-rate PID) we'd add if
+    // B alone is not enough on the actual track.
+    // =========================================================================================
+
+    /** @brief Static manufacturer-bias scalar applied to the LEFT motor in raw-PWM paths. */
+    static constexpr float MOTOR_BIAS_L = 1.0f;
+
+    /** @brief Static manufacturer-bias scalar applied to the RIGHT motor in raw-PWM paths. */
+    static constexpr float MOTOR_BIAS_R = 1.0f;
+
+    // Calibration-routine defaults. The routine spins both motors at this power
+    // for this duration, then computes scalars from the resulting encoder deltas.
+    // 50% power for 2 s gives ~1-2k encoder counts on TT motors — plenty of signal,
+    // not enough to spin the chassis off a bench in wheels-up mode.
+
+    /** @brief PWM power used by `Drive.calibrateMotorBias()` during the wheels-free spin. */
+    static constexpr int16_t MOTOR_BIAS_CALIB_POWER = 50;
+
+    /** @brief Spin duration in milliseconds used by `Drive.calibrateMotorBias()`. */
+    static constexpr uint32_t MOTOR_BIAS_CALIB_DURATION_MS = 2000;
 }    // namespace Config
 
 #endif    // CONFIG_H

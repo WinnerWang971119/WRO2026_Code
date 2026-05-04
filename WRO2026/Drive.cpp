@@ -52,6 +52,11 @@ bool DriveClass::begin()
     _moveDone = true;
     _turnDone = true;
 
+    // Apply the Config-defined motor-bias scalars (Strategy B; see DECISIONS.md). Defaults
+    // to (1.0, 1.0) — identity — until `Drive.calibrateMotorBias()` produces values that
+    // Diego hand-edits into Config::MOTOR_BIAS_L / MOTOR_BIAS_R.
+    setMotorBias(Config::MOTOR_BIAS_L, Config::MOTOR_BIAS_R);
+
     return true;
 }
 
@@ -76,16 +81,19 @@ void DriveClass::update()
 
 uint8_t DriveClass::setSpeed(int16_t L, int16_t R)
 {
+    _applyBias(L, R);
     return MiniR4.DriveDC.Move(L, R);
 }
 
 uint8_t DriveClass::setSpeedSync(int16_t L, int16_t R)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     return MiniR4.DriveDC.MoveSync(L, R);
 }
 
 uint8_t DriveClass::forwardGyro(int16_t power)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     return MiniR4.DriveDC.MoveGyro(power, _heldYaw);
 }
 
@@ -106,14 +114,21 @@ uint8_t DriveClass::stop(bool brake)
 
 uint8_t DriveClass::driveDist(int16_t power, float cm)
 {
+    // Apply motor-bias scalars by treating the single `power` as (L=power, R=power) and
+    // letting `_applyBias` produce per-wheel PWM. The public signature is unchanged.
+    int16_t powerL = power;
+    int16_t powerR = power;
+    _applyBias(powerL, powerR);
+
     const uint16_t encDeg = _cmToEncDeg(cm);
-    const uint8_t  rc     = MiniR4.DriveDC.MoveDegs(power, power, encDeg, Config::TURN_BRAKE, true);
+    const uint8_t  rc     = MiniR4.DriveDC.MoveDegs(powerL, powerR, encDeg, Config::TURN_BRAKE, true);
     _moveDone             = false;
     return rc;
 }
 
 uint8_t DriveClass::driveDistSync(int16_t power, float cm)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, Config::TURN_BRAKE, true);
@@ -123,6 +138,7 @@ uint8_t DriveClass::driveDistSync(int16_t power, float cm)
 
 uint8_t DriveClass::driveDistGyro(int16_t power, float cm)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveGyroDegs(power, _heldYaw, encDeg, Config::TURN_BRAKE, true);
@@ -136,13 +152,20 @@ uint8_t DriveClass::driveDistGyro(int16_t power, float cm)
 
 uint8_t DriveClass::driveTime(int16_t power, float sec)
 {
-    const uint8_t rc = MiniR4.DriveDC.MoveTime(power, power, sec, Config::TURN_BRAKE, true);
+    // Apply motor-bias scalars by treating the single `power` as (L=power, R=power) and
+    // letting `_applyBias` produce per-wheel PWM. The public signature is unchanged.
+    int16_t powerL = power;
+    int16_t powerR = power;
+    _applyBias(powerL, powerR);
+
+    const uint8_t rc = MiniR4.DriveDC.MoveTime(powerL, powerR, sec, Config::TURN_BRAKE, true);
     _moveDone        = false;
     return rc;
 }
 
 uint8_t DriveClass::driveTimeSync(int16_t L, int16_t R, float sec)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(L, R, sec, Config::TURN_BRAKE, true);
     _moveDone        = false;
     return rc;
@@ -150,6 +173,7 @@ uint8_t DriveClass::driveTimeSync(int16_t L, int16_t R, float sec)
 
 uint8_t DriveClass::driveTimeGyro(int16_t power, float sec)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint8_t rc =
         MiniR4.DriveDC.MoveGyroTime(power, _heldYaw, sec, Config::TURN_BRAKE, true);
     _moveDone = false;
@@ -162,6 +186,7 @@ uint8_t DriveClass::driveTimeGyro(int16_t power, float sec)
 
 uint8_t DriveClass::turnDeg(int16_t deg)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
@@ -184,6 +209,7 @@ uint8_t DriveClass::turnDeg(int16_t deg)
 
 uint8_t DriveClass::turnDegBlocking(int16_t deg)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
@@ -206,6 +232,7 @@ uint8_t DriveClass::turnDegBlocking(int16_t deg)
 
 uint8_t DriveClass::turnToYaw(int16_t yaw)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
     const uint8_t rc =
@@ -227,6 +254,7 @@ uint8_t DriveClass::turnToYaw(int16_t yaw)
 
 uint8_t DriveClass::turnToYawBlocking(int16_t yaw)
 {
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
     const uint8_t rc =
@@ -288,6 +316,128 @@ void DriveClass::holdYaw()
 }
 
 // -----------------------------------------------------------------------------------------
+// Motor-bias calibration (Strategy B — see DECISIONS.md)
+// -----------------------------------------------------------------------------------------
+
+uint8_t DriveClass::calibrateMotorBias(int16_t power, uint32_t durationMs)
+{
+    // Reset both encoders to zero so the post-spin readings ARE the per-wheel deltas.
+    MiniR4.DriveDC.resetCounter();
+
+    // Save the existing bias and force identity for the duration of the spin so the
+    // measurement reflects raw motor behaviour, not pre-existing correction.
+    const float savedBiasL = _biasL;
+    const float savedBiasR = _biasR;
+    _biasL                 = 1.0f;
+    _biasR                 = 1.0f;
+
+    // Drive the lower-MCU directly with raw `Move` to skip the Drive.setSpeed wrapper.
+    // We are already in identity-bias state, so the result would be the same either way,
+    // but going direct removes one layer of indirection that could mask a future bug.
+    const uint8_t spinRc = MiniR4.DriveDC.Move(power, power);
+    if (spinRc != 0x00)
+    {
+        // Restore bias and bail — we never spun, so encoder readings would be meaningless.
+        _biasL = savedBiasL;
+        _biasR = savedBiasR;
+        Serial.println(F("[calibrateMotorBias] ERROR: Move() failed to start the spin."));
+        return spinRc;
+    }
+
+    // Explicit blocking delay — the Doxygen on this method calls out that this is the ONE
+    // place in the codebase where a `delay()` is acceptable (manual one-shot, off the
+    // cooperative tick).
+    delay(durationMs);
+
+    // Active-brake stop. Reuse `stop(true)` so the move/turn done flags get cleared too.
+    stop(true);
+
+    // Read final encoder degrees on each side (post-direction-correction by setReverse).
+    const int32_t  encL = MiniR4.M2.getDegrees();
+    const int32_t  encR = MiniR4.M3.getDegrees();
+    const uint32_t aL   = (uint32_t) abs(encL);
+    const uint32_t aR   = (uint32_t) abs(encR);
+
+    // Sanity check: zero on either side means the motor never spun (stuck wheel, broken
+    // encoder, or we tried to calibrate at too low a power). Don't divide by zero, don't
+    // mutate bias.
+    if (aL == 0 || aR == 0)
+    {
+        _biasL = savedBiasL;
+        _biasR = savedBiasR;
+        Serial.print(F("[calibrateMotorBias] ERROR: zero encoder delta. encL="));
+        Serial.print(encL);
+        Serial.print(F(" encR="));
+        Serial.println(encR);
+        return 0x01;
+    }
+
+    // Direction sanity check: after `setReverse` is honoured, both encoders should have the
+    // same sign when both motors are commanded with the same positive PWM. Opposite signs
+    // mean a wiring error or a wrong `MOTOR_*_REVERSE` flag in Config.h — silently absing
+    // would hide the bug and yield a "successful" calibration that drives the chassis the
+    // wrong way.
+    if ((encL > 0) != (encR > 0))
+    {
+        _biasL = savedBiasL;
+        _biasR = savedBiasR;
+        Serial.print(F("[calibrateMotorBias] ERROR: wheels spun opposite directions. encL="));
+        Serial.print(encL);
+        Serial.print(F(" encR="));
+        Serial.println(encR);
+        Serial.println(F("Check MOTOR_LEFT_REVERSE / MOTOR_RIGHT_REVERSE in Config.h."));
+        return 0x02;
+    }
+
+    // The target is the mean of the two observed rotations — both wheels should reach this
+    // common value when the bias scalars are applied next time.
+    const float target   = ((float) aL + (float) aR) / 2.0f;
+    const float newBiasL = target / (float) aL;
+    const float newBiasR = target / (float) aR;
+
+    // Restore the original bias — calibration NEVER auto-applies. Diego copies the printed
+    // values into Config.h and re-flashes; persistence is via source-edit only.
+    _biasL = savedBiasL;
+    _biasR = savedBiasR;
+
+    Serial.print(F("[calibrateMotorBias] result (power="));
+    Serial.print(power);
+    Serial.print(F(", dur="));
+    Serial.print(durationMs);
+    Serial.println(F("ms):"));
+    Serial.print(F("  MOTOR_BIAS_L = "));
+    Serial.print(newBiasL, 4);
+    Serial.println(F("f;"));
+    Serial.print(F("  MOTOR_BIAS_R = "));
+    Serial.print(newBiasR, 4);
+    Serial.println(F("f;"));
+    Serial.println(F("Copy these into Config.h, then re-flash."));
+
+    return 0x00;
+}
+
+void DriveClass::setMotorBias(float biasL, float biasR)
+{
+    _biasL = biasL;
+    _biasR = biasR;
+}
+
+void DriveClass::resetMotorBias()
+{
+    setMotorBias(1.0f, 1.0f);
+}
+
+float DriveClass::getBiasL() const
+{
+    return _biasL;
+}
+
+float DriveClass::getBiasR() const
+{
+    return _biasR;
+}
+
+// -----------------------------------------------------------------------------------------
 // Private helpers
 // -----------------------------------------------------------------------------------------
 
@@ -303,4 +453,10 @@ uint16_t DriveClass::_cmToEncDeg(float cm)
     // cm * 10 -> mm; divide by wheel circumference (PI * diameter_mm); multiply by 360 deg.
     const float revs = (cm * 10.0f) / ((float) PI * Config::WHEEL_DIAM_MM);
     return (uint16_t) (revs * 360.0f);
+}
+
+void DriveClass::_applyBias(int16_t& L, int16_t& R) const
+{
+    L = (int16_t) ((float) L * _biasL);
+    R = (int16_t) ((float) R * _biasR);
 }

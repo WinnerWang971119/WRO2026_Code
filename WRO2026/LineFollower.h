@@ -81,6 +81,10 @@ public:
      * @note Phase 1 deliberately omits the integral term — `Config::LINE_KI` is unused. If
      *       integral action is needed later, add an `_errSum` accumulator with appropriate
      *       windup guard (clamp `_errSum` and/or only integrate when `|err|` is small).
+     * @note The `Drive.setSpeed(L, R)` call below applies motor-bias calibration
+     *       (Strategy B) automatically — see DECISIONS.md. If oscillation persists
+     *       after calibration, consider adding Strategy C (R4-side encoder-rate
+     *       PID) as a runtime layer on top.
      */
     void update();
 

@@ -328,10 +328,77 @@ public:
      */
     void holdYaw();
 
+    // -------------------------------------------------------------------------------------
+    // Motor-bias calibration (Strategy B — see DECISIONS.md)
+    // -------------------------------------------------------------------------------------
+
+    /**
+     * @brief Run a wheels-free calibration routine and print bias scalars.
+     *
+     * Spins both motors at @p power for @p durationMs using raw `Move` (no Sync, no
+     * Gyro), reads final encoder degrees on each, and computes scalars that, when
+     * multiplied through future `setSpeed` / `driveDist` / `driveTime` calls,
+     * equalise the two wheels' rotation per unit PWM.
+     *
+     * **Wheels MUST be free of the ground.** Routine spins for ~2 s.
+     *
+     * Prints the resulting scalars to Serial in a copy-paste-ready format. Diego
+     * then hand-edits `Config::MOTOR_BIAS_L` / `MOTOR_BIAS_R` and re-flashes.
+     *
+     * @param power      PWM target during calibration (default `Config::MOTOR_BIAS_CALIB_POWER`).
+     * @param durationMs Spin duration in milliseconds (default `Config::MOTOR_BIAS_CALIB_DURATION_MS`).
+     * @return `0x00` on success; `0x01` on zero encoder delta (stuck wheel / broken
+     *         encoder / power too low); `0x02` on opposite-sign deltas (wiring or
+     *         `MOTOR_*_REVERSE` flag mismatch); MMLower error code otherwise.
+     *
+     * @note Strategy B (Phase 1.5). See DECISIONS.md for full rationale.
+     * @note This is the ONE place in the codebase where a `delay()` is acceptable —
+     *       the routine is a manual one-shot, not part of any cooperative tick.
+     */
+    uint8_t calibrateMotorBias(int16_t  power      = Config::MOTOR_BIAS_CALIB_POWER,
+                               uint32_t durationMs = Config::MOTOR_BIAS_CALIB_DURATION_MS);
+
+    /**
+     * @brief Manually set the motor-bias scalars at runtime.
+     *
+     * Used by `begin()` to apply the Config defaults, and available for live
+     * override during testing.
+     *
+     * @param biasL Scalar for the left motor's raw-PWM commands.
+     * @param biasR Scalar for the right motor's raw-PWM commands.
+     *
+     * @note Strategy B. See DECISIONS.md.
+     */
+    void setMotorBias(float biasL, float biasR);
+
+    /**
+     * @brief Reset both bias scalars to 1.0f (identity — no correction).
+     *
+     * Equivalent to `setMotorBias(1.0f, 1.0f)` but reads more clearly at call sites
+     * where the intent is explicitly "I don't trust the calibration, give me raw".
+     *
+     * @note Strategy B. See DECISIONS.md.
+     */
+    void resetMotorBias();
+
+    /**
+     * @brief Read current left-motor bias scalar (telemetry).
+     * @return Current `_biasL`.
+     */
+    float getBiasL() const;
+
+    /**
+     * @brief Read current right-motor bias scalar (telemetry).
+     * @return Current `_biasR`.
+     */
+    float getBiasR() const;
+
 private:
     int16_t _heldYaw  = 0;       ///< Current yaw target used by `forwardGyro` and `*Gyro`.
     bool    _moveDone = true;    ///< Cleared on bounded move issue, set by `update()`.
     bool    _turnDone = true;    ///< Cleared on async turn issue, set by `update()`.
+    float   _biasL    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM L paths. See DECISIONS.md.
+    float   _biasR    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM R paths. See DECISIONS.md.
 
     /**
      * @brief Normalise an absolute yaw target into the range that
@@ -358,6 +425,17 @@ private:
      *         `*Degs` lower-MCU API).
      */
     static uint16_t _cmToEncDeg(float cm);
+
+    /**
+     * @brief Multiply (L, R) in-place by the bias scalars before forwarding to
+     *        any raw-PWM MatrixMiniR4 call (`Move`, `MoveDegs`, `MoveTime`).
+     *
+     * Sync/Gyro paths must NOT call this — they close the loop on the STM32 and
+     * applying a feedforward scalar on top would fight the inner PID.
+     *
+     * @note Strategy B. See DECISIONS.md.
+     */
+    void _applyBias(int16_t& L, int16_t& R) const;
 };
 
 /**
