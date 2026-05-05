@@ -334,6 +334,16 @@ bool DriveClass::isTurnDone() const
     return _turnDone;
 }
 
+bool DriveClass::isIdle() const
+{
+    return _isIdle() && _qCount == 0;
+}
+
+void DriveClass::waitUntilIdle()
+{
+    _drainBlocking();
+}
+
 int32_t DriveClass::getEncL() const
 {
     // M2/M3 hardcoded to match Config::MOTOR_LEFT_ID/RIGHT_ID == 2/3. Editing those config

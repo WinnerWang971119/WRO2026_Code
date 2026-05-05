@@ -305,14 +305,47 @@ public:
      * @brief Whether the most recent bounded move (`driveDist*` / `driveTime*`) has finished.
      * @return `true` if no bounded move is pending.
      * @note Continuous primitives (`setSpeed`, etc.) do not affect this flag.
+     * @warning **Queue-blind.** Returns `true` between queued segments only if a dispatch
+     *          failed; the happy path keeps it `false` from the first move's start until
+     *          the last queued move's end. For "is everything (current + queue) done?",
+     *          use `isIdle()` instead.
      */
     bool isMoveDone() const;
 
     /**
      * @brief Whether the most recent async turn has finished.
      * @return `true` if no async turn is pending. Blocking turns leave this `true` on return.
+     * @warning **Queue-blind** — same caveat as `isMoveDone()`. Use `isIdle()` to query
+     *          chassis-and-queue state together.
      */
     bool isTurnDone() const;
+
+    /**
+     * @brief Whether the chassis is fully idle: no bounded move, no async turn, no profile
+     *        in flight, AND the command queue is empty.
+     *
+     * This is the right query for the auto-path planner's "is it safe to issue the next
+     * mission step?" tick — it's queue-aware unlike `isMoveDone()` / `isTurnDone()`.
+     *
+     * @return `true` iff `_moveDone && _turnDone && _profileState == IDLE && _qCount == 0`.
+     */
+    bool isIdle() const;
+
+    /**
+     * @brief Block (spin) until the chassis is fully idle and the queue is empty.
+     *
+     * Calls `update()` and `delay(2)` in a tight loop until `isIdle()` returns `true`.
+     * Exposed for command-time orchestration where the next decision genuinely needs
+     * every queued move to be complete (mission-step transitions, calibration sequences,
+     * end-of-run cleanup).
+     *
+     * @warning **Do NOT call from inside any module's `update()`.** This spins indefinitely
+     *          and would block the cooperative tick chain. Reserved for top-level
+     *          orchestration. Allowed `delay()` site #4 alongside `calibrateMotorBias`,
+     *          `_drainBlocking` (which this method delegates to), and the historical
+     *          tShape blocking spin (now centralised inside `_drainBlocking`).
+     */
+    void waitUntilIdle();
 
     /**
      * @brief Left-wheel encoder reading in degrees (post-direction-correction).
