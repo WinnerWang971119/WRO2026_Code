@@ -1,0 +1,9 @@
+# Python build pipeline (Phase 2 PR 1)
+tools/path_planner/output/*
+!tools/path_planner/output/.gitkeep
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.uv/
+*.egg-info/

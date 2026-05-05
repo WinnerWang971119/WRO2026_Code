@@ -1,0 +1,5 @@
+# Fallback for plain-venv users: python -m venv .venv && .\.venv\Scripts\pip install -r tools/path_planner/requirements.txt
+networkx>=3.2
+matplotlib>=3.8
+shapely>=2.0
+pytest>=8.0
