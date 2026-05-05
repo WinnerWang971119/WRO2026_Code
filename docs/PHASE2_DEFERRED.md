@@ -4,12 +4,28 @@ PR 1 of Phase 2 (`phase2/path-planner-python`) shipped a working offline build p
 in `tools/path_planner/field_data.py` is validated, turned into a weighted graph, run through
 Dijkstra all-pairs, compiled to a primitive sequence with correct heading propagation, and emitted
 as `WRO2026/routes.h` + `WRO2026/routes.cpp`. A matplotlib visualization (`map.png`) and a
-property-based `pytest` suite are included. The R4 runtime that consumes `routes.h` is PR 2;
-the real 2026 field encoding and Serial-console mission entrypoint are PR 3. Several features
-described in `docs/PATH_PLANNER_SPEC.md` were intentionally left out of PR 1 to keep the diff
-small and reviewable. This document records each deferred feature so that a future contributor
-(or a future session of this same Claude instance) can revive the work without re-reading the
-entire conversation history.
+property-based `pytest` suite are included.
+
+PR 2 (`phase2/path-tracker-runtime`) shipped the R4-side runtime: `FieldMap` (header-only namespace
+over `Routes::`), `Localization` (single source of truth for `currentNode` and a yaw offset
+captured at start-button press), `PathTracker` (non-blocking FSM with a fluent `goTo()` builder
+queue), and a `setDistanceTarget(cm)` extension on `LineFollower` so the projection-edge primitive
+works. A pure-Python end-to-end simulator under `tools/path_planner/sim/` plus
+`test_runtime_sim.py` provides the verification bench (no hardware required for PR 2). PR 3 still
+needs to replace `field_data.py` with the real 2026 layout and ship the Serial-console mission
+entrypoint.
+
+This document records each remaining deferred feature so that a future contributor (or a future
+session of this same Claude instance) can revive the work without re-reading the entire
+conversation history.
+
+## PR 2.5+ graduates (already shipped)
+
+- **End-to-end pure-Python simulator** (spec §6 step 9). Shipped in PR 2 as
+  `tools/path_planner/sim/` + `tools/path_planner/tests/test_runtime_sim.py`. Mirrors the
+  PathTracker FSM in pure Python and asserts that the simulator's dispatched-primitive sequence
+  equals what `compile_path` emits for the same NEXT_HOP-walked path, plus chassis arrival within
+  0.1 cm. This was previously the fourth row of the status table below.
 
 ---
 
@@ -20,7 +36,8 @@ entire conversation history.
 | Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | Deferred to Phase 2.5 | After PR 3 ships real-field nav and accumulated blind-walk drift is observed |
 | Per-scenario NEXT_HOP tables (transparent self-target) | §7.4 | Deferred to Phase 2.5 | After PR 3 encodes multiple goals on the real field |
 | `wall_zero` primitive on the R4 | §5.3 | Deferred to Phase 2.5 | After mechanical hard-bumper or limit-switch work is done |
-| End-to-end pure-Python simulator | §6 step 9 | Deferred to Phase 2.5 | After first real-field plan misbehaves and needs offline replay |
+| Hardware verification of PR 2's PathTracker on the toy printout | PR 2 scope | Deferred to a follow-up bench session (PR 2.5 patches) | Once mechanical chassis geometry is finalised |
+| IMU drift compensation across long runs | new in PR 2 | Deferred to PR 3 | Once the real 2026 field's longer paths expose drift accumulation |
 | Serial-console mission entrypoint | PR 3 scope | Deferred to PR 3 | After PR 2's PathTracker exists |
 
 ---
@@ -160,46 +177,6 @@ same PR.
 Small on the code side: one new primitive function in `primitives.cpp` (~40 lines of C++) and a
 `Localization::resetAxis` method (~20 lines). The hard part is the mechanical work and the
 per-surface back-off calibration, which is outside the software scope.
-
----
-
-## End-to-end pure-Python simulator
-
-### What it is
-
-Section 6, step 9 calls for:
-> 「End-to-end 模擬 — 在電腦上模擬執行」
-
-The idea is a pure-Python "fake R4" that accepts the compiled primitive list from `compiler.py`,
-advances a virtual chassis state `(x, y, heading_deg)` for each primitive, and returns or prints
-the full trace. This lets a developer verify a planned route without uploading to hardware: does
-the simulated robot end up at the right coordinates? Does it clear all obstacles?
-
-PR 1 provides `compiler.py` (primitive emission) and the `pytest` suite (plan-correctness checks
-on the graph and heading logic), which together cover most of the verification value. A separate
-visual simulator mainly adds value as a replay tool for diagnosing hardware failures.
-
-### Why deferred
-
-The compiler's unit tests already validate plan correctness at the primitive level, and the
-visualizer's `map.png` gives spatial intuition. A full simulator only pays off when there is a
-real multi-step field mission that misbehaves on hardware and needs an offline "what would the
-chassis have done?" trace. That situation does not arise until PR 3 is running on the real field.
-It is also valuable as an onboarding aid; that, too, is a PR 3-era concern.
-
-### What unlocks it
-
-First instance of a real-field plan executing unexpectedly on hardware, or the first time a new
-contributor needs to understand plan execution without robot access. Alternatively, if the test
-suite for PR 3's field data grows large enough that hardware iteration becomes the bottleneck,
-the simulator pays for itself immediately.
-
-### Estimated effort
-
-Small. The simulator is a self-contained module (~150 lines of Python) that consumes the existing
-`CompilerResult` data structure from `compiler.py` and has no new dependencies. Tests are ~50 lines
-of fixture-driven assertions against known routes on the toy graph. No changes to `routes.h`,
-`planner.py`, or any R4 code.
 
 ---
 

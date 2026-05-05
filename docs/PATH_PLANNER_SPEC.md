@@ -188,10 +188,18 @@ Compile plan 時，每進入一個 node 就更新 heading。Blind move 中的 `t
 
 ```cpp
 uint8_t  current_node;   // 我在哪個 node（enum index）
-uint8_t  current_heading; // N=0, E=1, S=2, W=3
+float    current_heading_deg; // [0, 360) world frame, CCW+, 0 deg = +x (East)
 ```
 
 **這就是全部的 localization 狀態**。沒有 (x, y, θ) 連續估計。
+
+> **PR 1/2 update (2026-05-06):** the actual implementation uses **continuous float degrees in
+> `[0, 360)`**, CCW positive, `0 deg = +x` (East), to match the Python pipeline's heading
+> propagation. The cardinal `N=0/E=1/S=2/W=3` enum sketched above turned out to be too coarse for
+> the goal-approach blind sequences (`approach_heading_deg = 0.0` etc.). PR 2's `Localization`
+> reads the IMU live and applies a one-time world-frame offset captured at the start-button press
+> (not at `begin()`); PR 2's `PathTracker` dispatches absolute turns via `Drive.turnToYaw(...)` so
+> each turn re-anchors to IMU truth.
 
 ### 5.2 主迴圈
 
