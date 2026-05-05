@@ -37,11 +37,16 @@ pipx install uv                  # cross-platform fallback
 Then from the repo root:
 
 ```powershell
-uv sync
+uv sync --extra dev
 ```
 
 That reads `pyproject.toml` + `uv.lock` and pulls in `networkx`,
-`matplotlib`, `shapely`, and `pytest`.
+`matplotlib`, `shapely`, and the `dev` extra containing `pytest`.
+
+`uv.lock` is intentionally committed to keep developer installs reproducible
+and to give future CI a stable dependency graph. TODO when CI lands: use
+`uv sync --extra dev` in the workflow so the lockfile remains the source
+of truth.
 
 ### Fallback: plain venv + pip
 
@@ -103,7 +108,7 @@ All tests live under `tools/path_planner/tests/` and run from the
 them.
 
 ```powershell
-uv run pytest tools/path_planner/tests/ -v
+uv run --extra dev pytest tools/path_planner/tests/ -v
 ```
 
 (or `python -m pytest tools/path_planner/tests/ -v` with a plain venv).

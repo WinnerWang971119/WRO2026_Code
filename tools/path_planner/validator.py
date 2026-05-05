@@ -319,10 +319,10 @@ def validate(field_data) -> None:
             raise FieldDataError(
                 f"OBSTACLES[{i}].kind must be a string label; got: {kind!r}"
             )
-        if x_min > x_max or y_min > y_max:
+        if x_min >= x_max or y_min >= y_max:
             raise FieldDataError(
-                f"OBSTACLES[{i}] has invalid bounds: x_min > x_max or "
-                f"y_min > y_max -- got {obs!r}"
+                f"OBSTACLES[{i}] has invalid bounds: x_min >= x_max or "
+                f"y_min >= y_max -- got {obs!r}"
             )
 
     # 8. Scalars.

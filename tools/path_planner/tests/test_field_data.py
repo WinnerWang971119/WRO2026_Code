@@ -71,9 +71,24 @@ def test_line_segments_unknown_node() -> None:
 
 
 def test_obstacle_invalid_bounds() -> None:
-    """OBSTACLES with x_min > x_max (or y_min > y_max) must be rejected."""
+    """OBSTACLES with inverted bounds must be rejected."""
     fd = _clone_field_data()
     fd.OBSTACLES = [(50.0, 0.0, 40.0, 10.0, "wall")]
+    with pytest.raises(FieldDataError, match=r"invalid bounds"):
+        validate(fd)
+
+
+@pytest.mark.parametrize(
+    "obstacle",
+    [
+        (40.0, 0.0, 40.0, 10.0, "wall"),
+        (40.0, 10.0, 50.0, 10.0, "wall"),
+    ],
+)
+def test_obstacle_zero_area_rejected(obstacle) -> None:
+    """OBSTACLES must describe positive-area rectangles, not lines."""
+    fd = _clone_field_data()
+    fd.OBSTACLES = [obstacle]
     with pytest.raises(FieldDataError, match=r"invalid bounds"):
         validate(fd)
 
