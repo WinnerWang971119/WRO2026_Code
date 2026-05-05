@@ -126,8 +126,8 @@ void loop()
         EventTrace.pushEvent("DEMO RUN");
         Drive.holdYaw();
         LineFollower.setEnabled(true);
-        Drive.driveDistGyro(Config::CRUISE_SPEED, DEMO_DIST_CM);    // gyro-locked straight.
-        Drive.turnDeg(DEMO_TURN_DEG);                               // async relative turn.
+        Drive.driveDist(DEMO_DIST_CM).setPower(Config::CRUISE_SPEED).setMode(DriveMode::GYRO);
+        Drive.turnDeg(DEMO_TURN_DEG);    // async relative turn — defaults to Config::TURN_POWER, mode 0.
     }
     _btnPrev = btnNow;
 #endif    // DEMO_MODE

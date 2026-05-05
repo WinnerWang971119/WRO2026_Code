@@ -5,6 +5,10 @@
  *
  * @note Build-time invariant: the wheel diameter must be positive — otherwise
  *       `_cmToEncDeg` would divide by zero or invert the travel direction silently.
+ *
+ * @note The verb entry points (`driveDist`, `driveTime`, `turnDeg`, `turnToYaw`) are
+ *       defined inline in `Drive.h` because they construct fluent builders that themselves
+ *       live in the header. The heavy `_execXxx` dispatch methods live here.
  */
 
 #include "Drive.h"
@@ -109,167 +113,173 @@ uint8_t DriveClass::stop(bool brake)
 }
 
 // -----------------------------------------------------------------------------------------
-// Distance-bounded primitives
+// Distance-bounded executors (called from DriveDistBuilder::~DriveDistBuilder)
 // -----------------------------------------------------------------------------------------
 
-uint8_t DriveClass::driveDist(int16_t power, float cm)
+uint8_t DriveClass::_execDriveDistRaw(int16_t power, float cm, bool brake, bool blocking)
 {
     // Apply motor-bias scalars by treating the single `power` as (L=power, R=power) and
-    // letting `_applyBias` produce per-wheel PWM. The public signature is unchanged.
+    // letting `_applyBias` produce per-wheel PWM.
     int16_t powerL = power;
     int16_t powerR = power;
     _applyBias(powerL, powerR);
 
     const uint16_t encDeg = _cmToEncDeg(cm);
-    const uint8_t  rc     = MiniR4.DriveDC.MoveDegs(powerL, powerR, encDeg, Config::TURN_BRAKE, true);
-    _moveDone             = false;
+    // The library convention: the last argument is `async`. Blocking == sync == async=false.
+    const uint8_t rc = MiniR4.DriveDC.MoveDegs(powerL, powerR, encDeg, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
-uint8_t DriveClass::driveDistSync(int16_t power, float cm)
+uint8_t DriveClass::_execDriveDistSync(int16_t power, float cm, bool brake, bool blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, Config::TURN_BRAKE, true);
-    _moveDone = false;
+        MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
-uint8_t DriveClass::driveDistGyro(int16_t power, float cm)
+uint8_t DriveClass::_execDriveDistGyro(int16_t power,
+                                       float   cm,
+                                       int16_t yaw,
+                                       bool    brake,
+                                       bool    blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveGyroDegs(power, _heldYaw, encDeg, Config::TURN_BRAKE, true);
-    _moveDone = false;
+        MiniR4.DriveDC.MoveGyroDegs(power, yaw, encDeg, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
 // -----------------------------------------------------------------------------------------
-// Time-bounded primitives
+// Time-bounded executors (called from DriveTimeBuilder::~DriveTimeBuilder)
 // -----------------------------------------------------------------------------------------
 
-uint8_t DriveClass::driveTime(int16_t power, float sec)
+uint8_t DriveClass::_execDriveTimeRaw(int16_t power, float sec, bool brake, bool blocking)
 {
     // Apply motor-bias scalars by treating the single `power` as (L=power, R=power) and
-    // letting `_applyBias` produce per-wheel PWM. The public signature is unchanged.
+    // letting `_applyBias` produce per-wheel PWM.
     int16_t powerL = power;
     int16_t powerR = power;
     _applyBias(powerL, powerR);
 
-    const uint8_t rc = MiniR4.DriveDC.MoveTime(powerL, powerR, sec, Config::TURN_BRAKE, true);
-    _moveDone        = false;
+    const uint8_t rc = MiniR4.DriveDC.MoveTime(powerL, powerR, sec, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
-uint8_t DriveClass::driveTimeSync(int16_t L, int16_t R, float sec)
+uint8_t DriveClass::_execDriveTimeSync(int16_t power, float sec, bool brake, bool blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(L, R, sec, Config::TURN_BRAKE, true);
-    _moveDone        = false;
+    const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(power, power, sec, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
-uint8_t DriveClass::driveTimeGyro(int16_t power, float sec)
+uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
+                                       float   sec,
+                                       int16_t yaw,
+                                       bool    brake,
+                                       bool    blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint8_t rc =
-        MiniR4.DriveDC.MoveGyroTime(power, _heldYaw, sec, Config::TURN_BRAKE, true);
-    _moveDone = false;
+    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(power, yaw, sec, brake, !blocking);
+    if (!blocking)
+    {
+        _moveDone = false;
+    }
     return rc;
 }
 
 // -----------------------------------------------------------------------------------------
-// Turns
+// Turn executors (called from TurnDegBuilder / TurnToYawBuilder destructors)
 // -----------------------------------------------------------------------------------------
 
-uint8_t DriveClass::turnDeg(int16_t deg)
+uint8_t DriveClass::_execTurnDeg(int16_t deg,
+                                 int16_t power,
+                                 uint8_t mode,
+                                 bool    brake,
+                                 bool    blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
-    const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
+    const int16_t cur          = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    const int16_t target       = _normalizeYaw((int32_t) cur + (int32_t) deg);
+    const bool    wasIdleAtTry = _turnDone;
 
+    // The library's `async` argument is the inverse of our `blocking` flag.
     const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, true);
+        MiniR4.DriveDC.TurnGyro(power, target, mode, brake, !blocking);
 
     if (rc == 0x00)
     {
-        _heldYaw  = target;
-        _turnDone = false;
+        _heldYaw = target;
+        // Async path: clear `_turnDone` so callers can poll. Blocking path: the library
+        // already spun until the lower MCU reported done, so leave `_turnDone = true`.
+        _turnDone = blocking ? true : false;
     }
     else
     {
         // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
-        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
-        _turnDone = true;
+        // primitives keep their existing yaw lock. C1 fix: unblock any caller polling
+        // isTurnDone() — but ONLY if no prior bounded task was pending at entry. If a
+        // prior task is still in flight, we must not lie about its completion (W1).
+        if (wasIdleAtTry)
+        {
+            _turnDone = true;
+        }
+        Serial.print(F("[Drive] _execTurnDeg failed, rc=0x"));
+        Serial.println(rc, HEX);
     }
     return rc;
 }
 
-uint8_t DriveClass::turnDegBlocking(int16_t deg)
+uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
+                                   int16_t power,
+                                   uint8_t mode,
+                                   bool    brake,
+                                   bool    blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
-    const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
+    const int16_t target       = _normalizeYaw((int32_t) yaw);
+    const bool    wasIdleAtTry = _turnDone;
 
     const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, false);
+        MiniR4.DriveDC.TurnGyro(power, target, mode, brake, !blocking);
 
     if (rc == 0x00)
     {
         _heldYaw  = target;
-        _turnDone = true;    // library already blocked until the lower MCU reported done.
+        _turnDone = blocking ? true : false;
     }
     else
     {
-        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
-        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
-        _turnDone = true;
-    }
-    return rc;
-}
-
-uint8_t DriveClass::turnToYaw(int16_t yaw)
-{
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t target = _normalizeYaw((int32_t) yaw);
-
-    const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, true);
-
-    if (rc == 0x00)
-    {
-        _heldYaw  = target;
-        _turnDone = false;
-    }
-    else
-    {
-        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
-        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
-        _turnDone = true;
-    }
-    return rc;
-}
-
-uint8_t DriveClass::turnToYawBlocking(int16_t yaw)
-{
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t target = _normalizeYaw((int32_t) yaw);
-
-    const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(Config::TURN_POWER, target, Config::TURN_MODE, Config::TURN_BRAKE, false);
-
-    if (rc == 0x00)
-    {
-        _heldYaw  = target;
-        _turnDone = true;
-    }
-    else
-    {
-        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
-        // primitives keep their existing yaw lock, and unblock any caller polling isTurnDone().
-        _turnDone = true;
+        // Turn never started. C1 fix: unblock the caller — but only if the slot was
+        // actually idle at entry (W1: don't clobber a pending prior task's flag).
+        if (wasIdleAtTry)
+        {
+            _turnDone = true;
+        }
+        Serial.print(F("[Drive] _execTurnToYaw failed, rc=0x"));
+        Serial.println(rc, HEX);
     }
     return rc;
 }
@@ -440,6 +450,21 @@ float DriveClass::getBiasR() const
 // -----------------------------------------------------------------------------------------
 // Private helpers
 // -----------------------------------------------------------------------------------------
+
+int16_t DriveClass::_presetToPwm(Config::SpeedPreset preset) const
+{
+    switch (preset)
+    {
+    case Config::SpeedPreset::SLOW:
+        return Config::SPEED_SLOW;
+    case Config::SpeedPreset::NORMAL:
+        return Config::SPEED_NORMAL;
+    case Config::SpeedPreset::FAST:
+        return Config::SPEED_FAST;
+    }
+    // Defensive fallback — `enum class` should keep the switch exhaustive at compile time.
+    return Config::SPEED_NORMAL;
+}
 
 int16_t DriveClass::_normalizeYaw(int32_t deg)
 {

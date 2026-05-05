@@ -11,28 +11,34 @@
  * Method families:
  *  - **Continuous** (`setSpeed`, `setSpeedSync`, `forwardGyro`, `stop`) — the underlying
  *    motors run until the next continuous command is issued or `stop()` is called. These do
- *    NOT touch the bounded-task done flags.
- *  - **Distance-bounded** (`driveDist`, `driveDistSync`, `driveDistGyro`) — non-blocking,
- *    measured in cm. Sets `_moveDone = false`; cleared by `update()` once the underlying
- *    library reports the task done.
- *  - **Time-bounded** (`driveTime`, `driveTimeSync`, `driveTimeGyro`) — non-blocking,
- *    measured in seconds. Same done-flag semantics as distance-bounded.
- *  - **Turns** (`turnDeg`, `turnDegBlocking`, `turnToYaw`, `turnToYawBlocking`) — both
- *    relative and absolute. Async variants set `_turnDone = false`; blocking variants return
- *    only once the lower MCU reports task done and leave `_turnDone = true`.
+ *    NOT touch the bounded-task done flags. Kept as direct (non-fluent) calls because they
+ *    take 0-2 trivial arguments — fluent there would be ceremony. Of these, ONLY `setSpeed`
+ *    applies the motor-bias scalar (Strategy B); `setSpeedSync` and `forwardGyro` do not,
+ *    because the STM32 closes the loop on those paths and a feedforward scalar would fight
+ *    the inner PID. See DECISIONS.md.
+ *  - **Distance-bounded** (`driveDist(cm)`) — fluent builder; defaults to non-blocking, raw
+ *    PWM, brake-on-stop. Set `.setMode(DriveMode::SYNC|GYRO)`, `.setBlocking(true)`, etc. on
+ *    the returned builder; the move executes when the temporary destructs at end-of-statement.
+ *  - **Time-bounded** (`driveTime(sec)`) — same fluent shape as `driveDist`.
+ *  - **Turns** (`turnDeg(deg)` / `turnToYaw(yaw)`) — fluent builders; defaults to
+ *    non-blocking, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`, power
+ *    `Config::TURN_POWER`. Both relative (`turnDeg`) and absolute (`turnToYaw`) targets are
+ *    supported.
  *
  * @note The underlying `MiniR4.DriveDC` lower-MCU API exposes ONE task-done bit, so this
  *       class collapses move-done and turn-done into a single shared "task done" signal
  *       inside `update()`. Application code MUST NOT issue a bounded move and a turn
- *       concurrently — they would race for the same flag. On a failed turn issue (non-zero
- *       rc from TurnGyro), `_turnDone` is set/left `true` immediately so the caller is
- *       unblocked even though no task is in flight on the lower MCU.
+ *       concurrently — they would race for the same flag. On a failed turn issue
+ *       (non-zero rc from TurnGyro): if the slot was idle at entry, `_turnDone` is set
+ *       `true` so the caller is unblocked (C1 fix). If a prior task was already in
+ *       flight, `_turnDone` is left untouched — the prior task still owns the slot
+ *       (W1 guard).
  *
- * @warning The `*Blocking` variants spin inside the underlying library's `delay(50)`-ish
- *          poll loop until the lower MCU reports the task is done. They MUST NOT be called
- *          from inside any module's `update()` method — `update()` must remain non-blocking
- *          and cooperative. Blocking entry points are reserved for command-time orchestration
- *          (mission step transitions, calibration routines, etc.).
+ * @warning The `*Builder::setBlocking(true)` variant spins inside the underlying library's
+ *          `delay(50)`-ish poll loop until the lower MCU reports the task is done. They MUST
+ *          NOT be called from inside any module's `update()` method — `update()` must remain
+ *          non-blocking and cooperative. Blocking entry points are reserved for command-time
+ *          orchestration (mission step transitions, calibration routines, etc.).
  */
 
 #ifndef DRIVE_H
@@ -42,6 +48,26 @@
 #include <MatrixMiniR4.h>
 
 #include "Config.h"
+
+// Forward declarations so DriveClass can name-friend the builders before they are defined.
+class DriveDistBuilder;
+class DriveTimeBuilder;
+class TurnDegBuilder;
+class TurnToYawBuilder;
+
+/**
+ * @brief Mode selector for distance/time-bounded straight-line moves.
+ *
+ * Selects which lower-MCU primitive a `driveDist` / `driveTime` builder dispatches to. The
+ * choice determines whether the `_applyBias` correction is applied (RAW only — Sync/Gyro
+ * close the loop on the STM32, so layering a feedforward scalar would fight their inner PID).
+ */
+enum class DriveMode : uint8_t
+{
+    RAW,     ///< Open-loop PWM (`Move` / `MoveDegs` / `MoveTime`). Bias-compensated via `_applyBias`.
+    SYNC,    ///< `MoveSync*` — STM32 encoder-rate sync PID closes the loop. No bias applied.
+    GYRO     ///< `MoveGyro*` — STM32 yaw-lock PID closes the loop. No bias applied.
+};
 
 /**
  * @brief Rich movement-primitive facade over `MiniR4.DriveDC` + `MiniR4.Motion`.
@@ -53,6 +79,14 @@
  */
 class DriveClass
 {
+    // The fluent builders need access to the private `_execXxx` dispatch methods and the
+    // `_presetToPwm` helper. Friending keeps the public surface small and prevents callers
+    // from invoking the legacy wide-signature paths directly.
+    friend class DriveDistBuilder;
+    friend class DriveTimeBuilder;
+    friend class TurnDegBuilder;
+    friend class TurnToYawBuilder;
+
 public:
     /**
      * @brief Configure the drivebase, register reverse-flags, and push every PID profile.
@@ -79,7 +113,7 @@ public:
     void update();
 
     // -------------------------------------------------------------------------------------
-    // Continuous primitives
+    // Continuous primitives (kept direct — 0-2 args, fluent would be ceremony)
     // -------------------------------------------------------------------------------------
 
     /**
@@ -93,6 +127,7 @@ public:
      * @param R Right-motor power in `[-100, 100]`.
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Continuous; does not touch the move/turn done flags.
+     * @note Bias-compensated via `_applyBias` (raw-PWM path).
      */
     uint8_t setSpeed(int16_t L, int16_t R);
 
@@ -107,6 +142,7 @@ public:
      * @param R Right-motor power in `[-100, 100]`.
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Continuous; does not touch the move/turn done flags.
+     * @note No bias applied — STM32 closes the loop.
      */
     uint8_t setSpeedSync(int16_t L, int16_t R);
 
@@ -121,6 +157,7 @@ public:
      *              locking heading.
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Continuous; does not touch the move/turn done flags.
+     * @note No bias applied — STM32 closes the loop.
      */
     uint8_t forwardGyro(int16_t power);
 
@@ -138,144 +175,69 @@ public:
     uint8_t stop(bool brake = true);
 
     // -------------------------------------------------------------------------------------
-    // Distance-bounded primitives (non-blocking)
+    // Fluent verb entry points
     // -------------------------------------------------------------------------------------
 
     /**
-     * @brief Drive a fixed distance at raw PWM power, non-blocking.
+     * @brief Build a distance-bounded straight-line move.
      *
-     * @param power Drive power applied to BOTH wheels in `[-100, 100]`.
-     * @param cm    Distance in centimetres (always positive — sign is carried by `power`).
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`. Poll `isMoveDone()` (or rely on `update()` to clear the
-     *       flag) before issuing the next bounded command.
+     * Returns a `DriveDistBuilder` that executes the move when the temporary destructs at
+     * end-of-statement. Defaults are: non-blocking, `DriveMode::RAW`, power
+     * `Config::SPEED_NORMAL`, brake `true`, heading = current `_heldYaw` (only consulted in
+     * `DriveMode::GYRO`).
+     *
+     * Example:
+     * @code
+     * Drive.driveDist(30);                                                    // defaults
+     * Drive.driveDist(30).setPower(50);                                       // override
+     * Drive.driveDist(30).setPreset(Config::SpeedPreset::FAST).setMode(DriveMode::GYRO);
+     * @endcode
+     *
+     * @param cm Distance in centimetres (always non-negative — sign is carried by `power`).
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means
+     *       you forgot the chain.
      */
-    uint8_t driveDist(int16_t power, float cm);
+    [[nodiscard]] DriveDistBuilder driveDist(float cm);
 
     /**
-     * @brief Drive a fixed distance with MoveSync wheel synchronisation, non-blocking.
+     * @brief Build a time-bounded straight-line move.
      *
-     * @param power Drive power in `[-100, 100]`.
-     * @param cm    Distance in centimetres.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`.
-     */
-    uint8_t driveDistSync(int16_t power, float cm);
-
-    /**
-     * @brief Drive a fixed distance holding the held-yaw target, non-blocking.
+     * Returns a `DriveTimeBuilder` that executes the move when the temporary destructs.
+     * Defaults match `driveDist`.
      *
-     * @param power Drive power in `[-100, 100]`.
-     * @param cm    Distance in centimetres.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`. Heading is locked to the current `_heldYaw`.
-     */
-    uint8_t driveDistGyro(int16_t power, float cm);
-
-    // -------------------------------------------------------------------------------------
-    // Time-bounded primitives (non-blocking)
-    // -------------------------------------------------------------------------------------
-
-    /**
-     * @brief Drive at raw PWM power for a fixed time, non-blocking.
-     *
-     * @param power Drive power applied to BOTH wheels in `[-100, 100]`.
-     * @param sec   Duration in seconds.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`.
-     */
-    uint8_t driveTime(int16_t power, float sec);
-
-    /**
-     * @brief Drive with MoveSync at independent L/R powers for a fixed time, non-blocking.
-     *
-     * @param L   Left-motor power in `[-100, 100]`.
-     * @param R   Right-motor power in `[-100, 100]`.
      * @param sec Duration in seconds.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`.
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]`.
      */
-    uint8_t driveTimeSync(int16_t L, int16_t R, float sec);
+    [[nodiscard]] DriveTimeBuilder driveTime(float sec);
 
     /**
-     * @brief Drive holding the held-yaw target for a fixed time, non-blocking.
+     * @brief Build a relative-yaw-delta turn.
      *
-     * @param power Drive power in `[-100, 100]`.
-     * @param sec   Duration in seconds.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_moveDone = false`.
-     */
-    uint8_t driveTimeGyro(int16_t power, float sec);
-
-    // -------------------------------------------------------------------------------------
-    // Turns
-    // -------------------------------------------------------------------------------------
-
-    /**
-     * @brief Turn by a relative yaw delta, non-blocking.
-     *
-     * Computes the absolute target as `current_yaw + deg`, normalises through
-     * `_normalizeYaw`, and issues `MiniR4.DriveDC.TurnGyro` with `async = true`. Updates
-     * `_heldYaw` to the post-turn target so subsequent `forwardGyro` / `*Gyro` primitives
-     * lock onto the new heading.
+     * Returns a `TurnDegBuilder` that executes the turn when the temporary destructs.
+     * Defaults are: non-blocking, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
+     * power `Config::TURN_POWER`.
      *
      * @param deg Relative yaw delta in degrees. Positive = whichever direction the lower MCU
      *            interprets as positive yaw (typically counter-clockwise).
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_turnDone = false`. Updates `_heldYaw` to the post-turn target.
-     *       Yaw wrap-around: `_normalizeYaw` keeps targets in `(-360, +360)`; do not
-     *       pre-modulo to `[-180, 180]` — the example sketch shows ±270 working fine.
-     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
-     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
-     *       previous yaw lock is preserved.
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]`.
      */
-    uint8_t turnDeg(int16_t deg);
+    [[nodiscard]] TurnDegBuilder turnDeg(int16_t deg);
 
     /**
-     * @brief Turn by a relative yaw delta, blocking until complete.
+     * @brief Build an absolute-yaw turn.
      *
-     * Same target math as `turnDeg`, but `async = false` so the underlying library spins on
-     * `delay(50)` until the lower MCU signals completion. Leaves `_turnDone = true` on
-     * return.
+     * Returns a `TurnToYawBuilder` that executes the turn when the temporary destructs.
+     * Defaults match `turnDeg`.
      *
-     * @param deg Relative yaw delta in degrees.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Returns with `_turnDone = true` (the underlying library already blocked until the
-     *       lower MCU reported done). Updates `_heldYaw` to the post-turn target.
-     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
-     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
-     *       previous yaw lock is preserved.
-     * @warning DO NOT call from inside any `update()` — see class-level warning.
+     * @param yaw Absolute yaw target in degrees (normalised through `_normalizeYaw` to
+     *            `(-360, +360)` before being handed to `TurnGyro`).
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]`.
      */
-    uint8_t turnDegBlocking(int16_t deg);
-
-    /**
-     * @brief Turn to an absolute yaw heading, non-blocking.
-     *
-     * @param yaw Absolute yaw target in degrees, normalised through `_normalizeYaw` to the
-     *            `(-360, +360)` range that `TurnGyro` accepts.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Sets `_turnDone = false`. Updates `_heldYaw` to the post-turn target.
-     *       Yaw wrap-around: `_normalizeYaw` keeps targets in `(-360, +360)`; do not
-     *       pre-modulo to `[-180, 180]` — the example sketch shows ±270 working fine.
-     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
-     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
-     *       previous yaw lock is preserved.
-     */
-    uint8_t turnToYaw(int16_t yaw);
-
-    /**
-     * @brief Turn to an absolute yaw heading, blocking until complete.
-     *
-     * @param yaw Absolute yaw target in degrees.
-     * @return `0x00` on success, lower-MCU error code otherwise.
-     * @note Returns with `_turnDone = true`. Updates `_heldYaw` to the post-turn target.
-     * @note If `TurnGyro` returns non-zero (turn failed to start), `_turnDone` is left/set
-     *       to `true` and `_heldYaw` is NOT updated — the caller is unblocked and the
-     *       previous yaw lock is preserved.
-     * @warning DO NOT call from inside any `update()` — see class-level warning.
-     */
-    uint8_t turnToYawBlocking(int16_t yaw);
+    [[nodiscard]] TurnToYawBuilder turnToYaw(int16_t yaw);
 
     // -------------------------------------------------------------------------------------
     // State accessors
@@ -400,6 +362,109 @@ private:
     float   _biasL    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM L paths. See DECISIONS.md.
     float   _biasR    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM R paths. See DECISIONS.md.
 
+    // -------------------------------------------------------------------------------------
+    // Builder dispatch targets — each fluent builder destructor calls into one of these.
+    // -------------------------------------------------------------------------------------
+
+    /**
+     * @brief Open-loop PWM distance move (`MoveDegs`). Bias-compensated.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param cm       Distance in centimetres.
+     * @param brake    Apply brake at end of move.
+     * @param blocking If `true`, block until the lower MCU reports done; if `false`, return
+     *                 immediately and clear `_moveDone`.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveDistRaw(int16_t power, float cm, bool brake, bool blocking);
+
+    /**
+     * @brief MoveSync distance move (`MoveSyncDegs`). No bias applied.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param cm       Distance in centimetres.
+     * @param brake    Apply brake at end of move.
+     * @param blocking Block / async semantics — see `_execDriveDistRaw`.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveDistSync(int16_t power, float cm, bool brake, bool blocking);
+
+    /**
+     * @brief MoveGyro distance move (`MoveGyroDegs`). Heading-locked. No bias applied.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param cm       Distance in centimetres.
+     * @param yaw      Heading to hold during the move (typically the current `_heldYaw`).
+     * @param brake    Apply brake at end of move.
+     * @param blocking Block / async semantics — see `_execDriveDistRaw`.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveDistGyro(int16_t power, float cm, int16_t yaw, bool brake, bool blocking);
+
+    /**
+     * @brief Open-loop PWM time move (`MoveTime`). Bias-compensated.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param sec      Duration in seconds.
+     * @param brake    Apply brake at end of move.
+     * @param blocking Block / async semantics.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveTimeRaw(int16_t power, float sec, bool brake, bool blocking);
+
+    /**
+     * @brief MoveSync time move (`MoveSyncTime`). No bias applied.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param sec      Duration in seconds.
+     * @param brake    Apply brake at end of move.
+     * @param blocking Block / async semantics.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveTimeSync(int16_t power, float sec, bool brake, bool blocking);
+
+    /**
+     * @brief MoveGyro time move (`MoveGyroTime`). Heading-locked. No bias applied.
+     * @param power    PWM target in `[-100, 100]`.
+     * @param sec      Duration in seconds.
+     * @param yaw      Heading to hold during the move.
+     * @param brake    Apply brake at end of move.
+     * @param blocking Block / async semantics.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     */
+    uint8_t _execDriveTimeGyro(int16_t power, float sec, int16_t yaw, bool brake, bool blocking);
+
+    /**
+     * @brief Relative-yaw-delta turn (`TurnGyro` with target = current yaw + deg).
+     * @param deg      Relative yaw delta in degrees.
+     * @param power    PWM target for the turn.
+     * @param mode     Turn motor mode (0 = pivot, 1 = counter-rotate).
+     * @param brake    Apply brake at end of turn.
+     * @param blocking Block until done (`async = false`) or fire-and-forget (`async = true`).
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     * @note On non-zero rc, `_turnDone` is left `true` and `_heldYaw` is NOT updated — the
+     *       chassis never moved, so the previous yaw lock must be preserved.
+     */
+    uint8_t _execTurnDeg(int16_t deg, int16_t power, uint8_t mode, bool brake, bool blocking);
+
+    /**
+     * @brief Absolute-yaw turn (`TurnGyro` with target = `_normalizeYaw(yaw)`).
+     * @param yaw      Absolute yaw target in degrees.
+     * @param power    PWM target for the turn.
+     * @param mode     Turn motor mode (0 = pivot, 1 = counter-rotate).
+     * @param brake    Apply brake at end of turn.
+     * @param blocking Block until done or async.
+     * @return `0x00` on success, lower-MCU error code otherwise.
+     * @note Same C1-fix semantics as `_execTurnDeg`.
+     */
+    uint8_t _execTurnToYaw(int16_t yaw, int16_t power, uint8_t mode, bool brake, bool blocking);
+
+    /**
+     * @brief Resolve a `Config::SpeedPreset` to its corresponding PWM constant.
+     *
+     * @param preset Coarse speed selector.
+     * @return PWM in `[-100, 100]`. `SLOW` -> `Config::SPEED_SLOW`,
+     *         `NORMAL` -> `Config::SPEED_NORMAL`, `FAST` -> `Config::SPEED_FAST`.
+     * @note Falls back to `Config::SPEED_NORMAL` for any unrecognised value (defensive — the
+     *       `enum class` should keep the switch exhaustive at compile time).
+     */
+    int16_t _presetToPwm(Config::SpeedPreset preset) const;
+
     /**
      * @brief Normalise an absolute yaw target into the range that
      *        `MiniR4.DriveDC.TurnGyro` accepts.
@@ -442,5 +507,695 @@ private:
  * @brief Single global instance — defined in Drive.cpp.
  */
 extern DriveClass Drive;
+
+// =========================================================================================
+// Fluent builders — header-only, inline. Each is RAII: the destructor executes the move
+// with whatever knobs were set. `_executed` guards against accidental double-execution if
+// a builder is moved out of (we delete copy and move below to keep it simple, but the flag
+// also makes the destructor safe even if a future change re-enables move).
+//
+// `[[nodiscard]]` on the class itself means a stack-stored builder warns if unused.
+// =========================================================================================
+
+/**
+ * @brief Fluent builder for `Drive.driveDist(cm)` — distance-bounded straight-line move.
+ *
+ * Auto-executes when the temporary destructs at end-of-statement. Setters return `*this` by
+ * reference for chaining. Defaults: `DriveMode::RAW`, power `Config::SPEED_NORMAL`, brake
+ * `true`, blocking `false`, heading = `Drive`'s current `_heldYaw` (only consulted in
+ * `DriveMode::GYRO`).
+ */
+class [[nodiscard]] DriveDistBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for distance @p cm.
+     * @param drive Reference to the singleton `Drive` (only `Drive.driveDist` should call this).
+     * @param cm    Distance in centimetres.
+     */
+    DriveDistBuilder(DriveClass& drive, float cm) : _drive(drive), _cm(cm)
+    {
+    }
+
+    DriveDistBuilder(const DriveDistBuilder&)            = delete;
+    DriveDistBuilder& operator=(const DriveDistBuilder&) = delete;
+    DriveDistBuilder& operator=(DriveDistBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb methods (`Drive.driveDist(cm)`) can return a builder by value on
+     * compilers that do not perform mandatory copy elision (pre-C++17). The moved-from
+     * instance is marked `_executed` so its destructor is a no-op.
+     */
+    DriveDistBuilder(DriveDistBuilder&& other) noexcept
+        : _drive(other._drive),
+          _cm(other._cm),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _heading(other._heading),
+          _headingSet(other._headingSet),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the PWM power explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     * @note Calling both `setPower` and `setPreset` on the same builder is allowed; the
+     *       last `setPower` (whether before or after `setPreset`) wins.
+     */
+    DriveDistBuilder& setPower(int16_t p)
+    {
+        _power       = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the PWM power.
+     * @param p Preset selector — resolved via `Drive._presetToPwm` at execute-time.
+     * @return `*this` for chaining.
+     * @note Ignored if `setPower` was also called on the same builder.
+     */
+    DriveDistBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset       = p;
+        _presetSet    = true;
+        return *this;
+    }
+
+    /**
+     * @brief Choose which underlying lower-MCU primitive executes the move.
+     * @param m `RAW` (open-loop), `SYNC` (encoder-rate sync PID), or `GYRO` (yaw-lock).
+     * @return `*this` for chaining.
+     * @note `_applyBias` is applied only for `RAW`; the other modes are closed-loop on the
+     *       STM32.
+     */
+    DriveDistBuilder& setMode(DriveMode m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at end-of-move.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    DriveDistBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the move completes.
+     * @param b `true` = sync (library spins on `delay`); `false` = async (default).
+     * @return `*this` for chaining.
+     * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     */
+    DriveDistBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Override the heading held during a `DriveMode::GYRO` move.
+     * @param yaw Absolute yaw target in degrees.
+     * @return `*this` for chaining.
+     * @note Only consulted when the resolved mode is `GYRO`. If never set, the move uses the
+     *       current `Drive` `_heldYaw` (snapshot via `holdYaw()` or set by a prior turn).
+     */
+    DriveDistBuilder& setHeading(int16_t yaw)
+    {
+        _heading       = yaw;
+        _headingSet    = true;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-execute. Resolves the final knobs and dispatches to the
+     *        appropriate `DriveClass::_execDriveDist*` method.
+     * @note Idempotent: the `_executed` guard prevents a second dispatch if a future change
+     *       re-enables move semantics.
+     */
+    ~DriveDistBuilder()
+    {
+        if (_executed)
+        {
+            return;
+        }
+        _executed = true;
+
+        const int16_t resolvedPower = _resolvePower();
+        switch (_mode)
+        {
+        case DriveMode::RAW:
+            _drive._execDriveDistRaw(resolvedPower, _cm, _brake, _blocking);
+            break;
+        case DriveMode::SYNC:
+            _drive._execDriveDistSync(resolvedPower, _cm, _brake, _blocking);
+            break;
+        case DriveMode::GYRO:
+        {
+            const int16_t yaw = _headingSet ? _heading : _drive._heldYaw;
+            _drive._execDriveDistGyro(resolvedPower, _cm, yaw, _brake, _blocking);
+            break;
+        }
+        }
+    }
+
+private:
+    /**
+     * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::SPEED_NORMAL` as the documented default.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return _drive._presetToPwm(_preset);
+        }
+        return Config::SPEED_NORMAL;
+    }
+
+    DriveClass& _drive;
+    float       _cm;
+    int16_t     _power          = Config::SPEED_NORMAL;
+    bool        _powerExplicit  = false;
+    Config::SpeedPreset _preset = Config::SpeedPreset::NORMAL;
+    bool        _presetSet      = false;
+    DriveMode   _mode           = DriveMode::RAW;
+    bool        _brake          = true;
+    bool        _blocking       = false;
+    int16_t     _heading        = 0;
+    bool        _headingSet     = false;
+    bool        _executed       = false;
+};
+
+/**
+ * @brief Fluent builder for `Drive.driveTime(sec)` — time-bounded straight-line move.
+ *
+ * Auto-executes on destruction. Setters mirror `DriveDistBuilder`; only the time vs. distance
+ * verb differs.
+ */
+class [[nodiscard]] DriveTimeBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for duration @p sec.
+     * @param drive Reference to the singleton `Drive`.
+     * @param sec   Duration in seconds.
+     */
+    DriveTimeBuilder(DriveClass& drive, float sec) : _drive(drive), _sec(sec)
+    {
+    }
+
+    DriveTimeBuilder(const DriveTimeBuilder&)            = delete;
+    DriveTimeBuilder& operator=(const DriveTimeBuilder&) = delete;
+    DriveTimeBuilder& operator=(DriveTimeBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb methods can return a builder by value on compilers without
+     * mandatory copy elision. The moved-from instance is marked `_executed` so its
+     * destructor is a no-op.
+     */
+    DriveTimeBuilder(DriveTimeBuilder&& other) noexcept
+        : _drive(other._drive),
+          _sec(other._sec),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _heading(other._heading),
+          _headingSet(other._headingSet),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the PWM power explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     */
+    DriveTimeBuilder& setPower(int16_t p)
+    {
+        _power         = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the PWM power.
+     * @param p Preset selector.
+     * @return `*this` for chaining.
+     */
+    DriveTimeBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset    = p;
+        _presetSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Choose which underlying lower-MCU primitive executes the move.
+     * @param m `RAW`, `SYNC`, or `GYRO`.
+     * @return `*this` for chaining.
+     */
+    DriveTimeBuilder& setMode(DriveMode m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at end-of-move.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    DriveTimeBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the move completes.
+     * @param b `true` = sync; `false` = async.
+     * @return `*this` for chaining.
+     */
+    DriveTimeBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Override the heading held during a `DriveMode::GYRO` move.
+     * @param yaw Absolute yaw target in degrees.
+     * @return `*this` for chaining.
+     * @note Only consulted when the resolved mode is `GYRO`.
+     */
+    DriveTimeBuilder& setHeading(int16_t yaw)
+    {
+        _heading    = yaw;
+        _headingSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-execute. Dispatches to the correct
+     *        `DriveClass::_execDriveTime*` method.
+     */
+    ~DriveTimeBuilder()
+    {
+        if (_executed)
+        {
+            return;
+        }
+        _executed = true;
+
+        const int16_t resolvedPower = _resolvePower();
+        switch (_mode)
+        {
+        case DriveMode::RAW:
+            _drive._execDriveTimeRaw(resolvedPower, _sec, _brake, _blocking);
+            break;
+        case DriveMode::SYNC:
+            _drive._execDriveTimeSync(resolvedPower, _sec, _brake, _blocking);
+            break;
+        case DriveMode::GYRO:
+        {
+            const int16_t yaw = _headingSet ? _heading : _drive._heldYaw;
+            _drive._execDriveTimeGyro(resolvedPower, _sec, yaw, _brake, _blocking);
+            break;
+        }
+        }
+    }
+
+private:
+    /**
+     * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::SPEED_NORMAL`.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return _drive._presetToPwm(_preset);
+        }
+        return Config::SPEED_NORMAL;
+    }
+
+    DriveClass& _drive;
+    float       _sec;
+    int16_t     _power          = Config::SPEED_NORMAL;
+    bool        _powerExplicit  = false;
+    Config::SpeedPreset _preset = Config::SpeedPreset::NORMAL;
+    bool        _presetSet      = false;
+    DriveMode   _mode           = DriveMode::RAW;
+    bool        _brake          = true;
+    bool        _blocking       = false;
+    int16_t     _heading        = 0;
+    bool        _headingSet     = false;
+    bool        _executed       = false;
+};
+
+/**
+ * @brief Fluent builder for `Drive.turnDeg(deg)` — relative-yaw-delta turn.
+ *
+ * Auto-executes on destruction. Defaults: power `Config::TURN_POWER`, mode `Config::TURN_MODE`,
+ * brake `Config::TURN_BRAKE`, blocking `false`.
+ */
+class [[nodiscard]] TurnDegBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for relative delta @p deg.
+     * @param drive Reference to the singleton `Drive`.
+     * @param deg   Relative yaw delta in degrees.
+     */
+    TurnDegBuilder(DriveClass& drive, int16_t deg) : _drive(drive), _deg(deg)
+    {
+    }
+
+    TurnDegBuilder(const TurnDegBuilder&)            = delete;
+    TurnDegBuilder& operator=(const TurnDegBuilder&) = delete;
+    TurnDegBuilder& operator=(TurnDegBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb methods can return a builder by value on compilers without
+     * mandatory copy elision. The moved-from instance is marked `_executed`.
+     */
+    TurnDegBuilder(TurnDegBuilder&& other) noexcept
+        : _drive(other._drive),
+          _deg(other._deg),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the turn PWM power explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     */
+    TurnDegBuilder& setPower(int16_t p)
+    {
+        _power         = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the turn power.
+     * @param p Preset selector.
+     * @return `*this` for chaining.
+     */
+    TurnDegBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset    = p;
+        _presetSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the lower-MCU turn motor mode.
+     * @param m `0` = single-motor pivot (one wheel braked), `1` = counter-rotation.
+     * @return `*this` for chaining.
+     */
+    TurnDegBuilder& setMode(uint8_t m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at end-of-turn.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    TurnDegBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the turn completes.
+     * @param b `true` = sync (library spins); `false` = async (default).
+     * @return `*this` for chaining.
+     * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     */
+    TurnDegBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-execute. Dispatches to `DriveClass::_execTurnDeg`.
+     */
+    ~TurnDegBuilder()
+    {
+        if (_executed)
+        {
+            return;
+        }
+        _executed                   = true;
+        const int16_t resolvedPower = _resolvePower();
+        _drive._execTurnDeg(_deg, resolvedPower, _mode, _brake, _blocking);
+    }
+
+private:
+    /**
+     * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::TURN_POWER` as the documented default.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return _drive._presetToPwm(_preset);
+        }
+        return Config::TURN_POWER;
+    }
+
+    DriveClass&         _drive;
+    int16_t             _deg;
+    int16_t             _power         = Config::TURN_POWER;
+    bool                _powerExplicit = false;
+    Config::SpeedPreset _preset        = Config::SpeedPreset::NORMAL;
+    bool                _presetSet     = false;
+    uint8_t             _mode          = Config::TURN_MODE;
+    bool                _brake         = Config::TURN_BRAKE;
+    bool                _blocking      = false;
+    bool                _executed      = false;
+};
+
+/**
+ * @brief Fluent builder for `Drive.turnToYaw(yaw)` — absolute-yaw turn.
+ *
+ * Auto-executes on destruction. Defaults match `TurnDegBuilder`.
+ */
+class [[nodiscard]] TurnToYawBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for absolute target @p yaw.
+     * @param drive Reference to the singleton `Drive`.
+     * @param yaw   Absolute yaw target in degrees.
+     */
+    TurnToYawBuilder(DriveClass& drive, int16_t yaw) : _drive(drive), _yaw(yaw)
+    {
+    }
+
+    TurnToYawBuilder(const TurnToYawBuilder&)            = delete;
+    TurnToYawBuilder& operator=(const TurnToYawBuilder&) = delete;
+    TurnToYawBuilder& operator=(TurnToYawBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb methods can return a builder by value on compilers without
+     * mandatory copy elision. The moved-from instance is marked `_executed`.
+     */
+    TurnToYawBuilder(TurnToYawBuilder&& other) noexcept
+        : _drive(other._drive),
+          _yaw(other._yaw),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the turn PWM power explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     */
+    TurnToYawBuilder& setPower(int16_t p)
+    {
+        _power         = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the turn power.
+     * @param p Preset selector.
+     * @return `*this` for chaining.
+     */
+    TurnToYawBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset    = p;
+        _presetSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the lower-MCU turn motor mode.
+     * @param m `0` = pivot, `1` = counter-rotate.
+     * @return `*this` for chaining.
+     */
+    TurnToYawBuilder& setMode(uint8_t m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at end-of-turn.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    TurnToYawBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the turn completes.
+     * @param b `true` = sync; `false` = async.
+     * @return `*this` for chaining.
+     * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     */
+    TurnToYawBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-execute. Dispatches to `DriveClass::_execTurnToYaw`.
+     */
+    ~TurnToYawBuilder()
+    {
+        if (_executed)
+        {
+            return;
+        }
+        _executed                   = true;
+        const int16_t resolvedPower = _resolvePower();
+        _drive._execTurnToYaw(_yaw, resolvedPower, _mode, _brake, _blocking);
+    }
+
+private:
+    /**
+     * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::TURN_POWER`.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return _drive._presetToPwm(_preset);
+        }
+        return Config::TURN_POWER;
+    }
+
+    DriveClass&         _drive;
+    int16_t             _yaw;
+    int16_t             _power         = Config::TURN_POWER;
+    bool                _powerExplicit = false;
+    Config::SpeedPreset _preset        = Config::SpeedPreset::NORMAL;
+    bool                _presetSet     = false;
+    uint8_t             _mode          = Config::TURN_MODE;
+    bool                _brake         = Config::TURN_BRAKE;
+    bool                _blocking      = false;
+    bool                _executed      = false;
+};
+
+// =========================================================================================
+// Inline definitions of the verb entry points — these MUST come after the builder classes
+// are fully defined, since they construct and return them by value.
+// =========================================================================================
+
+inline DriveDistBuilder DriveClass::driveDist(float cm)
+{
+    return DriveDistBuilder(*this, cm);
+}
+
+inline DriveTimeBuilder DriveClass::driveTime(float sec)
+{
+    return DriveTimeBuilder(*this, sec);
+}
+
+inline TurnDegBuilder DriveClass::turnDeg(int16_t deg)
+{
+    return TurnDegBuilder(*this, deg);
+}
+
+inline TurnToYawBuilder DriveClass::turnToYaw(int16_t yaw)
+{
+    return TurnToYawBuilder(*this, yaw);
+}
 
 #endif    // DRIVE_H
