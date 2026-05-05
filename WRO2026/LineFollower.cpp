@@ -122,7 +122,7 @@ void LineFollowerClass::update()
     // works unchanged because differential-drive geometry is direction-symmetric: a CW body
     // rotation moves the front-mounted tracer the same way regardless of whether the body
     // is travelling forward or backward. See DECISIONS.md "Reverse line-following".
-    int16_t cruise = _presetToPwm(_preset);
+    int16_t cruise = presetToPwm(_preset);
     if (_reverse)
     {
         cruise = (int16_t) -cruise;
@@ -131,17 +131,14 @@ void LineFollowerClass::update()
     if (_useTShape)
     {
         // Distance-based ramp from `_tShapeStartPwm` to `_tShapeTargetPwm`. The ramp distance
-        // is implicit: `|cruise - start| / accel`, clamped to `[MIN_CM, MAX_CM]`. Encoder
-        // degrees are converted to cm using the same formula as `Drive::_cmToEncDeg`,
-        // inverted: `cm = enc / 360 * (PI * WHEEL_DIAM_MM / 10)`. We duplicate the small bit
-        // of constant math here rather than expose a `Drive::_cmToEncDeg` to keep its private
-        // surface intact.
+        // is implicit: `|cruise - start| / accel`, clamped to `[MIN_CM, MAX_CM]`. The
+        // shared `encDegToCm()` helper (WROMath.h) is the single source of truth for the
+        // inverse of `cmToEncDeg` — this used to duplicate the math inline.
         const int32_t now      = Drive.getEncL();
         const int32_t delta    = now - _tShapeStartEnc;
-        // Compare unsigned magnitudes so a momentary counter-rotation cannot drive
-        // `traveledCm` negative and pull `cruise` below the starting PWM.
-        const float traveledCm =
-            (float) abs(delta) / 360.0f * ((float) PI * Config::WHEEL_DIAM_MM / 10.0f);
+        // Use the absolute value so a momentary counter-rotation cannot drive `traveledCm`
+        // negative and pull `cruise` below the starting PWM.
+        const float traveledCm = encDegToCm(abs(delta));
 
         float rampCm = (float) abs(cruise - _tShapeStartPwm) / _tShapeAccel;
         if (rampCm < Config::TSHAPE_RAMP_MIN_CM)
@@ -287,7 +284,7 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
             _tShapeAccel     = accel;
             _tShapeStartEnc  = Drive.getEncL();
             _tShapeStartPwm  = 0;
-            _tShapeTargetPwm = _presetToPwm(_preset);
+            _tShapeTargetPwm = presetToPwm(_preset);
         }
         else
         {
@@ -351,20 +348,5 @@ bool LineFollowerClass::getReverse() const
     return _reverse;
 }
 
-// =========================================================================================
-// Private helpers.
-// =========================================================================================
-
-int16_t LineFollowerClass::_presetToPwm(Config::SpeedPreset preset) const
-{
-    switch (preset)
-    {
-        case Config::SpeedPreset::SLOW:
-            return Config::SPEED_SLOW;
-        case Config::SpeedPreset::NORMAL:
-            return Config::SPEED_NORMAL;
-        case Config::SpeedPreset::FAST:
-            return Config::SPEED_FAST;
-    }
-    return Config::SPEED_NORMAL;    // unreachable; calms the compiler on the no-default switch.
-}
+// `_presetToPwm` removed — see `presetToPwm` in WROMath.h. Internal callers above invoke
+// the free function directly.

@@ -4,7 +4,7 @@
  * @author WRO 2026
  *
  * @note Build-time invariant: the wheel diameter must be positive — otherwise
- *       `_cmToEncDeg` would divide by zero or invert the travel direction silently.
+ *       `cmToEncDeg` (WROMath.h) would divide by zero or invert the travel direction silently.
  *
  * @note The verb entry points (`driveDist`, `driveTime`, `turnDeg`, `turnToYaw`) are
  *       defined inline in `Drive.h` because they construct fluent builders that themselves
@@ -165,7 +165,7 @@ uint8_t DriveClass::_execDriveDistRaw(int16_t power, float cm, bool brake, bool 
     int16_t powerR = power;
     _applyBias(powerL, powerR);
 
-    const uint16_t encDeg = _cmToEncDeg(cm);
+    const uint16_t encDeg = cmToEncDeg(cm);
     // The library convention: the last argument is `async`. Blocking == sync == async=false.
     const uint8_t rc = MiniR4.DriveDC.MoveDegs(powerL, powerR, encDeg, brake, !blocking);
     // W3 guard: only set `_moveDone = false` when the lower MCU actually accepted the task.
@@ -181,7 +181,7 @@ uint8_t DriveClass::_execDriveDistRaw(int16_t power, float cm, bool brake, bool 
 uint8_t DriveClass::_execDriveDistSync(int16_t power, float cm, bool brake, bool blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint16_t encDeg = _cmToEncDeg(cm);
+    const uint16_t encDeg = cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
@@ -198,7 +198,7 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
                                        bool    blocking)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint16_t encDeg = _cmToEncDeg(cm);
+    const uint16_t encDeg = cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveGyroDegs(power, yaw, encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
@@ -505,21 +505,6 @@ float DriveClass::getBiasR() const
 // Private helpers
 // -----------------------------------------------------------------------------------------
 
-int16_t DriveClass::_presetToPwm(Config::SpeedPreset preset) const
-{
-    switch (preset)
-    {
-    case Config::SpeedPreset::SLOW:
-        return Config::SPEED_SLOW;
-    case Config::SpeedPreset::NORMAL:
-        return Config::SPEED_NORMAL;
-    case Config::SpeedPreset::FAST:
-        return Config::SPEED_FAST;
-    }
-    // Defensive fallback — `enum class` should keep the switch exhaustive at compile time.
-    return Config::SPEED_NORMAL;
-}
-
 int16_t DriveClass::_normalizeYaw(int32_t deg)
 {
     // C++11+ truncating modulo: the result is always in (-360, +360) for any int32 input,
@@ -527,12 +512,9 @@ int16_t DriveClass::_normalizeYaw(int32_t deg)
     return (int16_t) (deg % 360);
 }
 
-uint16_t DriveClass::_cmToEncDeg(float cm)
-{
-    // cm * 10 -> mm; divide by wheel circumference (PI * diameter_mm); multiply by 360 deg.
-    const float revs = (cm * 10.0f) / ((float) PI * Config::WHEEL_DIAM_MM);
-    return (uint16_t) (revs * 360.0f);
-}
+// `_presetToPwm` and `_cmToEncDeg` moved to free functions in WROMath.h once LineFollower
+// also needed them. Internal callers below now invoke `presetToPwm(...)` / `cmToEncDeg(...)`
+// directly.
 
 void DriveClass::_applyBias(int16_t& L, int16_t& R) const
 {
@@ -709,7 +691,7 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
     }
 
     // Defensive non-negative clamp on the move bound. A negative totalCm/totalSec would later
-    // underflow into _cmToEncDeg's uint16_t cast (or produce a negative ramp duration), so we
+    // underflow into cmToEncDeg's uint16_t cast (or produce a negative ramp duration), so we
     // floor at zero up-front. WARNING-2 fix.
     if (totalCm < 0.0f)
     {
@@ -837,7 +819,7 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
     {
         // ---------------------------------------------------------------------------------
         // Distance variant — encoder-based ramps in cm, converted to encoder degrees via the
-        // shared `_cmToEncDeg` helper. Negative `cruise` (backwards) is handled implicitly:
+        // shared `cmToEncDeg` helper (WROMath.h). Negative `cruise` (backwards) is handled implicitly:
         // we store `_profileTotalEnc` / `_profileAccelEnc` / `_profileDecelEnc` as positive
         // magnitudes and `_updateProfile` compares them against `abs(encDelta)`. The PWM
         // setpoints (`_profileStartSpd` / `_profilePeakSpd` / `_profileEndSpd`) carry the
@@ -885,9 +867,9 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         // Store ramp + total distances as positive magnitudes — `_updateProfile` and
         // `_profileSpeedAt` compare them against `abs(encDelta)` so the same code path
         // handles both forward and reverse moves transparently.
-        _profileTotalEnc = (int32_t) _cmToEncDeg(totalCm);
-        _profileAccelEnc = (int32_t) _cmToEncDeg(accelCm < 0.0f ? 0.0f : accelCm);
-        _profileDecelEnc = (int32_t) _cmToEncDeg(decelCm < 0.0f ? 0.0f : decelCm);
+        _profileTotalEnc = (int32_t) cmToEncDeg(totalCm);
+        _profileAccelEnc = (int32_t) cmToEncDeg(accelCm < 0.0f ? 0.0f : accelCm);
+        _profileDecelEnc = (int32_t) cmToEncDeg(decelCm < 0.0f ? 0.0f : decelCm);
         _profileStartEnc = MiniR4.M2.getDegrees();
     }
 

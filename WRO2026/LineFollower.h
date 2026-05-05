@@ -375,15 +375,8 @@ public:
                              bool                reverse);
 
 private:
-    /**
-     * @brief Map a `Config::SpeedPreset` to its associated PWM cruise target.
-     *
-     * @param preset Preset to resolve.
-     * @return `Config::SPEED_SLOW`, `SPEED_NORMAL`, or `SPEED_FAST` depending on input;
-     *         `Config::SPEED_NORMAL` for any unrecognised value (defensive — calms the
-     *         compiler on the no-default switch).
-     */
-    int16_t _presetToPwm(Config::SpeedPreset preset) const;
+    // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
+    // here invoke the free function directly.
 
     MatrixLineTracer    _tracer;                                  ///< Owned sensor driver shared with Intersection (T7).
     bool                _enabled  = false;                        ///< When false, `update()` is a no-op.

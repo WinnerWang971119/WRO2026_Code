@@ -50,6 +50,7 @@
 #include <MatrixMiniR4.h>
 
 #include "Config.h"
+#include "WROMath.h"
 
 // Forward declarations so DriveClass can name-friend the builders before they are defined.
 class DriveDistBuilder;
@@ -71,43 +72,9 @@ enum class DriveMode : uint8_t
     GYRO     ///< `MoveGyro*` — STM32 yaw-lock PID closes the loop. No bias applied.
 };
 
-/**
- * @brief Clamp a raw PWM command into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX]
- *        (with mirrored negative range), snapping non-zero small magnitudes
- *        UP to the deadband floor.
- *
- * Apply at every boundary where a computed PWM hits the lower MCU:
- *   * `LineFollower::update()`'s P+D mix (so small line-correction commands
- *     are honored instead of stalling silently in the dead zone).
- *   * `Drive::setSpeed()` after `_applyBias` (so any caller-issued continuous
- *     command is also deadband-corrected).
- *   * `_updateProfile()`'s speed-emission per tick (so ramp setpoints below
- *     the floor still move the chassis).
- *
- * @param pwm Raw signed PWM in any range.
- * @return Clamped/snapped PWM:
- *           - `pwm == 0` -> returns `0` unchanged (intentional stop)
- *           - `0 < |pwm| < PWM_MIN_MAGNITUDE` -> returns `+/-PWM_MIN_MAGNITUDE` (sign preserved)
- *           - `|pwm| > PWM_MAX` -> returns `+/-PWM_MAX` (sign preserved)
- *           - else -> returns `pwm` unchanged
- */
-inline int16_t deadbandSnap(int16_t pwm)
-{
-    if (pwm == 0)
-    {
-        return 0;
-    }
-    if (pwm > 0)
-    {
-        if (pwm < Config::PWM_MIN_MAGNITUDE) return Config::PWM_MIN_MAGNITUDE;
-        if (pwm > Config::PWM_MAX)           return Config::PWM_MAX;
-        return pwm;
-    }
-    // pwm < 0
-    if (pwm > -Config::PWM_MIN_MAGNITUDE) return -Config::PWM_MIN_MAGNITUDE;
-    if (pwm < -Config::PWM_MAX)           return -Config::PWM_MAX;
-    return pwm;
-}
+// Math helpers used by Drive and its builders live in `WROMath.h` (free functions).
+// Notably `deadbandSnap`, `presetToPwm`, `cmToEncDeg` — all originally private to this
+// class, factored out once a second caller (LineFollower) needed them.
 
 /**
  * @brief Captured parameters of a queued Drive command.
@@ -163,9 +130,10 @@ struct DriveCommand
  */
 class DriveClass
 {
-    // The fluent builders need access to the private `_execXxx` dispatch methods and the
-    // `_presetToPwm` helper. Friending keeps the public surface small and prevents callers
-    // from invoking the legacy wide-signature paths directly.
+    // The fluent builders need access to the private `_execXxx` dispatch methods. Friending
+    // keeps the public surface small and prevents callers from invoking the legacy
+    // wide-signature paths directly. (`presetToPwm` is now a free function in `WROMath.h`,
+    // so builders no longer need friend access for it.)
     friend class DriveDistBuilder;
     friend class DriveTimeBuilder;
     friend class TurnDegBuilder;
@@ -675,17 +643,6 @@ private:
     uint8_t _execTurnToYaw(int16_t yaw, int16_t power, uint8_t mode, bool brake, bool blocking);
 
     /**
-     * @brief Resolve a `Config::SpeedPreset` to its corresponding PWM constant.
-     *
-     * @param preset Coarse speed selector.
-     * @return PWM in `[-100, 100]`. `SLOW` -> `Config::SPEED_SLOW`,
-     *         `NORMAL` -> `Config::SPEED_NORMAL`, `FAST` -> `Config::SPEED_FAST`.
-     * @note Falls back to `Config::SPEED_NORMAL` for any unrecognised value (defensive — the
-     *       `enum class` should keep the switch exhaustive at compile time).
-     */
-    int16_t _presetToPwm(Config::SpeedPreset preset) const;
-
-    /**
      * @brief Normalise an absolute yaw target into the range that
      *        `MiniR4.DriveDC.TurnGyro` accepts.
      *
@@ -698,18 +655,9 @@ private:
      */
     static int16_t _normalizeYaw(int32_t deg);
 
-    /**
-     * @brief Convert a linear distance in centimetres to wheel rotation in degrees.
-     *
-     * Formula: `(cm * 10 / (PI * WHEEL_DIAM_MM)) * 360`. The `cm * 10` converts to mm so the
-     * units cancel against `WHEEL_DIAM_MM`.
-     *
-     * @param cm Linear distance in centimetres (always non-negative — sign of travel is
-     *           carried by the `power` argument of the calling primitive).
-     * @return Wheel rotation in degrees, cast to `uint16_t` (the type accepted by every
-     *         `*Degs` lower-MCU API).
-     */
-    static uint16_t _cmToEncDeg(float cm);
+    // `presetToPwm` and `cmToEncDeg` were previously private members of this class.
+    // They moved to free functions in `WROMath.h` once `LineFollower` started needing
+    // both — see WROMath.h's preamble for the policy on what lives there.
 
     /**
      * @brief Multiply (L, R) in-place by the bias scalars before forwarding to
@@ -946,7 +894,7 @@ public:
 
     /**
      * @brief Use a `Config::SpeedPreset` for the PWM power.
-     * @param p Preset selector — resolved via `Drive._presetToPwm` at execute-time.
+     * @param p Preset selector — resolved via `presetToPwm` (WROMath.h) at execute-time.
      * @return `*this` for chaining.
      * @note Ignored if `setPower` was also called on the same builder.
      */
@@ -1201,7 +1149,7 @@ private:
         }
         if (_presetSet)
         {
-            return _drive._presetToPwm(_preset);
+            return presetToPwm(_preset);
         }
         return Config::SPEED_NORMAL;
     }
@@ -1523,7 +1471,7 @@ private:
         }
         if (_presetSet)
         {
-            return _drive._presetToPwm(_preset);
+            return presetToPwm(_preset);
         }
         return Config::SPEED_NORMAL;
     }
@@ -1722,7 +1670,7 @@ private:
         }
         if (_presetSet)
         {
-            return _drive._presetToPwm(_preset);
+            return presetToPwm(_preset);
         }
         return Config::TURN_POWER;
     }
@@ -1911,7 +1859,7 @@ private:
         }
         if (_presetSet)
         {
-            return _drive._presetToPwm(_preset);
+            return presetToPwm(_preset);
         }
         return Config::TURN_POWER;
     }
