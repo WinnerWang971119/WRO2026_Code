@@ -99,4 +99,4 @@ Keep `setup()` and `loop()` thin — they construct/configure objects and dispat
 - Create a feature branch — never commit straight to `main`.
 - When debugging, present 2–3 options with tradeoffs **before** picking a fix.
 - Use the `code-writer` agent for implementation once a plan is agreed.
-- When planning something, always read `ARCHITECTURE.md` and `DECISIONS.md` first to understand the big picture.
+- When planning something, always read `ARCHITECTURE.md` and `DECISIONS.md` and `Roadmap.md` first to understand the big picture.
