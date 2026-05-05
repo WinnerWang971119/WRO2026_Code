@@ -131,12 +131,12 @@ def _run(
     no_viz: bool = False,
     verbose: bool = False,
 ) -> int:
-    """Pure-function entry point so tests can call without arg parsing.
+    """Test-friendly entry point so tests can call without arg parsing.
 
     Mirrors the argparse layer in :func:`main` but accepts already-parsed
     parameters. The two layers are intentionally separated so the test
-    suite can drive the orchestrator without subprocess overhead and
-    without monkeypatching ``sys.argv``.
+    suite can drive the orchestrator directly, without subprocess
+    overhead and without monkeypatching ``sys.argv``.
 
     :param out_dir: override the output directory for ``routes.h`` /
         ``routes.cpp``. ``None`` falls back to the
