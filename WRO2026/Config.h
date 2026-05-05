@@ -137,6 +137,35 @@ namespace Config
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
     constexpr int16_t SPEED_FAST = 80;
 
+    // =============================================================================
+    // PWM bounds (saturation cap + motor deadband floor).
+    //
+    // Two physical properties of the TT motors:
+    //   * Saturation: PWM above ~95% gives no headroom for closed-loop corrections
+    //     — anything beyond gets clipped by the lower MCU.
+    //   * Deadband: PWM below ~20% can't break static friction; the motor stays
+    //     still even though a non-zero command was issued. Any P+D correction in
+    //     the (0, 20) range would be silently lost without compensation.
+    //
+    // `deadbandSnap()` (defined in Drive.h) takes a raw PWM and returns a value
+    // in {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (with mirrored negative range): zero
+    // stays zero, non-zero values below the floor snap UP to the floor magnitude,
+    // values above the cap clamp DOWN to the cap. Apply this at every actuator
+    // boundary where a computed PWM hits the lower MCU.
+    // =============================================================================
+
+    /** @brief Saturation cap — any |PWM| above this gets clipped to this magnitude. */
+    constexpr int16_t PWM_MAX = 95;
+
+    /**
+     * @brief Motor deadband floor — non-zero |PWM| below this can't break stiction.
+     *
+     * `deadbandSnap()` snaps non-zero commands UP to this floor (preserving sign)
+     * so P+D corrections always result in motion. Zero commands pass through —
+     * the caller intended to stop, deadband is irrelevant.
+     */
+    constexpr int16_t PWM_MIN_MAGNITUDE = 20;
+
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
     // ---------------------------------------------------------------------------------------
@@ -269,10 +298,27 @@ namespace Config
     /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
     constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
 
-    /** @brief Default starting speed for a profiled move (raw PWM). 0 = start at rest. */
-    constexpr int16_t TSHAPE_START_SPEED = 0;
+    /**
+     * @brief Default starting speed for a profiled move (raw PWM).
+     *
+     * Set to `PWM_MIN_MAGNITUDE` (the motor deadband floor) rather than 0 so the
+     * very first ramp tick emits a PWM the motor can actually act on. Starting at
+     * 0 would waste the first ~20% of the ramp distance with the chassis sitting
+     * still while the speed setpoint climbs through the dead zone.
+     *
+     * Override per-call with `.setStartSpeed(0)` if a true rest-start is desired
+     * (e.g. for very long ramps where the lost first centimetres don't matter).
+     */
+    constexpr int16_t TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE;
 
-    /** @brief Default ending speed for a profiled move (raw PWM). 0 = end at rest. */
+    /**
+     * @brief Default ending speed for a profiled move (raw PWM). 0 = end at rest.
+     *
+     * Stays at 0 (no symmetric deadband floor) by design: the motor naturally
+     * stalls in the last bit when the ramp passes through the dead zone, then
+     * `stop()` engages the brake immediately — the chassis comes to rest cleanly
+     * without needing a ramp-down floor.
+     */
     constexpr int16_t TSHAPE_END_SPEED = 0;
 
     /**

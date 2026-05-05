@@ -72,6 +72,44 @@ enum class DriveMode : uint8_t
 };
 
 /**
+ * @brief Clamp a raw PWM command into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX]
+ *        (with mirrored negative range), snapping non-zero small magnitudes
+ *        UP to the deadband floor.
+ *
+ * Apply at every boundary where a computed PWM hits the lower MCU:
+ *   * `LineFollower::update()`'s P+D mix (so small line-correction commands
+ *     are honored instead of stalling silently in the dead zone).
+ *   * `Drive::setSpeed()` after `_applyBias` (so any caller-issued continuous
+ *     command is also deadband-corrected).
+ *   * `_updateProfile()`'s speed-emission per tick (so ramp setpoints below
+ *     the floor still move the chassis).
+ *
+ * @param pwm Raw signed PWM in any range.
+ * @return Clamped/snapped PWM:
+ *           - `pwm == 0` -> returns `0` unchanged (intentional stop)
+ *           - `0 < |pwm| < PWM_MIN_MAGNITUDE` -> returns `+/-PWM_MIN_MAGNITUDE` (sign preserved)
+ *           - `|pwm| > PWM_MAX` -> returns `+/-PWM_MAX` (sign preserved)
+ *           - else -> returns `pwm` unchanged
+ */
+inline int16_t deadbandSnap(int16_t pwm)
+{
+    if (pwm == 0)
+    {
+        return 0;
+    }
+    if (pwm > 0)
+    {
+        if (pwm < Config::PWM_MIN_MAGNITUDE) return Config::PWM_MIN_MAGNITUDE;
+        if (pwm > Config::PWM_MAX)           return Config::PWM_MAX;
+        return pwm;
+    }
+    // pwm < 0
+    if (pwm > -Config::PWM_MIN_MAGNITUDE) return -Config::PWM_MIN_MAGNITUDE;
+    if (pwm < -Config::PWM_MAX)           return -Config::PWM_MAX;
+    return pwm;
+}
+
+/**
  * @brief Captured parameters of a queued Drive command.
  *
  * Built by a fluent builder's destructor and pushed onto `DriveClass`'s internal

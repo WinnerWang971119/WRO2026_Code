@@ -119,6 +119,8 @@ void DriveClass::update()
 uint8_t DriveClass::setSpeed(int16_t L, int16_t R)
 {
     _applyBias(L, R);
+    L = deadbandSnap(L);
+    R = deadbandSnap(R);
     return MiniR4.DriveDC.Move(L, R);
 }
 
@@ -620,16 +622,18 @@ void DriveClass::_updateProfile()
         int16_t L = spd;
         int16_t R = spd;
         _applyBias(L, R);
+        L = deadbandSnap(L);
+        R = deadbandSnap(R);
         MiniR4.DriveDC.Move(L, R);
         break;
     }
     case DriveMode::SYNC:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveSync(spd, spd);
+        MiniR4.DriveDC.MoveSync(deadbandSnap(spd), deadbandSnap(spd));
         break;
     case DriveMode::GYRO:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveGyro(spd, _profileHeading);
+        MiniR4.DriveDC.MoveGyro(deadbandSnap(spd), _profileHeading);
         break;
     }
 }

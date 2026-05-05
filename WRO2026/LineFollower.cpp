@@ -169,9 +169,14 @@ void LineFollowerClass::update()
                 break;
 
             case Config::LostLineAction::CRAWL:
+            {
                 // Straight creep forward (no steering) so the strip may be reacquired.
-                Drive.setSpeed((int16_t) (cruise / 2), (int16_t) (cruise / 2));
+                // `cruise / 2` is already in-range, but snap for consistency with the main
+                // mix path so every PWM hitting the lower MCU goes through the same gate.
+                const int16_t crawl = deadbandSnap((int16_t) (cruise / 2));
+                Drive.setSpeed(crawl, crawl);
                 break;
+            }
         }
         return;
     }
@@ -201,9 +206,13 @@ void LineFollowerClass::update()
     int16_t L = (int16_t) (cruise + corr);
     int16_t R = (int16_t) (cruise - corr);
 
-    // Re-clamp each channel to the DriveDC PWM range.
-    L = (int16_t) constrain(L, -100, 100);
-    R = (int16_t) constrain(R, -100, 100);
+    // Snap each channel into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (mirrored for negatives).
+    // This compensates for both the saturation cap and the motor deadband floor: a small P+D
+    // correction in the (0, 20) range would otherwise be silently lost in the dead zone.
+    // Drive.setSpeed re-snaps internally — the snap here ensures the value passed in already
+    // reflects the post-mix correction so future readers see a consistent post-snap value.
+    L = deadbandSnap(L);
+    R = deadbandSnap(R);
 
     Drive.setSpeed(L, R);
 }
