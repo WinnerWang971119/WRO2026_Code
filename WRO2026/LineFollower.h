@@ -41,7 +41,13 @@
 
 #include <Arduino.h>
 #include <MatrixMiniR4.h>            // brings in Wire1
-#include "MiniR4_MXLineTracer.h"     // MatrixLineTracer
+#include <MiniR4_MXLineTracer.h>     // MatrixLineTracer — angle-brackets so the Arduino
+                                     // build resolves it through the installed library's
+                                     // src/ tree on any machine, not just Diego's local
+                                     // worktree path. clangd hover may still show
+                                     // `<error type> *` on `getTracer()` until a
+                                     // `c_cpp_properties.json` is wired up — that's an
+                                     // IDE-config concern, not a source-code one.
 #include "Config.h"
 
 // Forward declaration so the builder can hold a reference to the owner type.
