@@ -16,14 +16,16 @@
  *    applies the motor-bias scalar (Strategy B); `setSpeedSync` and `forwardGyro` do not,
  *    because the STM32 closes the loop on those paths and a feedforward scalar would fight
  *    the inner PID. See DECISIONS.md.
- *  - **Distance-bounded** (`driveDist(cm)`) — fluent builder; defaults to non-blocking, raw
- *    PWM, brake-on-stop. Set `.setMode(DriveMode::SYNC|GYRO)`, `.setBlocking(true)`, etc. on
- *    the returned builder; the move executes when the temporary destructs at end-of-statement.
+ *  - **Distance-bounded** (`driveDist(cm)`) — fluent builder; **sync-blocking by default**,
+ *    raw PWM, brake-on-stop. Each verb call drains the queue at end-of-statement so mission
+ *    code reads top-down like Python. Chain `.async()` to opt out (auto-path planner case
+ *    where the caller ticks `loop()` and polls `Drive.isIdle()`). Other knobs:
+ *    `.setMode(DriveMode::SYNC|GYRO)`, `.setPower(...)`, etc.
  *  - **Time-bounded** (`driveTime(sec)`) — same fluent shape as `driveDist`.
- *  - **Turns** (`turnDeg(deg)` / `turnToYaw(yaw)`) — fluent builders; defaults to
- *    non-blocking, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`, power
+ *  - **Turns** (`turnDeg(deg)` / `turnToYaw(yaw)`) — fluent builders; **sync-blocking by
+ *    default**, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`, power
  *    `Config::TURN_POWER`. Both relative (`turnDeg`) and absolute (`turnToYaw`) targets are
- *    supported.
+ *    supported. Chain `.async()` to opt out.
  *
  * @note The underlying `MiniR4.DriveDC` lower-MCU API exposes ONE task-done bit, so this
  *       class collapses move-done and turn-done into a single shared "task done" signal
@@ -165,10 +167,38 @@ public:
      * @note Because the lower MCU reports a single task-done bit, this method clears BOTH
      *       move and turn flags simultaneously — see class docblock.
      * @note A queued blocking-variant builder bypasses this method's normal flow: it calls
-     *       `_drainBlocking()` (which spins on `update()` + `delay(2)`) to honour synchronous
-     *       semantics on top of the queue infrastructure.
+     *       `_drainBlocking()` (which spins on the registered tick callback + `delay(2)`,
+     *       falling back to `update()` alone if no callback is registered) to honour
+     *       synchronous semantics on top of the queue infrastructure. This means `update()`
+     *       may be re-entered indirectly via `setTickCallback`'s registered cooperative tick
+     *       during a sync block.
      */
     void update();
+
+    /**
+     * @brief Register a function to call each iteration of the blocking-spin loop.
+     *
+     * `_drainBlocking()` (used by sync-by-default builders) needs to keep ALL
+     * cooperative subsystems alive during its spin — otherwise `EventTrace` doesn't
+     * render, `LineFollower` doesn't poll the tracer, etc. Register a function that
+     * ticks every module (typically `cooperativeTick()` defined in the sketch) and
+     * `_drainBlocking` will invoke it instead of just calling `Drive.update()`.
+     *
+     * Call this exactly once from `setup()`, after every module's `begin()`.
+     *
+     * @param cb Pointer to the cooperative-tick function. Pass `nullptr` to clear.
+     *
+     * @note If no callback is registered, `_drainBlocking` falls back to ticking
+     *       only `Drive.update()` and emits a one-time Serial warning at first use.
+     *       This is a safe degradation but means other modules freeze during a sync
+     *       block — register the callback to avoid this.
+     * @warning The registered callback's call chain MUST NOT issue sync-blocking Drive
+     *          commands (`driveDist` / `driveTime` / `turnDeg` / `turnToYaw` without
+     *          `.async()`). Doing so would re-enter `_drainBlocking()` from inside its
+     *          own spin, recursing indefinitely. Today no `update()` does this; if a
+     *          future module's tick needs to issue Drive moves, it must use `.async()`.
+     */
+    void setTickCallback(void (*cb)());
 
     // -------------------------------------------------------------------------------------
     // Continuous primitives (kept direct — 0-2 args, fluent would be ceremony)
@@ -334,16 +364,17 @@ public:
     /**
      * @brief Block (spin) until the chassis is fully idle and the queue is empty.
      *
-     * Calls `update()` and `delay(2)` in a tight loop until `isIdle()` returns `true`.
-     * Exposed for command-time orchestration where the next decision genuinely needs
-     * every queued move to be complete (mission-step transitions, calibration sequences,
-     * end-of-run cleanup).
+     * Thin wrapper that delegates to `_drainBlocking()` — see that method's doxygen for
+     * the spin contract, the registered tick-callback, and the allowed-`delay()`
+     * rationale. Exposed for command-time orchestration where the next decision genuinely
+     * needs every queued move to be complete (mission-step transitions, calibration
+     * sequences, end-of-run cleanup).
      *
-     * @warning **Do NOT call from inside any module's `update()`.** This spins indefinitely
-     *          and would block the cooperative tick chain. Reserved for top-level
-     *          orchestration. Allowed `delay()` site #4 alongside `calibrateMotorBias`,
-     *          `_drainBlocking` (which this method delegates to), and the historical
-     *          tShape blocking spin (now centralised inside `_drainBlocking`).
+     * @warning **Do NOT call from inside any module's `update()`.** Reserved for
+     *          top-level orchestration only.
+     * @note Mostly redundant since builders are sync-by-default — a hand-written mission
+     *       script doesn't need `waitUntilIdle()` between calls. Useful when mixing
+     *       `.async()` calls with subsequent code that needs them all to land first.
      */
     void waitUntilIdle();
 
@@ -452,6 +483,15 @@ private:
     bool    _turnDone = true;    ///< Cleared on async turn issue, set by `update()`.
     float   _biasL    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM L paths. See DECISIONS.md.
     float   _biasR    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM R paths. See DECISIONS.md.
+
+    /// @brief Optional cooperative-tick callback invoked from `_drainBlocking` so other
+    ///        modules keep running during a sync-blocking Drive command. Registered via
+    ///        `setTickCallback()`. `nullptr` until set; falls back to `update()` alone with a
+    ///        one-time Serial warning.
+    void (*_tickCallback)() = nullptr;
+    /// @brief One-shot guard so the missing-callback warning is printed only once per
+    ///        registration cycle (cleared by `setTickCallback`).
+    bool _tickCallbackWarningEmitted = false;
 
     // -----------------------------------------------------------------------------------------
     // Command queue (sequential dispatch from update())
@@ -797,10 +837,13 @@ extern DriveClass Drive;
 /**
  * @brief Fluent builder for `Drive.driveDist(cm)` — distance-bounded straight-line move.
  *
- * Auto-executes when the temporary destructs at end-of-statement. Setters return `*this` by
- * reference for chaining. Defaults: `DriveMode::RAW`, power `Config::SPEED_NORMAL`, brake
- * `true`, blocking `false`, heading = `Drive`'s current `_heldYaw` (only consulted in
- * `DriveMode::GYRO`).
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes when the temporary
+ * destructs at end-of-statement. Setters return `*this` by reference for chaining. Defaults:
+ * `DriveMode::RAW`, power `Config::SPEED_NORMAL`, brake `true`, blocking `true` (the
+ * destructor drains the queue before returning), heading = `Drive`'s current `_heldYaw` (only
+ * consulted in `DriveMode::GYRO`). Mission scripts read top-down like Python — each verb call
+ * blocks until done. The auto-path planner opts out per call via `.async()` so it can poll
+ * `Drive.isIdle()` instead.
  */
 class [[nodiscard]] DriveDistBuilder
 {
@@ -902,13 +945,34 @@ public:
 
     /**
      * @brief Block the caller until the move completes.
-     * @param b `true` = sync (library spins on `delay`); `false` = async (default).
+     * @param b `true` = sync (default — library spins on `delay`); `false` = async.
      * @return `*this` for chaining.
      * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     * @note The default is now `true` (sync). Prefer `.async()` for the auto-path-planner
+     *       opt-out — it documents intent more clearly than `.setBlocking(false)`.
      */
     DriveDistBuilder& setBlocking(bool b)
     {
         _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this command out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor will enqueue the
+     * command and return immediately, without draining the queue. Use for the auto-path
+     * planner case where the caller ticks `loop()` and polls `Drive.isIdle()` to know
+     * when to issue the next command — the planner explicitly does NOT want each verb
+     * call to block its own tick.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`). Hand-written mission scripts should
+     *       almost never need `.async()` — it's a tool for the auto-path planner.
+     */
+    DriveDistBuilder& async()
+    {
+        _blocking = false;
         return *this;
     }
 
@@ -1112,7 +1176,8 @@ private:
     bool        _presetSet      = false;
     DriveMode   _mode           = DriveMode::RAW;
     bool        _brake          = true;
-    bool        _blocking       = false;
+    bool        _blocking       = true;    ///< default sync — destructor blocks until command completes.
+                                           ///< Auto-planner opts out per call via `.async()`.
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
     bool        _tShape         = false;
@@ -1128,8 +1193,8 @@ private:
 /**
  * @brief Fluent builder for `Drive.driveTime(sec)` — time-bounded straight-line move.
  *
- * Auto-executes on destruction. Setters mirror `DriveDistBuilder`; only the time vs. distance
- * verb differs.
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
+ * Setters mirror `DriveDistBuilder`; only the time vs. distance verb differs.
  */
 class [[nodiscard]] DriveTimeBuilder
 {
@@ -1226,12 +1291,33 @@ public:
 
     /**
      * @brief Block the caller until the move completes.
-     * @param b `true` = sync; `false` = async.
+     * @param b `true` = sync (default); `false` = async.
      * @return `*this` for chaining.
+     * @note The default is now `true` (sync). Prefer `.async()` for the auto-path-planner
+     *       opt-out — it documents intent more clearly than `.setBlocking(false)`.
      */
     DriveTimeBuilder& setBlocking(bool b)
     {
         _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this command out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor will enqueue the
+     * command and return immediately, without draining the queue. Use for the auto-path
+     * planner case where the caller ticks `loop()` and polls `Drive.isIdle()` to know
+     * when to issue the next command — the planner explicitly does NOT want each verb
+     * call to block its own tick.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`). Hand-written mission scripts should
+     *       almost never need `.async()` — it's a tool for the auto-path planner.
+     */
+    DriveTimeBuilder& async()
+    {
+        _blocking = false;
         return *this;
     }
 
@@ -1412,7 +1498,8 @@ private:
     bool        _presetSet      = false;
     DriveMode   _mode           = DriveMode::RAW;
     bool        _brake          = true;
-    bool        _blocking       = false;
+    bool        _blocking       = true;    ///< default sync — destructor blocks until command completes.
+                                           ///< Auto-planner opts out per call via `.async()`.
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
     bool        _tShape         = false;
@@ -1428,8 +1515,9 @@ private:
 /**
  * @brief Fluent builder for `Drive.turnDeg(deg)` — relative-yaw-delta turn.
  *
- * Auto-executes on destruction. Defaults: power `Config::TURN_POWER`, mode `Config::TURN_MODE`,
- * brake `Config::TURN_BRAKE`, blocking `false`.
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
+ * Defaults: power `Config::TURN_POWER`, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
+ * blocking `true`.
  */
 class [[nodiscard]] TurnDegBuilder
 {
@@ -1516,13 +1604,34 @@ public:
 
     /**
      * @brief Block the caller until the turn completes.
-     * @param b `true` = sync (library spins); `false` = async (default).
+     * @param b `true` = sync (default — library spins); `false` = async.
      * @return `*this` for chaining.
      * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     * @note The default is now `true` (sync). Prefer `.async()` for the auto-path-planner
+     *       opt-out — it documents intent more clearly than `.setBlocking(false)`.
      */
     TurnDegBuilder& setBlocking(bool b)
     {
         _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this command out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor will enqueue the
+     * command and return immediately, without draining the queue. Use for the auto-path
+     * planner case where the caller ticks `loop()` and polls `Drive.isIdle()` to know
+     * when to issue the next command — the planner explicitly does NOT want each verb
+     * call to block its own tick.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`). Hand-written mission scripts should
+     *       almost never need `.async()` — it's a tool for the auto-path planner.
+     */
+    TurnDegBuilder& async()
+    {
+        _blocking = false;
         return *this;
     }
 
@@ -1588,14 +1697,16 @@ private:
     bool                _presetSet     = false;
     uint8_t             _mode          = Config::TURN_MODE;
     bool                _brake         = Config::TURN_BRAKE;
-    bool                _blocking      = false;
+    bool                _blocking      = true;    ///< default sync — destructor blocks until command completes.
+                                                  ///< Auto-planner opts out per call via `.async()`.
     bool                _executed      = false;
 };
 
 /**
  * @brief Fluent builder for `Drive.turnToYaw(yaw)` — absolute-yaw turn.
  *
- * Auto-executes on destruction. Defaults match `TurnDegBuilder`.
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
+ * Defaults match `TurnDegBuilder`.
  */
 class [[nodiscard]] TurnToYawBuilder
 {
@@ -1682,13 +1793,34 @@ public:
 
     /**
      * @brief Block the caller until the turn completes.
-     * @param b `true` = sync; `false` = async.
+     * @param b `true` = sync (default); `false` = async.
      * @return `*this` for chaining.
      * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     * @note The default is now `true` (sync). Prefer `.async()` for the auto-path-planner
+     *       opt-out — it documents intent more clearly than `.setBlocking(false)`.
      */
     TurnToYawBuilder& setBlocking(bool b)
     {
         _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this command out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor will enqueue the
+     * command and return immediately, without draining the queue. Use for the auto-path
+     * planner case where the caller ticks `loop()` and polls `Drive.isIdle()` to know
+     * when to issue the next command — the planner explicitly does NOT want each verb
+     * call to block its own tick.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`). Hand-written mission scripts should
+     *       almost never need `.async()` — it's a tool for the auto-path planner.
+     */
+    TurnToYawBuilder& async()
+    {
+        _blocking = false;
         return *this;
     }
 
@@ -1754,7 +1886,8 @@ private:
     bool                _presetSet     = false;
     uint8_t             _mode          = Config::TURN_MODE;
     bool                _brake         = Config::TURN_BRAKE;
-    bool                _blocking      = false;
+    bool                _blocking      = true;    ///< default sync — destructor blocks until command completes.
+                                                  ///< Auto-planner opts out per call via `.async()`.
     bool                _executed      = false;
 };
 

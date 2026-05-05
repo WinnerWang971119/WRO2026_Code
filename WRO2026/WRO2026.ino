@@ -5,17 +5,20 @@
  *
  * @details
  * Phase 1 deliverable: a thin entry that wires every module together. `setup()` follows the
- * documented MatrixMiniR4 initialisation order; `loop()` is a clean cooperative tick across
- * Drive -> LineFollower -> Intersection -> Manipulator -> EventTrace, with NO business logic.
+ * documented MatrixMiniR4 initialisation order; `loop()` delegates to `cooperativeTick()` —
+ * a clean tick across Drive -> LineFollower -> Intersection -> Manipulator -> EventTrace,
+ * with NO business logic. The same `cooperativeTick()` is registered with
+ * `Drive.setTickCallback(...)` so that during a Drive sync-blocking spin, every other module
+ * keeps running.
  *
  * Define `DEMO_MODE` at compile time (e.g. via the IDE custom-build flags or by uncommenting
  * the line below) to enable a tiny smoke routine triggered by `BTN_UP`.
  *
  * @note No business logic in `loop()`. Per ARCHITECTURE.md iron rule 1, every module's
- *       `update()` is non-blocking; the loop just dispatches them.
- * @note No `delay()` is used anywhere in this file — every primitive issued from the demo
- *       block is non-blocking and is driven to completion by the cooperative `update()`
- *       chain on subsequent ticks.
+ *       `update()` is non-blocking; the loop just dispatches them via `cooperativeTick()`.
+ * @note This sketch contains no `delay()` itself. The Drive sync-default path uses
+ *       `delay(2)` inside `_drainBlocking` — the documented allowed-delay site for
+ *       synchronous-orchestration paths, off the cooperative tick chain.
  */
 
 // #define DEMO_MODE   // Uncomment to enable the BTN_UP smoke routine.
@@ -52,6 +55,25 @@ namespace
 #endif    // DEMO_MODE
 
 /**
+ * @brief Cooperative tick — calls every module's `update()` exactly once.
+ *
+ * Used as both the body of `loop()` and as the registered tick callback for
+ * `Drive.setTickCallback()` so that during a sync-blocking Drive command, every
+ * other module continues to run (EventTrace renders, LineFollower polls the
+ * tracer, Intersection latches edges, Manipulator advances its state machine).
+ *
+ * Order matters — see `loop()` doxygen for the rationale.
+ */
+void cooperativeTick()
+{
+    Drive.update();
+    LineFollower.update();
+    Intersection.update();
+    Manipulator.update();
+    EventTrace.update();
+}
+
+/**
  * @brief Arduino entry: bring up the lower MCU and every WRO module in dependency order.
  *
  * Order is fixed and must not be reshuffled:
@@ -83,6 +105,11 @@ void setup()
     Manipulator.begin();
     EventTrace.begin();
 
+    // Wire up the tick callback so Drive's sync-blocking builders keep every other
+    // module alive during their spin. Without this, EventTrace would not render and
+    // LineFollower would not poll the tracer while a Drive command is in flight.
+    Drive.setTickCallback(cooperativeTick);
+
     // 5. Surface a boot marker so the OLED + serial confirm a clean cold-start.
     EventTrace.pushEvent("BOOT OK");
     Serial.println("WRO2026 Phase 1 ready.");
@@ -91,7 +118,9 @@ void setup()
 /**
  * @brief Arduino main loop: one cooperative tick across every module.
  *
- * Order matters:
+ * The body is just `cooperativeTick();` — the same function is also registered with
+ * `Drive.setTickCallback()` so it runs during sync-blocking Drive commands too. Order of
+ * the calls inside `cooperativeTick()` matters:
  *   - `Drive.update()`        — flushes any completed bounded-task flags first so downstream
  *                               modules see fresh state.
  *   - `LineFollower.update()` — reads the tracer once and computes the corr.
@@ -100,16 +129,14 @@ void setup()
  *                               in without touching this file.
  *   - `EventTrace.update()`   — samples this tick's truth from each module above.
  *
- * No business logic lives here. The optional DEMO_MODE block is the only exception, and it
- * only ever issues non-blocking primitives.
+ * No business logic lives here. The optional DEMO_MODE block is the only exception. Its
+ * `Drive.driveDist(...)` / `Drive.turnDeg(...)` calls are now sync-blocking by default — the
+ * registered tick callback keeps every other module alive during those blocks, so the demo
+ * runs to completion in a single `loop()` iteration.
  */
 void loop()
 {
-    Drive.update();
-    LineFollower.update();
-    Intersection.update();
-    Manipulator.update();
-    EventTrace.update();
+    cooperativeTick();
 
 #ifdef DEMO_MODE
     // Tiny smoke routine: on a BTN_UP rising edge, drive a short straight then a 90-degree
@@ -118,7 +145,8 @@ void loop()
     // `_demoArmed` makes the demo a one-shot per power-cycle; pressing BTN_UP again after
     // the first activation does nothing. This is intentionally defensive — re-firing the
     // demo while a bounded task from the previous run is still pending would race the
-    // shared task-done flag inside `DriveClass`.
+    // shared task-done flag inside `DriveClass`. Both verbs sync-block by default; BTN_UP
+    // polling resumes naturally once they return.
     const bool btnNow = MiniR4.BTN_UP.getState();
     if (btnNow && !_btnPrev && !_demoArmed)
     {
@@ -127,7 +155,7 @@ void loop()
         Drive.holdYaw();
         LineFollower.setEnabled(true);
         Drive.driveDist(DEMO_DIST_CM).setPower(Config::CRUISE_SPEED).setMode(DriveMode::GYRO);
-        Drive.turnDeg(DEMO_TURN_DEG);    // async relative turn — defaults to Config::TURN_POWER, mode 0.
+        Drive.turnDeg(DEMO_TURN_DEG);    // sync relative turn — defaults to Config::TURN_POWER, mode 0.
     }
     _btnPrev = btnNow;
 #endif    // DEMO_MODE

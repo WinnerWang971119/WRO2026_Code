@@ -69,6 +69,12 @@ bool DriveClass::begin()
     return true;
 }
 
+void DriveClass::setTickCallback(void (*cb)())
+{
+    _tickCallback                = cb;
+    _tickCallbackWarningEmitted  = false;    // reset so re-register clears the warned state
+}
+
 void DriveClass::update()
 {
     // -------------------------------------------------------------------------------------
@@ -1013,9 +1019,29 @@ void DriveClass::_drainBlocking()
     // Allowed `delay()` site #3. The blocking caller is by definition off the cooperative
     // tick chain (synchronous-orchestration path), so this spin doesn't violate the iron
     // rule — which targets non-blocking `update()` chains, not orchestration.
+    //
+    // Sync-by-default builders need EVERY module to keep ticking during the spin —
+    // otherwise EventTrace doesn't render, LineFollower stops polling the tracer, etc.
+    // The sketch registers a `cooperativeTick()`-style function via `setTickCallback`;
+    // we call it here. If no callback was registered we degrade to ticking only
+    // `Drive.update()` and warn once.
     while (!_isIdle() || _qCount > 0)
     {
-        update();
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!_tickCallbackWarningEmitted)
+            {
+                Serial.println(F("[Drive] _drainBlocking: no tick callback set — only "
+                                  "Drive.update() will tick during blocks. Call "
+                                  "Drive.setTickCallback(...) in setup()."));
+                _tickCallbackWarningEmitted = true;
+            }
+            update();
+        }
         delay(2);
     }
 }
