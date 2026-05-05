@@ -140,9 +140,9 @@ No changes to: `Drive.h/.cpp`, `LineFollower.h/.cpp`, `Intersection.h/.cpp`, `Ma
 
 ## Notes for reviewer
 
-- **`uv.lock` is untracked** — uv generates it on first sync. Add `uv.lock` to the next commit or to
-  `.gitignore` per team preference; it was not in the T1 scope. Reviewer should decide: check in for
-  reproducible CI, or gitignore for library-style repos.
+- **`uv.lock` is present at the repo root in this branch** and should be used as the pinned dependency
+  lockfile for reproducible `uv sync`/CI environments; no reviewer action is needed on tracked vs
+  ignored status in this PR.
 - **`tools/__init__.py`** is a minimal namespace marker. It does not expose any public API — it exists
   solely so `from tools.path_planner import ...` resolves correctly after wheel install.
 - **`arduino-cli` not available** on this machine; AC3 satisfied by manual audit above. Full compile
