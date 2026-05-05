@@ -378,6 +378,43 @@ namespace Config
      * the new command and prints a Serial warning — that's a caller bug.
      */
     constexpr uint8_t DRIVE_QUEUE_CAPACITY = 8;
+
+    /**
+     * @brief Per-command worst-case ceiling used by `_drainBlocking` to bound its
+     *        synchronous spin (code review F3).
+     *
+     * A typical 30 cm @ 50 PWM move completes in ~1 s; 10 s is a 10× safety factor
+     * that still fits the 2-minute WRO run clock even if a full queue (8 cmds plus
+     * the in-flight one) all hit the ceiling. The drain budget is computed as
+     * `(qCount + 1) * DRIVE_DRAIN_TIMEOUT_MS_PER_CMD`. On expiry the drain stops the
+     * chassis, clears the queue, and surfaces a Serial warning.
+     */
+    constexpr uint32_t DRIVE_DRAIN_TIMEOUT_MS_PER_CMD = 10000;
+
+    // =============================================================================
+    // Intersection debounce (code review F7).
+    //
+    // The MX line tracer can flicker between NONE, UNKNOWN, and a valid junction
+    // type at the leading/trailing edges of a junction marker, under lighting
+    // changes, or during fast motion. Without debounce a single physical
+    // intersection can fire multiple software edges. With these knobs we require
+    // a stable streak of valid samples to ARM and a stable streak of NONE samples
+    // to RELEASE — a single noisy sample no longer crosses the threshold.
+    //
+    // At ~50-100 Hz cooperative tick, 2 ticks ≈ 20-40 ms ≈ ~0.5-1 cm at typical
+    // line-follow speeds (15-30 cm/s). Junction markers are ~5-10 cm wide so 2
+    // ticks is well within the dwell time but rejects single-sample flicker.
+    // =============================================================================
+
+    /**
+     * @brief Consecutive valid-junction samples required to arm a rising edge.
+     */
+    constexpr uint8_t INTERSECTION_DEBOUNCE_TICKS = 2;
+
+    /**
+     * @brief Consecutive NONE samples required to release before re-arming.
+     */
+    constexpr uint8_t INTERSECTION_RELEASE_TICKS = 2;
 }    // namespace Config
 
 #endif    // CONFIG_H

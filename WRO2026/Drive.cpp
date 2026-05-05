@@ -882,6 +882,25 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
 }
 
 // -----------------------------------------------------------------------------------------
+// Fault state accessors (code review F5).
+// -----------------------------------------------------------------------------------------
+
+bool DriveClass::hasFault() const
+{
+    return _fault.kind != Fault::NONE;
+}
+
+DriveClass::FaultInfo DriveClass::getFault() const
+{
+    return _fault;
+}
+
+void DriveClass::clearFault()
+{
+    _fault = FaultInfo{};
+}
+
+// -----------------------------------------------------------------------------------------
 // Command-queue plumbing — invoked from update() and from builder destructors.
 // -----------------------------------------------------------------------------------------
 
@@ -908,6 +927,15 @@ void DriveClass::_dispatchNext()
         return;
     }
 
+    // Fault gate (code review F5): once a fault is latched, the queue is frozen until
+    // higher-level recovery code calls `clearFault()`. Without this, `update()` would
+    // happily dispatch the next queued command on the very tick after a failed one — and
+    // the mission planner's pose model would diverge from physical reality.
+    if (hasFault())
+    {
+        return;
+    }
+
     // Pop.
     const DriveCommand cmd = _queue[_qHead];
     _qHead                 = (uint8_t) ((_qHead + 1) % Config::DRIVE_QUEUE_CAPACITY);
@@ -927,19 +955,25 @@ void DriveClass::_dispatchNext()
     // Dispatch by kind. All paths use blocking=false — the queue is the asynchronous
     // execution chain; blocking-variant builders go through `_drainBlocking()` to achieve
     // synchronous semantics on top of this.
+    //
+    // Capture the rc and latch a fault on non-zero (code review F5). The W3 guard inside
+    // each executor already prevents a failed dispatch from leaving `_moveDone = false`
+    // (which would have hung `_drainBlocking` forever); the fault gate above stops the
+    // follow-up queued commands from racing ahead of the lower MCU's actual state.
+    uint8_t rc = 0x00;
     switch (cmd.kind)
     {
     case DriveCommand::Kind::DRIVE_DIST:
         switch (cmd.mode)
         {
         case DriveMode::RAW:
-            _execDriveDistRaw(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
+            rc = _execDriveDistRaw(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::SYNC:
-            _execDriveDistSync(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
+            rc = _execDriveDistSync(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::GYRO:
-            _execDriveDistGyro(cmd.power, cmd.cm, cmd.heading, cmd.brake, /*blocking*/ false);
+            rc = _execDriveDistGyro(cmd.power, cmd.cm, cmd.heading, cmd.brake, /*blocking*/ false);
             break;
         }
         break;
@@ -948,50 +982,68 @@ void DriveClass::_dispatchNext()
         switch (cmd.mode)
         {
         case DriveMode::RAW:
-            _execDriveTimeRaw(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
+            rc = _execDriveTimeRaw(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::SYNC:
-            _execDriveTimeSync(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
+            rc = _execDriveTimeSync(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
             break;
         case DriveMode::GYRO:
-            _execDriveTimeGyro(cmd.power, cmd.sec, cmd.heading, cmd.brake, /*blocking*/ false);
+            rc = _execDriveTimeGyro(cmd.power, cmd.sec, cmd.heading, cmd.brake, /*blocking*/ false);
             break;
         }
         break;
 
     case DriveCommand::Kind::TURN_DEG:
-        _execTurnDeg(cmd.deg, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
+        rc = _execTurnDeg(cmd.deg, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
         break;
 
     case DriveCommand::Kind::TURN_TO_YAW:
-        _execTurnToYaw(cmd.yaw, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
+        rc = _execTurnToYaw(cmd.yaw, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
         break;
 
     case DriveCommand::Kind::PROFILE_DIST:
-        _execProfileMove(cmd.mode,
-                         /*isTime*/ false,
-                         cmd.cm,
-                         /*totalSec*/ 0.0f,
-                         cmd.power,
-                         cmd.startSpeed,
-                         cmd.endSpeed,
-                         cmd.accel,
-                         cmd.brake,
-                         cmd.heading);
+        rc = _execProfileMove(cmd.mode,
+                              /*isTime*/ false,
+                              cmd.cm,
+                              /*totalSec*/ 0.0f,
+                              cmd.power,
+                              cmd.startSpeed,
+                              cmd.endSpeed,
+                              cmd.accel,
+                              cmd.brake,
+                              cmd.heading);
         break;
 
     case DriveCommand::Kind::PROFILE_TIME:
-        _execProfileMove(cmd.mode,
-                         /*isTime*/ true,
-                         /*totalCm*/ 0.0f,
-                         cmd.sec,
-                         cmd.power,
-                         cmd.startSpeed,
-                         cmd.endSpeed,
-                         cmd.accel,
-                         cmd.brake,
-                         cmd.heading);
+        rc = _execProfileMove(cmd.mode,
+                              /*isTime*/ true,
+                              /*totalCm*/ 0.0f,
+                              cmd.sec,
+                              cmd.power,
+                              cmd.startSpeed,
+                              cmd.endSpeed,
+                              cmd.accel,
+                              cmd.brake,
+                              cmd.heading);
         break;
+    }
+
+    if (rc != 0x00)
+    {
+        // Lower MCU rejected the command. Freeze the queue, stop the chassis, latch the
+        // fault. Higher-level recovery is responsible for `clearFault()` + re-issue.
+        Serial.print(F("[Drive] _dispatchNext: dispatch failed, rc=0x"));
+        Serial.println(rc, HEX);
+        _fault.kind    = Fault::DISPATCH_FAILED;
+        _fault.rc      = rc;
+        _fault.cmdKind = cmd.kind;
+
+        MiniR4.DriveDC.Move(0, 0);
+        MiniR4.DriveDC.brake(true);
+        _moveDone     = true;
+        _turnDone     = true;
+        _profileState = ProfileState::IDLE;
+        _clearQueue();
     }
 }
 
@@ -1011,8 +1063,38 @@ void DriveClass::_drainBlocking()
     // The sketch registers a `cooperativeTick()`-style function via `setTickCallback`;
     // we call it here. If no callback was registered we degrade to ticking only
     // `Drive.update()` and warn once.
+    //
+    // Bounded-spin guard (code review F3): without a deadline a stalled wheel, lost
+    // STM32 task-done bit, or unreachable profile target would trap the entire mission.
+    // Budget is `(qCount + 1) * DRIVE_DRAIN_TIMEOUT_MS_PER_CMD` — the +1 covers the
+    // command currently in flight (which is no longer in `_queue`). On expiry we hard-
+    // stop the chassis, drop the queue, and emit a Serial warning so higher layers see
+    // the failure. Mission-level recovery hooks land with F5's fault struct.
+    const uint32_t budget   = ((uint32_t) _qCount + 1U)
+                              * (uint32_t) Config::DRIVE_DRAIN_TIMEOUT_MS_PER_CMD;
+    const uint32_t deadline = millis() + budget;
+
     while (!_isIdle() || _qCount > 0)
     {
+        if ((int32_t) (millis() - deadline) >= 0)
+        {
+            Serial.println(F("[Drive] _drainBlocking: timeout — aborting queue"));
+            // Hard-stop sequence — mirrors `stop(true)` minus the public-API bookkeeping
+            // (we already own the state we need to clear). Latch a fault so higher-level
+            // recovery (mission planner) sees the abort via `hasFault()` (F5).
+            MiniR4.DriveDC.Move(0, 0);
+            MiniR4.DriveDC.brake(true);
+            _fault.kind = Fault::DRAIN_TIMEOUT;
+            _fault.rc   = 0x00;
+            // _fault.cmdKind left at its default — the in-flight command's kind is no longer
+            // tracked once dispatched.
+            _moveDone     = true;
+            _turnDone     = true;
+            _profileState = ProfileState::IDLE;
+            _clearQueue();
+            return;
+        }
+
         if (_tickCallback != nullptr)
         {
             _tickCallback();

@@ -280,11 +280,18 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
             // Seed the cruise-ramp state. The ramp progresses with the left encoder; once
             // the ramp distance is consumed, `update()` clears `_useTShape` so subsequent
             // ticks fall straight through to the full preset cruise.
+            //
+            // Sign-by-direction on the target PWM: when `_reverse` is set, the steady-state
+            // `cruise` in `update()` is negated, so the ramp target must be negated too —
+            // otherwise the ramp interpolation overrides the correctly-signed cruise with a
+            // positive value during the ramp window and the chassis briefly drives forward
+            // before reversing (see code review F2).
             _useTShape       = true;
             _tShapeAccel     = accel;
             _tShapeStartEnc  = Drive.getEncL();
             _tShapeStartPwm  = 0;
-            _tShapeTargetPwm = presetToPwm(_preset);
+            _tShapeTargetPwm = _reverse ? (int16_t) -presetToPwm(_preset)
+                                        : presetToPwm(_preset);
         }
         else
         {

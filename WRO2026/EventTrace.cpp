@@ -28,8 +28,9 @@ bool EventTraceClass::begin()
     memset(_buf, 0, sizeof(_buf));
 
     // Prime the edge-detection cache so the first update() does not synthesise spurious events.
-    _prevLineLost = false;
-    _prevTurnDone = true;
+    _prevLineLost     = false;
+    _prevTurnDone     = true;
+    _prevIntEdgeCount = Intersection.getEdgeCount();
 
     return true;
 }
@@ -77,10 +78,15 @@ void EventTraceClass::update()
     }
 
     // -----------------------------------------------------------------------------------------
-    // Source poll 2 — Intersection: already edge-triggered (read-and-clear).
+    // Source poll 2 — Intersection: passive observation via the broadcast edge counter so
+    // we never compete with the navigation layer's read-and-clear `isAtIntersection()`
+    // (code review F6).
     // -----------------------------------------------------------------------------------------
-    if (Intersection.isAtIntersection())
+    const uint32_t intCountNow = Intersection.getEdgeCount();
+    if (intCountNow != _prevIntEdgeCount)
     {
+        _prevIntEdgeCount = intCountNow;
+
         const char* label = nullptr;
         switch (Intersection.getLastType())
         {

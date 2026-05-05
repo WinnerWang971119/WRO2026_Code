@@ -11,6 +11,7 @@
  */
 
 #include "Intersection.h"
+#include "Config.h"          // INTERSECTION_DEBOUNCE_TICKS / INTERSECTION_RELEASE_TICKS
 #include "LineFollower.h"    // For LineFollower.getTracer() — kept out of the header.
 
 /**
@@ -30,6 +31,9 @@ bool IntersectionClass::begin()
     _wasAtJunction = false;
     _edgeFired     = false;
     _lastType      = JunctionType::NONE;
+    _edgeCount     = 0;
+    _validStreak   = 0;
+    _noneStreak    = 0;
     return true;
 }
 
@@ -40,18 +44,58 @@ void IntersectionClass::update()
         return;
     }
 
-    const uint8_t raw           = _tracer->getJunctionType();
-    const bool    atJunctionNow = (raw != static_cast<uint8_t>(JunctionType::NONE)
+    // Validate the raw byte is a known enum value before treating it as a JunctionType
+    // (code review F7). Anything outside `[NONE..UNKNOWN]` is treated as UNKNOWN — the same
+    // category as a sensor flicker. Without this guard a corrupt I2C byte would be
+    // `static_cast` directly into `_lastType`, broadcasting nonsense to consumers.
+    const uint8_t rawByte         = _tracer->getJunctionType();
+    const bool    rawInRange      = rawByte <= static_cast<uint8_t>(JunctionType::UNKNOWN);
+    const uint8_t raw             = rawInRange ? rawByte
+                                                : static_cast<uint8_t>(JunctionType::UNKNOWN);
+    const bool    atJunctionNow   = (raw != static_cast<uint8_t>(JunctionType::NONE)
                                    && raw != static_cast<uint8_t>(JunctionType::UNKNOWN));
 
-    // Rising edge: latch the type and raise the consumer flag.
-    if (atJunctionNow && !_wasAtJunction)
+    // Debounce streaks (code review F7). A sample only counts toward the "armed" or
+    // "released" verdict once it has been observed for `*_TICKS` consecutive ticks.
+    // Cap the increment at the threshold so the counters can't overflow on a long dwell.
+    if (atJunctionNow)
     {
-        _lastType  = static_cast<JunctionType>(raw);
-        _edgeFired = true;
+        if (_validStreak < Config::INTERSECTION_DEBOUNCE_TICKS)
+        {
+            _validStreak++;
+        }
+        _noneStreak = 0;
+    }
+    else
+    {
+        if (_noneStreak < Config::INTERSECTION_RELEASE_TICKS)
+        {
+            _noneStreak++;
+        }
+        _validStreak = 0;
     }
 
-    _wasAtJunction = atJunctionNow;
+    const bool stableValid = _validStreak >= Config::INTERSECTION_DEBOUNCE_TICKS;
+    const bool stableNone  = _noneStreak  >= Config::INTERSECTION_RELEASE_TICKS;
+
+    // Rising edge: armed only when the valid streak crosses the debounce threshold AND
+    // the previous debounced state was "released". A single noisy NONE/UNKNOWN sample no
+    // longer flips `_wasAtJunction` — the release streak must be satisfied first.
+    if (stableValid && !_wasAtJunction)
+    {
+        _lastType      = static_cast<JunctionType>(raw);
+        _edgeFired     = true;
+        _edgeCount++;
+        _wasAtJunction = true;
+    }
+    else if (stableNone && _wasAtJunction)
+    {
+        _wasAtJunction = false;
+    }
+    // Otherwise: hold the previous debounced state. This is the key F7 fix — without it,
+    // a single intermediate NONE/UNKNOWN tick mid-junction would reset `_wasAtJunction`
+    // and the next valid sample would fire a duplicate edge for the same physical
+    // junction.
 }
 
 bool IntersectionClass::isAtIntersection()
@@ -59,6 +103,11 @@ bool IntersectionClass::isAtIntersection()
     const bool fired = _edgeFired;
     _edgeFired       = false;
     return fired;
+}
+
+uint32_t IntersectionClass::getEdgeCount() const
+{
+    return _edgeCount;
 }
 
 JunctionType IntersectionClass::getLastType() const

@@ -34,7 +34,8 @@
 #define INTERSECTION_H
 
 #include <Arduino.h>
-#include "MiniR4_MXLineTracer.h"    // for MatrixLineTracer pointer type
+#include <MatrixMiniR4.h>    // brings in `MatrixLineTracer` transitively (see code review F9
+                             // for why we don't include `<MiniR4_MXLineTracer.h>` directly).
 
 /**
  * @brief Junction type mirror of `MatrixLineTracer::getJunctionType()` return values.
@@ -108,12 +109,30 @@ public:
      * @return `true` if a rising edge has been latched since the last call; `false` otherwise.
      *         Always clears the internal flag before returning.
      * @note Read-and-clear. Returns true exactly once per junction entry. Subsequent calls
-     *       return false until the sensor leaves the junction and re-enters. Caller must
-     *       coordinate consumption — multiple consumers reading the same edge will only see
-     *       it once between them.
+     *       return false until the sensor leaves the junction and re-enters. Reserved for
+     *       the **single** owning consumer (e.g. the navigation/path-tracker layer). Other
+     *       observers (telemetry, OLED logging) should use `getEdgeCount()` instead — see
+     *       code review F6.
      * @note Intentionally non-`const` because it mutates `_edgeFired`.
      */
     bool isAtIntersection();
+
+    /**
+     * @brief Non-consuming, multi-observer rising-edge counter.
+     *
+     * Strictly increments by exactly one each time `update()` detects a rising edge of the
+     * "at-junction" condition. Observers that need to react to edges WITHOUT contending
+     * with the navigation layer's read-and-clear `isAtIntersection()` should cache the
+     * value returned here and fire whenever a new tick produces a different value.
+     *
+     * @return Total number of rising edges since `begin()`. Wraps after `2^32` events,
+     *         which is irrelevant in any realistic competition run.
+     * @note Use this in EventTrace and any future passive observer. The single consuming
+     *       consumer should still use `isAtIntersection()` because that doubles as its
+     *       state-machine arming bit.
+     * @note See code review F6.
+     */
+    uint32_t getEdgeCount() const;
 
     /**
      * @brief Type classification captured at the most recent rising edge.
@@ -127,9 +146,12 @@ public:
 
 private:
     MatrixLineTracer* _tracer        = nullptr;                ///< Shared tracer from LineFollower.
-    bool              _wasAtJunction = false;                  ///< Previous-tick at-junction state.
+    bool              _wasAtJunction = false;                  ///< Debounced at-junction state.
     bool              _edgeFired     = false;                  ///< Latched rising edge, cleared on read.
     JunctionType      _lastType      = JunctionType::NONE;     ///< Type captured at the last edge.
+    uint32_t          _edgeCount     = 0;                      ///< Strictly-increasing edge counter (F6).
+    uint8_t           _validStreak   = 0;                      ///< Consecutive valid-junction ticks (F7).
+    uint8_t           _noneStreak    = 0;                      ///< Consecutive NONE ticks (F7).
 };
 
 /**

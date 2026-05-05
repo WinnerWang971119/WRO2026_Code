@@ -32,6 +32,20 @@
 #include "LineFollower.h"
 #include "Manipulator.h"
 
+namespace
+{
+    /**
+     * @brief Latches `true` if any module's `begin()` returned `false` during `setup()`
+     *        (code review F8). When set, `loop()` suppresses every motion-issuing path
+     *        (currently just the DEMO_MODE block) so a partially-initialised robot does
+     *        not move with stale tuning, an unbound tracer, or a never-OLED'd display.
+     *
+     * @note The cooperative tick still runs so the OLED keeps rendering the `BOOT FAIL`
+     *       trace lines — the operator needs to see what went wrong.
+     */
+    bool _setupFailed = false;
+}    // namespace
+
 #ifdef DEMO_MODE
 namespace
 {
@@ -98,21 +112,41 @@ void setup()
     // 3. Tell the power module how many cells are physically installed (must match the pack).
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
-    // 4. Initialise our modules in dependency order.
-    Drive.begin();
-    LineFollower.begin();
-    Intersection.begin();
-    Manipulator.begin();
-    EventTrace.begin();
+    // 4. Initialise our modules in dependency order. Every `begin()` returns a `bool`
+    //    success indicator — accumulate them here so a partial init never reports
+    //    "ready" and motion is gated for the rest of the run (code review F8).
+    const bool driveOk = Drive.begin();
+    const bool lineOk  = LineFollower.begin();
+    const bool intOk   = Intersection.begin();
+    const bool manipOk = Manipulator.begin();
+    const bool traceOk = EventTrace.begin();
 
     // Wire up the tick callback so Drive's sync-blocking builders keep every other
     // module alive during their spin. Without this, EventTrace would not render and
     // LineFollower would not poll the tracer while a Drive command is in flight.
     Drive.setTickCallback(cooperativeTick);
 
-    // 5. Surface a boot marker so the OLED + serial confirm a clean cold-start.
-    EventTrace.pushEvent("BOOT OK");
-    Serial.println("WRO2026 Phase 1 ready.");
+    _setupFailed = !(driveOk && lineOk && intOk && manipOk && traceOk);
+
+    // 5. Surface a boot marker. On failure, name the offending modules so the operator
+    //    can diagnose without re-reading every begin() body. EventTrace.begin() may
+    //    itself have failed — push the events anyway; if the OLED is dead the Serial
+    //    output is the fallback channel.
+    if (_setupFailed)
+    {
+        Serial.println(F("WRO2026 Phase 1 BOOT FAIL — module begin() returned false:"));
+        if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
+        if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
+        if (!intOk)    { Serial.println(F("  - Intersection")); EventTrace.pushEvent("FAIL INT"); }
+        if (!manipOk)  { Serial.println(F("  - Manipulator"));  EventTrace.pushEvent("FAIL MANIP"); }
+        if (!traceOk)  { Serial.println(F("  - EventTrace"));   EventTrace.pushEvent("FAIL TRACE"); }
+        EventTrace.pushEvent("BOOT FAIL");
+    }
+    else
+    {
+        EventTrace.pushEvent("BOOT OK");
+        Serial.println(F("WRO2026 Phase 1 ready."));
+    }
 }
 
 /**
@@ -147,6 +181,15 @@ void loop()
     // demo while a bounded task from the previous run is still pending would race the
     // shared task-done flag inside `DriveClass`. Both verbs sync-block by default; BTN_UP
     // polling resumes naturally once they return.
+    //
+    // Motion gate (F8): if any module's `begin()` failed in setup(), refuse to issue any
+    // motion. The OLED + Serial trail already explained which module bailed; surfacing
+    // a stale-tuning move on top would just hide the failure.
+    if (_setupFailed)
+    {
+        return;
+    }
+
     const bool btnNow = MiniR4.BTN_UP.getState();
     if (btnNow && !_btnPrev && !_demoArmed)
     {

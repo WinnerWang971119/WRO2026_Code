@@ -100,7 +100,8 @@ struct DriveCommand
     };
 
     Kind        kind;
-    DriveMode   mode      = DriveMode::RAW;     ///< For DRIVE_DIST/TIME and PROFILE_DIST/TIME.
+    DriveMode   mode      = DriveMode::SYNC;    ///< For DRIVE_DIST/TIME and PROFILE_DIST/TIME.
+                                                ///< SYNC is the project-wide default — see DECISIONS.md.
 
     // Bounds.
     float       cm        = 0.0f;
@@ -276,15 +277,20 @@ public:
      * @brief Build a distance-bounded straight-line move.
      *
      * Returns a `DriveDistBuilder` that executes the move when the temporary destructs at
-     * end-of-statement. Defaults are: non-blocking, `DriveMode::RAW`, power
-     * `Config::SPEED_NORMAL`, brake `true`, heading = current `_heldYaw` (only consulted in
-     * `DriveMode::GYRO`).
+     * end-of-statement. Defaults are: sync-blocking, `DriveMode::SYNC`, trapezoidal profile
+     * (`tShape`) on, power `Config::SPEED_NORMAL`, brake `true`, heading = current `_heldYaw`
+     * (only consulted in `DriveMode::GYRO`). The SYNC + tShape default reflects the auto-path
+     * planner being the dominant consumer — see DECISIONS.md "Sync + T-shape as default
+     * move profile". Opt out per call: `.setMode(DriveMode::RAW)`, `.tShape(false)` is not
+     * exposed (set acceleration absurdly high or chain `.setStartSpeed(cruise).setEndSpeed(cruise)`
+     * if a flat profile is wanted on a one-off — usually just stay with the default).
      *
      * Example:
      * @code
-     * Drive.driveDist(30);                                                    // defaults
-     * Drive.driveDist(30).setPower(50);                                       // override
-     * Drive.driveDist(30).setPreset(Config::SpeedPreset::FAST).setMode(DriveMode::GYRO);
+     * Drive.driveDist(30);                                                    // SYNC + tShape, sync-block
+     * Drive.driveDist(30).setPower(50);                                       // override power
+     * Drive.driveDist(30).setMode(DriveMode::GYRO);                           // straight-line under yaw lock
+     * Drive.driveDist(30).setMode(DriveMode::RAW);                            // open-loop fallback
      * @endcode
      *
      * @param cm Distance in centimetres (always non-negative — sign is carried by `power`).
@@ -298,7 +304,8 @@ public:
      * @brief Build a time-bounded straight-line move.
      *
      * Returns a `DriveTimeBuilder` that executes the move when the temporary destructs.
-     * Defaults match `driveDist`.
+     * Defaults match `driveDist` (sync-blocking, `DriveMode::SYNC`, `tShape` on, power
+     * `Config::SPEED_NORMAL`, brake `true`).
      *
      * @param sec Duration in seconds.
      * @return A fluent builder that auto-executes on destruction.
@@ -483,6 +490,55 @@ public:
      */
     float getBiasR() const;
 
+    // -------------------------------------------------------------------------------------
+    // Fault state (code review F5 + F3)
+    //
+    // The queue and the sync-blocking drain are both fail-fast: when the lower MCU rejects
+    // a queued dispatch (`_dispatchNext` non-zero rc) or `_drainBlocking` exceeds its
+    // bounded budget, motors are stopped, the queue is cleared, and the fault is recorded
+    // here. Higher-level mission code is expected to query `hasFault()` between mission
+    // steps; on fault, recover (or abort), then call `clearFault()` to re-arm the queue.
+    // -------------------------------------------------------------------------------------
+
+    /**
+     * @brief Source of a Drive-layer fault.
+     */
+    enum class Fault : uint8_t
+    {
+        NONE             = 0,   ///< No fault — normal operation.
+        DRAIN_TIMEOUT    = 1,   ///< `_drainBlocking` deadline exceeded (F3).
+        DISPATCH_FAILED  = 2    ///< `_dispatchNext` saw a non-zero rc from the lower MCU (F5).
+    };
+
+    /**
+     * @brief Captured details of the last Drive fault.
+     */
+    struct FaultInfo
+    {
+        Fault              kind    = Fault::NONE;
+        uint8_t            rc      = 0x00;                              ///< Lower-MCU error code (`DISPATCH_FAILED` only).
+        DriveCommand::Kind cmdKind = DriveCommand::Kind::DRIVE_DIST;    ///< Kind of the offending command.
+    };
+
+    /**
+     * @brief Whether a fault is currently latched.
+     * @return `true` if `_fault.kind != Fault::NONE`.
+     */
+    bool hasFault() const;
+
+    /**
+     * @brief Snapshot of the latched fault. Undefined fields when `!hasFault()`.
+     */
+    FaultInfo getFault() const;
+
+    /**
+     * @brief Clear the latched fault so the queue is re-armed.
+     *
+     * @note Does NOT restart any motion — the queue was emptied at fault time. The
+     *       caller is responsible for re-issuing whatever follow-up moves it wants.
+     */
+    void clearFault();
+
 private:
     int16_t _heldYaw  = 0;       ///< Current yaw target used by `forwardGyro` and `*Gyro`.
     bool    _moveDone = true;    ///< Cleared on bounded move issue, set by `update()`.
@@ -507,6 +563,14 @@ private:
     uint8_t      _qHead  = 0;   ///< Index of next command to dispatch.
     uint8_t      _qTail  = 0;   ///< Index of next free slot to enqueue into.
     uint8_t      _qCount = 0;   ///< Current queue depth.
+
+    /**
+     * @brief Latched fault from the queue dispatcher or the blocking drain.
+     *
+     * Cleared by `clearFault()`. While set, `_dispatchNext` becomes a no-op so a stale
+     * queue cannot fire after a recorded failure.
+     */
+    FaultInfo _fault;
 
     // -------------------------------------------------------------------------------------
     // Trapezoidal-profile state machine (`.tShape()`-driven moves)
@@ -825,11 +889,12 @@ extern DriveClass Drive;
  *
  * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes when the temporary
  * destructs at end-of-statement. Setters return `*this` by reference for chaining. Defaults:
- * `DriveMode::RAW`, power `Config::SPEED_NORMAL`, brake `true`, blocking `true` (the
- * destructor drains the queue before returning), heading = `Drive`'s current `_heldYaw` (only
- * consulted in `DriveMode::GYRO`). Mission scripts read top-down like Python — each verb call
- * blocks until done. The auto-path planner opts out per call via `.async()` so it can poll
- * `Drive.isIdle()` instead.
+ * `DriveMode::SYNC`, `tShape` on, power `Config::SPEED_NORMAL`, brake `true`, blocking `true`
+ * (the destructor drains the queue before returning), heading = `Drive`'s current `_heldYaw`
+ * (only consulted in `DriveMode::GYRO`). The SYNC + tShape default reflects the auto-path
+ * planner being the dominant consumer — see DECISIONS.md "Sync + T-shape as default move
+ * profile". Mission scripts read top-down like Python — each verb call blocks until done. The
+ * auto-path planner opts out per call via `.async()` so it can poll `Drive.isIdle()` instead.
  */
 class [[nodiscard]] DriveDistBuilder
 {
@@ -979,6 +1044,14 @@ public:
     /**
      * @brief Enable trapezoidal velocity profile for this move.
      *
+     * @note **`tShape` is on by default** — this setter is idempotent and exists for
+     *       explicit-readability and parity with `setStartSpeed`/`setEndSpeed`/`setAccel`.
+     *       To opt OUT of the profile on a one-off, chain
+     *       `.setStartSpeed(cruise).setEndSpeed(cruise)` so the ramp formula short-circuits
+     *       (the no-ramp epsilon `Config::TSHAPE_NO_RAMP_EPSILON_PWM` then fires on both
+     *       sides). Defaulting it on is intentional — see DECISIONS.md "Sync + T-shape as
+     *       default move profile".
+     *
      * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
      * ramps down to `endSpeed` (default 0, but defaults to cruise when `setBrake(false)` is
      * also chained — assumes a no-brake move is chaining into a follow-up).
@@ -988,8 +1061,6 @@ public:
      * `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]` and to half of the move
      * length. If accel + decel distance > total, profile becomes a triangle (peak speed
      * reduced).
-     *
-     * Mutually compatible with all other builder setters. Has no effect if not chained.
      *
      * @return Reference to this builder for chaining.
      * @note Profile runs cooperatively from `Drive.update()` — issuing a new bounded move
@@ -1088,6 +1159,18 @@ public:
         }
         _executed = true;
 
+        // Reject negative distance at the public-API boundary (code review F4). The
+        // contract is: distance is non-negative, reverse direction is expressed via
+        // negative power. A typo like `Drive.driveDist(-3)` would otherwise reach
+        // `cmToEncDeg`, casting a negative float into a huge `uint16_t` encoder target.
+        // The profile path already clamps as a defensive WARNING-2 — this is the
+        // matching front-door check.
+        if (_cm < 0.0f)
+        {
+            Serial.println(F("[Drive] driveDist: negative cm rejected"));
+            return;
+        }
+
         // Resolve cruise — explicit setPower wins, then setPreset, then SPEED_NORMAL.
         const int16_t cruise = _resolvePower();
 
@@ -1109,7 +1192,16 @@ public:
             // a `.setBrake(false).tShape()` move is presumed to be chaining into a follow-up,
             // so ramping down to zero would defeat the purpose. Explicit `.setEndSpeed(0)`
             // still wins because `_endSpeedSet` becomes true.
-            cmd.startSpeed = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            //
+            // Sign-by-cruise on the default start speed: a reverse move (cruise<0) must ramp
+            // from a negative-direction PWM, otherwise the trapezoid initially drives the
+            // chassis FORWARD before crossing zero into the requested reverse direction
+            // (see code review F1). Explicit `.setStartSpeed(...)` still wins.
+            cmd.startSpeed = _startSpeedSet
+                               ? _startSpeed
+                               : (cruise >= 0
+                                      ? Config::TSHAPE_START_SPEED
+                                      : (int16_t) -Config::TSHAPE_START_SPEED);
             cmd.endSpeed   = _endSpeedSet
                                ? _endSpeed
                                : (_brake ? Config::TSHAPE_END_SPEED : cruise);
@@ -1160,13 +1252,13 @@ private:
     bool        _powerExplicit  = false;
     Config::SpeedPreset _preset = Config::SpeedPreset::NORMAL;
     bool        _presetSet      = false;
-    DriveMode   _mode           = DriveMode::RAW;
+    DriveMode   _mode           = DriveMode::SYNC;   ///< default SYNC — see DECISIONS.md.
     bool        _brake          = true;
     bool        _blocking       = true;    ///< default sync — destructor blocks until command completes.
                                            ///< Auto-planner opts out per call via `.async()`.
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
-    bool        _tShape         = false;
+    bool        _tShape         = true;    ///< default trapezoidal profile — see DECISIONS.md.
     bool        _accelExplicit  = false;
     float       _accel          = Config::TSHAPE_ACCEL_PWM_PER_CM;
     bool        _startSpeedSet  = false;
@@ -1180,7 +1272,8 @@ private:
  * @brief Fluent builder for `Drive.driveTime(sec)` — time-bounded straight-line move.
  *
  * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
- * Setters mirror `DriveDistBuilder`; only the time vs. distance verb differs.
+ * Setters mirror `DriveDistBuilder`; only the time vs. distance verb differs. Defaults:
+ * `DriveMode::SYNC`, `tShape` on (see DECISIONS.md "Sync + T-shape as default move profile").
  */
 class [[nodiscard]] DriveTimeBuilder
 {
@@ -1323,6 +1416,10 @@ public:
     /**
      * @brief Enable trapezoidal velocity profile for this time-bounded move.
      *
+     * @note **`tShape` is on by default** — this setter is idempotent. To opt OUT, chain
+     *       `.setStartSpeed(cruise).setEndSpeed(cruise)`; see `DriveDistBuilder::tShape()`
+     *       for the full rationale and DECISIONS.md "Sync + T-shape as default move profile".
+     *
      * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
      * ramps back down to `endSpeed` (default 0, but defaults to cruise when
      * `setBrake(false)` is also chained).
@@ -1422,6 +1519,13 @@ public:
         }
         _executed = true;
 
+        // Reject negative duration — see DriveDistBuilder::~ for rationale (F4).
+        if (_sec < 0.0f)
+        {
+            Serial.println(F("[Drive] driveTime: negative sec rejected"));
+            return;
+        }
+
         // Resolve cruise — explicit setPower wins, then setPreset, then SPEED_NORMAL.
         const int16_t cruise = _resolvePower();
 
@@ -1435,7 +1539,12 @@ public:
         if (_tShape && _sec >= Config::TSHAPE_MIN_MOVE_SEC)
         {
             cmd.kind       = DriveCommand::Kind::PROFILE_TIME;
-            cmd.startSpeed = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            // Sign-by-cruise on the default start speed — see DriveDistBuilder for rationale (F1).
+            cmd.startSpeed = _startSpeedSet
+                               ? _startSpeed
+                               : (cruise >= 0
+                                      ? Config::TSHAPE_START_SPEED
+                                      : (int16_t) -Config::TSHAPE_START_SPEED);
             cmd.endSpeed   = _endSpeedSet
                                ? _endSpeed
                                : (_brake ? Config::TSHAPE_END_SPEED : cruise);
@@ -1482,13 +1591,13 @@ private:
     bool        _powerExplicit  = false;
     Config::SpeedPreset _preset = Config::SpeedPreset::NORMAL;
     bool        _presetSet      = false;
-    DriveMode   _mode           = DriveMode::RAW;
+    DriveMode   _mode           = DriveMode::SYNC;   ///< default SYNC — see DECISIONS.md.
     bool        _brake          = true;
     bool        _blocking       = true;    ///< default sync — destructor blocks until command completes.
                                            ///< Auto-planner opts out per call via `.async()`.
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
-    bool        _tShape         = false;
+    bool        _tShape         = true;    ///< default trapezoidal profile — see DECISIONS.md.
     bool        _accelExplicit  = false;
     float       _accel          = Config::TSHAPE_ACCEL_PWM_PER_CM;
     bool        _startSpeedSet  = false;

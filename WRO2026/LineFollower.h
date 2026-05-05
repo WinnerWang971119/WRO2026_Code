@@ -40,14 +40,14 @@
 #define LINEFOLLOWER_H
 
 #include <Arduino.h>
-#include <MatrixMiniR4.h>            // brings in Wire1
-#include <MiniR4_MXLineTracer.h>     // MatrixLineTracer — angle-brackets so the Arduino
-                                     // build resolves it through the installed library's
-                                     // src/ tree on any machine, not just Diego's local
-                                     // worktree path. clangd hover may still show
-                                     // `<error type> *` on `getTracer()` until a
-                                     // `c_cpp_properties.json` is wired up — that's an
-                                     // IDE-config concern, not a source-code one.
+#include <MatrixMiniR4.h>    // Brings in `MatrixLineTracer` transitively via MiniR4I2C.h.
+                             // The Arduino 1.5 library spec only adds `<lib>/src/` to the
+                             // include path — not nested subdirectories like
+                             // `src/Modules/Sensors/` — so `<MiniR4_MXLineTracer.h>` is not
+                             // portable across build environments. The vendor facade
+                             // `<MatrixMiniR4.h>` already declares the type, which is all
+                             // we need for the `MatrixLineTracer*` member below.
+                             // (See code review F9.)
 #include "Config.h"
 
 // Forward declaration so the builder can hold a reference to the owner type.
@@ -76,6 +76,9 @@ class LineFollowerClass;
  *    UNCHANGED — re-enabling the controller does not silently reset cruise.
  *  - When `setEnabled(false)` is invoked without `.setBrake(...)`, the brake defaults to
  *    `true`, matching the historical Phase 1 behaviour.
+ *  - `tShape` is **on by default** on `setEnabled(true)` — cruise ramps from 0 up to the
+ *    resolved preset over `Config::TSHAPE_ACCEL_PWM_PER_CM`. See DECISIONS.md
+ *    "Sync + T-shape as default move profile" for rationale.
  *
  * Lifetime / safety:
  *  - The builder is `[[nodiscard]]`: storing the temporary in a variable without using it
@@ -144,11 +147,15 @@ public:
     /**
      * @brief Enable trapezoidal velocity profile on this enable transition.
      *
-     * When chained on a `setEnabled(true)` call, the line follower's cruise PWM ramps from
-     * 0 up to the resolved preset over an implicit ramp distance: `cruise / accel`, clamped
-     * to `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]`. The ramp is purely
-     * forward (line following has no natural "end of move", so there is no ramp-down) and
-     * is consumed once: after the ramp distance is traveled, subsequent ticks use the full
+     * @note **`tShape` is on by default** — this setter is idempotent and exists for
+     *       explicit-readability. See DECISIONS.md "Sync + T-shape as default move profile"
+     *       for rationale.
+     *
+     * On a `setEnabled(true)` call, the line follower's cruise PWM ramps from 0 up to the
+     * resolved preset over an implicit ramp distance: `cruise / accel`, clamped to
+     * `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]`. The ramp is purely forward
+     * (line following has no natural "end of move", so there is no ramp-down) and is
+     * consumed once: after the ramp distance is traveled, subsequent ticks use the full
      * preset cruise. Disabling the controller cancels the ramp.
      *
      * Acceleration defaults to `Config::TSHAPE_ACCEL_PWM_PER_CM`. Override via `.setAccel()`.
@@ -192,7 +199,8 @@ private:
     bool                _brake               = true;   ///< Brake on disable (only used if !enable).
     bool                _hasPresetOverride   = false;  ///< True iff `_presetOverride` is meaningful.
     Config::SpeedPreset _presetOverride{};             ///< Pending preset; only honored when override flag set.
-    bool                _tShape              = false;  ///< Enable cruise-ramp on a setEnabled(true) transition.
+    bool                _tShape              = true;   ///< default ON — cruise-ramp on a setEnabled(true) transition.
+                                                        ///< See DECISIONS.md "Sync + T-shape as default move profile".
     bool                _accelExplicit       = false;  ///< Reserved for parity with the Drive builders.
     float               _accel               = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
     bool                _hasReverseOverride  = false;  ///< True iff `_reverseOverride` is meaningful.

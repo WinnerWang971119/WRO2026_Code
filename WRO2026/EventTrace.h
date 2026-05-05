@@ -134,6 +134,16 @@ private:
     bool _prevTurnDone = true;
 
     /**
+     * @brief Last-observed value of `Intersection.getEdgeCount()`.
+     *
+     * EventTrace is a passive observer of intersection events: we cache the strictly-
+     * increasing counter and fire whenever it advances. This avoids consuming the
+     * read-and-clear `isAtIntersection()` flag — that bit is reserved for the navigation
+     * layer's exclusive state machine. See code review F6.
+     */
+    uint32_t _prevIntEdgeCount = 0;
+
+    /**
      * @brief Repaint the OLED with the current ring-buffer contents (newest at top).
      *
      * @note Walks the ring backwards from `_head` so the freshest event lands on line 0 and
