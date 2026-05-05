@@ -70,6 +70,50 @@ enum class DriveMode : uint8_t
 };
 
 /**
+ * @brief Captured parameters of a queued Drive command.
+ *
+ * Built by a fluent builder's destructor and pushed onto `DriveClass`'s internal
+ * FIFO. Dispatched by `Drive.update()` when the previous command completes. Holds
+ * a discriminated-union shape — `kind` selects which of the bounded/profiled
+ * subtypes the other fields apply to.
+ */
+struct DriveCommand
+{
+    /**
+     * @brief Discriminator for the queued command's variant.
+     */
+    enum class Kind : uint8_t
+    {
+        DRIVE_DIST,        ///< Non-profiled distance move (mode-driven).
+        DRIVE_TIME,        ///< Non-profiled time move (mode-driven).
+        TURN_DEG,          ///< Relative turn.
+        TURN_TO_YAW,       ///< Absolute-yaw turn.
+        PROFILE_DIST,      ///< Profiled (tShape) distance move.
+        PROFILE_TIME       ///< Profiled (tShape) time move.
+    };
+
+    Kind        kind;
+    DriveMode   mode      = DriveMode::RAW;     ///< For DRIVE_DIST/TIME and PROFILE_DIST/TIME.
+
+    // Bounds.
+    float       cm        = 0.0f;
+    float       sec       = 0.0f;
+    int16_t     deg       = 0;                  ///< For TURN_DEG.
+    int16_t     yaw       = 0;                  ///< For TURN_TO_YAW.
+
+    // Common.
+    int16_t     power     = 0;
+    int16_t     heading   = 0;                  ///< Used by GYRO mode and PROFILE_*.
+    bool        brake     = true;
+    uint8_t     turnMode  = 0;                  ///< For TURN_*.
+
+    // Profile-only.
+    int16_t     startSpeed = 0;
+    int16_t     endSpeed   = 0;
+    float       accel      = 0.0f;
+};
+
+/**
  * @brief Rich movement-primitive facade over `MiniR4.DriveDC` + `MiniR4.Motion`.
  *
  * Holds the persistent yaw-hold target (`_heldYaw`), the move/turn done flags, and exposes a
@@ -104,13 +148,25 @@ public:
     /**
      * @brief Cooperative tick — must be called every iteration of the main `loop()`.
      *
-     * Polls `MiniR4.DriveDC.isPrevTaskDone()` and clears `_moveDone` / `_turnDone` together
-     * once the lower MCU signals completion.
+     * Three-stage tick, executed strictly in this order each call:
+     *   1. **Drain** — if no profile is in flight and a bounded task was issued, poll
+     *      `MiniR4.DriveDC.isPrevTaskDone()`. When the lower MCU reports completion, clear
+     *      `_moveDone` and `_turnDone` together (the MCU exposes a single task-done bit).
+     *   2. **Profile** — advance the trapezoidal `.tShape()` state machine via
+     *      `_updateProfile()` (idempotent when IDLE). On the tick that the profile finishes,
+     *      this stage flips `_moveDone` to `true` so stage 3 sees an idle chassis on the same
+     *      tick — chained queue moves get dispatched without an extra-tick gap.
+     *   3. **Dispatch** — if `_isIdle()` and `_qCount > 0`, pop the next `DriveCommand` and
+     *      hand it to `_dispatchNext()`. The dispatcher also auto-disables `LineFollower`
+     *      (with `brake=false`) if it was enabled — a queued bounded/profiled move owns the
+     *      motors exclusively and must not race the follower's tick loop.
+     *
      * @note Contains NO `delay()`. Safe to call at any cadence.
      * @note Because the lower MCU reports a single task-done bit, this method clears BOTH
      *       move and turn flags simultaneously — see class docblock.
-     * @note Also advances the trapezoidal-profile state machine if a `.tShape()`-driven
-     *       move is in flight (see `_updateProfile`).
+     * @note A queued blocking-variant builder bypasses this method's normal flow: it calls
+     *       `_drainBlocking()` (which spins on `update()` + `delay(2)`) to honour synchronous
+     *       semantics on top of the queue infrastructure.
      */
     void update();
 
@@ -364,6 +420,15 @@ private:
     float   _biasL    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM L paths. See DECISIONS.md.
     float   _biasR    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM R paths. See DECISIONS.md.
 
+    // -----------------------------------------------------------------------------------------
+    // Command queue (sequential dispatch from update())
+    // -----------------------------------------------------------------------------------------
+
+    DriveCommand _queue[Config::DRIVE_QUEUE_CAPACITY];
+    uint8_t      _qHead  = 0;   ///< Index of next command to dispatch.
+    uint8_t      _qTail  = 0;   ///< Index of next free slot to enqueue into.
+    uint8_t      _qCount = 0;   ///< Current queue depth.
+
     // -------------------------------------------------------------------------------------
     // Trapezoidal-profile state machine (`.tShape()`-driven moves)
     // -------------------------------------------------------------------------------------
@@ -554,7 +619,12 @@ private:
      * the correct continuous MMLower primitive (`Move` / `MoveSync` / `MoveGyro`) for the
      * configured `_profileMode`. RAW mode applies `_applyBias`; SYNC and GYRO do NOT (the
      * STM32 closes the loop — see DECISIONS.md). When `frac >= 1.0`, transitions to `DONE`,
-     * issues `stop(_profileBrake)`, marks `_moveDone = true`, and returns to `IDLE`.
+     * marks the done flags, and returns to `IDLE`. The DONE branch SPLITS by endSpeed:
+     *   - `_profileEndSpd == 0` → inline `Move(0,0) + brake(_profileBrake)` (does NOT call
+     *     `stop()` because that would `_clearQueue()` and wipe queued follow-ups; W1 fix).
+     *   - `_profileEndSpd != 0` → no motor command at all; the prior tick's setpoint (already
+     *     at endSpeed) holds, and the next queued move's first tick overwrites it. This is
+     *     how chained moves preserve cruise across boundaries.
      *
      * @note Idempotent when `_profileState == IDLE` — short-circuits immediately.
      */
@@ -612,6 +682,69 @@ private:
                              float     accel,
                              bool      brake,
                              int16_t   heading);
+
+    // -------------------------------------------------------------------------------------
+    // Command-queue plumbing — invoked from update() and from builder destructors.
+    // -------------------------------------------------------------------------------------
+
+    /**
+     * @brief Push a command onto the queue. Drops + warns on overflow.
+     *
+     * The queue is a fixed-size FIFO with `Config::DRIVE_QUEUE_CAPACITY` slots; if it is
+     * already full, the new command is dropped and a warning is printed to Serial. This is
+     * a caller bug — the path planner should not be issuing more bounded moves than the
+     * queue can hold without occasional `_drainBlocking()` calls.
+     *
+     * @param cmd Fully-populated command POD. Copy semantics — caller's instance is no
+     *            longer needed after the call returns.
+     * @return `true` if enqueued; `false` if dropped due to overflow.
+     */
+    bool _enqueue(const DriveCommand& cmd);
+
+    /**
+     * @brief Pop the front command if any, dispatch it. Called from `update()` when idle.
+     *
+     * Also auto-disables `LineFollower` (with `brake=false`) before dispatching, so the
+     * follower's tick loop does not race the new bounded/profiled move on motor PWM. The
+     * caller must re-enable the follower explicitly after their queued move sequence completes.
+     *
+     * @note No-ops if the queue is empty — safe to call unconditionally.
+     */
+    void _dispatchNext();
+
+    /**
+     * @brief `true` when no current task is in flight AND no profile is active.
+     *
+     * Used by `update()` to decide whether to dispatch the next queued command and by
+     * blocking-variant destructors (via `_drainBlocking`) to know when their drain phase
+     * is complete.
+     *
+     * @return `true` iff `_moveDone && _turnDone && _profileState == ProfileState::IDLE`.
+     */
+    bool _isIdle() const;
+
+    /**
+     * @brief Drain queue and current task synchronously. Used by blocking variants.
+     *
+     * Spins, calling `update()` and `delay(2)`, until `_isIdle()` returns true AND the queue
+     * is empty.
+     *
+     * @note This is the THIRD allowed `delay()` site in the codebase (after
+     *       `calibrateMotorBias` and the historical per-builder spin which is now folded into
+     *       this helper). The blocking caller is by definition off the cooperative tick chain,
+     *       so this spin doesn't violate the iron rule — which targets non-blocking `update()`
+     *       chains, not synchronous-orchestration paths.
+     */
+    void _drainBlocking();
+
+    /**
+     * @brief Empty the queue without dispatching. Called from `stop()`.
+     *
+     * Resets head, tail, and count to zero — the storage is left untouched but is no longer
+     * referenced. Used to implement `Drive.stop()`'s abort semantics: pending commands are
+     * discarded, not just the in-flight one.
+     */
+    void _clearQueue();
 };
 
 /**
@@ -838,21 +971,31 @@ public:
     }
 
     /**
-     * @brief Destructor — RAII auto-execute. Resolves the final knobs and dispatches to the
-     *        appropriate `DriveClass::_execDriveDist*` method, OR to `_execProfileMove` when
-     *        `tShape()` was chained.
+     * @brief Destructor — RAII auto-enqueue. Resolves the final knobs and pushes a
+     *        `DriveCommand` onto the Drive queue.
+     *
+     * The actual dispatch happens later, from `Drive.update()`, when the previous queued
+     * command (if any) has finished. This makes source-order sequencing of multiple moves
+     * work without caller-side polling — see `Config::DRIVE_QUEUE_CAPACITY` rationale.
      *
      * Endpoint-default rule: when `_brake == false` and `setEndSpeed()` was never called,
      * `endSpeed` resolves to the cruise PWM (the assumption is that a no-brake move is
      * chaining into a follow-up segment). Override with an explicit `setEndSpeed(0)` if a
      * coast-to-stop is intended.
      *
-     * @note Idempotent: the `_executed` guard prevents a second dispatch if a future change
+     * Min-move threshold: when `_tShape` is set but `_cm < Config::TSHAPE_MIN_MOVE_CM`, the
+     * profile is silently skipped — the command is enqueued as `Kind::DRIVE_DIST` instead of
+     * `Kind::PROFILE_DIST`. The half-of-total clamp on per-side ramp distances would force
+     * the effective acceleration steeper than `TSHAPE_ACCEL_PWM_PER_CM` on short moves; a
+     * non-profiled constant-cruise move is the cleaner fallback.
+     *
+     * @note Idempotent: the `_executed` guard prevents a second enqueue if a future change
      *       re-enables move semantics.
-     * @note When `_blocking == true && _tShape == true` the destructor spins on
-     *       `Drive.update()` with a `delay(2)` poll to honour the blocking semantic from
-     *       outside the cooperative tick chain. This is the SECOND allowed `delay()` site
-     *       in the codebase (after `calibrateMotorBias`); see DECISIONS.md.
+     * @note When `_blocking == true`, the destructor calls `_drainBlocking()` before AND
+     *       after the enqueue: drain anything already in the queue plus the in-flight task,
+     *       enqueue this command, drain again. Result: synchronous semantics on top of the
+     *       queue infrastructure. `_drainBlocking()` is the THIRD allowed `delay()` site —
+     *       see its doxygen.
      */
     ~DriveDistBuilder()
     {
@@ -862,60 +1005,51 @@ public:
         }
         _executed = true;
 
-        const int16_t resolvedPower = _resolvePower();
+        // Resolve cruise — explicit setPower wins, then setPreset, then SPEED_NORMAL.
+        const int16_t cruise = _resolvePower();
 
-        if (_tShape)
+        // Build the command POD.
+        DriveCommand cmd;
+        cmd.cm      = _cm;
+        cmd.power   = cruise;
+        cmd.mode    = _mode;
+        cmd.brake   = _brake;
+        cmd.heading = _headingSet ? _heading : _drive._heldYaw;
+
+        // Decide profile vs non-profile, with the min-move-threshold no-op for tShape. Below
+        // the threshold we silently fall back to a non-profiled constant-cruise move so the
+        // constant-acceleration contract isn't violated on short hops.
+        if (_tShape && _cm >= Config::TSHAPE_MIN_MOVE_CM)
         {
+            cmd.kind       = DriveCommand::Kind::PROFILE_DIST;
             // Resolve start/end speeds. The no-brake → endSpeed=cruise rule kicks in here:
             // a `.setBrake(false).tShape()` move is presumed to be chaining into a follow-up,
             // so ramping down to zero would defeat the purpose. Explicit `.setEndSpeed(0)`
             // still wins because `_endSpeedSet` becomes true.
-            const int16_t startSpd = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
-            const int16_t endSpd =
-                _endSpeedSet ? _endSpeed : (_brake ? Config::TSHAPE_END_SPEED : resolvedPower);
-            const int16_t hdg = _headingSet ? _heading : _drive._heldYaw;
-
-            _drive._execProfileMove(_mode,
-                                    /*isTime*/ false,
-                                    _cm,
-                                    /*totalSec*/ 0.0f,
-                                    resolvedPower,
-                                    startSpd,
-                                    endSpd,
-                                    _accel,
-                                    _brake,
-                                    hdg);
-
-            // Blocking + tShape: spin on Drive.update() until the profile completes. This is
-            // off the cooperative tick chain (the caller is on a synchronous-orchestration
-            // path), so a short `delay(2)` between polls is acceptable. Mirrors the library's
-            // own blocking pattern and matches the calibration routine's policy.
-            if (_blocking)
-            {
-                while (!_drive.isMoveDone())
-                {
-                    _drive.update();
-                    delay(2);
-                }
-            }
-            return;
+            cmd.startSpeed = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            cmd.endSpeed   = _endSpeedSet
+                               ? _endSpeed
+                               : (_brake ? Config::TSHAPE_END_SPEED : cruise);
+            cmd.accel      = _accel;
+        }
+        else
+        {
+            cmd.kind = DriveCommand::Kind::DRIVE_DIST;
+            // Profile-only fields are unused; leave defaulted.
         }
 
-        // Non-tShape path: existing fire-and-forget dispatch.
-        switch (_mode)
+        if (_blocking)
         {
-        case DriveMode::RAW:
-            _drive._execDriveDistRaw(resolvedPower, _cm, _brake, _blocking);
-            break;
-        case DriveMode::SYNC:
-            _drive._execDriveDistSync(resolvedPower, _cm, _brake, _blocking);
-            break;
-        case DriveMode::GYRO:
-        {
-            const int16_t yaw = _headingSet ? _heading : _drive._heldYaw;
-            _drive._execDriveDistGyro(resolvedPower, _cm, yaw, _brake, _blocking);
-            break;
+            // Blocking variant: drain anything already in the queue plus the current move,
+            // then enqueue this one and drain again. Synchronous semantics on top of the
+            // queue infrastructure. The drain helper is the third allowed `delay()` site.
+            _drive._drainBlocking();
+            _drive._enqueue(cmd);
+            _drive._drainBlocking();
         }
+        else
+        {
+            _drive._enqueue(cmd);
         }
     }
 
@@ -1160,17 +1294,20 @@ public:
     }
 
     /**
-     * @brief Destructor — RAII auto-execute. Dispatches to the correct
-     *        `DriveClass::_execDriveTime*` method, OR to `_execProfileMove` when `tShape()`
-     *        was chained.
+     * @brief Destructor — RAII auto-enqueue. Resolves the final knobs and pushes a
+     *        `DriveCommand` onto the Drive queue.
      *
-     * Endpoint-default rule: when `_brake == false` and `setEndSpeed()` was never called,
-     * `endSpeed` resolves to the cruise PWM (same chained-move presumption as the distance
-     * builder).
+     * The actual dispatch happens later, from `Drive.update()`, when the previous queued
+     * command (if any) has finished. Endpoint-default rule mirrors `DriveDistBuilder`:
+     * when `_brake == false` and `setEndSpeed()` was never called, `endSpeed` resolves to
+     * cruise (chained-move presumption).
      *
-     * @note When `_blocking == true && _tShape == true` the destructor spins on
-     *       `Drive.update()` with a `delay(2)` poll — the second allowed `delay()` site in
-     *       the codebase.
+     * Min-move threshold: when `_tShape` is set but `_sec < Config::TSHAPE_MIN_MOVE_SEC`,
+     * the profile is silently skipped — the command is enqueued as `Kind::DRIVE_TIME`
+     * instead of `Kind::PROFILE_TIME`.
+     *
+     * @note When `_blocking == true`, the destructor calls `_drainBlocking()` before AND
+     *       after the enqueue (third allowed `delay()` site — see its doxygen).
      */
     ~DriveTimeBuilder()
     {
@@ -1180,51 +1317,39 @@ public:
         }
         _executed = true;
 
-        const int16_t resolvedPower = _resolvePower();
+        // Resolve cruise — explicit setPower wins, then setPreset, then SPEED_NORMAL.
+        const int16_t cruise = _resolvePower();
 
-        if (_tShape)
+        DriveCommand cmd;
+        cmd.sec     = _sec;
+        cmd.power   = cruise;
+        cmd.mode    = _mode;
+        cmd.brake   = _brake;
+        cmd.heading = _headingSet ? _heading : _drive._heldYaw;
+
+        if (_tShape && _sec >= Config::TSHAPE_MIN_MOVE_SEC)
         {
-            const int16_t startSpd = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
-            const int16_t endSpd =
-                _endSpeedSet ? _endSpeed : (_brake ? Config::TSHAPE_END_SPEED : resolvedPower);
-            const int16_t hdg = _headingSet ? _heading : _drive._heldYaw;
-
-            _drive._execProfileMove(_mode,
-                                    /*isTime*/ true,
-                                    /*totalCm*/ 0.0f,
-                                    _sec,
-                                    resolvedPower,
-                                    startSpd,
-                                    endSpd,
-                                    _accel,
-                                    _brake,
-                                    hdg);
-
-            if (_blocking)
-            {
-                while (!_drive.isMoveDone())
-                {
-                    _drive.update();
-                    delay(2);
-                }
-            }
-            return;
+            cmd.kind       = DriveCommand::Kind::PROFILE_TIME;
+            cmd.startSpeed = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            cmd.endSpeed   = _endSpeedSet
+                               ? _endSpeed
+                               : (_brake ? Config::TSHAPE_END_SPEED : cruise);
+            cmd.accel      = _accel;
+        }
+        else
+        {
+            cmd.kind = DriveCommand::Kind::DRIVE_TIME;
         }
 
-        switch (_mode)
+        if (_blocking)
         {
-        case DriveMode::RAW:
-            _drive._execDriveTimeRaw(resolvedPower, _sec, _brake, _blocking);
-            break;
-        case DriveMode::SYNC:
-            _drive._execDriveTimeSync(resolvedPower, _sec, _brake, _blocking);
-            break;
-        case DriveMode::GYRO:
-        {
-            const int16_t yaw = _headingSet ? _heading : _drive._heldYaw;
-            _drive._execDriveTimeGyro(resolvedPower, _sec, yaw, _brake, _blocking);
-            break;
+            _drive._drainBlocking();
+            _drive._enqueue(cmd);
+            _drive._drainBlocking();
         }
+        else
+        {
+            _drive._enqueue(cmd);
         }
     }
 
@@ -1369,7 +1494,11 @@ public:
     }
 
     /**
-     * @brief Destructor — RAII auto-execute. Dispatches to `DriveClass::_execTurnDeg`.
+     * @brief Destructor — RAII auto-enqueue. Pushes a `Kind::TURN_DEG` command onto the
+     *        Drive queue.
+     *
+     * The turn dispatches later from `Drive.update()`. Blocking variant drains the queue
+     * before and after enqueue (third allowed `delay()` site).
      */
     ~TurnDegBuilder()
     {
@@ -1377,9 +1506,27 @@ public:
         {
             return;
         }
-        _executed                   = true;
+        _executed = true;
+
         const int16_t resolvedPower = _resolvePower();
-        _drive._execTurnDeg(_deg, resolvedPower, _mode, _brake, _blocking);
+
+        DriveCommand cmd;
+        cmd.kind     = DriveCommand::Kind::TURN_DEG;
+        cmd.deg      = _deg;
+        cmd.power    = resolvedPower;
+        cmd.turnMode = _mode;
+        cmd.brake    = _brake;
+
+        if (_blocking)
+        {
+            _drive._drainBlocking();
+            _drive._enqueue(cmd);
+            _drive._drainBlocking();
+        }
+        else
+        {
+            _drive._enqueue(cmd);
+        }
     }
 
 private:
@@ -1513,7 +1660,11 @@ public:
     }
 
     /**
-     * @brief Destructor — RAII auto-execute. Dispatches to `DriveClass::_execTurnToYaw`.
+     * @brief Destructor — RAII auto-enqueue. Pushes a `Kind::TURN_TO_YAW` command onto the
+     *        Drive queue.
+     *
+     * The turn dispatches later from `Drive.update()`. Blocking variant drains the queue
+     * before and after enqueue (third allowed `delay()` site).
      */
     ~TurnToYawBuilder()
     {
@@ -1521,9 +1672,27 @@ public:
         {
             return;
         }
-        _executed                   = true;
+        _executed = true;
+
         const int16_t resolvedPower = _resolvePower();
-        _drive._execTurnToYaw(_yaw, resolvedPower, _mode, _brake, _blocking);
+
+        DriveCommand cmd;
+        cmd.kind     = DriveCommand::Kind::TURN_TO_YAW;
+        cmd.yaw      = _yaw;
+        cmd.power    = resolvedPower;
+        cmd.turnMode = _mode;
+        cmd.brake    = _brake;
+
+        if (_blocking)
+        {
+            _drive._drainBlocking();
+            _drive._enqueue(cmd);
+            _drive._drainBlocking();
+        }
+        else
+        {
+            _drive._enqueue(cmd);
+        }
     }
 
 private:

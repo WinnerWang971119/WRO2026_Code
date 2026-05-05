@@ -13,6 +13,11 @@
 
 #include "Drive.h"
 
+#include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
+                              // its tick loop does not write setSpeed concurrently with a
+                              // queued bounded/profiled move. LineFollower.h does NOT pull
+                              // Drive.h transitively, so the include is non-circular.
+
 static_assert(Config::WHEEL_DIAM_MM > 0.0f, "WHEEL_DIAM_MM must be positive");
 
 /// @brief Single global instance.
@@ -66,10 +71,12 @@ bool DriveClass::begin()
 
 void DriveClass::update()
 {
-    // When a profile is in flight, the profile owns `_moveDone` — the lower-MCU task-done
-    // bit refers to a *prior* bounded MMLower task and would falsely flip _moveDone to true
-    // mid-cruise (W1 fix). Skip the drain in that case; _updateProfile will set _moveDone
-    // when the profile itself completes.
+    // -------------------------------------------------------------------------------------
+    // Stage 1 — drain any in-flight bounded task. When a profile is in flight, the profile
+    // owns `_moveDone` — the lower-MCU task-done bit refers to a *prior* bounded MMLower
+    // task and would falsely flip _moveDone to true mid-cruise (W1 fix). Skip the drain in
+    // that case; _updateProfile will set _moveDone when the profile itself completes.
+    // -------------------------------------------------------------------------------------
     if (_profileState == ProfileState::IDLE && (!_moveDone || !_turnDone))
     {
         // The lower MCU reports a single task-done bit, so move-done and turn-done collapse
@@ -82,8 +89,21 @@ void DriveClass::update()
         }
     }
 
-    // Profile state machine — idempotent when IDLE, so the call is cheap on every tick.
+    // -------------------------------------------------------------------------------------
+    // Stage 2 — advance the profile state machine. Idempotent when IDLE, so the call is
+    // cheap on every tick. Order matters: profile drain MUST run before stage 3 so that a
+    // just-completed profile sets `_moveDone` here, allowing `_dispatchNext()` to fire on
+    // the same tick (no inter-segment gap on chained queue moves).
+    // -------------------------------------------------------------------------------------
     _updateProfile();
+
+    // -------------------------------------------------------------------------------------
+    // Stage 3 — if the chassis is fully idle and a queued command is waiting, dispatch it.
+    // -------------------------------------------------------------------------------------
+    if (_isIdle() && _qCount > 0)
+    {
+        _dispatchNext();
+    }
 }
 
 // -----------------------------------------------------------------------------------------
@@ -113,8 +133,14 @@ uint8_t DriveClass::stop(bool brake)
     MiniR4.DriveDC.Move(0, 0);
     const uint8_t brakeRc = MiniR4.DriveDC.brake(brake);
 
-    _moveDone = true;
-    _turnDone = true;
+    _moveDone     = true;
+    _turnDone     = true;
+    _profileState = ProfileState::IDLE;    // also abort any in-flight profile
+
+    // Abort semantics — pending queued work is dropped. Without this, a `Drive.stop()` call
+    // intended to halt the chassis would be silently undone on the next `update()` tick when
+    // the queue dispatched the next command.
+    _clearQueue();
 
     return brakeRc;
 }
@@ -134,7 +160,10 @@ uint8_t DriveClass::_execDriveDistRaw(int16_t power, float cm, bool brake, bool 
     const uint16_t encDeg = _cmToEncDeg(cm);
     // The library convention: the last argument is `async`. Blocking == sync == async=false.
     const uint8_t rc = MiniR4.DriveDC.MoveDegs(powerL, powerR, encDeg, brake, !blocking);
-    if (!blocking)
+    // W3 guard: only set `_moveDone = false` when the lower MCU actually accepted the task.
+    // Without this, a failed dispatch leaves the flag stuck at `false` forever and
+    // `_drainBlocking()` infinite-loops waiting for a task that never started.
+    if (!blocking && rc == 0x00)
     {
         _moveDone = false;
     }
@@ -147,7 +176,7 @@ uint8_t DriveClass::_execDriveDistSync(int16_t power, float cm, bool brake, bool
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, brake, !blocking);
-    if (!blocking)
+    if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
     }
@@ -164,7 +193,7 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
     const uint16_t encDeg = _cmToEncDeg(cm);
     const uint8_t  rc =
         MiniR4.DriveDC.MoveGyroDegs(power, yaw, encDeg, brake, !blocking);
-    if (!blocking)
+    if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
     }
@@ -184,7 +213,7 @@ uint8_t DriveClass::_execDriveTimeRaw(int16_t power, float sec, bool brake, bool
     _applyBias(powerL, powerR);
 
     const uint8_t rc = MiniR4.DriveDC.MoveTime(powerL, powerR, sec, brake, !blocking);
-    if (!blocking)
+    if (!blocking && rc == 0x00)    // W3 guard — see _execDriveDistRaw
     {
         _moveDone = false;
     }
@@ -195,7 +224,7 @@ uint8_t DriveClass::_execDriveTimeSync(int16_t power, float sec, bool brake, boo
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(power, power, sec, brake, !blocking);
-    if (!blocking)
+    if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
     }
@@ -210,7 +239,7 @@ uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
     const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(power, yaw, sec, brake, !blocking);
-    if (!blocking)
+    if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
     }
@@ -532,11 +561,35 @@ void DriveClass::_updateProfile()
 
     if (frac >= 1.0f)
     {
-        // Profile complete — issue stop and finalise. One tick of latency vs. immediate
-        // completion is acceptable per spec.
+        // Profile complete — finalise. One tick of latency vs. immediate completion is
+        // acceptable per spec.
         _profileState = ProfileState::DONE;
-        stop(_profileBrake);
-        _moveDone     = true;
+        if (_profileEndSpd == 0)
+        {
+            // Bounded move ending at rest. We INLINE the equivalent of `stop(_profileBrake)`
+            // here rather than calling it: `stop()` calls `_clearQueue()` which would wipe
+            // every queued follow-up command — that's fine for a top-level abort but wrong
+            // for the queue dispatcher's "this move just completed normally, hand off to the
+            // next" path. The canonical pattern
+            //
+            //     Drive.driveDist(30).tShape();   // default endSpeed=0
+            //     Drive.driveDist(20).tShape();   // would be wiped if we called stop()
+            //
+            // depends on this distinction. W1 (queue review).
+            MiniR4.DriveDC.Move(0, 0);
+            MiniR4.DriveDC.brake(_profileBrake);
+            _moveDone = true;
+            _turnDone = true;
+        }
+        else
+        {
+            // Chained move: caller asked us to leave the chassis at endSpeed (typically
+            // cruise) so the next queued move can pick up without a zero-velocity gap. The
+            // last setpoint issued by `_profileSpeedAt(near 1.0)` was already at endSpeed —
+            // leave it. No motor command, no brake.
+            _moveDone = true;
+            _turnDone = true;
+        }
         _profileState = ProfileState::IDLE;
         return;
     }
@@ -824,4 +877,143 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
     _profileState = ProfileState::RAMP_UP;
     _moveDone     = false;
     return 0x00;
+}
+
+// -----------------------------------------------------------------------------------------
+// Command-queue plumbing — invoked from update() and from builder destructors.
+// -----------------------------------------------------------------------------------------
+
+bool DriveClass::_enqueue(const DriveCommand& cmd)
+{
+    if (_qCount >= Config::DRIVE_QUEUE_CAPACITY)
+    {
+        // Caller bug — the path planner is issuing more bounded moves than the queue can
+        // hold without an occasional `_drainBlocking()`. Drop the new command rather than
+        // silently overwriting an in-flight slot, and surface the issue on Serial.
+        Serial.println(F("[Drive] queue overflow — dropping command"));
+        return false;
+    }
+    _queue[_qTail] = cmd;
+    _qTail         = (uint8_t) ((_qTail + 1) % Config::DRIVE_QUEUE_CAPACITY);
+    _qCount++;
+    return true;
+}
+
+void DriveClass::_dispatchNext()
+{
+    if (_qCount == 0)
+    {
+        return;
+    }
+
+    // Pop.
+    const DriveCommand cmd = _queue[_qHead];
+    _qHead                 = (uint8_t) ((_qHead + 1) % Config::DRIVE_QUEUE_CAPACITY);
+    _qCount--;
+
+    // Race guard: a Drive bounded/profiled move owns the motors exclusively for its
+    // duration. If the line follower is enabled, its update() would race us by writing
+    // setSpeed every tick. Auto-disable with brake=false so the follower stops cleanly
+    // without us issuing a redundant brake (the queued move will set its own motor
+    // setpoints on its first tick). Caller re-enables the follower after the queued
+    // sequence completes.
+    if (LineFollower.isEnabled())
+    {
+        LineFollower.setEnabled(false).setBrake(false);
+    }
+
+    // Dispatch by kind. All paths use blocking=false — the queue is the asynchronous
+    // execution chain; blocking-variant builders go through `_drainBlocking()` to achieve
+    // synchronous semantics on top of this.
+    switch (cmd.kind)
+    {
+    case DriveCommand::Kind::DRIVE_DIST:
+        switch (cmd.mode)
+        {
+        case DriveMode::RAW:
+            _execDriveDistRaw(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
+            break;
+        case DriveMode::SYNC:
+            _execDriveDistSync(cmd.power, cmd.cm, cmd.brake, /*blocking*/ false);
+            break;
+        case DriveMode::GYRO:
+            _execDriveDistGyro(cmd.power, cmd.cm, cmd.heading, cmd.brake, /*blocking*/ false);
+            break;
+        }
+        break;
+
+    case DriveCommand::Kind::DRIVE_TIME:
+        switch (cmd.mode)
+        {
+        case DriveMode::RAW:
+            _execDriveTimeRaw(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
+            break;
+        case DriveMode::SYNC:
+            _execDriveTimeSync(cmd.power, cmd.sec, cmd.brake, /*blocking*/ false);
+            break;
+        case DriveMode::GYRO:
+            _execDriveTimeGyro(cmd.power, cmd.sec, cmd.heading, cmd.brake, /*blocking*/ false);
+            break;
+        }
+        break;
+
+    case DriveCommand::Kind::TURN_DEG:
+        _execTurnDeg(cmd.deg, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
+        break;
+
+    case DriveCommand::Kind::TURN_TO_YAW:
+        _execTurnToYaw(cmd.yaw, cmd.power, cmd.turnMode, cmd.brake, /*blocking*/ false);
+        break;
+
+    case DriveCommand::Kind::PROFILE_DIST:
+        _execProfileMove(cmd.mode,
+                         /*isTime*/ false,
+                         cmd.cm,
+                         /*totalSec*/ 0.0f,
+                         cmd.power,
+                         cmd.startSpeed,
+                         cmd.endSpeed,
+                         cmd.accel,
+                         cmd.brake,
+                         cmd.heading);
+        break;
+
+    case DriveCommand::Kind::PROFILE_TIME:
+        _execProfileMove(cmd.mode,
+                         /*isTime*/ true,
+                         /*totalCm*/ 0.0f,
+                         cmd.sec,
+                         cmd.power,
+                         cmd.startSpeed,
+                         cmd.endSpeed,
+                         cmd.accel,
+                         cmd.brake,
+                         cmd.heading);
+        break;
+    }
+}
+
+bool DriveClass::_isIdle() const
+{
+    return _moveDone && _turnDone && _profileState == ProfileState::IDLE;
+}
+
+void DriveClass::_drainBlocking()
+{
+    // Allowed `delay()` site #3. The blocking caller is by definition off the cooperative
+    // tick chain (synchronous-orchestration path), so this spin doesn't violate the iron
+    // rule — which targets non-blocking `update()` chains, not orchestration.
+    while (!_isIdle() || _qCount > 0)
+    {
+        update();
+        delay(2);
+    }
+}
+
+void DriveClass::_clearQueue()
+{
+    // Reset the FIFO without touching its storage — slots are no longer referenced.
+    _qHead  = 0;
+    _qTail  = 0;
+    _qCount = 0;
 }

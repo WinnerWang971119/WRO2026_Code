@@ -286,6 +286,52 @@ namespace Config
 
     /** @brief Tick-rate target for the profile state machine — only used as a comment marker. */
     // Profile is driven from Drive.update() at whatever rate the main loop ticks (~50-200 Hz typical).
+
+    /**
+     * @brief Minimum move length below which `.tShape()` silently no-ops.
+     *
+     * Below this threshold, the half-of-total clamp on per-side ramp distances would force
+     * the effective acceleration steeper than `TSHAPE_ACCEL_PWM_PER_CM`, breaking the
+     * constant-acceleration contract. Cleaner to fall back to a non-profiled constant-cruise
+     * move below the threshold than to deliver an inconsistent ramp.
+     *
+     * @note When tShape no-ops, the move still runs — just without the ramp. Caller does not
+     *       need to special-case short moves.
+     */
+    constexpr float TSHAPE_MIN_MOVE_CM = 5.0f;
+
+    /** @brief Same threshold as TSHAPE_MIN_MOVE_CM but for time-bounded moves (seconds). */
+    constexpr float TSHAPE_MIN_MOVE_SEC = 0.4f;
+
+    // =============================================================================
+    // Drive command queue (sequential dispatch).
+    //
+    // Drive's fluent builder destructors enqueue commands instead of dispatching
+    // immediately. `Drive.update()` pops the next command when the current bounded
+    // move + profile state machine are both idle. This makes source-order sequencing
+    // of multiple moves work without caller-side polling — the future auto-path
+    // planner can issue dozens of moves and they execute in order:
+    //
+    //   Drive.driveDist(30).tShape();
+    //   Drive.driveDist(20).tShape();
+    //   Drive.turnDeg(90);
+    //
+    // Blocking variants (`.setBlocking(true)`) bypass the queue: they drain existing
+    // entries first, then dispatch synchronously.
+    //
+    // `Drive.stop()` clears the queue (abort semantics).
+    //
+    // See DECISIONS.md "Drive command queue" for full rationale.
+    // =============================================================================
+
+    /**
+     * @brief Maximum number of pending commands the Drive queue can hold.
+     *
+     * 8 is comfortably more than a typical multi-segment maneuver and keeps the
+     * struct array under 1 KB even with the largest command POD. Overflow drops
+     * the new command and prints a Serial warning — that's a caller bug.
+     */
+    constexpr uint8_t DRIVE_QUEUE_CAPACITY = 8;
 }    // namespace Config
 
 #endif    // CONFIG_H
