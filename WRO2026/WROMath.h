@@ -11,7 +11,7 @@
  *      no heavy stdlib pulls).
  *
  * Anything that doesn't meet all three stays as a private member of its owning
- * class. Don't speculatively add helpers here — wait until a third caller
+ * class. Don't speculatively add helpers here — wait until the second caller
  * materialises, then factor out.
  *
  * Currently included:
@@ -116,10 +116,10 @@ inline int16_t presetToPwm(Config::SpeedPreset preset)
  * Formula: `revs = (cm * 10) / (PI * WHEEL_DIAM_MM)`, then `degs = revs * 360`.
  * The `* 10` converts cm to mm so the wheel diameter (also mm) cancels cleanly.
  *
- * @param cm Distance in centimetres. Negative inputs are not specifically supported —
- *           the cast to `uint16_t` for negative values is implementation-defined; existing
- *           call sites pass non-negative `cm` and use a separate sign on `power` for
- *           reverse moves.
+ * @param cm Distance in centimetres. Negative inputs are clamped to 0 — converting a
+ *           negative float to `uint16_t` is undefined behavior in C++ when the truncated
+ *           value is out of range. Call sites pass non-negative `cm` and use a separate
+ *           sign on `power` for reverse moves; the clamp is defence-in-depth.
  * @return Encoder degrees the wheel must rotate to cover that distance.
  *
  * @note Source of truth for this conversion — both `_execDriveDistRaw/Sync/Gyro` and
@@ -128,6 +128,10 @@ inline int16_t presetToPwm(Config::SpeedPreset preset)
  */
 inline uint16_t cmToEncDeg(float cm)
 {
+    if (cm < 0.0f)
+    {
+        cm = 0.0f;
+    }
     const float revs = (cm * 10.0f) / ((float) PI * Config::WHEEL_DIAM_MM);
     return (uint16_t) (revs * 360.0f);
 }

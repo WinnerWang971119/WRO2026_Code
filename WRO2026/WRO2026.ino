@@ -174,7 +174,11 @@ void loop()
 
 #ifdef DEMO_MODE
     // Tiny smoke routine: on a BTN_UP rising edge, drive a short straight then a 90-degree
-    // turn. Verifies wiring + PIDs + the line-following enable path without needing a field.
+    // turn. Verifies wiring + PIDs only — line-following is intentionally NOT exercised
+    // here because `Drive::_dispatchNext()` auto-disables LineFollower whenever a bounded
+    // or profiled move is dispatched (the race-guard in Drive.cpp). Calling
+    // `LineFollower.setEnabled(true)` immediately before `driveDist(...)` would be
+    // immediately undone, so the line of code is omitted to keep the demo honest.
     //
     // `_demoArmed` makes the demo a one-shot per power-cycle; pressing BTN_UP again after
     // the first activation does nothing. This is intentionally defensive — re-firing the
@@ -196,7 +200,6 @@ void loop()
         _demoArmed = true;
         EventTrace.pushEvent("DEMO RUN");
         Drive.holdYaw();
-        LineFollower.setEnabled(true);
         Drive.driveDist(DEMO_DIST_CM).setPower(Config::CRUISE_SPEED).setMode(DriveMode::GYRO);
         Drive.turnDeg(DEMO_TURN_DEG);    // sync relative turn — defaults to Config::TURN_POWER, mode 0.
     }

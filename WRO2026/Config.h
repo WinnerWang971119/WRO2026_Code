@@ -4,13 +4,6 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-/*
-For who ever is writing the code.
-Please write your things and make modification here.
-Thanks!
-*/
-
-
 /**
  * @brief Single source of truth for every tunable constant; modules MUST source values from
  *        here, never hardcode.
@@ -147,7 +140,7 @@ namespace Config
     //     still even though a non-zero command was issued. Any P+D correction in
     //     the (0, 20) range would be silently lost without compensation.
     //
-    // `deadbandSnap()` (defined in Drive.h) takes a raw PWM and returns a value
+    // `deadbandSnap()` (defined in WROMath.h) takes a raw PWM and returns a value
     // in {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (with mirrored negative range): zero
     // stays zero, non-zero values below the floor snap UP to the floor magnitude,
     // values above the cap clamp DOWN to the cap. Apply this at every actuator
