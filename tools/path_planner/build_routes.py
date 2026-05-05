@@ -183,9 +183,11 @@ def _run(
         graph, field_data.COST_BLIND_MULTIPLIER
     )
 
-    # 4. Resolve output paths. We re-import the defaults at call time so
-    #    test monkeypatching of header_writer's module-level constants
-    #    works without restructuring the imports above.
+    # 4. Resolve output paths. The DEFAULT_* names below are this
+    #    module's own bindings (imported at module load time). Tests
+    #    redirect output by monkeypatching
+    #    ``tools.path_planner.build_routes.DEFAULT_HEADER_PATH`` etc. --
+    #    patching the source module has no effect here.
     if out_dir is not None:
         header_path = out_dir / "routes.h"
         source_path = out_dir / "routes.cpp"

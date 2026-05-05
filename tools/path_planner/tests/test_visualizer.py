@@ -94,10 +94,11 @@ def test_render_with_default_output_path(tmp_path, monkeypatch, graph) -> None:
     default_dest = tmp_path / "default.png"
     monkeypatch.setattr(visualizer, "DEFAULT_OUTPUT", default_dest)
 
-    # Call without out_path — the function signature defaults to
-    # DEFAULT_OUTPUT, which is evaluated at call time via the module attribute.
-    # Because the default is a module-level constant we need to call with the
-    # current value of DEFAULT_OUTPUT explicitly.
+    # render_map's signature uses ``out_path=DEFAULT_OUTPUT`` -- a Python
+    # default argument, so it was bound to the original constant when
+    # visualizer.py was imported. Monkeypatching the module attribute does
+    # NOT retroactively change the default; we re-read the patched value
+    # explicitly and pass it in.
     result = visualizer.render_map(field_data, graph, out_path=visualizer.DEFAULT_OUTPUT)
 
     assert result == default_dest

@@ -60,11 +60,6 @@ _NODE_COLOR: dict[str, str] = {
     "projection": "blue",
     "goal":       "red",
 }
-_NODE_ZORDER: dict[str, int] = {
-    "line":       4,
-    "projection": 4,
-    "goal":       4,
-}
 
 # Edge-type → (color, linestyle, linewidth) mapping.
 _EDGE_STYLE: dict[str, tuple[str, str, float]] = {
