@@ -139,15 +139,15 @@ def _run(
     overhead and without monkeypatching ``sys.argv``.
 
     :param out_dir: override the output directory for ``routes.h`` /
-        ``routes.cpp``. ``None`` falls back to the
-        :data:`tools.path_planner.header_writer.DEFAULT_HEADER_PATH` and
-        :data:`tools.path_planner.header_writer.DEFAULT_SOURCE_PATH`
-        constants resolved at call time (so monkeypatching them in tests
-        works).
+        ``routes.cpp``. ``None`` falls back to the default header/source
+        paths imported into this module from
+        :mod:`tools.path_planner.header_writer` at module import time.
+        Tests that need to override those defaults should patch the
+        corresponding names in :mod:`tools.path_planner.build_routes`.
     :param map_out: override the visualization output path. ``None``
-        falls back to
-        :data:`tools.path_planner.visualizer.DEFAULT_OUTPUT`,
-        again resolved at call time.
+        falls back to the default visualization output path imported
+        into this module from :mod:`tools.path_planner.visualizer` at
+        module import time.
     :param no_viz: when True, skip visualization entirely.
     :param verbose: when True, write per-step progress to stderr.
     :return: process exit code (see module docstring).
