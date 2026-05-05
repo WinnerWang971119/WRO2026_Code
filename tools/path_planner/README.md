@@ -1,0 +1,168 @@
+# WRO 2026 Path Planner — Offline Build Pipeline
+
+A small Python pipeline that turns hand-authored field data into the
+two C++ files (`routes.h`, `routes.cpp`) the on-robot runtime walks at
+every line node. The whole thing runs offline on a developer machine;
+the robot never executes any of this code.
+
+```
+field_data.py  ──►  validator  ──►  graph_builder (C-space inflation)
+                                          │
+                                          ▼
+                                planner (Dijkstra all-pairs)
+                                          │
+                                          ▼
+                            header_writer ──► WRO2026/routes.{h,cpp}
+                                          │
+                                          └─► visualizer ──► output/map.png
+```
+
+The on-robot `PathTracker` (PR 2) reads the next-hop table at every
+line intersection to decide which neighbour to step toward — the
+expensive shortest-path math has already been done at build time.
+
+## Prerequisites
+
+- **Python 3.11+**.
+- One of the two install paths below.
+
+### Recommended: `uv`
+
+```powershell
+winget install astral-sh.uv      # Windows
+# or
+pipx install uv                  # cross-platform fallback
+```
+
+Then from the repo root:
+
+```powershell
+uv sync --extra dev
+```
+
+That reads `pyproject.toml` + `uv.lock` and pulls in `networkx`,
+`matplotlib`, `shapely`, and the `dev` extra containing `pytest`.
+
+`uv.lock` is intentionally committed to keep developer installs reproducible
+and to give future CI a stable dependency graph. TODO when CI lands: use
+`uv sync --extra dev` in the workflow so the lockfile remains the source
+of truth.
+
+### Fallback: plain venv + pip
+
+Windows (PowerShell):
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\pip install -r tools\path_planner\requirements.txt
+.\.venv\Scripts\activate
+```
+
+Linux / macOS:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r tools/path_planner/requirements.txt
+```
+
+## Regenerate routes.h / routes.cpp
+
+One command, from the repo root:
+
+```powershell
+uv run python tools/path_planner/build_routes.py
+```
+
+(or, with a plain venv, just `python tools/path_planner/build_routes.py`
+once the venv is active).
+
+That writes:
+
+- `WRO2026/routes.h`
+- `WRO2026/routes.cpp`
+- `tools/path_planner/output/map.png`
+
+## CLI flags
+
+| Flag              | Purpose                                                                                  | Example                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `--out-dir DIR`   | Write `routes.h` + `routes.cpp` into `DIR` instead of `WRO2026/`.                        | `... build_routes.py --out-dir build/`                        |
+| `--map-out PATH`  | Override the visualization output path.                                                  | `... build_routes.py --map-out /tmp/map.png`                  |
+| `--no-viz`        | Skip rendering `map.png` entirely (useful in CI).                                        | `... build_routes.py --no-viz`                                |
+| `--verbose`, `-v` | Print per-step progress (`validating ...`, `building graph ...`, etc.) to stderr.        | `... build_routes.py -v`                                      |
+
+## Exit codes
+
+| Code | Meaning                                                                       |
+| ---- | ----------------------------------------------------------------------------- |
+| `0`  | Success. Both header files (and the map, unless `--no-viz`) were written.     |
+| `1`  | Visualization failed, but `routes.h` / `routes.cpp` were still emitted.       |
+| `2`  | Validation or data error. `routes.h` was NOT written; fix `field_data.py`.    |
+
+## Running the tests
+
+All tests live under `tools/path_planner/tests/` and run from the
+**repo root**, not the package directory — the imports use the
+`tools.path_planner.*` form, so `cd`'ing into the package would break
+them.
+
+```powershell
+uv run --extra dev pytest tools/path_planner/tests/ -v
+```
+
+(or `python -m pytest tools/path_planner/tests/ -v` with a plain venv).
+
+## Determinism
+
+Re-running `build_routes.py` against an unchanged `field_data.py`
+produces a **byte-identical** `routes.h` / `routes.cpp` pair (AC2). The
+`routes.h` banner embeds `hashlib.sha256(field_data.py).hexdigest()`,
+so reviewers can verify "the committed header is current with the
+committed `field_data.py`" at a glance:
+
+```powershell
+python -c "import hashlib, pathlib; \
+print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes()).hexdigest())"
+```
+
+If that hex string does not appear at the top of `routes.h`, regen.
+
+`map.png` is **not** part of the determinism contract — matplotlib
+output is not byte-stable across versions, and the runtime never reads
+it.
+
+## Editing field_data.py — workflow
+
+1. Edit `tools/path_planner/field_data.py`.
+2. Run `uv run python tools/path_planner/build_routes.py`.
+3. Open `tools/path_planner/output/map.png` and sanity-check the
+   geometry (nodes in the right places, blind edges hop the right
+   gaps, no edge clips an obstacle).
+4. Commit `field_data.py`, `WRO2026/routes.h`, and
+   `WRO2026/routes.cpp` **together** in the same commit. The `routes.h`
+   banner SHA256 must equal `sha256(field_data.py)` — if reviewers see
+   a mismatch, the commit is incomplete.
+
+## Module layout
+
+| File                | Role                                                                                |
+| ------------------- | ----------------------------------------------------------------------------------- |
+| `field_data.py`     | Hand-authored field: nodes, line segments, projections, goals, obstacles.           |
+| `validator.py`      | Strict shape + reference checks. Raises `FieldDataError` on the first problem.      |
+| `graph_builder.py`  | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
+| `planner.py`        | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
+| `compiler.py`       | Heading-aware primitive emission (PR 2 will lean on this for path execution).       |
+| `visualizer.py`     | Matplotlib renderer for `map.png` (Agg backend, headless-safe).                     |
+| `header_writer.py`  | Emits `routes.h` + `routes.cpp`; embeds `field_data.py`'s SHA256 in the banner.     |
+| `build_routes.py`   | This script — sequences every layer above, decides exit codes.                      |
+
+## Pointers to deeper docs
+
+- `docs/PATH_PLANNER_SPEC.md` — full architecture spec (heading
+  convention, edge types, C-space inflation rules, deterministic
+  output guarantees).
+- `docs/PHASE2_DEFERRED.md` — calibration tiers, scenarios,
+  `wall_zero`, and other items intentionally left for a later phase.
+- `docs/plans/2026-05-05-phase2-pr1-path-planner-python.md` — this
+  PR's plan (T1 through T10, acceptance criteria, test-case index).
