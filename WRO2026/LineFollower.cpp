@@ -41,7 +41,9 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _tShape,
                                _accel,
                                _hasReverseOverride,
-                               _reverseOverride);
+                               _reverseOverride,
+                               _hasDistanceTarget,
+                               _distanceTargetCm);
     _executed = true;
 }
 
@@ -78,6 +80,17 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setReverse(bool reverse)
 {
     _reverseOverride    = reverse;
     _hasReverseOverride = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setDistanceTarget(float cm)
+{
+    // Clamp non-positive values to zero — gate trips on the first tick (equivalent to
+    // "disable now"). Negative inputs are almost certainly a caller bug, but failing
+    // loud here would propagate into a fault that the call site cannot fix; clamping
+    // keeps the contract simple.
+    _distanceTargetCm  = (cm > 0.0f) ? cm : 0.0f;
+    _hasDistanceTarget = true;
     return *this;
 }
 
@@ -230,6 +243,37 @@ void LineFollowerClass::update()
     R = deadbandSnap(R);
 
     Drive.setSpeed(L, R);
+
+    // -------------------------------------------------------------------------------------
+    // Distance gate (PathTracker PROJECTION_FOLLOW). Evaluated AFTER the PID issues the
+    // correction so the wheels are commanded one last time on the trip-tick before the
+    // controller self-disables and brakes. Sampling both wheels and averaging the absolute
+    // deltas guards against a momentary single-wheel slip pulling the gate too early.
+    // -------------------------------------------------------------------------------------
+    if (_distanceTargetActive)
+    {
+        const int32_t dL = Drive.getEncL() - _distanceStartEncL;
+        const int32_t dR = Drive.getEncR() - _distanceStartEncR;
+        const int32_t avgDeg = (abs(dL) + abs(dR)) / 2;
+        const float traveledCm = encDegToCm(avgDeg);
+        if (traveledCm >= _distanceTargetCm)
+        {
+            // Trip the latch and self-disable with active brake. Delegating to the
+            // builder's apply path keeps the disable semantics identical to a caller-issued
+            // setEnabled(false) — including clearing _lastErr / _lostLine / _useTShape.
+            _distanceReached = true;
+            _applyEnableBuilder(/*targetEnabled=*/false,
+                                /*brake=*/true,
+                                /*hasPresetOverride=*/false,
+                                /*preset=*/_preset,
+                                /*tShape=*/false,
+                                /*accel=*/Config::TSHAPE_ACCEL_PWM_PER_CM,
+                                /*hasReverseOverride=*/false,
+                                /*reverse=*/_reverse,
+                                /*hasDistanceTarget=*/false,
+                                /*distanceTargetCm=*/0.0f);
+        }
+    }
 }
 
 // =========================================================================================
@@ -255,7 +299,9 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                tShape,
                                             float               accel,
                                             bool                hasReverseOverride,
-                                            bool                reverse)
+                                            bool                reverse,
+                                            bool                hasDistanceTarget,
+                                            float               distanceTargetCm)
 {
     // Apply preset and reverse first so that, if anyone ever extends this to react
     // synchronously to the enable transition, they see the freshly chosen cruise + direction.
@@ -297,15 +343,34 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         {
             _useTShape = false;
         }
+
+        if (hasDistanceTarget)
+        {
+            // Arm the encoder-distance gate. Capture both wheels' counters as the
+            // baseline so a single-wheel encoder hiccup cannot bias the average.
+            // Clear the latch — a re-arm after a previous gate trip starts fresh.
+            _distanceTargetActive = true;
+            _distanceTargetCm     = distanceTargetCm;
+            _distanceStartEncL    = Drive.getEncL();
+            _distanceStartEncR    = Drive.getEncR();
+            _distanceReached      = false;
+        }
+        else
+        {
+            // Re-enabling without a distance target disarms any prior gate so a stale
+            // baseline cannot fire mid-segment after the new enable.
+            _distanceTargetActive = false;
+        }
     }
     else
     {
         // Disable path. Iron rule: always flip the flag and always clear `_lastErr` and
         // `_lostLine`. The brake choice ONLY affects whether `Drive.stop(...)` fires.
-        _enabled   = false;
-        _lastErr   = 0.0f;
-        _lostLine  = false;
-        _useTShape = false;    // Disabling cancels any active cruise ramp.
+        _enabled              = false;
+        _lastErr              = 0.0f;
+        _lostLine             = false;
+        _useTShape            = false;    // Disabling cancels any active cruise ramp.
+        _distanceTargetActive = false;    // Disabling also disarms the distance gate.
 
         if (brake)
         {
@@ -338,6 +403,13 @@ float LineFollowerClass::getRawError() const
 MatrixLineTracer* LineFollowerClass::getTracer()
 {
     return &_tracer;
+}
+
+bool LineFollowerClass::isDistanceReached()
+{
+    const bool latched  = _distanceReached;
+    _distanceReached    = false;
+    return latched;
 }
 
 Config::SpeedPreset LineFollowerClass::getPreset() const
