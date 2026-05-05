@@ -34,7 +34,12 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
         return;
     }
 
-    _owner._applyEnableBuilder(_targetEnabled, _brake, _hasPresetOverride, _presetOverride);
+    _owner._applyEnableBuilder(_targetEnabled,
+                               _brake,
+                               _hasPresetOverride,
+                               _presetOverride,
+                               _tShape,
+                               _accel);
     _executed = true;
 }
 
@@ -53,6 +58,20 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setPreset(Config::SpeedPre
     return *this;
 }
 
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::tShape()
+{
+    _tShape = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setAccel(float pwmPerCm)
+{
+    _accel         = pwmPerCm;
+    _accelExplicit = true;
+    _tShape        = true;
+    return *this;
+}
+
 // =========================================================================================
 // LineFollowerClass — lifecycle.
 // =========================================================================================
@@ -67,10 +86,11 @@ bool LineFollowerClass::begin()
     _tracer.begin();
     _tracer.setThreshold(Config::LINE_THRESHOLD);
 
-    _enabled  = false;
-    _lostLine = false;
-    _lastErr  = 0.0f;
-    _preset   = Config::SpeedPreset::NORMAL;
+    _enabled   = false;
+    _lostLine  = false;
+    _lastErr   = 0.0f;
+    _preset    = Config::SpeedPreset::NORMAL;
+    _useTShape = false;
 
     return true;
 }
@@ -88,7 +108,46 @@ void LineFollowerClass::update()
 
     // Resolve cruise from the active preset. Reading once at the top of the tick keeps the
     // L/R mix symmetric and avoids any chance of preset mid-tick flip-flopping.
-    const int16_t cruise = _presetToPwm(_preset);
+    int16_t cruise = _presetToPwm(_preset);
+
+    if (_useTShape)
+    {
+        // Distance-based ramp from `_tShapeStartPwm` to `_tShapeTargetPwm`. The ramp distance
+        // is implicit: `|cruise - start| / accel`, clamped to `[MIN_CM, MAX_CM]`. Encoder
+        // degrees are converted to cm using the same formula as `Drive::_cmToEncDeg`,
+        // inverted: `cm = enc / 360 * (PI * WHEEL_DIAM_MM / 10)`. We duplicate the small bit
+        // of constant math here rather than expose a `Drive::_cmToEncDeg` to keep its private
+        // surface intact.
+        const int32_t now      = Drive.getEncL();
+        const int32_t delta    = now - _tShapeStartEnc;
+        // Compare unsigned magnitudes so a momentary counter-rotation cannot drive
+        // `traveledCm` negative and pull `cruise` below the starting PWM.
+        const float traveledCm =
+            (float) abs(delta) / 360.0f * ((float) PI * Config::WHEEL_DIAM_MM / 10.0f);
+
+        float rampCm = (float) abs(cruise - _tShapeStartPwm) / _tShapeAccel;
+        if (rampCm < Config::TSHAPE_RAMP_MIN_CM)
+        {
+            rampCm = Config::TSHAPE_RAMP_MIN_CM;
+        }
+        if (rampCm > Config::TSHAPE_RAMP_MAX_CM)
+        {
+            rampCm = Config::TSHAPE_RAMP_MAX_CM;
+        }
+
+        if (traveledCm >= rampCm)
+        {
+            // Ramp consumed — switch to full preset cruise for the rest of this enable
+            // session. Subsequent ticks short-circuit this branch entirely.
+            _useTShape = false;
+        }
+        else
+        {
+            const float r = (rampCm > 0.0f) ? (traveledCm / rampCm) : 1.0f;
+            cruise = (int16_t) (_tShapeStartPwm
+                                + (int16_t) ((_tShapeTargetPwm - _tShapeStartPwm) * r));
+        }
+    }
 
     if (!_tracer.isOnline())
     {
@@ -168,7 +227,9 @@ void LineFollowerClass::setPreset(Config::SpeedPreset preset)
 void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                brake,
                                             bool                hasPresetOverride,
-                                            Config::SpeedPreset preset)
+                                            Config::SpeedPreset preset,
+                                            bool                tShape,
+                                            float               accel)
 {
     // Apply preset first so that, if anyone ever extends this to react synchronously to the
     // enable transition, they see the freshly chosen cruise.
@@ -183,14 +244,31 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         // No Drive.stop(...) call here regardless of `brake` — by contract `setBrake(...)` is
         // only meaningful on disable.
         _enabled = true;
+
+        if (tShape)
+        {
+            // Seed the cruise-ramp state. The ramp progresses with the left encoder; once
+            // the ramp distance is consumed, `update()` clears `_useTShape` so subsequent
+            // ticks fall straight through to the full preset cruise.
+            _useTShape       = true;
+            _tShapeAccel     = accel;
+            _tShapeStartEnc  = Drive.getEncL();
+            _tShapeStartPwm  = 0;
+            _tShapeTargetPwm = _presetToPwm(_preset);
+        }
+        else
+        {
+            _useTShape = false;
+        }
     }
     else
     {
         // Disable path. Iron rule: always flip the flag and always clear `_lastErr` and
         // `_lostLine`. The brake choice ONLY affects whether `Drive.stop(...)` fires.
-        _enabled  = false;
-        _lastErr  = 0.0f;
-        _lostLine = false;
+        _enabled   = false;
+        _lastErr   = 0.0f;
+        _lostLine  = false;
+        _useTShape = false;    // Disabling cancels any active cruise ramp.
 
         if (brake)
         {

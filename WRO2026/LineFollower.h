@@ -135,12 +135,43 @@ public:
      */
     LineFollowerEnableBuilder& setPreset(Config::SpeedPreset preset);
 
+    /**
+     * @brief Enable trapezoidal velocity profile on this enable transition.
+     *
+     * When chained on a `setEnabled(true)` call, the line follower's cruise PWM ramps from
+     * 0 up to the resolved preset over an implicit ramp distance: `cruise / accel`, clamped
+     * to `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]`. The ramp is purely
+     * forward (line following has no natural "end of move", so there is no ramp-down) and
+     * is consumed once: after the ramp distance is traveled, subsequent ticks use the full
+     * preset cruise. Disabling the controller cancels the ramp.
+     *
+     * Acceleration defaults to `Config::TSHAPE_ACCEL_PWM_PER_CM`. Override via `.setAccel()`.
+     * Has no effect on a `setEnabled(false)` transition.
+     *
+     * @return `*this` for fluent chaining.
+     */
+    LineFollowerEnableBuilder& tShape();
+
+    /**
+     * @brief Override the per-PWM-per-cm acceleration rate for this enable's ramp.
+     *
+     * Implies `tShape()`. If `tShape()` was not also chained, this setter has no effect on
+     * the disable path; on the enable path it triggers the ramp.
+     *
+     * @param pwmPerCm PWM units gained per cm of travel during the ramp.
+     * @return `*this` for chaining.
+     */
+    LineFollowerEnableBuilder& setAccel(float pwmPerCm);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
     bool                _brake             = true;     ///< Brake on disable (only used if !enable).
     bool                _hasPresetOverride = false;    ///< True iff `_presetOverride` is meaningful.
     Config::SpeedPreset _presetOverride{};     ///< Pending preset; only honored when override flag set.
+    bool                _tShape            = false;    ///< Enable cruise-ramp on a setEnabled(true) transition.
+    bool                _accelExplicit     = false;    ///< Reserved for parity with the Drive builders.
+    float               _accel             = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
     bool                _executed          = false;    ///< Guards against repeated apply.
 };
 
@@ -286,11 +317,18 @@ public:
      *                          ignored when `targetEnabled == true`.
      * @param hasPresetOverride `true` if `preset` should overwrite the active preset.
      * @param preset            New preset; honored only when `hasPresetOverride` is true.
+     * @param tShape            On an enable transition, ramps cruise from 0 up to the
+     *                          resolved preset over an implicit distance — see
+     *                          `LineFollowerEnableBuilder::tShape()`.
+     * @param accel             Ramp rate in PWM-per-cm; used only when `tShape == true` AND
+     *                          `targetEnabled == true`.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
                              bool                hasPresetOverride,
-                             Config::SpeedPreset preset);
+                             Config::SpeedPreset preset,
+                             bool                tShape,
+                             float               accel);
 
 private:
     /**
@@ -308,6 +346,13 @@ private:
     bool                _lostLine = false;                        ///< Last-tick lost-line state (no channel online).
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
     Config::SpeedPreset _preset   = Config::SpeedPreset::NORMAL;  ///< Active cruise preset; sourced by `update()`.
+
+    // Trapezoidal cruise-ramp state (`.tShape()` on the enable builder).
+    bool    _useTShape       = false;    ///< If true, cruise PWM ramps over distance after enable.
+    float   _tShapeAccel     = Config::TSHAPE_ACCEL_PWM_PER_CM;
+    int32_t _tShapeStartEnc  = 0;        ///< Encoder reading at enable.
+    int16_t _tShapeStartPwm  = 0;        ///< Starting cruise (typically 0).
+    int16_t _tShapeTargetPwm = 0;        ///< Final cruise (resolved from preset).
 };
 
 /**

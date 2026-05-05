@@ -109,6 +109,8 @@ public:
      * @note Contains NO `delay()`. Safe to call at any cadence.
      * @note Because the lower MCU reports a single task-done bit, this method clears BOTH
      *       move and turn flags simultaneously — see class docblock.
+     * @note Also advances the trapezoidal-profile state machine if a `.tShape()`-driven
+     *       move is in flight (see `_updateProfile`).
      */
     void update();
 
@@ -363,6 +365,48 @@ private:
     float   _biasR    = 1.0f;    ///< Static manufacturer-bias scalar applied to raw-PWM R paths. See DECISIONS.md.
 
     // -------------------------------------------------------------------------------------
+    // Trapezoidal-profile state machine (`.tShape()`-driven moves)
+    // -------------------------------------------------------------------------------------
+    /**
+     * @brief State of the active profile move, if any.
+     *
+     * `IDLE` means no profile is in flight; `Drive.update()` skips the profile branch entirely.
+     * Other states represent the three phases of the trapezoid plus the brief DONE tick during
+     * which `update()` issues the final stop and clears `_moveDone`.
+     */
+    enum class ProfileState : uint8_t
+    {
+        IDLE,
+        RAMP_UP,
+        CRUISE,
+        RAMP_DOWN,
+        DONE
+    };
+
+    /// Mode of the active profile move (RAW / SYNC / GYRO). Mirrors `DriveMode`.
+    DriveMode    _profileMode   = DriveMode::RAW;
+    ProfileState _profileState  = ProfileState::IDLE;
+    bool         _profileIsTime = false;    ///< true → time-bounded (driveTime); false → distance.
+
+    // Bounds — distance variant uses encoder-degrees; time variant uses millis().
+    int32_t  _profileStartEnc = 0;    ///< Encoder reading at move start (degrees).
+    int32_t  _profileTotalEnc = 0;    ///< Total target travel in encoder degrees.
+    uint32_t _profileStartMs  = 0;    ///< millis() at move start (time variant only).
+    uint32_t _profileTotalMs  = 0;    ///< Total target duration in ms (time variant only).
+
+    // Profile shape parameters (cached at move-start time after resolving overrides).
+    int16_t  _profileCruise   = 0;    ///< Resolved cruise PWM.
+    int16_t  _profileStartSpd = 0;    ///< Resolved start speed (PWM).
+    int16_t  _profileEndSpd   = 0;    ///< Resolved end speed (PWM).
+    int16_t  _profilePeakSpd  = 0;    ///< Peak achievable (== cruise unless triangle fallback).
+    int32_t  _profileAccelEnc = 0;    ///< Per-side ramp-up distance in encoder degrees.
+    int32_t  _profileDecelEnc = 0;    ///< Per-side ramp-down distance in encoder degrees.
+    uint32_t _profileAccelMs  = 0;    ///< Per-side ramp-up duration in ms (time variant).
+    uint32_t _profileDecelMs  = 0;    ///< Per-side ramp-down duration in ms (time variant).
+    bool     _profileBrake    = true; ///< Apply brake at end?
+    int16_t  _profileHeading  = 0;    ///< Heading target for GYRO mode.
+
+    // -------------------------------------------------------------------------------------
     // Builder dispatch targets — each fluent builder destructor calls into one of these.
     // -------------------------------------------------------------------------------------
 
@@ -501,6 +545,73 @@ private:
      * @note Strategy B. See DECISIONS.md.
      */
     void _applyBias(int16_t& L, int16_t& R) const;
+
+    /**
+     * @brief Advance the profile state machine one tick. Called from `update()` when active.
+     *
+     * Reads encoder (distance variant) or millis() (time variant), computes the traveled
+     * fraction in `[0, 1]`, calls `_profileSpeedAt()` for the current setpoint, and dispatches
+     * the correct continuous MMLower primitive (`Move` / `MoveSync` / `MoveGyro`) for the
+     * configured `_profileMode`. RAW mode applies `_applyBias`; SYNC and GYRO do NOT (the
+     * STM32 closes the loop — see DECISIONS.md). When `frac >= 1.0`, transitions to `DONE`,
+     * issues `stop(_profileBrake)`, marks `_moveDone = true`, and returns to `IDLE`.
+     *
+     * @note Idempotent when `_profileState == IDLE` — short-circuits immediately.
+     */
+    void _updateProfile();
+
+    /**
+     * @brief Compute the current speed setpoint based on traveled fraction (0.0 → 1.0).
+     *
+     * Implements the trapezoidal velocity profile:
+     *  - Below the accel threshold: linear interp from `_profileStartSpd` → `_profilePeakSpd`.
+     *  - Above the decel threshold: linear interp from `_profilePeakSpd` → `_profileEndSpd`.
+     *  - In between: hold at `_profilePeakSpd`.
+     *
+     * In the triangle-fallback case, `_profilePeakSpd` is below `_profileCruise` and the
+     * accel/decel intervals abut at the midpoint — the integral of the profile still equals
+     * the requested distance/duration.
+     *
+     * @param traveledFrac Fraction of total move completed in [0.0, 1.0].
+     * @return Current speed setpoint as PWM in `[-100, 100]`.
+     */
+    int16_t _profileSpeedAt(float traveledFrac) const;
+
+    /**
+     * @brief Resolve all profile parameters and seed the state machine.
+     *
+     * Called from a builder's destructor. Computes per-side ramp distances with all clamps
+     * (MIN_CM / MAX_CM / half-of-total) applied, detects the triangle-fallback case and
+     * computes the reduced peak, decides whether to skip a ramp entirely (no-ramp epsilon
+     * for chained moves), and transitions the state machine to RAMP_UP. If a profile is
+     * already in flight, it is cancelled silently (its motors keep running until this new
+     * call's first `_updateProfile` tick overwrites them).
+     *
+     * @param mode        RAW / SYNC / GYRO.
+     * @param isTime      `true` for `driveTime`, `false` for `driveDist`.
+     * @param totalCm     Total travel in cm (distance variant). Ignored for time variant.
+     * @param totalSec    Total duration in seconds (time variant). Ignored for distance variant.
+     * @param cruise      Target cruise speed (PWM).
+     * @param startSpeed  Starting speed at t=0 (PWM).
+     * @param endSpeed    Ending speed at completion (PWM).
+     * @param accel       PWM per cm. For time variant, interpreted via the cmToMs scaling
+     *                    documented in the body — see `tShape()` doxygen on the time builder.
+     * @param brake       Apply brake at end.
+     * @param heading     Yaw target for GYRO mode (ignored otherwise).
+     * @return `0x00` on successful seed; non-zero if pre-conditions failed
+     *         (currently only `0x01` when `accel <= 0` — caller should fall back to a
+     *         fire-and-forget non-profiled move).
+     */
+    uint8_t _execProfileMove(DriveMode mode,
+                             bool      isTime,
+                             float     totalCm,
+                             float     totalSec,
+                             int16_t   cruise,
+                             int16_t   startSpeed,
+                             int16_t   endSpeed,
+                             float     accel,
+                             bool      brake,
+                             int16_t   heading);
 };
 
 /**
@@ -560,6 +671,13 @@ public:
           _blocking(other._blocking),
           _heading(other._heading),
           _headingSet(other._headingSet),
+          _tShape(other._tShape),
+          _accelExplicit(other._accelExplicit),
+          _accel(other._accel),
+          _startSpeedSet(other._startSpeedSet),
+          _startSpeed(other._startSpeed),
+          _endSpeedSet(other._endSpeedSet),
+          _endSpeed(other._endSpeed),
           _executed(other._executed)
     {
         other._executed = true;
@@ -643,10 +761,98 @@ public:
     }
 
     /**
+     * @brief Enable trapezoidal velocity profile for this move.
+     *
+     * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
+     * ramps down to `endSpeed` (default 0, but defaults to cruise when `setBrake(false)` is
+     * also chained — assumes a no-brake move is chaining into a follow-up).
+     *
+     * Acceleration is `Config::TSHAPE_ACCEL_PWM_PER_CM` unless overridden via `.setAccel()`.
+     * Per-side ramp distance is implicit: `(cruise - endpointSpeed) / accel`, clamped to
+     * `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]` and to half of the move
+     * length. If accel + decel distance > total, profile becomes a triangle (peak speed
+     * reduced).
+     *
+     * Mutually compatible with all other builder setters. Has no effect if not chained.
+     *
+     * @return Reference to this builder for chaining.
+     * @note Profile runs cooperatively from `Drive.update()` — issuing a new bounded move
+     *       while a profile is in flight cancels the in-flight profile silently. Callers
+     *       must poll `Drive.isMoveDone()` if sequencing matters.
+     */
+    DriveDistBuilder& tShape()
+    {
+        _tShape = true;
+        return *this;
+    }
+
+    /**
+     * @brief Override the per-PWM-per-cm acceleration rate for this profiled move.
+     *
+     * Implies `tShape()`. If `tShape()` was not also chained, this setter has no effect.
+     *
+     * @param pwmPerCm PWM units gained per cm of travel during ramps.
+     * @return Reference to this builder for chaining.
+     */
+    DriveDistBuilder& setAccel(float pwmPerCm)
+    {
+        _accel         = pwmPerCm;
+        _accelExplicit = true;
+        _tShape        = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the starting speed of the profiled move (default 0 = at rest).
+     *
+     * Used for chained moves: pass the previous move's exit speed so the new move starts
+     * smoothly without a step in PWM. Implies `tShape()`.
+     *
+     * @param startPwm Starting speed in `[-100, 100]`.
+     * @return Reference to this builder for chaining.
+     */
+    DriveDistBuilder& setStartSpeed(int16_t startPwm)
+    {
+        _startSpeed    = startPwm;
+        _startSpeedSet = true;
+        _tShape        = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the ending speed of the profiled move (default 0 = stop at rest).
+     *
+     * For chained moves, pass cruise to skip the ramp-down at this segment's end. Implies
+     * `tShape()`. Note: when `setBrake(false)` is chained, the default automatically
+     * resolves to `cruise` instead of 0 — explicit `setEndSpeed(0)` overrides that.
+     *
+     * @param endPwm Ending speed in `[-100, 100]`.
+     * @return Reference to this builder for chaining.
+     */
+    DriveDistBuilder& setEndSpeed(int16_t endPwm)
+    {
+        _endSpeed    = endPwm;
+        _endSpeedSet = true;
+        _tShape      = true;
+        return *this;
+    }
+
+    /**
      * @brief Destructor — RAII auto-execute. Resolves the final knobs and dispatches to the
-     *        appropriate `DriveClass::_execDriveDist*` method.
+     *        appropriate `DriveClass::_execDriveDist*` method, OR to `_execProfileMove` when
+     *        `tShape()` was chained.
+     *
+     * Endpoint-default rule: when `_brake == false` and `setEndSpeed()` was never called,
+     * `endSpeed` resolves to the cruise PWM (the assumption is that a no-brake move is
+     * chaining into a follow-up segment). Override with an explicit `setEndSpeed(0)` if a
+     * coast-to-stop is intended.
+     *
      * @note Idempotent: the `_executed` guard prevents a second dispatch if a future change
      *       re-enables move semantics.
+     * @note When `_blocking == true && _tShape == true` the destructor spins on
+     *       `Drive.update()` with a `delay(2)` poll to honour the blocking semantic from
+     *       outside the cooperative tick chain. This is the SECOND allowed `delay()` site
+     *       in the codebase (after `calibrateMotorBias`); see DECISIONS.md.
      */
     ~DriveDistBuilder()
     {
@@ -657,6 +863,45 @@ public:
         _executed = true;
 
         const int16_t resolvedPower = _resolvePower();
+
+        if (_tShape)
+        {
+            // Resolve start/end speeds. The no-brake → endSpeed=cruise rule kicks in here:
+            // a `.setBrake(false).tShape()` move is presumed to be chaining into a follow-up,
+            // so ramping down to zero would defeat the purpose. Explicit `.setEndSpeed(0)`
+            // still wins because `_endSpeedSet` becomes true.
+            const int16_t startSpd = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            const int16_t endSpd =
+                _endSpeedSet ? _endSpeed : (_brake ? Config::TSHAPE_END_SPEED : resolvedPower);
+            const int16_t hdg = _headingSet ? _heading : _drive._heldYaw;
+
+            _drive._execProfileMove(_mode,
+                                    /*isTime*/ false,
+                                    _cm,
+                                    /*totalSec*/ 0.0f,
+                                    resolvedPower,
+                                    startSpd,
+                                    endSpd,
+                                    _accel,
+                                    _brake,
+                                    hdg);
+
+            // Blocking + tShape: spin on Drive.update() until the profile completes. This is
+            // off the cooperative tick chain (the caller is on a synchronous-orchestration
+            // path), so a short `delay(2)` between polls is acceptable. Mirrors the library's
+            // own blocking pattern and matches the calibration routine's policy.
+            if (_blocking)
+            {
+                while (!_drive.isMoveDone())
+                {
+                    _drive.update();
+                    delay(2);
+                }
+            }
+            return;
+        }
+
+        // Non-tShape path: existing fire-and-forget dispatch.
         switch (_mode)
         {
         case DriveMode::RAW:
@@ -703,6 +948,13 @@ private:
     bool        _blocking       = false;
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
+    bool        _tShape         = false;
+    bool        _accelExplicit  = false;
+    float       _accel          = Config::TSHAPE_ACCEL_PWM_PER_CM;
+    bool        _startSpeedSet  = false;
+    int16_t     _startSpeed     = Config::TSHAPE_START_SPEED;
+    bool        _endSpeedSet    = false;
+    int16_t     _endSpeed       = Config::TSHAPE_END_SPEED;
     bool        _executed       = false;
 };
 
@@ -747,6 +999,13 @@ public:
           _blocking(other._blocking),
           _heading(other._heading),
           _headingSet(other._headingSet),
+          _tShape(other._tShape),
+          _accelExplicit(other._accelExplicit),
+          _accel(other._accel),
+          _startSpeedSet(other._startSpeedSet),
+          _startSpeed(other._startSpeed),
+          _endSpeedSet(other._endSpeedSet),
+          _endSpeed(other._endSpeed),
           _executed(other._executed)
     {
         other._executed = true;
@@ -823,8 +1082,95 @@ public:
     }
 
     /**
+     * @brief Enable trapezoidal velocity profile for this time-bounded move.
+     *
+     * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
+     * ramps back down to `endSpeed` (default 0, but defaults to cruise when
+     * `setBrake(false)` is also chained).
+     *
+     * Acceleration is `Config::TSHAPE_ACCEL_PWM_PER_CM`. Because a time-bounded move has no
+     * a-priori distance, ramp DURATIONS are derived via the approximation
+     * `rampMs ≈ rampCm / |cruise| * 1000` — the units-coherent equivalent ramp time at the
+     * target cruise speed. This is documented as an approximation; it is not as physically
+     * meaningful as the distance-variant formula but matches the same `Config::TSHAPE_*`
+     * tuning constants. Per-side ramp duration is then clamped to half of `totalSec`. If the
+     * accel + decel durations together exceed `totalSec`, the profile collapses to a triangle
+     * with reduced peak.
+     *
+     * @return Reference to this builder for chaining.
+     * @note Profile runs cooperatively from `Drive.update()` — issuing a new bounded move
+     *       while a profile is in flight cancels the in-flight profile silently.
+     */
+    DriveTimeBuilder& tShape()
+    {
+        _tShape = true;
+        return *this;
+    }
+
+    /**
+     * @brief Override the per-PWM-per-cm acceleration rate for this profiled move.
+     *
+     * Implies `tShape()`. For the time variant the rate is reinterpreted as ramp duration
+     * via the cm/cruise scaling — see `tShape()` doxygen.
+     *
+     * @param pwmPerCm PWM units gained per cm of travel during ramps.
+     * @return Reference to this builder for chaining.
+     */
+    DriveTimeBuilder& setAccel(float pwmPerCm)
+    {
+        _accel         = pwmPerCm;
+        _accelExplicit = true;
+        _tShape        = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the starting speed of the profiled move (default 0 = at rest).
+     *
+     * Used for chained moves: pass the previous move's exit speed so the new move starts
+     * smoothly without a step in PWM. Implies `tShape()`.
+     *
+     * @param startPwm Starting speed in `[-100, 100]`.
+     * @return Reference to this builder for chaining.
+     */
+    DriveTimeBuilder& setStartSpeed(int16_t startPwm)
+    {
+        _startSpeed    = startPwm;
+        _startSpeedSet = true;
+        _tShape        = true;
+        return *this;
+    }
+
+    /**
+     * @brief Set the ending speed of the profiled move (default 0 = stop at rest).
+     *
+     * For chained moves, pass cruise to skip the ramp-down at this segment's end. Implies
+     * `tShape()`. Note: when `setBrake(false)` is chained, the default automatically
+     * resolves to `cruise` instead of 0 — explicit `setEndSpeed(0)` overrides that.
+     *
+     * @param endPwm Ending speed in `[-100, 100]`.
+     * @return Reference to this builder for chaining.
+     */
+    DriveTimeBuilder& setEndSpeed(int16_t endPwm)
+    {
+        _endSpeed    = endPwm;
+        _endSpeedSet = true;
+        _tShape      = true;
+        return *this;
+    }
+
+    /**
      * @brief Destructor — RAII auto-execute. Dispatches to the correct
-     *        `DriveClass::_execDriveTime*` method.
+     *        `DriveClass::_execDriveTime*` method, OR to `_execProfileMove` when `tShape()`
+     *        was chained.
+     *
+     * Endpoint-default rule: when `_brake == false` and `setEndSpeed()` was never called,
+     * `endSpeed` resolves to the cruise PWM (same chained-move presumption as the distance
+     * builder).
+     *
+     * @note When `_blocking == true && _tShape == true` the destructor spins on
+     *       `Drive.update()` with a `delay(2)` poll — the second allowed `delay()` site in
+     *       the codebase.
      */
     ~DriveTimeBuilder()
     {
@@ -835,6 +1181,36 @@ public:
         _executed = true;
 
         const int16_t resolvedPower = _resolvePower();
+
+        if (_tShape)
+        {
+            const int16_t startSpd = _startSpeedSet ? _startSpeed : Config::TSHAPE_START_SPEED;
+            const int16_t endSpd =
+                _endSpeedSet ? _endSpeed : (_brake ? Config::TSHAPE_END_SPEED : resolvedPower);
+            const int16_t hdg = _headingSet ? _heading : _drive._heldYaw;
+
+            _drive._execProfileMove(_mode,
+                                    /*isTime*/ true,
+                                    /*totalCm*/ 0.0f,
+                                    _sec,
+                                    resolvedPower,
+                                    startSpd,
+                                    endSpd,
+                                    _accel,
+                                    _brake,
+                                    hdg);
+
+            if (_blocking)
+            {
+                while (!_drive.isMoveDone())
+                {
+                    _drive.update();
+                    delay(2);
+                }
+            }
+            return;
+        }
+
         switch (_mode)
         {
         case DriveMode::RAW:
@@ -881,6 +1257,13 @@ private:
     bool        _blocking       = false;
     int16_t     _heading        = 0;
     bool        _headingSet     = false;
+    bool        _tShape         = false;
+    bool        _accelExplicit  = false;
+    float       _accel          = Config::TSHAPE_ACCEL_PWM_PER_CM;
+    bool        _startSpeedSet  = false;
+    int16_t     _startSpeed     = Config::TSHAPE_START_SPEED;
+    bool        _endSpeedSet    = false;
+    int16_t     _endSpeed       = Config::TSHAPE_END_SPEED;
     bool        _executed       = false;
 };
 

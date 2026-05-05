@@ -66,7 +66,11 @@ bool DriveClass::begin()
 
 void DriveClass::update()
 {
-    if (!_moveDone || !_turnDone)
+    // When a profile is in flight, the profile owns `_moveDone` — the lower-MCU task-done
+    // bit refers to a *prior* bounded MMLower task and would falsely flip _moveDone to true
+    // mid-cruise (W1 fix). Skip the drain in that case; _updateProfile will set _moveDone
+    // when the profile itself completes.
+    if (_profileState == ProfileState::IDLE && (!_moveDone || !_turnDone))
     {
         // The lower MCU reports a single task-done bit, so move-done and turn-done collapse
         // into one signal here. Application code MUST NOT issue a bounded move and a turn
@@ -77,6 +81,9 @@ void DriveClass::update()
             _turnDone = true;
         }
     }
+
+    // Profile state machine — idempotent when IDLE, so the call is cheap on every tick.
+    _updateProfile();
 }
 
 // -----------------------------------------------------------------------------------------
@@ -484,4 +491,337 @@ void DriveClass::_applyBias(int16_t& L, int16_t& R) const
 {
     L = (int16_t) ((float) L * _biasL);
     R = (int16_t) ((float) R * _biasR);
+}
+
+// -----------------------------------------------------------------------------------------
+// Trapezoidal-profile state machine (`.tShape()` cooperative driver)
+// -----------------------------------------------------------------------------------------
+
+void DriveClass::_updateProfile()
+{
+    if (_profileState == ProfileState::IDLE)
+    {
+        return;
+    }
+
+    // Compute traveled fraction in [0, 1].
+    float frac;
+    if (_profileIsTime)
+    {
+        const uint32_t elapsed = millis() - _profileStartMs;
+        frac = (_profileTotalMs == 0) ? 1.0f : (float) elapsed / (float) _profileTotalMs;
+    }
+    else
+    {
+        // Use the left motor (M2) as the canonical encoder, matching `getEncL()`. We compare
+        // unsigned magnitudes everywhere so negative-direction (reverse) moves work without
+        // any sign juggling: `_profileTotalEnc` is stored as a positive magnitude, and the
+        // encoder delta's absolute value is compared against it.
+        const int32_t  now      = MiniR4.M2.getDegrees();
+        const int32_t  delta    = now - _profileStartEnc;
+        const uint32_t traveled = (uint32_t) abs(delta);
+        if (_profileTotalEnc == 0)
+        {
+            frac = 1.0f;
+        }
+        else
+        {
+            frac = (float) traveled / (float) _profileTotalEnc;
+        }
+    }
+
+    if (frac >= 1.0f)
+    {
+        // Profile complete — issue stop and finalise. One tick of latency vs. immediate
+        // completion is acceptable per spec.
+        _profileState = ProfileState::DONE;
+        stop(_profileBrake);
+        _moveDone     = true;
+        _profileState = ProfileState::IDLE;
+        return;
+    }
+
+    // Compute speed setpoint and issue the appropriate continuous primitive.
+    const int16_t spd = _profileSpeedAt(frac);
+
+    switch (_profileMode)
+    {
+    case DriveMode::RAW:
+    {
+        int16_t L = spd;
+        int16_t R = spd;
+        _applyBias(L, R);
+        MiniR4.DriveDC.Move(L, R);
+        break;
+    }
+    case DriveMode::SYNC:
+        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
+        MiniR4.DriveDC.MoveSync(spd, spd);
+        break;
+    case DriveMode::GYRO:
+        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
+        MiniR4.DriveDC.MoveGyro(spd, _profileHeading);
+        break;
+    }
+}
+
+int16_t DriveClass::_profileSpeedAt(float frac) const
+{
+    // The trapezoid integral matches the requested distance/duration because:
+    //   integral = (start + peak) / 2 * accel + peak * (total - accel - decel)
+    //                                          + (peak + end) / 2 * decel
+    // For the full-trapezoid case peak = cruise; the triangle-fallback branch in
+    // `_execProfileMove` reduces peak so the same identity still holds.
+    if (_profileIsTime)
+    {
+        const uint32_t elapsedMs = (uint32_t) (frac * (float) _profileTotalMs);
+        if (elapsedMs < _profileAccelMs)
+        {
+            // Ramp up: linear interp from start → peak.
+            const float r =
+                _profileAccelMs == 0 ? 1.0f : (float) elapsedMs / (float) _profileAccelMs;
+            return (int16_t) (_profileStartSpd
+                              + (int16_t) ((_profilePeakSpd - _profileStartSpd) * r));
+        }
+        else if (_profileTotalMs > _profileDecelMs
+                 && elapsedMs >= (_profileTotalMs - _profileDecelMs))
+        {
+            // Ramp down: linear interp from peak → end.
+            const uint32_t into = elapsedMs - (_profileTotalMs - _profileDecelMs);
+            const float    r =
+                _profileDecelMs == 0 ? 1.0f : (float) into / (float) _profileDecelMs;
+            return (int16_t) (_profilePeakSpd + (int16_t) ((_profileEndSpd - _profilePeakSpd) * r));
+        }
+        return _profilePeakSpd;
+    }
+
+    // Distance variant — same shape, units in encoder degrees.
+    const int32_t traveled = (int32_t) (frac * (float) _profileTotalEnc);
+    if (traveled < _profileAccelEnc)
+    {
+        const float r =
+            _profileAccelEnc == 0 ? 1.0f : (float) traveled / (float) _profileAccelEnc;
+        return (int16_t) (_profileStartSpd + (int16_t) ((_profilePeakSpd - _profileStartSpd) * r));
+    }
+    else if (_profileTotalEnc > _profileDecelEnc
+             && traveled >= (_profileTotalEnc - _profileDecelEnc))
+    {
+        const int32_t into = traveled - (_profileTotalEnc - _profileDecelEnc);
+        const float   r =
+            _profileDecelEnc == 0 ? 1.0f : (float) into / (float) _profileDecelEnc;
+        return (int16_t) (_profilePeakSpd + (int16_t) ((_profileEndSpd - _profilePeakSpd) * r));
+    }
+    return _profilePeakSpd;
+}
+
+uint8_t DriveClass::_execProfileMove(DriveMode mode,
+                                     bool      isTime,
+                                     float     totalCm,
+                                     float     totalSec,
+                                     int16_t   cruise,
+                                     int16_t   startSpeed,
+                                     int16_t   endSpeed,
+                                     float     accel,
+                                     bool      brake,
+                                     int16_t   heading)
+{
+    // Defensive: an invalid acceleration would either divide-by-zero (0) or invert the ramp
+    // direction (negative). Surface a Serial warning and bail out — the caller is then free
+    // to fall back to a fire-and-forget non-profiled move on its own.
+    if (accel <= 0.0f)
+    {
+        Serial.println(F("[Drive] tShape: invalid accel"));
+        _profileState = ProfileState::IDLE;
+        return 0x01;
+    }
+
+    // Defensive non-negative clamp on the move bound. A negative totalCm/totalSec would later
+    // underflow into _cmToEncDeg's uint16_t cast (or produce a negative ramp duration), so we
+    // floor at zero up-front. WARNING-2 fix.
+    if (totalCm < 0.0f)
+    {
+        totalCm = 0.0f;
+    }
+    if (totalSec < 0.0f)
+    {
+        totalSec = 0.0f;
+    }
+
+    // Cancel any in-flight profile (silent — caller-discipline issue). We deliberately do NOT
+    // stop the motors here: the new move is about to issue its own setpoints from the next
+    // _updateProfile tick.
+    if (_profileState != ProfileState::IDLE)
+    {
+        _profileState = ProfileState::IDLE;
+    }
+
+    _profileMode     = mode;
+    _profileIsTime   = isTime;
+    _profileBrake    = brake;
+    _profileHeading  = heading;
+    _profileCruise   = cruise;
+    _profileStartSpd = startSpeed;
+    _profileEndSpd   = endSpeed;
+
+    // Resolve per-side ramp distances (cm) with the no-ramp epsilon AND the [MIN, MAX] clamps.
+    // Returns 0.0f on the no-ramp path (chained move already at cruise).
+    auto resolveRamp = [&](int16_t endpoint) -> float
+    {
+        if (abs(cruise - endpoint) < Config::TSHAPE_NO_RAMP_EPSILON_PWM)
+        {
+            return 0.0f;
+        }
+        float raw = (float) abs(cruise - endpoint) / accel;
+        if (raw < Config::TSHAPE_RAMP_MIN_CM)
+        {
+            raw = Config::TSHAPE_RAMP_MIN_CM;
+        }
+        if (raw > Config::TSHAPE_RAMP_MAX_CM)
+        {
+            raw = Config::TSHAPE_RAMP_MAX_CM;
+        }
+        return raw;
+    };
+
+    if (isTime)
+    {
+        // ---------------------------------------------------------------------------------
+        // Time variant — convert the cm-based ramp distances into ms via the cruise-speed
+        // approximation: rampMs ≈ rampCm / |cruise| * 1000. This is a units-coherent
+        // reinterpretation of the same `Config::TSHAPE_*` knobs and is documented in
+        // `DriveTimeBuilder::tShape()`.
+        // ---------------------------------------------------------------------------------
+        const float total = totalSec * 1000.0f;    // ms
+        auto        cmToMs = [&](float cm) -> float
+        {
+            // No-ramp short-circuit MUST come before the cruise==0 fallback so that a chained
+            // move (resolveRamp returned 0.0f) honours the documented no-ramp invariant — even
+            // when cruise itself is 0 (degenerate stand-still call). CRITICAL-1 fix.
+            if (cm == 0.0f)
+            {
+                return 0.0f;
+            }
+            // Defensive: cruise == 0 means a degenerate "stand still" call — half the total
+            // is the safest default ramp duration since the speed table is flat.
+            if (cruise == 0)
+            {
+                return total * 0.5f;
+            }
+            return cm / (float) abs(cruise) * 1000.0f;
+        };
+
+        float accelMs = cmToMs(resolveRamp(startSpeed));
+        float decelMs = cmToMs(resolveRamp(endSpeed));
+
+        // Half-of-total cap — must not exceed half the move duration on either side.
+        if (accelMs > total * 0.5f)
+        {
+            accelMs = total * 0.5f;
+        }
+        if (decelMs > total * 0.5f)
+        {
+            decelMs = total * 0.5f;
+        }
+
+        // Triangle fallback: if the two ramps don't fit, collapse the cruise plateau and
+        // reduce the peak so the speed-vs-time integral still equals the cruise * total
+        // requested. The simple averaged-peak heuristic keeps the math easy and bounded:
+        // peak <= cruise always (clamp).
+        if (accelMs + decelMs > total)
+        {
+            int16_t peak = (int16_t) (((int32_t) startSpeed + (int32_t) endSpeed
+                                       + (int32_t) cruise)
+                                      / 3);
+            // Peak must NEVER exceed the requested cruise.
+            if (peak > cruise && cruise >= 0)
+            {
+                peak = cruise;
+            }
+            if (peak < cruise && cruise < 0)
+            {
+                peak = cruise;
+            }
+            _profilePeakSpd = peak;
+
+            if (accelMs + decelMs > 0.0f)
+            {
+                const float scale = total / (accelMs + decelMs);
+                accelMs *= scale;
+                decelMs *= scale;
+            }
+        }
+        else
+        {
+            _profilePeakSpd = cruise;
+        }
+
+        _profileAccelMs = (uint32_t) accelMs;
+        _profileDecelMs = (uint32_t) decelMs;
+        _profileTotalMs = (uint32_t) total;
+        _profileStartMs = millis();
+    }
+    else
+    {
+        // ---------------------------------------------------------------------------------
+        // Distance variant — encoder-based ramps in cm, converted to encoder degrees via the
+        // shared `_cmToEncDeg` helper. Negative `cruise` (backwards) is handled implicitly:
+        // we store `_profileTotalEnc` / `_profileAccelEnc` / `_profileDecelEnc` as positive
+        // magnitudes and `_updateProfile` compares them against `abs(encDelta)`. The PWM
+        // setpoints (`_profileStartSpd` / `_profilePeakSpd` / `_profileEndSpd`) carry the
+        // sign and are dispatched directly to the motors.
+        // ---------------------------------------------------------------------------------
+        float accelCm = resolveRamp(startSpeed);
+        float decelCm = resolveRamp(endSpeed);
+
+        if (accelCm > totalCm * 0.5f)
+        {
+            accelCm = totalCm * 0.5f;
+        }
+        if (decelCm > totalCm * 0.5f)
+        {
+            decelCm = totalCm * 0.5f;
+        }
+
+        if (accelCm + decelCm > totalCm)
+        {
+            int16_t peak = (int16_t) (((int32_t) startSpeed + (int32_t) endSpeed
+                                       + (int32_t) cruise)
+                                      / 3);
+            if (peak > cruise && cruise >= 0)
+            {
+                peak = cruise;
+            }
+            if (peak < cruise && cruise < 0)
+            {
+                peak = cruise;
+            }
+            _profilePeakSpd = peak;
+
+            if (accelCm + decelCm > 0.0f)
+            {
+                const float scale = totalCm / (accelCm + decelCm);
+                accelCm *= scale;
+                decelCm *= scale;
+            }
+        }
+        else
+        {
+            _profilePeakSpd = cruise;
+        }
+
+        // Store ramp + total distances as positive magnitudes — `_updateProfile` and
+        // `_profileSpeedAt` compare them against `abs(encDelta)` so the same code path
+        // handles both forward and reverse moves transparently.
+        _profileTotalEnc = (int32_t) _cmToEncDeg(totalCm);
+        _profileAccelEnc = (int32_t) _cmToEncDeg(accelCm < 0.0f ? 0.0f : accelCm);
+        _profileDecelEnc = (int32_t) _cmToEncDeg(decelCm < 0.0f ? 0.0f : decelCm);
+        _profileStartEnc = MiniR4.M2.getDegrees();
+    }
+
+    // Initial state — RAMP_UP, even if accelDist == 0; the first `_updateProfile` tick will
+    // observe `traveled >= _profileAccelEnc` (or its time-variant equivalent) and fall
+    // straight through to the cruise plateau.
+    _profileState = ProfileState::RAMP_UP;
+    _moveDone     = false;
+    return 0x00;
 }

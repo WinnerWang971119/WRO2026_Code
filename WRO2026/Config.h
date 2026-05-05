@@ -240,6 +240,52 @@ namespace Config
 
     /** @brief Spin duration in milliseconds used by `Drive.calibrateMotorBias()`. */
     static constexpr uint32_t MOTOR_BIAS_CALIB_DURATION_MS = 2000;
+
+    // =============================================================================
+    // Trapezoidal velocity profile (`.tShape()` modifier on Drive / LineFollower).
+    //
+    // Acceleration-based: speed ramps at TSHAPE_ACCEL_PWM_PER_CM (PWM units gained
+    // per cm of encoder travel) until the cruise target is reached, then plateaus,
+    // then ramps back down at the same rate. Per-side ramp distance per move is
+    // implicit: (cruise - endpointSpeed) / accel, clamped to [MIN_CM, MAX_CM] and
+    // to half of the total move length. If accel- and decel-distances together
+    // exceed total, the cruise plateau collapses (triangle fallback) and the peak
+    // speed is reduced so the integral still matches the requested distance.
+    //
+    // Endpoint-default convention: when a move is configured `.setBrake(false)`,
+    // the default `endSpeed` resolves to `cruise` (not 0) — the assumption is that
+    // a no-brake move is chaining into a follow-up. Caller can override with an
+    // explicit `.setEndSpeed(0)` if they really want a coast-to-stop.
+    //
+    // See DECISIONS.md "Trapezoidal velocity profile" for full rationale.
+    // =============================================================================
+
+    /** @brief PWM units gained per cm of travel during the ramp phase. */
+    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 5.0f;
+
+    /** @brief Floor on the per-side ramp distance — never shorter than this (cm). */
+    constexpr float TSHAPE_RAMP_MIN_CM = 2.0f;
+
+    /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
+    constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
+
+    /** @brief Default starting speed for a profiled move (raw PWM). 0 = start at rest. */
+    constexpr int16_t TSHAPE_START_SPEED = 0;
+
+    /** @brief Default ending speed for a profiled move (raw PWM). 0 = end at rest. */
+    constexpr int16_t TSHAPE_END_SPEED = 0;
+
+    /**
+     * @brief Hysteresis: if `|cruise - endpointSpeed| < TSHAPE_NO_RAMP_EPSILON_PWM`,
+     *        skip the ramp on that side entirely.
+     *
+     * Prevents the MIN_CM floor from forcing a tiny pointless ramp on chained moves
+     * where startSpeed or endSpeed is already at (or very near) cruise.
+     */
+    constexpr int16_t TSHAPE_NO_RAMP_EPSILON_PWM = 2;
+
+    /** @brief Tick-rate target for the profile state machine — only used as a comment marker. */
+    // Profile is driven from Drive.update() at whatever rate the main loop ticks (~50-200 Hz typical).
 }    // namespace Config
 
 #endif    // CONFIG_H
