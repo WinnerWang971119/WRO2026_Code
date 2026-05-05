@@ -155,3 +155,28 @@ A second interaction is between LineFollower and queued Drive moves. LineFollowe
 A defensive guard worth recording: each `_execXxx` async path only sets `_moveDone = false` when the lower MCU returned `0x00`. Without this, a failed dispatch (e.g. `MoveDegs` rejecting because the lower MCU is in a transient bad state) would leave `_moveDone == false` forever, hanging `_drainBlocking()` on a task that never started. The guard mirrors the C1/W1 pattern already in the turn execs.
 
 The blocking variant deserves its own paragraph. `setBlocking(true)` bypasses the queue's async semantics by *draining* it: the destructor calls `_drainBlocking()` (which spins until queue is empty AND chassis is idle), then enqueues the new command, then drains again. The result is a synchronous-looking call on top of the queue infrastructure. Reserve blocking for command-time orchestration (calibration routines, mission-step transitions where the next decision genuinely needs the move to be complete) — never use it inside any module's `update()` because the spin would block the cooperative tick chain.
+
+## Sync-by-default builders; `.async()` opt-out for the auto-path planner
+
+The first cut of the queue made async the default and required callers to remember `Drive.waitUntilIdle()` (or a `while (!Drive.isIdle()) ...` loop) at every sync point — between consecutive moves that needed to complete in order, before a manipulator action that depended on chassis position, before any decision that read sensor state assuming the chassis had stopped. Diego pointed out that this is exactly the kind of thing humans forget under deadline pressure: the mission code looks complete, but a missing `waitUntilIdle()` silently runs the next command before the previous one has finished, and you don't notice until the chassis does something weird on the field.
+
+The fix is to flip the default: builder destructors now block by default. Each verb call is sync; the next line of mission code can assume the previous move completed. Hand-written mission scripts read like Python — `Drive.driveDist(30); Drive.turnDeg(-90); Drive.driveDist(30);` and so on. There is nothing to remember and nothing to forget.
+
+The auto-path planner — which is the architecturally critical consumer of this API — opts out per call with `.async()`. A planner ticking `loop()` and polling `Drive.isIdle()` writes:
+
+```cpp
+if (Drive.isIdle()) {
+    Drive.driveDist(30).setMode(GYRO).tShape().async();   // queues, returns immediately
+    advanceMissionState();
+}
+```
+
+`.async()` flips the builder's `_blocking` flag back to `false`; the destructor enqueues without draining. The queue and the dispatcher are unchanged — this is purely a destructor-policy change.
+
+Two pieces of supporting infrastructure make sync-default safe. First, the blocking spin (`_drainBlocking`) needs to keep every other module ticking — otherwise EventTrace stops rendering, LineFollower stops polling its tracer, Intersection stops latching edges, the OLED freezes. The fix is `Drive.setTickCallback(cooperativeTick)`, registered once in `setup()` after every module's `begin()`. `_drainBlocking` invokes the callback each spin iteration instead of just calling `Drive.update()`. The cooperative-tick function is defined in the sketch and just calls every module's `update()` in the established order. If the callback isn't registered, `_drainBlocking` falls back to ticking only `Drive.update()` and emits a one-time Serial warning telling the developer to wire it up.
+
+Second, the registered callback's call chain MUST NOT issue sync-blocking Drive commands. If it did, `_drainBlocking` would re-enter itself from inside its own spin and recurse indefinitely. Today no module's `update()` issues Drive commands at all (`LineFollower` calls `Drive.setSpeed` and `Drive.stop`, both continuous primitives that don't go through the queue), so the constraint isn't currently binding. If a future module's tick *does* need to issue Drive moves, it must use `.async()`. This is documented as a `@warning` on `setTickCallback`'s doxygen.
+
+`waitUntilIdle()` and `isIdle()` are kept on the public surface even though sync-default makes them mostly unnecessary for hand-written scripts. Both are still useful when mixing styles — e.g. an auto-planner that wants to drain a batch of `.async()` calls before reading a sensor would call `Drive.waitUntilIdle()`. The `isIdle()` query is queue-aware (returns `true` only when the chassis AND the queue are both empty); `isMoveDone()` and `isTurnDone()` are queue-blind and now carry an explicit `@warning` to reach for `isIdle()` when the caller meant queue-aware.
+
+The DEMO_MODE block in `WRO2026.ino` is unchanged in shape but its semantics shift — the two Drive verbs now block sequentially instead of firing async. That is the right behaviour for a one-shot demo: the BTN_UP rising edge triggers the sequence, the chassis runs each segment to completion, and the demo armed flag prevents re-entry until the next power-cycle.
