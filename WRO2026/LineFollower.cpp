@@ -39,7 +39,9 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _hasPresetOverride,
                                _presetOverride,
                                _tShape,
-                               _accel);
+                               _accel,
+                               _hasReverseOverride,
+                               _reverseOverride);
     _executed = true;
 }
 
@@ -72,6 +74,13 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setAccel(float pwmPerCm)
     return *this;
 }
 
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setReverse(bool reverse)
+{
+    _reverseOverride    = reverse;
+    _hasReverseOverride = true;
+    return *this;
+}
+
 // =========================================================================================
 // LineFollowerClass — lifecycle.
 // =========================================================================================
@@ -90,6 +99,7 @@ bool LineFollowerClass::begin()
     _lostLine  = false;
     _lastErr   = 0.0f;
     _preset    = Config::SpeedPreset::NORMAL;
+    _reverse   = false;
     _useTShape = false;
 
     return true;
@@ -107,8 +117,16 @@ void LineFollowerClass::update()
     }
 
     // Resolve cruise from the active preset. Reading once at the top of the tick keeps the
-    // L/R mix symmetric and avoids any chance of preset mid-tick flip-flopping.
+    // L/R mix symmetric and avoids any chance of preset mid-tick flip-flopping. When
+    // `_reverse` is set, negate cruise so the chassis drives backward — the P+D mix below
+    // works unchanged because differential-drive geometry is direction-symmetric: a CW body
+    // rotation moves the front-mounted tracer the same way regardless of whether the body
+    // is travelling forward or backward. See DECISIONS.md "Reverse line-following".
     int16_t cruise = _presetToPwm(_preset);
+    if (_reverse)
+    {
+        cruise = (int16_t) -cruise;
+    }
 
     if (_useTShape)
     {
@@ -238,13 +256,19 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                hasPresetOverride,
                                             Config::SpeedPreset preset,
                                             bool                tShape,
-                                            float               accel)
+                                            float               accel,
+                                            bool                hasReverseOverride,
+                                            bool                reverse)
 {
-    // Apply preset first so that, if anyone ever extends this to react synchronously to the
-    // enable transition, they see the freshly chosen cruise.
+    // Apply preset and reverse first so that, if anyone ever extends this to react
+    // synchronously to the enable transition, they see the freshly chosen cruise + direction.
     if (hasPresetOverride)
     {
         _preset = preset;
+    }
+    if (hasReverseOverride)
+    {
+        _reverse = reverse;
     }
 
     if (targetEnabled)
@@ -315,6 +339,16 @@ MatrixLineTracer* LineFollowerClass::getTracer()
 Config::SpeedPreset LineFollowerClass::getPreset() const
 {
     return _preset;
+}
+
+void LineFollowerClass::setReverse(bool reverse)
+{
+    _reverse = reverse;
+}
+
+bool LineFollowerClass::getReverse() const
+{
+    return _reverse;
 }
 
 // =========================================================================================

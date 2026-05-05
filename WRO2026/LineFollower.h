@@ -169,16 +169,35 @@ public:
      */
     LineFollowerEnableBuilder& setAccel(float pwmPerCm);
 
+    /**
+     * @brief Override the line-follow direction as part of this transition.
+     *
+     * @param reverse `true` to follow the line while driving BACKWARDS (cruise PWM negated;
+     *                P+D mix unchanged because the differential-drive geometry is symmetric
+     *                — a CW body rotation moves the front-mounted tracer the same direction
+     *                regardless of motion direction). `false` for the default forward case.
+     * @return        `*this` for fluent chaining.
+     * @note Assumes the line tracer is FRONT-mounted on the chassis. The tracer itself is
+     *       not moved or re-bound — only the sign of cruise flips. The line-error sign
+     *       does NOT need to flip for differential drive, see DECISIONS.md for the
+     *       kinematics derivation.
+     * @note If this method is NOT called on the builder, the owner's current direction is
+     *       left unchanged — re-enabling the controller does not silently reset direction.
+     */
+    LineFollowerEnableBuilder& setReverse(bool reverse);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
-    bool                _brake             = true;     ///< Brake on disable (only used if !enable).
-    bool                _hasPresetOverride = false;    ///< True iff `_presetOverride` is meaningful.
-    Config::SpeedPreset _presetOverride{};     ///< Pending preset; only honored when override flag set.
-    bool                _tShape            = false;    ///< Enable cruise-ramp on a setEnabled(true) transition.
-    bool                _accelExplicit     = false;    ///< Reserved for parity with the Drive builders.
-    float               _accel             = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
-    bool                _executed          = false;    ///< Guards against repeated apply.
+    bool                _brake               = true;   ///< Brake on disable (only used if !enable).
+    bool                _hasPresetOverride   = false;  ///< True iff `_presetOverride` is meaningful.
+    Config::SpeedPreset _presetOverride{};             ///< Pending preset; only honored when override flag set.
+    bool                _tShape              = false;  ///< Enable cruise-ramp on a setEnabled(true) transition.
+    bool                _accelExplicit       = false;  ///< Reserved for parity with the Drive builders.
+    float               _accel               = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
+    bool                _hasReverseOverride  = false;  ///< True iff `_reverseOverride` is meaningful.
+    bool                _reverseOverride     = false;  ///< Pending reverse flag; only honored when override flag set.
+    bool                _executed            = false;  ///< Guards against repeated apply.
 };
 
 /**
@@ -276,6 +295,21 @@ public:
     Config::SpeedPreset getPreset() const;
 
     /**
+     * @brief Direct (non-fluent) reverse-direction setter.
+     *
+     * @param reverse `true` to follow the line backwards; `false` for forward (default).
+     * @note Takes effect on the next `update()` tick. Assumes a front-mounted tracer.
+     */
+    void setReverse(bool reverse);
+
+    /**
+     * @brief Read the active line-follow direction.
+     * @return `true` if the controller is currently following the line in reverse; `false`
+     *         for the default forward case.
+     */
+    bool getReverse() const;
+
+    /**
      * @brief Whether closed-loop line following is currently active.
      * @return `true` if `update()` will run the controller; `false` if it short-circuits.
      */
@@ -328,13 +362,17 @@ public:
      *                          `LineFollowerEnableBuilder::tShape()`.
      * @param accel             Ramp rate in PWM-per-cm; used only when `tShape == true` AND
      *                          `targetEnabled == true`.
+     * @param hasReverseOverride `true` if `reverse` should overwrite the active direction.
+     * @param reverse           New reverse flag; honored only when `hasReverseOverride` is true.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
                              bool                hasPresetOverride,
                              Config::SpeedPreset preset,
                              bool                tShape,
-                             float               accel);
+                             float               accel,
+                             bool                hasReverseOverride,
+                             bool                reverse);
 
 private:
     /**
@@ -352,6 +390,7 @@ private:
     bool                _lostLine = false;                        ///< Last-tick lost-line state (no channel online).
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
     Config::SpeedPreset _preset   = Config::SpeedPreset::NORMAL;  ///< Active cruise preset; sourced by `update()`.
+    bool                _reverse  = false;                        ///< When true, `update()` negates cruise to follow line in reverse.
 
     // Trapezoidal cruise-ramp state (`.tShape()` on the enable builder).
     bool    _useTShape       = false;    ///< If true, cruise PWM ramps over distance after enable.
