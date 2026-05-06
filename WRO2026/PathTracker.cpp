@@ -467,6 +467,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     {
         case Routes::EdgeType::LINE_E:
         {
+            // Drain any stale Intersection edge that latched while the chassis was sitting
+            // on a junction (BTN_UP start at a goal/line node, or rotating in place over a
+            // junction marking during the preceding TURNING state). Without this, LINE_FOLLOW
+            // consumes that stale flag on its very first tick and advances Localization to
+            // _nextHop without the chassis having moved, silently skipping the line segment.
+            (void) Intersection.isAtIntersection();
             LineFollower.setEnabled(true);
             _state = State::LINE_FOLLOW;
             break;
