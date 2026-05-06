@@ -374,14 +374,37 @@ void PathTrackerClass::_onPlanNextHop()
 {
     const uint8_t cur = Localization.getCurrentNode();
 
-    // Already at the goal node? Skip directly to the goal-blind sequence (if it's a goal)
-    // or back to IDLE / DEQUEUE. No spurious turn dispatch.
+    // Already at the goal node? Apply the absolute approach-heading correction (if any)
+    // and then drop into the goal-blind sequence — or, for non-GOAL waypoints, just done.
     if (cur == _currentGoal)
     {
         if (_activeGoalApproach != nullptr)
         {
-            _state       = State::GOAL_BLIND_DISPATCH;
-            _blindIndex  = 0;
+            _blindIndex = 0;
+
+            // Mirror compile_path's stage-3 ACT_TURN_TO emission
+            // (tools/path_planner/compiler.py:233-235): if the chassis arrival heading
+            // does not match approach_heading_deg, dispatch one absolute turn before the
+            // blind sequence. Without this, generated routes whose arrival edge heading
+            // differs from approach_heading_deg execute blind moves from the wrong yaw.
+            const float currentWorld  = Localization.getHeadingDeg();
+            const float approachWorld = _activeGoalApproach->approach_heading_deg;
+            float       delta         = approachWorld - currentWorld;
+            while (delta > 180.0f)   { delta -= 360.0f; }
+            while (delta <= -180.0f) { delta += 360.0f; }
+
+            if (fabsf(delta) > Config::NAV_TURN_TOLERANCE_DEG)
+            {
+                const int16_t imuTarget = Localization.toImuYaw(approachWorld);
+                Drive.turnToYaw(imuTarget).async();
+                // Land in GOAL_BLIND_AWAIT — its Drive.isIdle() check then transitions
+                // into GOAL_BLIND_DISPATCH for the first blind move.
+                _state = State::GOAL_BLIND_AWAIT;
+            }
+            else
+            {
+                _state = State::GOAL_BLIND_DISPATCH;
+            }
         }
         else
         {
