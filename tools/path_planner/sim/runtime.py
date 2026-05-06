@@ -301,3 +301,95 @@ class PathTrackerSim:
         simulator's currently-held ``current_node`` as the source.
         """
         return walk_next_hop(self._next_hop, self._localization.current_node(), goal_name)
+
+    def step_through(self, goal_name: str):
+        """Generator variant of :meth:`go_to` that yields per-primitive.
+
+        Yields a stream of ``(primitive, chassis_snapshot)`` tuples, one
+        per dispatched primitive. The ``chassis_snapshot`` is a copy of
+        the chassis taken AFTER the primitive has been applied — useful
+        for the CLI demo's per-step pose printout and for any future
+        visual replay tool.
+
+        Mirrors :meth:`go_to` exactly in terms of which primitives are
+        emitted, the order, and the chassis end state. The same fault
+        and validation rules apply.
+
+        :param goal_name: target node name.
+        :yields: ``(primitive, VirtualChassis)`` per primitive.
+        :raises: same exceptions as :meth:`go_to`.
+        """
+        if goal_name not in self._field_data.NODES:
+            raise KeyError(f"goal {goal_name!r} not in field_data.NODES")
+        if not self._localization.is_zeroed():
+            raise RuntimeError(
+                "PathTrackerSim.step_through() called before "
+                "LocalizationSim.zero_heading_from_current()"
+            )
+
+        current = self._localization.current_node()
+        while current != goal_name:
+            nxt = self._next_hop[current][goal_name]
+            if nxt is None:
+                raise UnreachableGoalError(current, goal_name, current=current)
+            edge = self._graph.edges[current, nxt]
+            target_heading = float(edge["heading_deg"])
+
+            delta = normalize_turn(target_heading - self._chassis.heading_deg)
+            if abs(delta) > TURN_EPSILON_DEG:
+                self._chassis.turn_relative(delta)
+                self._chassis.heading_deg = _normalize(target_heading)
+                yield (ACT_TURN_REL, delta), self._snapshot_chassis()
+
+            edge_type = edge["type"]
+            distance_cm = float(edge["distance_cm"])
+            if edge_type == EDGE_LINE:
+                self._chassis.follow_line_to_intersection(distance_cm)
+                self._localization.on_intersection(nxt)
+                yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
+            elif edge_type == EDGE_PROJECTION:
+                self._chassis.follow_line_distance(distance_cm)
+                self._localization.on_dead_reckoned_advance(nxt)
+                yield (ACT_FOLLOW_DIST, distance_cm), self._snapshot_chassis()
+            elif edge_type == EDGE_BLIND:
+                self._chassis.forward(distance_cm)
+                self._localization.on_dead_reckoned_advance(nxt)
+                yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
+            else:    # pragma: no cover -- defensive only
+                raise ValueError(
+                    f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
+                )
+            current = nxt
+
+        if (
+            self._field_data.NODE_TYPES.get(goal_name) == "goal"
+            and goal_name in self._field_data.GOAL_APPROACH
+        ):
+            spec = self._field_data.GOAL_APPROACH[goal_name]
+            approach = float(spec["approach_heading_deg"])
+            if abs(normalize_turn(approach - self._chassis.heading_deg)) > TURN_EPSILON_DEG:
+                self._chassis.turn_to_heading(approach)
+                yield (ACT_TURN_TO, approach), self._snapshot_chassis()
+            for action, value in spec["blind_moves"]:
+                if action == ACT_TURN_REL:
+                    deg = float(value)
+                    if abs(deg) > TURN_EPSILON_DEG:
+                        self._chassis.turn_relative(deg)
+                        yield (ACT_TURN_REL, deg), self._snapshot_chassis()
+                elif action == ACT_FORWARD:
+                    cm = float(value)
+                    if cm > 0.0:
+                        self._chassis.forward(cm)
+                        yield (ACT_FORWARD, cm), self._snapshot_chassis()
+                else:    # pragma: no cover -- defensive only
+                    raise ValueError(
+                        f"unsupported blind-move action {action!r} for goal {goal_name!r}"
+                    )
+
+    def _snapshot_chassis(self) -> VirtualChassis:
+        """Return a copy of the current chassis pose (for step_through yields)."""
+        return VirtualChassis(
+            x_cm=self._chassis.x_cm,
+            y_cm=self._chassis.y_cm,
+            heading_deg=self._chassis.heading_deg,
+        )
