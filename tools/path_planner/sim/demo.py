@@ -48,7 +48,11 @@ from tools.path_planner.compiler import (
 from tools.path_planner.graph_builder import build_graph
 from tools.path_planner.planner import compute_all_pairs_next_hop
 from tools.path_planner.sim.chassis import VirtualChassis
-from tools.path_planner.sim.runtime import PathTrackerSim, walk_next_hop
+from tools.path_planner.sim.runtime import (
+    PathTrackerSim,
+    UnreachableGoalError,
+    walk_next_hop,
+)
 
 
 def _format_primitive(p: Primitive) -> str:
@@ -74,24 +78,51 @@ def _run_one_goto(
     goal: str,
     step_counter: List[int],
     plot_traces: List[List[tuple]],
-) -> None:
+) -> bool:
+    """Execute one goTo. Returns True on success, False if the FSM faulted.
+
+    Mirrors PathTracker's C++ behaviour: an UNREACHABLE fault aborts the
+    leg without crashing the program — the operator sees a clear message
+    and the demo continues to attempt subsequent goals (which will also
+    fault if currentNode hasn't advanced, but the chassis is correctly
+    parked, EventTrace would have surfaced NAV FAULT UNR, etc.).
+    """
     print(f"\n>>> goTo({goal!r})")
     print(
         f"    start pose ({sim.chassis.x_cm:7.3f}, {sim.chassis.y_cm:7.3f}) "
         f"heading {sim.chassis.heading_deg:7.3f}; "
         f"current_node = {sim.localization.current_node()!r}"
     )
-    walked = walk_next_hop(
-        sim._next_hop, sim.localization.current_node(), goal
-    )    # pylint: disable=protected-access
+    try:
+        walked = walk_next_hop(
+            sim._next_hop, sim.localization.current_node(), goal
+        )    # pylint: disable=protected-access
+    except UnreachableGoalError as err:
+        print(
+            f"    !! UNREACHABLE: NEXT_HOP[{err.current!r}][{goal!r}] = None\n"
+            f"    !! C++ runtime would enter Fault::UNREACHABLE here and brake.\n"
+            f"    !! (note: blind edges are unidirectional by design — goal "
+            f"nodes have no outgoing edges in the toy graph.)"
+        )
+        return False
     print(f"    NEXT_HOP walk: {' -> '.join(walked)}")
 
     leg_trace = [(sim.chassis.x_cm, sim.chassis.y_cm)]
-    for primitive, snapshot in sim.step_through(goal):
-        step_counter[0] += 1
-        _print_step(step_counter[0], primitive, snapshot)
-        leg_trace.append((snapshot.x_cm, snapshot.y_cm))
+    try:
+        for primitive, snapshot in sim.step_through(goal):
+            step_counter[0] += 1
+            _print_step(step_counter[0], primitive, snapshot)
+            leg_trace.append((snapshot.x_cm, snapshot.y_cm))
+    except UnreachableGoalError as err:
+        # Defensive: walk_next_hop already proved the path exists, but a
+        # mid-traverse fault could still occur in a future planner change.
+        print(
+            f"    !! UNREACHABLE mid-traverse at {err.current!r} -> {goal!r}"
+        )
+        plot_traces.append(leg_trace)
+        return False
     plot_traces.append(leg_trace)
+    return True
 
 
 def _maybe_plot(
@@ -198,13 +229,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     step_counter = [0]
     sequence_traces: List[List[tuple]] = []
 
-    for goal in goals:
+    aborted_at: int | None = None
+    for i, goal in enumerate(goals, start=1):
         if goal not in toy_field_data.NODES:
             print(f"error: goal {goal!r} is not a known node "
                   f"(known: {sorted(toy_field_data.NODES.keys())})",
                   file=sys.stderr)
             return 2
-        _run_one_goto(sim, goal, step_counter, sequence_traces)
+        ok = _run_one_goto(sim, goal, step_counter, sequence_traces)
+        if not ok:
+            aborted_at = i
+            break
 
     print("\n" + "=" * 70)
     print("FINAL POSE")
@@ -214,12 +249,17 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"heading: {chassis.heading_deg:.3f} deg")
     print(f"current_node: {sim.localization.current_node()}")
     print(f"primitives total: {step_counter[0]}")
+    if aborted_at is not None:
+        print(
+            f"\nNOTE: aborted at goal #{aborted_at} ({goals[aborted_at - 1]!r}); "
+            f"{len(goals) - aborted_at} subsequent goals skipped."
+        )
 
     if args.plot:
         out = _REPO_ROOT / "tools" / "path_planner" / "output" / "sim_trace.png"
         _maybe_plot(sequence_traces, toy_field_data, out)
 
-    return 0
+    return 1 if aborted_at is not None else 0
 
 
 if __name__ == "__main__":
