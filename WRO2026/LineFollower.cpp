@@ -420,6 +420,51 @@ bool LineFollowerClass::isDistanceReached()
     return latched;
 }
 
+bool LineFollowerClass::followDistance(float cm)
+{
+    if (!Drive.isIdle())
+    {
+        return false;
+    }
+
+    setEnabled(true).setDistanceTarget(cm);
+    return waitUntilDistanceReached();
+}
+
+bool LineFollowerClass::waitUntilDistanceReached()
+{
+    if (_distanceReached)
+    {
+        return isDistanceReached();
+    }
+
+    if (!_enabled || !_distanceTargetActive || !Drive.isIdle())
+    {
+        return false;
+    }
+
+    const uint32_t deadline = millis() + Config::LINE_FOLLOW_WAIT_TIMEOUT_MS;
+
+    while (_enabled)
+    {
+        if (!Drive.isIdle() || (int32_t) (millis() - deadline) >= 0)
+        {
+            setEnabled(false);
+            return false;
+        }
+
+        update();
+        if (_distanceReached)
+        {
+            return isDistanceReached();
+        }
+
+        delay(2);
+    }
+
+    return isDistanceReached();
+}
+
 Config::SpeedPreset LineFollowerClass::getPreset() const
 {
     return _preset;
