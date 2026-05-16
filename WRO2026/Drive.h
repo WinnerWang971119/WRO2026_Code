@@ -1757,8 +1757,19 @@ public:
     }
 
     /**
-     * @brief Set the lower-MCU turn motor mode.
-     * @param m `0` = single-motor pivot (one wheel braked), `1` = counter-rotation.
+     * @brief Select the wheel pattern used by the custom TurnGyro state machine
+     *        (`_updateTurnProfile` in Drive.cpp; replaces MiniR4.DriveDC.TurnGyro).
+     *
+     * @param m Wheel-pattern byte. Encoding:
+     *          - `0` = COUNTER_ROT — both wheels spin opposite directions, chassis pivots around its center.
+     *          - `1` = PIVOT_LEFT — left wheel braked; right wheel drives forward; chassis pivots around the LEFT wheel.
+     *          - `2` = PIVOT_RIGHT — right wheel braked; left wheel drives forward; chassis pivots around the RIGHT wheel.
+     *
+     * @note This is the NEW encoding (introduced by the custom TurnGyro rewrite — see DECISIONS.md / the
+     *       2026-05-17 plan). It is intentionally NOT the legacy `MiniR4.DriveDC.TurnGyro` encoding
+     *       (`0=pivot, 1=counter-rot`); the new state machine owns wheel dispatch directly via `Move(L, R)`
+     *       and needed a third value for the pivot-side selection. PathTracker maps `Routes::TurnMode::*`
+     *       to this byte via `_turnModeToByte` in PathTracker.cpp.
      * @return `*this` for chaining.
      */
     TurnDegBuilder& setMode(uint8_t m)
@@ -1946,8 +1957,19 @@ public:
     }
 
     /**
-     * @brief Set the lower-MCU turn motor mode.
-     * @param m `0` = pivot, `1` = counter-rotate.
+     * @brief Select the wheel pattern used by the custom TurnGyro state machine
+     *        (`_updateTurnProfile` in Drive.cpp; replaces MiniR4.DriveDC.TurnGyro).
+     *
+     * @param m Wheel-pattern byte. Encoding:
+     *          - `0` = COUNTER_ROT — both wheels spin opposite directions, chassis pivots around its center.
+     *          - `1` = PIVOT_LEFT — left wheel braked; right wheel drives forward; chassis pivots around the LEFT wheel.
+     *          - `2` = PIVOT_RIGHT — right wheel braked; left wheel drives forward; chassis pivots around the RIGHT wheel.
+     *
+     * @note This is the NEW encoding (introduced by the custom TurnGyro rewrite — see DECISIONS.md / the
+     *       2026-05-17 plan). It is intentionally NOT the legacy `MiniR4.DriveDC.TurnGyro` encoding
+     *       (`0=pivot, 1=counter-rot`); the new state machine owns wheel dispatch directly via `Move(L, R)`
+     *       and needed a third value for the pivot-side selection. PathTracker maps `Routes::TurnMode::*`
+     *       to this byte via `_turnModeToByte` in PathTracker.cpp.
      * @return `*this` for chaining.
      */
     TurnToYawBuilder& setMode(uint8_t m)
