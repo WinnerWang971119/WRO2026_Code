@@ -450,11 +450,6 @@ bool LineFollowerClass::waitUntilDistanceReached()
         }
 
         update();
-        if (!_enabled)
-        {
-            break;
-        }
-
         delay(2);
     }
 
