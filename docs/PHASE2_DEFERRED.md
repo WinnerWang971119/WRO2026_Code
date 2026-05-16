@@ -39,6 +39,7 @@ conversation history.
 | Hardware verification of PR 2's PathTracker on the toy printout | PR 2 scope | Deferred to a follow-up bench session (PR 2.5 patches) | Once mechanical chassis geometry is finalised |
 | IMU drift compensation across long runs | new in PR 2 | Deferred to PR 3 | Once the real 2026 field's longer paths expose drift accumulation |
 | Serial-console mission entrypoint | PR 3 scope | Deferred to PR 3 | After PR 2's PathTracker exists |
+| `NAV FAULT <code>` suffix in EventTrace (NZ / UNR / DRV / BAD / DRN) | PR 2 plan §68, regressed in `.ino` | Deferred to PR 3 | Bundled with Serial-console entrypoint since both touch operator-visible reporting |
 
 ---
 
@@ -214,6 +215,65 @@ host-side tool.
 Small. ~80 lines in `main.cpp` or a new `SerialMission.h`. No changes to `routes.h`, `planner.py`,
 or any existing R4 module. The naming lookup could use a short linear scan over `Routes::NODES`
 (N ≤ 20 on the toy graph, O(N) is fine at human interaction speed).
+
+---
+
+## `NAV FAULT <code>` suffix in EventTrace
+
+### What it is
+
+PR 2's plan (`docs/plans/2026-05-06-phase2-pr2-path-tracker-runtime.md:68`) specified an operator-
+visible fault taxonomy on the EventTrace channel:
+
+> `NAV FAULT <code>` (NOT_ZEROED → NZ, UNREACHABLE → UNR, DRIVE_FAULT → DRV, BAD_NODE → BAD).
+
+The intent was that the OLED + Serial trace shows *which* fault kind tripped, so the operator can
+diagnose without having to query `getFault().kind` over Serial. PR 2's implementation in
+`WRO2026/WRO2026.ino:201` and `:209` regressed to a bare:
+
+```cpp
+if (PathTracker.hasFault()) { EventTrace.pushEvent("NAV FAULT"); return; }
+```
+
+Consequence: all five fault kinds (NZ, UNR, DRV, BAD, plus the newer `DRAIN_TIMEOUT` enum at
+`PathTracker.h:133`) collapse to the same operator-visible event. The internal `_enterFault` Serial
+print still includes `kind=N`, so the information is recoverable over USB; it just isn't surfaced
+in EventTrace.
+
+`DRAIN_TIMEOUT` was added after the spec was written and has no mnemonic assigned — proposed: `DRN`.
+
+### Why deferred
+
+PR 2 is already merged-bound on `phase2/path-tracker-runtime` and the regression is operator-UX
+only, not a correctness bug. Bundling the fix with PR 3 makes sense because:
+
+1. PR 3 introduces the Serial-console mission entrypoint, which also touches operator-facing
+   reporting. Both can use the same `_faultMnemonic(Fault)` helper.
+2. Spec drift fixes belong with the PR that exercises the affected surface on real hardware.
+
+### What unlocks it
+
+Nothing external — this is purely a code change ready whenever PR 3 starts. The fix should land
+*together* with the Serial-console entrypoint so the operator gets a single coherent reporting
+surface across `NAV ZERO`, `NAV ARR <node>`, `NAV FAULT <code>`, and Serial-console echoes.
+
+### Estimated effort
+
+Trivial. ~15 lines total:
+
+- Add `static const char* _faultMnemonic(Fault)` to `PathTracker.h` (or an inline switch in the
+  .ino) mapping each enum value to the 2–3-char string: `NZ / UNR / DRV / BAD / DRN`.
+- Replace the two `EventTrace.pushEvent("NAV FAULT")` callsites in `WRO2026/WRO2026.ino` with a
+  composed `"NAV FAULT <code>"` string (verify against EventTrace's max event width; current uses
+  hover at ≤12 chars).
+- Update `docs/plans/2026-05-06-phase2-pr2-path-tracker-runtime.md:68` to add `DRAIN_TIMEOUT → DRN`
+  to the taxonomy line so the spec matches reality.
+
+Source: this gap was flagged by Copilot review on PR #5 (`PathTracker.cpp:214` thread). The first
+half of that review comment — about `_currentGoal` being `NODE_NONE` if `_drainBlocking` were
+entered while IDLE — is *not* a real concern (the drain is only invoked after a successful
+`_enqueue`, so `_qCount >= 1` is guaranteed and DEQUEUE will always have set `_currentGoal` before
+the timeout branch fires). Only the second half — the EventTrace taxonomy drift — needs action.
 
 ---
 
