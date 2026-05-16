@@ -7,6 +7,7 @@
 #include "LineFollower.h"
 
 #include "Drive.h"
+#include "Intersection.h"
 
 /**
  * @brief Single global instance referenced by every other module.
@@ -450,10 +451,54 @@ bool LineFollowerClass::waitUntilDistanceReached()
         }
 
         update();
-        delay(2);
+        yield();
     }
 
     return isDistanceReached();
+}
+
+bool LineFollowerClass::followUntilIntersection()
+{
+    if (!Drive.isIdle())
+    {
+        return false;
+    }
+
+    setEnabled(true);
+    return waitUntilIntersection();
+}
+
+bool LineFollowerClass::waitUntilIntersection()
+{
+    if (!_enabled || !Drive.isIdle())
+    {
+        return false;
+    }
+
+    (void) Intersection.isAtIntersection();
+
+    const uint32_t startMs = millis();
+    while (_enabled)
+    {
+        if (!Drive.isIdle()
+            || (millis() - startMs) >= Config::LINE_FOLLOW_WAIT_TIMEOUT_MS)
+        {
+            setEnabled(false);
+            return false;
+        }
+
+        update();
+        Intersection.update();
+        if (Intersection.isAtIntersection())
+        {
+            setEnabled(false);
+            return true;
+        }
+
+        yield();
+    }
+
+    return false;
 }
 
 Config::SpeedPreset LineFollowerClass::getPreset() const
