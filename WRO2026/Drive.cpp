@@ -1009,6 +1009,13 @@ void DriveClass::_updateTurnProfile()
         R = (int16_t) (+_turnDeltaSign * pwmMag);
         break;
     }
+
+    // Apply the same deadband snap / PWM saturation used by other drive outputs so
+    // profiled turns neither stall below the minimum effective magnitude nor exceed
+    // the configured PWM range at the actuator boundary.
+    L = (int16_t) deadbandSnap(L);
+    R = (int16_t) deadbandSnap(R);
+
     MiniR4.DriveDC.Move(L, R);
 }
 
