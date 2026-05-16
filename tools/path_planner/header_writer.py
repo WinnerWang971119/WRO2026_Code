@@ -6,12 +6,19 @@ files the runtime ``PathTracker`` consumes:
 * :data:`DEFAULT_HEADER_PATH` (``WRO2026/routes.h``) -- declarations
   (``constexpr`` sizes, enums, struct definitions, ``extern`` arrays).
 * :data:`DEFAULT_SOURCE_PATH` (``WRO2026/routes.cpp``) -- definitions
-  (``NODES``, ``NEXT_HOP``, ``EDGES``).
+  (``NODES``, ``NEXT_HOP``, ``EDGES``, ``PIPELINE_CONFIG``).
 
 PR3 simplification: drops ``GoalApproach`` struct, ``BlindAction`` enum,
 projection-related node category, and the per-goal blind-move arrays.
 Every node is either a ``LINE`` or ``BLIND`` type; the runtime reaches
 each one via the corresponding edge type.
+
+Pipeline-mode extension (T7): emits mission-wide motion-mode defaults
+(``PIPELINE_CONFIG``) plus four optional per-edge override slots
+(``line_mode_override``, ``blind_mode_override``,
+``projection_mode_override``, ``pre_turn_mode_override``). Each enum
+carries a ``DEFAULT = 0`` sentinel meaning "inherit
+``PIPELINE_CONFIG.<category>``" at runtime dispatch.
 
 Determinism contract: byte-identical re-emit on identical inputs.
 
@@ -22,6 +29,10 @@ Determinism contract: byte-identical re-emit on identical inputs.
 * Line endings are LF only (``newline=''``).
 * No ``datetime.now()`` in the output -- the embedded SHA256 of
   ``field_data.py`` is the only "version stamp."
+* ``PIPELINE_CONFIG`` values are baked in from the Python singleton at
+  emit time; they are intentionally NOT part of the SHA256 input (the
+  hash continues to cover ``field_data.py`` only -- changing that is a
+  separate behavior decision deferred past T7).
 """
 
 from __future__ import annotations
@@ -32,7 +43,14 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.pipeline_config import (
+    PIPELINE_CONFIG,
+    BlindMode,
+    LineMode,
+    ProjectionMode,
+    TurnMode,
+)
 
 DEFAULT_HEADER_PATH = Path("WRO2026/routes.h")
 DEFAULT_SOURCE_PATH = Path("WRO2026/routes.cpp")
@@ -44,14 +62,33 @@ _REGEN_COMMAND = "uv run python tools/path_planner/build_routes.py"
 _INDENT = "    "
 
 _EDGE_TYPE_TO_ENUM: Dict[str, str] = {
-    EDGE_LINE:  "EdgeType::LINE_E",
-    EDGE_BLIND: "EdgeType::BLIND_E",
+    EDGE_LINE:       "EdgeType::LINE",
+    EDGE_BLIND:      "EdgeType::BLIND",
+    EDGE_PROJECTION: "EdgeType::PROJECTION",
 }
 
 _NODE_TYPE_TO_ENUM: Dict[str, str] = {
     "line":  "NodeType::LINE",
     "blind": "NodeType::BLIND",
 }
+
+# Which override slot on EdgeInfo a ``primitive_mode`` value should land
+# on, keyed by the edge's transport type. ``pre_turn_mode`` always lands
+# on ``pre_turn_mode_override`` regardless of edge type (it describes the
+# turn that precedes the edge, not the edge traversal itself).
+_PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE: Dict[str, str] = {
+    EDGE_LINE:       "line_mode_override",
+    EDGE_BLIND:      "blind_mode_override",
+    EDGE_PROJECTION: "projection_mode_override",
+}
+
+# Default sentinel strings emitted when an override slot is unset. Each
+# corresponds to the ``DEFAULT = 0`` member on the matching enum so a
+# zero-initialised EdgeInfo means "inherit PIPELINE_CONFIG".
+_LINE_MODE_DEFAULT       = "LineMode::DEFAULT"
+_BLIND_MODE_DEFAULT      = "BlindMode::DEFAULT"
+_PROJECTION_MODE_DEFAULT = "ProjectionMode::DEFAULT"
+_TURN_MODE_DEFAULT       = "TurnMode::DEFAULT"
 
 
 def _format_float(value: float) -> str:
@@ -74,17 +111,109 @@ def _next_hop_cell(
     return str(index_of[cell])
 
 
+def _override_enum_value(
+    enum_cls,
+    mode_tag,
+    default_sentinel: str,
+) -> str:
+    """Resolve a ``primitive_mode`` / ``pre_turn_mode`` tag to a C++ enum literal.
+
+    Accepts either an :class:`enum.IntEnum` member from ``pipeline_config``
+    or the bare string name of one (e.g. ``"FAST"`` or
+    ``LineMode.FAST``). Unknown tags fall back to the DEFAULT sentinel
+    rather than raising -- the validator (T6) owns strict checking, and
+    we want the header writer to remain robust to legacy fixtures.
+    """
+    if mode_tag is None:
+        return default_sentinel
+    if isinstance(mode_tag, enum_cls):
+        return enum_cls.__name__ + "::" + mode_tag.name
+    if isinstance(mode_tag, str):
+        try:
+            member = enum_cls[mode_tag]
+        except KeyError:
+            return default_sentinel
+        return enum_cls.__name__ + "::" + member.name
+    # Integer or other -- best-effort lookup; fall back to DEFAULT.
+    try:
+        member = enum_cls(int(mode_tag))
+    except (ValueError, TypeError):
+        return default_sentinel
+    return enum_cls.__name__ + "::" + member.name
+
+
+def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
+    """Compute the four override-enum literals for one edge.
+
+    Returns ``(line_override, blind_override, projection_override, turn_override)``
+    in the same order they appear on the C++ ``EdgeInfo`` struct. The
+    ``primitive_mode`` attribute lands on exactly one slot, picked by the
+    edge's ``type``; the other two primitive slots stay DEFAULT. The
+    ``pre_turn_mode`` attribute always lands on the turn slot.
+    """
+    line_override       = _LINE_MODE_DEFAULT
+    blind_override      = _BLIND_MODE_DEFAULT
+    projection_override = _PROJECTION_MODE_DEFAULT
+    turn_override       = _TURN_MODE_DEFAULT
+
+    primitive_mode = edge_attrs.get("primitive_mode")
+    if primitive_mode is not None:
+        edge_type = edge_attrs.get("type")
+        slot = _PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE.get(edge_type)
+        if slot == "line_mode_override":
+            line_override = _override_enum_value(
+                LineMode, primitive_mode, _LINE_MODE_DEFAULT
+            )
+        elif slot == "blind_mode_override":
+            blind_override = _override_enum_value(
+                BlindMode, primitive_mode, _BLIND_MODE_DEFAULT
+            )
+        elif slot == "projection_mode_override":
+            projection_override = _override_enum_value(
+                ProjectionMode, primitive_mode, _PROJECTION_MODE_DEFAULT
+            )
+        # Unknown edge_type -> drop the override silently; validator owns
+        # the strict check.
+
+    pre_turn_mode = edge_attrs.get("pre_turn_mode")
+    if pre_turn_mode is not None:
+        turn_override = _override_enum_value(
+            TurnMode, pre_turn_mode, _TURN_MODE_DEFAULT
+        )
+
+    return line_override, blind_override, projection_override, turn_override
+
+
+def _none_edge_cell() -> str:
+    return (
+        "{ EdgeType::NONE, "
+        + _format_float(0.0) + ", " + _format_float(0.0) + ", "
+        + _LINE_MODE_DEFAULT + ", "
+        + _BLIND_MODE_DEFAULT + ", "
+        + _PROJECTION_MODE_DEFAULT + ", "
+        + _TURN_MODE_DEFAULT
+        + " }"
+    )
+
+
 def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
     if not graph.has_edge(from_name, to_name):
-        return (
-            "{ EdgeType::NONE, "
-            + _format_float(0.0) + ", " + _format_float(0.0) + " }"
-        )
+        return _none_edge_cell()
     edge = graph.edges[from_name, to_name]
     enum_name = _EDGE_TYPE_TO_ENUM[edge["type"]]
     distance = _format_float(edge["distance_cm"])
     heading = _format_float(edge["heading_deg"])
-    return "{ " + enum_name + ", " + distance + ", " + heading + " }"
+    (line_override, blind_override, projection_override, turn_override) = (
+        _resolve_overrides(edge)
+    )
+    return (
+        "{ " + enum_name + ", " + distance + ", " + heading + ", "
+        + line_override + ", "
+        + blind_override + ", "
+        + projection_override + ", "
+        + turn_override
+        + " }"
+    )
 
 
 def _node_row(
@@ -152,18 +281,65 @@ def _build_routes_h_lines(
     lines.append(_INDENT + "// Edge motion class, dispatched by the runtime.")
     lines.append(
         _INDENT
-        + "enum class EdgeType : uint8_t { NONE = 0, LINE_E = 1, BLIND_E = 2 };"
+        + "enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, "
+        + "PROJECTION = 3 };"
     )
+    lines.append("")
+    lines.append(
+        _INDENT + "// Per-category motion-mode selectors. DEFAULT (= 0) means"
+    )
+    lines.append(
+        _INDENT + "// 'inherit PIPELINE_CONFIG.<category>' at dispatch time."
+    )
+    lines.append(
+        _INDENT
+        + "enum class LineMode       : uint8_t { DEFAULT = 0, NORMAL = 1, "
+        + "SLOW = 2, FAST = 3 };"
+    )
+    lines.append(
+        _INDENT
+        + "enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, "
+        + "GYRO_TSHAPE = 2, RAW_FLAT = 3 };"
+    )
+    lines.append(
+        _INDENT
+        + "enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, "
+        + "SLOW = 2, FAST = 3 };"
+    )
+    lines.append(
+        _INDENT
+        + "enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, "
+        + "PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };"
+    )
+    lines.append("")
+    lines.append(
+        _INDENT + "// Mission-wide motion-mode defaults, baked in from"
+    )
+    lines.append(
+        _INDENT + "// tools/path_planner/pipeline_config.py at build time."
+    )
+    lines.append(_INDENT + "struct PipelineConfig {")
+    lines.append(_INDENT * 2 + "LineMode       line;")
+    lines.append(_INDENT * 2 + "BlindMode      blind;")
+    lines.append(_INDENT * 2 + "ProjectionMode projection;")
+    lines.append(_INDENT * 2 + "TurnMode       turn;")
+    lines.append(_INDENT + "};")
+    lines.append(_INDENT + "extern const PipelineConfig PIPELINE_CONFIG;")
     lines.append("")
     lines.append(
         _INDENT
         + "struct NodeInfo { float x_cm; float y_cm; NodeType type; "
         + "const char* name; };"
     )
-    lines.append(
-        _INDENT
-        + "struct EdgeInfo { EdgeType type; float distance_cm; float heading_deg; };"
-    )
+    lines.append(_INDENT + "struct EdgeInfo {")
+    lines.append(_INDENT * 2 + "EdgeType       type;")
+    lines.append(_INDENT * 2 + "float          distance_cm;")
+    lines.append(_INDENT * 2 + "float          heading_deg;")
+    lines.append(_INDENT * 2 + "LineMode       line_mode_override;")
+    lines.append(_INDENT * 2 + "BlindMode      blind_mode_override;")
+    lines.append(_INDENT * 2 + "ProjectionMode projection_mode_override;")
+    lines.append(_INDENT * 2 + "TurnMode       pre_turn_mode_override;")
+    lines.append(_INDENT + "};")
     lines.append("")
     lines.append(_INDENT + "extern const NodeInfo NODES[N_NODES];")
     lines.append(_INDENT + "extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];")
@@ -243,6 +419,18 @@ def _emit_edges_table(graph: nx.DiGraph, node_names: List[str]) -> List[str]:
     return out
 
 
+def _emit_pipeline_config() -> List[str]:
+    """Bake the Python-side PIPELINE_CONFIG singleton into a C++ definition."""
+    return [
+        _INDENT + "const PipelineConfig PIPELINE_CONFIG = {",
+        _INDENT * 2 + "LineMode::"       + PIPELINE_CONFIG.line.name       + ",",
+        _INDENT * 2 + "BlindMode::"      + PIPELINE_CONFIG.blind.name      + ",",
+        _INDENT * 2 + "ProjectionMode::" + PIPELINE_CONFIG.projection.name + ",",
+        _INDENT * 2 + "TurnMode::"       + PIPELINE_CONFIG.turn.name       + ",",
+        _INDENT + "};",
+    ]
+
+
 def _build_routes_cpp_lines(
     field_data,
     graph: nx.DiGraph,
@@ -258,6 +446,8 @@ def _build_routes_cpp_lines(
     lines.append("")
     lines.append("namespace Routes {")
 
+    lines.extend(_emit_pipeline_config())
+    lines.append("")
     lines.extend(_emit_nodes_array(field_data, node_names))
     lines.append("")
     lines.extend(_emit_next_hop_table(next_hop_table, node_names, index_of))
