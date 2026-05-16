@@ -199,6 +199,72 @@ namespace Config
     constexpr bool TURN_BRAKE = true;
 
     // ---------------------------------------------------------------------------------------
+    // Line-sensor → axle geometric offset (intersection overshoot compensation)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Distance from the line-sensor centerline to the wheel-axle line, in cm.
+     *
+     * Positive = sensor is in front of (ahead of) the axle.
+     *
+     * Used by the PathTracker LINE_OVERSHOOT state: the intersection-detect event fires
+     * when the SENSOR is over the junction marker, but we want the chassis CENTER (the
+     * axle midpoint) to land on the node. After detecting the intersection, PathTracker
+     * re-arms LineFollower with `setDistanceTarget(LINE_SENSOR_AXLE_OFFSET_CM)` to roll
+     * forward by exactly this amount before stopping.
+     *
+     * @note TODO: measure on real chassis.
+     */
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 5.0f;
+
+    // ---------------------------------------------------------------------------------------
+    // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Cruise PWM during the fast phase of the custom TurnGyro state machine,
+     *        in the [-100, 100] DriveDC range.
+     *
+     * Applied until the heading error falls within ±TURN_SLOW_ZONE_DEG of the target.
+     * Replaces the lower-MCU TurnGyro's internal fixed speed.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr int16_t TURN_CRUISE_PWM = 50;
+
+    /**
+     * @brief Slow-zone half-width in degrees.
+     *
+     * When |heading error| ≤ this value, the turn ramps down from TURN_CRUISE_PWM to
+     * TURN_SLOW_SPEED_PWM. Sized to give enough time to bleed rotational momentum
+     * before the tolerance gate fires.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr float TURN_SLOW_ZONE_DEG = 30.0f;
+
+    /**
+     * @brief PWM applied in the slow zone, in [-100, 100].
+     *
+     * Held constant while |heading error| > TURN_TOLERANCE_DEG. Set equal to
+     * Config::PWM_MIN_MAGNITUDE so the motor reliably breaks static friction even
+     * at minimum command.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr int16_t TURN_SLOW_SPEED_PWM = 20;
+
+    /**
+     * @brief Final heading tolerance in degrees.
+     *
+     * When |heading error| ≤ this value, the TurnGyro state machine brakes and
+     * declares the turn complete.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr float TURN_TOLERANCE_DEG = 1.0f;
+
+    // ---------------------------------------------------------------------------------------
     // Lost-line behavior
     // ---------------------------------------------------------------------------------------
 
@@ -429,10 +495,11 @@ namespace Config
     /**
      * @brief Maximum number of pending goTo() entries the PathTracker queue can hold.
      *
-     * Sized to comfortably exceed a typical multi-step demo or mission segment. Overflow
-     * drops the new entry and prints a Serial warning — that is a caller bug.
+     * Bumped 8→32 to accommodate missions chaining 10+ destinations; trivial RAM cost
+     * (32 bytes since GoalEntry/NavEntry is a single uint8_t). Overflow drops the new
+     * entry and prints a Serial warning — that is a caller bug.
      */
-    constexpr uint8_t PATH_QUEUE_CAPACITY = 8;
+    constexpr uint8_t PATH_QUEUE_CAPACITY = 32;
 
     /**
      * @brief Per-goal worst-case ceiling used by `PathTracker._drainBlocking` to bound
