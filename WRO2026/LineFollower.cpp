@@ -433,11 +433,6 @@ bool LineFollowerClass::followDistance(float cm)
 
 bool LineFollowerClass::waitUntilDistanceReached()
 {
-    if (_distanceReached)
-    {
-        return isDistanceReached();
-    }
-
     if (!_enabled || !_distanceTargetActive || !Drive.isIdle())
     {
         return false;
@@ -454,9 +449,9 @@ bool LineFollowerClass::waitUntilDistanceReached()
         }
 
         update();
-        if (_distanceReached)
+        if (!_enabled)
         {
-            return isDistanceReached();
+            break;
         }
 
         delay(2);
