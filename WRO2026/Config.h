@@ -190,19 +190,6 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /**
-     * @brief Default cruise PWM for `Drive.turnDeg` / `Drive.turnToYaw`, in [-100, 100].
-     *
-     * Consumed as the default value of `TurnDegBuilder::_power` / `TurnToYawBuilder::_power`
-     * and propagated into the custom TurnGyro state machine's `_turnCruisePwm` cruise
-     * magnitude. Callers can override per-call via `.setPower(...)` on the builder; the
-     * slow-zone PWM is always `Config::TURN_SLOW_SPEED_PWM` and is not overridable.
-     *
-     * @note Replaces the older "`DriveDC.TurnGyro` power" semantic — the lower-MCU
-     *       TurnGyro is no longer called.
-     */
-    constexpr int16_t TURN_POWER = 50;
-
-    /**
      * @brief Default wheel-pattern selector for the custom TurnGyro state machine.
      *
      * Encoding (NEW — set by the 2026-05-17 PR4 plan; intentionally different from
@@ -247,11 +234,14 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /**
-     * @brief Cruise PWM during the fast phase of the custom TurnGyro state machine,
-     *        in the [-100, 100] DriveDC range.
+     * @brief Cruise PWM for `Drive.turnDeg` / `Drive.turnToYaw`, in [-100, 100].
      *
-     * Applied until the heading error falls within ±TURN_SLOW_ZONE_DEG of the target.
-     * Replaces the lower-MCU TurnGyro's internal fixed speed.
+     * Two roles:
+     *   1. Default value of `TurnDegBuilder::_power` / `TurnToYawBuilder::_power`;
+     *      callers can override per-call via `.setPower(...)` on the builder.
+     *   2. Fast-phase PWM magnitude for the custom TurnGyro state machine. Applied
+     *      until the heading error falls within ±TURN_SLOW_ZONE_DEG of the target,
+     *      after which the turn ramps down to `TURN_SLOW_SPEED_PWM` (not overridable).
      *
      * @note TODO: tune on real chassis.
      */

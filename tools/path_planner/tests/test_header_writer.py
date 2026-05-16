@@ -259,7 +259,11 @@ def test_edge_types_use_enum(emit_targets):
 
 def test_compute_source_hash_is_full_sha256():
     digest = compute_source_hash(_TOY_FIELD_SOURCE)
-    expected = hashlib.sha256(_TOY_FIELD_SOURCE.read_bytes()).hexdigest()
+    # Mirror compute_source_hash's CRLF->LF normalization so the test is stable
+    # on Windows checkouts with git autocrlf=true (raw bytes would otherwise
+    # contain CRLF and diverge from the LF-normalized digest).
+    normalized = _TOY_FIELD_SOURCE.read_bytes().replace(b"\r\n", b"\n")
+    expected = hashlib.sha256(normalized).hexdigest()
     assert digest == expected
     assert len(digest) == 64
     assert all(c in "0123456789abcdef" for c in digest)

@@ -24,7 +24,7 @@
  *  - **Time-bounded** (`driveTime(sec)`) — same fluent shape as `driveDist`.
  *  - **Turns** (`turnDeg(deg)` / `turnToYaw(yaw)`) — fluent builders; **sync-blocking by
  *    default**, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`, power
- *    `Config::TURN_POWER`. Both relative (`turnDeg`) and absolute (`turnToYaw`) targets are
+ *    `Config::TURN_CRUISE_PWM`. Both relative (`turnDeg`) and absolute (`turnToYaw`) targets are
  *    supported. Chain `.async()` to opt out.
  *
  * @note The underlying `MiniR4.DriveDC` lower-MCU API exposes ONE task-done bit, so this
@@ -318,7 +318,7 @@ public:
      *
      * Returns a `TurnDegBuilder` that executes the turn when the temporary destructs.
      * Defaults are: non-blocking, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
-     * power `Config::TURN_POWER`.
+     * power `Config::TURN_CRUISE_PWM`.
      *
      * @param deg Relative yaw delta in degrees. Positive = whichever direction the lower MCU
      *            interprets as positive yaw (typically counter-clockwise).
@@ -1703,7 +1703,7 @@ private:
  * @brief Fluent builder for `Drive.turnDeg(deg)` — relative-yaw-delta turn.
  *
  * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
- * Defaults: power `Config::TURN_POWER`, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
+ * Defaults: power `Config::TURN_CRUISE_PWM`, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
  * blocking `true`.
  */
 class [[nodiscard]] TurnDegBuilder
@@ -1872,7 +1872,7 @@ public:
 private:
     /**
      * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
-     *        `Config::TURN_POWER` as the documented default.
+     *        `Config::TURN_CRUISE_PWM` as the documented default.
      */
     int16_t _resolvePower() const
     {
@@ -1884,12 +1884,12 @@ private:
         {
             return presetToPwm(_preset);
         }
-        return Config::TURN_POWER;
+        return Config::TURN_CRUISE_PWM;
     }
 
     DriveClass&         _drive;
     int16_t             _deg;
-    int16_t             _power         = Config::TURN_POWER;
+    int16_t             _power         = Config::TURN_CRUISE_PWM;
     bool                _powerExplicit = false;
     Config::SpeedPreset _preset        = Config::SpeedPreset::NORMAL;
     bool                _presetSet     = false;
@@ -2072,7 +2072,7 @@ public:
 private:
     /**
      * @brief Resolve the final PWM power: explicit `setPower` wins, then `setPreset`, then
-     *        `Config::TURN_POWER`.
+     *        `Config::TURN_CRUISE_PWM`.
      */
     int16_t _resolvePower() const
     {
@@ -2084,12 +2084,12 @@ private:
         {
             return presetToPwm(_preset);
         }
-        return Config::TURN_POWER;
+        return Config::TURN_CRUISE_PWM;
     }
 
     DriveClass&         _drive;
     int16_t             _yaw;
-    int16_t             _power         = Config::TURN_POWER;
+    int16_t             _power         = Config::TURN_CRUISE_PWM;
     bool                _powerExplicit = false;
     Config::SpeedPreset _preset        = Config::SpeedPreset::NORMAL;
     bool                _presetSet     = false;
