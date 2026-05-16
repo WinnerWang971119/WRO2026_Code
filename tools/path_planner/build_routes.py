@@ -64,6 +64,7 @@ from tools.path_planner.header_writer import (  # noqa: E402
     DEFAULT_SOURCE_PATH,
     emit_routes,
 )
+from tools.path_planner.pipeline_config import PIPELINE_CONFIG  # noqa: F401 -- baked into routes.cpp by header_writer
 from tools.path_planner.planner import compute_all_pairs_next_hop  # noqa: E402
 from tools.path_planner.validator import FieldDataError, validate  # noqa: E402
 from tools.path_planner.visualizer import (  # noqa: E402
@@ -159,6 +160,12 @@ def _run(
 
     # 1. Validate the field-data module before doing any geometry work.
     #    Validation failure is fatal: routes.h must NOT be written.
+    log(
+        f"pipeline_config: line={PIPELINE_CONFIG.line.name}, "
+        f"blind={PIPELINE_CONFIG.blind.name}, "
+        f"projection={PIPELINE_CONFIG.projection.name}, "
+        f"turn={PIPELINE_CONFIG.turn.name}"
+    )
     log("validating field_data.py ...")
     try:
         validate(field_data)
