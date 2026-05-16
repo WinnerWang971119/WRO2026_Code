@@ -398,6 +398,7 @@ def _build_routes_h_lines(
     )
     lines.append(_INDENT + "struct BlindMove { BlindAction action; float value; };")
     lines.append(_INDENT + "struct GoalApproach {")
+    lines.append(_INDENT * 2 + "uint8_t goal_node;")
     lines.append(_INDENT * 2 + "uint8_t entry_node;")
     lines.append(_INDENT * 2 + "float   approach_heading_deg;")
     lines.append(_INDENT * 2 + "const BlindMove* blind_moves;")
@@ -603,13 +604,21 @@ def _emit_blind_arrays_and_goal_approach(
                 "GOAL_APPROACH[" + repr(goal) + "].entry references "
                 "unknown node " + repr(entry)
             )
+        if goal not in index_of:
+            raise KeyError(
+                "GOAL_APPROACH[" + repr(goal) + "] references "
+                "unknown goal node " + repr(goal)
+            )
+        goal_index = index_of[goal]
         entry_index = index_of[entry]
         approach_heading = _format_float(spec["approach_heading_deg"])
         symbol = _blind_array_symbol(goal)
         count = len(spec["blind_moves"])
         approach_lines.append(
             _INDENT * 2
-            + "{ /*entry_node=*/" + str(entry_index)
+            + "{ /*goal_node=*/" + str(goal_index)
+            + " /*=" + goal + "*/, "
+            + "/*entry_node=*/" + str(entry_index)
             + " /*=" + entry + "*/, "
             + "/*approach_heading_deg=*/" + approach_heading + ", "
             + "/*blind_moves=*/" + symbol + ", "

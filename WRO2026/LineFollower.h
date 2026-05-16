@@ -193,6 +193,28 @@ public:
      */
     LineFollowerEnableBuilder& setReverse(bool reverse);
 
+    /**
+     * @brief Stop after the chassis has travelled @p cm centimetres along the line.
+     *
+     * Used by `PathTracker` to traverse PROJECTION edges (line segments terminated by a
+     * waypoint that has no physical intersection marker, so the runtime stops by encoder
+     * distance). When the gate trips, `update()` self-disables (with active brake by
+     * default) and latches a one-shot `isDistanceReached()` flag the consumer reads to
+     * advance its FSM.
+     *
+     * @param cm  Target travel in centimetres. Non-positive values are silently clamped
+     *            to zero — the gate trips on the first tick, equivalent to "disable now."
+     * @return    `*this` for fluent chaining.
+     * @note Implies `setEnabled(true)` — has no effect on a `setEnabled(false)` transition.
+     * @note The gate measures the absolute average of the two wheels' encoder deltas via
+     *       `encDegToCm(...)` (`WROMath.h`). Encoder counters are sampled at the moment
+     *       the builder applies (in `_applyEnableBuilder`).
+     * @note A second `setEnabled(true).setDistanceTarget(cm)` after the gate trips
+     *       re-arms cleanly — the controller resamples the encoder counters as its new
+     *       baseline.
+     */
+    LineFollowerEnableBuilder& setDistanceTarget(float cm);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
@@ -205,6 +227,8 @@ private:
     float               _accel               = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
     bool                _hasReverseOverride  = false;  ///< True iff `_reverseOverride` is meaningful.
     bool                _reverseOverride     = false;  ///< Pending reverse flag; only honored when override flag set.
+    bool                _hasDistanceTarget   = false;  ///< True iff `_distanceTargetCm` is meaningful.
+    float               _distanceTargetCm    = 0.0f;   ///< Pending distance gate (cm); only honored when flag set.
     bool                _executed            = false;  ///< Guards against repeated apply.
 };
 
@@ -354,24 +378,41 @@ public:
     MatrixLineTracer* getTracer();
 
     /**
+     * @brief Read-and-clear: was the distance gate tripped since the last query?
+     *
+     * `update()` sets the internal flag exactly once when the encoder-distance gate fires
+     * and self-disables the controller. The flag stays set until `isDistanceReached()` is
+     * called, at which point it is cleared. Mirrors `Intersection::isAtIntersection()`'s
+     * read-and-clear contract — the consumer (PathTracker's PROJECTION_FOLLOW state) is
+     * the single owner of the latched event.
+     *
+     * @return `true` exactly once after each gate trip; `false` otherwise.
+     * @note Intentionally non-`const` because it mutates `_distanceReached`.
+     */
+    bool isDistanceReached();
+
+    /**
      * @brief Internal apply-hook called by `LineFollowerEnableBuilder::~`.
      *
      * Public only because the builder is a free-standing class; conceptually private. Do not
      * call from user code — invoke `setEnabled(...)` instead and let the builder destructor
      * dispatch here.
      *
-     * @param targetEnabled     Final value of `_enabled` after the transition.
-     * @param brake             Whether to call `Drive.stop(true)` on a disable transition;
-     *                          ignored when `targetEnabled == true`.
-     * @param hasPresetOverride `true` if `preset` should overwrite the active preset.
-     * @param preset            New preset; honored only when `hasPresetOverride` is true.
-     * @param tShape            On an enable transition, ramps cruise from 0 up to the
-     *                          resolved preset over an implicit distance — see
-     *                          `LineFollowerEnableBuilder::tShape()`.
-     * @param accel             Ramp rate in PWM-per-cm; used only when `tShape == true` AND
-     *                          `targetEnabled == true`.
-     * @param hasReverseOverride `true` if `reverse` should overwrite the active direction.
-     * @param reverse           New reverse flag; honored only when `hasReverseOverride` is true.
+     * @param targetEnabled       Final value of `_enabled` after the transition.
+     * @param brake               Whether to call `Drive.stop(true)` on a disable transition;
+     *                            ignored when `targetEnabled == true`.
+     * @param hasPresetOverride   `true` if `preset` should overwrite the active preset.
+     * @param preset              New preset; honored only when `hasPresetOverride` is true.
+     * @param tShape              On an enable transition, ramps cruise from 0 up to the
+     *                            resolved preset over an implicit distance — see
+     *                            `LineFollowerEnableBuilder::tShape()`.
+     * @param accel               Ramp rate in PWM-per-cm; used only when `tShape == true` AND
+     *                            `targetEnabled == true`.
+     * @param hasReverseOverride  `true` if `reverse` should overwrite the active direction.
+     * @param reverse             New reverse flag; honored only when `hasReverseOverride`.
+     * @param hasDistanceTarget   `true` if `distanceTargetCm` should arm the gate.
+     * @param distanceTargetCm    Target travel in cm; honored only when flag set AND
+     *                            `targetEnabled == true`. Encoder baseline is captured here.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
@@ -380,7 +421,9 @@ public:
                              bool                tShape,
                              float               accel,
                              bool                hasReverseOverride,
-                             bool                reverse);
+                             bool                reverse,
+                             bool                hasDistanceTarget,
+                             float               distanceTargetCm);
 
 private:
     // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
@@ -399,6 +442,15 @@ private:
     int32_t _tShapeStartEnc  = 0;        ///< Encoder reading at enable.
     int16_t _tShapeStartPwm  = 0;        ///< Starting cruise (typically 0).
     int16_t _tShapeTargetPwm = 0;        ///< Final cruise (resolved from preset).
+
+    // Distance-target gate state (`.setDistanceTarget(cm)` on the enable builder, used by
+    // PathTracker's PROJECTION_FOLLOW state). When armed, `update()` evaluates the average
+    // absolute encoder delta after the PID branch and self-disables (active brake) on hit.
+    bool    _distanceTargetActive = false;    ///< Gate armed.
+    float   _distanceTargetCm     = 0.0f;     ///< Target travel from baseline.
+    int32_t _distanceStartEncL    = 0;        ///< Left encoder reading at arm.
+    int32_t _distanceStartEncR    = 0;        ///< Right encoder reading at arm.
+    bool    _distanceReached      = false;    ///< One-shot latch; cleared by isDistanceReached().
 };
 
 /**

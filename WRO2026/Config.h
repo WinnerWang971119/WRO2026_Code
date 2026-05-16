@@ -408,6 +408,50 @@ namespace Config
      * @brief Consecutive NONE samples required to release before re-arming.
      */
     constexpr uint8_t INTERSECTION_RELEASE_TICKS = 2;
+
+    // =========================================================================================
+    // PathTracker queue + drain timeout + heading tolerance (Phase 2 PR2).
+    //
+    // PathTracker.goTo() returns a fluent builder that auto-enqueues a goal on the FIFO. The
+    // destructor sync-blocks by default (drains the queue via the registered cooperative tick
+    // callback) so source-order chains like
+    //
+    //   PathTracker.goTo("C");
+    //   PathTracker.goTo("G");
+    //
+    // execute one-after-the-other with no caller polling. Chain `.async()` on the builder to
+    // opt out (auto-planner case where the caller ticks loop() and polls PathTracker.isIdle()).
+    //
+    // See docs/plans/2026-05-06-phase2-pr2-path-tracker-runtime.md and
+    // user_fluent_api_preference.md for the rationale.
+    // =========================================================================================
+
+    /**
+     * @brief Maximum number of pending goTo() entries the PathTracker queue can hold.
+     *
+     * Sized to comfortably exceed a typical multi-step demo or mission segment. Overflow
+     * drops the new entry and prints a Serial warning — that is a caller bug.
+     */
+    constexpr uint8_t PATH_QUEUE_CAPACITY = 8;
+
+    /**
+     * @brief Per-goal worst-case ceiling used by `PathTracker._drainBlocking` to bound
+     *        the synchronous spin (mirrors `DRIVE_DRAIN_TIMEOUT_MS_PER_CMD`).
+     *
+     * 60 s per goal accommodates a worst-case multi-edge traverse on the toy graph at slow
+     * cruise. Drain budget is `(qCount + 1) * PATH_DRAIN_TIMEOUT_MS_PER_GOAL`. On expiry,
+     * the chassis is stopped, the queue cleared, and a fault is latched.
+     */
+    constexpr uint32_t PATH_DRAIN_TIMEOUT_MS_PER_GOAL = 60000;
+
+    /**
+     * @brief Tolerance (degrees) below which `PathTracker` skips an absolute turn dispatch.
+     *
+     * Avoids a sub-degree twitch at every edge join when consecutive edges happen to be
+     * colinear (e.g. mid-segment projection-node hand-off). 0.5 deg is well below the
+     * `Drive.turnToYaw` resolvable range.
+     */
+    constexpr float NAV_TURN_TOLERANCE_DEG = 0.5f;
 }    // namespace Config
 
 #endif    // CONFIG_H

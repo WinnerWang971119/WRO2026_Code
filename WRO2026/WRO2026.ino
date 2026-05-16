@@ -1,44 +1,52 @@
 /**
  * @file WRO2026.ino
- * @brief WRO 2026 Mosaic Masters — Phase 1 entry sketch.
+ * @brief WRO 2026 Mosaic Masters — Phase 2 PR2 entry sketch.
  * @author WRO 2026
  *
  * @details
- * Phase 1 deliverable: a thin entry that wires every module together. `setup()` follows the
- * documented MatrixMiniR4 initialisation order; `loop()` delegates to `cooperativeTick()` —
- * a clean tick across Drive -> LineFollower -> Intersection -> Manipulator -> EventTrace,
- * with NO business logic. The same `cooperativeTick()` is registered with
- * `Drive.setTickCallback(...)` so that during a Drive sync-blocking spin, every other module
- * keeps running.
+ * Phase 2 PR2 deliverable: a thin entry that wires every module together. `setup()` follows
+ * the documented MatrixMiniR4 initialisation order; `loop()` delegates to
+ * `cooperativeTick()` — a clean tick across
+ * Drive -> LineFollower -> Intersection -> Manipulator -> PathTracker -> EventTrace,
+ * with NO business logic. The same `cooperativeTick()` is registered with both
+ * `Drive.setTickCallback(...)` and `PathTracker.setTickCallback(...)` so that during a
+ * sync-blocking spin (Drive's `_drainBlocking` or PathTracker's goTo() drain), every other
+ * module continues to run.
  *
- * Define `DEMO_MODE` at compile time (e.g. via the IDE custom-build flags or by uncommenting
- * the line below) to enable a tiny smoke routine triggered by `BTN_UP`.
+ * Define `NAV_DEMO_MODE` at compile time (e.g. via the IDE custom-build flags or by
+ * uncommenting the line below) to enable the Phase 2 navigation demo: the operator
+ * presses BTN_UP once, which captures the IMU yaw offset and runs the hardcoded sequence
+ * `goTo("C")` then `goTo("G")`. The Phase 1 `DEMO_MODE` smoke (drive 30 cm + 90 deg turn)
+ * is replaced — every primitive it exercised is exercised by the nav demo through
+ * PathTracker -> Drive / LineFollower / Intersection.
  *
  * @note No business logic in `loop()`. Per ARCHITECTURE.md iron rule 1, every module's
  *       `update()` is non-blocking; the loop just dispatches them via `cooperativeTick()`.
- * @note This sketch contains no `delay()` itself. The Drive sync-default path uses
- *       `delay(2)` inside `_drainBlocking` — the documented allowed-delay site for
- *       synchronous-orchestration paths, off the cooperative tick chain.
+ * @note The cooperative tick order matters — see `cooperativeTick()` doxygen. PathTracker
+ *       is AFTER Intersection so its read-and-clear edge consumption sees this tick's event.
  */
 
-// #define DEMO_MODE   // Uncomment to enable the BTN_UP smoke routine.
+// #define NAV_DEMO_MODE   // Uncomment to enable the BTN_UP nav demo.
 
 #include <MatrixMiniR4.h>
 
 #include "Config.h"
 #include "Drive.h"
 #include "EventTrace.h"
+#include "FieldMap.h"
 #include "Intersection.h"
 #include "LineFollower.h"
+#include "Localization.h"
 #include "Manipulator.h"
+#include "PathTracker.h"
 
 namespace
 {
     /**
-     * @brief Latches `true` if any module's `begin()` returned `false` during `setup()`
-     *        (code review F8). When set, `loop()` suppresses every motion-issuing path
-     *        (currently just the DEMO_MODE block) so a partially-initialised robot does
-     *        not move with stale tuning, an unbound tracer, or a never-OLED'd display.
+     * @brief Latches `true` if any module's `begin()` returned `false` during `setup()`.
+     *        When set, `loop()` suppresses every motion-issuing path so a partially-
+     *        initialised robot does not move with stale tuning, an unbound tracer, or a
+     *        never-OLED'd display.
      *
      * @note The cooperative tick still runs so the OLED keeps rendering the `BOOT FAIL`
      *       trace lines — the operator needs to see what went wrong.
@@ -46,37 +54,31 @@ namespace
     bool _setupFailed = false;
 }    // namespace
 
-#ifdef DEMO_MODE
+#ifdef NAV_DEMO_MODE
 namespace
 {
-    /**
-     * @brief Distance, in centimetres, that the DEMO_MODE smoke routine drives forward.
-     *
-     * Lifted out of `loop()` so the sketch obeys the project's strict no-magic-numbers rule
-     * even for demo-only constants.
-     */
-    static constexpr float DEMO_DIST_CM = 30.0f;
-
-    /**
-     * @brief Relative yaw delta, in degrees, that the DEMO_MODE smoke routine turns through
-     *        after the straight-line segment.
-     */
-    static constexpr int16_t DEMO_TURN_DEG = 90;
-
-    bool _demoArmed = false;    ///< Latches the one-shot demo so re-presses do nothing.
-    bool _btnPrev   = false;    ///< Previous BTN_UP sample, for rising-edge detection.
+    bool _navArmed = false;    ///< Latches the one-shot demo so re-presses do nothing.
+    bool _btnPrev  = false;    ///< Previous BTN_UP sample, for rising-edge detection.
 }    // namespace
-#endif    // DEMO_MODE
+#endif    // NAV_DEMO_MODE
 
 /**
  * @brief Cooperative tick — calls every module's `update()` exactly once.
  *
- * Used as both the body of `loop()` and as the registered tick callback for
- * `Drive.setTickCallback()` so that during a sync-blocking Drive command, every
- * other module continues to run (EventTrace renders, LineFollower polls the
- * tracer, Intersection latches edges, Manipulator advances its state machine).
+ * Used as the body of `loop()` AND as the registered tick callback for both
+ * `Drive.setTickCallback()` and `PathTracker.setTickCallback()` so every other module
+ * continues to tick during either sync-blocking spin.
  *
- * Order matters — see `loop()` doxygen for the rationale.
+ * Order matters:
+ *  - `Drive.update()`        — flushes any completed bounded-task flags first so downstream
+ *                              modules see fresh state.
+ *  - `LineFollower.update()` — reads the tracer once and computes the corr.
+ *  - `Intersection.update()` — reuses the same tracer read on the same tick.
+ *  - `Manipulator.update()`  — currently a stub; kept in the chain so Phase 3 just fills it
+ *                              in without touching this file.
+ *  - `PathTracker.update()`  — advances the per-edge FSM. AFTER Intersection so its
+ *                              `isAtIntersection()` consumes this tick's edge.
+ *  - `EventTrace.update()`   — samples this tick's truth from each module above.
  */
 void cooperativeTick()
 {
@@ -84,6 +86,7 @@ void cooperativeTick()
     LineFollower.update();
     Intersection.update();
     Manipulator.update();
+    PathTracker.update();
     EventTrace.update();
 }
 
@@ -91,15 +94,17 @@ void cooperativeTick()
  * @brief Arduino entry: bring up the lower MCU and every WRO module in dependency order.
  *
  * Order is fixed and must not be reshuffled:
- *   1. `MiniR4.begin()`                    — lower MCU, IMU, motors, servos, OLED.
- *   2. `Serial.begin(115200)`              — telemetry console.
- *   3. `MiniR4.PWR.setBattCell(...)`       — must match the physical pack.
- *   4. `Drive.begin()`                     — drivebase + PIDs + reverse flags.
- *   5. `LineFollower.begin()`              — MXLineTracer + outer-loop PID.
- *   6. `Intersection.begin()`              — pattern detector (reuses tracer).
- *   7. `Manipulator.begin()`               — Phase-3 stub kept in the chain.
- *   8. `EventTrace.begin()`                — OLED ring buffer; pushed last so the boot
- *                                            event is the first line on screen.
+ *   1. `MiniR4.begin()`                 — lower MCU, IMU, motors, servos, OLED.
+ *   2. `Serial.begin(115200)`           — telemetry console.
+ *   3. `MiniR4.PWR.setBattCell(...)`    — must match the physical pack.
+ *   4. `Drive.begin()`                  — drivebase + PIDs + reverse flags.
+ *   5. `LineFollower.begin()`           — MXLineTracer + outer-loop PID.
+ *   6. `Intersection.begin()`           — pattern detector (reuses tracer).
+ *   7. `Manipulator.begin()`            — Phase-3 stub kept in the chain.
+ *   8. `Localization.begin()`           — currentNode, yawOffsetDeg unzeroed.
+ *   9. `PathTracker.begin()`            — FSM + queue idle.
+ *  10. `EventTrace.begin()`             — OLED ring buffer; pushed last so the boot
+ *                                          event is the first line on screen.
  */
 void setup()
 {
@@ -114,95 +119,99 @@ void setup()
 
     // 4. Initialise our modules in dependency order. Every `begin()` returns a `bool`
     //    success indicator — accumulate them here so a partial init never reports
-    //    "ready" and motion is gated for the rest of the run (code review F8).
+    //    "ready" and motion is gated for the rest of the run.
     const bool driveOk = Drive.begin();
     const bool lineOk  = LineFollower.begin();
     const bool intOk   = Intersection.begin();
     const bool manipOk = Manipulator.begin();
+    const bool locOk   = Localization.begin();
+    const bool pathOk  = PathTracker.begin();
     const bool traceOk = EventTrace.begin();
 
-    // Wire up the tick callback so Drive's sync-blocking builders keep every other
-    // module alive during their spin. Without this, EventTrace would not render and
-    // LineFollower would not poll the tracer while a Drive command is in flight.
+    // Wire up the tick callbacks so any sync-blocking spin keeps every other module alive.
     Drive.setTickCallback(cooperativeTick);
+    PathTracker.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(driveOk && lineOk && intOk && manipOk && traceOk);
+    _setupFailed = !(driveOk && lineOk && intOk && manipOk && locOk && pathOk && traceOk);
 
     // 5. Surface a boot marker. On failure, name the offending modules so the operator
-    //    can diagnose without re-reading every begin() body. EventTrace.begin() may
-    //    itself have failed — push the events anyway; if the OLED is dead the Serial
-    //    output is the fallback channel.
+    //    can diagnose without re-reading every begin() body.
     if (_setupFailed)
     {
-        Serial.println(F("WRO2026 Phase 1 BOOT FAIL — module begin() returned false:"));
-        if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
-        if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
-        if (!intOk)    { Serial.println(F("  - Intersection")); EventTrace.pushEvent("FAIL INT"); }
-        if (!manipOk)  { Serial.println(F("  - Manipulator"));  EventTrace.pushEvent("FAIL MANIP"); }
-        if (!traceOk)  { Serial.println(F("  - EventTrace"));   EventTrace.pushEvent("FAIL TRACE"); }
+        Serial.println(F("WRO2026 Phase 2 BOOT FAIL — module begin() returned false:"));
+        if (!driveOk)  { Serial.println(F("  - Drive"));         EventTrace.pushEvent("FAIL DRIVE"); }
+        if (!lineOk)   { Serial.println(F("  - LineFollower"));  EventTrace.pushEvent("FAIL LINE"); }
+        if (!intOk)    { Serial.println(F("  - Intersection"));  EventTrace.pushEvent("FAIL INT"); }
+        if (!manipOk)  { Serial.println(F("  - Manipulator"));   EventTrace.pushEvent("FAIL MANIP"); }
+        if (!locOk)    { Serial.println(F("  - Localization"));  EventTrace.pushEvent("FAIL LOC"); }
+        if (!pathOk)   { Serial.println(F("  - PathTracker"));   EventTrace.pushEvent("FAIL PATH"); }
+        if (!traceOk)  { Serial.println(F("  - EventTrace"));    EventTrace.pushEvent("FAIL TRACE"); }
         EventTrace.pushEvent("BOOT FAIL");
     }
     else
     {
         EventTrace.pushEvent("BOOT OK");
-        Serial.println(F("WRO2026 Phase 1 ready."));
+        Serial.println(F("WRO2026 Phase 2 ready."));
     }
 }
 
 /**
  * @brief Arduino main loop: one cooperative tick across every module.
  *
- * The body is just `cooperativeTick();` — the same function is also registered with
- * `Drive.setTickCallback()` so it runs during sync-blocking Drive commands too. Order of
- * the calls inside `cooperativeTick()` matters:
- *   - `Drive.update()`        — flushes any completed bounded-task flags first so downstream
- *                               modules see fresh state.
- *   - `LineFollower.update()` — reads the tracer once and computes the corr.
- *   - `Intersection.update()` — reuses the same tracer read on the same tick.
- *   - `Manipulator.update()`  — currently a stub; kept in the chain so Phase 3 just fills it
- *                               in without touching this file.
- *   - `EventTrace.update()`   — samples this tick's truth from each module above.
- *
- * No business logic lives here. The optional DEMO_MODE block is the only exception. Its
- * `Drive.driveDist(...)` / `Drive.turnDeg(...)` calls are now sync-blocking by default — the
- * registered tick callback keeps every other module alive during those blocks, so the demo
- * runs to completion in a single `loop()` iteration.
+ * The body is just `cooperativeTick();` outside `NAV_DEMO_MODE`. With `NAV_DEMO_MODE`
+ * defined, an additional BTN_UP rising-edge handler captures the IMU yaw offset and runs
+ * a hardcoded `goTo("C"); goTo("G");` sequence. Both PathTracker `goTo` calls are
+ * sync-blocking by default — the registered cooperative tick callback keeps every other
+ * module alive during their drain.
  */
 void loop()
 {
     cooperativeTick();
 
-#ifdef DEMO_MODE
-    // Tiny smoke routine: on a BTN_UP rising edge, drive a short straight then a 90-degree
-    // turn. Verifies wiring + PIDs only — line-following is intentionally NOT exercised
-    // here because `Drive::_dispatchNext()` auto-disables LineFollower whenever a bounded
-    // or profiled move is dispatched (the race-guard in Drive.cpp). Calling
-    // `LineFollower.setEnabled(true)` immediately before `driveDist(...)` would be
-    // immediately undone, so the line of code is omitted to keep the demo honest.
-    //
-    // `_demoArmed` makes the demo a one-shot per power-cycle; pressing BTN_UP again after
-    // the first activation does nothing. This is intentionally defensive — re-firing the
-    // demo while a bounded task from the previous run is still pending would race the
-    // shared task-done flag inside `DriveClass`. Both verbs sync-block by default; BTN_UP
-    // polling resumes naturally once they return.
-    //
-    // Motion gate (F8): if any module's `begin()` failed in setup(), refuse to issue any
-    // motion. The OLED + Serial trail already explained which module bailed; surfacing
-    // a stale-tuning move on top would just hide the failure.
+#ifdef NAV_DEMO_MODE
+    // Motion gate: if any module's begin() failed, refuse to issue any motion. The OLED +
+    // Serial trail already explained which module bailed; surfacing a stale-tuning move on
+    // top would just hide the failure.
     if (_setupFailed)
     {
         return;
     }
 
+    // One-shot per power-cycle on the BTN_UP rising edge. Capture the IMU yaw offset NOW
+    // (operator has just placed the chassis on Routes::START_NODE facing the start
+    // heading), push a marker, then chain the hardcoded nav demo. Each goTo() drains
+    // its own queue at end-of-statement, so the second call only starts after the first
+    // has arrived.
     const bool btnNow = MiniR4.BTN_UP.getState();
-    if (btnNow && !_btnPrev && !_demoArmed)
+    if (btnNow && !_btnPrev && !_navArmed)
     {
-        _demoArmed = true;
-        EventTrace.pushEvent("DEMO RUN");
-        Drive.holdYaw();
-        Drive.driveDist(DEMO_DIST_CM).setPower(Config::CRUISE_SPEED).setMode(DriveMode::GYRO);
-        Drive.turnDeg(DEMO_TURN_DEG);    // sync relative turn — defaults to Config::TURN_POWER, mode 0.
+        _navArmed = true;
+
+        const bool zeroed = Localization.zeroHeadingFromCurrent();
+        if (!zeroed)
+        {
+            EventTrace.pushEvent("NAV ZERO FAIL");
+            return;
+        }
+        EventTrace.pushEvent("NAV ZERO");
+
+        PathTracker.goTo("C");    // sync-blocks until C reached
+        if (PathTracker.hasFault())
+        {
+            EventTrace.pushEvent("NAV FAULT");
+            return;
+        }
+        EventTrace.pushEvent("NAV ARR C");
+
+        PathTracker.goTo("G");    // sync-blocks until G reached + blind moves done
+        if (PathTracker.hasFault())
+        {
+            EventTrace.pushEvent("NAV FAULT");
+            return;
+        }
+        EventTrace.pushEvent("NAV ARR G");
+        EventTrace.pushEvent("NAV DONE");
     }
     _btnPrev = btnNow;
-#endif    // DEMO_MODE
+#endif    // NAV_DEMO_MODE
 }
