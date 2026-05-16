@@ -3,7 +3,10 @@ param(
     [string]$PythonPath,
 
     [Parameter(Mandatory = $true)]
-    [string]$ScriptPath
+    [string]$ScriptPath,
+
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$ScriptArgs = @()
 )
 
 Set-StrictMode -Version Latest
@@ -14,10 +17,10 @@ if (-not (Test-Path $PythonPath)) {
 }
 
 if (-not (Test-Path $ScriptPath)) {
-    throw "Path planner script was not found at '$ScriptPath'. Update wro2026.pathPlanner.scriptPath."
+    throw "Path planner script was not found at '$ScriptPath'. Update wro2026.pathPlanner.scriptPath or wro2026.sim.scriptPath."
 }
 
-& $PythonPath $ScriptPath
+& $PythonPath $ScriptPath @ScriptArgs
 if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
