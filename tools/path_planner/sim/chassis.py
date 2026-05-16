@@ -97,6 +97,17 @@ class VirtualChassis:
         """
         self._advance(cm)
 
+    def follow_line_to_distance(self, cm: float) -> None:
+        """Advance the chassis straight forward by @p cm.
+
+        Mirrors the runtime EDGE_PROJECTION dispatch (line-follow stopped
+        by encoder distance). The sim does not model lateral offset for
+        line-following, so this is a thin wrapper over :meth:`forward`.
+
+        :param cm: encoder-gated distance in centimetres (positive).
+        """
+        self.forward(cm)
+
     def forward(self, cm: float) -> None:
         """Translate the chassis forward by @p cm (open-loop blind move)."""
         self._advance(cm)
