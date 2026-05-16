@@ -122,3 +122,76 @@ def test_compute_path_cost_missing_edge_raises() -> None:
     assert not g.has_edge("A", "G")
     with pytest.raises(KeyError):
         compute_path_cost(g, ["A", "G"], real_field_data.COST_BLIND_MULTIPLIER)
+
+
+# -- pivot compensation tests (T13) ------------------------------------------
+
+
+def test_pivot_compensation_zero_turn_no_displacement():
+    """A 0 deg pivot compensates to no geometry change on the following edge."""
+    from tools.path_planner.planner import compute_pivot_compensation
+
+    adj_dist, adj_heading = compute_pivot_compensation(
+        turn_deg=0.0,
+        track_cm=15.0,
+        next_edge_dist=42.0,
+        next_edge_heading=90.0,
+    )
+    assert adj_dist == pytest.approx(42.0)
+    assert adj_heading == pytest.approx(90.0)
+
+
+def test_pivot_compensation_90deg_with_track_15cm_yields_75cm_reduction():
+    """90 deg pivot, TRACK_CM=15 -> chord 10.6066cm, forward projection 7.5cm.
+
+    chord_cm = 2 * (15/2) * sin(45 deg) = 15 * sqrt(2)/2 ~= 10.6066
+    forward_component = chord_cm * sin(45 deg) = 10.6066 * sqrt(2)/2 = 7.5000
+    adjusted_dist = 30 - 7.5 = 22.5
+    """
+    from tools.path_planner.planner import compute_pivot_compensation
+
+    adj_dist, adj_heading = compute_pivot_compensation(
+        turn_deg=90.0,
+        track_cm=15.0,
+        next_edge_dist=30.0,
+        next_edge_heading=90.0,
+    )
+    assert adj_dist == pytest.approx(22.5, abs=1e-6)
+    assert adj_heading == pytest.approx(90.0)
+
+
+def test_pivot_compensation_neg_90deg_yields_same_magnitude():
+    """Negative turn (right pivot) yields same magnitude as positive turn."""
+    from tools.path_planner.planner import compute_pivot_compensation
+
+    pos, _ = compute_pivot_compensation(+90.0, 15.0, 30.0, 0.0)
+    neg, _ = compute_pivot_compensation(-90.0, 15.0, 30.0, 0.0)
+    assert pos == pytest.approx(neg)
+
+
+def test_pivot_compensation_clamps_to_nonneg_distance():
+    """If the forward component exceeds next_edge_dist, adjusted_dist clamps to 0."""
+    from tools.path_planner.planner import compute_pivot_compensation
+
+    # 180 deg pivot with TRACK_CM=15: chord = 15, forward_component = 15 * 1 = 15
+    # next_edge_dist = 5 -> adjusted should clamp to 0
+    adj_dist, _ = compute_pivot_compensation(180.0, 15.0, 5.0, 0.0)
+    assert adj_dist == pytest.approx(0.0)
+
+
+def test_apply_pivot_compensations_raises_on_multi_successor():
+    """A pivot edge whose destination has >1 out-edge is rejected."""
+    from tools.path_planner.graph_builder import Pivot
+    from tools.path_planner.planner import apply_pivot_compensations
+
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_node("C")
+    g.add_node("D")
+    g.add_edge("A", "B", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
+    g.add_edge("B", "C", distance_cm=20.0, heading_deg=90.0)
+    g.add_edge("B", "D", distance_cm=15.0, heading_deg=-90.0)
+
+    with pytest.raises(ValueError, match="pivot"):
+        apply_pivot_compensations(g, track_cm=15.0)
