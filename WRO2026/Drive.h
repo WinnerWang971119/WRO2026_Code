@@ -674,6 +674,17 @@ private:
      */
     uint8_t _turnMotorMode = 0;
 
+    int16_t _turnCruisePwm = Config::TURN_CRUISE_PWM;
+    ///< @brief Cruise PWM magnitude for the in-flight turn profile. Captured from
+    ///<        `cmd.power` at dispatch time by `_execTurnDeg`/`_execTurnToYaw`,
+    ///<        defaulting to `Config::TURN_CRUISE_PWM` when the caller did not
+    ///<        explicitly override via `.setPower(...)` on the builder. Non-positive
+    ///<        values fall back to the Config default to keep the sign-direction
+    ///<        logic in `_updateTurnProfile` clean (sign comes from `_turnDeltaSign`,
+    ///<        magnitude from this field). Slow-zone PWM is always
+    ///<        `Config::TURN_SLOW_SPEED_PWM` — not overridable, since the final
+    ///<        approach must stay gentle enough to stop within `TURN_TOLERANCE_DEG`.
+
     bool _turnProfileBrakeOnDone = true;
     ///< @brief Whether to engage the active brake at completion of the turn profile.
     ///<        Mirrors `DriveCommand::brake` captured at dispatch time. Read by

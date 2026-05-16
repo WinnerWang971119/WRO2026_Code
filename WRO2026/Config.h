@@ -189,10 +189,35 @@ namespace Config
     // Turn defaults
     // ---------------------------------------------------------------------------------------
 
-    /** @brief Default rotation power for `DriveDC.TurnGyro` calls, in [-100, 100]. */
+    /**
+     * @brief Default cruise PWM for `Drive.turnDeg` / `Drive.turnToYaw`, in [-100, 100].
+     *
+     * Consumed as the default value of `TurnDegBuilder::_power` / `TurnToYawBuilder::_power`
+     * and propagated into the custom TurnGyro state machine's `_turnCruisePwm` cruise
+     * magnitude. Callers can override per-call via `.setPower(...)` on the builder; the
+     * slow-zone PWM is always `Config::TURN_SLOW_SPEED_PWM` and is not overridable.
+     *
+     * @note Replaces the older "`DriveDC.TurnGyro` power" semantic — the lower-MCU
+     *       TurnGyro is no longer called.
+     */
     constexpr int16_t TURN_POWER = 50;
 
-    /** @brief Turn motor mode: 0 = single-motor pivot, 1 = two-motor counter-rotation. */
+    /**
+     * @brief Default wheel-pattern selector for the custom TurnGyro state machine.
+     *
+     * Encoding (NEW — set by the 2026-05-17 PR4 plan; intentionally different from
+     * the legacy `MiniR4.DriveDC.TurnGyro` byte values):
+     *   - `0` = COUNTER_ROT — both wheels spin opposite directions, chassis pivots
+     *                         around its center. Tightest in-place rotation.
+     *   - `1` = PIVOT_LEFT  — left wheel braked, right wheel drives; chassis pivots
+     *                         around the LEFT wheel.
+     *   - `2` = PIVOT_RIGHT — right wheel braked, left wheel drives; chassis pivots
+     *                         around the RIGHT wheel.
+     *
+     * @note `TurnDegBuilder::setMode` / `TurnToYawBuilder::setMode` accept this byte;
+     *       PathTracker maps `Routes::TurnMode::*` to it via `_turnModeToByte`. See
+     *       `Drive.h::TurnDegBuilder::setMode` for the full encoding contract.
+     */
     constexpr uint8_t TURN_MODE = 0;
 
     /** @brief Apply active brake at end of turn (vs. coast). */

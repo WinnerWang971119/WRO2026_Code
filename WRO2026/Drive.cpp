@@ -275,15 +275,16 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // @note `power` parameter retained for API compatibility; the new profile uses
-    //       Config::TURN_CRUISE_PWM/TURN_SLOW_SPEED_PWM. Override is not supported.
-    //       (TODO: honor `power` as a runtime override later.)
+    // `power` is honored as the cruise-PWM magnitude override: callers can chain
+    // `Drive.turnDeg(deg).setPower(80)` for a faster turn. Slow-zone PWM stays at
+    // Config::TURN_SLOW_SPEED_PWM (the final-approach must stay gentle enough to
+    // stop within TURN_TOLERANCE_DEG). Non-positive overrides fall back to the
+    // Config default to keep `_turnDeltaSign` as the sole source of rotation sign.
     //
     // Mode encoding (NEW — repurposed from MiniR4.DriveDC.TurnGyro's 0/1 bits):
     //   0 = COUNTER_ROT (both wheels spin opposite directions)
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
-    (void) power;    // silence unused-warning while preserving the API
 
     const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
@@ -304,6 +305,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
     _turnMotorMode          = mode;
+    _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
     _turnProfileBrakeOnDone = brake;
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
@@ -324,12 +326,11 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // @note `power` parameter retained for API compatibility; the new profile uses
-    //       Config::TURN_CRUISE_PWM/TURN_SLOW_SPEED_PWM. Override is not supported.
-    //       (TODO: honor `power` as a runtime override later.)
+    // `power` is honored as the cruise-PWM magnitude override; see _execTurnDeg
+    // for the full rationale. Slow-zone PWM stays at Config::TURN_SLOW_SPEED_PWM.
+    // Non-positive overrides fall back to the Config default.
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
-    (void) power;
 
     const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
     const int16_t target = _normalizeYaw((int32_t) yaw);
@@ -348,6 +349,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
     _turnMotorMode          = mode;
+    _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
     _turnProfileBrakeOnDone = brake;
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
@@ -957,7 +959,7 @@ void DriveClass::_updateTurnProfile()
     switch (_turnProfileState)
     {
     case TurnProfileState::CRUISE:
-        pwmMag = Config::TURN_CRUISE_PWM;
+        pwmMag = _turnCruisePwm;
         break;
     case TurnProfileState::SLOW:
         pwmMag = Config::TURN_SLOW_SPEED_PWM;
