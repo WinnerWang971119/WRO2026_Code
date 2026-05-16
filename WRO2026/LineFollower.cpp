@@ -475,8 +475,10 @@ bool LineFollowerClass::waitUntilIntersection()
         return false;
     }
 
-    // Clear any stale latched edge before waiting for the next fresh intersection after entry.
-    (void) Intersection.isAtIntersection();
+    // Consume one stale latched edge, if any, so this wait targets the next fresh intersection
+    // after entry rather than a previous segment's leftover edge.
+    const bool clearedStaleEdge = Intersection.isAtIntersection();
+    (void) clearedStaleEdge;
 
     const uint32_t startMs = millis();
     while (_enabled)
@@ -488,8 +490,8 @@ bool LineFollowerClass::waitUntilIntersection()
             return false;
         }
 
-        // Keep the normal cooperative order: LineFollower first, then Intersection reading the
-        // same shared tracer state on this iteration.
+        // Match the documented loop order from Intersection.h and WRO2026.ino: LineFollower
+        // updates first, then Intersection reads the same shared tracer state on this iteration.
         update();
         Intersection.update();
         if (Intersection.isAtIntersection())
