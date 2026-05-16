@@ -188,7 +188,7 @@ void MissionClass::_emitFault()
     Serial.print(F(" from="));
     Serial.print(info.fromNode);
     Serial.print(F(" to="));
-    Serial.println(info.goalNode);
+    Serial.println(info.destNode);
 
     // Push a short tag to OLED (NAV FAULT <mn>). Size is shared with the
     // EventTrace ring slot so a future change to MAX_LINE_LEN flows here
