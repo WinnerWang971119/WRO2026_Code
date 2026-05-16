@@ -44,9 +44,8 @@ That reads `pyproject.toml` + `uv.lock` and pulls in `networkx`,
 `matplotlib`, `shapely`, and the `dev` extra containing `pytest`.
 
 `uv.lock` is intentionally committed to keep developer installs reproducible
-and to give future CI a stable dependency graph. TODO when CI lands: use
-`uv sync --extra dev` in the workflow so the lockfile remains the source
-of truth.
+and to keep GitHub Actions on the same dependency graph. The CI workflow uses
+`uv sync --extra dev --frozen`, so the lockfile remains the source of truth.
 
 ### Fallback: plain venv + pip
 
