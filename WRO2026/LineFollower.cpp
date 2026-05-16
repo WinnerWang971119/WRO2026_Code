@@ -475,6 +475,7 @@ bool LineFollowerClass::waitUntilIntersection()
         return false;
     }
 
+    // Clear any stale latched edge before waiting for the next fresh intersection after entry.
     (void) Intersection.isAtIntersection();
 
     const uint32_t startMs = millis();
@@ -487,6 +488,8 @@ bool LineFollowerClass::waitUntilIntersection()
             return false;
         }
 
+        // Keep the normal cooperative order: LineFollower first, then Intersection reading the
+        // same shared tracer state on this iteration.
         update();
         Intersection.update();
         if (Intersection.isAtIntersection())
