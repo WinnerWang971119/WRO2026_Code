@@ -615,6 +615,71 @@ private:
     int16_t  _profileHeading  = 0;    ///< Heading target for GYRO mode.
 
     // -------------------------------------------------------------------------------------
+    // Custom TurnGyro profile state machine (replaces MiniR4.DriveDC.TurnGyro)
+    //
+    // Parallel to the trapezoidal move profile above, but for in-place turns. The lower-MCU
+    // `TurnGyro` primitive overshoots noticeably; we replace it with a cooperative two-phase
+    // profile (CRUISE → SLOW → BRAKE) driven from `_updateTurnProfile()`, which is hooked
+    // into `Drive.update()` parallel to `_updateProfile()`.
+    // -------------------------------------------------------------------------------------
+    /**
+     * @brief State of the in-flight custom TurnGyro profile (parallel to ProfileState).
+     *
+     * `CRUISE` = fast phase at `Config::TURN_CRUISE_PWM`; `SLOW` = ramped-down phase at
+     * `Config::TURN_SLOW_SPEED_PWM` once the heading error enters
+     * `Config::TURN_SLOW_ZONE_DEG`; `BRAKE` = final stop after the error falls within
+     * `Config::TURN_TOLERANCE_DEG`. `IDLE` means no turn is in flight; `_updateTurnProfile()`
+     * short-circuits in that state.
+     */
+    enum class TurnProfileState : uint8_t
+    {
+        IDLE,
+        CRUISE,
+        SLOW,
+        BRAKE
+    };
+
+    TurnProfileState _turnProfileState = TurnProfileState::IDLE;
+    ///< @brief Current TurnGyro phase. `IDLE` = no turn in flight; non-IDLE values are
+    ///<        driven by `_updateTurnProfile()`.
+
+    int16_t _turnTargetYaw = 0;
+    ///< @brief Absolute IMU-frame yaw target for the in-flight turn, normalized to
+    ///<        `[-180, 180]`. Captured at dispatch time by `_execTurnDeg` /
+    ///<        `_execTurnToYaw` (after `_normalizeYaw`) and read every tick by
+    ///<        `_updateTurnProfile()`.
+
+    int8_t _turnDeltaSign = 0;
+    ///< @brief Sign of the initial yaw delta (`+1` = CCW / left turn, `-1` = CW / right
+    ///<        turn). Captured ONCE at dispatch so the BRAKE-boundary tick does not
+    ///<        oscillate sign when the IMU briefly flips across the target. `0` only in
+    ///<        the IDLE state.
+
+    /**
+     * @brief Repurposed cmd.turnMode byte selecting the wheel pattern for the custom
+     *        TurnGyro profile.
+     *
+     * @note SEMANTIC REMAP — the existing `DriveCommand::turnMode` field used to mirror
+     *       the MiniR4 lower-MCU `TurnGyro` API where:
+     *           - `0` = pivot (one wheel stopped)
+     *           - `1` = counter-rotate (wheels in opposite directions)
+     *       We REUSE the same byte but redefine its values for the custom profile:
+     *           - `0` = COUNTER_ROT (both wheels, opposite directions — was old `1`)
+     *           - `1` = PIVOT_LEFT  (only left wheel drives; right wheel held)
+     *           - `2` = PIVOT_RIGHT (only right wheel drives; left wheel held)
+     *       The remap is intentional: the new profile owns wheel dispatch directly via
+     *       `Move(L, R)`, so the new encoding describes which wheels move rather than
+     *       which lower-MCU `TurnGyro` mode to ask for. `_execTurnDeg` /
+     *       `_execTurnToYaw` translate `cmd.turnMode` into this field at dispatch.
+     */
+    uint8_t _turnMotorMode = 0;
+
+    bool _turnProfileBrakeOnDone = true;
+    ///< @brief Whether to engage the active brake at completion of the turn profile.
+    ///<        Mirrors `DriveCommand::brake` captured at dispatch time. Read by
+    ///<        `_updateTurnProfile()` in the `BRAKE` transition.
+
+    // -------------------------------------------------------------------------------------
     // Builder dispatch targets — each fluent builder destructor calls into one of these.
     // -------------------------------------------------------------------------------------
 
@@ -752,6 +817,22 @@ private:
      * @note Idempotent when `_profileState == IDLE` — short-circuits immediately.
      */
     void _updateProfile();
+
+    /**
+     * @brief Cooperative tick for the custom TurnGyro state machine (replaces
+     *        `MiniR4.DriveDC.TurnGyro`). Reads the IMU yaw, computes the normalized
+     *        delta to `_turnTargetYaw`, dispatches the appropriate `Move(L, R)` wheel
+     *        pattern per `_turnMotorMode`, and transitions through
+     *        `CRUISE` → `SLOW` → `BRAKE` based on `Config::TURN_SLOW_ZONE_DEG` and
+     *        `Config::TURN_TOLERANCE_DEG`. Idempotent / no-op when
+     *        `_turnProfileState == IDLE`.
+     *
+     * @note Hook ordering inside `Drive.update()`: drain-task-done bit →
+     *       `_updateProfile()` → `_updateTurnProfile()` → `_dispatchNext`. The
+     *       drain-task-done bit must NOT flip `_turnDone` while a turn profile is in
+     *       flight (same W1 guard as the move profile).
+     */
+    void _updateTurnProfile();
 
     /**
      * @brief Compute the current speed setpoint based on traveled fraction (0.0 → 1.0).
