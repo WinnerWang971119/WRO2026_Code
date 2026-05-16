@@ -371,6 +371,8 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         _lostLine             = false;
         _useTShape            = false;    // Disabling cancels any active cruise ramp.
         _distanceTargetActive = false;    // Disabling also disarms the distance gate.
+        _distanceReached      = false;    // Clear the latch so a re-enable without a new
+                                          // setDistanceTarget cannot report a stale trip.
 
         if (brake)
         {
