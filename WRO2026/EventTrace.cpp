@@ -10,8 +10,11 @@
 #include <string.h>          // strncpy, memset
 
 #include "Drive.h"
+#include "FieldMap.h"
 #include "Intersection.h"
 #include "LineFollower.h"
+#include "Localization.h"
+#include "routes.h"
 
 /**
  * @brief Single global instance, declared `extern` in EventTrace.h.
@@ -31,6 +34,7 @@ bool EventTraceClass::begin()
     _prevLineLost     = false;
     _prevTurnDone     = true;
     _prevIntEdgeCount = Intersection.getEdgeCount();
+    _lastHeartbeat_ms = millis();
 
     return true;
 }
@@ -117,6 +121,11 @@ void EventTraceClass::update()
     _prevTurnDone = doneNow;
 
     // -----------------------------------------------------------------------------------------
+    // Heartbeat: periodic status line on Serial so the operator always sees liveness.
+    // -----------------------------------------------------------------------------------------
+    _emitHeartbeat();
+
+    // -----------------------------------------------------------------------------------------
     // Render only when something new arrived this tick.
     // -----------------------------------------------------------------------------------------
     if (_dirty)
@@ -124,6 +133,26 @@ void EventTraceClass::update()
         _render();
         _dirty = false;
     }
+}
+
+void EventTraceClass::_emitHeartbeat()
+{
+    const uint32_t now = millis();
+    if (now - _lastHeartbeat_ms < Config::MISSION_HEARTBEAT_MS)
+    {
+        return;
+    }
+    _lastHeartbeat_ms = now;
+
+    const uint8_t node = Localization.getCurrentNode();
+    const char*   name = (node < Routes::N_NODES) ? Routes::NODES[node].name : "?";
+
+    Serial.print(F("HB t="));
+    Serial.print(now);
+    Serial.print(F(" yaw="));
+    Serial.print(Localization.getHeadingDeg(), 1);
+    Serial.print(F(" node="));
+    Serial.println(name);
 }
 
 void EventTraceClass::_render()

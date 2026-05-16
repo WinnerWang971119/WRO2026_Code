@@ -144,6 +144,18 @@ private:
     uint32_t _prevIntEdgeCount = 0;
 
     /**
+     * @brief Last millis() at which a heartbeat status line was emitted to Serial.
+     *
+     * PR3 ships a periodic `HB t=... yaw=... node=...` line so the
+     * operator's serial console always shows liveness even when no
+     * state transition has fired. Period: `Config::MISSION_HEARTBEAT_MS`.
+     */
+    uint32_t _lastHeartbeat_ms = 0;
+
+    /** @brief Emit the heartbeat line to Serial if the period has elapsed. */
+    void _emitHeartbeat();
+
+    /**
      * @brief Repaint the OLED with the current ring-buffer contents (newest at top).
      *
      * @note Walks the ring backwards from `_head` so the freshest event lands on line 0 and

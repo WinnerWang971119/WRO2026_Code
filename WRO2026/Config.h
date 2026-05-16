@@ -452,6 +452,36 @@ namespace Config
      * `Drive.turnToYaw` resolvable range.
      */
     constexpr float NAV_TURN_TOLERANCE_DEG = 0.5f;
+
+    // =========================================================================================
+    // Mission DSL (PR3).
+    //
+    // Mission is a thin, fully-manual scheduler the operator hand-writes in
+    // WRO2026.ino. Each `Mission.<verb>(...)` call enqueues one step; the
+    // queue advances entirely from `Mission.update()` in the cooperative
+    // tick. No automatic planning — that is intentional for PR3.
+    //
+    // On PathTracker fault, Mission halts the chassis, beeps five long
+    // tones, flashes the RGB LEDs red, and waits for BTN_DOWN to clear.
+    // =========================================================================================
+
+    /** @brief Maximum number of pending Mission steps (no dynamic alloc). */
+    constexpr uint8_t MAX_MISSION_STEPS = 64;
+
+    /** @brief On-board buzzer pin (MatrixMiniR4 hardware mapping). */
+    constexpr uint8_t BUZZER_PIN = 6;
+
+    /** @brief Tone frequency used for the halt-on-fault beep sequence. */
+    constexpr uint16_t MISSION_FAULT_BEEP_HZ = 1000;
+
+    /** @brief Duration of each on/off pulse in the halt-on-fault beep sequence. */
+    constexpr uint16_t MISSION_FAULT_BEEP_MS = 500;
+
+    /** @brief Number of beeps emitted before Mission awaits BTN_DOWN to clear. */
+    constexpr uint8_t MISSION_FAULT_BEEPS = 5;
+
+    /** @brief Interval at which EventTrace emits its `HB ...` status heartbeat. */
+    constexpr uint32_t MISSION_HEARTBEAT_MS = 500;
 }    // namespace Config
 
 #endif    // CONFIG_H
