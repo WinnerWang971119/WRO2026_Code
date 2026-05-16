@@ -23,13 +23,17 @@
  * ``Mission.update()`` ticked from ``loop()`` alongside Drive,
  * LineFollower, Intersection, PathTracker, EventTrace.
  *
- * On any PathTracker fault mid-``goTo``, Mission enters a fault state:
- *   1. Five 500-ms beeps at 1 kHz on pin 6.
- *   2. Both RGB LEDs flash red, then hold red.
- *   3. The remaining queue is dropped; Mission idles awaiting
- *      ``BTN_DOWN``.
- *   4. On press: LEDs clear, PathTracker fault is cleared, Mission
- *      returns to IDLE.
+ * Fault behaviour (PathTracker-fault OR ``goTo`` to an unknown node):
+ *   1. The remaining queue is dropped immediately and the chassis is
+ *      braked via ``Drive.stop(true)``.
+ *   2. Mission transitions to ``FAULT_BEEPING``. Five ``MISSION_FAULT_BEEPS``
+ *      cycles of 1 kHz ``MiniR4.Buzzer.beep(...)`` (the library owns the
+ *      buzzer pin); the on-board RGB LEDs flash red in sync — on during
+ *      the beep half-cycle, off during the gap.
+ *   3. After the last cycle, Mission transitions to ``FAULT_AWAIT_RESET``,
+ *      holds the LEDs solid red, and awaits a ``BTN_DOWN`` rising edge.
+ *   4. On press: LEDs clear, ``PathTracker.clearFault()``, Mission
+ *      returns to ``IDLE``.
  *
  * Fixed-size step queue (``Config::MAX_MISSION_STEPS``); overflow drops
  * the new step and prints a Serial warning.
@@ -160,6 +164,7 @@ private:
 
     uint8_t  _faultBeepIdx       = 0;
     uint32_t _faultPhaseStart_ms = 0;
+    bool     _faultLedOn         = false;
     bool     _btnPrev            = false;
 };
 

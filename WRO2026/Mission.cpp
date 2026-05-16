@@ -146,10 +146,16 @@ void MissionClass::_beep(uint16_t freq_hz, uint16_t duration_ms)
 void MissionClass::_enterFaultBeeping(uint32_t now)
 {
     // Every mission-halting path lands here so the robot ends in the same
-    // known-safe state: chassis braked, LEDs red, first beep emitted, FSM
-    // in FAULT_BEEPING awaiting BTN_DOWN.
+    // known-safe state: chassis braked, queue cleared, LEDs red, first
+    // beep emitted, FSM in FAULT_BEEPING. The remaining queue is dropped
+    // immediately so isIdle() can never return true while a stale step
+    // sits behind a latched fault.
     Drive.stop(true);
+    _count = 0;
+    _idx   = 0;
+    _stepState = StepState::ENTER;
     _setLeds(255, 0, 0);
+    _faultLedOn         = true;
     _state              = State::FAULT_BEEPING;
     _faultBeepIdx       = 0;
     _faultPhaseStart_ms = now;
@@ -170,8 +176,10 @@ void MissionClass::_emitFault()
     Serial.print(F(" to="));
     Serial.println(info.goalNode);
 
-    // Push a short tag to OLED (NAV FAULT <mn>).
-    char buf[20];
+    // Push a short tag to OLED (NAV FAULT <mn>). Size is shared with the
+    // EventTrace ring slot so a future change to MAX_LINE_LEN flows here
+    // without an out-of-sync truncation.
+    char buf[EventTraceClass::MAX_LINE_LEN];
     snprintf(buf, sizeof(buf), "NAV FAULT %s",
              PathTrackerClass::faultMnemonic(info.kind));
     EventTrace.pushEvent(buf);
@@ -239,7 +247,10 @@ void MissionClass::update()
                     {
                         Serial.print(F("[Mission] arrived "));
                         Serial.println(s.text == nullptr ? "?" : s.text);
-                        char buf[20];
+                        // Buffer width tracks EventTrace's ring slot so the
+                        // OLED truncation rule stays single-sourced. snprintf
+                        // truncates long node names cleanly within MAX_LINE_LEN.
+                        char buf[EventTraceClass::MAX_LINE_LEN];
                         snprintf(buf, sizeof(buf), "ARR %s",
                                  s.text == nullptr ? "?" : s.text);
                         EventTrace.pushEvent(buf);
@@ -313,15 +324,29 @@ void MissionClass::update()
         case State::FAULT_BEEPING:
         {
             const uint32_t now = millis();
-            const uint32_t cycle_ms = (uint32_t) Config::MISSION_FAULT_BEEP_MS * 2u;
+            const uint32_t half_ms  = Config::MISSION_FAULT_BEEP_MS;
+            const uint32_t cycle_ms = half_ms * 2u;
             const uint32_t elapsed = now - _faultPhaseStart_ms;
             const uint8_t  desiredIdx = (uint8_t) (elapsed / cycle_ms);
+
+            // LEDs flash in sync with the beep: red during the first
+            // half-cycle (while the tone plays), off during the gap.
+            const bool ledOnPhase = (elapsed % cycle_ms) < half_ms;
+            if (ledOnPhase != _faultLedOn)
+            {
+                _faultLedOn = ledOnPhase;
+                _setLeds(ledOnPhase ? 255 : 0, 0, 0);
+            }
 
             if (desiredIdx > _faultBeepIdx)
             {
                 _faultBeepIdx = desiredIdx;
                 if (_faultBeepIdx >= Config::MISSION_FAULT_BEEPS)
                 {
+                    // Hold LEDs solid red while waiting for the ack so the
+                    // operator can still see the chassis is in fault.
+                    _setLeds(255, 0, 0);
+                    _faultLedOn = true;
                     Serial.println(F("[Mission] press BTN_DOWN to clear fault"));
                     EventTrace.pushEvent("PRESS BTN_DOWN");
                     _state = State::FAULT_AWAIT_RESET;
@@ -341,10 +366,13 @@ void MissionClass::update()
             if (btnNow && !_btnPrev)
             {
                 _setLeds(0, 0, 0);
+                _faultLedOn = false;
                 if (PathTracker.hasFault())
                 {
                     PathTracker.clearFault();
                 }
+                // Queue was cleared on fault entry; resetting indices is
+                // belt-and-braces in case a stale path slipped through.
                 _count = 0;
                 _idx   = 0;
                 _state = State::IDLE;

@@ -13,9 +13,12 @@
  *      `Mission.start()`. The mission runs asynchronously from `loop()`.
  *   4. Serial prints state-change events + periodic `HB t=... yaw=... node=...`
  *      heartbeats. OLED scrolls the same events.
- *   5. On PathTracker fault (UNREACHABLE / DRIVE_FAULT / ...): the chassis
- *      stops, the buzzer emits 5 × 500 ms tones at 1 kHz, the RGB LEDs
- *      flash red. Press `BTN_DOWN` to acknowledge and reset.
+ *   5. On PathTracker fault (UNREACHABLE / DRIVE_FAULT / ...) or a
+ *      `goTo` to an unknown node name: the chassis stops, the queue is
+ *      dropped, the buzzer emits 5 × 500 ms tones at 1 kHz via
+ *      `MiniR4.Buzzer.beep`, and the on-board RGB LEDs flash red in
+ *      sync with the beep (solid red while awaiting the ack). Press
+ *      `BTN_DOWN` to acknowledge and reset.
  *
  * Author the mission inline below — one `Mission.<verb>(...)` per line.
  * Available verbs: `goTo`, `wait`, `print`, `beep`, `led`. See Mission.h.
