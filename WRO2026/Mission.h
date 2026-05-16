@@ -79,7 +79,9 @@ public:
      */
     MissionClass& print(const char* msg);
 
-    /** @brief Enqueue a buzzer tone. Non-blocking via ``tone()``. */
+    /**
+     * @brief Enqueue a buzzer tone. Non-blocking via ``MiniR4.Buzzer.beep``.
+     */
     MissionClass& beep(uint16_t freq_hz, uint32_t duration_ms);
 
     /**
@@ -144,7 +146,9 @@ private:
     bool _push(const Step& s);
     void _advanceStep();
     void _emitFault();
+    void _enterFaultBeeping(uint32_t now);
     void _setLeds(uint8_t r, uint8_t g, uint8_t b);
+    void _beep(uint16_t freq_hz, uint16_t duration_ms);
 
     Step _queue[Config::MAX_MISSION_STEPS];
     uint8_t _count = 0;

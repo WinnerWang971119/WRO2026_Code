@@ -468,9 +468,6 @@ namespace Config
     /** @brief Maximum number of pending Mission steps (no dynamic alloc). */
     constexpr uint8_t MAX_MISSION_STEPS = 64;
 
-    /** @brief On-board buzzer pin (MatrixMiniR4 hardware mapping). */
-    constexpr uint8_t BUZZER_PIN = 6;
-
     /** @brief Tone frequency used for the halt-on-fault beep sequence. */
     constexpr uint16_t MISSION_FAULT_BEEP_HZ = 1000;
 

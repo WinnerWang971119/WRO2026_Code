@@ -135,6 +135,27 @@ void MissionClass::_setLeds(uint8_t r, uint8_t g, uint8_t b)
     MiniR4.LED.setColor(1, r, g, b);
 }
 
+void MissionClass::_beep(uint16_t freq_hz, uint16_t duration_ms)
+{
+    // MatrixMiniR4 owns the on-board buzzer (pin 6 internally). Using the
+    // library's non-blocking beep keeps wiring + timer setup the library's
+    // concern; we do not poke the pin directly.
+    MiniR4.Buzzer.beep(freq_hz, duration_ms);
+}
+
+void MissionClass::_enterFaultBeeping(uint32_t now)
+{
+    // Every mission-halting path lands here so the robot ends in the same
+    // known-safe state: chassis braked, LEDs red, first beep emitted, FSM
+    // in FAULT_BEEPING awaiting BTN_DOWN.
+    Drive.stop(true);
+    _setLeds(255, 0, 0);
+    _state              = State::FAULT_BEEPING;
+    _faultBeepIdx       = 0;
+    _faultPhaseStart_ms = now;
+    _beep(Config::MISSION_FAULT_BEEP_HZ, Config::MISSION_FAULT_BEEP_MS);
+}
+
 void MissionClass::_emitFault()
 {
     if (!PathTracker.hasFault())
@@ -176,15 +197,8 @@ void MissionClass::update()
             // Drain-time PathTracker fault check.
             if (PathTracker.hasFault())
             {
-                Drive.stop(true);
                 _emitFault();
-                _setLeds(255, 0, 0);
-                _state = State::FAULT_BEEPING;
-                _faultBeepIdx       = 0;
-                _faultPhaseStart_ms = millis();
-                tone(Config::BUZZER_PIN,
-                     Config::MISSION_FAULT_BEEP_HZ,
-                     Config::MISSION_FAULT_BEEP_MS);
+                _enterFaultBeeping(millis());
                 return;
             }
 
@@ -211,14 +225,8 @@ void MissionClass::update()
                             Serial.print(F("[Mission] unknown node '"));
                             Serial.print(s.text == nullptr ? "?" : s.text);
                             Serial.println(F("'"));
-                            // Synthesise a fault path the same way PathTracker would.
-                            _setLeds(255, 0, 0);
-                            _state = State::FAULT_BEEPING;
-                            _faultBeepIdx       = 0;
-                            _faultPhaseStart_ms = now;
-                            tone(Config::BUZZER_PIN,
-                                 Config::MISSION_FAULT_BEEP_HZ,
-                                 Config::MISSION_FAULT_BEEP_MS);
+                            EventTrace.pushEvent("NAV FAULT BAD");
+                            _enterFaultBeeping(now);
                             return;
                         }
                         Serial.print(F("[Mission] goTo "));
@@ -267,7 +275,7 @@ void MissionClass::update()
                 {
                     if (_stepState == StepState::ENTER)
                     {
-                        tone(Config::BUZZER_PIN, s.freq_hz, (uint32_t) s.duration_ms);
+                        _beep(s.freq_hz, (uint16_t) s.duration_ms);
                         _stepStart_ms = now;
                         _stepState    = StepState::ACTIVE;
                     }
@@ -321,9 +329,7 @@ void MissionClass::update()
                 }
                 else
                 {
-                    tone(Config::BUZZER_PIN,
-                         Config::MISSION_FAULT_BEEP_HZ,
-                         Config::MISSION_FAULT_BEEP_MS);
+                    _beep(Config::MISSION_FAULT_BEEP_HZ, Config::MISSION_FAULT_BEEP_MS);
                 }
             }
             return;
