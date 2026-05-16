@@ -258,10 +258,15 @@ void LineFollowerClass::update()
         const float traveledCm = encDegToCm(avgDeg);
         if (traveledCm >= _distanceTargetCm)
         {
-            // Trip the latch and self-disable with active brake. Delegating to the
-            // builder's apply path keeps the disable semantics identical to a caller-issued
-            // setEnabled(false) — including clearing _lastErr / _lostLine / _useTShape.
-            _distanceReached = true;
+            // Self-disable with active brake. Delegating to the builder's apply path keeps
+            // the disable semantics identical to a caller-issued setEnabled(false) —
+            // including clearing _lastErr / _lostLine / _useTShape.
+            //
+            // The latch is set AFTER the apply call because the disable path itself clears
+            // `_distanceReached` (so a user-initiated disable cannot leak a stale trip into
+            // a later re-enable). Setting it before would be immediately clobbered, leaving
+            // `isDistanceReached()` permanently false and hanging PathTracker's
+            // PROJECTION_FOLLOW state until its drain-timeout fault fires.
             _applyEnableBuilder(/*targetEnabled=*/false,
                                 /*brake=*/true,
                                 /*hasPresetOverride=*/false,
@@ -272,6 +277,7 @@ void LineFollowerClass::update()
                                 /*reverse=*/_reverse,
                                 /*hasDistanceTarget=*/false,
                                 /*distanceTargetCm=*/0.0f);
+            _distanceReached = true;
         }
     }
 }
