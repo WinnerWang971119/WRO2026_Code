@@ -583,3 +583,126 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
     assert sim.resolve_projection_mode(edge_proj_slow) == ProjectionMode.SLOW
     assert sim.resolve_pre_turn_mode(edge_turn_pivot) == TurnMode.PIVOT_RIGHT
+
+
+# ---------------------------------------------------------------------------
+# Symmetric trapezoidal profile — FSM-level coverage of the C++ ramp-down
+# behaviour (see DECISIONS.md "LineFollower distance-gated stops use a
+# symmetric trapezoidal profile" and `WRO2026/LineFollower.cpp`).
+#
+# The runtime sim collapses each primitive into a single atomic geometric
+# advance — it does NOT model PWM trajectories — so these tests verify the
+# FSM contract (state-transitions + final position) rather than per-tick
+# cruise samples. PWM-level behaviour is verified on hardware; the sim's
+# job is to prove that the dispatched primitive sequence still matches the
+# C++ runtime after the LineFollower ramp-down work.
+# ---------------------------------------------------------------------------
+
+
+def test_line_overshoot_no_rampup_only_rampdown():
+    """LINE_OVERSHOOT advances exactly LINE_SENSOR_AXLE_OFFSET_CM with no cruise-→-0 step.
+
+    The C++ runtime re-arms ``LineFollower.setEnabled(true).setTShapeRampUp(false)
+    .setDistanceTarget(LINE_SENSOR_AXLE_OFFSET_CM)`` at intersection-detect.
+    The re-arm guard in ``_applyEnableBuilder`` skips the ramp-up reseed
+    (so cruise does not drop from preset back to 0) and the ramp-down
+    fitted to the 5 cm hop carries the chassis from cruise PWM down to
+    ``Config::PWM_MIN_MAGNITUDE`` before the gate's active brake fires.
+    The sim does not model PWM, so the equivalent FSM-level contract is
+    that the LINE_OVERSHOOT step advances the chassis by exactly
+    ``LINE_SENSOR_AXLE_OFFSET_CM`` past the intersection marker and
+    Localization advances to the next node.
+    """
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (30.0, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    graph = _single_edge_graph("A", "B", EDGE_LINE, 30.0, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+
+    # FSM contract: FOLLOW_INT then a separate LINE_OVERSHOOT step
+    # carrying the LINE_SENSOR_AXLE_OFFSET_CM payload — never collapsed,
+    # never elided, never re-emitting an ACT_TURN_REL between them.
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+    ]
+    # Position contract: 30 cm FOLLOW_INT + 5 cm LINE_OVERSHOOT along +x.
+    assert chassis.x_cm == pytest.approx(30.0 + LINE_SENSOR_AXLE_OFFSET_CM, abs=1e-9)
+    assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
+    assert sim.localization.current_node() == "B"
+
+
+def test_projection_full_trapezoid():
+    """A long PROJECTION edge runs ramp-up + plateau + ramp-down and lands on the node.
+
+    Mirrors the hardware contract for a long PROJECTION edge: the C++
+    ``LineFollower`` ramps up from 0 to cruise, holds the plateau, then
+    ramps down to ``Config::PWM_MIN_MAGNITUDE`` before the distance gate
+    actively brakes the chassis. The sim collapses all three phases into
+    a single atomic ``follow_line_to_distance(100.0)`` advance, so the
+    FSM-level invariants are: a single ``ACT_FOLLOW_DIST`` primitive, no
+    ``ACT_LINE_OVERSHOOT`` (the encoder gate already lands the chassis on
+    the node), and a chassis position exactly at the edge's terminus.
+    """
+    distance_cm = 100.0
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (distance_cm, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, distance_cm, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+
+    assert prims == [(ACT_FOLLOW_DIST, distance_cm)]
+    # No overshoot step on PROJECTION — encoder gate lands the chassis on the node.
+    assert not any(action == ACT_LINE_OVERSHOOT for action, _ in prims)
+    assert chassis.x_cm == pytest.approx(distance_cm, abs=1e-9)
+    assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
+    assert sim.localization.current_node() == "B"
+
+
+def test_projection_short_truncated_triangle():
+    """A PROJECTION edge shorter than 2*TSHAPE_RAMP_MIN_CM collapses to a half-clamped triangle.
+
+    With both ramp-up and ramp-down active on a very short edge, the C++
+    ``LineFollower`` clamps each ramp to half the distance target so the
+    two zones cannot overlap — producing a triangular profile with no
+    plateau. The sim still collapses the whole thing to a single atomic
+    ``follow_line_to_distance(cm)`` advance, so the FSM-level invariants
+    are unchanged: a single ``ACT_FOLLOW_DIST`` primitive, no
+    ``ACT_LINE_OVERSHOOT``, and chassis position exactly at the terminus.
+    The picked distance ``3.0`` cm is below ``2 * TSHAPE_RAMP_MIN_CM`` =
+    4.0 cm (using the C++ ``Config::TSHAPE_RAMP_MIN_CM = 2.0`` cm), so it
+    is the regime where the half-clamp kicks in.
+    """
+    distance_cm = 3.0
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (distance_cm, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, distance_cm, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+
+    assert prims == [(ACT_FOLLOW_DIST, distance_cm)]
+    assert not any(action == ACT_LINE_OVERSHOOT for action, _ in prims)
+    assert chassis.x_cm == pytest.approx(distance_cm, abs=1e-9)
+    assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
+    assert sim.localization.current_node() == "B"

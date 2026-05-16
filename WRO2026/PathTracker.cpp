@@ -407,7 +407,9 @@ void PathTrackerClass::update()
             // chain (it does NOT reset preset / direction / `_lastErr`).
             if (Intersection.isAtIntersection())
             {
+                // Already-enabled re-arm: skip ramp-up reseed; ramp-down to floor handles the smooth stop.
                 LineFollower.setEnabled(true)
+                            .setTShapeRampUp(false)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
             }
