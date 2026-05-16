@@ -234,8 +234,18 @@ def _node_row(
 
 
 def compute_source_hash(field_data_source_path: Path) -> str:
-    """Return the SHA256 hex digest of ``field_data.py``'s raw bytes."""
-    return hashlib.sha256(Path(field_data_source_path).read_bytes()).hexdigest()
+    """Return the SHA256 hex digest of ``field_data.py``'s LF-normalized bytes.
+
+    The digest is computed over the file's content with CRLF sequences collapsed
+    to LF so the hash is stable across Windows (which checks the file out as
+    CRLF under git's autocrlf=true) and Linux/CI (which checks it out as LF).
+    Without this normalization, the embedded ``Source SHA256:`` stamp in
+    routes.h / routes.cpp diverges between platforms and CI's
+    idempotent-re-emit check fails on every Windows-authored regen.
+    """
+    raw = Path(field_data_source_path).read_bytes()
+    normalized = raw.replace(b"\r\n", b"\n")
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def _routes_h_banner(source_hash: str) -> List[str]:
