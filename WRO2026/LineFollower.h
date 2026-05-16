@@ -24,8 +24,8 @@
  *  - `begin()` once from `setup()` after `MiniR4.begin()` and `Drive.begin()`.
  *  - `update()` every iteration of the main `loop()`. Non-blocking. Short-circuits if disabled.
  *  - `setEnabled(true)` to start following; `setEnabled(false)` to stop and brake (default).
- *  - `followDistance(cm)` / `waitUntilDistanceReached()` when a caller wants Solution-1 style
- *    exclusive motor ownership before returning to a blocking `Drive.*` move.
+ *  - `followDistance(cm)` / `waitUntilDistanceReached()` when a caller needs the line-follow
+ *    segment to finish before returning motor ownership to the next blocking `Drive.*` move.
  *
  * Fluent API:
  *  The verb method `setEnabled(bool)` returns a `[[nodiscard]]` builder
@@ -396,8 +396,7 @@ public:
     /**
      * @brief Sync-blocking helper: follow the current line for @p cm, then return.
      *
-     * Convenience wrapper for the exact "arm + poll to completion" pattern recommended by the
-     * async-contract issue:
+     * Convenience wrapper for the common "arm + poll to completion" pattern:
      *
      * @code
      * LineFollower.followDistance(50);

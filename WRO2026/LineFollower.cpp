@@ -438,11 +438,12 @@ bool LineFollowerClass::waitUntilDistanceReached()
         return false;
     }
 
-    const uint32_t deadline = millis() + Config::LINE_FOLLOW_WAIT_TIMEOUT_MS;
+    const uint32_t startMs = millis();
 
     while (_enabled)
     {
-        if (!Drive.isIdle() || (int32_t) (millis() - deadline) >= 0)
+        if (!Drive.isIdle()
+            || (millis() - startMs) >= Config::LINE_FOLLOW_WAIT_TIMEOUT_MS)
         {
             setEnabled(false);
             return false;
