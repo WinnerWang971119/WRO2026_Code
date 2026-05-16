@@ -21,7 +21,7 @@ a known-good placeholder layout the simulator + pytest suite verify against.
 # Outer field dimensions in millimetres. The visualizer overlays the
 # matplotlib axes on map.png using this as the world extent so the
 # pixel-to-cm scale is implicit (no separate constant needed).
-FIELD_MM = (3000, 2000)
+FIELD_MM = (2500, 1000)  # PLACEHOLDER — remeasure tomorrow (issue #10)
 
 # Path (relative to tools/path_planner/) of the printed field PNG the
 # visualizer drops in as the background. The image is purely cosmetic

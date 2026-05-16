@@ -143,6 +143,33 @@ it.
    banner SHA256 must equal `sha256(field_data.py)` — if reviewers see
    a mismatch, the commit is incomplete.
 
+## Authoring real-field NODES
+
+Resolves issue #10 scope 1.
+
+Launch the picker from the repo root:
+
+```powershell
+uv run python tools/path_planner/pick_xy.py
+```
+
+That opens a matplotlib window with `maps/map.png` as the background and
+the current `NODES` overlaid as dim grey reference dots. Left-click any
+point on the field and the `(x, y)` in centimetres is printed to stdout
+to 3 decimal places, with a red marker plus a 1-decimal-place label
+dropped at the click for visual reference. Keybinds: `c` clears every
+marker (the NODES overlay stays put), `u` undoes the most recent marker.
+Close the window to exit. Paste the printed coordinates straight into
+the `NODES` dict in `field_data.py`.
+
+`field_data.py` is the single source of truth for both the on-robot
+routes (`WRO2026/routes.h` / `routes.cpp`) and the Python simulator
+(`tools/path_planner/sim/`). Once you have authored real NODES,
+regenerate with `uv run python tools/path_planner/build_routes.py`; both
+the robot's compiled next-hop table and the sim's map snap to the new
+coordinates automatically — there is no separate "robot field" and
+"sim field" to keep in sync.
+
 ## Module layout
 
 | File                | Role                                                                                |
