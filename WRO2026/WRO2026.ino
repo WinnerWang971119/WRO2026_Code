@@ -152,17 +152,20 @@ void loop()
     // BTN_UP rising edge arms the mission exactly once. The press captures
     // the IMU yaw NOW (operator has placed the chassis on `Routes::START_NODE`
     // facing `START_HEADING_DEG`); subsequent presses do nothing.
+    //
+    // `_missionArmed` is set ONLY on a successful zero so a transient
+    // failure does not permanently lock the operator out of retrying.
     const bool btnUpNow = MiniR4.BTN_UP.getState();
     if (btnUpNow && !_btnUpPrev && !_missionArmed)
     {
-        _missionArmed = true;
         if (!Localization.zeroHeadingFromCurrent())
         {
             EventTrace.pushEvent("ZERO FAIL");
-            Serial.println(F("[main] zeroHeadingFromCurrent() failed"));
+            Serial.println(F("[main] zeroHeadingFromCurrent() failed; press BTN_UP again to retry"));
         }
         else
         {
+            _missionArmed = true;
             EventTrace.pushEvent("NAV ZERO");
             buildMission();
         }

@@ -57,14 +57,26 @@ public:
     void update();
 
     /**
-     * @brief Enqueue a ``goTo("name")`` step. Resolves name to node id now.
+     * @brief Enqueue a ``goTo("name")`` step. Resolves the name to a node id now.
+     *
+     * @note ``nodeName`` is stored as a pointer for the eventual Serial /
+     *       OLED log line and must remain valid until the step executes.
+     *       Passing a string literal (e.g. ``Mission.goTo("A")``) is the
+     *       intended idiom and satisfies this naturally; do NOT pass a
+     *       pointer to a stack buffer or a temporary ``String.c_str()``.
      */
     MissionClass& goTo(const char* nodeName);
 
     /** @brief Enqueue a non-blocking wait. */
     MissionClass& wait(uint32_t ms);
 
-    /** @brief Enqueue a Serial + OLED log entry. ``msg`` must remain valid. */
+    /**
+     * @brief Enqueue a Serial + OLED log entry.
+     *
+     * @note ``msg`` is stored as a pointer and must remain valid until the
+     *       step executes. Same lifetime rule as :func:`goTo` — pass a
+     *       string literal, not a stack buffer.
+     */
     MissionClass& print(const char* msg);
 
     /** @brief Enqueue a buzzer tone. Non-blocking via ``tone()``. */
