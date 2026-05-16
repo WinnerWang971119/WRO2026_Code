@@ -43,9 +43,10 @@ from tools.path_planner.validator import validate
 EDGE_LINE = "LINE"
 EDGE_BLIND = "BLIND"
 
-# Back-compat aliases — header_writer / compiler / sim still reference
-# these names. Projection edges are no longer emitted but the tag is kept
-# so a future PR can re-introduce them without churning every import.
+# Reserved tag for projection edges. PR3 dropped projection support but
+# the tag is kept so a future PR can re-introduce projections without
+# renaming the canonical edge-type vocabulary. No module currently
+# imports it.
 EDGE_PROJECTION = "PROJECTION"
 
 

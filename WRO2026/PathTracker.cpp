@@ -89,6 +89,20 @@ void PathTrackerClass::clearFault()
     }
 }
 
+void PathTrackerClass::abort()
+{
+    // Stop the chassis first; Drive.stop(true) also clears Drive's queue,
+    // so a half-issued turn or driveDist will not resume.
+    Drive.stop(true);
+
+    _clearQueue();
+    _state          = State::IDLE;
+    _currentGoal    = FieldMap::NODE_NONE;
+    _nextHop        = FieldMap::NODE_NONE;
+    _activeEdgeType = Routes::EdgeType::NONE;
+    _fault          = FaultInfo{};
+}
+
 const char* PathTrackerClass::faultMnemonic(Fault kind)
 {
     switch (kind)

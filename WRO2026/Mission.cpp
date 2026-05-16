@@ -13,6 +13,7 @@
 #include "Drive.h"
 #include "EventTrace.h"
 #include "FieldMap.h"
+#include "LineFollower.h"
 #include "PathTracker.h"
 #include "routes.h"
 
@@ -30,6 +31,11 @@ bool MissionClass::begin()
     return true;
 }
 
+// IMPORTANT: `s.text` is stored by pointer and dereferenced when the step
+// actually runs (potentially seconds after _push). Callers MUST pass a
+// string literal or other static-storage pointer. Never pass
+// `String::c_str()`, a stack buffer, or a heap-allocated char* whose
+// lifetime ends before the queue executes the step.
 bool MissionClass::_push(const Step& s)
 {
     if (_count >= Config::MAX_MISSION_STEPS)
@@ -108,10 +114,19 @@ void MissionClass::start()
 
 void MissionClass::abort()
 {
+    // Real safety stop: cancel every cooperative subsystem that could
+    // re-issue motion on the next tick. Drive.stop(true) alone is not
+    // enough — PathTracker may be mid-edge (TURNING / LINE_FOLLOW /
+    // BLIND_FORWARD) and its next update() would resume the route.
+    // LineFollower must be disabled too so the tracer stops driving the
+    // motors on the same tick.
+    PathTracker.abort();
+    LineFollower.setEnabled(false);
     Drive.stop(true);
-    _count = 0;
-    _idx   = 0;
-    _state = State::IDLE;
+
+    _count     = 0;
+    _idx       = 0;
+    _state     = State::IDLE;
     _stepState = StepState::ENTER;
     Serial.println(F("[Mission] abort"));
 }
@@ -137,10 +152,9 @@ void MissionClass::_setLeds(uint8_t r, uint8_t g, uint8_t b)
 
 void MissionClass::_beep(uint16_t freq_hz, uint16_t duration_ms)
 {
-    // MatrixMiniR4 owns the on-board buzzer (pin 6 internally). Using the
-    // library's non-blocking beep keeps wiring + timer setup the library's
-    // concern; we do not poke the pin directly.
-    MiniR4.Buzzer.beep(freq_hz, duration_ms);
+    // MatrixMiniR4 owns the on-board buzzer (pin 6 internally). The library
+    // exposes the non-blocking tone as MiniR4BUZZER::Tone(freq, ms).
+    MiniR4.Buzzer.Tone(freq_hz, duration_ms);
 }
 
 void MissionClass::_enterFaultBeeping(uint32_t now)

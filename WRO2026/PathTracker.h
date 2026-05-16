@@ -105,6 +105,17 @@ public:
     void       clearFault();
 
     /**
+     * @brief Hard-cancel any in-flight goal: stop chassis, empty queue,
+     *        reset FSM to IDLE, clear any latched fault.
+     *
+     * Symmetric with `Drive.stop(true)`. Use this as a real safety stop
+     * (e.g. `Mission.abort()`) — `clearFault()` alone is a no-op when
+     * the FSM is mid-edge (`TURNING` / `LINE_FOLLOW` / `BLIND_FORWARD`),
+     * which would otherwise let the next `update()` tick resume motion.
+     */
+    void       abort();
+
+    /**
      * @brief Short mnemonic ("UNR", "DRV", ...) for a Fault enum value.
      */
     static const char* faultMnemonic(Fault kind);

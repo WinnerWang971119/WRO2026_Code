@@ -99,10 +99,34 @@ public:
     /**
      * @brief Arm the mission. Returns immediately; subsequent ``update()``
      *        calls drain the queue. Logs a Serial message on transition.
+     *
+     * @warning **Calling ``start()`` while a mission is already running
+     *          silently rewinds the queue index to 0 and re-runs the
+     *          entire queue from the first step.** The FSM is moved
+     *          unconditionally into ``RUNNING``; there is no guard
+     *          against re-entry. The intended usage pattern is one
+     *          ``buildMission(); Mission.start();`` per power cycle,
+     *          gated externally (the .ino uses ``_missionArmed`` for
+     *          this). If you need to re-arm a finished mission, this
+     *          is fine; if you need to abort + replace a running
+     *          mission, call ``Mission.abort()`` first.
+     * @warning Calling ``start()`` while in ``FAULT_BEEPING`` or
+     *          ``FAULT_AWAIT_RESET`` also rewinds to ``RUNNING`` and
+     *          the next tick will immediately re-fault if the
+     *          underlying PathTracker fault is still latched. Clear
+     *          the fault (or call ``Mission.abort()``) first.
      */
     void start();
 
-    /** @brief Drop the entire queue and return to IDLE. Stops Drive. */
+    /**
+     * @brief Real safety stop: cancel the in-flight PathTracker FSM,
+     *        disable LineFollower, brake the chassis, empty the queue,
+     *        return Mission to ``IDLE``, and clear any latched fault.
+     *
+     * Symmetric with ``Drive.stop(true)`` but at the mission level —
+     * use this anywhere you need a hard cancel of every cooperative
+     * subsystem that could re-issue motion on the next tick.
+     */
     void abort();
 
     /** @brief ``true`` when no mission is running and no fault is latched. */
