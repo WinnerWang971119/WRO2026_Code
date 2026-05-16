@@ -177,7 +177,10 @@ def test_edge_types_use_enum(emit_targets):
 
 def test_compute_source_hash_is_full_sha256():
     digest = compute_source_hash(_FIELD_DATA_SRC)
-    expected = hashlib.sha256(_FIELD_DATA_SRC.read_bytes()).hexdigest()
+    # compute_source_hash LF-normalizes before hashing so the digest is stable
+    # whether field_data.py was checked out CRLF (Windows autocrlf) or LF.
+    raw = _FIELD_DATA_SRC.read_bytes()
+    expected = hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
     assert digest == expected
     assert len(digest) == 64
     assert all(c in "0123456789abcdef" for c in digest)
