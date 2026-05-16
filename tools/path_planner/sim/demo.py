@@ -42,7 +42,6 @@ if str(_REPO_ROOT) not in sys.path:
 from tools.path_planner import field_data as toy_field_data
 from tools.path_planner.compiler import (
     ACT_TURN_REL,
-    ACT_TURN_TO,
     Primitive,
 )
 from tools.path_planner.graph_builder import build_graph
@@ -60,7 +59,7 @@ def _format_primitive(p: Primitive) -> str:
     action, value = p
     if value is None:
         return f"{action}()"
-    if action in (ACT_TURN_REL, ACT_TURN_TO):
+    if action == ACT_TURN_REL:
         return f"{action}({value:+.3f} deg)"
     return f"{action}({value:.3f} cm)"
 
