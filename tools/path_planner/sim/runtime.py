@@ -100,11 +100,6 @@ def walk_next_hop(
         nxt = next_hop[current][target]
         if nxt is None:
             raise UnreachableGoalError(source, target, current=current)
-        # NEXT_HOP self-loop sentinel: if we are already AT the target,
-        # the table reports `next_hop[target][target] == target`. We
-        # break BEFORE consuming that step so the walk ends cleanly.
-        if current == target:
-            break
         path.append(nxt)
         current = nxt
         if current == target:
