@@ -22,12 +22,6 @@
  *  - **`JunctionType` enum mirrors the library's 0..4 values exactly**, so a plain
  *    `static_cast<JunctionType>(raw)` is the only conversion ever needed.
  *
- * Lifecycle (see WRO2026.ino):
- *  - `Intersection.begin()` once in `setup()`, AFTER `LineFollower.begin()`.
- *  - `Intersection.update()` every iteration of `loop()`, AFTER `LineFollower.update()` (so
- *    both modules act on the same I2C cycle's worth of sensor state).
- *  - Consumers (EventTrace in T8, PathTracker in Phase 2) call `isAtIntersection()` and, on
- *    `true`, fetch `getLastType()` for the captured classification.
  */
 
 #ifndef INTERSECTION_H
