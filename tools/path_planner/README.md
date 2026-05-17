@@ -116,13 +116,15 @@ uv run --extra dev pytest tools/path_planner/tests/ -v
 
 Re-running `build_routes.py` against an unchanged `field_data.py`
 produces a **byte-identical** `routes.h` / `routes.cpp` pair (AC2). The
-`routes.h` banner embeds `hashlib.sha256(field_data.py).hexdigest()`,
-so reviewers can verify "the committed header is current with the
-committed `field_data.py`" at a glance:
+`routes.h` banner embeds the SHA256 of `field_data.py`'s **LF-normalized**
+bytes (CRLF sequences collapsed to LF first, so the digest matches across
+Windows and Linux checkouts regardless of git autocrlf), so reviewers can
+verify "the committed header is current with the committed
+`field_data.py`" at a glance:
 
 ```powershell
 python -c "import hashlib, pathlib; \
-print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes()).hexdigest())"
+print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes().replace(b'\r\n', b'\n')).hexdigest())"
 ```
 
 If that hex string does not appear at the top of `routes.h`, regen.

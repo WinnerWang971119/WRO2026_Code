@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import tempfile
 import warnings
 from pathlib import Path
 from types import SimpleNamespace
@@ -184,6 +185,24 @@ def test_compute_source_hash_is_full_sha256():
     assert digest == expected
     assert len(digest) == 64
     assert all(c in "0123456789abcdef" for c in digest)
+
+
+def test_compute_source_hash_normalizes_crlf_to_lf(tmp_path):
+    """CRLF and LF copies of the same content must hash to the same digest.
+
+    Guards the CRLF->LF normalization explicitly so a regression to raw-byte
+    hashing would fail this test even on an LF-only Linux checkout, not just
+    on Windows where autocrlf happens to expose it.
+    """
+    content_lf = b"FIELD_MM = (3000, 2000)\nNODES = {}\nSTART_NODE = None\n"
+    content_crlf = content_lf.replace(b"\n", b"\r\n")
+
+    lf_path = tmp_path / "lf.py"
+    crlf_path = tmp_path / "crlf.py"
+    lf_path.write_bytes(content_lf)
+    crlf_path.write_bytes(content_crlf)
+
+    assert compute_source_hash(lf_path) == compute_source_hash(crlf_path)
 
 
 def test_default_paths_are_under_repo():

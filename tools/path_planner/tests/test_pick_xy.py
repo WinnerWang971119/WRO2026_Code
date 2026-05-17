@@ -52,3 +52,23 @@ def test_resolve_map_png_none_when_missing():
     """TC7: _resolve_map_png on stub with MAP_PNG=None returns None."""
     stub = types.SimpleNamespace(MAP_PNG=None)
     assert pick_xy._resolve_map_png(stub) is None
+
+
+def test_main_returns_2_when_map_missing(monkeypatch, tmp_path, capsys):
+    """Hard-fail contract: main() returns 2 + writes to stderr when the
+    configured map can't be read. Exercised without opening a GUI by
+    pointing MAP_PNG at a non-existent file."""
+    missing = tmp_path / "definitely_does_not_exist.png"
+    monkeypatch.setattr(pick_xy.field_data, "MAP_PNG", str(missing))
+    assert pick_xy.main() == 2
+    err = capsys.readouterr().err
+    assert "pick_xy:" in err
+    assert "cannot read map" in err
+
+
+def test_main_returns_2_when_map_png_is_none(monkeypatch, capsys):
+    """Hard-fail contract: main() returns 2 when MAP_PNG is unconfigured."""
+    monkeypatch.setattr(pick_xy.field_data, "MAP_PNG", None)
+    assert pick_xy.main() == 2
+    err = capsys.readouterr().err
+    assert "MAP_PNG" in err or "pick_xy:" in err
