@@ -31,13 +31,19 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import matplotlib.image as mpimg
-import matplotlib.pyplot as plt
-
-from tools.path_planner import field_data
-
-# Root of the path_planner tree; map.png paths are resolved relative to it.
+# Allow running as ``python tools/path_planner/pick_xy.py`` (no ``uv run``,
+# no ``-m`` flag) by threading the repo root onto sys.path before the
+# absolute ``tools.path_planner.*`` import below. Mirrors the bootstrap
+# in ``tools/path_planner/sim/demo.py`` and ``tools/path_planner/build_routes.py``.
 _PLANNER_ROOT: Path = Path(__file__).resolve().parent
+_REPO_ROOT: Path = _PLANNER_ROOT.parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+import matplotlib.image as mpimg  # noqa: E402
+import matplotlib.pyplot as plt  # noqa: E402
+
+from tools.path_planner import field_data  # noqa: E402
 
 PICKER_DOT_COLOR        = "red"
 PICKER_DOT_SIZE         = 60
