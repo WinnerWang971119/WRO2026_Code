@@ -142,8 +142,10 @@ it.
    gaps, no edge clips an obstacle).
 4. Commit `field_data.py`, `WRO2026/routes.h`, and
    `WRO2026/routes.cpp` **together** in the same commit. The `routes.h`
-   banner SHA256 must equal `sha256(field_data.py)` — if reviewers see
-   a mismatch, the commit is incomplete.
+   banner SHA256 must equal the **LF-normalized** SHA256 of `field_data.py`
+   (CRLF sequences collapsed to LF first, so the digest is stable across
+   Windows and Linux checkouts) — see the Determinism section above for
+   the one-liner. If reviewers see a mismatch, the commit is incomplete.
 
 ## Authoring real-field NODES
 

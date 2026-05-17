@@ -6,12 +6,11 @@
  * @details
  * Consumes the precomputed `Routes::NEXT_HOP` table and dispatches one
  * edge at a time onto `Drive` and `LineFollower` to navigate the chassis
- * from its current node to a goal node. PR3 simplification: only LINE
- * and BLIND edge types; the PR2 PROJECTION/GOAL_APPROACH states are
- * gone.
+ * from its current node (single source of truth: `Localization`) toward
+ * a queued destination node.
  *
  * Owns:
- *  - A FIFO queue of pending goal entries (`Config::PATH_QUEUE_CAPACITY`).
+ *  - A FIFO queue of pending navigation entries (`Config::PATH_QUEUE_CAPACITY`).
  *  - A per-edge state machine driven from `update()` (cooperative tick).
  *  - A fluent `goTo(node)` builder. Default is sync-blocking; chain
  *    `.async()` to enqueue + return immediately.
@@ -21,9 +20,46 @@
  *    does not restart motion. `faultMnemonic()` returns a short tag
  *    (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
  *
+ * FSM states (`State`):
+ *  - `IDLE`              — nothing pending; waits for a goal to be enqueued.
+ *  - `DEQUEUE`           — pops the next nav entry off the FIFO.
+ *  - `PLAN_NEXT_HOP`     — resolves the next edge via `FieldMap::getNextHop`,
+ *                          dispatches the pre-edge yaw turn (if non-trivial).
+ *  - `TURNING`           — waits for `Drive.isIdle()` after a turn dispatch.
+ *  - `LINE_FOLLOW`       — waits for `Intersection.isAtIntersection()` while
+ *                          the LineFollower drives the chassis along a line
+ *                          segment.
+ *  - `LINE_OVERSHOOT`    — after intersection-detect, re-arms LineFollower
+ *                          with a distance gate equal to
+ *                          `Config::LINE_SENSOR_AXLE_OFFSET_CM` so the
+ *                          chassis center (axle) lands on the node, not
+ *                          the sensor. Waits for
+ *                          `LineFollower.isDistanceReached()`.
+ *  - `PROJECTION_FOLLOW` — line-follows an edge of type `EdgeType::PROJECTION`
+ *                          using the edge's `distance_cm` as the gate,
+ *                          since the next node has no physical intersection
+ *                          marker. Waits for
+ *                          `LineFollower.isDistanceReached()`.
+ *  - `BLIND_FORWARD`     — waits for `Drive.isIdle()` after a dead-reckoned
+ *                          forward move.
+ *  - `FAULT`             — latched fault; cleared via `clearFault()` or
+ *                          `abort()`.
+ *
+ * Per-edge motion-mode resolution:
+ *  - Each `Routes::EdgeInfo` carries per-category override fields
+ *    (`line_mode_override`, `blind_mode_override`,
+ *    `projection_mode_override`, `pre_turn_mode_override`). `DEFAULT` means
+ *    "inherit `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves
+ *    DEFAULT → concrete at edge-dispatch time and chains the appropriate
+ *    builder setters.
+ *
  * Iron rules (match `Drive`'s discipline):
  *  1. `update()` is non-blocking; every Drive call is `.async()`.
- *  2. Localization is the only writer of `_currentNode`.
+ *  2. Localization is the only writer of `_currentNode` — PathTracker
+ *     advances it via `onIntersection(...)` / `onDeadReckonedAdvance(...)`
+ *     ONLY after the corresponding edge has truly completed (for LINE
+ *     edges, this means AFTER the overshoot has rolled the axle onto the
+ *     node, not at the intersection-detect tick).
  */
 
 #ifndef PATHTRACKER_H
@@ -84,11 +120,18 @@ public:
         DRAIN_TIMEOUT = 5
     };
 
+    /**
+     * @brief Snapshot of the latched fault, returned by `getFault()`.
+     *
+     * @note `destNode` is the active destination node that was in flight
+     *       when the fault tripped (renamed from the historical
+     *       `goalNode` field as part of the PR3 internals cleanup).
+     */
     struct FaultInfo
     {
         Fault   kind     = Fault::NONE;
         uint8_t fromNode = FieldMap::NODE_NONE;
-        uint8_t goalNode = FieldMap::NODE_NONE;
+        uint8_t destNode = FieldMap::NODE_NONE;
     };
 
     bool begin();
@@ -110,8 +153,9 @@ public:
      *
      * Symmetric with `Drive.stop(true)`. Use this as a real safety stop
      * (e.g. `Mission.abort()`) — `clearFault()` alone is a no-op when
-     * the FSM is mid-edge (`TURNING` / `LINE_FOLLOW` / `BLIND_FORWARD`),
-     * which would otherwise let the next `update()` tick resume motion.
+     * the FSM is mid-edge (`TURNING` / `LINE_FOLLOW` / `LINE_OVERSHOOT` /
+     * `PROJECTION_FOLLOW` / `BLIND_FORWARD`), which would otherwise let
+     * the next `update()` tick resume motion.
      */
     void       abort();
 
@@ -121,6 +165,9 @@ public:
     static const char* faultMnemonic(Fault kind);
 
 private:
+    /**
+     * @brief Per-edge FSM state. See class doxygen for the full lifecycle.
+     */
     enum class State : uint8_t
     {
         IDLE,
@@ -128,17 +175,28 @@ private:
         PLAN_NEXT_HOP,
         TURNING,
         LINE_FOLLOW,
+        LINE_OVERSHOOT,
+        PROJECTION_FOLLOW,
         BLIND_FORWARD,
         FAULT
     };
 
-    struct GoalEntry
+    /**
+     * @brief One pending entry on PathTracker's FIFO.
+     *
+     * A `goTo(...)` call enqueues exactly one of these; the destination
+     * node id is the only payload (the planner re-resolves the next-hop
+     * at every PLAN_NEXT_HOP tick, so no edge state needs to be cached).
+     * Renamed from `GoalEntry` (PR3 internals cleanup) — the public
+     * `goTo()` verb is unchanged.
+     */
+    struct NavEntry
     {
-        uint8_t goalId;
+        uint8_t nodeId;
     };
 
     bool _enqueue(uint8_t goalId);
-    bool _pop(GoalEntry& out);
+    bool _pop(NavEntry& out);
     void _clearQueue();
 
     void _enterFault(Fault kind, uint8_t from, uint8_t to);
@@ -149,15 +207,15 @@ private:
 
     void _applyGoToBuilder(uint8_t goalId, bool blocking);
 
-    GoalEntry _queue[Config::PATH_QUEUE_CAPACITY];
-    uint8_t   _qHead  = 0;
-    uint8_t   _qTail  = 0;
-    uint8_t   _qCount = 0;
+    NavEntry _queue[Config::PATH_QUEUE_CAPACITY];
+    uint8_t  _qHead  = 0;
+    uint8_t  _qTail  = 0;
+    uint8_t  _qCount = 0;
 
-    State            _state          = State::IDLE;
-    uint8_t          _currentGoal    = FieldMap::NODE_NONE;
-    uint8_t          _nextHop        = FieldMap::NODE_NONE;
-    Routes::EdgeType _activeEdgeType = Routes::EdgeType::NONE;
+    State            _state           = State::IDLE;
+    uint8_t          _destinationNode = FieldMap::NODE_NONE;
+    uint8_t          _nextHop         = FieldMap::NODE_NONE;
+    Routes::EdgeType _activeEdgeType  = Routes::EdgeType::NONE;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;

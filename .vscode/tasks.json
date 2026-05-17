@@ -1,0 +1,145 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Path Planner: Build Routes",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/path_planner_task.ps1",
+                "${config:wro2026.pathPlanner.pythonPath}",
+                "${config:wro2026.pathPlanner.scriptPath}"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Sim: Run PathTracker Demo",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/path_planner_task.ps1",
+                "${config:wro2026.pathPlanner.pythonPath}",
+                "${config:wro2026.sim.scriptPath}",
+                "--goals",
+                "${config:wro2026.sim.goals}"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Sim: Plot PathTracker Demo",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/path_planner_task.ps1",
+                "${config:wro2026.pathPlanner.pythonPath}",
+                "${config:wro2026.sim.scriptPath}",
+                "--goals",
+                "${config:wro2026.sim.goals}",
+                "--plot"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Arduino: Verify WRO2026",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "verify",
+                "${config:wro2026.arduino.cliPath}",
+                "${config:wro2026.arduino.fqbn}",
+                "${config:wro2026.arduino.sketchPath}"
+            ],
+            "dependsOn": "Path Planner: Build Routes",
+            "dependsOrder": "sequence",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Arduino: Upload WRO2026",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "upload",
+                "${config:wro2026.arduino.cliPath}",
+                "${config:wro2026.arduino.fqbn}",
+                "${config:wro2026.arduino.sketchPath}",
+                "${config:wro2026.arduino.port}"
+            ],
+            "dependsOn": "Arduino: Verify WRO2026",
+            "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Arduino: List Boards",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "list-boards",
+                "${config:wro2026.arduino.cliPath}",
+                "${config:wro2026.arduino.fqbn}",
+                "${config:wro2026.arduino.sketchPath}"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        }
+    ]
+}

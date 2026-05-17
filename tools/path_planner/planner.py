@@ -27,10 +27,24 @@ Penalising blind edges keeps the planner on the line whenever a line
 detour is reasonable - the line follower is far more reliable than
 open-loop encoder moves.
 
-The raw ``distance_cm`` attribute is left untouched on the input graph;
-this module operates on a *copy* with an extra ``cost`` attribute, so
-callers can re-use the original graph for visualisation or heading
-propagation downstream (T6).
+The raw ``distance_cm`` attribute on the *input* graph is left untouched;
+this module operates on a *copy* with an extra ``cost`` attribute and any
+single-wheel-pivot compensation baked in, so callers can re-use the
+original graph for visualisation or heading propagation downstream (T6).
+
+Single-wheel pivot compensation
+-------------------------------
+
+Edges in the graph may carry a ``pivot`` attribute (the integer value of
+a :class:`tools.path_planner.graph_builder.Pivot` member). When set to
+``Pivot.LEFT`` or ``Pivot.RIGHT``, the turn entering that edge is
+executed as a single-wheel pivot rather than a counter-rotation. The
+chassis centre traces an arc instead of staying put, so it lands offset
+from where a counter-rotation would have left it. The planner
+compensates for that displacement by shortening the FOLLOWING edge's
+``distance_cm`` (see :func:`compute_pivot_compensation`). The
+compensation is applied to a private weighted copy of the graph; the
+caller's graph is never mutated.
 
 Sentinels
 ---------
@@ -45,15 +59,183 @@ Sentinels
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+import math
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND
+from tools.path_planner.graph_builder import EDGE_BLIND, Pivot
 
 # Public type alias: outer key = source node, inner key = target node,
 # value = next node on the shortest path (or None if unreachable).
 NextHopTable = Dict[str, Dict[str, Optional[str]]]
+
+
+# -- physical constants -------------------------------------------------------
+
+# Chassis track width (wheel-to-wheel) in centimetres. This MUST mirror
+# ``Config::TRACK_MM`` in ``WRO2026/Config.h`` (currently 150 mm = 15 cm).
+# Kept as a Python-side mirror so :mod:`tools.path_planner.field_data` does
+# not have to take a dependency on the C++ headers. Update both sides
+# together when the real chassis is measured.
+TRACK_CM: float = 15.0
+
+
+# -- pivot-compensation helpers ----------------------------------------------
+
+
+def compute_pivot_compensation(
+    turn_deg: float,
+    track_cm: float,
+    next_edge_dist: float,
+    next_edge_heading: float,
+) -> Tuple[float, float]:
+    """Adjust next-edge geometry to compensate for a single-wheel pivot turn.
+
+    For a single-wheel pivot through ``turn_deg`` degrees around one wheel,
+    the chassis centre moves along a chord of length
+    ``2 * (track_cm / 2) * sin(|theta| / 2)`` (i.e. an arc of radius
+    ``track_cm / 2``). The chord direction depends on pivot side and turn
+    direction.
+
+    For now we treat the chord as a translation along the bisector of the
+    turn (a small-angle approximation that is exact for the chord
+    *magnitude* and a reasonable estimate for the heading-projection at
+    modest turn angles). The forward component of the chord -- the piece
+    that overshoots the next node along the next-edge heading -- is
+    ``chord_cm * sin(|theta| / 2)``, which we subtract from
+    ``next_edge_dist``. ``next_edge_heading`` is unchanged: the planner
+    emits absolute world headings, so the next edge's heading direction
+    is independent of how the chassis arrived at its starting point.
+
+    The math may need refining once we have real chassis measurements;
+    keeping the helper pure (no graph dependency) makes it cheap to swap
+    out later.
+
+    :param turn_deg: signed turn magnitude (degrees, CCW positive). Only
+        ``|turn_deg|`` enters the chord calculation, so the sign is
+        accepted but unused -- callers may pass a signed delta directly.
+    :param track_cm: chassis track width (wheel-to-wheel) in centimetres.
+        Must be non-negative. ``0.0`` is allowed and yields zero
+        compensation.
+    :param next_edge_dist: planner's intended distance to the next node
+        (cm). The compensated distance is clamped at ``0.0`` -- a turn so
+        large it would erase the next edge entirely yields a zero-length
+        edge rather than a negative one.
+    :param next_edge_heading: planner's intended heading at the next
+        edge (degrees, world frame). Returned unchanged.
+    :return: ``(adjusted_distance_cm, adjusted_heading_deg)`` tuple.
+        Currently the heading is returned verbatim; the distance is
+        ``max(0.0, next_edge_dist - chord_cm * sin(|theta| / 2))``.
+    """
+    abs_theta_rad = math.radians(abs(turn_deg))
+    half_theta = abs_theta_rad / 2.0
+    chord_cm = 2.0 * (track_cm / 2.0) * math.sin(half_theta)
+    # Forward component of the chord along the post-turn heading.
+    # Geometrically this is the projection of the chord onto the
+    # next-edge direction; for a chord oriented along the bisector of
+    # the turn, that projection simplifies to chord_cm * sin(|theta| / 2).
+    forward_component = chord_cm * math.sin(half_theta)
+    adjusted_dist = max(0.0, next_edge_dist - forward_component)
+    return (adjusted_dist, next_edge_heading)
+
+
+def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
+    """Walk ``graph`` and shorten every edge that follows a pivot turn.
+
+    For every edge ``(src, dst)`` in ``graph`` whose ``pivot`` attribute
+    is set to :attr:`Pivot.LEFT` or :attr:`Pivot.RIGHT` (compared by
+    integer value, since :func:`graph_builder._extract_directional_attrs`
+    stores the int rather than the IntEnum), this function locates the
+    *single* out-edge from ``dst`` and rewrites its ``distance_cm`` to
+    the value returned by :func:`compute_pivot_compensation`. The
+    ``heading_deg`` field is also overwritten with the (currently
+    unchanged) value from the helper, so a future refinement of the
+    heading math automatically flows through.
+
+    The turn magnitude is computed as the heading delta between the
+    pivot-tagged edge and the following edge (normalised to
+    ``[-180, 180]`` degrees).
+
+    .. note::
+
+        This conservative implementation refuses to compensate when the
+        landing node has more than one forward out-edge. Out-edge choice
+        is only known once Dijkstra has picked a path, but
+        :func:`apply_pivot_compensations` runs *before* Dijkstra so it
+        cannot know which successor will fire -- applying the
+        adjustment to all successors would silently overcorrect every
+        branch that is not the one we end up taking. The safe scope cut
+        for the 2026-05-17 hardware test is to require pivot
+        destinations to have exactly one forward out-edge so the choice
+        is unambiguous. The field-data author can structure the graph
+        accordingly. A future per-path pivot-aware planner could relax
+        this restriction.
+
+        The back-edge from ``dst`` to ``src`` (always present when the
+        edge was emitted by :func:`build_graph`'s bidirectional pair) is
+        excluded from the out-edge count and from the compensation
+        target -- the chassis is never going to immediately reverse the
+        pivot it just executed.
+
+    :param graph: a directed graph (typically a private weighted copy --
+        callers must NOT pass the user-visible graph because edge
+        attributes are mutated in place).
+    :param track_cm: chassis track width in centimetres. Forwarded to
+        :func:`compute_pivot_compensation`.
+    :raises ValueError: when a pivot-tagged edge's destination node has
+        zero or more than one out-edge. The error message names the
+        destination node and its out-degree so the field-data author
+        can find the offending entry.
+    """
+    pivot_values = {int(Pivot.LEFT), int(Pivot.RIGHT)}
+
+    # Snapshot the edge list so in-place attribute mutation during
+    # iteration cannot disturb the loop variable. We only ever mutate
+    # the *following* edge, never the pivot-tagged edge itself, but
+    # making this explicit removes any doubt.
+    pivot_edges = [
+        (src, dst, data)
+        for src, dst, data in graph.edges(data=True)
+        if int(data.get("pivot", Pivot.NONE)) in pivot_values
+    ]
+
+    for src, dst, pivot_edge_data in pivot_edges:
+        # Exclude the back-edge to ``src``: build_graph emits every edge
+        # bidirectionally, so dst->src is always present and is never a
+        # legitimate next-edge candidate (the chassis would not pivot
+        # only to immediately reverse). Counting it would make pivot
+        # compensation impossible to apply on any realistic graph.
+        forward_out_edges = [
+            (s, d, data)
+            for s, d, data in graph.out_edges(dst, data=True)
+            if d != src
+        ]
+        if len(forward_out_edges) != 1:
+            raise ValueError(
+                "pivot compensation requires destination node "
+                f"'{dst}' (entered from '{src}') to have exactly one "
+                f"forward out-edge, got {len(forward_out_edges)}. "
+                "Restructure the graph so pivot landings are unambiguous, "
+                f"or drop the pivot tag on edge ('{src}', '{dst}')."
+            )
+
+        _next_src, _next_dst, next_edge_data = forward_out_edges[0]
+        pre_heading = float(pivot_edge_data["heading_deg"])
+        post_heading = float(next_edge_data["heading_deg"])
+        # Normalise the turn delta into [-180, 180]. ((d + 180) % 360) - 180
+        # is the standard trick; works for any IEEE-754 float input.
+        turn_deg = ((post_heading - pre_heading + 180.0) % 360.0) - 180.0
+
+        next_dist = float(next_edge_data["distance_cm"])
+        adj_dist, adj_heading = compute_pivot_compensation(
+            turn_deg=turn_deg,
+            track_cm=track_cm,
+            next_edge_dist=next_dist,
+            next_edge_heading=post_heading,
+        )
+        next_edge_data["distance_cm"] = adj_dist
+        next_edge_data["heading_deg"] = adj_heading
 
 
 # -- internal helpers ---------------------------------------------------------
@@ -114,7 +296,10 @@ def compute_all_pairs_next_hop(
       next-hop reconstructs the optimal path.
 
     Edge cost = ``distance_cm * (cost_blind_multiplier if type == EDGE_BLIND
-    else 1.0)``. The function does not mutate ``graph``.
+    else 1.0)``. Single-wheel-pivot compensation
+    (:func:`apply_pivot_compensations`) is applied to the private
+    weighted copy *before* Dijkstra runs, so reported costs reflect the
+    compensated geometry. The function does not mutate ``graph``.
 
     :param graph: directed graph as produced by
         :func:`tools.path_planner.graph_builder.build_graph`. Every edge
@@ -124,8 +309,22 @@ def compute_all_pairs_next_hop(
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
+    :raises ValueError: bubbled from :func:`apply_pivot_compensations`
+        when a pivot-tagged edge's destination has anything other than
+        exactly one out-edge.
     """
     weighted = _weighted_copy(graph, cost_blind_multiplier)
+    # Apply pivot compensation BEFORE Dijkstra so the edge costs the
+    # planner sees match the geometry the runtime will actually drive.
+    # The mutation lands on the private ``weighted`` copy only.
+    apply_pivot_compensations(weighted, TRACK_CM)
+    # ``cost`` was set from the pre-compensation distance, so refresh it
+    # for any edge whose ``distance_cm`` changed during compensation.
+    # Edges that did not change retain the original cost untouched.
+    for _u, _v, data in weighted.edges(data=True):
+        multiplier = cost_blind_multiplier if data["type"] == EDGE_BLIND else 1.0
+        data["cost"] = float(data["distance_cm"]) * multiplier
+
     nodes = list(graph.nodes())
 
     next_hop: NextHopTable = {}
@@ -165,6 +364,17 @@ def compute_path_cost(
     :func:`compute_all_pairs_next_hop`, so tests can confirm a Dijkstra
     decision matches a hand-computed cost. A single-node path (or empty
     path) has cost ``0.0`` because no edges are traversed.
+
+    .. note::
+
+        Unlike :func:`compute_all_pairs_next_hop`, this function reads
+        ``distance_cm`` straight off the *input* graph and does not
+        apply pivot compensation. If a caller needs the compensated
+        cost, they should run :func:`apply_pivot_compensations` on a
+        copy of the graph first and pass that copy in here. Today this
+        function is only used by tests to cross-check Dijkstra against a
+        hand-computed cost on graphs without pivot tags, so the
+        divergence is intentional.
 
     :param graph: directed graph carrying ``type`` and ``distance_cm``
         on every edge.

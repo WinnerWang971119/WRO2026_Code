@@ -82,8 +82,14 @@ void DriveClass::update()
     // owns `_moveDone` — the lower-MCU task-done bit refers to a *prior* bounded MMLower
     // task and would falsely flip _moveDone to true mid-cruise (W1 fix). Skip the drain in
     // that case; _updateProfile will set _moveDone when the profile itself completes.
+    //
+    // Same guard applies when the custom TurnGyro profile is in flight: `_updateTurnProfile`
+    // owns `_turnDone` (and the collapsed `_moveDone`) and the lower-MCU task-done bit would
+    // refer to a *prior* bounded MMLower task, falsely flipping _turnDone mid-turn.
     // -------------------------------------------------------------------------------------
-    if (_profileState == ProfileState::IDLE && (!_moveDone || !_turnDone))
+    if (_profileState == ProfileState::IDLE
+        && _turnProfileState == TurnProfileState::IDLE
+        && (!_moveDone || !_turnDone))
     {
         // The lower MCU reports a single task-done bit, so move-done and turn-done collapse
         // into one signal here. Application code MUST NOT issue a bounded move and a turn
@@ -102,6 +108,8 @@ void DriveClass::update()
     // the same tick (no inter-segment gap on chained queue moves).
     // -------------------------------------------------------------------------------------
     _updateProfile();
+    _updateTurnProfile();    // NEW — cooperative tick parallel to _updateProfile, owns
+                              // the custom CRUISE → SLOW → BRAKE TurnGyro state machine.
 
     // -------------------------------------------------------------------------------------
     // Stage 3 — if the chassis is fully idle and a queued command is waiting, dispatch it.
@@ -141,9 +149,10 @@ uint8_t DriveClass::stop(bool brake)
     MiniR4.DriveDC.Move(0, 0);
     const uint8_t brakeRc = MiniR4.DriveDC.brake(brake);
 
-    _moveDone     = true;
-    _turnDone     = true;
-    _profileState = ProfileState::IDLE;    // also abort any in-flight profile
+    _moveDone         = true;
+    _turnDone         = true;
+    _profileState     = ProfileState::IDLE;        // also abort any in-flight profile
+    _turnProfileState = TurnProfileState::IDLE;    // also abort any in-flight turn profile
 
     // Abort semantics — pending queued work is dropped. Without this, a `Drive.stop()` call
     // intended to halt the chassis would be silently undone on the next `update()` tick when
@@ -264,36 +273,69 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
                                  bool    brake,
                                  bool    blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t cur          = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
-    const int16_t target       = _normalizeYaw((int32_t) cur + (int32_t) deg);
-    const bool    wasIdleAtTry = _turnDone;
+    // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
+    //
+    // `power` is honored as the cruise-PWM magnitude override: callers can chain
+    // `Drive.turnDeg(deg).setPower(80)` for a faster turn. Slow-zone PWM stays at
+    // Config::TURN_SLOW_SPEED_PWM (the final-approach must stay gentle enough to
+    // stop within TURN_TOLERANCE_DEG). Non-positive overrides fall back to the
+    // Config default to keep `_turnDeltaSign` as the sole source of rotation sign.
+    //
+    // Mode encoding (NEW — repurposed from MiniR4.DriveDC.TurnGyro's 0/1 bits):
+    //   0 = COUNTER_ROT (both wheels spin opposite directions)
+    //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
+    //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    // The library's `async` argument is the inverse of our `blocking` flag.
-    const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(power, target, mode, brake, !blocking);
+    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
-    if (rc == 0x00)
+    // Capture the initial signed delta normalized into (-180, +180] so the BRAKE-edge
+    // tick cannot oscillate the spin direction when the IMU briefly straddles target.
+    int32_t deltaNorm = (int32_t) target - (int32_t) cur;
+    while (deltaNorm > 180)
     {
-        _heldYaw = target;
-        // Async path: clear `_turnDone` so callers can poll. Blocking path: the library
-        // already spun until the lower MCU reported done, so leave `_turnDone = true`.
-        _turnDone = blocking ? true : false;
+        deltaNorm -= 360;
     }
-    else
+    while (deltaNorm <= -180)
     {
-        // Turn never started — leave _heldYaw at the previous target so forwardGyro/*Gyro
-        // primitives keep their existing yaw lock. C1 fix: unblock any caller polling
-        // isTurnDone() — but ONLY if no prior bounded task was pending at entry. If a
-        // prior task is still in flight, we must not lie about its completion (W1).
-        if (wasIdleAtTry)
-        {
-            _turnDone = true;
-        }
-        Serial.print(F("[Drive] _execTurnDeg failed, rc=0x"));
-        Serial.println(rc, HEX);
+        deltaNorm += 360;
     }
-    return rc;
+
+    // Short-circuit on no-op turns. When the normalized delta is already within
+    // the heading tolerance, arming the profile would issue one spurious CRUISE
+    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
+    // Just mark the turn done and keep _heldYaw at the target so subsequent
+    // yaw-locked moves stay aligned.
+    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    {
+        _heldYaw          = target;
+        _turnTargetYaw    = target;
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        (void) power;
+        (void) mode;
+        (void) brake;
+        (void) blocking;
+        return 0x00;
+    }
+
+    const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
+
+    _turnTargetYaw          = target;
+    _turnDeltaSign          = sign;
+    _turnMotorMode          = mode;
+    _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
+    _turnProfileBrakeOnDone = brake;
+    _turnProfileState       = TurnProfileState::CRUISE;
+    _turnDone               = false;
+    _heldYaw                = target;
+
+    // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing
+    // extra here. We always return 0x00 — the new state machine cannot fail at dispatch
+    // (no lower-MCU round trip), so there is no rc to surface.
+    (void) blocking;
+    return 0x00;
 }
 
 uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
@@ -302,30 +344,59 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
                                    bool    brake,
                                    bool    blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const int16_t target       = _normalizeYaw((int32_t) yaw);
-    const bool    wasIdleAtTry = _turnDone;
+    // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
+    //
+    // `power` is honored as the cruise-PWM magnitude override; see _execTurnDeg
+    // for the full rationale. Slow-zone PWM stays at Config::TURN_SLOW_SPEED_PWM.
+    // Non-positive overrides fall back to the Config default.
+    //
+    // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    const uint8_t rc =
-        MiniR4.DriveDC.TurnGyro(power, target, mode, brake, !blocking);
+    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    const int16_t target = _normalizeYaw((int32_t) yaw);
 
-    if (rc == 0x00)
+    int32_t deltaNorm = (int32_t) target - (int32_t) cur;
+    while (deltaNorm > 180)
     {
-        _heldYaw  = target;
-        _turnDone = blocking ? true : false;
+        deltaNorm -= 360;
     }
-    else
+    while (deltaNorm <= -180)
     {
-        // Turn never started. C1 fix: unblock the caller — but only if the slot was
-        // actually idle at entry (W1: don't clobber a pending prior task's flag).
-        if (wasIdleAtTry)
-        {
-            _turnDone = true;
-        }
-        Serial.print(F("[Drive] _execTurnToYaw failed, rc=0x"));
-        Serial.println(rc, HEX);
+        deltaNorm += 360;
     }
-    return rc;
+
+    // Short-circuit on no-op turns. When the normalized delta is already within
+    // the heading tolerance, arming the profile would issue one spurious CRUISE
+    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
+    // Just mark the turn done and keep _heldYaw at the target so subsequent
+    // yaw-locked moves stay aligned.
+    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    {
+        _heldYaw          = target;
+        _turnTargetYaw    = target;
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        (void) power;
+        (void) mode;
+        (void) brake;
+        (void) blocking;
+        return 0x00;
+    }
+
+    const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
+
+    _turnTargetYaw          = target;
+    _turnDeltaSign          = sign;
+    _turnMotorMode          = mode;
+    _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
+    _turnProfileBrakeOnDone = brake;
+    _turnProfileState       = TurnProfileState::CRUISE;
+    _turnDone               = false;
+    _heldYaw                = target;
+
+    (void) blocking;
+    return 0x00;
 }
 
 // -----------------------------------------------------------------------------------------
@@ -882,6 +953,113 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
 }
 
 // -----------------------------------------------------------------------------------------
+// Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
+//
+// Two-stage profile: CRUISE at TURN_CRUISE_PWM until within TURN_SLOW_ZONE_DEG of target,
+// then SLOW at TURN_SLOW_SPEED_PWM until within TURN_TOLERANCE_DEG, then BRAKE.
+// Both wheels' PWM magnitude/sign depends on _turnDeltaSign (captured at dispatch) and
+// _turnMotorMode (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT — repurposed from cmd.turnMode).
+// -----------------------------------------------------------------------------------------
+
+void DriveClass::_updateTurnProfile()
+{
+    if (_turnProfileState == TurnProfileState::IDLE)
+    {
+        return;
+    }
+
+    // Read current IMU yaw + compute signed normalized delta into (-180, +180].
+    const int16_t cur      = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    int32_t       rawDelta = (int32_t) _turnTargetYaw - (int32_t) cur;
+    while (rawDelta > 180)
+    {
+        rawDelta -= 360;
+    }
+    while (rawDelta <= -180)
+    {
+        rawDelta += 360;
+    }
+    // rawDelta is in (-180, +180] so a plain abs() is sufficient — no risk of int overflow.
+    // Consistent with the `abs(delta)` / `abs(encL)` pattern used elsewhere in this file.
+    const float absDelta = (float) abs(rawDelta);
+
+    // Final stop band — tightest check first, then slow-zone entry.
+    if (absDelta <= Config::TURN_TOLERANCE_DEG)
+    {
+        _turnProfileState = TurnProfileState::BRAKE;
+    }
+    else if (absDelta <= Config::TURN_SLOW_ZONE_DEG
+             && _turnProfileState == TurnProfileState::CRUISE)
+    {
+        _turnProfileState = TurnProfileState::SLOW;
+    }
+
+    // Choose PWM magnitude by state.
+    int16_t pwmMag = 0;
+    switch (_turnProfileState)
+    {
+    case TurnProfileState::CRUISE:
+        pwmMag = _turnCruisePwm;
+        break;
+    case TurnProfileState::SLOW:
+        pwmMag = Config::TURN_SLOW_SPEED_PWM;
+        break;
+    case TurnProfileState::BRAKE:
+        MiniR4.DriveDC.Move(0, 0);
+        MiniR4.DriveDC.brake(_turnProfileBrakeOnDone);
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;    // single-task-done bit collapse (matches _updateProfile)
+        return;
+    default:
+        // IDLE handled above; no other state values exist.
+        return;
+    }
+
+    // Apply rotation direction. The captured `_turnDeltaSign` tells us which way to spin:
+    //   +1 → yaw must increase (CCW / left turn).
+    //   -1 → yaw must decrease (CW / right turn).
+    //
+    // Sign convention for the wheel pattern (per Drive's existing setSpeed semantics):
+    // positive PWM on the left wheel drives the left side forward, which rotates the nose
+    // RIGHT (clockwise body). To rotate the body CCW (yaw increases on this IMU) the left
+    // wheel must spin BACKWARD and the right wheel FORWARD — hence the L = -sign*pwm,
+    // R = +sign*pwm pattern for counter-rotation. If hardware testing reveals the IMU yaw
+    // axis is inverted relative to this assumption, flip the signs below and update this
+    // comment.
+    int16_t L = 0;
+    int16_t R = 0;
+    switch (_turnMotorMode)
+    {
+    case 0:    // COUNTER_ROT — both wheels spin opposite directions.
+        L = (int16_t) (-_turnDeltaSign * pwmMag);
+        R = (int16_t) (+_turnDeltaSign * pwmMag);
+        break;
+    case 1:    // PIVOT_LEFT — left wheel stationary, right wheel drives the rotation.
+        L = 0;
+        R = (int16_t) (+_turnDeltaSign * pwmMag);
+        break;
+    case 2:    // PIVOT_RIGHT — right wheel stationary, left wheel drives the rotation.
+        L = (int16_t) (-_turnDeltaSign * pwmMag);
+        R = 0;
+        break;
+    default:
+        // Unknown mode — fall back to counter-rotation rather than refusing to turn.
+        L = (int16_t) (-_turnDeltaSign * pwmMag);
+        R = (int16_t) (+_turnDeltaSign * pwmMag);
+        break;
+    }
+
+    // Apply the same deadband snap / PWM saturation used by other drive outputs so
+    // profiled turns neither stall below the minimum effective magnitude nor exceed
+    // the configured PWM range at the actuator boundary.
+    L = (int16_t) deadbandSnap(L);
+    R = (int16_t) deadbandSnap(R);
+
+    MiniR4.DriveDC.Move(L, R);
+}
+
+// -----------------------------------------------------------------------------------------
 // Fault state accessors (code review F5).
 // -----------------------------------------------------------------------------------------
 
@@ -1040,16 +1218,18 @@ void DriveClass::_dispatchNext()
 
         MiniR4.DriveDC.Move(0, 0);
         MiniR4.DriveDC.brake(true);
-        _moveDone     = true;
-        _turnDone     = true;
-        _profileState = ProfileState::IDLE;
+        _moveDone         = true;
+        _turnDone         = true;
+        _profileState     = ProfileState::IDLE;
+        _turnProfileState = TurnProfileState::IDLE;
         _clearQueue();
     }
 }
 
 bool DriveClass::_isIdle() const
 {
-    return _moveDone && _turnDone && _profileState == ProfileState::IDLE;
+    return _moveDone && _turnDone && _profileState == ProfileState::IDLE
+           && _turnProfileState == TurnProfileState::IDLE;
 }
 
 void DriveClass::_drainBlocking()
@@ -1088,9 +1268,10 @@ void DriveClass::_drainBlocking()
             _fault.rc   = 0x00;
             // _fault.cmdKind left at its default — the in-flight command's kind is no longer
             // tracked once dispatched.
-            _moveDone     = true;
-            _turnDone     = true;
-            _profileState = ProfileState::IDLE;
+            _moveDone         = true;
+            _turnDone         = true;
+            _profileState     = ProfileState::IDLE;
+            _turnProfileState = TurnProfileState::IDLE;
             _clearQueue();
             return;
         }

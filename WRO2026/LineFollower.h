@@ -145,18 +145,22 @@ public:
     LineFollowerEnableBuilder& setPreset(Config::SpeedPreset preset);
 
     /**
-     * @brief Enable trapezoidal velocity profile on this enable transition.
+     * @brief Enable the trapezoidal cruise ramp-UP on this enable transition.
      *
      * @note **`tShape` is on by default** — this setter is idempotent and exists for
-     *       explicit-readability. See DECISIONS.md "Sync + T-shape as default move profile"
-     *       for rationale.
+     *       explicit-readability. It is effectively an alias of `setTShapeRampUp(true)`
+     *       and affects ONLY the ramp-up phase. The symmetric ramp-DOWN before a
+     *       distance gate is controlled by `setTShapeRampDown(bool)` (also on by
+     *       default). See DECISIONS.md "LineFollower distance-gated stops use a
+     *       symmetric trapezoidal profile" for rationale.
      *
      * On a `setEnabled(true)` call, the line follower's cruise PWM ramps from 0 up to the
      * resolved preset over an implicit ramp distance: `cruise / accel`, clamped to
-     * `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]`. The ramp is purely forward
-     * (line following has no natural "end of move", so there is no ramp-down) and is
-     * consumed once: after the ramp distance is traveled, subsequent ticks use the full
-     * preset cruise. Disabling the controller cancels the ramp.
+     * `[Config::TSHAPE_RAMP_MIN_CM, Config::TSHAPE_RAMP_MAX_CM]`. With a distance target
+     * also armed, the ramp-up is additionally clamped to half the distance target so it
+     * cannot overlap the ramp-down zone. The ramp is consumed once: after the ramp
+     * distance is traveled, subsequent ticks use the full preset cruise. Disabling the
+     * controller cancels the ramp.
      *
      * Acceleration defaults to `Config::TSHAPE_ACCEL_PWM_PER_CM`. Override via `.setAccel()`.
      * Has no effect on a `setEnabled(false)` transition.
@@ -164,6 +168,36 @@ public:
      * @return `*this` for fluent chaining.
      */
     LineFollowerEnableBuilder& tShape();
+
+    /**
+     * @brief Opt out of the cruise ramp-up on this enable transition.
+     *
+     * @param on  `true` (default) keeps the trapezoidal ramp from 0 → cruise; `false`
+     *            instantly applies full cruise from the first post-enable tick.
+     * @return `*this` for fluent chaining.
+     *
+     * @note Default is `true` for ergonomic continuity with `tShape()`. The
+     *       enable path automatically skips the ramp-up reseed when the controller
+     *       was already enabled (re-arm semantics), so callers chaining
+     *       `setDistanceTarget(...)` on an already-running follower do not need to
+     *       set this explicitly. Provided for manual sketches that want instant cruise.
+     */
+    LineFollowerEnableBuilder& setTShapeRampUp(bool on);
+
+    /**
+     * @brief Opt out of the cruise ramp-down before the distance gate.
+     *
+     * @param on  `true` (default) ramps cruise from its current value down to
+     *            `Config::PWM_MIN_MAGNITUDE` over the approach distance, then
+     *            fires active brake at the gate. `false` holds full cruise until
+     *            the gate trips and brakes from cruise directly (legacy behaviour).
+     * @return `*this` for fluent chaining.
+     *
+     * @note Only meaningful when `setDistanceTarget(...)` is also chained.
+     *       For a `LINE_OVERSHOOT`-style 5 cm hop, ramp distance is fitted to the
+     *       available distance (see implementation note in `LineFollower.cpp`).
+     */
+    LineFollowerEnableBuilder& setTShapeRampDown(bool on);
 
     /**
      * @brief Override the per-PWM-per-cm acceleration rate for this enable's ramp.
@@ -221,8 +255,10 @@ private:
     bool                _brake               = true;   ///< Brake on disable (only used if !enable).
     bool                _hasPresetOverride   = false;  ///< True iff `_presetOverride` is meaningful.
     Config::SpeedPreset _presetOverride{};             ///< Pending preset; only honored when override flag set.
-    bool                _tShape              = true;   ///< default ON — cruise-ramp on a setEnabled(true) transition.
-                                                        ///< See DECISIONS.md "Sync + T-shape as default move profile".
+    bool                _tShapeRampUp        = true;   ///< default ON — cruise ramp-up from 0 on a setEnabled(true) transition.
+                                                        ///< See DECISIONS.md "LineFollower distance-gated stops use a symmetric trapezoidal profile".
+    bool                _tShapeRampDown      = true;   ///< default ON — cruise ramp-down to PWM_MIN_MAGNITUDE before the distance gate.
+                                                        ///< Only meaningful with `setDistanceTarget(...)` also chained.
     bool                _accelExplicit       = false;  ///< Reserved for parity with the Drive builders.
     float               _accel               = Config::TSHAPE_ACCEL_PWM_PER_CM; ///< Ramp rate.
     bool                _hasReverseOverride  = false;  ///< True iff `_reverseOverride` is meaningful.
@@ -403,10 +439,16 @@ public:
      *                            ignored when `targetEnabled == true`.
      * @param hasPresetOverride   `true` if `preset` should overwrite the active preset.
      * @param preset              New preset; honored only when `hasPresetOverride` is true.
-     * @param tShape              On an enable transition, ramps cruise from 0 up to the
-     *                            resolved preset over an implicit distance — see
-     *                            `LineFollowerEnableBuilder::tShape()`.
-     * @param accel               Ramp rate in PWM-per-cm; used only when `tShape == true` AND
+     * @param tShapeRampUp        On an enable transition that is a true off→on transition,
+     *                            ramps cruise from 0 up to the resolved preset over an
+     *                            implicit distance — see `LineFollowerEnableBuilder::tShape()`.
+     *                            Re-enabling a running follower never reseeds the ramp-up
+     *                            regardless of this flag.
+     * @param tShapeRampDown      On an enable transition with a distance target armed, ramps
+     *                            cruise from the current preset's PWM down to
+     *                            `Config::PWM_MIN_MAGNITUDE` over the approach distance —
+     *                            see `LineFollowerEnableBuilder::setTShapeRampDown(bool)`.
+     * @param accel               Ramp rate in PWM-per-cm; used by both ramp phases when
      *                            `targetEnabled == true`.
      * @param hasReverseOverride  `true` if `reverse` should overwrite the active direction.
      * @param reverse             New reverse flag; honored only when `hasReverseOverride`.
@@ -418,7 +460,8 @@ public:
                              bool                brake,
                              bool                hasPresetOverride,
                              Config::SpeedPreset preset,
-                             bool                tShape,
+                             bool                tShapeRampUp,
+                             bool                tShapeRampDown,
                              float               accel,
                              bool                hasReverseOverride,
                              bool                reverse,
@@ -442,6 +485,15 @@ private:
     int32_t _tShapeStartEnc  = 0;        ///< Encoder reading at enable.
     int16_t _tShapeStartPwm  = 0;        ///< Starting cruise (typically 0).
     int16_t _tShapeTargetPwm = 0;        ///< Final cruise (resolved from preset).
+
+    // Trapezoidal cruise ramp-DOWN state (used when a distance target is armed and
+    // `_useTShapeRampDown` is set). The ramp-down lerps cruise from `_tShapeRampDownStart`
+    // down to `Config::PWM_MIN_MAGNITUDE` (sign-corrected for reverse) as the chassis
+    // approaches the distance gate, so the active brake fires at floor PWM rather than from
+    // full cruise. See DECISIONS.md "LineFollower distance-gated stops use a symmetric
+    // trapezoidal profile".
+    bool    _useTShapeRampDown   = false;    ///< Set when ramp-down should apply this distance run.
+    int16_t _tShapeRampDownStart = 0;        ///< Cruise PWM captured at gate-arm time.
 
     // Distance-target gate state (`.setDistanceTarget(cm)` on the enable builder, used by
     // PathTracker's PROJECTION_FOLLOW state). When armed, `update()` evaluates the average

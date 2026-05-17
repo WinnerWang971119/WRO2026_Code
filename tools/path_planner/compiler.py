@@ -18,11 +18,11 @@ Primitive vocabulary:
   the per-degree epsilon.
 * ``("follow_line_to_intersection", None)`` -- line-follow until the
   next intersection event. Emitted for :data:`EDGE_LINE` traversals.
+* ``("follow_line_to_distance", cm)`` -- line-follow stopped by encoder
+  distance. Emitted for :data:`EDGE_PROJECTION` traversals -- used when
+  the waypoint has no physical intersection marker beneath the strip.
 * ``("forward", cm)`` -- dead-reckoned forward move. Emitted for
   :data:`EDGE_BLIND` traversals.
-
-PR3 simplification: projection edges and goal-approach blind sequences
-were removed. Every node is reached by either a LINE or BLIND edge.
 """
 
 from __future__ import annotations
@@ -31,10 +31,11 @@ from typing import List, Optional, Tuple
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
 
 ACT_TURN_REL = "turn_relative"
 ACT_FOLLOW_INT = "follow_line_to_intersection"
+ACT_FOLLOW_DIST = "follow_line_to_distance"
 ACT_FORWARD = "forward"
 
 Primitive = Tuple[str, Optional[float]]
@@ -82,6 +83,7 @@ def compile_path(
          > 1e-6``, emit ``(ACT_TURN_REL, delta)``.
        * Emit one motion primitive based on ``edge['type']``:
          ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
+         ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
          ``EDGE_BLIND`` -> ``(ACT_FORWARD, distance_cm)``.
        * Update ``current_heading = edge['heading_deg']``.
 
@@ -117,6 +119,8 @@ def compile_path(
 
         if edge_type == EDGE_LINE:
             out.append((ACT_FOLLOW_INT, None))
+        elif edge_type == EDGE_PROJECTION:
+            out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
         elif edge_type == EDGE_BLIND:
             out.append((ACT_FORWARD, float(edge["distance_cm"])))
         else:
@@ -132,9 +136,11 @@ def compile_path(
 __all__ = [
     "ACT_TURN_REL",
     "ACT_FOLLOW_INT",
+    "ACT_FOLLOW_DIST",
     "ACT_FORWARD",
     "EDGE_LINE",
     "EDGE_BLIND",
+    "EDGE_PROJECTION",
     "Primitive",
     "compile_path",
     "final_heading_after",

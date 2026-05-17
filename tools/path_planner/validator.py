@@ -2,14 +2,23 @@
 
 Inspects the raw module attributes (``NODES``, ``NODE_TYPES``,
 ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``OBSTACLES``, ``FIELD_MM``,
-``MAP_PNG``, ...) and raises :class:`FieldDataError` on the first
-malformed entry with a precise key path and a one-line nudge toward the
-fix.
+``MAP_PNG``, optional ``EDGES``, ...) and raises :class:`FieldDataError`
+on the first malformed entry with a precise key path and a one-line
+nudge toward the fix.
 
 PR3 schema (vs PR1/PR2): drops ``PROJECTIONS`` and ``GOAL_APPROACH``,
 adds required ``BLIND_EDGES`` and ``FIELD_MM`` / ``MAP_PNG``.
 
+PR4 (T3/T6) adds an optional ``EDGES`` table for rich per-edge metadata
+(EDGE_PROJECTION, per-edge mode overrides, single-wheel pivot tags).
+Absence of ``EDGES`` is benign for backward compatibility.
+
 The validator performs no I/O, no logging, and mutates no global state.
+
+Imports of :mod:`tools.path_planner.graph_builder` and
+:mod:`tools.path_planner.pipeline_config` are deferred inside the EDGES
+validator to avoid a circular import (``graph_builder`` imports
+:func:`validate` from this module).
 """
 
 from __future__ import annotations
@@ -77,6 +86,188 @@ def _validate_edge_list(
                 f"{label} contains unknown node: '{b}' "
                 f"(entry {i}: ('{a}', '{b}')) -- add to NODES or fix"
             )
+
+
+def _validate_edges_field(field_data) -> None:
+    """Validate the optional ``field_data.EDGES`` rich-edge table.
+
+    Runs only when ``field_data`` exposes an ``EDGES`` attribute. Each
+    entry must be a dict carrying required keys (``type``, ``u``, ``v``,
+    ``distance_cm``, ``heading_deg``) and may carry optional keys
+    (``primitive_mode``, ``pre_turn_mode``, ``pivot``). Mode overrides
+    are cross-checked against the edge ``type`` -- e.g. a
+    :class:`LineMode` is illegal on an :data:`EDGE_BLIND` edge -- and
+    the :class:`DEFAULT <pipeline_config.LineMode>` sentinel is rejected
+    on any override (DEFAULT == "absent", so being explicit about it is
+    a confusion).
+
+    The cross-edge pivot-compensation check (does the upcoming turn
+    delta exceed the minimum useful angle?) is deliberately deferred to
+    :mod:`tools.path_planner.planner` (T5); this validator only checks
+    the per-entry shape.
+
+    Imports of :class:`Pivot`, :class:`LineMode`, :class:`BlindMode`,
+    :class:`ProjectionMode`, and :class:`TurnMode` are performed inside
+    the function to avoid a circular import with
+    :mod:`tools.path_planner.graph_builder`.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or
+        any object exposing the same top-level attributes).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``EDGES[i]`` key path and
+        one-line fix hint on the first malformed entry.
+    """
+    edges = getattr(field_data, "EDGES", None)
+    if edges is None:
+        return  # backward-compatible: missing EDGES is fine.
+
+    if not isinstance(edges, (list, tuple)):
+        raise FieldDataError(
+            "EDGES must be a list/tuple of dicts; "
+            f"got: {type(edges).__name__} -- "
+            "define EDGES = [ {...}, {...}, ... ] in field_data.py"
+        )
+
+    # Deferred imports to avoid circular import via graph_builder, which
+    # itself imports `validate` from this module.
+    from tools.path_planner.graph_builder import (
+        EDGE_BLIND,
+        EDGE_LINE,
+        EDGE_PROJECTION,
+        Pivot,
+    )
+    from tools.path_planner.pipeline_config import (
+        BlindMode,
+        LineMode,
+        ProjectionMode,
+        TurnMode,
+    )
+
+    legal_edge_types = (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION)
+    mode_class_by_edge_type = {
+        EDGE_LINE: (LineMode, "LineMode"),
+        EDGE_BLIND: (BlindMode, "BlindMode"),
+        EDGE_PROJECTION: (ProjectionMode, "ProjectionMode"),
+    }
+    nodes = getattr(field_data, "NODES", {})
+
+    for i, entry in enumerate(edges):
+        if not isinstance(entry, dict):
+            raise FieldDataError(
+                f"EDGES[{i}] must be a dict; got: {entry!r} -- "
+                "each entry needs at least 'type', 'u', 'v', "
+                "'distance_cm', 'heading_deg'"
+            )
+
+        # Required keys ----------------------------------------------------
+        for required_key in ("type", "u", "v", "distance_cm", "heading_deg"):
+            if required_key not in entry:
+                raise FieldDataError(
+                    f"EDGES[{i}] missing required key '{required_key}' -- "
+                    "each entry needs 'type', 'u', 'v', 'distance_cm', "
+                    "and 'heading_deg'"
+                )
+
+        edge_type = entry["type"]
+        u = entry["u"]
+        v = entry["v"]
+        distance_cm = entry["distance_cm"]
+        heading_deg = entry["heading_deg"]
+
+        if edge_type not in legal_edge_types:
+            raise FieldDataError(
+                f"EDGES[{i}].type = {edge_type!r}; expected one of "
+                f"{legal_edge_types} -- use EDGE_LINE, EDGE_BLIND, or "
+                "EDGE_PROJECTION from graph_builder"
+            )
+
+        if u == v:
+            raise FieldDataError(
+                f"EDGES[{i}] is a self-loop ('{u}','{v}'); "
+                "remove the entry or fix one of the endpoints"
+            )
+
+        if u not in nodes:
+            raise FieldDataError(
+                f"EDGES[{i}] references unknown node u='{u}' -- "
+                "add it to NODES or fix the entry"
+            )
+
+        if v not in nodes:
+            raise FieldDataError(
+                f"EDGES[{i}] references unknown node v='{v}' -- "
+                "add it to NODES or fix the entry"
+            )
+
+        if not _is_number(distance_cm) or distance_cm <= 0:
+            raise FieldDataError(
+                f"EDGES[{i}].distance_cm must be a positive number; "
+                f"got: {distance_cm!r} -- use a value > 0 in centimetres"
+            )
+
+        if (
+            not _is_number(heading_deg)
+            or not (0.0 <= float(heading_deg) < 360.0)
+        ):
+            raise FieldDataError(
+                f"EDGES[{i}].heading_deg must be a number in [0, 360); "
+                f"got: {heading_deg!r} -- normalize via "
+                "`heading % 360.0`"
+            )
+
+        # Optional: primitive_mode ----------------------------------------
+        if "primitive_mode" in entry:
+            primitive_mode = entry["primitive_mode"]
+            expected_cls, expected_name = mode_class_by_edge_type[edge_type]
+            if not isinstance(primitive_mode, expected_cls):
+                raise FieldDataError(
+                    f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
+                    f"type {edge_type} requires a {expected_name} instance "
+                    "(LineMode on LINE edges, BlindMode on BLIND edges, "
+                    "ProjectionMode on PROJECTION edges)"
+                )
+            if int(primitive_mode) == 0:
+                # Every mode IntEnum's DEFAULT member is value 0.
+                raise FieldDataError(
+                    f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT -- "
+                    "DEFAULT means 'inherit PIPELINE_CONFIG', which is "
+                    "what absence already encodes; omit the override or "
+                    "pick a concrete mode"
+                )
+
+        # Optional: pre_turn_mode -----------------------------------------
+        if "pre_turn_mode" in entry:
+            pre_turn_mode = entry["pre_turn_mode"]
+            if not isinstance(pre_turn_mode, TurnMode):
+                raise FieldDataError(
+                    f"EDGES[{i}].pre_turn_mode = {pre_turn_mode!r} -- "
+                    "must be a TurnMode instance "
+                    "(COUNTER_ROT, PIVOT_LEFT, or PIVOT_RIGHT)"
+                )
+            if int(pre_turn_mode) == 0:
+                raise FieldDataError(
+                    f"EDGES[{i}].pre_turn_mode = TurnMode.DEFAULT -- "
+                    "DEFAULT means 'inherit PIPELINE_CONFIG.turn', which "
+                    "is what absence already encodes; omit the override "
+                    "or pick a concrete mode"
+                )
+
+        # Optional: pivot -------------------------------------------------
+        if "pivot" in entry:
+            pivot = entry["pivot"]
+            if not isinstance(pivot, Pivot):
+                raise FieldDataError(
+                    f"EDGES[{i}].pivot = {pivot!r} -- "
+                    "must be a Pivot instance (Pivot.LEFT, Pivot.RIGHT, "
+                    "or Pivot.NONE; though NONE is redundant since "
+                    "absence already encodes it)"
+                )
+            # NONE is allowed but redundant -- do not reject it as
+            # DEFAULT-sentinel, because Pivot.NONE is the meaningful
+            # "counter-rotation" value, not a placeholder. The
+            # cross-edge geometry check (is the upcoming turn delta
+            # large enough for compensation to matter?) is deferred to
+            # planner.py (T5).
 
 
 def validate(field_data) -> None:
@@ -252,3 +443,6 @@ def validate(field_data) -> None:
         raise FieldDataError(
             f"MAP_PNG must be a non-empty path string; got: {map_png!r}"
         )
+
+    # 9. Optional rich-edge table (PR4 / T6). Absent on legacy fixtures.
+    _validate_edges_field(field_data)

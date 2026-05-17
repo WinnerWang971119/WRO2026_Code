@@ -18,6 +18,9 @@ Mosaic Masters field measurements before the run.** The values below are
 a known-good placeholder layout the simulator + pytest suite verify against.
 """
 
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot  # noqa: F401 — Pivot kept for future use; see EDGES[2] note
+from tools.path_planner.pipeline_config import LineMode, BlindMode, ProjectionMode, TurnMode
+
 # Outer field dimensions in millimetres. The visualizer overlays the
 # matplotlib axes on map.png using this as the world extent so the
 # pixel-to-cm scale is implicit (no separate constant needed).
@@ -36,6 +39,9 @@ NODES = {
     "D": (10.0,  150.0),
     "E": (100.0, 80.0),
     "G": (250.0, 80.0),
+    # P1: projection waypoint on the A→B line segment (no physical intersection
+    # marker), used by the EDGES[0] PROJECTION demonstration entry below.
+    "P1": (55.0, 10.0),
 }
 
 # Allowed values: "line" (reached by line-following), "blind" (reached by
@@ -43,6 +49,7 @@ NODES = {
 NODE_TYPES = {
     "A": "line", "B": "line", "C": "line", "D": "line", "E": "line",
     "G": "blind",
+    "P1": "line",   # projection waypoint; no physical intersection cross
 }
 
 # Undirected; graph_builder produces two directed line edges per segment.
@@ -68,3 +75,75 @@ COST_BLIND_MULTIPLIER = 5.0
 
 START_NODE = "A"
 START_HEADING_DEG = 0.0
+
+# ---------------------------------------------------------------------------
+# Rich edge list — demonstration fixtures for T11/T12/T13 tests.
+#
+# Schema: each dict MUST supply:
+#   type          : EDGE_LINE | EDGE_BLIND | EDGE_PROJECTION
+#   u             : source node name (must exist in NODES)
+#   v             : destination node name (must exist in NODES)
+#   distance_cm   : Euclidean length in centimetres (float)
+#   heading_deg   : departure heading in degrees, CCW from +x, [0, 360)
+#
+# Optional overrides (absent = inherit the pipeline-wide PIPELINE_CONFIG
+# default for that edge's category at C++ dispatch time):
+#   primitive_mode : LineMode | BlindMode | ProjectionMode value
+#   pre_turn_mode  : TurnMode value — wheel pattern for the approach turn
+#   pivot          : Pivot enum value — single-wheel pivot selector
+#
+# graph_builder.build_graph() emits a bidirectional directed pair for each
+# entry, forwarding all optional keys onto both directions verbatim.
+# These entries are ADDITIVE alongside LINE_SEGMENTS / BLIND_EDGES, not a
+# replacement; the planner merges all edge sources into one DiGraph.
+# ---------------------------------------------------------------------------
+EDGES = [
+    # [0] PROJECTION demo — A to P1 along the A-B line strip; no intersection
+    #     marker at P1 so the chassis stops by encoder distance, not by a
+    #     detected cross. Exercises the EDGE_PROJECTION compile path (T8/T11).
+    {
+        "type":         EDGE_PROJECTION,
+        "u":            "A",
+        "v":            "P1",
+        "distance_cm":  45.0,   # |P1 - A| = |(55-10, 10-10)| = 45 cm
+        "heading_deg":  0.0,    # due East (+x direction)
+    },
+
+    # [1] LINE edge with a per-edge FAST preset — D to E at full cruise speed.
+    #     Exercises the primitive_mode per-edge override path (T7/T12).
+    #     Geometry: D(10,150)->E(100,80); dist≈114.02 cm, heading≈322.13° (NE quadrant CCW from +x).
+    {
+        "type":           EDGE_LINE,
+        "u":              "D",
+        "v":              "E",
+        "distance_cm":    114.02,
+        "heading_deg":    322.13,
+        "primitive_mode": LineMode.FAST,
+    },
+
+    # [2] LINE edge demonstrating pre_turn_mode override — the turn that
+    #     PRECEDES the C->E traversal uses a single-wheel left pivot wheel
+    #     pattern. Exercises the pre_turn_mode override path emitted by T7
+    #     and consumed by T17's PathTracker turn dispatch.
+    #
+    #     NOTE: this entry intentionally OMITS `pivot=Pivot.LEFT`. The
+    #     planner's `apply_pivot_compensations` requires that the destination
+    #     node of a pivot-tagged edge have exactly one out-edge so the
+    #     geometric correction has a unique target — E has four out-edges
+    #     (A/B/C/D), so a pivot tag here would (correctly) raise. The
+    #     compensation math is still exercised in isolation by T13's
+    #     `test_apply_pivot_compensations_raises_on_multi_successor` and
+    #     `test_pivot_compensation_*` cases against a self-contained toy
+    #     graph. Restore `pivot=Pivot.LEFT` here once the field topology
+    #     evolves to a single-successor target for this approach.
+    #
+    #     Geometry: C(200,150)->E(100,80); dist≈122.07 cm, heading≈214.99° (SW quadrant).
+    {
+        "type":           EDGE_LINE,
+        "u":              "C",
+        "v":              "E",
+        "distance_cm":    122.07,
+        "heading_deg":    214.99,
+        "pre_turn_mode":  TurnMode.PIVOT_LEFT,
+    },
+]
