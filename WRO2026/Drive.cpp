@@ -300,6 +300,26 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     {
         deltaNorm += 360;
     }
+
+    // Short-circuit on no-op turns. When the normalized delta is already within
+    // the heading tolerance, arming the profile would issue one spurious CRUISE
+    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
+    // Just mark the turn done and keep _heldYaw at the target so subsequent
+    // yaw-locked moves stay aligned.
+    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    {
+        _heldYaw          = target;
+        _turnTargetYaw    = target;
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        (void) power;
+        (void) mode;
+        (void) brake;
+        (void) blocking;
+        return 0x00;
+    }
+
     const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
 
     _turnTargetYaw          = target;
@@ -344,6 +364,26 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     {
         deltaNorm += 360;
     }
+
+    // Short-circuit on no-op turns. When the normalized delta is already within
+    // the heading tolerance, arming the profile would issue one spurious CRUISE
+    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
+    // Just mark the turn done and keep _heldYaw at the target so subsequent
+    // yaw-locked moves stay aligned.
+    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    {
+        _heldYaw          = target;
+        _turnTargetYaw    = target;
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        (void) power;
+        (void) mode;
+        (void) brake;
+        (void) blocking;
+        return 0x00;
+    }
+
     const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
 
     _turnTargetYaw          = target;

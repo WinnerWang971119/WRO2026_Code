@@ -204,9 +204,26 @@ def _emit_directed_pair(
     those attributes are mirrored onto both the forward and reverse
     directed edges so the planner can pick either traversal direction
     without losing pipeline-mode intent.
+
+    Geometric attributes (``distance_cm``, ``heading_deg``) default to
+    the Euclidean / atan2 of ``pu`` and ``pv``. When ``options`` supplies
+    explicit overrides (the validator enforces sanity on EDGES entries),
+    those overrides are honored: distance is symmetric on both directions,
+    and the reverse edge's heading is :func:`_reverse_heading` of the
+    overridden forward heading -- not of the computed geometry -- so the
+    pair stays self-consistent.
     """
     distance_cm = _euclid(pu, pv)
     heading = _heading_deg(pu, pv)
+    # EDGES override: when field_data.EDGES provides explicit distance_cm /
+    # heading_deg, honor them instead of the computed geometry. Validator
+    # enforces sanity. Distance is symmetric on both directions; heading on
+    # the reverse edge is _reverse_heading(forward_heading).
+    if options:
+        if "distance_cm" in options:
+            distance_cm = float(options["distance_cm"])
+        if "heading_deg" in options:
+            heading = float(options["heading_deg"])
     forwarded = _extract_forward_attrs(options) if options else {}
     g.add_edge(
         u, v,

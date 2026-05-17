@@ -101,17 +101,22 @@ namespace
     }
 
     /**
-     * @brief Map a `Routes::TurnMode` to the lower-MCU turn motor-mode byte
-     *        consumed by `TurnDegBuilder::setMode(uint8_t)` /
+     * @brief Map a `Routes::TurnMode` to the wheel-pattern byte consumed by
+     *        `TurnDegBuilder::setMode(uint8_t)` /
      *        `TurnToYawBuilder::setMode(uint8_t)`.
      *
-     * Byte encoding (matches the lower-MCU's `TurnGyro` mode argument):
-     *   0 = counter-rotation (both wheels driven, opposite signs)
-     *   1 = pivot left  (left wheel braked, right drives)
-     *   2 = pivot right (right wheel braked, left drives)
+     * Byte encoding matches the custom TurnGyro state machine introduced by the
+     * 2026-05-17 PR4 plan (see `Drive.h::TurnDegBuilder::setMode` and
+     * `Config::TURN_MODE` for the authoritative contract):
      *
-     * `TurnMode::DEFAULT` should not reach this helper (callers resolve it via
-     * `_resolveTurnMode()` first). It is mapped to counter-rotation defensively.
+     *   0 = COUNTER_ROT — both wheels spin opposite directions; tightest in-place rotation.
+     *   1 = PIVOT_LEFT  — left wheel braked, right drives; chassis pivots around left wheel.
+     *   2 = PIVOT_RIGHT — right wheel braked, left drives; chassis pivots around right wheel.
+     *
+     * @note Intentionally distinct from the legacy `MiniR4.DriveDC.TurnGyro` byte values —
+     *       the lower-MCU TurnGyro is no longer called.
+     * @note `TurnMode::DEFAULT` should not reach this helper (callers resolve it via
+     *       `_resolveTurnMode()` first). It is mapped to counter-rotation defensively.
      */
     uint8_t _turnModeToByte(Routes::TurnMode m)
     {
