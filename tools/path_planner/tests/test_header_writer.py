@@ -322,17 +322,19 @@ def test_edge_primitive_mode_override_emit(emit_targets):
 def test_edge_pre_turn_mode_override_emit(emit_targets):
     """TC3: an edge with pre_turn_mode=TurnMode.PIVOT_LEFT emits the override.
 
-    Uses a minimal two-node fixture (A--B only) so the pivot-compensation
-    planner's "destination has exactly one out-edge" precondition is
-    satisfied in both directions. Pivot/pre_turn_mode are mirrored onto
-    both directed edges by ``_emit_directed_pair``, so each landing has
-    exactly one successor (the source) -- satisfying the planner's
-    one-out-edge guard either way the pivot is traversed.
+    Three-node A->B->C fixture: ``A->B`` carries the pivot override, and
+    ``B->C`` is the single forward continuation needed by
+    ``apply_pivot_compensations`` (the back-edge ``B->A`` is excluded
+    from the count so it does not trip the multi-successor guard).
+    Directional overrides (``pre_turn_mode``, ``pivot``) are forward-only
+    after the Codex P1 fix, so the reverse traversal would land at A
+    with no pivot tag -- the compensation iteration finds only the
+    forward (A,B) entry.
     """
     header_path, source_path = emit_targets
     fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0)},
-        NODE_TYPES={"A": "line", "B": "blind"},
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
         LINE_SEGMENTS=[],
         BLIND_EDGES=[],
         OBSTACLES=[],
@@ -351,6 +353,13 @@ def test_edge_pre_turn_mode_override_emit(emit_targets):
                 "heading_deg":   0.0,
                 "pre_turn_mode": TurnMode.PIVOT_LEFT,
                 "pivot":         Pivot.LEFT,
+            },
+            {
+                "type":          EDGE_BLIND,
+                "u":             "B",
+                "v":             "C",
+                "distance_cm":   100.0,
+                "heading_deg":   90.0,
             },
         ],
     )

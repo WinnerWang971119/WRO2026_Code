@@ -162,28 +162,55 @@ def edge_clips_obstacle(
     return False
 
 
-_OPTIONAL_FORWARD_KEYS = ("primitive_mode", "pre_turn_mode")
+# Symmetric: describes HOW to traverse the segment, not which end is the
+# entry. Safe to copy onto both directions of a bidirectional pair.
+_BIDIRECTIONAL_OPTIONAL_KEYS = ("primitive_mode",)
+
+# Direction-dependent: ``pre_turn_mode`` selects the alignment for the
+# turn that PRECEDES this edge, and ``pivot`` selects which wheel the
+# chassis pivots around when ENTERING this edge. Both depend on which
+# end the chassis is approaching from, so they must NOT be copied to the
+# reverse edge (a one-way override would otherwise silently steer the
+# robot with the wrong wheel pattern on backward traversal -- Codex P1).
+_DIRECTIONAL_OPTIONAL_KEYS = ("pre_turn_mode",)
 
 
-def _extract_forward_attrs(options: dict) -> dict:
-    """Pull optional, opaque metadata out of a source-edge options dict.
+def _extract_bidirectional_attrs(options: dict) -> dict:
+    """Pull symmetric metadata out of a source-edge options dict.
 
-    Forwards :data:`_OPTIONAL_FORWARD_KEYS` verbatim (no validation -- the
-    validator in T6 owns the enum check) plus the integer encoding of an
-    optional ``pivot`` key. Absent keys stay absent on the graph edge so
-    downstream consumers can distinguish "inherit / no override" from an
-    explicit ``Pivot.NONE``.
+    Symmetric attributes (currently just ``primitive_mode``) describe the
+    segment itself rather than the entry direction, so they are copied
+    verbatim onto both the forward and reverse directed edges. Absent
+    keys stay absent so downstream consumers can distinguish "no
+    override" from an explicit value.
 
     :param options: dict-like source-edge attributes (may be empty).
-    :return: dict of attributes to splat onto the directed graph edge.
+    :return: dict of attributes to splat onto both directions.
     """
     forwarded: dict = {}
-    for key in _OPTIONAL_FORWARD_KEYS:
+    for key in _BIDIRECTIONAL_OPTIONAL_KEYS:
+        if key in options:
+            forwarded[key] = options[key]
+    return forwarded
+
+
+def _extract_directional_attrs(options: dict) -> dict:
+    """Pull direction-dependent metadata out of a source-edge options dict.
+
+    These attributes (``pre_turn_mode``, ``pivot``) describe behavior
+    that depends on which end is the entry, so the caller must apply the
+    returned dict ONLY to the forward (u -> v) directed edge -- never to
+    the reverse. The integer encoding of ``pivot`` is stored so
+    downstream consumers don't have to import the IntEnum.
+
+    :param options: dict-like source-edge attributes (may be empty).
+    :return: dict of attributes to splat onto the forward edge only.
+    """
+    forwarded: dict = {}
+    for key in _DIRECTIONAL_OPTIONAL_KEYS:
         if key in options:
             forwarded[key] = options[key]
     if "pivot" in options:
-        # Store the integer value so downstream consumers don't have to
-        # import the IntEnum just to read this attribute.
         forwarded["pivot"] = int(options["pivot"])
     return forwarded
 
@@ -199,11 +226,16 @@ def _emit_directed_pair(
 ) -> None:
     """Add the forward + reverse directed edges for an undirected pair.
 
-    Optional ``options`` carries forward-only metadata
-    (``primitive_mode``, ``pre_turn_mode``, ``pivot``). When present,
-    those attributes are mirrored onto both the forward and reverse
-    directed edges so the planner can pick either traversal direction
-    without losing pipeline-mode intent.
+    Optional ``options`` carries two flavors of metadata:
+
+    * **Bidirectional** (``primitive_mode``): describes the segment
+      itself; copied onto both directions.
+    * **Directional** (``pre_turn_mode``, ``pivot``): describes behavior
+      that depends on which end is the entry. Applied ONLY to the
+      forward (u -> v) edge. Mirroring these to the reverse edge would
+      steer the chassis with the wrong wheel pattern on backward
+      traversal (Codex P1). To override the reverse direction too, add a
+      separate ``EDGES`` entry with ``u`` and ``v`` swapped.
 
     Geometric attributes (``distance_cm``, ``heading_deg``) default to
     the Euclidean / atan2 of ``pu`` and ``pv``. When ``options`` supplies
@@ -224,20 +256,22 @@ def _emit_directed_pair(
             distance_cm = float(options["distance_cm"])
         if "heading_deg" in options:
             heading = float(options["heading_deg"])
-    forwarded = _extract_forward_attrs(options) if options else {}
+    bidirectional = _extract_bidirectional_attrs(options) if options else {}
+    directional   = _extract_directional_attrs(options)   if options else {}
     g.add_edge(
         u, v,
         type=edge_type,
         distance_cm=distance_cm,
         heading_deg=heading,
-        **forwarded,
+        **bidirectional,
+        **directional,
     )
     g.add_edge(
         v, u,
         type=edge_type,
         distance_cm=distance_cm,
         heading_deg=_reverse_heading(heading),
-        **forwarded,
+        **bidirectional,
     )
 
 

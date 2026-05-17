@@ -145,7 +145,7 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
 
     For every edge ``(src, dst)`` in ``graph`` whose ``pivot`` attribute
     is set to :attr:`Pivot.LEFT` or :attr:`Pivot.RIGHT` (compared by
-    integer value, since :func:`graph_builder._extract_forward_attrs`
+    integer value, since :func:`graph_builder._extract_directional_attrs`
     stores the int rather than the IntEnum), this function locates the
     *single* out-edge from ``dst`` and rewrites its ``distance_cm`` to
     the value returned by :func:`compute_pivot_compensation`. The
@@ -160,17 +160,23 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
     .. note::
 
         This conservative implementation refuses to compensate when the
-        landing node has more than one out-edge. Out-edge choice is only
-        known once Dijkstra has picked a path, but
+        landing node has more than one forward out-edge. Out-edge choice
+        is only known once Dijkstra has picked a path, but
         :func:`apply_pivot_compensations` runs *before* Dijkstra so it
         cannot know which successor will fire -- applying the
         adjustment to all successors would silently overcorrect every
         branch that is not the one we end up taking. The safe scope cut
         for the 2026-05-17 hardware test is to require pivot
-        destinations to have exactly one out-edge so the choice is
-        unambiguous. The field-data author can structure the graph
+        destinations to have exactly one forward out-edge so the choice
+        is unambiguous. The field-data author can structure the graph
         accordingly. A future per-path pivot-aware planner could relax
         this restriction.
+
+        The back-edge from ``dst`` to ``src`` (always present when the
+        edge was emitted by :func:`build_graph`'s bidirectional pair) is
+        excluded from the out-edge count and from the compensation
+        target -- the chassis is never going to immediately reverse the
+        pivot it just executed.
 
     :param graph: a directed graph (typically a private weighted copy --
         callers must NOT pass the user-visible graph because edge
@@ -195,17 +201,26 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
     ]
 
     for src, dst, pivot_edge_data in pivot_edges:
-        out_edges = list(graph.out_edges(dst, data=True))
-        if len(out_edges) != 1:
+        # Exclude the back-edge to ``src``: build_graph emits every edge
+        # bidirectionally, so dst->src is always present and is never a
+        # legitimate next-edge candidate (the chassis would not pivot
+        # only to immediately reverse). Counting it would make pivot
+        # compensation impossible to apply on any realistic graph.
+        forward_out_edges = [
+            (s, d, data)
+            for s, d, data in graph.out_edges(dst, data=True)
+            if d != src
+        ]
+        if len(forward_out_edges) != 1:
             raise ValueError(
                 "pivot compensation requires destination node "
                 f"'{dst}' (entered from '{src}') to have exactly one "
-                f"out-edge, got {len(out_edges)}. Restructure the graph "
-                "so pivot landings are unambiguous, or drop the pivot "
-                f"tag on edge ('{src}', '{dst}')."
+                f"forward out-edge, got {len(forward_out_edges)}. "
+                "Restructure the graph so pivot landings are unambiguous, "
+                f"or drop the pivot tag on edge ('{src}', '{dst}')."
             )
 
-        _next_src, _next_dst, next_edge_data = out_edges[0]
+        _next_src, _next_dst, next_edge_data = forward_out_edges[0]
         pre_heading = float(pivot_edge_data["heading_deg"])
         post_heading = float(next_edge_data["heading_deg"])
         # Normalise the turn delta into [-180, 180]. ((d + 180) % 360) - 180

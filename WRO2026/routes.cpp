@@ -73,7 +73,7 @@ namespace Routes {
         { // from E (index 4)
             { EdgeType::LINE, 114.017543f, 217.874984f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to A
             { EdgeType::LINE, 122.065556f, 325.007980f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to B
-            { EdgeType::LINE, 122.070000f, 34.990000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::PIVOT_LEFT }, // to C
+            { EdgeType::LINE, 122.070000f, 34.990000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to C
             { EdgeType::LINE, 114.020000f, 142.130000f, LineMode::FAST, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to D
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to E
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to G

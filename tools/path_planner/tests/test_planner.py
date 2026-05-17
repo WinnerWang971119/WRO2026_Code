@@ -180,7 +180,11 @@ def test_pivot_compensation_clamps_to_nonneg_distance():
 
 
 def test_apply_pivot_compensations_raises_on_multi_successor():
-    """A pivot edge whose destination has >1 out-edge is rejected."""
+    """A pivot edge whose destination has >1 forward out-edge is rejected.
+
+    The back-edge to ``src`` is excluded from the count -- a bidirectional
+    pair plus 2 real forward continuations still trips the guard.
+    """
     from tools.path_planner.graph_builder import Pivot
     from tools.path_planner.planner import apply_pivot_compensations
 
@@ -195,3 +199,76 @@ def test_apply_pivot_compensations_raises_on_multi_successor():
 
     with pytest.raises(ValueError, match="pivot"):
         apply_pivot_compensations(g, track_cm=15.0)
+
+
+# -- Codex P1 regression: directional overrides must not mirror to reverse --
+
+
+def test_emit_directed_pair_pivot_not_mirrored_to_reverse():
+    """`pre_turn_mode` and `pivot` are direction-dependent and must stay forward-only.
+
+    Codex P1 regression: mirroring these onto the reverse edge would steer
+    the chassis with the wrong wheel pattern on backward traversal.
+    """
+    from tools.path_planner.graph_builder import EDGE_LINE, Pivot, _emit_directed_pair
+
+    g = nx.DiGraph()
+    g.add_node("U")
+    g.add_node("V")
+    _emit_directed_pair(
+        g,
+        "U",
+        "V",
+        pu=(0.0, 0.0),
+        pv=(10.0, 0.0),
+        edge_type=EDGE_LINE,
+        options={
+            "pivot": Pivot.LEFT,
+            "pre_turn_mode": "PIVOT_LEFT",
+            "primitive_mode": "NORMAL",
+        },
+    )
+    forward = g.edges["U", "V"]
+    reverse = g.edges["V", "U"]
+
+    # Forward edge carries every override.
+    assert forward.get("pivot") == int(Pivot.LEFT)
+    assert forward.get("pre_turn_mode") == "PIVOT_LEFT"
+    assert forward.get("primitive_mode") == "NORMAL"
+
+    # Reverse edge must NOT inherit the directional overrides.
+    assert "pivot" not in reverse
+    assert "pre_turn_mode" not in reverse
+    # `primitive_mode` is direction-symmetric (selects how to follow the
+    # segment, not which way) so it stays mirrored.
+    assert reverse.get("primitive_mode") == "NORMAL"
+
+
+def test_apply_pivot_compensations_ignores_back_edge():
+    """Bidirectional graph: pivot dst with back-edge + 1 forward edge must compensate.
+
+    Codex P1 regression: counting all out-edges (including the back-edge
+    to ``src``) makes pivot compensation unusable on the bidirectional
+    graphs ``build_graph`` actually produces.
+    """
+    from tools.path_planner.graph_builder import Pivot
+    from tools.path_planner.planner import apply_pivot_compensations
+
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_node("C")
+    # Forward pivot edge A->B, plus the bidirectional back-edge B->A.
+    g.add_edge("A", "B", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
+    g.add_edge("B", "A", distance_cm=10.0, heading_deg=180.0)
+    # Single real continuation off B (plus the back-edge above).
+    g.add_edge("B", "C", distance_cm=30.0, heading_deg=90.0)
+    g.add_edge("C", "B", distance_cm=30.0, heading_deg=270.0)
+
+    apply_pivot_compensations(g, track_cm=15.0)
+
+    # The B->C edge should have been shortened by the 90 deg pivot's
+    # forward chord component (7.5 cm for TRACK_CM=15, |theta|=90 deg).
+    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
+    # The back-edge B->A must NOT have been touched.
+    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
