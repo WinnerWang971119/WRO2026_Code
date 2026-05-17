@@ -7,6 +7,7 @@
 #include "LineFollower.h"
 
 #include "Drive.h"
+#include "Intersection.h"
 
 /**
  * @brief Single global instance referenced by every other module.
@@ -544,6 +545,91 @@ bool LineFollowerClass::isDistanceReached()
     const bool latched  = _distanceReached;
     _distanceReached    = false;
     return latched;
+}
+
+bool LineFollowerClass::followDistance(float cm)
+{
+    if (!Drive.isIdle())
+    {
+        return false;
+    }
+
+    setEnabled(true).setDistanceTarget(cm);
+    return waitUntilDistanceReached();
+}
+
+bool LineFollowerClass::waitUntilDistanceReached()
+{
+    if (!_enabled || !_distanceTargetActive || !Drive.isIdle())
+    {
+        return false;
+    }
+
+    const uint32_t startMs = millis();
+
+    while (_enabled)
+    {
+        if (!Drive.isIdle()
+            || (millis() - startMs) >= Config::LINE_FOLLOW_WAIT_TIMEOUT_MS)
+        {
+            setEnabled(false);
+            return false;
+        }
+
+        update();
+        yield();
+    }
+
+    return isDistanceReached();
+}
+
+bool LineFollowerClass::followUntilIntersection()
+{
+    if (!Drive.isIdle())
+    {
+        return false;
+    }
+
+    setEnabled(true);
+    return waitUntilIntersection();
+}
+
+bool LineFollowerClass::waitUntilIntersection()
+{
+    if (!_enabled || !Drive.isIdle())
+    {
+        return false;
+    }
+
+    // Consume one stale latched edge, if any, so this wait targets the next fresh intersection
+    // after entry rather than a previous segment's leftover edge.
+    const bool clearedStaleEdge = Intersection.isAtIntersection();
+    (void) clearedStaleEdge;
+
+    const uint32_t startMs = millis();
+    while (_enabled)
+    {
+        if (!Drive.isIdle()
+            || (millis() - startMs) >= Config::LINE_FOLLOW_WAIT_TIMEOUT_MS)
+        {
+            setEnabled(false);
+            return false;
+        }
+
+        // Match the documented loop order from Intersection.h and WRO2026.ino: LineFollower
+        // updates first, then Intersection reads the same shared tracer state on this iteration.
+        update();
+        Intersection.update();
+        if (Intersection.isAtIntersection())
+        {
+            setEnabled(false);
+            return true;
+        }
+
+        yield();
+    }
+
+    return false;
 }
 
 Config::SpeedPreset LineFollowerClass::getPreset() const

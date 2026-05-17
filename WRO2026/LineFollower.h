@@ -24,6 +24,10 @@
  *  - `begin()` once from `setup()` after `MiniR4.begin()` and `Drive.begin()`.
  *  - `update()` every iteration of the main `loop()`. Non-blocking. Short-circuits if disabled.
  *  - `setEnabled(true)` to start following; `setEnabled(false)` to stop and brake (default).
+ *  - `followDistance(cm)` / `waitUntilDistanceReached()` when a caller needs the line-follow
+ *    segment to finish before returning motor ownership to the next blocking `Drive.*` move.
+ *  - `followUntilIntersection()` / `waitUntilIntersection()` when a caller wants the follower
+ *    to own the motors until the next fresh intersection edge, then stop.
  *
  * Fluent API:
  *  The verb method `setEnabled(bool)` returns a `[[nodiscard]]` builder
@@ -426,6 +430,99 @@ public:
      * @note Intentionally non-`const` because it mutates `_distanceReached`.
      */
     bool isDistanceReached();
+
+    /**
+     * @brief Sync-blocking helper: follow the current line for @p cm, then return.
+     *
+     * Convenience wrapper for the common "arm + poll to completion" pattern:
+     *
+     * @code
+     * LineFollower.followDistance(50);
+     * Drive.driveDist(30);
+     * LineFollower.followDistance(50);
+     * @endcode
+     *
+     * Equivalent to:
+     *
+     * @code
+     * LineFollower.setEnabled(true).setDistanceTarget(cm);
+     * return LineFollower.waitUntilDistanceReached();
+     * @endcode
+     *
+     * Uses the currently configured preset + reverse direction. If the caller needs custom
+     * settings, stage them first with `setPreset(...)`, `setReverse(...)`, or the fluent
+     * builder, then call `waitUntilDistanceReached()`.
+     *
+     * @param cm Target travel in centimetres.
+     * @return `true` if the distance gate tripped; `false` on timeout or if a bounded Drive
+     *         move already owns the chassis.
+     * @warning Do NOT call from inside any module's `update()` method. This helper is
+     *          intentionally sync-blocking and reserved for top-level orchestration only.
+     */
+    bool followDistance(float cm);
+
+    /**
+     * @brief Block until the currently-armed distance gate trips.
+     *
+     * This is the lower-level half of `followDistance(cm)`. Use it when you need extra builder
+     * knobs before starting the segment, e.g.
+     *
+     * @code
+     * LineFollower.setEnabled(true)
+     *             .setPreset(Config::SpeedPreset::FAST)
+     *             .setDistanceTarget(50);
+     * const bool ok = LineFollower.waitUntilDistanceReached();
+     * @endcode
+     *
+     * The wait is bounded by `Config::LINE_FOLLOW_WAIT_TIMEOUT_MS`. On timeout, or if the
+     * helper detects that a bounded Drive move already owns the chassis, the follower is
+     * disabled with active brake and `false` is returned.
+     *
+     * @return `true` if the distance gate tripped; `false` otherwise.
+     * @warning Do NOT call from inside any module's `update()` method. This helper is
+     *          intentionally sync-blocking and reserved for top-level orchestration only.
+     */
+    bool waitUntilDistanceReached();
+
+    /**
+     * @brief Sync-blocking helper: follow the current line until the next fresh intersection.
+     *
+     * Convenience wrapper for:
+     *
+     * @code
+     * LineFollower.setEnabled(true);
+     * return LineFollower.waitUntilIntersection();
+     * @endcode
+     *
+     * On success, the helper disables the follower with the default brake behaviour, so motor
+     * ownership is cleanly handed back to the next blocking `Drive.*` call.
+     *
+     * @return `true` if a fresh intersection edge was observed; `false` on timeout or if a
+     *         bounded Drive move already owns the chassis.
+     * @warning Do NOT call from inside any module's `update()` method. This helper is
+     *          intentionally sync-blocking and reserved for top-level orchestration only.
+     */
+    bool followUntilIntersection();
+
+    /**
+     * @brief Block until the next fresh intersection edge is observed.
+     *
+     * Use this after manually enabling the follower or staging other options first, e.g.
+     *
+     * @code
+     * LineFollower.setEnabled(true).setPreset(Config::SpeedPreset::FAST);
+     * const bool ok = LineFollower.waitUntilIntersection();
+     * @endcode
+     *
+     * The helper clears one stale latched edge at entry so it waits for the next newly-detected
+     * intersection after the call starts. On success it disables the follower with the default
+     * brake behaviour. The wait is bounded by `Config::LINE_FOLLOW_WAIT_TIMEOUT_MS`.
+     *
+     * @return `true` if a fresh intersection edge was observed; `false` otherwise.
+     * @warning Do NOT call from inside any module's `update()` method. This helper is
+     *          intentionally sync-blocking and reserved for top-level orchestration only.
+     */
+    bool waitUntilIntersection();
 
     /**
      * @brief Internal apply-hook called by `LineFollowerEnableBuilder::~`.

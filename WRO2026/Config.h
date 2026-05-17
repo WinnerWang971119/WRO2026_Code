@@ -300,6 +300,18 @@ namespace Config
     /** @brief Default lost-line action used by the LineFollower. */
     constexpr LostLineAction LOST_LINE_ACTION = LostLineAction::STOP;
 
+    /**
+     * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.
+     *
+     * The new sync helper is intentionally a thin orchestration wrapper around repeated
+     * `LineFollower.update()` ticks. Without a deadline, a bad sensor read, wrong target, or
+     * a caller accidentally handing motor ownership back to a bounded `Drive` move would hang
+     * the sketch forever. 10 s matches `DRIVE_DRAIN_TIMEOUT_MS_PER_CMD`, which is already the
+     * project-wide "something is stuck" ceiling for a single bounded chassis segment. On
+     * expiry the helper disables the follower with active brake and returns `false`.
+     */
+    constexpr uint32_t LINE_FOLLOW_WAIT_TIMEOUT_MS = 10000;
+
     // ---------------------------------------------------------------------------------------
     // OLED event trace
     // ---------------------------------------------------------------------------------------
