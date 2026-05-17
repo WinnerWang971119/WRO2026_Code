@@ -38,7 +38,8 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _brake,
                                _hasPresetOverride,
                                _presetOverride,
-                               _tShape,
+                               _tShapeRampUp,
+                               _tShapeRampDown,
                                _accel,
                                _hasReverseOverride,
                                _reverseOverride,
@@ -64,7 +65,23 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setPreset(Config::SpeedPre
 
 LineFollowerEnableBuilder& LineFollowerEnableBuilder::tShape()
 {
-    _tShape = true;
+    // Idempotent — `_tShapeRampUp` defaults to `true`. Kept as an explicit-readability alias
+    // for callers that want the chain to spell out "yes, ramp on this enable transition."
+    // The symmetric ramp-down is governed by `setTShapeRampDown(bool)` and is also on by
+    // default; this setter does NOT touch it (see header doxygen).
+    _tShapeRampUp = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setTShapeRampUp(bool on)
+{
+    _tShapeRampUp = on;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setTShapeRampDown(bool on)
+{
+    _tShapeRampDown = on;
     return *this;
 }
 
@@ -72,7 +89,10 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setAccel(float pwmPerCm)
 {
     _accel         = pwmPerCm;
     _accelExplicit = true;
-    _tShape        = true;
+    // setAccel implies a ramp is desired — turning on ramp-up matches the previous
+    // contract. Ramp-down stays at its own default (also on); a caller who wants only
+    // ramp-down can chain `.setTShapeRampUp(false)` afterwards.
+    _tShapeRampUp  = true;
     return *this;
 }
 
@@ -108,12 +128,13 @@ bool LineFollowerClass::begin()
     _tracer.begin();
     _tracer.setThreshold(Config::LINE_THRESHOLD);
 
-    _enabled   = false;
-    _lostLine  = false;
-    _lastErr   = 0.0f;
-    _preset    = Config::SpeedPreset::NORMAL;
-    _reverse   = false;
-    _useTShape = false;
+    _enabled           = false;
+    _lostLine          = false;
+    _lastErr           = 0.0f;
+    _preset            = Config::SpeedPreset::NORMAL;
+    _reverse           = false;
+    _useTShape         = false;
+    _useTShapeRampDown = false;
 
     return true;
 }
@@ -162,6 +183,18 @@ void LineFollowerClass::update()
         {
             rampCm = Config::TSHAPE_RAMP_MAX_CM;
         }
+        // If a distance gate is armed AND a ramp-down is also active, clamp the ramp-up to
+        // at most half the distance target so the two zones cannot overlap. Without this
+        // clamp the ramp-down branch's lerp would fight the ramp-up branch's lerp on very
+        // short distance moves. The ramp-down branch applies a matching half-clamp.
+        if (_distanceTargetActive && _useTShapeRampDown)
+        {
+            const float halfCm = _distanceTargetCm * 0.5f;
+            if (rampCm > halfCm)
+            {
+                rampCm = halfCm;
+            }
+        }
 
         if (traveledCm >= rampCm)
         {
@@ -175,6 +208,66 @@ void LineFollowerClass::update()
             cruise = (int16_t) (_tShapeStartPwm
                                 + (int16_t) ((_tShapeTargetPwm - _tShapeStartPwm) * r));
         }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Trapezoidal ramp-DOWN before the distance gate. Lerps cruise from the captured
+    // `_tShapeRampDownStart` PWM down to `Config::PWM_MIN_MAGNITUDE` (sign-corrected for
+    // reverse) over the approach distance, so when the gate trips the active brake fires
+    // at floor PWM rather than from full cruise. Runs INDEPENDENTLY of the ramp-up branch
+    // above — both can apply in sequence over a long PROJECTION_FOLLOW edge.
+    //
+    // See DECISIONS.md "LineFollower distance-gated stops use a symmetric trapezoidal
+    // profile" for the full rationale.
+    // -------------------------------------------------------------------------------------
+    if (_useTShapeRampDown && _distanceTargetActive)
+    {
+        // Average wheel deltas (same baseline as the distance gate below).
+        const int32_t dL          = Drive.getEncL() - _distanceStartEncL;
+        const int32_t dR          = Drive.getEncR() - _distanceStartEncR;
+        const float   traveledCm  = encDegToCm((abs(dL) + abs(dR)) / 2);
+        const float   remainingCm = _distanceTargetCm - traveledCm;
+
+        // Sign-by-direction on the floor target: when `_tShapeRampDownStart` is negative
+        // (reverse), the floor is `-PWM_MIN_MAGNITUDE` so the lerp stays on the negative
+        // side of zero and the deadband floor is honored in reverse too.
+        const int16_t targetFloor = (_tShapeRampDownStart < 0)
+                                        ? (int16_t) -Config::PWM_MIN_MAGNITUDE
+                                        : (int16_t) Config::PWM_MIN_MAGNITUDE;
+
+        // Default geometry: how far the ramp WOULD want, given full cruise range and the
+        // configured accel. Clamped to global ramp bounds, then fitted to the available
+        // distance. With ramp-up active, at most half the distance is rampdown (the
+        // ramp-up branch above applies a matching half-clamp). Without ramp-up (the
+        // re-arm path used by LINE_OVERSHOOT), the ramp-down may consume the full travel.
+        const float defaultRampCm =
+            (_tShapeAccel > 0.0f)
+                ? ((float) abs(_tShapeRampDownStart - targetFloor) / _tShapeAccel)
+                : 0.0f;
+        const float distanceClamp = _useTShape ? (_distanceTargetCm * 0.5f)
+                                                : _distanceTargetCm;
+        float rampDownCm = (defaultRampCm < distanceClamp) ? defaultRampCm : distanceClamp;
+        if (rampDownCm < Config::TSHAPE_RAMP_MIN_CM)
+        {
+            rampDownCm = Config::TSHAPE_RAMP_MIN_CM;
+        }
+        if (rampDownCm > Config::TSHAPE_RAMP_MAX_CM)
+        {
+            rampDownCm = Config::TSHAPE_RAMP_MAX_CM;
+        }
+
+        if (remainingCm <= rampDownCm)
+        {
+            // In the ramp-down zone. Lerp cruise from `_tShapeRampDownStart` toward
+            // `targetFloor` as `remaining` shrinks to 0. When `remaining` <= 0 (we have
+            // already reached or overshot the gate), pin to `targetFloor` until the
+            // distance-gate branch below fires the active brake.
+            const float r        = (rampDownCm > 0.0f) ? (remainingCm / rampDownCm) : 0.0f;
+            const float clampedR = (r < 0.0f) ? 0.0f : ((r > 1.0f) ? 1.0f : r);
+            cruise               = (int16_t) (targetFloor
+                                + (int16_t) ((_tShapeRampDownStart - targetFloor) * clampedR));
+        }
+        // else: still in the cruise plateau zone — leave `cruise` unchanged.
     }
 
     if (!_tracer.isOnline())
@@ -271,7 +364,8 @@ void LineFollowerClass::update()
                                 /*brake=*/true,
                                 /*hasPresetOverride=*/false,
                                 /*preset=*/_preset,
-                                /*tShape=*/false,
+                                /*tShapeRampUp=*/false,
+                                /*tShapeRampDown=*/false,
                                 /*accel=*/Config::TSHAPE_ACCEL_PWM_PER_CM,
                                 /*hasReverseOverride=*/false,
                                 /*reverse=*/_reverse,
@@ -302,7 +396,8 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                brake,
                                             bool                hasPresetOverride,
                                             Config::SpeedPreset preset,
-                                            bool                tShape,
+                                            bool                tShapeRampUp,
+                                            bool                tShapeRampDown,
                                             float               accel,
                                             bool                hasReverseOverride,
                                             bool                reverse,
@@ -322,22 +417,27 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
 
     if (targetEnabled)
     {
-        // Enable path: just flip the flag. The next update() tick will issue setSpeed.
-        // No Drive.stop(...) call here regardless of `brake` — by contract `setBrake(...)` is
-        // only meaningful on disable.
+        // Snapshot the previous enable state BEFORE we flip the flag. The re-arm guard
+        // below distinguishes a true off→on transition (seed ramp-up from 0) from a
+        // re-enable on an already-running controller (preserve in-flight ramp, do NOT
+        // reset cruise to 0 — that is the Copilot-flagged PR12 bug). See DECISIONS.md
+        // "LineFollower distance-gated stops use a symmetric trapezoidal profile".
+        const bool wasAlreadyEnabled = _enabled;
         _enabled = true;
 
-        if (tShape)
+        // Ramp-up arming: only seed on a true off→on transition. A `setEnabled(true)` issued
+        // while the controller is already enabled (e.g. PathTracker re-arming the distance
+        // gate mid-segment from LINE_FOLLOW into LINE_OVERSHOOT) must NOT reset cruise — it
+        // must preserve whatever ramp/plateau state was already in flight.
+        //
+        // Sign-by-direction on the target PWM: when `_reverse` is set, the steady-state
+        // `cruise` in `update()` is negated, so the ramp target must be negated too —
+        // otherwise the ramp interpolation overrides the correctly-signed cruise with a
+        // positive value during the ramp window and the chassis briefly drives forward
+        // before reversing (see code review F2).
+        const bool shouldRampUp = tShapeRampUp && !wasAlreadyEnabled;
+        if (shouldRampUp)
         {
-            // Seed the cruise-ramp state. The ramp progresses with the left encoder; once
-            // the ramp distance is consumed, `update()` clears `_useTShape` so subsequent
-            // ticks fall straight through to the full preset cruise.
-            //
-            // Sign-by-direction on the target PWM: when `_reverse` is set, the steady-state
-            // `cruise` in `update()` is negated, so the ramp target must be negated too —
-            // otherwise the ramp interpolation overrides the correctly-signed cruise with a
-            // positive value during the ramp window and the chassis briefly drives forward
-            // before reversing (see code review F2).
             _useTShape       = true;
             _tShapeAccel     = accel;
             _tShapeStartEnc  = Drive.getEncL();
@@ -345,9 +445,32 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
             _tShapeTargetPwm = _reverse ? (int16_t) -presetToPwm(_preset)
                                         : presetToPwm(_preset);
         }
-        else
+        else if (!tShapeRampUp)
         {
+            // Caller explicitly opted out of ramp-up — kill any in-flight ramp.
             _useTShape = false;
+        }
+        // else (wasAlreadyEnabled && tShapeRampUp): leave `_useTShape` alone so any
+        // in-flight ramp keeps progressing.
+
+        // Capture the accel for the ramp-down even when ramp-up did not fire, so a
+        // re-arm-only path (LINE_OVERSHOOT) still has a usable accel.
+        if (!shouldRampUp)
+        {
+            _tShapeAccel = accel;
+        }
+
+        // Ramp-down arming: only meaningful with a distance target. Capture the cruise PWM
+        // the ramp-down will descend FROM at gate-arm time. The math in `update()` lerps
+        // cruise from this value down to `Config::PWM_MIN_MAGNITUDE` (sign-corrected) as
+        // the chassis approaches the gate, so the active brake fires at floor PWM rather
+        // than from full cruise — eliminates the lower-MCU brake-from-cruise stopping
+        // distance variance.
+        _useTShapeRampDown = tShapeRampDown && hasDistanceTarget;
+        if (_useTShapeRampDown)
+        {
+            _tShapeRampDownStart = _reverse ? (int16_t) -presetToPwm(_preset)
+                                            : presetToPwm(_preset);
         }
 
         if (hasDistanceTarget)
@@ -364,8 +487,10 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         else
         {
             // Re-enabling without a distance target disarms any prior gate so a stale
-            // baseline cannot fire mid-segment after the new enable.
+            // baseline cannot fire mid-segment after the new enable. Ramp-down also makes
+            // no sense without a gate to ramp toward.
             _distanceTargetActive = false;
+            _useTShapeRampDown    = false;
         }
     }
     else
@@ -375,7 +500,8 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         _enabled              = false;
         _lastErr              = 0.0f;
         _lostLine             = false;
-        _useTShape            = false;    // Disabling cancels any active cruise ramp.
+        _useTShape            = false;    // Disabling cancels any active cruise ramp-up.
+        _useTShapeRampDown    = false;    // Disabling also cancels any active ramp-down.
         _distanceTargetActive = false;    // Disabling also disarms the distance gate.
         _distanceReached      = false;    // Clear the latch so a re-enable without a new
                                           // setDistanceTarget cannot report a stale trip.

@@ -16,6 +16,8 @@ from tools.path_planner import field_data as real_field_data
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
+    EDGE_PROJECTION,
+    _reverse_heading,
     build_graph,
 )
 
@@ -36,6 +38,10 @@ _FIELD_ATTRS = (
 
 def _clone_field_data() -> SimpleNamespace:
     snapshot = {attr: copy.deepcopy(getattr(real_field_data, attr)) for attr in _FIELD_ATTRS}
+    # EDGES is optional; clone it too when present so override tests can
+    # mutate it without polluting other tests sharing real_field_data.
+    if hasattr(real_field_data, "EDGES"):
+        snapshot["EDGES"] = copy.deepcopy(real_field_data.EDGES)
     return SimpleNamespace(**snapshot)
 
 
@@ -106,3 +112,80 @@ def test_heading_correctness_for_known_segment() -> None:
     assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
     # A=(10, 10) -> D=(10, 150): North, heading 90.
     assert g.edges["A", "D"]["heading_deg"] == pytest.approx(90.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# EDGES geometry override (graph_builder honors caller-supplied
+# distance_cm / heading_deg instead of recomputing from node coords).
+# Regression guard for Copilot PR #12 review comment #6.
+# ---------------------------------------------------------------------------
+
+
+def test_edges_distance_cm_override_is_honored() -> None:
+    """An EDGES entry with explicit distance_cm wins over Euclidean geometry."""
+    fd = _clone_field_data()
+    # A=(10, 10) -> B=(200, 10): true Euclidean = 190.0 cm. Inject a
+    # bidirectional rich-edge override claiming the strip is 99.0 cm.
+    # Use EDGE_PROJECTION so the entry is additive (not a duplicate of
+    # the existing LINE_SEGMENTS A-B pair); networkx replaces edge
+    # attrs on the second add_edge call, so the override is what sticks.
+    fd.EDGES = [
+        {
+            "type":         EDGE_PROJECTION,
+            "u":            "A",
+            "v":            "B",
+            "distance_cm":  99.0,
+            "heading_deg":  0.0,    # geometric heading also happens to be 0
+        },
+    ]
+    # Replacing the cloned EDGES with a single entry leaves projection
+    # node P1 unreferenced; the resulting "node has no incident edges"
+    # warning is unrelated to the override path under test.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["distance_cm"] == pytest.approx(99.0, abs=1e-9)
+    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(99.0, abs=1e-9)
+
+
+def test_edges_heading_deg_override_is_honored_with_reverse() -> None:
+    """An EDGES entry with explicit heading_deg uses it for the forward edge
+    and ``_reverse_heading(...)`` for the reverse edge."""
+    fd = _clone_field_data()
+    # A->B's geometric heading is 0.0 (due East). Inject an obviously wrong
+    # 45.0 to prove the override path runs and the reverse is computed off
+    # the override (45.0 + 180.0 == 225.0), not off the computed geometry.
+    fd.EDGES = [
+        {
+            "type":         EDGE_PROJECTION,
+            "u":            "A",
+            "v":            "B",
+            "distance_cm":  190.0,   # validator wants a positive number
+            "heading_deg":  45.0,
+        },
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["heading_deg"] == pytest.approx(45.0, abs=1e-9)
+    assert g.edges["B", "A"]["heading_deg"] == pytest.approx(
+        _reverse_heading(45.0), abs=1e-9
+    )
+    assert g.edges["B", "A"]["heading_deg"] == pytest.approx(225.0, abs=1e-9)
+
+
+def test_legacy_edges_without_options_fall_back_to_computed_geometry() -> None:
+    """LINE_SEGMENTS / BLIND_EDGES entries (no options dict) still use the
+    computed Euclidean distance + atan2 heading. Regression guard so the
+    override path does not silently change legacy callers."""
+    fd = _clone_field_data()
+    # Drop EDGES to isolate the legacy path. LINE_SEGMENTS pair A-B remains.
+    fd.EDGES = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    # A=(10, 10) -> B=(200, 10): Euclidean = 190.0 cm, heading = 0.0.
+    assert g.edges["A", "B"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
+    assert g.edges["A", "B"]["heading_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
+    assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
