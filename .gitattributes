@@ -1,0 +1,8 @@
+# Force LF for auto-generated planner outputs and their golden fixtures.
+# header_writer.py emits LF; without these rules, Windows git autocrlf=true
+# would convert these files to CRLF on checkout, breaking byte-identical
+# golden comparisons in test_routes_{h,cpp}_matches_golden.
+tools/path_planner/tests/golden/routes_toy.h   text eol=lf
+tools/path_planner/tests/golden/routes_toy.cpp text eol=lf
+WRO2026/routes.h                                text eol=lf
+WRO2026/routes.cpp                              text eol=lf

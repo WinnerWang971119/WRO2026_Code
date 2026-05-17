@@ -116,13 +116,15 @@ uv run --extra dev pytest tools/path_planner/tests/ -v
 
 Re-running `build_routes.py` against an unchanged `field_data.py`
 produces a **byte-identical** `routes.h` / `routes.cpp` pair (AC2). The
-`routes.h` banner embeds `hashlib.sha256(field_data.py).hexdigest()`,
-so reviewers can verify "the committed header is current with the
-committed `field_data.py`" at a glance:
+`routes.h` banner embeds the SHA256 of `field_data.py`'s **LF-normalized**
+bytes (CRLF sequences collapsed to LF first, so the digest matches across
+Windows and Linux checkouts regardless of git autocrlf), so reviewers can
+verify "the committed header is current with the committed
+`field_data.py`" at a glance:
 
 ```powershell
 python -c "import hashlib, pathlib; \
-print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes()).hexdigest())"
+print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes().replace(b'\r\n', b'\n')).hexdigest())"
 ```
 
 If that hex string does not appear at the top of `routes.h`, regen.
@@ -140,8 +142,37 @@ it.
    gaps, no edge clips an obstacle).
 4. Commit `field_data.py`, `WRO2026/routes.h`, and
    `WRO2026/routes.cpp` **together** in the same commit. The `routes.h`
-   banner SHA256 must equal `sha256(field_data.py)` — if reviewers see
-   a mismatch, the commit is incomplete.
+   banner SHA256 must equal the **LF-normalized** SHA256 of `field_data.py`
+   (CRLF sequences collapsed to LF first, so the digest is stable across
+   Windows and Linux checkouts) — see the Determinism section above for
+   the one-liner. If reviewers see a mismatch, the commit is incomplete.
+
+## Authoring real-field NODES
+
+Resolves issue #10 scope 1.
+
+Launch the picker from the repo root:
+
+```powershell
+uv run python tools/path_planner/pick_xy.py
+```
+
+That opens a matplotlib window with `maps/map.png` as the background and
+the current `NODES` overlaid as dim grey reference dots. Left-click any
+point on the field and the `(x, y)` in centimetres is printed to stdout
+to 3 decimal places, with a red marker plus a 1-decimal-place label
+dropped at the click for visual reference. Keybinds: `c` clears every
+marker (the NODES overlay stays put), `u` undoes the most recent marker.
+Close the window to exit. Paste the printed coordinates straight into
+the `NODES` dict in `field_data.py`.
+
+`field_data.py` is the single source of truth for both the on-robot
+routes (`WRO2026/routes.h` / `routes.cpp`) and the Python simulator
+(`tools/path_planner/sim/`). Once you have authored real NODES,
+regenerate with `uv run python tools/path_planner/build_routes.py`; both
+the robot's compiled next-hop table and the sim's map snap to the new
+coordinates automatically — there is no separate "robot field" and
+"sim field" to keep in sync.
 
 ## Module layout
 
