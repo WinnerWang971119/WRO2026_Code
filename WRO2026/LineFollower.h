@@ -5,20 +5,22 @@
  *
  * @details
  * `LineFollowerClass` is the singleton that converts the weighted error reported by the
- * MATRIX Line Tracer 10CH sensor (`MatrixLineTracer::getError()`, range `[-4.5, +4.5]`) into
- * differential left/right PWM commands sent to `Drive.setSpeed(L, R)`. It is deliberately the
- * *outer* loop: it commands raw PWM, NOT `MoveSync`, so the lower-MCU's wheel-balance PID does
- * not stack on top of this one and oscillate (see `Drive::setSpeed` doxygen).
+ * 8-channel reflectance line array (`WROLineArrayClass::getError()`, range `[-3.5, +3.5]`)
+ * into differential left/right PWM commands sent to `Drive.setSpeed(L, R)`. It is deliberately
+ * the *outer* loop: it commands raw PWM, NOT `MoveSync`, so the lower-MCU's wheel-balance PID
+ * does not stack on top of this one and oscillate (see `Drive::setSpeed` doxygen).
  *
  * Tuning is sourced exclusively from `Config::LINE_KP`, `Config::LINE_KI` (currently 0 — see
- * `update()` note), `Config::LINE_KD`, `Config::LINE_MAX_CORR`, the active speed preset
- * (resolved by `_presetToPwm()` from `Config::SPEED_SLOW/NORMAL/FAST`), and
- * `Config::LINE_THRESHOLD`. Hardware wiring is sourced from `Config::LINE_I2C_PORT`. Lost-line
- * behaviour is dispatched on `Config::LOST_LINE_ACTION`.
+ * `update()` note), `Config::LINE_KD`, `Config::LINE_MAX_CORR`, and the active speed preset
+ * (resolved by `_presetToPwm()` from `Config::SPEED_SLOW/NORMAL/FAST`). Hardware wiring,
+ * per-channel calibration baselines, and the firmware-level illumination/normalization for
+ * the underlying MXColor boards live entirely in `WROLineArrayClass` (see `WROLineArray.h`
+ * for the two-layer calibration contract). Lost-line behaviour is dispatched on
+ * `Config::LOST_LINE_ACTION`.
  *
- * The owned `MatrixLineTracer _tracer` instance is exposed through `getTracer()` so that the
- * Intersection module can read junction state from the *same* sensor without issuing
- * duplicate I2C transactions.
+ * The shared `WROLineArrayClass` singleton (`LineArray`) is exposed through `getArray()` so
+ * that the Intersection module can read junction state from the *same* sensor without
+ * issuing duplicate I2C transactions on the same Wire1 boards.
  *
  * Lifecycle:
  *  - `begin()` once from `setup()` after `MiniR4.begin()` and `Drive.begin()`.
@@ -44,15 +46,15 @@
 #define LINEFOLLOWER_H
 
 #include <Arduino.h>
-#include <MatrixMiniR4.h>    // Brings in `MatrixLineTracer` transitively via MiniR4I2C.h.
-                             // The Arduino 1.5 library spec only adds `<lib>/src/` to the
-                             // include path — not nested subdirectories like
-                             // `src/Modules/Sensors/` — so `<MiniR4_MXLineTracer.h>` is not
-                             // portable across build environments. The vendor facade
-                             // `<MatrixMiniR4.h>` already declares the type, which is all
-                             // we need for the `MatrixLineTracer*` member below.
-                             // (See code review F9.)
+#include <MatrixMiniR4.h>
 #include "Config.h"
+#include "WROLineArray.h"    // Brings in `WROLineArrayClass` and the `LineArray` singleton —
+                             // the WRO 2026 8-channel reflectance backend that replaces the
+                             // vendor `MatrixLineTracer`. `LineFollower` and `Intersection`
+                             // both hold a non-owning `WROLineArrayClass*` onto this
+                             // singleton; the controller-side surface (getError(),
+                             // isOnline(), getJunctionType()) is preserved so the P+D
+                             // mathematics here did not change.
 
 // Forward declaration so the builder can hold a reference to the owner type.
 class LineFollowerClass;
@@ -228,6 +230,10 @@ public:
      *       kinematics derivation.
      * @note If this method is NOT called on the builder, the owner's current direction is
      *       left unchanged — re-enabling the controller does not silently reset direction.
+     * @note On 2-board configurations (`Config::LINE_BOARD_COUNT == 2`), this flips
+     *       `WROLineArrayClass`'s active board to the rear — see
+     *       `WROLineArray.h::setReverseActive()` and DECISIONS.md. The actual wiring will
+     *       land in T5.
      */
     LineFollowerEnableBuilder& setReverse(bool reverse);
 
@@ -273,25 +279,33 @@ private:
 };
 
 /**
- * @brief Singleton outer-loop line follower over `MatrixLineTracer` and `Drive.setSpeed`.
+ * @brief Singleton outer-loop line follower over `WROLineArrayClass` and `Drive.setSpeed`.
  *
- * Owns one `MatrixLineTracer` instance, runs a P+D controller every `update()` tick, and
- * drives the chassis at `_presetToPwm(_preset) ± corr`. The integral term is intentionally
- * absent in Phase 1 — see `update()` doxygen.
+ * Holds a non-owning pointer to the `LineArray` singleton (bound in `begin()` and shared
+ * with `Intersection` to avoid duplicate I2C transactions), runs a P+D controller every
+ * `update()` tick, and drives the chassis at `_presetToPwm(_preset) ± corr`. The integral
+ * term is intentionally absent in Phase 1 — see `update()` doxygen.
  */
 class LineFollowerClass
 {
 public:
     /**
-     * @brief Wire up the tracer to Wire1 + the configured mux channel and initialise it.
+     * @brief Bind onto the `LineArray` singleton and reset controller state.
      *
-     * Sets `_tracer._pWire = &Wire1` and `_tracer._ch = Config::LINE_I2C_PORT`, calls
-     * `_tracer.begin()`, then pushes `Config::LINE_THRESHOLD` via `setThreshold()`. Resets the
-     * controller state (`_enabled`, `_lostLine`, `_lastErr`).
+     * Captures `_array = &LineArray` (non-owning) so this controller and `Intersection`
+     * both sample the same `WROLineArrayClass` instance — no duplicate I2C transactions on
+     * the same Wire1 boards. Resets the controller state (`_enabled`, `_lostLine`,
+     * `_lastErr`). All hardware initialisation (I2C port selection, firmware-level
+     * illumination via `MatrixColor::setLight(...)`, software per-channel calibration)
+     * lives in `WROLineArrayClass::begin()` — see `WROLineArray.h` for the two-layer
+     * calibration contract.
      *
-     * @return `true` (the underlying `MatrixLineTracer::begin()` returns void; we surface a
-     *         `bool` for symmetry with the other `*::begin()` methods in this codebase).
-     * @note Must be called from `setup()` AFTER `MiniR4.begin()` so `Wire1` is alive.
+     * @return `true` once `_array` is bound. The underlying `WROLineArrayClass::begin()`
+     *         must already have been called by the sketch — `LineFollower::begin()` does
+     *         not call it implicitly, since the lifecycle order is strict: `LineArray`
+     *         comes up BEFORE the controllers that depend on it.
+     * @note Must be called from `setup()` AFTER `MiniR4.begin()` (so `Wire1` is alive)
+     *       AND AFTER `LineArray.begin()` (so the singleton is hardware-initialised).
      */
     bool begin();
 
@@ -300,15 +314,16 @@ public:
      *
      * Behaviour:
      *  - If `!_enabled`, returns immediately (short-circuit).
-     *  - If `!_tracer.isOnline()` (line lost beneath every channel), sets `_lostLine = true`
-     *    and dispatches `Config::LOST_LINE_ACTION`:
+     *  - If `!_array->isOnline()` (line lost beneath every channel of the active board),
+     *    sets `_lostLine = true` and dispatches `Config::LOST_LINE_ACTION`:
      *      - `STOP`  → `Drive.stop(true)`  — active brake.
      *      - `COAST` → `Drive.stop(false)` — release power, roll to a stop.
      *      - `CRAWL` → `Drive.setSpeed(cruise/2, cruise/2)` — straight creep forward (no
      *                  steering) so the strip can be reacquired. `cruise` is resolved from
      *                  the current preset via `_presetToPwm()`.
-     *  - Otherwise (line online): clears `_lostLine`, samples `_tracer.getError()`, runs a P+D
-     *    controller `corr = LINE_KP*err + LINE_KD*(err - _lastErr)`, clamps `corr` to
+     *  - Otherwise (line online): clears `_lostLine`, samples `_array->getError()` (range
+     *    `[-3.5, +3.5]` for the 8-channel array), runs a P+D controller
+     *    `corr = LINE_KP*err + LINE_KD*(err - _lastErr)`, clamps `corr` to
      *    `[-LINE_MAX_CORR, +LINE_MAX_CORR]`, then commands
      *    `Drive.setSpeed(cruise + corr, cruise - corr)` with each channel re-clamped to
      *    `[-100, +100]` (the DriveDC PWM range). `cruise` is sourced from
@@ -371,6 +386,10 @@ public:
      *
      * @param reverse `true` to follow the line backwards; `false` for forward (default).
      * @note Takes effect on the next `update()` tick. Assumes a front-mounted tracer.
+     * @note On 2-board configurations (`Config::LINE_BOARD_COUNT == 2`), this flips
+     *       `WROLineArrayClass`'s active board to the rear — see
+     *       `WROLineArray.h::setReverseActive()` and DECISIONS.md. The actual wiring will
+     *       land in T5.
      */
     void setReverse(bool reverse);
 
@@ -397,25 +416,28 @@ public:
     /**
      * @brief Most recent weighted error sample stored by the controller.
      *
-     * @return The last value returned by `MatrixLineTracer::getError()` while the line was
-     *         online (range `[-4.5, +4.5]`). Reset to `0.0f` by `begin()`, by
-     *         `setEnabled(false)`, and on every entry to the lost-line branch of `update()` —
-     *         so a caller observing the value immediately after the line is dropped will see
-     *         `0.0f`, not a stale sample.
+     * @return The last value returned by `WROLineArrayClass::getError()` while the line was
+     *         online (range `[-3.5, +3.5]` for the 8-channel array). Reset to `0.0f` by
+     *         `begin()`, by `setEnabled(false)`, and on every entry to the lost-line branch
+     *         of `update()` — so a caller observing the value immediately after the line is
+     *         dropped will see `0.0f`, not a stale sample.
      * @note Useful as telemetry for OLED tuning views.
      */
     float getRawError() const;
 
     /**
-     * @brief Pointer to the owned `MatrixLineTracer` so the Intersection module can share it.
+     * @brief Pointer to the shared `WROLineArrayClass` singleton so Intersection can read
+     *        from the same sensor without duplicate I2C transactions.
      *
      * Intersection (T7) calls this from its own `begin()` to bind onto the *same* sensor
-     * instance — duplicating the driver would issue duplicate I2C transactions on the same
-     * Wire1 mux channel.
+     * instance — both modules share the singleton, so a single `getError()` /
+     * `isOnline()` / `getJunctionType()` sample on either side issues exactly one set of
+     * I2C transactions against the active MXColor board.
      *
-     * @return Non-owning pointer to the tracer. Lifetime equals this singleton's lifetime.
+     * @return Non-owning pointer to the `WROLineArrayClass` singleton (== `&LineArray`).
+     *         Lifetime equals the singleton's.
      */
-    MatrixLineTracer* getTracer();
+    WROLineArrayClass* getArray();
 
     /**
      * @brief Read-and-clear: was the distance gate tripped since the last query?
@@ -569,7 +591,7 @@ private:
     // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
     // here invoke the free function directly.
 
-    MatrixLineTracer    _tracer;                                  ///< Owned sensor driver shared with Intersection (T7).
+    WROLineArrayClass*  _array    = nullptr;                      ///< Pointer to the singleton WROLineArrayClass shared with Intersection (T7).
     bool                _enabled  = false;                        ///< When false, `update()` is a no-op.
     bool                _lostLine = false;                        ///< Last-tick lost-line state (no channel online).
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
