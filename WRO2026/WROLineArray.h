@@ -146,6 +146,15 @@ public:
      * @note Must be called from `setup()` AFTER `MiniR4.begin()` (so `Wire1` is alive)
      *       and BEFORE `LineFollower.begin()` (which binds onto the `LineArray`
      *       singleton and assumes it is already initialised).
+     * @note `begin()` converts the user-facing 1..4 port labels in
+     *       `Config::LINE_FRONT_I2C_PORT` / `LINE_REAR_I2C_PORT` (which match the
+     *       physical I2C1..I2C4 silkscreen on the MiniR4 board and meat.ino's
+     *       `MiniR4.I2C{N}.MXColor` pattern) into the 0-based PCA9548A mux channel
+     *       IDs that `MatrixColor::_ch` expects (I2C1 → ch 0 ... I2C4 → ch 3 —
+     *       see `MatrixMiniR4.h:96-100`). `MatrixColor::i2cMUXSelect()` writes
+     *       `(1 << _ch)`, so passing the raw 1..4 would select the WRONG physical
+     *       port. Config keeps the 1..4 form so the operator's mental model matches
+     *       the board labels; the conversion is the wrapper's responsibility.
      * @note This is **Layer 1** of the two-layer calibration contract — see file-level
      *       doxygen. The hardware calibration is volatile and resets on power cycle, so
      *       it MUST be re-applied at every boot. Do NOT remove the `setLight(...)` call
@@ -417,7 +426,18 @@ private:
      *
      * @param boardIdx  `0` for front, `1` for rear.
      * @param out       Output buffer of exactly 8 bytes, channels indexed left-to-right.
-     * @return `true` if the I2C transaction succeeded; `false` on failure.
+     * @return `false` on either of the two failure modes enforced INSIDE this method:
+     *         (a) `boardIdx >= 2` (hard physical-board-count bound), OR
+     *         (b) any of the 4 CMYK bytes reads as `> 99` (invalid packed-decimal-digit
+     *         form, surfaces I²C transport corruption — `MatrixColor::getColor()` returns
+     *         raw `Wire.read()` bytes with no transport-status check, so a bus failure /
+     *         dropout can surface as `0xFF` which unpacks to nonsense out-of-range values).
+     *         Callers that accept `boardIdx` from external input should additionally enforce
+     *         `boardIdx < Config::LINE_BOARD_COUNT` before calling here — see the public
+     *         `readBoard()` method, which performs that check.
+     *         On ALL failure paths `out[]` is NOT written, so the caller's cache is
+     *         preserved as last-known-good. `true` if the I2C transaction succeeded AND
+     *         all 4 bytes fell in the valid `[0..99]` range.
      *
      * @note **INFERRED CONTRACT — must be validated on hardware before merge.** The
      *       CMYK-byte → channel-index mapping above is inferred from meat.ino's

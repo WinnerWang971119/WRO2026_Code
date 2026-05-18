@@ -73,8 +73,21 @@ bool WROLineArrayClass::begin()
     for (uint8_t b = 0; b < Config::LINE_BOARD_COUNT; ++b)
     {
         _boards[b]._pWire = &Wire1;
-        _boards[b]._ch    = (b == 0) ? Config::LINE_FRONT_I2C_PORT
-                                     : Config::LINE_REAR_I2C_PORT;
+
+        // ---------------------------------------------------------------------------------
+        // Convert user-facing 1..4 port labels (matching the physical I2C1..I2C4
+        // markings on the MiniR4 board AND meat.ino's MiniR4.I2C{N}.MXColor
+        // pattern) to the 0-based PCA9548A mux channel ID that MatrixColor::_ch
+        // expects. The vendor convention (MatrixMiniR4.h:96-100):
+        //   I2C1 → mux ch 0, I2C2 → ch 1, I2C3 → ch 2, I2C4 → ch 3.
+        // MatrixColor::i2cMUXSelect() writes (1 << _ch), so passing the raw 1..4
+        // would select the WRONG physical port (e.g., port label 4 → ch 4, which
+        // doesn't exist on a MiniR4). The old MatrixLineTracer hid this bug by
+        // no-op'ing its mux-select. See PR #20 codex P2 + DECISIONS.md.
+        // ---------------------------------------------------------------------------------
+        const uint8_t portLabel = (b == 0) ? Config::LINE_FRONT_I2C_PORT
+                                           : Config::LINE_REAR_I2C_PORT;
+        _boards[b]._ch          = static_cast<uint8_t>(portLabel - 1);
 
         const bool boardOk = _boards[b].begin();
         if (!boardOk)
@@ -88,10 +101,14 @@ bool WROLineArrayClass::begin()
             // path). We deliberately do NOT `continue` here: the `setLight()` call
             // below remains best-effort even on a failed `begin()` since the LED may
             // still be controllable on a partially-initialised board.
+            //
+            // Log the user-facing port label (1..4) — not the 0-based mux channel —
+            // so the operator can match the warning to the physical I2C1..I2C4
+            // silkscreen on the board without doing the conversion in their head.
             Serial.print(F("[WROLineArray.begin] WARN: board "));
             Serial.print(b);
             Serial.print(F(" (I2C port "));
-            Serial.print(_boards[b]._ch);
+            Serial.print(portLabel);
             Serial.println(F(") begin() returned false."));
 
             if (b == 0)
@@ -394,11 +411,12 @@ void WROLineArrayClass::_refreshCache()
     // latch here guarantees the two modes see exactly the same I²C-failure
     // semantics and the same `_lastChannels` / `_lastOnline` state transitions.
     // Safe to pass _lastChannels directly as the out buffer: _readBoardInternal
-    // does NOT write to out[] on its failure path (the only failure mode today
-    // is the boardIdx >= 2 bounds check, which returns false before any write).
-    // If that helper ever grows a partial-write failure path, restore the
-    // temporary-buffer + memcpy pattern to preserve the "last-known-good"
-    // invariant relied on below.
+    // returns false BEFORE any write to out[] on both of its failure paths today
+    // (the boardIdx >= 2 bounds check, AND the CMYK byte > 99 transport-corruption
+    // guard added in the previous commit). The last-known-good invariant in
+    // _lastChannels therefore survives any failure. If _readBoardInternal ever
+    // grows a partial-write failure path, restore the temporary-buffer + memcpy
+    // pattern to preserve this invariant.
     if (_readBoardInternal(_activeBoard, _lastChannels))
     {
         _lastOnline = _isOnlineFromCache(_lastChannels);
@@ -442,6 +460,23 @@ bool WROLineArrayClass::_readBoardInternal(uint8_t boardIdx, uint8_t out[8])
     const uint8_t bm = _boards[boardIdx].getColor(M);
     const uint8_t by = _boards[boardIdx].getColor(Y);
     const uint8_t bk = _boards[boardIdx].getColor(K);
+
+    // -------------------------------------------------------------------------------------
+    // Reject obviously-corrupt CMYK bytes (P1 from PR #20 codex review).
+    // Each packed byte must be in [0..99] (two decimal digits 0..9). On I²C
+    // bus failure / dropout MatrixColor::getColor() can return 0xFF (=255)
+    // since the underlying i2cReadData has no transport-status check. Letting
+    // 0xFF through would unpack to (25, 5) and downstream _computeError would
+    // see norm values >> 1 (above the HIGH calibration of 9), falsely
+    // reporting a very strong on-line and silently defeating lost-line safety.
+    //
+    // Return false WITHOUT touching out[] so the caller's last-known-good
+    // cache is preserved (matches the existing failure-path contract).
+    // -------------------------------------------------------------------------------------
+    if (bc > 99 || bm > 99 || by > 99 || bk > 99)
+    {
+        return false;
+    }
 
     // -------------------------------------------------------------------------------------
     // Unpack per the inferred table (see method @note above + header doxygen):

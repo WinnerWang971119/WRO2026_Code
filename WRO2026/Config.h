@@ -212,17 +212,44 @@ namespace Config
     /**
      * @brief I²C port index (1..4) on Wire1 carrying the FRONT line-sensor board.
      *
-     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4.
-     * Port 0 is the on-board Wire — never use 0 for an external sensor board.
+     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4 (matches
+     * the physical silkscreen labels AND meat.ino's `MiniR4.I2C{N}.MXColor` pattern).
+     * Port 0 is the on-board `Wire` — never use 0 for an external sensor board.
+     *
+     * @note Valid range is `[1..4]`. The 1..4 → 0..3 conversion to the underlying
+     *       PCA9548A mux channel ID (`MatrixColor::_ch`, which `i2cMUXSelect()` shifts
+     *       as `(1 << _ch)`) happens inside `WROLineArrayClass::begin()` — do NOT
+     *       pre-convert here. Vendor source cross-reference:
+     *       `MatrixMiniR4.h:96-100` (`I2C1` → mux ch 0 ... `I2C4` → ch 3).
      */
     constexpr uint8_t LINE_FRONT_I2C_PORT = 1;
+
+    static_assert(LINE_FRONT_I2C_PORT >= 1 && LINE_FRONT_I2C_PORT <= 4,
+                  "Config::LINE_FRONT_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
 
     /**
      * @brief I²C port index (1..4) on Wire1 carrying the REAR line-sensor board.
      *
-     * Ignored when LINE_BOARD_COUNT == 1. Must be distinct from LINE_FRONT_I2C_PORT.
+     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4 (matches
+     * the physical silkscreen labels AND meat.ino's `MiniR4.I2C{N}.MXColor` pattern).
+     * Ignored when `LINE_BOARD_COUNT == 1`. Must be distinct from `LINE_FRONT_I2C_PORT`.
+     *
+     * @note Valid range is `[1..4]`. The 1..4 → 0..3 conversion to the underlying
+     *       PCA9548A mux channel ID (`MatrixColor::_ch`, which `i2cMUXSelect()` shifts
+     *       as `(1 << _ch)`) happens inside `WROLineArrayClass::begin()` — do NOT
+     *       pre-convert here. Vendor source cross-reference:
+     *       `MatrixMiniR4.h:96-100` (`I2C1` → mux ch 0 ... `I2C4` → ch 3).
      */
     constexpr uint8_t LINE_REAR_I2C_PORT = 4;
+
+    static_assert(LINE_REAR_I2C_PORT >= 1 && LINE_REAR_I2C_PORT <= 4,
+                  "Config::LINE_REAR_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
 
     /**
      * @brief Per-board, per-channel calibrated WHITE (off-line) reflectance value.
