@@ -19,12 +19,14 @@
  *    spread on top of the firmware baseline, not in place of it.
  *
  *  - **Layer 2 — software per-channel baselines.** `calibrate()` (operator-driven,
- *    sync-blocking ~5 s) sweeps the bar over white + line, captures per-channel
- *    min/max into `Config::LINE_CALIB_LOW` / `LINE_CALIB_HIGH` constants the operator
- *    pastes into `Config.h`, and reflashes. All getter math (`_computeError`,
- *    `_isOnlineFromCache`, `_classifyJunction`) reads these constants to normalise
- *    each channel onto a `[0, 1]` intensity scale before applying the symmetric
- *    weight set or the on-line ratio gate.
+ *    sync-blocking ~5 s in 1-board configs, ~12 s in 2-board configs because the
+ *    front and rear bars must be swept sequentially) sweeps the bar over white +
+ *    line, captures per-channel min/max into `Config::LINE_CALIB_LOW` /
+ *    `LINE_CALIB_HIGH` constants the operator pastes into `Config.h`, and
+ *    reflashes. All getter math (`_computeError`, `_isOnlineFromCache`,
+ *    `_classifyJunction`) reads these constants to normalise each channel onto a
+ *    `[0, 1]` intensity scale before applying the symmetric weight set or the
+ *    on-line ratio gate.
  *
  * @note **INFERRED CONTRACT (load-bearing — validate on bring-up).** The CMYK-byte
  *       packing used by `_readBoardInternal()` is inferred from `meat.ino` lines
@@ -278,8 +280,54 @@ bool WROLineArrayClass::readBoard(uint8_t boardIdx, uint8_t out[8])
 }
 
 // =========================================================================================
-// Operator-driven Layer-2 calibration sweep (~5 s, sync-blocking)
+// Operator-driven Layer-2 calibration sweep (~5 s × N boards, sequential, sync-blocking)
 // =========================================================================================
+
+void WROLineArrayClass::_sweepOneBoardForCalibration(uint8_t   boardIdx,
+                                                     uint8_t   mnRow[8],
+                                                     uint8_t   mxRow[8],
+                                                     uint16_t& validCount)
+{
+    // -------------------------------------------------------------------------------------
+    // Single-board, 5-second sampling phase used by `calibrate()` to sweep boards
+    // sequentially. Front and rear bars sit at opposite ends of the chassis, so the
+    // operator physically cannot present both to the reference at the same time — the
+    // previous monolithic "read every configured board every 20 ms" loop recorded
+    // ambient garbage on whichever bar was off-target. Splitting the inner per-board
+    // branch into this helper lets `calibrate()` dispatch phases one-board-at-a-time
+    // with an inter-phase repositioning cue.
+    //
+    // Sampling cadence matches the original sweep (~50 Hz over 5 s ≈ 250 samples per
+    // call), so the per-board statistical quality is identical to the pre-refactor
+    // behaviour — only the wall-clock arrangement of phases has changed.
+    // -------------------------------------------------------------------------------------
+    const uint32_t start = millis();
+    while ((millis() - start) < 5000U)
+    {
+        uint8_t sample[8];
+        if (!_readBoardInternal(boardIdx, sample))
+        {
+            // Transient I²C miss; the next iteration will retry. validCount
+            // is NOT bumped — if every iteration fails, calibrate()'s
+            // post-sweep handler substitutes safe defaults for this row.
+            delay(20);
+            continue;
+        }
+        ++validCount;
+        for (uint8_t c = 0; c < 8; ++c)
+        {
+            if (sample[c] < mnRow[c])
+            {
+                mnRow[c] = sample[c];
+            }
+            if (sample[c] > mxRow[c])
+            {
+                mxRow[c] = sample[c];
+            }
+        }
+        delay(20);
+    }
+}
 
 void WROLineArrayClass::calibrate()
 {
@@ -347,7 +395,7 @@ void WROLineArrayClass::calibrate()
     // -------------------------------------------------------------------------------------
     // Layer 2 — per-board valid-sample counter (Diego's PR #20 review, fix #7).
     //
-    // Counts successful reads from each board across the 5 s sweep. After the sweep,
+    // Counts successful reads from each board across its 5 s phase. After the sweep,
     // any board with `validSamples[b] == 0` (passed pre-flight but ALL 250 in-sweep
     // reads failed — intermittent connection, brownout under LED load, etc.) gets a
     // per-board warning + safe-default row in the printed paste block instead of the
@@ -361,42 +409,50 @@ void WROLineArrayClass::calibrate()
     // -------------------------------------------------------------------------------------
     uint16_t validSamples[2] = {0, 0};
 
-    Serial.println(F("=== WROLineArray.calibrate(): sweep bar over white and over line "
-                     "for 5 s... ==="));
+    // -------------------------------------------------------------------------------------
+    // Phase 1: sweep the FRONT board (boards[0]) only. Operator presents the FRONT bar
+    // to the white + line reference during this 5 s window. Front and rear bars sit at
+    // opposite ends of the chassis and cannot be physically swept at once — sequencing
+    // the phases is what makes the rear-board calibration meaningful (the previous
+    // monolithic loop recorded ambient garbage on the inactive bar).
+    // -------------------------------------------------------------------------------------
+    if (Config::LINE_BOARD_COUNT >= 2)
+    {
+        Serial.println(F("=== PHASE 1/2: sweep FRONT bar over white and line for 5 s... ==="));
+    }
+    else
+    {
+        Serial.println(F("=== PHASE 1/1: sweep FRONT bar over white and line for 5 s... ==="));
+    }
+    _sweepOneBoardForCalibration(0, mn[0], mx[0], validSamples[0]);
 
     // -------------------------------------------------------------------------------------
-    // Sampling loop. ~50 Hz at 20 ms cadence × 5 s ≈ 250 samples per board — plenty of
-    // signal for the operator to sweep both extremes without rushing.
+    // Phase 2: only when a REAR board is configured. Audible cue + countdown gives the
+    // operator time to physically reposition the chassis or the reference strip so the
+    // REAR bar is now over the target. Then a second 5 s sweep on boards[1].
     // -------------------------------------------------------------------------------------
-    const uint32_t start = millis();
-    while ((millis() - start) < 5000U)
+    if (Config::LINE_BOARD_COUNT >= 2)
     {
-        for (uint8_t b = 0; b < Config::LINE_BOARD_COUNT; ++b)
+        Serial.println(F("=== PHASE 1 done. Reposition for REAR bar..."));
+
+        // Two short beeps to alert the operator. Frequencies chosen distinct from
+        // the Mission fault-beep pattern (1 kHz × 500 ms) so they're not confused
+        // with a fault.
+        MiniR4.Buzzer.Tone(1200, 200);
+        delay(300);
+        MiniR4.Buzzer.Tone(1200, 200);
+
+        // Countdown so the operator has a known window to physically swap.
+        for (uint8_t i = 3; i >= 1; --i)
         {
-            uint8_t sample[8];
-            if (!_readBoardInternal(b, sample))
-            {
-                // Skip this board on a transient I²C miss; the next iteration will
-                // try again. We do NOT bail the whole sweep — a brief mux contention
-                // glitch should not invalidate 5 s of operator work. The valid-sample
-                // counter for this board is NOT bumped; if every iteration fails the
-                // post-sweep handler below substitutes safe defaults for this row.
-                continue;
-            }
-            ++validSamples[b];
-            for (uint8_t c = 0; c < 8; ++c)
-            {
-                if (sample[c] < mn[b][c])
-                {
-                    mn[b][c] = sample[c];
-                }
-                if (sample[c] > mx[b][c])
-                {
-                    mx[b][c] = sample[c];
-                }
-            }
+            Serial.print(F("  starting PHASE 2 in "));
+            Serial.print(i);
+            Serial.println(F("..."));
+            delay(1000);
         }
-        delay(20);
+
+        Serial.println(F("=== PHASE 2/2: sweep REAR bar over white and line for 5 s... ==="));
+        _sweepOneBoardForCalibration(1, mn[1], mx[1], validSamples[1]);
     }
 
     // -------------------------------------------------------------------------------------

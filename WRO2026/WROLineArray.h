@@ -65,8 +65,9 @@
  *    take a single I2C transaction per loop tick can do so explicitly, then read the
  *    cached values via the three getters.
  *  - `calibrate()` is invoked from sketch top-level only (e.g. on a `BTN_DOWN` long-press
- *    during pre-mission idle). It is sync-blocking for ~5 s and MUST NOT be called from
- *    any module's `update()` path.
+ *    during pre-mission idle). It is sync-blocking for ~5 s (1-board config) or ~12 s
+ *    (2-board config — 5 s front sweep + ~3 s inter-phase countdown + 5 s rear sweep)
+ *    and MUST NOT be called from any module's `update()` path.
  *
  * Junction classification:
  *  - Returns one of {0=NONE, 1=LEFT, 2=RIGHT, 3=T_OR_CROSS} per the priority order
@@ -352,17 +353,21 @@ public:
     bool readBoard(uint8_t boardIdx, uint8_t out[8]);
 
     /**
-     * @brief Software per-channel calibration routine — captures min/max over a 5 s
-     *        sweep and prints a Config-paste-ready block to Serial.
+     * @brief Software per-channel calibration routine — captures min/max over a per-board
+     *        5 s sweep (sequential for 2-board configs) and prints a Config-paste-ready
+     *        block to Serial.
      *
      * Caller-managed workflow (mirrors `Drive::calibrateMotorBias()`):
      *  1. Operator holds `BTN_DOWN` for >=2 s during the pre-mission idle screen.
      *  2. The sketch's idle handler calls `LineArray.calibrate()` — control transfers
      *     here.
-     *  3. Operator manually sweeps the sensor bar over the test surface for the full
-     *     ~5 s duration, alternating between bare white substrate (captures the per-channel
-     *     LOW baseline) and directly over a black line (captures the per-channel HIGH
-     *     baseline). For 2-board configurations the operator repeats on the rear board.
+     *  3. Operator manually sweeps the FRONT sensor bar over the test surface for the
+     *     full 5 s of Phase 1, alternating between bare white substrate (captures the
+     *     per-channel LOW baseline) and directly over a black line (captures the
+     *     per-channel HIGH baseline). For 2-board configurations the routine then
+     *     beeps twice and counts down 3 s while the operator repositions; the operator
+     *     then sweeps the REAR bar for the 5 s of Phase 2. See the two-phase sweep
+     *     `@note` below for the rationale.
      *  4. On return, the method has printed two `constexpr uint8_t LINE_CALIB_LOW[...] = { ... };`
      *     and `constexpr uint8_t LINE_CALIB_HIGH[...] = { ... };` blocks to Serial at
      *     115200 baud, in C++ paste-ready format.
@@ -371,10 +376,12 @@ public:
      *
      * No EEPROM, no auto-baseline on boot — deterministic and reviewable from source.
      *
-     * @warning Sync-blocking for ~5 s. MUST be called from sketch top-level only
-     *          (e.g. an idle-screen handler before the mission starts). Calling from any
-     *          module's `update()` path would freeze the cooperative loop and break
-     *          `LineFollower`, `Intersection`, and the `Drive` queue dispatcher.
+     * @warning Sync-blocking for ~5 s (1-board config) or ~12 s (2-board config — 5 s
+     *          front sweep + ~3 s inter-phase countdown + 5 s rear sweep). MUST be called
+     *          from sketch top-level only (e.g. an idle-screen handler before the mission
+     *          starts). Calling from any module's `update()` path would freeze the
+     *          cooperative loop and break `LineFollower`, `Intersection`, and the `Drive`
+     *          queue dispatcher.
      *
      * @note This is **Layer 2** of the two-layer calibration contract — see file-level
      *       doxygen. The software baselines printed here compensate for residual
@@ -383,6 +390,18 @@ public:
      *       thinking the firmware calibration already covers it.
      * @note On a 2-board configuration this captures both boards; on a 1-board
      *       configuration only the front board's block is printed.
+     * @note Two-phase sweep workflow (for `LINE_BOARD_COUNT == 2`). Front and rear bars
+     *       cannot be physically swept simultaneously (they sit at opposite ends of the
+     *       chassis), so this routine sweeps them SEQUENTIALLY inside a single operator
+     *       trigger:
+     *        1. Phase 1: 5 s sweep of the FRONT bar only. Operator presents the front
+     *           bar to the white + line reference.
+     *        2. Audible cue (two 1.2 kHz beeps), Serial prompt, 3-second countdown.
+     *        3. Phase 2: 5 s sweep of the REAR bar only. Operator presents the rear bar.
+     *       `LINE_BOARD_COUNT == 1` configs skip Phase 2 entirely. Total wall-clock
+     *       time: ~5 s (1-board) or ~12 s (2-board) including the inter-phase pause.
+     *       The per-phase sampling loop lives in the private helper
+     *       `_sweepOneBoardForCalibration()`.
      * @note **Safety net for unresponsive / flaky boards (PR #20 fix #7):**
      *       (1) A pre-flight connectivity check runs ONE read per configured board
      *       before the 5 s sweep — if any configured board does not respond, the
@@ -498,6 +517,29 @@ private:
      * @return `0` = NONE, `1` = LEFT, `2` = RIGHT, `3` = T_OR_CROSS. Never returns `4`.
      */
     uint8_t _classifyJunction(const uint8_t channels[8]) const;
+
+    /**
+     * @brief Run one ~5 s sampling phase for a single board.
+     *
+     * Used by `calibrate()` to sequence boards one at a time (front and rear cannot
+     * be physically swept simultaneously since they sit at opposite ends of the
+     * chassis). Reads only the specified board every 20 ms for 5 s, updating its
+     * `mnRow` / `mxRow` min/max accumulators and bumping `validCount` on each
+     * successful `_readBoardInternal` call.
+     *
+     * @param boardIdx Which `_boards[]` slot to sample (must be `< LINE_BOARD_COUNT`).
+     * @param mnRow     Per-channel minimum accumulator for this board (size 8).
+     *                  Caller seeds with 9 (the highest valid value); this helper
+     *                  only updates if a sampled channel is lower.
+     * @param mxRow     Per-channel maximum accumulator for this board (size 8).
+     *                  Caller seeds with 0; only updated upward.
+     * @param validCount Output reference. Incremented once per successful sample.
+     *                  Caller should pre-zero.
+     */
+    void _sweepOneBoardForCalibration(uint8_t   boardIdx,
+                                      uint8_t   mnRow[8],
+                                      uint8_t   mxRow[8],
+                                      uint16_t& validCount);
 };
 
 /**
