@@ -19,8 +19,9 @@
  *    spread on top of the firmware baseline, not in place of it.
  *
  *  - **Layer 2 — software per-channel baselines.** `calibrate()` (operator-driven,
- *    sync-blocking ~5 s in 1-board configs, ~12 s in 2-board configs because the
- *    front and rear bars must be swept sequentially) sweeps the bar over white +
+ *    sync-blocking ~5 s in 1-board configs, 10+ s in 2-board configs because the
+ *    front and rear bars must be swept sequentially with an operator-paced BTN_UP
+ *    gate between phases) sweeps the bar over white +
  *    line, captures per-channel min/max into `Config::LINE_CALIB_LOW` /
  *    `LINE_CALIB_HIGH` constants the operator pastes into `Config.h`, and
  *    reflashes. All getter math (`_computeError`, `_isOnlineFromCache`,
@@ -427,9 +428,13 @@ void WROLineArrayClass::calibrate()
     _sweepOneBoardForCalibration(0, mn[0], mx[0], validSamples[0]);
 
     // -------------------------------------------------------------------------------------
-    // Phase 2: only when a REAR board is configured. Audible cue + countdown gives the
-    // operator time to physically reposition the chassis or the reference strip so the
-    // REAR bar is now over the target. Then a second 5 s sweep on boards[1].
+    // Phase 2: only when a REAR board is configured. Audible cue + operator-gated wait
+    // gives the operator UNBOUNDED time to physically reposition the chassis or the
+    // reference strip so the REAR bar is now over the target. Then a second 5 s sweep
+    // on boards[1]. Previously this was a 3 s auto-countdown — replaced (Diego's PR #20
+    // review) with an explicit BTN_UP press gate because the timer pressured rushed /
+    // bad calibration. 60 s hard timeout caps the unbounded wait so the routine can't
+    // hang indefinitely if the operator wanders off.
     // -------------------------------------------------------------------------------------
     if (Config::LINE_BOARD_COUNT >= 2)
     {
@@ -442,17 +447,47 @@ void WROLineArrayClass::calibrate()
         delay(300);
         MiniR4.Buzzer.Tone(1200, 200);
 
-        // Countdown so the operator has a known window to physically swap.
-        for (uint8_t i = 3; i >= 1; --i)
+        // Wait for the operator to confirm by pressing BTN_UP. 60 s timeout
+        // so the routine can't hang indefinitely if the operator wanders off.
+        // Rising-edge detection: ignore the BTN_UP state when entering this
+        // loop in case it's already pressed; require a confirmed release-then-
+        // press before accepting.
+        Serial.println(F("  Press BTN_UP when REAR bar is positioned, "
+                         "or wait 60 s to abort..."));
+        const uint32_t waitStart = millis();
+        bool btnSeenReleased     = false;
+        bool phase2Confirmed     = false;
+        while ((millis() - waitStart) < 60000U)
         {
-            Serial.print(F("  starting PHASE 2 in "));
-            Serial.print(i);
-            Serial.println(F("..."));
-            delay(1000);
+            const bool btnUpNow = MiniR4.BTN_UP.getState();
+            if (!btnUpNow)
+            {
+                btnSeenReleased = true;
+            }
+            else if (btnSeenReleased)
+            {
+                // Rising edge after at least one observed release.
+                phase2Confirmed = true;
+                break;
+            }
+            delay(20);   // Polling cadence; matches the calibrate() sweep tick.
         }
 
-        Serial.println(F("=== PHASE 2/2: sweep REAR bar over white and line for 5 s... ==="));
-        _sweepOneBoardForCalibration(1, mn[1], mx[1], validSamples[1]);
+        if (!phase2Confirmed)
+        {
+            Serial.println(F("[WROLineArray.calibrate] PHASE 2 ABORTED: "
+                             "BTN_UP not pressed within 60 s. REAR row will "
+                             "use safe defaults; re-run calibrate() when ready."));
+            // Fall through — the post-sweep Layer-2 safety net will substitute
+            // LOW=0/HIGH=9 for board 1 because validSamples[1] is still zero.
+            // No explicit overwrite needed here.
+        }
+        else
+        {
+            Serial.println(F("=== PHASE 2/2: sweep REAR bar over white and "
+                             "line for 5 s... ==="));
+            _sweepOneBoardForCalibration(1, mn[1], mx[1], validSamples[1]);
+        }
     }
 
     // -------------------------------------------------------------------------------------

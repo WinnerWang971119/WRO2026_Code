@@ -65,9 +65,10 @@
  *    take a single I2C transaction per loop tick can do so explicitly, then read the
  *    cached values via the three getters.
  *  - `calibrate()` is invoked from sketch top-level only (e.g. on a `BTN_DOWN` long-press
- *    during pre-mission idle). It is sync-blocking for ~5 s (1-board config) or ~12 s
- *    (2-board config — 5 s front sweep + ~3 s inter-phase countdown + 5 s rear sweep)
- *    and MUST NOT be called from any module's `update()` path.
+ *    during pre-mission idle). It is sync-blocking for ~5 s (1-board config) or 10+ s
+ *    (2-board config — 5 s front sweep + operator-paced reposition gated on BTN_UP +
+ *    5 s rear sweep; unbounded by operator pace, capped at 5 + 60 + 5 = 70 s if the
+ *    BTN_UP timeout fires) and MUST NOT be called from any module's `update()` path.
  *
  * Junction classification:
  *  - Returns one of {0=NONE, 1=LEFT, 2=RIGHT, 3=T_OR_CROSS} per the priority order
@@ -365,9 +366,10 @@ public:
      *     full 5 s of Phase 1, alternating between bare white substrate (captures the
      *     per-channel LOW baseline) and directly over a black line (captures the
      *     per-channel HIGH baseline). For 2-board configurations the routine then
-     *     beeps twice and counts down 3 s while the operator repositions; the operator
-     *     then sweeps the REAR bar for the 5 s of Phase 2. See the two-phase sweep
-     *     `@note` below for the rationale.
+     *     beeps twice and waits indefinitely for the operator to press BTN_UP
+     *     (60 s timeout) while they reposition; the operator then sweeps the REAR
+     *     bar for the 5 s of Phase 2. See the two-phase sweep `@note` below for
+     *     the rationale.
      *  4. On return, the method has printed two `constexpr uint8_t LINE_CALIB_LOW[...] = { ... };`
      *     and `constexpr uint8_t LINE_CALIB_HIGH[...] = { ... };` blocks to Serial at
      *     115200 baud, in C++ paste-ready format.
@@ -376,12 +378,14 @@ public:
      *
      * No EEPROM, no auto-baseline on boot — deterministic and reviewable from source.
      *
-     * @warning Sync-blocking for ~5 s (1-board config) or ~12 s (2-board config — 5 s
-     *          front sweep + ~3 s inter-phase countdown + 5 s rear sweep). MUST be called
-     *          from sketch top-level only (e.g. an idle-screen handler before the mission
-     *          starts). Calling from any module's `update()` path would freeze the
-     *          cooperative loop and break `LineFollower`, `Intersection`, and the `Drive`
-     *          queue dispatcher.
+     * @warning Sync-blocking for ~5 s (1-board config) or 10+ s (2-board config — 5 s
+     *          front sweep + operator-paced reposition gated on BTN_UP + 5 s rear sweep;
+     *          unbounded by operator pace, capped at 5 + 60 + 5 = 70 s if the BTN_UP
+     *          timeout fires and Phase 2 is skipped). MUST be called from sketch
+     *          top-level only (e.g. an idle-screen handler before the mission starts).
+     *          Calling from any module's `update()` path would freeze the cooperative
+     *          loop and break `LineFollower`, `Intersection`, and the `Drive` queue
+     *          dispatcher.
      *
      * @note This is **Layer 2** of the two-layer calibration contract — see file-level
      *       doxygen. The software baselines printed here compensate for residual
@@ -396,11 +400,16 @@ public:
      *       trigger:
      *        1. Phase 1: 5 s sweep of the FRONT bar only. Operator presents the front
      *           bar to the white + line reference.
-     *        2. Audible cue (two 1.2 kHz beeps), Serial prompt, 3-second countdown.
+     *        2. Audible cue (two 1.2 kHz beeps), then WAIT for operator to press
+     *           BTN_UP confirming the REAR bar is positioned. 60 s timeout: if
+     *           BTN_UP is not pressed in time, Phase 2 is skipped entirely and the
+     *           REAR row falls back to safe defaults (LOW=0, HIGH=9) via the
+     *           existing Layer-2 safety net.
      *        3. Phase 2: 5 s sweep of the REAR bar only. Operator presents the rear bar.
      *       `LINE_BOARD_COUNT == 1` configs skip Phase 2 entirely. Total wall-clock
-     *       time: ~5 s (1-board) or ~12 s (2-board) including the inter-phase pause.
-     *       The per-phase sampling loop lives in the private helper
+     *       time: ~5 s (1-board) or ~5 s + operator-paced reposition + 5 s = 10+ s
+     *       (2-board — unbounded by operator pace, capped at 5 + 60 + 5 = 70 s if the
+     *       timeout fires). The per-phase sampling loop lives in the private helper
      *       `_sweepOneBoardForCalibration()`.
      * @note **Safety net for unresponsive / flaky boards (PR #20 fix #7):**
      *       (1) A pre-flight connectivity check runs ONE read per configured board
