@@ -9,6 +9,13 @@
  * Operator flow:
  *   1. Power on. Module begin()s run; OLED shows `BOOT OK` (or `BOOT FAIL`).
  *   2. Place chassis on `Routes::START_NODE` (`A`) facing `START_HEADING_DEG`.
+ *   2a. Optional one-shot: hold BTN_DOWN for >= 2 s BEFORE pressing
+ *       BTN_UP to run `LineArray.calibrate()`. The routine spins for
+ *       5 s; sweep the 8-channel sensor bar between full-white and
+ *       over-the-line during the window. Per-board min/max values
+ *       print to Serial in a paste-ready `Config::LINE_CALIB_*` block.
+ *       Hand-edit the values into `Config.h` and re-flash. The
+ *       calibration is one-shot per power cycle.
  *   3. Press `BTN_UP` once — this zeros the IMU yaw offset, then calls
  *      `Mission.start()`. The mission runs asynchronously from `loop()`.
  *   4. Serial prints state-change events + periodic `HB t=... yaw=... node=...`
@@ -39,12 +46,15 @@
 #include "Manipulator.h"
 #include "Mission.h"
 #include "PathTracker.h"
+#include "WROLineArray.h"
 
 namespace
 {
     bool _setupFailed = false;
     bool _missionArmed = false;
     bool _btnUpPrev    = false;
+    uint32_t _btnDownPressStartMs = 0;   // 0 = not currently pressed; nonzero = press start timestamp
+    bool _calibrationDone = false;        // one-shot guard so a single long-press fires calibrate() once
 }    // namespace
 
 /**
@@ -109,6 +119,7 @@ void setup()
     Serial.begin(115200);
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
+    const bool arrayOk = LineArray.begin();
     const bool driveOk = Drive.begin();
     const bool lineOk  = LineFollower.begin();
     const bool intOk   = Intersection.begin();
@@ -121,11 +132,12 @@ void setup()
     Drive.setTickCallback(cooperativeTick);
     PathTracker.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && traceOk);
+    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && traceOk);
 
     if (_setupFailed)
     {
         Serial.println(F("WRO2026 PR3 BOOT FAIL — module begin() returned false:"));
+        if (!arrayOk)  { Serial.println(F("  - LineArray"));    EventTrace.pushEvent("FAIL ARR"); }
         if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
         if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
         if (!intOk)    { Serial.println(F("  - Intersection")); EventTrace.pushEvent("FAIL INT"); }
@@ -150,6 +162,38 @@ void loop()
     if (_setupFailed)
     {
         return;
+    }
+
+    // Pre-mission idle: BTN_DOWN held >= 2 s triggers a one-shot LineArray
+    // calibration sweep. Only available before the mission has been armed
+    // (so we don't intercept the BTN_DOWN fault-acknowledge path that
+    // activates after a Mission fault). One-shot per power cycle —
+    // `_calibrationDone` prevents re-entry after release.
+    if (!_missionArmed && !_calibrationDone)
+    {
+        const bool btnDownNow = MiniR4.BTN_DOWN.getState();
+        if (btnDownNow)
+        {
+            if (_btnDownPressStartMs == 0)
+            {
+                _btnDownPressStartMs = millis();
+            }
+            else if ((millis() - _btnDownPressStartMs) >= 2000)
+            {
+                EventTrace.pushEvent("CAL START");
+                Serial.println(F("[main] LineArray.calibrate(): sweep bar for 5 s..."));
+                LineArray.calibrate();
+                EventTrace.pushEvent("CAL DONE");
+                _calibrationDone = true;
+                _btnDownPressStartMs = 0;
+            }
+        }
+        else
+        {
+            // Released before the 2 s threshold — reset start so a tap doesn't
+            // accumulate toward an unintended trigger.
+            _btnDownPressStartMs = 0;
+        }
     }
 
     // BTN_UP rising edge arms the mission exactly once. The press captures
