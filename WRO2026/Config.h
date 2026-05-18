@@ -175,15 +175,142 @@ namespace Config
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
     constexpr int16_t LINE_MAX_CORR = 40;
 
-    /** @brief Threshold passed to `MXLineTracer.setThreshold()` (0..100). */
-    constexpr uint8_t LINE_THRESHOLD = 60;
-
     // ---------------------------------------------------------------------------------------
-    // MXLineTracer wiring
+    // 8-channel custom line sensor (WROLineArray)
+    //
+    // WROLineArray drives 1-2 MXColor-protocol I²C boards. Each board packs 8 reflectance
+    // channels into 4 CMYK bytes, with tens digit = channel N and ones digit = channel N+1
+    // (0..9 packed-byte range per channel after firmware-level scaling).
+    //
+    // Two-layer calibration:
+    //   Layer 1 — firmware-level hardware calibration: WROLineArray::begin() issues the
+    //             firmware setLight() command and calls the board's calibration routine.
+    //             This layer is VOLATILE — it resets on every power cycle and must be
+    //             re-run on every boot via begin().
+    //   Layer 2 — software per-channel baselines: LINE_CALIB_LOW / LINE_CALIB_HIGH below
+    //             are hand-edited into this file after running WROLineArray::calibrate()
+    //             and pasting the Serial output (same workflow as Drive.calibrateMotorBias()
+    //             → copy scalars → paste into Config.h → reflash). This layer SURVIVES
+    //             re-flash and power cycles because it lives in firmware. Both layers are
+    //             required; they are NOT redundant — Layer 1 brings the hardware to a
+    //             consistent operating point, Layer 2 normalises inter-channel spread.
     // ---------------------------------------------------------------------------------------
 
-    /** @brief External I2C port index (I2C1 = first external port on Wire1). */
-    constexpr uint8_t LINE_I2C_PORT = 1;
+    /**
+     * @brief Number of MXColor-protocol boards installed.
+     *
+     * 1 = front board only (typical WRO setup); 2 = front + rear boards present.
+     * When set to 1, LINE_REAR_I2C_PORT is ignored at compile time.
+     */
+    constexpr uint8_t LINE_BOARD_COUNT = 1;
+
+    /**
+     * @brief I²C port index (1..4) on Wire1 carrying the FRONT line-sensor board.
+     *
+     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4.
+     * Port 0 is the on-board Wire — never use 0 for an external sensor board.
+     */
+    constexpr uint8_t LINE_FRONT_I2C_PORT = 1;
+
+    /**
+     * @brief I²C port index (1..4) on Wire1 carrying the REAR line-sensor board.
+     *
+     * Ignored when LINE_BOARD_COUNT == 1. Must be distinct from LINE_FRONT_I2C_PORT.
+     */
+    constexpr uint8_t LINE_REAR_I2C_PORT = 4;
+
+    /**
+     * @brief Per-board, per-channel calibrated WHITE (off-line) reflectance value.
+     *
+     * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
+     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     *
+     * Workflow: run WROLineArray::calibrate() with the sensor over a WHITE surface,
+     * read the Serial output, and paste the 8 values per board into the inner arrays
+     * here, then reflash. Values survive power cycles because they live in firmware
+     * (Layer-2 calibration). Zeroed defaults are safe before first calibration —
+     * they cause every channel to be treated as "fully bright = off-line".
+     */
+    constexpr uint8_t LINE_CALIB_LOW[2][8] = {
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+    };
+
+    /**
+     * @brief Per-board, per-channel calibrated DARK (on-line) reflectance value.
+     *
+     * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
+     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     *
+     * Workflow: run WROLineArray::calibrate() with the sensor over the DARK line,
+     * read the Serial output, and paste the 8 values per board into the inner arrays
+     * here, then reflash. Defaults of 9 (maximum brightness delta) are safe before
+     * first calibration — they prevent false on-line detections when LOW == HIGH.
+     */
+    constexpr uint8_t LINE_CALIB_HIGH[2][8] = {
+        {9, 9, 9, 9, 9, 9, 9, 9},
+        {9, 9, 9, 9, 9, 9, 9, 9},
+    };
+
+    /**
+     * @brief Channel ON-LINE threshold expressed as a fraction of (HIGH - LOW).
+     *
+     * A channel is declared "on-line" when its normalised reading ≥ this ratio.
+     * 0.5f = midpoint between the calibrated white and dark values. Increase toward
+     * 1.0f to require a stronger dark reading (reduces false positives on smudged
+     * surfaces); decrease toward 0.0f to trigger earlier (increases sensitivity).
+     *
+     * Applied per-channel: onLine = (raw - LOW[b][ch]) / (HIGH[b][ch] - LOW[b][ch])
+     *                               >= LINE_CHANNEL_ON_RATIO.
+     */
+    constexpr float LINE_CHANNEL_ON_RATIO = 0.5f;
+
+    /**
+     * @brief Minimum number of channels simultaneously ON-LINE to declare a
+     *        T_OR_CROSS junction (highest-priority junction class, checked first).
+     *
+     * At 7 of 8 channels lit, the robot is clearly centred on a wide cross or T
+     * marker. Lower values risk false triggers on debris or sensor variation;
+     * higher values may miss junctions under partial occlusion.
+     *
+     * @note TODO: tune on real mat after per-channel calibration is complete.
+     */
+    constexpr uint8_t LINE_JUNCTION_T_MIN_ON = 7;
+
+    /**
+     * @brief Upper inclusive channel index for the LEFT junction predicate.
+     *
+     * LEFT junction fires when all channels ch[0..LINE_JUNCTION_LEFT_HI] are ON-LINE
+     * AND all channels ch[LINE_JUNCTION_LEFT_HI+1..7] are OFF-LINE. Adjust to match
+     * the physical width of the left-branch marker relative to the sensor array.
+     *
+     * @note TODO: tune on real mat.
+     */
+    constexpr uint8_t LINE_JUNCTION_LEFT_HI = 4;
+
+    /**
+     * @brief Lower inclusive channel index for the RIGHT junction predicate.
+     *
+     * RIGHT junction fires when all channels ch[LINE_JUNCTION_RIGHT_LO..7] are ON-LINE
+     * AND all channels ch[0..LINE_JUNCTION_RIGHT_LO-1] are OFF-LINE. Adjust to match
+     * the physical width of the right-branch marker relative to the sensor array.
+     *
+     * @note TODO: tune on real mat.
+     */
+    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = 3;
+
+    /**
+     * @brief On-board LED brightness level applied by WROLineArray::begin() via the
+     *        firmware-level setLight() command (0..255).
+     *
+     * Higher values improve contrast on pale surfaces; too high can wash out the dark
+     * line or saturate the detector. 200 is a reasonable starting point for indoor
+     * fluorescent lighting on the WRO competition mat.
+     *
+     * @note This is a Layer-1 (volatile) setting — it is re-applied on every begin()
+     *       call and does not persist across power cycles on its own.
+     */
+    constexpr uint8_t LINE_LED_PWM = 200;
 
     // ---------------------------------------------------------------------------------------
     // Turn defaults
