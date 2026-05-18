@@ -317,6 +317,29 @@ namespace Config
      */
     constexpr uint8_t LINE_LED_PWM = 200;
 
+    /**
+     * @brief Toggle tick-scoped caching in WROLineArrayClass.
+     *
+     * When `false` (default — legacy / current PR behaviour): each call to
+     * `getError()`, `isOnline()`, and `getJunctionType()` independently issues
+     * a full 4-byte CMYK I²C transaction. `WROLineArrayClass::update()` is a
+     * no-op. Total per cooperative tick: 3 sensor reads (~33 ms at vendor I²C
+     * timing), giving ~28-30 Hz loop rate.
+     *
+     * When `true`: `WROLineArrayClass::update()` issues the single sensor
+     * read for the tick (must be called at the top of `cooperativeTick()` for
+     * this to work). The three getters become pure cache readers. Total per
+     * tick: 1 sensor read (~11 ms), giving ~70-80 Hz loop rate.
+     *
+     * Default is `false` to preserve the currently-tested code path on first
+     * flash. Flip to `true` after hardware bring-up confirms the cached path
+     * behaves identically (no controller wobble from one-tick-stale data on
+     * a chassis travelling at typical cruise).
+     *
+     * See PR #20 review thread + DECISIONS.md if added later.
+     */
+    constexpr bool LINE_ARRAY_TICK_CACHE_ENABLED = false;
+
     // ---------------------------------------------------------------------------------------
     // Turn defaults
     // ---------------------------------------------------------------------------------------

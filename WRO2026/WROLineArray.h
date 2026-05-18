@@ -158,22 +158,43 @@ public:
     bool begin();
 
     /**
-     * @brief Optional cache refresh — samples the active board once and stores the
-     *        per-channel values for subsequent getter calls.
+     * @brief Cooperative-tick hook whose behaviour depends on the compile-time
+     *        `Config::LINE_ARRAY_TICK_CACHE_ENABLED` toggle.
      *
      * @details
-     * `getError()`, `isOnline()`, and `getJunctionType()` all refresh internally on every
-     * call, so `update()` is NOT required. It exists for callers that prefer to take
-     * exactly one I2C transaction per loop tick and then read the cached values
-     * cheaply via the three getters — equivalent to calling any one of them and
-     * letting it cache.
+     * Dual-mode dispatch (resolved at compile time — the off-path branch is
+     * dead-code-eliminated):
+     *
+     *  - When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true`:
+     *    `update()` is the SINGLE per-tick refresh site. It samples the active
+     *    board once (one 4-byte CMYK I2C transaction) and stores the per-channel
+     *    values + on-line latch into the cache. `getError()`, `isOnline()`, and
+     *    `getJunctionType()` then become pure cache readers — they do NOT
+     *    re-issue any I2C traffic for the remainder of the tick. **`update()`
+     *    MUST be called BEFORE any of those three getters in a given tick**; the
+     *    sketch's `cooperativeTick()` does this automatically by placing the
+     *    `LineArray.update()` call at the top of the dispatch list. Per-tick
+     *    I2C cost: 1 read (~11 ms).
+     *
+     *  - When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == false` (default — current
+     *    PR #20 behaviour): `update()` is a NO-OP. Each of the three getters
+     *    refreshes the cache independently on every call. Per-tick I2C cost: 3
+     *    reads (~33 ms) when all three getters are touched in the same tick.
+     *
+     * The toggle is a `constexpr bool` so the compiler can dead-code-eliminate
+     * the off-path branch entirely; flipping the toggle requires a recompile and
+     * reflash. The no-op-when-disabled property means `cooperativeTick()` does
+     * not need to be edited when the toggle changes — `LineArray.update()` stays
+     * at the top of the dispatch list either way and harms nothing in the legacy
+     * configuration.
      *
      * @note Non-blocking aside from the underlying ~1-2 ms synchronous I2C read on the
-     *       active board (4 CMYK bytes via `MatrixColor::getColor(...)`). Safe to call
-     *       at any cadence.
-     * @note On I2C read failure the channel cache is left untouched and `_lastOnline`
-     *       is set to `false` — the next `isOnline()` call will report the lost-line
-     *       state without re-issuing the failed transaction.
+     *       active board (4 CMYK bytes via `MatrixColor::getColor(...)`) when the
+     *       caching toggle is enabled. Safe to call at any cadence.
+     * @note On I2C read failure (caching path only) the channel cache is left
+     *       untouched (last-known-good values remain available) and `_lastOnline`
+     *       is set to `false` — subsequent cached getter calls in the tick will
+     *       report the lost-line state without re-issuing the failed transaction.
      */
     void update();
 
@@ -190,8 +211,11 @@ public:
      * @note Range is `[-3.5, +3.5]` — narrower than the vendor tracer's `[-4.5, +4.5]`
      *       because we have 8 channels rather than 10. `Config::LINE_KP` may need a
      *       one-shot retune at first hardware test; this is normal Phase 1 tuning.
-     * @note Refreshes the channel cache internally — calling `update()` first is
-     *       optional.
+     * @note When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true` this is a pure
+     *       cache read — the value is whatever `update()` latched at the top of
+     *       the current cooperative tick. When the toggle is `false` (legacy /
+     *       default) the channel cache is refreshed inline on every call, so
+     *       calling `update()` first is optional.
      * @note On I2C read failure returns `0.0f` (matches the no-line-online case so the
      *       lost-line dispatch fires identically).
      */
@@ -205,8 +229,11 @@ public:
      *         `(value - LOW) / (HIGH - LOW)` exceeds `Config::LINE_CHANNEL_ON_RATIO`
      *         (default `0.5f`, i.e. midpoint between calibrated white and calibrated
      *         dark); `false` otherwise.
-     * @note Refreshes the channel cache internally — calling `update()` first is
-     *       optional.
+     * @note When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true` this is a pure
+     *       cache read — the value reflects whatever `update()` latched at the
+     *       top of the current cooperative tick. When the toggle is `false`
+     *       (legacy / default) the channel cache is refreshed inline on every
+     *       call, so calling `update()` first is optional.
      * @note On I2C read failure returns `false` so `LineFollower::update()` enters its
      *       lost-line branch and dispatches `Config::LOST_LINE_ACTION`. No automatic
      *       fall-back to the inactive board (would deliver opposite-signed error).
@@ -234,9 +261,14 @@ public:
      * @return One of `{0, 1, 2, 3}` mirroring the `JunctionType` enum in
      *         `Intersection.h`. `4` (UNKNOWN) is NEVER returned by this backend — the
      *         predicates above are mutually exclusive by construction.
-     * @note Refreshes the channel cache internally — calling `update()` first is
-     *       optional. Calls after `getError()` / `isOnline()` reuse the same sample
-     *       (channel cache is shared across all three getters).
+     * @note When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true` this is a pure
+     *       cache read — the value reflects whatever `update()` latched at the
+     *       top of the current cooperative tick, so the sample is **provably
+     *       shared** with `getError()` / `isOnline()` in the same tick. When the
+     *       toggle is `false` (legacy / default) the channel cache is refreshed
+     *       inline on every call; the cache is still shared across getters
+     *       within a tick because each refresh writes the same `_lastChannels`
+     *       buffer, but a different mid-tick sample is taken per call.
      * @note The asymmetric overlap between LEFT (`ch0..LEFT_HI`) and RIGHT
      *       (`RIGHT_LO..ch7`) predicates on channels `[RIGHT_LO..LEFT_HI]` is by
      *       design — the strict opposite-side-off requirement eliminates false fires
@@ -356,6 +388,18 @@ private:
                                              ///< issues exactly one I2C transaction.
     bool        _lastOnline       = false;   ///< Cached on-line state for the most recent
                                              ///< sample (cleared to false on I2C failure).
+
+    /**
+     * @brief Refresh `_lastChannels` and `_lastOnline` from the active board.
+     *
+     * Reads the 4 CMYK bytes via `_readBoardInternal`; on I²C failure sets
+     * `_lastOnline = false` and leaves `_lastChannels` untouched.
+     *
+     * Called by:
+     *  - `update()` (when `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true`)
+     *  - The three public getters (when the toggle is `false` — legacy path)
+     */
+    void _refreshCache();
 
     /**
      * @brief Read one board's 4 CMYK bytes via `MatrixColor::getColor(...)` and unpack

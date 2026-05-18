@@ -69,6 +69,12 @@ namespace
  */
 void cooperativeTick()
 {
+    // LineArray.update() refreshes the sensor cache for the rest of the tick
+    // WHEN Config::LINE_ARRAY_TICK_CACHE_ENABLED is true. When false, this is
+    // a no-op and the getters refresh independently (current PR #20 behaviour).
+    // See WROLineArray.h::update().
+    LineArray.update();
+
     Drive.update();
     LineFollower.update();
     Intersection.update();

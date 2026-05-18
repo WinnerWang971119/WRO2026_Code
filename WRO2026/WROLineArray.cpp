@@ -158,103 +158,63 @@ bool WROLineArrayClass::begin()
 }
 
 // =========================================================================================
-// Cooperative tick — optional cache refresh
+// Cooperative tick — toggle-driven cache refresh
 // =========================================================================================
 
 void WROLineArrayClass::update()
 {
-    // The three getters refresh internally on every call, so this is purely a "take one
-    // I²C transaction per loop tick" optimisation for callers that want predictable
-    // bus bandwidth. The transaction is the only blocking thing here (~1-2 ms on the
-    // I²C bus); no `delay()` is permitted in this path.
-    uint8_t fresh[8];
-    if (!_readBoardInternal(_activeBoard, fresh))
+    if (!Config::LINE_ARRAY_TICK_CACHE_ENABLED)
     {
-        // I²C failure: documented contract — leave `_lastChannels` untouched, clear the
-        // on-line latch. The next getter call will report the lost-line state without
-        // re-issuing the failed transaction.
-        _lastOnline = false;
+        // Legacy path: update() is a no-op. The three getters refresh
+        // independently on every call (current PR #20 behaviour). Leaving
+        // update() as a no-op here keeps cooperativeTick() unchanged when
+        // the toggle is flipped at compile time — no extra I²C traffic.
         return;
     }
-
-    for (uint8_t c = 0; c < 8; ++c)
-    {
-        _lastChannels[c] = fresh[c];
-    }
-    _lastOnline = _isOnlineFromCache(_lastChannels);
+    _refreshCache();
 }
 
 // =========================================================================================
-// MatrixLineTracer-compatible getters (refresh-on-call)
+// MatrixLineTracer-compatible getters (cache-read when toggle ON, refresh-on-call when OFF)
 // =========================================================================================
 
 float WROLineArrayClass::getError()
 {
-    // Same refresh path as `update()` — fold the cache update in so callers that skip
-    // `update()` still see a fresh sample.
-    uint8_t fresh[8];
-    if (!_readBoardInternal(_activeBoard, fresh))
+    // When the tick-cache toggle is OFF (legacy / default), refresh inline so
+    // callers that skip `update()` still see a fresh sample — preserves the
+    // current PR #20 behaviour byte-for-byte. When the toggle is ON, the cache
+    // was already populated by `update()` at the top of the cooperative tick;
+    // we read it directly without any further I²C traffic. The compiler
+    // dead-code-eliminates whichever branch the constexpr toggle disables.
+    if (!Config::LINE_ARRAY_TICK_CACHE_ENABLED)
     {
-        _lastOnline = false;
-        return 0.0f;
+        _refreshCache();
     }
-
-    for (uint8_t c = 0; c < 8; ++c)
-    {
-        _lastChannels[c] = fresh[c];
-    }
-    _lastOnline = _isOnlineFromCache(_lastChannels);
-
-    if (!_lastOnline)
-    {
-        // Mirror MatrixLineTracer's behaviour: no on-line channel ⇒ zero error so the
-        // outer P+D controller commands no correction and the lost-line dispatch
-        // (`Config::LOST_LINE_ACTION`) takes over via `isOnline()`.
-        return 0.0f;
-    }
-    return _computeError(_lastChannels);
+    // Mirror MatrixLineTracer's behaviour: no on-line channel ⇒ zero error so the
+    // outer P+D controller commands no correction and the lost-line dispatch
+    // (`Config::LOST_LINE_ACTION`) takes over via `isOnline()`.
+    return _lastOnline ? _computeError(_lastChannels) : 0.0f;
 }
 
 bool WROLineArrayClass::isOnline()
 {
-    uint8_t fresh[8];
-    if (!_readBoardInternal(_activeBoard, fresh))
+    if (!Config::LINE_ARRAY_TICK_CACHE_ENABLED)
     {
-        _lastOnline = false;
-        return false;
+        _refreshCache();
     }
-
-    for (uint8_t c = 0; c < 8; ++c)
-    {
-        _lastChannels[c] = fresh[c];
-    }
-    _lastOnline = _isOnlineFromCache(_lastChannels);
     return _lastOnline;
 }
 
 uint8_t WROLineArrayClass::getJunctionType()
 {
-    uint8_t fresh[8];
-    if (!_readBoardInternal(_activeBoard, fresh))
+    if (!Config::LINE_ARRAY_TICK_CACHE_ENABLED)
     {
-        _lastOnline = false;
-        // Integer literal `0` ⇒ JunctionType::NONE in Intersection.h. We deliberately
-        // do not include Intersection.h here — the wrapper is the LOWER layer and
-        // pulling in the upper-layer enum would create an unnecessary header cycle.
-        return 0;
+        _refreshCache();
     }
-
-    for (uint8_t c = 0; c < 8; ++c)
-    {
-        _lastChannels[c] = fresh[c];
-    }
-    _lastOnline = _isOnlineFromCache(_lastChannels);
-
-    if (!_lastOnline)
-    {
-        return 0;    // NONE
-    }
-    return _classifyJunction(_lastChannels);
+    // Integer literal `0` ⇒ JunctionType::NONE in Intersection.h. We deliberately
+    // do not include Intersection.h here — the wrapper is the LOWER layer and
+    // pulling in the upper-layer enum would create an unnecessary header cycle.
+    return _lastOnline ? _classifyJunction(_lastChannels) : (uint8_t) 0;
 }
 
 // =========================================================================================
@@ -426,6 +386,24 @@ void WROLineArrayClass::calibrate()
 // =========================================================================================
 // Private helpers
 // =========================================================================================
+
+void WROLineArrayClass::_refreshCache()
+{
+    // Single chokepoint shared by `update()` (caching path) and the three getters
+    // (legacy refresh-on-call path). Consolidating the read + cache + on-line
+    // latch here guarantees the two modes see exactly the same I²C-failure
+    // semantics and the same `_lastChannels` / `_lastOnline` state transitions.
+    if (_readBoardInternal(_activeBoard, _lastChannels))
+    {
+        _lastOnline = _isOnlineFromCache(_lastChannels);
+    }
+    else
+    {
+        _lastOnline = false;
+        // _lastChannels deliberately left as-is — last-known-good values
+        // remain available; the offline flag is the canonical signal.
+    }
+}
 
 /**
  * @note **INFERRED CONTRACT — validate on bring-up.** The CMYK-byte → channel-index
