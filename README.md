@@ -228,8 +228,12 @@ this one keystroke:
 | `Arduino: Verify WRO2026`    | Auto-runs `Build Routes` then `arduino-cli compile`. Default build (Ctrl+Shift+B). |
 | `Arduino: Upload WRO2026`    | Verify → `arduino-cli upload` to the configured port.              |
 | `Arduino: List Boards`       | `arduino-cli board list` — find the COM port for your bot.         |
+| `Arduino: Monitor Serial`    | `arduino-cli monitor` on the configured port + baud rate.          |
 
 Tool paths are read from `wro2026.*` keys in `.vscode/settings.json`.
+Set `wro2026.arduino.baudRate` to match `Serial.begin(...)`; the firmware
+currently uses `115200`, and a mismatch is the usual cause of garbled serial
+text such as `��������`.
 
 ### Path planner — regenerate `routes.h` / `routes.cpp`
 
@@ -287,15 +291,16 @@ Fixture & Measurement Plan") for the exact setups and pass criteria.
 1. Edit `buildMission()` in `WRO2026/WRO2026.ino`. Chain `Mission.<verb>(...)`
    calls, end with `Mission.start()`.
 2. Verify + upload (Arduino IDE or VS Code tasks).
-3. Power on the robot. `setup()` runs every module's `begin()`. OLED
+3. Start `Arduino: Monitor Serial` in VS Code if you want the live event log.
+4. Power on the robot. `setup()` runs every module's `begin()`. OLED
    shows `BOOT OK` (or `BOOT FAIL` — read serial to find out why).
-4. Place the chassis on `Routes::START_NODE` (`A`) facing
+5. Place the chassis on `Routes::START_NODE` (`A`) facing
    `Config::START_HEADING_DEG`.
-5. Press **`BTN_UP`** once. The IMU yaw offset zeros, `Mission.start()`
+6. Press **`BTN_UP`** once. The IMU yaw offset zeros, `Mission.start()`
    arms the queue, the run begins.
-6. Serial (`115200`) and OLED log every state change plus a periodic
+7. Serial (`115200`) and OLED log every state change plus a periodic
    `HB t=... yaw=... node=...` heartbeat.
-7. On a fault (`UNREACHABLE`, `DRIVE_FAULT`, unknown node name) the
+8. On a fault (`UNREACHABLE`, `DRIVE_FAULT`, unknown node name) the
    chassis stops, the queue drops, the buzzer beeps 5× at 1 kHz, and the
    RGB LEDs flash red. Press **`BTN_DOWN`** to acknowledge and reset.
 

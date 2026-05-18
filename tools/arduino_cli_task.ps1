@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('verify', 'upload', 'list-boards')]
+    [ValidateSet('verify', 'upload', 'list-boards', 'monitor')]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -12,7 +12,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SketchPath,
 
-    [string]$Port = ''
+    [string]$Port = '',
+
+    [string]$BaudRate = '115200'
 )
 
 Set-StrictMode -Version Latest
@@ -40,7 +42,7 @@ function Invoke-ArduinoCli {
     }
 }
 
-function Resolve-UploadPort {
+function Resolve-SerialPort {
     param(
         [string]$ConfiguredPort
     )
@@ -79,11 +81,16 @@ switch ($Action) {
     }
     'upload' {
         $sketchDir = Resolve-SketchDir
-        $uploadPort = Resolve-UploadPort -ConfiguredPort $Port
+        $uploadPort = Resolve-SerialPort -ConfiguredPort $Port
         Write-Host "Uploading to $uploadPort"
         Invoke-ArduinoCli upload --fqbn $Fqbn --port $uploadPort $sketchDir
     }
     'list-boards' {
         Invoke-ArduinoCli board list
+    }
+    'monitor' {
+        $monitorPort = Resolve-SerialPort -ConfiguredPort $Port
+        Write-Host "Monitoring $monitorPort at $BaudRate baud"
+        Invoke-ArduinoCli monitor --port $monitorPort --config "baudrate=$BaudRate"
     }
 }
