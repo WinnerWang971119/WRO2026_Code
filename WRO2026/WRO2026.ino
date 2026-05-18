@@ -9,13 +9,16 @@
  * Operator flow:
  *   1. Power on. Module begin()s run; OLED shows `BOOT OK` (or `BOOT FAIL`).
  *   2. Place chassis on `Routes::START_NODE` (`A`) facing `START_HEADING_DEG`.
- *   2a. Optional one-shot: hold BTN_DOWN for >= 2 s BEFORE pressing
- *       BTN_UP to run `LineArray.calibrate()`. The routine spins for
- *       5 s; sweep the 8-channel sensor bar between full-white and
- *       over-the-line during the window. Per-board min/max values
- *       print to Serial in a paste-ready `Config::LINE_CALIB_*` block.
- *       Hand-edit the values into `Config.h` and re-flash. The
- *       calibration is one-shot per power cycle.
+ *   2a. Optional pre-mission calibration: hold BTN_DOWN for >= 2 s to
+ *       open the OLED CALIBRATION menu. BTN_DOWN short-presses cycle
+ *       the cursor (LINE -> MOTOR -> EXIT). BTN_UP confirms the selection:
+ *         - LINE:  runs LineArray.calibrate() (sequential per-board
+ *                  sweep with BTN_UP gate between phases).
+ *         - MOTOR: runs Drive.calibrateMotorBias() (~2 s wheels-up spin;
+ *                  LIFT THE CHASSIS before selecting this!).
+ *         - EXIT:  returns to idle.
+ *       After dispatch the menu closes; the operator can re-enter it
+ *       any time before the mission is armed.
  *   3. Press `BTN_UP` once — this zeros the IMU yaw offset, then calls
  *      `Mission.start()`. The mission runs asynchronously from `loop()`.
  *   4. Serial prints state-change events + periodic `HB t=... yaw=... node=...`
@@ -50,12 +53,68 @@
 
 namespace
 {
-    bool _setupFailed = false;
-    bool _missionArmed = false;
-    bool _btnUpPrev    = false;
-    uint32_t _btnDownPressStartMs = 0;   // 0 = not currently pressed; nonzero = press start timestamp
-    bool _calibrationDone = false;        // one-shot guard so a single long-press fires calibrate() once
+    /**
+     * @brief Calibration menu top-level state. IDLE = normal pre-mission flow;
+     *        OPEN = operator is currently navigating the on-OLED menu and the
+     *        BTN_UP mission-arm path is suppressed.
+     */
+    enum class CalMenuState : uint8_t
+    {
+        IDLE,
+        OPEN
+    };
+
+    /**
+     * @brief Calibration menu items, indexed contiguously so BTN_DOWN
+     *        short-presses can cycle by integer modulo.
+     */
+    enum class CalMenuItem : uint8_t
+    {
+        LINE  = 0,
+        MOTOR = 1,
+        EXIT  = 2
+    };
+
+    constexpr uint8_t CAL_MENU_ITEM_COUNT = 3;
+
+    bool         _setupFailed         = false;
+    bool         _missionArmed        = false;
+    bool         _btnUpPrev           = false;
+    bool         _btnDownPrev         = false;
+    uint32_t     _btnDownPressStartMs = 0;   // 0 = not currently pressed; nonzero = press start timestamp
+    CalMenuState _calMenuState        = CalMenuState::IDLE;
+    CalMenuItem  _calMenuSel          = CalMenuItem::LINE;
 }    // namespace
+
+/**
+ * @brief Draw the CALIBRATION menu to the OLED.
+ *
+ * The 128x32 panel at text size 1 fits ~4 rows of 8 px text. We use row 0 as
+ * the title and rows 1..3 for the three menu items. The cursor `> ` precedes
+ * the currently-selected item; non-selected rows get two spaces so labels
+ * align vertically.
+ *
+ * Called once on menu entry and once per BTN_DOWN cursor cycle. Other
+ * modules' `cooperativeTick()` OLED writes may transiently overwrite the
+ * menu; that is acceptable — the next cursor move repaints.
+ */
+void renderCalMenu()
+{
+    MiniR4.OLED.clearDisplay();
+    MiniR4.OLED.setTextSize(1);
+    MiniR4.OLED.setTextColor(WHITE);
+    MiniR4.OLED.setCursor(0, 0);
+    MiniR4.OLED.println(F("CALIBRATION"));
+
+    static const char* labels[CAL_MENU_ITEM_COUNT] = { "LINE", "MOTOR", "EXIT" };
+    for (uint8_t i = 0; i < CAL_MENU_ITEM_COUNT; ++i)
+    {
+        MiniR4.OLED.setCursor(0, 8 + i * 8);
+        MiniR4.OLED.print((i == static_cast<uint8_t>(_calMenuSel)) ? F("> ") : F("  "));
+        MiniR4.OLED.println(labels[i]);
+    }
+    MiniR4.OLED.display();
+}
 
 /**
  * @brief Cooperative tick — every module's `update()` exactly once.
@@ -170,12 +229,69 @@ void loop()
         return;
     }
 
-    // Pre-mission idle: BTN_DOWN held >= 2 s triggers a one-shot LineArray
-    // calibration sweep. Only available before the mission has been armed
-    // (so we don't intercept the BTN_DOWN fault-acknowledge path that
-    // activates after a Mission fault). One-shot per power cycle —
-    // `_calibrationDone` prevents re-entry after release.
-    if (!_missionArmed && !_calibrationDone)
+    // -----------------------------------------------------------------------
+    // Calibration menu state machine. While OPEN: BTN_DOWN rising edge cycles
+    // the cursor, BTN_UP rising edge confirms the selection and closes the
+    // menu. The IDLE-state BTN_UP mission-arm path is suppressed for the rest
+    // of this loop pass via the early `return`.
+    // -----------------------------------------------------------------------
+    if (_calMenuState == CalMenuState::OPEN)
+    {
+        const bool btnDownNow = MiniR4.BTN_DOWN.getState();
+        const bool btnUpNow   = MiniR4.BTN_UP.getState();
+
+        // BTN_DOWN short-press rising edge → cycle cursor.
+        if (btnDownNow && !_btnDownPrev)
+        {
+            _calMenuSel = static_cast<CalMenuItem>(
+                (static_cast<uint8_t>(_calMenuSel) + 1) % CAL_MENU_ITEM_COUNT);
+            renderCalMenu();
+        }
+
+        // BTN_UP short-press rising edge → confirm + dispatch + exit menu.
+        if (btnUpNow && !_btnUpPrev)
+        {
+            switch (_calMenuSel)
+            {
+                case CalMenuItem::LINE:
+                    EventTrace.pushEvent("CAL LINE");
+                    Serial.println(F("[main] dispatching LineArray.calibrate()..."));
+                    LineArray.calibrate();
+                    break;
+                case CalMenuItem::MOTOR:
+                    EventTrace.pushEvent("CAL MOTOR");
+                    Serial.println(F("[main] dispatching Drive.calibrateMotorBias()..."));
+                    Drive.calibrateMotorBias();
+                    break;
+                case CalMenuItem::EXIT:
+                    EventTrace.pushEvent("CAL EXIT");
+                    Serial.println(F("[main] menu exit."));
+                    break;
+            }
+            _calMenuState = CalMenuState::IDLE;
+
+            // Force a release-poll so the BTN_UP press that confirmed doesn't
+            // immediately re-trigger the mission-arm path in the same loop
+            // pass, and so a still-held BTN_DOWN doesn't cycle the cursor of
+            // a re-opened menu the next time we enter OPEN.
+            while (MiniR4.BTN_UP.getState() || MiniR4.BTN_DOWN.getState())
+            {
+                delay(20);
+            }
+            _btnDownPrev = false;
+            _btnUpPrev   = false;
+            return;
+        }
+
+        _btnDownPrev = btnDownNow;
+        _btnUpPrev   = btnUpNow;
+        return;   // skip IDLE-state BTN_UP arm logic while menu is open
+    }
+
+    // IDLE state: BTN_DOWN held >= 2 s opens the OLED calibration menu. Only
+    // available before the mission has been armed (so we don't intercept the
+    // BTN_DOWN fault-acknowledge path that activates after a Mission fault).
+    if (!_missionArmed)
     {
         const bool btnDownNow = MiniR4.BTN_DOWN.getState();
         if (btnDownNow)
@@ -186,12 +302,23 @@ void loop()
             }
             else if ((millis() - _btnDownPressStartMs) >= 2000)
             {
-                EventTrace.pushEvent("CAL START");
-                Serial.println(F("[main] LineArray.calibrate(): sweep bar for 5 s..."));
-                LineArray.calibrate();
-                EventTrace.pushEvent("CAL DONE");
-                _calibrationDone = true;
+                EventTrace.pushEvent("CAL MENU");
+                Serial.println(F("[main] entering calibration menu (BTN_DOWN held >= 2s)"));
+                _calMenuState        = CalMenuState::OPEN;
+                _calMenuSel          = CalMenuItem::LINE;
                 _btnDownPressStartMs = 0;
+                renderCalMenu();
+
+                // Wait for BTN_DOWN release so the still-held button doesn't
+                // immediately count as a short-press cursor cycle on the very
+                // next loop tick.
+                while (MiniR4.BTN_DOWN.getState())
+                {
+                    delay(20);
+                }
+                _btnDownPrev = false;
+                _btnUpPrev   = false;
+                return;   // bail; next loop tick handles menu navigation
             }
         }
         else
@@ -208,8 +335,12 @@ void loop()
     //
     // `_missionArmed` is set ONLY on a successful zero so a transient
     // failure does not permanently lock the operator out of retrying.
+    //
+    // Guard: while BTN_DOWN is being held toward the 2-s menu-entry threshold,
+    // ignore BTN_UP so that accidental thumb-on-both-buttons cannot spuriously
+    // arm the mission when the operator believes they are entering the cal menu.
     const bool btnUpNow = MiniR4.BTN_UP.getState();
-    if (btnUpNow && !_btnUpPrev && !_missionArmed)
+    if (btnUpNow && !_btnUpPrev && !_missionArmed && _btnDownPressStartMs == 0)
     {
         if (!Localization.zeroHeadingFromCurrent())
         {
