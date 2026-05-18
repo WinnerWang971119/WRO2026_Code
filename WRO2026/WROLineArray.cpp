@@ -290,6 +290,45 @@ void WROLineArrayClass::calibrate()
     // Intersection / Drive queue dispatch).
 
     // -------------------------------------------------------------------------------------
+    // Layer 1 — pre-flight connectivity check (Diego's PR #20 review, fix #7).
+    //
+    // One read per configured board BEFORE the 5 s sweep, so the operator does not waste
+    // 5 s sweeping over a dead bar (unplugged, wrong port, mux mis-wired). This catches
+    // the 99 % failure mode at the very start of `calibrate()` rather than after the
+    // sweep, when the only signal would have been seed `mn={9..}` / `mx={0..}` arrays
+    // that paste as the dead-channel pattern (LOW >= HIGH on every channel).
+    //
+    // Abort criterion: ANY configured board failing to respond cancels the whole sweep —
+    // we do NOT print a partial calibration block, because the operator may not notice
+    // a missing row and could paste a half-calibrated config that silently drives the
+    // robot reverse-only (or forward-only) on a bad sensor.
+    //
+    // The CMYK byte > 99 guard inside `_readBoardInternal` (previous commit) feeds this
+    // pre-flight naturally — a corrupt-byte response is also a `false` return.
+    // -------------------------------------------------------------------------------------
+    for (uint8_t b = 0; b < Config::LINE_BOARD_COUNT; ++b)
+    {
+        uint8_t preflight[8];
+        if (!_readBoardInternal(b, preflight))
+        {
+            // Print the user-facing 1..4 port label (matches silkscreen + Config) — not
+            // the 0-based mux channel — so the operator can match the warning to the
+            // physical I2C1..I2C4 marking without doing the conversion in their head.
+            // See DECISIONS.md discussion of the 1..4 → 0..3 mux conversion that
+            // happens in `begin()`.
+            const uint8_t portLabel = (b == 0) ? Config::LINE_FRONT_I2C_PORT
+                                               : Config::LINE_REAR_I2C_PORT;
+            Serial.print(F("[WROLineArray.calibrate] ABORT: board "));
+            Serial.print(b);
+            Serial.print(F(" (port I2C"));
+            Serial.print(portLabel);
+            Serial.println(F(") not responding. Check wiring/port label. "
+                             "No values printed; re-run after fixing."));
+            return;
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
     // Per-board, per-channel running min/max. Seed `min` to the maximum possible packed
     // value (9) and `max` to the minimum (0) so the very first sample shrinks `min`
     // and grows `max` regardless of what it reads.
@@ -304,6 +343,23 @@ void WROLineArrayClass::calibrate()
             mx[b][c] = 0;
         }
     }
+
+    // -------------------------------------------------------------------------------------
+    // Layer 2 — per-board valid-sample counter (Diego's PR #20 review, fix #7).
+    //
+    // Counts successful reads from each board across the 5 s sweep. After the sweep,
+    // any board with `validSamples[b] == 0` (passed pre-flight but ALL 250 in-sweep
+    // reads failed — intermittent connection, brownout under LED load, etc.) gets a
+    // per-board warning + safe-default row in the printed paste block instead of the
+    // seed `mn`/`mx` values. Safe defaults (LOW=0, HIGH=9) match the Config.h
+    // pre-calibration baseline — non-inverted, so they will NOT trigger the dead-
+    // channel warning at next boot — but they also give lost-line behaviour on that
+    // board, so the operator will notice and re-run `calibrate()`.
+    //
+    // Only indices `[0..LINE_BOARD_COUNT-1]` are touched; the size-2 array gives us a
+    // fixed stack layout regardless of board count.
+    // -------------------------------------------------------------------------------------
+    uint16_t validSamples[2] = {0, 0};
 
     Serial.println(F("=== WROLineArray.calibrate(): sweep bar over white and over line "
                      "for 5 s... ==="));
@@ -322,9 +378,12 @@ void WROLineArrayClass::calibrate()
             {
                 // Skip this board on a transient I²C miss; the next iteration will
                 // try again. We do NOT bail the whole sweep — a brief mux contention
-                // glitch should not invalidate 5 s of operator work.
+                // glitch should not invalidate 5 s of operator work. The valid-sample
+                // counter for this board is NOT bumped; if every iteration fails the
+                // post-sweep handler below substitutes safe defaults for this row.
                 continue;
             }
+            ++validSamples[b];
             for (uint8_t c = 0; c < 8; ++c)
             {
                 if (sample[c] < mn[b][c])
@@ -338,6 +397,36 @@ void WROLineArrayClass::calibrate()
             }
         }
         delay(20);
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Post-sweep: substitute safe defaults for any CONFIGURED board that produced zero
+    // valid samples during the sweep (intermittent connection / brownout after the
+    // pre-flight check passed). LOW=0 / HIGH=9 matches the Config.h pre-calibration
+    // defaults; non-inverted so the boot-time dead-channel warning in `begin()` will
+    // NOT fire — but the operator will still see lost-line behaviour on that board
+    // and know calibration needs another run.
+    //
+    // Print one warning per affected board BEFORE the paste block so the operator
+    // notices the issue at the top of the output, not buried inside a "// Paste this"
+    // banner.
+    // -------------------------------------------------------------------------------------
+    for (uint8_t b = 0; b < Config::LINE_BOARD_COUNT; ++b)
+    {
+        if (validSamples[b] == 0)
+        {
+            Serial.print(F("[WROLineArray.calibrate] WARN: board "));
+            Serial.print(b);
+            Serial.println(F(" produced NO valid samples during the sweep "
+                             "(intermittent connection? brownout?). "
+                             "Skipping its row — safe defaults emitted so the "
+                             "paste still parses, but you MUST re-run calibrate()."));
+            for (uint8_t c = 0; c < 8; ++c)
+            {
+                mn[b][c] = 0;
+                mx[b][c] = 9;
+            }
+        }
     }
 
     // -------------------------------------------------------------------------------------

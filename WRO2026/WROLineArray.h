@@ -383,6 +383,21 @@ public:
      *       thinking the firmware calibration already covers it.
      * @note On a 2-board configuration this captures both boards; on a 1-board
      *       configuration only the front board's block is printed.
+     * @note **Safety net for unresponsive / flaky boards (PR #20 fix #7):**
+     *       (1) A pre-flight connectivity check runs ONE read per configured board
+     *       before the 5 s sweep — if any configured board does not respond, the
+     *       whole sweep is aborted with a message naming the failing port (no values
+     *       printed, so the operator cannot accidentally paste a half-calibrated
+     *       block). (2) During the sweep, per-board valid-sample counters track
+     *       intermittent failures; any configured board that produced zero valid
+     *       samples gets a per-board warning AND has its row replaced with safe
+     *       defaults (LOW=0, HIGH=9 — matches the Config.h pre-calibration baseline,
+     *       so the printed block always parses as valid C++ and the next-boot dead-
+     *       channel warning in `begin()` does NOT fire). The operator will still see
+     *       lost-line behaviour on the affected board and know calibration needs
+     *       another run. The boot-time dead-channel warning, the CMYK byte > 99
+     *       guard in `_readBoardInternal`, and the 1..4 → 0..3 port conversion in
+     *       `begin()` all compose cleanly with this safety net.
      */
     void calibrate();
 
