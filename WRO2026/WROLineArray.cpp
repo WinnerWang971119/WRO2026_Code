@@ -56,6 +56,16 @@ WROLineArrayClass LineArray;
 bool WROLineArrayClass::begin()
 {
     // -------------------------------------------------------------------------------------
+    // Front-board health accumulator. The FRONT board is mandatory (default driving
+    // direction); a failure here propagates out of `begin()` as `false` so the sketch's
+    // `_setupFailed` boot health gate catches it and the operator sees a hard boot
+    // failure instead of `BOOT OK` with a dead sensor. The REAR board is optional by
+    // design (only used when LineFollower.setReverse(true) AND LINE_BOARD_COUNT == 2),
+    // so its failure stays warn-only and does NOT affect this accumulator.
+    // -------------------------------------------------------------------------------------
+    bool frontOk = true;
+
+    // -------------------------------------------------------------------------------------
     // Per-board hardware bring-up. Wire the I²C transport (`Wire1` + mux channel from
     // Config) BEFORE invoking `MatrixColor::begin()` — the driver caches the pointer
     // and the mux channel internally and uses them on every transaction.
@@ -69,17 +79,25 @@ bool WROLineArrayClass::begin()
         const bool boardOk = _boards[b].begin();
         if (!boardOk)
         {
-            // Log to Serial but do NOT halt or return false. A 2-board configuration
-            // missing its rear board (operator forgot to plug it in) must still allow
-            // the front board to drive a forward-only mission — same fail-soft
-            // discipline as the rest of the boot path. The front-board failure case
-            // bubbles up via the empty `_lastChannels` cache rather than via this
-            // return value (operator catches the "no line ever online" symptom).
+            // Log to Serial unconditionally — the warning is useful diagnostic context
+            // regardless of which board failed. Front-board failure additionally flips
+            // `frontOk` so the return value below signals the sketch's `_setupFailed`
+            // boot health gate; rear-board failure in a 2-board configuration is
+            // warn-only by design (operator can still run a forward-only mission on
+            // the front alone — same fail-soft discipline as the rest of the boot
+            // path). We deliberately do NOT `continue` here: the `setLight()` call
+            // below remains best-effort even on a failed `begin()` since the LED may
+            // still be controllable on a partially-initialised board.
             Serial.print(F("[WROLineArray.begin] WARN: board "));
             Serial.print(b);
             Serial.print(F(" (I2C port "));
             Serial.print(_boards[b]._ch);
             Serial.println(F(") begin() returned false."));
+
+            if (b == 0)
+            {
+                frontOk = false;
+            }
         }
 
         // ---------------------------------------------------------------------------------
@@ -134,7 +152,9 @@ bool WROLineArrayClass::begin()
     }
     _lastOnline = false;
 
-    return true;
+    // Front-board failure surfaces here so the sketch's `_setupFailed` boot health
+    // gate catches it; rear-board failure was already logged warn-only above.
+    return frontOk;
 }
 
 // =========================================================================================

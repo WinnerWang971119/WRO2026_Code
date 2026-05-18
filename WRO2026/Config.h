@@ -204,6 +204,11 @@ namespace Config
      */
     constexpr uint8_t LINE_BOARD_COUNT = 1;
 
+    static_assert(LINE_BOARD_COUNT == 1 || LINE_BOARD_COUNT == 2,
+                  "Config::LINE_BOARD_COUNT must be 1 or 2 — WROLineArrayClass has fixed [2][8] "
+                  "storage and front/rear semantics. Update both this assertion AND the array "
+                  "dimensions if a third board is ever added.");
+
     /**
      * @brief I²C port index (1..4) on Wire1 carrying the FRONT line-sensor board.
      *

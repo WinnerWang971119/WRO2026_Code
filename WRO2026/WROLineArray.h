@@ -135,10 +135,13 @@ public:
      * (`MatrixColor::setLight(...)`) exactly once with brightness `Config::LINE_LED_PWM`.
      * Resets `_activeBoard = 0` (front) and clears the channel cache.
      *
-     * @return `true` if the front board initialised successfully. The rear board failing
-     *         in a 2-board config is logged to Serial but does NOT cause a `false` return —
-     *         single-board missions can still run on the front board if the operator
-     *         forgets to install the rear (see "Error Handling" in the design plan).
+     * @return `true` on success; `false` if the FRONT board's `MatrixColor::begin()`
+     *         returned false (the sketch's `_setupFailed` boot health gate catches this
+     *         and halts the boot with a hard failure indication). Rear-board failures
+     *         (only relevant when `Config::LINE_BOARD_COUNT == 2`) are logged to Serial
+     *         but do NOT affect the return value — the operator can still run a
+     *         forward-only mission on the front alone (see "Error Handling" in the
+     *         design plan).
      *
      * @note Must be called from `setup()` AFTER `MiniR4.begin()` (so `Wire1` is alive)
      *       and BEFORE `LineFollower.begin()` (which binds onto the `LineArray`
