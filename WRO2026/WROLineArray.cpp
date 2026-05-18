@@ -393,6 +393,12 @@ void WROLineArrayClass::_refreshCache()
     // (legacy refresh-on-call path). Consolidating the read + cache + on-line
     // latch here guarantees the two modes see exactly the same I²C-failure
     // semantics and the same `_lastChannels` / `_lastOnline` state transitions.
+    // Safe to pass _lastChannels directly as the out buffer: _readBoardInternal
+    // does NOT write to out[] on its failure path (the only failure mode today
+    // is the boardIdx >= 2 bounds check, which returns false before any write).
+    // If that helper ever grows a partial-write failure path, restore the
+    // temporary-buffer + memcpy pattern to preserve the "last-known-good"
+    // invariant relied on below.
     if (_readBoardInternal(_activeBoard, _lastChannels))
     {
         _lastOnline = _isOnlineFromCache(_lastChannels);

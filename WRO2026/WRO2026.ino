@@ -64,7 +64,7 @@ namespace
  * `Drive.setTickCallback()` and `PathTracker.setTickCallback()` so any
  * sync-blocking drain spin keeps everyone alive.
  *
- * Order: Drive -> LineFollower -> Intersection -> Manipulator
+ * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
  *     -> PathTracker -> Mission -> EventTrace.
  */
 void cooperativeTick()
