@@ -32,10 +32,10 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention). */
-    constexpr uint8_t MOTOR_LEFT_ID = 2;     // M2
+    constexpr uint8_t MOTOR_LEFT_ID = 1;     // M2
 
     /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention). */
-    constexpr uint8_t MOTOR_RIGHT_ID = 3;    // M3
+    constexpr uint8_t MOTOR_RIGHT_ID = 2;    // M3
 
     /** @brief Reverse the left motor's positive-power direction at the driver level. */
     constexpr bool MOTOR_LEFT_REVERSE = true;
