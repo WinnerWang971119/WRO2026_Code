@@ -140,7 +140,7 @@ namespace Config
     constexpr float WHEEL_DIAM_MM = 60.0f;
 
     /** @brief Wheel-to-wheel track width in millimetres. @note TODO: measure on real chassis. */
-    constexpr float TRACK_MM = 150.0f;
+    constexpr float TRACK_MM = 170.0f;
 
     // ---------------------------------------------------------------------------------------
     // Speed presets (consumed by the fluent Drive / LineFollower APIs)
@@ -410,7 +410,7 @@ namespace Config
      *
      * See PR #20 review thread + DECISIONS.md if added later.
      */
-    constexpr bool LINE_ARRAY_TICK_CACHE_ENABLED = false;
+    constexpr bool LINE_ARRAY_TICK_CACHE_ENABLED = true;
 
     // ---------------------------------------------------------------------------------------
     // Turn defaults
@@ -660,7 +660,7 @@ namespace Config
     constexpr float TSHAPE_MIN_MOVE_CM = 5.0f;
 
     /** @brief Same threshold as TSHAPE_MIN_MOVE_CM but for time-bounded moves (seconds). */
-    constexpr float TSHAPE_MIN_MOVE_SEC = 0.4f;
+    constexpr float TSHAPE_MIN_MOVE_SEC = 0.2f;
 
     // =============================================================================
     // Drive command queue (sequential dispatch).
