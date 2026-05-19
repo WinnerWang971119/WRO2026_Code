@@ -454,6 +454,32 @@ public:
     bool isDistanceReached();
 
     /**
+     * @brief Register the cooperative-tick callback invoked from the sync-blocking follow
+     *        helpers (`waitUntilDistanceReached` and `waitUntilIntersection`) so other
+     *        modules keep running during a blocked line-follow wait.
+     *
+     * Mirrors `DriveClass::setTickCallback` exactly — same signature, same fallback
+     * semantics. The sketch registers `cooperativeTick` here in `setup()` next to the
+     * matching `Drive` / `PathTracker` registrations.
+     *
+     * @param cb Pointer to the cooperative-tick function. Pass `nullptr` to clear.
+     *
+     * @note If no callback is registered, the blocking helpers fall back to ticking only
+     *       `LineFollower.update()` (and `Intersection.update()` for the intersection
+     *       wait) and emit a one-time Serial warning at first use. Safe degradation, but
+     *       means `LineArray.update()` will NOT run during the wait — flipping
+     *       `Config::LINE_ARRAY_TICK_CACHE_ENABLED` to `true` without a registered
+     *       callback would freeze sensor reads to whatever was cached on entry.
+     * @warning The registered callback's call chain MUST NOT issue sync-blocking
+     *          `followDistance` / `waitUntilDistanceReached` / `followUntilIntersection`
+     *          / `waitUntilIntersection` calls. Doing so would re-enter the blocking
+     *          spin from inside its own callback and recurse indefinitely. Today no
+     *          `update()` does this; if a future module's tick needs to issue
+     *          line-follow waits, it must do so off-tick.
+     */
+    void setTickCallback(void (*cb)());
+
+    /**
      * @brief Sync-blocking helper: follow the current line for @p cm, then return.
      *
      * Convenience wrapper for the common "arm + poll to completion" pattern:
@@ -622,6 +648,17 @@ private:
     int32_t _distanceStartEncL    = 0;        ///< Left encoder reading at arm.
     int32_t _distanceStartEncR    = 0;        ///< Right encoder reading at arm.
     bool    _distanceReached      = false;    ///< One-shot latch; cleared by isDistanceReached().
+
+    /// @brief Optional cooperative-tick callback invoked from the sync-blocking follow
+    ///        helpers so other modules (notably `LineArray` when tick-cache mode is
+    ///        enabled) keep running during the wait. Registered via `setTickCallback()`.
+    ///        `nullptr` until set; falls back to ticking `LineFollower.update()` (and
+    ///        `Intersection.update()` in the intersection-wait path) alone with a one-time
+    ///        Serial warning.
+    void (*_tickCallback)() = nullptr;
+    /// @brief One-shot guard so the missing-callback warning is printed only once per
+    ///        registration cycle (cleared by `setTickCallback`).
+    bool _tickCallbackWarningEmitted = false;
 };
 
 /**

@@ -558,6 +558,12 @@ bool LineFollowerClass::isDistanceReached()
     return latched;
 }
 
+void LineFollowerClass::setTickCallback(void (*cb)())
+{
+    _tickCallback                = cb;
+    _tickCallbackWarningEmitted  = false;    // reset so re-register clears the warned state
+}
+
 bool LineFollowerClass::followDistance(float cm)
 {
     if (!Drive.isIdle())
@@ -587,7 +593,27 @@ bool LineFollowerClass::waitUntilDistanceReached()
             return false;
         }
 
-        update();
+        // Sync-blocking helpers must keep the rest of the cooperative tick alive — in
+        // particular `LineArray.update()` when tick-cache mode is enabled. Mirror
+        // `Drive::_drainBlocking`: dispatch the registered `cooperativeTick`-style
+        // callback, falling back to local `update()` with a one-shot warning if no
+        // callback has been registered yet.
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!_tickCallbackWarningEmitted)
+            {
+                Serial.println(F("[LineFollower] waitUntilDistanceReached: no tick "
+                                 "callback set — only LineFollower.update() will tick "
+                                 "during the wait. Call LineFollower.setTickCallback(...) "
+                                 "in setup()."));
+                _tickCallbackWarningEmitted = true;
+            }
+            update();
+        }
         yield();
     }
 
@@ -627,10 +653,30 @@ bool LineFollowerClass::waitUntilIntersection()
             return false;
         }
 
-        // Match the documented loop order from Intersection.h and WRO2026.ino: LineFollower
-        // updates first, then Intersection reads the same shared tracer state on this iteration.
-        update();
-        Intersection.update();
+        // Match the documented loop order from Intersection.h and WRO2026.ino: LineArray
+        // refresh first, then LineFollower, then Intersection reads the same shared
+        // tracer state on this iteration. `cooperativeTick()` itself preserves that
+        // order — see WRO2026.ino. The fallback path (no callback registered) keeps
+        // the legacy explicit `update(); Intersection.update();` pair so a sketch that
+        // forgets the registration still produces correct (if less complete) behaviour
+        // with a one-shot Serial warning.
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!_tickCallbackWarningEmitted)
+            {
+                Serial.println(F("[LineFollower] waitUntilIntersection: no tick "
+                                 "callback set — only LineFollower.update() + "
+                                 "Intersection.update() will tick during the wait. "
+                                 "Call LineFollower.setTickCallback(...) in setup()."));
+                _tickCallbackWarningEmitted = true;
+            }
+            update();
+            Intersection.update();
+        }
         if (Intersection.isAtIntersection())
         {
             setEnabled(false);

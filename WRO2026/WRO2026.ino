@@ -119,9 +119,11 @@ void renderCalMenu()
 /**
  * @brief Cooperative tick — every module's `update()` exactly once.
  *
- * Used as the body of `loop()` and registered with both
- * `Drive.setTickCallback()` and `PathTracker.setTickCallback()` so any
- * sync-blocking drain spin keeps everyone alive.
+ * Used as the body of `loop()` and registered with `Drive.setTickCallback()`,
+ * `PathTracker.setTickCallback()`, and `LineFollower.setTickCallback()` so any
+ * sync-blocking drain or follow-wait keeps everyone alive — in particular
+ * `LineArray.update()` runs every iteration when `LINE_ARRAY_TICK_CACHE_ENABLED`
+ * is flipped on, instead of freezing to whatever was cached on entry.
  *
  * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
  *     -> PathTracker -> Mission -> EventTrace.
@@ -196,6 +198,7 @@ void setup()
 
     Drive.setTickCallback(cooperativeTick);
     PathTracker.setTickCallback(cooperativeTick);
+    LineFollower.setTickCallback(cooperativeTick);
 
     _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && traceOk);
 
