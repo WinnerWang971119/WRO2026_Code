@@ -284,7 +284,10 @@ private:
  * Holds a non-owning pointer to the `LineArray` singleton (bound in `begin()` and shared
  * with `Intersection` to avoid duplicate I2C transactions), runs a P+D controller every
  * `update()` tick, and drives the chassis at `_presetToPwm(_preset) ± corr`. The integral
- * term is intentionally absent in Phase 1 — see `update()` doxygen.
+ * term is intentionally absent in Phase 1 — see `update()` doxygen. When the underlying
+ * line array classifies the current tick as a junction (LEFT/RIGHT/T_OR_CROSS), the P+D
+ * mix is bypassed and both wheels run at symmetric cruise to suppress centroid-skew wobble
+ * across the junction — see `isPidFrozen()`.
  */
 class LineFollowerClass
 {
@@ -412,6 +415,28 @@ public:
      * @note Polled by EventTrace (T8) to push `LINE LOST` / `LINE OK` transitions.
      */
     bool isLineLost() const;
+
+    /**
+     * @brief Whether the most recent update() tick froze the P+D mix due to a
+     *        junction classification (LEFT, RIGHT, or T_OR_CROSS).
+     *
+     * When the underlying `WROLineArrayClass::getJunctionType()` returns anything
+     * other than NONE/UNKNOWN, the weighted-center error is unreliable (the
+     * centroid math is skewed by the cross-bar's black region), so the P+D
+     * controller is bypassed for that tick and both wheels run at symmetric
+     * cruise PWM. This accessor exposes that state for Serial debug, future
+     * telemetry, and unit-test-style inspection. The freeze is purely internal
+     * to update(); no builder setter or mode flag is added.
+     *
+     * @return `true` if the freeze branch ran on the last update() tick; `false`
+     *         otherwise (including whenever the controller is disabled — the
+     *         disable path clears the flag explicitly).
+     * @note See DECISIONS.md "LineFollower PID freeze during junction dwell" and
+     *       issue #22 for the design rationale.
+     * @note EventTrace does NOT consume this accessor today; it exists for
+     *       Serial-side tuning visibility without contending with the OLED ring.
+     */
+    bool isPidFrozen() const;
 
     /**
      * @brief Most recent weighted error sample stored by the controller.
@@ -620,6 +645,12 @@ private:
     WROLineArrayClass*  _array    = nullptr;                      ///< Pointer to the singleton WROLineArrayClass shared with Intersection (T7).
     bool                _enabled  = false;                        ///< When false, `update()` is a no-op.
     bool                _lostLine = false;                        ///< Last-tick lost-line state (no channel online).
+    /// @brief True on the most recent update() tick where the junction classifier
+    ///        (LEFT/RIGHT/T_OR_CROSS) suppressed the P+D mix. Reset to false on the
+    ///        first non-junction tick AND in the disable path and lost-line branch
+    ///        (so no flag leaks across an enable/disable cycle or a line-lost
+    ///        transition). See `isPidFrozen()` for the public accessor.
+    bool                _pidFrozen = false;
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
     Config::SpeedPreset _preset   = Config::SpeedPreset::NORMAL;  ///< Active cruise preset; sourced by `update()`.
     bool                _reverse  = false;                        ///< When true, `update()` negates cruise to follow line in reverse.
