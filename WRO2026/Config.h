@@ -30,12 +30,57 @@ namespace Config
     // ---------------------------------------------------------------------------------------
     // Motor IDs and direction
     // ---------------------------------------------------------------------------------------
+    //
+    // ⚠️  DO NOT EDIT `MOTOR_LEFT_ID` / `MOTOR_RIGHT_ID` IN ISOLATION  ⚠️
+    //
+    // These two constants LOOK like config knobs but they are NOT independently tunable.
+    // They are consumed in exactly one place — `MiniR4.DriveDC.begin(left_id, right_id, ...)`
+    // at `Drive.cpp:40-41` — while EVERY OTHER reference to the drive pair in `Drive.cpp`
+    // hardcodes `MiniR4.M2` and `MiniR4.M3` directly. Specifically:
+    //
+    //   - `Drive.cpp:35-38`   setReverse / setPPR_RPM are called on M2 / M3 by name.
+    //   - `Drive.cpp:428-435` getEncL / getEncR read M2.getDegrees() / M3.getDegrees().
+    //   - `Drive.cpp:491-492, 620, 944`  profile-state and bias-calibration encoder sampling
+    //                                    also read M2 / M3 directly.
+    //   - `Drive.h:397-406`   doxygen explicitly calls out the M2/M3 assumption.
+    //
+    // Changing only these two constants therefore puts the system into a contradictory
+    // state: `DriveDC` would steer a different motor pair than the one the R4-side code
+    // configures and reads. The "left encoder" would read a motor `DriveDC` doesn't own,
+    // motor-bias calibration would target the wrong wheel, and reverse flags would be
+    // applied to the wrong motor. The bug is silent — the chassis still moves, just
+    // wrong, and distance gates drift unpredictably.
+    //
+    // If you actually need to re-wire the drive pair to different ports, you MUST also
+    // edit every `MiniR4.M2` / `MiniR4.M3` reference in `Drive.cpp` AND update the M2/M3
+    // doxygen in `Drive.h`. See PR #20 codex P1 review for the full failure analysis.
+    // A cleaner long-term fix is a `motorById<ID>()` constexpr template helper that
+    // dispatches on the ID — but that refactor is intentionally NOT done here; the
+    // assumption that "the drive pair is M2/M3" is baked deep enough that the
+    // safest current state is "this convention is the ground truth, enforced by
+    // static_assert below."
+    //
+    // The static_assert lines below are the load-bearing safety net: they will FAIL THE
+    // BUILD if either constant is edited without the Drive.cpp / Drive.h surgery above.
+    // Do not "fix" them by editing the assert — that defeats the entire point.
+    // ---------------------------------------------------------------------------------------
 
-    /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention). */
-    constexpr uint8_t MOTOR_LEFT_ID = 1;     // M2
+    /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
+    constexpr uint8_t MOTOR_LEFT_ID = 2;     // M2
 
-    /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention). */
-    constexpr uint8_t MOTOR_RIGHT_ID = 2;    // M3
+    /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
+    constexpr uint8_t MOTOR_RIGHT_ID = 3;    // M3
+
+    static_assert(MOTOR_LEFT_ID == 2,
+                  "MOTOR_LEFT_ID is hardcoded as M2 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
+    static_assert(MOTOR_RIGHT_ID == 3,
+                  "MOTOR_RIGHT_ID is hardcoded as M3 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
 
     /** @brief Reverse the left motor's positive-power direction at the driver level. */
     constexpr bool MOTOR_LEFT_REVERSE = true;
