@@ -282,6 +282,10 @@ void LineFollowerClass::update()
 
         // Line lost beneath every channel. Dispatch on Config::LOST_LINE_ACTION.
         _lostLine = true;
+        // Clear the junction freeze flag — if a lost-line condition fires while frozen,
+        // we treat lost-line as the authoritative path and want the next online tick to
+        // start fresh (no stale freeze flag carrying over).
+        _pidFrozen = false;
 
         switch (Config::LOST_LINE_ACTION)
         {
@@ -550,11 +554,14 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
     }
     else
     {
-        // Disable path. Iron rule: always flip the flag and always clear `_lastErr` and
-        // `_lostLine`. The brake choice ONLY affects whether `Drive.stop(...)` fires.
+        // Disable path. Iron rule: always flip the flag and always clear `_lastErr`,
+        // `_lostLine`, and `_pidFrozen`. The brake choice ONLY affects whether
+        // `Drive.stop(...)` fires. `_pidFrozen` is cleared here so a freeze that was
+        // active at disable time cannot leak into the next enable cycle — AC #8 / AC #10.
         _enabled              = false;
         _lastErr              = 0.0f;
         _lostLine             = false;
+        _pidFrozen            = false;    // Clear junction-freeze flag — no stale state on re-enable.
         _useTShape            = false;    // Disabling cancels any active cruise ramp-up.
         _useTShapeRampDown    = false;    // Disabling also cancels any active ramp-down.
         _distanceTargetActive = false;    // Disabling also disarms the distance gate.
