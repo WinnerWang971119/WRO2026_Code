@@ -14,7 +14,7 @@ param(
 
     [string]$Port = '',
 
-    [string]$BaudRate = '115200'
+    [string]$BaudRate = ''
 )
 
 Set-StrictMode -Version Latest
@@ -74,6 +74,18 @@ function Resolve-SerialPort {
     throw ("Multiple serial devices detected: {0}. Set wro2026.arduino.port in workspace settings." -f ($detectedPorts -join ', '))
 }
 
+function Resolve-BaudRate {
+    param(
+        [string]$ConfiguredBaudRate
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredBaudRate)) {
+        return $ConfiguredBaudRate
+    }
+
+    throw 'No baud rate configured. Set wro2026.arduino.baudRate in workspace settings.'
+}
+
 switch ($Action) {
     'verify' {
         $sketchDir = Resolve-SketchDir
@@ -90,7 +102,8 @@ switch ($Action) {
     }
     'monitor' {
         $monitorPort = Resolve-SerialPort -ConfiguredPort $Port
-        Write-Host "Monitoring $monitorPort at $BaudRate baud"
-        Invoke-ArduinoCli monitor --port $monitorPort --config "baudrate=$BaudRate"
+        $monitorBaudRate = Resolve-BaudRate -ConfiguredBaudRate $BaudRate
+        Write-Host "Monitoring $monitorPort at $monitorBaudRate baud"
+        Invoke-ArduinoCli monitor --port $monitorPort --config "baudrate=$monitorBaudRate"
     }
 }
