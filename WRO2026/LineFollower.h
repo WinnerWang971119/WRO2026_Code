@@ -324,13 +324,21 @@ public:
      *      - `CRAWL` → `Drive.setSpeed(cruise/2, cruise/2)` — straight creep forward (no
      *                  steering) so the strip can be reacquired. `cruise` is resolved from
      *                  the current preset via `_presetToPwm()`.
-     *  - Otherwise (line online): clears `_lostLine`, samples `_array->getError()` (range
-     *    `[-3.5, +3.5]` for the 8-channel array), runs a P+D controller
-     *    `corr = LINE_KP*err + LINE_KD*(err - _lastErr)`, clamps `corr` to
+     *  - Otherwise (line online): clears `_lostLine`, then samples
+     *    `_array->getJunctionType()` ONCE to drive the junction-freeze gate. When the
+     *    classifier returns anything other than NONE/UNKNOWN (LEFT, RIGHT, or T_OR_CROSS),
+     *    the P+D math is bypassed and both wheels are commanded at the same `cruise` PWM
+     *    (deadband-snapped) to suppress centroid-skew wobble across the junction —
+     *    `isPidFrozen()` exposes this state. On the first non-frozen tick after a freeze,
+     *    `_lastErr` is reset to 0 to prevent a derivative kick. Otherwise (no junction),
+     *    samples `_array->getError()` (range `[-3.5, +3.5]` for the 8-channel array), runs
+     *    a P+D controller `corr = LINE_KP*err + LINE_KD*(err - _lastErr)`, clamps `corr` to
      *    `[-LINE_MAX_CORR, +LINE_MAX_CORR]`, then commands
      *    `Drive.setSpeed(cruise + corr, cruise - corr)` with each channel re-clamped to
      *    `[-100, +100]` (the DriveDC PWM range). `cruise` is sourced from
      *    `_presetToPwm(_preset)`, NOT the historical hardcoded `Config::CRUISE_SPEED`.
+     *    The distance-gate evaluation runs unconditionally after either branch so the
+     *    encoder gate keeps ticking during freeze.
      *
      * @note Non-blocking. Contains NO `delay()`. Safe to call at any cadence.
      * @note Phase 1 deliberately omits the integral term — `Config::LINE_KI` is unused. If
