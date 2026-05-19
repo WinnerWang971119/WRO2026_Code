@@ -82,35 +82,6 @@ void EventTraceClass::update()
     }
 
     // -----------------------------------------------------------------------------------------
-    // Source poll 2 — Intersection: passive observation via the broadcast edge counter so
-    // we never compete with the navigation layer's read-and-clear `isAtIntersection()`
-    // (code review F6).
-    // -----------------------------------------------------------------------------------------
-    const uint32_t intCountNow = Intersection.getEdgeCount();
-    if (intCountNow != _prevIntEdgeCount)
-    {
-        _prevIntEdgeCount = intCountNow;
-
-        const char* label = nullptr;
-        switch (Intersection.getLastType())
-        {
-            case JunctionType::LEFT:
-                label = "INT LEFT";
-                break;
-            case JunctionType::RIGHT:
-                label = "INT RIGHT";
-                break;
-            case JunctionType::T_OR_CROSS:
-                label = "INT TX";
-                break;
-            default:
-                label = "INT ?";
-                break;
-        }
-        pushEvent(label);
-    }
-
-    // -----------------------------------------------------------------------------------------
     // Source poll 3 — Drive: level signal, fire on rising edge of `isTurnDone()`.
     // -----------------------------------------------------------------------------------------
     const bool doneNow = Drive.isTurnDone();

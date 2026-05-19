@@ -30,12 +30,57 @@ namespace Config
     // ---------------------------------------------------------------------------------------
     // Motor IDs and direction
     // ---------------------------------------------------------------------------------------
+    //
+    // ⚠️  DO NOT EDIT `MOTOR_LEFT_ID` / `MOTOR_RIGHT_ID` IN ISOLATION  ⚠️
+    //
+    // These two constants LOOK like config knobs but they are NOT independently tunable.
+    // They are consumed in exactly one place — `MiniR4.DriveDC.begin(left_id, right_id, ...)`
+    // at `Drive.cpp:40-41` — while EVERY OTHER reference to the drive pair in `Drive.cpp`
+    // hardcodes `MiniR4.M2` and `MiniR4.M3` directly. Specifically:
+    //
+    //   - `Drive.cpp:35-38`   setReverse / setPPR_RPM are called on M2 / M3 by name.
+    //   - `Drive.cpp:428-435` getEncL / getEncR read M2.getDegrees() / M3.getDegrees().
+    //   - `Drive.cpp:491-492, 620, 944`  profile-state and bias-calibration encoder sampling
+    //                                    also read M2 / M3 directly.
+    //   - `Drive.h:397-406`   doxygen explicitly calls out the M2/M3 assumption.
+    //
+    // Changing only these two constants therefore puts the system into a contradictory
+    // state: `DriveDC` would steer a different motor pair than the one the R4-side code
+    // configures and reads. The "left encoder" would read a motor `DriveDC` doesn't own,
+    // motor-bias calibration would target the wrong wheel, and reverse flags would be
+    // applied to the wrong motor. The bug is silent — the chassis still moves, just
+    // wrong, and distance gates drift unpredictably.
+    //
+    // If you actually need to re-wire the drive pair to different ports, you MUST also
+    // edit every `MiniR4.M2` / `MiniR4.M3` reference in `Drive.cpp` AND update the M2/M3
+    // doxygen in `Drive.h`. See PR #20 codex P1 review for the full failure analysis.
+    // A cleaner long-term fix is a `motorById<ID>()` constexpr template helper that
+    // dispatches on the ID — but that refactor is intentionally NOT done here; the
+    // assumption that "the drive pair is M2/M3" is baked deep enough that the
+    // safest current state is "this convention is the ground truth, enforced by
+    // static_assert below."
+    //
+    // The static_assert lines below are the load-bearing safety net: they will FAIL THE
+    // BUILD if either constant is edited without the Drive.cpp / Drive.h surgery above.
+    // Do not "fix" them by editing the assert — that defeats the entire point.
+    // ---------------------------------------------------------------------------------------
 
-    /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention). */
+    /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
     constexpr uint8_t MOTOR_LEFT_ID = 2;     // M2
 
-    /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention). */
+    /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
     constexpr uint8_t MOTOR_RIGHT_ID = 3;    // M3
+
+    static_assert(MOTOR_LEFT_ID == 2,
+                  "MOTOR_LEFT_ID is hardcoded as M2 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
+    static_assert(MOTOR_RIGHT_ID == 3,
+                  "MOTOR_RIGHT_ID is hardcoded as M3 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
 
     /** @brief Reverse the left motor's positive-power direction at the driver level. */
     constexpr bool MOTOR_LEFT_REVERSE = true;
@@ -95,7 +140,7 @@ namespace Config
     constexpr float WHEEL_DIAM_MM = 60.0f;
 
     /** @brief Wheel-to-wheel track width in millimetres. @note TODO: measure on real chassis. */
-    constexpr float TRACK_MM = 150.0f;
+    constexpr float TRACK_MM = 170.0f;
 
     // ---------------------------------------------------------------------------------------
     // Speed presets (consumed by the fluent Drive / LineFollower APIs)
@@ -175,15 +220,197 @@ namespace Config
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
     constexpr int16_t LINE_MAX_CORR = 40;
 
-    /** @brief Threshold passed to `MXLineTracer.setThreshold()` (0..100). */
-    constexpr uint8_t LINE_THRESHOLD = 60;
-
     // ---------------------------------------------------------------------------------------
-    // MXLineTracer wiring
+    // 8-channel custom line sensor (WROLineArray)
+    //
+    // WROLineArray drives 1-2 MXColor-protocol I²C boards. Each board packs 8 reflectance
+    // channels into 4 CMYK bytes, with tens digit = channel N and ones digit = channel N+1
+    // (0..9 packed-byte range per channel after firmware-level scaling).
+    //
+    // Two-layer calibration:
+    //   Layer 1 — firmware-level hardware calibration: WROLineArray::begin() issues the
+    //             firmware setLight() command and calls the board's calibration routine.
+    //             This layer is VOLATILE — it resets on every power cycle and must be
+    //             re-run on every boot via begin().
+    //   Layer 2 — software per-channel baselines: LINE_CALIB_LOW / LINE_CALIB_HIGH below
+    //             are hand-edited into this file after running WROLineArray::calibrate()
+    //             and pasting the Serial output (same workflow as Drive.calibrateMotorBias()
+    //             → copy scalars → paste into Config.h → reflash). This layer SURVIVES
+    //             re-flash and power cycles because it lives in firmware. Both layers are
+    //             required; they are NOT redundant — Layer 1 brings the hardware to a
+    //             consistent operating point, Layer 2 normalises inter-channel spread.
     // ---------------------------------------------------------------------------------------
 
-    /** @brief External I2C port index (I2C1 = first external port on Wire1). */
-    constexpr uint8_t LINE_I2C_PORT = 1;
+    /**
+     * @brief Number of MXColor-protocol boards installed.
+     *
+     * 1 = front board only (typical WRO setup); 2 = front + rear boards present.
+     * When set to 1, LINE_REAR_I2C_PORT is ignored at compile time.
+     */
+    constexpr uint8_t LINE_BOARD_COUNT = 1;
+
+    static_assert(LINE_BOARD_COUNT == 1 || LINE_BOARD_COUNT == 2,
+                  "Config::LINE_BOARD_COUNT must be 1 or 2 — WROLineArrayClass has fixed [2][8] "
+                  "storage and front/rear semantics. Update both this assertion AND the array "
+                  "dimensions if a third board is ever added.");
+
+    /**
+     * @brief I²C port index (1..4) on Wire1 carrying the FRONT line-sensor board.
+     *
+     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4 (matches
+     * the physical silkscreen labels AND meat.ino's `MiniR4.I2C{N}.MXColor` pattern).
+     * Port 0 is the on-board `Wire` — never use 0 for an external sensor board.
+     *
+     * @note Valid range is `[1..4]`. The 1..4 → 0..3 conversion to the underlying
+     *       PCA9548A mux channel ID (`MatrixColor::_ch`, which `i2cMUXSelect()` shifts
+     *       as `(1 << _ch)`) happens inside `WROLineArrayClass::begin()` — do NOT
+     *       pre-convert here. Vendor source cross-reference:
+     *       `MatrixMiniR4.h:96-100` (`I2C1` → mux ch 0 ... `I2C4` → ch 3).
+     */
+    constexpr uint8_t LINE_FRONT_I2C_PORT = 1;
+
+    static_assert(LINE_FRONT_I2C_PORT >= 1 && LINE_FRONT_I2C_PORT <= 4,
+                  "Config::LINE_FRONT_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
+
+    /**
+     * @brief I²C port index (1..4) on Wire1 carrying the REAR line-sensor board.
+     *
+     * Maps to the hardware I2C1..I2C4 external ports on the MATRIX Mini R4 (matches
+     * the physical silkscreen labels AND meat.ino's `MiniR4.I2C{N}.MXColor` pattern).
+     * Ignored when `LINE_BOARD_COUNT == 1`. Must be distinct from `LINE_FRONT_I2C_PORT`.
+     *
+     * @note Valid range is `[1..4]`. The 1..4 → 0..3 conversion to the underlying
+     *       PCA9548A mux channel ID (`MatrixColor::_ch`, which `i2cMUXSelect()` shifts
+     *       as `(1 << _ch)`) happens inside `WROLineArrayClass::begin()` — do NOT
+     *       pre-convert here. Vendor source cross-reference:
+     *       `MatrixMiniR4.h:96-100` (`I2C1` → mux ch 0 ... `I2C4` → ch 3).
+     */
+    constexpr uint8_t LINE_REAR_I2C_PORT = 4;
+
+    static_assert(LINE_REAR_I2C_PORT >= 1 && LINE_REAR_I2C_PORT <= 4,
+                  "Config::LINE_REAR_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
+
+    /**
+     * @brief Per-board, per-channel calibrated WHITE (off-line) reflectance value.
+     *
+     * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
+     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     *
+     * Workflow: run WROLineArray::calibrate() with the sensor over a WHITE surface,
+     * read the Serial output, and paste the 8 values per board into the inner arrays
+     * here, then reflash. Values survive power cycles because they live in firmware
+     * (Layer-2 calibration). Zeroed defaults are safe before first calibration —
+     * they cause every channel to be treated as "fully bright = off-line".
+     */
+    constexpr uint8_t LINE_CALIB_LOW[2][8] = {
+        {0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0},
+    };
+
+    /**
+     * @brief Per-board, per-channel calibrated DARK (on-line) reflectance value.
+     *
+     * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
+     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     *
+     * Workflow: run WROLineArray::calibrate() with the sensor over the DARK line,
+     * read the Serial output, and paste the 8 values per board into the inner arrays
+     * here, then reflash. Defaults of 9 (maximum brightness delta) are safe before
+     * first calibration — they prevent false on-line detections when LOW == HIGH.
+     */
+    constexpr uint8_t LINE_CALIB_HIGH[2][8] = {
+        {9, 9, 9, 9, 9, 9, 9, 9},
+        {9, 9, 9, 9, 9, 9, 9, 9},
+    };
+
+    /**
+     * @brief Channel ON-LINE threshold expressed as a fraction of (HIGH - LOW).
+     *
+     * A channel is declared "on-line" when its normalised reading ≥ this ratio.
+     * 0.5f = midpoint between the calibrated white and dark values. Increase toward
+     * 1.0f to require a stronger dark reading (reduces false positives on smudged
+     * surfaces); decrease toward 0.0f to trigger earlier (increases sensitivity).
+     *
+     * Applied per-channel: onLine = (raw - LOW[b][ch]) / (HIGH[b][ch] - LOW[b][ch])
+     *                               >= LINE_CHANNEL_ON_RATIO.
+     */
+    constexpr float LINE_CHANNEL_ON_RATIO = 0.5f;
+
+    /**
+     * @brief Minimum number of channels simultaneously ON-LINE to declare a
+     *        T_OR_CROSS junction (highest-priority junction class, checked first).
+     *
+     * At 7 of 8 channels lit, the robot is clearly centred on a wide cross or T
+     * marker. Lower values risk false triggers on debris or sensor variation;
+     * higher values may miss junctions under partial occlusion.
+     *
+     * @note TODO: tune on real mat after per-channel calibration is complete.
+     */
+    constexpr uint8_t LINE_JUNCTION_T_MIN_ON = 7;
+
+    /**
+     * @brief Upper inclusive channel index for the LEFT junction predicate.
+     *
+     * LEFT junction fires when all channels ch[0..LINE_JUNCTION_LEFT_HI] are ON-LINE
+     * AND all channels ch[LINE_JUNCTION_LEFT_HI+1..7] are OFF-LINE. Adjust to match
+     * the physical width of the left-branch marker relative to the sensor array.
+     *
+     * @note TODO: tune on real mat.
+     */
+    constexpr uint8_t LINE_JUNCTION_LEFT_HI = 4;
+
+    /**
+     * @brief Lower inclusive channel index for the RIGHT junction predicate.
+     *
+     * RIGHT junction fires when all channels ch[LINE_JUNCTION_RIGHT_LO..7] are ON-LINE
+     * AND all channels ch[0..LINE_JUNCTION_RIGHT_LO-1] are OFF-LINE. Adjust to match
+     * the physical width of the right-branch marker relative to the sensor array.
+     *
+     * @note TODO: tune on real mat.
+     */
+    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = 3;
+
+    /**
+     * @brief On-board LED brightness level applied by WROLineArray::begin() via the
+     *        firmware-level setLight() command (0..255).
+     *
+     * Higher values improve contrast on pale surfaces; too high can wash out the dark
+     * line or saturate the detector. 200 is a reasonable starting point for indoor
+     * fluorescent lighting on the WRO competition mat.
+     *
+     * @note This is a Layer-1 (volatile) setting — it is re-applied on every begin()
+     *       call and does not persist across power cycles on its own.
+     */
+    constexpr uint8_t LINE_LED_PWM = 200;
+
+    /**
+     * @brief Toggle tick-scoped caching in WROLineArrayClass.
+     *
+     * When `false` (default — legacy / current PR behaviour): each call to
+     * `getError()`, `isOnline()`, and `getJunctionType()` independently issues
+     * a full 4-byte CMYK I²C transaction. `WROLineArrayClass::update()` is a
+     * no-op. Total per cooperative tick: 3 sensor reads (~33 ms at vendor I²C
+     * timing), giving ~28-30 Hz loop rate.
+     *
+     * When `true`: `WROLineArrayClass::update()` issues the single sensor
+     * read for the tick (must be called at the top of `cooperativeTick()` for
+     * this to work). The three getters become pure cache readers. Total per
+     * tick: 1 sensor read (~11 ms), giving ~70-80 Hz loop rate.
+     *
+     * Default is `false` to preserve the currently-tested code path on first
+     * flash. Flip to `true` after hardware bring-up confirms the cached path
+     * behaves identically (no controller wobble from one-tick-stale data on
+     * a chassis travelling at typical cruise).
+     *
+     * See PR #20 review thread + DECISIONS.md if added later.
+     */
+    constexpr bool LINE_ARRAY_TICK_CACHE_ENABLED = true;
 
     // ---------------------------------------------------------------------------------------
     // Turn defaults
@@ -433,7 +660,7 @@ namespace Config
     constexpr float TSHAPE_MIN_MOVE_CM = 5.0f;
 
     /** @brief Same threshold as TSHAPE_MIN_MOVE_CM but for time-bounded moves (seconds). */
-    constexpr float TSHAPE_MIN_MOVE_SEC = 0.4f;
+    constexpr float TSHAPE_MIN_MOVE_SEC = 0.2f;
 
     // =============================================================================
     // Drive command queue (sequential dispatch).

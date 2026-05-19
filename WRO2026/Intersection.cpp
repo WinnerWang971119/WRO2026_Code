@@ -12,7 +12,7 @@
 
 #include "Intersection.h"
 #include "Config.h"          // INTERSECTION_DEBOUNCE_TICKS / INTERSECTION_RELEASE_TICKS
-#include "LineFollower.h"    // For LineFollower.getTracer() — kept out of the header.
+#include "LineFollower.h"    // For LineFollower.getArray() — kept out of the header.
 
 /**
  * @brief Single global instance.
@@ -21,8 +21,8 @@ IntersectionClass Intersection;
 
 bool IntersectionClass::begin()
 {
-    _tracer = LineFollower.getTracer();
-    if (_tracer == nullptr)
+    _array = LineFollower.getArray();
+    if (_array == nullptr)
     {
         // Defensive — should not happen if LineFollower.begin() ran first.
         return false;
@@ -39,16 +39,24 @@ bool IntersectionClass::begin()
 
 void IntersectionClass::update()
 {
-    if (_tracer == nullptr)
+    if (_array == nullptr)
     {
         return;
     }
 
+    // @note With the WROLineArrayClass backend (post-Issue #16), our
+    // classifier returns NONE/LEFT/RIGHT/T_OR_CROSS only — UNKNOWN is
+    // never emitted. This validation and the UNKNOWN-as-UNKNOWN clamp
+    // remain in place defensively in case (a) a future sensor backend
+    // re-introduces ambiguous samples, or (b) bus corruption returns a
+    // byte outside the [NONE..UNKNOWN] enum range. Removing the guard
+    // would silently broadcast nonsense to consumers — keep it.
+    //
     // Validate the raw byte is a known enum value before treating it as a JunctionType
     // (code review F7). Anything outside `[NONE..UNKNOWN]` is treated as UNKNOWN — the same
     // category as a sensor flicker. Without this guard a corrupt I2C byte would be
     // `static_cast` directly into `_lastType`, broadcasting nonsense to consumers.
-    const uint8_t rawByte         = _tracer->getJunctionType();
+    const uint8_t rawByte         = _array->getJunctionType();
     const bool    rawInRange      = rawByte <= static_cast<uint8_t>(JunctionType::UNKNOWN);
     const uint8_t raw             = rawInRange ? rawByte
                                                 : static_cast<uint8_t>(JunctionType::UNKNOWN);

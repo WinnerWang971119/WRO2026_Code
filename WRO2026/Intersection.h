@@ -1,21 +1,22 @@
 /**
  * @file Intersection.h
- * @brief Edge-triggered junction/intersection detector built on `MatrixLineTracer`.
+ * @brief Edge-triggered junction/intersection detector built on `WROLineArrayClass`.
  * @author WRO 2026
  *
  * @details
  * `IntersectionClass` is the singleton that turns the raw, polled
- * `MatrixLineTracer::getJunctionType()` reading into a one-shot, edge-triggered event the rest
+ * `WROLineArrayClass::getJunctionType()` reading into a one-shot, edge-triggered event the rest
  * of the firmware can consume cleanly. Without edge detection, naive callers polling
  * `getJunctionType()` would see the same intersection reported on every loop tick for as long as
  * the chassis straddles the marker — leading to duplicate path-tracker decisions, OLED log
  * spam, and stuck state-machine transitions.
  *
  * Design rules:
- *  - **Shares the LineFollower's tracer pointer.** `begin()` calls `LineFollower.getTracer()`
- *    and binds onto the same `MatrixLineTracer` instance, so we issue zero extra I2C
- *    transactions on the Wire1 mux channel — every `update()` reuses the sample LineFollower
- *    just took. Caller MUST invoke `LineFollower.begin()` before `Intersection.begin()`.
+ *  - **Shares the LineFollower's WROLineArrayClass pointer.** `begin()` calls
+ *    `LineFollower.getArray()` and binds onto the same `WROLineArrayClass` instance, so we issue
+ *    zero extra I2C transactions on the Wire1 mux channel — every `update()` reuses the sample
+ *    LineFollower just took. Caller MUST invoke `LineFollower.begin()` before
+ *    `Intersection.begin()`.
  *  - **`update()` is non-blocking** — no `delay()`, no I2C wait loops. Cooperative tick.
  *  - **Edge-triggered consumption** — `isAtIntersection()` returns `true` exactly once per
  *    junction *entry* (rising edge of "at-junction"), then auto-clears.
@@ -34,11 +35,14 @@
 #define INTERSECTION_H
 
 #include <Arduino.h>
-#include <MatrixMiniR4.h>    // brings in `MatrixLineTracer` transitively (see code review F9
-                             // for why we don't include `<MiniR4_MXLineTracer.h>` directly).
+#include <MatrixMiniR4.h>    // hardware facade — retained for MiniR4 globals used in Intersection.cpp.
+#include "WROLineArray.h"    // WROLineArrayClass (post-Issue #16 replacement for MatrixLineTracer*;
+                             // formerly `#include <MatrixMiniR4.h>` was the sole include and the
+                             // type was `MatrixLineTracer*` — see code review F9 for the original
+                             // rationale against including `<MiniR4_MXLineTracer.h>` directly).
 
 /**
- * @brief Junction type mirror of `MatrixLineTracer::getJunctionType()` return values.
+ * @brief Junction type mirror of `WROLineArrayClass::getJunctionType()` return values.
  *
  * Underlying values are stable (must match the library's 0..4 convention exactly) so that the
  * raw `uint8_t` returned by the driver can be converted with a plain
@@ -47,6 +51,10 @@
  * @note `UNKNOWN` (4) is reported by the sensor when *something* was detected at the line
  *       array but it could not be classified. The detector treats UNKNOWN the same as NONE
  *       (i.e. no edge fires) to avoid acting on noisy / ambiguous samples.
+ * @note With the WROLineArrayClass backend (post-Issue #16), this value is never emitted —
+ *       our junction classifier returns NONE for the otherwise-ambiguous case. The enum value
+ *       and the handling code remain so that a future backend with ambiguous samples (or a
+ *       regression in classification) is handled safely.
  */
 enum class JunctionType : uint8_t
 {
@@ -60,10 +68,10 @@ enum class JunctionType : uint8_t
 /**
  * @brief Singleton edge-triggered intersection detector.
  *
- * Owns no hardware of its own — borrows the `MatrixLineTracer*` exposed by `LineFollower` so
+ * Owns no hardware of its own — borrows the `WROLineArrayClass*` exposed by `LineFollower` so
  * both modules read the same I2C sample. State machine on each `update()`:
  *
- *  - Sample `raw = _tracer->getJunctionType()`.
+ *  - Sample `raw = _array->getJunctionType()`.
  *  - `atJunctionNow = (raw != NONE && raw != UNKNOWN)`.
  *  - If `atJunctionNow && !_wasAtJunction`  →  rising edge: latch `_lastType`, set
  *    `_edgeFired = true`.
@@ -77,20 +85,20 @@ class IntersectionClass
 {
 public:
     /**
-     * @brief Bind to LineFollower's shared tracer and reset detector state.
+     * @brief Bind to LineFollower's shared WROLineArrayClass pointer and reset detector state.
      *
-     * @return `true` if `LineFollower.getTracer()` returned a non-null pointer; `false`
+     * @return `true` if `LineFollower.getArray()` returned a non-null pointer; `false`
      *         otherwise (defensive — should never happen if `LineFollower.begin()` was called
      *         first, in which case `update()` and friends will silently no-op).
      * @note Must be called from `setup()` AFTER `LineFollower.begin()` so the underlying
-     *       `MatrixLineTracer` has been initialised on Wire1 + the configured mux channel.
+     *       `WROLineArrayClass` has been initialised on Wire1 + the configured mux channel.
      */
     bool begin();
 
     /**
      * @brief Cooperative tick — call every iteration of the main `loop()`.
      *
-     * Samples the shared tracer, runs the rising-edge detector, and (on a rising edge) latches
+     * Samples the shared WROLineArrayClass instance, runs the rising-edge detector, and (on a rising edge) latches
      * the captured junction type into `_lastType` and raises `_edgeFired`. Does not consume
      * the flag — that is `isAtIntersection()`'s job.
      *
@@ -99,7 +107,7 @@ public:
      *       both NONE and UNKNOWN as "no junction" so a momentary unclassified sample doesn't
      *       fire.
      * @note Should be called AFTER `LineFollower.update()` in the main loop so both modules
-     *       observe the same I2C cycle's worth of state on the shared tracer.
+     *       observe the same I2C cycle's worth of state on the shared WROLineArrayClass instance.
      */
     void update();
 
@@ -145,7 +153,7 @@ public:
     JunctionType getLastType() const;
 
 private:
-    MatrixLineTracer* _tracer        = nullptr;                ///< Shared tracer from LineFollower.
+    WROLineArrayClass* _array         = nullptr;                ///< Shared WROLineArrayClass singleton from LineFollower.
     bool              _wasAtJunction = false;                  ///< Debounced at-junction state.
     bool              _edgeFired     = false;                  ///< Latched rising edge, cleared on read.
     JunctionType      _lastType      = JunctionType::NONE;     ///< Type captured at the last edge.

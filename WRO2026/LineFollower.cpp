@@ -8,6 +8,10 @@
 
 #include "Drive.h"
 #include "Intersection.h"
+#include "WROLineArray.h"    // Direct include for IWYU clarity — `LineFollower.h` already
+                             // transitively brings this in, but binding to `&LineArray` and
+                             // dereferencing `WROLineArrayClass*` makes the dependency
+                             // explicit at the use site.
 
 /**
  * @brief Single global instance referenced by every other module.
@@ -121,13 +125,12 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setDistanceTarget(float cm
 
 bool LineFollowerClass::begin()
 {
-    // Wire the tracer onto Wire1 + the configured mux channel BEFORE calling its begin().
-    // The driver caches the pointer/channel internally and uses them on every transaction.
-    _tracer._pWire = &Wire1;
-    _tracer._ch    = Config::LINE_I2C_PORT;
-
-    _tracer.begin();
-    _tracer.setThreshold(Config::LINE_THRESHOLD);
+    // Bind to the WROLineArrayClass singleton. The sketch's setup() is
+    // responsible for calling LineArray.begin() BEFORE LineFollower.begin()
+    // so the Layer-1 hardware calibration (setLight()) and per-board mux
+    // channels are already up. See DECISIONS.md "8-channel custom line
+    // sensor" and the WROLineArrayClass class header.
+    _array = &LineArray;
 
     _enabled           = false;
     _lostLine          = false;
@@ -271,7 +274,7 @@ void LineFollowerClass::update()
         // else: still in the cruise plateau zone — leave `cruise` unchanged.
     }
 
-    if (!_tracer.isOnline())
+    if (!_array->isOnline())
     {
         // Clear the D-term history so the first tick after reacquisition does not see a stale
         // derivative computed against an old (possibly several-second-stale) error sample.
@@ -308,7 +311,7 @@ void LineFollowerClass::update()
     // -------------------------------------------------------------------------------------
     _lostLine = false;
 
-    const float err  = _tracer.getError();
+    const float err  = _array->getError();
     const float dErr = err - _lastErr;
     _lastErr         = err;
 
@@ -414,6 +417,14 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
     if (hasReverseOverride)
     {
         _reverse = reverse;
+        // Propagate direction to the sensor so 2-board configurations swap to the rear
+        // board atomically with the controller flipping cruise sign. The nullptr guard
+        // makes this a silent no-op if the builder somehow fires before begin() runs —
+        // same defensive pattern used elsewhere in this file.
+        if (_array != nullptr)
+        {
+            _array->setReverseActive(_reverse);
+        }
     }
 
     if (targetEnabled)
@@ -535,9 +546,9 @@ float LineFollowerClass::getRawError() const
     return _lastErr;
 }
 
-MatrixLineTracer* LineFollowerClass::getTracer()
+WROLineArrayClass* LineFollowerClass::getArray()
 {
-    return &_tracer;
+    return _array;
 }
 
 bool LineFollowerClass::isDistanceReached()
@@ -545,6 +556,12 @@ bool LineFollowerClass::isDistanceReached()
     const bool latched  = _distanceReached;
     _distanceReached    = false;
     return latched;
+}
+
+void LineFollowerClass::setTickCallback(void (*cb)())
+{
+    _tickCallback                = cb;
+    _tickCallbackWarningEmitted  = false;    // reset so re-register clears the warned state
 }
 
 bool LineFollowerClass::followDistance(float cm)
@@ -576,7 +593,27 @@ bool LineFollowerClass::waitUntilDistanceReached()
             return false;
         }
 
-        update();
+        // Sync-blocking helpers must keep the rest of the cooperative tick alive — in
+        // particular `LineArray.update()` when tick-cache mode is enabled. Mirror
+        // `Drive::_drainBlocking`: dispatch the registered `cooperativeTick`-style
+        // callback, falling back to local `update()` with a one-shot warning if no
+        // callback has been registered yet.
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!_tickCallbackWarningEmitted)
+            {
+                Serial.println(F("[LineFollower] waitUntilDistanceReached: no tick "
+                                 "callback set — only LineFollower.update() will tick "
+                                 "during the wait. Call LineFollower.setTickCallback(...) "
+                                 "in setup()."));
+                _tickCallbackWarningEmitted = true;
+            }
+            update();
+        }
         yield();
     }
 
@@ -616,10 +653,30 @@ bool LineFollowerClass::waitUntilIntersection()
             return false;
         }
 
-        // Match the documented loop order from Intersection.h and WRO2026.ino: LineFollower
-        // updates first, then Intersection reads the same shared tracer state on this iteration.
-        update();
-        Intersection.update();
+        // Match the documented loop order from Intersection.h and WRO2026.ino: LineArray
+        // refresh first, then LineFollower, then Intersection reads the same shared
+        // tracer state on this iteration. `cooperativeTick()` itself preserves that
+        // order — see WRO2026.ino. The fallback path (no callback registered) keeps
+        // the legacy explicit `update(); Intersection.update();` pair so a sketch that
+        // forgets the registration still produces correct (if less complete) behaviour
+        // with a one-shot Serial warning.
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!_tickCallbackWarningEmitted)
+            {
+                Serial.println(F("[LineFollower] waitUntilIntersection: no tick "
+                                 "callback set — only LineFollower.update() + "
+                                 "Intersection.update() will tick during the wait. "
+                                 "Call LineFollower.setTickCallback(...) in setup()."));
+                _tickCallbackWarningEmitted = true;
+            }
+            update();
+            Intersection.update();
+        }
         if (Intersection.isAtIntersection())
         {
             setEnabled(false);
@@ -640,6 +697,13 @@ Config::SpeedPreset LineFollowerClass::getPreset() const
 void LineFollowerClass::setReverse(bool reverse)
 {
     _reverse = reverse;
+    // Mirror the apply-builder path so the non-fluent setter keeps the sensor's active
+    // board in sync with the controller's direction. nullptr-guarded for the same
+    // pre-begin() safety reason.
+    if (_array != nullptr)
+    {
+        _array->setReverseActive(_reverse);
+    }
 }
 
 bool LineFollowerClass::getReverse() const
