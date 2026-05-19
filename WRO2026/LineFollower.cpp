@@ -282,6 +282,10 @@ void LineFollowerClass::update()
 
         // Line lost beneath every channel. Dispatch on Config::LOST_LINE_ACTION.
         _lostLine = true;
+        // Clear the junction freeze flag — if a lost-line condition fires while frozen,
+        // we treat lost-line as the authoritative path and want the next online tick to
+        // start fresh (no stale freeze flag carrying over).
+        _pidFrozen = false;
 
         switch (Config::LOST_LINE_ACTION)
         {
@@ -307,39 +311,82 @@ void LineFollowerClass::update()
     }
 
     // -------------------------------------------------------------------------------------
-    // Line online: run the P+D controller.
+    // Line online: junction-freeze gate, then P+D controller.
     // -------------------------------------------------------------------------------------
     _lostLine = false;
 
-    const float err  = _array->getError();
-    const float dErr = err - _lastErr;
-    _lastErr         = err;
+    // Sample the junction classifier ONCE per tick. With Config::LINE_ARRAY_TICK_CACHE_ENABLED
+    // == true this is a free cache read; with caching off it is one ~9 ms I2C transaction.
+    // Intersection.update() runs after us and will issue its own call against the same sensor
+    // — eliminating that double-read is tracked separately (out of scope for issue #22).
+    //
+    // Freeze fires on any classifier value other than NONE / UNKNOWN — broadened from the
+    // original issue #22 scope (T_OR_CROSS only) because the centroid-skew defect affects
+    // LEFT and RIGHT junctions just as much (the issue body itself noted this). See
+    // DECISIONS.md "LineFollower PID freeze during junction dwell".
+    const uint8_t junctionRaw = _array->getJunctionType();
+    const bool    atJunction  = (junctionRaw != (uint8_t) JunctionType::NONE
+                              && junctionRaw != (uint8_t) JunctionType::UNKNOWN);
 
-    float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
-
-    // Clamp the correction to the configured maximum.
-    if (corr > Config::LINE_MAX_CORR)
+    if (atJunction)
     {
-        corr = Config::LINE_MAX_CORR;
+        _pidFrozen = true;
+
+        // Command symmetric cruise. `cruise` already reflects ramp-up / ramp-down progress
+        // (modified by the branches above) and is sign-flipped for reverse. Drive.setSpeed
+        // applies per-motor bias calibration automatically (DECISIONS.md "Strategy B"), so
+        // no additional bias handling is needed here. deadbandSnap mirrors the snap applied
+        // in the P+D path so a cruise value inside the deadband range (rare but possible
+        // during ramp-up) is not silently dropped by Drive.setSpeed's internal re-snap.
+        const int16_t snapped = deadbandSnap(cruise);
+        Drive.setSpeed(snapped, snapped);
+
+        // Fall through to the distance-gate block below — do NOT early return. The encoder
+        // distance counter must keep ticking during the freeze (acceptance criterion).
     }
-    else if (corr < -Config::LINE_MAX_CORR)
+    else
     {
-        corr = -Config::LINE_MAX_CORR;
+        if (_pidFrozen)
+        {
+            // First non-frozen tick after a freeze: clear the D-term history. Without this
+            // the dErr computed against a pre-freeze `_lastErr` (potentially several ticks
+            // stale) would produce a derivative kick on the first post-junction PID tick.
+            // Mirrors the lost-line branch's existing `_lastErr = 0.0f;` reset.
+            _lastErr   = 0.0f;
+            _pidFrozen = false;
+        }
+
+        const float err  = _array->getError();
+        const float dErr = err - _lastErr;
+        _lastErr         = err;
+
+        float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
+
+        // Clamp the correction to the configured maximum.
+        if (corr > Config::LINE_MAX_CORR)
+        {
+            corr = Config::LINE_MAX_CORR;
+        }
+        else if (corr < -Config::LINE_MAX_CORR)
+        {
+            corr = -Config::LINE_MAX_CORR;
+        }
+
+        // Differential mix around the cruise setpoint (sourced from the active preset).
+        int16_t L = (int16_t) (cruise + corr);
+        int16_t R = (int16_t) (cruise - corr);
+
+        // Snap each channel into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (mirrored for negatives).
+        // This compensates for both the saturation cap and the motor deadband floor: a small
+        // P+D correction in the (0, 20) range would otherwise be silently lost in the dead
+        // zone. Drive.setSpeed re-snaps internally — the snap here ensures the value passed
+        // in already reflects the post-mix correction so future readers see a consistent
+        // post-snap value.
+        L = deadbandSnap(L);
+        R = deadbandSnap(R);
+
+        Drive.setSpeed(L, R);
     }
-
-    // Differential mix around the cruise setpoint (sourced from the active preset).
-    int16_t L = (int16_t) (cruise + corr);
-    int16_t R = (int16_t) (cruise - corr);
-
-    // Snap each channel into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (mirrored for negatives).
-    // This compensates for both the saturation cap and the motor deadband floor: a small P+D
-    // correction in the (0, 20) range would otherwise be silently lost in the dead zone.
-    // Drive.setSpeed re-snaps internally — the snap here ensures the value passed in already
-    // reflects the post-mix correction so future readers see a consistent post-snap value.
-    L = deadbandSnap(L);
-    R = deadbandSnap(R);
-
-    Drive.setSpeed(L, R);
 
     // -------------------------------------------------------------------------------------
     // Distance gate (PathTracker PROJECTION_FOLLOW). Evaluated AFTER the PID issues the
@@ -507,11 +554,14 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
     }
     else
     {
-        // Disable path. Iron rule: always flip the flag and always clear `_lastErr` and
-        // `_lostLine`. The brake choice ONLY affects whether `Drive.stop(...)` fires.
+        // Disable path. Iron rule: always flip the flag and always clear `_lastErr`,
+        // `_lostLine`, and `_pidFrozen`. The brake choice ONLY affects whether
+        // `Drive.stop(...)` fires. `_pidFrozen` is cleared here so a freeze that was
+        // active at disable time cannot leak into the next enable cycle — AC #8 / AC #10.
         _enabled              = false;
         _lastErr              = 0.0f;
         _lostLine             = false;
+        _pidFrozen            = false;    // Clear junction-freeze flag — no stale state on re-enable.
         _useTShape            = false;    // Disabling cancels any active cruise ramp-up.
         _useTShapeRampDown    = false;    // Disabling also cancels any active ramp-down.
         _distanceTargetActive = false;    // Disabling also disarms the distance gate.
@@ -539,6 +589,11 @@ bool LineFollowerClass::isEnabled() const
 bool LineFollowerClass::isLineLost() const
 {
     return _lostLine;
+}
+
+bool LineFollowerClass::isPidFrozen() const
+{
+    return _pidFrozen;
 }
 
 float LineFollowerClass::getRawError() const

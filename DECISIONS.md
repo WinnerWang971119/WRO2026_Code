@@ -198,3 +198,40 @@ The fluent verbs themselves do not change shape; only the per-builder default in
 `LineFollower::setEnabled(true).setDistanceTarget(cm)` now applies cruise ramp-up (off→on transition only — skipped on re-enable), a cruise plateau, and a cruise ramp-DOWN from cruise PWM to `Config::PWM_MIN_MAGNITUDE` over the approach distance. The final stop is an active brake at the gate, fired at floor PWM — not from cruise. This eliminates the lower MCU's brake-from-cruise stopping distance variance, which matters for PROJECTION_FOLLOW node-precision. Ramp distances are fitted to the available distance: with no ramp-up (re-arm case like LINE_OVERSHOOT) the ramp-down consumes the whole travel; with both ramps active each is clamped to half. Manual opt-outs are exposed via `LineFollowerEnableBuilder::setTShapeRampUp(bool)` and `setTShapeRampDown(bool)`.
 
 The change also fixes a Copilot-flagged bug in PR #12: PathTracker's LINE_OVERSHOOT state re-armed an already-enabled LineFollower with `setEnabled(true).setDistanceTarget(LINE_SENSOR_AXLE_OFFSET_CM)`, which used to drop cruise to 0 and ramp back up (because the enable path unconditionally reseeded the ramp from 0). The new re-arm guard in `_applyEnableBuilder` only seeds the ramp-up on a true off→on transition; re-enabling a running controller preserves whatever ramp/plateau state was already in flight. PathTracker's LINE_OVERSHOOT call site additionally chains `.setTShapeRampUp(false)` as a defensive belt-and-suspenders annotation — the guard already suppresses the reseed, but the explicit chain documents intent at the call site.
+
+## LineFollower junction PID-freeze — symmetric cruise during all non-NONE/UNKNOWN junction classifications
+
+**Defect being fixed**
+
+When the chassis crosses any junction (LEFT, RIGHT, T_OR_CROSS), the weighted-centroid error reported by `WROLineArrayClass::getError()` becomes unreliable. The cross-bar's black region pulls the centroid laterally away from the run-line, and the P+D mix inside `LineFollowerClass::update()` sees what appears to be a large heading error. The resulting correction command is spurious — the chassis is actually still on the correct heading — and causes visible wobble on every junction crossing.
+
+**Decision**
+
+Add a junction-freeze gate inside `LineFollowerClass::update()`, positioned after the lost-line dispatch and immediately before the P+D mix — so cruise entering the gate already reflects any active trapezoidal ramp progress (which is what makes ramp continuity work for free during a freeze). On each tick, read `_array->getJunctionType()` (the raw, un-debounced value — not the Intersection edge). When the result is anything other than `JunctionType::NONE` or `JunctionType::UNKNOWN`, skip the entire P+D computation and command `Drive.setSpeed(cruise, cruise)` (deadband-snapped). On the first non-junction tick after a freeze ends, reset `_lastErr` to `0.0f` before computing the derivative — identical to the lost-line exit pattern at LineFollower.cpp:281 — to prevent a derivative kick from the stale pre-freeze error. `_pidFrozen` is also cleared unconditionally on two cleanup paths: the `_applyEnableBuilder` disable branch (so the next enable cycle starts clean) and the lost-line dispatch in `update()` (so a lost-line condition mid-junction does not leak the freeze flag into the next online tick). Trapezoidal velocity ramps and the encoder distance gate continue ticking every tick regardless of freeze state; the freeze only suppresses the P+D output.
+
+**Trigger scope — all non-NONE/UNKNOWN, not just T_OR_CROSS (issue #22 was narrower)**
+
+Issue #22 originally proposed freezing only on `T_OR_CROSS`. The scope was broadened on 2026-05-19 to cover all non-NONE/UNKNOWN classifications, which includes LEFT and RIGHT junctions. The issue body itself flagged this: *"LEFT / RIGHT behaviour — they have the same and even bigger problem because the difference between left and right sensors will be enormous."* The underlying reason: on a LEFT or RIGHT junction only one half of the cross-bar is present, so the centroid pull is entirely asymmetric and the L-vs-R sensor difference becomes maximal — making the spurious error larger than at a full T or cross.
+
+**Output choice — symmetric cruise, bias applied by Drive**
+
+Both wheels are commanded at the same `cruise` value. The sign is handled by the existing forward/reverse logic at LineFollower.cpp:163–167 that already adjusts the cruise sign before calling `Drive.setSpeed`. `Drive.setSpeed` routes through the Strategy-B per-motor bias scalars (`_biasL` / `_biasR`) automatically, so no extra bias arithmetic is needed in the freeze branch. The chassis holds its last pre-junction heading rather than trying to actively correct it — which is the correct behaviour given that the sensor reading is known to be unreliable for the duration of the crossing.
+
+**Debounce — instant enter, instant exit**
+
+There is no hysteresis on the freeze gate. The wobble begins on the first tick that sees a non-NONE/UNKNOWN junction type; any debounce delay would allow at least one bad P+D command through before the freeze engaged, which is exactly what we are trying to prevent. `Intersection.update()`'s own debounce counters (`INTERSECTION_DEBOUNCE_TICKS` / `INTERSECTION_RELEASE_TICKS`) are unaffected — they still govern when Intersection fires a rising or falling EDGE for the path tracker's node-advance logic. The junction-freeze gate reads the raw `getJunctionType()` value independently and does not interact with or modify Intersection's state machine.
+
+**D-term reset — exit only, not entry**
+
+`_lastErr` is reset to `0.0f` on the first non-frozen tick after a freeze, not on freeze entry. Resetting at entry would discard the last valid pre-junction error, which could itself cause a small kick if the freeze is very brief. Resetting at exit guarantees the derivative computed on tick N+1 (the first tick with a reliable centroid again) uses a neutral base rather than the pre-freeze error sample, which is now several ticks stale and would compute against a sample taken at a very different chassis position. This mirrors the lost-line exit reset at LineFollower.cpp:281.
+
+**EventTrace — no new events**
+
+The freeze does not add entries to the 4-line OLED ring buffer. The existing events (LINE LOST, LINE OK, TURN END, intersection edges) already fill the buffer during complex maneuvers; adding a per-junction freeze/unfreeze event pair would crowd out the more useful ones. The `isPidFrozen()` accessor on `LineFollowerClass` remains available for Serial-side diagnostics during bring-up without competing with the OLED.
+
+**Alternatives considered**
+
+- *Hold last L/R PWM mix* — risks latching the first skewed centroid reading (the one that triggered the freeze) as the "held" value, since the centroid starts drifting before `getJunctionType()` returns non-NONE. Symmetric cruise avoids this; the pre-junction heading is implicitly preserved by the chassis's own momentum and the motor-bias calibration.
+- *IMU yaw-hold during freeze* — most robust: lock absolute yaw at freeze entry, drive both wheels to maintain it. Adds an IMU dependency to `LineFollowerClass` and another tunable gain. Kept on the shelf as an escalation path if symmetric cruise drifts visibly during field tests.
+- *Tick-scoped caching of `getJunctionType()` on `WROLineArrayClass`* — orthogonal optimization (noted in PR #20 review); reduces duplicate I2C reads if multiple callers query junction type in the same tick. Tracked separately from this decision.
+- *Debounce the freeze enter/exit* — defeats the purpose; the wobble starts on tick 1 of the junction crossing.
