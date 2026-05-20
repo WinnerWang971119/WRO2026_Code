@@ -78,6 +78,14 @@ _EDGE_BLIND_LINEWIDTH: float = 1.5
 
 _EDGE_ZORDER: int = 3
 
+# Proposed-edge preview styling (used by FieldCanvas.render's proposed_edges
+# kwarg -- drawn ABOVE committed edges, BELOW the highlight ring, so the
+# operator can see the proposal sitting on top of the existing graph.
+_PROPOSED_EDGE_COLOR: str = "cyan"
+_PROPOSED_EDGE_LINESTYLE: tuple = (0, (3, 3))  # dashed
+_PROPOSED_EDGE_LINEWIDTH: float = 1.8
+_PROPOSED_EDGE_ZORDER: int = 4  # between _EDGE_ZORDER (3) and _NODE_ZORDER (6)
+
 # Node dots + labels.
 _NODE_DOT_SIZE: float = 60.0
 _NODE_ZORDER: int = 6
@@ -233,19 +241,26 @@ class FieldCanvas:
         model: FieldModel,
         *,
         highlighted_nodes: Optional[list[str]] = None,
+        proposed_edges: Optional[list[tuple[str, str, str]]] = None,
     ) -> None:
         """Redraw the canvas from scratch for the given model.
 
         Clears the axes, restores the cosmetic limits / labels / grid,
         then paints in fixed z-order: background → obstacles → edges →
-        nodes → highlight ring. Calling this after every model mutation
-        is the editor's standard refresh path.
+        proposed-edge overlay → nodes → highlight ring. Calling this
+        after every model mutation is the editor's standard refresh path.
 
         :param model: The :class:`FieldModel` to render. Stored on the
             canvas for use by :meth:`find_node_at`.
         :param highlighted_nodes: Optional list of node names to draw a
             thick yellow ring around (on top of the regular node dots).
             Unknown names are silently skipped.
+        :param proposed_edges: Optional list of ``(a, b, kind)`` triples
+            drawn as a dashed cyan overlay above the committed edges.
+            ``kind`` is informational (caller may use it for status
+            reporting); the canvas styles all proposed edges identically.
+            Unknown node names are silently skipped (consistent with
+            ``highlighted_nodes``).
         :return: ``None``.
         """
         self._last_model = model
@@ -265,6 +280,8 @@ class FieldCanvas:
         self._draw_background(model, width_cm, height_cm)
         self._draw_obstacles(model)
         self._draw_edges(model)
+        if proposed_edges:
+            self._draw_proposed_edges(model, proposed_edges)
         self._draw_nodes(model)
         if highlighted_nodes:
             self._draw_highlight(model, highlighted_nodes)
@@ -511,6 +528,36 @@ class FieldCanvas:
                 linestyle=_EDGE_BLIND_LINESTYLE,
                 linewidth=_EDGE_BLIND_LINEWIDTH,
                 zorder=_EDGE_ZORDER,
+            )
+
+    def _draw_proposed_edges(
+        self,
+        model: FieldModel,
+        proposed_edges: list[tuple[str, str, str]],
+    ) -> None:
+        """Overlay the given (a, b, kind) edges in dashed cyan above committed edges.
+
+        The third tuple element (``kind``) is currently informational only — every
+        proposed edge is styled identically. Unknown node names are silently
+        skipped to match the defensive style used elsewhere in this class
+        (the model may briefly hold a half-deleted state mid-edit).
+
+        :param model: Source of node coordinates.
+        :param proposed_edges: List of ``(a, b, kind)`` triples.
+        """
+        nodes = model.nodes
+        for u, v, _kind in proposed_edges:
+            if u not in nodes or v not in nodes:
+                continue
+            ux, uy = nodes[u]
+            vx, vy = nodes[v]
+            self._ax.plot(
+                [ux, vx],
+                [uy, vy],
+                color=_PROPOSED_EDGE_COLOR,
+                linestyle=_PROPOSED_EDGE_LINESTYLE,
+                linewidth=_PROPOSED_EDGE_LINEWIDTH,
+                zorder=_PROPOSED_EDGE_ZORDER,
             )
 
     def _draw_nodes(self, model: FieldModel) -> None:
