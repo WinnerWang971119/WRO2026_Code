@@ -334,6 +334,37 @@ class FieldCanvas:
                     best_name = name
         return best_name
 
+    def find_obstacle_at(self, x: float, y: float) -> Optional[int]:
+        """Return the index of the topmost obstacle whose raw rectangle
+        contains ``(x, y)``, or ``None`` if no obstacle contains the point.
+
+        Hit-testing uses the *raw* (un-inflated) axis-aligned bounding box
+        stored in ``model.obstacles`` -- the inflated polygon is a planner
+        visualization and should not change which obstacle the user can
+        click on. The point is considered inside an obstacle if it is
+        within or on the boundary of the rectangle (``xmin <= x <= xmax``
+        and ``ymin <= y <= ymax``).
+
+        Iteration walks the obstacle list in reverse so that, when two
+        obstacles overlap at ``(x, y)``, the one drawn *last* (i.e. the
+        one visually on top) wins. Disjoint obstacles -- the common
+        case -- are unaffected by the iteration order.
+
+        :param x: World x coordinate, in centimetres.
+        :param y: World y coordinate, in centimetres.
+        :return: Index into :attr:`FieldModel.obstacles`, or ``None`` if
+            the point misses every obstacle (also returns ``None`` if
+            :meth:`render` has never been called).
+        """
+        if self._last_model is None:
+            return None
+        obstacles = self._last_model.obstacles
+        for index in range(len(obstacles) - 1, -1, -1):
+            xmin, ymin, xmax, ymax, _kind = obstacles[index]
+            if xmin <= x <= xmax and ymin <= y <= ymax:
+                return index
+        return None
+
     def figure_to_world(
         self, event
     ) -> Optional[tuple[float, float]]:

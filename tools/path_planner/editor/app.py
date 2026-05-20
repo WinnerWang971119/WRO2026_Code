@@ -54,6 +54,7 @@ from tools.path_planner.editor.commands import (
     AddObstacle,
     DeleteEdge,
     DeleteNode,
+    DeleteObstacle,
     MoveNode,
     RenameNode,
     SetNodeType,
@@ -602,7 +603,7 @@ class EditorApp:
         :param button: Matplotlib button number (1 = left, 3 = right).
         """
         if button == _MOUSE_BUTTON_RIGHT:
-            self._show_node_context_menu(x, y)
+            self._show_context_menu(x, y)
             return
 
         if button != _MOUSE_BUTTON_LEFT:
@@ -918,17 +919,34 @@ class EditorApp:
     # Right-click context menu
     # ------------------------------------------------------------------
 
-    def _show_node_context_menu(self, x: float, y: float) -> None:
-        """Pop up a Rename / Set-type / Delete menu over the clicked node.
+    def _show_context_menu(self, x: float, y: float) -> None:
+        """Route a right-click to either the node or the obstacle context menu.
+
+        Nodes are visually on top of obstacles, so a click that lands on a
+        node always shows the node menu. Falling back to obstacle hit-testing
+        only when no node is under the cursor preserves the existing
+        node-rename / set-type / delete flow.
 
         :param x: World x coordinate of the click.
         :param y: World y coordinate of the click.
         """
-        target = self._canvas.find_node_at(x, y)
-        if target is None:
-            self._set_status("Right-click: no node at click point.")
+        node_target = self._canvas.find_node_at(x, y)
+        if node_target is not None:
+            self._show_node_context_menu(node_target)
             return
 
+        obstacle_index = self._canvas.find_obstacle_at(x, y)
+        if obstacle_index is not None:
+            self._show_obstacle_context_menu(obstacle_index)
+            return
+
+        self._set_status("Right-click: no node or obstacle at click point.")
+
+    def _show_node_context_menu(self, target: str) -> None:
+        """Pop up a Rename / Set-type / Delete menu over a clicked node.
+
+        :param target: The node name under the cursor.
+        """
         menu = tk.Menu(self._root, tearoff=False)
         menu.add_command(
             label=f"Rename {target!r} ...",
@@ -961,6 +979,70 @@ class EditorApp:
             menu.tk_popup(screen_x, screen_y)
         finally:
             menu.grab_release()
+
+    def _show_obstacle_context_menu(self, obstacle_index: int) -> None:
+        """Pop up a Delete menu over a right-clicked obstacle.
+
+        Mirrors :meth:`_show_node_context_menu` but for obstacles, which
+        have no rename / type-change verbs -- delete is the only mutation
+        available from the context menu. The menu shows the obstacle's
+        ``kind`` tag so the operator can sanity-check which rectangle is
+        about to disappear when several obstacles overlap.
+
+        :param obstacle_index: Index into :attr:`FieldModel.obstacles` of
+            the obstacle under the cursor (returned by
+            :meth:`FieldCanvas.find_obstacle_at`).
+        """
+        obstacles = self._model.obstacles
+        if obstacle_index < 0 or obstacle_index >= len(obstacles):
+            return
+        kind = obstacles[obstacle_index][4]
+
+        menu = tk.Menu(self._root, tearoff=False)
+        menu.add_command(
+            label=f"Delete obstacle [{obstacle_index}] ({kind!r})",
+            command=lambda: self._context_delete_obstacle(obstacle_index),
+        )
+
+        try:
+            screen_x = self._root.winfo_pointerx()
+            screen_y = self._root.winfo_pointery()
+            menu.tk_popup(screen_x, screen_y)
+        finally:
+            menu.grab_release()
+
+    def _context_delete_obstacle(self, obstacle_index: int) -> None:
+        """Confirm + dispatch :class:`DeleteObstacle` for *obstacle_index*.
+
+        Validates the index against the live ``model.obstacles`` list so a
+        stale menu (e.g. obstacle deleted by undo/redo between the right
+        click and the menu selection) shows a status-bar warning instead
+        of raising ``IndexError`` out of the command.
+
+        :param obstacle_index: Index into :attr:`FieldModel.obstacles`.
+        """
+        obstacles = self._model.obstacles
+        if obstacle_index < 0 or obstacle_index >= len(obstacles):
+            self._set_status(
+                f"Obstacle index {obstacle_index} is no longer valid; "
+                "model changed since the menu opened."
+            )
+            return
+        xmin, ymin, xmax, ymax, kind = obstacles[obstacle_index]
+
+        confirm = messagebox.askyesno(
+            "Confirm delete",
+            f"Delete obstacle [{obstacle_index}] {kind!r} at "
+            f"({xmin:.1f}, {ymin:.1f}) -> ({xmax:.1f}, {ymax:.1f})?",
+            parent=self._root,
+        )
+        if not confirm:
+            return
+
+        if self._dispatch(DeleteObstacle(obstacle_index)):
+            self._set_status(
+                f"Deleted obstacle [{obstacle_index}] ({kind!r})."
+            )
 
     def _context_rename(self, target: str) -> None:
         """Prompt for a new name and dispatch :class:`RenameNode`.

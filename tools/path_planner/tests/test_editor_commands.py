@@ -19,6 +19,7 @@ from tools.path_planner.editor.commands import (
     AddObstacle,
     DeleteEdge,
     DeleteNode,
+    DeleteObstacle,
     MoveNode,
     RenameNode,
     SetStart,
@@ -200,6 +201,37 @@ def test_add_obstacle_revert_pops_specific_entry() -> None:
 
     cmd.revert(model)
     assert model.obstacles == original_obstacles
+
+
+# ---------------------------------------------------------------------------
+# DeleteObstacle apply / revert / out-of-range guard
+# ---------------------------------------------------------------------------
+
+
+def test_delete_obstacle_revert_reinserts_at_original_index() -> None:
+    """DeleteObstacle.revert must put the obstacle back where it was."""
+    model = make_model()
+    # Two obstacles so the index actually matters for revert.
+    model.obstacles.append((100.0, 100.0, 150.0, 150.0, "wall"))
+    original_obstacles = list(model.obstacles)
+
+    cmd = DeleteObstacle(0)
+    cmd.apply(model)
+    assert model.obstacles == [(100.0, 100.0, 150.0, 150.0, "wall")]
+
+    cmd.revert(model)
+    assert model.obstacles == original_obstacles
+
+
+def test_delete_obstacle_raises_on_out_of_range_index() -> None:
+    """DeleteObstacle must raise IndexError -- not silently no-op -- on a
+    stale index. The editor's context menu relies on this so a confirm
+    dialog opened against an already-removed obstacle surfaces cleanly."""
+    model = make_model()
+    with pytest.raises(IndexError):
+        DeleteObstacle(99).apply(model)
+    with pytest.raises(IndexError):
+        DeleteObstacle(-1).apply(model)
 
 
 # ---------------------------------------------------------------------------
