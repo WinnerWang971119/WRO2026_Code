@@ -40,6 +40,8 @@ import tkinter as tk
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tkinter import messagebox, simpledialog
+
+from tools.path_planner.editor.dialogs import AddNodeDialog
 from typing import Optional
 
 from tools.path_planner.editor import loader
@@ -573,36 +575,20 @@ class EditorApp:
     def _handle_add_node_click(self, x: float, y: float) -> None:
         """Prompt for name + type then dispatch :class:`AddNode`.
 
+        Opens the combined :class:`AddNodeDialog` (T3). OK dispatches
+        :class:`AddNode` at the clicked coordinates; Cancel is a no-op.
+        Validation of duplicate / illegal names happens downstream in
+        ``AddNode.apply`` -- any ``ValueError`` is surfaced by ``_dispatch``
+        in the status bar.
+
         :param x: World x coordinate of the click.
         :param y: World y coordinate of the click.
         """
-        name = simpledialog.askstring(
-            "New node",
-            "Name:",
-            parent=self._root,
-        )
-        if not name:
+        dlg = AddNodeDialog(self._root, initial_type=_NODE_TYPE_LINE)
+        dlg.wait_window()
+        if dlg.result is None:
             return
-        name = name.strip()
-        if not name:
-            return
-
-        node_type = simpledialog.askstring(
-            "Node type",
-            f"line / blind (default: {_NODE_TYPE_LINE}):",
-            initialvalue=_NODE_TYPE_LINE,
-            parent=self._root,
-        )
-        if node_type is None:
-            return
-        node_type = node_type.strip().lower() or _NODE_TYPE_LINE
-        if node_type not in _VALID_NODE_TYPES:
-            self._set_status(
-                f"Invalid node type {node_type!r}; "
-                f"must be one of {list(_VALID_NODE_TYPES)}."
-            )
-            return
-
+        name, node_type = dlg.result
         self._dispatch(AddNode(name, (x, y), node_type))
 
     def _handle_move_click(self, x: float, y: float) -> None:
