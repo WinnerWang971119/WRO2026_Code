@@ -44,10 +44,11 @@ from tkinter import messagebox, simpledialog
 from tools.path_planner.editor.dialogs import AddNodeDialog
 from typing import Optional
 
-from tools.path_planner.editor import loader
+from tools.path_planner.editor import auto_edges, loader
 from tools.path_planner.editor.canvas import FieldCanvas
 from tools.path_planner.editor.commands import (
     AddBlindEdge,
+    AddEdgesBatch,
     AddLineEdge,
     AddNode,
     AddObstacle,
@@ -207,6 +208,10 @@ class EditorApp:
         # Obstacle mode: live (x, y) of the drag cursor, used by the
         # preview overlay. ``None`` when no drag is in progress.
         self._obstacle_cursor: Optional[tuple[float, float]] = None
+        # Auto-create preview state (T8). ``None`` when no preview is active.
+        # When non-None, the canvas renders the list as a dashed cyan overlay
+        # and the SidePanels show Accept / Reject instead of Auto-create.
+        self._proposed_edges: Optional[list[tuple[str, str, str]]] = None
 
         # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
@@ -250,6 +255,9 @@ class EditorApp:
         self._panels.on_redo = self._redo
         self._panels.on_save = self._save
         self._panels.on_save_and_build = self._save_and_build
+        self._panels.on_auto_create_edges = self._on_panel_auto_create_edges
+        self._panels.on_accept_proposed = self._on_panel_accept_proposed
+        self._panels.on_reject_proposed = self._on_panel_reject_proposed
 
         # Clear transient drag / preview / selection state whenever the
         # user switches modes — otherwise a half-finished obstacle drag
@@ -302,7 +310,11 @@ class EditorApp:
     def _refresh_view(self) -> None:
         """Re-render canvas + side panels + button enable states + title."""
         highlighted = list(self._edge_selection)
-        self._canvas.render(self._model, highlighted_nodes=highlighted)
+        self._canvas.render(
+            self._model,
+            highlighted_nodes=highlighted,
+            proposed_edges=self._proposed_edges,
+        )
         self._panels.refresh(self._model)
         self._panels.set_undo_enabled(self._history.can_undo)
         self._panels.set_redo_enabled(self._history.can_redo)
@@ -457,6 +469,79 @@ class EditorApp:
             self._last_committed_heading = heading_deg
 
     # ------------------------------------------------------------------
+    # Auto-create-edges (T8)
+    # ------------------------------------------------------------------
+
+    def _on_panel_auto_create_edges(self) -> None:
+        """Compute proposed edges + enter preview mode.
+
+        Reads ``max_edge_length_cm`` from the panel at click time (no
+        caching). On empty result -- < 3 non-collinear nodes, or every
+        candidate filtered by obstacles / pre-existing pairs / length cap --
+        writes a status-bar message and does NOT enter preview mode. On a
+        non-empty result, stores the list on ``self._proposed_edges``,
+        switches the panel to "preview" state (revealing Accept / Reject),
+        and re-renders so the canvas paints the overlay.
+
+        :return: ``None``.
+        """
+        max_len_cm = self._panels.max_edge_length_cm
+        proposals = auto_edges.propose_edges(self._model, max_len_cm)
+        if not proposals:
+            self._set_status(
+                "No edges to propose (need >= 3 non-collinear nodes / all candidates filtered)."
+            )
+            return
+        line_count = sum(1 for _a, _b, k in proposals if k == "line")
+        blind_count = sum(1 for _a, _b, k in proposals if k == "blind")
+        self._proposed_edges = proposals
+        self._panels.set_auto_create_state("preview")
+        self._set_status(
+            f"Proposed {len(proposals)} edges (line={line_count}, blind={blind_count}). "
+            "Accept or Reject."
+        )
+        self._refresh_view()
+
+    def _on_panel_accept_proposed(self) -> None:
+        """Commit the proposed edges via :class:`AddEdgesBatch`.
+
+        Clears the preview state BEFORE dispatching so the canvas refresh
+        triggered by :meth:`_dispatch` does not re-paint the (now-committed)
+        edges as a dashed cyan overlay. On dispatch failure, the preview is
+        restored so the user can inspect the offending edges and decide
+        whether to Reject or fix the model.
+
+        :return: ``None``.
+        """
+        if self._proposed_edges is None:
+            return
+        batch = list(self._proposed_edges)
+        # Clear preview FIRST so _dispatch's own _refresh_view doesn't
+        # re-paint the now-committed edges as a cyan overlay.
+        self._proposed_edges = None
+        self._panels.set_auto_create_state("idle")
+        if self._dispatch(AddEdgesBatch(batch)):
+            self._set_status(f"Added {len(batch)} edges.")
+        else:
+            # Dispatch already wrote a status message about the conflict.
+            # Restore the preview so the user can inspect / Reject.
+            self._proposed_edges = batch
+            self._panels.set_auto_create_state("preview")
+            self._refresh_view()
+
+    def _on_panel_reject_proposed(self) -> None:
+        """Discard the preview without touching the model.
+
+        :return: ``None``.
+        """
+        if self._proposed_edges is None:
+            return
+        self._proposed_edges = None
+        self._panels.set_auto_create_state("idle")
+        self._set_status("Proposal rejected.")
+        self._refresh_view()
+
+    # ------------------------------------------------------------------
     # Canvas mouse handlers (mode-routed)
     # ------------------------------------------------------------------
 
@@ -482,6 +567,9 @@ class EditorApp:
         * OBSTACLE-mode rubber-band rectangle anchor + cursor
           (``_obstacle_anchor``, ``_obstacle_cursor``).
         * EDGE-mode two-click endpoint queue (``_edge_selection``).
+        * Auto-create preview state (``_proposed_edges``) -- mode change
+          kills any in-progress proposal so the Accept/Reject buttons do
+          not survive into a different mode.
 
         Called whenever the user switches mode so a half-finished drag
         or partial edge selection does not bleed into the next mode.
@@ -492,6 +580,9 @@ class EditorApp:
         self._obstacle_anchor = None
         self._obstacle_cursor = None
         self._edge_selection = []
+        if self._proposed_edges is not None:
+            self._proposed_edges = None
+            self._panels.set_auto_create_state("idle")
 
     def _on_mode_change(self) -> None:
         """``mode_var`` write trace: drop transient state and re-render.
