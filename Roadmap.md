@@ -1,11 +1,14 @@
 # WRO 2026 Mosaic Masters — Roadmap
 
-This roadmap is the time axis of the project. It schedules the work whose
-shape is described in [ARCHITECTURE.md](./ARCHITECTURE.md) and whose
-rationale is recorded in the ADRs under [docs/decisions/](./docs/decisions/)
-(indexed in [DECISIONS.md](./DECISIONS.md)). When this document and either
-of those disagree, the architecture / decisions docs win and this file
-gets updated.
+This roadmap is the sequence axis of the project. Phases are linear —
+finish one, start the next, as fast as possible. Internal phase timing
+is deliberately not budgeted; only the external WRO competition dates
+are fixed. The roadmap schedules the work whose shape is described in
+[ARCHITECTURE.md](./ARCHITECTURE.md) and whose rationale is recorded in
+the ADRs under [docs/decisions/](./docs/decisions/) (indexed in
+[DECISIONS.md](./DECISIONS.md)). When this document and either of those
+disagree, the architecture / decisions docs win and this file gets
+updated.
 
 ## 1. Big Picture
 
@@ -18,20 +21,14 @@ the start zone. Three deadlines: regional `2026-07-21`, national
 two parallel tracks: mechanical (chassis, manipulator, sensor mounts) and
 software (modules in [ARCHITECTURE.md](./ARCHITECTURE.md)).
 
-**Status snapshot (2026-05-20):** the **Foundation** (original Phases 0-2)
-is closed and shipped to `main`. The drivebase facade, the line-follow +
+**Status snapshot.** The **Foundation** (original Phases 0-2) is closed
+and shipped to `main`. The drivebase facade, the line-follow +
 intersection + custom 8-channel sensor stack, the offline Python path
 planner, the on-robot `Localization` + `PathTracker`, and the Mission
 operator DSL are all live. Issues #16 (8-ch line sensor) and #22
 (junction PID freeze) have landed. Manipulator v0 mechanism is in
-progress on the mech track; perception (color + camera) and the Tasks
-layer are not yet started.
-
-Software is ~4-5 weeks ahead of the original schedule. The phase plan
-below uses that buffer for hardware verification on the real chassis,
-real-field encoding via `pick_xy.py`, an early start on manipulator
-software against the expected RC interface, and pulling some Phase 2.5
-deferred items forward into Phase 3.
+progress on the mech track; perception (camera) and the Tasks layer are
+not yet started. Phase 3 is next.
 
 **Two physical chassis.** Phases 3-6 run on the **test rover** (TT
 motors, current `Config.h` defaults). The **competition robot Lofaix**
@@ -43,27 +40,28 @@ re-tune `LINE_KP` / `LINE_KD` on Lofaix's geometry, and re-pass the
 Phase 6 B6.1 ten-trial battery on Lofaix to confirm the regional target
 still holds. Issue #15 tracks the EV3 model swap.
 
-## 2. Timeline at a Glance
+## 2. Phase Sequence
 
-| Phase | Dates | Goal | Must-ship-by |
-|---|---|---|---|
-| **Foundation** | shipped | Drive / LineFollower / Intersection / WROLineArray / FieldMap / Localization / PathTracker / Mission DSL / Python path planner / CI | done |
-| 3 | `2026-05-20` → `2026-06-03` (2 wk) | Hardware verification of the shipped stack + real 2026 field encoded | `2026-06-03` |
-| 4 | `2026-06-03` → `2026-06-17` (2 wk) | Perception: one camera module (3×3 mosaic + single-cell color) — runs in parallel with mech building manipulator v0 | `2026-06-17` |
-| 5 | `2026-06-17` → `2026-07-01` (2 wk) | Manipulator software on v0 mechanism + first end-to-end Task | `2026-07-01` |
-| 6 | `2026-07-01` → `2026-07-15` (2 wk) | Tasks layer + Mission scheduler + recoveries + full 2-minute run | `2026-07-15` |
-| 7 | `2026-07-15` → `2026-07-21` (6 d) | Regional sprint — code freeze, on-site calibration, compete | `2026-07-21` |
-| 8 | `2026-07-22` → `2026-08-24` (~5 wk) | National refinement — post-mortem driven fixes, mech reinforcement | `2026-08-24` |
-| 9 | `2026-08-25` → `2026-11-30` (~14 wk) | World final prep — task-order experiments, robustness, travel | `2026-11-30` |
+| Phase | Goal | Status |
+|---|---|---|
+| **Foundation** | Drive / LineFollower / Intersection / WROLineArray / FieldMap / Localization / PathTracker / Mission DSL / Python path planner / CI | shipped |
+| 3 | Hardware verification of the shipped stack + real 2026 field encoded | next |
+| 4 | Perception: one camera module (3×3 mosaic + single-cell color) — runs in parallel with mech building manipulator v0 | pending |
+| 5 | Manipulator software on v0 mechanism + first end-to-end Task | pending |
+| 6 | Tasks layer + Mission scheduler + recoveries + full 2-minute run | pending |
+| 7 | Lofaix bring-up + regional sprint (compete `2026-07-21`) | pending |
+| 8 | National refinement (compete `2026-08-24`) | pending |
+| 9 | World final prep (compete `2026-11-30`) | pending |
 
-Dates shift if the manipulator mechanism slips or if hardware
-verification surfaces a bug class that needs more than the budgeted
-buffer. Phase 3 is the load-bearing one — it tests the assumption that
-the simulator-verified stack actually works on the real chassis.
+Phases are linear — finish one, start the next. Phase 3 is the
+load-bearing one: it tests the assumption that the simulator-verified
+stack actually works on the real chassis. Only external competition
+dates are fixed; internal phase duration is "as fast as possible," not
+budgeted.
 
 ## 3. Foundation (shipped, retained for context)
 
-The work shipped before 2026-05-20 is captured by:
+The work in `main` at the start of Phase 3 is captured by:
 - [ARCHITECTURE.md](./ARCHITECTURE.md) — module map as it stands today.
 - [DECISIONS.md](./DECISIONS.md) + [docs/decisions/](./docs/decisions/) — every load-bearing decision (ADR-001 through ADR-020).
 - [docs/archive/plans/](./docs/archive/plans/) — the seven plan docs whose work landed.
@@ -87,7 +85,7 @@ Foundation deliverables:
 | Python path planner pipeline | shipped | `tools/path_planner/README.md` |
 | GitHub Actions CI | shipped | `.github/workflows/` |
 
-## 4. Phase 3 — Hardware Verification + Real-Field Encoding (`2026-05-20` → `2026-06-03`, 2 weeks)
+## 4. Phase 3 — Hardware Verification + Real-Field Encoding
 
 **Goal:** Prove the shipped stack works on the real chassis (not just the
 simulator), and replace the toy A-G+P1 graph with the actual 2026 field
@@ -130,7 +128,7 @@ the blind edges of the real field, consider pulling forward calibration
 nodes + blind-cost tiers + `wall_zero` (ADR-aligned with Phase 2.5
 deferred work) into a Phase 3.5 sub-task before Phase 4 starts.
 
-## 5. Phase 4 — Perception (`2026-06-03` → `2026-06-17`, 2 weeks)
+## 5. Phase 4 — Perception
 
 **Goal:** Read individual cell colors AND the 3×3 mosaic pattern
 reliably under workshop lighting — both through a **single camera
@@ -160,7 +158,7 @@ of the manipulator mechanism, so it lands while mech finishes manipulator v0.
 | P4.5 | Workshop-lighting calibration table — single source for both reads | sw | P4.3, P4.4 | calibration data |
 | P4.6 | Manipulator v0 final assembly + bench range-of-motion check | mech | P3.9 | mech v0 ready |
 
-## 6. Phase 5 — Manipulator + First Task (`2026-06-17` → `2026-07-01`, 2 weeks)
+## 6. Phase 5 — Manipulator + First Task
 
 **Goal:** Drive the manipulator v0 mechanism from software; build and run
 one end-to-end Task (probably tool delivery as the simplest) that
@@ -188,7 +186,7 @@ composes PathTracker + Manipulator + camera module.
 | P5.6 | Mission DSL `.task("name", args)` verb + dispatcher | sw | P5.4 | DSL extension |
 | P5.7 | End-to-end tool delivery on test mat, 5 trials | both | P5.5, P5.6 | first scoring run |
 
-## 7. Phase 6 — Tasks Layer Complete + Mission Scheduler + Recoveries (`2026-07-01` → `2026-07-15`, 2 weeks)
+## 7. Phase 6 — Tasks Layer Complete + Mission Scheduler + Recoveries
 
 **Goal:** Every scoring action implemented as a Task; Mission scheduler
 picks task order; 2-minute time guard + return-to-start works; the third
@@ -218,7 +216,9 @@ named failure recovery (failed grip) lands.
 | P6.7 | Failed-grip recovery branch in Tasks | sw | P5.1 | recovery 3 |
 | P6.8 | Ten full-run scoring sessions; require ≥8/10 success on regional-target scope | both | P6.6, P6.7 | run metrics |
 
-## 8. Phase 7 — Lofaix Bring-up + Regional Sprint (`2026-07-15` → `2026-07-21`, 6 days)
+## 8. Phase 7 — Lofaix Bring-up + Regional Sprint
+
+**Compete date:** `2026-07-21` (regional, fixed by WRO).
 
 **Goal:** Move the working software stack from the test rover onto the
 competition robot **Lofaix** (LEGO EV3 motors), confirm the regional
@@ -231,7 +231,7 @@ in the sprint window — only constants tunable.
 - [ ] `Drive.calibrateMotorBias()` re-run on Lofaix, scalars committed.
 - [ ] `LINE_KP` / `LINE_KD` re-tuned on Lofaix.
 - [ ] B6.1 ten-trial battery passes on Lofaix at the same 8/10 success rate.
-- [ ] Code frozen on `2026-07-18`. Only color baselines and PID gains may change after freeze.
+- [ ] Code frozen before venue practice. Only color baselines and PID gains may change after freeze.
 - [ ] On-site lighting calibration recorded for the camera module (single table, both use cases).
 - [ ] Battery cells charged, spares present, `setBattCell(2)` confirmed.
 - [ ] At least one full practice run executed at the venue before competition.
@@ -254,12 +254,14 @@ in the sprint window — only constants tunable.
 | P7.3 | Venue practice run + on-site lighting calibration | both | P7.1 | tuned baselines |
 | P7.4 | Compete | both | P7.3 | regional result |
 
-**Note on the schedule:** P7.0a-P7.0e ideally land before `2026-07-15` so
-the entire 6-day Phase 7 window is available for venue prep + compete. If
-Lofaix mech slips, P7.0 tasks eat into the freeze window; the freeze date
-shifts later in the week but `2026-07-21` is fixed.
+**Sequence note:** P7.0a-P7.0e (Lofaix bring-up) should land early in
+this phase so the bulk of the time goes to venue prep + compete. If
+Lofaix mech slips, the bring-up tasks compress the freeze window, but
+the regional compete date `2026-07-21` is fixed.
 
-## 9. Phase 8 — National Refinement (`2026-07-22` → `2026-08-24`, ~5 weeks)
+## 9. Phase 8 — National Refinement
+
+**Compete date:** `2026-08-24` (national, fixed by WRO).
 
 **Goal:** Convert regional learnings into measurable score gains; compete
 at national.
@@ -287,7 +289,9 @@ at national.
 | P8.7 | Code freeze for national, tag commit | sw | P8.6 | national tag |
 | P8.8 | Compete at national | both | P8.7 | national result |
 
-## 10. Phase 9 — World Final Prep (`2026-08-25` → `2026-11-30`, ~14 weeks)
+## 10. Phase 9 — World Final Prep
+
+**Compete date:** `2026-11-30` (world final, fixed by WRO).
 
 **Goal:** Maximize score per run by re-ordering the task queue, shaving
 seconds, and hardening the robot for travel and repeated handling.
@@ -322,8 +326,8 @@ can lock in.
 
 | Decision | Owner | Decide-by | Options | Notes |
 |---|---|---|---|---|
-| Camera | sw lead | Phase 4 entry (`2026-06-03`) | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives the camera module impl; lighting calibration required either way (ADR-006). Camera is the **sole** color sensor — no dedicated ColorReader (ADR-021). |
-| Manipulator mechanism geometry | mech lead | Phase 5 entry (`2026-06-17`) | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator.setLift/setGripper/setArm` parameters (ADR-007). |
+| Camera | sw lead | Phase 4 entry | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives the camera module impl; lighting calibration required either way (ADR-006). Camera is the **sole** color sensor — no dedicated ColorReader (ADR-021). |
+| Manipulator mechanism geometry | mech lead | Phase 5 entry | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator.setLift/setGripper/setArm` parameters (ADR-007). |
 
 ### Closed in Foundation
 
@@ -339,7 +343,7 @@ can lock in.
 | # | Risk | Likelihood | Impact | Mitigation | Track |
 |---|---|---|---|---|---|
 | 1 | Manipulator slips on tool / tile / cement, repeatedly | M | H | Failed-grip recovery (ADR-009); grip-pad tuning in Phase 5/6; one retry then yield. | mech + sw |
-| 2 | Manipulator v0 mechanism slips past `2026-06-17` (Phase 5 entry) | M | H | Phase 4 (perception) and Phase 5 (manipulator sw) are scoped to run independently so a mech slip only delays Phase 5; software can draft `Manipulator` against expected RC servo IDs from `Config` as soon as Phase 4 ships. | mech |
+| 2 | Manipulator v0 mechanism slips past Phase 5 entry | M | H | Phase 4 (perception) and Phase 5 (manipulator sw) are scoped to run independently so a mech slip only delays Phase 5; software can draft `Manipulator` against expected RC servo IDs from `Config` as soon as Phase 4 ships. | mech |
 | 3 | Line sensor unreliable on competition mat surface | L | H | Two-layer calibration (firmware illumination + per-channel software baselines, ADR-019); re-baseline on-site (Phase 7.3). | sw |
 | 4 | Camera lighting shift between practice and venue | H | H | On-site re-baseline in Phase 7.3 / Phase 8.6; geometry fixed by line-follow stop, not odometry (ADR-006). | sw |
 | 5 | 2S battery sag causes brownout under high motor draw | M | M | `MiniR4.PWR.setBattCell(2)` correct; charged spares in go-bag; monitor `MiniR4.PWR` voltage on OLED. | mech |
@@ -348,7 +352,7 @@ can lock in.
 | 8 | Practice field arrives late, blocking Phase 6 / Phase 8 tuning | M | M | Use printed reduced-scale field (P3.4) until full-scale arrives; budget tuning into Phase 8 buffer weeks. | mech |
 | 9 | Encoder slip / dead-reckoning drift during a long task | M | M | Architecture rejects pure dead-reckoning (ADR-001); `Localization` re-anchors at every intersection. If Phase 3 verification exposes blind-edge drift, pull forward Phase 2.5 calibration nodes / `wall_zero`. | sw |
 | 10 | `Localization` written from outside the module | L | H | Coding criteria checklist in [ARCHITECTURE.md](./ARCHITECTURE.md); ADR-005; enforced in code review. | sw |
-| 11 | Lofaix (competition robot) not mech-ready by Phase 7 entry (`2026-07-15`) | M | H | Mech track must deliver Lofaix as a parallel deliverable during Phases 5-6. If slip, P7.0a-P7.0e eat the freeze window — `2026-07-18` freeze shifts later, but the `2026-07-21` regional date is fixed. Worst case: compete on the test rover with TT-tuned `Config.h`. | mech |
+| 11 | Lofaix (competition robot) not mech-ready by Phase 7 entry | M | H | Mech track must deliver Lofaix as a parallel deliverable during Phases 5-6. If slip, P7.0a-P7.0e compress the freeze window, but the `2026-07-21` regional date is fixed. Worst case: compete on the test rover with TT-tuned `Config.h`. | mech |
 | 12 | TT-tuned `Config.h` constants silently misapplied to Lofaix EV3 motors | L | H | P7.0b is a hard exit gate; static_assert or per-chassis preprocessor flag in `Config.h` (issue #15 design) prevents accidental cross-chassis flashing. | sw |
 
 ## 13. Test Fixture & Measurement Plan
