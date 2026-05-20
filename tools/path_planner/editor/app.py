@@ -186,11 +186,9 @@ class EditorApp:
         self._panels.pack(side="right", fill="y")
 
         # ---- 6. Canvas (left, expands) ----
-        # The panels module already imports the field_data module via the
-        # canvas, but we pass our captured reference for consistency.
-        self._canvas: FieldCanvas = FieldCanvas(
-            self._root, self._field_data_module
-        )
+        # The canvas resolves ``model.map_png`` against the planner root
+        # itself; it does not need a field_data module reference.
+        self._canvas: FieldCanvas = FieldCanvas(self._root)
         self._canvas.tk_widget.pack(side="left", fill="both", expand=True)
 
         # ---- 7. Mouse / mode state ----
@@ -249,6 +247,14 @@ class EditorApp:
         self._panels.on_redo = self._redo
         self._panels.on_save = self._save
         self._panels.on_save_and_build = self._save_and_build
+
+        # Clear transient drag / preview / selection state whenever the
+        # user switches modes — otherwise a half-finished obstacle drag
+        # or edge pick would latch across a mode change and surprise the
+        # user the next time they clicked.
+        self._panels.mode_var.trace_add(
+            "write", lambda *_args: self._on_mode_change()
+        )
 
     def _wire_canvas_callbacks(self) -> None:
         """Hook the three :class:`FieldCanvas` mouse slots to self handlers."""
@@ -443,6 +449,36 @@ class EditorApp:
             return Mode(raw)
         except ValueError:
             return None
+
+    def _clear_transient_state(self) -> None:
+        """Reset all per-mode transient interaction state.
+
+        Cleared:
+
+        * MOVE-mode drag latch (``_drag_target``, ``_drag_origin_xy``).
+        * OBSTACLE-mode rubber-band rectangle anchor + cursor
+          (``_obstacle_anchor``, ``_obstacle_cursor``).
+        * EDGE-mode two-click endpoint queue (``_edge_selection``).
+
+        Called whenever the user switches mode so a half-finished drag
+        or partial edge selection does not bleed into the next mode.
+        Does **not** touch model state or the dirty flag.
+        """
+        self._drag_target = None
+        self._drag_origin_xy = None
+        self._obstacle_anchor = None
+        self._obstacle_cursor = None
+        self._edge_selection = []
+
+    def _on_mode_change(self) -> None:
+        """``mode_var`` write trace: drop transient state and re-render.
+
+        The re-render is what makes the change visible: it wipes any
+        highlight ring around the previously-selected edge endpoints and
+        any in-progress obstacle preview rectangle.
+        """
+        self._clear_transient_state()
+        self._refresh_view()
 
     def _on_canvas_click(self, x: float, y: float, button: int) -> None:
         """Route a press event to the per-mode handler.
@@ -922,6 +958,13 @@ class EditorApp:
         the intermediate ``X -> Y`` mapping is dropped) so the LibCST
         rewriter only sees the latest target name for each original.
 
+        Degenerate chains that collapse to identity (``X -> Y -> X``)
+        are dropped entirely rather than recorded as ``{X: X}`` — the
+        latter would force :func:`tools.path_planner.editor.ast_rewrite.
+        rewrite_edges_uv` to rewrite the EDGES tree to a byte-identical
+        result and burn mtime for no reason, violating its
+        no-op-preserves-mtime contract.
+
         :param old: Name as it was before this rename.
         :param new: New name.
         """
@@ -932,9 +975,19 @@ class EditorApp:
                 forwarded_source = src
                 break
         if forwarded_source is not None:
-            self._pending_renames[forwarded_source] = new
+            # Chain collapse: the original source was already in the queue.
+            if forwarded_source == new:
+                # X -> Y followed by Y -> X collapses to identity; drop the
+                # entry entirely so Save doesn't trigger a no-op rewrite.
+                del self._pending_renames[forwarded_source]
+            else:
+                self._pending_renames[forwarded_source] = new
         else:
-            self._pending_renames[old] = new
+            # Fresh rename. Don't insert an identity entry in the first
+            # place (the panel layer already short-circuits ``old == new``,
+            # but be defensive in case a future caller bypasses it).
+            if old != new:
+                self._pending_renames[old] = new
 
     # ------------------------------------------------------------------
     # Save / Save & Build

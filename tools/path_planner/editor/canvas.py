@@ -142,22 +142,14 @@ class FieldCanvas:
 
     :param parent: Parent Tk widget (or :class:`tkinter.Tk`) that will
         host the embedded canvas widget.
-    :param field_data: The :mod:`tools.path_planner.field_data` module
-        reference. Used only to resolve relative ``MAP_PNG`` paths against
-        the planner root (``tools/path_planner/``); the model passed to
-        :meth:`render` is the source of truth for everything else.
     """
 
-    def __init__(self, parent: tk.Widget | tk.Tk, field_data) -> None:
+    def __init__(self, parent: tk.Widget | tk.Tk) -> None:
         """Construct the figure, axes, and embedded Tk canvas.
 
         :param parent: Parent Tk widget to embed the canvas into.
-        :param field_data: ``tools.path_planner.field_data`` module
-            reference. Stored for :meth:`render` to resolve relative map
-            paths.
         """
         self._parent: tk.Widget | tk.Tk = parent
-        self._field_data = field_data
 
         # Mouse-drag tracking state. ``_active_button`` is the button
         # number currently held, or ``None`` if no button is pressed. This
