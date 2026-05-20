@@ -430,10 +430,15 @@ class FieldCanvas:
                 stacklevel=2,
             )
             return
+        # ``origin="upper"`` (vs. the visualizer's ``"lower"``) flips the
+        # PNG vertically so the editor view matches the operator's
+        # physical orientation of the field mat. Nodes, edges, obstacles,
+        # and axis labels stay in the model's SW-origin frame -- only the
+        # image's pixel-to-extent mapping is mirrored.
         self._ax.imshow(
             img,
             extent=(0.0, width_cm, 0.0, height_cm),
-            origin="lower",
+            origin="upper",
             alpha=_BACKGROUND_ALPHA,
             zorder=_BACKGROUND_ZORDER,
             aspect="auto",
