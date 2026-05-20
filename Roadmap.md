@@ -49,7 +49,7 @@ still holds. Issue #15 tracks the EV3 model swap.
 |---|---|---|---|
 | **Foundation** | shipped | Drive / LineFollower / Intersection / WROLineArray / FieldMap / Localization / PathTracker / Mission DSL / Python path planner / CI | done |
 | 3 | `2026-05-20` → `2026-06-03` (2 wk) | Hardware verification of the shipped stack + real 2026 field encoded | `2026-06-03` |
-| 4 | `2026-06-03` → `2026-06-17` (2 wk) | Perception: `ColorReader` + `CameraMosaic` modules — runs in parallel with mech building manipulator v0 | `2026-06-17` |
+| 4 | `2026-06-03` → `2026-06-17` (2 wk) | Perception: one camera module (3×3 mosaic + single-cell color) — runs in parallel with mech building manipulator v0 | `2026-06-17` |
 | 5 | `2026-06-17` → `2026-07-01` (2 wk) | Manipulator software on v0 mechanism + first end-to-end Task | `2026-07-01` |
 | 6 | `2026-07-01` → `2026-07-15` (2 wk) | Tasks layer + Mission scheduler + recoveries + full 2-minute run | `2026-07-15` |
 | 7 | `2026-07-15` → `2026-07-21` (6 d) | Regional sprint — code freeze, on-site calibration, compete | `2026-07-21` |
@@ -132,37 +132,39 @@ deferred work) into a Phase 3.5 sub-task before Phase 4 starts.
 
 ## 5. Phase 4 — Perception (`2026-06-03` → `2026-06-17`, 2 weeks)
 
-**Goal:** Read individual cell colors and the 3×3 mosaic pattern reliably
-under workshop lighting. These modules are independent of the manipulator
-mechanism, so they run while mech finishes manipulator v0.
+**Goal:** Read individual cell colors AND the 3×3 mosaic pattern
+reliably under workshop lighting — both through a **single camera
+module**. Per [ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md)
+there is no dedicated color sensor. The camera module runs independently
+of the manipulator mechanism, so it lands while mech finishes manipulator v0.
 
 **Exit criteria (hard gates):**
-- [ ] Camera + color sensor hardware selected and decisions logged in [DECISIONS.md](./DECISIONS.md) (ADR-006 implementation closes; new ADR for color-sensor model).
-- [ ] `ColorReader.read()` returns `{Y, B, G, W, NONE}` correctly on ≥18/20 samples per color under workshop lighting.
-- [ ] `CameraMosaic.capturePattern(out[9])` classifies all 9 cells correctly on ≥9/10 captures under workshop lighting.
-- [ ] Both modules expose the `update()` cooperative-tick interface and respect Rule 1 (no `delay()` in tick paths).
+- [ ] Camera hardware selected and decision logged in [DECISIONS.md](./DECISIONS.md) (ADR-006 implementation closes).
+- [ ] Camera module's single-cell color read returns `{Y, B, G, W, NONE}` correctly on ≥18/20 samples per color under workshop lighting (replaces what was the ColorReader benchmark, B4.1).
+- [ ] Camera module's `capturePattern(out[9])` classifies all 9 cells correctly on ≥9/10 captures under workshop lighting (B4.2).
+- [ ] Module exposes the `update()` cooperative-tick interface and respects Rule 1 (no `delay()` in tick paths).
+- [ ] One calibration table in `Config.h` covers both use cases (single-cell and 3×3).
 
 **Tracks running in parallel:**
-- Mechanical: finalize manipulator v0; design permanent color + camera mounts (geometry locks in Phase 5).
-- Software: `ColorReader.h/.cpp` and `CameraMosaic.h/.cpp` written against the chosen sensors; calibration baselines committed to `Config.h` like `LINE_CALIB_*`.
+- Mechanical: finalize manipulator v0; design permanent camera mount that serves both 3×3-mosaic view AND single-cell view at the cement-block pick point (geometry locks in Phase 5).
+- Software: camera module (`CameraMosaic` / `CameraColor` / `Camera` — name decided when written) covering both operations; one calibration baseline committed to `Config.h` like `LINE_CALIB_*`.
 
 **Tasks (ordered):**
 
 | ID | Task | Track | Blocked By | Output |
 |----|------|-------|------------|--------|
-| P4.1 | Decide camera (HuskyLens vs raw) — write new ADR | sw | P3.7 | camera ADR |
-| P4.2 | Decide color sensor — write new ADR | sw | P3.7 | color ADR |
-| P4.3 | Mount color sensor + camera in placeholder positions for calibration | both | P4.1, P4.2 | placeholder mounts |
-| P4.4 | `ColorReader.h/.cpp` — `read() → ColorEnum`, calibration baselines | sw | P4.2, P4.3 | color module |
-| P4.5 | `CameraMosaic.h/.cpp` — `capturePattern(out[9])` | sw | P4.1, P4.3 | mosaic module |
-| P4.6 | Workshop-lighting calibration table for both modules | sw | P4.4, P4.5 | calibration data |
-| P4.7 | Manipulator v0 final assembly + bench range-of-motion check | mech | P3.9 | mech v0 ready |
+| P4.1 | Decide camera (HuskyLens vs raw) — write the ADR-006 implementation closure | sw | P3.7 | camera selection |
+| P4.2 | Mount camera in placeholder position for calibration (both use cases) | both | P4.1 | placeholder mount |
+| P4.3 | Camera module — `capturePattern(out[9])` for the 3×3 mosaic | sw | P4.1, P4.2 | mosaic read |
+| P4.4 | Camera module — `readSingleColor() → ColorEnum` for cement / tile | sw | P4.3 | single-cell read |
+| P4.5 | Workshop-lighting calibration table — single source for both reads | sw | P4.3, P4.4 | calibration data |
+| P4.6 | Manipulator v0 final assembly + bench range-of-motion check | mech | P3.9 | mech v0 ready |
 
 ## 6. Phase 5 — Manipulator + First Task (`2026-06-17` → `2026-07-01`, 2 weeks)
 
 **Goal:** Drive the manipulator v0 mechanism from software; build and run
 one end-to-end Task (probably tool delivery as the simplest) that
-composes PathTracker + Manipulator + ColorReader.
+composes PathTracker + Manipulator + camera module.
 
 **Exit criteria (hard gates):**
 - [ ] `Manipulator.setLift(h)` / `setGripper(angle)` / `setArm(angle)` non-blocking; reach commanded position within tolerance + timeout.
@@ -180,7 +182,7 @@ composes PathTracker + Manipulator + ColorReader.
 |----|------|-------|------------|--------|
 | P5.1 | Replace `Manipulator` stub with real `setLift/setGripper/setArm` against v0 | sw | P4.7 | manipulator sw v1 |
 | P5.2 | Tune servo ranges, neutral positions, grip force | both | P5.1 | tuned manipulator |
-| P5.3 | Install permanent color + camera mounts; re-baseline calibration | both | P5.2 | locked geometry |
+| P5.3 | Install permanent camera mount (serves both 3×3 + single-cell views); re-baseline calibration | both | P5.2 | locked geometry |
 | P5.4 | `Tasks.h/.cpp` framework (`start/update/isDone/abort` per scoring action) | sw | P5.1 | tasks framework |
 | P5.5 | First task FSM — tool delivery (drive → grip → drive → drop → verify) | sw | P5.4 | tool task |
 | P5.6 | Mission DSL `.task("name", args)` verb + dispatcher | sw | P5.4 | DSL extension |
@@ -209,7 +211,7 @@ named failure recovery (failed grip) lands.
 |----|------|-------|------------|--------|
 | P6.1 | Tasks — mosaic pattern read (uses CameraMosaic) | sw | P5.5 | mosaic read task |
 | P6.2 | Tasks — mosaic tile placement (composes pattern + manipulator) | sw | P6.1 | mosaic place task |
-| P6.3 | Tasks — cement delivery (uses ColorReader) | sw | P5.5 | cement task |
+| P6.3 | Tasks — cement delivery (uses camera `readSingleColor()` for block ID) | sw | P5.5 | cement task |
 | P6.4 | Tasks — brick-trowel return | sw | P5.5 | return task |
 | P6.5 | Mission scheduler — greedy score/sec + per-task estimates | sw | P6.2, P6.3, P6.4 | scheduler |
 | P6.6 | Mission 2-minute time guard + forced return-to-start at t=100s | sw | P6.5 | time guard |
@@ -230,7 +232,7 @@ in the sprint window — only constants tunable.
 - [ ] `LINE_KP` / `LINE_KD` re-tuned on Lofaix.
 - [ ] B6.1 ten-trial battery passes on Lofaix at the same 8/10 success rate.
 - [ ] Code frozen on `2026-07-18`. Only color baselines and PID gains may change after freeze.
-- [ ] On-site lighting calibration recorded for `ColorReader` and `CameraMosaic`.
+- [ ] On-site lighting calibration recorded for the camera module (single table, both use cases).
 - [ ] Battery cells charged, spares present, `setBattCell(2)` confirmed.
 - [ ] At least one full practice run executed at the venue before competition.
 
@@ -320,8 +322,7 @@ can lock in.
 
 | Decision | Owner | Decide-by | Options | Notes |
 |---|---|---|---|---|
-| Camera | sw lead | Phase 4 entry (`2026-06-03`) | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives `CameraMosaic` impl; lighting calibration required either way (ADR-006). |
-| Color sensor | sw lead | Phase 4 entry (`2026-06-03`) | MXColorV3 ; HTColV2 ; Vernier | `ColorReader.read()` → `{Y, B, G, W, NONE}` regardless. |
+| Camera | sw lead | Phase 4 entry (`2026-06-03`) | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives the camera module impl; lighting calibration required either way (ADR-006). Camera is the **sole** color sensor — no dedicated ColorReader (ADR-021). |
 | Manipulator mechanism geometry | mech lead | Phase 5 entry (`2026-06-17`) | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator.setLift/setGripper/setArm` parameters (ADR-007). |
 
 ### Closed in Foundation
@@ -363,7 +364,7 @@ hardware. IDs are referenced from each phase's "Exit criteria" gates.
 | 3 | B3.4 | T- and +-intersections, 20 trials each | ≥19/20 correct detections per type |
 | 3 | B3.5 | `PathTracker.goTo(name)`, 10 random A→B traversals on real-field printout | ≤1 missed intersection across all 10 runs |
 | 3 | B3.6 | Inject lost-line + missed-intersection in lab | Recoveries trigger and bound within timeout |
-| 4 | B4.1 | Each color sample (Y/B/G/W) shown to `ColorReader` 20× under workshop lighting | ≥18/20 correct per color |
+| 4 | B4.1 | Each color sample (Y/B/G/W) shown to the camera's `readSingleColor()` 20× under workshop lighting | ≥18/20 correct per color |
 | 4 | B4.2 | Mosaic pattern card under workshop lighting, robot at fixed stop | All 9 cells correct on ≥9/10 captures |
 | 5 | B5.1 | Manipulator `setLift / setGripper / setArm` range sweep | Reaches commanded position within tolerance + timeout |
 | 5 | B5.2 | Tool delivery Task end-to-end on test mat, 5 trials | ≥4/5 complete with score awarded |
@@ -383,10 +384,10 @@ concept, check this table first.
 |---|---|
 | Field (printed playing surface with black lines) | `field_data.py` → `routes.h` → `FieldMap` |
 | Intersection / waypoint (line crossing used as checkpoint) | `Intersection`, `Localization` |
-| Mosaic frame (3×3 fixture holding the pattern) | `CameraMosaic`, `Tasks` |
+| Mosaic frame (3×3 fixture holding the pattern) | camera module, `Tasks` |
 | Mosaic tile (single colored piece placed into one cell) | `Tasks`, `Manipulator` |
 | Tools (the three deliverable items) | `Tasks`, `Manipulator` |
-| Cement blocks (colored blocks delivered to deposit zones) | `Tasks`, `ColorReader`, `Manipulator` |
+| Cement blocks (colored blocks delivered to deposit zones) | `Tasks`, camera module (`readSingleColor`), `Manipulator` |
 | Brick trowel (returned to start zone at end) | `Tasks`, `Mission` |
 | Deposit zones (color-matched drop locations) | `field_data.py` / `routes.h`, `Tasks` |
 | 2-minute run (full autonomous round, scored up to 233) | `Mission` |

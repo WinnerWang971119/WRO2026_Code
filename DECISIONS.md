@@ -41,14 +41,15 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 - [ADR-019 — Custom 8-channel `WROLineArray` replaces vendor `MatrixLineTracer`](./docs/decisions/019-8channel-custom-line-sensor.md)
 - [ADR-020 — Freeze LineFollower PID output during any intersection](./docs/decisions/020-junction-pid-freeze.md)
+- [ADR-021 — Camera is the sole color sensor — no dedicated `ColorReader` module](./docs/decisions/021-camera-as-sole-color-sensor.md) (Phase 4)
 
 ## Status summary
 
 | Status | Count | ADRs |
 |---|---|---|
 | Implemented | 16 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018, 019, 020 |
-| Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 4), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
-| Pending implementation | 2 | 006 (Phase 3 camera), 007 (Phase 3 manipulator) |
+| Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
+| Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
 | Superseded | 0 | (ADR-010 supersedes the older "no logging at all" stance from the Phase 0 draft) |
 

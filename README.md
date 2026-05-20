@@ -52,7 +52,7 @@ map        (FieldMap, Localization, routes.h)
    |
    v
 perception + actuation
-           (LineFollower, Intersection, ColorReader, CameraMosaic,
+           (LineFollower, Intersection, Camera (mosaic + color),
             Drive, Manipulator)
    |
    v

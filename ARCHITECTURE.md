@@ -92,13 +92,12 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | `WROMath` | unit conversions | `cmToEncDeg`, `encDegToCm`, `presetToPwm`, `deadbandSnap` |
 | `StateMachine<State>` | generic FSM helper (header-only template, unused) | `enter(s)`, `current()`, `elapsed()`, `changed()`, `ack()` |
 
-### Not yet built (Phase 3+)
+### Not yet built (Phase 4+)
 
 | Module | Phase | Reason |
 |---|---|---|
-| `ColorReader` | 3 | Awaiting color sensor selection (open in [Roadmap.md](./Roadmap.md)). |
-| `CameraMosaic` | 3 | Awaiting camera selection (HuskyLens vs raw). |
-| Per-task FSMs (the old `Tasks` module) | 4 | Mission DSL covers PR3; richer per-task state machines come once perception + manipulator land. |
+| Camera module (`CameraMosaic` / `CameraColor` — name TBD) | 4 | Awaiting camera selection (HuskyLens vs raw, [ADR-006](./docs/decisions/006-mosaic-via-camera.md)). Handles **both** the 3×3 mosaic pattern read and single-cell color reads ([ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md)) — no dedicated `ColorReader` module is planned. |
+| Per-task FSMs (the old `Tasks` module) | 5/6 | Mission DSL covers PR3; richer per-task state machines come once perception + manipulator land. |
 
 ## The two iron rules
 
