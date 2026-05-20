@@ -1,0 +1,91 @@
+{
+  "FIELD_MM": [
+    3000,
+    2000
+  ],
+  "MAP_PNG": "maps/map.png",
+  "ROBOT_RADIUS_CM": 8.0,
+  "COST_BLIND_MULTIPLIER": 5.0,
+  "START_NODE": "A",
+  "START_HEADING_DEG": 0.0,
+  "NODES": {
+    "A": [
+      10.0,
+      10.0
+    ],
+    "B": [
+      200.0,
+      10.0
+    ],
+    "C": [
+      200.0,
+      150.0
+    ],
+    "D": [
+      10.0,
+      150.0
+    ],
+    "E": [
+      100.0,
+      80.0
+    ],
+    "G": [
+      250.0,
+      80.0
+    ],
+    "P1": [
+      55.0,
+      10.0
+    ]
+  },
+  "NODE_TYPES": {
+    "A": "line",
+    "B": "line",
+    "C": "line",
+    "D": "line",
+    "E": "line",
+    "G": "blind",
+    "P1": "line"
+  },
+  "LINE_SEGMENTS": [
+    [
+      "A",
+      "B"
+    ],
+    [
+      "B",
+      "C"
+    ],
+    [
+      "C",
+      "D"
+    ],
+    [
+      "D",
+      "A"
+    ],
+    [
+      "A",
+      "E"
+    ],
+    [
+      "B",
+      "E"
+    ],
+    [
+      "C",
+      "E"
+    ],
+    [
+      "D",
+      "E"
+    ]
+  ],
+  "BLIND_EDGES": [
+    [
+      "B",
+      "G"
+    ]
+  ],
+  "OBSTACLES": []
+}
