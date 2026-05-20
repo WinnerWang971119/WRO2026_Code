@@ -184,6 +184,47 @@ WRO2026_Code/
 
 Keep `setup()` and `loop()` thin — they construct/configure objects and dispatch to class methods via `cooperativeTick()`. Heavy logic lives in classes, not in free functions in the `.ino`.
 
+## Documenting design decisions (ADRs)
+
+Load-bearing design decisions live as one file per decision under [`docs/decisions/`](./docs/decisions/), indexed by [`DECISIONS.md`](./DECISIONS.md). When you make a decision that crosses module boundaries, changes an existing rule, or sets a project-wide convention, write a new ADR — don't bury the rationale in a commit message that future readers won't find.
+
+**When to write one**
+
+- New design rule that crosses module boundaries (e.g., "all builders block by default").
+- Change to an existing rule — write a **new** ADR with the next number, mark the old one **Superseded by ADR-NNN**, update cross-links in both files.
+- A "rule" that lasted long enough to be worth citing. One-PR conventions don't need an ADR; project-wide constraints do.
+
+**Required shape** (stay ~30–60 lines per file):
+
+```markdown
+# ADR-NNN: <one-line decision title>
+
+**Status:** Implemented | Partially implemented | Pending implementation | Deferred | Superseded by ADR-XXX
+**Date decided:** YYYY-MM (phase)
+
+## Rule
+<1-3 sentences — the rule as it is in force today>
+
+## Why
+<1-2 paragraphs — the motivation. Skip the implementation play-by-play; that lives in commits.>
+
+## How to apply
+<Where/when this rule kicks in. Cite specific module / API surfaces.>
+
+## Trigger to revisit
+<The specific condition that would cause us to re-open this decision.>
+
+## See also
+<Links to related ADRs, code modules, or other docs.>
+```
+
+**Rules**
+
+- ADR numbers are assigned **in order of first appearance**, not by topic. Never renumber.
+- Strip implementation history (reviewer-found bugs, struct sizes, "first cut was X" narratives). That belongs in commit messages / PR descriptions.
+- After adding an ADR, update the index in `DECISIONS.md` (one line in the appropriate section + bump the status-summary table).
+- If you find yourself making a one-off implementation decision while writing code, ask whether it's project-wide enough to deserve an ADR. If yes, write the ADR in the same PR that lands the code.
+
 ## Workflow rules (from user's global AGENTS.md, repeated for emphasis)
 
 - For non-trivial work, run the `plan` skill first, then `execute`.
