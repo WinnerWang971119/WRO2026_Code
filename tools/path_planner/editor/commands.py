@@ -33,6 +33,9 @@ from tools.path_planner.editor.model import FieldModel
 #: Allowed values for ``FieldModel.node_types`` entries.
 _VALID_NODE_TYPES: frozenset[str] = frozenset({"line", "blind"})
 
+#: Allowed ``kind`` values for edge-batch entries.
+_VALID_EDGE_KINDS: frozenset[str] = frozenset({"line", "blind"})
+
 #: Heading bounds, in degrees, CCW from +x (matches ``field_data`` convention).
 _HEADING_MIN_DEG: float = 0.0
 _HEADING_MAX_DEG_EXCLUSIVE: float = 360.0
@@ -534,6 +537,127 @@ class AddBlindEdge:
         index = _find_edge_index(model.blind_edges, target)
         if index >= 0:
             del model.blind_edges[index]
+
+
+@dataclass
+class AddEdgesBatch:
+    """Append multiple edges atomically.  One undo entry covers the whole batch.
+
+    All edges are validated before any mutation takes place.  If any edge
+    fails validation the model is left completely untouched (all-or-nothing).
+    An empty batch is a legal no-op.
+
+    :ivar edges: Sequence of ``(node_a, node_b, kind)`` triples where *kind*
+        is either ``"line"`` or ``"blind"``.
+    """
+
+    edges: list[tuple[str, str, str]]
+
+    # Populated during apply(); each entry is ("line"|"blind", appended_index).
+    # Stored in input order; revert walks this list in reverse.
+    _applied_indices: list[tuple[str, int]] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Validate all edges, then append them atomically to *model*.
+
+        **First pass (validation):** Each ``(a, b, kind)`` entry is checked in
+        input order.  The check fails immediately (with a precise message) if:
+
+        * *kind* is not ``"line"`` or ``"blind"``
+        * Either endpoint is not in ``model.nodes``
+        * The undirected pair ``{a, b}`` already exists in
+          ``model.line_segments`` or ``model.blind_edges``
+        * The same undirected pair appears more than once within
+          ``self.edges`` itself
+
+        No model mutation occurs if any check fails.
+
+        **Second pass (append):** Each edge is appended to the matching list
+        and its ``("line"|"blind", new_index)`` is recorded in
+        ``_applied_indices``.
+
+        :param model: Target model.
+        :raises ValueError: On the first validation failure; the model is
+            untouched.
+        """
+        # ── Pass 1: validate, collect no mutations ───────────────────────────
+        # Canonical key for an undirected pair: frozenset so (a,b)==(b,a).
+        seen_in_batch: set[frozenset[str]] = set()
+
+        for entry in self.edges:
+            a, b, kind = entry
+
+            if kind not in _VALID_EDGE_KINDS:
+                raise ValueError(
+                    f"AddEdgesBatch: kind must be one of "
+                    f"{sorted(_VALID_EDGE_KINDS)!r}, got {kind!r} "
+                    f"in edge {entry!r}"
+                )
+
+            if a not in model.nodes:
+                raise ValueError(
+                    f"AddEdgesBatch: unknown node {a!r} in edge {entry!r}"
+                )
+            if b not in model.nodes:
+                raise ValueError(
+                    f"AddEdgesBatch: unknown node {b!r} in edge {entry!r}"
+                )
+
+            pair = frozenset({a, b})
+            if pair in seen_in_batch:
+                raise ValueError(
+                    f"AddEdgesBatch: duplicate pair within batch: {entry!r}"
+                )
+
+            line_idx = _find_edge_index(model.line_segments, (a, b))
+            if line_idx >= 0:
+                raise ValueError(
+                    f"AddEdgesBatch: edge {entry!r} conflicts with existing "
+                    f"line_segments[{line_idx}]"
+                )
+
+            blind_idx = _find_edge_index(model.blind_edges, (a, b))
+            if blind_idx >= 0:
+                raise ValueError(
+                    f"AddEdgesBatch: edge {entry!r} conflicts with existing "
+                    f"blind_edges[{blind_idx}]"
+                )
+
+            seen_in_batch.add(pair)
+
+        # ── Pass 2: append ────────────────────────────────────────────────────
+        applied: list[tuple[str, int]] = []
+        for a, b, kind in self.edges:
+            if kind == "line":
+                new_index = len(model.line_segments)
+                model.line_segments.append((a, b))
+                applied.append(("line", new_index))
+            else:  # kind == "blind"
+                new_index = len(model.blind_edges)
+                model.blind_edges.append((a, b))
+                applied.append(("blind", new_index))
+
+        self._applied_indices = applied
+
+    def revert(self, model: FieldModel) -> None:
+        """Remove every edge that :meth:`apply` appended, in reverse order.
+
+        Walking in reverse ensures that each deletion is always removing from
+        the tail of its list (since apply only ever appended), so no earlier
+        recorded index is disturbed by a later deletion.
+
+        :param model: Target model.
+        """
+        assert self._applied_indices is not None, (
+            "AddEdgesBatch.revert called before a successful apply"
+        )
+        for list_name, idx in reversed(self._applied_indices):
+            if list_name == "line":
+                del model.line_segments[idx]
+            else:
+                del model.blind_edges[idx]
 
 
 @dataclass

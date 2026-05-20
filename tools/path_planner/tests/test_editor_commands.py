@@ -13,6 +13,7 @@ import pytest
 
 from tools.path_planner.editor.commands import (
     AddBlindEdge,
+    AddEdgesBatch,
     AddLineEdge,
     AddNode,
     AddObstacle,
@@ -387,3 +388,145 @@ def test_history_undo_redo_round_trip_10_mutations() -> None:
         history.redo(model)
 
     assert model.to_json_dict() == states_after[9]
+
+
+# ---------------------------------------------------------------------------
+# AddEdgesBatch (TC1, TC2, TC3, TC4, TC14)
+# ---------------------------------------------------------------------------
+
+
+def make_four_node_model() -> FieldModel:
+    """Return a model with four nodes (a, b, c, d) and no edges."""
+    return FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        cost_blind_multiplier=5.0,
+        start_node="a",
+        start_heading_deg=0.0,
+        nodes={
+            "a": (10.0, 10.0),
+            "b": (100.0, 10.0),
+            "c": (200.0, 10.0),
+            "d": (300.0, 10.0),
+        },
+        node_types={"a": "line", "b": "line", "c": "line", "d": "line"},
+        line_segments=[],
+        blind_edges=[],
+        obstacles=[],
+    )
+
+
+def test_add_edges_batch_empty_is_noop() -> None:
+    """TC1: empty batch — apply and revert must leave the model untouched."""
+    model = make_four_node_model()
+    snap_before = model.snapshot()
+
+    cmd = AddEdgesBatch(edges=[])
+    cmd.apply(model)
+
+    # Model is unchanged after apply.
+    assert model.to_json_dict() == snap_before.to_json_dict()
+
+    cmd.revert(model)
+
+    # Model is still unchanged after revert.
+    assert model.to_json_dict() == snap_before.to_json_dict()
+
+
+def test_add_edges_batch_three_mixed_edges_apply_and_revert() -> None:
+    """TC2: 3 mixed edges apply to the correct lists; revert restores the model."""
+    model = make_four_node_model()
+    snap_before = model.snapshot()
+
+    cmd = AddEdgesBatch(edges=[
+        ("a", "b", "line"),
+        ("b", "c", "blind"),
+        ("c", "d", "line"),
+    ])
+    cmd.apply(model)
+
+    # line_segments must contain the two line edges.
+    assert ("a", "b") in model.line_segments
+    assert ("c", "d") in model.line_segments
+    # blind_edges must contain the one blind edge.
+    assert ("b", "c") in model.blind_edges
+    # Counts are exact.
+    assert len(model.line_segments) == 2
+    assert len(model.blind_edges) == 1
+
+    cmd.revert(model)
+
+    # After revert, model must be byte-identical to the pre-apply snapshot.
+    assert model.to_json_dict() == snap_before.to_json_dict()
+    assert model.line_segments == []
+    assert model.blind_edges == []
+
+
+def test_add_edges_batch_duplicate_existing_edge_raises_and_model_untouched() -> None:
+    """TC3: batch containing an edge that already exists raises ValueError;
+    model must be untouched."""
+    model = make_four_node_model()
+    # Seed an existing line edge.
+    model.line_segments.append(("a", "b"))
+    snap_before = model.snapshot()
+
+    cmd = AddEdgesBatch(edges=[("a", "b", "line")])
+
+    with pytest.raises(ValueError) as exc_info:
+        cmd.apply(model)
+
+    # Error message must name the list and index.
+    msg = str(exc_info.value)
+    assert "line_segments" in msg
+    assert "0" in msg
+
+    # Model must be untouched.
+    assert model.to_json_dict() == snap_before.to_json_dict()
+
+
+def test_add_edges_batch_intra_batch_duplicate_raises_and_model_untouched() -> None:
+    """TC4: two entries with the same undirected pair within the batch raise
+    ValueError; model must be untouched."""
+    model = make_four_node_model()
+    snap_before = model.snapshot()
+
+    # ("a","b","line") and ("b","a","blind") form the same undirected pair.
+    cmd = AddEdgesBatch(edges=[
+        ("a", "b", "line"),
+        ("b", "a", "blind"),
+    ])
+
+    with pytest.raises(ValueError) as exc_info:
+        cmd.apply(model)
+
+    assert "duplicate" in str(exc_info.value).lower()
+
+    # Model must be untouched — no partial writes.
+    assert model.to_json_dict() == snap_before.to_json_dict()
+
+
+def test_add_edges_batch_round_trip_apply_revert_apply() -> None:
+    """TC14 (AddEdgesBatch): apply → revert → apply; final state matches
+    the state captured after the FIRST apply.  This verifies that
+    _applied_indices is rebuilt correctly on the re-apply."""
+    model = make_four_node_model()
+
+    cmd = AddEdgesBatch(edges=[
+        ("a", "b", "line"),
+        ("b", "c", "blind"),
+        ("c", "d", "line"),
+    ])
+
+    # First apply.
+    cmd.apply(model)
+    state_after_first_apply = model.to_json_dict()
+
+    # Revert.
+    cmd.revert(model)
+    assert model.line_segments == []
+    assert model.blind_edges == []
+
+    # Re-apply — _applied_indices must be rebuilt from scratch.
+    cmd.apply(model)
+    assert model.to_json_dict() == state_after_first_apply
