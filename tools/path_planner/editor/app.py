@@ -239,6 +239,7 @@ class EditorApp:
         """Hook every :class:`SidePanels` callback slot to a method on self."""
         self._panels.on_node_select = self._on_panel_node_select
         self._panels.on_node_type_change = self._on_panel_node_type_change
+        self._panels.on_node_coords_change = self._on_panel_node_coords_change
         self._panels.on_start_node_change = self._on_panel_start_node_change
         self._panels.on_start_heading_change = (
             self._on_panel_start_heading_change
@@ -407,6 +408,26 @@ class EditorApp:
         if self._model.node_types.get(node_name) == new_type:
             return
         self._dispatch(SetNodeType(node_name, new_type))
+
+    def _on_panel_node_coords_change(
+        self, node_name: str, x_cm: float, y_cm: float
+    ) -> None:
+        """Dispatch a :class:`MoveNode` when the inspector x/y entries commit.
+
+        Skips the round-trip if the new coordinates equal the current ones --
+        prevents an empty undo entry on a FocusOut that wasn't actually edited.
+
+        :param node_name: Node whose coordinates were edited.
+        :param x_cm: New x in centimetres.
+        :param y_cm: New y in centimetres.
+        """
+        current = self._model.nodes.get(node_name)
+        if current is None:
+            return
+        cx, cy = current
+        if float(cx) == x_cm and float(cy) == y_cm:
+            return
+        self._dispatch(MoveNode(node_name, (x_cm, y_cm)))
 
     def _on_panel_start_node_change(self, node_name: str) -> None:
         """Dispatch a :class:`SetStart` when the start-node combobox changes.

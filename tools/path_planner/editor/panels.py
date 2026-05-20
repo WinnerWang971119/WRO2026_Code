@@ -102,6 +102,10 @@ _HEADING_STEP_DEG = 0.1
 _COORD_DECIMALS = 1
 # Format string for the heading spinbox value.
 _HEADING_FORMAT = "%.1f"
+# Coordinate-entry format string (centimetres, 1 decimal).
+_COORD_FORMAT: str = "%.1f"
+# Coordinate-entry width in characters.
+_COORD_ENTRY_WIDTH: int = 8
 # Initial status-bar message before the app sets anything.
 _DEFAULT_STATUS_TEXT = "Ready."
 
@@ -132,6 +136,9 @@ class SidePanels(tk.Frame):
         selection was cleared.
     :ivar on_node_type_change: Fired when the inspector's type combobox
         changes.  Arguments are ``(node_name, new_type)``.
+    :ivar on_node_coords_change: Fired when the inspector's x/y entry
+        widgets commit a valid in-range value.  Arguments are
+        ``(node_name, x_cm, y_cm)``.
     :ivar on_start_node_change: Fired when the start-pose node combobox
         changes.  Sole argument is the chosen node name.
     :ivar on_start_heading_change: Fired when the start-pose spinbox
@@ -161,6 +168,7 @@ class SidePanels(tk.Frame):
         # ---- Public callback attributes (assigned by T12 after init) ----
         self.on_node_select: Optional[Callable[[Optional[str]], None]] = None
         self.on_node_type_change: Optional[Callable[[str, str], None]] = None
+        self.on_node_coords_change: Optional[Callable[[str, float, float], None]] = None
         self.on_start_node_change: Optional[Callable[[str], None]] = None
         self.on_start_heading_change: Optional[Callable[[float], None]] = None
         self.on_undo: Optional[Callable[[], None]] = None
@@ -172,12 +180,18 @@ class SidePanels(tk.Frame):
         self.mode_var = tk.StringVar(value=Mode.MOVE.value)
         self._selected_node_var = tk.StringVar(value="")
         self._selected_type_var = tk.StringVar(value="")
-        self._selected_coords_var = tk.StringVar(value="(no selection)")
+        self._selected_x_var = tk.StringVar(value="")
+        self._selected_y_var = tk.StringVar(value="")
         self._start_node_var = tk.StringVar(value="")
         self._start_heading_var = tk.StringVar(
             value=_HEADING_FORMAT % _HEADING_MIN_DEG
         )
         self._status_var = tk.StringVar(value=_DEFAULT_STATUS_TEXT)
+
+        # Field bounds cached from refresh() so coord validation doesn't need
+        # to round-trip through the app -> model on every keystroke.
+        # ``(width_cm, height_cm)`` once the first refresh runs; ``None`` until then.
+        self._field_extent_cm: Optional[tuple[float, float]] = None
 
         # Re-entrancy guard: ``refresh`` writes to Tk variables, which would
         # otherwise re-fire user-callback bindings.  Setting this flag tells
@@ -271,15 +285,30 @@ class SidePanels(tk.Frame):
             "<<ComboboxSelected>>", self._handle_type_change
         )
 
-        # --- Inspector: (x, y) label ---
+        # --- Inspector: x / y editable entries ---
         coords_row = tk.Frame(group)
         coords_row.pack(side="top", fill="x")
-        tk.Label(coords_row, text="(x, y):").pack(side="left")
-        tk.Label(
+        tk.Label(coords_row, text="x:").pack(side="left")
+        self._x_entry = tk.Entry(
             coords_row,
-            textvariable=self._selected_coords_var,
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+            textvariable=self._selected_x_var,
+            width=_COORD_ENTRY_WIDTH,
+            state="disabled",
+        )
+        self._x_entry.pack(side="left", padx=(0, 6))
+        self._x_entry.bind("<Return>", self._handle_coords_commit)
+        self._x_entry.bind("<FocusOut>", self._handle_coords_commit)
+
+        tk.Label(coords_row, text="y:").pack(side="left")
+        self._y_entry = tk.Entry(
+            coords_row,
+            textvariable=self._selected_y_var,
+            width=_COORD_ENTRY_WIDTH,
+            state="disabled",
+        )
+        self._y_entry.pack(side="left")
+        self._y_entry.bind("<Return>", self._handle_coords_commit)
+        self._y_entry.bind("<FocusOut>", self._handle_coords_commit)
 
     def _build_start_pose_panel(self) -> None:
         """Create the **Start** labelframe: node combobox + heading spinbox."""
@@ -400,6 +429,11 @@ class SidePanels(tk.Frame):
         """
         self._suppress_callbacks = True
         try:
+            # Cache the field bounds (cm) so coord-entry validation can read them
+            # without a back-reference to the model.
+            width_mm, height_mm = model.field_mm
+            self._field_extent_cm = (float(width_mm) / 10.0, float(height_mm) / 10.0)
+
             previously_selected = self._selected_node_var.get() or None
 
             # --- Node listbox: rebuild from sorted node names. ---
@@ -467,17 +501,21 @@ class SidePanels(tk.Frame):
         self._selected_node_var.set(node_name)
         self._selected_type_var.set(model.node_types.get(node_name, ""))
         x, y = model.nodes[node_name]
-        self._selected_coords_var.set(
-            f"({x:.{_COORD_DECIMALS}f}, {y:.{_COORD_DECIMALS}f}) cm"
-        )
+        self._selected_x_var.set(_COORD_FORMAT % float(x))
+        self._selected_y_var.set(_COORD_FORMAT % float(y))
         self._type_combo.configure(state="readonly")
+        self._x_entry.configure(state="normal")
+        self._y_entry.configure(state="normal")
 
     def _clear_inspector(self) -> None:
         """Reset the inspector to its empty / no-selection state."""
         self._selected_node_var.set("")
         self._selected_type_var.set("")
-        self._selected_coords_var.set("(no selection)")
+        self._selected_x_var.set("")
+        self._selected_y_var.set("")
         self._type_combo.configure(state="disabled")
+        self._x_entry.configure(state="disabled")
+        self._y_entry.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # Widget event handlers -- forward to user callbacks, if assigned.
@@ -514,6 +552,47 @@ class SidePanels(tk.Frame):
             return
         if self.on_node_type_change is not None:
             self.on_node_type_change(node_name, new_type)
+
+    def _handle_coords_commit(self, _event: tk.Event) -> None:
+        """Parse x/y entries, validate, fire ``on_node_coords_change``.
+
+        Triggered by ``<Return>`` or ``<FocusOut>`` on either entry. If the
+        parsed value is invalid (not a float, out of field bounds), reset the
+        entry to the model's current value via a status-bar message and do
+        NOT fire the callback. The reset happens by writing back the var the
+        *next* refresh would supply -- not by parsing the entry text -- so a
+        partial edit cannot survive an invalid commit.
+
+        :param _event: Tk event (unused).
+        """
+        if self._suppress_callbacks:
+            return
+        node_name = self._selected_node_var.get()
+        if not node_name or self._field_extent_cm is None:
+            return
+
+        raw_x = self._selected_x_var.get()
+        raw_y = self._selected_y_var.get()
+        width_cm, height_cm = self._field_extent_cm
+        try:
+            x = float(raw_x)
+        except ValueError:
+            self._status_var.set("x must be a number")
+            return
+        try:
+            y = float(raw_y)
+        except ValueError:
+            self._status_var.set("y must be a number")
+            return
+        if not (0.0 <= x <= width_cm):
+            self._status_var.set(f"x must be in [0, {width_cm:.1f}]")
+            return
+        if not (0.0 <= y <= height_cm):
+            self._status_var.set(f"y must be in [0, {height_cm:.1f}]")
+            return
+
+        if self.on_node_coords_change is not None:
+            self.on_node_coords_change(node_name, x, y)
 
     def _handle_start_node_change(self, _event: tk.Event) -> None:
         """Forward start-node combobox changes to :attr:`on_start_node_change`."""
