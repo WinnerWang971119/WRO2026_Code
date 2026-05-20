@@ -52,7 +52,7 @@ map        (FieldMap, Localization, routes.h)
    |
    v
 perception + actuation
-           (LineFollower, Intersection, ColorReader, CameraMosaic,
+           (LineFollower, Intersection, Camera (mosaic + color),
             Drive, Manipulator)
    |
    v
@@ -104,16 +104,19 @@ Drive.driveDist(30).async();                               // enqueues, returns 
   queued moves so chained `.async()` calls dispatch in source order.
 
 The rule for the whole project: **any verb with 3+ knobs is a fluent
-builder; 0–2 knobs stay direct.** See `DECISIONS.md` — "Fluent / builder
-API…", "Sync-by-default builders…", "Drive command queue…" for the full
-story.
+builder; 0–2 knobs stay direct.** See [`DECISIONS.md`](./DECISIONS.md) —
+ADR-012 (fluent builder), ADR-015 (drive queue), ADR-016 (sync-default),
+ADR-017 (SYNC + tShape default) for the full story.
 
 ### Localization is the single source of truth
 
-`Localization.currentNode` and `Localization.heading` are written only by
-two upstream events: `Intersection` arrival and `Drive.turnDeg`
-completion. Every other module reads from `Localization` and never writes
-to it. If position is ever wrong, there is exactly one place to look.
+`Localization.getCurrentNode()` and `getHeadingDeg()` are the single
+source of truth for "where am I?". Writes happen only through
+`Localization.onIntersection(advanceTo)` and `onDeadReckonedAdvance(advanceTo)`,
+both called from `PathTracker`. Heading is computed live from IMU yaw +
+offset — no cached copy means no staleness. Every other module reads
+from `Localization` and never writes to it. If position is ever wrong,
+there is exactly one place to look.
 
 ### Path planning is offline
 
@@ -203,9 +206,12 @@ WRO2026_code/
 │   ├── tests/                pytest suite (run from repo root).
 │   └── README.md             full pipeline docs + CLI flags + exit codes.
 │
-├── docs/                     deep-dive specs, plans, archived audits.
+├── docs/
+│   ├── decisions/            one ADR per load-bearing design decision.
+│   ├── archive/              shipped plans + audits + superseded specs.
+│   └── PHASE2_DEFERRED.md    Phase 2.5 work that's still deferred.
 ├── ARCHITECTURE.md           module map + dependency graph + iron rules.
-├── DECISIONS.md              every load-bearing design decision + why.
+├── DECISIONS.md              index into docs/decisions/.
 ├── Roadmap.md                phase plan + exit criteria + benchmarks.
 └── CLAUDE.md / AGENTS.md     coding rules for AI assistants on this repo.
 ```
@@ -303,7 +309,7 @@ Fixture & Measurement Plan") for the exact setups and pass criteria.
 
 - Hardware quick map and required init sequence: [`CLAUDE.md`](./CLAUDE.md).
 - Path planner pipeline: [`tools/path_planner/README.md`](./tools/path_planner/README.md).
-- Phase plans + archived audits: [`docs/plans/`](./docs/plans/),
-  [`docs/archive/`](./docs/archive/).
+- Design decisions (ADRs): [`docs/decisions/`](./docs/decisions/).
+- Phase plans + archived audits: [`docs/archive/`](./docs/archive/).
 - Vendor library reference (out-of-repo):
   `C:\Users\wangd\documents\WRO2026\MatrixMiniR4\`.
