@@ -82,6 +82,39 @@ That writes:
 - `WRO2026/routes.cpp`
 - `tools/path_planner/output/map.png`
 
+### Generated `routes.h` schema (what the firmware consumes)
+
+```cpp
+namespace Routes {
+    constexpr uint8_t N_NODES = N;
+    constexpr uint8_t START_NODE = 0;
+    constexpr float   START_HEADING_DEG = 0.0f;
+
+    enum class NodeType : uint8_t { LINE = 0, BLIND = 1 };
+    enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, PROJECTION = 3 };
+
+    // Mode enums — per-edge overrides for how the firmware executes the move
+    enum class LineMode       : uint8_t { DEFAULT = 0, ... };
+    enum class BlindMode      : uint8_t { DEFAULT = 0, ... };
+    enum class ProjectionMode : uint8_t { DEFAULT = 0, ... };
+    enum class TurnMode       : uint8_t { DEFAULT = 0, ... };
+
+    struct PipelineConfig {
+        LineMode line; BlindMode blind; ProjectionMode projection; TurnMode turn;
+    };
+    extern const PipelineConfig PIPELINE_CONFIG;
+
+    struct NodeInfo  { float x_cm, y_cm; NodeType type; const char* name; };
+    struct EdgeInfo  { EdgeType type; float distance_cm, heading_deg; /* per-edge mode overrides */ };
+
+    extern const NodeInfo NODES[N_NODES];
+    extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];   // 0xFF = unreachable
+    extern const EdgeInfo EDGES[N_NODES][N_NODES];
+}
+```
+
+`PathTracker` reads `NEXT_HOP[currentNode][goal]` at every intersection to pick the next neighbour, and looks up `EDGES[from][to]` for the per-edge primitive (line-follow, blind drive, projection-follow) and any mode overrides. The defaults in `PIPELINE_CONFIG` apply when an edge's mode field is `DEFAULT`.
+
 ## CLI flags
 
 | Flag              | Purpose                                                                                  | Example                                                       |
@@ -182,17 +215,22 @@ coordinates automatically — there is no separate "robot field" and
 | `validator.py`      | Strict shape + reference checks. Raises `FieldDataError` on the first problem.      |
 | `graph_builder.py`  | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
 | `planner.py`        | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
-| `compiler.py`       | Heading-aware primitive emission (PR 2 will lean on this for path execution).       |
+| `compiler.py`       | Heading-aware primitive emission for downstream `PathTracker`.                      |
+| `pipeline_config.py`| Default `LineMode` / `BlindMode` / `ProjectionMode` / `TurnMode` baked into `routes.cpp`. |
 | `visualizer.py`     | Matplotlib renderer for `map.png` (Agg backend, headless-safe).                     |
 | `header_writer.py`  | Emits `routes.h` + `routes.cpp`; embeds `field_data.py`'s SHA256 in the banner.     |
 | `build_routes.py`   | This script — sequences every layer above, decides exit codes.                      |
+| `pick_xy.py`        | Tk/matplotlib GUI for measuring field coordinates off `maps/map.png` (issue #10).   |
+| `sim/`              | Pure-Python mirror of the R4 `PathTracker` FSM for hardware-free verification.      |
+| `tests/`            | pytest suite + golden files for the whole pipeline.                                 |
 
 ## Pointers to deeper docs
 
-- `docs/PATH_PLANNER_SPEC.md` — full architecture spec (heading
+- `docs/archive/PATH_PLANNER_SPEC.md` — original architecture spec (heading
   convention, edge types, C-space inflation rules, deterministic
-  output guarantees).
+  output guarantees). Archived 2026-05-20; this README supersedes it for
+  current usage.
 - `docs/PHASE2_DEFERRED.md` — calibration tiers, scenarios,
   `wall_zero`, and other items intentionally left for a later phase.
-- `docs/plans/2026-05-05-phase2-pr1-path-planner-python.md` — this
-  PR's plan (T1 through T10, acceptance criteria, test-case index).
+- `docs/archive/plans/` — historical PR plans (PR1 path planner, PR2
+  PathTracker runtime, PR3 Mission DSL, pipeline-modes, pick_xy).

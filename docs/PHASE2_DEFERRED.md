@@ -1,31 +1,26 @@
 # Phase 2 Deferred Features
 
-PR 1 of Phase 2 (`phase2/path-planner-python`) shipped a working offline build pipeline: field data
-in `tools/path_planner/field_data.py` is validated, turned into a weighted graph, run through
-Dijkstra all-pairs, compiled to a primitive sequence with correct heading propagation, and emitted
-as `WRO2026/routes.h` + `WRO2026/routes.cpp`. A matplotlib visualization (`map.png`) and a
-property-based `pytest` suite are included.
+Phase 2 shipped through PR3 (Mission DSL). The offline Python pipeline, the R4 runtime
+(`FieldMap`, `Localization`, `PathTracker`), the pure-Python simulator, and the operator
+Mission DSL are all in `main`. This document tracks the work that was scoped out of PR1/PR2/PR3
+and remains genuinely deferred — usually because it depends on real 2026 field geometry or
+on mechanical hardware that doesn't exist yet.
 
-PR 2 (`phase2/path-tracker-runtime`) shipped the R4-side runtime: `FieldMap` (header-only namespace
-over `Routes::`), `Localization` (single source of truth for `currentNode` and a yaw offset
-captured at start-button press), `PathTracker` (non-blocking FSM with a fluent `goTo()` builder
-queue), and a `setDistanceTarget(cm)` extension on `LineFollower` so the projection-edge primitive
-works. A pure-Python end-to-end simulator under `tools/path_planner/sim/` plus
-`test_runtime_sim.py` provides the verification bench (no hardware required for PR 2). PR 3 still
-needs to replace `field_data.py` with the real 2026 layout and ship the Serial-console mission
-entrypoint.
+The detailed design narratives below are preserved so a future contributor can revive each
+feature without re-reading the PR conversations. Items shipped during Phase 2 are recorded
+in the "Graduates" subsection.
 
-This document records each remaining deferred feature so that a future contributor (or a future
-session of this same Claude instance) can revive the work without re-reading the entire
-conversation history.
+## Graduates (already shipped)
 
-## PR 2.5+ graduates (already shipped)
-
-- **End-to-end pure-Python simulator** (spec §6 step 9). Shipped in PR 2 as
-  `tools/path_planner/sim/` + `tools/path_planner/tests/test_runtime_sim.py`. Mirrors the
-  PathTracker FSM in pure Python and asserts that the simulator's dispatched-primitive sequence
-  equals what `compile_path` emits for the same NEXT_HOP-walked path, plus chassis arrival within
-  0.1 cm. This was previously the fourth row of the status table below.
+- **End-to-end pure-Python simulator** (spec §6 step 9). `tools/path_planner/sim/` +
+  `tools/path_planner/tests/test_runtime_sim.py`. Mirrors PathTracker in pure Python and asserts
+  primitive-sequence equality + chassis arrival within 0.1 cm.
+- **Operator mission entrypoint** (was "Serial-console" in the spec). Shipped as the **Mission
+  DSL** in PR3 (`Mission.h/.cpp` + inline `buildMission()` in `WRO2026.ino`). Verbs:
+  `goTo` / `wait` / `print` / `beep` / `led`.
+- **NAV FAULT mnemonics** (NZ / UNR / DRV / BAD / DRN). Shipped in `PathTracker::faultMnemonic()`
+  and emitted to Serial on every fault transition. EventTrace also pushes a `FAIL PATH` line
+  on the OLED.
 
 ---
 
@@ -33,13 +28,12 @@ conversation history.
 
 | Feature | Spec § | Status | When likely |
 |---|---|---|---|
-| Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | Deferred to Phase 2.5 | After PR 3 ships real-field nav and accumulated blind-walk drift is observed |
-| Per-scenario NEXT_HOP tables (transparent self-target) | §7.4 | Deferred to Phase 2.5 | After PR 3 encodes multiple goals on the real field |
+| Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | Deferred to Phase 2.5 | After real-field nav exposes accumulated blind-walk drift |
+| Per-scenario NEXT_HOP tables (transparent self-target) | §7.4 | Deferred to Phase 2.5 | After the real 2026 field encodes multiple goals |
 | `wall_zero` primitive on the R4 | §5.3 | Deferred to Phase 2.5 | After mechanical hard-bumper or limit-switch work is done |
-| Hardware verification of PR 2's PathTracker on the toy printout | PR 2 scope | Deferred to a follow-up bench session (PR 2.5 patches) | Once mechanical chassis geometry is finalised |
-| IMU drift compensation across long runs | new in PR 2 | Deferred to PR 3 | Once the real 2026 field's longer paths expose drift accumulation |
-| Serial-console mission entrypoint | PR 3 scope | Deferred to PR 3 | After PR 2's PathTracker exists |
-| `NAV FAULT <code>` suffix in EventTrace (NZ / UNR / DRV / BAD / DRN) | PR 2 plan §68, regressed in `.ino` | Deferred to PR 3 | Bundled with Serial-console entrypoint since both touch operator-visible reporting |
+| Hardware verification of PathTracker on the toy printout | PR2 scope | Deferred to bench session | Once mechanical chassis geometry is finalised |
+| IMU drift compensation across long runs | PR2-new | Deferred | Once the real 2026 field's longer paths expose drift accumulation |
+| Replace `field_data.py` with the real 2026 layout | PR3 followup | Deferred | After field is measured via `pick_xy.py` (issue #10 scope 1 shipped the tool) |
 
 ---
 
@@ -218,68 +212,9 @@ or any existing R4 module. The naming lookup could use a short linear scan over 
 
 ---
 
-## `NAV FAULT <code>` suffix in EventTrace
-
-### What it is
-
-PR 2's plan (`docs/plans/2026-05-06-phase2-pr2-path-tracker-runtime.md:68`) specified an operator-
-visible fault taxonomy on the EventTrace channel:
-
-> `NAV FAULT <code>` (NOT_ZEROED → NZ, UNREACHABLE → UNR, DRIVE_FAULT → DRV, BAD_NODE → BAD).
-
-The intent was that the OLED + Serial trace shows *which* fault kind tripped, so the operator can
-diagnose without having to query `getFault().kind` over Serial. PR 2's implementation in
-`WRO2026/WRO2026.ino:201` and `:209` regressed to a bare:
-
-```cpp
-if (PathTracker.hasFault()) { EventTrace.pushEvent("NAV FAULT"); return; }
-```
-
-Consequence: all five fault kinds (NZ, UNR, DRV, BAD, plus the newer `DRAIN_TIMEOUT` enum at
-`PathTracker.h:133`) collapse to the same operator-visible event. The internal `_enterFault` Serial
-print still includes `kind=N`, so the information is recoverable over USB; it just isn't surfaced
-in EventTrace.
-
-`DRAIN_TIMEOUT` was added after the spec was written and has no mnemonic assigned — proposed: `DRN`.
-
-### Why deferred
-
-PR 2 is already merged-bound on `phase2/path-tracker-runtime` and the regression is operator-UX
-only, not a correctness bug. Bundling the fix with PR 3 makes sense because:
-
-1. PR 3 introduces the Serial-console mission entrypoint, which also touches operator-facing
-   reporting. Both can use the same `_faultMnemonic(Fault)` helper.
-2. Spec drift fixes belong with the PR that exercises the affected surface on real hardware.
-
-### What unlocks it
-
-Nothing external — this is purely a code change ready whenever PR 3 starts. The fix should land
-*together* with the Serial-console entrypoint so the operator gets a single coherent reporting
-surface across `NAV ZERO`, `NAV ARR <node>`, `NAV FAULT <code>`, and Serial-console echoes.
-
-### Estimated effort
-
-Trivial. ~15 lines total:
-
-- Add `static const char* _faultMnemonic(Fault)` to `PathTracker.h` (or an inline switch in the
-  .ino) mapping each enum value to the 2–3-char string: `NZ / UNR / DRV / BAD / DRN`.
-- Replace the two `EventTrace.pushEvent("NAV FAULT")` callsites in `WRO2026/WRO2026.ino` with a
-  composed `"NAV FAULT <code>"` string (verify against EventTrace's max event width; current uses
-  hover at ≤12 chars).
-- Update `docs/plans/2026-05-06-phase2-pr2-path-tracker-runtime.md:68` to add `DRAIN_TIMEOUT → DRN`
-  to the taxonomy line so the spec matches reality.
-
-Source: this gap was flagged by Copilot review on PR #5 (`PathTracker.cpp:214` thread). The first
-half of that review comment — about `_currentGoal` being `NODE_NONE` if `_drainBlocking` were
-entered while IDLE — is *not* a real concern (the drain is only invoked after a successful
-`_enqueue`, so `_qCount >= 1` is guaranteed and DEQUEUE will always have set `_currentGoal` before
-the timeout branch fires). Only the second half — the EventTrace taxonomy drift — needs action.
-
----
-
 ## How to revive a deferred feature
 
-1. Re-read `docs/PATH_PLANNER_SPEC.md` and the subsection above for the specific feature.
+1. Re-read the archived spec at `docs/archive/PATH_PLANNER_SPEC.md` and the subsection above for the specific feature.
 2. If the feature changes `field_data.py`'s schema (e.g. adding `CALIBRATION_NODES` or
    `my_target_*` obstacle kinds), update `validator.py` first and add/update tests in
    `tests/test_field_data.py`.
