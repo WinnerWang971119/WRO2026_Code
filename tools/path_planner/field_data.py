@@ -60,49 +60,11 @@ EDGES = [
     # [0] PROJECTION demo — A to P1 along the A-B line strip; no intersection
     #     marker at P1 so the chassis stops by encoder distance, not by a
     #     detected cross. Exercises the EDGE_PROJECTION compile path (T8/T11).
-    {
-        "type":         EDGE_PROJECTION,
-        "u":            "A",
-        "v":            "P1",
-        "distance_cm":  45.0,   # |P1 - A| = |(55-10, 10-10)| = 45 cm
-        "heading_deg":  0.0,    # due East (+x direction)
-    },
-
-    # [1] LINE edge with a per-edge FAST preset — D to E at full cruise speed.
-    #     Exercises the primitive_mode per-edge override path (T7/T12).
-    #     Geometry: D(10,150)->E(100,80); dist≈114.02 cm, heading≈322.13° (NE quadrant CCW from +x).
-    {
-        "type":           EDGE_LINE,
-        "u":              "D",
-        "v":              "E",
-        "distance_cm":    114.02,
-        "heading_deg":    322.13,
-        "primitive_mode": LineMode.FAST,
-    },
-
-    # [2] LINE edge demonstrating pre_turn_mode override — the turn that
-    #     PRECEDES the C->E traversal uses a single-wheel left pivot wheel
-    #     pattern. Exercises the pre_turn_mode override path emitted by T7
-    #     and consumed by T17's PathTracker turn dispatch.
-    #
-    #     NOTE: this entry intentionally OMITS `pivot=Pivot.LEFT`. The
-    #     planner's `apply_pivot_compensations` requires that the destination
-    #     node of a pivot-tagged edge have exactly one out-edge so the
-    #     geometric correction has a unique target — E has four out-edges
-    #     (A/B/C/D), so a pivot tag here would (correctly) raise. The
-    #     compensation math is still exercised in isolation by T13's
-    #     `test_apply_pivot_compensations_raises_on_multi_successor` and
-    #     `test_pivot_compensation_*` cases against a self-contained toy
-    #     graph. Restore `pivot=Pivot.LEFT` here once the field topology
-    #     evolves to a single-successor target for this approach.
-    #
-    #     Geometry: C(200,150)->E(100,80); dist≈122.07 cm, heading≈214.99° (SW quadrant).
-    {
-        "type":           EDGE_LINE,
-        "u":              "C",
-        "v":              "E",
-        "distance_cm":    122.07,
-        "heading_deg":    214.99,
-        "pre_turn_mode":  TurnMode.PIVOT_LEFT,
-    },
+    #{
+    #    "type":         EDGE_PROJECTION,
+    #    "u":            "A",
+    #    "v":            "P1",
+    #    "distance_cm":  45.0,   # |P1 - A| = |(55-10, 10-10)| = 45 cm
+    #    "heading_deg":  0.0,    # due East (+x direction)
+    #},
 ]

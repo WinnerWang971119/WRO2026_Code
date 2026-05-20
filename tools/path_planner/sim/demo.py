@@ -191,7 +191,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument(
         "--goals",
-        default="C,G",
+        default="start,finial",
         help="Comma-separated list of goal node names. Default: C,G "
              "(matches WRO2026.ino's NAV_DEMO_MODE).",
     )

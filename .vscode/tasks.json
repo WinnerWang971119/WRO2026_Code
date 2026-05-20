@@ -22,6 +22,26 @@
             "problemMatcher": []
         },
         {
+            "label": "Editor: Open Field Editor GUI",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/path_planner_task.ps1",
+                "${config:wro2026.pathPlanner.pythonPath}",
+                "${config:wro2026.editor.scriptPath}"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
             "label": "Sim: Run PathTracker Demo",
             "type": "shell",
             "command": "pwsh",

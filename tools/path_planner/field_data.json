@@ -1,91 +1,64 @@
 {
   "FIELD_MM": [
-    3000,
-    2000
+    3200,
+    1540
   ],
   "MAP_PNG": "maps/map.png",
-  "ROBOT_RADIUS_CM": 8.0,
+  "ROBOT_RADIUS_CM": 15.0,
   "COST_BLIND_MULTIPLIER": 5.0,
-  "START_NODE": "A",
+  "START_NODE": "Start",
   "START_HEADING_DEG": 0.0,
   "NODES": {
-    "A": [
-      10.0,
-      10.0
+    "Inter1": [
+      67.9,
+      36.9
     ],
-    "B": [
-      200.0,
-      10.0
+    "Inter2": [
+      240.3,
+      36.9
     ],
-    "C": [
-      200.0,
-      150.0
+    "Start": [
+      24.154545037397327,
+      23.51148225469729
     ],
-    "D": [
-      10.0,
-      150.0
-    ],
-    "E": [
-      100.0,
-      80.0
-    ],
-    "G": [
-      250.0,
-      80.0
-    ],
-    "P1": [
-      55.0,
-      10.0
+    "finial": [
+      94.92956453907219,
+      57.95824634655533
     ]
   },
   "NODE_TYPES": {
-    "A": "line",
-    "B": "line",
-    "C": "line",
-    "D": "line",
-    "E": "line",
-    "G": "blind",
-    "P1": "line"
+    "Inter1": "line",
+    "Inter2": "line",
+    "Start": "blind",
+    "finial": "blind"
   },
   "LINE_SEGMENTS": [
     [
-      "A",
-      "B"
-    ],
-    [
-      "B",
-      "C"
-    ],
-    [
-      "C",
-      "D"
-    ],
-    [
-      "D",
-      "A"
-    ],
-    [
-      "A",
-      "E"
-    ],
-    [
-      "B",
-      "E"
-    ],
-    [
-      "C",
-      "E"
-    ],
-    [
-      "D",
-      "E"
+      "Inter1",
+      "Inter2"
     ]
   ],
   "BLIND_EDGES": [
     [
-      "B",
-      "G"
+      "Inter1",
+      "Start"
+    ],
+    [
+      "Inter1",
+      "finial"
+    ],
+    [
+      "Inter2",
+      "finial"
     ]
   ],
-  "OBSTACLES": []
+  "OBSTACLES": [
+    [
+      127.95198799699928,
+      24.000000000000007,
+      144.75618904726184,
+      26.85714285714286,
+      "obstacle"
+    ]
+  ]
 }
