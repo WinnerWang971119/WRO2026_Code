@@ -33,6 +33,16 @@ real-field encoding via `pick_xy.py`, an early start on manipulator
 software against the expected RC interface, and pulling some Phase 2.5
 deferred items forward into Phase 3.
 
+**Two physical chassis.** Phases 3-6 run on the **test rover** (TT
+motors, current `Config.h` defaults). The **competition robot Lofaix**
+(LEGO EV3 motors) must be assembled and brought up before Phase 7's code
+freeze. Bring-up means: re-tune motor PPR / RPM constants in `Config.h`
+for EV3, re-run `Drive.calibrateMotorBias()` from scratch (TT scalars
+do not transfer — see [ADR-011](./docs/decisions/011-motor-bias-strategy-b.md)),
+re-tune `LINE_KP` / `LINE_KD` on Lofaix's geometry, and re-pass the
+Phase 6 B6.1 ten-trial battery on Lofaix to confirm the regional target
+still holds. Issue #15 tracks the EV3 model swap.
+
 ## 2. Timeline at a Glance
 
 | Phase | Dates | Goal | Must-ship-by |
@@ -206,28 +216,46 @@ named failure recovery (failed grip) lands.
 | P6.7 | Failed-grip recovery branch in Tasks | sw | P5.1 | recovery 3 |
 | P6.8 | Ten full-run scoring sessions; require ≥8/10 success on regional-target scope | both | P6.6, P6.7 | run metrics |
 
-## 8. Phase 7 — Regional Sprint (`2026-07-15` → `2026-07-21`, 6 days)
+## 8. Phase 7 — Lofaix Bring-up + Regional Sprint (`2026-07-15` → `2026-07-21`, 6 days)
 
-**Goal:** Compete at regional. No code rewrites — only constants tunable.
+**Goal:** Move the working software stack from the test rover onto the
+competition robot **Lofaix** (LEGO EV3 motors), confirm the regional
+target still holds on Lofaix, then compete at regional. No code rewrites
+in the sprint window — only constants tunable.
 
 **Exit criteria (hard gates):**
-- [ ] Code frozen on `2026-07-15`. Only color baselines and PID gains may change.
+- [ ] Lofaix mechanically assembled and powered (mech track must deliver before this phase starts).
+- [ ] `Config.h` updated for EV3 PPR / RPM (issue #15).
+- [ ] `Drive.calibrateMotorBias()` re-run on Lofaix, scalars committed.
+- [ ] `LINE_KP` / `LINE_KD` re-tuned on Lofaix.
+- [ ] B6.1 ten-trial battery passes on Lofaix at the same 8/10 success rate.
+- [ ] Code frozen on `2026-07-18`. Only color baselines and PID gains may change after freeze.
 - [ ] On-site lighting calibration recorded for `ColorReader` and `CameraMosaic`.
 - [ ] Battery cells charged, spares present, `setBattCell(2)` confirmed.
 - [ ] At least one full practice run executed at the venue before competition.
 
 **Tracks running in parallel:**
-- Mechanical: visual inspection, fastener check, spare parts staged.
-- Software: re-baseline color thresholds against venue lighting.
+- Mechanical: Lofaix assembly must complete BEFORE phase entry; in-phase mech work is visual inspection, fastener check, spare parts staging.
+- Software: chassis swap recalibration, re-run regional benchmark on Lofaix, then re-baseline color thresholds against venue lighting.
 
 **Tasks (ordered):**
 
 | ID | Task | Track | Blocked By | Output |
 |----|------|-------|------------|--------|
-| P7.1 | Code freeze, tag commit | sw | P6.8 | regional tag |
+| P7.0a | Lofaix mech assembly complete | mech | (parallel to Phase 5/6) | Lofaix ready |
+| P7.0b | Swap `Config.h` motor constants (PPR / RPM / reverse flags) for EV3 | sw | P7.0a, issue #15 | EV3 Config |
+| P7.0c | Re-run `calibrateMotorBias()` on Lofaix; commit new scalars | sw | P7.0b | Lofaix bias |
+| P7.0d | Re-tune `LINE_KP` / `LINE_KD` on Lofaix | sw | P7.0c | Lofaix line PID |
+| P7.0e | Re-run B6.1 ten-trial battery on Lofaix; confirm ≥8/10 success | both | P7.0d | Lofaix qualified |
+| P7.1 | Code freeze, tag commit | sw | P7.0e | regional tag |
 | P7.2 | Pack spares, batteries, cables | mech | — | go-bag |
 | P7.3 | Venue practice run + on-site lighting calibration | both | P7.1 | tuned baselines |
 | P7.4 | Compete | both | P7.3 | regional result |
+
+**Note on the schedule:** P7.0a-P7.0e ideally land before `2026-07-15` so
+the entire 6-day Phase 7 window is available for venue prep + compete. If
+Lofaix mech slips, P7.0 tasks eat into the freeze window; the freeze date
+shifts later in the week but `2026-07-21` is fixed.
 
 ## 9. Phase 8 — National Refinement (`2026-07-22` → `2026-08-24`, ~5 weeks)
 
@@ -319,6 +347,8 @@ can lock in.
 | 8 | Practice field arrives late, blocking Phase 6 / Phase 8 tuning | M | M | Use printed reduced-scale field (P3.4) until full-scale arrives; budget tuning into Phase 8 buffer weeks. | mech |
 | 9 | Encoder slip / dead-reckoning drift during a long task | M | M | Architecture rejects pure dead-reckoning (ADR-001); `Localization` re-anchors at every intersection. If Phase 3 verification exposes blind-edge drift, pull forward Phase 2.5 calibration nodes / `wall_zero`. | sw |
 | 10 | `Localization` written from outside the module | L | H | Coding criteria checklist in [ARCHITECTURE.md](./ARCHITECTURE.md); ADR-005; enforced in code review. | sw |
+| 11 | Lofaix (competition robot) not mech-ready by Phase 7 entry (`2026-07-15`) | M | H | Mech track must deliver Lofaix as a parallel deliverable during Phases 5-6. If slip, P7.0a-P7.0e eat the freeze window — `2026-07-18` freeze shifts later, but the `2026-07-21` regional date is fixed. Worst case: compete on the test rover with TT-tuned `Config.h`. | mech |
+| 12 | TT-tuned `Config.h` constants silently misapplied to Lofaix EV3 motors | L | H | P7.0b is a hard exit gate; static_assert or per-chassis preprocessor flag in `Config.h` (issue #15 design) prevents accidental cross-chassis flashing. | sw |
 
 ## 13. Test Fixture & Measurement Plan
 
