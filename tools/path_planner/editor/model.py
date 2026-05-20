@@ -17,8 +17,9 @@ Coordinate convention (inherited from ``field_data.py``):
 from __future__ import annotations
 
 import copy
+import types
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 
 @dataclass
@@ -170,6 +171,64 @@ class FieldModel:
             blind_edges=[tuple(edge) for edge in data["BLIND_EDGES"]],
             obstacles=[tuple(obs) for obs in data["OBSTACLES"]],
         )
+
+    # ------------------------------------------------------------------
+    # Validator integration
+    # ------------------------------------------------------------------
+
+    def to_module_proxy(self) -> Any:
+        """Return a :class:`types.SimpleNamespace` whose attributes satisfy
+        :func:`tools.path_planner.validator.validate`.
+
+        The validator reads the 11 required attributes listed in
+        ``validator._REQUIRED_ATTRS`` via ``getattr``.  This method maps
+        every snake_case field of :class:`FieldModel` back to the
+        corresponding ``SCREAMING_SNAKE_CASE`` name, preserving the exact
+        Python types (tuples stay tuples, dicts stay dicts, lists stay
+        lists) so that the validator's ``isinstance`` checks pass without
+        any conversion.
+
+        The optional ``EDGES`` attribute is intentionally absent from the
+        proxy: the GUI model does not own rich per-edge metadata, and the
+        validator treats a missing ``EDGES`` as benign (backward-compatible
+        with pre-PR4 fixtures).
+
+        :return: A :class:`types.SimpleNamespace` with exactly the 11
+            attributes ``validator._REQUIRED_ATTRS`` lists.
+        """
+        return types.SimpleNamespace(
+            NODES=self.nodes,
+            NODE_TYPES=self.node_types,
+            LINE_SEGMENTS=self.line_segments,
+            BLIND_EDGES=self.blind_edges,
+            OBSTACLES=self.obstacles,
+            ROBOT_RADIUS_CM=self.robot_radius_cm,
+            COST_BLIND_MULTIPLIER=self.cost_blind_multiplier,
+            START_NODE=self.start_node,
+            START_HEADING_DEG=self.start_heading_deg,
+            FIELD_MM=self.field_mm,
+            MAP_PNG=self.map_png,
+        )
+
+    def validate(self) -> None:
+        """Validate the in-memory model against the full PR3/PR4 schema rules.
+
+        Delegates to :func:`tools.path_planner.validator.validate` after
+        wrapping ``self`` in a :class:`types.SimpleNamespace` proxy (see
+        :meth:`to_module_proxy`).  Imports are deferred inside the method
+        body to prevent a circular import: ``validator`` may be imported by
+        modules that are themselves imported at the top of this file in the
+        future.
+
+        :raises tools.path_planner.validator.FieldDataError: On the first
+            schema violation found, with a precise key-path message and a
+            one-line fix hint.
+        :return: ``None`` on success.
+        """
+        # Deferred import — keeps module-level import graph acyclic.
+        from tools.path_planner.validator import validate  # noqa: PLC0415
+
+        validate(self.to_module_proxy())
 
     def to_json_dict(self) -> dict:
         """Produce a dict ready for
