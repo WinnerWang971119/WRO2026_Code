@@ -17,6 +17,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-003 — Arduino-style modules — no class hierarchies, no DI, no `delay()` in `update()`](./docs/decisions/003-arduino-style-modules.md)
 - [ADR-004 — Motor-speed/position PID stays on the STM32](./docs/decisions/004-pid-stays-on-stm32.md)
 - [ADR-005 — `Localization` is the single source of truth for current node + heading](./docs/decisions/005-localization-single-source-of-truth.md)
+- [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md)
 
 ### Mission-layer
 
@@ -47,7 +48,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 16 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018, 019, 020 |
+| Implemented | 17 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018, 019, 020, 022 |
 | Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
 | Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |

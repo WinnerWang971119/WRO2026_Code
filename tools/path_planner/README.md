@@ -115,6 +115,63 @@ namespace Routes {
 
 `PathTracker` reads `NEXT_HOP[currentNode][goal]` at every intersection to pick the next neighbour, and looks up `EDGES[from][to]` for the per-edge primitive (line-follow, blind drive, projection-follow) and any mode overrides. The defaults in `PIPELINE_CONFIG` apply when an edge's mode field is `DEFAULT`.
 
+## Editing the field graph
+
+### Live GUI (recommended)
+
+```powershell
+uv run python tools/path_planner/edit_field.py
+```
+
+Opens a Tk window with a matplotlib canvas overlaying `maps/map.png` on the left and
+control panels on the right (mode toggle, node list + inspector, start-pose panel,
+Save / Save & Build buttons).
+
+| Mode | Action |
+| --- | --- |
+| Add Node | Left-click empty canvas → enter name + type (`line` / `blind`) |
+| Move | Left-click + drag a node |
+| Edge | Left-click selects up to 2 nodes; `L` adds a line edge; `B` adds a blind edge |
+| Obstacle | Drag a rectangle; release → enter `kind` label |
+| Start | Click a node to set it as `START_NODE` |
+
+Right-click on a node: Rename / Set type / Delete (Delete refuses if `EDGES` references
+the node — hand-edit `field_data.py` first).
+
+Shortcuts: `Ctrl-Z` undo, `Ctrl-Y` / `Ctrl-Shift-Z` redo, `Ctrl-S` save,
+`Delete` removes the selected edge (Edge mode with 2 nodes selected).
+
+**Save** validates the model, writes `field_data.json`, and (if any node was renamed)
+rewrites the `"u"` / `"v"` keys of the rich `EDGES` table in `field_data.py` via
+LibCST — preserving all comments and formatting.
+
+**Save & Build** does Save, then regenerates `routes.h` + `routes.cpp` in-process.
+
+### Reading coordinates only
+
+```powershell
+uv run python tools/path_planner/pick_xy.py
+```
+
+Left-click any point on the field and the `(x, y)` in centimetres is printed to
+stdout. Read-only; does not modify `field_data.*`.
+
+### Migration (one-shot)
+
+```powershell
+uv run python tools/path_planner/edit_field.py --migrate
+```
+
+Ports the legacy Python-literal `field_data.py` to `field_data.json` + a thin loader
+stub. Idempotent: subsequent runs are no-ops. The rich `EDGES` block (with `Pivot` /
+`LineMode` / `TurnMode` references) stays in Python.
+
+### Hand-editing JSON directly
+
+`field_data.json` is plain JSON — you can edit it in any text editor. The schema
+mirrors the old Python literal keys. Run `build_routes.py` afterwards to regenerate
+`routes.h` / `routes.cpp`.
+
 ## CLI flags
 
 | Flag              | Purpose                                                                                  | Example                                                       |
@@ -166,63 +223,72 @@ If that hex string does not appear at the top of `routes.h`, regen.
 output is not byte-stable across versions, and the runtime never reads
 it.
 
-## Editing field_data.py — workflow
+## Editing field_data — workflow
 
-1. Edit `tools/path_planner/field_data.py`.
-2. Run `uv run python tools/path_planner/build_routes.py`.
-3. Open `tools/path_planner/output/map.png` and sanity-check the
+Since [ADR-022](../../docs/decisions/022-field-data-json-loader.md), geometry input lives
+in `field_data.json` and `field_data.py` is a thin loader. Use the GUI or hand-edit
+the JSON (see [Editing the field graph](#editing-the-field-graph) above). The rich
+`EDGES` table (per-edge enum overrides) is still hand-edited directly in
+`field_data.py`.
+
+After any edit:
+
+1. Run `uv run python tools/path_planner/build_routes.py`.
+2. Open `tools/path_planner/output/map.png` and sanity-check the
    geometry (nodes in the right places, blind edges hop the right
    gaps, no edge clips an obstacle).
-4. Commit `field_data.py`, `WRO2026/routes.h`, and
-   `WRO2026/routes.cpp` **together** in the same commit. The `routes.h`
-   banner SHA256 must equal the **LF-normalized** SHA256 of `field_data.py`
-   (CRLF sequences collapsed to LF first, so the digest is stable across
-   Windows and Linux checkouts) — see the Determinism section above for
+3. Commit `field_data.json`, `field_data.py` (if EDGES changed),
+   `WRO2026/routes.h`, and `WRO2026/routes.cpp` **together** in the same
+   commit. The `routes.h` banner SHA256 must equal the **LF-normalized**
+   SHA256 of `field_data.py` — see the Determinism section above for
    the one-liner. If reviewers see a mismatch, the commit is incomplete.
 
 ## Authoring real-field NODES
 
-Resolves issue #10 scope 1.
+Use the live GUI (`edit_field.py`) in **Add Node** mode to place nodes directly on the
+map image — see [Editing the field graph](#editing-the-field-graph) above. The GUI
+writes coordinates to `field_data.json` on Save.
 
-Launch the picker from the repo root:
+For a read-only coordinate probe (issue #10 scope 1), use `pick_xy.py`:
 
 ```powershell
 uv run python tools/path_planner/pick_xy.py
 ```
 
 That opens a matplotlib window with `maps/map.png` as the background and
-the current `NODES` overlaid as dim grey reference dots. Left-click any
+the current NODES overlaid as dim grey reference dots. Left-click any
 point on the field and the `(x, y)` in centimetres is printed to stdout
-to 3 decimal places, with a red marker plus a 1-decimal-place label
-dropped at the click for visual reference. Keybinds: `c` clears every
-marker (the NODES overlay stays put), `u` undoes the most recent marker.
-Close the window to exit. Paste the printed coordinates straight into
-the `NODES` dict in `field_data.py`.
+to 3 decimal places. Keybinds: `c` clears every marker, `u` undoes the
+most recent marker. Close the window to exit.
 
-`field_data.py` is the single source of truth for both the on-robot
-routes (`WRO2026/routes.h` / `routes.cpp`) and the Python simulator
-(`tools/path_planner/sim/`). Once you have authored real NODES,
-regenerate with `uv run python tools/path_planner/build_routes.py`; both
-the robot's compiled next-hop table and the sim's map snap to the new
-coordinates automatically — there is no separate "robot field" and
-"sim field" to keep in sync.
+`field_data.json` (loaded by `field_data.py`) is the single source of truth for both
+the on-robot routes (`WRO2026/routes.h` / `routes.cpp`) and the Python simulator
+(`tools/path_planner/sim/`). Once you have authored real NODES, regenerate with
+`uv run python tools/path_planner/build_routes.py`; both the robot's compiled
+next-hop table and the sim's map snap to the new coordinates automatically — there is
+no separate "robot field" and "sim field" to keep in sync.
 
 ## Module layout
 
-| File                | Role                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------- |
-| `field_data.py`     | Hand-authored field: nodes, line segments, projections, goals, obstacles.           |
-| `validator.py`      | Strict shape + reference checks. Raises `FieldDataError` on the first problem.      |
-| `graph_builder.py`  | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
-| `planner.py`        | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
-| `compiler.py`       | Heading-aware primitive emission for downstream `PathTracker`.                      |
-| `pipeline_config.py`| Default `LineMode` / `BlindMode` / `ProjectionMode` / `TurnMode` baked into `routes.cpp`. |
-| `visualizer.py`     | Matplotlib renderer for `map.png` (Agg backend, headless-safe).                     |
-| `header_writer.py`  | Emits `routes.h` + `routes.cpp`; embeds `field_data.py`'s SHA256 in the banner.     |
-| `build_routes.py`   | This script — sequences every layer above, decides exit codes.                      |
-| `pick_xy.py`        | Tk/matplotlib GUI for measuring field coordinates off `maps/map.png` (issue #10).   |
-| `sim/`              | Pure-Python mirror of the R4 `PathTracker` FSM for hardware-free verification.      |
-| `tests/`            | pytest suite + golden files for the whole pipeline.                                 |
+| File                    | Role                                                                                |
+| ----------------------- | ----------------------------------------------------------------------------------- |
+| `field_data.json`       | Machine- and human-editable geometry: nodes, edges, obstacles, start pose.          |
+| `field_data.py`         | Thin loader (`load_field_json()`) + hand-authored rich `EDGES` table.               |
+| `validator.py`          | Strict shape + reference checks. Raises `FieldDataError` on the first problem.      |
+| `graph_builder.py`      | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
+| `planner.py`            | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
+| `compiler.py`           | Heading-aware primitive emission for downstream `PathTracker`.                      |
+| `pipeline_config.py`    | Default `LineMode` / `BlindMode` / `ProjectionMode` / `TurnMode` baked into `routes.cpp`. |
+| `visualizer.py`         | Matplotlib renderer for `map.png` (Agg backend, headless-safe).                     |
+| `header_writer.py`      | Emits `routes.h` + `routes.cpp`; embeds `field_data.py`'s SHA256 in the banner.     |
+| `build_routes.py`       | CLI orchestrator — sequences every layer above, decides exit codes.                 |
+| `edit_field.py`         | Entry point for the live Tk field-graph editor (issue #10 scope 2).                 |
+| `editor/loader.py`      | JSON load + deterministic dump for `field_data.json`.                               |
+| `editor/migrate.py`     | One-shot port from legacy Python-literal `field_data.py` to JSON.                  |
+| `editor/ast_rewrite.py` | LibCST-based rename cascade for `"u"` / `"v"` keys in the `EDGES` table.           |
+| `pick_xy.py`            | Read-only Tk/matplotlib coordinate probe against `maps/map.png` (issue #10 scope 1). |
+| `sim/`                  | Pure-Python mirror of the R4 `PathTracker` FSM for hardware-free verification.      |
+| `tests/`                | pytest suite + golden files for the whole pipeline.                                 |
 
 ## Pointers to deeper docs
 
