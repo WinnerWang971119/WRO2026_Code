@@ -109,6 +109,13 @@ _COORD_ENTRY_WIDTH: int = 8
 # Initial status-bar message before the app sets anything.
 _DEFAULT_STATUS_TEXT = "Ready."
 
+# Max-edge-length Spinbox bounds (centimetres).
+_MAX_EDGE_LENGTH_MIN: float = 10.0
+_MAX_EDGE_LENGTH_MAX: float = 300.0
+_MAX_EDGE_LENGTH_STEP: float = 5.0
+_MAX_EDGE_LENGTH_DEFAULT: float = 60.0
+_MAX_EDGE_LENGTH_FORMAT: str = "%.1f"
+
 
 # ---------------------------------------------------------------------------
 # SidePanels frame
@@ -139,6 +146,12 @@ class SidePanels(tk.Frame):
     :ivar on_node_coords_change: Fired when the inspector's x/y entry
         widgets commit a valid in-range value.  Arguments are
         ``(node_name, x_cm, y_cm)``.
+    :ivar on_auto_create_edges: Fired when the **Auto-create edges** button
+        is clicked.  No arguments.
+    :ivar on_accept_proposed: Fired when the **Accept** button is clicked
+        in preview mode.  No arguments.
+    :ivar on_reject_proposed: Fired when the **Reject** button is clicked
+        in preview mode.  No arguments.
     :ivar on_start_node_change: Fired when the start-pose node combobox
         changes.  Sole argument is the chosen node name.
     :ivar on_start_heading_change: Fired when the start-pose spinbox
@@ -169,6 +182,9 @@ class SidePanels(tk.Frame):
         self.on_node_select: Optional[Callable[[Optional[str]], None]] = None
         self.on_node_type_change: Optional[Callable[[str, str], None]] = None
         self.on_node_coords_change: Optional[Callable[[str, float, float], None]] = None
+        self.on_auto_create_edges: Optional[Callable[[], None]] = None
+        self.on_accept_proposed: Optional[Callable[[], None]] = None
+        self.on_reject_proposed: Optional[Callable[[], None]] = None
         self.on_start_node_change: Optional[Callable[[str], None]] = None
         self.on_start_heading_change: Optional[Callable[[float], None]] = None
         self.on_undo: Optional[Callable[[], None]] = None
@@ -185,6 +201,9 @@ class SidePanels(tk.Frame):
         self._start_node_var = tk.StringVar(value="")
         self._start_heading_var = tk.StringVar(
             value=_HEADING_FORMAT % _HEADING_MIN_DEG
+        )
+        self._max_edge_length_var = tk.StringVar(
+            value=_MAX_EDGE_LENGTH_FORMAT % _MAX_EDGE_LENGTH_DEFAULT
         )
         self._status_var = tk.StringVar(value=_DEFAULT_STATUS_TEXT)
 
@@ -309,6 +328,49 @@ class SidePanels(tk.Frame):
         self._y_entry.pack(side="left")
         self._y_entry.bind("<Return>", self._handle_coords_commit)
         self._y_entry.bind("<FocusOut>", self._handle_coords_commit)
+
+        # --- Auto-create edges row (T7) ---
+        autocreate_row = tk.Frame(group)
+        autocreate_row.pack(side="top", fill="x", pady=(_SECTION_SPACING, 0))
+
+        length_label_row = tk.Frame(autocreate_row)
+        length_label_row.pack(side="top", fill="x")
+        tk.Label(length_label_row, text="Max edge length (cm):").pack(side="left")
+        self._max_edge_length_spinbox = ttk.Spinbox(
+            length_label_row,
+            from_=_MAX_EDGE_LENGTH_MIN,
+            to=_MAX_EDGE_LENGTH_MAX,
+            increment=_MAX_EDGE_LENGTH_STEP,
+            textvariable=self._max_edge_length_var,
+            format=_MAX_EDGE_LENGTH_FORMAT,
+            width=6,
+        )
+        self._max_edge_length_spinbox.pack(side="right")
+
+        # Button sub-row: hosts the Auto-create button in idle mode and
+        # the Accept / Reject pair in preview mode.  The state is toggled
+        # via :meth:`set_auto_create_state`.
+        self._autocreate_button_frame = tk.Frame(autocreate_row)
+        self._autocreate_button_frame.pack(side="top", fill="x", pady=(4, 0))
+
+        self._auto_create_button = tk.Button(
+            self._autocreate_button_frame,
+            text="Auto-create edges",
+            command=self._handle_auto_create_edges,
+        )
+        self._accept_button = tk.Button(
+            self._autocreate_button_frame,
+            text="Accept",
+            command=self._handle_accept_proposed,
+        )
+        self._reject_button = tk.Button(
+            self._autocreate_button_frame,
+            text="Reject",
+            command=self._handle_reject_proposed,
+        )
+
+        # Start in idle mode -- Accept / Reject hidden until preview opens.
+        self.set_auto_create_state("idle")
 
     def _build_start_pose_panel(self) -> None:
         """Create the **Start** labelframe: node combobox + heading spinbox."""
@@ -488,6 +550,51 @@ class SidePanels(tk.Frame):
         """
         self._redo_button.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
+    def set_auto_create_state(self, mode: str) -> None:
+        """Toggle the auto-create button row between idle and preview modes.
+
+        Idle mode shows only the **Auto-create edges** button.  Preview
+        mode hides it and shows **Accept** + **Reject** instead.  The two
+        callback slots :attr:`on_accept_proposed` / :attr:`on_reject_proposed`
+        wire to those buttons.
+
+        :param mode: ``"idle"`` or ``"preview"``.
+        :raises ValueError: If *mode* is not one of the two strings.
+        """
+        if mode == "idle":
+            self._accept_button.pack_forget()
+            self._reject_button.pack_forget()
+            self._auto_create_button.pack(side="left", fill="x", expand=True)
+        elif mode == "preview":
+            self._auto_create_button.pack_forget()
+            self._accept_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+            self._reject_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        else:
+            raise ValueError(
+                f"set_auto_create_state: mode must be 'idle' or 'preview', "
+                f"got {mode!r}"
+            )
+
+    @property
+    def max_edge_length_cm(self) -> float:
+        """Current Spinbox value parsed as a float.
+
+        Returns :data:`_MAX_EDGE_LENGTH_DEFAULT` if the Spinbox holds an
+        unparseable string (defensive against a transient empty entry during
+        a mid-edit FocusOut).  Out-of-range values are NOT clamped here; the
+        Spinbox widget enforces its own ``from_``/``to`` bounds visually, and
+        a manually typed out-of-range value will simply propagate to the
+        auto-create caller.  Callers that need clamping should add their own
+        bounds check.
+
+        :return: Max edge length in centimetres, as a float.
+        """
+        raw = self._max_edge_length_var.get()
+        try:
+            return float(raw)
+        except ValueError:
+            return _MAX_EDGE_LENGTH_DEFAULT
+
     # ------------------------------------------------------------------
     # Internal helpers (inspector population)
     # ------------------------------------------------------------------
@@ -634,6 +741,21 @@ class SidePanels(tk.Frame):
         """Fire :attr:`on_redo` if assigned."""
         if self.on_redo is not None:
             self.on_redo()
+
+    def _handle_auto_create_edges(self) -> None:
+        """Fire :attr:`on_auto_create_edges` if assigned."""
+        if self.on_auto_create_edges is not None:
+            self.on_auto_create_edges()
+
+    def _handle_accept_proposed(self) -> None:
+        """Fire :attr:`on_accept_proposed` if assigned."""
+        if self.on_accept_proposed is not None:
+            self.on_accept_proposed()
+
+    def _handle_reject_proposed(self) -> None:
+        """Fire :attr:`on_reject_proposed` if assigned."""
+        if self.on_reject_proposed is not None:
+            self.on_reject_proposed()
 
     def _handle_save(self) -> None:
         """Fire :attr:`on_save` if assigned."""
