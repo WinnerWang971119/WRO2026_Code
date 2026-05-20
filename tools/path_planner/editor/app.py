@@ -379,10 +379,9 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _on_panel_node_select(self, node_name: Optional[str]) -> None:
-        """Status-only handler: update the bar when the listbox selection
-        changes. The panel itself drives the inspector update; this hook is
-        kept for completeness and future expansion (e.g. centring the canvas
-        view on the selected node).
+        """Called when the listbox selection changes.  Updates the status bar
+        and triggers a full view refresh so the inspector (driven by
+        SidePanels.refresh) reflects the new selection.
 
         :param node_name: Selected node name, or ``None`` if cleared.
         """
@@ -390,6 +389,7 @@ class EditorApp:
             self._set_status("Selection cleared.")
         else:
             self._set_status(f"Selected node {node_name!r}.")
+        self._refresh_view()
 
     def _on_panel_node_type_change(self, node_name: str, new_type: str) -> None:
         """Dispatch a :class:`SetNodeType` command when the combobox changes.
