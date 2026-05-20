@@ -16,10 +16,16 @@ the start zone. We have three deadlines — regional on `2026-07-21`, national
 on `2026-08-24`, world final at the end of November `2026-11-30`. The team is
 2-3 people running two parallel tracks: a mechanical track (chassis,
 manipulator, sensor mounts) and a software track (modules in
-[ARCHITECTURE.md](./ARCHITECTURE.md)). The hard constraint at `2026-05-03` is
-that nothing is built yet — no chassis, no manipulator, no software — so
-Phase 0 is pure hardware bring-up and the open decisions in
-[DECISIONS.md](./DECISIONS.md) must be closed before software can lock in.
+[ARCHITECTURE.md](./ARCHITECTURE.md)).
+
+**Status snapshot (2026-05-20):** Phase 0 (hardware bring-up + foundational
+decisions) is closed. Phase 1 (Drive / LineFollower / Intersection) shipped.
+Phase 2 (FieldMap / Localization / PathTracker + offline Python planner)
+shipped through PR3 (Mission DSL). The 8-channel custom line sensor
+(`WROLineArray`, issue #16) and the intersection PID freeze (issue #22) both
+landed on `main`. The remaining work — perception (color + camera),
+manipulator hardware + control, full mission scheduler, recoveries — is
+re-scoped against today's calendar in §2 below.
 
 ## 2. Timeline at a Glance
 
@@ -244,18 +250,23 @@ seconds, and hardening the robot for travel and repeated handling.
 
 ## 11. Open Decisions Log
 
-These are the open items from [ARCHITECTURE.md](./ARCHITECTURE.md) section
-"Open items to confirm before coding" and [DECISIONS.md](./DECISIONS.md). All
-must be closed before software can rely on a fixed sensor or mechanism. Decide-by
-dates fall in Phase 0 or early Phase 1.
+Closed decisions are recorded in [DECISIONS.md](./DECISIONS.md). The remaining
+open items below must be closed before their phase's software can lock in.
 
 | Decision | Owner | Decide-by | Options | Notes |
 |---|---|---|---|---|
-| Camera | sw lead | `2026-05-12` | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives `CameraMosaic` impl; lighting calibration required either way (per [DECISIONS.md](./DECISIONS.md)). |
-| Line sensor | sw lead | `2026-05-12` | MXLineTracer (10ch I2C) ; custom analog array | Affects `LineFollower` and `Intersection` interfaces. |
-| Color sensor | sw lead | `2026-05-12` | MXColorV3 ; HTColV2 ; Vernier | `ColorReader.read()` -> `{Y,B,G,W,NONE}` regardless. |
-| Manipulator v0 mechanism | mech lead | `2026-05-17` | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator` setLift/setGripper/setArm parameters. |
-| Line PID source | sw lead | `2026-05-24` | Library line-tracker helper ; custom PID | If lib helper proves usable, write less code; if not, `LineFollower` owns PID per [DECISIONS.md](./DECISIONS.md). |
+| Camera | sw lead | TBD (Phase 3 entry) | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives `CameraMosaic` impl; lighting calibration required either way. |
+| Color sensor | sw lead | TBD (Phase 3 entry) | MXColorV3 ; HTColV2 ; Vernier | `ColorReader.read()` -> `{Y,B,G,W,NONE}` regardless. |
+| Manipulator mechanism | mech lead | TBD (Phase 3 entry) | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator` setLift/setGripper/setArm parameters. |
+
+### Closed in Phase 0 / Phase 1
+
+| Decision | Closed | Outcome |
+|---|---|---|
+| Line sensor | 2026-05 | Custom `WROLineArray` — 8 ch / board on MXColor I2C boards, 1–2 boards (front + optional rear). Replaces vendor MXLineTracer. |
+| Line PID source | 2026-05 | Own P+D in `LineFollower.update()`, intersection-freeze added in issue #22. |
+| Motor / DriveDC API | 2026-05 | `MiniR4.DriveDC` wrapped by `Drive` fluent-builder facade with FIFO queue + T-shape. |
+| STM32 firmware version | 2026-05 | ≥ v6.0 confirmed at boot (`MiniR4.begin()` halts if older). |
 
 ## 12. Risk Register
 
