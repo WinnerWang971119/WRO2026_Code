@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('verify', 'upload', 'list-boards')]
+    [ValidateSet('verify', 'upload', 'list-boards', 'monitor')]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
@@ -12,7 +12,9 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SketchPath,
 
-    [string]$Port = ''
+    [string]$Port = '',
+
+    [string]$BaudRate = ''
 )
 
 Set-StrictMode -Version Latest
@@ -40,12 +42,12 @@ function Invoke-ArduinoCli {
     }
 }
 
-function Resolve-UploadPort {
+function Resolve-SerialPort {
     param(
         [string]$ConfiguredPort
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPort)) {
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPort) -and $ConfiguredPort -ne 'auto') {
         return $ConfiguredPort
     }
 
@@ -72,6 +74,18 @@ function Resolve-UploadPort {
     throw ("Multiple serial devices detected: {0}. Set wro2026.arduino.port in workspace settings." -f ($detectedPorts -join ', '))
 }
 
+function Resolve-BaudRate {
+    param(
+        [string]$ConfiguredBaudRate
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredBaudRate)) {
+        return $ConfiguredBaudRate
+    }
+
+    throw 'No baud rate configured. Set wro2026.arduino.baudRate in workspace settings.'
+}
+
 switch ($Action) {
     'verify' {
         $sketchDir = Resolve-SketchDir
@@ -79,11 +93,17 @@ switch ($Action) {
     }
     'upload' {
         $sketchDir = Resolve-SketchDir
-        $uploadPort = Resolve-UploadPort -ConfiguredPort $Port
+        $uploadPort = Resolve-SerialPort -ConfiguredPort $Port
         Write-Host "Uploading to $uploadPort"
         Invoke-ArduinoCli upload --fqbn $Fqbn --port $uploadPort $sketchDir
     }
     'list-boards' {
         Invoke-ArduinoCli board list
+    }
+    'monitor' {
+        $monitorPort = Resolve-SerialPort -ConfiguredPort $Port
+        $monitorBaudRate = Resolve-BaudRate -ConfiguredBaudRate $BaudRate
+        Write-Host "Monitoring $monitorPort at $monitorBaudRate baud"
+        Invoke-ArduinoCli monitor --port $monitorPort --config "baudrate=$monitorBaudRate"
     }
 }

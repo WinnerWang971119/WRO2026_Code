@@ -7,5 +7,6 @@
     "wro2026.arduino.cliPath": "C:/Users/wangd/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe",
     "wro2026.arduino.fqbn": "arduino:renesas_uno:unor4wifi",
     "wro2026.arduino.sketchPath": "WRO2026",
-    "wro2026.arduino.port": ""
+    "wro2026.arduino.port": "auto",
+    "wro2026.arduino.baudRate": "115200"
 }
