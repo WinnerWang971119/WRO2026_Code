@@ -47,7 +47,7 @@ function Resolve-SerialPort {
         [string]$ConfiguredPort
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPort)) {
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPort) -and $ConfiguredPort -ne 'auto') {
         return $ConfiguredPort
     }
 
