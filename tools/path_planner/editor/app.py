@@ -76,9 +76,28 @@ _WINDOW_TITLE: str = "WRO 2026 Field Editor"
 #: Suffix appended to the window title when the model has unsaved changes.
 _DIRTY_TITLE_SUFFIX: str = " *"
 
-#: Initial window geometry (width x height in pixels), big enough to host the
-#: matplotlib canvas plus the 240px side panel without scrolling.
-_DEFAULT_WINDOW_GEOMETRY: str = "1100x700"
+#: Initial canvas area width in pixels. The canvas height is derived from the
+#: loaded field's aspect ratio so the map renders without huge empty bars
+#: above and below it. The right-hand side panel (``_PANEL_WIDTH_PX``) and a
+#: small chrome margin are added on top of these to get the window geometry.
+_DEFAULT_CANVAS_WIDTH_PX: int = 900
+
+#: Width of the right-hand side panel column. Mirrors
+#: ``tools.path_planner.editor.panels._PANEL_WIDTH_PX``. Duplicated here
+#: rather than imported because the panels module pins its own column width
+#: with ``pack_propagate(0)`` -- this constant only feeds the initial window
+#: sizing math.
+_SIDE_PANEL_WIDTH_PX: int = 240
+
+#: Extra vertical pixels reserved for the matplotlib figure's axis labels,
+#: title bar, and status row so the field rectangle itself fits inside the
+#: canvas area without being clipped.
+_CANVAS_CHROME_PX: int = 80
+
+#: Hard floor on the initial window dimensions so a degenerately tall or thin
+#: field still produces a usable starting window.
+_MIN_WINDOW_WIDTH_PX: int = 800
+_MIN_WINDOW_HEIGHT_PX: int = 400
 
 #: Valid node-type strings as displayed in dialogs and combobox submenus.
 _NODE_TYPE_LINE: str = "line"
@@ -183,7 +202,7 @@ class EditorApp:
         self._owns_root: bool = root is None
         self._root: tk.Tk = root if root is not None else tk.Tk()
         self._root.title(_WINDOW_TITLE)
-        self._root.geometry(_DEFAULT_WINDOW_GEOMETRY)
+        self._root.geometry(self._initial_window_geometry())
 
         # ---- 5. Side panels (right column, fixed width) ----
         self._panels: SidePanels = SidePanels(self._root)
@@ -193,6 +212,7 @@ class EditorApp:
         # The canvas resolves ``model.map_png`` against the planner root
         # itself; it does not need a field_data module reference.
         self._canvas: FieldCanvas = FieldCanvas(self._root)
+        self._size_canvas_to_field()
         self._canvas.tk_widget.pack(side="left", fill="both", expand=True)
 
         # ---- 7. Mouse / mode state ----
@@ -230,6 +250,55 @@ class EditorApp:
 
         # ---- 10. Initial render + panel population ----
         self._refresh_view()
+
+    # ------------------------------------------------------------------
+    # Initial sizing (canvas + window match the field's aspect ratio)
+    # ------------------------------------------------------------------
+
+    def _field_aspect_ratio(self) -> float:
+        """Return ``field_mm[0] / field_mm[1]`` with a safe fallback.
+
+        Used by :meth:`_initial_window_geometry` and
+        :meth:`_size_canvas_to_field` to pick a starting size that mirrors
+        the field's real-world proportions. A non-positive height falls
+        back to ``1.0`` (square) so a degenerate model still yields a
+        usable window.
+        """
+        width_mm, height_mm = self._model.field_mm
+        if height_mm <= 0.0:
+            return 1.0
+        return float(width_mm) / float(height_mm)
+
+    def _initial_window_geometry(self) -> str:
+        """Compute a ``"WxH"`` geometry string sized to the field aspect.
+
+        The canvas area is ``_DEFAULT_CANVAS_WIDTH_PX`` wide; its height is
+        derived from the field aspect so the map fills the canvas without
+        large empty bars. The window adds the side panel width and a small
+        vertical chrome margin for matplotlib's axis labels.
+        """
+        aspect = self._field_aspect_ratio()
+        canvas_w = _DEFAULT_CANVAS_WIDTH_PX
+        canvas_h = max(int(round(canvas_w / aspect)), _MIN_WINDOW_HEIGHT_PX)
+        window_w = max(canvas_w + _SIDE_PANEL_WIDTH_PX, _MIN_WINDOW_WIDTH_PX)
+        window_h = max(canvas_h + _CANVAS_CHROME_PX, _MIN_WINDOW_HEIGHT_PX)
+        return f"{window_w}x{window_h}"
+
+    def _size_canvas_to_field(self) -> None:
+        """Resize the matplotlib figure to match the field aspect ratio.
+
+        The canvas is laid out with ``fill="both", expand=True`` so the Tk
+        widget tracks the window, but matplotlib's initial figsize still
+        seeds the first paint. Without this, a 4:3 default figure paired
+        with a 2:1 field leaves big gray bars above and below the map.
+        """
+        aspect = self._field_aspect_ratio()
+        # Pick a width in inches and let the height follow the field aspect.
+        # 9.0 in keeps the figure within the default Tk DPI render budget
+        # while leaving room for axis labels.
+        width_in = 9.0
+        height_in = max(width_in / aspect, 2.5)
+        self._canvas.figure.set_size_inches(width_in, height_in, forward=False)
 
     # ------------------------------------------------------------------
     # Lifecycle
