@@ -483,13 +483,15 @@ class FieldCanvas:
         # physical orientation of the field mat. Nodes, edges, obstacles,
         # and axis labels stay in the model's SW-origin frame -- only the
         # image's pixel-to-extent mapping is mirrored.
+        # Omit ``aspect`` so imshow inherits the axes' ``set_aspect("equal")``
+        # set in :meth:`render`. Passing ``aspect="auto"`` would override
+        # that and re-stretch the field rectangle on every window resize.
         self._ax.imshow(
             img,
             extent=(0.0, width_cm, 0.0, height_cm),
             origin="upper",
             alpha=_BACKGROUND_ALPHA,
             zorder=_BACKGROUND_ZORDER,
-            aspect="auto",
         )
 
     def _draw_obstacles(self, model: FieldModel) -> None:

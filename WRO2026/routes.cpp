@@ -13,17 +13,17 @@ namespace Routes {
 
     const NodeInfo NODES[N_NODES] = {
         { 67.900000f, 36.900000f, NodeType::LINE, "Inter1" },     // index 0
-        { 120.772725f, 36.872651f, NodeType::LINE, "Inter2" },     // index 1
+        { 240.300000f, 36.900000f, NodeType::LINE, "Inter2" },     // index 1
         { 24.154545f, 23.511482f, NodeType::BLIND, "Start"  },     // index 2
         { 94.929565f, 57.958246f, NodeType::BLIND, "finial" },     // index 3
     };
 
     const uint8_t NEXT_HOP[N_NODES][N_NODES] = {
         // [from][to] = next-hop node index; 0xFF = unreachable
-        {    0, 0xFF,    2,    3 }, // from Inter1 (index 0)
-        { 0xFF,    1, 0xFF, 0xFF }, // from Inter2 (index 1)
-        {    0, 0xFF,    2,    0 }, // from Start (index 2)
-        {    0, 0xFF,    0,    3 }, // from finial (index 3)
+        { 0, 3, 2, 3 }, // from Inter1 (index 0)
+        { 3, 1, 3, 3 }, // from Inter2 (index 1)
+        { 0, 0, 2, 0 }, // from Start (index 2)
+        { 0, 1, 0, 3 }, // from finial (index 3)
     };
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
@@ -38,7 +38,7 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Start
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to finial
+            { EdgeType::BLIND, 146.887757f, 171.757514f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to finial
         },
         { // from Start (index 2)
             { EdgeType::BLIND, 45.748412f, 17.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter1
@@ -48,7 +48,7 @@ namespace Routes {
         },
         { // from finial (index 3)
             { EdgeType::BLIND, 34.264371f, 217.921513f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter2
+            { EdgeType::BLIND, 146.887757f, 351.757514f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Inter2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to Start
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT }, // to finial
         },
