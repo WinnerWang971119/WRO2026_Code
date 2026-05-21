@@ -20,7 +20,7 @@ The dominant consumer of the Drive API is the auto-path planner. Phase 2+ issues
 
 The cost of forgetting must be borne by the rare case (calibration routine that wants raw PWM, deliberately flat short pulse), not the common case.
 
-SYNC over GYRO: SYNC closes the loop on left-vs-right encoder match — cancels the manufacturer asymmetry between the two TT motors (the dominant disturbance on a flat line-following segment). GYRO is the right tool for long open straights; on a line-following field the line is the heading reference, so layering yaw-lock on top of the outer P+D would either add latency or fight the line controller.
+SYNC over GYRO: SYNC closes the loop on left-vs-right encoder match — cancels the manufacturer asymmetry between the two drive motors (the dominant disturbance on a flat line-following segment). GYRO is the right tool for long open straights; on a line-following field the line is the heading reference, so layering yaw-lock on top of the outer P+D would either add latency or fight the line controller.
 
 `tShape` default leans on the existing min-move threshold (`TSHAPE_MIN_MOVE_CM = 5`, `TSHAPE_MIN_MOVE_SEC = 0.4`) for graceful degradation. Below those thresholds, the builder destructor silently downgrades from `PROFILE_*` to `DRIVE_*` and runs flat.
 
