@@ -31,14 +31,17 @@ progress on the mech track; perception (camera) and the Tasks layer are
 not yet started. Phase 3 is next.
 
 **Two physical chassis.** Phases 3-6 run on the **test rover** (TT
-motors, current `Config.h` defaults). The **competition robot Lofaix**
-(LEGO EV3 motors) must be assembled and brought up before Phase 7's code
-freeze. Bring-up means: re-tune motor PPR / RPM constants in `Config.h`
-for EV3, re-run `Drive.calibrateMotorBias()` from scratch (TT scalars
-do not transfer — see [ADR-011](./docs/decisions/011-motor-bias-strategy-b.md)),
-re-tune `LINE_KP` / `LINE_KD` on Lofaix's geometry, and re-pass the
-Phase 6 B6.1 ten-trial battery on Lofaix to confirm the regional target
-still holds. Issue #15 tracks the EV3 model swap.
+motors; switch the alias to `MatrixTT` in `Config.h`). The **competition
+robot Lofaix** (LEGO EV3 motors) must be assembled and brought up before
+Phase 7's code freeze. The EV3 model swap landed in the issue-#15 PR:
+`Config.h` now defaults to `using ActiveMotor = LegoEV3;`
+(see [ADR-022](./docs/decisions/022-dual-motor-profile.md)). Bring-up
+now only requires: re-running `Drive.calibrateMotorBias()` on Lofaix
+(TT scalars do not transfer —
+see [ADR-011](./docs/decisions/011-motor-bias-strategy-b.md)),
+re-tuning `LINE_KP` / `LINE_KD` on Lofaix's geometry, and re-passing
+the Phase 6 B6.1 ten-trial battery on Lofaix to confirm the regional
+target still holds.
 
 ## 2. Phase Sequence
 
@@ -227,7 +230,7 @@ in the sprint window — only constants tunable.
 
 **Exit criteria (hard gates):**
 - [ ] Lofaix mechanically assembled and powered (mech track must deliver before this phase starts).
-- [ ] `Config.h` updated for EV3 PPR / RPM (issue #15).
+- [ ] `Config::ActiveMotor` confirmed as `LegoEV3` on flashed Lofaix (constants landed in issue #15 PR; see [ADR-022](./docs/decisions/022-dual-motor-profile.md)).
 - [ ] `Drive.calibrateMotorBias()` re-run on Lofaix, scalars committed.
 - [ ] `LINE_KP` / `LINE_KD` re-tuned on Lofaix.
 - [ ] B6.1 ten-trial battery passes on Lofaix at the same 8/10 success rate.
@@ -245,7 +248,7 @@ in the sprint window — only constants tunable.
 | ID | Task | Track | Blocked By | Output |
 |----|------|-------|------------|--------|
 | P7.0a | Lofaix mech assembly complete | mech | (parallel to Phase 5/6) | Lofaix ready |
-| P7.0b | Swap `Config.h` motor constants (PPR / RPM / reverse flags) for EV3 | sw | P7.0a, issue #15 | EV3 Config |
+| P7.0b | Swap `Config.h` motor constants (PPR / RPM / reverse flags) for EV3 (done in #15 PR) | sw | P7.0a, issue #15 | EV3 Config |
 | P7.0c | Re-run `calibrateMotorBias()` on Lofaix; commit new scalars | sw | P7.0b | Lofaix bias |
 | P7.0d | Re-tune `LINE_KP` / `LINE_KD` on Lofaix | sw | P7.0c | Lofaix line PID |
 | P7.0e | Re-run B6.1 ten-trial battery on Lofaix; confirm ≥8/10 success | both | P7.0d | Lofaix qualified |
@@ -353,7 +356,7 @@ can lock in.
 | 9 | Encoder slip / dead-reckoning drift during a long task | M | M | Architecture rejects pure dead-reckoning (ADR-001); `Localization` re-anchors at every intersection. If Phase 3 verification exposes blind-edge drift, pull forward Phase 2.5 calibration nodes / `wall_zero`. | sw |
 | 10 | `Localization` written from outside the module | L | H | Coding criteria checklist in [ARCHITECTURE.md](./ARCHITECTURE.md); ADR-005; enforced in code review. | sw |
 | 11 | Lofaix (competition robot) not mech-ready by Phase 7 entry | M | H | Mech track must deliver Lofaix as a parallel deliverable during Phases 5-6. If slip, P7.0a-P7.0e compress the freeze window, but the `2026-07-21` regional date is fixed. Worst case: compete on the test rover with TT-tuned `Config.h`. | mech |
-| 12 | TT-tuned `Config.h` constants silently misapplied to Lofaix EV3 motors | L | H | P7.0b is a hard exit gate; static_assert or per-chassis preprocessor flag in `Config.h` (issue #15 design) prevents accidental cross-chassis flashing. | sw |
+| 12 | TT-tuned `Config.h` constants silently misapplied to Lofaix EV3 motors | L | H | Single-line `using ActiveMotor = ...;` toggle in `Config.h` makes the swap one explicit edit + reflash; Doxygen `@warning` on the alias declaration reminds the operator to re-run `Drive.calibrateMotorBias()` after the swap (see [ADR-022](./docs/decisions/022-dual-motor-profile.md)). | sw |
 
 ## 13. Test Fixture & Measurement Plan
 
