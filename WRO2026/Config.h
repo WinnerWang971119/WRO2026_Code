@@ -89,41 +89,73 @@ namespace Config
     constexpr bool MOTOR_RIGHT_REVERSE = false;
 
     // ---------------------------------------------------------------------------------------
-    // Motor profile + PID gains (TT-motor)
+    // Motor profile + PID gains (selected via ActiveMotor)
     // ---------------------------------------------------------------------------------------
-    //
-    // PID gains taken from MatrixMiniR4 `MiniR4DriveDC.h` TT defaults:
-    //   - setMoveSyncPID  TT: Kp=0.02,  Ki=0.00, Kd=0.04
-    //   - setMoveGyroPID  TT: Kp=6.01,  Ki=0.00, Kd=2.15
-    //   - setTurnGyroPID  TT: Kp=22.75, Ki=0.08, Kd=0.25
-    //
 
-    /** @brief Encoder pulses per output-shaft revolution for the TT motor. */
-    constexpr uint16_t MOTOR_PPR = 545;
+    /**
+     * @brief Vendor PID + encoder defaults for the Matrix TT motor.
+     * @note Source: MatrixMiniR4 MiniR4DriveDC.h PID docstrings (setMoveSyncPID, setMoveGyroPID,
+     *       setTurnGyroPID) + examples/4-DriveDC Functions/MiniR4_DriveDC_Test/MiniR4_DriveDC_Test.ino:64-74.
+     */
+    struct MatrixTT
+    {
+        static constexpr uint16_t PPR = 545;
+        static constexpr uint16_t RPM = 200;
+        static constexpr float    MOVESYNC_KP = 0.02f;
+        static constexpr float    MOVESYNC_KI = 0.0f;
+        static constexpr float    MOVESYNC_KD = 0.04f;
+        static constexpr float    MOVEGYRO_KP = 6.01f;
+        static constexpr float    MOVEGYRO_KI = 0.0f;
+        static constexpr float    MOVEGYRO_KD = 2.15f;
+        static constexpr float    TURNGYRO_KP = 22.75f;
+        static constexpr float    TURNGYRO_KI = 0.08f;
+        static constexpr float    TURNGYRO_KD = 0.25f;
+    };
 
-    /** @brief Nominal no-load RPM for the TT motor at full power. */
-    constexpr uint16_t MOTOR_RPM = 200;
+    /**
+     * @brief Vendor PID + encoder defaults for the LEGO EV3 motor (LE-F TurnGyro variant).
+     * @note Source: MiniR4DriveDC.h PID docstrings + MiniR4_DriveDC_Test.ino:52-62.
+     *       LE-F = "LEGO EV3 Fast" Kp (22.75). LE-S variant uses Kp=5.25 — not used here.
+     */
+    struct LegoEV3
+    {
+        static constexpr uint16_t PPR = 360;
+        static constexpr uint16_t RPM = 300;
+        static constexpr float    MOVESYNC_KP = 0.002f;
+        static constexpr float    MOVESYNC_KI = 0.0f;
+        static constexpr float    MOVESYNC_KD = 0.004f;
+        static constexpr float    MOVEGYRO_KP = 0.52f;
+        static constexpr float    MOVEGYRO_KI = 0.0f;
+        static constexpr float    MOVEGYRO_KD = 0.15f;
+        static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
+        static constexpr float    TURNGYRO_KI = 0.02f;
+        static constexpr float    TURNGYRO_KD = 1.54f;
+    };
 
-    /** @brief MoveSync (left/right encoder match) Kp. */
-    constexpr float MOVESYNC_KP = 0.02f;
-    /** @brief MoveSync Ki. */
-    constexpr float MOVESYNC_KI = 0.0f;
-    /** @brief MoveSync Kd. */
-    constexpr float MOVESYNC_KD = 0.04f;
+    /**
+     * @brief Single edit point to swap the chassis motor model.
+     *
+     * Default is LegoEV3 (Lofaix competition robot). Switch to MatrixTT for the
+     * test rover. The flat constants below (MOTOR_PPR, MOVESYNC_K*, …) forward
+     * to ActiveMotor::* so call sites do not change.
+     *
+     * @warning Swapping motors does NOT recalibrate MOTOR_BIAS_L/R — those are
+     *          per-physical-chassis measurements and MUST be re-captured via
+     *          Drive.calibrateMotorBias() after a swap. See ADR-011 + ADR-022.
+     */
+    using ActiveMotor = LegoEV3;
 
-    /** @brief MoveGyro (straight-line yaw lock) Kp. */
-    constexpr float MOVEGYRO_KP = 6.01f;
-    /** @brief MoveGyro Ki. */
-    constexpr float MOVEGYRO_KI = 0.0f;
-    /** @brief MoveGyro Kd. */
-    constexpr float MOVEGYRO_KD = 2.15f;
-
-    /** @brief TurnGyro (in-place rotation) Kp. */
-    constexpr float TURNGYRO_KP = 22.75f;
-    /** @brief TurnGyro Ki. */
-    constexpr float TURNGYRO_KI = 0.08f;
-    /** @brief TurnGyro Kd. */
-    constexpr float TURNGYRO_KD = 0.25f;
+    constexpr uint16_t MOTOR_PPR    = ActiveMotor::PPR;
+    constexpr uint16_t MOTOR_RPM    = ActiveMotor::RPM;
+    constexpr float    MOVESYNC_KP  = ActiveMotor::MOVESYNC_KP;
+    constexpr float    MOVESYNC_KI  = ActiveMotor::MOVESYNC_KI;
+    constexpr float    MOVESYNC_KD  = ActiveMotor::MOVESYNC_KD;
+    constexpr float    MOVEGYRO_KP  = ActiveMotor::MOVEGYRO_KP;
+    constexpr float    MOVEGYRO_KI  = ActiveMotor::MOVEGYRO_KI;
+    constexpr float    MOVEGYRO_KD  = ActiveMotor::MOVEGYRO_KD;
+    constexpr float    TURNGYRO_KP  = ActiveMotor::TURNGYRO_KP;
+    constexpr float    TURNGYRO_KI  = ActiveMotor::TURNGYRO_KI;
+    constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;
 
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
     constexpr float LINE_KP = 8.0f;
