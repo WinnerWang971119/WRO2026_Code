@@ -140,6 +140,30 @@
                 "clear": true
             },
             "problemMatcher": []
+        },
+        {
+            "label": "Arduino: Monitor Serial",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "monitor",
+                "${config:wro2026.arduino.cliPath}",
+                "${config:wro2026.arduino.fqbn}",
+                "${config:wro2026.arduino.sketchPath}",
+                "${config:wro2026.arduino.port}",
+                "${config:wro2026.arduino.baudRate}"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
         }
     ]
 }
