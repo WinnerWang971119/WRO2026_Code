@@ -36,6 +36,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-016 — Drive builders block by default; `.async()` opts out](./docs/decisions/016-sync-default-builders.md)
 - [ADR-017 — `DriveMode::SYNC` + `tShape` are the project-wide default](./docs/decisions/017-sync-plus-tshape-default-profile.md)
 - [ADR-018 — LineFollower distance-gated stops use symmetric trapezoidal + active brake](./docs/decisions/018-linefollower-distance-gated-stops.md)
+- [ADR-022 — Dual motor profile via constexpr struct + ActiveMotor alias](./docs/decisions/022-dual-motor-profile.md)
 
 ### Perception
 
@@ -47,7 +48,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 16 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018, 019, 020 |
+| Implemented | 17 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018, 019, 020, 022 |
 | Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
 | Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
