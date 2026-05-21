@@ -88,9 +88,14 @@ EDGES = [
 
 
 def _write(tmp_path: Path, name: str, content: str) -> Path:
-    """Write *content* to *tmp_path/name* encoded as UTF-8, return the path."""
+    """Write *content* to *tmp_path/name* encoded as UTF-8 with LF newlines.
+
+    Forces ``newline="\\n"`` to match what ``rewrite_edges_uv`` writes; without
+    it, ``write_text`` would emit CRLF on Windows and downstream byte-diff
+    assertions would see a wall of line-ending changes on top of the real edits.
+    """
     p = tmp_path / name
-    p.write_text(content, encoding="utf-8")
+    p.write_text(content, encoding="utf-8", newline="\n")
     return p
 
 
@@ -255,6 +260,35 @@ def test_tc15_cross_entry_both_occurrences_renamed(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Quote-style preservation test
 # ---------------------------------------------------------------------------
+
+
+def test_unsafe_rename_value_raises_before_touching_disk(tmp_path: Path) -> None:
+    """Rename values with quote / backslash characters must raise ValueError untouched."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_TC7)
+    original_bytes = path.read_bytes()
+    mtime_before = path.stat().st_mtime_ns
+
+    for bad in ('A"B', "A'B", "A\\B"):
+        with pytest.raises(ValueError):
+            rewrite_edges_uv(path, {"E": bad})
+
+        assert path.read_bytes() == original_bytes, (
+            f"File must not be written when value {bad!r} is rejected"
+        )
+        assert path.stat().st_mtime_ns == mtime_before, (
+            f"mtime must not change when value {bad!r} is rejected"
+        )
+
+
+def test_unsafe_rename_key_raises_before_touching_disk(tmp_path: Path) -> None:
+    """Rename keys with quote / backslash characters must raise ValueError untouched."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_TC7)
+    original_bytes = path.read_bytes()
+
+    with pytest.raises(ValueError):
+        rewrite_edges_uv(path, {'bad"key': "Z"})
+
+    assert path.read_bytes() == original_bytes
 
 
 def test_quote_style_preserved_after_rename(tmp_path: Path) -> None:

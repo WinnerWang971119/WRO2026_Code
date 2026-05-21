@@ -331,17 +331,20 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
     The header is a fixed template: the captured docstring, the loader and
     enum imports the rich-``EDGES`` table needs, the ``_data = load_field_json()``
     call, and the eleven aliases that re-expose the JSON values under the
-    original module-attribute names.  The tail is appended verbatim.
+    original module-attribute names.
 
-    A single blank line separates the alias block from the tail so the
-    visual rhythm matches the original file.  If the tail already starts
-    with a blank line we let it stand; otherwise we insert one so the
-    header never abuts the EDGES banner directly.
+    The tail is then appended, *normalised* so exactly one blank line
+    separates the alias block from the tail's first non-blank line: any
+    leading newlines on ``tail`` are stripped before joining, then the
+    header's own trailing newline supplies the single separator.  This
+    normalisation is the only modification applied to the tail; every
+    non-blank character (including all comments inside ``EDGES``) is
+    preserved byte-for-byte.
 
     :param docstring: Verbatim docstring (quotes included) from the original
         file.
     :param tail: Verbatim slice of the source from the rich-EDGES banner
-        downward.
+        downward.  Leading blank lines are normalised away.
     :return: The full new file contents, ready to be written.
     """
     header_lines = [

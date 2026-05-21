@@ -36,9 +36,9 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 
-# Exit codes mirror the migration script's contract (see ``editor/migrate.py``).
+# Success exit code; failure codes are owned by ``editor/migrate.py`` and
+# propagated by returning ``migrate.run(...)`` directly.
 _EXIT_OK: int = 0
-_EXIT_ERROR: int = 2
 
 
 def main(argv: list[str] | None = None) -> int:

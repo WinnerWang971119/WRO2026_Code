@@ -178,6 +178,35 @@ class _EdgesUVRenamer(cst.CSTTransformer):
         return isinstance(target, cst.Name) and target.value == "EDGES"
 
 
+# Characters that would break ``_wrap_with_same_style`` because it does not
+# escape the inner string -- a quote would close the literal early and a
+# backslash would start an escape sequence in the emitted Python source.
+_UNSAFE_RENAME_CHARS: tuple[str, ...] = ('"', "'", "\\")
+
+
+def _validate_rename(label: str, value: str) -> None:
+    """Reject rename names that ``_wrap_with_same_style`` cannot safely emit.
+
+    The GUI is the only caller, and node names are bare identifier-like
+    tokens; this is a defense-in-depth check so a malformed name fails
+    loudly before any source file is written.
+
+    :param label: ``"key"`` or ``"value"`` -- used in the error message.
+    :param value: The candidate rename string.
+    :raises ValueError: If ``value`` contains a quote or backslash.
+    """
+    if not isinstance(value, str):
+        raise ValueError(
+            f"rename {label} must be a string, got {type(value).__name__}"
+        )
+    for ch in _UNSAFE_RENAME_CHARS:
+        if ch in value:
+            raise ValueError(
+                f"rename {label} {value!r} contains unsafe character {ch!r}; "
+                "node names must not contain quotes or backslashes"
+            )
+
+
 def rewrite_edges_uv(path: Path, renames: Dict[str, str]) -> bool:
     """Rewrite ``u`` and ``v`` node-name string literals inside ``EDGES``.
 
@@ -195,13 +224,21 @@ def rewrite_edges_uv(path: Path, renames: Dict[str, str]) -> bool:
     :param path: Filesystem path to the Python source file (typically
         ``tools/path_planner/field_data.py``).
     :param renames: Mapping of old node name to new node name. An empty
-        mapping is a guaranteed no-op.
+        mapping is a guaranteed no-op. Every key and value must be a
+        bare string without quote characters or backslashes; violations
+        raise ``ValueError`` before the file is touched.
     :return: True if the file was rewritten on disk; False otherwise.
+    :raises ValueError: If any rename key or value contains a quote or
+        backslash character.
     :raises OSError: If the file cannot be read or written.
     :raises libcst.ParserSyntaxError: If the source is not valid Python.
     """
     if not renames:
         return False
+
+    for old, new in renames.items():
+        _validate_rename("key", old)
+        _validate_rename("value", new)
 
     source = path.read_text(encoding="utf-8")
     module = cst.parse_module(source)
@@ -210,8 +247,7 @@ def rewrite_edges_uv(path: Path, renames: Dict[str, str]) -> bool:
     if not transformer.changed:
         return False
 
-    # Preserve the file's original newline convention by writing in text mode
-    # with the same encoding; LibCST round-trips the newline characters that
-    # were present in the input via Module.default_newline / per-line tokens.
-    path.write_text(modified.code, encoding="utf-8")
+    # Pin LF line endings so the file is byte-stable across Windows / POSIX --
+    # matches ``migrate._write_source`` and avoids platform-dependent diffs.
+    path.write_text(modified.code, encoding="utf-8", newline="\n")
     return True
