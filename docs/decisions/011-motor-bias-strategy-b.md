@@ -9,7 +9,7 @@ Manufacturer mismatch between the two chassis DC motors is compensated by **a st
 
 Calibration is a manual one-shot: `Drive.calibrateMotorBias()` spins both motors for ~2 s wheels-free, reads the encoder deltas, prints two scalars to Serial. Diego hand-edits `Config.h` and re-flashes. **No EEPROM persistence, no auto-recalibration** — the source file is the single source of truth.
 
-The rule is model-neutral: it applies to whatever DC motor pair the chassis is currently running. The project uses two physical chassis — a **test rover** with TT motors (current dev target, `Config.h` is tuned for this) and a **competition robot "Lofaix"** with LEGO EV3 motors. The scalars do not carry between chassis; `calibrateMotorBias()` must be re-run on each one, and `Config.h` re-flashed accordingly.
+The rule is model-neutral: it applies to whatever DC motor pair the chassis is currently running. The project uses two physical chassis — a **competition robot "Lofaix"** with LEGO EV3 motors (current active `Config::ActiveMotor`, `Config.h` is tuned for this — see ADR-022) and a **test rover** with TT motors (alternate `using ActiveMotor = MatrixTT;` setting). The scalars do not carry between chassis; `calibrateMotorBias()` must be re-run on each one, and `Config.h` re-flashed accordingly.
 
 Sync, Gyro, and Turn paths do **not** apply the bias — they close the loop on the STM32, and a feedforward scalar on top of an inner PID would fight the regulator.
 
@@ -35,3 +35,4 @@ When switching from the test rover to Lofaix (or vice versa), re-run `calibrateM
 
 - `WRO2026/Drive.h` — `calibrateMotorBias`, `_applyBias`
 - `WRO2026/Config.h` — `MOTOR_BIAS_L` / `MOTOR_BIAS_R`
+- [ADR-022](./022-dual-motor-profile.md)
