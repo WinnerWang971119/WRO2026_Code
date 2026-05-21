@@ -13,10 +13,12 @@
  * value here is intended to be the only edit required to retune the robot — never duplicate any
  * of these constants in a `.cpp`/`.ino` or as a function-local literal.
  *
- * @note PID gains and motor specs target TT-motors (the chassis we are building). Values are
- *       sourced from MatrixMiniR4's `MiniR4DriveDC.h` TT defaults (`setMoveSyncPID` /
- *       `setMoveGyroPID` / `setTurnGyroPID` docstrings). If we ever switch motor families,
- *       re-tune in this section, not via a compile-time flag.
+ * @note PID gains and encoder specs are dispatched via `Config::ActiveMotor` — see the two
+ *       `constexpr struct`s `MatrixTT` and `LegoEV3` below. Values are sourced from
+ *       MatrixMiniR4's `MiniR4DriveDC.h` PID docstrings (`setMoveSyncPID` /
+ *       `setMoveGyroPID` / `setTurnGyroPID`) and the vendor example
+ *       `MiniR4_DriveDC_Test.ino`. To swap chassis, edit only the `using ActiveMotor = ...;`
+ *       line; the flat constants below forward to the active profile. See ADR-022.
  */
 namespace Config
 {
@@ -210,7 +212,7 @@ namespace Config
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).
     //
-    // Two physical properties of the TT motors:
+    // Two physical properties of the DC drive motors (applies to both `MatrixTT` and `LegoEV3` profiles):
     //   * Saturation: PWM above ~95% gives no headroom for closed-loop corrections
     //     — anything beyond gets clipped by the lower MCU.
     //   * Deadband: PWM below ~20% can't break static friction; the motor stays
@@ -581,7 +583,8 @@ namespace Config
     // =========================================================================================
     // Motor-bias calibration (Strategy B from Phase 1.5 chassis-API research).
     //
-    // TT-motors of the same model can vary 10-20% in RPM at the same PWM. Our
+    // DC drive motors of the same model can vary 10-20% in RPM at the same PWM (this is true for
+    // both `MatrixTT` and `LegoEV3`). Our
     // raw-PWM Drive paths (setSpeed, driveDist, driveTime — all routed through
     // MatrixMiniR4 Move/MoveDegs/MoveTime, which are open-loop) are the ones
     // affected; Sync/Gyro variants close the loop on the STM32 and don't need it.
@@ -606,8 +609,9 @@ namespace Config
 
     // Calibration-routine defaults. The routine spins both motors at this power
     // for this duration, then computes scalars from the resulting encoder deltas.
-    // 50% power for 2 s gives ~1-2k encoder counts on TT motors — plenty of signal,
-    // not enough to spin the chassis off a bench in wheels-up mode.
+    // 50% power for 2 s gives a few thousand encoder counts on either profile (PPR 360 for
+    // LegoEV3, 545 for MatrixTT) — plenty of signal, not enough to spin the chassis off a
+    // bench in wheels-up mode.
 
     /** @brief PWM power used by `Drive.calibrateMotorBias()` during the wheels-free spin. */
     static constexpr int16_t MOTOR_BIAS_CALIB_POWER = 50;
