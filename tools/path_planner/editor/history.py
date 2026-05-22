@@ -141,6 +141,19 @@ class History:
         return bool(self._undo_stack)
 
     @property
+    def undo_stack(self) -> tuple[Command, ...]:
+        """Read-only view of the undo stack, oldest-applied first.
+
+        Callers that need to re-derive auxiliary state (e.g. the editor's
+        pending-EDGES-rename queue) walk this view after every undo / redo
+        to keep their state in lockstep with the history. Returning a tuple
+        prevents accidental mutation through the view.
+
+        :return: A tuple of :class:`Command` instances in apply order.
+        """
+        return tuple(self._undo_stack)
+
+    @property
     def can_redo(self) -> bool:
         """``True`` iff there is at least one command on the redo stack.
 

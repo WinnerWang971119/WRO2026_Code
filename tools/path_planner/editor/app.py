@@ -447,6 +447,11 @@ class EditorApp:
         # Any undo brings the buffer back into "dirty vs saved" ambiguity --
         # we conservatively mark dirty so the user is prompted on close.
         self._mark_dirty()
+        # Rebuild _pending_renames from the surviving RenameNode commands so
+        # the next Save doesn't rewrite EDGES with a rename the user just
+        # undid (Codex PR29 #13). Must run after history.undo mutates the
+        # stack so we observe the post-undo state.
+        self._recompute_pending_renames()
         self._refresh_view()
         self._set_status("Undid last action.")
 
@@ -456,6 +461,10 @@ class EditorApp:
             self._set_status("Nothing to redo.")
             return
         self._mark_dirty()
+        # Mirror _undo: keep _pending_renames in lockstep with the history
+        # so a redone rename is back in the queue, and an irrelevant redo
+        # (e.g. a MoveNode) leaves the queue unchanged.
+        self._recompute_pending_renames()
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -1238,6 +1247,23 @@ class EditorApp:
             if old != new:
                 self._pending_renames[old] = new
 
+    def _recompute_pending_renames(self) -> None:
+        """Rebuild ``_pending_renames`` from the live history undo stack.
+
+        Walks ``self._history.undo_stack`` oldest-to-newest and replays each
+        :class:`RenameNode` through :meth:`_record_pending_rename`, so the
+        resulting queue matches what would have accumulated if the user had
+        only ever issued the renames that survive in history. Used by
+        :meth:`_undo` / :meth:`_redo` to keep the queue from drifting past
+        the model state -- without this, undoing a rename leaves the rename
+        in the queue and the next Save rewrites EDGES to a name that no
+        longer exists in JSON.
+        """
+        self._pending_renames.clear()
+        for command in self._history.undo_stack:
+            if isinstance(command, RenameNode):
+                self._record_pending_rename(command.old, command.new)
+
     # ------------------------------------------------------------------
     # Save / Save & Build
     # ------------------------------------------------------------------
@@ -1292,6 +1318,24 @@ class EditorApp:
                 # Keep the pending renames so the user can retry. JSON was
                 # written, but the rewrite did not happen.
                 return False
+            # Refresh the cached field_data module so _find_edges_reference
+            # sees the rewritten u/v values on the next delete attempt
+            # (Codex PR29 #14). Without this, the in-memory EDGES list keeps
+            # the pre-rewrite names and a later delete of the new name would
+            # silently succeed even though field_data.py still references it.
+            if self._field_data_module is not None:
+                import importlib  # noqa: PLC0415
+                try:
+                    self._field_data_module = importlib.reload(
+                        self._field_data_module
+                    )
+                except Exception:  # noqa: BLE001 -- best-effort refresh
+                    # If the reload fails (e.g. the rewriter produced a file
+                    # the import machinery rejects), keep the stale reference
+                    # rather than wiping it. JSON has already been saved and
+                    # the rewrite already touched disk; the worst case is the
+                    # delete-guard staying as accurate as it was pre-save.
+                    pass
             self._pending_renames.clear()
 
         self._clear_dirty()
