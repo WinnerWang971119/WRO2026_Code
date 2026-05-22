@@ -13,9 +13,18 @@ PR3 simplification (vs PR1/PR2):
 Coordinate system: origin (0, 0) at field SW corner. X is East, Y is North.
 Distances in centimetres. Headings in degrees, [0, 360), CCW from +x.
 
-**Swap NODES / LINE_SEGMENTS / BLIND_EDGES / OBSTACLES for the real WRO 2026
-Mosaic Masters field measurements before the run.** The values below are
-a known-good placeholder layout the simulator + pytest suite verify against.
+Source of truth: the geometry (NODES / NODE_TYPES / LINE_SEGMENTS / BLIND_EDGES /
+OBSTACLES plus FIELD_MM, MAP_PNG, ROBOT_RADIUS_CM, COST_BLIND_MULTIPLIER,
+START_NODE, START_HEADING_DEG) lives in :file:`field_data.json` and is the file
+the live editor (`edit_field.py`) mutates. This module is a thin loader that
+re-exposes those values under their historical attribute names so callers do
+not need to know about the JSON layout. The rich ``EDGES`` table stays in
+Python because per-edge entries reference enum values (``LineMode``,
+``TurnMode``, ``Pivot``) that JSON cannot represent (see ADR-022).
+
+Tests that need a stable graph shape import
+:mod:`tools.path_planner.tests.fixtures.toy_field_data` instead of this module
+so editor saves do not flip the planner suite red.
 """
 
 from tools.path_planner.editor.loader import load_field_json
