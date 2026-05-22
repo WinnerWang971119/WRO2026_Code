@@ -2,7 +2,7 @@
 
 **Goal:** Reflect reality in `Config.h` — Lofaix uses LEGO EV3 motors, not Matrix TT — and add a single-line compile-time toggle so the test rover (TT) and Lofaix (EV3) can swap without scattered edits.
 
-**Approach:** Introduce two `constexpr` structs (`MatrixTT`, `LegoEV3`) in `namespace Config` carrying the vendor-cited PPR/RPM/PID values. Add `using ActiveMotor = LegoEV3;` as the single edit point. Keep the existing flat constants (`MOTOR_PPR`, `MOVESYNC_KP`, …) as one-line forwarders so `Drive.cpp` callsites are untouched. Update `MOTOR_LEFT/RIGHT_REVERSE` documentation to make clear it's a chassis-wiring property (orthogonal to motor type). Reframe the TT-flavored comments throughout `Config.h`, flip the dev-target wording in ADR-011, generalize ADR-017, mark Phase 7 P7.0b done in Roadmap.md, and add ADR-022 documenting the new mechanism.
+**Approach:** Introduce two structs with `static constexpr` members (`MatrixTT`, `LegoEV3`) in `namespace Config` carrying the vendor-cited PPR/RPM/PID values. Add `using ActiveMotor = LegoEV3;` as the single edit point. Keep the existing flat constants (`MOTOR_PPR`, `MOVESYNC_KP`, …) as one-line forwarders so `Drive.cpp` callsites are untouched. Update `MOTOR_LEFT/RIGHT_REVERSE` documentation to make clear it's a chassis-wiring property (orthogonal to motor type). Reframe the TT-flavored comments throughout `Config.h`, flip the dev-target wording in ADR-011, generalize ADR-017, mark Phase 7 P7.0b done in Roadmap.md, and add ADR-022 documenting the new mechanism.
 
 ## Scope
 
@@ -11,7 +11,7 @@
   - `docs/decisions/011-motor-bias-strategy-b.md` — flip "test rover (TT, current dev target)" wording. Rule unchanged.
   - `docs/decisions/017-sync-plus-tshape-default-profile.md` — generalize "two TT motors" → "two drive motors". Rule unchanged.
   - `Roadmap.md` — Phase 7 paragraph (lines 33-41), exit gate at line 230, task row P7.0b (line 248), risk row #12 (line 356).
-  - `docs/decisions/022-dual-motor-profile.md` — new ADR documenting the constexpr-struct + alias mechanism.
+  - `docs/decisions/022-dual-motor-profile.md` — new ADR documenting the per-motor-struct + alias mechanism.
   - `DECISIONS.md` — one-line index entry for ADR-022 + status-summary bump.
 - **Out of scope:**
   - `Drive.calibrateMotorBias()` workflow or any `MOTOR_BIAS_L/R` values — per-chassis, requires hardware.
@@ -22,8 +22,8 @@
 
 ## Decisions
 
-- **Toggle mechanism:** `constexpr struct + using` alias inside `namespace Config`. Single-line edit to swap chassis.
-- **Default after this PR:** `using ActiveMotor = LegoEV3;` (Lofaix is the real competition chassis per `project_two_chassis.md`).
+- **Toggle mechanism:** per-motor struct (with `static constexpr` members) + `using` alias inside `namespace Config`. Single-line edit to swap chassis.
+- **Default after this PR:** `using ActiveMotor = LegoEV3;` (Lofaix is the real competition chassis; see Roadmap Phase 7).
 - **TurnGyro Kp for LEGO:** LE-F variant (`Kp=22.75, Ki=0.02, Kd=1.54`) per vendor example `MiniR4_DriveDC_Test.ino:61`.
 - **Flat constants:** kept as one-line forwarders to `ActiveMotor::...` so `Drive.cpp` is untouched.
 - **Reverse flags:** stay as standalone constants — wiring property, not motor-type property. Existing static_asserts at `Config.h:76-83` preserved.
@@ -34,7 +34,7 @@
 
 - [ ] `Config.h` defines `Config::MatrixTT` and `Config::LegoEV3` structs each carrying `PPR`, `RPM`, `MOVESYNC_KP/KI/KD`, `MOVEGYRO_KP/KI/KD`, `TURNGYRO_KP/KI/KD` with vendor-cited values.
 - [ ] `Config::ActiveMotor` resolves to `Config::LegoEV3` after this PR.
-- [ ] `Config::MOTOR_PPR`, `Config::MOTOR_RPM`, `Config::MOVESYNC_K{P,I,D}`, `Config::MOVEGYRO_K{P,I,D}`, `Config::TURNGYRO_K{P,I,D}` resolve to `ActiveMotor::*` values via flat forwarders.
+- [ ] `Config::MOTOR_PPR`, `Config::MOTOR_RPM`, `Config::MOVESYNC_K{P,I,D}`, `Config::MOVEGYRO_K{P,I,D}`, `Config::TURNGYRO_K{P,I,D}` resolve to `ActiveMotor::PPR`, `ActiveMotor::MOTOR_RPM`, `ActiveMotor::MOVESYNC_KP`, etc. via flat forwarders.
 - [ ] `Drive.cpp` source is unchanged (no diff in the file).
 - [ ] All TT-specific comments in `Config.h` (header doxygen at lines 16-19, motor-profile block 91-99, lines 101/104/181/552/577) are reworded to be motor-type-neutral, with one source-cited Doxygen comment near `ActiveMotor` pointing at MiniR4DriveDC.h docstrings + vendor example.
 - [ ] `docs/decisions/011-motor-bias-strategy-b.md` line 12 wording flipped: LEGO EV3 (Lofaix) is the active dev target after this PR; TT is the rover-side fallback. Re-calibration warning intact.
@@ -97,7 +97,8 @@ namespace Config
      *
      * Default is LegoEV3 (Lofaix competition robot). Switch to MatrixTT for the
      * test rover. The flat constants below (MOTOR_PPR, MOVESYNC_K*, …) forward
-     * to ActiveMotor::* so call sites do not change.
+     * to ActiveMotor::PPR / ActiveMotor::MOVESYNC_KP / etc. so call sites do
+     * not change.
      *
      * @warning Swapping motors does NOT recalibrate MOTOR_BIAS_L/R — those are
      *          per-physical-chassis measurements and MUST be re-captured via
@@ -149,7 +150,7 @@ namespace Config
 | T3 | Reword ADR-011 line 12 | — | low | `docs/decisions/011-motor-bias-strategy-b.md` | Change "test rover with TT motors (current dev target, Config.h is tuned for this)" to acknowledge LEGO EV3 (Lofaix) is the now-active `ActiveMotor`, with TT remaining the alternate setting for the test rover. Keep the cross-chassis re-calibration warning verbatim. Add a one-line "See also: ADR-022" pointer at the bottom of the ADR. Rule statement unchanged. Satisfies AC 6. |
 | T4 | Generalize ADR-017 line 23 | — | low | `docs/decisions/017-sync-plus-tshape-default-profile.md` | Change "the two TT motors" to "the two drive motors". No other change. Satisfies AC 7. |
 | T5 | Update Roadmap.md Phase 7 narrative + tables | — | low | `Roadmap.md` | Edits: (a) lines 33-41 — rewrite the "Two physical chassis" paragraph to say the `Config.h` motor swap landed in this PR (cite issue #15), and Phase 7 now only does `calibrateMotorBias()` re-run + `LINE_KP/KD` retune + B6.1 ten-trial battery on Lofaix; (b) line 230 exit gate — reword from "Config.h updated for EV3 PPR / RPM (issue #15)" to "ActiveMotor verified set to LegoEV3 on flashed Lofaix (issue #15 closed in prep)"; (c) line 248 — append "(done in #15 PR)" to the P7.0b row description and update the status column if there is one; (d) line 356 risk row #12 — keep the risk text but reword the mitigation column from "static_assert or per-chassis preprocessor flag" to "single-line `using ActiveMotor = ...;` toggle in Config.h + Doxygen warning about MOTOR_BIAS (see ADR-022)". Satisfies AC 8. |
-| T6 | Create ADR-022 | T1 | low | `docs/decisions/022-dual-motor-profile.md` | New file using the standard ADR template per CLAUDE.md "Documenting design decisions (ADRs)" section. Status: Implemented. Date decided: 2026-05 (Phase 2). Rule: "Motor-type-dependent constants (PPR/RPM/PID gains) live in per-motor `constexpr struct`s inside `Config`; the active chassis selects one via `using ActiveMotor = ...;`. To swap chassis, edit only that alias." Why: cite issue #15, the dual-chassis fact (test rover + Lofaix), the scattered TT assumptions before this PR. How to apply: list the swap protocol (edit alias → reflash → re-run `Drive.calibrateMotorBias()` → re-tune `LINE_KP/KD`). Trigger to revisit: add a third motor model, or move bias scalars into the profile. See also: ADR-011 (per-chassis bias), ADR-017 (drive-pair asymmetry). Cite vendor source files. Stay ~30-60 lines. Satisfies AC 9. |
+| T6 | Create ADR-022 | T1 | low | `docs/decisions/022-dual-motor-profile.md` | New file using the standard ADR template per CLAUDE.md "Documenting design decisions (ADRs)" section. Status: Implemented. Date decided: 2026-05 (Phase 2). Rule: "Motor-type-dependent constants (PPR/RPM/PID gains) live in per-motor structs with `static constexpr` members inside `Config`; the active chassis selects one via `using ActiveMotor = ...;`. To swap chassis, edit only that alias." Why: cite issue #15, the dual-chassis fact (test rover + Lofaix), the scattered TT assumptions before this PR. How to apply: list the swap protocol (edit alias → reflash → re-run `Drive.calibrateMotorBias()` → re-tune `LINE_KP/KD`). Trigger to revisit: add a third motor model, or move bias scalars into the profile. See also: ADR-011 (per-chassis bias), ADR-017 (drive-pair asymmetry). Cite vendor source files. Stay ~30-60 lines. Satisfies AC 9. |
 | T7 | Add ADR-022 to DECISIONS.md index | T6 | low | `DECISIONS.md` | One new line in the appropriate section (likely the Drive/Config section) referencing ADR-022. Bump the status-summary table by one row. Match the existing index entry style exactly. Satisfies AC 10. |
 | T8 | Verify build + grep audit | T1, T2 | low | (no file changes) | Run `uv run pytest tools/path_planner/tests/` (TC1), then `arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026/` if available (TC2). Run TC3 + TC4 + TC5 grep audits and confirm `Drive.cpp` byte-identical to `main`. Run TC6 by locally flipping the alias to `MatrixTT`, rebuilding (or recompiling Config.h via a quick standalone test), then reverting. Log results inline in the implementation report. Satisfies AC 11, 12. |
 

@@ -14,9 +14,9 @@
  * of these constants in a `.cpp`/`.ino` or as a function-local literal.
  *
  * @note PID gains and encoder specs are dispatched via `Config::ActiveMotor` — see the two
- *       `constexpr struct`s `MatrixTT` and `LegoEV3` below. Values are sourced from
- *       MatrixMiniR4's `MiniR4DriveDC.h` PID docstrings (`setMoveSyncPID` /
- *       `setMoveGyroPID` / `setTurnGyroPID`) and the vendor example
+ *       structs `MatrixTT` and `LegoEV3` (each with `static constexpr` members) below.
+ *       Values are sourced from MatrixMiniR4's `MiniR4DriveDC.h` PID docstrings
+ *       (`setMoveSyncPID` / `setMoveGyroPID` / `setTurnGyroPID`) and the vendor example
  *       `MiniR4_DriveDC_Test.ino`. To swap chassis, edit only the `using ActiveMotor = ...;`
  *       line; the flat constants below forward to the active profile. See ADR-022.
  */
@@ -139,7 +139,8 @@ namespace Config
      *
      * Default is LegoEV3 (Lofaix competition robot). Switch to MatrixTT for the
      * test rover. The flat constants below (MOTOR_PPR, MOVESYNC_K*, …) forward
-     * to ActiveMotor::* so call sites do not change.
+     * to ActiveMotor::PPR / ActiveMotor::MOVESYNC_KP / etc. so call sites do
+     * not change.
      *
      * @warning Swapping motors does NOT recalibrate MOTOR_BIAS_L/R — those are
      *          per-physical-chassis measurements and MUST be re-captured via

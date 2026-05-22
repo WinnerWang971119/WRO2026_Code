@@ -36,7 +36,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-016 — Drive builders block by default; `.async()` opts out](./docs/decisions/016-sync-default-builders.md)
 - [ADR-017 — `DriveMode::SYNC` + `tShape` are the project-wide default](./docs/decisions/017-sync-plus-tshape-default-profile.md)
 - [ADR-018 — LineFollower distance-gated stops use symmetric trapezoidal + active brake](./docs/decisions/018-linefollower-distance-gated-stops.md)
-- [ADR-022 — Dual motor profile via constexpr struct + ActiveMotor alias](./docs/decisions/022-dual-motor-profile.md)
+- [ADR-022 — Dual motor profile via per-motor structs + ActiveMotor alias](./docs/decisions/022-dual-motor-profile.md)
 
 ### Perception
 
