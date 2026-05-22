@@ -171,14 +171,17 @@ class _MigrationError(RuntimeError):
 
 
 def _read_source(path: Path) -> str:
-    """Read ``path`` as UTF-8 with universal newlines preserved.
+    """Read ``path`` as UTF-8 and normalise line endings to ``\\n``.
 
-    Using :meth:`pathlib.Path.read_text` with ``encoding='utf-8'`` is enough
-    to give us the source as a single string with ``\\n`` line endings on
-    every platform Python supports.
+    :meth:`pathlib.Path.read_text` uses universal-newlines mode, which
+    translates any CRLF or CR sequences in the file into ``\\n`` before
+    returning the string. The on-disk line endings are therefore NOT
+    preserved through this round-trip; the caller pairs this helper with
+    :func:`_write_source` (``newline='\\n'``) so the rewritten file is
+    byte-stable on LF regardless of the source's original endings.
 
     :param path: Source file path.
-    :return: Full file contents.
+    :return: Full file contents with ``\\n`` line endings.
     """
     return path.read_text(encoding="utf-8")
 

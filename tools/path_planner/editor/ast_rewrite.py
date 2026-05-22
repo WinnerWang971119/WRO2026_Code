@@ -9,9 +9,12 @@ are load-bearing for human readers, so we cannot round-trip the file through
 
 This module performs a surgical rewrite using `LibCST
 <https://libcst.readthedocs.io/>`__, a concrete-syntax-tree library that
-preserves every byte of formatting -- comments, blank lines, indentation,
-and the quote style of every string literal -- by default. The transformer
-only touches ``SimpleString`` value nodes that:
+preserves comments, blank lines, indentation, and the quote style of every
+string literal by default. Line endings are normalised to ``\n`` on write
+(see :func:`rewrite_edges_uv`) so the on-disk output is byte-stable across
+Windows / POSIX; an input file with CRLF endings is therefore re-emitted
+with LF endings. The transformer only touches ``SimpleString`` value nodes
+that:
 
 1. Sit inside the top-level ``EDGES = [...]`` assignment, AND
 2. Are the value of a ``"u"`` or ``"v"`` dict key, AND
@@ -213,9 +216,11 @@ def rewrite_edges_uv(path: Path, renames: Dict[str, str]) -> bool:
     Loads ``path`` as Python source, parses it with LibCST, walks the
     top-level ``EDGES = [...]`` assignment, and replaces any ``"u"`` or
     ``"v"`` dict value whose stripped string matches a key of ``renames``
-    with the corresponding mapped name. All comments, blank lines,
-    whitespace, and the quote style of unchanged literals are preserved
-    byte-for-byte.
+    with the corresponding mapped name. Comments, blank lines, whitespace,
+    and the quote style of unchanged literals survive the round-trip
+    unchanged. Line endings are normalised: ``Path.read_text`` translates
+    any CRLF input to LF before parsing, and the file is written back with
+    ``newline="\n"``, so a CRLF source file is re-emitted with LF endings.
 
     The file is rewritten ONLY when at least one literal actually changes;
     if no rewrites occur (no ``EDGES`` assignment, empty list, or no rename

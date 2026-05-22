@@ -45,7 +45,15 @@ BLIND_EDGES           = _data["BLIND_EDGES"]
 OBSTACLES             = _data["OBSTACLES"]
 
 # ---------------------------------------------------------------------------
-# Rich edge list — demonstration fixtures for T11/T12/T13 tests.
+# Rich edge list — optional per-edge overrides for the live field graph.
+#
+# This list is ADDITIVE alongside the geometry loaded from field_data.json
+# (LINE_SEGMENTS / BLIND_EDGES). Entries here let an author attach enum-typed
+# overrides (primitive_mode / pre_turn_mode / pivot) to a specific edge that
+# JSON cannot represent. Leaving the list empty is fine — every edge then
+# inherits the pipeline-wide PIPELINE_CONFIG defaults at C++ dispatch time.
+# The example below is commented out and uses placeholder node names; uncomment
+# (and rename ``u`` / ``v`` to nodes that exist in ``NODES``) to attach overrides.
 #
 # Schema: each dict MUST supply:
 #   type          : EDGE_LINE | EDGE_BLIND | EDGE_PROJECTION
