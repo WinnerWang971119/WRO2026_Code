@@ -1,4 +1,9 @@
-"""Tests for tools.path_planner.visualizer (PR3)."""
+"""Tests for tools.path_planner.visualizer (PR3).
+
+Uses the stable toy fixture so editor saves to the live ``field_data.json``
+cannot rename or remove the nodes these assertions reference (see ADR-022
+and ``tests/fixtures/toy_field_data.py``).
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.path_planner import field_data
+from tools.path_planner.tests.fixtures import toy_field_data as field_data
 from tools.path_planner.graph_builder import build_graph
 from tools.path_planner import visualizer
 

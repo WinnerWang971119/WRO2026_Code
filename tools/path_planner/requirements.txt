@@ -3,3 +3,4 @@ networkx>=3.2
 matplotlib>=3.8
 shapely>=2.0
 pytest>=8.0
+libcst>=1.1

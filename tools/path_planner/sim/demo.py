@@ -1,26 +1,30 @@
-"""CLI demo: run the PathTracker simulator on the toy field and print the trace.
+"""CLI demo: run the PathTracker simulator on the live field and print the trace.
 
 Usage::
 
     uv run python -m tools.path_planner.sim.demo
 
-By default runs the same sequence the R4's NAV_DEMO_MODE will run::
+By default this runs a short tour over the current live geometry from
+``tools/path_planner/field_data.json``::
 
-    goTo("C")
-    goTo("G")
+    goTo("Inter1")
+    goTo("finial")
 
-starting from `field_data.START_NODE` facing `field_data.START_HEADING_DEG`.
+starting from ``field_data.START_NODE`` facing ``field_data.START_HEADING_DEG``.
 Every emitted primitive is printed with the chassis pose AFTER it executes,
 plus a final summary of the cumulative pose.
 
 The optional ``--goals A,B,C`` flag overrides the default pair so you can
-explore other paths without editing this file.
+explore other paths without editing this file. Goal names must exist in
+the live ``NODES`` dict; if the field editor renames a node, update your
+``--goals`` accordingly.
 
 The optional ``--plot`` flag renders the chassis trace on top of the
-existing matplotlib visualisation (`tools/path_planner/output/sim_trace.png`).
+existing matplotlib visualisation (``tools/path_planner/output/sim_trace.png``).
 
 This module is purely a developer aid; it is NOT exercised by the test
-suite. Tests live in `tools/path_planner/tests/test_runtime_sim.py`.
+suite. Tests live in ``tools/path_planner/tests/test_runtime_sim.py`` and
+use the stable toy fixture so they survive editor edits.
 """
 
 from __future__ import annotations
@@ -39,7 +43,7 @@ _REPO_ROOT = _HERE.parent.parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tools.path_planner import field_data as toy_field_data
+from tools.path_planner import field_data
 from tools.path_planner.compiler import (
     ACT_TURN_REL,
     Primitive,
@@ -187,13 +191,13 @@ def _maybe_plot(
 def main(argv: Iterable[str] | None = None) -> int:
     """CLI entry point. Returns a process exit code."""
     parser = argparse.ArgumentParser(
-        description="Run the PathTracker simulator on the toy field."
+        description="Run the PathTracker simulator on the live field."
     )
     parser.add_argument(
         "--goals",
-        default="C,G",
-        help="Comma-separated list of goal node names. Default: C,G "
-             "(matches WRO2026.ino's NAV_DEMO_MODE).",
+        default="Inter1,finial",
+        help="Comma-separated list of goal node names from the live "
+             "field_data.json. Default: Inter1,finial.",
     )
     parser.add_argument(
         "--plot",
@@ -211,28 +215,28 @@ def main(argv: Iterable[str] | None = None) -> int:
     print("=" * 70)
     print("PathTracker simulator demo")
     print("=" * 70)
-    print(f"start node:    {toy_field_data.START_NODE}")
-    print(f"start heading: {toy_field_data.START_HEADING_DEG} deg")
+    print(f"start node:    {field_data.START_NODE}")
+    print(f"start heading: {field_data.START_HEADING_DEG} deg")
     print(f"goals:         {goals}")
 
-    graph = build_graph(toy_field_data)
+    graph = build_graph(field_data)
     next_hop = compute_all_pairs_next_hop(
-        graph, toy_field_data.COST_BLIND_MULTIPLIER
+        graph, field_data.COST_BLIND_MULTIPLIER
     )
-    chassis = VirtualChassis.from_field_data(toy_field_data)
-    sim = PathTrackerSim(toy_field_data, graph, next_hop, chassis)
+    chassis = VirtualChassis.from_field_data(field_data)
+    sim = PathTrackerSim(field_data, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()
     print(f"\nLocalization zeroed at IMU yaw 0 -> world heading "
-          f"{toy_field_data.START_HEADING_DEG} deg.")
+          f"{field_data.START_HEADING_DEG} deg.")
 
     step_counter = [0]
     sequence_traces: List[List[tuple]] = []
 
     aborted_at: int | None = None
     for i, goal in enumerate(goals, start=1):
-        if goal not in toy_field_data.NODES:
+        if goal not in field_data.NODES:
             print(f"error: goal {goal!r} is not a known node "
-                  f"(known: {sorted(toy_field_data.NODES.keys())})",
+                  f"(known: {sorted(field_data.NODES.keys())})",
                   file=sys.stderr)
             return 2
         ok = _run_one_goto(sim, goal, step_counter, sequence_traces)
@@ -256,7 +260,7 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     if args.plot:
         out = _REPO_ROOT / "tools" / "path_planner" / "output" / "sim_trace.png"
-        _maybe_plot(sequence_traces, toy_field_data, out)
+        _maybe_plot(sequence_traces, field_data, out)
 
     return 1 if aborted_at is not None else 0
 

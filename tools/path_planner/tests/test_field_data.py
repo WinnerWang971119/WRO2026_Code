@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.path_planner import field_data as real_field_data
+from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import FieldDataError, validate
 
 _FIELD_ATTRS = (

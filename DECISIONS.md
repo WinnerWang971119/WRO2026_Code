@@ -17,6 +17,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-003 — Arduino-style modules — no class hierarchies, no DI, no `delay()` in `update()`](./docs/decisions/003-arduino-style-modules.md)
 - [ADR-004 — Motor-speed/position PID stays on the STM32](./docs/decisions/004-pid-stays-on-stm32.md)
 - [ADR-005 — `Localization` is the single source of truth for current node + heading](./docs/decisions/005-localization-single-source-of-truth.md)
+- [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md)
 
 ### Mission-layer
 

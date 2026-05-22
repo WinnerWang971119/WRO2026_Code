@@ -4,7 +4,7 @@
         {
             "name": "Arduino UNO R4 WiFi",
             "compilerPath": "${env:LOCALAPPDATA}/Arduino15/packages/arduino/tools/arm-none-eabi-gcc/7-2017q4/bin/arm-none-eabi-g++.exe",
-            "intelliSenseMode": "windows-gcc-x64",
+            "intelliSenseMode": "windows-gcc-arm",
             "cStandard": "c11",
             "cppStandard": "c++17",
             "defines": [
