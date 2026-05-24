@@ -310,7 +310,9 @@ void LineFollowerClass::update()
         // derivative computed against an old (possibly several-second-stale) error sample.
         _lastErr = 0.0f;
 
-        // Line lost beneath every channel.
+        // Set `_lostLine = true` BEFORE the overshoot-mode branch so EventTrace's
+        // LINE LOST event still fires correctly via `isLineLost()`, even when
+        // overshoot-mode suppresses LOST_LINE_ACTION dispatch. See T12 / ADR-023.
         _lostLine = true;
         // Clear the junction freeze flag — if a lost-line condition fires while frozen,
         // we treat lost-line as the authoritative path and want the next online tick to
