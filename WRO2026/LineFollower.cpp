@@ -49,7 +49,11 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _hasReverseOverride,
                                _reverseOverride,
                                _hasDistanceTarget,
-                               _distanceTargetCm);
+                               _distanceTargetCm,
+                               _hasOvershootModeOverride,
+                               _overshootModeOverride,
+                               _hasBrakeOnGateOverride,
+                               _brakeOnGateOverride);
     _executed = true;
 }
 
@@ -116,6 +120,26 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setDistanceTarget(float cm
     // keeps the contract simple.
     _distanceTargetCm  = (cm > 0.0f) ? cm : 0.0f;
     _hasDistanceTarget = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setOvershootMode(bool on)
+{
+    // Mirrors the setPreset / setReverse override-pair pattern: stage the flag plus a
+    // "has-override" marker so the owner's existing value is preserved across re-enables
+    // when the setter is not chained. See ADR-023.
+    _overshootModeOverride    = on;
+    _hasOvershootModeOverride = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setBrakeOnGate(bool on)
+{
+    // Mirrors the setPreset / setReverse override-pair pattern: stage the flag plus a
+    // "has-override" marker so the owner's existing value is preserved across re-enables
+    // when the setter is not chained. See ADR-023.
+    _brakeOnGateOverride    = on;
+    _hasBrakeOnGateOverride = true;
     return *this;
 }
 
@@ -274,119 +298,162 @@ void LineFollowerClass::update()
         // else: still in the cruise plateau zone — leave `cruise` unchanged.
     }
 
+    // Tracks whether the line-online middle block (junction-freeze + P+D mix) should run
+    // this tick. Set false by the overshoot-mode dead-reckon branch below so control falls
+    // through to the distance-gate block at the bottom of update() without sampling the
+    // (offline) sensor for junction state or weighted error.
+    bool runOnlinePath = true;
+
     if (!_array->isOnline())
     {
         // Clear the D-term history so the first tick after reacquisition does not see a stale
         // derivative computed against an old (possibly several-second-stale) error sample.
         _lastErr = 0.0f;
 
-        // Line lost beneath every channel. Dispatch on Config::LOST_LINE_ACTION.
+        // Line lost beneath every channel.
         _lostLine = true;
         // Clear the junction freeze flag — if a lost-line condition fires while frozen,
         // we treat lost-line as the authoritative path and want the next online tick to
         // start fresh (no stale freeze flag carrying over).
         _pidFrozen = false;
 
-        switch (Config::LOST_LINE_ACTION)
+        if (_overshootMode)
         {
-            case Config::LostLineAction::STOP:
-                Drive.stop(true);
-                break;
-
-            case Config::LostLineAction::COAST:
-                Drive.stop(false);
-                break;
-
-            case Config::LostLineAction::CRAWL:
+            // Overshoot-mode dead-reckon: ignore line-offline and command symmetric
+            // cruise PWM (deadband-snapped) so the chassis advances through the
+            // sensor-to-axle window even when the line physically ends at the node.
+            // See ADR-023 "Pass-through collinear intersections" and ADR-018.
+            //
+            // The encoder distance gate evaluation MUST still run (the block below
+            // this one), so the gate trip fires at LINE_SENSOR_AXLE_OFFSET_CM even
+            // though the line is gone. Mirrors the junction-freeze pattern: do NOT
+            // early-return — fall through to the distance-gate block at the bottom
+            // of update(). The online-path middle block (junction-freeze + P+D) is
+            // skipped via `runOnlinePath = false` because the sensor is offline and
+            // sampling getJunctionType()/getError() against it would be invalid.
+            const int16_t snapped = deadbandSnap(cruise);
+            Drive.setSpeed(snapped, snapped);
+            runOnlinePath = false;
+            // Fall through to the distance-gate block below — do NOT early return.
+            // The encoder gate must keep ticking even in dead-reckon mode.
+        }
+        else
+        {
+            // Existing LOST_LINE_ACTION dispatch (today's behavior).
+            switch (Config::LOST_LINE_ACTION)
             {
-                // Straight creep forward (no steering) so the strip may be reacquired.
-                // `cruise / 2` is already in-range, but snap for consistency with the main
-                // mix path so every PWM hitting the lower MCU goes through the same gate.
-                const int16_t crawl = deadbandSnap((int16_t) (cruise / 2));
-                Drive.setSpeed(crawl, crawl);
-                break;
+                case Config::LostLineAction::STOP:
+                    Drive.stop(true);
+                    break;
+
+                case Config::LostLineAction::COAST:
+                    Drive.stop(false);
+                    break;
+
+                case Config::LostLineAction::CRAWL:
+                {
+                    // Straight creep forward (no steering) so the strip may be reacquired.
+                    // `cruise / 2` is already in-range, but snap for consistency with the
+                    // main mix path so every PWM hitting the lower MCU goes through the
+                    // same gate.
+                    const int16_t crawl = deadbandSnap((int16_t) (cruise / 2));
+                    Drive.setSpeed(crawl, crawl);
+                    break;
+                }
             }
+            // Early-return preserves existing semantics — no distance-gate tick on the
+            // non-overshoot lost-line path.
+            return;
         }
-        return;
     }
 
     // -------------------------------------------------------------------------------------
-    // Line online: junction-freeze gate, then P+D controller.
+    // Line online: junction-freeze gate, then P+D controller. Skipped when
+    // `runOnlinePath == false` (overshoot-mode dead-reckon fallthrough above) so the
+    // distance-gate block at the bottom still runs but no junction/P+D math is done
+    // against an offline sensor.
     // -------------------------------------------------------------------------------------
-    _lostLine = false;
-
-    // Sample the junction classifier ONCE per tick. With Config::LINE_ARRAY_TICK_CACHE_ENABLED
-    // == true this is a free cache read; with caching off it is one ~9 ms I2C transaction.
-    // Intersection.update() runs after us and will issue its own call against the same sensor
-    // — eliminating that double-read is tracked separately (out of scope for issue #22).
-    //
-    // Freeze fires on any classifier value other than NONE / UNKNOWN — broadened from the
-    // original issue #22 scope (T_OR_CROSS only) because the centroid-skew defect affects
-    // LEFT and RIGHT junctions just as much (the issue body itself noted this). See
-    // DECISIONS.md "LineFollower PID freeze during junction dwell".
-    const uint8_t junctionRaw = _array->getJunctionType();
-    const bool    atJunction  = (junctionRaw != (uint8_t) JunctionType::NONE
-                              && junctionRaw != (uint8_t) JunctionType::UNKNOWN);
-
-    if (atJunction)
+    if (runOnlinePath)
     {
-        _pidFrozen = true;
+        _lostLine = false;
 
-        // Command symmetric cruise. `cruise` already reflects ramp-up / ramp-down progress
-        // (modified by the branches above) and is sign-flipped for reverse. Drive.setSpeed
-        // applies per-motor bias calibration automatically (DECISIONS.md "Strategy B"), so
-        // no additional bias handling is needed here. deadbandSnap mirrors the snap applied
-        // in the P+D path so a cruise value inside the deadband range (rare but possible
-        // during ramp-up) is not silently dropped by Drive.setSpeed's internal re-snap.
-        const int16_t snapped = deadbandSnap(cruise);
-        Drive.setSpeed(snapped, snapped);
+        // Sample the junction classifier ONCE per tick. With
+        // Config::LINE_ARRAY_TICK_CACHE_ENABLED == true this is a free cache read; with
+        // caching off it is one ~9 ms I2C transaction. Intersection.update() runs after us
+        // and will issue its own call against the same sensor — eliminating that double-read
+        // is tracked separately (out of scope for issue #22).
+        //
+        // Freeze fires on any classifier value other than NONE / UNKNOWN — broadened from
+        // the original issue #22 scope (T_OR_CROSS only) because the centroid-skew defect
+        // affects LEFT and RIGHT junctions just as much (the issue body itself noted this).
+        // See DECISIONS.md "LineFollower PID freeze during junction dwell".
+        const uint8_t junctionRaw = _array->getJunctionType();
+        const bool    atJunction  = (junctionRaw != (uint8_t) JunctionType::NONE
+                                  && junctionRaw != (uint8_t) JunctionType::UNKNOWN);
 
-        // Fall through to the distance-gate block below — do NOT early return. The encoder
-        // distance counter must keep ticking during the freeze (acceptance criterion).
-    }
-    else
-    {
-        if (_pidFrozen)
+        if (atJunction)
         {
-            // First non-frozen tick after a freeze: clear the D-term history. Without this
-            // the dErr computed against a pre-freeze `_lastErr` (potentially several ticks
-            // stale) would produce a derivative kick on the first post-junction PID tick.
-            // Mirrors the lost-line branch's existing `_lastErr = 0.0f;` reset.
-            _lastErr   = 0.0f;
-            _pidFrozen = false;
+            _pidFrozen = true;
+
+            // Command symmetric cruise. `cruise` already reflects ramp-up / ramp-down
+            // progress (modified by the branches above) and is sign-flipped for reverse.
+            // Drive.setSpeed applies per-motor bias calibration automatically (DECISIONS.md
+            // "Strategy B"), so no additional bias handling is needed here. deadbandSnap
+            // mirrors the snap applied in the P+D path so a cruise value inside the deadband
+            // range (rare but possible during ramp-up) is not silently dropped by
+            // Drive.setSpeed's internal re-snap.
+            const int16_t snapped = deadbandSnap(cruise);
+            Drive.setSpeed(snapped, snapped);
+
+            // Fall through to the distance-gate block below — do NOT early return. The
+            // encoder distance counter must keep ticking during the freeze (acceptance
+            // criterion).
         }
-
-        const float err  = _array->getError();
-        const float dErr = err - _lastErr;
-        _lastErr         = err;
-
-        float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
-
-        // Clamp the correction to the configured maximum.
-        if (corr > Config::LINE_MAX_CORR)
+        else
         {
-            corr = Config::LINE_MAX_CORR;
+            if (_pidFrozen)
+            {
+                // First non-frozen tick after a freeze: clear the D-term history. Without
+                // this the dErr computed against a pre-freeze `_lastErr` (potentially
+                // several ticks stale) would produce a derivative kick on the first
+                // post-junction PID tick. Mirrors the lost-line branch's existing
+                // `_lastErr = 0.0f;` reset.
+                _lastErr   = 0.0f;
+                _pidFrozen = false;
+            }
+
+            const float err  = _array->getError();
+            const float dErr = err - _lastErr;
+            _lastErr         = err;
+
+            float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
+
+            // Clamp the correction to the configured maximum.
+            if (corr > Config::LINE_MAX_CORR)
+            {
+                corr = Config::LINE_MAX_CORR;
+            }
+            else if (corr < -Config::LINE_MAX_CORR)
+            {
+                corr = -Config::LINE_MAX_CORR;
+            }
+
+            // Differential mix around the cruise setpoint (sourced from the active preset).
+            int16_t L = (int16_t) (cruise + corr);
+            int16_t R = (int16_t) (cruise - corr);
+
+            // Snap each channel into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (mirrored for
+            // negatives). This compensates for both the saturation cap and the motor
+            // deadband floor: a small P+D correction in the (0, 20) range would otherwise
+            // be silently lost in the dead zone. Drive.setSpeed re-snaps internally — the
+            // snap here ensures the value passed in already reflects the post-mix
+            // correction so future readers see a consistent post-snap value.
+            L = deadbandSnap(L);
+            R = deadbandSnap(R);
+
+            Drive.setSpeed(L, R);
         }
-        else if (corr < -Config::LINE_MAX_CORR)
-        {
-            corr = -Config::LINE_MAX_CORR;
-        }
-
-        // Differential mix around the cruise setpoint (sourced from the active preset).
-        int16_t L = (int16_t) (cruise + corr);
-        int16_t R = (int16_t) (cruise - corr);
-
-        // Snap each channel into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX] (mirrored for negatives).
-        // This compensates for both the saturation cap and the motor deadband floor: a small
-        // P+D correction in the (0, 20) range would otherwise be silently lost in the dead
-        // zone. Drive.setSpeed re-snaps internally — the snap here ensures the value passed
-        // in already reflects the post-mix correction so future readers see a consistent
-        // post-snap value.
-        L = deadbandSnap(L);
-        R = deadbandSnap(R);
-
-        Drive.setSpeed(L, R);
-    }
+    }    // end if (runOnlinePath)
 
     // -------------------------------------------------------------------------------------
     // Distance gate (PathTracker PROJECTION_FOLLOW). Evaluated AFTER the PID issues the
@@ -402,26 +469,52 @@ void LineFollowerClass::update()
         const float traveledCm = encDegToCm(avgDeg);
         if (traveledCm >= _distanceTargetCm)
         {
-            // Self-disable with active brake. Delegating to the builder's apply path keeps
-            // the disable semantics identical to a caller-issued setEnabled(false) —
-            // including clearing _lastErr / _lostLine / _useTShape.
-            //
-            // The latch is set AFTER the apply call because the disable path itself clears
-            // `_distanceReached` (so a user-initiated disable cannot leak a stale trip into
-            // a later re-enable). Setting it before would be immediately clobbered, leaving
-            // `isDistanceReached()` permanently false and hanging PathTracker's
-            // PROJECTION_FOLLOW state until its drain-timeout fault fires.
-            _applyEnableBuilder(/*targetEnabled=*/false,
-                                /*brake=*/true,
-                                /*hasPresetOverride=*/false,
-                                /*preset=*/_preset,
-                                /*tShapeRampUp=*/false,
-                                /*tShapeRampDown=*/false,
-                                /*accel=*/Config::TSHAPE_ACCEL_PWM_PER_CM,
-                                /*hasReverseOverride=*/false,
-                                /*reverse=*/_reverse,
-                                /*hasDistanceTarget=*/false,
-                                /*distanceTargetCm=*/0.0f);
+            if (_brakeOnGate)
+            {
+                // Today's behavior (default): self-disable with active brake. Delegating to
+                // the builder's apply path keeps the disable semantics identical to a
+                // caller-issued setEnabled(false) — including clearing _lastErr /
+                // _lostLine / _useTShape.
+                //
+                // The latch is set AFTER the apply call because the disable path itself
+                // clears `_distanceReached` (so a user-initiated disable cannot leak a stale
+                // trip into a later re-enable). Setting it before would be immediately
+                // clobbered, leaving `isDistanceReached()` permanently false and hanging
+                // PathTracker's PROJECTION_FOLLOW state until its drain-timeout fault fires.
+                _applyEnableBuilder(/*targetEnabled=*/false,
+                                    /*brake=*/true,
+                                    /*hasPresetOverride=*/false,
+                                    /*preset=*/_preset,
+                                    /*tShapeRampUp=*/false,
+                                    /*tShapeRampDown=*/false,
+                                    /*accel=*/Config::TSHAPE_ACCEL_PWM_PER_CM,
+                                    /*hasReverseOverride=*/false,
+                                    /*reverse=*/_reverse,
+                                    /*hasDistanceTarget=*/false,
+                                    /*distanceTargetCm=*/0.0f,
+                                    /*hasOvershootModeOverride=*/false,
+                                    /*overshootMode=*/false,
+                                    /*hasBrakeOnGateOverride=*/false,
+                                    /*brakeOnGate=*/true);
+            }
+            else
+            {
+                // Pass-through (ADR-023): gate trip latches `_distanceReached` and clears
+                // the gate / ramp state, but the controller stays enabled and keeps issuing
+                // Drive.setSpeed at cruise. PathTracker is the single consumer of
+                // `_distanceReached`; it will re-arm the controller for the next edge via
+                // `setEnabled(true)` on an already-enabled controller (no ramp-up reseed).
+                //
+                // Do NOT call `_applyEnableBuilder`; do NOT call `Drive.stop`. `_enabled`
+                // stays true; cruise PWM continues on the next tick.
+                _distanceTargetActive = false;
+                _useTShape            = false;
+                _useTShapeRampDown    = false;
+            }
+            // Latch the one-shot trip flag AFTER the brake-path apply call (which itself
+            // clears `_distanceReached` via the disable branch). On the pass-through path
+            // there is no apply call, so the order is harmless. PathTracker reads the latch
+            // via `isDistanceReached()`.
             _distanceReached = true;
         }
     }
@@ -453,7 +546,11 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                hasReverseOverride,
                                             bool                reverse,
                                             bool                hasDistanceTarget,
-                                            float               distanceTargetCm)
+                                            float               distanceTargetCm,
+                                            bool                hasOvershootModeOverride,
+                                            bool                overshootMode,
+                                            bool                hasBrakeOnGateOverride,
+                                            bool                brakeOnGate)
 {
     // Apply preset and reverse first so that, if anyone ever extends this to react
     // synchronously to the enable transition, they see the freshly chosen cruise + direction.
@@ -472,6 +569,20 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         {
             _array->setReverseActive(_reverse);
         }
+    }
+
+    // Apply overshoot-mode override if set. Default false on the owner preserves
+    // today's LOST_LINE_ACTION dispatch when no caller has opted in. See ADR-023.
+    if (hasOvershootModeOverride)
+    {
+        _overshootMode = overshootMode;
+    }
+
+    // Apply brake-on-gate override if set. Default true on the owner preserves
+    // today's self-disable-with-brake behavior on gate trip. See ADR-023.
+    if (hasBrakeOnGateOverride)
+    {
+        _brakeOnGate = brakeOnGate;
     }
 
     if (targetEnabled)
@@ -567,6 +678,12 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         _distanceTargetActive = false;    // Disabling also disarms the distance gate.
         _distanceReached      = false;    // Clear the latch so a re-enable without a new
                                           // setDistanceTarget cannot report a stale trip.
+        _overshootMode        = false;    // Restore owner default so a re-enable without an
+                                          // explicit setOvershootMode(...) starts from the
+                                          // LOST_LINE_ACTION dispatch path. See ADR-023.
+        _brakeOnGate          = true;     // Restore owner default so a re-enable without an
+                                          // explicit setBrakeOnGate(...) starts with the
+                                          // self-disable-with-brake behavior. See ADR-023.
 
         if (brake)
         {
