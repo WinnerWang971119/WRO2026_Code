@@ -412,7 +412,12 @@ _FLOAT_RE = re.compile(
     re.MULTILINE,
 )
 _BOOL_RE = re.compile(
-    r"constexpr\s+bool\s+PATH_PASS_THROUGH_ENABLED\s*=\s*(true|false)\s*;",
+    # T10 wrapped the default in an #ifndef/#define block so the value can be
+    # overridden via `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=...` at compile time.
+    # The `#define PATH_PASS_THROUGH_ENABLED_DEFAULT <bool>` is the source of
+    # truth for the default; the `constexpr bool PATH_PASS_THROUGH_ENABLED = ...;`
+    # line just propagates that to the public symbol.
+    r"#define\s+PATH_PASS_THROUGH_ENABLED_DEFAULT\s+(true|false)",
     re.MULTILINE,
 )
 
@@ -448,7 +453,8 @@ def test_tc9_path_pass_through_enabled_parity():
     text = _CONFIG_H.read_text(encoding="utf-8")
     match = _BOOL_RE.search(text)
     assert match is not None, (
-        "Could not find 'constexpr bool PATH_PASS_THROUGH_ENABLED = ...;' in Config.h"
+        "Could not find '#define PATH_PASS_THROUGH_ENABLED_DEFAULT <bool>' in Config.h "
+        "(the #ifndef-wrapped default introduced by T10's host-compile harness)"
     )
     config_raw = match.group(1)          # "true" or "false"
     config_value: bool = config_raw == "true"
