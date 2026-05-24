@@ -672,6 +672,30 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
         case Routes::EdgeType::BLIND:
         {
+            // Pass-through LINE→BLIND handoff: when _passThrough is set, the
+            // LineFollower is still enabled (T5's brake-on-gate=false path), so
+            // we need to:
+            //   1. Capture the current cruise PWM BEFORE disabling LineFollower
+            //      (so we know what speed to hand off to Drive.driveDist).
+            //   2. Disable LineFollower WITHOUT braking — it releases the motors
+            //      cleanly; whatever speeds Drive last latched stay until the
+            //      next move's setStartSpeed kicks in.
+            //   3. Pass the captured cruise as .setStartSpeed(...) to Drive
+            //      builders that otherwise default to Config::TSHAPE_START_SPEED
+            //      (PWM_MIN_MAGNITUDE), which would dip the chassis to the
+            //      deadband floor first.
+            //
+            // For non-pass-through, LineFollower was already disabled by T5's
+            // path and startSpeed defaults to the existing TSHAPE_START_SPEED.
+            //
+            // See ADR-023.
+            int16_t startSpeed = Config::TSHAPE_START_SPEED;
+            if (_passThrough)
+            {
+                startSpeed = presetToPwm(LineFollower.getPreset());
+                LineFollower.setEnabled(false).setBrake(false);
+            }
+
             // Per-edge motion-profile override (DEFAULT → pipeline default).
             // Three concrete BlindMode values map onto the Drive builder chain:
             //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
@@ -699,6 +723,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
+                         .setStartSpeed(startSpeed)    // pass-through: cruise; otherwise: PWM_MIN_MAGNITUDE
                          .tShape()
                          .async();
                     break;
@@ -706,9 +731,17 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
                 case Routes::BlindMode::RAW_FLAT:
                 {
+                    // RAW_FLAT pins start=end=cruise for a flat open-loop profile (the "FLAT"
+                    // in the name). Pass-through is the one case where the inbound
+                    // LineFollower cruise can legitimately differ from cruisePwm (non-NORMAL
+                    // preset on the inbound LINE edge); use the captured startSpeed there.
+                    // Non-pass-through MUST keep .setStartSpeed(cruisePwm) — anything else
+                    // introduces a ramp and breaks the FLAT contract for callers that picked
+                    // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
+                    const int16_t rawStart = _passThrough ? startSpeed : cruisePwm;
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::RAW)
-                         .setStartSpeed(cruisePwm)
+                         .setStartSpeed(rawStart)
                          .setEndSpeed(cruisePwm)
                          .async();
                     break;
@@ -720,12 +753,14 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 {
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::SYNC)
+                         .setStartSpeed(startSpeed)
                          .tShape()
                          .async();
                     break;
                 }
             }
             _state = State::BLIND_FORWARD;
+            _passThrough = false;    // consumed
             break;
         }
 
