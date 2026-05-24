@@ -43,6 +43,13 @@ Public surface:
   :func:`tools.path_planner.compiler.compile_path` (the C++ runtime owns
   this transition as an FSM state, not as a compiled primitive), so it
   is intentionally kept out of :mod:`tools.path_planner.compiler`.
+* :data:`ACT_LINE_PASS` -- sim-only primitive tag emitted INSTEAD OF
+  ``ACT_LINE_OVERSHOOT`` when the next-hop edge after an EDGE_LINE
+  intersection is collinear with the inbound edge (heading delta
+  <= :data:`NAV_TURN_TOLERANCE_DEG`) and the intersected node is not the
+  final destination. Chassis advance is identical to LINE_OVERSHOOT;
+  only the primitive name differs (for downstream verification +
+  telemetry). See ADR-023 "Pass-through collinear intersections".
 """
 
 from __future__ import annotations
@@ -79,6 +86,14 @@ TURN_EPSILON_DEG: float = 1e-6
 # or the cross-check goal-position test will diverge.
 LINE_SENSOR_AXLE_OFFSET_CM: float = 5.0
 
+# MUST mirror ``Config::NAV_TURN_TOLERANCE_DEG`` in WRO2026/Config.h.
+# Pytest TC9 verifies parity via regex grep on the header (no C parser).
+NAV_TURN_TOLERANCE_DEG: float = 0.5
+
+# MUST mirror ``Config::PATH_PASS_THROUGH_ENABLED`` in WRO2026/Config.h.
+# Pytest TC8 verifies parity via the same regex pattern.
+PATH_PASS_THROUGH_ENABLED: bool = True
+
 # Sim-only primitive tag for the LINE_OVERSHOOT FSM transition. The C++
 # runtime models this as an FSM state (not as a compiled primitive), so
 # it is intentionally NOT added to
@@ -86,10 +101,22 @@ LINE_SENSOR_AXLE_OFFSET_CM: float = 5.0
 # sim emits it, downstream of every ``ACT_FOLLOW_INT``.
 ACT_LINE_OVERSHOOT: str = "line_overshoot"
 
+# Sim-only primitive tag for the pass-through (collinear) LINE_OVERSHOOT
+# transition. Emitted INSTEAD OF ACT_LINE_OVERSHOOT when the next-hop edge
+# from the intersected node is collinear (heading delta <= NAV_TURN_TOLERANCE_DEG)
+# with the inbound edge AND the intersected node is not the final destination.
+# Chassis position update is IDENTICAL to ACT_LINE_OVERSHOOT (5cm advance);
+# the primitive name differs only for downstream verification + telemetry.
+# See ADR-023 "Pass-through collinear intersections".
+ACT_LINE_PASS: str = "line_pass"
+
 
 __all__ = [
     "ACT_LINE_OVERSHOOT",
+    "ACT_LINE_PASS",
     "LINE_SENSOR_AXLE_OFFSET_CM",
+    "NAV_TURN_TOLERANCE_DEG",
+    "PATH_PASS_THROUGH_ENABLED",
     "TURN_EPSILON_DEG",
     "LocalizationSim",
     "PathTrackerSim",
@@ -219,6 +246,39 @@ def resolve_pre_turn_mode(edge) -> TurnMode:
     return _resolve_override(edge, "pre_turn_mode", PIPELINE_CONFIG.turn, TurnMode)
 
 
+def _should_pass_through(graph, next_hop, current_edge, intersected_node, goal_name) -> bool:
+    """Return True iff a LINE-edge intersection at ``intersected_node`` should
+    emit ``ACT_LINE_PASS`` instead of ``ACT_LINE_OVERSHOOT``.
+
+    Conditions (all must hold):
+
+    * :data:`PATH_PASS_THROUGH_ENABLED` is True.
+    * ``intersected_node`` is not the goal (final destination never passes through).
+    * A next-next hop exists from ``intersected_node`` toward ``goal_name``
+      (non-``None``, non-self).
+    * The next-next edge's ``heading_deg``, wrap-normalized via
+      :func:`tools.path_planner.compiler.normalize_turn` against
+      ``current_edge``'s ``heading_deg``, has absolute value
+      <= :data:`NAV_TURN_TOLERANCE_DEG`.
+
+    The wrap normalization is REQUIRED -- without it the 359.5deg / 0.0deg
+    boundary diverges from the C++ side (which also wrap-normalizes per
+    ADR-023).
+    """
+    if not PATH_PASS_THROUGH_ENABLED:
+        return False
+    if intersected_node == goal_name:
+        return False
+    next_next = next_hop[intersected_node][goal_name]
+    if next_next is None or next_next == intersected_node:
+        return False
+    next_edge = graph.edges[intersected_node, next_next]
+    heading_delta = normalize_turn(
+        float(next_edge["heading_deg"]) - float(current_edge["heading_deg"])
+    )
+    return abs(heading_delta) <= NAV_TURN_TOLERANCE_DEG
+
+
 class LocalizationSim:
     """Mirror of ``LocalizationClass``."""
 
@@ -342,11 +402,17 @@ class PathTrackerSim:
             if edge_type == EDGE_LINE:
                 out.append((ACT_FOLLOW_INT, None))
                 self._chassis.follow_line_to_intersection(distance_cm)
-                # LINE_OVERSHOOT FSM transition: after the intersection
-                # marker is sensed, the runtime re-arms LineFollower with
-                # setDistanceTarget(LINE_SENSOR_AXLE_OFFSET_CM) so the
-                # wheel axle (not the line sensor) lands on the node.
-                out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when the
+                # next-hop edge after ``nxt`` is collinear with the inbound
+                # edge, else ACT_LINE_OVERSHOOT. Chassis advance is identical
+                # (5cm); the primitive name differs only for downstream
+                # verification + telemetry. See ADR-023.
+                if _should_pass_through(
+                    self._graph, self._next_hop, edge, nxt, goal_name
+                ):
+                    out.append((ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM))
+                else:
+                    out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
                 self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
                 self._localization.on_intersection(nxt)
             elif edge_type == EDGE_PROJECTION:
@@ -404,11 +470,19 @@ class PathTrackerSim:
             if edge_type == EDGE_LINE:
                 self._chassis.follow_line_to_intersection(distance_cm)
                 yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
-                # LINE_OVERSHOOT FSM transition (see go_to for rationale).
+                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS on
+                # collinear next-hop, else ACT_LINE_OVERSHOOT. Chassis advance
+                # is identical. See go_to for rationale and ADR-023.
+                pass_through = _should_pass_through(
+                    self._graph, self._next_hop, edge, nxt, goal_name
+                )
                 self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
                 self._localization.on_intersection(nxt)
                 yield (
-                    (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+                    (
+                        ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
+                        LINE_SENSOR_AXLE_OFFSET_CM,
+                    ),
                     self._snapshot_chassis(),
                 )
             elif edge_type == EDGE_PROJECTION:
