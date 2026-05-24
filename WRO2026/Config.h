@@ -830,8 +830,18 @@ namespace Config
      *       back via code change, not a Config toggle.
      * @note The Python sim (`tools/path_planner/sim/runtime.py`) hand-mirrors this
      *       constant. A pytest verifies parity via regex grep on this header.
+     * @note **Compile-time override:** the default value below is guarded by an
+     *       `#ifndef PATH_PASS_THROUGH_ENABLED_DEFAULT` so a build can flip the
+     *       behavior via `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=false` on the
+     *       compiler command line — used by the `WRO2026/test/` host-compile
+     *       harness to exercise both branches of the AC7b behavioral toggle
+     *       without editing this file. The public `Config::PATH_PASS_THROUGH_ENABLED`
+     *       symbol is unchanged; only its initializer is overridable.
      */
-    constexpr bool PATH_PASS_THROUGH_ENABLED = true;
+#ifndef PATH_PASS_THROUGH_ENABLED_DEFAULT
+#define PATH_PASS_THROUGH_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
 
     // =========================================================================================
     // Mission DSL (PR3).
