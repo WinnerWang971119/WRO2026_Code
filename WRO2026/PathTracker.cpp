@@ -620,10 +620,25 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
             // Resolve the per-edge cruise-mode override (DEFAULT → pipeline
             // default) and chain it onto the enable transition.
+            //
+            // Chain `.setOvershootMode(false)` to flip the controller back to
+            // normal P+D after the overshoot window. T4 always sets
+            // overshootMode=true during the LINE_OVERSHOOT arming; here we
+            // clear it so the new LINE segment runs the full PID controller.
+            //
+            // If _passThrough is true (pass-through into a collinear LINE next
+            // edge), the controller is already enabled — `setEnabled(true)`
+            // hits the already-enabled fast-path in `_applyEnableBuilder`, so
+            // no ramp-up reseed fires. Cruise PWM is preserved across the
+            // intersection (preset may snap if the new edge has a different
+            // LineMode override; see ADR-023 trade-off).
             const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
             const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
-            LineFollower.setEnabled(true).setPreset(preset);
+            LineFollower.setEnabled(true)
+                        .setPreset(preset)
+                        .setOvershootMode(false);
             _state = State::LINE_FOLLOW;
+            _passThrough = false;    // consumed
             break;
         }
 
@@ -636,12 +651,22 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // state in update()).
             (void) Intersection.isAtIntersection();    // defensive — drain any latched edge
 
+            // For pass-through LINE→PROJECTION, the controller is already enabled
+            // from the LINE_OVERSHOOT pass-through (T5). `setEnabled(true)` hits
+            // the already-enabled fast-path → no ramp-up reseed; the new
+            // distance-target gate baseline is captured at this re-arm tick.
+            // `setOvershootMode(false)` flips the controller back to normal P+D.
+            //
+            // For non-pass-through, the controller is already disabled (T5 path);
+            // `setEnabled(true)` performs a fresh enable with ramp-up.
             const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
             const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setOvershootMode(false)
                         .setDistanceTarget(edge.distance_cm);
             _state = State::PROJECTION_FOLLOW;
+            _passThrough = false;    // consumed
             break;
         }
 
