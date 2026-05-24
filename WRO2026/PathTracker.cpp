@@ -170,6 +170,7 @@ bool PathTrackerClass::begin()
     _destinationNode = FieldMap::NODE_NONE;
     _nextHop         = FieldMap::NODE_NONE;
     _activeEdgeType  = Routes::EdgeType::NONE;
+    _passThrough     = false;
     _fault = FaultInfo{};
     return true;
 }
@@ -215,6 +216,7 @@ void PathTrackerClass::abort()
     _destinationNode = FieldMap::NODE_NONE;
     _nextHop         = FieldMap::NODE_NONE;
     _activeEdgeType  = Routes::EdgeType::NONE;
+    _passThrough     = false;
     _fault           = FaultInfo{};
 }
 
@@ -412,9 +414,49 @@ void PathTrackerClass::update()
             // chain (it does NOT reset preset / direction / `_lastErr`).
             if (Intersection.isAtIntersection())
             {
-                // Already-enabled re-arm: skip ramp-up reseed; ramp-down to floor handles the smooth stop.
+                // -----------------------------------------------------------------
+                // Pass-through decision: peek the next hop AFTER _nextHop. If the
+                // peeked edge is collinear with the inbound edge (heading delta
+                // wrap-normalized to within NAV_TURN_TOLERANCE_DEG) AND _nextHop is
+                // not the final destination, take the pass-through branch — keep
+                // LineFollower running across the overshoot without braking.
+                // See ADR-023 and issue #19.
+                //
+                // Wrap-normalize MUST match the sim's `normalize_turn` so the
+                // 359.5°/0.0° boundary classifies the same on both sides.
+                // TODO: extract the wrap-normalize loop (duplicated in
+                //       `_onPlanNextHop`) into a `WROMath` free helper.
+                // -----------------------------------------------------------------
+                _passThrough = false;
+                if (Config::PATH_PASS_THROUGH_ENABLED && _nextHop != _destinationNode)
+                {
+                    const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
+                    if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
+                    {
+                        const Routes::EdgeInfo& nextEdge = FieldMap::getEdge(_nextHop, nextNext);
+                        if (nextEdge.type != Routes::EdgeType::NONE)
+                        {
+                            const uint8_t cur = Localization.getCurrentNode();
+                            const Routes::EdgeInfo& inboundEdge = FieldMap::getEdge(cur, _nextHop);
+                            float delta = nextEdge.heading_deg - inboundEdge.heading_deg;
+                            while (delta >   180.0f) { delta -= 360.0f; }
+                            while (delta <= -180.0f) { delta += 360.0f; }
+                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+                            {
+                                _passThrough = true;
+                            }
+                        }
+                    }
+                }
+
+                // Arm the overshoot. Always set overshootMode=true (project-wide rule
+                // per ADR-023: the 5cm window dead-reckons through line-offline
+                // conditions). brakeOnGate and tShapeRampDown depend on _passThrough.
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
+                            .setTShapeRampDown(!_passThrough)
+                            .setOvershootMode(true)
+                            .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
             }
