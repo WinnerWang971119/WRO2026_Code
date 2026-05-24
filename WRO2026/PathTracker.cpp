@@ -590,6 +590,20 @@ void PathTrackerClass::_onPlanNextHop()
 
     if (fabsf(delta) > Config::NAV_TURN_TOLERANCE_DEG)
     {
+        // Yaw-vs-peek divergence guard (ADR-023 follow-up): the LINE_OVERSHOOT
+        // pass-through decision (T4) uses EDGE headings from FieldMap, while
+        // this turn dispatch decision uses live IMU heading (Localization).
+        // If the IMU has drifted slightly, the peek may have classified the
+        // hop as pass-through (controller left enabled) while this branch now
+        // decides a turn is required. Without a guard, LineFollower.update()
+        // would keep issuing Drive.setSpeed each tick while Drive.turnToYaw
+        // owns the wheels — two writers fighting for motors. Disable the
+        // follower cleanly (no brake) so Drive's turn command runs alone.
+        if (LineFollower.isEnabled())
+        {
+            LineFollower.setEnabled(false).setBrake(false);
+        }
+
         const int16_t imuTarget = Localization.toImuYaw(targetWorld);
 
         // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
