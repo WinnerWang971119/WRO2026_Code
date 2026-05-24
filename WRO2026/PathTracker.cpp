@@ -466,13 +466,29 @@ void PathTrackerClass::update()
         case State::LINE_OVERSHOOT:
         {
             // Wait until the chassis has rolled forward by LINE_SENSOR_AXLE_OFFSET_CM
-            // past the intersection-detect point. `isDistanceReached()` is
-            // read-and-clear; the LineFollower self-disables (active brake) when
-            // the gate fires, so we just need to drop the enable flag explicitly
-            // and advance the graph node.
+            // past the intersection-detect point. `isDistanceReached()` is read-and-clear;
+            // the LineFollower's internal gate handling differs based on `_passThrough`:
+            //
+            //   - Stop-and-go (_passThrough == false): LineFollower's update() armed
+            //     `_brakeOnGate = true` (default), so when the gate trips it self-disables
+            //     via _applyEnableBuilder with active brake. By the time we observe
+            //     isDistanceReached() here, the chassis is already braked and the
+            //     controller is disabled. Same as pre-issue-19 behavior.
+            //
+            //   - Pass-through (_passThrough == true): LineFollower's update() armed
+            //     `_brakeOnGate = false`, so the gate trip latches `_distanceReached`
+            //     without disabling the controller. The chassis continues at cruise PWM
+            //     under LineFollower's symmetric output. _dispatchEdgeAfterTurn (T6/T7)
+            //     consumes _passThrough to decide whether to keep LineFollower live (LINE
+            //     next), re-arm for a new distance target (PROJECTION next), or release
+            //     with no brake before handing off to Drive.driveDist (BLIND next).
+            //
+            // Either way, advance Localization to the intersected node. _passThrough is
+            // consumed by the upcoming PLAN_NEXT_HOP → _dispatchEdgeAfterTurn dispatch.
+            //
+            // See ADR-023 and issue #19.
             if (LineFollower.isDistanceReached())
             {
-                LineFollower.setEnabled(false);
                 Localization.onIntersection(_nextHop);
                 _state = State::PLAN_NEXT_HOP;
             }
