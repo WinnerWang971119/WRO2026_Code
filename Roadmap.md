@@ -25,10 +25,11 @@ software (modules in [ARCHITECTURE.md](./ARCHITECTURE.md)).
 and shipped to `main`. The drivebase facade, the line-follow +
 intersection + custom 8-channel sensor stack, the offline Python path
 planner, the on-robot `Localization` + `PathTracker`, and the Mission
-operator DSL are all live. Issues #16 (8-ch line sensor) and #22
-(junction PID freeze) have landed. Manipulator v0 mechanism is in
-progress on the mech track; perception (camera) and the Tasks layer are
-not yet started. Phase 3 is next.
+operator DSL are all live. Issues #16 (8-ch line sensor), #22
+(junction PID freeze), and #21 (bidirectional line following — runtime
+auto-direction with 3-layer override, ADR-024) have landed.
+Manipulator v0 mechanism is in progress on the mech track; perception
+(camera) and the Tasks layer are not yet started. Phase 3 is next.
 
 **Two physical chassis.** Phases 3-6 run on the **test rover** (TT
 motors; switch the alias to `MatrixTT` in `Config.h`). The **competition
