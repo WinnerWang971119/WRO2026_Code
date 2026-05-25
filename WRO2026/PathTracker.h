@@ -70,6 +70,7 @@
 
 #include "Config.h"
 #include "FieldMap.h"
+#include "NavTypes.h"
 #include "routes.h"
 
 class PathTrackerClass;

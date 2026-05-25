@@ -46,6 +46,7 @@
 #include <stdint.h>
 
 #include "Config.h"
+#include "NavTypes.h"
 
 class MissionClass
 {
