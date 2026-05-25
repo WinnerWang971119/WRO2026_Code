@@ -91,7 +91,9 @@ LINE_SENSOR_AXLE_OFFSET_CM: float = 5.0
 NAV_TURN_TOLERANCE_DEG: float = 0.5
 
 # MUST mirror ``Config::PATH_PASS_THROUGH_ENABLED`` in WRO2026/Config.h.
-# Pytest TC8 verifies parity via the same regex pattern.
+# Pytest TC9 verifies parity via the same regex pattern (see
+# ``test_tc9_path_pass_through_enabled_parity``). TC8 covers the
+# behavioral disable, not the constant-value parity check.
 PATH_PASS_THROUGH_ENABLED: bool = True
 
 # Sim-only primitive tag for the LINE_OVERSHOOT FSM transition. The C++

@@ -128,10 +128,12 @@ need to be revisited.
       `PATH_PASS_THROUGH_ENABLED = False` emits `ACT_LINE_OVERSHOOT` (legacy behavior) at
       every collinear intersection.
 - [ ] **AC7b (C++ opt-out):** Host-compile test T10 has two compile-and-run targets,
-      `-DPATH_PASS_THROUGH_ENABLED=1` and `-DPATH_PASS_THROUGH_ENABLED=0`. Each target
-      asserts the corresponding primitive sequence on the canonical collinear fixture. Both
-      targets added to the Arduino CI workflow. A pure compile-only check is **not
-      sufficient** — the flag must be exercised behaviorally on both branches.
+      `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=true` and `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=false`.
+      The `_DEFAULT` macro is the `#ifndef`-guarded override in `Config.h` that drives
+      `Config::PATH_PASS_THROUGH_ENABLED`. Each target asserts the corresponding primitive
+      sequence on the canonical collinear fixture. Both targets added to the Arduino CI
+      workflow. A pure compile-only check is **not sufficient** — the flag must be
+      exercised behaviorally on both branches.
 - [ ] **AC8 (sim emission):** The sim emits `ACT_LINE_PASS` instead of `ACT_LINE_OVERSHOOT`
       for any LINE-edge intersection whose next-hop edge from that node is collinear with
       the inbound edge. Chassis position update is identical to `ACT_LINE_OVERSHOOT`.
@@ -390,7 +392,7 @@ pytest (TC9) extends to cover both constants via regex grep on `Config.h`.
 | TC12 | Sim: PROJECTION-inbound exit unchanged                      | Unit         | Path whose intersection node is reached via a PROJECTION edge (not LINE) emits the legacy sequence — no LINE_PASS. AC11 coverage.                                |
 | T10a | Host-compile: setOvershootMode dead-reckon branch          | Unit (C++)   | Stub LineArray::isOnline() reads to synthesize "online → offline" sequence. With overshoot mode ON, controller dead-reckons symmetric cruise PWM (no LOST_LINE_ACTION dispatch). With overshoot mode OFF, today's behavior is preserved. |
 | T10b | Host-compile: setBrakeOnGate(false) gate-trip behavior     | Unit (C++)   | Stub encoder reads to synthesize a 5 cm distance gate. With brake-on-gate=false, gate trip latches `isDistanceReached=true`, clears `_distanceTargetActive`, but does NOT disable the controller (no `Drive.stop`).                  |
-| T10c | Host-compile: PATH_PASS_THROUGH_ENABLED behavioral toggle  | Unit (C++)   | Two build targets `-DPATH_PASS_THROUGH_ENABLED=1` and `=0`. Each asserts the correct primitive sequence on the canonical collinear fixture. Compile-only is not sufficient.                                                              |
+| T10c | Host-compile: PATH_PASS_THROUGH_ENABLED behavioral toggle  | Unit (C++)   | Two CMake targets compiled with `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=true` and `=false` (the `#ifndef`-guarded override in `Config.h`). Each asserts the correct primitive sequence on the canonical collinear fixture. Compile-only is not sufficient. |
 | T10d | Host-compile: junction-freeze interaction in overshoot     | Unit (C++)   | Stub junction-classifier returns T_OR_CROSS during the overshoot window; assert `_pidFrozen` stays true and symmetric cruise PWM is still commanded. AC9 coverage.                                                                       |
 | HW1  | Hardware: 4-node collinear LINE chain, stopwatch           | Hardware     | **Phase 3 deliverable** — chassis traverses A→D without visible deceleration at B, C.                              |
 | HW2  | Hardware: turn-at-intersection regression                  | Hardware     | **Phase 3 deliverable** — chassis stop-turns at non-collinear intersections, identical to today.                   |
@@ -419,9 +421,10 @@ test-coverage gap explicitly in ADR-023 — but the default plan is to build the
 uv run pytest tools/path_planner/tests/
 arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026/
 # Host-compile tests (T10) — new harness under WRO2026/test/.
-# Two build variants for AC7b:
-make -C WRO2026/test PATH_PASS_THROUGH_ENABLED=1 test
-make -C WRO2026/test PATH_PASS_THROUGH_ENABLED=0 test
+# Both AC7b variants land as separate ctest cases from a single configure:
+cmake -S WRO2026/test -B build/test
+cmake --build build/test
+ctest --test-dir build/test --output-on-failure
 ```
 
 The exact host-compile build system (CMake, Makefile, or a `tools/cppcheck/`-style script)

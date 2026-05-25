@@ -69,8 +69,9 @@ namespace fixture
 }    // namespace fixture
 
 /// Wrap-normalize a heading delta to (-180, +180].
-/// Mirrors the inline block in `PathTracker.cpp:529-531` and the production
-/// peek logic specified by the plan.
+/// Mirrors the inline block in `PathTrackerClass::_onLineFollow` (the pass-through
+/// peek) and the duplicated copy in `_onPlanNextHop` — keep all three in sync
+/// until the TODO to extract a `WROMath::wrapNormalize180` helper is resolved.
 static float wrapDelta(float delta)
 {
     while (delta >  180.0f) { delta -= 360.0f; }
