@@ -32,6 +32,14 @@ from tools.path_planner.graph_builder import (
     EDGE_PROJECTION,
     build_graph,
 )
+from tools.path_planner.sim.runtime import (
+    ACT_BLIND_REVERSE,
+    ACT_LINE_REVERSE,
+    ACT_PROJECTION_REVERSE,
+    BIDIRECTIONAL_ENABLED,
+    BIDIRECTIONAL_TURN_THRESHOLD_DEG,
+    LINE_BOARD_COUNT,
+)
 
 
 @pytest.fixture(scope="session")
@@ -260,20 +268,63 @@ def _walk_expected_headings(
     start_heading: float,
     graph: nx.DiGraph,
 ) -> List[float]:
+    """Return the expected chassis body heading at each motion primitive.
+
+    Mirrors the direction-resolution branch of
+    :func:`tools.path_planner.compiler.compile_path` so that the
+    auto-resolved direction (FRONT vs REAR) yields the same body
+    heading the compiler walks against. For FRONT hops the body
+    heading equals the edge heading; for REAR hops it is
+    ``(edge_heading + 180) % 360`` so the rear sensor leads.
+    """
     headings: List[float] = []
     current = start_heading
     for u, v in zip(path[:-1], path[1:]):
-        current = graph.edges[u, v]["heading_deg"]
+        edge_heading = float(graph.edges[u, v]["heading_deg"])
+        # Auto resolution: no per-edge override, no pipeline override,
+        # no builder overrides, both kill-switch and board-count permit
+        # the auto rear step -> REAR iff |turn_delta| exceeds the
+        # bidirectional threshold.
+        delta = normalize_turn(edge_heading - current)
+        if (
+            BIDIRECTIONAL_ENABLED
+            and LINE_BOARD_COUNT >= 2
+            and abs(delta) > BIDIRECTIONAL_TURN_THRESHOLD_DEG
+        ):
+            body_target = (edge_heading + 180.0) % 360.0
+        else:
+            body_target = edge_heading % 360.0
+        # Only advance the running heading when the turn delta would
+        # actually be emitted (mirror compile_path's epsilon guard).
+        body_delta = normalize_turn(body_target - current)
+        if abs(body_delta) > 1e-6:
+            current = body_target
         headings.append(current)
     return headings
 
 
 def _replay_primitives(primitives: List[Primitive], start_heading: float) -> List[float]:
-    motion_actions = {ACT_FOLLOW_INT, ACT_FORWARD}
+    """Replay a primitive sequence and return the body heading at each motion step.
+
+    Handles both forward primitives (``ACT_FOLLOW_INT`` / ``ACT_FORWARD``
+    / ``ACT_FOLLOW_DIST``) and reverse primitives
+    (``ACT_LINE_REVERSE`` / ``ACT_BLIND_REVERSE`` /
+    ``ACT_PROJECTION_REVERSE``) introduced by T12.
+    """
+    motion_actions = {
+        ACT_FOLLOW_INT,
+        ACT_FORWARD,
+        ACT_FOLLOW_DIST,
+        ACT_LINE_REVERSE,
+        ACT_BLIND_REVERSE,
+        ACT_PROJECTION_REVERSE,
+    }
     headings: List[float] = []
     current = start_heading
-    for action, value in primitives:
+    for prim in primitives:
+        action = prim[0]
         if action == ACT_TURN_REL:
+            value = prim[1]
             assert value is not None
             current = (current + value) % 360.0
         elif action in motion_actions:

@@ -11,7 +11,7 @@ Heading convention (matches :mod:`tools.path_planner.graph_builder`):
 * Continuous float degrees in ``[0, 360)``.
 * ``0 deg`` = +x axis (East), CCW positive.
 
-Primitive vocabulary:
+Primitive vocabulary (forward hops):
 
 * ``("turn_relative", deg)`` -- in-place turn by ``deg`` degrees, CCW
   positive. Emitted between graph edges when the heading delta exceeds
@@ -23,6 +23,21 @@ Primitive vocabulary:
   the waypoint has no physical intersection marker beneath the strip.
 * ``("forward", cm)`` -- dead-reckoned forward move. Emitted for
   :data:`EDGE_BLIND` traversals.
+
+Primitive vocabulary (reverse hops, T12+):
+
+For hops where :func:`tools.path_planner.sim.runtime.resolve_direction`
+selects :class:`~tools.path_planner.sim.runtime.Direction.REAR`, the
+chassis turns to ``(edge_heading + 180) % 360`` (so the rear sensor
+faces along the edge) and dispatches the reverse-mirrored primitive:
+
+* ``("line_reverse", target_node, line_mode)``
+* ``("blind_reverse", target_node, distance_cm, blind_mode)``
+* ``("projection_reverse", target_node, distance_cm, projection_mode)``
+
+The emission shape must stay byte-identical to
+``PathTrackerSim.go_to(...)`` so the offline simulator and the firmware
+agree on every hop (TC18 cross-module parity).
 """
 
 from __future__ import annotations
@@ -79,13 +94,40 @@ def compile_path(
     2. For every consecutive pair ``(u, v)``:
 
        * Look up ``edge = graph.edges[u, v]`` (KeyError on missing edge).
-       * If ``abs(normalize_turn(edge['heading_deg'] - current_heading))
+       * Resolve the chassis travel direction for the hop via
+         :func:`tools.path_planner.sim.runtime.resolve_direction` (the
+         same helper the runtime FSM and ``PathTrackerSim.go_to`` call).
+         Inputs are the per-edge ``direction_override``, the global
+         :data:`PIPELINE_CONFIG.direction`, the running ``current_heading``,
+         the edge's forward heading, whether this is the last hop, and the
+         module-level kill-switch / board-count constants from
+         :mod:`tools.path_planner.sim.runtime`. Builder overrides
+         (``arrival`` / ``route``) are always
+         :class:`~tools.path_planner.sim.runtime.Direction.AUTO` at
+         compile time -- those are runtime-only.
+       * Compute the body-target heading: ``edge_heading`` for FRONT
+         hops, ``(edge_heading + 180) % 360`` for REAR hops.
+       * If ``abs(normalize_turn(body_target - current_heading))
          > 1e-6``, emit ``(ACT_TURN_REL, delta)``.
-       * Emit one motion primitive based on ``edge['type']``:
-         ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
+       * Emit one motion primitive based on ``edge['type']`` and
+         direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
          ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
          ``EDGE_BLIND`` -> ``(ACT_FORWARD, distance_cm)``.
-       * Update ``current_heading = edge['heading_deg']``.
+         REAR: ``EDGE_LINE`` ->
+         ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
+         ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
+         ``EDGE_BLIND`` ->
+         ``(ACT_BLIND_REVERSE, v, distance_cm, blind_mode)``.
+       * Update ``current_heading = body_target`` ONLY when a turn was
+         actually emitted (delta exceeded the epsilon). Mirrors
+         :meth:`PathTrackerSim.go_to` -- leaving the running heading
+         untouched below the threshold avoids 1-ULP drift that would
+         break byte-identical parity on the next hop.
+
+    The emission shape MUST stay byte-identical to
+    ``PathTrackerSim.go_to(...)`` so the offline simulator and the C++
+    runtime agree on every hop. This parity is verified by
+    ``test_property_random_walks`` in ``test_runtime_sim.py``.
 
     :param path: ordered list of node names; first element is the
         chassis's current node.
@@ -106,29 +148,97 @@ def compile_path(
     if not path:
         return out
 
-    current_heading = start_heading_deg
+    # Local imports to avoid a circular dependency: ``sim.runtime`` imports
+    # the ACT_* primitive tags and ``normalize_turn`` from this module. We
+    # only need direction-resolution machinery inside the loop, so deferring
+    # the import here keeps the module-level graph clean.
+    from tools.path_planner.pipeline_config import PIPELINE_CONFIG
+    from tools.path_planner.sim.runtime import (
+        ACT_BLIND_REVERSE,
+        ACT_LINE_REVERSE,
+        ACT_PROJECTION_REVERSE,
+        BIDIRECTIONAL_ENABLED,
+        LINE_BOARD_COUNT,
+        Direction,
+        _read_edge_dir_override,
+        resolve_blind_mode,
+        resolve_direction,
+        resolve_line_mode,
+        resolve_projection_mode,
+    )
 
-    for u, v in zip(path[:-1], path[1:]):
+    current_heading = start_heading_deg
+    last_index = len(path) - 1
+
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
         edge = graph.edges[u, v]
         edge_heading = float(edge["heading_deg"])
         edge_type = edge["type"]
+        is_last_hop = ((i + 1) == last_index)
 
-        delta = normalize_turn(edge_heading - current_heading)
+        direction = resolve_direction(
+            edge_dir_override=_read_edge_dir_override(edge),
+            pipeline_default=PIPELINE_CONFIG.direction,
+            builder_arrival=Direction.AUTO,
+            builder_route=Direction.AUTO,
+            current_heading=current_heading,
+            edge_heading=edge_heading,
+            is_last_hop=is_last_hop,
+            bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+            line_board_count=LINE_BOARD_COUNT,
+        )
+
+        # Body target heading: forward edge for FRONT, opposite for REAR
+        # (so the rear sensor faces along the edge). Mirrors
+        # ``_body_heading_for`` in ``sim.runtime``.
+        if direction == Direction.REAR:
+            body_target = (edge_heading + 180.0) % 360.0
+        else:
+            body_target = edge_heading % 360.0
+
+        delta = normalize_turn(body_target - current_heading)
         if abs(delta) > _TURN_EPSILON_DEG:
             out.append((ACT_TURN_REL, delta))
+            # Only update the running heading when a turn is actually
+            # emitted -- mirrors :meth:`PathTrackerSim.go_to` which leaves
+            # ``chassis.heading_deg`` untouched when the delta is below
+            # the epsilon. Skipping this guard would diverge by 1 ULP on
+            # the next hop and break the byte-identical parity check
+            # (TC18 / ``test_property_random_walks``).
+            current_heading = body_target
 
-        if edge_type == EDGE_LINE:
-            out.append((ACT_FOLLOW_INT, None))
-        elif edge_type == EDGE_PROJECTION:
-            out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
-        elif edge_type == EDGE_BLIND:
-            out.append((ACT_FORWARD, float(edge["distance_cm"])))
+        if direction == Direction.REAR:
+            if edge_type == EDGE_LINE:
+                out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge)))
+            elif edge_type == EDGE_PROJECTION:
+                out.append((
+                    ACT_PROJECTION_REVERSE,
+                    v,
+                    float(edge["distance_cm"]),
+                    resolve_projection_mode(edge),
+                ))
+            elif edge_type == EDGE_BLIND:
+                out.append((
+                    ACT_BLIND_REVERSE,
+                    v,
+                    float(edge["distance_cm"]),
+                    resolve_blind_mode(edge),
+                ))
+            else:
+                raise ValueError(
+                    f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
+                )
         else:
-            raise ValueError(
-                f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
-            )
-
-        current_heading = edge_heading
+            if edge_type == EDGE_LINE:
+                out.append((ACT_FOLLOW_INT, None))
+            elif edge_type == EDGE_PROJECTION:
+                out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
+            elif edge_type == EDGE_BLIND:
+                out.append((ACT_FORWARD, float(edge["distance_cm"])))
+            else:
+                raise ValueError(
+                    f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
+                )
 
     return out
 
