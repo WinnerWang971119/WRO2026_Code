@@ -112,10 +112,41 @@ ACT_LINE_OVERSHOOT: str = "line_overshoot"
 # See ADR-023 "Pass-through collinear intersections".
 ACT_LINE_PASS: str = "line_pass"
 
+# Bidirectional line-following primitive tags. Each mirrors its forward
+# counterpart (``ACT_FOLLOW_INT`` / ``ACT_FORWARD`` / ``ACT_FOLLOW_DIST``)
+# but drives the chassis BACKWARD along its current heading instead of
+# rotating in place. Emitted by :class:`PathTrackerSim.go_to` (T11+) when
+# :func:`resolve_direction` selects REVERSE for the upcoming edge based on
+# the turn delta vs :data:`BIDIRECTIONAL_TURN_THRESHOLD_DEG`. The C++
+# runtime owns the matching ``EDGE_*_REVERSE`` dispatch path; the sim's
+# emission must stay byte-identical to the compiler's output (TC18 parity).
+ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, target_node, line_mode)
+ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
+ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, projection_mode)
+
+
+# MUST mirror ``Config::BIDIRECTIONAL_ENABLED`` in WRO2026/Config.h.
+# Python cannot import C++ headers, so this constant is hand-mirrored.
+# Pytest TC14a/b verify parity via regex grep on the header (no C parser);
+# see ``test_tc14_bidirectional_*_parity`` for the defending tests.
+BIDIRECTIONAL_ENABLED: bool = True
+
+# MUST mirror ``Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG`` in WRO2026/Config.h.
+# When the pre-edge turn delta exceeds this threshold (absolute degrees),
+# the runtime drives the rear sensor toward the next intersection (emitting
+# ``ACT_*_REVERSE``) instead of rotating in place + driving forward. TC14a/b
+# defend the value parity.
+BIDIRECTIONAL_TURN_THRESHOLD_DEG: float = 90.0
+
 
 __all__ = [
+    "ACT_BLIND_REVERSE",
     "ACT_LINE_OVERSHOOT",
     "ACT_LINE_PASS",
+    "ACT_LINE_REVERSE",
+    "ACT_PROJECTION_REVERSE",
+    "BIDIRECTIONAL_ENABLED",
+    "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_SENSOR_AXLE_OFFSET_CM",
     "NAV_TURN_TOLERANCE_DEG",
     "PATH_PASS_THROUGH_ENABLED",
