@@ -44,6 +44,7 @@ from tools.path_planner.graph_builder import (
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
+    DirectionMode,
     LineMode,
     ProjectionMode,
     TurnMode,
@@ -56,14 +57,22 @@ from tools.path_planner.sim import (
     VirtualChassis,
     walk_next_hop,
 )
+from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
+    ACT_BLIND_REVERSE,
     ACT_LINE_OVERSHOOT,
+    ACT_LINE_PASS,
+    ACT_LINE_REVERSE,
+    ACT_PROJECTION_REVERSE,
+    Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
     resolve_blind_mode,
+    resolve_direction,
     resolve_line_mode,
     resolve_pre_turn_mode,
     resolve_projection_mode,
 )
+from tools.path_planner.tests.fixtures import bidirectional_field_data
 
 _POSITION_TOL_CM: float = 0.1
 
@@ -131,7 +140,7 @@ def fresh_sim(toy_field, toy_graph_and_table):
 
 
 def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
-    """Insert ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` after each FOLLOW_INT.
+    """Insert ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` after each LINE primitive.
 
     The runtime sim (post-T9) emits a LINE_OVERSHOOT step after every
     EDGE_LINE traversal so the wheel axle (not the line sensor) lands on
@@ -139,11 +148,15 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     C++ runtime owns it as an FSM state), so to compare the sim's output
     against ``compile_path``'s output we must re-add the LINE_OVERSHOOT
     steps in the same positions the sim emits them.
+
+    Post-T12, EDGE_LINE traversals on REAR hops emit ``ACT_LINE_REVERSE``
+    instead of ``ACT_FOLLOW_INT`` but still trigger the LINE_OVERSHOOT
+    FSM transition; the helper therefore matches either primitive name.
     """
     out: List[Primitive] = []
     for prim in primitives:
         out.append(prim)
-        if prim[0] == ACT_FOLLOW_INT:
+        if prim[0] in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
             out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
     return out
 
@@ -705,4 +718,500 @@ def test_projection_short_truncated_triangle():
     assert not any(action == ACT_LINE_OVERSHOOT for action, _ in prims)
     assert chassis.x_cm == pytest.approx(distance_cm, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
+    assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# Bidirectional line-following sim end-to-end tests (T14)
+#
+# Covers: AC1-AC9 (both clauses), AC11, AC12, AC14, TC17, TC18.
+#
+# Fixtures: tools/path_planner/tests/fixtures/bidirectional_field_data.py
+# Code under test: tools/path_planner/sim/runtime.py -- resolve_direction,
+#                  PathTrackerSim.go_to, Direction, BIDIRECTIONAL_ENABLED,
+#                  LINE_BOARD_COUNT.
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Shared sim factory
+# ---------------------------------------------------------------------------
+
+
+def _make_bidir_sim(fd):
+    """Return a (sim, chassis) pair from a bidirectional fixture namespace.
+
+    The fixture namespace carries build_graph() and build_next_hop()
+    factory attributes mirroring the collinear_4node pattern.
+    """
+    graph = fd.build_graph()
+    next_hop = fd.build_next_hop()
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis
+
+
+# ---------------------------------------------------------------------------
+# TC1 -- resolve_direction heading boundary: 89deg / 90deg / 91deg
+#
+# Verifies AC1/AC2: threshold is strictly greater-than so ties (== 90deg)
+# stay FRONT.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "heading_delta_deg, expected_direction",
+    [
+        (89.0, Direction.FRONT),   # abs(89) < 90  -> FRONT
+        (90.0, Direction.FRONT),   # abs(90) == 90 -> FRONT  (strictly >)
+        (91.0, Direction.REAR),    # abs(91) > 90  -> REAR
+    ],
+    ids=["TC1_89deg_FRONT", "TC1_90deg_FRONT", "TC1_91deg_REAR"],
+)
+def test_bidir_tc1_resolve_direction_boundary(heading_delta_deg, expected_direction):
+    """TC1: Auto algorithm boundary at BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90deg.
+
+    At exactly 90deg the condition abs(delta) > threshold is False -> FRONT.
+    At 91deg the condition is True -> REAR.  Verifies AC1/AC2.
+    """
+    result = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.AUTO,
+        current_heading=0.0,
+        edge_heading=heading_delta_deg,
+        is_last_hop=False,
+        bidirectional_enabled=True,
+        line_board_count=2,
+    )
+    assert result == expected_direction
+
+
+# ---------------------------------------------------------------------------
+# TC2 -- heading delta 179.5deg -> REAR (near-antiparallel)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc2_near_antiparallel_resolves_rear():
+    """TC2: A 179.5deg heading delta exceeds the 90deg threshold -> REAR.
+
+    Verifies AC1: near-antiparallel edges are served by the rear sensor.
+    """
+    result = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.AUTO,
+        current_heading=0.0,
+        edge_heading=179.5,
+        is_last_hop=False,
+        bidirectional_enabled=True,
+        line_board_count=2,
+    )
+    assert result == Direction.REAR
+
+
+# ---------------------------------------------------------------------------
+# TC3 -- BIDIRECTIONAL_ENABLED kill-switch disables auto REAR (AC9 clause a)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc3_kill_switch_disables_auto_rear(monkeypatch):
+    """TC3: When BIDIRECTIONAL_ENABLED is monkeypatched to False, a 175deg delta
+    still resolves FRONT.  The auto step checks bidirectional_enabled and
+    short-circuits to FRONT before evaluating the heading delta.
+    Verifies AC9 clause a.
+    """
+    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_ENABLED", False)
+
+    result = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.AUTO,
+        current_heading=0.0,
+        edge_heading=175.0,
+        is_last_hop=False,
+        bidirectional_enabled=False,
+        line_board_count=2,
+    )
+    assert result == Direction.FRONT
+
+
+# ---------------------------------------------------------------------------
+# TC3b -- kill-switch off + explicit route_direction=REAR still wins (AC9b)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc3b_kill_switch_off_explicit_rear_still_rear(monkeypatch):
+    """TC3b: kill-switch=False but builder override=REAR -> REAR.
+
+    AC9 clause b: setRouteDirection(REAR) bypasses the kill-switch because
+    step 4 (builder route) runs before step 5 (auto kill-switch check).
+    """
+    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_ENABLED", False)
+
+    result = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.REAR,
+        current_heading=0.0,
+        edge_heading=0.0,
+        is_last_hop=False,
+        bidirectional_enabled=False,
+        line_board_count=2,
+    )
+    assert result == Direction.REAR
+
+
+# ---------------------------------------------------------------------------
+# TC4 -- LINE_BOARD_COUNT == 1 prevents auto REAR (AC3)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc4_one_board_chassis_cannot_auto_rear(monkeypatch):
+    """TC4: With LINE_BOARD_COUNT monkeypatched to 1, a 175deg delta resolves FRONT.
+
+    The auto step checks line_board_count < 2 and short-circuits to FRONT
+    when the rear board is absent.  Verifies AC3.
+    """
+    monkeypatch.setattr(_runtime, "LINE_BOARD_COUNT", 1)
+
+    result = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.AUTO,
+        current_heading=0.0,
+        edge_heading=175.0,
+        is_last_hop=False,
+        bidirectional_enabled=True,
+        line_board_count=1,
+    )
+    assert result == Direction.FRONT
+
+
+# ---------------------------------------------------------------------------
+# TC5 -- setArrivalDirection(REAR) forces only the last hop REAR (AC6/AC7)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc5_arrival_direction_rear_only_last_hop():
+    """TC5: arrival_direction=REAR forces only the C->D (is_last_hop=True) hop REAR.
+
+    On the mixed-turn fixture (headings 0deg / 135deg / 135deg):
+      A->B: auto, delta 0deg -> FRONT.
+      B->C: auto, delta 135deg > 90deg -> REAR.
+      C->D: is_last_hop=True, arrival=REAR -> forced REAR.
+
+    Two ACT_LINE_REVERSE (B->C, C->D) and one ACT_FOLLOW_INT (A->B).
+    Verifies AC6/AC7.
+    """
+    fd = bidirectional_field_data.make_mixed_turn_field()
+    sim, chassis = _make_bidir_sim(fd)
+
+    prims = sim.go_to("D", arrival_direction=Direction.REAR)
+    act_tags = [p[0] for p in prims]
+
+    assert ACT_FOLLOW_INT in act_tags
+    assert act_tags.count(ACT_LINE_REVERSE) == 2
+    assert sim.localization.current_node() == "D"
+
+
+# ---------------------------------------------------------------------------
+# TC6 -- setRouteDirection(REAR) forces every hop REAR (AC4/AC5)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc6_route_direction_rear_all_hops():
+    """TC6: route_direction=REAR forces ALL three hops on the path to use REAR.
+
+    Every hop emits ACT_LINE_REVERSE; no ACT_FOLLOW_INT is emitted anywhere.
+    Verifies AC4/AC5.
+    """
+    fd = bidirectional_field_data.make_mixed_turn_field()
+    sim, chassis = _make_bidir_sim(fd)
+
+    prims = sim.go_to("D", route_direction=Direction.REAR)
+    act_tags = [p[0] for p in prims]
+
+    assert act_tags.count(ACT_LINE_REVERSE) == 3
+    assert ACT_FOLLOW_INT not in act_tags
+    assert sim.localization.current_node() == "D"
+
+
+# ---------------------------------------------------------------------------
+# TC7 -- per-edge direction_override wins over builder route direction (AC8)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc7_per_edge_override_wins_over_builder():
+    """TC7: Edge A->B has direction_override=FORCE_REVERSE; builder says FRONT.
+
+    Step 1 of the resolution algorithm is binding and supersedes the builder
+    preference.  A->B emits ACT_LINE_REVERSE; B->C (no override, builder
+    FRONT) emits ACT_FOLLOW_INT.  The REAR hop must precede the FRONT hop in
+    emission order.  Verifies AC8.
+    """
+    fd = bidirectional_field_data.make_rear_edge_field()
+    sim, chassis = _make_bidir_sim(fd)
+
+    prims = sim.go_to("C", route_direction=Direction.FRONT)
+    act_tags = [p[0] for p in prims]
+
+    assert act_tags.count(ACT_LINE_REVERSE) == 1
+    assert act_tags.count(ACT_FOLLOW_INT) == 1
+
+    # The REAR hop (A->B) must precede the FRONT hop (B->C).
+    line_tags = [t for t in act_tags if t in (ACT_LINE_REVERSE, ACT_FOLLOW_INT)]
+    assert line_tags[0] == ACT_LINE_REVERSE
+
+    assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC10 -- BLIND edge resolved REAR emits ACT_BLIND_REVERSE (AC12)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc10_blind_edge_rear_emits_blind_reverse():
+    """TC10: A BLIND edge traversed with REAR direction emits ACT_BLIND_REVERSE.
+
+    The primitive tuple shape is:
+        (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
+
+    Chassis advances via VirtualChassis.reverse().  Per-edge FORCE_REVERSE
+    override used for determinism.  Verifies AC12.
+    """
+    distance_cm = 40.0
+    nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+    )
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge(
+        "A", "B",
+        type=EDGE_BLIND,
+        distance_cm=distance_cm,
+        heading_deg=0.0,
+        direction_override=int(DirectionMode.FORCE_REVERSE),
+    )
+    g.add_edge(
+        "B", "A",
+        type=EDGE_BLIND,
+        distance_cm=distance_cm,
+        heading_deg=180.0,
+    )
+    next_hop = {"A": {"A": "A", "B": "B"}, "B": {"A": "A", "B": "B"}}
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+    act_tags = [p[0] for p in prims]
+
+    assert ACT_BLIND_REVERSE in act_tags
+
+    blind_rev_prims = [p for p in prims if p[0] == ACT_BLIND_REVERSE]
+    assert len(blind_rev_prims) == 1
+    _, target_node, emitted_dist, emitted_mode = blind_rev_prims[0]
+    assert target_node == "B"
+    assert emitted_dist == pytest.approx(distance_cm, abs=1e-9)
+    assert emitted_mode == BlindMode.SYNC_TSHAPE   # PIPELINE_CONFIG.blind default
+
+    assert sim.localization.current_node() == "B"
+
+    # REAR body heading = normalize(0+180) = 180deg.
+    # reverse(40) moves opposite to 180deg = toward +x. chassis.x == 40cm.
+    assert chassis.x_cm == pytest.approx(distance_cm, abs=_POSITION_TOL_CM)
+
+
+# ---------------------------------------------------------------------------
+# TC11 -- PROJECTION edge resolved REAR emits ACT_PROJECTION_REVERSE (AC11)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc11_projection_edge_rear_emits_projection_reverse():
+    """TC11: A PROJECTION edge traversed with REAR direction emits ACT_PROJECTION_REVERSE.
+
+    Tuple shape: (ACT_PROJECTION_REVERSE, target_node, distance_cm, proj_mode).
+    Per-edge FORCE_REVERSE override used for determinism.  Verifies AC11.
+    """
+    distance_cm = 25.0
+    nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+    )
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge(
+        "A", "B",
+        type=EDGE_PROJECTION,
+        distance_cm=distance_cm,
+        heading_deg=0.0,
+        direction_override=int(DirectionMode.FORCE_REVERSE),
+    )
+    g.add_edge(
+        "B", "A",
+        type=EDGE_PROJECTION,
+        distance_cm=distance_cm,
+        heading_deg=180.0,
+    )
+    next_hop = {"A": {"A": "A", "B": "B"}, "B": {"A": "A", "B": "B"}}
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+    act_tags = [p[0] for p in prims]
+
+    assert ACT_PROJECTION_REVERSE in act_tags
+
+    proj_rev_prims = [p for p in prims if p[0] == ACT_PROJECTION_REVERSE]
+    assert len(proj_rev_prims) == 1
+    _, target_node, emitted_dist, emitted_mode = proj_rev_prims[0]
+    assert target_node == "B"
+    assert emitted_dist == pytest.approx(distance_cm, abs=1e-9)
+    assert emitted_mode == ProjectionMode.NORMAL   # PIPELINE_CONFIG.projection default
+
+    assert sim.localization.current_node() == "B"
+
+
+# ---------------------------------------------------------------------------
+# TC17 -- bare go_to (no modifier) defaults to AUTO direction resolution (AC14)
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc17_bare_goto_defaults_to_auto():
+    """TC17: A bare go_to call (no modifier) runs the AUTO algorithm.
+
+    On the collinear fixture (all hops heading 0deg, start heading 0deg) the
+    auto algorithm sees delta=0deg -> FRONT for every hop.  No ACT_LINE_REVERSE
+    is emitted; three ACT_FOLLOW_INT primitives are emitted (A->B->C->D).
+
+    Verifies AC14: go_to(goal) with no modifiers is equivalent to
+    go_to(goal, route_direction=AUTO, arrival_direction=AUTO).
+    """
+    fd = bidirectional_field_data.make_collinear_field()
+    sim, chassis = _make_bidir_sim(fd)
+
+    prims = sim.go_to("D")
+    act_tags = [p[0] for p in prims]
+
+    assert ACT_LINE_REVERSE not in act_tags
+    assert act_tags.count(ACT_FOLLOW_INT) == 3
+    assert sim.localization.current_node() == "D"
+
+
+# ---------------------------------------------------------------------------
+# TC18 -- compiler <-> sim primitive parity
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc18_compiler_sim_parity_front_only():
+    """TC18 (FRONT-only path): compile_path and PathTrackerSim emit identical primitives.
+
+    Uses a 2-hop path A->B->C with a 90deg turn at B (non-collinear) so the
+    sim emits ACT_LINE_OVERSHOOT (not ACT_LINE_PASS) at the intermediate node,
+    matching the _interleave_overshoot expectation.
+
+    The compiler emits ACT_FOLLOW_INT for each EDGE_LINE hop; the sim emits
+    the same plus ACT_LINE_OVERSHOOT after each ACT_FOLLOW_INT.
+    Verifies TC18 cross-module parity for the FRONT-only case.
+    """
+    # A(0,0) --heading 0deg--> B(50,0) --heading 90deg--> C(50,50)
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 50.0)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+    )
+    g = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        g.add_node(name, x_cm=float(x), y_cm=float(y))
+    edges_raw = [
+        ("A", "B", EDGE_LINE, 50.0, 0.0),
+        ("B", "C", EDGE_LINE, 50.0, 90.0),
+    ]
+    for u, v, etype, dist, hdg in edges_raw:
+        g.add_edge(u, v, type=etype, distance_cm=dist, heading_deg=hdg)
+        g.add_edge(v, u, type=etype, distance_cm=dist, heading_deg=(hdg + 180.0) % 360.0)
+    next_hop = {
+        "A": {"A": "A", "B": "B", "C": "B"},
+        "B": {"A": "A", "B": "B", "C": "C"},
+        "C": {"A": "B", "B": "B", "C": "C"},
+    }
+
+    walked = walk_next_hop(next_hop, "A", "C")
+    compiler_prims = compile_path(walked, fd.START_HEADING_DEG, g, fd)
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    sim_prims = sim.go_to("C")
+
+    assert sim_prims == _interleave_overshoot(compiler_prims)
+    assert sim.localization.current_node() == "C"
+
+
+def test_bidir_tc18_compiler_sim_parity_rear_hop():
+    """TC18 (REAR hop): compile_path and PathTrackerSim emit identical primitives
+    for a single REAR hop (no intermediate nodes so pass-through cannot interfere).
+
+    T12 is already landed: compile_path emits ACT_LINE_REVERSE for REAR hops.
+    A 2-node graph A->B with direction_override=FORCE_REVERSE gives a minimal
+    fixture where compiler and sim must produce the same sequence:
+        (ACT_TURN_REL, 180.0)                   -- turn to face 180deg (body heading for REAR)
+        (ACT_LINE_REVERSE, 'B', LineMode.NORMAL) -- REAR traverse
+        (ACT_LINE_OVERSHOOT, 5.0)                -- sim-only overshoot step
+
+    Verifies the TC18 contract for the REAR case.
+    """
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+    )
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge(
+        "A", "B",
+        type=EDGE_LINE,
+        distance_cm=50.0,
+        heading_deg=0.0,
+        direction_override=int(DirectionMode.FORCE_REVERSE),
+    )
+    g.add_edge(
+        "B", "A",
+        type=EDGE_LINE,
+        distance_cm=50.0,
+        heading_deg=180.0,
+    )
+    next_hop = {"A": {"A": "A", "B": "B"}, "B": {"A": "A", "B": "B"}}
+
+    walked = walk_next_hop(next_hop, "A", "B")
+    compiler_prims = compile_path(walked, fd.START_HEADING_DEG, g, fd)
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    sim_prims = sim.go_to("B")
+
+    # compile_path emits (ACT_TURN_REL, 180.0) + (ACT_LINE_REVERSE, 'B', mode).
+    # _interleave_overshoot adds ACT_LINE_OVERSHOOT after ACT_LINE_REVERSE.
+    assert sim_prims == _interleave_overshoot(compiler_prims)
     assert sim.localization.current_node() == "B"
