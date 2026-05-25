@@ -158,3 +158,40 @@ target_compile_definitions(test_path_tracker_passthrough_off
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_passthrough_off PRIVATE ${COMMON_INCLUDES})
 add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough_off)
+
+# =========================================================================================
+# Test executable #3a — BIDIRECTIONAL_ENABLED == true build (kill-switch ON, default).
+#
+# Exercises TC12 (REVERSE_UNAVAILABLE fault on 1-board + REAR LINE/PROJECTION),
+# TC13 (Mission modifier no-op on non-GOTO step), and TC14c (compile-time kill-switch
+# override propagates into runtime behavior). See the test file's docblock for the
+# rationale on why the production .cpp sources for PathTracker / Mission are NOT
+# linked in here — the test mirrors the relevant slices inline, following the same
+# precedent as `test_path_tracker_passthrough.cpp`.
+# =========================================================================================
+add_executable(test_path_tracker_bidirectional_on
+    ${TEST_DIR}/test_path_tracker_bidirectional.cpp
+    ${SUT_SOURCES}
+    ${MOCK_SOURCES}
+)
+target_compile_definitions(test_path_tracker_bidirectional_on
+    PRIVATE BIDIRECTIONAL_ENABLED_DEFAULT=true)
+target_include_directories(test_path_tracker_bidirectional_on PRIVATE ${COMMON_INCLUDES})
+add_test(NAME path_tracker_bidirectional_on COMMAND test_path_tracker_bidirectional_on)
+
+# =========================================================================================
+# Test executable #3b — BIDIRECTIONAL_ENABLED == false build (kill-switch OFF).
+#
+# Asserts that the same 175-deg fixture that picks REAR on the ON build picks FRONT
+# on the OFF build — i.e. the compile-time toggle genuinely controls runtime behavior,
+# not just compilation.
+# =========================================================================================
+add_executable(test_path_tracker_bidirectional_off
+    ${TEST_DIR}/test_path_tracker_bidirectional.cpp
+    ${SUT_SOURCES}
+    ${MOCK_SOURCES}
+)
+target_compile_definitions(test_path_tracker_bidirectional_off
+    PRIVATE BIDIRECTIONAL_ENABLED_DEFAULT=false)
+target_include_directories(test_path_tracker_bidirectional_off PRIVATE ${COMMON_INCLUDES})
+add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
