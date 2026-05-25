@@ -843,6 +843,18 @@ namespace Config
 #endif
     constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
 
+    /// Master kill-switch for bidirectional line-following auto-selection.
+    /// When false, PathTracker never picks REAR direction automatically;
+    /// manual builder/edge overrides still work.
+#ifndef BIDIRECTIONAL_ENABLED_DEFAULT
+#define BIDIRECTIONAL_ENABLED_DEFAULT true
+#endif
+    constexpr bool BIDIRECTIONAL_ENABLED = BIDIRECTIONAL_ENABLED_DEFAULT;
+
+    /// Angular threshold (degrees) above which PathTracker selects REAR
+    /// line-following instead of performing a wide on-the-spot turn.
+    constexpr float BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90.0f;
+
     // =========================================================================================
     // Mission DSL (PR3).
     //
