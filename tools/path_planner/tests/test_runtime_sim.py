@@ -1215,3 +1215,302 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
     # _interleave_overshoot adds ACT_LINE_OVERSHOOT after ACT_LINE_REVERSE.
     assert sim_prims == _interleave_overshoot(compiler_prims)
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# ADR-023 + bidirectional composition tests (T15)
+#
+# Covers AC13: pass-through fires correctly (or is correctly suppressed) when
+# one or more hops on the route are traversed in the REAR direction.  The
+# key invariant is that _should_pass_through peeks at resolved BODY headings,
+# not raw forward-edge headings -- so a REAR->FRONT transition across
+# anti-parallel forward edges still produces a zero body-heading delta and
+# ACT_LINE_PASS fires (TC9c).
+#
+# Test IDs:
+#   TC9  -- two consecutive REAR hops, collinear fwd edges -> ACT_LINE_PASS
+#   TC9b -- two consecutive REAR hops, non-collinear fwd edges -> no pass-through
+#   TC9c -- REAR->FRONT transition, anti-parallel fwd edges -> body delta 0 -> ACT_LINE_PASS
+# ===========================================================================
+
+
+def _make_three_hop_sim(
+    fwd_headings: tuple,
+    start_heading_deg: float,
+    edge_overrides: dict = None,
+) -> tuple:
+    """Build a minimal (sim, graph, next_hop) triple for a 3-hop A->B->C topology.
+
+    :param fwd_headings: ``(hdg_ab, hdg_bc)`` -- forward heading (degrees) of
+        each directed edge.
+    :param start_heading_deg: chassis heading at ``A`` after zeroing.
+    :param edge_overrides: optional dict mapping ``(u, v)`` pairs to extra
+        graph-edge attributes (e.g. ``{('A','B'): {'direction_override': 2}}``).
+        Only applied to the **forward** edge; reverse edges never inherit
+        directional overrides.
+    :returns: ``(sim, chassis, graph, next_hop)`` ready for ``go_to`` calls.
+    """
+    if edge_overrides is None:
+        edge_overrides = {}
+
+    hdg_ab, hdg_bc = fwd_headings
+
+    # Place nodes geometrically along the given headings.
+    import math as _math
+    ax, ay = 0.0, 0.0
+    bx = ax + _math.cos(_math.radians(hdg_ab)) * 50.0
+    by = ay + _math.sin(_math.radians(hdg_ab)) * 50.0
+    cx = bx + _math.cos(_math.radians(hdg_bc)) * 50.0
+    cy = by + _math.sin(_math.radians(hdg_bc)) * 50.0
+
+    nodes = {"A": (ax, ay), "B": (bx, by), "C": (cx, cy)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        START_NODE="A",
+        START_HEADING_DEG=start_heading_deg,
+    )
+
+    g = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        g.add_node(name, x_cm=float(x), y_cm=float(y))
+
+    raw_edges = [("A", "B", hdg_ab), ("B", "C", hdg_bc)]
+    for u, v, hdg in raw_edges:
+        fwd_attrs = dict(type=EDGE_LINE, distance_cm=50.0, heading_deg=float(hdg))
+        fwd_attrs.update(edge_overrides.get((u, v), {}))
+        rev_attrs = dict(
+            type=EDGE_LINE,
+            distance_cm=50.0,
+            heading_deg=(float(hdg) + 180.0) % 360.0,
+        )
+        g.add_edge(u, v, **fwd_attrs)
+        g.add_edge(v, u, **rev_attrs)
+
+    next_hop = {
+        "A": {"A": "A", "B": "B", "C": "B"},
+        "B": {"A": "A", "B": "B", "C": "C"},
+        "C": {"A": "B", "B": "B", "C": "C"},
+    }
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis, g, next_hop
+
+
+# ---------------------------------------------------------------------------
+# TC9 -- two consecutive REAR hops, collinear forward edges -> ACT_LINE_PASS
+#
+# Topology: A->B->C, forward headings both 0deg.
+# route_direction=REAR forces both hops REAR.
+# Body heading for REAR on 0deg edge = 180deg.
+# Inbound body heading at B = 180deg.
+# Peek: B->C forward heading 0deg, forced REAR -> body heading 180deg.
+# Delta = |180 - 180| = 0deg <= NAV_TURN_TOLERANCE_DEG -> ACT_LINE_PASS at B.
+# No ACT_TURN_REL between the two REAR hops (chassis stays at 180deg).
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc9_two_rear_hops_collinear_emits_line_pass():
+    """TC9: Two consecutive REAR hops on collinear (0deg, 0deg) forward edges emit
+    ACT_LINE_PASS at the intermediate intersection B, and ACT_LINE_OVERSHOOT only
+    at the destination C (destination guard always emits OVERSHOOT, not PASS).
+
+    The body heading after the first REAR hop is 180deg; the next-hop body heading
+    (B->C REAR) is also 180deg; delta = 0deg -> _should_pass_through returns True
+    at B.  B->C is the last hop (C is the destination) so pass-through is NOT
+    re-applied at C -- the destination guard forces ACT_LINE_OVERSHOOT there.
+    No ACT_TURN_REL is emitted between the two REAR hops because the chassis
+    heading does not change.
+
+    Verifies AC13: pass-through composes correctly with REAR direction.
+    """
+    sim, chassis, _, _ = _make_three_hop_sim(
+        fwd_headings=(0.0, 0.0),
+        start_heading_deg=0.0,
+    )
+
+    prims = sim.go_to("C", route_direction=Direction.REAR)
+    act_tags = [p[0] for p in prims]
+
+    # ACT_LINE_PASS must appear exactly once (at B, the intermediate node).
+    assert ACT_LINE_PASS in act_tags, (
+        f"Expected ACT_LINE_PASS at B for two collinear REAR hops; got {act_tags}"
+    )
+    assert act_tags.count(ACT_LINE_PASS) == 1, (
+        f"Expected exactly one ACT_LINE_PASS (at B only); got {act_tags}"
+    )
+
+    # ACT_LINE_OVERSHOOT appears exactly once at C (destination guard).
+    assert act_tags.count(ACT_LINE_OVERSHOOT) == 1, (
+        f"Expected exactly one ACT_LINE_OVERSHOOT (at destination C); got {act_tags}"
+    )
+
+    # No inter-hop ACT_TURN_REL: chassis stays at body heading 180deg the whole way.
+    # The initial turn from start heading (0deg) to first body heading (180deg) IS
+    # emitted (it is NOT between hops); strip it and check the slice between the
+    # two LINE_REVERSE primitives.
+    line_rev_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_REVERSE]
+    assert len(line_rev_indices) == 2, (
+        f"Expected two ACT_LINE_REVERSE primitives for two forced-REAR hops; got {act_tags}"
+    )
+    # Primitives between the two ACT_LINE_REVERSE are: ACT_LINE_PASS only (no turn).
+    between = prims[line_rev_indices[0] + 1 : line_rev_indices[1]]
+    between_tags = [p[0] for p in between]
+    assert ACT_TURN_REL not in between_tags, (
+        f"Unexpected ACT_TURN_REL between the two REAR hops; slice={between}"
+    )
+    assert between_tags == [ACT_LINE_PASS], (
+        f"Expected only [ACT_LINE_PASS] between the two REAR hops; got {between_tags}"
+    )
+
+    assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC9b -- two consecutive REAR hops, non-collinear -> no pass-through
+#
+# Topology: A->B->C, forward headings 0deg then 90deg.
+# route_direction=REAR forces both hops REAR.
+# Body heading after A->B REAR on 0deg edge = 180deg.
+# Peek: B->C forward heading 90deg, forced REAR -> body heading 270deg.
+# Delta = |270 - 180| = 90deg > NAV_TURN_TOLERANCE_DEG -> ACT_LINE_OVERSHOOT at B.
+# A pre-hop turn IS emitted before the second REAR hop.
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc9b_two_rear_hops_non_collinear_no_line_pass():
+    """TC9b: Two consecutive REAR hops on non-collinear (0deg, 90deg) forward edges do
+    NOT emit ACT_LINE_PASS at B.
+
+    Body heading after A->B REAR = 180deg.  Next-hop peek (B->C REAR) resolves to
+    body heading 270deg.  Delta = 90deg > NAV_TURN_TOLERANCE_DEG -> pass-through
+    is blocked; ACT_LINE_OVERSHOOT fires and a pre-hop ACT_TURN_REL is emitted
+    before the second REAR hop.
+
+    Verifies AC13 (negative path): non-collinear REAR hops correctly suppress
+    pass-through and still emit the turn primitive.
+    """
+    sim, chassis, _, _ = _make_three_hop_sim(
+        fwd_headings=(0.0, 90.0),
+        start_heading_deg=0.0,
+    )
+
+    prims = sim.go_to("C", route_direction=Direction.REAR)
+    act_tags = [p[0] for p in prims]
+
+    # ACT_LINE_PASS must NOT appear when the body-heading delta exceeds tolerance.
+    assert ACT_LINE_PASS not in act_tags, (
+        f"Unexpected ACT_LINE_PASS for non-collinear REAR hops; got {act_tags}"
+    )
+
+    # ACT_LINE_OVERSHOOT must appear at B (pass-through blocked).
+    assert ACT_LINE_OVERSHOOT in act_tags, (
+        f"Expected ACT_LINE_OVERSHOOT at B when pass-through is blocked; got {act_tags}"
+    )
+
+    # A turn primitive must appear between the two REAR hops (body heading changes
+    # from 180deg to 270deg to align for the second hop).
+    line_rev_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_REVERSE]
+    assert len(line_rev_indices) == 2, (
+        f"Expected two ACT_LINE_REVERSE primitives for two forced-REAR hops; got {act_tags}"
+    )
+    between = prims[line_rev_indices[0] + 1 : line_rev_indices[1]]
+    between_tags = [p[0] for p in between]
+    assert ACT_TURN_REL in between_tags, (
+        f"Expected ACT_TURN_REL between non-collinear REAR hops; slice={between}"
+    )
+
+    assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC9c -- mixed REAR->FRONT transition on anti-parallel forward edges -> ACT_LINE_PASS
+#
+# Topology: A->B->C.
+#   A->B: forward heading 0deg, forced REAR via direction_override.
+#         Body heading = (0 + 180) % 360 = 180deg.
+#   B->C: forward heading 180deg, no override.
+#         Auto-resolution: chassis heading after A->B = 180deg,
+#         edge_heading = 180deg, delta = wrap(180 - 180) = 0deg <= 90deg -> FRONT.
+#         Body heading = 180deg (FRONT on 180deg forward edge).
+# Body-heading delta at B = |180 - 180| = 0deg -> ACT_LINE_PASS fires.
+#
+# Critical invariant: _should_pass_through uses resolved BODY headings, not raw
+# forward-edge headings. The forward-edge delta would be |180 - 0| = 180deg
+# (which would BLOCK pass-through). The body-heading delta is 0deg (which fires
+# pass-through). TC9c breaks if the peek reverts to raw forward-edge comparison.
+# ---------------------------------------------------------------------------
+
+
+def test_bidir_tc9c_rear_to_front_antiparallel_fwd_edges_emits_line_pass():
+    """TC9c: REAR->FRONT transition with anti-parallel forward edges (0deg, 180deg)
+    emits ACT_LINE_PASS at B because the BODY-heading delta is 0deg.
+
+    A->B is forced REAR (body heading = 180deg).
+    B->C forward heading is 180deg; after the first hop the chassis heading is 180deg,
+    so auto-resolution: delta = wrap(180 - 180) = 0deg -> FRONT; body heading = 180deg.
+    Body-heading delta at B = |180 - 180| = 0deg <= NAV_TURN_TOLERANCE_DEG.
+
+    The destination C still receives ACT_LINE_OVERSHOOT (destination guard always
+    prevents ACT_LINE_PASS at the final node), so the sequence is:
+        (ACT_TURN_REL, 180.0)          -- align to 180deg body heading for A->B REAR
+        (ACT_LINE_REVERSE, 'B', mode)  -- A->B REAR hop
+        (ACT_LINE_PASS, 5.0)           -- pass-through fires at B (body delta = 0deg)
+        (ACT_FOLLOW_INT, None)         -- B->C FRONT hop
+        (ACT_LINE_OVERSHOOT, 5.0)      -- destination guard at C
+
+    This test is THE critical proof that _should_pass_through peeks at resolved body
+    headings, NOT raw forward edge headings. Without T6's body-heading peek fix,
+    the raw forward-edge delta would be |180 - 0| = 180deg and pass-through would
+    not fire, incorrectly emitting ACT_LINE_OVERSHOOT + ACT_TURN_REL instead.
+
+    Verifies AC13 (mixed-direction clause of ADR-023).
+    """
+    sim, chassis, _, _ = _make_three_hop_sim(
+        fwd_headings=(0.0, 180.0),
+        start_heading_deg=0.0,
+        edge_overrides={
+            ("A", "B"): {"direction_override": int(DirectionMode.FORCE_REVERSE)},
+        },
+    )
+    # B->C has forward heading 180deg (no override -- auto will resolve FRONT because
+    # after the A->B REAR hop the chassis heading is 180deg, so delta = 0deg <= 90deg).
+    # We do NOT pass route_direction=REAR here; only A->B is forced REAR via the
+    # per-edge override. B->C uses auto resolution.
+
+    prims = sim.go_to("C")
+    act_tags = [p[0] for p in prims]
+
+    # ACT_LINE_PASS must appear exactly once at B (the intermediate node).
+    assert ACT_LINE_PASS in act_tags, (
+        f"Expected ACT_LINE_PASS at B for REAR->FRONT anti-parallel transition; "
+        f"got {act_tags}. Check that _should_pass_through uses body headings, "
+        f"not raw forward-edge headings."
+    )
+    assert act_tags.count(ACT_LINE_PASS) == 1, (
+        f"Expected exactly one ACT_LINE_PASS (at B only); got {act_tags}"
+    )
+
+    # ACT_LINE_OVERSHOOT must appear exactly once at C (destination guard).
+    assert act_tags.count(ACT_LINE_OVERSHOOT) == 1, (
+        f"Expected exactly one ACT_LINE_OVERSHOOT (at destination C only); got {act_tags}"
+    )
+
+    # The sequence at B must be: ACT_LINE_REVERSE (first hop end) immediately
+    # followed by ACT_LINE_PASS (no turn between them).
+    line_rev_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_REVERSE]
+    assert len(line_rev_indices) == 1, (
+        f"Expected exactly one ACT_LINE_REVERSE (A->B REAR); got {act_tags}"
+    )
+    pass_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_PASS]
+    assert len(pass_indices) == 1, (
+        f"Expected exactly one ACT_LINE_PASS at B; got {act_tags}"
+    )
+    # ACT_LINE_PASS must immediately follow ACT_LINE_REVERSE (no turn between them).
+    assert pass_indices[0] == line_rev_indices[0] + 1, (
+        f"ACT_LINE_PASS at index {pass_indices[0]} should immediately follow "
+        f"ACT_LINE_REVERSE at index {line_rev_indices[0]}; got {act_tags}"
+    )
+
+    assert sim.localization.current_node() == "C"
