@@ -24,6 +24,7 @@ namespace Routes {
     enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3 };
     enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
     enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
+    enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };
 
     // Mission-wide motion-mode defaults, baked in from
     // tools/path_planner/pipeline_config.py at build time.
@@ -32,6 +33,7 @@ namespace Routes {
         BlindMode      blind;
         ProjectionMode projection;
         TurnMode       turn;
+        DirectionMode  direction;
     };
     extern const PipelineConfig PIPELINE_CONFIG;
 
@@ -44,6 +46,7 @@ namespace Routes {
         BlindMode      blind_mode_override;
         ProjectionMode projection_mode_override;
         TurnMode       pre_turn_mode_override;
+        DirectionMode  direction_override;
     };
 
     extern const NodeInfo NODES[N_NODES];

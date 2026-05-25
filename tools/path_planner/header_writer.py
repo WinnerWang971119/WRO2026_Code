@@ -47,6 +47,7 @@ from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECT
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
+    DirectionMode,
     LineMode,
     ProjectionMode,
     TurnMode,
@@ -89,6 +90,7 @@ _LINE_MODE_DEFAULT       = "LineMode::DEFAULT"
 _BLIND_MODE_DEFAULT      = "BlindMode::DEFAULT"
 _PROJECTION_MODE_DEFAULT = "ProjectionMode::DEFAULT"
 _TURN_MODE_DEFAULT       = "TurnMode::DEFAULT"
+_DIRECTION_MODE_DEFAULT  = "DirectionMode::DEFAULT"
 
 
 def _format_float(value: float) -> str:
@@ -142,19 +144,24 @@ def _override_enum_value(
     return enum_cls.__name__ + "::" + member.name
 
 
-def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
-    """Compute the four override-enum literals for one edge.
+def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
+    """Compute the five override-enum literals for one edge.
 
-    Returns ``(line_override, blind_override, projection_override, turn_override)``
+    Returns
+    ``(line_override, blind_override, projection_override, turn_override, direction_override)``
     in the same order they appear on the C++ ``EdgeInfo`` struct. The
     ``primitive_mode`` attribute lands on exactly one slot, picked by the
     edge's ``type``; the other two primitive slots stay DEFAULT. The
-    ``pre_turn_mode`` attribute always lands on the turn slot.
+    ``pre_turn_mode`` attribute always lands on the turn slot. The
+    ``direction_override`` attribute (populated by T4 in ``graph_builder``)
+    always lands on the direction slot; absent today, so defaults to
+    ``DirectionMode::DEFAULT``.
     """
     line_override       = _LINE_MODE_DEFAULT
     blind_override      = _BLIND_MODE_DEFAULT
     projection_override = _PROJECTION_MODE_DEFAULT
     turn_override       = _TURN_MODE_DEFAULT
+    direction_override  = _DIRECTION_MODE_DEFAULT
 
     primitive_mode = edge_attrs.get("primitive_mode")
     if primitive_mode is not None:
@@ -181,7 +188,19 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
             TurnMode, pre_turn_mode, _TURN_MODE_DEFAULT
         )
 
-    return line_override, blind_override, projection_override, turn_override
+    direction_mode = edge_attrs.get("direction_override")
+    if direction_mode is not None:
+        direction_override = _override_enum_value(
+            DirectionMode, direction_mode, _DIRECTION_MODE_DEFAULT
+        )
+
+    return (
+        line_override,
+        blind_override,
+        projection_override,
+        turn_override,
+        direction_override,
+    )
 
 
 def _none_edge_cell() -> str:
@@ -191,7 +210,8 @@ def _none_edge_cell() -> str:
         + _LINE_MODE_DEFAULT + ", "
         + _BLIND_MODE_DEFAULT + ", "
         + _PROJECTION_MODE_DEFAULT + ", "
-        + _TURN_MODE_DEFAULT
+        + _TURN_MODE_DEFAULT + ", "
+        + _DIRECTION_MODE_DEFAULT
         + " }"
     )
 
@@ -203,15 +223,20 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
     enum_name = _EDGE_TYPE_TO_ENUM[edge["type"]]
     distance = _format_float(edge["distance_cm"])
     heading = _format_float(edge["heading_deg"])
-    (line_override, blind_override, projection_override, turn_override) = (
-        _resolve_overrides(edge)
-    )
+    (
+        line_override,
+        blind_override,
+        projection_override,
+        turn_override,
+        direction_override,
+    ) = _resolve_overrides(edge)
     return (
         "{ " + enum_name + ", " + distance + ", " + heading + ", "
         + line_override + ", "
         + blind_override + ", "
         + projection_override + ", "
-        + turn_override
+        + turn_override + ", "
+        + direction_override
         + " }"
     )
 
@@ -321,6 +346,11 @@ def _build_routes_h_lines(
         + "enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, "
         + "PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };"
     )
+    lines.append(
+        _INDENT
+        + "enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, "
+        + "FORCE_REVERSE = 2 };"
+    )
     lines.append("")
     lines.append(
         _INDENT + "// Mission-wide motion-mode defaults, baked in from"
@@ -333,6 +363,7 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "BlindMode      blind;")
     lines.append(_INDENT * 2 + "ProjectionMode projection;")
     lines.append(_INDENT * 2 + "TurnMode       turn;")
+    lines.append(_INDENT * 2 + "DirectionMode  direction;")
     lines.append(_INDENT + "};")
     lines.append(_INDENT + "extern const PipelineConfig PIPELINE_CONFIG;")
     lines.append("")
@@ -349,6 +380,7 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "BlindMode      blind_mode_override;")
     lines.append(_INDENT * 2 + "ProjectionMode projection_mode_override;")
     lines.append(_INDENT * 2 + "TurnMode       pre_turn_mode_override;")
+    lines.append(_INDENT * 2 + "DirectionMode  direction_override;")
     lines.append(_INDENT + "};")
     lines.append("")
     lines.append(_INDENT + "extern const NodeInfo NODES[N_NODES];")
@@ -437,6 +469,7 @@ def _emit_pipeline_config() -> List[str]:
         _INDENT * 2 + "BlindMode::"      + PIPELINE_CONFIG.blind.name      + ",",
         _INDENT * 2 + "ProjectionMode::" + PIPELINE_CONFIG.projection.name + ",",
         _INDENT * 2 + "TurnMode::"       + PIPELINE_CONFIG.turn.name       + ",",
+        _INDENT * 2 + "DirectionMode::"  + PIPELINE_CONFIG.direction.name  + ",",
         _INDENT + "};",
     ]
 

@@ -51,6 +51,13 @@ class TurnMode(IntEnum):
     PIVOT_RIGHT = 3  # right wheel still; left wheel spins; chassis pivots around right wheel
 
 
+class DirectionMode(IntEnum):
+    """Travel-direction override for an edge traversal (forward vs reverse)."""
+    DEFAULT       = 0  # defer to builder -> auto algorithm (inherit PIPELINE_CONFIG.direction)
+    FORCE_FORWARD = 1  # force forward traversal regardless of heading delta
+    FORCE_REVERSE = 2  # force reverse traversal regardless of heading delta
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     """Mission-wide motion-mode defaults baked into routes.cpp at build time."""
@@ -58,6 +65,7 @@ class PipelineConfig:
     blind:      BlindMode      = BlindMode.SYNC_TSHAPE
     projection: ProjectionMode = ProjectionMode.NORMAL
     turn:       TurnMode       = TurnMode.COUNTER_ROT
+    direction:  DirectionMode  = DirectionMode.DEFAULT
 
 
 # Mission-wide default. Edit here to swap defaults globally. Per-edge overrides
@@ -70,6 +78,7 @@ __all__ = [
     "BlindMode",
     "ProjectionMode",
     "TurnMode",
+    "DirectionMode",
     "PipelineConfig",
     "PIPELINE_CONFIG",
 ]
