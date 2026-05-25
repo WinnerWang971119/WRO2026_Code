@@ -216,10 +216,12 @@ bool PathTrackerClass::begin()
     _qTail  = 0;
     _qCount = 0;
     _state  = State::IDLE;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
-    _passThrough     = false;
+    _destinationNode      = FieldMap::NODE_NONE;
+    _nextHop              = FieldMap::NODE_NONE;
+    _activeEdgeType       = Routes::EdgeType::NONE;
+    _passThrough          = false;
+    _resolvedDirection    = Direction::AUTO;
+    _resolvedBodyHeading  = 0.0f;
     _fault = FaultInfo{};
     return true;
 }
@@ -261,12 +263,14 @@ void PathTrackerClass::abort()
     Drive.stop(true);
 
     _clearQueue();
-    _state           = State::IDLE;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
-    _passThrough     = false;
-    _fault           = FaultInfo{};
+    _state               = State::IDLE;
+    _destinationNode     = FieldMap::NODE_NONE;
+    _nextHop             = FieldMap::NODE_NONE;
+    _activeEdgeType      = Routes::EdgeType::NONE;
+    _passThrough         = false;
+    _resolvedDirection   = Direction::AUTO;
+    _resolvedBodyHeading = 0.0f;
+    _fault               = FaultInfo{};
 }
 
 const char* PathTrackerClass::faultMnemonic(Fault kind)
@@ -482,12 +486,40 @@ void PathTrackerClass::update()
                     const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
                     if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
                     {
-                        const Routes::EdgeInfo& nextEdge = FieldMap::getEdge(_nextHop, nextNext);
-                        if (nextEdge.type != Routes::EdgeType::NONE)
+                        const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
+                        if (outbound.type != Routes::EdgeType::NONE)
                         {
-                            const uint8_t cur = Localization.getCurrentNode();
-                            const Routes::EdgeInfo& inboundEdge = FieldMap::getEdge(cur, _nextHop);
-                            float delta = nextEdge.heading_deg - inboundEdge.heading_deg;
+                            // Body-heading peek: the pass-through
+                            // delta MUST compare BODY-headings, not raw forward edge
+                            // headings. The chassis arrives at the intersection
+                            // facing `_resolvedBodyHeading` (set by `_onPlanNextHop`
+                            // for the inbound hop), which is either the inbound
+                            // edge heading (FRONT) or `+180°` (REAR). The outbound
+                            // body-heading is computed by re-resolving direction for
+                            // the next-next hop with `inboundBody` as currentHeading.
+                            // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
+                            const float inboundBody = _resolvedBodyHeading;
+
+                            // TODO(T8): replace Direction::AUTO with the actual NavEntry.route_direction / arrival_direction fields.
+                            const Direction nextDir = _resolveDirection(
+                                outbound.direction_override,
+                                Routes::PIPELINE_CONFIG.direction,
+                                Direction::AUTO,
+                                Direction::AUTO,
+                                inboundBody,
+                                outbound.heading_deg,
+                                (nextNext == _destinationNode),
+                                Config::BIDIRECTIONAL_ENABLED,
+                                Config::LINE_BOARD_COUNT);
+
+                            float outboundBody = outbound.heading_deg;
+                            if (nextDir == Direction::REAR)
+                            {
+                                outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
+                                if (outboundBody < 0.0f) outboundBody += 360.0f;
+                            }
+
+                            float delta = outboundBody - inboundBody;
                             while (delta >   180.0f) { delta -= 360.0f; }
                             while (delta <= -180.0f) { delta += 360.0f; }
                             if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
@@ -632,8 +664,51 @@ void PathTrackerClass::_onPlanNextHop()
     _activeEdgeType = edge.type;
 
     const float currentWorld = Localization.getHeadingDeg();
-    const float targetWorld  = edge.heading_deg;
-    float delta = targetWorld - currentWorld;
+
+    // -----------------------------------------------------------------------
+    // Bidirectional direction resolution.
+    //
+    // Resolve per-hop precedence: per-edge override → pipeline default →
+    // builder arrival override (last-hop only) → builder route override →
+    // auto (turn-saving comparison against BIDIRECTIONAL_TURN_THRESHOLD_DEG,
+    // gated by 2-board chassis + kill-switch). Then compute the body-target
+    // heading the chassis must face: equal to edge.heading_deg for FRONT,
+    // or (edge.heading_deg + 180°) mod 360 for REAR (so the rear board ends
+    // up pointing along the edge direction).
+    //
+    // The skip-turn check below MUST compare against bodyTarget — not the raw
+    // edge.heading_deg — otherwise a chassis already aligned with the raw
+    // forward heading would short-circuit a REAR hop into a forward-going
+    // LineFollower dispatch.
+    // -----------------------------------------------------------------------
+    const bool isLastHop = (nxt == _destinationNode);
+
+    // TODO(T8): replace Direction::AUTO with the actual NavEntry.route_direction / arrival_direction fields.
+    const Direction builderArrival = Direction::AUTO;
+    const Direction builderRoute   = Direction::AUTO;
+
+    const Direction resolved = _resolveDirection(
+        edge.direction_override,
+        Routes::PIPELINE_CONFIG.direction,
+        builderArrival,
+        builderRoute,
+        currentWorld,
+        edge.heading_deg,
+        isLastHop,
+        Config::BIDIRECTIONAL_ENABLED,
+        Config::LINE_BOARD_COUNT);
+
+    float bodyTarget = edge.heading_deg;
+    if (resolved == Direction::REAR)
+    {
+        bodyTarget = fmodf(bodyTarget + 180.0f, 360.0f);
+        if (bodyTarget < 0.0f) bodyTarget += 360.0f;
+    }
+
+    _resolvedDirection   = resolved;
+    _resolvedBodyHeading = bodyTarget;
+
+    float delta = bodyTarget - currentWorld;
     while (delta > 180.0f)   { delta -= 360.0f; }
     while (delta <= -180.0f) { delta += 360.0f; }
 
@@ -648,12 +723,17 @@ void PathTrackerClass::_onPlanNextHop()
         // would keep issuing Drive.setSpeed each tick while Drive.turnToYaw
         // owns the wheels — two writers fighting for motors. Disable the
         // follower cleanly (no brake) so Drive's turn command runs alone.
+        //
+        // The same guard fires for REAR hops where the peek (now also
+        // body-heading aware) and this branch agree on FRONT semantics
+        // but disagree on whether a turn is needed: the bodyTarget vs.
+        // currentWorld delta is the authoritative trigger.
         if (LineFollower.isEnabled())
         {
             LineFollower.setEnabled(false).setBrake(false);
         }
 
-        const int16_t imuTarget = Localization.toImuYaw(targetWorld);
+        const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
 
         // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
         // default) and map to the lower-MCU mode byte the Turn builders accept.

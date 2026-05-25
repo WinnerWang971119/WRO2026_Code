@@ -229,6 +229,26 @@ private:
     /// See ADR-023 and issue #19.
     bool _passThrough = false;
 
+    /// @brief Resolved direction (FRONT/REAR) for the current hop.
+    ///
+    /// Set per-hop in `_onPlanNextHop()` by `_resolveDirection(...)` and consumed
+    /// by `_dispatchEdgeAfterTurn()` (T7) to pick forward vs. reverse dispatch
+    /// onto LineFollower/Drive. `AUTO` is the unresolved sentinel (only valid
+    /// before the first plan tick).
+    Direction _resolvedDirection = Direction::AUTO;
+
+    /// @brief Resolved body-target heading (world frame, degrees in `[0, 360)`)
+    ///        for the current hop.
+    ///
+    /// Equal to `edge.heading_deg` when `_resolvedDirection == FRONT`, or
+    /// `(edge.heading_deg + 180°) mod 360` when `_resolvedDirection == REAR`.
+    /// This is the heading the chassis BODY must face — used both for the
+    /// `Drive.turnToYaw(...)` target AND for the `NAV_TURN_TOLERANCE_DEG`
+    /// skip-turn comparison in `_onPlanNextHop()`. The pass-through peek
+    /// (T6) also uses it as the inbound-body heading when classifying the
+    /// next-next hop's geometry.
+    float _resolvedBodyHeading = 0.0f;
+
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;
     bool  _tickCallbackWarningEmitted = false;
