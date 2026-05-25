@@ -98,6 +98,29 @@ public:
     MissionClass& led(uint8_t r, uint8_t g, uint8_t b, uint32_t duration_ms = 0);
 
     /**
+     * @brief Force the direction of travel for EVERY hop on the path to the
+     *        most-recently-enqueued ``goTo`` step's goal.
+     *
+     * @note No-op + Serial warning if the most-recent step is not a GOTO.
+     *       Mission state is not corrupted on misuse. Defaults
+     *       (``Direction::AUTO``) when never called preserve pre-T9 behaviour.
+     *
+     * @return ``*this`` for verb chaining.
+     */
+    MissionClass& setRouteDirection(Direction d);
+
+    /**
+     * @brief Force the direction of travel for the FINAL hop into the goal
+     *        of the most-recently-enqueued ``goTo`` step.
+     *
+     * @note Same misuse semantics as :func:`setRouteDirection`. Wins over
+     *       :func:`setRouteDirection` for the final hop only.
+     *
+     * @return ``*this`` for verb chaining.
+     */
+    MissionClass& setArrivalDirection(Direction d);
+
+    /**
      * @brief Arm the mission. Returns immediately; subsequent ``update()``
      *        calls drain the queue. Logs a Serial message on transition.
      *
@@ -163,13 +186,15 @@ private:
     struct Step
     {
         StepType    type;
-        uint32_t    duration_ms;    ///< wait / beep / led duration
-        uint16_t    freq_hz;        ///< beep frequency
-        uint8_t     goal;           ///< goto: resolved node id
+        uint32_t    duration_ms;       ///< wait / beep / led duration
+        uint16_t    freq_hz;           ///< beep frequency
+        uint8_t     goal;              ///< goto: resolved node id
         uint8_t     r;
         uint8_t     g;
         uint8_t     b;
-        const char* text;           ///< print / goto name (for logging)
+        const char* text;              ///< print / goto name (for logging)
+        Direction   route_direction;   ///< goto: per-step setRouteDirection override (default AUTO).
+        Direction   arrival_direction; ///< goto: per-step setArrivalDirection override (default AUTO).
     };
 
     bool _push(const Step& s);

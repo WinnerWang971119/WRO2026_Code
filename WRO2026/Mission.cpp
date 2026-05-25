@@ -97,6 +97,34 @@ MissionClass& MissionClass::led(uint8_t r, uint8_t g, uint8_t b, uint32_t durati
     return *this;
 }
 
+// Modifier verbs — mutate the most-recently-enqueued GOTO step in place.
+// No-op + Serial warning when misused (queue empty or last step is not GOTO),
+// so misuse leaves the queue unmodified rather than corrupted. Both fields
+// are zero-initialized to Direction::AUTO by `Step s{}` in goTo(), so a bare
+// `Mission.goTo("X")` without these modifiers behaves identically to pre-T9.
+
+MissionClass& MissionClass::setRouteDirection(Direction d)
+{
+    if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
+    {
+        Serial.println(F("[Mission] setRouteDirection: no preceding goTo step (ignored)"));
+        return *this;
+    }
+    _queue[_count - 1].route_direction = d;
+    return *this;
+}
+
+MissionClass& MissionClass::setArrivalDirection(Direction d)
+{
+    if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
+    {
+        Serial.println(F("[Mission] setArrivalDirection: no preceding goTo step (ignored)"));
+        return *this;
+    }
+    _queue[_count - 1].arrival_direction = d;
+    return *this;
+}
+
 void MissionClass::start()
 {
     if (_count == 0)
@@ -253,7 +281,10 @@ void MissionClass::update()
                         }
                         Serial.print(F("[Mission] goTo "));
                         Serial.println(s.text == nullptr ? "?" : s.text);
-                        PathTracker.goTo(s.goal).async();
+                        PathTracker.goTo(s.goal)
+                            .setRouteDirection(s.route_direction)
+                            .setArrivalDirection(s.arrival_direction)
+                            .async();
                         _stepState    = StepState::ACTIVE;
                         _stepStart_ms = now;
                     }
