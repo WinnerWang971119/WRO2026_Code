@@ -902,13 +902,16 @@ def test_bidir_tc4_one_board_chassis_cannot_auto_rear(monkeypatch):
 def test_bidir_tc5_arrival_direction_rear_only_last_hop():
     """TC5: arrival_direction=REAR forces only the C->D (is_last_hop=True) hop REAR.
 
-    On the mixed-turn fixture (headings 0deg / 135deg / 135deg):
+    On the mixed-turn fixture (edge headings 0deg / 135deg / 270deg):
       A->B: auto, delta 0deg -> FRONT.
-      B->C: auto, delta 135deg > 90deg -> REAR.
-      C->D: is_last_hop=True, arrival=REAR -> forced REAR.
+      B->C: auto, delta 135deg > 90deg -> REAR (body becomes 315deg).
+      C->D: auto would resolve FRONT (delta -45deg from body 315deg);
+            is_last_hop=True and arrival=REAR overrides -> forced REAR.
 
     Two ACT_LINE_REVERSE (B->C, C->D) and one ACT_FOLLOW_INT (A->B).
-    Verifies AC6/AC7.
+    The fixture's last-hop auto-FRONT makes this assertion load-bearing on
+    the arrival_direction parameter -- without the override it would emit
+    only one ACT_LINE_REVERSE.  Verifies AC6/AC7.
     """
     fd = bidirectional_field_data.make_mixed_turn_field()
     sim, chassis = _make_bidir_sim(fd)
@@ -918,6 +921,25 @@ def test_bidir_tc5_arrival_direction_rear_only_last_hop():
 
     assert ACT_FOLLOW_INT in act_tags
     assert act_tags.count(ACT_LINE_REVERSE) == 2
+    assert sim.localization.current_node() == "D"
+
+
+def test_bidir_tc5_baseline_no_arrival_override_last_hop_is_front():
+    """TC5 negative control: without arrival_direction, the last hop auto-FRONTs.
+
+    Uses the same fixture as TC5 but lets every hop auto-resolve.  Proves
+    that TC5's arrival_direction=REAR is load-bearing: without it the
+    C->D hop emits ACT_FOLLOW_INT (not ACT_LINE_REVERSE), so the second
+    ACT_LINE_REVERSE in TC5 can only come from the override.
+    """
+    fd = bidirectional_field_data.make_mixed_turn_field()
+    sim, _chassis = _make_bidir_sim(fd)
+
+    prims = sim.go_to("D")
+    act_tags = [p[0] for p in prims]
+
+    assert act_tags.count(ACT_LINE_REVERSE) == 1
+    assert act_tags.count(ACT_FOLLOW_INT) == 2
     assert sim.localization.current_node() == "D"
 
 
