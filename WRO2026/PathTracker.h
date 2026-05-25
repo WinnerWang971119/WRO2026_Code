@@ -217,6 +217,17 @@ private:
     uint8_t          _nextHop         = FieldMap::NODE_NONE;
     Routes::EdgeType _activeEdgeType  = Routes::EdgeType::NONE;
 
+    /// @brief Pass-through eligibility for the in-flight LINE_OVERSHOOT.
+    ///
+    /// Set in `update()`'s `LINE_FOLLOW` case at intersection-detect when the
+    /// next-hop edge after `_nextHop` (toward `_destinationNode`) is collinear
+    /// with the inbound edge — heading delta wrap-normalized to within
+    /// `Config::NAV_TURN_TOLERANCE_DEG`. Consumed by `LINE_OVERSHOOT` (T5) and
+    /// `_dispatchEdgeAfterTurn` (T6/T7) to skip the brake-and-restart cycle.
+    /// Reset to false on every fresh intersection-detect tick.
+    /// See ADR-023 and issue #19.
+    bool _passThrough = false;
+
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;
     bool  _tickCallbackWarningEmitted = false;

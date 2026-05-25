@@ -172,6 +172,7 @@ composes PathTracker + Manipulator + camera module.
 - [ ] Permanent color + camera mounts installed; calibration tables re-baselined.
 - [ ] First `Tasks` FSM (tool delivery) reaches `isDone()` in ≥4/5 lab trials.
 - [ ] Mission DSL gains a `.task("name", args)` verb that dispatches into the Tasks layer.
+- [ ] Simulator mirrors the robot end-to-end: `sim/demo.py` (or its successor) loads the **same** Mission script the robot runs in `WRO2026.ino` and walks it through the Python `PathTrackerSim` — no separate sim-only `--goals` list once Tasks ship. A `Mission` change is therefore observable in the simulator without editing demo code.
 
 **Tracks running in parallel:**
 - Mechanical: finalize permanent sensor mounts; lock manipulator geometry; spare-parts ordering.
@@ -188,6 +189,7 @@ composes PathTracker + Manipulator + camera module.
 | P5.5 | First task FSM — tool delivery (drive → grip → drive → drop → verify) | sw | P5.4 | tool task |
 | P5.6 | Mission DSL `.task("name", args)` verb + dispatcher | sw | P5.4 | DSL extension |
 | P5.7 | End-to-end tool delivery on test mat, 5 trials | both | P5.5, P5.6 | first scoring run |
+| P5.8 | Teach `sim/demo.py` to load the robot's Mission script (no sim-only `--goals` once Tasks ship); render task-level events alongside the chassis trace | sw | P5.6 | sim mirrors robot |
 
 ## 7. Phase 6 — Tasks Layer Complete + Mission Scheduler + Recoveries
 
@@ -201,6 +203,7 @@ named failure recovery (failed grip) lands.
 - [ ] 2-minute time guard triggers at `t = 100 s` to start return-to-start.
 - [ ] Failed-grip recovery (ADR-009 third branch) triggers and yields in lab tests.
 - [ ] Full 2-minute run on practice field scores meeting the **regional target**: mosaic placement working (≥6 of 9 tiles) + cement delivery + tool delivery, succeeding on ≥8 of 10 lab attempts.
+- [ ] Simulator can execute the full Mission script — scheduler ordering, time guard, recoveries — end-to-end against the live field, matching the robot's traversal step-for-step. The sim is the dry-run check before every hardware session.
 
 **Tracks running in parallel:**
 - Mechanical: tuning only — weights, grip pads, no rebuilds.

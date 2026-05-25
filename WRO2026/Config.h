@@ -811,6 +811,38 @@ namespace Config
      */
     constexpr float NAV_TURN_TOLERANCE_DEG = 0.5f;
 
+    /**
+     * @brief Whether PathTracker passes straight through collinear intersections
+     *        without braking.
+     *
+     * When `true` (default), at each LINE-edge intersection PathTracker peeks the
+     * next-hop edge after `_nextHop` (toward `_destinationNode`). If the next edge's
+     * heading delta vs. the inbound edge is within `NAV_TURN_TOLERANCE_DEG` and the
+     * intersected node is not the final destination, the chassis traverses the node
+     * at cruise PWM with no ramp-down → brake → ramp-up cycle. See ADR-023
+     * "Pass-through collinear intersections" for the full rule.
+     *
+     * @note Setting this to `false` reverts to today's stop-and-go behavior at every
+     *       intersection regardless of geometry. Useful as the Level-1 rollback knob
+     *       if pass-through regresses on hardware. The companion
+     *       `LineFollower::setOvershootMode(true)` (project-wide overshoot-mode rule
+     *       per ADR-023) remains active independently of this flag — it is rolled
+     *       back via code change, not a Config toggle.
+     * @note The Python sim (`tools/path_planner/sim/runtime.py`) hand-mirrors this
+     *       constant. A pytest verifies parity via regex grep on this header.
+     * @note **Compile-time override:** the default value below is guarded by an
+     *       `#ifndef PATH_PASS_THROUGH_ENABLED_DEFAULT` so a build can flip the
+     *       behavior via `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=false` on the
+     *       compiler command line — used by the `WRO2026/test/` host-compile
+     *       harness to exercise both branches of the AC7b behavioral toggle
+     *       without editing this file. The public `Config::PATH_PASS_THROUGH_ENABLED`
+     *       symbol is unchanged; only its initializer is overridable.
+     */
+#ifndef PATH_PASS_THROUGH_ENABLED_DEFAULT
+#define PATH_PASS_THROUGH_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
+
     // =========================================================================================
     // Mission DSL (PR3).
     //

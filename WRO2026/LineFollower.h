@@ -259,6 +259,45 @@ public:
      */
     LineFollowerEnableBuilder& setDistanceTarget(float cm);
 
+    /**
+     * @brief Override the lost-line policy for this enable session — dead-reckon vs.
+     *        `Config::LOST_LINE_ACTION`.
+     *
+     * @param on  When `on == true` AND `setEnabled(true)` is the parent transition, the
+     *            controller dead-reckons symmetric cruise PWM whenever `_array->isOnline()`
+     *            returns false during this enable session, instead of dispatching
+     *            `Config::LOST_LINE_ACTION`. Default `false` preserves today's
+     *            LOST_LINE_ACTION behaviour (STOP / COAST / CRAWL). Used by PathTracker for
+     *            the 5 cm `LINE_OVERSHOOT` window so the chassis advances cleanly even when
+     *            the line physically ends at the node. Has no effect on `setEnabled(false)`
+     *            transitions.
+     * @return    `*this` for fluent chaining.
+     * @note If this method is NOT called on the builder, the owner's current overshoot-mode
+     *       value is left unchanged across re-enables (mirrors the `setPreset(...)` /
+     *       `setReverse(...)` override pattern). See ADR-023 for the pass-through-collinear
+     *       intersections design and ADR-018 for the underlying lost-line dispatch model.
+     */
+    LineFollowerEnableBuilder& setOvershootMode(bool on);
+
+    /**
+     * @brief Override whether the distance-gate trip self-disables the controller and
+     *        actively brakes.
+     *
+     * @param on  When `on == false` AND a distance gate is armed via
+     *            `setDistanceTarget(cm)`, the gate trip latches `_distanceReached = true`
+     *            and clears `_distanceTargetActive` + ramp state, but does NOT self-disable
+     *            the controller and does NOT call `Drive.stop`. Used by PathTracker for
+     *            pass-through traversals where motor ownership must stay with LineFollower
+     *            across the 5 cm overshoot. Default `true` preserves today's brake-on-gate
+     *            behaviour (gate trip → self-disable + active brake).
+     * @return    `*this` for fluent chaining.
+     * @note If this method is NOT called on the builder, the owner's current brake-on-gate
+     *       value is left unchanged across re-enables (mirrors the `setPreset(...)` /
+     *       `setReverse(...)` override pattern). See ADR-023 for the pass-through-collinear
+     *       intersections design.
+     */
+    LineFollowerEnableBuilder& setBrakeOnGate(bool on);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
@@ -275,6 +314,10 @@ private:
     bool                _reverseOverride     = false;  ///< Pending reverse flag; only honored when override flag set.
     bool                _hasDistanceTarget   = false;  ///< True iff `_distanceTargetCm` is meaningful.
     float               _distanceTargetCm    = 0.0f;   ///< Pending distance gate (cm); only honored when flag set.
+    bool                _hasOvershootModeOverride = false;  ///< True iff `_overshootModeOverride` is meaningful.
+    bool                _overshootModeOverride    = false;  ///< Pending overshoot-mode flag; only honored when override flag set.
+    bool                _hasBrakeOnGateOverride   = false;  ///< True iff `_brakeOnGateOverride` is meaningful.
+    bool                _brakeOnGateOverride      = true;   ///< Pending brake-on-gate flag; only honored when override flag set. Default true matches owner default.
     bool                _executed            = false;  ///< Guards against repeated apply.
 };
 
@@ -633,6 +676,22 @@ public:
      * @param hasDistanceTarget   `true` if `distanceTargetCm` should arm the gate.
      * @param distanceTargetCm    Target travel in cm; honored only when flag set AND
      *                            `targetEnabled == true`. Encoder baseline is captured here.
+     * @param hasOvershootModeOverride  `true` if `overshootMode` should overwrite the owner's
+     *                            `_overshootMode`. Absent → owner value preserved across
+     *                            re-enables (mirrors the preset/reverse override pattern).
+     * @param overshootMode       New overshoot-mode flag; honored only when
+     *                            `hasOvershootModeOverride`. When true AND
+     *                            `targetEnabled == true`, `update()` dead-reckons symmetric
+     *                            cruise on `isOnline() == false` instead of dispatching
+     *                            `Config::LOST_LINE_ACTION`. See ADR-023 / ADR-018.
+     * @param hasBrakeOnGateOverride  `true` if `brakeOnGate` should overwrite the owner's
+     *                            `_brakeOnGate`. Absent → owner value preserved across
+     *                            re-enables.
+     * @param brakeOnGate         New brake-on-gate flag; honored only when
+     *                            `hasBrakeOnGateOverride`. When false AND a distance gate
+     *                            is armed, the gate trip latches `_distanceReached` without
+     *                            self-disabling the controller or calling `Drive.stop`.
+     *                            See ADR-023.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
@@ -644,7 +703,11 @@ public:
                              bool                hasReverseOverride,
                              bool                reverse,
                              bool                hasDistanceTarget,
-                             float               distanceTargetCm);
+                             float               distanceTargetCm,
+                             bool                hasOvershootModeOverride,
+                             bool                overshootMode,
+                             bool                hasBrakeOnGateOverride,
+                             bool                brakeOnGate);
 
 private:
     // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
@@ -662,6 +725,8 @@ private:
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
     Config::SpeedPreset _preset   = Config::SpeedPreset::NORMAL;  ///< Active cruise preset; sourced by `update()`.
     bool                _reverse  = false;                        ///< When true, `update()` negates cruise to follow line in reverse.
+    bool                _overshootMode = false;                   ///< When true, isOnline()==false dead-reckons symmetric cruise (no LOST_LINE_ACTION). See ADR-023.
+    bool                _brakeOnGate   = true;                    ///< When false, distance-gate trip latches _distanceReached without self-disabling. See ADR-023.
 
     // Trapezoidal cruise-ramp state (`.tShape()` on the enable builder).
     bool    _useTShape       = false;    ///< If true, cruise PWM ramps over distance after enable.

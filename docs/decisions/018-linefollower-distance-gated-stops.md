@@ -1,6 +1,6 @@
 # ADR-018: `LineFollower.setDistanceTarget(cm)` uses a symmetric trapezoidal profile with active brake at the gate
 
-**Status:** Implemented
+**Status:** Implemented (Refined by ADR-023)
 **Date decided:** 2026-05 (Phase 2 PR2)
 
 ## Rule
@@ -32,4 +32,5 @@ If venue mat surface changes the brake stopping distance significantly (e.g., mu
 ## See also
 
 - [ADR-014](./014-tshape-trapezoidal-velocity-profile.md) — Drive-side tShape (sibling profile)
+- [ADR-023](./023-pass-through-collinear-intersections.md) — refines this ADR by adding a runtime line-presence probe option (`setOvershootMode(true)`) for the 5 cm sensor-to-axle overshoot window.
 - `WRO2026/LineFollower.cpp` — `_applyEnableBuilder`

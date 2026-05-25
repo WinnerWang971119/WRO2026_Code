@@ -170,6 +170,7 @@ bool PathTrackerClass::begin()
     _destinationNode = FieldMap::NODE_NONE;
     _nextHop         = FieldMap::NODE_NONE;
     _activeEdgeType  = Routes::EdgeType::NONE;
+    _passThrough     = false;
     _fault = FaultInfo{};
     return true;
 }
@@ -215,6 +216,7 @@ void PathTrackerClass::abort()
     _destinationNode = FieldMap::NODE_NONE;
     _nextHop         = FieldMap::NODE_NONE;
     _activeEdgeType  = Routes::EdgeType::NONE;
+    _passThrough     = false;
     _fault           = FaultInfo{};
 }
 
@@ -412,9 +414,49 @@ void PathTrackerClass::update()
             // chain (it does NOT reset preset / direction / `_lastErr`).
             if (Intersection.isAtIntersection())
             {
-                // Already-enabled re-arm: skip ramp-up reseed; ramp-down to floor handles the smooth stop.
+                // -----------------------------------------------------------------
+                // Pass-through decision: peek the next hop AFTER _nextHop. If the
+                // peeked edge is collinear with the inbound edge (heading delta
+                // wrap-normalized to within NAV_TURN_TOLERANCE_DEG) AND _nextHop is
+                // not the final destination, take the pass-through branch — keep
+                // LineFollower running across the overshoot without braking.
+                // See ADR-023 and issue #19.
+                //
+                // Wrap-normalize MUST match the sim's `normalize_turn` so the
+                // 359.5°/0.0° boundary classifies the same on both sides.
+                // TODO: extract the wrap-normalize loop (duplicated in
+                //       `_onPlanNextHop`) into a `WROMath` free helper.
+                // -----------------------------------------------------------------
+                _passThrough = false;
+                if (Config::PATH_PASS_THROUGH_ENABLED && _nextHop != _destinationNode)
+                {
+                    const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
+                    if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
+                    {
+                        const Routes::EdgeInfo& nextEdge = FieldMap::getEdge(_nextHop, nextNext);
+                        if (nextEdge.type != Routes::EdgeType::NONE)
+                        {
+                            const uint8_t cur = Localization.getCurrentNode();
+                            const Routes::EdgeInfo& inboundEdge = FieldMap::getEdge(cur, _nextHop);
+                            float delta = nextEdge.heading_deg - inboundEdge.heading_deg;
+                            while (delta >   180.0f) { delta -= 360.0f; }
+                            while (delta <= -180.0f) { delta += 360.0f; }
+                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+                            {
+                                _passThrough = true;
+                            }
+                        }
+                    }
+                }
+
+                // Arm the overshoot. Always set overshootMode=true (project-wide rule
+                // per ADR-023: the 5cm window dead-reckons through line-offline
+                // conditions). brakeOnGate and tShapeRampDown depend on _passThrough.
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
+                            .setTShapeRampDown(!_passThrough)
+                            .setOvershootMode(true)
+                            .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
             }
@@ -424,13 +466,29 @@ void PathTrackerClass::update()
         case State::LINE_OVERSHOOT:
         {
             // Wait until the chassis has rolled forward by LINE_SENSOR_AXLE_OFFSET_CM
-            // past the intersection-detect point. `isDistanceReached()` is
-            // read-and-clear; the LineFollower self-disables (active brake) when
-            // the gate fires, so we just need to drop the enable flag explicitly
-            // and advance the graph node.
+            // past the intersection-detect point. `isDistanceReached()` is read-and-clear;
+            // the LineFollower's internal gate handling differs based on `_passThrough`:
+            //
+            //   - Stop-and-go (_passThrough == false): LineFollower's update() armed
+            //     `_brakeOnGate = true` (default), so when the gate trips it self-disables
+            //     via _applyEnableBuilder with active brake. By the time we observe
+            //     isDistanceReached() here, the chassis is already braked and the
+            //     controller is disabled. Same as pre-issue-19 behavior.
+            //
+            //   - Pass-through (_passThrough == true): LineFollower's update() armed
+            //     `_brakeOnGate = false`, so the gate trip latches `_distanceReached`
+            //     without disabling the controller. The chassis continues at cruise PWM
+            //     under LineFollower's symmetric output. _dispatchEdgeAfterTurn (T6/T7)
+            //     consumes _passThrough to decide whether to keep LineFollower live (LINE
+            //     next), re-arm for a new distance target (PROJECTION next), or release
+            //     with no brake before handing off to Drive.driveDist (BLIND next).
+            //
+            // Either way, advance Localization to the intersected node. _passThrough is
+            // consumed by the upcoming PLAN_NEXT_HOP → _dispatchEdgeAfterTurn dispatch.
+            //
+            // See ADR-023 and issue #19.
             if (LineFollower.isDistanceReached())
             {
-                LineFollower.setEnabled(false);
                 Localization.onIntersection(_nextHop);
                 _state = State::PLAN_NEXT_HOP;
             }
@@ -532,6 +590,20 @@ void PathTrackerClass::_onPlanNextHop()
 
     if (fabsf(delta) > Config::NAV_TURN_TOLERANCE_DEG)
     {
+        // Yaw-vs-peek divergence guard (ADR-023 follow-up): the LINE_OVERSHOOT
+        // pass-through decision (T4) uses EDGE headings from FieldMap, while
+        // this turn dispatch decision uses live IMU heading (Localization).
+        // If the IMU has drifted slightly, the peek may have classified the
+        // hop as pass-through (controller left enabled) while this branch now
+        // decides a turn is required. Without a guard, LineFollower.update()
+        // would keep issuing Drive.setSpeed each tick while Drive.turnToYaw
+        // owns the wheels — two writers fighting for motors. Disable the
+        // follower cleanly (no brake) so Drive's turn command runs alone.
+        if (LineFollower.isEnabled())
+        {
+            LineFollower.setEnabled(false).setBrake(false);
+        }
+
         const int16_t imuTarget = Localization.toImuYaw(targetWorld);
 
         // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
@@ -562,10 +634,25 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
             // Resolve the per-edge cruise-mode override (DEFAULT → pipeline
             // default) and chain it onto the enable transition.
+            //
+            // Chain `.setOvershootMode(false)` to flip the controller back to
+            // normal P+D after the overshoot window. T4 always sets
+            // overshootMode=true during the LINE_OVERSHOOT arming; here we
+            // clear it so the new LINE segment runs the full PID controller.
+            //
+            // If _passThrough is true (pass-through into a collinear LINE next
+            // edge), the controller is already enabled — `setEnabled(true)`
+            // hits the already-enabled fast-path in `_applyEnableBuilder`, so
+            // no ramp-up reseed fires. Cruise PWM is preserved across the
+            // intersection (preset may snap if the new edge has a different
+            // LineMode override; see ADR-023 trade-off).
             const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
             const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
-            LineFollower.setEnabled(true).setPreset(preset);
+            LineFollower.setEnabled(true)
+                        .setPreset(preset)
+                        .setOvershootMode(false);
             _state = State::LINE_FOLLOW;
+            _passThrough = false;    // consumed
             break;
         }
 
@@ -578,17 +665,51 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // state in update()).
             (void) Intersection.isAtIntersection();    // defensive — drain any latched edge
 
+            // For pass-through LINE→PROJECTION, the controller is already enabled
+            // from the LINE_OVERSHOOT pass-through (T5). `setEnabled(true)` hits
+            // the already-enabled fast-path → no ramp-up reseed; the new
+            // distance-target gate baseline is captured at this re-arm tick.
+            // `setOvershootMode(false)` flips the controller back to normal P+D.
+            //
+            // For non-pass-through, the controller is already disabled (T5 path);
+            // `setEnabled(true)` performs a fresh enable with ramp-up.
             const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
             const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setOvershootMode(false)
                         .setDistanceTarget(edge.distance_cm);
             _state = State::PROJECTION_FOLLOW;
+            _passThrough = false;    // consumed
             break;
         }
 
         case Routes::EdgeType::BLIND:
         {
+            // Pass-through LINE→BLIND handoff: when _passThrough is set, the
+            // LineFollower is still enabled (T5's brake-on-gate=false path), so
+            // we need to:
+            //   1. Capture the current cruise PWM BEFORE disabling LineFollower
+            //      (so we know what speed to hand off to Drive.driveDist).
+            //   2. Disable LineFollower WITHOUT braking — it releases the motors
+            //      cleanly; whatever speeds Drive last latched stay until the
+            //      next move's setStartSpeed kicks in.
+            //   3. Pass the captured cruise as .setStartSpeed(...) to Drive
+            //      builders that otherwise default to Config::TSHAPE_START_SPEED
+            //      (PWM_MIN_MAGNITUDE), which would dip the chassis to the
+            //      deadband floor first.
+            //
+            // For non-pass-through, LineFollower was already disabled by T5's
+            // path and startSpeed defaults to the existing TSHAPE_START_SPEED.
+            //
+            // See ADR-023.
+            int16_t startSpeed = Config::TSHAPE_START_SPEED;
+            if (_passThrough)
+            {
+                startSpeed = presetToPwm(LineFollower.getPreset());
+                LineFollower.setEnabled(false).setBrake(false);
+            }
+
             // Per-edge motion-profile override (DEFAULT → pipeline default).
             // Three concrete BlindMode values map onto the Drive builder chain:
             //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
@@ -616,6 +737,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
+                         .setStartSpeed(startSpeed)    // pass-through: cruise; otherwise: PWM_MIN_MAGNITUDE
                          .tShape()
                          .async();
                     break;
@@ -623,9 +745,17 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
                 case Routes::BlindMode::RAW_FLAT:
                 {
+                    // RAW_FLAT pins start=end=cruise for a flat open-loop profile (the "FLAT"
+                    // in the name). Pass-through is the one case where the inbound
+                    // LineFollower cruise can legitimately differ from cruisePwm (non-NORMAL
+                    // preset on the inbound LINE edge); use the captured startSpeed there.
+                    // Non-pass-through MUST keep .setStartSpeed(cruisePwm) — anything else
+                    // introduces a ramp and breaks the FLAT contract for callers that picked
+                    // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
+                    const int16_t rawStart = _passThrough ? startSpeed : cruisePwm;
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::RAW)
-                         .setStartSpeed(cruisePwm)
+                         .setStartSpeed(rawStart)
                          .setEndSpeed(cruisePwm)
                          .async();
                     break;
@@ -637,12 +767,14 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 {
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::SYNC)
+                         .setStartSpeed(startSpeed)
                          .tShape()
                          .async();
                     break;
                 }
             }
             _state = State::BLIND_FORWARD;
+            _passThrough = false;    // consumed
             break;
         }
 
