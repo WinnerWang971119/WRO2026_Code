@@ -244,6 +244,38 @@ def test_emit_directed_pair_pivot_not_mirrored_to_reverse():
     assert reverse.get("primitive_mode") == "NORMAL"
 
 
+def test_direction_override_not_mirrored_to_reverse_edge():
+    """TC15 / Codex P1 regression: EDGES `direction` is direction-dependent.
+
+    An override on (A, B) with direction='rear' must produce
+    direction_override = FORCE_REVERSE on the (A, B) directed edge ONLY.
+    The reverse (B, A) edge must retain DEFAULT -- mirroring would silently
+    flip the chassis on backward traversal of an unrelated hop.
+    """
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0)},
+        NODE_TYPES={"A": "line", "B": "line"},
+        LINE_SEGMENTS=[("A", "B")],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=1.0,
+        COST_BLIND_MULTIPLIER=1.0,
+        EDGES=[{"type": EDGE_LINE, "u": "A", "v": "B", "distance_cm": 100.0,
+                "heading_deg": 0.0, "direction": "rear"}],
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(200, 200),
+        MAP_PNG="maps/map.png",
+    )
+    graph = build_graph(fd)
+    fwd = graph.edges["A", "B"]
+    rev = graph.edges["B", "A"]
+    # Forward edge has the override (integer 2 = FORCE_REVERSE).
+    assert fwd["direction_override"] == 2
+    # Reverse edge must NOT have the override copied (absent or DEFAULT==0).
+    assert rev.get("direction_override", 0) == 0
+
+
 def test_apply_pivot_compensations_ignores_back_edge():
     """Bidirectional graph: pivot dst with back-edge + 1 forward edge must compensate.
 

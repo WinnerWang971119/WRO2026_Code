@@ -433,3 +433,45 @@ def test_no_legacy_edge_type_suffix_anywhere():
     assert not hits, (
         "Found legacy EdgeType _E suffix in: " + ", ".join(hits)
     )
+
+
+def test_direction_override_emits_force_reverse_one_direction(emit_targets):
+    """TC8: an EDGES direction='rear' override emits FORCE_REVERSE for
+    the forward (A,B) edge and DEFAULT for the reverse (B,A) edge.
+
+    Asymmetric per-edge direction override regression: the header writer
+    must emit DirectionMode::FORCE_REVERSE in exactly one cell (A->B) and
+    leave the (B->A) cell at DirectionMode::DEFAULT (value 0, not the
+    FORCE_REVERSE literal).
+    """
+    fd = _build_toy_field_data()
+    # Drop the A-B pair from LINE_SEGMENTS so the rich-EDGES entry is the
+    # sole carrier of A<->B geometry; this makes the FORCE_REVERSE cell
+    # unambiguously traceable to the override.
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
+    fd.EDGES = [
+        {
+            "type":        EDGE_LINE,
+            "u":           "A",
+            "v":           "B",
+            "distance_cm": 190.0,
+            "heading_deg": 0.0,
+            "direction":   "rear",
+        }
+    ]
+    header_path, source_path = emit_targets
+    graph = build_graph(fd)
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    emit_routes(
+        fd, graph, next_hop,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    cpp_text = source_path.read_text(encoding="utf-8")
+    # The forward edge cell (A->B) must contain DirectionMode::FORCE_REVERSE.
+    assert "FORCE_REVERSE" in cpp_text, "A->B forward edge missing FORCE_REVERSE"
+    # FORCE_REVERSE should appear exactly once (only the A->B cell, not B->A).
+    assert cpp_text.count("FORCE_REVERSE") == 1, (
+        f"Expected exactly 1 FORCE_REVERSE cell (A->B), got "
+        f"{cpp_text.count('FORCE_REVERSE')}"
+    )
