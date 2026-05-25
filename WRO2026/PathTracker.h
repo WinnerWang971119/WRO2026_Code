@@ -15,10 +15,10 @@
  *  - A fluent `goTo(node)` builder. Default is sync-blocking; chain
  *    `.async()` to enqueue + return immediately.
  *  - A latched fault state (`Fault::NOT_ZEROED`, `UNREACHABLE`,
- *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`) surfaced via
- *    `hasFault()` / `getFault()`. `clearFault()` re-arms the queue but
- *    does not restart motion. `faultMnemonic()` returns a short tag
- *    (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
+ *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`)
+ *    surfaced via `hasFault()` / `getFault()`. `clearFault()` re-arms
+ *    the queue but does not restart motion. `faultMnemonic()` returns
+ *    a short tag (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
  *
  * FSM states (`State`):
  *  - `IDLE`              — nothing pending; waits for a goal to be enqueued.
@@ -113,12 +113,13 @@ class PathTrackerClass
 public:
     enum class Fault : uint8_t
     {
-        NONE         = 0,
-        NOT_ZEROED   = 1,
-        UNREACHABLE  = 2,
-        DRIVE_FAULT  = 3,
-        BAD_NODE     = 4,
-        DRAIN_TIMEOUT = 5
+        NONE                = 0,
+        NOT_ZEROED          = 1,
+        UNREACHABLE         = 2,
+        DRIVE_FAULT         = 3,
+        BAD_NODE            = 4,
+        DRAIN_TIMEOUT       = 5,
+        REVERSE_UNAVAILABLE = 6
     };
 
     /**

@@ -277,12 +277,13 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
 {
     switch (kind)
     {
-        case Fault::NONE:          return "OK";
-        case Fault::NOT_ZEROED:    return "NZ";
-        case Fault::UNREACHABLE:   return "UNR";
-        case Fault::DRIVE_FAULT:   return "DRV";
-        case Fault::BAD_NODE:      return "BAD";
-        case Fault::DRAIN_TIMEOUT: return "DRN";
+        case Fault::NONE:                return "OK";
+        case Fault::NOT_ZEROED:          return "NZ";
+        case Fault::UNREACHABLE:         return "UNR";
+        case Fault::DRIVE_FAULT:         return "DRV";
+        case Fault::BAD_NODE:            return "BAD";
+        case Fault::DRAIN_TIMEOUT:       return "DRN";
+        case Fault::REVERSE_UNAVAILABLE: return "REV";
     }
     return "??";
 }
@@ -753,6 +754,37 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     const uint8_t cur = Localization.getCurrentNode();
     const Routes::EdgeInfo& edge = FieldMap::getEdge(cur, _nextHop);
 
+    // -----------------------------------------------------------------------
+    // Reverse-availability guard (T7 / issue #19).
+    //
+    // Reject REAR LINE/PROJECTION on a 1-board chassis — there is no rear
+    // sensor to read the line. `_resolveDirection` (Step 5 in _onPlanNextHop)
+    // short-circuits AUTO to FRONT when `LINE_BOARD_COUNT < 2`, so this
+    // fault only fires for an operator-forced or edge-forced REAR (via
+    // DirectionMode::FORCE_REVERSE on the pipeline default or the edge
+    // override, or a future arrival/route builder override).
+    //
+    // BLIND REAR is permitted on a 1-board chassis: dead-reckoned reverse
+    // does not require a rear line sensor — only negative PWM (Step 5 below).
+    // -----------------------------------------------------------------------
+    if (_resolvedDirection == Direction::REAR && Config::LINE_BOARD_COUNT < 2)
+    {
+        if (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION)
+        {
+            Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+            Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+            Serial.print(F(" at u="));
+            Serial.print(cur);
+            Serial.print(F(" v="));
+            Serial.print(_nextHop);
+            Serial.println(F(" requires rear board"));
+            _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
+            return;
+        }
+    }
+
+    const bool reverse = (_resolvedDirection == Direction::REAR);
+
     switch (edge.type)
     {
         case Routes::EdgeType::LINE:
@@ -775,10 +807,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // no ramp-up reseed fires. Cruise PWM is preserved across the
             // intersection (preset may snap if the new edge has a different
             // LineMode override; see ADR-023 trade-off).
+            //
+            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
+            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
+            // — the guard above rejects REAR LINE on a 1-board chassis.
             const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
             const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setReverse(reverse)
                         .setOvershootMode(false);
             _state = State::LINE_FOLLOW;
             _passThrough = false;    // consumed
@@ -802,10 +839,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //
             // For non-pass-through, the controller is already disabled (T5 path);
             // `setEnabled(true)` performs a fresh enable with ramp-up.
+            //
+            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
+            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
+            // — the guard above rejects REAR PROJECTION on a 1-board chassis.
             const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
             const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setReverse(reverse)
                         .setOvershootMode(false)
                         .setDistanceTarget(edge.distance_cm);
             _state = State::PROJECTION_FOLLOW;
@@ -839,6 +881,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 LineFollower.setEnabled(false).setBrake(false);
             }
 
+            // BLIND REAR (T7 / issue #19): sign-by-power is the convention —
+            // `driveDist` rejects negative cm at Drive.h:1254 (positive distance,
+            // signed PWM). Negate the cruise + start/end speeds when REAR so the
+            // trapezoid ramps from a negative-direction PWM straight away
+            // (Drive.h:1288-1296 documents the matching sign-by-cruise rule).
+            const int16_t cruisePwm = reverse ? (int16_t) -Config::SPEED_NORMAL
+                                              : (int16_t)  Config::SPEED_NORMAL;
+            const int16_t signedStartSpeed = reverse ? (int16_t) -startSpeed : startSpeed;
+
             // Per-edge motion-profile override (DEFAULT → pipeline default).
             // Three concrete BlindMode values map onto the Drive builder chain:
             //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
@@ -847,7 +898,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //   - GYRO_TSHAPE : Drive.driveDist(cm).setMode(GYRO).tShape().async()
             //                   (straight-line yaw lock + trapezoidal profile; heading
             //                   sourced from edge.heading_deg, converted into the IMU
-            //                   frame via Localization.toImuYaw)
+            //                   frame via Localization.toImuYaw — body heading already
+            //                   accounts for REAR via `_resolvedBodyHeading`, so passing
+            //                   `edge.heading_deg` keeps the yaw target correct only when
+            //                   FRONT; REAR uses `_resolvedBodyHeading`).
             //   - RAW_FLAT    : Drive.driveDist(cm).setMode(RAW)
             //                       .setStartSpeed(cruise).setEndSpeed(cruise).async()
             //                   (open-loop PWM, no ramp — start/end speeds pinned to the
@@ -856,17 +910,19 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // DEFAULT cannot reach here (resolved above), but we route it through
             // the SYNC_TSHAPE branch defensively to match the historical behaviour.
             const Routes::BlindMode resolvedBlindMode = _resolveBlindMode(edge);
-            const int16_t           cruisePwm         = Config::SPEED_NORMAL;
 
             switch (resolvedBlindMode)
             {
                 case Routes::BlindMode::GYRO_TSHAPE:
                 {
-                    const int16_t imuTarget = Localization.toImuYaw(edge.heading_deg);
+                    // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
+                    // rotated 180° for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
+                    const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
-                         .setStartSpeed(startSpeed)    // pass-through: cruise; otherwise: PWM_MIN_MAGNITUDE
+                         .setPower(cruisePwm)
+                         .setStartSpeed(signedStartSpeed)    // pass-through: cruise; otherwise: ±PWM_MIN_MAGNITUDE
                          .tShape()
                          .async();
                     break;
@@ -881,9 +937,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // Non-pass-through MUST keep .setStartSpeed(cruisePwm) — anything else
                     // introduces a ramp and breaks the FLAT contract for callers that picked
                     // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
-                    const int16_t rawStart = _passThrough ? startSpeed : cruisePwm;
+                    const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::RAW)
+                         .setPower(cruisePwm)
                          .setStartSpeed(rawStart)
                          .setEndSpeed(cruisePwm)
                          .async();
@@ -896,7 +953,8 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 {
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::SYNC)
-                         .setStartSpeed(startSpeed)
+                         .setPower(cruisePwm)
+                         .setStartSpeed(signedStartSpeed)
                          .tShape()
                          .async();
                     break;
