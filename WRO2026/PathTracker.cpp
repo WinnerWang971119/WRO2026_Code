@@ -196,13 +196,25 @@ PathTrackerGoToBuilder::~PathTrackerGoToBuilder()
     {
         return;
     }
-    _owner._applyGoToBuilder(_goalId, _blocking);
+    _owner._applyGoToBuilder(_goalId, _blocking, _routeDirection, _arrivalDirection);
     _executed = true;
 }
 
 PathTrackerGoToBuilder& PathTrackerGoToBuilder::async()
 {
     _blocking = false;
+    return *this;
+}
+
+PathTrackerGoToBuilder& PathTrackerGoToBuilder::setRouteDirection(Direction d)
+{
+    _routeDirection = d;
+    return *this;
+}
+
+PathTrackerGoToBuilder& PathTrackerGoToBuilder::setArrivalDirection(Direction d)
+{
+    _arrivalDirection = d;
     return *this;
 }
 
@@ -216,12 +228,14 @@ bool PathTrackerClass::begin()
     _qTail  = 0;
     _qCount = 0;
     _state  = State::IDLE;
-    _destinationNode      = FieldMap::NODE_NONE;
-    _nextHop              = FieldMap::NODE_NONE;
-    _activeEdgeType       = Routes::EdgeType::NONE;
-    _passThrough          = false;
-    _resolvedDirection    = Direction::AUTO;
-    _resolvedBodyHeading  = 0.0f;
+    _destinationNode         = FieldMap::NODE_NONE;
+    _nextHop                 = FieldMap::NODE_NONE;
+    _activeEdgeType          = Routes::EdgeType::NONE;
+    _passThrough             = false;
+    _resolvedDirection       = Direction::AUTO;
+    _resolvedBodyHeading     = 0.0f;
+    _activeRouteDirection    = Direction::AUTO;
+    _activeArrivalDirection  = Direction::AUTO;
     _fault = FaultInfo{};
     return true;
 }
@@ -263,14 +277,16 @@ void PathTrackerClass::abort()
     Drive.stop(true);
 
     _clearQueue();
-    _state               = State::IDLE;
-    _destinationNode     = FieldMap::NODE_NONE;
-    _nextHop             = FieldMap::NODE_NONE;
-    _activeEdgeType      = Routes::EdgeType::NONE;
-    _passThrough         = false;
-    _resolvedDirection   = Direction::AUTO;
-    _resolvedBodyHeading = 0.0f;
-    _fault               = FaultInfo{};
+    _state                  = State::IDLE;
+    _destinationNode        = FieldMap::NODE_NONE;
+    _nextHop                = FieldMap::NODE_NONE;
+    _activeEdgeType         = Routes::EdgeType::NONE;
+    _passThrough            = false;
+    _resolvedDirection      = Direction::AUTO;
+    _resolvedBodyHeading    = 0.0f;
+    _activeRouteDirection   = Direction::AUTO;
+    _activeArrivalDirection = Direction::AUTO;
+    _fault                  = FaultInfo{};
 }
 
 const char* PathTrackerClass::faultMnemonic(Fault kind)
@@ -292,15 +308,17 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
 // Queue
 // =========================================================================================
 
-bool PathTrackerClass::_enqueue(uint8_t goalId)
+bool PathTrackerClass::_enqueue(uint8_t goalId, Direction routeDir, Direction arrivalDir)
 {
     if (_qCount >= Config::PATH_QUEUE_CAPACITY)
     {
         Serial.println(F("[PathTracker] queue overflow; goTo dropped"));
         return false;
     }
-    _queue[_qTail].nodeId = goalId;
-    _qTail = (uint8_t) ((_qTail + 1) % Config::PATH_QUEUE_CAPACITY);
+    _queue[_qTail].nodeId            = goalId;
+    _queue[_qTail].route_direction   = routeDir;
+    _queue[_qTail].arrival_direction = arrivalDir;
+    _qTail  = (uint8_t) ((_qTail + 1) % Config::PATH_QUEUE_CAPACITY);
     _qCount++;
     return true;
 }
@@ -328,7 +346,11 @@ void PathTrackerClass::_clearQueue()
 // Builder dispatch
 // =========================================================================================
 
-void PathTrackerClass::_applyGoToBuilder(uint8_t goalId, bool blocking)
+void PathTrackerClass::_applyGoToBuilder(
+    uint8_t   goalId,
+    bool      blocking,
+    Direction routeDir,
+    Direction arrivalDir)
 {
     if (goalId == FieldMap::NODE_NONE || goalId >= Routes::N_NODES)
     {
@@ -347,7 +369,7 @@ void PathTrackerClass::_applyGoToBuilder(uint8_t goalId, bool blocking)
         Serial.println(F("); clear with clearFault()"));
         return;
     }
-    if (!_enqueue(goalId))
+    if (!_enqueue(goalId, routeDir, arrivalDir))
     {
         return;
     }
@@ -434,8 +456,10 @@ void PathTrackerClass::update()
                 _state = State::IDLE;
                 return;
             }
-            _destinationNode = e.nodeId;
-            _state           = State::PLAN_NEXT_HOP;
+            _destinationNode        = e.nodeId;
+            _activeRouteDirection   = e.route_direction;
+            _activeArrivalDirection = e.arrival_direction;
+            _state                  = State::PLAN_NEXT_HOP;
             return;
         }
 
@@ -501,12 +525,17 @@ void PathTrackerClass::update()
                             // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
                             const float inboundBody = _resolvedBodyHeading;
 
-                            // TODO(T8): replace Direction::AUTO with the actual NavEntry.route_direction / arrival_direction fields.
+                            // Read the builder overrides cached on DEQUEUE for the
+                            // in-flight goal. The next-next hop is still part of the
+                            // active goTo() call, so the same route_direction /
+                            // arrival_direction values apply (arrival only takes effect
+                            // when this is the final hop into the destination, which
+                            // _resolveDirection handles via the isLastHop flag).
                             const Direction nextDir = _resolveDirection(
                                 outbound.direction_override,
                                 Routes::PIPELINE_CONFIG.direction,
-                                Direction::AUTO,
-                                Direction::AUTO,
+                                _activeArrivalDirection,
+                                _activeRouteDirection,
                                 inboundBody,
                                 outbound.heading_deg,
                                 (nextNext == _destinationNode),
@@ -622,10 +651,12 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     Drive.stop(true);
 
     _clearQueue();
-    _state           = State::FAULT;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
+    _state                  = State::FAULT;
+    _destinationNode        = FieldMap::NODE_NONE;
+    _nextHop                = FieldMap::NODE_NONE;
+    _activeEdgeType         = Routes::EdgeType::NONE;
+    _activeRouteDirection   = Direction::AUTO;
+    _activeArrivalDirection = Direction::AUTO;
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -684,9 +715,13 @@ void PathTrackerClass::_onPlanNextHop()
     // -----------------------------------------------------------------------
     const bool isLastHop = (nxt == _destinationNode);
 
-    // TODO(T8): replace Direction::AUTO with the actual NavEntry.route_direction / arrival_direction fields.
-    const Direction builderArrival = Direction::AUTO;
-    const Direction builderRoute   = Direction::AUTO;
+    // Builder overrides cached on DEQUEUE for the in-flight goal (T8).
+    // Both default to Direction::AUTO for bare `goTo(...)` calls — the
+    // `_resolveDirection` precedence layers below per-edge / pipeline
+    // overrides only kick in when the operator chained
+    // `.setRouteDirection(...)` / `.setArrivalDirection(...)`.
+    const Direction builderArrival = _activeArrivalDirection;
+    const Direction builderRoute   = _activeRouteDirection;
 
     const Direction resolved = _resolveDirection(
         edge.direction_override,
