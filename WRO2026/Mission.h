@@ -47,6 +47,7 @@
 
 #include "Config.h"
 #include "NavTypes.h"
+#include "TasksTypes.h"
 
 class MissionClass
 {
@@ -166,7 +167,8 @@ private:
         WAIT,
         PRINT,
         BEEP,
-        LED
+        LED,
+        TASK,    ///< new (T4)
     };
 
     enum class State : uint8_t
@@ -195,6 +197,9 @@ private:
         const char* text;              ///< print / goto name (for logging)
         Direction   route_direction;   ///< goto: per-step setRouteDirection override (default AUTO).
         Direction   arrival_direction; ///< goto: per-step setArrivalDirection override (default AUTO).
+        // T4: task step
+        const char* task_name = nullptr;    ///< TASK: registry key (string-literal lifetime, same rule as `text`)
+        TaskArgs    task_args{};            ///< TASK: packed args
     };
 
     bool _push(const Step& s);
