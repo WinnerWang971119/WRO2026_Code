@@ -870,6 +870,16 @@ namespace Config
     /** @brief Maximum number of pending Mission steps (no dynamic alloc). */
     constexpr uint8_t MAX_MISSION_STEPS = 64;
 
+    // ---------------------------------------------------------------------------------------
+    // Tasks framework
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Maximum number of task types that can be registered in the Tasks registry. */
+    static constexpr size_t MAX_TASKS = 16;
+
+    /** @brief Maximum byte size of the serialised argument payload stored in a TaskArgs. */
+    static constexpr size_t MAX_TASK_ARG_BYTES = 16;
+
     /** @brief Tone frequency used for the halt-on-fault beep sequence. */
     constexpr uint16_t MISSION_FAULT_BEEP_HZ = 1000;
 
