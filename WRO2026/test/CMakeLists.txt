@@ -195,3 +195,55 @@ target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_bidirectional_off PRIVATE ${COMMON_INCLUDES})
 add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
+
+# =========================================================================================
+# Test executable #4 — Tasks framework dispatch (T9 of the Tasks plan).
+#
+# Exercises TC1..TC3, TC5..TC12 of the Tasks-framework plan
+# (`docs/plans/2026-05-26-tasks-framework-mission-task-verb.md`). Satisfies AC10
+# and all unit/integration ACs (AC2..AC9 positive). The compile-fail target
+# below covers TC4 / AC9 negative.
+#
+# Rationale for NOT linking the real `Tasks.cpp` / `Mission.cpp` (mirrors the
+# precedent established by `test_path_tracker_passthrough.cpp` and
+# `test_path_tracker_bidirectional.cpp`): the test inline-mirrors the slice of
+# Mission's TASK-case FSM + TasksClass's registry + dispatch + RAII guard so
+# the assertions don't need to mock the full PathTracker / Drive / LineFollower
+# / MatrixMiniR4 / EventTrace surface. Mirror sites are annotated
+# `// MIRROR: <path>:<line>` for drift detection at PR-review time. Real
+# production POD types (`TaskArgs`, `TaskRegistryEntry`) are pulled in from
+# `WRO2026/TasksTypes.h` so the union-layout / size invariants are bound to
+# the real definitions at compile time.
+# =========================================================================================
+add_executable(test_tasks_dispatch
+    ${TEST_DIR}/test_tasks_dispatch.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
+add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
+
+# =========================================================================================
+# Test executable #5 — TC4 / AC9 negative (compile-fail target).
+#
+# Proves the `static_assert` in `MissionClass::task<Args...>` fires when the
+# variadic argument pack exceeds `Config::MAX_TASK_ARG_BYTES`. The build is
+# expected to FAIL; ctest uses `WILL_FAIL TRUE` to interpret the build's
+# non-zero exit as a passing test.
+#
+# `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep the target out of the
+# default `cmake --build .` so a regular build does not break. The ctest
+# command below invokes the per-target build on demand.
+# =========================================================================================
+add_executable(test_tasks_dispatch_overflow
+    ${TEST_DIR}/test_tasks_dispatch_overflow.cpp
+)
+set_target_properties(test_tasks_dispatch_overflow PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_tasks_dispatch_overflow PRIVATE ${COMMON_INCLUDES})
+add_test(NAME tasks_overflow_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_tasks_dispatch_overflow
+)
+set_tests_properties(tasks_overflow_compile_fail PROPERTIES WILL_FAIL TRUE)
