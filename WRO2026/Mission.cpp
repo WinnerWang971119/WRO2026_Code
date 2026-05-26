@@ -149,6 +149,12 @@ void MissionClass::abort()
     // BLIND_FORWARD) and its next update() would resume the route.
     // LineFollower must be disabled too so the tracer stops driving the
     // motors on the same tick.
+    // T7: Tasks.abort() sets the framework-level _aborted flag. In this
+    // plan the flag is wired but subsystems do not yet poll it; an
+    // in-flight task body unwinds because PathTracker.abort() / Drive.stop
+    // below halt the chassis and subsequent subsystem builders return
+    // false to the task body.
+    Tasks.abort();
     PathTracker.abort();
     LineFollower.setEnabled(false);
     Drive.stop(true);
