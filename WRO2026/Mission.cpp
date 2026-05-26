@@ -15,6 +15,7 @@
 #include "FieldMap.h"
 #include "LineFollower.h"
 #include "PathTracker.h"
+#include "Tasks.h"
 #include "routes.h"
 
 MissionClass Mission;
@@ -235,6 +236,13 @@ void MissionClass::_advanceStep()
 
 void MissionClass::update()
 {
+    // T6: short-circuit when called from inside a blocking task body
+    // (the body re-enters cooperativeTick() while waiting on PathTracker
+    // / Drive sync drains; without this guard the Mission FSM would
+    // recurse into the same TASK step). Tasks.inTask() is true between
+    // runTask() entry and return (RAII scope-exit guard inside Tasks).
+    if (Tasks.inTask()) { return; }
+
     switch (_state)
     {
         case State::IDLE:
@@ -360,6 +368,60 @@ void MissionClass::update()
                         _setLeds(0, 0, 0);
                         _advanceStep();
                     }
+                    break;
+                }
+
+                case StepType::TASK:
+                {
+                    if (_stepState == StepState::ENTER)
+                    {
+                        const TaskRegistryEntry* entry =
+                            Tasks.findTask(s.task_name == nullptr ? "" : s.task_name);
+                        if (entry == nullptr)
+                        {
+                            Serial.print(F("[Mission] unknown task '"));
+                            Serial.print(s.task_name == nullptr ? "?" : s.task_name);
+                            Serial.println(F("'"));
+                            EventTrace.pushEvent("NAV FAULT TASK");
+                            _enterFaultBeeping(now);
+                            return;
+                        }
+
+                        // Boundary event before dispatch.
+                        char buf[EventTraceClass::MAX_LINE_LEN];
+                        snprintf(buf, sizeof(buf), "TASK START %s",
+                                 s.task_name == nullptr ? "?" : s.task_name);
+                        EventTrace.pushEvent(buf);
+
+                        const bool ok = Tasks.runTask(s.task_name, s.task_args);
+
+                        // Post-runTask fault check — a PathTracker fault that latched
+                        // mid-task did NOT trigger the top-of-RUNNING check at line 248
+                        // because the inTask() guard short-circuited Mission.update().
+                        // Check here so a task-internal fault triggers the fault path
+                        // BEFORE we advance past the step (mirrors how GOTO never
+                        // advances on a faulted leg).
+                        if (PathTracker.hasFault())
+                        {
+                            _emitFault();
+                            _enterFaultBeeping(now);
+                            return;
+                        }
+
+                        snprintf(buf, sizeof(buf), ok ? "TASK OK %s" : "TASK YIELD %s",
+                                 s.task_name == nullptr ? "?" : s.task_name);
+                        EventTrace.pushEvent(buf);
+                        if (!ok)
+                        {
+                            Serial.print(F("[Mission] task '"));
+                            Serial.print(s.task_name == nullptr ? "?" : s.task_name);
+                            Serial.println(F("' yielded"));
+                        }
+                        _advanceStep();
+                    }
+                    // No ACTIVE branch — runTask is fake-blocking; the in-flight period
+                    // is fully covered by Tasks.inTask() short-circuiting Mission.update()
+                    // at the top. _stepState stays in ENTER until _advanceStep() resets it.
                     break;
                 }
             }
