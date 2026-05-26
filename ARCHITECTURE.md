@@ -46,21 +46,21 @@ Calls go top-down only. Lower layers never call upper layers. EventTrace is a si
 WRO2026.ino
     │
     ▼
- Mission ───────► PathTracker ──► FieldMap (header-only over routes.h)
-                      │
-                      ▼
-                    Drive ◄────── LineFollower ◄───── Intersection
-                      │                │                  │
-                      │                └─────► WROLineArray ◄──┘
-                      ▼
-                Manipulator
-                      │
-                      ▼
-              ╔═══════════════════════════════════╗
-              ║   MatrixMiniR4 library (vendor)   ║
-              ║   Motor / Encoder / IMU / Servo   ║
-              ║   I2C / OLED / Button / Buzzer    ║
-              ╚═══════════════════════════════════╝
+ Mission ───────► Tasks ──────────► PathTracker ──► FieldMap (header-only over routes.h)
+                    │                    │
+                    │                    ▼
+                    │                  Drive ◄────── LineFollower ◄───── Intersection
+                    │                    │                │                  │
+                    │                    │                └─────► WROLineArray ◄──┘
+                    │                    ▼
+                    └──────────────► Manipulator
+                                         │
+                                         ▼
+                               ╔═══════════════════════════════════╗
+                               ║   MatrixMiniR4 library (vendor)   ║
+                               ║   Motor / Encoder / IMU / Servo   ║
+                               ║   I2C / OLED / Button / Buzzer    ║
+                               ╚═══════════════════════════════════╝
 
   EventTrace ────► (read-only polls of LineFollower, Intersection, Drive,
                     Localization; emits OLED + Serial)
@@ -69,7 +69,7 @@ WRO2026.ino
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
-`Drive → LineFollower → Intersection → Manipulator → PathTracker → Mission → EventTrace`.
+`LineArray → Drive → LineFollower → Intersection → Manipulator → Tasks → PathTracker → Mission → EventTrace`.
 
 The lower-layer modules tick first so that PathTracker / Mission see fresh state in the same loop iteration.
 
@@ -86,7 +86,8 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |
 | `routes` | **auto-generated** graph data | `Routes::NODES[N]`, `Routes::NEXT_HOP[N][N]`, `Routes::EDGES[N][N]`, `Routes::PIPELINE_CONFIG` |
 | `PathTracker` | FSM dispatching per-edge primitives | `goTo(name).async()`, `update()`, `isIdle()`, `hasFault()`, `getFault()`, `clearFault()`, `abort()` |
-| `Mission` | operator-authored DSL | `goTo(name)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `start()`, `abort()` |
+| `Mission` | operator-authored DSL | `goTo(name)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `task(name,args)`, `start()`, `abort()` |
+| `Tasks` | composite multi-step routines + name-string registry | `runTask(name, args)`, `findTask(name)`, `abort()`, `isAborted()`, `inTask()`, registry table in `Tasks.cpp` |
 | `Manipulator` | actuator control (stub) | `setLift(h)`, `setGripper(angle)`, `setArm(angle)`, `update()`, `isDone()` — all currently no-op |
 | `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()` — polled in `update()` |
 | `WROMath` | unit conversions | `cmToEncDeg`, `encDegToCm`, `presetToPwm`, `deadbandSnap` |
@@ -97,7 +98,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | Module | Phase | Reason |
 |---|---|---|
 | Camera module (`CameraMosaic` / `CameraColor` — name TBD) | 4 | Awaiting camera selection (HuskyLens vs raw, [ADR-006](./docs/decisions/006-mosaic-via-camera.md)). Handles **both** the 3×3 mosaic pattern read and single-cell color reads ([ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md)) — no dedicated `ColorReader` module is planned. |
-| Per-task FSMs (the old `Tasks` module) | 5/6 | Mission DSL covers PR3; richer per-task state machines come once perception + manipulator land. |
+| Per-task FSMs (preemptable task bodies) | 6 | Tasks layer ships with blocking method bodies (ADR-025). Converting specific slow tasks to per-task FSMs is deferred to the Phase 6 greedy scheduler (ADR-008). |
 
 ## The two iron rules
 
