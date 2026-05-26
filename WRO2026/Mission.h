@@ -48,21 +48,7 @@
 
 #include "Config.h"
 #include "NavTypes.h"
-#include "TasksTypes.h"
-
-/**
- * @brief Forward declaration of ``TasksClass`` + its singleton.
- *
- * The inline ``Mission.task<Args...>`` template (defined at the bottom of this
- * header) calls ``Tasks.inTask()`` to detect nested invocation from inside a
- * task body. Including ``Tasks.h`` here would re-introduce the cyclic layering
- * that ``TasksTypes.h`` exists to break (Mission ↔ Tasks), so a forward
- * declaration is used instead. Every translation unit that instantiates
- * ``Mission.task(...)`` also includes ``Tasks.h`` (directly or transitively
- * via the sketch), making the full type visible at the point of use.
- */
-class TasksClass;
-extern TasksClass Tasks;
+#include "Tasks.h"
 
 class MissionClass
 {
@@ -291,16 +277,8 @@ extern MissionClass Mission;
 //
 // The variadic ``task<Args...>`` verb and its ``_packArgs`` recursion helpers
 // must be visible at every instantiation point, so their bodies live in the
-// header. They are placed after the class body (and after the ``extern Mission``
-// declaration) so they may freely refer to ``Tasks.inTask()`` via the forward
-// declaration at the top of this header.
-//
-// ``Tasks.h`` is intentionally NOT included here — that would reintroduce the
-// cyclic Mission ↔ Tasks layering that ``TasksTypes.h`` exists to break. Every
-// translation unit that instantiates ``Mission.task(...)`` already includes
-// ``Tasks.h`` directly or transitively (the sketch's include chain pulls it
-// in), so the forward-declared ``TasksClass`` resolves to a complete type at
-// the point of instantiation.
+// header. They sit after the class body so they may freely refer to the global
+// ``Tasks`` singleton declared in ``Tasks.h`` (included above).
 // -----------------------------------------------------------------------------
 
 template <typename... Args>

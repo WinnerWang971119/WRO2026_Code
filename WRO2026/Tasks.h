@@ -121,6 +121,23 @@ public:
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
     bool inTask() const;
 
+    /**
+     * @brief Static registry of all known task names + their member-fn pointers.
+     *
+     * Defined in ``Tasks.cpp`` — adding a new task is a single-line append to
+     * the initializer there. ``_registry_count`` auto-derives from ``sizeof``,
+     * and a file-scope ``static_assert`` rejects the build if the count
+     * exceeds ``Config::MAX_TASKS``.
+     *
+     * @note Public so the bounds ``static_assert`` and any future external
+     *       validators (e.g. a Mission queue-time pre-check) can read the
+     *       size without the entries needing to grow a friend declaration.
+     *       The members are ``const`` — privacy here gives no additional
+     *       safety, only friction.
+     */
+    static const TaskRegistryEntry _registry[];
+    static const size_t            _registry_count;
+
 private:
     /**
      * @brief Smoke-test task body — prints the first two ``uint8`` arg slots.
@@ -133,9 +150,6 @@ private:
      *       has a deterministic, side-effect-only target during bring-up.
      */
     bool demoEcho(const TaskArgs& args);
-
-    static const TaskRegistryEntry _registry[];
-    static const size_t            _registry_count;
 
     bool _inTask  = false;
     bool _aborted = false;
