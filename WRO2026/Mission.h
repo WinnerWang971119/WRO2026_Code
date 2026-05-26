@@ -44,10 +44,25 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "Config.h"
 #include "NavTypes.h"
 #include "TasksTypes.h"
+
+/**
+ * @brief Forward declaration of ``TasksClass`` + its singleton.
+ *
+ * The inline ``Mission.task<Args...>`` template (defined at the bottom of this
+ * header) calls ``Tasks.inTask()`` to detect nested invocation from inside a
+ * task body. Including ``Tasks.h`` here would re-introduce the cyclic layering
+ * that ``TasksTypes.h`` exists to break (Mission ↔ Tasks), so a forward
+ * declaration is used instead. Every translation unit that instantiates
+ * ``Mission.task(...)`` also includes ``Tasks.h`` (directly or transitively
+ * via the sketch), making the full type visible at the point of use.
+ */
+class TasksClass;
+extern TasksClass Tasks;
 
 class MissionClass
 {
@@ -120,6 +135,37 @@ public:
      * @return ``*this`` for verb chaining.
      */
     MissionClass& setArrivalDirection(Direction d);
+
+    /**
+     * @brief Enqueue a named-task step. Packs ``args...`` into the step's
+     *        16-byte ``TaskArgs`` POD via ``memcpy`` and stores the task name
+     *        as a pointer (same string-literal lifetime rule as :func:`print`
+     *        and :func:`goTo` — pass a string literal, not a stack buffer).
+     *
+     * @tparam Args  Zero or more trivially-copyable argument types. The total
+     *               size ``sizeof...(args)`` summed by a fold expression must
+     *               fit in ``Config::MAX_TASK_ARG_BYTES`` (16); a
+     *               ``static_assert`` enforces this at compile time with the
+     *               message ``"Mission.task args exceed MAX_TASK_ARG_BYTES"``.
+     * @param name   Registry key; resolved against ``Tasks._registry`` at
+     *               execute time (an unknown name latches the mission fault).
+     * @param args   Argument pack. **Recommended:** pass a single per-task
+     *               ``struct <Name>Args { ... };`` value so the byte layout
+     *               matches the task body's ``reinterpret_cast<const
+     *               NameArgs*>`` unpack. Mixing raw scalar types is only safe
+     *               when the resulting byte layout is byte-identical to a
+     *               contiguous ``uint8_t[N]`` (i.e. no padding).
+     *
+     * @return ``*this`` for verb chaining.
+     *
+     * @note Nested calls are forbidden — if invoked while ``Tasks.inTask()``
+     *       returns ``true`` (i.e. from inside a task body), the call is
+     *       ignored and a warning is printed to Serial. Use this for the
+     *       operator-authored mission DSL, not from inside task bodies
+     *       themselves.
+     */
+    template <typename... Args>
+    MissionClass& task(const char* name, Args... args);
 
     /**
      * @brief Arm the mission. Returns immediately; subsequent ``update()``
@@ -209,6 +255,21 @@ private:
     void _setLeds(uint8_t r, uint8_t g, uint8_t b);
     void _beep(uint16_t freq_hz, uint16_t duration_ms);
 
+    /**
+     * @brief Recursively ``memcpy`` each argument into ``dst``.
+     *
+     * Member function so the inline ``task<Args...>`` template can access the
+     * private ``Step`` / ``StepType`` types from the same scope. ``memcpy`` is
+     * used instead of a placement-new / aliased pointer write because the R4's
+     * ARM Cortex-M4 has weak alignment guarantees on unaligned word stores —
+     * ``memcpy`` is always safe regardless of the run-time alignment of ``dst``.
+     */
+    template <typename T, typename... Rest>
+    void _packArgs(uint8_t* dst, const T& head, const Rest&... rest);
+
+    /** @brief Base case for the variadic ``_packArgs`` recursion. */
+    void _packArgs(uint8_t* /*dst*/);
+
     Step _queue[Config::MAX_MISSION_STEPS];
     uint8_t _count = 0;
     uint8_t _idx   = 0;
@@ -224,5 +285,53 @@ private:
 };
 
 extern MissionClass Mission;
+
+// -----------------------------------------------------------------------------
+// Inline template definitions
+//
+// The variadic ``task<Args...>`` verb and its ``_packArgs`` recursion helpers
+// must be visible at every instantiation point, so their bodies live in the
+// header. They are placed after the class body (and after the ``extern Mission``
+// declaration) so they may freely refer to ``Tasks.inTask()`` via the forward
+// declaration at the top of this header.
+//
+// ``Tasks.h`` is intentionally NOT included here — that would reintroduce the
+// cyclic Mission ↔ Tasks layering that ``TasksTypes.h`` exists to break. Every
+// translation unit that instantiates ``Mission.task(...)`` already includes
+// ``Tasks.h`` directly or transitively (the sketch's include chain pulls it
+// in), so the forward-declared ``TasksClass`` resolves to a complete type at
+// the point of instantiation.
+// -----------------------------------------------------------------------------
+
+template <typename... Args>
+MissionClass& MissionClass::task(const char* name, Args... args)
+{
+    constexpr size_t TOTAL =
+        (sizeof...(Args) == 0) ? 0 : (sizeof(Args) + ... + 0);
+    static_assert(TOTAL <= Config::MAX_TASK_ARG_BYTES,
+                  "Mission.task args exceed MAX_TASK_ARG_BYTES");
+
+    if (Tasks.inTask())
+    {
+        Serial.println(F("[Mission] task() called from inside a task body; ignored"));
+        return *this;
+    }
+
+    Step s{};
+    s.type      = StepType::TASK;
+    s.task_name = name;
+    _packArgs(s.task_args.bytes, args...);
+    _push(s);
+    return *this;
+}
+
+template <typename T, typename... Rest>
+inline void MissionClass::_packArgs(uint8_t* dst, const T& head, const Rest&... rest)
+{
+    memcpy(dst, &head, sizeof(T));
+    _packArgs(dst + sizeof(T), rest...);
+}
+
+inline void MissionClass::_packArgs(uint8_t* /*dst*/) {}
 
 #endif    // MISSION_H
