@@ -49,6 +49,7 @@
 #include "Manipulator.h"
 #include "Mission.h"
 #include "PathTracker.h"
+#include "Tasks.h"
 #include "WROLineArray.h"
 
 namespace
@@ -140,6 +141,7 @@ void cooperativeTick()
     LineFollower.update();
     Intersection.update();
     Manipulator.update();
+    Tasks.update();          // T8: housekeeping; no FSM in this plan
     PathTracker.update();
     Mission.update();
     EventTrace.update();
@@ -175,6 +177,7 @@ void buildMission()
         .wait(500)
         .goTo("A")
         .led(255, 255, 255, 1000)
+        .task("demoEcho", uint8_t(7), uint8_t(42))
         .print("DONE");
     Mission.start();
 }
@@ -194,13 +197,14 @@ void setup()
     const bool locOk   = Localization.begin();
     const bool pathOk  = PathTracker.begin();
     const bool missOk  = Mission.begin();
+    const bool tasksOk = Tasks.begin();
     const bool traceOk = EventTrace.begin();
 
     Drive.setTickCallback(cooperativeTick);
     PathTracker.setTickCallback(cooperativeTick);
     LineFollower.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && traceOk);
+    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && traceOk);
 
     if (_setupFailed)
     {
@@ -213,6 +217,7 @@ void setup()
         if (!locOk)    { Serial.println(F("  - Localization")); EventTrace.pushEvent("FAIL LOC"); }
         if (!pathOk)   { Serial.println(F("  - PathTracker"));  EventTrace.pushEvent("FAIL PATH"); }
         if (!missOk)   { Serial.println(F("  - Mission"));      EventTrace.pushEvent("FAIL MIS"); }
+        if (!tasksOk)  { Serial.println(F("  - Tasks"));        EventTrace.pushEvent("FAIL TASKS"); }
         if (!traceOk)  { Serial.println(F("  - EventTrace"));   EventTrace.pushEvent("FAIL TRACE"); }
         EventTrace.pushEvent("BOOT FAIL");
     }
