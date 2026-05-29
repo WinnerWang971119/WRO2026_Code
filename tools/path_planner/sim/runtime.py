@@ -67,6 +67,7 @@ from tools.path_planner.compiler import (
     Primitive,
     normalize_turn,
 )
+from tools.path_planner import pipeline_config as _pipeline_config
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
@@ -505,7 +506,9 @@ def _should_pass_through(
     # forward edges, the raw-edge delta would be 180° (and incorrectly
     # block pass-through) but the resolved body-headings are collinear.
     resolved_pipeline = (
-        pipeline_default if pipeline_default is not None else PIPELINE_CONFIG.direction
+        pipeline_default
+        if pipeline_default is not None
+        else _pipeline_config.PIPELINE_CONFIG.direction
     )
     resolved_route = builder_route if builder_route is not None else Direction.AUTO
     resolved_arrival = (
@@ -674,7 +677,7 @@ class PathTrackerSim:
 
             direction = resolve_direction(
                 edge_dir_override=_read_edge_dir_override(edge),
-                pipeline_default=PIPELINE_CONFIG.direction,
+                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                 builder_arrival=arrival_direction,
                 builder_route=route_direction,
                 current_heading=self._chassis.heading_deg,
@@ -716,7 +719,7 @@ class PathTrackerSim:
                     nxt,
                     goal_name,
                     inbound_body_heading=body_heading,
-                    pipeline_default=PIPELINE_CONFIG.direction,
+                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
                     bidirectional_enabled=BIDIRECTIONAL_ENABLED,
@@ -803,7 +806,7 @@ class PathTrackerSim:
 
             direction = resolve_direction(
                 edge_dir_override=_read_edge_dir_override(edge),
-                pipeline_default=PIPELINE_CONFIG.direction,
+                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                 builder_arrival=arrival_direction,
                 builder_route=route_direction,
                 current_heading=self._chassis.heading_deg,
@@ -841,7 +844,7 @@ class PathTrackerSim:
                     nxt,
                     goal_name,
                     inbound_body_heading=body_heading,
-                    pipeline_default=PIPELINE_CONFIG.direction,
+                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
                     bidirectional_enabled=BIDIRECTIONAL_ENABLED,
