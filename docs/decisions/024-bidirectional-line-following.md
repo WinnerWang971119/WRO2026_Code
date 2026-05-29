@@ -53,11 +53,14 @@ intuition.
 - **Offline override:** add `"direction": "front"` or `"rear"` to an EDGES entry
   in `field_data.py`. Applies only to the forward `(u,v)` directed edge (Codex
   P1 invariant; the reverse `(v,u)` edge retains `DEFAULT`).
-- **Resolution algorithm:** `_resolveDirection` in the anonymous namespace of
-  `PathTracker.cpp` is the single source of truth; the Python mirror is
+- **Resolution algorithm:** `resolveDirection` in `WRO2026/DirectionPolicy.h`
+  is the single C++ source of truth, shared between `PathTracker.cpp` and the
+  host-compile test suite via `#include`. The Python mirror is
   `tools/path_planner/sim/runtime.py::resolve_direction`. TC18 enforces
-  cross-language parity via a pytest that greps the generated header for matching
-  constant definitions.
+  cross-language parity via a pytest that greps the generated header for
+  matching constant definitions. Refactored out of `PathTracker.cpp`'s
+  anonymous namespace in PR #34 review to eliminate test-vs-production
+  byte-copy drift.
 
 ## Trigger to revisit
 

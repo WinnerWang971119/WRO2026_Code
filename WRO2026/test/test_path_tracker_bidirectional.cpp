@@ -83,10 +83,11 @@
 
 // Production headers we depend on for types only (no linkage to .cpp needed).
 #include "Config.h"
+#include "DirectionPolicy.h"    // Shared resolveDirection() — single source of truth.
 #include "NavTypes.h"
-#include "PathTracker.h"    // For PathTrackerClass::Fault + FaultInfo enums.
-#include "routes.h"         // For Routes::DirectionMode, Routes::EdgeType.
-#include "FieldMap.h"       // For FieldMap::NODE_NONE.
+#include "PathTracker.h"        // For PathTrackerClass::Fault + FaultInfo enums.
+#include "routes.h"             // For Routes::DirectionMode, Routes::EdgeType.
+#include "FieldMap.h"           // For FieldMap::NODE_NONE.
 
 // LineFollower / WROMath come along on the test target's SUT_SOURCES, but
 // nothing in this file touches them — the tests are pure logic exercises.
@@ -96,22 +97,19 @@
 #include <cstdio>
 
 // ===========================================================================
-// Inline replicas of production logic under test.
+// Test calls the real production helper via DirectionPolicy.h.
 //
-// Each helper below is a faithful copy of a specific block in the production
-// source, with a pointer back to the canonical site. CI parity is enforced
-// by the test itself: if these replicas drift, the assertions stop matching
-// the production behavior the next time a real-world fixture is checked in.
+// The dispatcher REVERSE_UNAVAILABLE guard is still replicated inline below
+// because its production site (PathTracker.cpp::_dispatchEdgeAfterTurn) is
+// tangled with Drive / LineFollower / Localization mocks. The shape is small
+// enough (~10 lines) that the drift risk is acceptable; the replica is
+// annotated with a back-pointer to the canonical site.
 // ===========================================================================
 
-/// Replica of `PathTracker.cpp::_resolveDirection` (anonymous namespace,
-/// file-local in production). See `PathTracker.cpp:76-112`. Kept byte-for-byte
-/// identical; if you edit one, edit the other.
-///
-/// The Python sim mirror is at
-/// `tools/path_planner/sim/runtime.py::resolve_direction` — TC18 covers the
-/// cross-language parity.
-static Direction replica_resolveDirection(
+/// Alias so existing tests that called the old replica name keep working
+/// while pointing at the canonical helper. New tests should call
+/// `resolveDirection` directly.
+static inline Direction replica_resolveDirection(
     Routes::DirectionMode edgeOverride,
     Routes::DirectionMode pipelineDefault,
     Direction             builderArrival,
@@ -119,33 +117,12 @@ static Direction replica_resolveDirection(
     float                 currentHeading,
     float                 edgeHeading,
     bool                  isLastHop,
-    bool                  bidirectionalEnabled,
+    bool                  bidirectionalAutoEnabled,
     uint8_t               lineBoardCount)
 {
-    // Step 1: per-edge override is binding.
-    if (edgeOverride == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-    if (edgeOverride == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-    // Step 2: pipeline default is binding when not DEFAULT.
-    if (pipelineDefault == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-    if (pipelineDefault == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-    // Step 3: arrival override wins on the final hop.
-    if (isLastHop && builderArrival != Direction::AUTO) return builderArrival;
-
-    // Step 4: route override wins on all hops.
-    if (builderRoute != Direction::AUTO) return builderRoute;
-
-    // Step 5: auto — only if 2-board chassis AND kill-switch on.
-    if (!bidirectionalEnabled) return Direction::FRONT;
-    if (lineBoardCount < 2)    return Direction::FRONT;
-
-    // Wrap delta into (-180, +180].
-    float delta = edgeHeading - currentHeading;
-    while (delta >   180.0f) { delta -= 360.0f; }
-    while (delta <= -180.0f) { delta += 360.0f; }
-    if (fabsf(delta) > Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG) return Direction::REAR;
-    return Direction::FRONT;
+    return resolveDirection(edgeOverride, pipelineDefault, builderArrival,
+                            builderRoute, currentHeading, edgeHeading,
+                            isLastHop, bidirectionalAutoEnabled, lineBoardCount);
 }
 
 /// Replica of the REVERSE_UNAVAILABLE guard at the top of
