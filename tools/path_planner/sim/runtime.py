@@ -441,6 +441,7 @@ def _should_pass_through(
     goal_name,
     *,
     inbound_body_heading: float,
+    inbound_direction: "Direction",
     pipeline_default: DirectionMode = None,
     builder_route: "Direction" = None,
     builder_arrival: "Direction" = None,
@@ -535,7 +536,14 @@ def _should_pass_through(
     next_body_heading = _body_heading_for(next_dir, next_edge_heading)
 
     heading_delta = wrap_pm180(next_body_heading - inbound_body_heading)
-    return abs(heading_delta) <= NAV_TURN_TOLERANCE_DEG
+    if abs(heading_delta) > NAV_TURN_TOLERANCE_DEG:
+        return False
+    # Pass-through requires matching direction across the intersection. A
+    # REAR->FRONT or FRONT->REAR transition would force the dispatcher to
+    # flip LineFollower.setReverse(...) mid-flight, jolting the chassis.
+    # Mirror of the C++ guard in PathTracker.cpp's LINE_FOLLOW intersection
+    # branch (PR #34 review).
+    return next_dir == inbound_direction
 
 
 class LocalizationSim:
@@ -719,6 +727,7 @@ class PathTrackerSim:
                     nxt,
                     goal_name,
                     inbound_body_heading=body_heading,
+                    inbound_direction=direction,
                     pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
@@ -844,6 +853,7 @@ class PathTrackerSim:
                     nxt,
                     goal_name,
                     inbound_body_heading=body_heading,
+                    inbound_direction=direction,
                     pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,

@@ -509,7 +509,20 @@ void PathTrackerClass::update()
                             float delta = outboundBody - inboundBody;
                             while (delta >   180.0f) { delta -= 360.0f; }
                             while (delta <= -180.0f) { delta += 360.0f; }
-                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+
+                            // Pass-through requires BOTH (1) collinear body
+                            // headings AND (2) matching direction across the
+                            // intersection. A REAR→FRONT or FRONT→REAR transition
+                            // would force the dispatcher to flip
+                            // LineFollower.setReverse(...) mid-flight — instantly
+                            // swapping the active line board and inverting cruise
+                            // sign in one tick, jolting the chassis without a
+                            // controlled stop. Falling through to LINE_OVERSHOOT
+                            // (with brake, no pass-through) gives the controller
+                            // a clean re-init window before the new edge starts.
+                            // PR #34 review.
+                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
+                                nextDir == _resolvedDirection)
                             {
                                 _passThrough = true;
                             }

@@ -1488,29 +1488,34 @@ def test_bidir_tc9b_two_rear_hops_non_collinear_no_line_pass():
 # ---------------------------------------------------------------------------
 
 
-def test_bidir_tc9c_rear_to_front_antiparallel_fwd_edges_emits_line_pass():
-    """TC9c: REAR->FRONT transition with anti-parallel forward edges (0deg, 180deg)
-    emits ACT_LINE_PASS at B because the BODY-heading delta is 0deg.
+def test_bidir_tc9c_rear_to_front_direction_flip_suppresses_pass_through():
+    """TC9c: REAR->FRONT transition on anti-parallel forward edges (0deg, 180deg) —
+    body-heading peek correctly identifies the geometry as collinear, but the
+    direction-flip guard (PR #34 review, F6) suppresses pass-through because
+    firing it would force LineFollower.setReverse(true->false) mid-flight, instantly
+    inverting cruise sign and jolting the chassis from +x motion to -x motion
+    in one tick without a controlled stop.
 
-    A->B is forced REAR (body heading = 180deg).
-    B->C forward heading is 180deg; after the first hop the chassis heading is 180deg,
-    so auto-resolution: delta = wrap(180 - 180) = 0deg -> FRONT; body heading = 180deg.
-    Body-heading delta at B = |180 - 180| = 0deg <= NAV_TURN_TOLERANCE_DEG.
+    Body-heading geometry of the fixture is unchanged from the original TC9c:
+        A->B forced REAR (body heading = 180deg);
+        after A->B REAR, chassis heading = 180deg;
+        B->C forward heading = 180deg, auto-resolves FRONT (delta = 0deg < 90deg);
+        body delta at B = |180 - 180| = 0deg <= NAV_TURN_TOLERANCE_DEG.
 
-    The destination C still receives ACT_LINE_OVERSHOOT (destination guard always
-    prevents ACT_LINE_PASS at the final node), so the sequence is:
-        (ACT_TURN_REL, 180.0)          -- align to 180deg body heading for A->B REAR
-        (ACT_LINE_REVERSE, 'B', mode)  -- A->B REAR hop
-        (ACT_LINE_PASS, 5.0)           -- pass-through fires at B (body delta = 0deg)
-        (ACT_FOLLOW_INT, None)         -- B->C FRONT hop
-        (ACT_LINE_OVERSHOOT, 5.0)      -- destination guard at C
+    The peek therefore correctly identifies the body-heading collinearity (which
+    is what the original TC9c proved). The new direction-flip guard then notes
+    that next_dir (FRONT) != inbound _resolvedDirection (REAR) and blocks
+    pass-through, falling through to ACT_LINE_OVERSHOOT + ACT_TURN_REL so the
+    LineFollower has a clean re-init window before the outbound hop.
 
-    This test is THE critical proof that _should_pass_through peeks at resolved body
-    headings, NOT raw forward edge headings. Without T6's body-heading peek fix,
-    the raw forward-edge delta would be |180 - 0| = 180deg and pass-through would
-    not fire, incorrectly emitting ACT_LINE_OVERSHOOT + ACT_TURN_REL instead.
+    Without F6: ACT_LINE_PASS at B, motors flip cruise sign in one tick.
+    With F6:    ACT_LINE_OVERSHOOT at B + a 180deg turn before the FRONT hop.
 
-    Verifies AC13 (mixed-direction clause of ADR-023).
+    The body-heading peek itself is still load-bearing — it correctly classifies
+    the geometry as collinear. The fact that we don't ACT on that classification
+    when direction differs is the new safety guard.
+
+    Verifies AC13 (mixed-direction clause of ADR-023) AND the F6 safety guard.
     """
     sim, chassis, _, _ = _make_three_hop_sim(
         fwd_headings=(0.0, 180.0),
@@ -1527,35 +1532,27 @@ def test_bidir_tc9c_rear_to_front_antiparallel_fwd_edges_emits_line_pass():
     prims = sim.go_to("C")
     act_tags = [p[0] for p in prims]
 
-    # ACT_LINE_PASS must appear exactly once at B (the intermediate node).
-    assert ACT_LINE_PASS in act_tags, (
-        f"Expected ACT_LINE_PASS at B for REAR->FRONT anti-parallel transition; "
-        f"got {act_tags}. Check that _should_pass_through uses body headings, "
-        f"not raw forward-edge headings."
-    )
-    assert act_tags.count(ACT_LINE_PASS) == 1, (
-        f"Expected exactly one ACT_LINE_PASS (at B only); got {act_tags}"
+    # ACT_LINE_PASS must NOT fire anywhere — direction flips between hops, and
+    # the F6 guard suppresses pass-through across direction changes.
+    assert ACT_LINE_PASS not in act_tags, (
+        f"Expected NO ACT_LINE_PASS (F6 direction-flip guard should suppress); "
+        f"got {act_tags}. If you see ACT_LINE_PASS, the guard regressed or the "
+        f"fixture geometry no longer triggers a direction flip."
     )
 
-    # ACT_LINE_OVERSHOOT must appear exactly once at C (destination guard).
-    assert act_tags.count(ACT_LINE_OVERSHOOT) == 1, (
-        f"Expected exactly one ACT_LINE_OVERSHOOT (at destination C only); got {act_tags}"
+    # ACT_LINE_REVERSE fires once for A->B REAR; ACT_FOLLOW_INT fires once for B->C FRONT.
+    assert act_tags.count(ACT_LINE_REVERSE) == 1, (
+        f"Expected one ACT_LINE_REVERSE (A->B REAR); got {act_tags}"
+    )
+    assert act_tags.count(ACT_FOLLOW_INT) == 1, (
+        f"Expected one ACT_FOLLOW_INT (B->C FRONT); got {act_tags}"
     )
 
-    # The sequence at B must be: ACT_LINE_REVERSE (first hop end) immediately
-    # followed by ACT_LINE_PASS (no turn between them).
-    line_rev_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_REVERSE]
-    assert len(line_rev_indices) == 1, (
-        f"Expected exactly one ACT_LINE_REVERSE (A->B REAR); got {act_tags}"
-    )
-    pass_indices = [i for i, (tag, *_) in enumerate(prims) if tag == ACT_LINE_PASS]
-    assert len(pass_indices) == 1, (
-        f"Expected exactly one ACT_LINE_PASS at B; got {act_tags}"
-    )
-    # ACT_LINE_PASS must immediately follow ACT_LINE_REVERSE (no turn between them).
-    assert pass_indices[0] == line_rev_indices[0] + 1, (
-        f"ACT_LINE_PASS at index {pass_indices[0]} should immediately follow "
-        f"ACT_LINE_REVERSE at index {line_rev_indices[0]}; got {act_tags}"
+    # OVERSHOOT fires at BOTH B (post-REAR, suppressed pass-through) AND C
+    # (destination guard always emits OVERSHOOT). Two OVERSHOOT total.
+    assert act_tags.count(ACT_LINE_OVERSHOOT) == 2, (
+        f"Expected two ACT_LINE_OVERSHOOT (suppressed pass-through at B + "
+        f"destination guard at C); got {act_tags}"
     )
 
     assert sim.localization.current_node() == "C"
