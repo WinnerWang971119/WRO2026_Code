@@ -59,11 +59,11 @@
  *
  *   TC14c — Compile-time kill-switch override drives runtime behavior (AC8c):
  *     This file is built TWICE by CMake — once with
- *     `-DBIDIRECTIONAL_ENABLED_DEFAULT=true` (default) and once with `=false`.
+ *     `-DBIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true` (default) and once with `=false`.
  *     Each build runs the same fixture (1-board chassis, AUTO direction at
  *     the builder, no edge override, currentHeading == 0 deg, edge heading
  *     == 175 deg — a body-flip is the turn-saving choice). Asserts:
- *       - `Config::BIDIRECTIONAL_ENABLED == BIDIRECTIONAL_ENABLED_DEFAULT`
+ *       - `Config::BIDIRECTIONAL_AUTO_ENABLED == BIDIRECTIONAL_AUTO_ENABLED_DEFAULT`
  *         (the macro definitely propagated into the constant).
  *       - With the flag ON: `_resolveDirection` may pick REAR. (On a 1-board
  *         chassis the auto branch is *also* gated by `LINE_BOARD_COUNT >= 2`,
@@ -572,10 +572,10 @@ static void test_TC13_modifier_after_overflow_does_not_corrupt_prior_step()
 // ===========================================================================
 // TC14c — Compile-time kill-switch override.
 //
-// This test asserts the BIDIRECTIONAL_ENABLED_DEFAULT macro genuinely
+// This test asserts the BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro genuinely
 // propagates into the runtime constant AND that the constant gates
 // `_resolveDirection`'s auto path. The CMakeLists.txt under WRO2026/test/
-// builds this file TWICE — once with `-DBIDIRECTIONAL_ENABLED_DEFAULT=true`
+// builds this file TWICE — once with `-DBIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true`
 // and once with `=false` — and registers each binary as a separate ctest
 // target (path_tracker_bidirectional_on / path_tracker_bidirectional_off).
 //
@@ -588,11 +588,11 @@ static void test_TC13_modifier_after_overflow_does_not_corrupt_prior_step()
 
 static void test_TC14c_macro_propagates_into_runtime_constant()
 {
-    TEST_SCOPE("TC14c: BIDIRECTIONAL_ENABLED_DEFAULT macro propagates into Config::BIDIRECTIONAL_ENABLED");
+    TEST_SCOPE("TC14c: BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro propagates into Config::BIDIRECTIONAL_AUTO_ENABLED");
 
     // The macro definition is the load-bearing override knob. Whatever the
     // compiler was told via `-D` MUST land on the public constant.
-    ASSERT_EQ(Config::BIDIRECTIONAL_ENABLED, (bool) BIDIRECTIONAL_ENABLED_DEFAULT);
+    ASSERT_EQ(Config::BIDIRECTIONAL_AUTO_ENABLED, (bool) BIDIRECTIONAL_AUTO_ENABLED_DEFAULT);
 }
 
 static void test_TC14c_2board_auto_175deg_differs_by_flag()
@@ -613,10 +613,10 @@ static void test_TC14c_2board_auto_175deg_differs_by_flag()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       175.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    2);
 
-    if (Config::BIDIRECTIONAL_ENABLED)
+    if (Config::BIDIRECTIONAL_AUTO_ENABLED)
     {
         // Flag ON: 175 deg > 90 deg threshold → turn-saving REAR.
         ASSERT_TRUE(resolved == Direction::REAR);
@@ -644,7 +644,7 @@ static void test_TC14c_2board_auto_0deg_always_front()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       0.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    2);
 
     ASSERT_TRUE(resolved == Direction::FRONT);
@@ -667,7 +667,7 @@ static void test_TC14c_1board_chassis_always_front_even_at_175deg()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       175.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    1);
 
     ASSERT_TRUE(resolved == Direction::FRONT);
@@ -680,7 +680,7 @@ static void test_TC14c_1board_chassis_always_front_even_at_175deg()
 static void test_TC14c_announce_build_mode()
 {
     TEST_SCOPE("TC14c: build-mode announcement");
-    if (Config::BIDIRECTIONAL_ENABLED)
+    if (Config::BIDIRECTIONAL_AUTO_ENABLED)
     {
         std::printf("INFO: BIDIRECTIONAL_ENABLED == true (kill-switch ON build)\n");
     }

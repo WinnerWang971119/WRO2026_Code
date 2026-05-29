@@ -465,13 +465,13 @@ def test_tc9_path_pass_through_enabled_parity():
 
 
 # ---------------------------------------------------------------------------
-# TC14 — parity: BIDIRECTIONAL_ENABLED / BIDIRECTIONAL_TURN_THRESHOLD_DEG
+# TC14 — parity: BIDIRECTIONAL_AUTO_ENABLED / BIDIRECTIONAL_TURN_THRESHOLD_DEG
 # ---------------------------------------------------------------------------
 
 
 def test_tc14a_bidirectional_enabled_config_parity():
-    """TC14a: Config.h defines BIDIRECTIONAL_ENABLED_DEFAULT macro guard
-    and the BIDIRECTIONAL_ENABLED constexpr. Sim's hand-mirrored value
+    """TC14a: Config.h defines BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro guard
+    and the BIDIRECTIONAL_AUTO_ENABLED constexpr. Sim's hand-mirrored value
     matches the C++ default."""
     assert _CONFIG_H.exists(), (
         f"Config.h not found at {_CONFIG_H}. "
@@ -480,16 +480,16 @@ def test_tc14a_bidirectional_enabled_config_parity():
     config_h = _CONFIG_H.read_text(encoding="utf-8")
     # Anchored regex defends against false positives from unrelated bools.
     assert re.search(
-        r"#define\s+BIDIRECTIONAL_ENABLED_DEFAULT\s+true",
+        r"#define\s+BIDIRECTIONAL_AUTO_ENABLED_DEFAULT\s+true",
         config_h,
-    ), "Config.h missing #define BIDIRECTIONAL_ENABLED_DEFAULT true"
+    ), "Config.h missing #define BIDIRECTIONAL_AUTO_ENABLED_DEFAULT true"
     assert re.search(
-        r"constexpr\s+bool\s+BIDIRECTIONAL_ENABLED\s*=",
+        r"constexpr\s+bool\s+BIDIRECTIONAL_AUTO_ENABLED\s*=",
         config_h,
-    ), "Config.h missing constexpr bool BIDIRECTIONAL_ENABLED = ..."
-    # Sim parity: runtime.BIDIRECTIONAL_ENABLED must equal C++ default (True).
-    assert _runtime.BIDIRECTIONAL_ENABLED is True, (
-        "Sim BIDIRECTIONAL_ENABLED diverged from C++ default (true)"
+    ), "Config.h missing constexpr bool BIDIRECTIONAL_AUTO_ENABLED = ..."
+    # Sim parity: runtime.BIDIRECTIONAL_AUTO_ENABLED must equal C++ default (True).
+    assert _runtime.BIDIRECTIONAL_AUTO_ENABLED is True, (
+        "Sim BIDIRECTIONAL_AUTO_ENABLED diverged from C++ default (true)"
     )
 
 

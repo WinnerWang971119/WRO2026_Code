@@ -539,7 +539,7 @@ void PathTrackerClass::update()
                                 inboundBody,
                                 outbound.heading_deg,
                                 (nextNext == _destinationNode),
-                                Config::BIDIRECTIONAL_ENABLED,
+                                Config::BIDIRECTIONAL_AUTO_ENABLED,
                                 Config::LINE_BOARD_COUNT);
 
                             float outboundBody = outbound.heading_deg;
@@ -731,7 +731,7 @@ void PathTrackerClass::_onPlanNextHop()
         currentWorld,
         edge.heading_deg,
         isLastHop,
-        Config::BIDIRECTIONAL_ENABLED,
+        Config::BIDIRECTIONAL_AUTO_ENABLED,
         Config::LINE_BOARD_COUNT);
 
     // ------------------------------------------------------------------------

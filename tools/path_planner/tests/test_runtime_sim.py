@@ -751,7 +751,7 @@ def test_projection_short_truncated_triangle():
 #
 # Fixtures: tools/path_planner/tests/fixtures/bidirectional_field_data.py
 # Code under test: tools/path_planner/sim/runtime.py -- resolve_direction,
-#                  PathTrackerSim.go_to, Direction, BIDIRECTIONAL_ENABLED,
+#                  PathTrackerSim.go_to, Direction, BIDIRECTIONAL_AUTO_ENABLED,
 #                  LINE_BOARD_COUNT.
 # ===========================================================================
 
@@ -837,17 +837,17 @@ def test_bidir_tc2_near_antiparallel_resolves_rear():
 
 
 # ---------------------------------------------------------------------------
-# TC3 -- BIDIRECTIONAL_ENABLED kill-switch disables auto REAR (AC9 clause a)
+# TC3 -- BIDIRECTIONAL_AUTO_ENABLED kill-switch disables auto REAR (AC9 clause a)
 # ---------------------------------------------------------------------------
 
 
 def test_bidir_tc3_kill_switch_disables_auto_rear(monkeypatch):
-    """TC3: When BIDIRECTIONAL_ENABLED is monkeypatched to False, a 175deg delta
+    """TC3: When BIDIRECTIONAL_AUTO_ENABLED is monkeypatched to False, a 175deg delta
     still resolves FRONT.  The auto step checks bidirectional_enabled and
     short-circuits to FRONT before evaluating the heading delta.
     Verifies AC9 clause a.
     """
-    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_ENABLED", False)
+    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_AUTO_ENABLED", False)
 
     result = resolve_direction(
         edge_dir_override=DirectionMode.DEFAULT,
@@ -874,7 +874,7 @@ def test_bidir_tc3b_kill_switch_off_explicit_rear_still_rear(monkeypatch):
     AC9 clause b: setRouteDirection(REAR) bypasses the kill-switch because
     step 4 (builder route) runs before step 5 (auto kill-switch check).
     """
-    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_ENABLED", False)
+    monkeypatch.setattr(_runtime, "BIDIRECTIONAL_AUTO_ENABLED", False)
 
     result = resolve_direction(
         edge_dir_override=DirectionMode.DEFAULT,

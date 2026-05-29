@@ -128,11 +128,11 @@ ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, targ
 ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, projection_mode)
 
 
-# MUST mirror ``Config::BIDIRECTIONAL_ENABLED`` in WRO2026/Config.h.
+# MUST mirror ``Config::BIDIRECTIONAL_AUTO_ENABLED`` in WRO2026/Config.h.
 # Python cannot import C++ headers, so this constant is hand-mirrored.
 # Pytest TC14a/b verify parity via regex grep on the header (no C parser);
 # see ``test_tc14_bidirectional_*_parity`` for the defending tests.
-BIDIRECTIONAL_ENABLED: bool = True
+BIDIRECTIONAL_AUTO_ENABLED: bool = True
 
 # MUST mirror ``Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG`` in WRO2026/Config.h.
 # When the pre-edge turn delta exceeds this threshold (absolute degrees),
@@ -181,7 +181,7 @@ __all__ = [
     "ACT_LINE_PASS",
     "ACT_LINE_REVERSE",
     "ACT_PROJECTION_REVERSE",
-    "BIDIRECTIONAL_ENABLED",
+    "BIDIRECTIONAL_AUTO_ENABLED",
     "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_BOARD_COUNT",
     "LINE_SENSOR_AXLE_OFFSET_CM",
@@ -365,7 +365,7 @@ def resolve_direction(
     :param is_last_hop: True iff the candidate edge terminates at the
         final destination of the route.
     :param bidirectional_enabled: project-wide kill switch for the auto
-        REAR step (mirrors ``Config::BIDIRECTIONAL_ENABLED``).
+        REAR step (mirrors ``Config::BIDIRECTIONAL_AUTO_ENABLED``).
     :param line_board_count: number of MXColor reflectance boards on
         the chassis (mirrors ``Config::LINE_BOARD_COUNT``). Auto step
         short-circuits to ``Direction.FRONT`` when ``< 2``.
@@ -486,7 +486,7 @@ def _should_pass_through(
         resolves to ``Direction.AUTO``. The next-next hop is the last
         hop iff ``next_next == goal_name``.
     :param bidirectional_enabled: optional module-level kill switch
-        override; ``None`` resolves to :data:`BIDIRECTIONAL_ENABLED`.
+        override; ``None`` resolves to :data:`BIDIRECTIONAL_AUTO_ENABLED`.
     :param line_board_count: optional board count override; ``None``
         resolves to :data:`LINE_BOARD_COUNT`.
     """
@@ -515,7 +515,7 @@ def _should_pass_through(
         builder_arrival if builder_arrival is not None else Direction.AUTO
     )
     resolved_enabled = (
-        bidirectional_enabled if bidirectional_enabled is not None else BIDIRECTIONAL_ENABLED
+        bidirectional_enabled if bidirectional_enabled is not None else BIDIRECTIONAL_AUTO_ENABLED
     )
     resolved_board_count = (
         line_board_count if line_board_count is not None else LINE_BOARD_COUNT
@@ -683,7 +683,7 @@ class PathTrackerSim:
                 current_heading=self._chassis.heading_deg,
                 edge_heading=edge_heading,
                 is_last_hop=is_last_hop,
-                bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                 line_board_count=LINE_BOARD_COUNT,
             )
             body_heading = _body_heading_for(direction, edge_heading)
@@ -722,7 +722,7 @@ class PathTrackerSim:
                     pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
-                    bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                     line_board_count=LINE_BOARD_COUNT,
                 ):
                     out.append((ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM))
@@ -812,7 +812,7 @@ class PathTrackerSim:
                 current_heading=self._chassis.heading_deg,
                 edge_heading=edge_heading,
                 is_last_hop=is_last_hop,
-                bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                 line_board_count=LINE_BOARD_COUNT,
             )
             body_heading = _body_heading_for(direction, edge_heading)
@@ -847,7 +847,7 @@ class PathTrackerSim:
                     pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
-                    bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                     line_board_count=LINE_BOARD_COUNT,
                 )
                 # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads

@@ -157,7 +157,7 @@ def compile_path(
         ACT_BLIND_REVERSE,
         ACT_LINE_REVERSE,
         ACT_PROJECTION_REVERSE,
-        BIDIRECTIONAL_ENABLED,
+        BIDIRECTIONAL_AUTO_ENABLED,
         LINE_BOARD_COUNT,
         Direction,
         _read_edge_dir_override,
@@ -184,7 +184,7 @@ def compile_path(
             current_heading=current_heading,
             edge_heading=edge_heading,
             is_last_hop=is_last_hop,
-            bidirectional_enabled=BIDIRECTIONAL_ENABLED,
+            bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
             line_board_count=LINE_BOARD_COUNT,
         )
 

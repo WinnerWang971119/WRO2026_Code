@@ -845,13 +845,21 @@ namespace Config
 #endif
     constexpr bool PATH_PASS_THROUGH_ENABLED = PATH_PASS_THROUGH_ENABLED_DEFAULT;
 
-    /// Master kill-switch for bidirectional line-following auto-selection.
-    /// When false, PathTracker never picks REAR direction automatically;
-    /// manual builder/edge overrides still work.
-#ifndef BIDIRECTIONAL_ENABLED_DEFAULT
-#define BIDIRECTIONAL_ENABLED_DEFAULT true
+    /// Kill-switch for bidirectional line-following auto-selection.
+    ///
+    /// Scope: gates ONLY the auto branch of `PathTracker::_resolveDirection`
+    /// (Step 5 — turn-saving REAR selection when |body delta| exceeds
+    /// `BIDIRECTIONAL_TURN_THRESHOLD_DEG`). Operator overrides (per-edge
+    /// `direction_override`, pipeline default, builder `setRouteDirection` /
+    /// `setArrivalDirection`) remain effective regardless of this flag.
+    ///
+    /// Renamed from `BIDIRECTIONAL_ENABLED` (PR #34 review) — the original
+    /// name was misleading ("master kill-switch") because overrides bypass
+    /// it; the `_AUTO_` infix matches the actual scope.
+#ifndef BIDIRECTIONAL_AUTO_ENABLED_DEFAULT
+#define BIDIRECTIONAL_AUTO_ENABLED_DEFAULT true
 #endif
-    constexpr bool BIDIRECTIONAL_ENABLED = BIDIRECTIONAL_ENABLED_DEFAULT;
+    constexpr bool BIDIRECTIONAL_AUTO_ENABLED = BIDIRECTIONAL_AUTO_ENABLED_DEFAULT;
 
     /// Angular threshold (degrees) above which PathTracker selects REAR
     /// line-following instead of performing a wide on-the-spot turn.

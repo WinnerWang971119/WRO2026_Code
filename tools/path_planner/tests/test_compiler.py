@@ -278,7 +278,7 @@ def _walk_expected_headings(
     later seeded a per-edge ``direction_override`` would cause non-deterministic
     parity failures because the mirror silently ignored Step 1.
 
-    Module-level constants ``BIDIRECTIONAL_ENABLED`` / ``LINE_BOARD_COUNT``
+    Module-level constants ``BIDIRECTIONAL_AUTO_ENABLED`` / ``LINE_BOARD_COUNT``
     are read off the live ``_runtime`` module at call time so a
     ``monkeypatch.setattr(_runtime, ...)`` propagates to this helper the
     same way it propagates to ``compile_path``'s lazy reads.
@@ -297,7 +297,7 @@ def _walk_expected_headings(
             current_heading=current,
             edge_heading=edge_heading,
             is_last_hop=((i + 1) == last_idx),
-            bidirectional_enabled=_runtime.BIDIRECTIONAL_ENABLED,
+            bidirectional_enabled=_runtime.BIDIRECTIONAL_AUTO_ENABLED,
             line_board_count=_runtime.LINE_BOARD_COUNT,
         )
         if direction == Direction.REAR:

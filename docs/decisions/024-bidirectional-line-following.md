@@ -5,7 +5,7 @@
 
 ## Rule
 
-When `LINE_BOARD_COUNT == 2` and `Config::BIDIRECTIONAL_ENABLED` is true,
+When `LINE_BOARD_COUNT == 2` and `Config::BIDIRECTIONAL_AUTO_ENABLED` is true,
 PathTracker chooses front-board (forward) or rear-board (reverse) traversal per
 hop by comparing the absolute heading delta to a strict
 `BIDIRECTIONAL_TURN_THRESHOLD_DEG` (default `90.0f`; ties go forward).
@@ -13,6 +13,12 @@ Manual overrides resolve in strict precedence: per-directed-edge
 `direction_override` in `routes.h` > `setArrivalDirection` (final hop only) >
 `setRouteDirection` (all hops) > auto. Pass-through (ADR-023) composes via the
 resolved body-heading delta, not the raw forward edge headings.
+
+The kill-switch (`BIDIRECTIONAL_AUTO_ENABLED`, renamed in PR #34 review from
+the misleading "ENABLED") gates ONLY the auto branch. Operator overrides
+(per-edge, pipeline default, builder route/arrival) bypass it. To fully
+disable bidirectional, clear the overrides in `field_data.py` AND set
+`BIDIRECTIONAL_AUTO_ENABLED` to false.
 
 When `LINE_BOARD_COUNT == 1` and REAR is forced (via override, builder, or edge
 tag), PathTracker raises `Fault::REVERSE_UNAVAILABLE`. Auto never picks REAR on
