@@ -216,6 +216,15 @@ private:
     uint32_t _faultPhaseStart_ms = 0;
     bool     _faultLedOn         = false;
     bool     _btnPrev            = false;
+
+    /// True iff the most recent step-pushing verb (goTo/wait/print/beep/led)
+    /// successfully enqueued a step. setRouteDirection / setArrivalDirection
+    /// MUST consult this flag before mutating `_queue[_count - 1]` — without
+    /// it, a chained modifier after a dropped overflow step silently rewrites
+    /// the PREVIOUS step (often another GOTO) and corrupts an unrelated goal's
+    /// direction. Reset by every step-pushing verb so the modifier can only
+    /// ever target the immediately-preceding push.
+    bool     _lastPushOk         = false;
 };
 
 extern MissionClass Mission;

@@ -215,37 +215,46 @@ namespace mission_replica
         Direction arrival_direction = Direction::AUTO;
     };
 
-    /// Fixed-size queue + count, mirroring `_queue` + `_count` in MissionClass.
+    /// Fixed-size queue + count + last-push tracker, mirroring `_queue`,
+    /// `_count`, and `_lastPushOk` in MissionClass.
     struct Queue
     {
         static constexpr uint8_t CAPACITY = Config::MAX_MISSION_STEPS;
         Step    items[CAPACITY] = {};
         uint8_t count = 0;
+        bool    lastPushOk = false;
 
         bool push(const Step& s)
         {
-            if (count >= CAPACITY) return false;
+            if (count >= CAPACITY)
+            {
+                lastPushOk = false;
+                return false;
+            }
             items[count++] = s;
+            lastPushOk = true;
             return true;
         }
     };
 
-    /// Replicates `MissionClass::setRouteDirection` (Mission.cpp:106-115).
-    /// Returns true if the modifier wrote through, false if it was rejected.
+    /// Replicates `MissionClass::setRouteDirection` (Mission.cpp). Returns
+    /// true if the modifier wrote through, false if rejected by any of the
+    /// three guards (no push, push overflowed, last step not GOTO).
     static bool setRouteDirection(Queue& q, Direction d)
     {
+        if (!q.lastPushOk) return false;
         if (q.count == 0 || q.items[q.count - 1].type != StepType::GOTO)
         {
-            // Production also emits a Serial warning; not asserted here.
             return false;
         }
         q.items[q.count - 1].route_direction = d;
         return true;
     }
 
-    /// Replicates `MissionClass::setArrivalDirection` (Mission.cpp:117-126).
+    /// Replicates `MissionClass::setArrivalDirection`.
     static bool setArrivalDirection(Queue& q, Direction d)
     {
+        if (!q.lastPushOk) return false;
         if (q.count == 0 || q.items[q.count - 1].type != StepType::GOTO)
         {
             return false;
@@ -506,6 +515,54 @@ static void test_TC13_modifier_targets_last_step_only()
     ASSERT_EQ(q.count, (uint8_t) 2);
 }
 
+static void test_TC13_modifier_after_overflow_does_not_corrupt_prior_step()
+{
+    TEST_SCOPE("TC13: modifier after queue-full overflow does NOT rewrite the prior GOTO's direction");
+
+    // Regression for the queue-full corruption bug from /code-review max:
+    // an overflowed Mission.goTo() previously left _count unchanged, so a
+    // chained .setRouteDirection() silently targeted the PREVIOUS step
+    // (often another GOTO) instead of being rejected. Fix: track the last
+    // push result and bail when it was false.
+
+    using namespace mission_replica;
+    Queue q;
+
+    // Fill the queue to capacity with GOTO steps.
+    for (uint8_t i = 0; i < Queue::CAPACITY; ++i)
+    {
+        Step s{};
+        s.type = StepType::GOTO;
+        ASSERT_TRUE(q.push(s));
+    }
+    ASSERT_EQ(q.count, Queue::CAPACITY);
+    ASSERT_TRUE(q.lastPushOk);
+
+    // Tag the last successfully-pushed GOTO so we can detect corruption.
+    q.items[Queue::CAPACITY - 1].route_direction = Direction::FRONT;
+
+    // Now push one more — overflow. lastPushOk must flip to false.
+    Step overflow{};
+    overflow.type = StepType::GOTO;
+    ASSERT_FALSE(q.push(overflow));
+    ASSERT_FALSE(q.lastPushOk);
+    ASSERT_EQ(q.count, Queue::CAPACITY);    // count unchanged
+
+    // Chained modifier on the (dropped) overflow step. MUST be rejected
+    // because lastPushOk is false — without the fix, it would silently
+    // rewrite q.items[CAPACITY - 1].route_direction (the prior valid GOTO).
+    const bool wrote = setRouteDirection(q, Direction::REAR);
+    ASSERT_FALSE(wrote);
+
+    // The previously-tagged FRONT must survive untouched.
+    ASSERT_TRUE(q.items[Queue::CAPACITY - 1].route_direction == Direction::FRONT);
+
+    // Same expectation for setArrivalDirection.
+    const bool wroteArrival = setArrivalDirection(q, Direction::REAR);
+    ASSERT_FALSE(wroteArrival);
+    ASSERT_TRUE(q.items[Queue::CAPACITY - 1].arrival_direction == Direction::AUTO);
+}
+
 // ===========================================================================
 // TC14c — Compile-time kill-switch override.
 //
@@ -642,12 +699,13 @@ int main()
     test_TC12_line_rear_2board_allowed();
     test_TC12_line_front_1board_allowed();
 
-    // TC13 — Mission modifier no-op on non-GOTO.
+    // TC13 — Mission modifier no-op on non-GOTO + queue-overflow corruption regression.
     test_TC13_setRouteDirection_after_wait_is_noop();
     test_TC13_setArrivalDirection_after_print_is_noop();
     test_TC13_setRouteDirection_on_empty_queue_is_noop();
     test_TC13_setRouteDirection_after_goto_writes_through();
     test_TC13_modifier_targets_last_step_only();
+    test_TC13_modifier_after_overflow_does_not_corrupt_prior_step();
 
     // TC14c — Compile-time kill-switch override.
     test_TC14c_macro_propagates_into_runtime_constant();
