@@ -41,7 +41,18 @@ greedy scheduler (ADR-008) can target specific slow tasks at that point.
   advances) or `false` for yield (Mission logs a `TASK YIELD` event and advances).
   Retry-once policy from ADR-009 lives inside task bodies, not in the Mission FSM.
 - Operators author missions in `WRO2026.ino::buildMission()` as a chain of
-  `Mission.<verb>(...)` calls including `.task(name, args...)`.
+  `Mission.<verb>(...)` calls including `.task(name, args...)`. Task names are
+  validated against `Tasks._registry` at queue time inside `task<>()`: an
+  unknown name does NOT enqueue, sets a sticky `_buildError` latch, and
+  `Mission.start()` refuses to arm — surfacing typos before any chassis motion.
+- **Mission verbs are queue-only — do not call them from task bodies.** All
+  `Mission.<verb>(...)` calls (including `goTo` / `wait` / `print` / `beep` /
+  `led` / `task`) APPEND to the queue; calling them inside a task body queues
+  the step for execution AFTER the current TASK step's `_advanceStep`, not
+  synchronously. Task bodies that need to drive the chassis, beep, or check
+  state MUST use the underlying singletons directly: `PathTracker`, `Drive`,
+  `LineFollower`, `MiniR4.Buzzer`, `MiniR4.LED`. Only `task` guards against
+  nested calls with a Serial warning; the others queue silently.
 - **Sync-drain-inside-tick exception to ADR-016:** ADR-016 forbids sync-blocking
   calls from registered tick callbacks. Task bodies execute inside
   `Mission.update()` via `Tasks.runTask`, which IS called from `cooperativeTick`.
@@ -49,6 +60,12 @@ greedy scheduler (ADR-008) can target specific slow tasks at that point.
   operator-script layer, mirroring what `buildMission()` would do as an unrolled
   blocking sequence in `setup()`. Re-entrancy is bounded by the `Tasks.inTask()`
   guard checked at the top of `MissionClass::update()`.
+- **`Tasks._aborted` lifecycle.** `Mission.abort()` calls `Tasks.abort()` FIRST
+  (before disabling PathTracker/LineFollower/Drive) so any subsystem polling
+  `Tasks.isAborted()` during its own shutdown sees the latched flag. The latch
+  is cleared by `Mission.start()` via `Tasks.clearAbort()` so it does not bleed
+  across mission runs. Task bodies that want cooperative cancellation should
+  poll `Tasks.isAborted()` at appropriate checkpoints inside their script.
 - Sim parity (issue #33 CTPS): the name-string registry is enumerable; a Python
   mirror of each task body follows naturally because both languages support
   sequential script-style flow. Sim work is a follow-up to this ADR.
