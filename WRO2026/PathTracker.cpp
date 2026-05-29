@@ -229,8 +229,12 @@ void PathTrackerClass::clearFault()
 
 void PathTrackerClass::abort()
 {
-    // Stop the chassis first; Drive.stop(true) also clears Drive's queue,
-    // so a half-issued turn or driveDist will not resume.
+    // Stop the chassis first. Disable LineFollower BEFORE Drive.stop(true)
+    // because the follower writes to Drive every tick — if it is still
+    // enabled after Drive.stop, the next cooperativeTick() iteration's
+    // LineFollower.update() re-issues Drive.setSpeed(...) and undoes the
+    // halt. Mirror of Mission::abort()'s ordering (Mission.cpp:166).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
@@ -630,6 +634,12 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _fault.fromNode = from;
     _fault.destNode = to;
 
+    // Disable LineFollower BEFORE Drive.stop(true). If the follower is left
+    // enabled (e.g., fault fired during LINE_FOLLOW or LINE_OVERSHOOT with
+    // brakeOnGate=false), its next update() tick re-issues Drive.setSpeed()
+    // and undoes the halt — making the fault non-fail-safe in exactly the
+    // scenario it is meant to protect. Codex P1 (PR #34 review).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
