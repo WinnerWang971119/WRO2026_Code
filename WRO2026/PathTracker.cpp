@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <math.h>
 
+#include "DirectionPolicy.h"
 #include "Drive.h"
 #include "Intersection.h"
 #include "LineFollower.h"
@@ -61,6 +62,11 @@ namespace
             ? Routes::PIPELINE_CONFIG.turn
             : edge.pre_turn_mode_override;
     }
+
+    // NOTE: the production direction-resolution helper has been promoted to
+    // `DirectionPolicy.h::resolveDirection` (header-only inline) so both
+    // production and the host-compile test target link the same definition.
+    // See ADR-024 and the PR #34 review.
 
     /**
      * @brief Map a `Routes::LineMode` to a `Config::SpeedPreset` for
@@ -147,13 +153,25 @@ PathTrackerGoToBuilder::~PathTrackerGoToBuilder()
     {
         return;
     }
-    _owner._applyGoToBuilder(_goalId, _blocking);
+    _owner._applyGoToBuilder(_goalId, _blocking, _routeDirection, _arrivalDirection);
     _executed = true;
 }
 
 PathTrackerGoToBuilder& PathTrackerGoToBuilder::async()
 {
     _blocking = false;
+    return *this;
+}
+
+PathTrackerGoToBuilder& PathTrackerGoToBuilder::setRouteDirection(Direction d)
+{
+    _routeDirection = d;
+    return *this;
+}
+
+PathTrackerGoToBuilder& PathTrackerGoToBuilder::setArrivalDirection(Direction d)
+{
+    _arrivalDirection = d;
     return *this;
 }
 
@@ -167,10 +185,14 @@ bool PathTrackerClass::begin()
     _qTail  = 0;
     _qCount = 0;
     _state  = State::IDLE;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
-    _passThrough     = false;
+    _destinationNode         = FieldMap::NODE_NONE;
+    _nextHop                 = FieldMap::NODE_NONE;
+    _activeEdgeType          = Routes::EdgeType::NONE;
+    _passThrough             = false;
+    _resolvedDirection       = Direction::AUTO;
+    _resolvedBodyHeading     = 0.0f;
+    _activeRouteDirection    = Direction::AUTO;
+    _activeArrivalDirection  = Direction::AUTO;
     _fault = FaultInfo{};
     return true;
 }
@@ -207,29 +229,38 @@ void PathTrackerClass::clearFault()
 
 void PathTrackerClass::abort()
 {
-    // Stop the chassis first; Drive.stop(true) also clears Drive's queue,
-    // so a half-issued turn or driveDist will not resume.
+    // Stop the chassis first. Disable LineFollower BEFORE Drive.stop(true)
+    // because the follower writes to Drive every tick — if it is still
+    // enabled after Drive.stop, the next cooperativeTick() iteration's
+    // LineFollower.update() re-issues Drive.setSpeed(...) and undoes the
+    // halt. Mirror of Mission::abort()'s ordering (Mission.cpp:166).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
-    _state           = State::IDLE;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
-    _passThrough     = false;
-    _fault           = FaultInfo{};
+    _state                  = State::IDLE;
+    _destinationNode        = FieldMap::NODE_NONE;
+    _nextHop                = FieldMap::NODE_NONE;
+    _activeEdgeType         = Routes::EdgeType::NONE;
+    _passThrough            = false;
+    _resolvedDirection      = Direction::AUTO;
+    _resolvedBodyHeading    = 0.0f;
+    _activeRouteDirection   = Direction::AUTO;
+    _activeArrivalDirection = Direction::AUTO;
+    _fault                  = FaultInfo{};
 }
 
 const char* PathTrackerClass::faultMnemonic(Fault kind)
 {
     switch (kind)
     {
-        case Fault::NONE:          return "OK";
-        case Fault::NOT_ZEROED:    return "NZ";
-        case Fault::UNREACHABLE:   return "UNR";
-        case Fault::DRIVE_FAULT:   return "DRV";
-        case Fault::BAD_NODE:      return "BAD";
-        case Fault::DRAIN_TIMEOUT: return "DRN";
+        case Fault::NONE:                return "OK";
+        case Fault::NOT_ZEROED:          return "NZ";
+        case Fault::UNREACHABLE:         return "UNR";
+        case Fault::DRIVE_FAULT:         return "DRV";
+        case Fault::BAD_NODE:            return "BAD";
+        case Fault::DRAIN_TIMEOUT:       return "DRN";
+        case Fault::REVERSE_UNAVAILABLE: return "REV";
     }
     return "??";
 }
@@ -238,15 +269,17 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
 // Queue
 // =========================================================================================
 
-bool PathTrackerClass::_enqueue(uint8_t goalId)
+bool PathTrackerClass::_enqueue(uint8_t goalId, Direction routeDir, Direction arrivalDir)
 {
     if (_qCount >= Config::PATH_QUEUE_CAPACITY)
     {
         Serial.println(F("[PathTracker] queue overflow; goTo dropped"));
         return false;
     }
-    _queue[_qTail].nodeId = goalId;
-    _qTail = (uint8_t) ((_qTail + 1) % Config::PATH_QUEUE_CAPACITY);
+    _queue[_qTail].nodeId            = goalId;
+    _queue[_qTail].route_direction   = routeDir;
+    _queue[_qTail].arrival_direction = arrivalDir;
+    _qTail  = (uint8_t) ((_qTail + 1) % Config::PATH_QUEUE_CAPACITY);
     _qCount++;
     return true;
 }
@@ -274,7 +307,11 @@ void PathTrackerClass::_clearQueue()
 // Builder dispatch
 // =========================================================================================
 
-void PathTrackerClass::_applyGoToBuilder(uint8_t goalId, bool blocking)
+void PathTrackerClass::_applyGoToBuilder(
+    uint8_t   goalId,
+    bool      blocking,
+    Direction routeDir,
+    Direction arrivalDir)
 {
     if (goalId == FieldMap::NODE_NONE || goalId >= Routes::N_NODES)
     {
@@ -293,7 +330,7 @@ void PathTrackerClass::_applyGoToBuilder(uint8_t goalId, bool blocking)
         Serial.println(F("); clear with clearFault()"));
         return;
     }
-    if (!_enqueue(goalId))
+    if (!_enqueue(goalId, routeDir, arrivalDir))
     {
         return;
     }
@@ -380,8 +417,10 @@ void PathTrackerClass::update()
                 _state = State::IDLE;
                 return;
             }
-            _destinationNode = e.nodeId;
-            _state           = State::PLAN_NEXT_HOP;
+            _destinationNode        = e.nodeId;
+            _activeRouteDirection   = e.route_direction;
+            _activeArrivalDirection = e.arrival_direction;
+            _state                  = State::PLAN_NEXT_HOP;
             return;
         }
 
@@ -433,15 +472,61 @@ void PathTrackerClass::update()
                     const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
                     if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
                     {
-                        const Routes::EdgeInfo& nextEdge = FieldMap::getEdge(_nextHop, nextNext);
-                        if (nextEdge.type != Routes::EdgeType::NONE)
+                        const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
+                        if (outbound.type != Routes::EdgeType::NONE)
                         {
-                            const uint8_t cur = Localization.getCurrentNode();
-                            const Routes::EdgeInfo& inboundEdge = FieldMap::getEdge(cur, _nextHop);
-                            float delta = nextEdge.heading_deg - inboundEdge.heading_deg;
+                            // Body-heading peek: the pass-through
+                            // delta MUST compare BODY-headings, not raw forward edge
+                            // headings. The chassis arrives at the intersection
+                            // facing `_resolvedBodyHeading` (set by `_onPlanNextHop`
+                            // for the inbound hop), which is either the inbound
+                            // edge heading (FRONT) or `+180°` (REAR). The outbound
+                            // body-heading is computed by re-resolving direction for
+                            // the next-next hop with `inboundBody` as currentHeading.
+                            // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
+                            const float inboundBody = _resolvedBodyHeading;
+
+                            // Read the builder overrides cached on DEQUEUE for the
+                            // in-flight goal. The next-next hop is still part of the
+                            // active goTo() call, so the same route_direction /
+                            // arrival_direction values apply (arrival only takes effect
+                            // when this is the final hop into the destination, which
+                            // _resolveDirection handles via the isLastHop flag).
+                            const Direction nextDir = resolveDirection(
+                                outbound.direction_override,
+                                Routes::PIPELINE_CONFIG.direction,
+                                _activeArrivalDirection,
+                                _activeRouteDirection,
+                                inboundBody,
+                                outbound.heading_deg,
+                                (nextNext == _destinationNode),
+                                Config::BIDIRECTIONAL_AUTO_ENABLED,
+                                Config::LINE_BOARD_COUNT);
+
+                            float outboundBody = outbound.heading_deg;
+                            if (nextDir == Direction::REAR)
+                            {
+                                outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
+                                if (outboundBody < 0.0f) outboundBody += 360.0f;
+                            }
+
+                            float delta = outboundBody - inboundBody;
                             while (delta >   180.0f) { delta -= 360.0f; }
                             while (delta <= -180.0f) { delta += 360.0f; }
-                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+
+                            // Pass-through requires BOTH (1) collinear body
+                            // headings AND (2) matching direction across the
+                            // intersection. A REAR→FRONT or FRONT→REAR transition
+                            // would force the dispatcher to flip
+                            // LineFollower.setReverse(...) mid-flight — instantly
+                            // swapping the active line board and inverting cruise
+                            // sign in one tick, jolting the chassis without a
+                            // controlled stop. Falling through to LINE_OVERSHOOT
+                            // (with brake, no pass-through) gives the controller
+                            // a clean re-init window before the new edge starts.
+                            // PR #34 review.
+                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
+                                nextDir == _resolvedDirection)
                             {
                                 _passThrough = true;
                             }
@@ -452,10 +537,22 @@ void PathTrackerClass::update()
                 // Arm the overshoot. Always set overshootMode=true (project-wide rule
                 // per ADR-023: the 5cm window dead-reckons through line-offline
                 // conditions). brakeOnGate and tShapeRampDown depend on _passThrough.
+                //
+                // `.setReverse(...)` is chained explicitly (PR #34 review). The
+                // previous code relied on LineFollower's sticky _reverse state —
+                // `setEnabled(true)` without `setReverse` left whatever was last
+                // configured. That works today, but a future change to
+                // LineFollower::_applyEnableBuilder that reset _reverse on
+                // re-enable would silently break the overshoot window on REAR
+                // LINE hops (overshoot dead-reckons forward instead of reverse).
+                // Making the direction explicit at every re-arm point removes
+                // the implicit coupling.
+                const bool overshootReverse = (_resolvedDirection == Direction::REAR);
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
                             .setTShapeRampDown(!_passThrough)
                             .setOvershootMode(true)
+                            .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
@@ -537,13 +634,21 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _fault.fromNode = from;
     _fault.destNode = to;
 
+    // Disable LineFollower BEFORE Drive.stop(true). If the follower is left
+    // enabled (e.g., fault fired during LINE_FOLLOW or LINE_OVERSHOOT with
+    // brakeOnGate=false), its next update() tick re-issues Drive.setSpeed()
+    // and undoes the halt — making the fault non-fail-safe in exactly the
+    // scenario it is meant to protect. Codex P1 (PR #34 review).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
-    _state           = State::FAULT;
-    _destinationNode = FieldMap::NODE_NONE;
-    _nextHop         = FieldMap::NODE_NONE;
-    _activeEdgeType  = Routes::EdgeType::NONE;
+    _state                  = State::FAULT;
+    _destinationNode        = FieldMap::NODE_NONE;
+    _nextHop                = FieldMap::NODE_NONE;
+    _activeEdgeType         = Routes::EdgeType::NONE;
+    _activeRouteDirection   = Direction::AUTO;
+    _activeArrivalDirection = Direction::AUTO;
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -583,8 +688,88 @@ void PathTrackerClass::_onPlanNextHop()
     _activeEdgeType = edge.type;
 
     const float currentWorld = Localization.getHeadingDeg();
-    const float targetWorld  = edge.heading_deg;
-    float delta = targetWorld - currentWorld;
+
+    // -----------------------------------------------------------------------
+    // Bidirectional direction resolution.
+    //
+    // Resolve per-hop precedence: per-edge override → pipeline default →
+    // builder arrival override (last-hop only) → builder route override →
+    // auto (turn-saving comparison against BIDIRECTIONAL_TURN_THRESHOLD_DEG,
+    // gated by 2-board chassis + kill-switch). Then compute the body-target
+    // heading the chassis must face: equal to edge.heading_deg for FRONT,
+    // or (edge.heading_deg + 180°) mod 360 for REAR (so the rear board ends
+    // up pointing along the edge direction).
+    //
+    // The skip-turn check below MUST compare against bodyTarget — not the raw
+    // edge.heading_deg — otherwise a chassis already aligned with the raw
+    // forward heading would short-circuit a REAR hop into a forward-going
+    // LineFollower dispatch.
+    // -----------------------------------------------------------------------
+    const bool isLastHop = (nxt == _destinationNode);
+
+    // Builder overrides cached on DEQUEUE for the in-flight goal (T8).
+    // Both default to Direction::AUTO for bare `goTo(...)` calls — the
+    // `_resolveDirection` precedence layers below per-edge / pipeline
+    // overrides only kick in when the operator chained
+    // `.setRouteDirection(...)` / `.setArrivalDirection(...)`.
+    const Direction builderArrival = _activeArrivalDirection;
+    const Direction builderRoute   = _activeRouteDirection;
+
+    const Direction resolved = resolveDirection(
+        edge.direction_override,
+        Routes::PIPELINE_CONFIG.direction,
+        builderArrival,
+        builderRoute,
+        currentWorld,
+        edge.heading_deg,
+        isLastHop,
+        Config::BIDIRECTIONAL_AUTO_ENABLED,
+        Config::LINE_BOARD_COUNT);
+
+    // ------------------------------------------------------------------------
+    // Early reverse-availability guard.
+    //
+    // Reject REAR LINE/PROJECTION on a 1-board chassis BEFORE the pre-edge turn
+    // is dispatched, otherwise the chassis physically rotates 180° to face the
+    // (unservable) REAR body-heading and then halts in fault — leaving the
+    // robot pointing backward with REVERSE_UNAVAILABLE latched and the operator
+    // forced to manually re-orient.
+    //
+    // The auto branch of `_resolveDirection` short-circuits to FRONT when
+    // `LINE_BOARD_COUNT < 2`, so this guard only fires for an operator-forced
+    // REAR (per-edge override, pipeline default, or builder route/arrival).
+    // BLIND REAR is permitted on 1-board chassis (no line sensor required),
+    // so the check is scoped to LINE / PROJECTION.
+    //
+    // The same guard is left in `_dispatchEdgeAfterTurn` as defensive
+    // redundancy — if a future FSM change introduces a path into the
+    // dispatcher that bypasses this early site, the late guard still fires.
+    // ------------------------------------------------------------------------
+    if (resolved == Direction::REAR && Config::LINE_BOARD_COUNT < 2 &&
+        (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION))
+    {
+        Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+        Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+        Serial.print(F(" at u="));
+        Serial.print(cur);
+        Serial.print(F(" v="));
+        Serial.print(nxt);
+        Serial.println(F(" requires rear board (pre-turn guard)"));
+        _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
+        return;
+    }
+
+    float bodyTarget = edge.heading_deg;
+    if (resolved == Direction::REAR)
+    {
+        bodyTarget = fmodf(bodyTarget + 180.0f, 360.0f);
+        if (bodyTarget < 0.0f) bodyTarget += 360.0f;
+    }
+
+    _resolvedDirection   = resolved;
+    _resolvedBodyHeading = bodyTarget;
+
+    float delta = bodyTarget - currentWorld;
     while (delta > 180.0f)   { delta -= 360.0f; }
     while (delta <= -180.0f) { delta += 360.0f; }
 
@@ -599,12 +784,17 @@ void PathTrackerClass::_onPlanNextHop()
         // would keep issuing Drive.setSpeed each tick while Drive.turnToYaw
         // owns the wheels — two writers fighting for motors. Disable the
         // follower cleanly (no brake) so Drive's turn command runs alone.
+        //
+        // The same guard fires for REAR hops where the peek (now also
+        // body-heading aware) and this branch agree on FRONT semantics
+        // but disagree on whether a turn is needed: the bodyTarget vs.
+        // currentWorld delta is the authoritative trigger.
         if (LineFollower.isEnabled())
         {
             LineFollower.setEnabled(false).setBrake(false);
         }
 
-        const int16_t imuTarget = Localization.toImuYaw(targetWorld);
+        const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
 
         // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
         // default) and map to the lower-MCU mode byte the Turn builders accept.
@@ -623,6 +813,37 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 {
     const uint8_t cur = Localization.getCurrentNode();
     const Routes::EdgeInfo& edge = FieldMap::getEdge(cur, _nextHop);
+
+    // -----------------------------------------------------------------------
+    // Reverse-availability guard (T7 / issue #19) — defensive redundancy.
+    //
+    // Same condition as the early guard in `_onPlanNextHop` (see the block
+    // beginning "Early reverse-availability guard"). The early guard is the
+    // load-bearing site — it fires before the 180° pre-edge turn dispatches —
+    // and this dispatcher-side check exists only to defend against future
+    // FSM changes that might route into `_dispatchEdgeAfterTurn` without
+    // re-running `_onPlanNextHop`.
+    //
+    // BLIND REAR is permitted on a 1-board chassis: dead-reckoned reverse
+    // does not require a rear line sensor — only negative PWM.
+    // -----------------------------------------------------------------------
+    if (_resolvedDirection == Direction::REAR && Config::LINE_BOARD_COUNT < 2)
+    {
+        if (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION)
+        {
+            Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+            Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+            Serial.print(F(" at u="));
+            Serial.print(cur);
+            Serial.print(F(" v="));
+            Serial.print(_nextHop);
+            Serial.println(F(" requires rear board"));
+            _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
+            return;
+        }
+    }
+
+    const bool reverse = (_resolvedDirection == Direction::REAR);
 
     switch (edge.type)
     {
@@ -646,10 +867,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // no ramp-up reseed fires. Cruise PWM is preserved across the
             // intersection (preset may snap if the new edge has a different
             // LineMode override; see ADR-023 trade-off).
+            //
+            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
+            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
+            // — the guard above rejects REAR LINE on a 1-board chassis.
             const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
             const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setReverse(reverse)
                         .setOvershootMode(false);
             _state = State::LINE_FOLLOW;
             _passThrough = false;    // consumed
@@ -673,10 +899,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //
             // For non-pass-through, the controller is already disabled (T5 path);
             // `setEnabled(true)` performs a fresh enable with ramp-up.
+            //
+            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
+            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
+            // — the guard above rejects REAR PROJECTION on a 1-board chassis.
             const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
             const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
+                        .setReverse(reverse)
                         .setOvershootMode(false)
                         .setDistanceTarget(edge.distance_cm);
             _state = State::PROJECTION_FOLLOW;
@@ -710,6 +941,15 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 LineFollower.setEnabled(false).setBrake(false);
             }
 
+            // BLIND REAR (T7 / issue #19): sign-by-power is the convention —
+            // `driveDist` rejects negative cm at Drive.h:1254 (positive distance,
+            // signed PWM). Negate the cruise + start/end speeds when REAR so the
+            // trapezoid ramps from a negative-direction PWM straight away
+            // (Drive.h:1288-1296 documents the matching sign-by-cruise rule).
+            const int16_t cruisePwm = reverse ? (int16_t) -Config::SPEED_NORMAL
+                                              : (int16_t)  Config::SPEED_NORMAL;
+            const int16_t signedStartSpeed = reverse ? (int16_t) -startSpeed : startSpeed;
+
             // Per-edge motion-profile override (DEFAULT → pipeline default).
             // Three concrete BlindMode values map onto the Drive builder chain:
             //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
@@ -718,7 +958,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //   - GYRO_TSHAPE : Drive.driveDist(cm).setMode(GYRO).tShape().async()
             //                   (straight-line yaw lock + trapezoidal profile; heading
             //                   sourced from edge.heading_deg, converted into the IMU
-            //                   frame via Localization.toImuYaw)
+            //                   frame via Localization.toImuYaw — body heading already
+            //                   accounts for REAR via `_resolvedBodyHeading`, so passing
+            //                   `edge.heading_deg` keeps the yaw target correct only when
+            //                   FRONT; REAR uses `_resolvedBodyHeading`).
             //   - RAW_FLAT    : Drive.driveDist(cm).setMode(RAW)
             //                       .setStartSpeed(cruise).setEndSpeed(cruise).async()
             //                   (open-loop PWM, no ramp — start/end speeds pinned to the
@@ -727,17 +970,19 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // DEFAULT cannot reach here (resolved above), but we route it through
             // the SYNC_TSHAPE branch defensively to match the historical behaviour.
             const Routes::BlindMode resolvedBlindMode = _resolveBlindMode(edge);
-            const int16_t           cruisePwm         = Config::SPEED_NORMAL;
 
             switch (resolvedBlindMode)
             {
                 case Routes::BlindMode::GYRO_TSHAPE:
                 {
-                    const int16_t imuTarget = Localization.toImuYaw(edge.heading_deg);
+                    // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
+                    // rotated 180° for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
+                    const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
-                         .setStartSpeed(startSpeed)    // pass-through: cruise; otherwise: PWM_MIN_MAGNITUDE
+                         .setPower(cruisePwm)
+                         .setStartSpeed(signedStartSpeed)    // pass-through: cruise; otherwise: ±PWM_MIN_MAGNITUDE
                          .tShape()
                          .async();
                     break;
@@ -752,9 +997,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // Non-pass-through MUST keep .setStartSpeed(cruisePwm) — anything else
                     // introduces a ramp and breaks the FLAT contract for callers that picked
                     // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
-                    const int16_t rawStart = _passThrough ? startSpeed : cruisePwm;
+                    const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::RAW)
+                         .setPower(cruisePwm)
                          .setStartSpeed(rawStart)
                          .setEndSpeed(cruisePwm)
                          .async();
@@ -767,7 +1013,8 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 {
                     Drive.driveDist(edge.distance_cm)
                          .setMode(DriveMode::SYNC)
-                         .setStartSpeed(startSpeed)
+                         .setPower(cruisePwm)
+                         .setStartSpeed(signedStartSpeed)
                          .tShape()
                          .async();
                     break;

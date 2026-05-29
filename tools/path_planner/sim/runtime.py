@@ -54,6 +54,7 @@ Public surface:
 
 from __future__ import annotations
 
+from enum import IntEnum
 from typing import List, Optional
 
 import networkx as nx
@@ -66,10 +67,12 @@ from tools.path_planner.compiler import (
     Primitive,
     normalize_turn,
 )
+from tools.path_planner import pipeline_config as _pipeline_config
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
+    DirectionMode,
     LineMode,
     ProjectionMode,
     TurnMode,
@@ -112,22 +115,90 @@ ACT_LINE_OVERSHOOT: str = "line_overshoot"
 # See ADR-023 "Pass-through collinear intersections".
 ACT_LINE_PASS: str = "line_pass"
 
+# Bidirectional line-following primitive tags. Each mirrors its forward
+# counterpart (``ACT_FOLLOW_INT`` / ``ACT_FORWARD`` / ``ACT_FOLLOW_DIST``)
+# but drives the chassis BACKWARD along its current heading instead of
+# rotating in place. Emitted by :class:`PathTrackerSim.go_to` (T11+) when
+# :func:`resolve_direction` selects REVERSE for the upcoming edge based on
+# the turn delta vs :data:`BIDIRECTIONAL_TURN_THRESHOLD_DEG`. The C++
+# runtime owns the matching ``EDGE_*_REVERSE`` dispatch path; the sim's
+# emission must stay byte-identical to the compiler's output (TC18 parity).
+ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, target_node, line_mode)
+ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
+ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, projection_mode)
+
+
+# MUST mirror ``Config::BIDIRECTIONAL_AUTO_ENABLED`` in WRO2026/Config.h.
+# Python cannot import C++ headers, so this constant is hand-mirrored.
+# Pytest TC14a/b verify parity via regex grep on the header (no C parser);
+# see ``test_tc14_bidirectional_*_parity`` for the defending tests.
+BIDIRECTIONAL_AUTO_ENABLED: bool = True
+
+# MUST mirror ``Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG`` in WRO2026/Config.h.
+# When the pre-edge turn delta exceeds this threshold (absolute degrees),
+# the runtime drives the rear sensor toward the next intersection (emitting
+# ``ACT_*_REVERSE``) instead of rotating in place + driving forward. TC14a/b
+# defend the value parity.
+BIDIRECTIONAL_TURN_THRESHOLD_DEG: float = 90.0
+
+# MUST mirror ``Config::LINE_BOARD_COUNT`` in WRO2026/Config.h.
+# Python cannot import C++ headers, so this constant is hand-mirrored.
+# Default to 2 here (the bidirectional-capable chassis configuration);
+# the resolve_direction "auto" step short-circuits to FRONT when
+# LINE_BOARD_COUNT < 2 since the rear board is required to follow a line
+# backward. Tests that need to exercise the 1-board fault path can patch
+# this module-level constant the same way TC9 patches PATH_PASS_THROUGH_ENABLED.
+LINE_BOARD_COUNT: int = 2
+
+
+class Direction(IntEnum):
+    """Travel direction the chassis takes through an edge.
+
+    Mirror of the C++ ``enum class Direction : uint8_t`` in
+    ``WRO2026/NavTypes.h``. ``AUTO`` and :class:`DirectionMode.DEFAULT`
+    both encode "no override" but are distinct types — never compare
+    across them. The resolution algorithm tests each independently.
+    """
+
+    AUTO  = 0    # defer to per-edge override / auto algorithm
+    FRONT = 1    # force forward (chassis front leads)
+    REAR  = 2    # force reverse (chassis rear leads)
+
+
+def wrap_pm180(delta_deg: float) -> float:
+    """Wrap a heading delta into ``(-180, +180]`` degrees.
+
+    Thin alias of :func:`tools.path_planner.compiler.normalize_turn`,
+    re-exposed under the name the resolution algorithm uses in the plan
+    so the Python code reads identically to the C++ helper.
+    """
+    return normalize_turn(delta_deg)
+
 
 __all__ = [
+    "ACT_BLIND_REVERSE",
     "ACT_LINE_OVERSHOOT",
     "ACT_LINE_PASS",
+    "ACT_LINE_REVERSE",
+    "ACT_PROJECTION_REVERSE",
+    "BIDIRECTIONAL_AUTO_ENABLED",
+    "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
+    "LINE_BOARD_COUNT",
     "LINE_SENSOR_AXLE_OFFSET_CM",
     "NAV_TURN_TOLERANCE_DEG",
     "PATH_PASS_THROUGH_ENABLED",
     "TURN_EPSILON_DEG",
+    "Direction",
     "LocalizationSim",
     "PathTrackerSim",
     "UnreachableGoalError",
     "resolve_blind_mode",
+    "resolve_direction",
     "resolve_line_mode",
     "resolve_pre_turn_mode",
     "resolve_projection_mode",
     "walk_next_hop",
+    "wrap_pm180",
 ]
 
 
@@ -248,7 +319,135 @@ def resolve_pre_turn_mode(edge) -> TurnMode:
     return _resolve_override(edge, "pre_turn_mode", PIPELINE_CONFIG.turn, TurnMode)
 
 
-def _should_pass_through(graph, next_hop, current_edge, intersected_node, goal_name) -> bool:
+def resolve_direction(
+    edge_dir_override: DirectionMode,
+    pipeline_default: DirectionMode,
+    builder_arrival: "Direction",
+    builder_route: "Direction",
+    current_heading: float,
+    edge_heading: float,
+    is_last_hop: bool,
+    bidirectional_enabled: bool,
+    line_board_count: int,
+) -> "Direction":
+    """Resolve which physical direction the chassis takes through one hop.
+
+    Function-identical Python mirror of the C++ ``PathTracker::_resolveDirection``
+    helper (T5). The algorithm is fully specified in the plan
+    "API Contracts — Resolution algorithm" section; both implementations
+    must stay byte-for-byte equivalent so the offline sim and the robot
+    agree on every hop's direction (TC18 parity).
+
+    Precedence (highest first):
+
+    1. Per-edge override (``EdgeInfo::direction_override``) is binding.
+    2. Pipeline default (``PipelineConfig::direction``) is binding when
+       not ``DEFAULT``.
+    3. Builder arrival override wins on the final hop.
+    4. Builder route override wins on every hop.
+    5. Auto: REAR only if both the kill-switch is on AND the chassis has
+       a rear board AND the body would need to turn more than
+       :data:`BIDIRECTIONAL_TURN_THRESHOLD_DEG` to face the edge forward.
+
+    :param edge_dir_override: :class:`DirectionMode` from the graph edge
+        attribute (or ``DirectionMode.DEFAULT`` when absent).
+    :param pipeline_default: :class:`DirectionMode` from
+        :data:`PIPELINE_CONFIG.direction`.
+    :param builder_arrival: :class:`Direction` set via
+        ``setArrivalDirection``; ``Direction.AUTO`` means no override.
+        Only considered on the last hop of the route.
+    :param builder_route: :class:`Direction` set via
+        ``setRouteDirection``; ``Direction.AUTO`` means no override.
+        Applies to every hop.
+    :param current_heading: chassis heading in degrees (any wrap; the
+        algorithm wraps the delta into ``(-180, +180]`` internally).
+    :param edge_heading: forward heading of the candidate edge in degrees.
+    :param is_last_hop: True iff the candidate edge terminates at the
+        final destination of the route.
+    :param bidirectional_enabled: project-wide kill switch for the auto
+        REAR step (mirrors ``Config::BIDIRECTIONAL_AUTO_ENABLED``).
+    :param line_board_count: number of MXColor reflectance boards on
+        the chassis (mirrors ``Config::LINE_BOARD_COUNT``). Auto step
+        short-circuits to ``Direction.FRONT`` when ``< 2``.
+    :return: resolved :class:`Direction` — always one of ``FRONT`` or
+        ``REAR`` (never ``AUTO``; the algorithm always resolves).
+    """
+    # Step 1: per-edge override is binding.
+    if edge_dir_override == DirectionMode.FORCE_FORWARD:
+        return Direction.FRONT
+    if edge_dir_override == DirectionMode.FORCE_REVERSE:
+        return Direction.REAR
+
+    # Step 2: pipeline default is binding when not DEFAULT.
+    if pipeline_default == DirectionMode.FORCE_FORWARD:
+        return Direction.FRONT
+    if pipeline_default == DirectionMode.FORCE_REVERSE:
+        return Direction.REAR
+
+    # Step 3: arrival override wins on the final hop.
+    if is_last_hop and builder_arrival != Direction.AUTO:
+        return builder_arrival
+
+    # Step 4: route override wins on all hops.
+    if builder_route != Direction.AUTO:
+        return builder_route
+
+    # Step 5: auto -- only if 2-board chassis AND kill-switch on.
+    if not bidirectional_enabled:
+        return Direction.FRONT
+    if line_board_count < 2:
+        return Direction.FRONT
+
+    delta = wrap_pm180(edge_heading - current_heading)
+    if abs(delta) > BIDIRECTIONAL_TURN_THRESHOLD_DEG:
+        return Direction.REAR
+    return Direction.FRONT
+
+
+def _read_edge_dir_override(edge) -> DirectionMode:
+    """Coerce the graph edge's ``direction_override`` attribute to
+    :class:`DirectionMode`.
+
+    Tolerates absence (returns ``DirectionMode.DEFAULT``), raw int values
+    (coerced via the enum constructor), and already-typed
+    :class:`DirectionMode` instances (returned as-is). Mirrors the
+    tolerance pattern of :func:`_resolve_override`.
+    """
+    raw = edge.get("direction_override") if hasattr(edge, "get") else None
+    if raw is None:
+        return DirectionMode.DEFAULT
+    if isinstance(raw, DirectionMode):
+        return raw
+    return DirectionMode(raw)
+
+
+def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
+    """Return the body heading the chassis assumes for one hop.
+
+    For ``FRONT`` the body faces along the edge; for ``REAR`` the body
+    faces opposite the edge so the rear sensor leads. Mirrors the
+    ``(edge.heading_deg + 180.0) % 360.0`` computation in
+    ``PathTracker::_onPlanNextHop`` (T6).
+    """
+    if direction == Direction.REAR:
+        return _normalize(edge_heading + 180.0)
+    return _normalize(edge_heading)
+
+
+def _should_pass_through(
+    graph,
+    next_hop,
+    intersected_node,
+    goal_name,
+    *,
+    inbound_body_heading: float,
+    inbound_direction: "Direction",
+    pipeline_default: DirectionMode = None,
+    builder_route: "Direction" = None,
+    builder_arrival: "Direction" = None,
+    bidirectional_enabled: bool = None,
+    line_board_count: int = None,
+) -> bool:
     """Return True iff a LINE-edge intersection at ``intersected_node`` should
     emit ``ACT_LINE_PASS`` instead of ``ACT_LINE_OVERSHOOT``.
 
@@ -258,14 +457,39 @@ def _should_pass_through(graph, next_hop, current_edge, intersected_node, goal_n
     * ``intersected_node`` is not the goal (final destination never passes through).
     * A next-next hop exists from ``intersected_node`` toward ``goal_name``
       (non-``None``, non-self).
-    * The next-next edge's ``heading_deg``, wrap-normalized via
-      :func:`tools.path_planner.compiler.normalize_turn` against
-      ``current_edge``'s ``heading_deg``, has absolute value
+    * The next-next edge's *body* heading (resolved via
+      :func:`resolve_direction` against ``inbound_body_heading``),
+      wrap-normalized against the inbound body heading, has absolute value
       <= :data:`NAV_TURN_TOLERANCE_DEG`.
 
-    The wrap normalization is REQUIRED -- without it the 359.5deg / 0.0deg
-    boundary diverges from the C++ side (which also wrap-normalizes per
-    ADR-023).
+    The peek MUST use resolved body-headings, not raw forward edge
+    headings. Without this, mixed REAR <-> FORWARD transitions across
+    anti-parallel forward edges (TC9c) would silently skip pass-through
+    even though the body never actually turned.
+
+    Note: ``inbound_body_heading`` and all subsequent parameters are
+    keyword-only. The previous signature placed ``inbound_body_heading``
+    positionally between ``goal_name`` and the kwargs, which made it easy
+    for external callers using the pre-bidirectional positional shape
+    (``graph, next_hop, current_edge, intersected_node, goal_name``) to
+    silently mis-bind. The ``*`` marker promotes any such mistake to a
+    loud ``TypeError`` at the call site.
+
+    :param inbound_body_heading: the body heading of the chassis as it
+        crosses ``intersected_node`` — for FRONT this is the inbound
+        edge's heading; for REAR it is that heading + 180° (mod 360).
+    :param pipeline_default: optional pipeline-level direction default.
+        ``None`` resolves to :data:`PIPELINE_CONFIG.direction`. Tests
+        and the FSM pass it explicitly when they have a value in scope.
+    :param builder_route: optional builder route override; ``None``
+        resolves to ``Direction.AUTO``.
+    :param builder_arrival: optional builder arrival override; ``None``
+        resolves to ``Direction.AUTO``. The next-next hop is the last
+        hop iff ``next_next == goal_name``.
+    :param bidirectional_enabled: optional module-level kill switch
+        override; ``None`` resolves to :data:`BIDIRECTIONAL_AUTO_ENABLED`.
+    :param line_board_count: optional board count override; ``None``
+        resolves to :data:`LINE_BOARD_COUNT`.
     """
     if not PATH_PASS_THROUGH_ENABLED:
         return False
@@ -275,10 +499,51 @@ def _should_pass_through(graph, next_hop, current_edge, intersected_node, goal_n
     if next_next is None or next_next == intersected_node:
         return False
     next_edge = graph.edges[intersected_node, next_next]
-    heading_delta = normalize_turn(
-        float(next_edge["heading_deg"]) - float(current_edge["heading_deg"])
+    next_edge_heading = float(next_edge["heading_deg"])
+
+    # Resolve the next-next hop's direction using the inbound body heading
+    # as `current_heading`. This is the critical fix vs the old raw-edge
+    # peek: on a mixed REAR -> FORWARD transition with anti-parallel
+    # forward edges, the raw-edge delta would be 180° (and incorrectly
+    # block pass-through) but the resolved body-headings are collinear.
+    resolved_pipeline = (
+        pipeline_default
+        if pipeline_default is not None
+        else _pipeline_config.PIPELINE_CONFIG.direction
     )
-    return abs(heading_delta) <= NAV_TURN_TOLERANCE_DEG
+    resolved_route = builder_route if builder_route is not None else Direction.AUTO
+    resolved_arrival = (
+        builder_arrival if builder_arrival is not None else Direction.AUTO
+    )
+    resolved_enabled = (
+        bidirectional_enabled if bidirectional_enabled is not None else BIDIRECTIONAL_AUTO_ENABLED
+    )
+    resolved_board_count = (
+        line_board_count if line_board_count is not None else LINE_BOARD_COUNT
+    )
+
+    next_dir = resolve_direction(
+        edge_dir_override=_read_edge_dir_override(next_edge),
+        pipeline_default=resolved_pipeline,
+        builder_arrival=resolved_arrival,
+        builder_route=resolved_route,
+        current_heading=inbound_body_heading,
+        edge_heading=next_edge_heading,
+        is_last_hop=(next_next == goal_name),
+        bidirectional_enabled=resolved_enabled,
+        line_board_count=resolved_board_count,
+    )
+    next_body_heading = _body_heading_for(next_dir, next_edge_heading)
+
+    heading_delta = wrap_pm180(next_body_heading - inbound_body_heading)
+    if abs(heading_delta) > NAV_TURN_TOLERANCE_DEG:
+        return False
+    # Pass-through requires matching direction across the intersection. A
+    # REAR->FRONT or FRONT->REAR transition would force the dispatcher to
+    # flip LineFollower.setReverse(...) mid-flight, jolting the chassis.
+    # Mirror of the C++ guard in PathTracker.cpp's LINE_FOLLOW intersection
+    # branch (PR #34 review).
+    return next_dir == inbound_direction
 
 
 class LocalizationSim:
@@ -358,7 +623,13 @@ class PathTrackerSim:
         """See module-level :func:`resolve_pre_turn_mode`."""
         return resolve_pre_turn_mode(edge)
 
-    def go_to(self, goal_name: str) -> List[Primitive]:
+    def go_to(
+        self,
+        goal_name: str,
+        *,
+        route_direction: "Direction" = Direction.AUTO,
+        arrival_direction: "Direction" = Direction.AUTO,
+    ) -> List[Primitive]:
         """Walk from the current node to ``goal_name``.
 
         Emits per edge: an optional ``ACT_TURN_REL`` to align heading,
@@ -366,11 +637,29 @@ class PathTrackerSim:
         ``ACT_LINE_OVERSHOOT`` step is appended after ``ACT_FOLLOW_INT``,
         mirroring the runtime LINE_OVERSHOOT FSM transition that
         advances the chassis by :data:`LINE_SENSOR_AXLE_OFFSET_CM` so
-        the wheel axle (not the line sensor) lands on the node. EDGE_PROJECTION
-        emits ``ACT_FOLLOW_DIST`` and advances Localization via
-        :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot
+        the wheel axle (not the line sensor) lands on the node.
+        EDGE_PROJECTION emits ``ACT_FOLLOW_DIST`` and advances Localization
+        via :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot
         step -- the encoder gate already lands the chassis on the node).
 
+        Per-edge direction resolution mirrors the runtime
+        ``PathTracker::_resolveDirection``: :func:`resolve_direction` is
+        called for every hop with ``route_direction`` /
+        ``arrival_direction`` as the builder inputs. REAR hops:
+
+        * Turn the chassis to ``(edge.heading_deg + 180°) mod 360`` (so
+          the rear sensor faces along the edge) before dispatch.
+        * Emit ``ACT_LINE_REVERSE`` / ``ACT_PROJECTION_REVERSE`` /
+          ``ACT_BLIND_REVERSE`` instead of the forward primitive.
+        * Advance the chassis backward via ``VirtualChassis.reverse``
+          for BLIND (mirrors how FRONT uses ``forward``).
+
+        :param goal_name: destination node name (must be in
+            ``field_data.NODES``).
+        :param route_direction: builder override applied to every hop
+            (``Direction.AUTO`` = no override; runs the auto algorithm).
+        :param arrival_direction: builder override applied only to the
+            final hop (``Direction.AUTO`` = no override).
         :raises KeyError: if ``goal_name`` is not a known node.
         :raises RuntimeError: if ``zero_heading_from_current()`` was not called.
         :raises UnreachableGoalError: if any intermediate hop is unreachable.
@@ -391,39 +680,92 @@ class PathTrackerSim:
             if nxt is None:
                 raise UnreachableGoalError(current, goal_name, current=current)
             edge = self._graph.edges[current, nxt]
-            target_heading = float(edge["heading_deg"])
+            edge_heading = float(edge["heading_deg"])
+            is_last_hop = (nxt == goal_name)
 
-            delta = normalize_turn(target_heading - self._chassis.heading_deg)
+            direction = resolve_direction(
+                edge_dir_override=_read_edge_dir_override(edge),
+                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                builder_arrival=arrival_direction,
+                builder_route=route_direction,
+                current_heading=self._chassis.heading_deg,
+                edge_heading=edge_heading,
+                is_last_hop=is_last_hop,
+                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                line_board_count=LINE_BOARD_COUNT,
+            )
+            body_heading = _body_heading_for(direction, edge_heading)
+
+            delta = wrap_pm180(body_heading - self._chassis.heading_deg)
             if abs(delta) > TURN_EPSILON_DEG:
                 out.append((ACT_TURN_REL, delta))
                 self._chassis.turn_relative(delta)
-                self._chassis.heading_deg = _normalize(target_heading)
+                self._chassis.heading_deg = _normalize(body_heading)
 
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
-                out.append((ACT_FOLLOW_INT, None))
-                self._chassis.follow_line_to_intersection(distance_cm)
-                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when the
-                # next-hop edge after ``nxt`` is collinear with the inbound
-                # edge, else ACT_LINE_OVERSHOOT. Chassis advance is identical
-                # (5cm); the primitive name differs only for downstream
-                # verification + telemetry. See ADR-023.
+                if direction == Direction.REAR:
+                    out.append((ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)))
+                    self._chassis.reverse(distance_cm)
+                else:
+                    out.append((ACT_FOLLOW_INT, None))
+                    self._chassis.follow_line_to_intersection(distance_cm)
+                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when
+                # the resolved body-heading of the next-next hop is
+                # collinear with the inbound body-heading (delta <=
+                # NAV_TURN_TOLERANCE_DEG), else ACT_LINE_OVERSHOOT. The
+                # peek MUST use resolved body-headings, not raw forward
+                # edge headings, so mixed REAR<->FORWARD transitions on
+                # anti-parallel forward edges still pass through cleanly
+                # (TC9c). Chassis advance is identical (5cm) regardless
+                # of direction; the primitive name differs only for
+                # downstream verification + telemetry. See ADR-023.
                 if _should_pass_through(
-                    self._graph, self._next_hop, edge, nxt, goal_name
+                    self._graph,
+                    self._next_hop,
+                    nxt,
+                    goal_name,
+                    inbound_body_heading=body_heading,
+                    inbound_direction=direction,
+                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                    builder_route=route_direction,
+                    builder_arrival=arrival_direction,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                    line_board_count=LINE_BOARD_COUNT,
                 ):
                     out.append((ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM))
                 else:
                     out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
-                self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
+                # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
+                # in the travel direction. When it detects the intersection at v,
+                # the chassis center is AXLE_OFFSET cm behind v in the travel
+                # direction. Advancing AXLE_OFFSET in the travel direction = reverse
+                # in body coordinates (body heading points opposite to travel).
+                if direction == Direction.REAR:
+                    self._chassis.reverse(LINE_SENSOR_AXLE_OFFSET_CM)
+                else:
+                    self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
                 self._localization.on_intersection(nxt)
             elif edge_type == EDGE_PROJECTION:
-                out.append((ACT_FOLLOW_DIST, distance_cm))
-                self._chassis.follow_line_to_distance(distance_cm)
+                if direction == Direction.REAR:
+                    out.append(
+                        (ACT_PROJECTION_REVERSE, nxt, distance_cm, resolve_projection_mode(edge))
+                    )
+                    self._chassis.reverse(distance_cm)
+                else:
+                    out.append((ACT_FOLLOW_DIST, distance_cm))
+                    self._chassis.follow_line_to_distance(distance_cm)
                 self._localization.on_dead_reckoned_advance(nxt)
             elif edge_type == EDGE_BLIND:
-                out.append((ACT_FORWARD, distance_cm))
-                self._chassis.forward(distance_cm)
+                if direction == Direction.REAR:
+                    out.append(
+                        (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
+                    )
+                    self._chassis.reverse(distance_cm)
+                else:
+                    out.append((ACT_FORWARD, distance_cm))
+                    self._chassis.forward(distance_cm)
                 self._localization.on_dead_reckoned_advance(nxt)
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
@@ -437,13 +779,22 @@ class PathTrackerSim:
     def walked_path(self, goal_name: str) -> List[str]:
         return walk_next_hop(self._next_hop, self._localization.current_node(), goal_name)
 
-    def step_through(self, goal_name: str):
+    def step_through(
+        self,
+        goal_name: str,
+        *,
+        route_direction: "Direction" = Direction.AUTO,
+        arrival_direction: "Direction" = Direction.AUTO,
+    ):
         """Generator variant of :meth:`go_to` yielding ``(primitive, snapshot)``.
 
-        Mirrors :meth:`go_to`'s emission shape exactly: an ``ACT_LINE_OVERSHOOT``
-        step is yielded after every ``ACT_FOLLOW_INT``, and EDGE_PROJECTION
-        yields ``ACT_FOLLOW_DIST`` then advances Localization via
-        :meth:`LocalizationSim.on_dead_reckoned_advance`.
+        Mirrors :meth:`go_to`'s emission shape exactly, including direction
+        resolution and ACT_*_REVERSE primitives for REAR hops.
+
+        :param goal_name: destination node name.
+        :param route_direction: builder override applied to every hop.
+        :param arrival_direction: builder override applied only to the
+            final hop.
         """
         if goal_name not in self._field_data.NODES:
             raise KeyError(f"goal {goal_name!r} not in field_data.NODES")
@@ -459,26 +810,65 @@ class PathTrackerSim:
             if nxt is None:
                 raise UnreachableGoalError(current, goal_name, current=current)
             edge = self._graph.edges[current, nxt]
-            target_heading = float(edge["heading_deg"])
+            edge_heading = float(edge["heading_deg"])
+            is_last_hop = (nxt == goal_name)
 
-            delta = normalize_turn(target_heading - self._chassis.heading_deg)
+            direction = resolve_direction(
+                edge_dir_override=_read_edge_dir_override(edge),
+                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                builder_arrival=arrival_direction,
+                builder_route=route_direction,
+                current_heading=self._chassis.heading_deg,
+                edge_heading=edge_heading,
+                is_last_hop=is_last_hop,
+                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                line_board_count=LINE_BOARD_COUNT,
+            )
+            body_heading = _body_heading_for(direction, edge_heading)
+
+            delta = wrap_pm180(body_heading - self._chassis.heading_deg)
             if abs(delta) > TURN_EPSILON_DEG:
                 self._chassis.turn_relative(delta)
-                self._chassis.heading_deg = _normalize(target_heading)
+                self._chassis.heading_deg = _normalize(body_heading)
                 yield (ACT_TURN_REL, delta), self._snapshot_chassis()
 
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
-                self._chassis.follow_line_to_intersection(distance_cm)
-                yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
+                if direction == Direction.REAR:
+                    self._chassis.reverse(distance_cm)
+                    yield (
+                        (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)),
+                        self._snapshot_chassis(),
+                    )
+                else:
+                    self._chassis.follow_line_to_intersection(distance_cm)
+                    yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
                 # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS on
-                # collinear next-hop, else ACT_LINE_OVERSHOOT. Chassis advance
-                # is identical. See go_to for rationale and ADR-023.
+                # collinear next-hop body heading, else ACT_LINE_OVERSHOOT.
+                # See go_to for rationale and ADR-023.
                 pass_through = _should_pass_through(
-                    self._graph, self._next_hop, edge, nxt, goal_name
+                    self._graph,
+                    self._next_hop,
+                    nxt,
+                    goal_name,
+                    inbound_body_heading=body_heading,
+                    inbound_direction=direction,
+                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                    builder_route=route_direction,
+                    builder_arrival=arrival_direction,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                    line_board_count=LINE_BOARD_COUNT,
                 )
-                self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
+                # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
+                # in the travel direction. When it detects the intersection at v,
+                # the chassis center is AXLE_OFFSET cm behind v in the travel
+                # direction. Advancing AXLE_OFFSET in the travel direction = reverse
+                # in body coordinates (body heading points opposite to travel).
+                if direction == Direction.REAR:
+                    self._chassis.reverse(LINE_SENSOR_AXLE_OFFSET_CM)
+                else:
+                    self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
                 self._localization.on_intersection(nxt)
                 yield (
                     (
@@ -488,13 +878,29 @@ class PathTrackerSim:
                     self._snapshot_chassis(),
                 )
             elif edge_type == EDGE_PROJECTION:
-                self._chassis.follow_line_to_distance(distance_cm)
-                self._localization.on_dead_reckoned_advance(nxt)
-                yield (ACT_FOLLOW_DIST, distance_cm), self._snapshot_chassis()
+                if direction == Direction.REAR:
+                    self._chassis.reverse(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (
+                        (ACT_PROJECTION_REVERSE, nxt, distance_cm, resolve_projection_mode(edge)),
+                        self._snapshot_chassis(),
+                    )
+                else:
+                    self._chassis.follow_line_to_distance(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FOLLOW_DIST, distance_cm), self._snapshot_chassis()
             elif edge_type == EDGE_BLIND:
-                self._chassis.forward(distance_cm)
-                self._localization.on_dead_reckoned_advance(nxt)
-                yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
+                if direction == Direction.REAR:
+                    self._chassis.reverse(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (
+                        (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
+                        self._snapshot_chassis(),
+                    )
+                else:
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
             else:    # pragma: no cover
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"

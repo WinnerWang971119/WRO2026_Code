@@ -112,6 +112,20 @@ class VirtualChassis:
         """Translate the chassis forward by @p cm (open-loop blind move)."""
         self._advance(cm)
 
+    def reverse(self, cm: float) -> None:
+        """Translate the chassis backward by @p cm along its current heading.
+
+        Mirrors :meth:`forward` but negates the displacement vector, so the
+        chassis moves opposite to its heading without rotating. Used by the
+        bidirectional line-following dispatch (T11+) where the runtime
+        drives the rear sensor toward the next intersection instead of
+        rotating in place.
+
+        :param cm: distance in centimetres (positive); negative values
+            simply re-invert the direction (move forward).
+        """
+        self._advance(-float(cm))
+
     # -- internal -------------------------------------------------------------
 
     def _advance(self, cm: float) -> None:

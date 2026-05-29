@@ -252,6 +252,19 @@ def _validate_edges_field(field_data) -> None:
                     "or pick a concrete mode"
                 )
 
+        # Optional: direction --------------------------------------------
+        # Per-directed-edge traversal override (asymmetric -- applies only
+        # to the forward u -> v edge, never mirrored to the reverse).
+        # Allowed values: "front" (FORCE_FORWARD), "rear" (FORCE_REVERSE),
+        # or absent (DEFAULT / inherit PIPELINE_CONFIG.direction).
+        if "direction" in entry:
+            direction = entry["direction"]
+            if direction not in ("front", "rear"):
+                raise FieldDataError(
+                    f"EDGES[{i}].direction must be 'front', 'rear', or "
+                    f"absent; got {direction!r}"
+                )
+
         # Optional: pivot -------------------------------------------------
         if "pivot" in entry:
             pivot = entry["pivot"]

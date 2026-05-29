@@ -106,3 +106,20 @@ def test_missing_required_attr_rejected() -> None:
     delattr(fd, "BLIND_EDGES")
     with pytest.raises(FieldDataError, match=r"missing required attribute: BLIND_EDGES"):
         validate(fd)
+
+
+def test_validator_rejects_invalid_direction_value() -> None:
+    """TC16: EDGES `direction` accepts only 'front' or 'rear' (or absent)."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": "LINE",
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "direction": "backwards",
+        }
+    ]
+    with pytest.raises(FieldDataError, match="direction"):
+        validate(fd)

@@ -32,6 +32,14 @@ from tools.path_planner.graph_builder import (
     EDGE_PROJECTION,
     build_graph,
 )
+from tools.path_planner.sim import runtime as _runtime
+from tools.path_planner.sim.runtime import (
+    ACT_BLIND_REVERSE,
+    ACT_LINE_REVERSE,
+    ACT_PROJECTION_REVERSE,
+    Direction,
+    resolve_direction,
+)
 
 
 @pytest.fixture(scope="session")
@@ -260,20 +268,73 @@ def _walk_expected_headings(
     start_heading: float,
     graph: nx.DiGraph,
 ) -> List[float]:
+    """Return the expected chassis body heading at each motion primitive.
+
+    Calls :func:`tools.path_planner.sim.runtime.resolve_direction` for every
+    hop with the same inputs ``compile_path`` would use — so the helper
+    honours the full 5-step precedence (per-edge override → pipeline default
+    → builder arrival → builder route → auto), not just the auto branch.
+    A previous version inlined only the auto branch; any random graph that
+    later seeded a per-edge ``direction_override`` would cause non-deterministic
+    parity failures because the mirror silently ignored Step 1.
+
+    Module-level constants ``BIDIRECTIONAL_AUTO_ENABLED`` / ``LINE_BOARD_COUNT``
+    are read off the live ``_runtime`` module at call time so a
+    ``monkeypatch.setattr(_runtime, ...)`` propagates to this helper the
+    same way it propagates to ``compile_path``'s lazy reads.
+    """
     headings: List[float] = []
     current = start_heading
-    for u, v in zip(path[:-1], path[1:]):
-        current = graph.edges[u, v]["heading_deg"]
+    last_idx = len(path) - 1
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
+        edge = graph.edges[u, v]
+        edge_heading = float(edge["heading_deg"])
+        direction = resolve_direction(
+            edge_dir_override=_runtime._read_edge_dir_override(edge),
+            pipeline_default=_runtime._pipeline_config.PIPELINE_CONFIG.direction,
+            builder_arrival=Direction.AUTO,
+            builder_route=Direction.AUTO,
+            current_heading=current,
+            edge_heading=edge_heading,
+            is_last_hop=((i + 1) == last_idx),
+            bidirectional_enabled=_runtime.BIDIRECTIONAL_AUTO_ENABLED,
+            line_board_count=_runtime.LINE_BOARD_COUNT,
+        )
+        if direction == Direction.REAR:
+            body_target = (edge_heading + 180.0) % 360.0
+        else:
+            body_target = edge_heading % 360.0
+        # Only advance the running heading when the turn delta would
+        # actually be emitted (mirror compile_path's epsilon guard).
+        body_delta = normalize_turn(body_target - current)
+        if abs(body_delta) > 1e-6:
+            current = body_target
         headings.append(current)
     return headings
 
 
 def _replay_primitives(primitives: List[Primitive], start_heading: float) -> List[float]:
-    motion_actions = {ACT_FOLLOW_INT, ACT_FORWARD}
+    """Replay a primitive sequence and return the body heading at each motion step.
+
+    Handles both forward primitives (``ACT_FOLLOW_INT`` / ``ACT_FORWARD``
+    / ``ACT_FOLLOW_DIST``) and reverse primitives
+    (``ACT_LINE_REVERSE`` / ``ACT_BLIND_REVERSE`` /
+    ``ACT_PROJECTION_REVERSE``) introduced by T12.
+    """
+    motion_actions = {
+        ACT_FOLLOW_INT,
+        ACT_FORWARD,
+        ACT_FOLLOW_DIST,
+        ACT_LINE_REVERSE,
+        ACT_BLIND_REVERSE,
+        ACT_PROJECTION_REVERSE,
+    }
     headings: List[float] = []
     current = start_heading
-    for action, value in primitives:
+    for prim in primitives:
+        action = prim[0]
         if action == ACT_TURN_REL:
+            value = prim[1]
             assert value is not None
             current = (current + value) % 360.0
         elif action in motion_actions:

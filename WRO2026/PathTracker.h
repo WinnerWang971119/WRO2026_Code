@@ -15,10 +15,10 @@
  *  - A fluent `goTo(node)` builder. Default is sync-blocking; chain
  *    `.async()` to enqueue + return immediately.
  *  - A latched fault state (`Fault::NOT_ZEROED`, `UNREACHABLE`,
- *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`) surfaced via
- *    `hasFault()` / `getFault()`. `clearFault()` re-arms the queue but
- *    does not restart motion. `faultMnemonic()` returns a short tag
- *    (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
+ *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`)
+ *    surfaced via `hasFault()` / `getFault()`. `clearFault()` re-arms
+ *    the queue but does not restart motion. `faultMnemonic()` returns
+ *    a short tag (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
  *
  * FSM states (`State`):
  *  - `IDLE`              — nothing pending; waits for a goal to be enqueued.
@@ -70,6 +70,7 @@
 
 #include "Config.h"
 #include "FieldMap.h"
+#include "NavTypes.h"
 #include "routes.h"
 
 class PathTrackerClass;
@@ -98,11 +99,29 @@ public:
      */
     PathTrackerGoToBuilder& async();
 
+    /**
+     * @brief Force the direction of travel for EVERY hop on the path to the
+     *        goal. Defaults to Direction::AUTO (let _resolveDirection pick).
+     * @note  Loses to per-edge `direction_override` (set in field_data.py).
+     *        See Notes for Implementer in the spec.
+     */
+    PathTrackerGoToBuilder& setRouteDirection(Direction d);
+
+    /**
+     * @brief Force the direction of travel for the FINAL hop into the goal.
+     *        Intermediate hops still use auto (or whatever `setRouteDirection`
+     *        set). Defaults to Direction::AUTO.
+     * @note  Wins over `setRouteDirection` for the final hop only.
+     */
+    PathTrackerGoToBuilder& setArrivalDirection(Direction d);
+
 private:
     PathTrackerClass& _owner;
     uint8_t           _goalId;
-    bool              _blocking = true;
-    bool              _executed = false;
+    bool              _blocking         = true;
+    bool              _executed         = false;
+    Direction         _routeDirection   = Direction::AUTO;
+    Direction         _arrivalDirection = Direction::AUTO;
 };
 
 class PathTrackerClass
@@ -112,12 +131,13 @@ class PathTrackerClass
 public:
     enum class Fault : uint8_t
     {
-        NONE         = 0,
-        NOT_ZEROED   = 1,
-        UNREACHABLE  = 2,
-        DRIVE_FAULT  = 3,
-        BAD_NODE     = 4,
-        DRAIN_TIMEOUT = 5
+        NONE                = 0,
+        NOT_ZEROED          = 1,
+        UNREACHABLE         = 2,
+        DRIVE_FAULT         = 3,
+        BAD_NODE            = 4,
+        DRAIN_TIMEOUT       = 5,
+        REVERSE_UNAVAILABLE = 6
     };
 
     /**
@@ -184,18 +204,31 @@ private:
     /**
      * @brief One pending entry on PathTracker's FIFO.
      *
-     * A `goTo(...)` call enqueues exactly one of these; the destination
-     * node id is the only payload (the planner re-resolves the next-hop
-     * at every PLAN_NEXT_HOP tick, so no edge state needs to be cached).
+     * A `goTo(...)` call enqueues exactly one of these. The destination
+     * node id is the planner payload (re-resolved at every PLAN_NEXT_HOP
+     * tick, so no edge state needs to be cached). The two `Direction`
+     * fields carry the per-call bidirectional builder overrides:
+     *
+     *  - `route_direction`   — applies to EVERY hop on the path (T8).
+     *  - `arrival_direction` — applies only to the FINAL hop into the
+     *                          destination; wins over `route_direction`
+     *                          for that hop. See `_resolveDirection` for
+     *                          precedence semantics.
+     *
+     * Both default to `Direction::AUTO` (= 0), so zero-initialized FIFO
+     * slots yield AUTO naturally — no constructor needed.
+     *
      * Renamed from `GoalEntry` (PR3 internals cleanup) — the public
      * `goTo()` verb is unchanged.
      */
     struct NavEntry
     {
-        uint8_t nodeId;
+        uint8_t   nodeId;
+        Direction route_direction;      ///< Forces every hop's direction (default AUTO).
+        Direction arrival_direction;    ///< Forces final-hop direction (default AUTO).
     };
 
-    bool _enqueue(uint8_t goalId);
+    bool _enqueue(uint8_t goalId, Direction routeDir, Direction arrivalDir);
     bool _pop(NavEntry& out);
     void _clearQueue();
 
@@ -205,7 +238,11 @@ private:
 
     void _drainBlocking();
 
-    void _applyGoToBuilder(uint8_t goalId, bool blocking);
+    void _applyGoToBuilder(
+        uint8_t   goalId,
+        bool      blocking,
+        Direction routeDir,
+        Direction arrivalDir);
 
     NavEntry _queue[Config::PATH_QUEUE_CAPACITY];
     uint8_t  _qHead  = 0;
@@ -217,6 +254,17 @@ private:
     uint8_t          _nextHop         = FieldMap::NODE_NONE;
     Routes::EdgeType _activeEdgeType  = Routes::EdgeType::NONE;
 
+    /// @brief Bidirectional builder overrides cached for the IN-FLIGHT goal.
+    ///
+    /// Populated at `DEQUEUE` from the popped `NavEntry` and consumed by
+    /// `_onPlanNextHop()` (every hop) and by the pass-through peek in
+    /// `update()`'s `LINE_FOLLOW` case (next-next hop classification).
+    /// Both default to `Direction::AUTO` — a bare `goTo(...)` with no
+    /// modifier keeps them AUTO, so `_resolveDirection` falls through to
+    /// the auto algorithm. See ADR-023 and issue #19.
+    Direction _activeRouteDirection   = Direction::AUTO;
+    Direction _activeArrivalDirection = Direction::AUTO;
+
     /// @brief Pass-through eligibility for the in-flight LINE_OVERSHOOT.
     ///
     /// Set in `update()`'s `LINE_FOLLOW` case at intersection-detect when the
@@ -227,6 +275,26 @@ private:
     /// Reset to false on every fresh intersection-detect tick.
     /// See ADR-023 and issue #19.
     bool _passThrough = false;
+
+    /// @brief Resolved direction (FRONT/REAR) for the current hop.
+    ///
+    /// Set per-hop in `_onPlanNextHop()` by `_resolveDirection(...)` and consumed
+    /// by `_dispatchEdgeAfterTurn()` (T7) to pick forward vs. reverse dispatch
+    /// onto LineFollower/Drive. `AUTO` is the unresolved sentinel (only valid
+    /// before the first plan tick).
+    Direction _resolvedDirection = Direction::AUTO;
+
+    /// @brief Resolved body-target heading (world frame, degrees in `[0, 360)`)
+    ///        for the current hop.
+    ///
+    /// Equal to `edge.heading_deg` when `_resolvedDirection == FRONT`, or
+    /// `(edge.heading_deg + 180°) mod 360` when `_resolvedDirection == REAR`.
+    /// This is the heading the chassis BODY must face — used both for the
+    /// `Drive.turnToYaw(...)` target AND for the `NAV_TURN_TOLERANCE_DEG`
+    /// skip-turn comparison in `_onPlanNextHop()`. The pass-through peek
+    /// (T6) also uses it as the inbound-body heading when classifying the
+    /// next-next hop's geometry.
+    float _resolvedBodyHeading = 0.0f;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;

@@ -30,6 +30,12 @@ compiler, and header writer):
 * ``pivot``          : integer (the value of a :class:`Pivot` member).
   Marks the turn entering this edge as a single-wheel pivot. Absent =
   inherit / no pivot.
+* ``direction_override`` : integer (the value of a
+  :class:`pipeline_config.DirectionMode` member, 1 = FORCE_FORWARD,
+  2 = FORCE_REVERSE). Forces forward/reverse traversal of this directed
+  edge regardless of heading delta. Absent = inherit
+  PIPELINE_CONFIG.direction. Asymmetric: applied to the forward edge
+  only -- the reverse edge needs its own ``EDGES`` entry to opt in.
 
 Edge-type semantics:
 
@@ -167,12 +173,27 @@ def edge_clips_obstacle(
 _BIDIRECTIONAL_OPTIONAL_KEYS = ("primitive_mode",)
 
 # Direction-dependent: ``pre_turn_mode`` selects the alignment for the
-# turn that PRECEDES this edge, and ``pivot`` selects which wheel the
-# chassis pivots around when ENTERING this edge. Both depend on which
-# end the chassis is approaching from, so they must NOT be copied to the
-# reverse edge (a one-way override would otherwise silently steer the
-# robot with the wrong wheel pattern on backward traversal -- Codex P1).
-_DIRECTIONAL_OPTIONAL_KEYS = ("pre_turn_mode",)
+# turn that PRECEDES this edge, ``pivot`` selects which wheel the
+# chassis pivots around when ENTERING this edge, and ``direction`` forces
+# forward/reverse traversal of the directed edge. All three depend on
+# which end the chassis is approaching from, so they must NOT be copied
+# to the reverse edge (a one-way override would otherwise silently steer
+# the robot with the wrong wheel pattern -- or, for ``direction``, force
+# the wrong traversal sense -- on backward traversal). This is the
+# Codex P1 invariant: asymmetric overrides stay on the forward (u -> v)
+# edge only; to override the reverse direction too, the author must add
+# a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
+_DIRECTIONAL_OPTIONAL_KEYS = ("pre_turn_mode", "direction")
+
+# String-to-integer mapping for the ``direction`` per-edge override.
+# Header_writer (T3) reads the integer via ``edge_attrs.get("direction_override")``
+# and resolves it through :class:`DirectionMode` (DEFAULT=0, FORCE_FORWARD=1,
+# FORCE_REVERSE=2). Keep this mapping in lockstep with the C++ enum order;
+# the integer encoding is part of the wire contract.
+_DIRECTION_STR_TO_INT = {
+    "front": 1,  # DirectionMode::FORCE_FORWARD
+    "rear":  2,  # DirectionMode::FORCE_REVERSE
+}
 
 
 def _extract_bidirectional_attrs(options: dict) -> dict:
@@ -197,21 +218,33 @@ def _extract_bidirectional_attrs(options: dict) -> dict:
 def _extract_directional_attrs(options: dict) -> dict:
     """Pull direction-dependent metadata out of a source-edge options dict.
 
-    These attributes (``pre_turn_mode``, ``pivot``) describe behavior
-    that depends on which end is the entry, so the caller must apply the
-    returned dict ONLY to the forward (u -> v) directed edge -- never to
-    the reverse. The integer encoding of ``pivot`` is stored so
-    downstream consumers don't have to import the IntEnum.
+    These attributes (``pre_turn_mode``, ``pivot``, ``direction``)
+    describe behavior that depends on which end is the entry, so the
+    caller must apply the returned dict ONLY to the forward (u -> v)
+    directed edge -- never to the reverse. The integer encoding of
+    ``pivot`` and the string-to-integer mapping of ``direction`` are
+    stored so downstream consumers don't have to import the IntEnums.
+
+    ``direction`` is translated from the field-data string vocabulary
+    (``"front"`` / ``"rear"``) into the wire integer (1 / 2) and stored
+    under the key ``direction_override`` -- the name the header writer
+    (T3) reads to emit the ``DirectionMode::*`` literal. Absence yields
+    no attribute, so header_writer falls back to DEFAULT (0).
 
     :param options: dict-like source-edge attributes (may be empty).
     :return: dict of attributes to splat onto the forward edge only.
     """
     forwarded: dict = {}
     for key in _DIRECTIONAL_OPTIONAL_KEYS:
+        if key == "direction":
+            continue  # handled below with string->integer translation
         if key in options:
             forwarded[key] = options[key]
     if "pivot" in options:
         forwarded["pivot"] = int(options["pivot"])
+    if "direction" in options:
+        # Validator (T4) has already constrained this to "front" or "rear".
+        forwarded["direction_override"] = _DIRECTION_STR_TO_INT[options["direction"]]
     return forwarded
 
 

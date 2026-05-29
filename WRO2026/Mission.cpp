@@ -28,6 +28,7 @@ bool MissionClass::begin()
     _faultBeepIdx       = 0;
     _faultPhaseStart_ms = 0;
     _btnPrev            = false;
+    _lastPushOk         = false;
     return true;
 }
 
@@ -53,7 +54,7 @@ MissionClass& MissionClass::goTo(const char* nodeName)
     s.type = StepType::GOTO;
     s.text = nodeName;
     s.goal = FieldMap::findNodeByName(nodeName);
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -62,7 +63,7 @@ MissionClass& MissionClass::wait(uint32_t ms)
     Step s{};
     s.type        = StepType::WAIT;
     s.duration_ms = ms;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -71,7 +72,7 @@ MissionClass& MissionClass::print(const char* msg)
     Step s{};
     s.type = StepType::PRINT;
     s.text = msg;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -81,7 +82,7 @@ MissionClass& MissionClass::beep(uint16_t freq_hz, uint32_t duration_ms)
     s.type        = StepType::BEEP;
     s.freq_hz     = freq_hz;
     s.duration_ms = duration_ms;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -93,7 +94,48 @@ MissionClass& MissionClass::led(uint8_t r, uint8_t g, uint8_t b, uint32_t durati
     s.g           = g;
     s.b           = b;
     s.duration_ms = duration_ms;
-    _push(s);
+    _lastPushOk = _push(s);
+    return *this;
+}
+
+// Modifier verbs — mutate the most-recently-enqueued GOTO step in place.
+// Misuse modes (all no-op + Serial warning, queue unchanged):
+//   - empty queue (no step pushed yet)
+//   - last step is not GOTO (modifier chained on wait/print/beep/led)
+//   - preceding push silently overflowed the queue (_lastPushOk == false) —
+//     without this third guard, the modifier would target _queue[_count - 1]
+//     which is the PREVIOUSLY-enqueued step (often another GOTO), silently
+//     rewriting an unrelated goal's direction.
+
+MissionClass& MissionClass::setRouteDirection(Direction d)
+{
+    if (!_lastPushOk)
+    {
+        Serial.println(F("[Mission] setRouteDirection: preceding step did not enqueue (ignored)"));
+        return *this;
+    }
+    if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
+    {
+        Serial.println(F("[Mission] setRouteDirection: no preceding goTo step (ignored)"));
+        return *this;
+    }
+    _queue[_count - 1].route_direction = d;
+    return *this;
+}
+
+MissionClass& MissionClass::setArrivalDirection(Direction d)
+{
+    if (!_lastPushOk)
+    {
+        Serial.println(F("[Mission] setArrivalDirection: preceding step did not enqueue (ignored)"));
+        return *this;
+    }
+    if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
+    {
+        Serial.println(F("[Mission] setArrivalDirection: no preceding goTo step (ignored)"));
+        return *this;
+    }
+    _queue[_count - 1].arrival_direction = d;
     return *this;
 }
 
@@ -124,10 +166,11 @@ void MissionClass::abort()
     LineFollower.setEnabled(false);
     Drive.stop(true);
 
-    _count     = 0;
-    _idx       = 0;
-    _state     = State::IDLE;
-    _stepState = StepState::ENTER;
+    _count       = 0;
+    _idx         = 0;
+    _state       = State::IDLE;
+    _stepState   = StepState::ENTER;
+    _lastPushOk  = false;
     Serial.println(F("[Mission] abort"));
 }
 
@@ -253,7 +296,10 @@ void MissionClass::update()
                         }
                         Serial.print(F("[Mission] goTo "));
                         Serial.println(s.text == nullptr ? "?" : s.text);
-                        PathTracker.goTo(s.goal).async();
+                        PathTracker.goTo(s.goal)
+                            .setRouteDirection(s.route_direction)
+                            .setArrivalDirection(s.arrival_direction)
+                            .async();
                         _stepState    = StepState::ACTIVE;
                         _stepStart_ms = now;
                     }

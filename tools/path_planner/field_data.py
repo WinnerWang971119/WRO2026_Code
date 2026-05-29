@@ -67,9 +67,16 @@ OBSTACLES             = _data["OBSTACLES"]
 #   primitive_mode : LineMode | BlindMode | ProjectionMode value
 #   pre_turn_mode  : TurnMode value — wheel pattern for the approach turn
 #   pivot          : Pivot enum value — single-wheel pivot selector
+#   direction      : "front" | "rear" — asymmetric per-directed-edge
+#                    traversal override; applies only to the forward
+#                    (u → v) edge, never mirrored to the reverse. Use
+#                    a separate EDGES entry with u/v swapped to override
+#                    the reverse direction too.
 #
 # graph_builder.build_graph() emits a bidirectional directed pair for each
-# entry, forwarding all optional keys onto both directions verbatim.
+# entry. ``primitive_mode`` is forwarded onto both directions; the
+# direction-dependent overrides (``pre_turn_mode``, ``pivot``, ``direction``)
+# land on the forward edge only.
 # These entries are ADDITIVE alongside LINE_SEGMENTS / BLIND_EDGES, not a
 # replacement; the planner merges all edge sources into one DiGraph.
 # ---------------------------------------------------------------------------
