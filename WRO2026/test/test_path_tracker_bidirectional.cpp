@@ -208,11 +208,17 @@ namespace mission_replica
 
     // Mirrors `MissionClass::Step` (Mission.h, private struct). Only the
     // fields the modifier verbs touch are kept — the rest is unused here.
+    //
+    // No default member initializers — production's struct also has none.
+    // Replicating that means every Step in this file MUST be value-initialized
+    // (`Step s{};`) or it carries indeterminate values, exactly matching the
+    // fragility production exhibits. If a future Mission.cpp refactor constructs
+    // a Step on the stack without braces, the replica won't paper over it.
     struct Step
     {
-        StepType  type              = StepType::WAIT;
-        Direction route_direction   = Direction::AUTO;
-        Direction arrival_direction = Direction::AUTO;
+        StepType  type;
+        Direction route_direction;
+        Direction arrival_direction;
     };
 
     /// Fixed-size queue + count + last-push tracker, mirroring `_queue`,
