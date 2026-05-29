@@ -96,6 +96,22 @@ const TaskRegistryEntry* TasksClass::findTask(const char* name) const
 
 bool TasksClass::runTask(const char* name, const TaskArgs& args)
 {
+    // Reentrancy guard. Tasks are leaf operations: a task body must NOT
+    // dispatch another task. Allowing it would (a) clobber `_inTask` when the
+    // inner InTaskGuard's destructor fires, breaking the `Mission.update()`
+    // re-entrancy guard that relies on `inTask()` staying true for the whole
+    // outer body, and (b) recurse with no depth bound (a task calling itself
+    // would blow the stack). Refuse here, before resolving the name or arming
+    // the guard. Share logic between tasks via private helpers, not runTask.
+    // See ADR-026.
+    if (_inTask)
+    {
+        Serial.print(F("[Tasks] runTask: refusing reentrant call to '"));
+        Serial.print(name == nullptr ? "(null)" : name);
+        Serial.println(F("'"));
+        return false;
+    }
+
     const TaskRegistryEntry* entry = findTask(name);
     if (entry == nullptr)
     {

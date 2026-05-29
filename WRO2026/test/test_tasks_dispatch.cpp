@@ -229,6 +229,16 @@ public:
     // dispatch behaviour and RAII guard semantics match production exactly.
     bool runTask(const char* name, const TaskArgs& args)
     {
+        // MIRROR: WRO2026/Tasks.cpp — reentrancy guard. Refuse a nested
+        // dispatch before resolving the name or arming the InTaskGuard.
+        if (_inTask)
+        {
+            test_mock::g_serial.print("[Tasks] runTask: refusing reentrant call to '");
+            test_mock::g_serial.print(name == nullptr ? "(null)" : name);
+            test_mock::g_serial.println("'");
+            return false;
+        }
+
         FreeFn body = _findFn(name);
         if (body == nullptr)
         {
@@ -1118,6 +1128,36 @@ static void test_TC14_queue_time_name_validation()
 }
 
 // ---------------------------------------------------------------------------
+// TC15 (new) — runTask is non-reentrant: a dispatch made while a task body is
+// already in flight is refused (returns false, body never runs). Mirrors the
+// ADR-026 guard. We simulate "mid-flight" via the test-only _testSetInTask
+// setter (same mechanism TC10 uses), so we don't need a reentrant task body
+// in the mirror registry.
+// ---------------------------------------------------------------------------
+static void test_TC15_runtask_reentrancy_rejected()
+{
+    TEST_SCOPE("TC15: runTask refuses a reentrant call when already inTask — returns false, body does not run");
+    test_mock::resetMocks();
+    Tasks.begin();
+
+    TaskArgs args{};
+    args.u8[0] = 7;
+    args.u8[1] = 42;
+
+    // Simulate being mid-dispatch, as if a task body were calling runTask again.
+    Tasks._testSetInTask(true);
+    const bool ok = Tasks.runTask("demoEcho", args);
+    Tasks._testSetInTask(false);
+
+    // Refused: returns false and prints the reentrancy warning.
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(test_mock::g_serial.contains("refusing reentrant call"));
+
+    // Body MUST NOT have run — demoEcho's Serial signature is absent.
+    ASSERT_FALSE(test_mock::g_serial.contains("a=7 b=42"));
+}
+
+// ---------------------------------------------------------------------------
 // TC12 — Queue-full path: ``_push`` rejects the new step, prints the
 // warning, ``_count`` is unchanged.
 // ---------------------------------------------------------------------------
@@ -1164,6 +1204,7 @@ int main()
     test_TC12_queue_full();
     test_TC13_start_clears_aborted_latch();
     test_TC14_queue_time_name_validation();
+    test_TC15_runtask_reentrancy_rejected();
 
     TEST_REPORT();
 }

@@ -25,6 +25,9 @@
  * Lifecycle invariants:
  *   - ``_inTask`` is owned EXCLUSIVELY by ``runTask`` via an RAII scope guard.
  *     No other method (including ``abort()`` / ``clearAbort()``) touches it.
+ *     ``runTask`` also READS it on entry to reject reentrant dispatch (a task
+ *     body calling ``runTask`` again) — tasks are non-reentrant leaf
+ *     operations; see ADR-026.
  *   - ``_aborted`` is a sticky latch settable via ``abort()`` and readable
  *     via :func:`isAborted`. It is cleared by either ``begin()`` (setup-time)
  *     or ``clearAbort()`` (called from ``Mission.start()`` before each new
@@ -82,9 +85,18 @@ public:
      *              its specific task (typically ``reinterpret_cast`` to a
      *              per-task ``struct``).
      *
-     * @return The body's return value, or ``false`` if ``name`` is unknown
+     * @return The body's return value; or ``false`` if ``name`` is unknown
      *         (an ``[Tasks] runTask: unknown name '<name>'`` warning is
-     *         printed to Serial in that case).
+     *         printed to Serial); or ``false`` if called reentrantly (see the
+     *         reentrancy note below).
+     *
+     * @note **Non-reentrant.** If ``runTask`` is invoked while a task body is
+     *       already in flight (``_inTask`` is ``true``), it refuses: it prints
+     *       a ``[Tasks] runTask: refusing reentrant call to '<name>'`` warning
+     *       and returns ``false`` WITHOUT resolving ``name`` or arming the
+     *       guard. Tasks are leaf operations — share logic between them via
+     *       private helpers, not by calling ``runTask`` from inside a task.
+     *       See ADR-026.
      *
      * @note ``_inTask`` is set ``true`` for the duration of dispatch via an
      *       RAII scope guard, so it is correctly reset even if the body
