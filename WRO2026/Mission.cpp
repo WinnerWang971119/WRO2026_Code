@@ -29,6 +29,7 @@ bool MissionClass::begin()
     _faultBeepIdx       = 0;
     _faultPhaseStart_ms = 0;
     _btnPrev            = false;
+    _buildError         = false;
     return true;
 }
 
@@ -128,11 +129,21 @@ MissionClass& MissionClass::setArrivalDirection(Direction d)
 
 void MissionClass::start()
 {
+    if (_buildError)
+    {
+        Serial.println(F("[Mission] start refused: build error (unknown task name at queue time)"));
+        EventTrace.pushEvent("MIS BUILD ERR");
+        _enterFaultBeeping(millis());
+        return;
+    }
     if (_count == 0)
     {
         Serial.println(F("[Mission] start with empty queue; no-op"));
         return;
     }
+    // Clear the abort latch from any previous mission run so a task body
+    // polling Tasks.isAborted() in this run sees a clean state.
+    Tasks.clearAbort();
     _idx = 0;
     _stepState = StepState::ENTER;
     _state = State::RUNNING;
@@ -159,10 +170,11 @@ void MissionClass::abort()
     LineFollower.setEnabled(false);
     Drive.stop(true);
 
-    _count     = 0;
-    _idx       = 0;
-    _state     = State::IDLE;
-    _stepState = StepState::ENTER;
+    _count       = 0;
+    _idx         = 0;
+    _state       = State::IDLE;
+    _stepState   = StepState::ENTER;
+    _buildError  = false;
     Serial.println(F("[Mission] abort"));
 }
 
@@ -388,14 +400,18 @@ void MissionClass::update()
                             Serial.print(F("[Mission] unknown task '"));
                             Serial.print(s.task_name == nullptr ? "?" : s.task_name);
                             Serial.println(F("'"));
-                            EventTrace.pushEvent("NAV FAULT TASK");
-                            _enterFaultBeeping(now);
+                            EventTrace.pushEvent("NV TASK");
+                            _enterFaultBeeping(millis());
                             return;
                         }
 
-                        // Boundary event before dispatch.
+                        // Boundary event before dispatch. Tags are kept short
+                        // (3 chars + space) so the OLED's MAX_LINE_LEN=20 budget
+                        // leaves 15 chars for the task name — fits Phase-5/6
+                        // names like "mosaicPlace" / "parkInBay" / "debugYield"
+                        // without truncation.
                         char buf[EventTraceClass::MAX_LINE_LEN];
-                        snprintf(buf, sizeof(buf), "TASK START %s",
+                        snprintf(buf, sizeof(buf), "T> %s",
                                  s.task_name == nullptr ? "?" : s.task_name);
                         EventTrace.pushEvent(buf);
 
@@ -406,15 +422,29 @@ void MissionClass::update()
                         // because the inTask() guard short-circuited Mission.update().
                         // Check here so a task-internal fault triggers the fault path
                         // BEFORE we advance past the step (mirrors how GOTO never
-                        // advances on a faulted leg).
+                        // advances on a faulted leg). Pass millis() fresh — `now`
+                        // captured at the top of update() is stale by however long
+                        // the (potentially multi-second) task body ran, and using
+                        // the stale value would collapse the FAULT_BEEPING beep
+                        // schedule.
                         if (PathTracker.hasFault())
                         {
                             _emitFault();
-                            _enterFaultBeeping(now);
+                            _enterFaultBeeping(millis());
                             return;
                         }
 
-                        snprintf(buf, sizeof(buf), ok ? "TASK OK %s" : "TASK YIELD %s",
+                        // If the task body called Mission.abort() mid-flight,
+                        // _state is now IDLE and _count/_idx have been reset.
+                        // Bail BEFORE pushing a misleading "TASK OK" event or
+                        // advancing _idx past _count — the operator's abort
+                        // should not be papered over by a "task completed" log.
+                        if (_state != State::RUNNING)
+                        {
+                            return;
+                        }
+
+                        snprintf(buf, sizeof(buf), ok ? "T+ %s" : "T- %s",
                                  s.task_name == nullptr ? "?" : s.task_name);
                         EventTrace.pushEvent(buf);
                         if (!ok)
@@ -486,9 +516,10 @@ void MissionClass::update()
                 }
                 // Queue was cleared on fault entry; resetting indices is
                 // belt-and-braces in case a stale path slipped through.
-                _count = 0;
-                _idx   = 0;
-                _state = State::IDLE;
+                _count       = 0;
+                _idx         = 0;
+                _state       = State::IDLE;
+                _buildError  = false;    // clear so a new buildMission can re-arm
                 Serial.println(F("[Mission] fault cleared; mission ended"));
                 EventTrace.pushEvent("MIS RESET");
             }

@@ -23,6 +23,17 @@
  * ``Mission.update()`` ticked from ``loop()`` alongside Drive,
  * LineFollower, Intersection, PathTracker, EventTrace.
  *
+ * @warning **All Mission verbs are queue-only.** Calling ``Mission.goTo``,
+ *          ``wait``, ``print``, ``beep``, ``led``, or ``task`` from inside a
+ *          task body APPENDS the step to the queue and runs it AFTER the
+ *          current TASK step's ``_advanceStep`` — it is NOT a synchronous
+ *          call. Task bodies that need to drive the chassis, beep, or check
+ *          state must use the underlying singletons directly: ``PathTracker``,
+ *          ``Drive``, ``LineFollower``, ``MiniR4.Buzzer``, ``MiniR4.LED``.
+ *          The ``task`` verb additionally guards against nested ``task()``
+ *          enqueues (printing a Serial warning); the other verbs do not
+ *          guard, so the queue-append happens silently. See ADR-025.
+ *
  * Fault behaviour (PathTracker-fault OR ``goTo`` to an unknown node):
  *   1. The remaining queue is dropped immediately and the chassis is
  *      braked via ``Drive.stop(true)``.
@@ -45,6 +56,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 #include <string.h>
+#include <type_traits>
 
 #include "Config.h"
 #include "NavTypes.h"
@@ -133,14 +145,21 @@ public:
      *               fit in ``Config::MAX_TASK_ARG_BYTES`` (16); a
      *               ``static_assert`` enforces this at compile time with the
      *               message ``"Mission.task args exceed MAX_TASK_ARG_BYTES"``.
+     *               A second ``static_assert`` enforces
+     *               ``std::is_trivially_copyable_v<Args>`` per arg — types
+     *               with non-trivial copy constructors cannot survive the
+     *               ``memcpy`` pack-and-unpack.
      * @param name   Registry key; resolved against ``Tasks._registry`` at
-     *               execute time (an unknown name latches the mission fault).
+     *               BOTH queue time (here — bad names set ``_buildError`` and
+     *               cause ``start()`` to refuse to arm) AND execute time
+     *               (as a defence-in-depth fault check).
      * @param args   Argument pack. **Recommended:** pass a single per-task
      *               ``struct <Name>Args { ... };`` value so the byte layout
      *               matches the task body's ``reinterpret_cast<const
      *               NameArgs*>`` unpack. Mixing raw scalar types is only safe
      *               when the resulting byte layout is byte-identical to a
-     *               contiguous ``uint8_t[N]`` (i.e. no padding).
+     *               contiguous ``uint8_t[N]`` (i.e. no padding). See the
+     *               struct-padding warning on ``TaskArgs`` in TasksTypes.h.
      *
      * @return ``*this`` for verb chaining.
      *
@@ -148,7 +167,9 @@ public:
      *       returns ``true`` (i.e. from inside a task body), the call is
      *       ignored and a warning is printed to Serial. Use this for the
      *       operator-authored mission DSL, not from inside task bodies
-     *       themselves.
+     *       themselves. See the queue-only warning at the top of this header
+     *       for why the OTHER verbs (``goTo``, ``wait``, ``print``, ``beep``,
+     *       ``led``) do NOT guard against nested calls — they queue silently.
      */
     template <typename... Args>
     MissionClass& task(const char* name, Args... args);
@@ -217,6 +238,13 @@ private:
         ACTIVE
     };
 
+    // NOTE: Step is a flat struct paying the worst-case size for every slot —
+    // a 20-byte growth in this PR (TaskArgs + task_name) times
+    // MAX_MISSION_STEPS=64 = ~1.28 KB of mostly-unused queue storage when the
+    // mission is dominated by GOTO/WAIT/PRINT steps. A tagged-union refactor
+    // (one payload per StepType) is the right shape but is multi-PR; tracked
+    // as a backlog item for the Phase 6 sweep. The 32 KB SRAM budget is
+    // comfortable today.
     struct Step
     {
         StepType    type;
@@ -268,6 +296,15 @@ private:
     uint32_t _faultPhaseStart_ms = 0;
     bool     _faultLedOn         = false;
     bool     _btnPrev            = false;
+
+    /**
+     * @brief Sticky build-error latch set by ``task<>()`` when the supplied
+     *        registry name does not resolve at queue time. ``start()`` checks
+     *        this and refuses to arm the mission if set, surfacing the typo
+     *        before any chassis motion happens. Cleared by ``begin()`` and
+     *        the fault-clear path (``FAULT_AWAIT_RESET`` → ``IDLE``).
+     */
+    bool _buildError = false;
 };
 
 extern MissionClass Mission;
@@ -284,14 +321,38 @@ extern MissionClass Mission;
 template <typename... Args>
 MissionClass& MissionClass::task(const char* name, Args... args)
 {
-    constexpr size_t TOTAL =
-        (sizeof...(Args) == 0) ? 0 : (sizeof(Args) + ... + 0);
+    // Binary right fold with `0` as the identity already produces 0 for an
+    // empty pack — no ternary guard needed. (Unary right fold `(sizeof(Args)
+    // + ...)` would be ill-formed for the empty pack; the `+ 0` initializer
+    // is what makes this expression safe.)
+    constexpr size_t TOTAL = (sizeof(Args) + ... + 0);
     static_assert(TOTAL <= Config::MAX_TASK_ARG_BYTES,
                   "Mission.task args exceed MAX_TASK_ARG_BYTES");
+
+    // Non-trivially-copyable arg types cannot survive the memcpy pack-and-
+    // unpack flow inside _packArgs / task body — they would invoke copy
+    // constructors that are erased by the byte-level copy. Forcing a TC
+    // requirement at compile time prevents callers from accidentally passing
+    // e.g. a std::string or a class with a vtable.
+    static_assert((std::is_trivially_copyable_v<Args> && ...),
+                  "Mission.task args must be trivially-copyable");
 
     if (Tasks.inTask())
     {
         Serial.println(F("[Mission] task() called from inside a task body; ignored"));
+        return *this;
+    }
+
+    // Queue-time registry validation: catch typos before any chassis motion.
+    // findTask is the same linear strcmp scan runTask uses at execute time;
+    // the redundancy is acceptable because it's a one-time queue-time cost
+    // and it turns a mid-route fault into a pre-arm refusal.
+    if (Tasks.findTask(name) == nullptr)
+    {
+        Serial.print(F("[Mission] task('"));
+        Serial.print(name == nullptr ? "(null)" : name);
+        Serial.println(F("') unknown at queue time; start() will refuse to arm"));
+        _buildError = true;
         return *this;
     }
 

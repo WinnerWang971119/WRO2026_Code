@@ -26,7 +26,8 @@ TasksClass Tasks;
 
 const TaskRegistryEntry TasksClass::_registry[] =
 {
-    { "demoEcho", &TasksClass::demoEcho },
+    { "demoEcho",   &TasksClass::demoEcho   },
+    { "debugYield", &TasksClass::debugYield },
 };
 
 const size_t TasksClass::_registry_count =
@@ -78,6 +79,13 @@ const TaskRegistryEntry* TasksClass::findTask(const char* name) const
     }
     for (size_t i = 0; i < _registry_count; i++)
     {
+        // Skip rows with a null name pointer (defensive — a hand-edit typo
+        // like `{ nullptr, &TasksClass::foo }` would otherwise feed nullptr
+        // into strcmp and yield UB).
+        if (_registry[i].name == nullptr)
+        {
+            continue;
+        }
         if (strcmp(_registry[i].name, name) == 0)
         {
             return &_registry[i];
@@ -97,6 +105,18 @@ bool TasksClass::runTask(const char* name, const TaskArgs& args)
         return false;
     }
 
+    // Defensive null-check on the member-function pointer: a registry edit
+    // that lands a placeholder like `{ "name", nullptr }` would otherwise
+    // hard-fault on the pmf call below. The static_assert on count alone
+    // does not catch this.
+    if (entry->fn == nullptr)
+    {
+        Serial.print(F("[Tasks] runTask: null fn for '"));
+        Serial.print(name);
+        Serial.println(F("'"));
+        return false;
+    }
+
     // Scope guard sets `_inTask = true` now and clears it on return through
     // any path (early return, normal return, future-added returns alike).
     InTaskGuard guard(&_inTask);
@@ -112,6 +132,14 @@ void TasksClass::abort()
     // (if any) still unwinds cleanly with `_inTask` correctly cleared by
     // the guard's destructor.
     _aborted = true;
+}
+
+void TasksClass::clearAbort()
+{
+    // Per-run reset of the abort latch, called from Mission.start() so an
+    // abort latched during run N does not bleed into run N+1. Intentionally
+    // does NOT touch `_inTask` — runTask's guard owns that.
+    _aborted = false;
 }
 
 bool TasksClass::isAborted() const
@@ -135,4 +163,15 @@ bool TasksClass::demoEcho(const TaskArgs& args)
     Serial.print(F(" b="));
     Serial.println(args.u8[1]);
     return true;
+}
+
+bool TasksClass::debugYield(const TaskArgs& /*args*/)
+{
+    // Production-side stub for the YIELD path so Mission's TASK case has
+    // an end-to-end test target. The host-mirror's `alwaysYield` stub used
+    // to be the only path that exercised `_advanceStep` + `TASK YIELD %s`
+    // emission; this body lets a real Mission/Tasks integration check the
+    // same branch.
+    Serial.println(F("[Tasks] debugYield"));
+    return false;
 }

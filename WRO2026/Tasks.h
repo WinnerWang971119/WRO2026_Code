@@ -24,10 +24,12 @@
  *
  * Lifecycle invariants:
  *   - ``_inTask`` is owned EXCLUSIVELY by ``runTask`` via an RAII scope guard.
- *     No other method (including ``abort()``) clears it.
- *   - ``_aborted`` is a sticky latch settable via ``abort()`` and readable via
- *     :func:`isAborted`. It is intentionally NOT cleared by ``runTask`` —
- *     clearing belongs to ``begin()`` / future explicit reset semantics.
+ *     No other method (including ``abort()`` / ``clearAbort()``) touches it.
+ *   - ``_aborted`` is a sticky latch settable via ``abort()`` and readable
+ *     via :func:`isAborted`. It is cleared by either ``begin()`` (setup-time)
+ *     or ``clearAbort()`` (called from ``Mission.start()`` before each new
+ *     mission run) so an abort latched during run N does not bleed into
+ *     run N+1.
  *   - There is no persistent active-task FSM state in TasksClass for this
  *     plan — task bodies run to completion inside ``runTask``. Multi-tick
  *     cooperative tasks land in a later iteration; for now ``update()`` is
@@ -107,15 +109,25 @@ public:
     /**
      * @brief Latch a request to stop the current task framework.
      *
-     * Sets ``_aborted = true``. The flag is sticky — readers
-     * (:func:`isAborted`) see it until something explicitly clears the
-     * latch (today: only ``begin()``). Does NOT clear ``_inTask`` — that
-     * is owned solely by ``runTask``'s scope guard so the in-flight body
-     * still gets to unwind cleanly.
+     * Sets ``_aborted = true``. The flag is sticky for the duration of the
+     * current mission and is reset by either ``begin()`` (setup-time) or
+     * ``clearAbort()`` (called from ``Mission.start()`` before each new
+     * mission run). Does NOT clear ``_inTask`` — that is owned solely by
+     * ``runTask``'s scope guard so the in-flight body still gets to unwind
+     * cleanly.
      */
     void abort();
 
-    /** @brief ``true`` after ``abort()`` has been called and before the next ``begin()``. */
+    /**
+     * @brief Clear the sticky ``_aborted`` latch without otherwise resetting
+     *        Tasks state.
+     *
+     * Called by ``Mission.start()`` so the abort latch from a previous
+     * mission does not bleed into the next run. Does NOT touch ``_inTask``.
+     */
+    void clearAbort();
+
+    /** @brief ``true`` after ``abort()`` has been called and before the next ``begin()`` / ``clearAbort()``. */
     bool isAborted() const;
 
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
@@ -150,6 +162,20 @@ private:
      *       has a deterministic, side-effect-only target during bring-up.
      */
     bool demoEcho(const TaskArgs& args);
+
+    /**
+     * @brief Always-yield task body — returns ``false`` so the FSM's YIELD
+     *        path (``TASK YIELD %s`` event + Serial line + ``_advanceStep``)
+     *        has a production-side exercise.
+     *
+     * @param args  Ignored.
+     * @return Always ``false``.
+     *
+     * @note Without this, the YIELD path is exercised only by the host-test
+     *       mirror's stub and any regression in Mission's TASK case that
+     *       mis-handles ``ok==false`` would ship undetected.
+     */
+    bool debugYield(const TaskArgs& args);
 
     bool _inTask  = false;
     bool _aborted = false;
