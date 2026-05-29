@@ -32,13 +32,13 @@ from tools.path_planner.graph_builder import (
     EDGE_PROJECTION,
     build_graph,
 )
+from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_REVERSE,
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
-    BIDIRECTIONAL_ENABLED,
-    BIDIRECTIONAL_TURN_THRESHOLD_DEG,
-    LINE_BOARD_COUNT,
+    Direction,
+    resolve_direction,
 )
 
 
@@ -270,27 +270,37 @@ def _walk_expected_headings(
 ) -> List[float]:
     """Return the expected chassis body heading at each motion primitive.
 
-    Mirrors the direction-resolution branch of
-    :func:`tools.path_planner.compiler.compile_path` so that the
-    auto-resolved direction (FRONT vs REAR) yields the same body
-    heading the compiler walks against. For FRONT hops the body
-    heading equals the edge heading; for REAR hops it is
-    ``(edge_heading + 180) % 360`` so the rear sensor leads.
+    Calls :func:`tools.path_planner.sim.runtime.resolve_direction` for every
+    hop with the same inputs ``compile_path`` would use — so the helper
+    honours the full 5-step precedence (per-edge override → pipeline default
+    → builder arrival → builder route → auto), not just the auto branch.
+    A previous version inlined only the auto branch; any random graph that
+    later seeded a per-edge ``direction_override`` would cause non-deterministic
+    parity failures because the mirror silently ignored Step 1.
+
+    Module-level constants ``BIDIRECTIONAL_AUTO_ENABLED`` / ``LINE_BOARD_COUNT``
+    are read off the live ``_runtime`` module at call time so a
+    ``monkeypatch.setattr(_runtime, ...)`` propagates to this helper the
+    same way it propagates to ``compile_path``'s lazy reads.
     """
     headings: List[float] = []
     current = start_heading
-    for u, v in zip(path[:-1], path[1:]):
-        edge_heading = float(graph.edges[u, v]["heading_deg"])
-        # Auto resolution: no per-edge override, no pipeline override,
-        # no builder overrides, both kill-switch and board-count permit
-        # the auto rear step -> REAR iff |turn_delta| exceeds the
-        # bidirectional threshold.
-        delta = normalize_turn(edge_heading - current)
-        if (
-            BIDIRECTIONAL_ENABLED
-            and LINE_BOARD_COUNT >= 2
-            and abs(delta) > BIDIRECTIONAL_TURN_THRESHOLD_DEG
-        ):
+    last_idx = len(path) - 1
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
+        edge = graph.edges[u, v]
+        edge_heading = float(edge["heading_deg"])
+        direction = resolve_direction(
+            edge_dir_override=_runtime._read_edge_dir_override(edge),
+            pipeline_default=_runtime._pipeline_config.PIPELINE_CONFIG.direction,
+            builder_arrival=Direction.AUTO,
+            builder_route=Direction.AUTO,
+            current_heading=current,
+            edge_heading=edge_heading,
+            is_last_hop=((i + 1) == last_idx),
+            bidirectional_enabled=_runtime.BIDIRECTIONAL_AUTO_ENABLED,
+            line_board_count=_runtime.LINE_BOARD_COUNT,
+        )
+        if direction == Direction.REAR:
             body_target = (edge_heading + 180.0) % 360.0
         else:
             body_target = edge_heading % 360.0

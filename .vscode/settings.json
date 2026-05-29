@@ -8,5 +8,10 @@
     "wro2026.arduino.fqbn": "arduino:renesas_uno:unor4wifi",
     "wro2026.arduino.sketchPath": "WRO2026",
     "wro2026.arduino.port": "auto",
-    "wro2026.arduino.baudRate": "115200"
+    "wro2026.arduino.baudRate": "115200",
+    "python.testing.pytestArgs": [
+        "."
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
 }

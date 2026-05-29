@@ -30,6 +30,7 @@ bool MissionClass::begin()
     _faultPhaseStart_ms = 0;
     _btnPrev            = false;
     _buildError         = false;
+    _lastPushOk         = false;
     return true;
 }
 
@@ -55,7 +56,7 @@ MissionClass& MissionClass::goTo(const char* nodeName)
     s.type = StepType::GOTO;
     s.text = nodeName;
     s.goal = FieldMap::findNodeByName(nodeName);
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -64,7 +65,7 @@ MissionClass& MissionClass::wait(uint32_t ms)
     Step s{};
     s.type        = StepType::WAIT;
     s.duration_ms = ms;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -73,7 +74,7 @@ MissionClass& MissionClass::print(const char* msg)
     Step s{};
     s.type = StepType::PRINT;
     s.text = msg;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -83,7 +84,7 @@ MissionClass& MissionClass::beep(uint16_t freq_hz, uint32_t duration_ms)
     s.type        = StepType::BEEP;
     s.freq_hz     = freq_hz;
     s.duration_ms = duration_ms;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
@@ -95,18 +96,26 @@ MissionClass& MissionClass::led(uint8_t r, uint8_t g, uint8_t b, uint32_t durati
     s.g           = g;
     s.b           = b;
     s.duration_ms = duration_ms;
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
 // Modifier verbs — mutate the most-recently-enqueued GOTO step in place.
-// No-op + Serial warning when misused (queue empty or last step is not GOTO),
-// so misuse leaves the queue unmodified rather than corrupted. Both fields
-// are zero-initialized to Direction::AUTO by `Step s{}` in goTo(), so a bare
-// `Mission.goTo("X")` without these modifiers behaves identically to pre-T9.
+// Misuse modes (all no-op + Serial warning, queue unchanged):
+//   - empty queue (no step pushed yet)
+//   - last step is not GOTO (modifier chained on wait/print/beep/led)
+//   - preceding push silently overflowed the queue (_lastPushOk == false) —
+//     without this third guard, the modifier would target _queue[_count - 1]
+//     which is the PREVIOUSLY-enqueued step (often another GOTO), silently
+//     rewriting an unrelated goal's direction.
 
 MissionClass& MissionClass::setRouteDirection(Direction d)
 {
+    if (!_lastPushOk)
+    {
+        Serial.println(F("[Mission] setRouteDirection: preceding step did not enqueue (ignored)"));
+        return *this;
+    }
     if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
     {
         Serial.println(F("[Mission] setRouteDirection: no preceding goTo step (ignored)"));
@@ -118,6 +127,11 @@ MissionClass& MissionClass::setRouteDirection(Direction d)
 
 MissionClass& MissionClass::setArrivalDirection(Direction d)
 {
+    if (!_lastPushOk)
+    {
+        Serial.println(F("[Mission] setArrivalDirection: preceding step did not enqueue (ignored)"));
+        return *this;
+    }
     if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
     {
         Serial.println(F("[Mission] setArrivalDirection: no preceding goTo step (ignored)"));
@@ -175,6 +189,7 @@ void MissionClass::abort()
     _state       = State::IDLE;
     _stepState   = StepState::ENTER;
     _buildError  = false;
+    _lastPushOk  = false;
     Serial.println(F("[Mission] abort"));
 }
 

@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <math.h>
 
+#include "DirectionPolicy.h"
 #include "Drive.h"
 #include "Intersection.h"
 #include "LineFollower.h"
@@ -62,54 +63,10 @@ namespace
             : edge.pre_turn_mode_override;
     }
 
-    /**
-     * @brief Resolve direction of travel for the current edge per precedence layers.
-     *
-     * Precedence (high → low): per-edge override → pipeline default → arrival
-     * override (last hop only) → route override → auto (180° turn-saving
-     * comparison against BIDIRECTIONAL_TURN_THRESHOLD_DEG, gated by board count
-     * and kill-switch).
-     *
-     * Mirrors tools/path_planner/sim/runtime.py::resolve_direction — cross-
-     * language parity is load-bearing for TC18.
-     */
-    Direction _resolveDirection(
-        Routes::DirectionMode edgeOverride,
-        Routes::DirectionMode pipelineDefault,
-        Direction             builderArrival,
-        Direction             builderRoute,
-        float                 currentHeading,
-        float                 edgeHeading,
-        bool                  isLastHop,
-        bool                  bidirectionalEnabled,
-        uint8_t               lineBoardCount)
-    {
-        // Step 1: per-edge override is binding.
-        if (edgeOverride == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-        if (edgeOverride == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-        // Step 2: pipeline default is binding when not DEFAULT.
-        if (pipelineDefault == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-        if (pipelineDefault == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-        // Step 3: arrival override wins on the final hop.
-        if (isLastHop && builderArrival != Direction::AUTO) return builderArrival;
-
-        // Step 4: route override wins on all hops.
-        if (builderRoute != Direction::AUTO) return builderRoute;
-
-        // Step 5: auto — only if 2-board chassis AND kill-switch on.
-        if (!bidirectionalEnabled) return Direction::FRONT;
-        if (lineBoardCount < 2)    return Direction::FRONT;
-
-        // Wrap delta into (-180, +180] using the same loop pattern as
-        // PathTrackerClass::_onPlanNextHop (existing wrap site).
-        float delta = edgeHeading - currentHeading;
-        while (delta >   180.0f) { delta -= 360.0f; }
-        while (delta <= -180.0f) { delta += 360.0f; }
-        if (fabsf(delta) > Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG) return Direction::REAR;
-        return Direction::FRONT;
-    }
+    // NOTE: the production direction-resolution helper has been promoted to
+    // `DirectionPolicy.h::resolveDirection` (header-only inline) so both
+    // production and the host-compile test target link the same definition.
+    // See ADR-024 and the PR #34 review.
 
     /**
      * @brief Map a `Routes::LineMode` to a `Config::SpeedPreset` for
@@ -272,8 +229,12 @@ void PathTrackerClass::clearFault()
 
 void PathTrackerClass::abort()
 {
-    // Stop the chassis first; Drive.stop(true) also clears Drive's queue,
-    // so a half-issued turn or driveDist will not resume.
+    // Stop the chassis first. Disable LineFollower BEFORE Drive.stop(true)
+    // because the follower writes to Drive every tick — if it is still
+    // enabled after Drive.stop, the next cooperativeTick() iteration's
+    // LineFollower.update() re-issues Drive.setSpeed(...) and undoes the
+    // halt. Mirror of Mission::abort()'s ordering (Mission.cpp:166).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
@@ -531,7 +492,7 @@ void PathTrackerClass::update()
                             // arrival_direction values apply (arrival only takes effect
                             // when this is the final hop into the destination, which
                             // _resolveDirection handles via the isLastHop flag).
-                            const Direction nextDir = _resolveDirection(
+                            const Direction nextDir = resolveDirection(
                                 outbound.direction_override,
                                 Routes::PIPELINE_CONFIG.direction,
                                 _activeArrivalDirection,
@@ -539,7 +500,7 @@ void PathTrackerClass::update()
                                 inboundBody,
                                 outbound.heading_deg,
                                 (nextNext == _destinationNode),
-                                Config::BIDIRECTIONAL_ENABLED,
+                                Config::BIDIRECTIONAL_AUTO_ENABLED,
                                 Config::LINE_BOARD_COUNT);
 
                             float outboundBody = outbound.heading_deg;
@@ -552,7 +513,20 @@ void PathTrackerClass::update()
                             float delta = outboundBody - inboundBody;
                             while (delta >   180.0f) { delta -= 360.0f; }
                             while (delta <= -180.0f) { delta += 360.0f; }
-                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+
+                            // Pass-through requires BOTH (1) collinear body
+                            // headings AND (2) matching direction across the
+                            // intersection. A REAR→FRONT or FRONT→REAR transition
+                            // would force the dispatcher to flip
+                            // LineFollower.setReverse(...) mid-flight — instantly
+                            // swapping the active line board and inverting cruise
+                            // sign in one tick, jolting the chassis without a
+                            // controlled stop. Falling through to LINE_OVERSHOOT
+                            // (with brake, no pass-through) gives the controller
+                            // a clean re-init window before the new edge starts.
+                            // PR #34 review.
+                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
+                                nextDir == _resolvedDirection)
                             {
                                 _passThrough = true;
                             }
@@ -563,10 +537,22 @@ void PathTrackerClass::update()
                 // Arm the overshoot. Always set overshootMode=true (project-wide rule
                 // per ADR-023: the 5cm window dead-reckons through line-offline
                 // conditions). brakeOnGate and tShapeRampDown depend on _passThrough.
+                //
+                // `.setReverse(...)` is chained explicitly (PR #34 review). The
+                // previous code relied on LineFollower's sticky _reverse state —
+                // `setEnabled(true)` without `setReverse` left whatever was last
+                // configured. That works today, but a future change to
+                // LineFollower::_applyEnableBuilder that reset _reverse on
+                // re-enable would silently break the overshoot window on REAR
+                // LINE hops (overshoot dead-reckons forward instead of reverse).
+                // Making the direction explicit at every re-arm point removes
+                // the implicit coupling.
+                const bool overshootReverse = (_resolvedDirection == Direction::REAR);
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
                             .setTShapeRampDown(!_passThrough)
                             .setOvershootMode(true)
+                            .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
@@ -648,6 +634,12 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _fault.fromNode = from;
     _fault.destNode = to;
 
+    // Disable LineFollower BEFORE Drive.stop(true). If the follower is left
+    // enabled (e.g., fault fired during LINE_FOLLOW or LINE_OVERSHOOT with
+    // brakeOnGate=false), its next update() tick re-issues Drive.setSpeed()
+    // and undoes the halt — making the fault non-fail-safe in exactly the
+    // scenario it is meant to protect. Codex P1 (PR #34 review).
+    LineFollower.setEnabled(false);
     Drive.stop(true);
 
     _clearQueue();
@@ -723,7 +715,7 @@ void PathTrackerClass::_onPlanNextHop()
     const Direction builderArrival = _activeArrivalDirection;
     const Direction builderRoute   = _activeRouteDirection;
 
-    const Direction resolved = _resolveDirection(
+    const Direction resolved = resolveDirection(
         edge.direction_override,
         Routes::PIPELINE_CONFIG.direction,
         builderArrival,
@@ -731,8 +723,41 @@ void PathTrackerClass::_onPlanNextHop()
         currentWorld,
         edge.heading_deg,
         isLastHop,
-        Config::BIDIRECTIONAL_ENABLED,
+        Config::BIDIRECTIONAL_AUTO_ENABLED,
         Config::LINE_BOARD_COUNT);
+
+    // ------------------------------------------------------------------------
+    // Early reverse-availability guard.
+    //
+    // Reject REAR LINE/PROJECTION on a 1-board chassis BEFORE the pre-edge turn
+    // is dispatched, otherwise the chassis physically rotates 180° to face the
+    // (unservable) REAR body-heading and then halts in fault — leaving the
+    // robot pointing backward with REVERSE_UNAVAILABLE latched and the operator
+    // forced to manually re-orient.
+    //
+    // The auto branch of `_resolveDirection` short-circuits to FRONT when
+    // `LINE_BOARD_COUNT < 2`, so this guard only fires for an operator-forced
+    // REAR (per-edge override, pipeline default, or builder route/arrival).
+    // BLIND REAR is permitted on 1-board chassis (no line sensor required),
+    // so the check is scoped to LINE / PROJECTION.
+    //
+    // The same guard is left in `_dispatchEdgeAfterTurn` as defensive
+    // redundancy — if a future FSM change introduces a path into the
+    // dispatcher that bypasses this early site, the late guard still fires.
+    // ------------------------------------------------------------------------
+    if (resolved == Direction::REAR && Config::LINE_BOARD_COUNT < 2 &&
+        (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION))
+    {
+        Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+        Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+        Serial.print(F(" at u="));
+        Serial.print(cur);
+        Serial.print(F(" v="));
+        Serial.print(nxt);
+        Serial.println(F(" requires rear board (pre-turn guard)"));
+        _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
+        return;
+    }
 
     float bodyTarget = edge.heading_deg;
     if (resolved == Direction::REAR)
@@ -790,17 +815,17 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     const Routes::EdgeInfo& edge = FieldMap::getEdge(cur, _nextHop);
 
     // -----------------------------------------------------------------------
-    // Reverse-availability guard (T7 / issue #19).
+    // Reverse-availability guard (T7 / issue #19) — defensive redundancy.
     //
-    // Reject REAR LINE/PROJECTION on a 1-board chassis — there is no rear
-    // sensor to read the line. `_resolveDirection` (Step 5 in _onPlanNextHop)
-    // short-circuits AUTO to FRONT when `LINE_BOARD_COUNT < 2`, so this
-    // fault only fires for an operator-forced or edge-forced REAR (via
-    // DirectionMode::FORCE_REVERSE on the pipeline default or the edge
-    // override, or a future arrival/route builder override).
+    // Same condition as the early guard in `_onPlanNextHop` (see the block
+    // beginning "Early reverse-availability guard"). The early guard is the
+    // load-bearing site — it fires before the 180° pre-edge turn dispatches —
+    // and this dispatcher-side check exists only to defend against future
+    // FSM changes that might route into `_dispatchEdgeAfterTurn` without
+    // re-running `_onPlanNextHop`.
     //
     // BLIND REAR is permitted on a 1-board chassis: dead-reckoned reverse
-    // does not require a rear line sensor — only negative PWM (Step 5 below).
+    // does not require a rear line sensor — only negative PWM.
     // -----------------------------------------------------------------------
     if (_resolvedDirection == Direction::REAR && Config::LINE_BOARD_COUNT < 2)
     {

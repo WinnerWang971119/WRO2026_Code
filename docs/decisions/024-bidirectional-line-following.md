@@ -5,7 +5,7 @@
 
 ## Rule
 
-When `LINE_BOARD_COUNT == 2` and `Config::BIDIRECTIONAL_ENABLED` is true,
+When `LINE_BOARD_COUNT == 2` and `Config::BIDIRECTIONAL_AUTO_ENABLED` is true,
 PathTracker chooses front-board (forward) or rear-board (reverse) traversal per
 hop by comparing the absolute heading delta to a strict
 `BIDIRECTIONAL_TURN_THRESHOLD_DEG` (default `90.0f`; ties go forward).
@@ -13,6 +13,12 @@ Manual overrides resolve in strict precedence: per-directed-edge
 `direction_override` in `routes.h` > `setArrivalDirection` (final hop only) >
 `setRouteDirection` (all hops) > auto. Pass-through (ADR-023) composes via the
 resolved body-heading delta, not the raw forward edge headings.
+
+The kill-switch (`BIDIRECTIONAL_AUTO_ENABLED`, renamed in PR #34 review from
+the misleading "ENABLED") gates ONLY the auto branch. Operator overrides
+(per-edge, pipeline default, builder route/arrival) bypass it. To fully
+disable bidirectional, clear the overrides in `field_data.py` AND set
+`BIDIRECTIONAL_AUTO_ENABLED` to false.
 
 When `LINE_BOARD_COUNT == 1` and REAR is forced (via override, builder, or edge
 tag), PathTracker raises `Fault::REVERSE_UNAVAILABLE`. Auto never picks REAR on
@@ -47,11 +53,14 @@ intuition.
 - **Offline override:** add `"direction": "front"` or `"rear"` to an EDGES entry
   in `field_data.py`. Applies only to the forward `(u,v)` directed edge (Codex
   P1 invariant; the reverse `(v,u)` edge retains `DEFAULT`).
-- **Resolution algorithm:** `_resolveDirection` in the anonymous namespace of
-  `PathTracker.cpp` is the single source of truth; the Python mirror is
+- **Resolution algorithm:** `resolveDirection` in `WRO2026/DirectionPolicy.h`
+  is the single C++ source of truth, shared between `PathTracker.cpp` and the
+  host-compile test suite via `#include`. The Python mirror is
   `tools/path_planner/sim/runtime.py::resolve_direction`. TC18 enforces
-  cross-language parity via a pytest that greps the generated header for matching
-  constant definitions.
+  cross-language parity via a pytest that greps the generated header for
+  matching constant definitions. Refactored out of `PathTracker.cpp`'s
+  anonymous namespace in PR #34 review to eliminate test-vs-production
+  byte-copy drift.
 
 ## Trigger to revisit
 

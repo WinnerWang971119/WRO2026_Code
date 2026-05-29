@@ -465,13 +465,13 @@ def test_tc9_path_pass_through_enabled_parity():
 
 
 # ---------------------------------------------------------------------------
-# TC14 — parity: BIDIRECTIONAL_ENABLED / BIDIRECTIONAL_TURN_THRESHOLD_DEG
+# TC14 — parity: BIDIRECTIONAL_AUTO_ENABLED / BIDIRECTIONAL_TURN_THRESHOLD_DEG
 # ---------------------------------------------------------------------------
 
 
 def test_tc14a_bidirectional_enabled_config_parity():
-    """TC14a: Config.h defines BIDIRECTIONAL_ENABLED_DEFAULT macro guard
-    and the BIDIRECTIONAL_ENABLED constexpr. Sim's hand-mirrored value
+    """TC14a: Config.h defines BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro guard
+    and the BIDIRECTIONAL_AUTO_ENABLED constexpr. Sim's hand-mirrored value
     matches the C++ default."""
     assert _CONFIG_H.exists(), (
         f"Config.h not found at {_CONFIG_H}. "
@@ -480,16 +480,16 @@ def test_tc14a_bidirectional_enabled_config_parity():
     config_h = _CONFIG_H.read_text(encoding="utf-8")
     # Anchored regex defends against false positives from unrelated bools.
     assert re.search(
-        r"#define\s+BIDIRECTIONAL_ENABLED_DEFAULT\s+true",
+        r"#define\s+BIDIRECTIONAL_AUTO_ENABLED_DEFAULT\s+true",
         config_h,
-    ), "Config.h missing #define BIDIRECTIONAL_ENABLED_DEFAULT true"
+    ), "Config.h missing #define BIDIRECTIONAL_AUTO_ENABLED_DEFAULT true"
     assert re.search(
-        r"constexpr\s+bool\s+BIDIRECTIONAL_ENABLED\s*=",
+        r"constexpr\s+bool\s+BIDIRECTIONAL_AUTO_ENABLED\s*=",
         config_h,
-    ), "Config.h missing constexpr bool BIDIRECTIONAL_ENABLED = ..."
-    # Sim parity: runtime.BIDIRECTIONAL_ENABLED must equal C++ default (True).
-    assert _runtime.BIDIRECTIONAL_ENABLED is True, (
-        "Sim BIDIRECTIONAL_ENABLED diverged from C++ default (true)"
+    ), "Config.h missing constexpr bool BIDIRECTIONAL_AUTO_ENABLED = ..."
+    # Sim parity: runtime.BIDIRECTIONAL_AUTO_ENABLED must equal C++ default (True).
+    assert _runtime.BIDIRECTIONAL_AUTO_ENABLED is True, (
+        "Sim BIDIRECTIONAL_AUTO_ENABLED diverged from C++ default (true)"
     )
 
 
@@ -510,6 +510,34 @@ def test_tc14b_bidirectional_turn_threshold_config_parity():
     )
     assert _runtime.BIDIRECTIONAL_TURN_THRESHOLD_DEG == 90.0, (
         "Sim BIDIRECTIONAL_TURN_THRESHOLD_DEG diverged from C++ default (90.0f)"
+    )
+
+
+def test_tc14c_line_board_count_config_parity():
+    """TC14c: Config.h defines LINE_BOARD_COUNT as constexpr uint8_t and the sim
+    mirror at runtime.LINE_BOARD_COUNT matches.
+
+    Defends the silent-drift class (sim/runtime claimed mirror but values diverged)
+    surfaced during PR #34 review. Without this test, a future bump of either
+    side leaves the parity broken at runtime.
+    """
+    assert _CONFIG_H.exists(), (
+        f"Config.h not found at {_CONFIG_H}. "
+        "Ensure the test is run from within the WRO2026_Code repo."
+    )
+    config_h = _CONFIG_H.read_text(encoding="utf-8")
+    match = re.search(
+        r"constexpr\s+uint8_t\s+LINE_BOARD_COUNT\s*=\s*([12])\s*;",
+        config_h,
+    )
+    assert match is not None, (
+        "Config.h missing 'constexpr uint8_t LINE_BOARD_COUNT = <1|2>;' "
+        "(anchored pattern)"
+    )
+    config_value = int(match.group(1))
+    assert _runtime.LINE_BOARD_COUNT == config_value, (
+        f"runtime.LINE_BOARD_COUNT ({_runtime.LINE_BOARD_COUNT}) "
+        f"!= Config.h ({config_value})"
     )
 
 

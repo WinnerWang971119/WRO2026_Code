@@ -59,11 +59,11 @@
  *
  *   TC14c — Compile-time kill-switch override drives runtime behavior (AC8c):
  *     This file is built TWICE by CMake — once with
- *     `-DBIDIRECTIONAL_ENABLED_DEFAULT=true` (default) and once with `=false`.
+ *     `-DBIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true` (default) and once with `=false`.
  *     Each build runs the same fixture (1-board chassis, AUTO direction at
  *     the builder, no edge override, currentHeading == 0 deg, edge heading
  *     == 175 deg — a body-flip is the turn-saving choice). Asserts:
- *       - `Config::BIDIRECTIONAL_ENABLED == BIDIRECTIONAL_ENABLED_DEFAULT`
+ *       - `Config::BIDIRECTIONAL_AUTO_ENABLED == BIDIRECTIONAL_AUTO_ENABLED_DEFAULT`
  *         (the macro definitely propagated into the constant).
  *       - With the flag ON: `_resolveDirection` may pick REAR. (On a 1-board
  *         chassis the auto branch is *also* gated by `LINE_BOARD_COUNT >= 2`,
@@ -83,10 +83,11 @@
 
 // Production headers we depend on for types only (no linkage to .cpp needed).
 #include "Config.h"
+#include "DirectionPolicy.h"    // Shared resolveDirection() — single source of truth.
 #include "NavTypes.h"
-#include "PathTracker.h"    // For PathTrackerClass::Fault + FaultInfo enums.
-#include "routes.h"         // For Routes::DirectionMode, Routes::EdgeType.
-#include "FieldMap.h"       // For FieldMap::NODE_NONE.
+#include "PathTracker.h"        // For PathTrackerClass::Fault + FaultInfo enums.
+#include "routes.h"             // For Routes::DirectionMode, Routes::EdgeType.
+#include "FieldMap.h"           // For FieldMap::NODE_NONE.
 
 // LineFollower / WROMath come along on the test target's SUT_SOURCES, but
 // nothing in this file touches them — the tests are pure logic exercises.
@@ -96,22 +97,19 @@
 #include <cstdio>
 
 // ===========================================================================
-// Inline replicas of production logic under test.
+// Test calls the real production helper via DirectionPolicy.h.
 //
-// Each helper below is a faithful copy of a specific block in the production
-// source, with a pointer back to the canonical site. CI parity is enforced
-// by the test itself: if these replicas drift, the assertions stop matching
-// the production behavior the next time a real-world fixture is checked in.
+// The dispatcher REVERSE_UNAVAILABLE guard is still replicated inline below
+// because its production site (PathTracker.cpp::_dispatchEdgeAfterTurn) is
+// tangled with Drive / LineFollower / Localization mocks. The shape is small
+// enough (~10 lines) that the drift risk is acceptable; the replica is
+// annotated with a back-pointer to the canonical site.
 // ===========================================================================
 
-/// Replica of `PathTracker.cpp::_resolveDirection` (anonymous namespace,
-/// file-local in production). See `PathTracker.cpp:76-112`. Kept byte-for-byte
-/// identical; if you edit one, edit the other.
-///
-/// The Python sim mirror is at
-/// `tools/path_planner/sim/runtime.py::resolve_direction` — TC18 covers the
-/// cross-language parity.
-static Direction replica_resolveDirection(
+/// Alias so existing tests that called the old replica name keep working
+/// while pointing at the canonical helper. New tests should call
+/// `resolveDirection` directly.
+static inline Direction replica_resolveDirection(
     Routes::DirectionMode edgeOverride,
     Routes::DirectionMode pipelineDefault,
     Direction             builderArrival,
@@ -119,33 +117,12 @@ static Direction replica_resolveDirection(
     float                 currentHeading,
     float                 edgeHeading,
     bool                  isLastHop,
-    bool                  bidirectionalEnabled,
+    bool                  bidirectionalAutoEnabled,
     uint8_t               lineBoardCount)
 {
-    // Step 1: per-edge override is binding.
-    if (edgeOverride == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-    if (edgeOverride == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-    // Step 2: pipeline default is binding when not DEFAULT.
-    if (pipelineDefault == Routes::DirectionMode::FORCE_FORWARD) return Direction::FRONT;
-    if (pipelineDefault == Routes::DirectionMode::FORCE_REVERSE) return Direction::REAR;
-
-    // Step 3: arrival override wins on the final hop.
-    if (isLastHop && builderArrival != Direction::AUTO) return builderArrival;
-
-    // Step 4: route override wins on all hops.
-    if (builderRoute != Direction::AUTO) return builderRoute;
-
-    // Step 5: auto — only if 2-board chassis AND kill-switch on.
-    if (!bidirectionalEnabled) return Direction::FRONT;
-    if (lineBoardCount < 2)    return Direction::FRONT;
-
-    // Wrap delta into (-180, +180].
-    float delta = edgeHeading - currentHeading;
-    while (delta >   180.0f) { delta -= 360.0f; }
-    while (delta <= -180.0f) { delta += 360.0f; }
-    if (fabsf(delta) > Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG) return Direction::REAR;
-    return Direction::FRONT;
+    return resolveDirection(edgeOverride, pipelineDefault, builderArrival,
+                            builderRoute, currentHeading, edgeHeading,
+                            isLastHop, bidirectionalAutoEnabled, lineBoardCount);
 }
 
 /// Replica of the REVERSE_UNAVAILABLE guard at the top of
@@ -208,44 +185,59 @@ namespace mission_replica
 
     // Mirrors `MissionClass::Step` (Mission.h, private struct). Only the
     // fields the modifier verbs touch are kept — the rest is unused here.
+    //
+    // No default member initializers — production's struct also has none.
+    // Replicating that means every Step in this file MUST be value-initialized
+    // (`Step s{};`) or it carries indeterminate values, exactly matching the
+    // fragility production exhibits. If a future Mission.cpp refactor constructs
+    // a Step on the stack without braces, the replica won't paper over it.
     struct Step
     {
-        StepType  type              = StepType::WAIT;
-        Direction route_direction   = Direction::AUTO;
-        Direction arrival_direction = Direction::AUTO;
+        StepType  type;
+        Direction route_direction;
+        Direction arrival_direction;
     };
 
-    /// Fixed-size queue + count, mirroring `_queue` + `_count` in MissionClass.
+    /// Fixed-size queue + count + last-push tracker, mirroring `_queue`,
+    /// `_count`, and `_lastPushOk` in MissionClass.
     struct Queue
     {
         static constexpr uint8_t CAPACITY = Config::MAX_MISSION_STEPS;
         Step    items[CAPACITY] = {};
         uint8_t count = 0;
+        bool    lastPushOk = false;
 
         bool push(const Step& s)
         {
-            if (count >= CAPACITY) return false;
+            if (count >= CAPACITY)
+            {
+                lastPushOk = false;
+                return false;
+            }
             items[count++] = s;
+            lastPushOk = true;
             return true;
         }
     };
 
-    /// Replicates `MissionClass::setRouteDirection` (Mission.cpp:106-115).
-    /// Returns true if the modifier wrote through, false if it was rejected.
+    /// Replicates `MissionClass::setRouteDirection` (Mission.cpp). Returns
+    /// true if the modifier wrote through, false if rejected by any of the
+    /// three guards (no push, push overflowed, last step not GOTO).
     static bool setRouteDirection(Queue& q, Direction d)
     {
+        if (!q.lastPushOk) return false;
         if (q.count == 0 || q.items[q.count - 1].type != StepType::GOTO)
         {
-            // Production also emits a Serial warning; not asserted here.
             return false;
         }
         q.items[q.count - 1].route_direction = d;
         return true;
     }
 
-    /// Replicates `MissionClass::setArrivalDirection` (Mission.cpp:117-126).
+    /// Replicates `MissionClass::setArrivalDirection`.
     static bool setArrivalDirection(Queue& q, Direction d)
     {
+        if (!q.lastPushOk) return false;
         if (q.count == 0 || q.items[q.count - 1].type != StepType::GOTO)
         {
             return false;
@@ -506,13 +498,61 @@ static void test_TC13_modifier_targets_last_step_only()
     ASSERT_EQ(q.count, (uint8_t) 2);
 }
 
+static void test_TC13_modifier_after_overflow_does_not_corrupt_prior_step()
+{
+    TEST_SCOPE("TC13: modifier after queue-full overflow does NOT rewrite the prior GOTO's direction");
+
+    // Regression for the queue-full corruption bug from /code-review max:
+    // an overflowed Mission.goTo() previously left _count unchanged, so a
+    // chained .setRouteDirection() silently targeted the PREVIOUS step
+    // (often another GOTO) instead of being rejected. Fix: track the last
+    // push result and bail when it was false.
+
+    using namespace mission_replica;
+    Queue q;
+
+    // Fill the queue to capacity with GOTO steps.
+    for (uint8_t i = 0; i < Queue::CAPACITY; ++i)
+    {
+        Step s{};
+        s.type = StepType::GOTO;
+        ASSERT_TRUE(q.push(s));
+    }
+    ASSERT_EQ(q.count, Queue::CAPACITY);
+    ASSERT_TRUE(q.lastPushOk);
+
+    // Tag the last successfully-pushed GOTO so we can detect corruption.
+    q.items[Queue::CAPACITY - 1].route_direction = Direction::FRONT;
+
+    // Now push one more — overflow. lastPushOk must flip to false.
+    Step overflow{};
+    overflow.type = StepType::GOTO;
+    ASSERT_FALSE(q.push(overflow));
+    ASSERT_FALSE(q.lastPushOk);
+    ASSERT_EQ(q.count, Queue::CAPACITY);    // count unchanged
+
+    // Chained modifier on the (dropped) overflow step. MUST be rejected
+    // because lastPushOk is false — without the fix, it would silently
+    // rewrite q.items[CAPACITY - 1].route_direction (the prior valid GOTO).
+    const bool wrote = setRouteDirection(q, Direction::REAR);
+    ASSERT_FALSE(wrote);
+
+    // The previously-tagged FRONT must survive untouched.
+    ASSERT_TRUE(q.items[Queue::CAPACITY - 1].route_direction == Direction::FRONT);
+
+    // Same expectation for setArrivalDirection.
+    const bool wroteArrival = setArrivalDirection(q, Direction::REAR);
+    ASSERT_FALSE(wroteArrival);
+    ASSERT_TRUE(q.items[Queue::CAPACITY - 1].arrival_direction == Direction::AUTO);
+}
+
 // ===========================================================================
 // TC14c — Compile-time kill-switch override.
 //
-// This test asserts the BIDIRECTIONAL_ENABLED_DEFAULT macro genuinely
+// This test asserts the BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro genuinely
 // propagates into the runtime constant AND that the constant gates
 // `_resolveDirection`'s auto path. The CMakeLists.txt under WRO2026/test/
-// builds this file TWICE — once with `-DBIDIRECTIONAL_ENABLED_DEFAULT=true`
+// builds this file TWICE — once with `-DBIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true`
 // and once with `=false` — and registers each binary as a separate ctest
 // target (path_tracker_bidirectional_on / path_tracker_bidirectional_off).
 //
@@ -525,11 +565,11 @@ static void test_TC13_modifier_targets_last_step_only()
 
 static void test_TC14c_macro_propagates_into_runtime_constant()
 {
-    TEST_SCOPE("TC14c: BIDIRECTIONAL_ENABLED_DEFAULT macro propagates into Config::BIDIRECTIONAL_ENABLED");
+    TEST_SCOPE("TC14c: BIDIRECTIONAL_AUTO_ENABLED_DEFAULT macro propagates into Config::BIDIRECTIONAL_AUTO_ENABLED");
 
     // The macro definition is the load-bearing override knob. Whatever the
     // compiler was told via `-D` MUST land on the public constant.
-    ASSERT_EQ(Config::BIDIRECTIONAL_ENABLED, (bool) BIDIRECTIONAL_ENABLED_DEFAULT);
+    ASSERT_EQ(Config::BIDIRECTIONAL_AUTO_ENABLED, (bool) BIDIRECTIONAL_AUTO_ENABLED_DEFAULT);
 }
 
 static void test_TC14c_2board_auto_175deg_differs_by_flag()
@@ -550,10 +590,10 @@ static void test_TC14c_2board_auto_175deg_differs_by_flag()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       175.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    2);
 
-    if (Config::BIDIRECTIONAL_ENABLED)
+    if (Config::BIDIRECTIONAL_AUTO_ENABLED)
     {
         // Flag ON: 175 deg > 90 deg threshold → turn-saving REAR.
         ASSERT_TRUE(resolved == Direction::REAR);
@@ -581,7 +621,7 @@ static void test_TC14c_2board_auto_0deg_always_front()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       0.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    2);
 
     ASSERT_TRUE(resolved == Direction::FRONT);
@@ -604,7 +644,7 @@ static void test_TC14c_1board_chassis_always_front_even_at_175deg()
         /*currentHeading*/    0.0f,
         /*edgeHeading*/       175.0f,
         /*isLastHop*/         false,
-        /*bidirectionalOn*/   Config::BIDIRECTIONAL_ENABLED,
+        /*bidirectionalOn*/   Config::BIDIRECTIONAL_AUTO_ENABLED,
         /*lineBoardCount*/    1);
 
     ASSERT_TRUE(resolved == Direction::FRONT);
@@ -617,7 +657,7 @@ static void test_TC14c_1board_chassis_always_front_even_at_175deg()
 static void test_TC14c_announce_build_mode()
 {
     TEST_SCOPE("TC14c: build-mode announcement");
-    if (Config::BIDIRECTIONAL_ENABLED)
+    if (Config::BIDIRECTIONAL_AUTO_ENABLED)
     {
         std::printf("INFO: BIDIRECTIONAL_ENABLED == true (kill-switch ON build)\n");
     }
@@ -642,12 +682,13 @@ int main()
     test_TC12_line_rear_2board_allowed();
     test_TC12_line_front_1board_allowed();
 
-    // TC13 — Mission modifier no-op on non-GOTO.
+    // TC13 — Mission modifier no-op on non-GOTO + queue-overflow corruption regression.
     test_TC13_setRouteDirection_after_wait_is_noop();
     test_TC13_setArrivalDirection_after_print_is_noop();
     test_TC13_setRouteDirection_on_empty_queue_is_noop();
     test_TC13_setRouteDirection_after_goto_writes_through();
     test_TC13_modifier_targets_last_step_only();
+    test_TC13_modifier_after_overflow_does_not_corrupt_prior_step();
 
     // TC14c — Compile-time kill-switch override.
     test_TC14c_macro_propagates_into_runtime_constant();
