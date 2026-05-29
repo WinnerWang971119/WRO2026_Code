@@ -734,6 +734,39 @@ void PathTrackerClass::_onPlanNextHop()
         Config::BIDIRECTIONAL_ENABLED,
         Config::LINE_BOARD_COUNT);
 
+    // ------------------------------------------------------------------------
+    // Early reverse-availability guard.
+    //
+    // Reject REAR LINE/PROJECTION on a 1-board chassis BEFORE the pre-edge turn
+    // is dispatched, otherwise the chassis physically rotates 180° to face the
+    // (unservable) REAR body-heading and then halts in fault — leaving the
+    // robot pointing backward with REVERSE_UNAVAILABLE latched and the operator
+    // forced to manually re-orient.
+    //
+    // The auto branch of `_resolveDirection` short-circuits to FRONT when
+    // `LINE_BOARD_COUNT < 2`, so this guard only fires for an operator-forced
+    // REAR (per-edge override, pipeline default, or builder route/arrival).
+    // BLIND REAR is permitted on 1-board chassis (no line sensor required),
+    // so the check is scoped to LINE / PROJECTION.
+    //
+    // The same guard is left in `_dispatchEdgeAfterTurn` as defensive
+    // redundancy — if a future FSM change introduces a path into the
+    // dispatcher that bypasses this early site, the late guard still fires.
+    // ------------------------------------------------------------------------
+    if (resolved == Direction::REAR && Config::LINE_BOARD_COUNT < 2 &&
+        (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION))
+    {
+        Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+        Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+        Serial.print(F(" at u="));
+        Serial.print(cur);
+        Serial.print(F(" v="));
+        Serial.print(nxt);
+        Serial.println(F(" requires rear board (pre-turn guard)"));
+        _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
+        return;
+    }
+
     float bodyTarget = edge.heading_deg;
     if (resolved == Direction::REAR)
     {
@@ -790,17 +823,17 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     const Routes::EdgeInfo& edge = FieldMap::getEdge(cur, _nextHop);
 
     // -----------------------------------------------------------------------
-    // Reverse-availability guard (T7 / issue #19).
+    // Reverse-availability guard (T7 / issue #19) — defensive redundancy.
     //
-    // Reject REAR LINE/PROJECTION on a 1-board chassis — there is no rear
-    // sensor to read the line. `_resolveDirection` (Step 5 in _onPlanNextHop)
-    // short-circuits AUTO to FRONT when `LINE_BOARD_COUNT < 2`, so this
-    // fault only fires for an operator-forced or edge-forced REAR (via
-    // DirectionMode::FORCE_REVERSE on the pipeline default or the edge
-    // override, or a future arrival/route builder override).
+    // Same condition as the early guard in `_onPlanNextHop` (see the block
+    // beginning "Early reverse-availability guard"). The early guard is the
+    // load-bearing site — it fires before the 180° pre-edge turn dispatches —
+    // and this dispatcher-side check exists only to defend against future
+    // FSM changes that might route into `_dispatchEdgeAfterTurn` without
+    // re-running `_onPlanNextHop`.
     //
     // BLIND REAR is permitted on a 1-board chassis: dead-reckoned reverse
-    // does not require a rear line sensor — only negative PWM (Step 5 below).
+    // does not require a rear line sensor — only negative PWM.
     // -----------------------------------------------------------------------
     if (_resolvedDirection == Direction::REAR && Config::LINE_BOARD_COUNT < 2)
     {
