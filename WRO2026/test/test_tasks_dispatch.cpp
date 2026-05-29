@@ -45,6 +45,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 // ===========================================================================
@@ -137,10 +138,32 @@ namespace test_mock
         bool hasFault() const { return _hasFault; }
     };
 
+    /// Call-order spy used by the abort() ordering test (S3 / new TC13).
+    /// Each subsystem the mirror shuts down records its index when called;
+    /// the test asserts Tasks fires first.
+    struct AbortOrderSpy
+    {
+        std::vector<const char*> calls;
+
+        void reset() { calls.clear(); }
+        void record(const char* who) { calls.emplace_back(who); }
+
+        /// Index of the first call to ``who``, or SIZE_MAX if not recorded.
+        size_t indexOf(const char* who) const
+        {
+            for (size_t i = 0; i < calls.size(); ++i)
+            {
+                if (std::strcmp(calls[i], who) == 0) return i;
+            }
+            return SIZE_MAX;
+        }
+    };
+
     /// Shared mocks for the whole TU. Each test resets them at the top.
     static CaptureSerial      g_serial;
     static CaptureEventTrace  g_eventTrace;
     static FakePathTracker    g_pathTracker;
+    static AbortOrderSpy      g_abortOrder;
 
     /// Convenience reset used by every test in main().
     static void resetMocks()
@@ -148,6 +171,7 @@ namespace test_mock
         g_serial.clear();
         g_eventTrace.clear();
         g_pathTracker.reset();
+        g_abortOrder.reset();
     }
 }    // namespace test_mock
 
@@ -227,8 +251,16 @@ public:
     }
 
     // MIRROR: WRO2026/Tasks.cpp:108-115 — ``TasksClass::abort``.
-    // Sticky latch; intentionally does NOT touch ``_inTask``.
-    void abort() { _aborted = true; }
+    // Sticky latch; intentionally does NOT touch ``_inTask``. Records the
+    // call order for TC13's ordering assertion.
+    void abort()
+    {
+        test_mock::g_abortOrder.record("Tasks");
+        _aborted = true;
+    }
+
+    // MIRROR: WRO2026/Tasks.cpp::clearAbort — per-run reset of the latch.
+    void clearAbort() { _aborted = false; }
 
     // MIRROR: WRO2026/Tasks.cpp:117-119 — ``TasksClass::isAborted``.
     bool isAborted() const { return _aborted; }
@@ -270,11 +302,12 @@ private:
         return true;
     }
 
-    /// Test-only stub used by TC9 — always returns ``false`` (yield without
-    /// abort). Production code adds this through a registry edit; the mirror
-    /// stages it here so TC9 doesn't need to edit production.
-    static bool _alwaysYieldBody(const TaskArgs& /*args*/)
+    /// Mirror of production's ``debugYield`` — returns ``false`` (yield
+    /// without abort). Production has the same name in its registry so TC9
+    /// exercises a name that also exists in real firmware.
+    static bool _debugYieldBody(const TaskArgs& /*args*/)
     {
+        test_mock::g_serial.println("[Tasks] debugYield");
         return false;
     }
 
@@ -310,26 +343,24 @@ private:
 };
 
 const TasksMirror::DispatchRow TasksMirror::_dispatch[] = {
-    { "demoEcho",    &TasksMirror::_demoEchoBody },
-    { "alwaysYield", &TasksMirror::_alwaysYieldBody },
+    { "demoEcho",   &TasksMirror::_demoEchoBody   },
+    { "debugYield", &TasksMirror::_debugYieldBody },
 };
 
 const size_t TasksMirror::_dispatch_count =
     sizeof(TasksMirror::_dispatch) / sizeof(TasksMirror::_dispatch[0]);
 
-// MIRROR: WRO2026/Tasks.cpp:27-30 — registry table layout.
-// We only populate the ``name`` field; see the rationale above the public
-// declaration. TC5 / TC7 / TC8 / TC9 bind to this table.
-//
-// ``alwaysYield`` is a TEST-ONLY entry that production does NOT carry — TC9
-// needs a registry-resolvable name whose body returns ``false`` (yield), and
-// the mirrored ``runTask`` resolves names through ``_dispatch`` (free-fn
-// table), while ``findTask`` resolves through ``_registry`` (real POD).
-// Both tables must list the same names so the FSM's pre-dispatch lookup
-// succeeds before the actual dispatch runs.
+// MIRROR: WRO2026/Tasks.cpp:27-30 — registry table layout. Both names listed
+// here MUST exist in production's `_registry` (Tasks.cpp:27-30) so the YIELD
+// path tested by TC9 exercises a name a real firmware registry can resolve
+// — `debugYield` is a real production task that always returns false. The
+// mirror's `findTask` resolves through this `_registry` array (real POD);
+// `runTask` resolves through `_dispatch` (free-fn table) above. Both tables
+// must list the same names so the FSM's pre-dispatch lookup succeeds before
+// the actual dispatch runs.
 const TaskRegistryEntry TasksMirror::_registry[] = {
-    { "demoEcho",    nullptr },
-    { "alwaysYield", nullptr },
+    { "demoEcho",   nullptr },
+    { "debugYield", nullptr },
 };
 
 const size_t TasksMirror::_registry_count =
@@ -395,9 +426,14 @@ public:
     // MIRROR: WRO2026/Mission.h:234-249 — ``Step`` POD.
     // We keep ``task_name`` / ``task_args`` (the TASK fields) and elide the
     // hardware-bound fields (r/g/b/freq_hz/etc.) that no TC inspects.
+    //
+    // Note: production's ``Step::type`` has NO default member initializer
+    // (so `Step s{}` zero-inits type to StepType::GOTO=0). The mirror MUST
+    // match that — a divergent NSDMI like `= StepType::WAIT` would silently
+    // give host tests a different default-state than the firmware.
     struct Step
     {
-        StepType    type              = StepType::WAIT;
+        StepType    type;
         const char* text              = nullptr;
         // T9 modifier fields (kept for fidelity; not exercised here).
         // (Direction enum lives in NavTypes.h; the mirror omits it because
@@ -418,6 +454,11 @@ public:
         _idx   = 0;
         _state = State::IDLE;
         _stepState = StepState::ENTER;
+        _buildError = false;
+        // Per-test isolation: reset counters so absolute assertions in
+        // future TCs don't carry state from earlier ones.
+        _updateGuardHits = 0;
+        _updateBodyHits  = 0;
         return true;
     }
 
@@ -446,13 +487,16 @@ public:
     template <typename... Args>
     MissionMirror& task(const char* name, Args... args)
     {
-        // MIRROR: WRO2026/Mission.h:309-312 — compile-time arg-size guard.
-        constexpr size_t TOTAL =
-            (sizeof...(Args) == 0) ? 0 : (sizeof(Args) + ... + 0);
+        // MIRROR: WRO2026/Mission.h — compile-time arg-size guard.
+        // Binary right fold with `0` identity already yields 0 for empty
+        // pack; no ternary needed.
+        constexpr size_t TOTAL = (sizeof(Args) + ... + 0);
         static_assert(TOTAL <= Config::MAX_TASK_ARG_BYTES,
                       "Mission.task args exceed MAX_TASK_ARG_BYTES");
+        static_assert((std::is_trivially_copyable_v<Args> && ...),
+                      "Mission.task args must be trivially-copyable");
 
-        // MIRROR: WRO2026/Mission.h:314-318 — nested-call guard.
+        // MIRROR: WRO2026/Mission.h — nested-call guard.
         if (Tasks.inTask())
         {
             test_mock::g_serial.println(
@@ -460,10 +504,19 @@ public:
             return *this;
         }
 
-        // MIRROR: WRO2026/Mission.h:320-324 — pack + push.
-        // ``Step s{}`` aggregate-init zero-fills ``task_args.bytes`` BEFORE
-        // pack — TC1 / TC2 / TC3 all depend on this behaviour. See test
-        // comment in test_TC1.
+        // MIRROR: WRO2026/Mission.h — queue-time registry pre-check.
+        if (Tasks.findTask(name) == nullptr)
+        {
+            test_mock::g_serial.print("[Mission] task('");
+            test_mock::g_serial.print(name == nullptr ? "(null)" : name);
+            test_mock::g_serial.println("') unknown at queue time; start() will refuse to arm");
+            _buildError = true;
+            return *this;
+        }
+
+        // MIRROR: WRO2026/Mission.h — pack + push. `Step s{}` aggregate-init
+        // zero-fills `task_args.bytes` BEFORE pack; TC1/TC2/TC3 depend on
+        // this. Production behaviour identical.
         Step s{};
         s.type      = StepType::TASK;
         s.task_name = name;
@@ -488,11 +541,20 @@ public:
     // MIRROR: WRO2026/Mission.cpp:129-142 — ``MissionClass::start``.
     void start()
     {
+        if (_buildError)
+        {
+            test_mock::g_serial.println(
+                "[Mission] start refused: build error (unknown task name at queue time)");
+            test_mock::g_eventTrace.pushEvent("MIS BUILD ERR");
+            _enterFaultBeeping();
+            return;
+        }
         if (_count == 0)
         {
             test_mock::g_serial.println("[Mission] start with empty queue; no-op");
             return;
         }
+        Tasks.clearAbort();
         _idx = 0;
         _stepState = StepState::ENTER;
         _state = State::RUNNING;
@@ -501,21 +563,26 @@ public:
 
     // MIRROR: WRO2026/Mission.cpp:144-167 — ``MissionClass::abort``.
     //
-    // Only the surface assertable from this TU is mirrored. The first call —
-    // ``Tasks.abort()`` — is load-bearing for TC11 (proves the wiring).
-    // The PathTracker / LineFollower / Drive shutdown calls in production
-    // have no test-side analogues here; their behaviour is covered by
-    // the bidirectional / passthrough tests.
+    // Records each subsystem call into ``g_abortOrder`` so TC13 can assert
+    // the load-bearing invariant that ``Tasks.abort()`` runs BEFORE the
+    // chassis-shutdown calls — subsystems polling Tasks.isAborted() during
+    // their own shutdown must see the latched flag. The chassis-side calls
+    // themselves are still stubbed (no production singletons available in
+    // this TU); the spy only records ordering.
     void abort()
     {
         // MIRROR: WRO2026/Mission.cpp:157 — Tasks.abort() is FIRST.
         Tasks.abort();
-        // Skipped: PathTracker.abort() / LineFollower.setEnabled(false) /
-        //          Drive.stop(true) — out of TC11 scope.
-        _count     = 0;
-        _idx       = 0;
-        _state     = State::IDLE;
-        _stepState = StepState::ENTER;
+        // Mirror the production call sequence as record-only stubs so the
+        // order-of-call invariant becomes testable.
+        test_mock::g_abortOrder.record("PathTracker");
+        test_mock::g_abortOrder.record("LineFollower");
+        test_mock::g_abortOrder.record("Drive");
+        _count       = 0;
+        _idx         = 0;
+        _state       = State::IDLE;
+        _stepState   = StepState::ENTER;
+        _buildError  = false;
         test_mock::g_serial.println("[Mission] abort");
     }
 
@@ -598,17 +665,27 @@ public:
     // Exposed because the production class does the same fill via push().
 
 private:
-    // MIRROR: WRO2026/Mission.cpp:380-432 — TASK case body.
+    // MIRROR: WRO2026/Mission.cpp — TASK case body. Updated to use the
+    // shorter `T>` / `T+` / `T-` / `NV TASK` event tags (the production
+    // change makes long task names like "mosaicPlace" fit in the OLED
+    // buffer) and to bail post-runTask if `_state != RUNNING` (the task
+    // body called Mission.abort() mid-flight).
+    //
+    // The mirror's local `buf` is sized to ``EventTraceClass::MAX_LINE_LEN``
+    // (20) to match production — a longer mirror-side buffer would hide
+    // the truncation behaviour that the new short tags are designed to
+    // prevent. ``EventTraceClass::MAX_LINE_LEN`` is not available in this
+    // TU because pulling EventTrace.h drags Config.h's full include graph;
+    // we hardcode 20 here with a comment ensuring drift-detection on the
+    // production constant.
     void _runTaskStep(Step& s)
     {
         if (_stepState != StepState::ENTER)
         {
-            // No ACTIVE branch in production for TASK — see comment at
-            // WRO2026/Mission.cpp:428-430.
             return;
         }
 
-        // MIRROR: WRO2026/Mission.cpp:384-394 — registry lookup.
+        // MIRROR: WRO2026/Mission.cpp — registry lookup.
         const TaskRegistryEntry* entry =
             Tasks.findTask(s.task_name == nullptr ? "" : s.task_name);
         if (entry == nullptr)
@@ -616,21 +693,23 @@ private:
             test_mock::g_serial.print("[Mission] unknown task '");
             test_mock::g_serial.print(s.task_name == nullptr ? "?" : s.task_name);
             test_mock::g_serial.println("'");
-            test_mock::g_eventTrace.pushEvent("NAV FAULT TASK");
+            test_mock::g_eventTrace.pushEvent("NV TASK");
             _enterFaultBeeping();
             return;
         }
 
-        // MIRROR: WRO2026/Mission.cpp:396-400 — TASK START boundary event.
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "TASK START %s",
+        // MIRROR: WRO2026/Mission.cpp — TASK START boundary event. Buffer
+        // size matches production's EventTraceClass::MAX_LINE_LEN=20.
+        constexpr size_t MAX_LINE_LEN = 20;
+        char buf[MAX_LINE_LEN];
+        std::snprintf(buf, sizeof(buf), "T> %s",
                       s.task_name == nullptr ? "?" : s.task_name);
         test_mock::g_eventTrace.pushEvent(buf);
 
-        // MIRROR: WRO2026/Mission.cpp:402 — dispatch.
+        // MIRROR: WRO2026/Mission.cpp — dispatch.
         const bool ok = Tasks.runTask(s.task_name, s.task_args);
 
-        // MIRROR: WRO2026/Mission.cpp:404-415 — post-runTask fault check.
+        // MIRROR: WRO2026/Mission.cpp — post-runTask fault check.
         if (test_mock::g_pathTracker.hasFault())
         {
             _emitFault();
@@ -638,8 +717,14 @@ private:
             return;
         }
 
-        // MIRROR: WRO2026/Mission.cpp:417-426 — TASK OK / TASK YIELD boundary.
-        std::snprintf(buf, sizeof(buf), ok ? "TASK OK %s" : "TASK YIELD %s",
+        // MIRROR: WRO2026/Mission.cpp — task body called Mission.abort()?
+        // Bail BEFORE pushing a misleading TASK OK event or advancing _idx.
+        if (_state != State::RUNNING)
+        {
+            return;
+        }
+
+        std::snprintf(buf, sizeof(buf), ok ? "T+ %s" : "T- %s",
                       s.task_name == nullptr ? "?" : s.task_name);
         test_mock::g_eventTrace.pushEvent(buf);
         if (!ok)
@@ -687,6 +772,7 @@ private:
     uint8_t   _idx       = 0;
     State     _state     = State::IDLE;
     StepState _stepState = StepState::ENTER;
+    bool      _buildError = false;
 
     // Instrumentation for TC10 — counts how many times the body of update()
     // ran past the guard. Lets the test prove the guard short-circuited.
@@ -846,9 +932,10 @@ static void test_TC7_fsm_happy_path()
     ASSERT_TRUE(Mission.state() == MissionMirror::State::IDLE);
     ASSERT_EQ(Mission.count(), (uint8_t) 0);
 
-    // Boundary events emitted in order.
-    ASSERT_TRUE(test_mock::g_eventTrace.contains("TASK START demoEcho"));
-    ASSERT_TRUE(test_mock::g_eventTrace.contains("TASK OK demoEcho"));
+    // Boundary events emitted in order, using the new short tag scheme
+    // (`T> ` / `T+ ` / `T- `) so longer task names fit in the OLED budget.
+    ASSERT_TRUE(test_mock::g_eventTrace.contains("T> demoEcho"));
+    ASSERT_TRUE(test_mock::g_eventTrace.contains("T+ demoEcho"));
 
     // Body actually ran end-to-end (substring proves the FSM path, not just
     // direct ``runTask`` from TC6).
@@ -864,21 +951,23 @@ static void test_TC7_fsm_happy_path()
 // ---------------------------------------------------------------------------
 static void test_TC8_fsm_unknown_name()
 {
-    TEST_SCOPE("TC8: unknown task name → NAV FAULT TASK + FAULT_BEEPING; demoEcho body NOT invoked");
+    TEST_SCOPE("TC8: unknown task name → queue-time refusal; start() refuses to arm, MIS BUILD ERR emitted");
     test_mock::resetMocks();
     Mission.begin();
     Tasks.begin();
 
+    // Queue-time validation catches the typo BEFORE the mission ever runs;
+    // the bad name is NOT pushed onto the queue, and start() refuses to arm.
     Mission.task("doesNotExist");
-    Mission.start();
-    Mission.update();    // dispatch — unknown name path
+    ASSERT_TRUE(test_mock::g_serial.contains("unknown at queue time"));
+    ASSERT_EQ(Mission.count(), (uint8_t) 0);
 
-    ASSERT_TRUE(test_mock::g_eventTrace.contains("NAV FAULT TASK"));
+    Mission.start();
+
+    ASSERT_TRUE(test_mock::g_eventTrace.contains("MIS BUILD ERR"));
     ASSERT_TRUE(Mission.state() == MissionMirror::State::FAULT_BEEPING);
 
-    // Negative-path: demoEcho's Serial signature MUST NOT be present —
-    // if the dispatcher mis-resolved (e.g. fell off the end of the array
-    // and into demoEcho), the body would have written this line.
+    // Negative-path: demoEcho's Serial signature MUST NOT be present.
     ASSERT_FALSE(test_mock::g_serial.contains("[Tasks] demoEcho"));
 }
 
@@ -887,17 +976,19 @@ static void test_TC8_fsm_unknown_name()
 // ---------------------------------------------------------------------------
 static void test_TC9_fsm_yield()
 {
-    TEST_SCOPE("TC9: task body returning false → TASK YIELD, FSM drains to IDLE");
+    TEST_SCOPE("TC9: debugYield body returns false → `T- debugYield` event, FSM drains to IDLE");
     test_mock::resetMocks();
     Mission.begin();
     Tasks.begin();
 
-    Mission.task("alwaysYield");
+    // Uses production's `debugYield` registry entry so the YIELD path is
+    // bound to a name a real firmware registry can resolve.
+    Mission.task("debugYield");
     Mission.start();
-    Mission.update();    // dispatch alwaysYield → returns false
+    Mission.update();    // dispatch debugYield → returns false
     Mission.update();    // drain-empty branch → IDLE
 
-    ASSERT_TRUE(test_mock::g_eventTrace.contains("TASK YIELD alwaysYield"));
+    ASSERT_TRUE(test_mock::g_eventTrace.contains("T- debugYield"));
     ASSERT_EQ(Mission.count(), (uint8_t) 0);
     ASSERT_TRUE(Mission.state() == MissionMirror::State::IDLE);
 }
@@ -950,7 +1041,7 @@ static void test_TC10_reentrancy_guard()
 // ---------------------------------------------------------------------------
 static void test_TC11_abort_flag_wiring()
 {
-    TEST_SCOPE("TC11: MissionMirror::abort() invokes Tasks.abort() — isAborted() flips to true");
+    TEST_SCOPE("TC11: Mission.abort() — isAborted() flips true, _state → IDLE, Tasks.abort() runs BEFORE chassis shutdown calls");
     test_mock::resetMocks();
     Tasks.begin();    // clears _aborted
     Mission.begin();
@@ -958,6 +1049,72 @@ static void test_TC11_abort_flag_wiring()
     ASSERT_FALSE(Tasks.isAborted());
     Mission.abort();
     ASSERT_TRUE(Tasks.isAborted());
+
+    // S8 (new): state must transition to IDLE so isIdle() reports correctly
+    // post-abort. A refactor that drops `_state = State::IDLE` from abort()
+    // would leave Mission stuck in its previous state.
+    ASSERT_TRUE(Mission.state() == MissionMirror::State::IDLE);
+
+    // S3 (new): Tasks.abort() must run FIRST so subsystems polling
+    // Tasks.isAborted() during their own shutdown see the latched flag.
+    const size_t tasksIdx        = test_mock::g_abortOrder.indexOf("Tasks");
+    const size_t pathTrackerIdx  = test_mock::g_abortOrder.indexOf("PathTracker");
+    const size_t lineFollowerIdx = test_mock::g_abortOrder.indexOf("LineFollower");
+    const size_t driveIdx        = test_mock::g_abortOrder.indexOf("Drive");
+    ASSERT_TRUE(tasksIdx != SIZE_MAX);
+    ASSERT_TRUE(pathTrackerIdx != SIZE_MAX);
+    ASSERT_TRUE(lineFollowerIdx != SIZE_MAX);
+    ASSERT_TRUE(driveIdx != SIZE_MAX);
+    ASSERT_TRUE(tasksIdx < pathTrackerIdx);
+    ASSERT_TRUE(tasksIdx < lineFollowerIdx);
+    ASSERT_TRUE(tasksIdx < driveIdx);
+}
+
+// ---------------------------------------------------------------------------
+// TC13 (new) — Mission.start() clears the Tasks._aborted latch so an abort
+// from mission N does not bleed into mission N+1.
+// ---------------------------------------------------------------------------
+static void test_TC13_start_clears_aborted_latch()
+{
+    TEST_SCOPE("TC13: Mission.start() invokes Tasks.clearAbort() — post-abort restart sees isAborted()==false");
+    test_mock::resetMocks();
+    Tasks.begin();
+    Mission.begin();
+
+    Mission.task("demoEcho");
+    Mission.abort();
+    ASSERT_TRUE(Tasks.isAborted());
+
+    // Restart the mission (need to re-queue since abort cleared _count).
+    Mission.task("demoEcho");
+    Mission.start();
+    ASSERT_FALSE(Tasks.isAborted());
+}
+
+// ---------------------------------------------------------------------------
+// TC14 (new) — Queue-time validation: bad task name does NOT enqueue and
+// flips _buildError; start() refuses to arm.
+// ---------------------------------------------------------------------------
+static void test_TC14_queue_time_name_validation()
+{
+    TEST_SCOPE("TC14: bad task name caught at queue time — _buildError set, start() enters FAULT_BEEPING with `MIS BUILD ERR`");
+    test_mock::resetMocks();
+    Tasks.begin();
+    Mission.begin();
+
+    // Good name first — sanity check that valid names DO enqueue.
+    Mission.task("demoEcho");
+    ASSERT_EQ(Mission.count(), (uint8_t) 1);
+
+    // Bad name — must NOT enqueue.
+    const uint8_t countBeforeBad = Mission.count();
+    Mission.task("doesNotExist");
+    ASSERT_EQ(Mission.count(), countBeforeBad);
+    ASSERT_TRUE(test_mock::g_serial.contains("unknown at queue time"));
+
+    Mission.start();
+    ASSERT_TRUE(Mission.state() == MissionMirror::State::FAULT_BEEPING);
+    ASSERT_TRUE(test_mock::g_eventTrace.contains("MIS BUILD ERR"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1162,8 @@ int main()
     test_TC10_reentrancy_guard();
     test_TC11_abort_flag_wiring();
     test_TC12_queue_full();
+    test_TC13_start_clears_aborted_latch();
+    test_TC14_queue_time_name_validation();
 
     TEST_REPORT();
 }

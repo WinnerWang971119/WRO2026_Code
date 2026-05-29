@@ -106,20 +106,29 @@ endif()
 # `Arduino.h` and `MatrixMiniR4.h` are angle-bracket includes inside
 # LineFollower.h, so the include-path search alone picks `mocks/`. No
 # force-include needed for those two.
+#
+# **Applied PER TARGET, not directory-wide**, so the compile-fail target
+# (`test_tasks_dispatch_overflow`, WILL_FAIL TRUE) does NOT inherit them.
+# Directory-wide force-includes would silently disarm AC9-negative: any
+# unrelated typo in a mock header would cause the overflow build to fail
+# for the wrong reason and still count as "passing." See PR #35 review
+# finding S1 / C8.
 # -----------------------------------------------------------------------------------------
-if(MSVC)
-    add_compile_options(
-        "/FI${MOCKS_DIR}/Drive.h"
-        "/FI${MOCKS_DIR}/WROLineArray.h"
-        "/FI${MOCKS_DIR}/Intersection.h"
-    )
-else()
-    add_compile_options(
-        "-include" "${MOCKS_DIR}/Drive.h"
-        "-include" "${MOCKS_DIR}/WROLineArray.h"
-        "-include" "${MOCKS_DIR}/Intersection.h"
-    )
-endif()
+function(add_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${MOCKS_DIR}/Drive.h"
+            "/FI${MOCKS_DIR}/WROLineArray.h"
+            "/FI${MOCKS_DIR}/Intersection.h"
+        )
+    else()
+        target_compile_options(${target} PRIVATE
+            "-include" "${MOCKS_DIR}/Drive.h"
+            "-include" "${MOCKS_DIR}/WROLineArray.h"
+            "-include" "${MOCKS_DIR}/Intersection.h"
+        )
+    endif()
+endfunction()
 
 # =========================================================================================
 # Test executable #1 — LineFollower overshoot / brake-on-gate / junction-freeze.
@@ -131,6 +140,7 @@ add_executable(test_line_follower_overshoot
     ${MOCK_SOURCES}
 )
 target_include_directories(test_line_follower_overshoot PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_line_follower_overshoot)
 add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 
 # =========================================================================================
@@ -144,6 +154,7 @@ add_executable(test_path_tracker_passthrough_on
 target_compile_definitions(test_path_tracker_passthrough_on
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=true)
 target_include_directories(test_path_tracker_passthrough_on PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_passthrough_on)
 add_test(NAME path_tracker_passthrough_on COMMAND test_path_tracker_passthrough_on)
 
 # =========================================================================================
@@ -157,6 +168,7 @@ add_executable(test_path_tracker_passthrough_off
 target_compile_definitions(test_path_tracker_passthrough_off
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_passthrough_off PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_passthrough_off)
 add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough_off)
 
 # =========================================================================================
@@ -177,6 +189,7 @@ add_executable(test_path_tracker_bidirectional_on
 target_compile_definitions(test_path_tracker_bidirectional_on
     PRIVATE BIDIRECTIONAL_ENABLED_DEFAULT=true)
 target_include_directories(test_path_tracker_bidirectional_on PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_bidirectional_on)
 add_test(NAME path_tracker_bidirectional_on COMMAND test_path_tracker_bidirectional_on)
 
 # =========================================================================================
@@ -194,6 +207,7 @@ add_executable(test_path_tracker_bidirectional_off
 target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_bidirectional_off PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_bidirectional_off)
 add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
 
 # =========================================================================================
@@ -220,6 +234,7 @@ add_executable(test_tasks_dispatch
     ${MOCK_SOURCES}
 )
 target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_tasks_dispatch)
 add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
 
 # =========================================================================================
@@ -242,6 +257,16 @@ set_target_properties(test_tasks_dispatch_overflow PROPERTIES
     EXCLUDE_FROM_DEFAULT_BUILD TRUE
 )
 target_include_directories(test_tasks_dispatch_overflow PRIVATE ${COMMON_INCLUDES})
+
+# DELIBERATELY no `add_mock_force_includes(...)` call here. The compile-fail
+# target with `WILL_FAIL TRUE` interprets ANY non-zero build exit code as a
+# passing test, so a typo in any force-included mock header would silently
+# disarm AC9-negative. The overflow TU only references TasksTypes.h + the
+# synthetic `Seventeen` struct + the inline `check_overflow` template, so it
+# does not need Drive/WROLineArray/Intersection mocks at all. The only path
+# that can fail this build is the `static_assert("Mission.task args exceed
+# MAX_TASK_ARG_BYTES")` itself — which is precisely what AC9-negative wants.
+
 add_test(NAME tasks_overflow_compile_fail
     COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target test_tasks_dispatch_overflow
