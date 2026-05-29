@@ -520,10 +520,22 @@ void PathTrackerClass::update()
                 // Arm the overshoot. Always set overshootMode=true (project-wide rule
                 // per ADR-023: the 5cm window dead-reckons through line-offline
                 // conditions). brakeOnGate and tShapeRampDown depend on _passThrough.
+                //
+                // `.setReverse(...)` is chained explicitly (PR #34 review). The
+                // previous code relied on LineFollower's sticky _reverse state —
+                // `setEnabled(true)` without `setReverse` left whatever was last
+                // configured. That works today, but a future change to
+                // LineFollower::_applyEnableBuilder that reset _reverse on
+                // re-enable would silently break the overshoot window on REAR
+                // LINE hops (overshoot dead-reckons forward instead of reverse).
+                // Making the direction explicit at every re-arm point removes
+                // the implicit coupling.
+                const bool overshootReverse = (_resolvedDirection == Direction::REAR);
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
                             .setTShapeRampDown(!_passThrough)
                             .setOvershootMode(true)
+                            .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
                 _state = State::LINE_OVERSHOOT;
