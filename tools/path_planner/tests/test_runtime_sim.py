@@ -152,7 +152,30 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     Post-T12, EDGE_LINE traversals on REAR hops emit ``ACT_LINE_REVERSE``
     instead of ``ACT_FOLLOW_INT`` but still trigger the LINE_OVERSHOOT
     FSM transition; the helper therefore matches either primitive name.
+
+    Parity limitation — pass-through fixtures only:
+
+    The helper unconditionally inserts ``ACT_LINE_OVERSHOOT``. The sim,
+    however, emits ``ACT_LINE_PASS`` at intermediate intersections where
+    the body-heading delta is below ``NAV_TURN_TOLERANCE_DEG``
+    (ADR-023 collinear pass-through). ``compile_path`` is pass-through
+    unaware — it never emits ``ACT_LINE_PASS`` — so any fixture that
+    triggers pass-through in the sim cannot use this helper for parity
+    comparison. TC18 fixtures are constructed to avoid pass-through by
+    construction (90° turns or 2-node paths). If a future TC18-style
+    fixture introduces collinear intermediate hops, the parity assertion
+    will fail with a confusing diff; the fix is fixture redesign, not a
+    helper change. See the assertion below for the loud-failure mode.
     """
+    assert ACT_LINE_PASS not in (p[0] for p in primitives), (
+        "_interleave_overshoot received a primitive sequence containing "
+        "ACT_LINE_PASS. compile_path never emits this primitive, so the "
+        "input could only be a sim-emitted sequence — but the helper is "
+        "designed for compile_path output. The fixture cannot be used "
+        "for compile_path↔sim parity until it is redesigned to avoid "
+        "pass-through (e.g. add a turn at every intermediate node, or "
+        "drop intermediate nodes entirely)."
+    )
     out: List[Primitive] = []
     for prim in primitives:
         out.append(prim)
