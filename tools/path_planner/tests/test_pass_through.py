@@ -513,6 +513,34 @@ def test_tc14b_bidirectional_turn_threshold_config_parity():
     )
 
 
+def test_tc14c_line_board_count_config_parity():
+    """TC14c: Config.h defines LINE_BOARD_COUNT as constexpr uint8_t and the sim
+    mirror at runtime.LINE_BOARD_COUNT matches.
+
+    Defends the silent-drift class (sim/runtime claimed mirror but values diverged)
+    surfaced during PR #34 review. Without this test, a future bump of either
+    side leaves the parity broken at runtime.
+    """
+    assert _CONFIG_H.exists(), (
+        f"Config.h not found at {_CONFIG_H}. "
+        "Ensure the test is run from within the WRO2026_Code repo."
+    )
+    config_h = _CONFIG_H.read_text(encoding="utf-8")
+    match = re.search(
+        r"constexpr\s+uint8_t\s+LINE_BOARD_COUNT\s*=\s*([12])\s*;",
+        config_h,
+    )
+    assert match is not None, (
+        "Config.h missing 'constexpr uint8_t LINE_BOARD_COUNT = <1|2>;' "
+        "(anchored pattern)"
+    )
+    config_value = int(match.group(1))
+    assert _runtime.LINE_BOARD_COUNT == config_value, (
+        f"runtime.LINE_BOARD_COUNT ({_runtime.LINE_BOARD_COUNT}) "
+        f"!= Config.h ({config_value})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # TC10 — heading wrap: 359.5° → 0.0° normalizes to -0.5° → LINE_PASS
 # ---------------------------------------------------------------------------
