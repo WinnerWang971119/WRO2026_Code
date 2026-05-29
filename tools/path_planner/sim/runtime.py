@@ -438,8 +438,8 @@ def _should_pass_through(
     next_hop,
     intersected_node,
     goal_name,
-    inbound_body_heading: float,
     *,
+    inbound_body_heading: float,
     pipeline_default: DirectionMode = None,
     builder_route: "Direction" = None,
     builder_arrival: "Direction" = None,
@@ -464,6 +464,14 @@ def _should_pass_through(
     headings. Without this, mixed REAR <-> FORWARD transitions across
     anti-parallel forward edges (TC9c) would silently skip pass-through
     even though the body never actually turned.
+
+    Note: ``inbound_body_heading`` and all subsequent parameters are
+    keyword-only. The previous signature placed ``inbound_body_heading``
+    positionally between ``goal_name`` and the kwargs, which made it easy
+    for external callers using the pre-bidirectional positional shape
+    (``graph, next_hop, current_edge, intersected_node, goal_name``) to
+    silently mis-bind. The ``*`` marker promotes any such mistake to a
+    loud ``TypeError`` at the call site.
 
     :param inbound_body_heading: the body heading of the chassis as it
         crosses ``intersected_node`` — for FRONT this is the inbound
@@ -707,7 +715,7 @@ class PathTrackerSim:
                     self._next_hop,
                     nxt,
                     goal_name,
-                    body_heading,
+                    inbound_body_heading=body_heading,
                     pipeline_default=PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
@@ -832,7 +840,7 @@ class PathTrackerSim:
                     self._next_hop,
                     nxt,
                     goal_name,
-                    body_heading,
+                    inbound_body_heading=body_heading,
                     pipeline_default=PIPELINE_CONFIG.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
