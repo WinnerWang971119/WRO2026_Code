@@ -334,7 +334,7 @@ def _build_routes_h_lines(
     lines.append(
         _INDENT
         + "enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, "
-        + "GYRO_TSHAPE = 2, RAW_FLAT = 3 };"
+        + "GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };"
     )
     lines.append(
         _INDENT

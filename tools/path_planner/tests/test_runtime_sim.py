@@ -64,6 +64,7 @@ from tools.path_planner.sim.runtime import (
     ACT_LINE_PASS,
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
+    ACT_STOP_AT_LINE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
     resolve_blind_mode,
@@ -1556,3 +1557,188 @@ def test_bidir_tc9c_rear_to_front_direction_flip_suppresses_pass_through():
     )
 
     assert sim.localization.current_node() == "C"
+
+
+# ===========================================================================
+# STOP_AT_LINE blind edges (TC5 / TC6)
+#
+# A BLIND edge whose effective BlindMode is STOP_AT_LINE drives blind toward
+# the expected crossing and stops on the physical perpendicular line. FRONT
+# traversal re-anchors localization via on_intersection (the "better
+# localization") instead of dead-reckoning; the chassis ends exactly on the
+# node, so a goal-position cross-check passes. REAR traversal emits the
+# blind-reverse primitive carrying BlindMode.STOP_AT_LINE.
+#
+# Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim.go_to
+# EDGE_BLIND branch (FRONT STOP_AT_LINE re-anchor; REAR blind-reverse).
+# Fixtures: synthetic single-edge graphs marked primitive_mode=
+# BlindMode.STOP_AT_LINE (the schema's per-edge override slot).
+# ===========================================================================
+
+
+class _RecordingLocalizationSim(LocalizationSim):
+    """LocalizationSim that records every advance call for assertion.
+
+    Each entry is a ``(method_tag, advance_to)`` pair, ``method_tag`` being
+    ``"on_intersection"`` or ``"on_dead_reckoned_advance"``. Lets a test
+    prove a STOP_AT_LINE FRONT hop re-anchors via the intersection path
+    rather than the dead-reckon path -- the difference the feature exists to
+    make.
+    """
+
+    def __init__(self, field_data) -> None:
+        super().__init__(field_data)
+        self.advance_calls: List[tuple] = []
+
+    def on_intersection(self, advance_to: str) -> None:
+        self.advance_calls.append(("on_intersection", advance_to))
+        super().on_intersection(advance_to)
+
+    def on_dead_reckoned_advance(self, advance_to: str) -> None:
+        self.advance_calls.append(("on_dead_reckoned_advance", advance_to))
+        super().on_dead_reckoned_advance(advance_to)
+
+
+def _stop_at_line_blind_sim(
+    distance_cm: float,
+    *,
+    force_reverse: bool = False,
+):
+    """Build a sim over a single STOP_AT_LINE BLIND edge A->B heading 0 deg.
+
+    The forward (A, B) edge carries ``primitive_mode=BlindMode.STOP_AT_LINE``
+    (and, when @p force_reverse is set, ``direction_override=FORCE_REVERSE``
+    so the hop resolves REAR). The sim's localization is swapped for a
+    :class:`_RecordingLocalizationSim` so the test can assert which advance
+    path fired.
+
+    :param distance_cm: forward edge length in centimetres.
+    :param force_reverse: tag the forward edge FORCE_REVERSE when True.
+    :returns: ``(sim, chassis)`` with localization already zeroed.
+    """
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (distance_cm, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    fwd_attrs = dict(
+        type=EDGE_BLIND,
+        distance_cm=float(distance_cm),
+        heading_deg=0.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    if force_reverse:
+        fwd_attrs["direction_override"] = int(DirectionMode.FORCE_REVERSE)
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge("A", "B", **fwd_attrs)
+    g.add_edge(
+        "B", "A",
+        type=EDGE_BLIND,
+        distance_cm=float(distance_cm),
+        heading_deg=180.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim._localization = _RecordingLocalizationSim(fd)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis
+
+
+def test_sim_stop_at_line_blind_edge_reanchors_via_on_intersection():
+    """TC5: a FRONT STOP_AT_LINE blind edge emits ACT_STOP_AT_LINE and re-anchors.
+
+    A 40 cm BLIND edge A->B heading 0 deg with blind_mode=STOP_AT_LINE must
+    produce exactly ``[(ACT_STOP_AT_LINE, 40.0)]`` (no ACT_LINE_OVERSHOOT --
+    it is a blind hop, not a line hop), advance Localization via
+    on_intersection (NOT on_dead_reckoned_advance), and land the chassis on
+    the node. The on_intersection re-anchor is the "better localization" the
+    feature delivers; the goal-position cross-check (x == 40 cm, y == 0) is
+    the LINE-arrival equivalence the plan calls for.
+    """
+    sim, chassis = _stop_at_line_blind_sim(40.0)
+
+    prims = sim.go_to("B")
+
+    assert prims == [(ACT_STOP_AT_LINE, pytest.approx(40.0, abs=1e-9))]
+    # Re-anchor via on_intersection, never the dead-reckon path.
+    assert sim.localization.advance_calls == [("on_intersection", "B")]
+    # Chassis ends on the node -- goal-position cross-check.
+    assert chassis.x_cm == pytest.approx(40.0, abs=1e-9)
+    assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
+    assert sim.localization.current_node() == "B"
+
+
+def test_sim_stop_at_line_blind_edge_step_through_emits_stop_at_line():
+    """TC5 (step_through): the generator variant yields a single ACT_STOP_AT_LINE step."""
+    sim, _chassis = _stop_at_line_blind_sim(40.0)
+
+    steps = list(sim.step_through("B"))
+    prims = [prim for prim, _snap in steps]
+
+    assert prims == [(ACT_STOP_AT_LINE, pytest.approx(40.0, abs=1e-9))]
+    assert sim.localization.advance_calls == [("on_intersection", "B")]
+    assert sim.localization.current_node() == "B"
+
+
+def test_sim_stop_at_line_only_overrides_blind_edges():
+    """A plain (default) blind edge still dead-reckons -- STOP_AT_LINE does not leak.
+
+    Guards the mode boundary on the sim side: a BLIND edge without the
+    override emits ACT_FORWARD and advances via on_dead_reckoned_advance, so
+    the STOP_AT_LINE re-anchor path is gated strictly on the override.
+    """
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (20.0, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    graph = _single_edge_graph("A", "B", EDGE_BLIND, 20.0, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim._localization = _RecordingLocalizationSim(fd)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("B")
+
+    assert prims == [(ACT_FORWARD, pytest.approx(20.0, abs=1e-9))]
+    assert sim.localization.advance_calls == [("on_dead_reckoned_advance", "B")]
+    assert sim.localization.current_node() == "B"
+
+
+def test_sim_stop_at_line_blind_edge_rear_emits_blind_reverse():
+    """TC6: a REAR STOP_AT_LINE blind edge emits ACT_BLIND_REVERSE with the mode.
+
+    A forced-REAR traversal of the STOP_AT_LINE BLIND edge turns 180 deg
+    (so the rear sensor faces along the edge) and emits
+    ``(ACT_BLIND_REVERSE, 'B', 40.0, BlindMode.STOP_AT_LINE)``. The chassis
+    ends on the node.
+
+    Note on localization: the sim's REAR blind branch advances via
+    ``on_dead_reckoned_advance`` for every blind mode (the reverse re-anchor
+    is a runtime concern carried in the emitted mode tuple, not modelled by
+    the sim today). This asserts the implemented sim behaviour; the
+    re-anchor-on-success path is exercised host-side by the C++ mirror slice
+    (T16) and on the Phase-3 bench, not by the Python sim.
+    """
+    sim, chassis = _stop_at_line_blind_sim(40.0, force_reverse=True)
+
+    prims = sim.go_to("B")
+    act_tags = [p[0] for p in prims]
+
+    assert ACT_BLIND_REVERSE in act_tags
+    blind_rev = [p for p in prims if p[0] == ACT_BLIND_REVERSE]
+    assert len(blind_rev) == 1
+    _, target_node, emitted_dist, emitted_mode = blind_rev[0]
+    assert target_node == "B"
+    assert emitted_dist == pytest.approx(40.0, abs=1e-9)
+    assert emitted_mode == BlindMode.STOP_AT_LINE
+    # 180 deg turn precedes the reverse hop so the rear sensor leads.
+    assert (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)) in prims
+    # Chassis ends on the node (REAR body heading 180 deg; reverse(40) -> +x).
+    assert chassis.x_cm == pytest.approx(40.0, abs=_POSITION_TOL_CM)
+    assert sim.localization.current_node() == "B"

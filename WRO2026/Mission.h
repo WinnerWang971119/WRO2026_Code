@@ -135,6 +135,24 @@ public:
     MissionClass& setArrivalDirection(Direction d);
 
     /**
+     * @brief Force stop-at-line behaviour for the BLIND hops on the path to
+     *        the goal of the most-recently-enqueued ``goTo`` step.
+     *
+     * @note Same misuse semantics as :func:`setRouteDirection` (no-op + Serial
+     *       warning if the most-recent step is not a GOTO, or if its push
+     *       overflowed the queue). Forwarded to
+     *       ``PathTracker.goTo(...).setStopAtLine(...)`` at GOTO execute: the
+     *       call-site ON/OFF wins over each BLIND edge's BlindMode override,
+     *       AUTO defers to the edge. Defaults (``StopAtLine::AUTO``) when never
+     *       called preserve the per-edge BlindMode behaviour. See ADR-027.
+     *
+     * @param s  ON / OFF / AUTO — see :type:`StopAtLine`.
+     *
+     * @return ``*this`` for verb chaining.
+     */
+    MissionClass& setStopAtLine(StopAtLine s);
+
+    /**
      * @brief Enqueue a named-task step. Packs ``args...`` into the step's
      *        16-byte ``TaskArgs`` POD via ``memcpy`` and stores the task name
      *        as a pointer (same string-literal lifetime rule as :func:`print`
@@ -257,6 +275,7 @@ private:
         const char* text;              ///< print / goto name (for logging)
         Direction   route_direction;   ///< goto: per-step setRouteDirection override (default AUTO).
         Direction   arrival_direction; ///< goto: per-step setArrivalDirection override (default AUTO).
+        StopAtLine  stop_at_line;      ///< goto: per-step setStopAtLine override (default AUTO).
         // T4: task step
         const char* task_name = nullptr;    ///< TASK: registry key (string-literal lifetime, same rule as `text`)
         TaskArgs    task_args{};            ///< TASK: packed args

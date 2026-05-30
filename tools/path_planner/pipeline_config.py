@@ -29,10 +29,11 @@ class LineMode(IntEnum):
 
 class BlindMode(IntEnum):
     """Drive-mode bundle for an EDGE_BLIND traversal."""
-    DEFAULT     = 0  # inherit PIPELINE_CONFIG.blind at runtime
-    SYNC_TSHAPE = 1  # DriveMode::SYNC + tShape (today's runtime default)
-    GYRO_TSHAPE = 2  # DriveMode::GYRO + tShape — straight-line yaw lock
-    RAW_FLAT    = 3  # DriveMode::RAW + no profile — open-loop, no ramp
+    DEFAULT      = 0  # inherit PIPELINE_CONFIG.blind at runtime
+    SYNC_TSHAPE  = 1  # DriveMode::SYNC + tShape (today's runtime default)
+    GYRO_TSHAPE  = 2  # DriveMode::GYRO + tShape — straight-line yaw lock
+    RAW_FLAT     = 3  # DriveMode::RAW + no profile — open-loop, no ramp
+    STOP_AT_LINE = 4  # drive blind, arm near endpoint, stop on the crossing line, re-anchor
 
 
 class ProjectionMode(IntEnum):

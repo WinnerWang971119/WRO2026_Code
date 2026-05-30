@@ -22,7 +22,12 @@ Primitive vocabulary (forward hops):
   distance. Emitted for :data:`EDGE_PROJECTION` traversals -- used when
   the waypoint has no physical intersection marker beneath the strip.
 * ``("forward", cm)`` -- dead-reckoned forward move. Emitted for
-  :data:`EDGE_BLIND` traversals.
+  :data:`EDGE_BLIND` traversals whose effective ``BlindMode`` is *not*
+  ``STOP_AT_LINE``.
+* ``("stop_at_line", cm)`` -- drive blind toward the expected crossing,
+  arm a line detector near the endpoint, and stop on the perpendicular
+  line (re-anchoring localization). Emitted for :data:`EDGE_BLIND`
+  traversals whose effective ``BlindMode`` is ``STOP_AT_LINE``.
 
 Primitive vocabulary (reverse hops, T12+):
 
@@ -52,6 +57,7 @@ ACT_TURN_REL = "turn_relative"
 ACT_FOLLOW_INT = "follow_line_to_intersection"
 ACT_FOLLOW_DIST = "follow_line_to_distance"
 ACT_FORWARD = "forward"
+ACT_STOP_AT_LINE = "stop_at_line"
 
 Primitive = Tuple[str, Optional[float]]
 
@@ -112,7 +118,9 @@ def compile_path(
        * Emit one motion primitive based on ``edge['type']`` and
          direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
          ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
-         ``EDGE_BLIND`` -> ``(ACT_FORWARD, distance_cm)``.
+         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when the
+         edge's effective :class:`BlindMode` is ``STOP_AT_LINE`` (via
+         :func:`resolve_blind_mode`), else ``(ACT_FORWARD, distance_cm)``.
          REAR: ``EDGE_LINE`` ->
          ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
          ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
@@ -159,6 +167,7 @@ def compile_path(
         ACT_PROJECTION_REVERSE,
         BIDIRECTIONAL_AUTO_ENABLED,
         LINE_BOARD_COUNT,
+        BlindMode,
         Direction,
         _read_edge_dir_override,
         resolve_blind_mode,
@@ -234,7 +243,17 @@ def compile_path(
             elif edge_type == EDGE_PROJECTION:
                 out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
             elif edge_type == EDGE_BLIND:
-                out.append((ACT_FORWARD, float(edge["distance_cm"])))
+                # FRONT blind is mode-sensitive as of the stop-at-line work:
+                # a STOP_AT_LINE edge stops on the physical crossing (and
+                # re-anchors localization downstream) instead of dead-reckoning
+                # forward. Every other BlindMode keeps the plain forward hop.
+                # Mirrors the FRONT branch of ``PathTrackerSim.go_to`` (T9);
+                # the two emission streams must stay byte-identical
+                # (``test_property_random_walks`` / TC12).
+                if resolve_blind_mode(edge) == BlindMode.STOP_AT_LINE:
+                    out.append((ACT_STOP_AT_LINE, float(edge["distance_cm"])))
+                else:
+                    out.append((ACT_FORWARD, float(edge["distance_cm"])))
             else:
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
@@ -248,6 +267,7 @@ __all__ = [
     "ACT_FOLLOW_INT",
     "ACT_FOLLOW_DIST",
     "ACT_FORWARD",
+    "ACT_STOP_AT_LINE",
     "EDGE_LINE",
     "EDGE_BLIND",
     "EDGE_PROJECTION",

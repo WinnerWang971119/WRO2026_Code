@@ -494,6 +494,55 @@ namespace Config
     constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 5.0f;
 
     // ---------------------------------------------------------------------------------------
+    // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
+    //
+    // `Drive.stopAtLine(expectedCm)` drives straight toward an expected perpendicular crossing
+    // line, arms a T_OR_CROSS detector only once the chassis is near the expected endpoint,
+    // overshoots so the axle lands on the line, then active-brakes. PathTracker uses it on
+    // flagged BLIND hops to re-anchor `Localization` on the physical line instead of dead
+    // reckoning. The post-detect overshoot default reuses `LINE_SENSOR_AXLE_OFFSET_CM` above.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Arm-window half-length (cm): detection arms only once the chassis is within this
+     *        many cm of the expected endpoint.
+     *
+     * The seeker drives blind until `traveled >= expectedCm - STOP_AT_LINE_ARM_WINDOW_CM`, then
+     * arms its `T_OR_CROSS` detector. This prevents stopping on a line crossed earlier en route.
+     *
+     * @note Tuning constraint (load-bearing): the window only fires on the true line if the
+     *       encoder estimate of `traveled` is within this many cm of reality. If dead reckoning
+     *       UNDER-travels by more than this, the chassis crosses the real line while still
+     *       disarmed and misses it (→ runs to max → `LINE_NOT_FOUND`). Size this LARGER than the
+     *       worst-case dead-reckoning under-travel over a hop — generous, not tight. That drift
+     *       is exactly what stop-at-line exists to correct. Verified on hardware (bench B3.7).
+     * @note Overridable per call via `StopAtLineBuilder::setArmWithin(float)`.
+     */
+    constexpr float STOP_AT_LINE_ARM_WINDOW_CM = 10.0f;
+
+    /**
+     * @brief Extra search margin (cm) past the expected endpoint before failing.
+     *
+     * If no `T_OR_CROSS` is detected by `traveled >= expectedCm + STOP_AT_LINE_MAX_MARGIN_CM`,
+     * `Drive` fail-fast faults `LINE_NOT_FOUND` (stop + clear queue) — there is no silent
+     * dead-reckon fallback. Surfaced to PathTracker as `DRIVE_FAULT`.
+     *
+     * @note Overridable per call via `StopAtLineBuilder::setMaxDistance(float)`, which sets the
+     *       absolute max distance (default `expectedCm + STOP_AT_LINE_MAX_MARGIN_CM`).
+     */
+    constexpr float STOP_AT_LINE_MAX_MARGIN_CM = 15.0f;
+
+    /**
+     * @brief Consecutive `T_OR_CROSS` samples required to confirm a line detection.
+     *
+     * The seeker debounces the crossing with its own rising-edge counter — a single noisy
+     * `getJunctionType()` sample no longer triggers the stop. Mirrors the streak-confirm idiom
+     * used by `INTERSECTION_DEBOUNCE_TICKS`. At ~50-100 Hz cooperative tick, 2 ticks is well
+     * within a ~5-10 cm junction marker's dwell time while rejecting single-sample flicker.
+     */
+    constexpr uint8_t STOP_AT_LINE_DETECT_TICKS = 2;
+
+    // ---------------------------------------------------------------------------------------
     // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
     // ---------------------------------------------------------------------------------------
 

@@ -57,6 +57,7 @@ class DriveDistBuilder;
 class DriveTimeBuilder;
 class TurnDegBuilder;
 class TurnToYawBuilder;
+class StopAtLineBuilder;
 
 /**
  * @brief Mode selector for distance/time-bounded straight-line moves.
@@ -96,7 +97,8 @@ struct DriveCommand
         TURN_DEG,          ///< Relative turn.
         TURN_TO_YAW,       ///< Absolute-yaw turn.
         PROFILE_DIST,      ///< Profiled (tShape) distance move.
-        PROFILE_TIME       ///< Profiled (tShape) time move.
+        PROFILE_TIME,      ///< Profiled (tShape) time move.
+        STOP_AT_LINE       ///< Drive-until-line move; stops on T_OR_CROSS near the endpoint.
     };
 
     Kind        kind;
@@ -119,6 +121,16 @@ struct DriveCommand
     int16_t     startSpeed = 0;
     int16_t     endSpeed   = 0;
     float       accel      = 0.0f;
+
+    // STOP_AT_LINE-only. Dispatched into `_updateStopAtLine()` (a continuous, event-terminated
+    // machine), NOT `_updateProfile()` — the stop point is unknown until the line is detected,
+    // so the trapezoid's known-distance ramp-down does not apply. `mode`, `power`, `heading`,
+    // and `brake` above are reused; these add the seek-specific bounds.
+    float       expectedCm = 0.0f;     ///< Nominal distance to the expected crossing line.
+    float       armWithin  = 0.0f;     ///< Arm detection within this many cm of `expectedCm`.
+    float       maxCm      = 0.0f;     ///< Fault `LINE_NOT_FOUND` if no line detected by here.
+    float       overshoot  = 0.0f;     ///< Post-detect roll so the wheel axle lands on the line.
+    bool        reverse    = false;    ///< Back into the line via the rear board (needs 2 boards).
 };
 
 /**
@@ -139,6 +151,7 @@ class DriveClass
     friend class DriveTimeBuilder;
     friend class TurnDegBuilder;
     friend class TurnToYawBuilder;
+    friend class StopAtLineBuilder;
 
 public:
     /**
@@ -340,6 +353,43 @@ public:
      */
     [[nodiscard]] TurnToYawBuilder turnToYaw(int16_t yaw);
 
+    /**
+     * @brief Build a drive-until-line move that stops on an expected perpendicular crossing.
+     *
+     * Returns a `StopAtLineBuilder` that executes when the temporary destructs at
+     * end-of-statement. The move drives straight toward a line expected near @p expectedCm,
+     * **arms** a `T_OR_CROSS` detector only once the chassis is within `armWithin` cm of the
+     * expected endpoint (so an earlier line crossed en route cannot trigger), rolls a
+     * configurable `overshoot` past the detected line so the wheel axle lands on it, then
+     * active-brakes. If no line is seen by the resolved max distance the move faults
+     * `Fault::LINE_NOT_FOUND` (no silent dead-reckon fallback) — query `isLineFound()`.
+     *
+     * Defaults are: sync-blocking, `DriveMode::SYNC`, power `Config::SPEED_NORMAL`, brake
+     * `true`, heading = current `_heldYaw` (only consulted in `DriveMode::GYRO`),
+     * `armWithin = Config::STOP_AT_LINE_ARM_WINDOW_CM`,
+     * `maxDistance = expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`,
+     * `overshoot = Config::LINE_SENSOR_AXLE_OFFSET_CM`, forward (front board). Chain
+     * `.async()` for the auto-path-planner opt-out (tick `loop()`, poll `Drive.isIdle()`).
+     *
+     * Unlike `driveDist`, this is a CONTINUOUS event-terminated move: it runs the bespoke
+     * `_updateStopAtLine()` machine, NOT the bounded `_updateProfile()` trapezoid — the stop
+     * point is unknown until detection, so only the known-length overshoot can ramp down.
+     *
+     * Example:
+     * @code
+     * Drive.stopAtLine(40);                                    // SYNC, arm at 30 cm, axle-overshoot, sync-block
+     * Drive.stopAtLine(40).setMode(DriveMode::GYRO).async();   // heading-locked, pollable
+     * Drive.stopAtLine(40).setReverse(true);                   // back into the line via rear board
+     * @endcode
+     *
+     * @param expectedCm Nominal distance to the expected crossing line, in centimetres
+     *                   (always non-negative — reverse direction is selected via `.setReverse`).
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means
+     *       you forgot the chain.
+     */
+    [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm);
+
     // -------------------------------------------------------------------------------------
     // State accessors
     // -------------------------------------------------------------------------------------
@@ -370,9 +420,25 @@ public:
      * This is the right query for the auto-path planner's "is it safe to issue the next
      * mission step?" tick — it's queue-aware unlike `isMoveDone()` / `isTurnDone()`.
      *
-     * @return `true` iff `_moveDone && _turnDone && _profileState == IDLE && _qCount == 0`.
+     * @return `true` iff `_moveDone && _turnDone && _profileState == IDLE &&
+     *         _stopState == IDLE && _qCount == 0`.
      */
     bool isIdle() const;
+
+    /**
+     * @brief Latched result of the most recent `stopAtLine` move.
+     *
+     * Set `true` the tick the seeker confirms a `T_OR_CROSS` crossing; set `false` when a
+     * `stopAtLine` is dispatched and left `false` if the move runs to its max distance
+     * without a detection (which also latches `Fault::LINE_NOT_FOUND`). Other move/turn
+     * verbs do not touch this flag.
+     *
+     * @return `true` if the last `stopAtLine` found its line; `false` if it faulted/maxed or
+     *         none has run yet.
+     * @note On a no-line outcome `hasFault() == true` and `getFault().kind ==
+     *       Fault::LINE_NOT_FOUND` — this query and the fault state agree.
+     */
+    bool isLineFound() const;
 
     /**
      * @brief Block (spin) until the chassis is fully idle and the queue is empty.
@@ -507,7 +573,8 @@ public:
     {
         NONE             = 0,   ///< No fault — normal operation.
         DRAIN_TIMEOUT    = 1,   ///< `_drainBlocking` deadline exceeded (F3).
-        DISPATCH_FAILED  = 2    ///< `_dispatchNext` saw a non-zero rc from the lower MCU (F5).
+        DISPATCH_FAILED  = 2,   ///< `_dispatchNext` saw a non-zero rc from the lower MCU (F5).
+        LINE_NOT_FOUND   = 3    ///< `stopAtLine` ran the full max distance with no crossing found.
     };
 
     /**
@@ -691,6 +758,93 @@ private:
     ///<        `_updateTurnProfile()` in the `BRAKE` transition.
 
     // -------------------------------------------------------------------------------------
+    // Drive-until-line state machine (`stopAtLine()`-driven moves) — ADR-027
+    //
+    // Parallel to the trapezoidal move profile and the custom TurnGyro profile above, but for
+    // a CONTINUOUS event-terminated seek. `_updateStopAtLine()` commands continuous motion each
+    // tick per `.setMode` (it does NOT run `_updateProfile` — the stop point is unknown until a
+    // line is detected, so the trapezoid's known-distance ramp-down does not apply). It reads
+    // the line sensor's junction classification (via `WROLineArray`, included only in Drive.cpp)
+    // and stops on a debounced `T_OR_CROSS` near the expected endpoint or faults
+    // `Fault::LINE_NOT_FOUND` at the max distance. Hooked into `Drive.update()` parallel to
+    // `_updateProfile()` and included in `_isIdle()`.
+    // -------------------------------------------------------------------------------------
+    /**
+     * @brief State of the in-flight `stopAtLine` seek (parallel to ProfileState).
+     *
+     * `IDLE` means no seek is in flight; `_updateStopAtLine()` short-circuits in that state.
+     * `SEEK` = driving blind toward the endpoint, detection disarmed. `ARMED` = within the arm
+     * window, watching for a debounced `T_OR_CROSS`. `OVERSHOOT` = line detected, rolling the
+     * known overshoot distance with a ramp-to-`Config::PWM_MIN_MAGNITUDE` then active-brake.
+     * `DONE` is the brief tick during which `update()` issues the final stop, restores the front
+     * board, and clears `_moveDone`.
+     */
+    enum class StopAtLineState : uint8_t
+    {
+        IDLE,
+        SEEK,
+        ARMED,
+        OVERSHOOT,
+        DONE
+    };
+
+    StopAtLineState _stopState = StopAtLineState::IDLE;
+    ///< @brief Current seek phase. `IDLE` = no seek in flight; non-IDLE values are driven by
+    ///<        `_updateStopAtLine()`.
+
+    DriveMode _stopMode = DriveMode::SYNC;
+    ///< @brief Mode of the active seek (RAW / SYNC / GYRO). Selects which continuous primitive
+    ///<        `_updateStopAtLine()` commands each tick. Mirrors `DriveMode`.
+
+    int32_t _stopStartEnc = 0;
+    ///< @brief Per-side encoder reading (degrees) captured at seek dispatch; `traveled` is
+    ///<        measured relative to this each tick.
+
+    int16_t _stopCruise = Config::SPEED_NORMAL;
+    ///< @brief Resolved cruise PWM magnitude held during SEEK/ARMED. Captured from `cmd.power`
+    ///<        at dispatch.
+
+    int16_t _stopHeading = 0;
+    ///< @brief Yaw target held during a `DriveMode::GYRO` seek (ignored otherwise). Captured
+    ///<        from `cmd.heading` at dispatch.
+
+    float _stopExpectedCm = 0.0f;
+    ///< @brief Nominal distance to the expected crossing line. Captured from `cmd.expectedCm`.
+
+    float _stopArmWithin = Config::STOP_AT_LINE_ARM_WINDOW_CM;
+    ///< @brief Arm detection within this many cm of `_stopExpectedCm` (clamped so the arm
+    ///<        threshold never goes below 0). Captured from `cmd.armWithin`.
+
+    float _stopMaxCm = 0.0f;
+    ///< @brief Absolute max travel before faulting `LINE_NOT_FOUND`. Captured from `cmd.maxCm`
+    ///<        (default `expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`).
+
+    float _stopOvershoot = Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    ///< @brief Post-detect roll distance so the wheel axle lands on the line. Captured from
+    ///<        `cmd.overshoot`.
+
+    int32_t _stopDetectEnc = 0;
+    ///< @brief Per-side encoder reading (degrees) captured the tick the line is confirmed; the
+    ///<        OVERSHOOT phase rolls `_stopOvershoot` cm relative to this.
+
+    uint8_t _stopDetectStreak = 0;
+    ///< @brief Consecutive `T_OR_CROSS` samples seen in the ARMED phase. Confirms detection once
+    ///<        it reaches `Config::STOP_AT_LINE_DETECT_TICKS`; reset by a non-crossing sample.
+
+    bool _stopReverse = false;
+    ///< @brief Whether this seek backs into the line via the rear board (needs
+    ///<        `Config::LINE_BOARD_COUNT == 2`). Captured from `cmd.reverse`; in reverse,
+    ///<        `expectedCm`, `armWithin`, and `overshoot` are all measured along backward travel.
+
+    bool _stopBrake = true;
+    ///< @brief Whether to engage the active brake at the end of the OVERSHOOT roll. Mirrors
+    ///<        `DriveCommand::brake` captured at dispatch time.
+
+    bool _isLineFound = false;
+    ///< @brief Latched result of the last `stopAtLine` (see `isLineFound()`): `true` on a
+    ///<        confirmed crossing, `false` while seeking or after a `LINE_NOT_FOUND` fault.
+
+    // -------------------------------------------------------------------------------------
     // Builder dispatch targets — each fluent builder destructor calls into one of these.
     // -------------------------------------------------------------------------------------
 
@@ -846,6 +1000,39 @@ private:
     void _updateTurnProfile();
 
     /**
+     * @brief Cooperative tick for the `stopAtLine` seek state machine (ADR-027).
+     *
+     * Drives a CONTINUOUS event-terminated seek that does NOT use `_updateProfile()` (the stop
+     * point is unknown until the line is detected, so the trapezoid's known-distance ramp-down
+     * does not apply). Each tick it measures `traveled` from `_stopStartEnc`, commands the
+     * continuous primitive selected by `_stopMode` (`Move` / `MoveSync` / `MoveGyro`), and steps
+     * the state machine:
+     *   - `SEEK` — cruise flat at `_stopCruise` until `traveled >= _stopExpectedCm -
+     *     _stopArmWithin` (arm threshold clamped at 0), then transition to `ARMED`.
+     *   - `ARMED` — keep cruising; read `WROLineArray::getJunctionType()` and count consecutive
+     *     `T_OR_CROSS` samples. On `Config::STOP_AT_LINE_DETECT_TICKS` in a row, latch
+     *     `_isLineFound = true`, capture `_stopDetectEnc`, and transition to `OVERSHOOT`. If
+     *     `traveled >= _stopMaxCm` first, fault `Fault::LINE_NOT_FOUND` (stop + clear queue).
+     *   - `OVERSHOOT` — roll the known `_stopOvershoot` distance, ramping cruise →
+     *     `Config::PWM_MIN_MAGNITUDE`, then transition to `DONE`.
+     *   - `DONE` — issue the final stop (active-brake per `_stopBrake`), restore the front board
+     *     (`setReverseActive(false)`), set `_moveDone`, and return to `IDLE`.
+     *
+     * @note Idempotent / no-op when `_stopState == IDLE` — short-circuits immediately.
+     * @note Hook ordering inside `Drive.update()`: drain-task-done bit → `_updateProfile()` →
+     *       `_updateTurnProfile()` → `_updateStopAtLine()` → `_dispatchNext`. The drain-task-done
+     *       bit must NOT flip `_moveDone` while a seek is in flight (same W1 guard as the move
+     *       and turn profiles).
+     * @note Reads `WROLineArray::getJunctionType()` directly (NOT `Intersection::isAtIntersection`,
+     *       which is read-and-clear and owned by PathTracker's nav consumer). The
+     *       `WROLineArray.h` include lives in Drive.cpp only — the header needs none of its
+     *       definition.
+     * @note `@untested on hardware` for the reverse (rear-board) path until the rear board is
+     *       wired (ADR-024).
+     */
+    void _updateStopAtLine();
+
+    /**
      * @brief Compute the current speed setpoint based on traveled fraction (0.0 → 1.0).
      *
      * Implements the trapezoidal velocity profile:
@@ -934,7 +1121,8 @@ private:
      * blocking-variant destructors (via `_drainBlocking`) to know when their drain phase
      * is complete.
      *
-     * @return `true` iff `_moveDone && _turnDone && _profileState == ProfileState::IDLE`.
+     * @return `true` iff `_moveDone && _turnDone && _profileState == ProfileState::IDLE &&
+     *         _stopState == StopAtLineState::IDLE`.
      */
     bool _isIdle() const;
 
@@ -2100,6 +2288,320 @@ private:
     bool                _executed      = false;
 };
 
+/**
+ * @brief Fluent builder for `Drive.stopAtLine(expectedCm)` — drive-until-line seek (ADR-027).
+ *
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
+ * Drives straight toward a line expected near `expectedCm`, arms a `T_OR_CROSS` detector only
+ * once within `armWithin` cm of the endpoint, overshoots so the wheel axle lands on the line,
+ * then active-brakes — or faults `Fault::LINE_NOT_FOUND` if no line is seen by the max distance
+ * (query `Drive.isLineFound()`). Defaults: `DriveMode::SYNC`, power `Config::SPEED_NORMAL`,
+ * brake `true`, blocking `true`, forward (front board), heading = `Drive`'s current `_heldYaw`
+ * (only consulted in `DriveMode::GYRO`), `armWithin = Config::STOP_AT_LINE_ARM_WINDOW_CM`,
+ * `maxDistance = expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`,
+ * `overshoot = Config::LINE_SENSOR_AXLE_OFFSET_CM`. The SYNC default mirrors the project-wide
+ * move default (see DECISIONS.md). Unlike `driveDist` there is NO `tShape` knob — the seek is a
+ * continuous event-terminated move whose stop point is unknown until detection.
+ */
+class [[nodiscard]] StopAtLineBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for endpoint @p expectedCm.
+     * @param drive      Reference to the singleton `Drive` (only `Drive.stopAtLine` calls this).
+     * @param expectedCm Nominal distance to the expected crossing line, in centimetres.
+     */
+    StopAtLineBuilder(DriveClass& drive, float expectedCm) : _drive(drive), _expectedCm(expectedCm)
+    {
+    }
+
+    StopAtLineBuilder(const StopAtLineBuilder&)            = delete;
+    StopAtLineBuilder& operator=(const StopAtLineBuilder&) = delete;
+    StopAtLineBuilder& operator=(StopAtLineBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb method (`Drive.stopAtLine(expectedCm)`) can return a builder by value
+     * on compilers without mandatory copy elision. The moved-from instance is marked `_executed`
+     * so its destructor is a no-op.
+     */
+    StopAtLineBuilder(StopAtLineBuilder&& other) noexcept
+        : _drive(other._drive),
+          _expectedCm(other._expectedCm),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _heading(other._heading),
+          _headingSet(other._headingSet),
+          _armWithin(other._armWithin),
+          _armWithinSet(other._armWithinSet),
+          _maxDistance(other._maxDistance),
+          _maxDistanceSet(other._maxDistanceSet),
+          _overshoot(other._overshoot),
+          _overshootSet(other._overshootSet),
+          _reverse(other._reverse),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the PWM power explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     * @note The seek carries direction via `.setReverse()`, not the power sign — pass a positive
+     *       magnitude; the state machine applies the travel direction.
+     */
+    StopAtLineBuilder& setPower(int16_t p)
+    {
+        _power         = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the seek cruise PWM.
+     * @param p Preset selector — resolved via `presetToPwm` (WROMath.h) at execute-time.
+     * @return `*this` for chaining.
+     * @note Ignored if `setPower` was also called on the same builder.
+     */
+    StopAtLineBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset    = p;
+        _presetSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Choose which underlying continuous primitive drives the seek each tick.
+     * @param m `RAW` (open-loop), `SYNC` (encoder-rate sync PID), or `GYRO` (yaw-lock).
+     * @return `*this` for chaining.
+     * @note Default `SYNC`. `GYRO` holds `setHeading(...)` (or the current `_heldYaw`).
+     */
+    StopAtLineBuilder& setMode(DriveMode m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Override the heading held during a `DriveMode::GYRO` seek.
+     * @param yaw Absolute yaw target in degrees.
+     * @return `*this` for chaining.
+     * @note Only consulted when the resolved mode is `GYRO`. If never set, the seek uses the
+     *       current `Drive` `_heldYaw`.
+     */
+    StopAtLineBuilder& setHeading(int16_t yaw)
+    {
+        _heading    = yaw;
+        _headingSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Override the arm-window half-length: detection arms within this many cm of the
+     *        expected endpoint.
+     * @param cm Arm window in centimetres. Default `Config::STOP_AT_LINE_ARM_WINDOW_CM`.
+     * @return `*this` for chaining.
+     * @note Size this LARGER than the worst-case dead-reckoning under-travel over the hop — if
+     *       the encoder under-estimates by more than this, the chassis crosses the real line
+     *       while still disarmed and misses it (→ runs to max → `LINE_NOT_FOUND`). Generous, not
+     *       tight. See `Config::STOP_AT_LINE_ARM_WINDOW_CM` and the spec.
+     */
+    StopAtLineBuilder& setArmWithin(float cm)
+    {
+        _armWithin    = cm;
+        _armWithinSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Override the absolute max travel before faulting `LINE_NOT_FOUND`.
+     * @param cm Max search distance in centimetres. Default
+     *           `expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`.
+     * @return `*this` for chaining.
+     */
+    StopAtLineBuilder& setMaxDistance(float cm)
+    {
+        _maxDistance    = cm;
+        _maxDistanceSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Override the post-detect roll so the wheel axle lands on the line.
+     * @param cm Overshoot in centimetres. Default `Config::LINE_SENSOR_AXLE_OFFSET_CM`.
+     * @return `*this` for chaining.
+     */
+    StopAtLineBuilder& setOvershoot(float cm)
+    {
+        _overshoot    = cm;
+        _overshootSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Back into the line via the rear board instead of driving forward.
+     * @param r `true` = reverse (rear board); `false` (default) = forward (front board).
+     * @return `*this` for chaining.
+     * @note Requires `Config::LINE_BOARD_COUNT == 2`. On a 1-board chassis the reverse verb is
+     *       rejected at dispatch (Drive faults `LINE_NOT_FOUND`) rather than reading the
+     *       wrong-facing board. In reverse, `expectedCm`, `armWithin`, and `overshoot` are all
+     *       measured along the backward travel direction.
+     * @note `@untested on hardware` until the rear board is wired (ADR-024).
+     */
+    StopAtLineBuilder& setReverse(bool r)
+    {
+        _reverse = r;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at the end of the overshoot roll.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    StopAtLineBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the seek completes (detection + overshoot, or fault).
+     * @param b `true` = sync (default — spins on the registered tick callback); `false` = async.
+     * @return `*this` for chaining.
+     * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     * @note Prefer `.async()` for the auto-path-planner opt-out — it documents intent more
+     *       clearly than `.setBlocking(false)`.
+     */
+    StopAtLineBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this seek out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor enqueues the command and
+     * returns immediately. Use for the auto-path planner / PathTracker case where the caller
+     * ticks `loop()` and polls `Drive.isIdle()` / `Drive.isLineFound()` to know the outcome.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`).
+     */
+    StopAtLineBuilder& async()
+    {
+        _blocking = false;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-enqueue. Resolves the final knobs and pushes a
+     *        `Kind::STOP_AT_LINE` command onto the Drive queue.
+     *
+     * The seek dispatches later from `Drive.update()` into `_updateStopAtLine()` (NOT
+     * `_updateProfile()` — see the verb doxygen). Unset knobs resolve to their Config defaults:
+     * `armWithin = Config::STOP_AT_LINE_ARM_WINDOW_CM`,
+     * `maxCm = _expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`,
+     * `overshoot = Config::LINE_SENSOR_AXLE_OFFSET_CM`.
+     *
+     * @note Negative `expectedCm` is rejected at this boundary (reverse direction is selected
+     *       via `.setReverse()`, not a negative distance) — mirrors `DriveDistBuilder` (F4).
+     * @note When `_blocking == true`, the destructor drains the queue before AND after the
+     *       enqueue (third allowed `delay()` site — see `_drainBlocking` doxygen).
+     */
+    ~StopAtLineBuilder()
+    {
+        if (_executed)
+        {
+            return;
+        }
+        _executed = true;
+
+        // Reject negative distance at the public-API boundary — reverse direction is expressed
+        // via `.setReverse()`, never a negative distance. Mirrors DriveDistBuilder (F4).
+        if (_expectedCm < 0.0f)
+        {
+            Serial.println(F("[Drive] stopAtLine: negative expectedCm rejected"));
+            return;
+        }
+
+        // Resolve cruise — explicit setPower wins, then setPreset, then SPEED_NORMAL.
+        const int16_t cruise = _resolvePower();
+
+        DriveCommand cmd;
+        cmd.kind       = DriveCommand::Kind::STOP_AT_LINE;
+        cmd.mode       = _mode;
+        cmd.power      = cruise;
+        cmd.brake      = _brake;
+        cmd.heading    = _headingSet ? _heading : _drive._heldYaw;
+        cmd.expectedCm = _expectedCm;
+        cmd.armWithin  = _armWithinSet ? _armWithin : Config::STOP_AT_LINE_ARM_WINDOW_CM;
+        cmd.maxCm      = _maxDistanceSet
+                           ? _maxDistance
+                           : (_expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM);
+        cmd.overshoot  = _overshootSet ? _overshoot : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+        cmd.reverse    = _reverse;
+
+        if (_blocking)
+        {
+            _drive._drainBlocking();
+            _drive._enqueue(cmd);
+            _drive._drainBlocking();
+        }
+        else
+        {
+            _drive._enqueue(cmd);
+        }
+    }
+
+private:
+    /**
+     * @brief Resolve the final cruise PWM: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::SPEED_NORMAL` as the documented default.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return presetToPwm(_preset);
+        }
+        return Config::SPEED_NORMAL;
+    }
+
+    DriveClass&         _drive;
+    float               _expectedCm;
+    int16_t             _power          = Config::SPEED_NORMAL;
+    bool                _powerExplicit  = false;
+    Config::SpeedPreset _preset         = Config::SpeedPreset::NORMAL;
+    bool                _presetSet      = false;
+    DriveMode           _mode           = DriveMode::SYNC;   ///< default SYNC — see DECISIONS.md.
+    bool                _brake          = true;
+    bool                _blocking       = true;    ///< default sync — destructor blocks until command completes.
+                                                   ///< Auto-planner / PathTracker opt out per call via `.async()`.
+    int16_t             _heading        = 0;
+    bool                _headingSet     = false;
+    float               _armWithin      = Config::STOP_AT_LINE_ARM_WINDOW_CM;
+    bool                _armWithinSet   = false;
+    float               _maxDistance    = 0.0f;    ///< Resolved to `expectedCm + margin` if unset.
+    bool                _maxDistanceSet = false;
+    float               _overshoot      = Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    bool                _overshootSet   = false;
+    bool                _reverse        = false;
+    bool                _executed       = false;
+};
+
 // =========================================================================================
 // Inline definitions of the verb entry points — these MUST come after the builder classes
 // are fully defined, since they construct and return them by value.
@@ -2123,6 +2625,11 @@ inline TurnDegBuilder DriveClass::turnDeg(int16_t deg)
 inline TurnToYawBuilder DriveClass::turnToYaw(int16_t yaw)
 {
     return TurnToYawBuilder(*this, yaw);
+}
+
+inline StopAtLineBuilder DriveClass::stopAtLine(float expectedCm)
+{
+    return StopAtLineBuilder(*this, expectedCm);
 }
 
 #endif    // DRIVE_H

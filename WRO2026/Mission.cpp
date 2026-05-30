@@ -141,6 +141,22 @@ MissionClass& MissionClass::setArrivalDirection(Direction d)
     return *this;
 }
 
+MissionClass& MissionClass::setStopAtLine(StopAtLine s)
+{
+    if (!_lastPushOk)
+    {
+        Serial.println(F("[Mission] setStopAtLine: preceding step did not enqueue (ignored)"));
+        return *this;
+    }
+    if (_count == 0 || _queue[_count - 1].type != StepType::GOTO)
+    {
+        Serial.println(F("[Mission] setStopAtLine: no preceding goTo step (ignored)"));
+        return *this;
+    }
+    _queue[_count - 1].stop_at_line = s;
+    return *this;
+}
+
 void MissionClass::start()
 {
     if (_buildError)
@@ -325,6 +341,7 @@ void MissionClass::update()
                         PathTracker.goTo(s.goal)
                             .setRouteDirection(s.route_direction)
                             .setArrivalDirection(s.arrival_direction)
+                            .setStopAtLine(s.stop_at_line)
                             .async();
                         _stepState    = StepState::ACTIVE;
                         _stepStart_ms = now;

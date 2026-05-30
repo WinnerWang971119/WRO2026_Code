@@ -211,6 +211,57 @@ add_mock_force_includes(test_path_tracker_bidirectional_off)
 add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
 
 # =========================================================================================
+# Test executable #3c — PathTracker STOP_AT_LINE mirror-slice (TC7..TC10, T16).
+#
+# Exercises the STOP_AT_LINE FSM slice introduced by the 2026-05-30 stop-at-line
+# plan: re-anchor-on-success (TC7), DRIVE_FAULT-on-no-line (TC8), and the
+# call-flag OFF/ON precedence over the per-edge BlindMode (TC9/TC10).
+#
+# Rationale for NOT linking the real `PathTracker.cpp` and NOT mocking
+# `Drive.stopAtLine` (mirrors the precedent set by
+# `test_path_tracker_passthrough.cpp` and `test_path_tracker_bidirectional.cpp`):
+# the test inline-mirrors the small STOP_AT_LINE decision slice rather than drag
+# in the full Drive-builder / Localization / FieldMap / routes.cpp / MatrixMiniR4
+# / EventTrace surface. Mirror sites are annotated `// MIRROR: PathTracker.cpp:<line>`
+# for drift detection at PR-review time. The mock `Drive.h` is deliberately NOT
+# extended with a fault surface — the production `Drive.hasFault()` / `isIdle()`
+# observations are modelled as plain `bool` inputs to the replicated tick.
+#
+# Links `SUT_SOURCES` for parity with the sibling mirror targets (the test does
+# not touch LineFollower, but the force-included Drive/LineArray/Intersection
+# mocks resolve against the same TU set).
+# =========================================================================================
+add_executable(test_path_tracker_stop_at_line
+    ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
+    ${SUT_SOURCES}
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_path_tracker_stop_at_line PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_stop_at_line)
+add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
+
+# =========================================================================================
+# Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
+#
+# Tests the pure `WROMath.h` free functions `stopAtLineArmed` and `debounceStep`
+# directly — the only host-testable part of the stateful `Drive._updateStopAtLine`
+# seek (the arm-window DECISION of AC2 and the N-of-N detection debounce). The
+# stateful seek (PWM overshoot ramp + encoder roll + active brake) is bench-verified
+# on hardware (B3.7), not in CI.
+#
+# Minimal TU set: the pure functions touch no `Drive` / `LineArray` / `Intersection`
+# surface, so this target does NOT force-include those mocks. It links `MOCK_SOURCES`
+# only for the `Serial` / `g_mockMillis` definitions the mock `Arduino.h` declares
+# `extern` (pulled in transitively by `WROMath.h`'s `<Arduino.h>` include).
+# =========================================================================================
+add_executable(test_stop_at_line_armmath
+    ${TEST_DIR}/test_stop_at_line_armmath.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_stop_at_line_armmath PRIVATE ${COMMON_INCLUDES})
+add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
+
+# =========================================================================================
 # Test executable #4 — Tasks framework dispatch (T9 of the Tasks plan).
 #
 # Exercises TC1..TC3, TC5..TC12 of the Tasks-framework plan

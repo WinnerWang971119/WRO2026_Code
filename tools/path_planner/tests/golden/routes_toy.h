@@ -21,7 +21,7 @@ namespace Routes {
     // Per-category motion-mode selectors. DEFAULT (= 0) means
     // 'inherit PIPELINE_CONFIG.<category>' at dispatch time.
     enum class LineMode       : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
-    enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3 };
+    enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };
     enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
     enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
     enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };

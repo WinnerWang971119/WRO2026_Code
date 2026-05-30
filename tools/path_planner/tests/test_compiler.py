@@ -20,6 +20,7 @@ from tools.path_planner.compiler import (
     ACT_FOLLOW_DIST,
     ACT_FOLLOW_INT,
     ACT_FORWARD,
+    ACT_STOP_AT_LINE,
     ACT_TURN_REL,
     Primitive,
     compile_path,
@@ -32,11 +33,14 @@ from tools.path_planner.graph_builder import (
     EDGE_PROJECTION,
     build_graph,
 )
+from tools.path_planner.pipeline_config import BlindMode, DirectionMode
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_REVERSE,
+    ACT_LINE_OVERSHOOT,
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
+    LINE_SENSOR_AXLE_OFFSET_CM,
     Direction,
     resolve_direction,
 )
@@ -381,3 +385,202 @@ def test_property_random_paths() -> None:
         runs += 1
 
     assert runs == 100
+
+
+# -- compile_path: BLIND STOP_AT_LINE (TC1 / TC2 / TC12) ---------------------
+#
+# The stop-at-line work makes the FRONT blind branch mode-sensitive for the
+# first time: a BLIND edge whose effective ``BlindMode`` is ``STOP_AT_LINE``
+# compiles to ``(ACT_STOP_AT_LINE, distance_cm)`` instead of the plain
+# ``(ACT_FORWARD, distance_cm)``; a REAR traversal of the same edge keeps the
+# existing ``(ACT_BLIND_REVERSE, v, distance_cm, blind_mode)`` shape but now
+# carries ``BlindMode.STOP_AT_LINE`` in the mode slot. The override is keyed
+# on the ``primitive_mode`` graph attribute (a :class:`BlindMode` enum), the
+# same slot ``resolve_blind_mode`` reads -- the ``field_data`` schema spells
+# this per-edge as a ``primitive_mode`` override, so the tests author the
+# graph edge directly the same way the override-resolution tests do.
+
+
+def _stop_at_line_blind_graph(
+    distance_cm: float,
+    heading_deg: float,
+    *,
+    force_reverse: bool = False,
+) -> nx.DiGraph:
+    """Build a 2-node A->B graph with a STOP_AT_LINE BLIND edge.
+
+    The forward (A, B) edge carries ``primitive_mode=BlindMode.STOP_AT_LINE``
+    (and, when @p force_reverse is set, ``direction_override=FORCE_REVERSE``
+    so the hop resolves REAR without depending on the auto heading delta).
+    The reverse (B, A) edge mirrors the mode but never inherits the
+    directional override, matching :func:`graph_builder._emit_directed_pair`.
+
+    :param distance_cm: forward edge length in centimetres.
+    :param heading_deg: forward edge heading in ``[0, 360)`` degrees.
+    :param force_reverse: when True, tag the forward edge
+        ``FORCE_REVERSE`` so :func:`compile_path` resolves it REAR.
+    :return: a 2-node :class:`networkx.DiGraph` ready for ``compile_path``.
+    """
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    fwd_attrs = dict(
+        type=EDGE_BLIND,
+        distance_cm=distance_cm,
+        heading_deg=heading_deg,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    if force_reverse:
+        fwd_attrs["direction_override"] = int(DirectionMode.FORCE_REVERSE)
+    g.add_edge("A", "B", **fwd_attrs)
+    g.add_edge(
+        "B", "A",
+        type=EDGE_BLIND,
+        distance_cm=distance_cm,
+        heading_deg=(heading_deg + 180.0) % 360.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    return g
+
+
+def test_compile_stop_at_line_blind_edge_front_emits_stop_at_line() -> None:
+    """TC1: a FRONT BLIND edge with blind_mode=STOP_AT_LINE emits ACT_STOP_AT_LINE.
+
+    Start heading 0 deg matches the edge heading 0 deg, so no ACT_TURN_REL
+    is emitted: the compiler produces exactly one primitive carrying the
+    edge distance.
+    """
+    g = _stop_at_line_blind_graph(40.0, 0.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, None)
+
+    assert prims == [(ACT_STOP_AT_LINE, pytest.approx(40.0, abs=1e-9))]
+
+
+def test_compile_stop_at_line_blind_edge_front_with_turn() -> None:
+    """TC1 (turn variant): a non-zero heading delta emits TURN_REL then STOP_AT_LINE."""
+    g = _stop_at_line_blind_graph(40.0, 90.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, None)
+
+    assert prims == [
+        (ACT_TURN_REL, pytest.approx(90.0, abs=1e-9)),
+        (ACT_STOP_AT_LINE, pytest.approx(40.0, abs=1e-9)),
+    ]
+
+
+def test_compile_stop_at_line_blind_edge_rear_emits_blind_reverse() -> None:
+    """TC2: a REAR BLIND STOP_AT_LINE edge emits ACT_BLIND_REVERSE carrying the mode.
+
+    The REAR direction reuses the existing blind-reverse tuple shape
+    ``(ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)``; the only
+    difference from a plain blind-reverse hop is that the mode slot carries
+    ``BlindMode.STOP_AT_LINE``. The forced-REAR edge first turns 180 deg so
+    the rear sensor faces along the edge.
+    """
+    g = _stop_at_line_blind_graph(40.0, 0.0, force_reverse=True)
+
+    prims = compile_path(["A", "B"], 0.0, g, None)
+
+    assert prims == [
+        (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)),
+        (ACT_BLIND_REVERSE, "B", pytest.approx(40.0, abs=1e-9), BlindMode.STOP_AT_LINE),
+    ]
+
+
+def test_compile_stop_at_line_only_on_stop_at_line_mode() -> None:
+    """A plain (SYNC_TSHAPE-default) BLIND edge still emits ACT_FORWARD.
+
+    Guards the mode-sensitivity boundary: the STOP_AT_LINE action must NOT
+    leak onto blind edges that do not carry the override. A bare BLIND edge
+    (no ``primitive_mode``) inherits ``PIPELINE_CONFIG.blind`` and keeps the
+    dead-reckoned forward hop.
+    """
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=40.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=40.0, heading_deg=180.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, None)
+
+    assert prims == [(ACT_FORWARD, pytest.approx(40.0, abs=1e-9))]
+
+
+def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
+    """Re-add the sim-only ``ACT_LINE_OVERSHOOT`` step after each LINE primitive.
+
+    ``PathTrackerSim.go_to`` emits an ``ACT_LINE_OVERSHOOT`` step after every
+    EDGE_LINE traversal (the runtime owns that FSM transition; the compiler
+    does not). To compare ``compile_path`` output against the sim's output we
+    re-insert the overshoot step in the same positions. STOP_AT_LINE blind
+    edges add no overshoot step (they are blind hops, not line hops), so the
+    helper is a no-op across them -- which is exactly what proves byte-parity
+    on the blind action itself. Mirrors ``_interleave_overshoot`` in
+    ``test_runtime_sim.py``.
+    """
+    out: List[Primitive] = []
+    for prim in primitives:
+        out.append(prim)
+        if prim[0] in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
+            out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+    return out
+
+
+def test_stop_at_line_compiler_sim_parity() -> None:
+    """TC12: compiler and sim emit byte-identical streams over a STOP_AT_LINE hop.
+
+    Re-establishes the compiler<->sim parity invariant for the now
+    mode-sensitive FRONT blind branch. A two-hop path
+    ``A --LINE--> B --BLIND(STOP_AT_LINE)--> C`` with a 90 deg turn at B
+    (so the sim emits ACT_LINE_OVERSHOOT, not ACT_LINE_PASS, at the
+    intermediate node) must produce identical action streams once the
+    sim-only LINE_OVERSHOOT steps are re-interleaved into the compiler
+    output. A divergence here silently breaks the sim-mirrors-robot
+    guarantee on stop-at-line edges.
+    """
+    from tools.path_planner.sim import PathTrackerSim, VirtualChassis, walk_next_hop
+
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 50.0)}
+    fake_field = SimpleNamespace(
+        NODES=nodes, START_NODE="A", START_HEADING_DEG=0.0
+    )
+    g = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        g.add_node(name, x_cm=float(x), y_cm=float(y))
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=50.0, heading_deg=180.0)
+    g.add_edge(
+        "B", "C",
+        type=EDGE_BLIND,
+        distance_cm=50.0,
+        heading_deg=90.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    g.add_edge(
+        "C", "B",
+        type=EDGE_BLIND,
+        distance_cm=50.0,
+        heading_deg=270.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    next_hop = {
+        "A": {"A": "A", "B": "B", "C": "B"},
+        "B": {"A": "A", "B": "B", "C": "C"},
+        "C": {"A": "B", "B": "B", "C": "C"},
+    }
+
+    walked = walk_next_hop(next_hop, "A", "C")
+    compiler_prims = compile_path(walked, fake_field.START_HEADING_DEG, g, fake_field)
+
+    chassis = VirtualChassis.from_field_data(fake_field)
+    sim = PathTrackerSim(fake_field, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    sim_prims = sim.go_to("C")
+
+    # The STOP_AT_LINE action must survive in both streams unchanged.
+    assert (ACT_STOP_AT_LINE, pytest.approx(50.0, abs=1e-9)) in compiler_prims
+    assert (ACT_STOP_AT_LINE, pytest.approx(50.0, abs=1e-9)) in sim_prims
+    # Byte-identical once the sim-only overshoot steps are re-interleaved.
+    assert sim_prims == _interleave_overshoot(compiler_prims)
+    assert sim.localization.current_node() == "C"

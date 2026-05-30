@@ -22,8 +22,15 @@ the runtime-only LINE_OVERSHOOT FSM transition):
   via the encoder gate, not snapping to a physical marker). No
   LINE_OVERSHOOT step follows -- the encoder gate already lands the
   chassis on the node.
-* :data:`EDGE_BLIND` -- emit ``(ACT_FORWARD, distance_cm)``; Localization
-  advances via :meth:`LocalizationSim.on_dead_reckoned_advance`.
+* :data:`EDGE_BLIND` -- FRONT traversal is mode-sensitive (mirrors the
+  FRONT blind branch of :func:`tools.path_planner.compiler.compile_path`):
+  a ``STOP_AT_LINE`` blind edge (effective :class:`BlindMode` resolved via
+  :func:`resolve_blind_mode`) emits ``(ACT_STOP_AT_LINE, distance_cm)`` and
+  re-anchors via :meth:`LocalizationSim.on_intersection` (the chassis stops
+  on the physical crossing line, so it ends on the node); every other
+  ``BlindMode`` emits ``(ACT_FORWARD, distance_cm)`` and advances via
+  :meth:`LocalizationSim.on_dead_reckoned_advance`. The two emission
+  streams must stay byte-identical (``test_property_random_walks`` / TC12).
 
 Public surface:
 
@@ -63,6 +70,7 @@ from tools.path_planner.compiler import (
     ACT_FOLLOW_DIST,
     ACT_FOLLOW_INT,
     ACT_FORWARD,
+    ACT_STOP_AT_LINE,
     ACT_TURN_REL,
     Primitive,
     normalize_turn,
@@ -581,7 +589,11 @@ class PathTrackerSim:
       mirroring the runtime LINE_OVERSHOOT FSM transition.
     * ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``;
       Localization advances via :meth:`LocalizationSim.on_dead_reckoned_advance`.
-    * ``EDGE_BLIND`` -> ``(ACT_FORWARD, distance_cm)``.
+    * ``EDGE_BLIND`` (FRONT) -> ``(ACT_STOP_AT_LINE, distance_cm)`` with
+      :meth:`LocalizationSim.on_intersection` re-anchor when the effective
+      :class:`BlindMode` is ``STOP_AT_LINE``, else
+      ``(ACT_FORWARD, distance_cm)`` with
+      :meth:`LocalizationSim.on_dead_reckoned_advance`.
     """
 
     def __init__(
@@ -763,10 +775,24 @@ class PathTrackerSim:
                         (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
                     )
                     self._chassis.reverse(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                elif resolve_blind_mode(edge) == BlindMode.STOP_AT_LINE:
+                    # FRONT blind is mode-sensitive (mirrors the FRONT blind
+                    # branch of ``compile_path`` -- T7/T9 must stay
+                    # byte-identical, ``test_property_random_walks`` / TC12).
+                    # A STOP_AT_LINE edge drives blind toward the expected
+                    # crossing and stops on the physical perpendicular line,
+                    # so the chassis ends on the node and localization
+                    # re-anchors via ``on_intersection`` (the "better
+                    # localization") instead of dead-reckoning. The chassis
+                    # still advances ``distance_cm`` forward to the node.
+                    out.append((ACT_STOP_AT_LINE, distance_cm))
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_intersection(nxt)
                 else:
                     out.append((ACT_FORWARD, distance_cm))
                     self._chassis.forward(distance_cm)
-                self._localization.on_dead_reckoned_advance(nxt)
+                    self._localization.on_dead_reckoned_advance(nxt)
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
@@ -897,6 +923,14 @@ class PathTrackerSim:
                         (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
                         self._snapshot_chassis(),
                     )
+                elif resolve_blind_mode(edge) == BlindMode.STOP_AT_LINE:
+                    # FRONT STOP_AT_LINE blind: stop on the physical crossing
+                    # and re-anchor via ``on_intersection``. Mirrors the
+                    # ``go_to`` FRONT branch above (and ``compile_path``);
+                    # the emission stream stays byte-identical (TC12).
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_intersection(nxt)
+                    yield (ACT_STOP_AT_LINE, distance_cm), self._snapshot_chassis()
                 else:
                     self._chassis.forward(distance_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
