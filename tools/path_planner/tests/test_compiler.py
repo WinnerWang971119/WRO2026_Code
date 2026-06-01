@@ -40,6 +40,7 @@ from tools.path_planner.sim.runtime import (
     ACT_LINE_OVERSHOOT,
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
+    ACT_STOP_AT_LINE_REVERSE,
     LINE_SENSOR_AXLE_OFFSET_CM,
     Direction,
     resolve_direction,
@@ -469,15 +470,46 @@ def test_compile_stop_at_line_blind_edge_front_with_turn() -> None:
     ]
 
 
-def test_compile_stop_at_line_blind_edge_rear_emits_blind_reverse() -> None:
-    """TC2: a REAR BLIND STOP_AT_LINE edge emits ACT_BLIND_REVERSE carrying the mode.
+def test_compile_stop_at_line_blind_edge_rear_2board_emits_stop_at_line_reverse() -> None:
+    """A 2-board REAR STOP_AT_LINE blind edge seeks via ACT_STOP_AT_LINE_REVERSE.
 
-    The REAR direction reuses the existing blind-reverse tuple shape
-    ``(ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)``; the only
-    difference from a plain blind-reverse hop is that the mode slot carries
-    ``BlindMode.STOP_AT_LINE``. The forced-REAR edge first turns 180 deg so
-    the rear sensor faces along the edge.
+    On the default 2-board chassis (module ``LINE_BOARD_COUNT == 2``), a
+    forced-REAR STOP_AT_LINE edge has a rear board facing the travel
+    direction, so ``resolve_stop_at_line`` returns ``seek=True``. The hop
+    turns 180 deg (so the rear sensor leads) and emits the reverse seek
+    tuple ``(ACT_STOP_AT_LINE_REVERSE, target_node, distance_cm, blind_mode)``
+    whose mode slot carries the RAW edge mode ``BlindMode.STOP_AT_LINE``.
+    Byte-identical to the REAR branch of ``PathTrackerSim.go_to`` (AC1).
     """
+    g = _stop_at_line_blind_graph(40.0, 0.0, force_reverse=True)
+
+    prims = compile_path(["A", "B"], 0.0, g, None)
+
+    assert prims == [
+        (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)),
+        (
+            ACT_STOP_AT_LINE_REVERSE,
+            "B",
+            pytest.approx(40.0, abs=1e-9),
+            BlindMode.STOP_AT_LINE,
+        ),
+    ]
+
+
+def test_compile_stop_at_line_blind_edge_rear_1board_degrades_to_blind_reverse(
+    monkeypatch,
+) -> None:
+    """A 1-board forced-REAR STOP_AT_LINE blind edge degrades to ACT_BLIND_REVERSE.
+
+    With ``LINE_BOARD_COUNT == 1`` there is no rear board to seek with, so
+    ``resolve_stop_at_line`` returns ``seek=False`` for the forced-REAR hop.
+    It degrades to a reverse dead-reckon reusing the existing blind-reverse
+    tuple ``(ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)`` whose
+    mode slot still carries the RAW edge mode ``BlindMode.STOP_AT_LINE``. The
+    forced-REAR edge first turns 180 deg so the rear sensor faces along the
+    edge. Byte-identical to the REAR branch of ``PathTrackerSim.go_to`` (AC2).
+    """
+    monkeypatch.setattr(_runtime, "LINE_BOARD_COUNT", 1)
     g = _stop_at_line_blind_graph(40.0, 0.0, force_reverse=True)
 
     prims = compile_path(["A", "B"], 0.0, g, None)
