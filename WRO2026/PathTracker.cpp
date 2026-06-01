@@ -14,6 +14,7 @@
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
+#include "StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
 
@@ -133,6 +134,29 @@ namespace
             case Routes::TurnMode::PIVOT_RIGHT: return 2;
             case Routes::TurnMode::DEFAULT:     return 0;    // defensive — see doc above
             default:                            return 0;
+        }
+    }
+
+    /**
+     * @brief Map a resolved `Routes::BlindMode` motion bundle to the `DriveMode`
+     *        the `Drive.stopAtLine` seek runs under.
+     *
+     * @param m The `StopAtLineResolution::motionMode` from `resolveStopAtLine(...)`.
+     *          Always one of the three concrete velocity bundles — `SYNC_TSHAPE`,
+     *          `GYRO_TSHAPE`, or `RAW_FLAT` — so `STOP_AT_LINE` and `DEFAULT` never
+     *          reach this helper.
+     * @return The matching `DriveMode` (`SYNC`/`GYRO`/`RAW`).
+     * @note The `default` returns `DriveMode::SYNC` purely defensively; the resolver
+     *       guarantees `motionMode` is never `STOP_AT_LINE`/`DEFAULT`.
+     */
+    DriveMode blindModeToDriveMode(Routes::BlindMode m)
+    {
+        switch (m)
+        {
+            case Routes::BlindMode::SYNC_TSHAPE: return DriveMode::SYNC;
+            case Routes::BlindMode::GYRO_TSHAPE: return DriveMode::GYRO;
+            case Routes::BlindMode::RAW_FLAT:    return DriveMode::RAW;
+            default:                             return DriveMode::SYNC;    // defensive — see doc above
         }
     }
 }    // namespace
@@ -967,33 +991,29 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // -----------------------------------------------------------------
             // Effective stop-at-line resolution (ADR-027 / issue #27).
             //
-            // Precedence (mirrors `setArrivalDirection`): the call-site
-            // `_activeStopAtLine` flag — cached at DEQUEUE from the in-flight
-            // goal's NavEntry — wins over the per-edge BlindMode override:
-            //   - ON   → stop-at-line, even when the edge resolves to a plain
-            //            blind mode (e.g. BlindMode::DEFAULT).
-            //   - OFF  → never stop-at-line; the hop runs as a normal dead-
-            //            reckoned blind move on the pipeline blind default,
-            //            even when the edge says STOP_AT_LINE.
-            //   - AUTO → defer to the edge: stop-at-line iff the resolved
-            //            BlindMode is STOP_AT_LINE.
+            // One canonical decision — `resolveStopAtLine(...)` in
+            // `StopAtLinePolicy.h` (mirrored by `sim/runtime.py`) — folds the
+            // call-site `_activeStopAtLine` flag, the per-edge BlindMode, the
+            // pipeline blind default, the resolved travel direction, and the
+            // board count into `{seek, motionMode}`:
+            //   - seek == true  → run a `Drive.stopAtLine` seek in
+            //                      `motionMode`'s DriveMode (FRONT always; REAR
+            //                      only on a 2-board chassis).
+            //   - seek == false → dead-reckon the hop in `motionMode` (OFF, or a
+            //                      forced-REAR degrade on a 1-board chassis).
             //
-            // Resolved here so the rest of the BLIND case only has to branch on
-            // a single bool.
+            // `_resolveBlindMode(edge)` already maps DEFAULT → pipeline blind, so
+            // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
+            // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
             // -----------------------------------------------------------------
-            const Routes::BlindMode edgeBlindMode = _resolveBlindMode(edge);
-            bool                    stopAtLine;
-            switch (_activeStopAtLine)
-            {
-                case StopAtLine::ON:   stopAtLine = true;  break;
-                case StopAtLine::OFF:  stopAtLine = false; break;
-                case StopAtLine::AUTO:
-                default:
-                    stopAtLine = (edgeBlindMode == Routes::BlindMode::STOP_AT_LINE);
-                    break;
-            }
+            const StopAtLineResolution sal = resolveStopAtLine(
+                _activeStopAtLine,
+                _resolveBlindMode(edge),
+                Routes::PIPELINE_CONFIG.blind,
+                _resolvedDirection,
+                Config::LINE_BOARD_COUNT);
 
-            if (stopAtLine)
+            if (sal.seek)
             {
                 // A pass-through LINE→BLIND handoff leaves the LineFollower
                 // enabled (T5's brake-on-gate=false path). Release it WITHOUT
@@ -1005,13 +1025,24 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     LineFollower.setEnabled(false).setBrake(false);
                 }
 
-                // SYNC by default (the Drive builder's default mode); reverse
-                // is selected per the resolved hop direction. `.async()` keeps
-                // the FSM non-blocking — the STOP_AT_LINE state below polls
-                // `Drive.isIdle()` / `Drive.hasFault()` for the outcome.
+                // Drain any stale Intersection edge so the seek's own physical
+                // crossing cannot leak a phantom nav edge into the next LINE hop
+                // (AC7 — the forward seek drives over its target T_OR_CROSS while
+                // Intersection.update() independently counts it).
+                (void) Intersection.isAtIntersection();
+
+                // Honor the edge's resolved motion bundle. SYNC by default; GYRO
+                // additionally pins the held heading (body heading already accounts
+                // for REAR via `_resolvedBodyHeading`). Reverse is selected per the
+                // resolved hop direction. `.async()` keeps the FSM non-blocking —
+                // the STOP_AT_LINE state below polls `Drive.isIdle()` /
+                // `Drive.hasFault()` for the outcome.
+                const DriveMode mode = blindModeToDriveMode(sal.motionMode);
                 Drive.stopAtLine(edge.distance_cm)
-                     .setReverse(reverse)
-                     .async();
+                    .setReverse(reverse)
+                    .setMode(mode)
+                    .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                    .async();
                 _state       = State::STOP_AT_LINE;
                 _passThrough = false;    // consumed
                 break;
@@ -1067,22 +1098,14 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //                   (open-loop PWM, no ramp — start/end speeds pinned to the
             //                   cruise PWM short-circuits the trapezoidal profile)
             //
-            // DEFAULT cannot reach here (resolved above), but we route it through
-            // the SYNC_TSHAPE branch defensively to match the historical behaviour.
-            //
-            // STOP_AT_LINE also cannot drive this dead-reckoned path: the seek is
-            // dispatched above when stop-at-line is effective. We only reach here
-            // with `edgeBlindMode == STOP_AT_LINE` when the call-site flag forced
-            // OFF on a STOP_AT_LINE edge — in which case the spec mandates the
-            // "pipeline blind default" motion, so substitute
-            // `Routes::PIPELINE_CONFIG.blind` for the suppressed STOP_AT_LINE mode.
-            Routes::BlindMode resolvedBlindMode = edgeBlindMode;
-            if (resolvedBlindMode == Routes::BlindMode::STOP_AT_LINE)
-            {
-                resolvedBlindMode = Routes::PIPELINE_CONFIG.blind;
-            }
-
-            switch (resolvedBlindMode)
+            // DEFAULT and STOP_AT_LINE cannot reach this switch: `sal.motionMode`
+            // from `resolveStopAtLine(...)` is guaranteed to be one of the three
+            // concrete velocity bundles (SYNC_TSHAPE / GYRO_TSHAPE / RAW_FLAT). The
+            // resolver already folded the OFF-on-a-STOP_AT_LINE-edge case into the
+            // pipeline blind default, and the forced-REAR 1-board degrade keeps the
+            // edge's own mode — so the substitution that used to live here is gone.
+            // The defensive SYNC_TSHAPE default below remains as belt-and-braces.
+            switch (sal.motionMode)
             {
                 case Routes::BlindMode::GYRO_TSHAPE:
                 {
