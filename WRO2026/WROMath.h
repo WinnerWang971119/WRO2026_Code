@@ -21,12 +21,16 @@
  *   - `encDegToCm`    — inverse of `cmToEncDeg` (LineFollower's tShape ramp tracking).
  *   - `stopAtLineArmed` — arm-window predicate for `Drive.stopAtLine()` (Drive seek + host test).
  *   - `debounceStep`  — one streak-counter step for an event debounce (Drive seek + host test).
+ *   - `stopAtLineSeekMaxedOut` — max-distance fault predicate for the seek (Drive seek + host test).
+ *   - `stopAtLineProgressed`   — progress-detector for the seek watchdog (Drive seek + host test).
+ *   - `stopAtLineStalled`      — no-progress watchdog timeout for the seek (Drive seek + host test).
  *
- * @note The last two are extracted from `Drive::_updateStopAtLine()` purely so the
- *       arm-window and detection-debounce DECISIONS are unit-testable on the host
- *       (the stateful seek itself is bench-verified, not CI-verified — see the
- *       2026-05-30 stop-at-line plan, TC11). They follow the rule above because the
- *       Drive state machine is one caller and the host test is the second.
+ * @note The stopAtLine predicates are extracted from `Drive::_updateStopAtLine()` purely so the
+ *       arm-window, detection-debounce, max-distance, and stall-watchdog DECISIONS are
+ *       unit-testable on the host (the stateful seek itself is bench-verified, not CI-verified —
+ *       see the 2026-05-30 stop-at-line plan, TC11, and the 2026-06-02 plan, TC16/TC17). They
+ *       follow the rule above because the Drive state machine is one caller and the host test is
+ *       the second.
  *
  * @note Free functions in the global namespace, intentionally not in `namespace WROMath`.
  *       The names are specific enough that collision risk is low, and keeping callers free
@@ -227,6 +231,74 @@ inline uint8_t debounceStep(uint8_t streak, bool eventNow, uint8_t requiredTicks
         return requiredTicks;
     }
     return (uint8_t) (streak + 1);
+}
+
+/**
+ * @brief Whether a `Drive.stopAtLine()` seek has reached or exceeded its absolute max travel.
+ *
+ * The seek faults `Fault::LINE_NOT_FOUND` once it has driven `maxCm` cm without confirming a
+ * crossing — both the early SEEK phase and the ARMED phase enforce this so a seek that arms late
+ * (tight `setMaxDistance`) cannot overshoot its cap. The comparison is `>=` so the boundary value
+ * itself counts as maxed-out.
+ *
+ * @param traveledCm Distance travelled so far along the seek direction, in centimetres (always
+ *                   non-negative — the caller measures `abs(encDelta)`).
+ * @param maxCm      Absolute max travel before faulting, in centimetres.
+ * @return `true` once `traveledCm >= maxCm`; `false` while still under the cap.
+ *
+ * @note Source of truth for the max-distance DECISION — `Drive::_updateStopAtLine()` calls this in
+ *       both the SEEK and ARMED phases, and the host test (TC16) drives it directly so the boundary
+ *       behaviour is CI-verified.
+ */
+inline bool stopAtLineSeekMaxedOut(float traveledCm, float maxCm)
+{
+    return traveledCm >= maxCm;
+}
+
+/**
+ * @brief Whether a `Drive.stopAtLine()` seek has advanced enough since its last progress mark to
+ *        count as making progress (resetting the no-progress watchdog).
+ *
+ * The stall watchdog faults a seek whose `traveled` stops advancing (zero cruise / jammed wheel).
+ * To avoid tripping on float noise or encoder jitter, only an advance of at least `epsCm` since the
+ * last recorded progress baseline counts. The comparison is `>=` so an exact `epsCm` step counts.
+ *
+ * @param traveledCm     Distance travelled so far along the seek direction, in centimetres.
+ * @param lastProgressCm Travelled value at the last recorded progress (the watchdog baseline).
+ * @param epsCm          Minimum advance (cm) that counts as progress.
+ * @return `true` when `(traveledCm - lastProgressCm) >= epsCm`; `false` otherwise.
+ *
+ * @note Source of truth for the progress-detection DECISION — `Drive::_updateStopAtLine()` calls
+ *       this each active tick and, when it returns `true`, advances `_stopLastProgressCm` /
+ *       `_stopLastProgressMs`. The host test (TC17) drives it directly so the "slow-but-moving
+ *       never stalls" case is CI-verified.
+ */
+inline bool stopAtLineProgressed(float traveledCm, float lastProgressCm, float epsCm)
+{
+    return (traveledCm - lastProgressCm) >= epsCm;
+}
+
+/**
+ * @brief Whether a `Drive.stopAtLine()` seek has gone too long without progress (stall watchdog).
+ *
+ * Faults `Fault::LINE_NOT_FOUND` once `stallTimeoutMs` has elapsed since the last recorded progress
+ * mark — closing the unbounded-async hole where a never-advancing seek (zero cruise / stalled
+ * wheel) would hang the FSM forever. The subtraction is computed in unsigned arithmetic so it stays
+ * correct across a `millis()` rollover (matching the `_drainBlocking` deadline idiom in Drive.cpp).
+ *
+ * @param nowMs          Current `millis()` value.
+ * @param lastProgressMs `millis()` at the last recorded progress (the watchdog reset point).
+ * @param stallTimeoutMs Timeout (ms) without progress before the seek is considered stalled.
+ * @return `true` when `(nowMs - lastProgressMs) >= stallTimeoutMs` (rollover-safe); `false`
+ *         otherwise.
+ *
+ * @note Source of truth for the stall-watchdog DECISION — `Drive::_updateStopAtLine()` calls this
+ *       each active tick, and the host test (TC17) drives it directly so the stalled-trip and
+ *       moving-no-trip cases are both CI-verified.
+ */
+inline bool stopAtLineStalled(uint32_t nowMs, uint32_t lastProgressMs, uint32_t stallTimeoutMs)
+{
+    return (uint32_t) (nowMs - lastProgressMs) >= stallTimeoutMs;
 }
 
 #endif    // WRO_MATH_H

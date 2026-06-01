@@ -30,17 +30,6 @@ static_assert(Config::WHEEL_DIAM_MM > 0.0f, "WHEEL_DIAM_MM must be positive");
 /// @brief Single global instance.
 DriveClass Drive;
 
-/**
- * @brief Raw `getJunctionType()` value meaning "full-bar crossing" (T-junction / 4-way).
- *
- * Mirrors `JunctionType::T_OR_CROSS == 3` from Intersection.h, which itself mirrors the
- * `WROLineArrayClass::getJunctionType()` 0..3 contract. Defined locally so Drive.cpp does not
- * pull in `Intersection.h` (and the `Intersection` consumer it owns) just for one enumerator —
- * the seek reads the sensor classification directly per ADR-027. If the junction-type encoding
- * ever changes, both this constant and `Intersection.h`'s enum move together.
- */
-static constexpr uint8_t STOP_AT_LINE_T_OR_CROSS_RAW = 3;
-
 // -----------------------------------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------------------------------
@@ -181,13 +170,12 @@ uint8_t DriveClass::stop(bool brake)
     _profileState     = ProfileState::IDLE;        // also abort any in-flight profile
     _turnProfileState = TurnProfileState::IDLE;    // also abort any in-flight turn profile
 
-    // Abort any in-flight stopAtLine seek too (ADR-027). A reverse seek may have left the rear
-    // board active via `setReverseActive(true)` — restore the front board so LineFollower and
-    // any later read sample the forward-facing sensor. No-op in 1-board configs.
+    // Abort any in-flight stopAtLine seek too (ADR-027) — restore the front board so LineFollower
+    // and any later read sample the forward-facing sensor. The shared teardown re-issues the same
+    // `Move(0, 0)` + `brake(brake)` already done above with this `brake`, which is harmless.
     if (_stopState != StopAtLineState::IDLE)
     {
-        _stopState = StopAtLineState::IDLE;
-        LineArray.setReverseActive(false);
+        _endStopAtLine(brake);
     }
 
     // Abort semantics — pending queued work is dropped. Without this, a `Drive.stop()` call
@@ -638,6 +626,35 @@ void DriveClass::_applyBias(int16_t& L, int16_t& R) const
 // Trapezoidal-profile state machine (`.tShape()` cooperative driver)
 // -----------------------------------------------------------------------------------------
 
+void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
+{
+    // Shared continuous-emit path for both `_updateProfile` and `_updateStopAtLine`. Reads NO
+    // instance state — every input is a parameter — so the two callers cannot cross-contaminate
+    // through it. RAW applies the motor bias + deadband snap (open loop); SYNC / GYRO do NOT — the
+    // STM32 closes the loop and a feedforward scalar would fight its inner PID (see DECISIONS.md).
+    switch (mode)
+    {
+    case DriveMode::RAW:
+    {
+        int16_t L = mag;
+        int16_t R = mag;
+        _applyBias(L, R);
+        L = deadbandSnap(L);
+        R = deadbandSnap(R);
+        MiniR4.DriveDC.Move(L, R);
+        break;
+    }
+    case DriveMode::SYNC:
+        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
+        MiniR4.DriveDC.MoveSync(deadbandSnap(mag), deadbandSnap(mag));
+        break;
+    case DriveMode::GYRO:
+        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
+        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), heading);
+        break;
+    }
+}
+
 void DriveClass::_updateProfile()
 {
     if (_profileState == ProfileState::IDLE)
@@ -706,30 +723,10 @@ void DriveClass::_updateProfile()
         return;
     }
 
-    // Compute speed setpoint and issue the appropriate continuous primitive.
+    // Compute speed setpoint and issue the appropriate continuous primitive through the shared
+    // emitter (the heading is consulted only in GYRO mode).
     const int16_t spd = _profileSpeedAt(frac);
-
-    switch (_profileMode)
-    {
-    case DriveMode::RAW:
-    {
-        int16_t L = spd;
-        int16_t R = spd;
-        _applyBias(L, R);
-        L = deadbandSnap(L);
-        R = deadbandSnap(R);
-        MiniR4.DriveDC.Move(L, R);
-        break;
-    }
-    case DriveMode::SYNC:
-        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveSync(deadbandSnap(spd), deadbandSnap(spd));
-        break;
-    case DriveMode::GYRO:
-        // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveGyro(deadbandSnap(spd), _profileHeading);
-        break;
-    }
+    _emitContinuous(_profileMode, spd, _profileHeading);
 }
 
 int16_t DriveClass::_profileSpeedAt(float frac) const
@@ -1128,60 +1125,98 @@ void DriveClass::_updateStopAtLine()
         return;
     }
 
+    // DONE neither reads the encoder nor commands continuous motion — it only finalises. Handle it
+    // first so the per-tick STM32 encoder round-trip (`MiniR4.M2.getDegrees()`) and `encDegToCm`
+    // below are skipped entirely in that state.
+    if (_stopState == StopAtLineState::DONE)
+    {
+        // Final stop. Active-brake (or coast) per `_stopBrake`, restore the front board, mark the
+        // seek complete so `_dispatchNext` can hand off to the next queued command on this tick.
+        // DONE is a normal completion — the queue is intentionally NOT cleared.
+        _endStopAtLine(_stopBrake);
+        return;
+    }
+
     // Travel measured as an unsigned magnitude from the per-side baseline (M2, the canonical
     // encoder), matching `_updateProfile`. Forward and reverse both accumulate positive `traveled`
     // so the arm-window / max-distance comparisons need no sign juggling.
     const int32_t nowEnc   = MiniR4.M2.getDegrees();
     const float   traveled = encDegToCm((int32_t) abs(nowEnc - _stopStartEnc));
 
-    // Emit a continuous PWM at the given positive magnitude through the mode-correct primitive,
+    // No-progress watchdog (ADR-027): whenever `traveled` advances by at least
+    // `Config::STOP_AT_LINE_PROGRESS_EPS_CM` since the last mark, reset the watchdog (record the new
+    // baseline + timestamp). A seek whose `traveled` stops advancing (zero cruise / jammed wheel)
+    // never resets it, so `stopAtLineStalled(...)` faults `LINE_NOT_FOUND` once the timeout elapses.
+    // The progress decision lives in `stopAtLineProgressed` so the slow-but-moving "never stalls"
+    // case is host-testable (TC17).
+    if (stopAtLineProgressed(traveled, _stopLastProgressCm, Config::STOP_AT_LINE_PROGRESS_EPS_CM))
+    {
+        _stopLastProgressCm = traveled;
+        _stopLastProgressMs = millis();
+    }
+    const bool stalled =
+        stopAtLineStalled(millis(), _stopLastProgressMs, Config::STOP_AT_LINE_STALL_TIMEOUT_MS);
+
+    // Emit a continuous PWM at the given positive magnitude through the shared `_emitContinuous`,
     // applying the seek's travel direction (backward when `_stopReverse`). `_stopCruise` and every
     // magnitude passed here are positive — the builder carries direction in `_stopReverse`, never in
-    // the power sign. RAW applies the motor bias + deadband snap (open loop); SYNC / GYRO do NOT —
-    // the STM32 closes the loop and a feedforward scalar would fight its inner PID (mirrors
-    // `_updateProfile`; see DECISIONS.md).
+    // the power sign.
     auto driveContinuous = [&](int16_t mag)
     {
         const int16_t pwm = (int16_t) (_stopReverse ? -mag : mag);
-        switch (_stopMode)
-        {
-        case DriveMode::RAW:
-        {
-            int16_t L = pwm;
-            int16_t R = pwm;
-            _applyBias(L, R);
-            L = deadbandSnap(L);
-            R = deadbandSnap(R);
-            MiniR4.DriveDC.Move(L, R);
-            break;
-        }
-        case DriveMode::SYNC:
-            MiniR4.DriveDC.MoveSync(deadbandSnap(pwm), deadbandSnap(pwm));
-            break;
-        case DriveMode::GYRO:
-            MiniR4.DriveDC.MoveGyro(deadbandSnap(pwm), _stopHeading);
-            break;
-        }
+        _emitContinuous(_stopMode, pwm, _stopHeading);
     };
 
     switch (_stopState)
     {
     case StopAtLineState::SEEK:
     {
+        // No line by the max search distance, or no progress for the stall timeout → fail fast. The
+        // SEEK phase enforces the max-distance cap too (not only ARMED) so a seek that never arms
+        // (tight `setMaxDistance`) cannot overshoot, and a never-advancing seek cannot hang the
+        // async FSM forever. Same `LINE_NOT_FOUND` teardown as the ARMED no-line path.
+        if (stopAtLineSeekMaxedOut(traveled, _stopMaxCm) || stalled)
+        {
+            Serial.println(F("[Drive] stopAtLine: no line within max distance — LINE_NOT_FOUND"));
+            _fault.kind    = Fault::LINE_NOT_FOUND;
+            _fault.rc      = 0x00;
+            _fault.cmdKind = DriveCommand::Kind::STOP_AT_LINE;
+            _isLineFound   = false;
+            _clearQueue();
+            _endStopAtLine(true);
+            break;
+        }
+
         // Cruise flat toward the endpoint; arm detection once inside the window. The arm threshold
         // (`expectedCm - armWithin`, clamped at 0) lives in `stopAtLineArmed` so the SEEK → ARMED
-        // decision is host-testable (TC11).
+        // decision is host-testable (TC11). `_stopDetectStreak` is already zeroed at dispatch and
+        // SEEK never writes it — ARMED is its only writer — so no reset is needed on this transition.
         driveContinuous(_stopCruise);
         if (stopAtLineArmed(traveled, _stopExpectedCm, _stopArmWithin))
         {
-            _stopDetectStreak = 0;
-            _stopState        = StopAtLineState::ARMED;
+            _stopState = StopAtLineState::ARMED;
         }
         break;
     }
 
     case StopAtLineState::ARMED:
     {
+        // No line by the max search distance, or no progress for the stall timeout → fail fast. Stop,
+        // latch `LINE_NOT_FOUND`, clear the queue, restore the front board. No silent dead-reckon
+        // fallback (spec / AC7). Both gates run before the detection read so a maxed/stalled seek
+        // cannot also confirm on the same tick.
+        if (stopAtLineSeekMaxedOut(traveled, _stopMaxCm) || stalled)
+        {
+            Serial.println(F("[Drive] stopAtLine: no line within max distance — LINE_NOT_FOUND"));
+            _fault.kind    = Fault::LINE_NOT_FOUND;
+            _fault.rc      = 0x00;
+            _fault.cmdKind = DriveCommand::Kind::STOP_AT_LINE;
+            _isLineFound   = false;
+            _clearQueue();
+            _endStopAtLine(true);
+            break;
+        }
+
         // Keep cruising while watching for the crossing. Read the junction classification DIRECTLY
         // from the line array (NOT the read-and-clear `Intersection::isAtIntersection()`), and step
         // the consecutive-sample debounce. Detection confirms when the streak reaches
@@ -1189,7 +1224,7 @@ void DriveClass::_updateStopAtLine()
         driveContinuous(_stopCruise);
 
         const bool crossNow =
-            (LineArray.getJunctionType() == STOP_AT_LINE_T_OR_CROSS_RAW);
+            (LineArray.getJunctionType() == WROLineArrayClass::JUNCTION_T_OR_CROSS);
         _stopDetectStreak =
             debounceStep(_stopDetectStreak, crossNow, Config::STOP_AT_LINE_DETECT_TICKS);
 
@@ -1200,27 +1235,6 @@ void DriveClass::_updateStopAtLine()
             _isLineFound   = true;
             _stopDetectEnc = nowEnc;
             _stopState     = StopAtLineState::OVERSHOOT;
-            break;
-        }
-
-        // No line by the max search distance → fail fast. Stop, latch `LINE_NOT_FOUND`, clear the
-        // queue, restore the front board. No silent dead-reckon fallback (spec / AC7).
-        if (traveled >= _stopMaxCm)
-        {
-            Serial.println(F("[Drive] stopAtLine: no line within max distance — LINE_NOT_FOUND"));
-            MiniR4.DriveDC.Move(0, 0);
-            MiniR4.DriveDC.brake(true);
-
-            _fault.kind    = Fault::LINE_NOT_FOUND;
-            _fault.rc      = 0x00;
-            _fault.cmdKind = DriveCommand::Kind::STOP_AT_LINE;
-            _isLineFound   = false;
-
-            LineArray.setReverseActive(false);    // restore front board
-            _stopState = StopAtLineState::IDLE;
-            _moveDone  = true;
-            _turnDone  = true;
-            _clearQueue();
         }
         break;
     }
@@ -1258,24 +1272,25 @@ void DriveClass::_updateStopAtLine()
         break;
     }
 
-    case StopAtLineState::DONE:
-    {
-        // Final stop. Active-brake (or coast) per `_stopBrake`, restore the front board, mark the
-        // seek complete so `_dispatchNext` can hand off to the next queued command on this tick.
-        MiniR4.DriveDC.Move(0, 0);
-        MiniR4.DriveDC.brake(_stopBrake);
-
-        LineArray.setReverseActive(false);    // restore front board (no-op in 1-board configs)
-        _stopState = StopAtLineState::IDLE;
-        _moveDone  = true;
-        _turnDone  = true;
-        break;
-    }
-
     default:
-        // IDLE handled above; no other state values exist.
+        // IDLE and DONE are handled above the encoder read; no other state values exist.
         break;
     }
+}
+
+void DriveClass::_endStopAtLine(bool brake)
+{
+    // Shared seek teardown (ADR-027). Used by the DONE state (brake = `_stopBrake`), the no-line /
+    // max-distance / stall fault paths (brake = true), and `stop()` / `_drainBlocking()` when an
+    // in-flight seek is aborted. Restores the front board — a reverse seek may have left the rear
+    // board active via `setReverseActive(true)`; no-op in 1-board configs. Does NOT clear the queue:
+    // the normal DONE hand-off keeps it, and fault paths call `_clearQueue()` themselves first.
+    MiniR4.DriveDC.Move(0, 0);
+    MiniR4.DriveDC.brake(brake);
+    LineArray.setReverseActive(false);
+    _stopState = StopAtLineState::IDLE;
+    _moveDone  = true;
+    _turnDone  = true;
 }
 
 // -----------------------------------------------------------------------------------------
@@ -1469,6 +1484,12 @@ void DriveClass::_dispatchNext()
         _stopDetectStreak = 0;
         _isLineFound     = false;    // cleared on dispatch; latched true only on a confirmed line.
 
+        // Seed the no-progress watchdog: baseline at zero travel, clock from now (ADR-027). The
+        // watchdog faults `LINE_NOT_FOUND` if `traveled` does not advance for
+        // `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`.
+        _stopLastProgressCm = 0.0f;
+        _stopLastProgressMs = millis();
+
         // Select the rear board for a reverse seek so `getJunctionType()` samples the board that
         // faces the travel direction. No-op in 1-board configs (already rejected above), restored
         // to the front board at DONE/fault. LineFollower is disabled for the seek, so Drive briefly
@@ -1476,8 +1497,8 @@ void DriveClass::_dispatchNext()
         LineArray.setReverseActive(cmd.reverse);
 
         _stopState = StopAtLineState::SEEK;
-        _moveDone  = false;          // the seek owns _moveDone until DONE/fault.
-        rc         = 0x00;           // seeding cannot fail at dispatch (no lower-MCU round trip).
+        _moveDone  = false;          // the seek owns _moveDone until DONE/fault. `rc` stays 0x00 —
+                                     // seeding cannot fail at dispatch (no lower-MCU round trip).
         break;
     }
     }
@@ -1550,11 +1571,12 @@ void DriveClass::_drainBlocking()
             _profileState     = ProfileState::IDLE;
             _turnProfileState = TurnProfileState::IDLE;
             // Abort an in-flight stopAtLine seek too and restore the front board (ADR-027) — a
-            // reverse seek may have left the rear board active. No-op in 1-board configs.
+            // reverse seek may have left the rear board active. No-op in 1-board configs. Active-brake
+            // to match the hard-stop above. (The shared teardown re-issues `Move(0, 0)` +
+            // `brake(true)`, which is harmless after the hard-stop.)
             if (_stopState != StopAtLineState::IDLE)
             {
-                _stopState = StopAtLineState::IDLE;
-                LineArray.setReverseActive(false);
+                _endStopAtLine(true);
             }
             _clearQueue();
             return;

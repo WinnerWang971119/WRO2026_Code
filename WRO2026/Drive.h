@@ -831,6 +831,16 @@ private:
     ///< @brief Consecutive `T_OR_CROSS` samples seen in the ARMED phase. Confirms detection once
     ///<        it reaches `Config::STOP_AT_LINE_DETECT_TICKS`; reset by a non-crossing sample.
 
+    uint32_t _stopLastProgressMs = 0;
+    ///< @brief `millis()` at the last detected progress — the no-progress watchdog reset point.
+    ///<        Seeded at dispatch and advanced each tick `stopAtLineProgressed(...)` is true; the
+    ///<        watchdog faults `LINE_NOT_FOUND` once `now - this >= STOP_AT_LINE_STALL_TIMEOUT_MS`.
+
+    float _stopLastProgressCm = 0.0f;
+    ///< @brief `traveled` (cm) at the last detected progress — the progress-detector baseline. Seeded
+    ///<        at dispatch and advanced (with `_stopLastProgressMs`) whenever `traveled` gains at
+    ///<        least `Config::STOP_AT_LINE_PROGRESS_EPS_CM` since this value.
+
     bool _stopReverse = false;
     ///< @brief Whether this seek backs into the line via the rear board (needs
     ///<        `Config::LINE_BOARD_COUNT == 2`). Captured from `cmd.reverse`; in reverse,
@@ -965,6 +975,27 @@ private:
     void _applyBias(int16_t& L, int16_t& R) const;
 
     /**
+     * @brief Emit one continuous-PWM command in the given mode at the given magnitude/heading.
+     *
+     * The single shared continuous-emit path for both the trapezoidal profile
+     * (`_updateProfile`) and the `stopAtLine` seek (`_updateStopAtLine`). Dispatches the
+     * mode-correct lower-MCU primitive: `RAW` applies `_applyBias` then `deadbandSnap` on each
+     * wheel and calls `Move(L, R)`; `SYNC` calls `MoveSync(deadbandSnap(mag), deadbandSnap(mag))`;
+     * `GYRO` calls `MoveGyro(deadbandSnap(mag), heading)`. RAW is the only mode that applies the
+     * motor-bias scalar — SYNC / GYRO close the loop on the STM32 and a feedforward scalar would
+     * fight the inner PID (see DECISIONS.md).
+     *
+     * @param mode    Continuous primitive to dispatch (`RAW` / `SYNC` / `GYRO`).
+     * @param mag     Signed PWM magnitude (caller carries direction in the sign).
+     * @param heading Yaw target — only consulted in `GYRO` mode; ignored otherwise.
+     *
+     * @note Reads NO instance state — every input is a parameter, so the profile
+     *       (`_profileMode` / `_profileHeading`) and the seek (`_stopMode` / `_stopHeading`)
+     *       cannot cross-contaminate through it.
+     */
+    void _emitContinuous(DriveMode mode, int16_t mag, int16_t heading);
+
+    /**
      * @brief Advance the profile state machine one tick. Called from `update()` when active.
      *
      * Reads encoder (distance variant) or millis() (time variant), computes the traveled
@@ -1031,6 +1062,25 @@ private:
      *       wired (ADR-024).
      */
     void _updateStopAtLine();
+
+    /**
+     * @brief Tear down an in-flight `stopAtLine` seek: stop, brake, restore the front board, and
+     *        return the seek state machine to IDLE.
+     *
+     * The single shared seek-teardown path. Issues `Move(0, 0)` + `brake(brake)`, restores the
+     * front board (`LineArray.setReverseActive(false)` — a reverse seek may have selected the rear
+     * board; no-op in 1-board configs), sets `_stopState = IDLE`, and marks `_moveDone` /
+     * `_turnDone` so `_dispatchNext` can hand off on the same tick. Does NOT clear the queue — the
+     * caller decides queue semantics (normal DONE hand-off keeps the queue; a fault path calls
+     * `_clearQueue()` itself before this).
+     *
+     * @param brake `true` = engage the active brake; `false` = coast.
+     *
+     * @note Called from the DONE state (brake = `_stopBrake`), the no-line / max-distance / stall
+     *       fault paths (brake = `true`), and from `stop()` / `_drainBlocking()` when an in-flight
+     *       seek is aborted.
+     */
+    void _endStopAtLine(bool brake);
 
     /**
      * @brief Compute the current speed setpoint based on traveled fraction (0.0 → 1.0).
@@ -2339,11 +2389,9 @@ public:
           _heading(other._heading),
           _headingSet(other._headingSet),
           _armWithin(other._armWithin),
-          _armWithinSet(other._armWithinSet),
           _maxDistance(other._maxDistance),
           _maxDistanceSet(other._maxDistanceSet),
           _overshoot(other._overshoot),
-          _overshootSet(other._overshootSet),
           _reverse(other._reverse),
           _executed(other._executed)
     {
@@ -2415,8 +2463,7 @@ public:
      */
     StopAtLineBuilder& setArmWithin(float cm)
     {
-        _armWithin    = cm;
-        _armWithinSet = true;
+        _armWithin = cm;
         return *this;
     }
 
@@ -2440,8 +2487,7 @@ public:
      */
     StopAtLineBuilder& setOvershoot(float cm)
     {
-        _overshoot    = cm;
-        _overshootSet = true;
+        _overshoot = cm;
         return *this;
     }
 
@@ -2543,11 +2589,11 @@ public:
         cmd.brake      = _brake;
         cmd.heading    = _headingSet ? _heading : _drive._heldYaw;
         cmd.expectedCm = _expectedCm;
-        cmd.armWithin  = _armWithinSet ? _armWithin : Config::STOP_AT_LINE_ARM_WINDOW_CM;
+        cmd.armWithin  = _armWithin;
         cmd.maxCm      = _maxDistanceSet
                            ? _maxDistance
                            : (_expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM);
-        cmd.overshoot  = _overshootSet ? _overshoot : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+        cmd.overshoot  = _overshoot;
         cmd.reverse    = _reverse;
 
         if (_blocking)
@@ -2593,11 +2639,9 @@ private:
     int16_t             _heading        = 0;
     bool                _headingSet     = false;
     float               _armWithin      = Config::STOP_AT_LINE_ARM_WINDOW_CM;
-    bool                _armWithinSet   = false;
     float               _maxDistance    = 0.0f;    ///< Resolved to `expectedCm + margin` if unset.
     bool                _maxDistanceSet = false;
     float               _overshoot      = Config::LINE_SENSOR_AXLE_OFFSET_CM;
-    bool                _overshootSet   = false;
     bool                _reverse        = false;
     bool                _executed       = false;
 };
