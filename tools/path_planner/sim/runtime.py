@@ -22,15 +22,31 @@ the runtime-only LINE_OVERSHOOT FSM transition):
   via the encoder gate, not snapping to a physical marker). No
   LINE_OVERSHOOT step follows -- the encoder gate already lands the
   chassis on the node.
-* :data:`EDGE_BLIND` -- FRONT traversal is mode-sensitive (mirrors the
-  FRONT blind branch of :func:`tools.path_planner.compiler.compile_path`):
-  a ``STOP_AT_LINE`` blind edge (effective :class:`BlindMode` resolved via
-  :func:`resolve_blind_mode`) emits ``(ACT_STOP_AT_LINE, distance_cm)`` and
-  re-anchors via :meth:`LocalizationSim.on_intersection` (the chassis stops
-  on the physical crossing line, so it ends on the node); every other
-  ``BlindMode`` emits ``(ACT_FORWARD, distance_cm)`` and advances via
-  :meth:`LocalizationSim.on_dead_reckoned_advance`. The two emission
-  streams must stay byte-identical (``test_property_random_walks`` / TC12).
+* :data:`EDGE_BLIND` -- both FRONT and REAR traversal are mode-sensitive
+  (mirrors the blind branch of
+  :func:`tools.path_planner.compiler.compile_path`). The per-hop decision
+  runs through :func:`resolve_stop_at_line` (call flag ``AUTO`` — the
+  offline streams have no call-site verb, matching the firmware's per-edge
+  AUTO default), which returns ``(seek, motion_mode)``:
+
+    * ``seek`` + FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)``; re-anchors via
+      :meth:`LocalizationSim.on_intersection` (the front board stops on the
+      physical crossing line, so the chassis ends on the node).
+    * ``seek`` + REAR -> ``(ACT_STOP_AT_LINE_REVERSE, target, distance_cm,
+      blind_mode)``; re-anchors via :meth:`LocalizationSim.on_intersection`
+      (the rear board detects the crossing). Requires a 2-board chassis —
+      :func:`resolve_stop_at_line` returns ``seek=False`` for REAR on
+      1-board, degrading to the dead-reckon branch below.
+    * ``not seek`` + FRONT -> ``(ACT_FORWARD, distance_cm)``; advances via
+      :meth:`LocalizationSim.on_dead_reckoned_advance`.
+    * ``not seek`` + REAR -> ``(ACT_BLIND_REVERSE, target, distance_cm,
+      blind_mode)``; advances via
+      :meth:`LocalizationSim.on_dead_reckoned_advance`.
+
+  The non-``STOP_AT_LINE`` (dead-reckon) FRONT/REAR streams stay
+  byte-identical to the pre-resolver output
+  (``test_property_random_walks`` / TC12). The two ``seek`` branches are the
+  new behavior (mode-sensitive REAR via the rear board; AC1).
 
 Public surface:
 
@@ -135,6 +151,19 @@ ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, targe
 ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
 ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, projection_mode)
 
+# Reverse-direction stop-at-line primitive. Mirrors ``ACT_BLIND_REVERSE``'s
+# 4-tuple shape ``(action, target_node, distance_cm, blind_mode)`` but
+# re-anchors localization via :meth:`LocalizationSim.on_intersection` (the rear
+# board detects the physical crossing line) instead of dead-reckoning. Emitted
+# only for a 2-board REAR ``STOP_AT_LINE`` blind hop, where
+# :func:`resolve_stop_at_line` returns ``seek=True`` with a rear-facing board.
+# On a 1-board chassis a forced-REAR STOP_AT_LINE hop degrades to
+# ``ACT_BLIND_REVERSE`` (no rear board to seek with). The C++ runtime owns the
+# matching ``Drive.stopAtLine(...).setReverse(True)`` dispatch; this emission
+# must stay byte-identical to the compiler's output (AC1 firmware<->offline
+# agreement).
+ACT_STOP_AT_LINE_REVERSE: str = "stop_at_line_reverse"  # (ACT_STOP_AT_LINE_REVERSE, target_node, distance_cm, blind_mode)
+
 
 # MUST mirror ``Config::BIDIRECTIONAL_AUTO_ENABLED`` in WRO2026/Config.h.
 # Python cannot import C++ headers, so this constant is hand-mirrored.
@@ -173,6 +202,22 @@ class Direction(IntEnum):
     REAR  = 2    # force reverse (chassis rear leads)
 
 
+class StopAtLine(IntEnum):
+    """Per-hop call-site stop-at-line override.
+
+    Mirror of the C++ ``enum class StopAtLine : uint8_t`` in
+    ``WRO2026/NavTypes.h``. ``AUTO`` defers to the per-edge
+    :class:`BlindMode` (seek only when the edge is ``STOP_AT_LINE``); ``ON``
+    forces the seek on any BLIND edge; ``OFF`` force-disables it (the hop
+    dead-reckons). The offline compiler/sim have no call-site verb today, so
+    they always pass ``AUTO`` — matching the firmware's per-edge AUTO default.
+    """
+
+    AUTO = 0    # defer to the per-edge BlindMode override
+    ON   = 1    # force stop-at-line on this hop's BLIND edge (overrides edge)
+    OFF  = 2    # force-disable; traverse the BLIND edge as a dead-reckoned hop
+
+
 def wrap_pm180(delta_deg: float) -> float:
     """Wrap a heading delta into ``(-180, +180]`` degrees.
 
@@ -189,6 +234,7 @@ __all__ = [
     "ACT_LINE_PASS",
     "ACT_LINE_REVERSE",
     "ACT_PROJECTION_REVERSE",
+    "ACT_STOP_AT_LINE_REVERSE",
     "BIDIRECTIONAL_AUTO_ENABLED",
     "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_BOARD_COUNT",
@@ -199,12 +245,14 @@ __all__ = [
     "Direction",
     "LocalizationSim",
     "PathTrackerSim",
+    "StopAtLine",
     "UnreachableGoalError",
     "resolve_blind_mode",
     "resolve_direction",
     "resolve_line_mode",
     "resolve_pre_turn_mode",
     "resolve_projection_mode",
+    "resolve_stop_at_line",
     "walk_next_hop",
     "wrap_pm180",
 ]
@@ -313,6 +361,98 @@ def resolve_line_mode(edge) -> LineMode:
 def resolve_blind_mode(edge) -> BlindMode:
     """Return the effective :class:`BlindMode` for an EDGE_BLIND traversal."""
     return _resolve_override(edge, "primitive_mode", PIPELINE_CONFIG.blind, BlindMode)
+
+
+def resolve_stop_at_line(
+    call_flag: "StopAtLine",
+    edge_mode: BlindMode,
+    pipeline_blind: BlindMode,
+    direction: "Direction",
+    line_board_count: int,
+) -> tuple[bool, BlindMode]:
+    """Resolve whether a BLIND hop seeks a line and which motion bundle it runs.
+
+    Function-identical Python mirror of the C++
+    ``StopAtLinePolicy.h::resolveStopAtLine`` helper (T1). Answers one
+    question per BLIND hop: does this edge run a ``Drive.stopAtLine`` seek,
+    and if not, which motion bundle does the dead-reckoned fallback use?
+
+    Rule (T0 truth table):
+
+    1. ``seek_requested``: a call-site :attr:`StopAtLine.ON` always asks for
+       the seek; a call-site :attr:`StopAtLine.AUTO` asks only when the edge
+       itself is :attr:`BlindMode.STOP_AT_LINE`; :attr:`StopAtLine.OFF` never
+       asks.
+    2. ``board_ok``: a line board must face the travel direction — the front
+       board always faces forward, but a rear seek needs a second board
+       (``line_board_count >= 2``).
+    3. ``seek = seek_requested and board_ok``.
+    4. When seeking, the motion bundle is the edge's mode, except a bare
+       :attr:`BlindMode.STOP_AT_LINE` edge has no velocity profile of its own
+       and seeks under :attr:`BlindMode.SYNC_TSHAPE`.
+    5. When not seeking (OFF, or a board-degrade), the hop dead-reckons: a
+       :attr:`BlindMode.STOP_AT_LINE` edge falls back to the pipeline blind
+       mode; any residual ``STOP_AT_LINE`` (e.g. a ``STOP_AT_LINE`` pipeline
+       default) defensively degrades to :attr:`BlindMode.SYNC_TSHAPE`. The
+       returned ``motion_mode`` is therefore never ``STOP_AT_LINE`` and never
+       ``DEFAULT``.
+
+    The offline compiler/sim have no call-site stop-at-line verb today, so
+    they always pass ``call_flag=StopAtLine.AUTO`` — matching the firmware's
+    per-edge AUTO default. The full ``ON``/``OFF`` branches are implemented
+    anyway so the signature mirrors the C++ surface and TC13 can drive every
+    truth-table row through both languages.
+
+    Keep step-for-step identical with
+    ``WRO2026/StopAtLinePolicy.h::resolveStopAtLine``;
+    ``tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv`` is the
+    normative source; TC13 enforces parity.
+
+    :param call_flag: PathTracker's ``_activeStopAtLine`` (ON/OFF/AUTO).
+    :param edge_mode: ``resolve_blind_mode(edge)`` — already DEFAULT->pipeline
+        resolved, so never :attr:`BlindMode.DEFAULT`.
+    :param pipeline_blind: ``PIPELINE_CONFIG.blind`` — the mission-wide blind
+        default, used as the dead-reckon fallback for a ``STOP_AT_LINE`` edge
+        that does not seek.
+    :param direction: the post-:func:`resolve_direction` travel direction
+        (``FRONT``/``REAR``; never ``AUTO`` here).
+    :param line_board_count: number of MXColor reflectance boards on the
+        chassis (mirrors ``Config::LINE_BOARD_COUNT``); gates a rear seek.
+    :return: a ``(seek, motion_mode)`` tuple. ``seek`` is True iff the
+        ``Drive.stopAtLine`` seek should be dispatched; ``motion_mode`` is the
+        seek's drive mode (when seeking) or the dead-reckon fallback's drive
+        mode (when not) — always a concrete bundle, never ``STOP_AT_LINE`` or
+        ``DEFAULT``.
+    """
+    # Step 1: who asked for the seek? ON always; AUTO only on a STOP_AT_LINE
+    # edge; OFF never.
+    seek_requested = (call_flag == StopAtLine.ON) or (
+        call_flag == StopAtLine.AUTO and edge_mode == BlindMode.STOP_AT_LINE
+    )
+
+    # Step 2: a line board must face the travel direction. Front always; rear
+    # needs a second board.
+    board_ok = (direction == Direction.FRONT) or (line_board_count >= 2)
+
+    # Step 3: the seek runs only when requested and physically possible.
+    seek = seek_requested and board_ok
+
+    if seek:
+        # Step 4: keep the edge's typed mode; a bare STOP_AT_LINE edge seeks
+        # under SYNC_TSHAPE (it has no velocity profile of its own).
+        motion_mode = (
+            BlindMode.SYNC_TSHAPE
+            if edge_mode == BlindMode.STOP_AT_LINE
+            else edge_mode
+        )
+    else:
+        # Step 5: dead-reckon fallback. A STOP_AT_LINE edge falls back to the
+        # pipeline blind mode; any residual STOP_AT_LINE defensively degrades
+        # to SYNC_TSHAPE so the returned mode is never STOP_AT_LINE.
+        base = pipeline_blind if edge_mode == BlindMode.STOP_AT_LINE else edge_mode
+        motion_mode = BlindMode.SYNC_TSHAPE if base == BlindMode.STOP_AT_LINE else base
+
+    return seek, motion_mode
 
 
 def resolve_projection_mode(edge) -> ProjectionMode:
@@ -589,10 +729,14 @@ class PathTrackerSim:
       mirroring the runtime LINE_OVERSHOOT FSM transition.
     * ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``;
       Localization advances via :meth:`LocalizationSim.on_dead_reckoned_advance`.
-    * ``EDGE_BLIND`` (FRONT) -> ``(ACT_STOP_AT_LINE, distance_cm)`` with
-      :meth:`LocalizationSim.on_intersection` re-anchor when the effective
-      :class:`BlindMode` is ``STOP_AT_LINE``, else
-      ``(ACT_FORWARD, distance_cm)`` with
+    * ``EDGE_BLIND`` -> resolved per :func:`resolve_stop_at_line`:
+      ``seek`` FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)`` +
+      :meth:`LocalizationSim.on_intersection`; ``seek`` REAR ->
+      ``(ACT_STOP_AT_LINE_REVERSE, target, distance_cm, blind_mode)`` +
+      :meth:`LocalizationSim.on_intersection`; ``not seek`` FRONT ->
+      ``(ACT_FORWARD, distance_cm)`` +
+      :meth:`LocalizationSim.on_dead_reckoned_advance`; ``not seek`` REAR ->
+      ``(ACT_BLIND_REVERSE, target, distance_cm, blind_mode)`` +
       :meth:`LocalizationSim.on_dead_reckoned_advance`.
     """
 
@@ -770,28 +914,57 @@ class PathTrackerSim:
                     self._chassis.follow_line_to_distance(distance_cm)
                 self._localization.on_dead_reckoned_advance(nxt)
             elif edge_type == EDGE_BLIND:
-                if direction == Direction.REAR:
+                # Mode-sensitive blind dispatch (mirrors the blind branch of
+                # ``compile_path`` -- T7 must stay byte-identical,
+                # ``test_property_random_walks`` / TC12). The offline streams
+                # carry no call-site stop-at-line verb, so resolve with
+                # ``StopAtLine.AUTO`` (the firmware's per-edge AUTO default):
+                # an effective ``STOP_AT_LINE`` BlindMode seeks; everything
+                # else dead-reckons. REAR seek requires a 2-board chassis --
+                # ``resolve_stop_at_line`` returns ``seek=False`` for REAR on
+                # 1-board, degrading to the dead-reckon reverse below.
+                seek, _motion_mode = resolve_stop_at_line(
+                    StopAtLine.AUTO,
+                    resolve_blind_mode(edge),
+                    PIPELINE_CONFIG.blind,
+                    direction,
+                    LINE_BOARD_COUNT,
+                )
+                if seek and direction == Direction.FRONT:
+                    # Front board stops on the physical crossing line; the
+                    # chassis ends on the node, so localization re-anchors via
+                    # ``on_intersection`` (the "better localization") instead
+                    # of dead-reckoning. The chassis still advances
+                    # ``distance_cm`` forward to the node.
+                    out.append((ACT_STOP_AT_LINE, distance_cm))
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_intersection(nxt)
+                elif seek and direction == Direction.REAR:
+                    # 2-board REAR stop-at-line: the rear board detects the
+                    # crossing, so the chassis re-anchors via
+                    # ``on_intersection`` (mirrors the firmware reverse seek +
+                    # ``Localization.onIntersection``; AC1). The chassis
+                    # advances backward by ``distance_cm`` to the node.
+                    out.append(
+                        (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
+                    )
+                    self._chassis.reverse(distance_cm)
+                    self._localization.on_intersection(nxt)
+                elif direction == Direction.FRONT:
+                    # Dead-reckoned forward blind move (byte-identical to the
+                    # pre-resolver FRONT non-STOP_AT_LINE output).
+                    out.append((ACT_FORWARD, distance_cm))
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                else:
+                    # Dead-reckoned reverse blind move (byte-identical to the
+                    # pre-resolver REAR output): a non-STOP_AT_LINE REAR edge,
+                    # or a forced-REAR STOP_AT_LINE hop on a 1-board chassis
+                    # with no rear board to seek with (AC2).
                     out.append(
                         (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
                     )
                     self._chassis.reverse(distance_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                elif resolve_blind_mode(edge) == BlindMode.STOP_AT_LINE:
-                    # FRONT blind is mode-sensitive (mirrors the FRONT blind
-                    # branch of ``compile_path`` -- T7/T9 must stay
-                    # byte-identical, ``test_property_random_walks`` / TC12).
-                    # A STOP_AT_LINE edge drives blind toward the expected
-                    # crossing and stops on the physical perpendicular line,
-                    # so the chassis ends on the node and localization
-                    # re-anchors via ``on_intersection`` (the "better
-                    # localization") instead of dead-reckoning. The chassis
-                    # still advances ``distance_cm`` forward to the node.
-                    out.append((ACT_STOP_AT_LINE, distance_cm))
-                    self._chassis.forward(distance_cm)
-                    self._localization.on_intersection(nxt)
-                else:
-                    out.append((ACT_FORWARD, distance_cm))
-                    self._chassis.forward(distance_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
@@ -916,25 +1089,41 @@ class PathTrackerSim:
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (ACT_FOLLOW_DIST, distance_cm), self._snapshot_chassis()
             elif edge_type == EDGE_BLIND:
-                if direction == Direction.REAR:
+                # Mode-sensitive blind dispatch -- mirrors the ``go_to``
+                # EDGE_BLIND branch exactly (see there for rationale); the
+                # emission stream stays byte-identical (TC12) and the two
+                # ``seek`` branches re-anchor via ``on_intersection`` (AC1/AC3)
+                # while the dead-reckon branches advance via
+                # ``on_dead_reckoned_advance`` (AC2).
+                seek, _motion_mode = resolve_stop_at_line(
+                    StopAtLine.AUTO,
+                    resolve_blind_mode(edge),
+                    PIPELINE_CONFIG.blind,
+                    direction,
+                    LINE_BOARD_COUNT,
+                )
+                if seek and direction == Direction.FRONT:
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_intersection(nxt)
+                    yield (ACT_STOP_AT_LINE, distance_cm), self._snapshot_chassis()
+                elif seek and direction == Direction.REAR:
+                    self._chassis.reverse(distance_cm)
+                    self._localization.on_intersection(nxt)
+                    yield (
+                        (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
+                        self._snapshot_chassis(),
+                    )
+                elif direction == Direction.FRONT:
+                    self._chassis.forward(distance_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
+                else:
                     self._chassis.reverse(distance_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (
                         (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
                         self._snapshot_chassis(),
                     )
-                elif resolve_blind_mode(edge) == BlindMode.STOP_AT_LINE:
-                    # FRONT STOP_AT_LINE blind: stop on the physical crossing
-                    # and re-anchor via ``on_intersection``. Mirrors the
-                    # ``go_to`` FRONT branch above (and ``compile_path``);
-                    # the emission stream stays byte-identical (TC12).
-                    self._chassis.forward(distance_cm)
-                    self._localization.on_intersection(nxt)
-                    yield (ACT_STOP_AT_LINE, distance_cm), self._snapshot_chassis()
-                else:
-                    self._chassis.forward(distance_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
             else:    # pragma: no cover
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"

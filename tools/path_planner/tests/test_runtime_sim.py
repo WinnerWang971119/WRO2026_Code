@@ -65,6 +65,7 @@ from tools.path_planner.sim.runtime import (
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
     ACT_STOP_AT_LINE,
+    ACT_STOP_AT_LINE_REVERSE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
     resolve_blind_mode,
@@ -1710,27 +1711,57 @@ def test_sim_stop_at_line_only_overrides_blind_edges():
     assert sim.localization.current_node() == "B"
 
 
-def test_sim_stop_at_line_blind_edge_rear_emits_blind_reverse():
-    """TC6: a REAR STOP_AT_LINE blind edge emits ACT_BLIND_REVERSE with the mode.
+def test_sim_stop_at_line_blind_edge_rear_2board_seeks_via_stop_at_line_reverse():
+    """A 2-board REAR STOP_AT_LINE blind edge seeks via ACT_STOP_AT_LINE_REVERSE.
 
-    A forced-REAR traversal of the STOP_AT_LINE BLIND edge turns 180 deg
-    (so the rear sensor faces along the edge) and emits
-    ``(ACT_BLIND_REVERSE, 'B', 40.0, BlindMode.STOP_AT_LINE)``. The chassis
-    ends on the node.
-
-    Note on localization: the sim's REAR blind branch advances via
-    ``on_dead_reckoned_advance`` for every blind mode (the reverse re-anchor
-    is a runtime concern carried in the emitted mode tuple, not modelled by
-    the sim today). This asserts the implemented sim behaviour; the
-    re-anchor-on-success path is exercised host-side by the C++ mirror slice
-    (T16) and on the Phase-3 bench, not by the Python sim.
+    On the default 2-board chassis (module ``LINE_BOARD_COUNT == 2``), a
+    forced-REAR traversal of the STOP_AT_LINE BLIND edge has a rear board
+    facing the travel direction, so ``resolve_stop_at_line`` returns
+    ``seek=True``. The hop turns 180 deg (so the rear sensor leads), emits
+    ``(ACT_STOP_AT_LINE_REVERSE, 'B', 40.0, BlindMode.STOP_AT_LINE)``, and
+    re-anchors via ``on_intersection`` (the rear board detects the physical
+    crossing) -- mirroring the firmware reverse seek + ``onIntersection``
+    (AC1). The chassis ends on the node.
     """
     sim, chassis = _stop_at_line_blind_sim(40.0, force_reverse=True)
 
     prims = sim.go_to("B")
     act_tags = [p[0] for p in prims]
 
+    assert ACT_STOP_AT_LINE_REVERSE in act_tags
+    assert ACT_BLIND_REVERSE not in act_tags
+    stop_rev = [p for p in prims if p[0] == ACT_STOP_AT_LINE_REVERSE]
+    assert len(stop_rev) == 1
+    _, target_node, emitted_dist, emitted_mode = stop_rev[0]
+    assert target_node == "B"
+    assert emitted_dist == pytest.approx(40.0, abs=1e-9)
+    assert emitted_mode == BlindMode.STOP_AT_LINE
+    # 180 deg turn precedes the reverse hop so the rear sensor leads.
+    assert (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)) in prims
+    # Chassis ends on the node (REAR body heading 180 deg; reverse(40) -> +x).
+    assert chassis.x_cm == pytest.approx(40.0, abs=_POSITION_TOL_CM)
+    # Rear-board seek re-anchors on the physical crossing, not dead-reckoning.
+    assert sim.localization.advance_calls == [("on_intersection", "B")]
+    assert sim.localization.current_node() == "B"
+
+
+def test_sim_stop_at_line_blind_edge_rear_1board_degrades_to_blind_reverse(monkeypatch):
+    """A 1-board forced-REAR STOP_AT_LINE blind edge degrades to ACT_BLIND_REVERSE.
+
+    With ``LINE_BOARD_COUNT == 1`` there is no rear board to seek with, so
+    ``resolve_stop_at_line`` returns ``seek=False`` for the forced-REAR hop.
+    It degrades to a reverse dead-reckon: turn 180 deg, emit
+    ``(ACT_BLIND_REVERSE, 'B', 40.0, BlindMode.STOP_AT_LINE)``, and advance via
+    ``on_dead_reckoned_advance`` -- no seek, no fault (AC2).
+    """
+    monkeypatch.setattr(_runtime, "LINE_BOARD_COUNT", 1)
+    sim, chassis = _stop_at_line_blind_sim(40.0, force_reverse=True)
+
+    prims = sim.go_to("B")
+    act_tags = [p[0] for p in prims]
+
     assert ACT_BLIND_REVERSE in act_tags
+    assert ACT_STOP_AT_LINE_REVERSE not in act_tags
     blind_rev = [p for p in prims if p[0] == ACT_BLIND_REVERSE]
     assert len(blind_rev) == 1
     _, target_node, emitted_dist, emitted_mode = blind_rev[0]
@@ -1741,4 +1772,6 @@ def test_sim_stop_at_line_blind_edge_rear_emits_blind_reverse():
     assert (ACT_TURN_REL, pytest.approx(180.0, abs=1e-9)) in prims
     # Chassis ends on the node (REAR body heading 180 deg; reverse(40) -> +x).
     assert chassis.x_cm == pytest.approx(40.0, abs=_POSITION_TOL_CM)
+    # 1-board degrade dead-reckons; no rear-board seek re-anchor.
+    assert sim.localization.advance_calls == [("on_dead_reckoned_advance", "B")]
     assert sim.localization.current_node() == "B"
