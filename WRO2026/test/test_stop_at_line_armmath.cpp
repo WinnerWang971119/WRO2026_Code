@@ -189,6 +189,118 @@ static void test_TC11_debounce_requirement_of_one_confirms_immediately()
 }
 
 // ===========================================================================
+// TC16 — stopAtLineSeekMaxedOut(): boundary behaviour of the max-distance cap.
+//
+// Source of truth: `WROMath.h::stopAtLineSeekMaxedOut`, called each tick by
+// `Drive::_updateStopAtLine()` in both the SEEK and ARMED phases to fault the
+// seek with `Fault::LINE_NOT_FOUND` once `traveled >= max`. The boundary is
+// inclusive (`>=`), so a traveled value exactly equal to `maxCm` counts as
+// maxed-out (AC6).
+// ===========================================================================
+
+static void test_TC16_seek_maxed_out_boundary()
+{
+    TEST_SCOPE("TC16: stopAtLineSeekMaxedOut boundary — below / at / above max");
+
+    // Below the cap: seek is still in progress — must NOT fault.
+    ASSERT_FALSE(stopAtLineSeekMaxedOut(19.9f, 20.0f));
+
+    // Exactly at the cap: the `>=` boundary is inclusive — counts as maxed-out.
+    ASSERT_TRUE(stopAtLineSeekMaxedOut(20.0f, 20.0f));
+
+    // Above the cap: clearly maxed-out.
+    ASSERT_TRUE(stopAtLineSeekMaxedOut(25.0f, 20.0f));
+}
+
+// ===========================================================================
+// TC17 — watchdog pair: stopAtLineProgressed() + stopAtLineStalled().
+//
+// Source of truth: `WROMath.h::stopAtLineProgressed` and `stopAtLineStalled`,
+// called together each tick by `Drive::_updateStopAtLine()`. When `Progressed`
+// returns true, Drive resets both `_stopLastProgressCm` and `_stopLastProgressMs`
+// so the stall clock does not accumulate. `Stalled` faults the seek once the
+// elapsed time since the last progress reset exceeds `stallTimeoutMs`.
+//
+// Three sub-cases (a) slow-but-moving never stalls, (b) never-advancing trips,
+// and (c) rollover safety for the unsigned timestamp subtraction.
+// ===========================================================================
+
+static void test_TC17_slow_but_moving_never_stalls()
+{
+    TEST_SCOPE("TC17a: SLOW-BUT-MOVING — progress resets the watchdog, stall never fires");
+
+    // Seek parameters matching the shipped Config defaults.
+    constexpr float    eps     = Config::STOP_AT_LINE_PROGRESS_EPS_CM;
+    constexpr uint32_t timeout = Config::STOP_AT_LINE_STALL_TIMEOUT_MS;
+
+    // Simulate 100 cm seek advancing 0.5 cm/tick with now += 20 ms/tick.
+    // 0.5 cm > eps (0.2 cm), so every tick records progress and resets lastProgressMs.
+    float    traveled       = 0.0f;
+    float    lastProgressCm = 0.0f;
+    uint32_t lastProgressMs = 0u;
+    uint32_t now            = 0u;
+
+    while (traveled < 100.0f)
+    {
+        traveled += 0.5f;
+        now += 20u;
+
+        // Update the watchdog baseline whenever progress is detected — mirrors Drive's logic.
+        if (stopAtLineProgressed(traveled, lastProgressCm, eps))
+        {
+            lastProgressCm = traveled;
+            lastProgressMs = now;
+        }
+
+        // With fresh progress each tick the elapsed time stays near 20 ms — far below timeout.
+        ASSERT_FALSE(stopAtLineStalled(now, lastProgressMs, timeout));
+    }
+}
+
+static void test_TC17_never_advancing_trips_stall()
+{
+    TEST_SCOPE("TC17b: NEVER-ADVANCING — stall fires after timeout elapses");
+
+    constexpr uint32_t timeout = Config::STOP_AT_LINE_STALL_TIMEOUT_MS;
+
+    // Travel is frozen at 5.0 cm — no progress is ever recorded.
+    constexpr float    traveled       = 5.0f;
+    constexpr float    lastProgressCm = 5.0f;    // baseline matches current (no advance)
+    constexpr uint32_t lastProgressMs = 0u;
+
+    // Step now forward in 50 ms increments; stall must not fire before the timeout.
+    uint32_t now = 0u;
+    while (now < timeout)
+    {
+        ASSERT_FALSE(stopAtLineStalled(now, lastProgressMs, timeout));
+        now += 50u;
+    }
+
+    // now >= timeout: stall must fire.
+    ASSERT_TRUE(stopAtLineStalled(now, lastProgressMs, timeout));
+
+    // Travel is still not progressing — confirm the progress predicate stays false.
+    ASSERT_FALSE(stopAtLineProgressed(traveled, lastProgressCm, Config::STOP_AT_LINE_PROGRESS_EPS_CM));
+}
+
+static void test_TC17_rollover_safe_stall()
+{
+    TEST_SCOPE("TC17c: rollover — unsigned subtraction wraps correctly around millis() overflow");
+
+    // Rollover: lastProgressMs near UINT32_MAX, now has wrapped past 0.
+    //
+    // Case 1: nowMs=50, lastProgressMs=0xFFFFFFF0, stallTimeoutMs=100.
+    //   elapsed = (uint32_t)(50 - 0xFFFFFFF0) = (uint32_t)(50 + 16) = 66.
+    //   66 < 100 → NOT stalled yet.
+    ASSERT_FALSE(stopAtLineStalled(50u, 0xFFFFFFF0u, 100u));
+
+    // Case 2: nowMs=200, lastProgressMs=0xFFFFFFF0, stallTimeoutMs=100.
+    //   elapsed = (uint32_t)(200 - 0xFFFFFFF0) = (uint32_t)(200 + 16) = 216.
+    //   216 >= 100 → stalled.
+    ASSERT_TRUE(stopAtLineStalled(200u, 0xFFFFFFF0u, 100u));
+}
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
@@ -207,6 +319,14 @@ int main()
     test_TC11_debounce_resets_on_miss();
     test_TC11_debounce_saturates_at_required();
     test_TC11_debounce_requirement_of_one_confirms_immediately();
+
+    // TC16 — max-distance cap boundary.
+    test_TC16_seek_maxed_out_boundary();
+
+    // TC17 — stall watchdog: progress detection + timeout + rollover.
+    test_TC17_slow_but_moving_never_stalls();
+    test_TC17_never_advancing_trips_stall();
+    test_TC17_rollover_safe_stall();
 
     TEST_REPORT();
 }
