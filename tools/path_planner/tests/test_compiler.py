@@ -559,6 +559,90 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     return out
 
 
+def test_stop_at_line_compiler_sim_parity_rear() -> None:
+    """TC12 (REAR): compiler and sim emit byte-identical streams over a REAR STOP_AT_LINE hop.
+
+    Closes the coverage gap left by the FORWARD parity test (TC12) and the
+    REAR emission unit tests (T7).  A two-hop path
+    ``A --LINE(heading 0)--> B --BLIND(STOP_AT_LINE, FORCE_REVERSE)--> C``
+    forces the BLIND hop REAR via ``direction_override=FORCE_REVERSE`` (the
+    same technique T7's emission tests use), so the result is deterministic
+    regardless of auto-direction geometry.
+
+    On the default 2-board chassis (``LINE_BOARD_COUNT == 2``) the resolver
+    returns ``seek=True`` for the REAR hop, so the compiler emits
+    ``(ACT_STOP_AT_LINE_REVERSE, "C", 50.0, BlindMode.STOP_AT_LINE)`` and the
+    sim re-anchors via ``on_intersection``.  The LINE hop produces a 180-degree
+    body-heading change at B (forward heading 0 → REAR body heading 180), which
+    exceeds ``NAV_TURN_TOLERANCE_DEG``, so the sim emits ``ACT_LINE_OVERSHOOT``
+    (not ``ACT_LINE_PASS``) — satisfying the ``_interleave_overshoot`` contract.
+
+    Assertions (AC1):
+    - ``ACT_STOP_AT_LINE_REVERSE`` with the correct 4-tuple appears in both
+      the compiler stream and the sim stream.
+    - The two streams are byte-identical once the sim-only ``ACT_LINE_OVERSHOOT``
+      steps are re-interleaved into the compiler output.
+    - The sim's final localization node is the destination ``"C"``.
+    """
+    from tools.path_planner.sim import PathTrackerSim, VirtualChassis, walk_next_hop
+
+    # Three nodes in a line; A→B is the LINE hop, B→C is the BLIND REAR hop.
+    # All on heading 0 so the start heading 0 requires no initial turn, and the
+    # REAR body heading for B→C is 180 — a clean 180-degree turn that is
+    # guaranteed to break pass-through at B.
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (100.0, 0.0)}
+    fake_field = SimpleNamespace(
+        NODES=nodes, START_NODE="A", START_HEADING_DEG=0.0
+    )
+    g = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        g.add_node(name, x_cm=float(x), y_cm=float(y))
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=50.0, heading_deg=180.0)
+    # BLIND edge with STOP_AT_LINE mode and FORCE_REVERSE so the resolver sees
+    # direction=REAR; on a 2-board chassis this returns seek=True.
+    g.add_edge(
+        "B", "C",
+        type=EDGE_BLIND,
+        distance_cm=50.0,
+        heading_deg=0.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+        direction_override=int(DirectionMode.FORCE_REVERSE),
+    )
+    g.add_edge(
+        "C", "B",
+        type=EDGE_BLIND,
+        distance_cm=50.0,
+        heading_deg=180.0,
+        primitive_mode=BlindMode.STOP_AT_LINE,
+    )
+    next_hop = {
+        "A": {"A": "A", "B": "B", "C": "B"},
+        "B": {"A": "A", "B": "B", "C": "C"},
+        "C": {"A": "B", "B": "B", "C": "C"},
+    }
+
+    walked = walk_next_hop(next_hop, "A", "C")
+    compiler_prims = compile_path(walked, fake_field.START_HEADING_DEG, g, fake_field)
+
+    chassis = VirtualChassis.from_field_data(fake_field)
+    sim = PathTrackerSim(fake_field, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    sim_prims = sim.go_to("C")
+
+    # The STOP_AT_LINE_REVERSE action must appear in both streams with the
+    # correct 4-tuple shape (action, target_node, distance_cm, blind_mode).
+    assert (
+        ACT_STOP_AT_LINE_REVERSE, "C", pytest.approx(50.0, abs=1e-9), BlindMode.STOP_AT_LINE
+    ) in compiler_prims
+    assert (
+        ACT_STOP_AT_LINE_REVERSE, "C", pytest.approx(50.0, abs=1e-9), BlindMode.STOP_AT_LINE
+    ) in sim_prims
+    # Byte-identical once the sim-only overshoot steps are re-interleaved.
+    assert sim_prims == _interleave_overshoot(compiler_prims)
+    assert sim.localization.current_node() == "C"
+
+
 def test_stop_at_line_compiler_sim_parity() -> None:
     """TC12: compiler and sim emit byte-identical streams over a STOP_AT_LINE hop.
 
