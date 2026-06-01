@@ -542,6 +542,23 @@ namespace Config
      */
     constexpr uint8_t STOP_AT_LINE_DETECT_TICKS = 2;
 
+    /**
+     * @brief No-progress watchdog timeout (ms) for the unbounded stopAtLine seek.
+     *
+     * The cooperative tick runs every ~10-30 ms (LineArray I2C refresh + the 2 ms drain delay),
+     * so a moving seek advances every tick; 1500 ms (~50-150 idle ticks) trips only a truly
+     * stalled / zero-power seek, never a slow-but-moving one. On a no-progress timeout the seek
+     * fail-fasts Fault::LINE_NOT_FOUND instead of hanging the async nav FSM (which has no drain
+     * timeout). Bench-tunable.
+     */
+    constexpr uint32_t STOP_AT_LINE_STALL_TIMEOUT_MS = 1500;
+
+    /**
+     * @brief Minimum traveled advance (cm) per check that counts as forward progress for the
+     *        stall watchdog (guards float noise / encoder jitter from masking a real stall).
+     */
+    constexpr float STOP_AT_LINE_PROGRESS_EPS_CM = 0.2f;
+
     // ---------------------------------------------------------------------------------------
     // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
     // ---------------------------------------------------------------------------------------
