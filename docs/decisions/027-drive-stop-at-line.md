@@ -19,8 +19,10 @@ Detection only **arms** once `traveled ≥ expectedCm − armWithin`
 crossed earlier en route cannot stop the chassis. The arm threshold clamps to
 `0` when `armWithin ≥ expectedCm` (small-hop case — armed from the first tick).
 If no `T_OR_CROSS` is seen by `expectedCm + Config::STOP_AT_LINE_MAX_MARGIN_CM`,
-Drive fail-fast faults `LINE_NOT_FOUND` (stop + clear queue) — there is no silent
-dead-reckon fallback.
+Drive fail-fast faults `LINE_NOT_FOUND` (stop + clear queue). A no-progress stall
+watchdog (`Config::STOP_AT_LINE_STALL_TIMEOUT_MS`) also faults `LINE_NOT_FOUND`
+if the encoder reports no advance for that interval, closing the async-FSM
+infinite-hang hole. There is no silent dead-reckon fallback.
 
 When a `PathTracker` blind hop resolves to stop-at-line, success advances
 `Localization` via `onIntersection()` (a true node re-anchor), where a plain
@@ -60,19 +62,70 @@ this feature exists to correct, so the window is generous, not tight.
   `.setMaxDistance`, `.setOvershoot`, `.setReverse`, `.setBrake`, `.async()`.
   `Drive.isLineFound()` latches the last result; no-line latches
   `Fault::LINE_NOT_FOUND`.
-- **Detection** reads `LineArray.getJunctionType() == T_OR_CROSS` directly, with a
+- **Detection** reads `LineArray.getJunctionType() == T_OR_CROSS` (named constant
+  `WROLineArrayClass::JUNCTION_T_OR_CROSS`) directly, with a
   `Config::STOP_AT_LINE_DETECT_TICKS` rising-edge debounce. Drive does **NOT**
   consume `Intersection.isAtIntersection()` — that bit is read-and-clear and owned
   by PathTracker's nav consumer; reading it would steal the nav arming edge.
+  PathTracker drains `Intersection.isAtIntersection()` at stop-at-line dispatch
+  time so the seek's physical crossing cannot leak a stale nav edge into the next
+  LINE hop.
 - **Map trigger:** author a BLIND edge with `blind_mode: STOP_AT_LINE` in
   `field_data`; the pipeline emits `BlindMode::STOP_AT_LINE` (value `4`).
   **Call trigger:** tri-state `PathTracker.goTo(name).setStopAtLine(StopAtLine::ON|OFF|AUTO)`
   (and `Mission.setStopAtLine(...)`); the call-site ON/OFF wins over the edge,
   `AUTO` defers to the edge (mirrors `arrival_direction` precedence, ADR-024).
-- **Reverse** (`.setReverse(true)`) reads the rear board, gated on
-  `Config::LINE_BOARD_COUNT == 2`; the bare reverse verb is rejected on a 1-board
-  chassis rather than reading the wrong-facing board. Coded but `@note untested on
-  hardware` until the rear board is wired (ADR-024).
+- **Unified resolver:** the ON/OFF/AUTO precedence rule and board-availability
+  check live in `WRO2026/StopAtLinePolicy.h::resolveStopAtLine` (header-only,
+  mirroring `DirectionPolicy.h`). The normative source is the truth-table fixture
+  `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv`; the Python
+  twin is `sim/runtime.py::resolve_stop_at_line`. TC13 enforces cross-language
+  parity (same gate as `resolveDirection`/TC18). The resolver replaced the inlined
+  PathTracker switch and the host-test `replica_resolveStopAtLine`.
+- **Seek drive mode:** the seek defaults to `DriveMode::SYNC`. A call-site
+  `setStopAtLine(ON)` forced onto a typed blind edge (`GYRO_TSHAPE`, `RAW_FLAT`)
+  drives the seek in that edge's mode, with the resolved body heading passed to
+  `setHeading(...)` for `GYRO`. Edges typed `STOP_AT_LINE`/`SYNC_TSHAPE`/`DEFAULT`
+  resolve to `SYNC`.
+- **Reverse** (`.setReverse(true)`) is a first-class, supported path on a 2-board
+  chassis: the rear board detects the crossing; the compiler and Python sim emit
+  `ACT_STOP_AT_LINE_REVERSE`; `Localization.onIntersection()` re-anchors on
+  success. Logic is CI-tested (host C++ + Python parity via TC13); physical
+  rear-board bench (B3.7-reverse) is deferred until the rear board is wired. On a
+  1-board chassis a forced-REAR stop-at-line hop degrades to a reverse
+  dead-reckoned blind move (no fault, no 180°-turn): the resolver returns
+  `seek=false` and PathTracker emits the dead-reckon path instead. Drive's bare
+  reverse-reject remains as defense-in-depth (now unreachable from PathTracker,
+  which degrades first).
+
+## Seek state machine
+
+The `_updateStopAtLine` FSM runs four phases. All transitions are polled each
+cooperative tick; no blocking.
+
+**SEEK** — drive blind toward the endpoint. The line detector is **disarmed**; any
+line crossed early is ignored. Arms once `traveled >= expectedCm - armWithin`
+(clamps to 0 for small hops, so armed from tick 1). Faults `LINE_NOT_FOUND` if
+`stopAtLineSeekMaxedOut(traveled, maxCm)` or `stopAtLineStalled(...)` trips.
+
+**ARMED** — continue cruising while watching for a debounced `T_OR_CROSS`
+(`Config::STOP_AT_LINE_DETECT_TICKS` consecutive reads). Also checks
+`stopAtLineSeekMaxedOut` and the stall watchdog each tick. Transitions to
+OVERSHOOT on the debounced trigger.
+
+**OVERSHOOT** — rolls the chassis by the known axle-to-sensor offset so the wheel
+axle lands on the line, ramping to the deadband floor. No detector activity during
+this phase. Transitions to DONE when the overshoot distance is covered.
+
+**DONE** — issues a final active-brake, restores the front board as the active
+line-sensing board, and calls `_endStopAtLine(true)`. PathTracker receives the
+idle signal and calls `Localization.onIntersection()`.
+
+**Fault exits** (from SEEK or ARMED): `LINE_NOT_FOUND` is latched if
+`stopAtLineSeekMaxedOut(traveled, maxCm)` (max-distance overshoot) OR
+`stopAtLineStalled(nowMs, lastProgressMs, Config::STOP_AT_LINE_STALL_TIMEOUT_MS)`
+(no encoder advance for the stall window). Both predicates live in `WROMath.h`
+as pure inline functions — host-testable without hardware.
 
 ## Trigger to revisit
 
@@ -84,6 +137,7 @@ this feature exists to correct, so the window is generous, not tight.
 - `STOP_AT_LINE` is wanted on `LINE` or `PROJECTION` edges — out of scope here
   (a segment ending at a crossing is already a `LINE` edge); revisit if the edge
   taxonomy changes.
+- Physical B3.7-reverse bench pass once the rear board is wired.
 
 ## See also
 
@@ -93,4 +147,6 @@ this feature exists to correct, so the window is generous, not tight.
 - [ADR-012 — Fluent builder for verbs with 3+ knobs](./012-fluent-builder-3plus-knobs.md)
 - [ADR-016 — Drive builders block by default; `.async()` opts out](./016-sync-default-builders.md)
 - [ADR-017 — `DriveMode::SYNC` + `tShape` are the project-wide default](./017-sync-plus-tshape-default-profile.md)
+- `WRO2026/StopAtLinePolicy.h` — the single C++ source of the resolver.
 - `docs/plans/2026-05-30-stop-at-line.md` — the originating spec.
+- `docs/plans/2026-06-02-stop-at-line-option-b-fixes.md` — Option B + review-findings fix plan.

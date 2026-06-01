@@ -41,7 +41,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-018 — LineFollower distance-gated stops use symmetric trapezoidal + active brake](./docs/decisions/018-linefollower-distance-gated-stops.md) (Refined by ADR-023)
 - [ADR-022 — Dual motor profile via per-motor structs + ActiveMotor alias](./docs/decisions/022-dual-motor-profile.md)
 - [ADR-023 — Pass-through collinear intersections + runtime overshoot-mode probe](./docs/decisions/023-pass-through-collinear-intersections.md)
-- [ADR-027 — `Drive.stopAtLine()` reads the line-sensor leaf; re-anchors localization; arm-window rule](./docs/decisions/027-drive-stop-at-line.md)
+- [ADR-027 — `Drive.stopAtLine()` reads the line-sensor leaf; re-anchors localization; arm-window rule; reverse supported (2-board) via `StopAtLinePolicy` unified resolver](./docs/decisions/027-drive-stop-at-line.md)
 
 ### Perception
 

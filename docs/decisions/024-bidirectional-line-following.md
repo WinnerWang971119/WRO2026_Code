@@ -61,6 +61,12 @@ intuition.
   matching constant definitions. Refactored out of `PathTracker.cpp`'s
   anonymous namespace in PR #34 review to eliminate test-vs-production
   byte-copy drift.
+- **Stop-at-line composition:** `WRO2026/StopAtLinePolicy.h::resolveStopAtLine`
+  follows the same header-only shared-source pattern as `resolveDirection`. REAR
+  stop-at-line composes with the direction resolution above: on a 2-board chassis
+  a REAR-resolved hop seeks via the rear board and re-anchors on success; on a
+  1-board chassis the resolver degrades to a reverse dead-reckoned blind move
+  (no fault). See ADR-027 for the full resolver contract.
 
 ## Trigger to revisit
 
@@ -75,5 +81,6 @@ intuition.
 
 - [ADR-019 — Custom 8-channel `WROLineArray` (front + optional rear board)](./019-8channel-custom-line-sensor.md)
 - [ADR-023 — Pass-through collinear intersections (composes via body-heading delta, not raw forward edge headings)](./023-pass-through-collinear-intersections.md)
+- [ADR-027 — `Drive.stopAtLine()` reverse seek; `StopAtLinePolicy.h` unified resolver](./027-drive-stop-at-line.md)
 - [ADR-012 — Fluent builder for verbs with 3+ knobs](./012-fluent-builder-3plus-knobs.md)
 - `docs/plans/2026-05-25-bidirectional-line-following.md` — the originating spec.

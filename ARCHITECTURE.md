@@ -53,7 +53,7 @@ WRO2026.ino
                     │                  │  │              │                  │
                     │      (read-only) │  └──────► WROLineArray ◄───────────┘
                     │   Drive.stopAtLine          ▲
-                    │   reads getJunctionType ────┘   (ADR-027)
+                    │   reads getJunctionType ────┘   (ADR-027; reverse on 2-board via StopAtLinePolicy)
                     │                    │
                     │                    ▼
                     └──────────────► Manipulator
@@ -83,7 +83,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | Module | Owns | Key surface |
 |---|---|---|
 | `Config` | constants, pin maps, PID gains, calibration tables | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
-| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
+| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; shared resolver via `StopAtLinePolicy.h` | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |

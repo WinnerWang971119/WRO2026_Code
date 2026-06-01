@@ -140,11 +140,17 @@ existing modules (`Drive` + `PathTracker`), so no new module is added and the
 line detector near the expected endpoint, stops on the crossing, and re-anchors
 `Localization` via `onIntersection()` — the cheapest mitigation for blind-edge
 drift (Risk #9) short of pulling forward the Phase 2.5 calibration nodes above.
-The arm window and overshoot are bench-tuned on the real chassis (the encoder
-estimate must land within the arm window of the true line, so the window is
-sized generous against worst-case under-travel — see
-[ADR-027](./docs/decisions/027-drive-stop-at-line.md)). The software state
-machine is verified on hardware here, not in CI.
+Reverse stop-at-line is now a supported path on a 2-board chassis (rear board
+seeks, re-anchors on success); logic is CI-tested (host C++ + Python parity via
+`StopAtLinePolicy`). The arm window, overshoot, and physical behavior are
+bench-tuned on the real chassis (see
+[ADR-027](./docs/decisions/027-drive-stop-at-line.md)). Reverse rear-board
+bench (B3.7-reverse) deferred until the rear board is wired.
+
+*Follow-up (out of scope here):* `_updateTurnProfile` has no async stall
+watchdog — the same class of gap that was fixed for the stop-at-line seek. A
+jammed `.async()` turn can still hang the FSM; tracked as a future hardening
+item.
 
 ## 5. Phase 4 — Perception
 
@@ -389,7 +395,7 @@ hardware. IDs are referenced from each phase's "Exit criteria" gates.
 | 3 | B3.4 | T- and +-intersections, 20 trials each | ≥19/20 correct detections per type |
 | 3 | B3.5 | `PathTracker.goTo(name)`, 10 random A→B traversals on real-field printout | ≤1 missed intersection across all 10 runs |
 | 3 | B3.6 | Inject lost-line + missed-intersection in lab | Recoveries trigger and bound within timeout |
-| 3 | B3.7 | `Drive.stopAtLine(cm)` toward a taped perpendicular line, with one intervening line crossed before the arm window, 10 trials | Stops within ±2 cm of the taped line; zero false-triggers on the intervening line; `LINE_NOT_FOUND` fault on a removed line (ADR-027) |
+| 3 | B3.7 | `Drive.stopAtLine(cm)` toward a taped perpendicular line, with one intervening line crossed before the arm window, 10 trials | Stops within ±2 cm of the taped line; zero false-triggers on the intervening line; `LINE_NOT_FOUND` fault on a removed line (ADR-027). Reverse stop-at-line logic is CI-tested (host C++ + Python sim parity); physical rear-board bench (B3.7-reverse) is deferred until the rear board is wired. |
 | 4 | B4.1 | Each color sample (Y/B/G/W) shown to the camera's `readSingleColor()` 20× under workshop lighting | ≥18/20 correct per color |
 | 4 | B4.2 | Mosaic pattern card under workshop lighting, robot at fixed stop | All 9 cells correct on ≥9/10 captures |
 | 5 | B5.1 | Manipulator `setLift / setGripper / setArm` range sweep | Reaches commanded position within tolerance + timeout |
