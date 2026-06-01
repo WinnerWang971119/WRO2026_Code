@@ -17,7 +17,9 @@ the LINE_OVERSHOOT + PROJECTION_FOLLOW position contracts.
 from __future__ import annotations
 
 import copy
+import csv
 import math
+import pathlib
 import random
 import warnings
 from types import SimpleNamespace
@@ -68,11 +70,13 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
+    StopAtLine,
     resolve_blind_mode,
     resolve_direction,
     resolve_line_mode,
     resolve_pre_turn_mode,
     resolve_projection_mode,
+    resolve_stop_at_line,
 )
 from tools.path_planner.tests.fixtures import bidirectional_field_data
 
@@ -1775,3 +1779,97 @@ def test_sim_stop_at_line_blind_edge_rear_1board_degrades_to_blind_reverse(monke
     # 1-board degrade dead-reckons; no rear-board seek re-anchor.
     assert sim.localization.advance_calls == [("on_dead_reckoned_advance", "B")]
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# TC13 -- resolver-vs-fixture parity (Python side)
+#
+# Verifies AC4 (#6): the Python ``resolve_stop_at_line`` in runtime.py is a
+# faithful transcription of the canonical truth table frozen at
+# ``tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv`` (T0).
+# Every row in the fixture is driven through the resolver and the result is
+# compared to the expected columns. A row-count assertion guards against a
+# truncated or empty CSV vacuously passing.
+#
+# Column names are used for lookup (not positional index) so a future column
+# reorder cannot silently desync the test from the fixture.
+# ===========================================================================
+
+_FIXTURE_PATH = (
+    pathlib.Path(__file__).parent / "fixtures" / "stop_at_line_truth_table.csv"
+)
+
+_EXPECTED_ROW_COUNT = 144
+
+_CALL_FLAG_MAP = {
+    "AUTO": StopAtLine.AUTO,
+    "ON":   StopAtLine.ON,
+    "OFF":  StopAtLine.OFF,
+}
+
+_BLIND_MODE_MAP = {
+    "SYNC_TSHAPE":  BlindMode.SYNC_TSHAPE,
+    "GYRO_TSHAPE":  BlindMode.GYRO_TSHAPE,
+    "RAW_FLAT":     BlindMode.RAW_FLAT,
+    "STOP_AT_LINE": BlindMode.STOP_AT_LINE,
+}
+
+_DIRECTION_MAP = {
+    "FRONT": Direction.FRONT,
+    "REAR":  Direction.REAR,
+}
+
+
+def test_tc13_resolve_stop_at_line_matches_fixture():
+    """TC13 (Python): resolve_stop_at_line agrees with the T0 truth table for every row.
+
+    Reads ``stop_at_line_truth_table.csv`` by column name and calls
+    ``resolve_stop_at_line`` for each of the 144 input combinations, asserting
+    the returned ``(seek, motion_mode)`` matches the fixture's
+    ``expect_seek`` / ``expect_motionMode`` columns.
+
+    Satisfies AC4 (#6): the Python transcription cannot silently drift from
+    the canonical single-source truth table.
+    """
+    assert _FIXTURE_PATH.exists(), (
+        f"Truth-table fixture not found at {_FIXTURE_PATH}. "
+        "Run T0 to generate it before running TC13."
+    )
+
+    rows = []
+    with _FIXTURE_PATH.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            rows.append(row)
+
+    assert len(rows) == _EXPECTED_ROW_COUNT, (
+        f"Expected {_EXPECTED_ROW_COUNT} data rows in the truth-table fixture "
+        f"but found {len(rows)}. A truncated or empty CSV would produce "
+        "vacuous passing without this guard."
+    )
+
+    for row in rows:
+        call_flag     = _CALL_FLAG_MAP[row["callFlag"]]
+        edge_mode     = _BLIND_MODE_MAP[row["edgeMode"]]
+        pipeline_blind = _BLIND_MODE_MAP[row["pipelineBlind"]]
+        direction     = _DIRECTION_MAP[row["direction"]]
+        line_board_count = int(row["lineBoardCount"])
+        expect_seek   = row["expect_seek"].strip().lower() == "true"
+        expect_motion = _BLIND_MODE_MAP[row["expect_motionMode"]]
+
+        actual_seek, actual_motion = resolve_stop_at_line(
+            call_flag,
+            edge_mode,
+            pipeline_blind,
+            direction,
+            line_board_count,
+        )
+
+        assert (actual_seek, actual_motion) == (expect_seek, expect_motion), (
+            f"resolve_stop_at_line mismatch for row "
+            f"callFlag={row['callFlag']} edgeMode={row['edgeMode']} "
+            f"pipelineBlind={row['pipelineBlind']} direction={row['direction']} "
+            f"lineBoardCount={row['lineBoardCount']}: "
+            f"got (seek={actual_seek}, motionMode={actual_motion!r}) "
+            f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r})"
+        )
