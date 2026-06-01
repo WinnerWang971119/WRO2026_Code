@@ -292,6 +292,19 @@ public:
     uint8_t getJunctionType();
 
     /**
+     * @brief Raw `getJunctionType()` return value indicating a full-bar T-junction or
+     *        4-way crossing — the highest-priority junction verdict.
+     *
+     * Consumers should compare `LineArray.getJunctionType() == WROLineArrayClass::JUNCTION_T_OR_CROSS`
+     * rather than hardcoding the literal `3`. The value maps to `JunctionType::T_OR_CROSS`
+     * in `Intersection.h`; `UNKNOWN` (4) is never emitted by this backend.
+     *
+     * @note The full return-value contract is `{0=NONE, 1=LEFT, 2=RIGHT, 3=T_OR_CROSS}` —
+     *       see `getJunctionType()` for the complete priority-ordered predicate documentation.
+     */
+    static constexpr uint8_t JUNCTION_T_OR_CROSS = 3;
+
+    /**
      * @brief Flip the active board to follow the chassis's reverse-direction state.
      *
      * @param reverse `true` to select the REAR board (`_boards[1]`); `false` to select
