@@ -34,8 +34,10 @@
  *  - `Intersection.update()` every iteration of `loop()`, AFTER `LineFollower.update()` (so that
  *    — with the tick cache enabled, the shipped default — both modules act on the same I2C
  *    cycle's worth of sensor state; see the shared-single-sample design rule above).
- *  - Consumers (EventTrace in T8, PathTracker in Phase 2) call `isAtIntersection()` and, on
- *    `true`, fetch `getLastType()` for the captured classification.
+ *  - The navigation layer (PathTracker in Phase 2) calls `isAtIntersection()` and, on
+ *    `true`, fetches `getLastType()` for the captured classification. EventTrace no longer
+ *    observes intersections (it dropped that state in the wave-1 trace fixes), so a future
+ *    passive observer would use the non-consuming `getEdgeCount()` — see below.
  */
 
 #ifndef INTERSECTION_H
@@ -147,7 +149,8 @@ public:
      *
      * @return Total number of rising edges since `begin()`. Wraps after `2^32` events,
      *         which is irrelevant in any realistic competition run.
-     * @note Use this in EventTrace and any future passive observer. The single consuming
+     * @note For any future passive observer (telemetry / OLED logging). EventTrace was such
+     *       an observer in T8 but no longer traces intersections. The single consuming
      *       consumer should still use `isAtIntersection()` because that doubles as its
      *       state-machine arming bit.
      * @note See code review F6.
