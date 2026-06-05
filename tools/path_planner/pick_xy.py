@@ -28,6 +28,7 @@ Resolves issue #10 scope 1.
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -106,6 +107,10 @@ def _is_xy_coord(coord) -> bool:
     ``None``, or a length-1/3 sequence. Guarding here lets the picker open for
     repair instead of crashing on ``IndexError``/``TypeError`` before the
     window ever shows.
+
+    ``bool`` is rejected (it is an ``int`` subclass but never a coordinate) and
+    ``NaN``/``inf`` are rejected via :func:`math.isfinite` -- they pass the type
+    check but corrupt matplotlib autoscale/transforms in hard-to-debug ways.
     """
     if isinstance(coord, (str, bytes)):
         return False
@@ -113,7 +118,15 @@ def _is_xy_coord(coord) -> bool:
         x, y = coord  # length check + unpack in one step
     except (TypeError, ValueError):
         return False
-    return isinstance(x, (int, float)) and isinstance(y, (int, float))
+
+    def _is_finite_number(value) -> bool:
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+        )
+
+    return _is_finite_number(x) and _is_finite_number(y)
 
 
 def _draw_nodes_overlay(ax, field_data) -> None:

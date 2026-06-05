@@ -316,9 +316,11 @@ def compute_all_pairs_next_hop(
     if cost_blind_multiplier <= 0:
         raise ValueError(
             "cost_blind_multiplier must be positive, got "
-            f"{cost_blind_multiplier}. A non-positive multiplier makes "
-            "BLIND edges free or negative, breaking Dijkstra's "
-            "non-negative-weight assumption."
+            f"{cost_blind_multiplier}. Zero would make BLIND edges cost "
+            "nothing, so the planner would over-prefer them; a negative "
+            "multiplier would give them negative weight, which Dijkstra "
+            "cannot handle. A positive multiplier keeps BLIND edges more "
+            "expensive than equal-length LINE edges."
         )
 
     weighted = _weighted_copy(graph, cost_blind_multiplier)
