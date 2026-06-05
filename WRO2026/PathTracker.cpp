@@ -715,6 +715,14 @@ void PathTrackerClass::_onPlanNextHop()
     const Direction builderArrival = _activeArrivalDirection;
     const Direction builderRoute   = _activeRouteDirection;
 
+    // `edge.direction_override` is a per-DIRECTED-edge value: this hop reads
+    // `EDGES[cur][nxt]`. A field_data `direction:` override is baked onto the
+    // forward (u->v) edge only, so a hop the planner routes the other way
+    // (v->u) reads DEFAULT here and falls through to the AUTO heuristic below.
+    // That is intentional — front/rear depends on the entry direction, so an
+    // override authored for u->v must NOT bind v->u (mirroring it would reverse
+    // the chassis when forward is correct). Author a swapped EDGES entry to
+    // force the reverse sense. See graph_builder `_emit_directed_pair` warning.
     const Direction resolved = resolveDirection(
         edge.direction_override,
         Routes::PIPELINE_CONFIG.direction,
