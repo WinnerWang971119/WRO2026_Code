@@ -384,6 +384,53 @@ class FieldCanvas:
             return None
         return float(event.xdata), float(event.ydata)
 
+    def _clamped_world_coords(
+        self, event
+    ) -> Optional[tuple[float, float]]:
+        """Return world coords for *event*, clamped to the axes' data limits.
+
+        For an in-axes event this is identical to :meth:`figure_to_world`.
+        For an off-axes event (the cursor is over the side panel or window
+        chrome at release), ``event.xdata`` / ``event.ydata`` are ``None``,
+        so the pixel coordinates (``event.x`` / ``event.y``) are projected
+        back into data space via the axes' inverse data transform and then
+        clamped to the current ``xlim`` / ``ylim``. This lets a drag that is
+        released off the plot still resolve to the nearest valid field
+        position rather than being dropped (#61).
+
+        :param event: A matplotlib :class:`MouseEvent`.
+        :return: ``(world_x_cm, world_y_cm)`` clamped to the axes bounds, or
+            ``None`` when neither data nor pixel coordinates are available.
+        """
+        # Fast path: cursor inside the axes -> exact data coordinates.
+        in_axes = self.figure_to_world(event)
+        if in_axes is not None:
+            return in_axes
+
+        # Off-axes (or no inaxes): recover data coords from pixel position.
+        px = getattr(event, "x", None)
+        py = getattr(event, "y", None)
+        if px is None or py is None:
+            return None
+        try:
+            data_x, data_y = self._ax.transData.inverted().transform(
+                (px, py)
+            )
+        except (ValueError, TypeError):
+            return None
+
+        # Clamp into the visible data window so the editor never receives a
+        # position outside the field rectangle from an off-plot release.
+        x_lo, x_hi = self._ax.get_xlim()
+        y_lo, y_hi = self._ax.get_ylim()
+        # ``get_xlim``/``get_ylim`` are normally ascending here (render sets
+        # them via ``set_xlim(0, width)``) but guard against an inverted axis.
+        x_min, x_max = (x_lo, x_hi) if x_lo <= x_hi else (x_hi, x_lo)
+        y_min, y_max = (y_lo, y_hi) if y_lo <= y_hi else (y_hi, y_lo)
+        clamped_x = min(max(float(data_x), x_min), x_max)
+        clamped_y = min(max(float(data_y), y_min), y_max)
+        return clamped_x, clamped_y
+
     # ------------------------------------------------------------------
     # Internal: matplotlib event handlers
     # ------------------------------------------------------------------
@@ -419,12 +466,22 @@ class FieldCanvas:
             self.on_drag(coords[0], coords[1])
 
     def _on_button_release(self, event) -> None:
-        """Forward an in-axes ``button_release_event`` to :attr:`on_release`.
+        """Forward a ``button_release_event`` to :attr:`on_release`.
 
         Always clears the latched ``_active_button`` once the matching
         release is observed, even if the release happens outside the
         axes — otherwise a drag that ends off-canvas would leave the
         canvas stuck thinking the mouse is still down.
+
+        Unlike :meth:`_on_button_press` / :meth:`_on_motion_notify`, the
+        release fires :attr:`on_release` even when it lands *outside* the
+        axes. An off-axes release passes the cursor position clamped to the
+        axes' data limits (see :meth:`_clamped_world_coords`). Without this,
+        a drag released over the side panel or window chrome would skip the
+        editor's release logic entirely — a MOVE-mode drag would leave the
+        node live-mutated with no undo command, and an OBSTACLE drag would
+        never finish. Releasing off the plot is a common gesture when
+        dragging toward the field edge.
         """
         released_button = self._normalize_button(event.button)
         # Clear the latch regardless of whether the release is in-axes.
@@ -439,8 +496,10 @@ class FieldCanvas:
             # latch in that case too.
             self._active_button = None
 
-        coords = self.figure_to_world(event)
-        if coords is None or released_button is None:
+        if released_button is None:
+            return
+        coords = self._clamped_world_coords(event)
+        if coords is None:
             return
         if self.on_release is not None:
             self.on_release(coords[0], coords[1], released_button)
