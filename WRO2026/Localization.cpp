@@ -21,12 +21,35 @@ bool LocalizationClass::begin()
     return true;
 }
 
+bool LocalizationClass::_readImuYaw(float& yawOut)
+{
+    // `MiniR4Motion::getEuler` reads via `mmL.GetIMUEuler` but DISCARDS the RESULT, so a
+    // comms timeout there surfaces as a silent 0.0 yaw. Call the lower-MCU API directly so
+    // the RESULT is visible. On a non-OK read the library leaves the out-params untouched
+    // (MMLower.cpp GetIMUEuler returns before writing yaw on a wait/read timeout), so we
+    // must NOT copy `yaw` into `yawOut` unless the read returned OK.
+    double          roll = 0.0, pitch = 0.0, yaw = 0.0;
+    MMLower::RESULT result = mmL.GetIMUEuler(roll, pitch, yaw);
+    if (result != MMLower::RESULT::OK)
+    {
+        return false;
+    }
+    yawOut = (float) yaw;
+    return true;
+}
+
 bool LocalizationClass::zeroHeadingFromCurrent()
 {
-    // Read the IMU yaw NOW. MiniR4.Motion.getEuler returns a double in degrees; the
-    // value can lie anywhere in (-360, +360) depending on the boot orientation and any
-    // accumulated rotation since `MiniR4.begin()` ran.
-    const float imuYaw = (float) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    // Read the IMU yaw NOW through the result-surfacing path. The value can lie anywhere in
+    // (-360, +360) depending on the boot orientation and any accumulated rotation since
+    // `MiniR4.begin()` ran.
+    float imuYaw = 0.0f;
+    if (!_readImuYaw(imuYaw))
+    {
+        // Transient lower-MCU timeout: do NOT bind a corrupt frame. Leave `_yawOffsetDeg`
+        // and `_zeroed` untouched and report failure so the .ino BTN_UP retry path engages.
+        return false;
+    }
 
     // World-frame definition: world = normalize(imu - offset). At the zero moment we
     // want world == Routes::START_HEADING_DEG, so offset = imu - START_HEADING_DEG.
@@ -53,8 +76,23 @@ float LocalizationClass::getHeadingDeg() const
         // do, return the start heading rather than a garbage offset-relative value.
         return Routes::START_HEADING_DEG;
     }
-    const float imuYaw = (float) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
-    return _normalize(imuYaw - _yawOffsetDeg);
+    float imuYaw = 0.0f;
+    if (!_readImuYaw(imuYaw))
+    {
+        // Transient lower-MCU timeout: a 0.0-derived heading would be wrong by up to a
+        // full revolution and can flip a turn decision. Serve the last good heading
+        // instead. The cache is not refreshed, so it stays at its last valid value.
+        return _lastGoodHeadingDeg;
+    }
+    const float heading = _normalize(imuYaw - _yawOffsetDeg);
+    _lastGoodHeadingDeg = heading;
+    return heading;
+}
+
+float LocalizationClass::getLastHeadingDeg() const
+{
+    // No I/O: return the value cached by the most recent successful getHeadingDeg() read.
+    return _lastGoodHeadingDeg;
 }
 
 int16_t LocalizationClass::toImuYaw(float worldHeadingDeg) const

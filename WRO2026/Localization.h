@@ -30,8 +30,11 @@
  *  - `begin()` once in `setup()` after every `MiniR4.begin()` and the Phase 1 modules'
  *    `begin()`. The order is `Drive` -> `LineFollower` -> `Intersection` -> `Manipulator`
  *    -> `Localization` -> `PathTracker` -> `EventTrace`.
- *  - No `update()` — Localization is a pure state holder + accessor. Heading is read
- *    live from the IMU on every `getHeadingDeg()` call.
+ *  - No `update()` — Localization is a pure state holder + accessor. `getHeadingDeg()`
+ *    reads the IMU live; on a transient lower-MCU read failure it falls back to the last
+ *    good heading instead of a `0.0`-derived garbage value (see `getHeadingDeg`).
+ *  - `getLastHeadingDeg()` returns that cached value with NO I/O — use it on telemetry /
+ *    non-blocking paths that must not issue a bus transaction.
  */
 
 #ifndef LOCALIZATION_H
@@ -47,9 +50,10 @@
  * @brief Singleton that holds the discrete current node + IMU-frame yaw offset.
  *
  * Heading is treated as a derived quantity — `getHeadingDeg()` reads the IMU live and
- * returns the world-frame value via `normalize(IMU_yaw - _yawOffsetDeg)`. The class never
- * caches a heading sample, so there is no possibility of stale state between PathTracker's
- * dispatch tick and the read tick.
+ * returns the world-frame value via `normalize(IMU_yaw - _yawOffsetDeg)`. Every OK read
+ * also refreshes `_lastGoodHeadingDeg`; on a non-OK lower-MCU read `getHeadingDeg()`
+ * returns that cached value rather than a `0.0`-derived garbage heading, and
+ * `getLastHeadingDeg()` exposes the same cache for callers that must not issue I/O.
  */
 class LocalizationClass
 {
@@ -68,14 +72,15 @@ public:
     /**
      * @brief Capture the IMU yaw NOW and bind the world-frame offset.
      *
-     * Reads `MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw)`, computes
-     * `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG`, and sets `_zeroed = true`.
-     * Must be called once on the start-button press AFTER the operator has physically
-     * placed the chassis on `Routes::START_NODE` facing the start heading.
+     * Reads the IMU yaw through the result-surfacing lower-MCU call (`mmL.GetIMUEuler`). On
+     * an OK read computes `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG` and sets
+     * `_zeroed = true`. Must be called once on the start-button press AFTER the operator has
+     * physically placed the chassis on `Routes::START_NODE` facing the start heading.
      *
-     * @return `true` on success. Returns `false` only if a future defensive check (none
-     *         today) finds `MiniR4.Motion` un-ready; current implementation always
-     *         returns `true`.
+     * @return `true` on a successful read. Returns `false` on a non-OK IMU read (transient
+     *         STM32 comms timeout) WITHOUT touching `_yawOffsetDeg` or `_zeroed`, so the
+     *         `.ino` BTN_UP handler's retry path engages instead of latching a corrupt
+     *         world-frame offset.
      * @note Calling this a second time is allowed — it re-binds the offset to whatever
      *       the chassis is currently pointing at. Useful for re-zeroing during testing
      *       between bench runs.
@@ -100,15 +105,31 @@ public:
     uint8_t getCurrentNode() const;
 
     /**
-     * @brief Read the current world-frame heading in degrees.
+     * @brief Read the current world-frame heading in degrees (live IMU read).
      *
-     * Computes `normalize(MiniR4.Motion.getEuler(Yaw) - _yawOffsetDeg)` to `[0, 360)`.
-     * No state is mutated. Returns `Routes::START_HEADING_DEG` if `!isZeroed()`
+     * Issues a single lower-MCU IMU read (`mmL.GetIMUEuler`). On an OK read computes
+     * `normalize(imu_yaw - _yawOffsetDeg)` to `[0, 360)` and refreshes the last-good cache.
+     * On a NON-OK read (transient STM32 comms timeout) the underlying out-param is left
+     * untouched by the library, so this method returns the LAST GOOD heading instead of a
+     * `0.0`-derived garbage value. Returns `Routes::START_HEADING_DEG` if `!isZeroed()`
      * (defensive — caller should check `isZeroed()` before relying on this).
      *
      * @return Heading in `[0, 360)` degrees, CCW positive, `0 deg = +x` (East).
+     * @note Performs I/O. Telemetry / non-blocking paths must use `getLastHeadingDeg()`.
      */
     float getHeadingDeg() const;
+
+    /**
+     * @brief Read the cached world-frame heading WITHOUT issuing any I/O.
+     *
+     * Returns the value refreshed by the most recent successful `getHeadingDeg()` read, or
+     * `Routes::START_HEADING_DEG` if no successful read has occurred yet. This accessor
+     * never touches the IMU / I2C bus, so it is safe on paths whose contract forbids
+     * blocking on hardware (e.g. the EventTrace heartbeat).
+     *
+     * @return Last good heading in `[0, 360)` degrees, CCW positive, `0 deg = +x` (East).
+     */
+    float getLastHeadingDeg() const;
 
     /**
      * @brief Convert a world-frame heading to the IMU-frame yaw value `Drive.turnToYaw`
@@ -156,9 +177,31 @@ private:
      */
     static float _normalize(float deg);
 
+    /**
+     * @brief Read the raw IMU yaw through the result-surfacing lower-MCU call.
+     *
+     * Wraps `mmL.GetIMUEuler(roll, pitch, yaw)` (which `MiniR4Motion::getEuler` calls but
+     * whose `MMLower::RESULT` it discards) so callers can distinguish a real read from a
+     * silent comms timeout. On a non-OK read `yawOut` is left untouched — the library does
+     * not write the out-params on the timeout / read-error paths.
+     *
+     * @param yawOut  Set to the raw IMU yaw in degrees ONLY when the read returns OK.
+     * @return `true` if the lower-MCU read returned `MMLower::RESULT::OK`; `false` otherwise.
+     */
+    static bool _readImuYaw(float& yawOut);
+
     uint8_t _currentNode  = 0;        ///< Single source of truth for graph position.
     float   _yawOffsetDeg = 0.0f;     ///< Captured at zeroHeadingFromCurrent(); world = IMU - offset.
     bool    _zeroed       = false;    ///< Latched true on first zeroHeadingFromCurrent() call.
+
+    /**
+     * @brief World-frame heading from the last successful `getHeadingDeg()` read.
+     *
+     * Seeded to `Routes::START_HEADING_DEG` so a read before the first OK IMU sample still
+     * returns a sane value. Refreshed on every OK read; served verbatim (no I/O) by
+     * `getLastHeadingDeg()` and returned by `getHeadingDeg()` when a read fails.
+     */
+    mutable float _lastGoodHeadingDeg = (float) Routes::START_HEADING_DEG;
 };
 
 /**
