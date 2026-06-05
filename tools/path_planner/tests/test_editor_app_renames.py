@@ -23,23 +23,31 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import matplotlib
 import pytest
 
-from tools.path_planner.editor import ast_rewrite as ast_rewrite_mod
-from tools.path_planner.editor import loader
-from tools.path_planner.editor.app import EditorApp
-from tools.path_planner.editor.commands import RenameNode, SetNodeType
-from tools.path_planner.editor.history import History
-from tools.path_planner.editor.model import FieldModel
-
 # Importing EditorApp pulls in editor.canvas, which calls
-# ``matplotlib.use("TkAgg")`` at import time. These tests never render (the
-# view helpers are stubbed), so restore the headless Agg backend the rest of
-# the suite expects -- otherwise collection order can leave a Tk backend
-# active and break test_visualizer's PNG dumps.
-import matplotlib  # noqa: E402
-
+# ``matplotlib.use("TkAgg")`` at module-import time. On headless CI (no display)
+# that raises and fails collection; locally it would also leave a Tk backend
+# active and break test_visualizer's PNG dumps. These tests build a bare
+# EditorApp and never construct the canvas, so pin the headless-safe Agg backend
+# and no-op that one switch for the duration of the import.
 matplotlib.use("Agg")
+_real_mpl_use = matplotlib.use
+matplotlib.use = lambda *args, **kwargs: None
+try:
+    from tools.path_planner.editor.app import EditorApp  # noqa: E402
+finally:
+    matplotlib.use = _real_mpl_use
+
+from tools.path_planner.editor import ast_rewrite as ast_rewrite_mod  # noqa: E402
+from tools.path_planner.editor import loader  # noqa: E402
+from tools.path_planner.editor.commands import (  # noqa: E402
+    RenameNode,
+    SetNodeType,
+)
+from tools.path_planner.editor.history import History  # noqa: E402
+from tools.path_planner.editor.model import FieldModel  # noqa: E402
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "field_data_small.json"
 
