@@ -107,11 +107,9 @@ namespace FieldMap
      */
     inline Routes::EdgeType getEdgeType(uint8_t from, uint8_t to)
     {
-        if (from >= N_NODES || to >= N_NODES)
-        {
-            return Routes::EdgeType::NONE;
-        }
-        return Routes::EDGES[from][to].type;
+        // Delegate the bounds check to getEdge(): noEdge().type is EdgeType::NONE, so an
+        // out-of-range query still reports NONE without duplicating the guard here.
+        return getEdge(from, to).type;
     }
 
     /**
@@ -135,11 +133,11 @@ namespace FieldMap
      */
     inline Routes::NodeType getNodeType(uint8_t id)
     {
-        if (id >= N_NODES)
-        {
-            return noNode().type;
-        }
-        return Routes::NODES[id].type;
+        // Delegate the bounds check to getNode(). NodeType has no dedicated "none" value,
+        // so an out-of-range id reports noNode().type (NodeType::LINE) — indistinguishable
+        // from a real LINE node. Callers that must tell the two apart should range-check
+        // the id (`id < N_NODES`) before calling, or use getNode() and inspect the name.
+        return getNode(id).type;
     }
 
     /**
