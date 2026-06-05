@@ -32,42 +32,113 @@ namespace FieldMap
     constexpr uint8_t NODE_NONE = Routes::NEXT_HOP_NONE;
 
     /**
+     * @brief Safe sentinel returned when `getEdge()` is asked for an out-of-range index.
+     *
+     * `EdgeType::NONE` (= 0) marks "no edge"; distance/heading/overrides are all zeroed so the
+     * dispatcher treats it as a missing edge rather than a real maneuver. Function-local static
+     * so the const-reference return stays valid for the caller's lifetime (ODR-safe in a header).
+     */
+    inline const Routes::EdgeInfo& noEdge()
+    {
+        static const Routes::EdgeInfo kNoEdge = {
+            Routes::EdgeType::NONE,        // type
+            0.0f,                          // distance_cm
+            0.0f,                          // heading_deg
+            Routes::LineMode::DEFAULT,     // line_mode_override
+            Routes::BlindMode::DEFAULT,    // blind_mode_override
+            Routes::ProjectionMode::DEFAULT, // projection_mode_override
+            Routes::TurnMode::DEFAULT,     // pre_turn_mode_override
+            Routes::DirectionMode::DEFAULT // direction_override
+        };
+        return kNoEdge;
+    }
+
+    /**
+     * @brief Safe sentinel returned when `getNode()` is asked for an out-of-range id.
+     *
+     * Coordinates are zeroed, `type` is `NodeType::LINE` (the enum has no dedicated "none"
+     * value), and `name` is the empty string so consumers that `strcmp` the name never
+     * dereference a null pointer. Function-local static for a valid const-reference return.
+     */
+    inline const Routes::NodeInfo& noNode()
+    {
+        static const Routes::NodeInfo kNoNode = {
+            0.0f,                  // x_cm
+            0.0f,                  // y_cm
+            Routes::NodeType::LINE, // type
+            ""                     // name
+        };
+        return kNoNode;
+    }
+
+    /**
      * @brief Read the next-hop entry from the Dijkstra-precomputed table.
+     *
+     * @return `NODE_NONE` if either index is out of range (defensive — guards `NODE_NONE`
+     *         (0xFF) and any id `>= N_NODES` from reading past the fixed-size table).
      */
     inline uint8_t getNextHop(uint8_t from, uint8_t goal)
     {
+        if (from >= N_NODES || goal >= N_NODES)
+        {
+            return NODE_NONE;
+        }
         return Routes::NEXT_HOP[from][goal];
     }
 
     /**
      * @brief Read the directed edge metadata between two nodes.
+     *
+     * @return A zeroed `EdgeInfo` (`EdgeType::NONE`) if either index is out of range.
      */
     inline const Routes::EdgeInfo& getEdge(uint8_t from, uint8_t to)
     {
+        if (from >= N_NODES || to >= N_NODES)
+        {
+            return noEdge();
+        }
         return Routes::EDGES[from][to];
     }
 
     /**
      * @brief Convenience accessor for the edge type only.
+     *
+     * @return `EdgeType::NONE` if either index is out of range.
      */
     inline Routes::EdgeType getEdgeType(uint8_t from, uint8_t to)
     {
+        if (from >= N_NODES || to >= N_NODES)
+        {
+            return Routes::EdgeType::NONE;
+        }
         return Routes::EDGES[from][to].type;
     }
 
     /**
      * @brief Read a node descriptor by id.
+     *
+     * @return The `noNode()` sentinel if `id` is out of range.
      */
     inline const Routes::NodeInfo& getNode(uint8_t id)
     {
+        if (id >= N_NODES)
+        {
+            return noNode();
+        }
         return Routes::NODES[id];
     }
 
     /**
      * @brief Convenience accessor for the node category only.
+     *
+     * @return The `noNode()` sentinel's type (`NodeType::LINE`) if `id` is out of range.
      */
     inline Routes::NodeType getNodeType(uint8_t id)
     {
+        if (id >= N_NODES)
+        {
+            return noNode().type;
+        }
         return Routes::NODES[id].type;
     }
 
