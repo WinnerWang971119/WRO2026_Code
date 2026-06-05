@@ -43,7 +43,20 @@ if str(_REPO_ROOT) not in sys.path:
 import matplotlib.image as mpimg  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
-from tools.path_planner import field_data  # noqa: E402
+# ``field_data`` runs ``load_field_json()`` at import time, which raises
+# ``FieldDataError`` when ``field_data.json`` is missing or invalid. Guard the
+# import so that failure surfaces as the documented clean exit-code 2 in
+# ``main()`` rather than a raw traceback before ``main()`` ever runs (mirrors
+# how ``main()`` already handles a missing/unreadable map.png).
+from tools.path_planner.validator import FieldDataError  # noqa: E402
+
+try:
+    from tools.path_planner import field_data  # noqa: E402
+
+    _FIELD_DATA_ERROR: str | None = None
+except FieldDataError as err:
+    field_data = None  # type: ignore[assignment]
+    _FIELD_DATA_ERROR = str(err)
 
 PICKER_DOT_COLOR        = "red"
 PICKER_DOT_SIZE         = 60
@@ -85,13 +98,46 @@ def _format_label(x: float, y: float) -> str:
     return f"({x:.1f}, {y:.1f})"
 
 
+def _is_xy_coord(coord) -> bool:
+    """Return True only for a length-2 sequence of two finite numbers.
+
+    pick_xy reads ``field_data`` without running ``validator.validate``, so a
+    half-edited ``field_data.json`` can hand us a node coord that is a scalar,
+    ``None``, or a length-1/3 sequence. Guarding here lets the picker open for
+    repair instead of crashing on ``IndexError``/``TypeError`` before the
+    window ever shows.
+    """
+    if isinstance(coord, (str, bytes)):
+        return False
+    try:
+        x, y = coord  # length check + unpack in one step
+    except (TypeError, ValueError):
+        return False
+    return isinstance(x, (int, float)) and isinstance(y, (int, float))
+
+
 def _draw_nodes_overlay(ax, field_data) -> None:
-    """Plot existing ``NODES`` in dim grey on the axes."""
+    """Plot existing ``NODES`` in dim grey on the axes.
+
+    Skips (and warns about) any node whose coordinate is not a length-2 pair of
+    numbers so a mid-edit ``field_data.json`` still opens for measurement.
+    """
     nodes = getattr(field_data, "NODES", {})
     if not nodes:
         return
-    xs = [coord[0] for coord in nodes.values()]
-    ys = [coord[1] for coord in nodes.values()]
+    valid = {}
+    for name, coord in nodes.items():
+        if _is_xy_coord(coord):
+            valid[name] = coord
+        else:
+            print(
+                f"pick_xy: skipping node {name!r} with malformed coord {coord!r}",
+                file=sys.stderr,
+            )
+    if not valid:
+        return
+    xs = [coord[0] for coord in valid.values()]
+    ys = [coord[1] for coord in valid.values()]
     ax.scatter(
         xs, ys,
         color=NODES_OVERLAY_COLOR,
@@ -99,7 +145,7 @@ def _draw_nodes_overlay(ax, field_data) -> None:
         s=NODES_OVERLAY_DOT_SIZE,
         zorder=4,
     )
-    for name, (x, y) in nodes.items():
+    for name, (x, y) in valid.items():
         ax.annotate(
             name,
             xy=(x, y),
@@ -116,6 +162,12 @@ def _make_click_handler(ax, picked_artists: list):
     """Return a closure for ``mpl_connect('button_press_event')``."""
 
     def _on_click(event) -> None:
+        # Ignore the mouse-down of a pan/zoom drag: when the navigation toolbar
+        # is in pan or zoom mode it still emits a left-button press inside the
+        # axes, which would otherwise print a stray coord and drop a marker.
+        toolbar = ax.figure.canvas.toolbar
+        if toolbar and toolbar.mode:
+            return
         # event.button == 1 is left-click; ignore everything else.
         if event.button != 1:
             return
@@ -173,8 +225,31 @@ def _make_key_handler(picked_artists: list, fig):
     return _on_key
 
 
+def _free_clear_key_from_keymap() -> None:
+    """Drop ``'c'`` from matplotlib's default ``keymap.back``.
+
+    matplotlib's built-in ``keymap.back`` is ``['left', 'c', 'backspace',
+    'MouseButton.BACK']``. Registering a custom ``key_press_event`` callback
+    does not disable the built-in keymap, so an unmodified ``'c'`` press would
+    fire *both* the picker's clear-markers action and matplotlib's "back"
+    navigation (popping the pan/zoom view stack). Removing ``'c'`` from
+    ``keymap.back`` leaves the clear action as the sole handler. Idempotent.
+    """
+    back_keys = plt.rcParams.get("keymap.back", [])
+    if "c" in back_keys:
+        plt.rcParams["keymap.back"] = [key for key in back_keys if key != "c"]
+
+
 def main() -> int:
-    """CLI entry point. Returns 0 on clean exit, 2 if map.png is missing."""
+    """CLI entry point. Returns 0 on clean exit, 2 on a startup failure
+    (missing/invalid ``field_data.json`` or a missing/unreadable map.png)."""
+    if _FIELD_DATA_ERROR is not None:
+        print(
+            f"pick_xy: cannot load field_data.json: {_FIELD_DATA_ERROR}",
+            file=sys.stderr,
+        )
+        return 2
+    _free_clear_key_from_keymap()
     map_path = _resolve_map_png(field_data)
     if map_path is None:
         print(
@@ -184,7 +259,7 @@ def main() -> int:
         return 2
     try:
         img = mpimg.imread(str(map_path))
-    except (FileNotFoundError, PermissionError, OSError) as err:
+    except Exception as err:    # noqa: BLE001 -- undecodable PNG raises ValueError/SyntaxError, not OSError
         print(
             f"pick_xy: cannot read map at {map_path}: {err}",
             file=sys.stderr,
@@ -201,13 +276,16 @@ def main() -> int:
     ax.set_xlim(0, width_cm)
     ax.set_ylim(0, height_cm)
     ax.grid(True)
+    # No ``aspect="auto"``: imshow's aspect kwarg would override the
+    # ``ax.set_aspect("equal")`` above and stretch the field photo / grid
+    # non-uniformly. Omitting it keeps the equal-aspect lock so measurements
+    # line up with a true-proportion background.
     ax.imshow(
         img,
         extent=(0.0, width_cm, 0.0, height_cm),
         origin="lower",
         alpha=0.6,
         zorder=0,
-        aspect="auto",
     )
     _draw_nodes_overlay(ax, field_data)
 
