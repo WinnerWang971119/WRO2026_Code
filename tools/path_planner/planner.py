@@ -309,10 +309,18 @@ def compute_all_pairs_next_hop(
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
-    :raises ValueError: bubbled from :func:`apply_pivot_compensations`
-        when a pivot-tagged edge's destination has anything other than
-        exactly one out-edge.
+    :raises ValueError: when ``cost_blind_multiplier`` is not positive, or
+        bubbled from :func:`apply_pivot_compensations` when a pivot-tagged
+        edge's destination has anything other than exactly one out-edge.
     """
+    if cost_blind_multiplier <= 0:
+        raise ValueError(
+            "cost_blind_multiplier must be positive, got "
+            f"{cost_blind_multiplier}. A non-positive multiplier makes "
+            "BLIND edges free or negative, breaking Dijkstra's "
+            "non-negative-weight assumption."
+        )
+
     weighted = _weighted_copy(graph, cost_blind_multiplier)
     # Apply pivot compensation BEFORE Dijkstra so the edge costs the
     # planner sees match the geometry the runtime will actually drive.
