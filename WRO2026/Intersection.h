@@ -13,10 +13,16 @@
  *
  * Design rules:
  *  - **Shares the LineFollower's WROLineArrayClass pointer.** `begin()` calls
- *    `LineFollower.getArray()` and binds onto the same `WROLineArrayClass` instance, so we issue
- *    zero extra I2C transactions on the Wire1 mux channel — every `update()` reuses the sample
- *    LineFollower just took. Caller MUST invoke `LineFollower.begin()` before
- *    `Intersection.begin()`.
+ *    `LineFollower.getArray()` and binds onto the same `WROLineArrayClass` instance. Caller MUST
+ *    invoke `LineFollower.begin()` before `Intersection.begin()`.
+ *  - **Shared single I2C sample — only when the tick cache is enabled.** The "reuse the sample
+ *    LineFollower just took, zero extra I2C transactions" guarantee (mirrored in
+ *    LineFollower.h:21-23) holds ONLY when `Config::LINE_ARRAY_TICK_CACHE_ENABLED` is `true`,
+ *    which is the SHIPPED default (Config.h:450). With the cache on, `WROLineArrayClass::update()`
+ *    is the single refresh site and `getJunctionType()` is a pure cache reader, so LineFollower
+ *    and Intersection both observe the same physical sample. If the cache is disabled, each
+ *    `getJunctionType()` call issues its own I2C transaction, so the two modules read two
+ *    separate samples milliseconds apart and the shared-sample guarantee does not hold.
  *  - **`update()` is non-blocking** — no `delay()`, no I2C wait loops. Cooperative tick.
  *  - **Edge-triggered consumption** — `isAtIntersection()` returns `true` exactly once per
  *    junction *entry* (rising edge of "at-junction"), then auto-clears.
@@ -25,8 +31,9 @@
  *
  * Lifecycle (see WRO2026.ino):
  *  - `Intersection.begin()` once in `setup()`, AFTER `LineFollower.begin()`.
- *  - `Intersection.update()` every iteration of `loop()`, AFTER `LineFollower.update()` (so
- *    both modules act on the same I2C cycle's worth of sensor state).
+ *  - `Intersection.update()` every iteration of `loop()`, AFTER `LineFollower.update()` (so that
+ *    — with the tick cache enabled, the shipped default — both modules act on the same I2C
+ *    cycle's worth of sensor state; see the shared-single-sample design rule above).
  *  - Consumers (EventTrace in T8, PathTracker in Phase 2) call `isAtIntersection()` and, on
  *    `true`, fetch `getLastType()` for the captured classification.
  */
@@ -68,8 +75,10 @@ enum class JunctionType : uint8_t
 /**
  * @brief Singleton edge-triggered intersection detector.
  *
- * Owns no hardware of its own — borrows the `WROLineArrayClass*` exposed by `LineFollower` so
- * both modules read the same I2C sample. State machine on each `update()`:
+ * Owns no hardware of its own — borrows the `WROLineArrayClass*` exposed by `LineFollower`. With
+ * the tick cache enabled (`Config::LINE_ARRAY_TICK_CACHE_ENABLED`, shipped `true`) both modules
+ * read the same cached I2C sample; with the cache off each `getJunctionType()` re-reads the bus.
+ * State machine on each `update()`:
  *
  *  - Sample `raw = _array->getJunctionType()`.
  *  - `atJunctionNow = (raw != NONE && raw != UNKNOWN)`.
@@ -106,8 +115,11 @@ public:
      * @note Edge detection: returns rising edge of `(raw != NONE && raw != UNKNOWN)`. Treats
      *       both NONE and UNKNOWN as "no junction" so a momentary unclassified sample doesn't
      *       fire.
-     * @note Should be called AFTER `LineFollower.update()` in the main loop so both modules
-     *       observe the same I2C cycle's worth of state on the shared WROLineArrayClass instance.
+     * @note Should be called AFTER `LineFollower.update()` in the main loop so that — with the
+     *       tick cache enabled (`Config::LINE_ARRAY_TICK_CACHE_ENABLED`, shipped `true`) — both
+     *       modules observe the same I2C cycle's worth of state on the shared WROLineArrayClass
+     *       instance. With the cache off, each `getJunctionType()` issues its own I2C read, so the
+     *       two modules see two separate samples and the shared-sample guarantee does not hold.
      */
     void update();
 
