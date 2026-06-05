@@ -11,7 +11,6 @@
 
 #include "Drive.h"
 #include "FieldMap.h"
-#include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
 #include "routes.h"
@@ -31,9 +30,10 @@ bool EventTraceClass::begin()
     memset(_buf, 0, sizeof(_buf));
 
     // Prime the edge-detection cache so the first update() does not synthesise spurious events.
+    // NOTE: EventTrace does NOT trace intersections — `update()` polls only LineFollower and
+    // Drive. There is no Intersection edge cache to prime.
     _prevLineLost     = false;
     _prevTurnDone     = true;
-    _prevIntEdgeCount = Intersection.getEdgeCount();
     _lastHeartbeat_ms = millis();
 
     return true;
@@ -121,7 +121,9 @@ void EventTraceClass::_emitHeartbeat()
     Serial.print(F("HB t="));
     Serial.print(now);
     Serial.print(F(" yaw="));
-    Serial.print(Localization.getHeadingDeg(), 1);
+    // Cached read: the heartbeat must not issue a live IMU/I2C transaction (EventTrace's
+    // contract is non-blocking / no I/O). Navigation refreshes this cache via getHeadingDeg().
+    Serial.print(Localization.getLastHeadingDeg(), 1);
     Serial.print(F(" node="));
     Serial.println(name);
 }
