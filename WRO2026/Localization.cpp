@@ -11,6 +11,15 @@
 
 #include "routes.h"
 
+namespace
+{
+/// Backoff before the single retry of a transient lower-MCU IMU read. The
+/// MMLower-caller convention is to retry once after a short delay on a non-OK
+/// result; `GetIMUEuler` already carries its own 100 ms wait timeout, so this
+/// is just bus settle time before re-issuing the command.
+constexpr uint8_t IMU_READ_RETRY_DELAY_MS = 2;
+}    // namespace
+
 LocalizationClass Localization;    // single global instance
 
 bool LocalizationClass::begin()
@@ -18,6 +27,11 @@ bool LocalizationClass::begin()
     _currentNode  = Routes::START_NODE;
     _yawOffsetDeg = 0.0f;
     _zeroed       = false;
+    // Re-seed the heading cache so a re-begin / re-zero between bench runs does not serve
+    // the prior run's last heading. The stamp resets to 0 ("no live read yet") so a
+    // staleness check treats the seed value as not-yet-refreshed.
+    _lastGoodHeadingDeg = (float) Routes::START_HEADING_DEG;
+    _lastGoodHeadingMs  = 0;
     return true;
 }
 
@@ -30,6 +44,15 @@ bool LocalizationClass::_readImuYaw(float& yawOut)
     // must NOT copy `yaw` into `yawOut` unless the read returned OK.
     double          roll = 0.0, pitch = 0.0, yaw = 0.0;
     MMLower::RESULT result = mmL.GetIMUEuler(roll, pitch, yaw);
+    if (result != MMLower::RESULT::OK)
+    {
+        // Transient lower-MCU timeout: retry once after a short backoff (the
+        // MMLower-caller convention) before giving up, so a single missed frame
+        // does not fail zeroHeadingFromCurrent() or strand getHeadingDeg() on a
+        // stale heading when the retry would have recovered.
+        delay(IMU_READ_RETRY_DELAY_MS);
+        result = mmL.GetIMUEuler(roll, pitch, yaw);
+    }
     if (result != MMLower::RESULT::OK)
     {
         return false;
@@ -86,6 +109,7 @@ float LocalizationClass::getHeadingDeg() const
     }
     const float heading = _normalize(imuYaw - _yawOffsetDeg);
     _lastGoodHeadingDeg = heading;
+    _lastGoodHeadingMs  = millis();
     return heading;
 }
 
@@ -93,6 +117,12 @@ float LocalizationClass::getLastHeadingDeg() const
 {
     // No I/O: return the value cached by the most recent successful getHeadingDeg() read.
     return _lastGoodHeadingDeg;
+}
+
+uint32_t LocalizationClass::getLastHeadingUpdateMs() const
+{
+    // No I/O: timestamp of the last OK getHeadingDeg() read (0 if none since begin()).
+    return _lastGoodHeadingMs;
 }
 
 int16_t LocalizationClass::toImuYaw(float worldHeadingDeg) const

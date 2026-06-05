@@ -15,6 +15,15 @@
 #include "Localization.h"
 #include "routes.h"
 
+namespace
+{
+/// Heartbeat heading is treated as stale if no successful live read has refreshed the
+/// Localization cache within this window (~3 heartbeats at the 500 ms cadence). A stale
+/// value is flagged so a frozen-but-plausible cached heading (idle, between hops, or a
+/// failing IMU) is not read as a current measurement.
+constexpr uint32_t HEADING_STALE_MS = 1500;
+}    // namespace
+
 /**
  * @brief Single global instance, declared `extern` in EventTrace.h.
  */
@@ -124,6 +133,13 @@ void EventTraceClass::_emitHeartbeat()
     // Cached read: the heartbeat must not issue a live IMU/I2C transaction (EventTrace's
     // contract is non-blocking / no I/O). Navigation refreshes this cache via getHeadingDeg().
     Serial.print(Localization.getLastHeadingDeg(), 1);
+    // Flag a stale cache (idle, between hops, or a failing IMU) so a frozen-but-plausible
+    // heading is not read as current. No I/O — compares the cache's last-update stamp.
+    const uint32_t headingUpdateMs = Localization.getLastHeadingUpdateMs();
+    if (headingUpdateMs == 0 || (now - headingUpdateMs) > HEADING_STALE_MS)
+    {
+        Serial.print(F("?"));
+    }
     Serial.print(F(" node="));
     Serial.println(name);
 }

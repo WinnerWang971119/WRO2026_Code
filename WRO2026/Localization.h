@@ -132,6 +132,20 @@ public:
     float getLastHeadingDeg() const;
 
     /**
+     * @brief `millis()` of the last successful live heading read; `0` if none yet.
+     *
+     * Lets a no-I/O consumer distinguish a freshly-read heading from a stale cached one.
+     * `getLastHeadingDeg()` keeps returning a plausible value even when the IMU has been
+     * failing or no navigation code has read the heading recently, so a telemetry path
+     * (e.g. the EventTrace heartbeat) compares `millis() - getLastHeadingUpdateMs()`
+     * against its own staleness budget to flag the difference.
+     *
+     * @return `millis()` captured at the last OK `getHeadingDeg()` read; `0` if no OK read
+     *         has happened since `begin()` (which resets it).
+     */
+    uint32_t getLastHeadingUpdateMs() const;
+
+    /**
      * @brief Convert a world-frame heading to the IMU-frame yaw value `Drive.turnToYaw`
      *        expects.
      *
@@ -199,9 +213,13 @@ private:
      *
      * Seeded to `Routes::START_HEADING_DEG` so a read before the first OK IMU sample still
      * returns a sane value. Refreshed on every OK read; served verbatim (no I/O) by
-     * `getLastHeadingDeg()` and returned by `getHeadingDeg()` when a read fails.
+     * `getLastHeadingDeg()` and returned by `getHeadingDeg()` when a read fails. `begin()`
+     * re-seeds it so a re-zero between bench runs does not serve the prior run's heading.
      */
     mutable float _lastGoodHeadingDeg = (float) Routes::START_HEADING_DEG;
+
+    /// `millis()` of the last OK `getHeadingDeg()` read; `0` = none since `begin()`.
+    mutable uint32_t _lastGoodHeadingMs = 0;
 };
 
 /**
