@@ -114,10 +114,14 @@ if(MSVC)
         "/FI${MOCKS_DIR}/Intersection.h"
     )
 else()
+    # Use the `SHELL:` prefix so CMake keeps each `-include <path>` pair atomic. Without it,
+    # CMake de-duplicates the repeated `-include` flag, collapsing the three to one and
+    # leaving the paths as bare arguments -- g++ then treats them as extra source files and
+    # fails with "cannot specify '-o' with '-c' ... with multiple files".
     add_compile_options(
-        "-include" "${MOCKS_DIR}/Drive.h"
-        "-include" "${MOCKS_DIR}/WROLineArray.h"
-        "-include" "${MOCKS_DIR}/Intersection.h"
+        "SHELL:-include ${MOCKS_DIR}/Drive.h"
+        "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
+        "SHELL:-include ${MOCKS_DIR}/Intersection.h"
     )
 endif()
 
