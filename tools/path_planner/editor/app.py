@@ -196,13 +196,13 @@ class EditorApp:
         # ---- 3. History + dirty tracking + rename queue ----
         self._history: History = History()
         self._dirty: bool = False
+        # Net node renames awaiting flush into field_data.py EDGES on the next
+        # Save, keyed {current-EDGES-name: target-name}. Maintained as a delta:
+        # a fresh rename records forward, an undo records the inverse, a redo
+        # re-records forward (see _undo / _redo). It is NEVER rebuilt from the
+        # history stacks -- doing so was the source of the undo-saved-rename
+        # divergence, because History mutates (redo is cleared by any new edit).
         self._pending_renames: dict[str, str] = {}
-        # Identities (``id()``) of the RenameNode commands flushed by the most
-        # recent successful Save. ``_recompute_pending_renames`` skips these so
-        # an undo/redo after a Save does not re-accumulate already-saved
-        # renames from the surviving undo stack (which _save clears from
-        # _pending_renames but not from History).
-        self._saved_rename_ids: set[int] = set()
 
         # ---- 4. Tk root window ----
         self._owns_root: bool = root is None
@@ -512,30 +512,39 @@ class EditorApp:
 
     def _undo(self) -> None:
         """Pop one command off the undo stack and re-render."""
+        # Peek the command BEFORE undo pops it so we can mirror its effect onto
+        # the pending-rename delta.
+        undone = self._history.undo_stack[-1] if self._history.can_undo else None
         if not self._history.undo(self._model):
             self._set_status("Nothing to undo.")
             return
         # Any undo brings the buffer back into "dirty vs saved" ambiguity --
         # we conservatively mark dirty so the user is prompted on close.
         self._mark_dirty()
-        # Rebuild _pending_renames from the surviving RenameNode commands so
-        # the next Save doesn't rewrite EDGES with a rename the user just
-        # undid (Codex PR29 #13). Must run after history.undo mutates the
-        # stack so we observe the post-undo state.
-        self._recompute_pending_renames()
+        # Undoing a rename reverts new -> old in the model, so the pending
+        # EDGES rewrite must move the same way. _record_pending_rename's
+        # chain-collapse cancels a not-yet-saved rename (A->B then its inverse
+        # collapses to {}) and inverts an already-saved one (leaving {B: A} so
+        # the next Save reverts field_data.py to match field_data.json) with
+        # the same call -- no need to know whether the rename was saved.
+        if isinstance(undone, RenameNode):
+            self._record_pending_rename(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
     def _redo(self) -> None:
         """Re-apply one command from the redo stack and re-render."""
+        # Peek the command BEFORE redo pops it (redo re-applies redo_stack[-1]).
+        redone = self._history.redo_stack[-1] if self._history.can_redo else None
         if not self._history.redo(self._model):
             self._set_status("Nothing to redo.")
             return
         self._mark_dirty()
-        # Mirror _undo: keep _pending_renames in lockstep with the history
-        # so a redone rename is back in the queue, and an irrelevant redo
-        # (e.g. a MoveNode) leaves the queue unchanged.
-        self._recompute_pending_renames()
+        # Re-applying a rename re-establishes old -> new; record it forward so
+        # the queue is symmetric with _undo. A non-rename redo leaves the queue
+        # untouched.
+        if isinstance(redone, RenameNode):
+            self._record_pending_rename(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -1362,31 +1371,6 @@ class EditorApp:
             if old != new:
                 self._pending_renames[old] = new
 
-    def _recompute_pending_renames(self) -> None:
-        """Rebuild ``_pending_renames`` from the live history undo stack.
-
-        Walks ``self._history.undo_stack`` oldest-to-newest and replays each
-        :class:`RenameNode` through :meth:`_record_pending_rename`, so the
-        resulting queue matches what would have accumulated if the user had
-        only ever issued the renames that survive in history. Used by
-        :meth:`_undo` / :meth:`_redo` to keep the queue from drifting past
-        the model state -- without this, undoing a rename leaves the rename
-        in the queue and the next Save rewrites EDGES to a name that no
-        longer exists in JSON.
-
-        Renames already flushed by the most recent Save are skipped (their
-        command identities are recorded in :attr:`_saved_rename_ids`). Save
-        clears ``_pending_renames`` but not the History, so without this anchor
-        a later undo/redo would replay those flushed renames straight back into
-        the queue and the next Save would re-attempt their EDGES rewrite.
-        """
-        self._pending_renames.clear()
-        for command in self._history.undo_stack:
-            if isinstance(command, RenameNode):
-                if id(command) in self._saved_rename_ids:
-                    continue
-                self._record_pending_rename(command.old, command.new)
-
     # ------------------------------------------------------------------
     # Save / Save & Build
     # ------------------------------------------------------------------
@@ -1461,17 +1445,11 @@ class EditorApp:
                     pass
             self._pending_renames.clear()
 
-        # Anchor the next _recompute_pending_renames to this Save: every
-        # RenameNode currently on the undo stack is now persisted to disk, so a
-        # later undo/redo must not replay it back into _pending_renames. Record
-        # their identities; the recompute walk skips any RenameNode in this set
-        # (#64). Recomputed from scratch each Save so undone-then-resaved
-        # renames are tracked correctly.
-        self._saved_rename_ids = {
-            id(command)
-            for command in self._history.undo_stack
-            if isinstance(command, RenameNode)
-        }
+        # After a successful Save, field_data.json, field_data.py EDGES, and
+        # the model are all consistent, so the pending-rename delta is empty
+        # (cleared above when a flush ran; already empty otherwise). It now
+        # tracks only renames made AFTER this Save -- no history-derived anchor
+        # is needed, which is what makes undo-after-save robust.
 
         self._clear_dirty()
         self._set_status(_STATUS_SAVED)
