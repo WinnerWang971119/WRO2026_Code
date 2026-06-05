@@ -28,6 +28,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
     { "debugYield", &TasksClass::debugYield },
+    //Add new tasks here
 };
 
 const size_t TasksClass::_registry_count =
