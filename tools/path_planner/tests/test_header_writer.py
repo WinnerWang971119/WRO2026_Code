@@ -340,6 +340,66 @@ def test_default_paths_are_under_repo():
 
 
 # ---------------------------------------------------------------------------
+# Node-count ceiling guard (PR35 finding: 0xFF sentinel boundary).
+#
+# NEXT_HOP_NONE is 0xFF (255) and node ids run 0..N_NODES-1, so the sentinel
+# only aliases a valid id once N_NODES reaches 256. The guard must reject
+# 256+ and accept 255 -- the original `>= 255` test was off by one and
+# wrongly rejected an otherwise-valid 255-node field.
+# ---------------------------------------------------------------------------
+
+def test_emit_rejects_256_nodes():
+    """256 nodes alias id 255 onto NEXT_HOP_NONE(0xFF) and must be rejected.
+
+    With 256 nodes the valid ids run 0..255, so id 255 collides with the
+    0xFF sentinel and the table can no longer tell "no next hop" apart from
+    "go to node 255". The guard reads only ``field_data.NODES`` and fires
+    before any graph work, so the stub ``None`` graph / table is never
+    reached.
+    """
+    fd = SimpleNamespace(NODES={f"N{i}": (0.0, 0.0) for i in range(256)})
+    with pytest.raises(ValueError, match=r"ceiling \(max 255 nodes\)"):
+        emit_routes(fd, None, None, field_data_source_path=_TOY_FIELD_SOURCE)
+
+
+def test_emit_accepts_255_nodes(emit_targets):
+    """255 nodes is the true ceiling: ids 0..254 never reach the 0xFF sentinel.
+
+    Regression guard for the off-by-one ``>= 255`` check that wrongly
+    rejected a 255-node field. A straight N0->N1->...->N254 line chain emits
+    cleanly; the assertion is simply that emission succeeds and writes both
+    files.
+    """
+    header_path, source_path = emit_targets
+    names = [f"N{i}" for i in range(255)]
+    fd = SimpleNamespace(
+        NODES={name: (float(i), 0.0) for i, name in enumerate(names)},
+        NODE_TYPES={name: "line" for name in names},
+        LINE_SEGMENTS=[(names[i], names[i + 1]) for i in range(254)],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="N0",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        graph = build_graph(fd)
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    emit_routes(
+        fd, graph, next_hop,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    assert header_path.exists() and header_path.stat().st_size > 0
+    assert source_path.exists() and source_path.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
 # T11 / new tests (TC1, TC2, TC3, TC5)
 # ---------------------------------------------------------------------------
 

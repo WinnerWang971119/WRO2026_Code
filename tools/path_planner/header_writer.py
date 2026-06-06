@@ -534,10 +534,11 @@ def emit_routes(
 
     node_names: List[str] = sorted(field_data.NODES.keys())
     n_nodes = len(node_names)
-    if n_nodes >= 255:
+    if n_nodes >= 256:
         raise ValueError(
             f"emit_routes: N_NODES={n_nodes} exceeds the uint8_t/NEXT_HOP_NONE(0xFF)"
-            " ceiling (max 254 nodes)"
+            " ceiling (max 255 nodes). Node ids are 0..N_NODES-1, so the 0xFF"
+            " sentinel only collides with a valid id once N_NODES reaches 256."
         )
     index_of = _build_index_lookup(node_names)
 
