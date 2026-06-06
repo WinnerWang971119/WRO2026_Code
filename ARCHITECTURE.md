@@ -50,8 +50,11 @@ WRO2026.ino
                     │                    │
                     │                    ▼
                     │                  Drive ◄────── LineFollower ◄───── Intersection
-                    │                    │                │                  │
-                    │                    │                └─────► WROLineArray ◄──┘
+                    │                  │  │              │                  │
+                    │      (read-only) │  └──────► WROLineArray ◄───────────┘
+                    │   Drive.stopAtLine          ▲
+                    │   reads getJunctionType ────┘   (ADR-027; reverse on 2-board via StopAtLinePolicy)
+                    │                    │
                     │                    ▼
                     └──────────────► Manipulator
                                          │
@@ -65,7 +68,9 @@ WRO2026.ino
   EventTrace ────► (read-only polls of LineFollower, Intersection, Drive,
                     Localization; emits OLED + Serial)
   Localization ─── (read by PathTracker, Mission, EventTrace;
-                    written only by PathTracker)
+                    written by PathTracker via onIntersection /
+                    onDeadReckonedAdvance — a STOP_AT_LINE hop re-anchors
+                    via onIntersection, ADR-027)
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
@@ -78,15 +83,15 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | Module | Owns | Key surface |
 |---|---|---|
 | `Config` | constants, pin maps, PID gains, calibration tables | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
-| `Drive` | motion primitives + fluent builders + queue + T-shape | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
+| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; shared resolver via `StopAtLinePolicy.h` | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |
 | `Localization` | current node + IMU-yaw offset (single writer) | `zeroHeadingFromCurrent()`, `getCurrentNode()`, `getHeadingDeg()`, `toImuYaw(world)`, `onIntersection(advanceTo)`, `onDeadReckonedAdvance(advanceTo)` |
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |
 | `routes` | **auto-generated** graph data | `Routes::NODES[N]`, `Routes::NEXT_HOP[N][N]`, `Routes::EDGES[N][N]`, `Routes::PIPELINE_CONFIG` |
-| `PathTracker` | FSM dispatching per-edge primitives | `goTo(name).async()`, `update()`, `isIdle()`, `hasFault()`, `getFault()`, `clearFault()`, `abort()` |
-| `Mission` | operator-authored DSL | `goTo(name)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `task(name,args)`, `start()`, `abort()` |
+| `PathTracker` | FSM dispatching per-edge primitives; STOP_AT_LINE hops re-anchor via `Localization.onIntersection()` | `goTo(name).async().setStopAtLine(AUTO\|ON\|OFF)`, `update()`, `isIdle()`, `hasFault()`, `getFault()`, `clearFault()`, `abort()` |
+| `Mission` | operator-authored DSL | `goTo(name).setStopAtLine(...)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `task(name,args)`, `start()`, `abort()` |
 | `Tasks` | composite multi-step routines + name-string registry | `runTask(name, args)`, `findTask(name)`, `abort()`, `isAborted()`, `inTask()`, registry table in `Tasks.cpp` |
 | `Manipulator` | actuator control (stub) | `setLift(h)`, `setGripper(angle)`, `setArm(angle)`, `update()`, `isDone()` — all currently no-op |
 | `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()` — polled in `update()` |

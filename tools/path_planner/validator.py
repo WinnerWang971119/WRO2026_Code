@@ -216,6 +216,10 @@ def _validate_edges_field(field_data) -> None:
             )
 
         # Optional: primitive_mode ----------------------------------------
+        # Any concrete member of the edge type's mode enum is accepted --
+        # for BLIND edges this includes BlindMode.STOP_AT_LINE. Only the
+        # DEFAULT sentinel (== "absent") and values of the wrong enum type
+        # (or no enum type at all) are rejected.
         if "primitive_mode" in entry:
             primitive_mode = entry["primitive_mode"]
             expected_cls, expected_name = mode_class_by_edge_type[edge_type]
@@ -226,8 +230,7 @@ def _validate_edges_field(field_data) -> None:
                     "(LineMode on LINE edges, BlindMode on BLIND edges, "
                     "ProjectionMode on PROJECTION edges)"
                 )
-            if int(primitive_mode) == 0:
-                # Every mode IntEnum's DEFAULT member is value 0.
+            if primitive_mode == expected_cls.DEFAULT:
                 raise FieldDataError(
                     f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT -- "
                     "DEFAULT means 'inherit PIPELINE_CONFIG', which is "

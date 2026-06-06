@@ -25,6 +25,21 @@ enum class Direction : uint8_t
 };
 
 /**
+ * @brief Call-site override for stop-at-line behaviour on a BLIND hop.
+ *
+ * @note Tri-state precedence: a call-site ON/OFF wins over the per-edge
+ *       BlindMode override; AUTO defers to the edge (mirrors Direction::AUTO).
+ *       StopAtLine::AUTO and Routes::BlindMode::DEFAULT both encode "no
+ *       override" but are distinct C++ types — never compare across them.
+ */
+enum class StopAtLine : uint8_t
+{
+    AUTO = 0,    ///< Defer to the per-edge BlindMode override.
+    ON   = 1,    ///< Force stop-at-line on this hop's BLIND edge (overrides edge).
+    OFF  = 2,    ///< Force-disable; traverse the BLIND edge as a normal dead-reckoned hop.
+};
+
+/**
  * @brief Wrap a heading delta (degrees) into the half-open range (-180, 180].
  *
  * Single source of truth for the `while (d > 180) d -= 360; while (d <= -180) d += 360;`

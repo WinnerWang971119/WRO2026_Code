@@ -310,6 +310,30 @@ def test_pipeline_config_default_emit(emit_targets):
     assert "TurnMode::COUNTER_ROT" in cpp_text
 
 
+def test_blind_mode_enum_emits_stop_at_line(emit_targets):
+    """TC3: the emitted routes.h BlindMode enum carries STOP_AT_LINE = 4.
+
+    The stop-at-line work adds a fifth ``BlindMode`` member. The header
+    writer must render it verbatim into the generated ``BlindMode`` enum so
+    the firmware's ``Routes::BlindMode`` matches ``pipeline_config.BlindMode``.
+    The golden test (:func:`test_routes_h_matches_golden`) locks the full
+    line byte-for-byte; this test states the contract directly so a
+    regression that dropped the member fails with a readable diagnostic
+    rather than an opaque golden mismatch.
+    """
+    header_path, _ = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
+    assert "STOP_AT_LINE = 4" in header_text
+    # The new member lives on the BlindMode enum line, not some other enum.
+    blind_line = next(
+        line for line in header_text.splitlines()
+        if "enum class BlindMode" in line
+    )
+    assert "STOP_AT_LINE = 4" in blind_line
+    assert "RAW_FLAT = 3" in blind_line
+
+
 def test_edge_primitive_mode_override_emit(emit_targets):
     """TC2: an EDGE_LINE with primitive_mode=LineMode.FAST emits the override."""
     header_path, source_path = emit_targets

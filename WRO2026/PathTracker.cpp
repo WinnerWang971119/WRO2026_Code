@@ -14,6 +14,7 @@
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
+#include "StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
 
@@ -153,6 +154,29 @@ namespace
             default:                            return 0;
         }
     }
+
+    /**
+     * @brief Map a resolved `Routes::BlindMode` motion bundle to the `DriveMode`
+     *        the `Drive.stopAtLine` seek runs under.
+     *
+     * @param m The `StopAtLineResolution::motionMode` from `resolveStopAtLine(...)`.
+     *          Always one of the three concrete velocity bundles — `SYNC_TSHAPE`,
+     *          `GYRO_TSHAPE`, or `RAW_FLAT` — so `STOP_AT_LINE` and `DEFAULT` never
+     *          reach this helper.
+     * @return The matching `DriveMode` (`SYNC`/`GYRO`/`RAW`).
+     * @note The `default` returns `DriveMode::SYNC` purely defensively; the resolver
+     *       guarantees `motionMode` is never `STOP_AT_LINE`/`DEFAULT`.
+     */
+    DriveMode blindModeToDriveMode(Routes::BlindMode m)
+    {
+        switch (m)
+        {
+            case Routes::BlindMode::SYNC_TSHAPE: return DriveMode::SYNC;
+            case Routes::BlindMode::GYRO_TSHAPE: return DriveMode::GYRO;
+            case Routes::BlindMode::RAW_FLAT:    return DriveMode::RAW;
+            default:                             return DriveMode::SYNC;    // defensive — see doc above
+        }
+    }
 }    // namespace
 
 // =========================================================================================
@@ -171,7 +195,8 @@ PathTrackerGoToBuilder::~PathTrackerGoToBuilder()
     {
         return;
     }
-    _owner._applyGoToBuilder(_goalId, _blocking, _routeDirection, _arrivalDirection);
+    _owner._applyGoToBuilder(
+        _goalId, _blocking, _routeDirection, _arrivalDirection, _stopAtLine);
     _executed = true;
 }
 
@@ -193,6 +218,12 @@ PathTrackerGoToBuilder& PathTrackerGoToBuilder::setArrivalDirection(Direction d)
     return *this;
 }
 
+PathTrackerGoToBuilder& PathTrackerGoToBuilder::setStopAtLine(StopAtLine s)
+{
+    _stopAtLine = s;
+    return *this;
+}
+
 // =========================================================================================
 // PathTrackerClass — lifecycle
 // =========================================================================================
@@ -211,6 +242,7 @@ bool PathTrackerClass::begin()
     _resolvedBodyHeading     = 0.0f;
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
+    _activeStopAtLine        = StopAtLine::AUTO;
     _fault = FaultInfo{};
     return true;
 }
@@ -265,6 +297,7 @@ void PathTrackerClass::abort()
     _resolvedBodyHeading    = 0.0f;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
+    _activeStopAtLine       = StopAtLine::AUTO;
     _fault                  = FaultInfo{};
 }
 
@@ -297,6 +330,12 @@ bool PathTrackerClass::_enqueue(uint8_t goalId, Direction routeDir, Direction ar
     _queue[_qTail].nodeId            = goalId;
     _queue[_qTail].route_direction   = routeDir;
     _queue[_qTail].arrival_direction = arrivalDir;
+    // Default the call-site stop-at-line override to AUTO so a recycled FIFO
+    // slot never carries a stale value. The real value (when the operator
+    // chained `.setStopAtLine(...)`) is written into this same slot by
+    // `_applyGoToBuilder` immediately after this returns — `_enqueue` keeps its
+    // 3-arg signature, mirroring the queue plumbing for the Direction overrides.
+    _queue[_qTail].stop_at_line      = StopAtLine::AUTO;
     _qTail  = (uint8_t) ((_qTail + 1) % Config::PATH_QUEUE_CAPACITY);
     _qCount++;
     return true;
@@ -326,10 +365,11 @@ void PathTrackerClass::_clearQueue()
 // =========================================================================================
 
 void PathTrackerClass::_applyGoToBuilder(
-    uint8_t   goalId,
-    bool      blocking,
-    Direction routeDir,
-    Direction arrivalDir)
+    uint8_t    goalId,
+    bool       blocking,
+    Direction  routeDir,
+    Direction  arrivalDir,
+    StopAtLine stopAtLine)
 {
     if (goalId == FieldMap::NODE_NONE || goalId >= Routes::N_NODES)
     {
@@ -348,10 +388,15 @@ void PathTrackerClass::_applyGoToBuilder(
         Serial.println(F("); clear with clearFault()"));
         return;
     }
+    // Slot that `_enqueue` is about to fill (it advances `_qTail` past it on
+    // success). Captured BEFORE the call so the call-site stop-at-line override
+    // can be written into the same NavEntry without widening `_enqueue`.
+    const uint8_t slot = _qTail;
     if (!_enqueue(goalId, routeDir, arrivalDir))
     {
         return;
     }
+    _queue[slot].stop_at_line = stopAtLine;
     if (blocking)
     {
         _drainBlocking();
@@ -438,6 +483,7 @@ void PathTrackerClass::update()
             _destinationNode        = e.nodeId;
             _activeRouteDirection   = e.route_direction;
             _activeArrivalDirection = e.arrival_direction;
+            _activeStopAtLine       = e.stop_at_line;
             _state                  = State::PLAN_NEXT_HOP;
             return;
         }
@@ -635,6 +681,31 @@ void PathTrackerClass::update()
             if (Drive.isIdle())
             {
                 Localization.onDeadReckonedAdvance(_nextHop);
+                _state = State::PLAN_NEXT_HOP;
+            }
+            return;
+        }
+
+        case State::STOP_AT_LINE:
+        {
+            // Drive.stopAtLine(...) seek dispatched in `_dispatchEdgeAfterTurn`.
+            //
+            // No-line / max-distance fault: when the seek runs the full max
+            // distance without a crossing, Drive latches `Fault::LINE_NOT_FOUND`
+            // and `Drive.hasFault()` goes true. That is caught by the shared
+            // Drive-fault guard at the TOP of update() (same as BLIND_FORWARD),
+            // which stops the chassis and enters `Fault::DRIVE_FAULT` — so this
+            // state body only has to handle the success path. No dead-reckon
+            // fallback (ADR-027 / AC7).
+            //
+            // Success: the seek detected the crossing line, rolled the axle onto
+            // it, and active-braked — a true physical re-localisation event. Unlike
+            // BLIND_FORWARD (which dead-reckons via `onDeadReckonedAdvance`), advance
+            // the node with `onIntersection(...)` so this hop RE-ANCHORS the discrete
+            // position on the real line (the "better localization" of issue #27).
+            if (Drive.isIdle())
+            {
+                Localization.onIntersection(_nextHop);
                 _state = State::PLAN_NEXT_HOP;
             }
             return;
@@ -934,6 +1005,66 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
         case Routes::EdgeType::BLIND:
         {
+            // -----------------------------------------------------------------
+            // Effective stop-at-line resolution (ADR-027 / issue #27).
+            //
+            // One canonical decision — `resolveStopAtLine(...)` in
+            // `StopAtLinePolicy.h` (mirrored by `sim/runtime.py`) — folds the
+            // call-site `_activeStopAtLine` flag, the per-edge BlindMode, the
+            // pipeline blind default, the resolved travel direction, and the
+            // board count into `{seek, motionMode}`:
+            //   - seek == true  → run a `Drive.stopAtLine` seek in
+            //                      `motionMode`'s DriveMode (FRONT always; REAR
+            //                      only on a 2-board chassis).
+            //   - seek == false → dead-reckon the hop in `motionMode` (OFF, or a
+            //                      forced-REAR degrade on a 1-board chassis).
+            //
+            // `_resolveBlindMode(edge)` already maps DEFAULT → pipeline blind, so
+            // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
+            // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
+            // -----------------------------------------------------------------
+            const StopAtLineResolution sal = resolveStopAtLine(
+                _activeStopAtLine,
+                _resolveBlindMode(edge),
+                Routes::PIPELINE_CONFIG.blind,
+                _resolvedDirection,
+                Config::LINE_BOARD_COUNT);
+
+            if (sal.seek)
+            {
+                // A pass-through LINE→BLIND handoff leaves the LineFollower
+                // enabled (T5's brake-on-gate=false path). Release it WITHOUT
+                // braking before handing the wheels to the Drive seek so the
+                // two writers never fight over the motors — same ordering the
+                // dead-reckoned blind branch below uses.
+                if (_passThrough)
+                {
+                    LineFollower.setEnabled(false).setBrake(false);
+                }
+
+                // Drain any stale Intersection edge so the seek's own physical
+                // crossing cannot leak a phantom nav edge into the next LINE hop
+                // (AC7 — the forward seek drives over its target T_OR_CROSS while
+                // Intersection.update() independently counts it).
+                (void) Intersection.isAtIntersection();
+
+                // Honor the edge's resolved motion bundle. SYNC by default; GYRO
+                // additionally pins the held heading (body heading already accounts
+                // for REAR via `_resolvedBodyHeading`). Reverse is selected per the
+                // resolved hop direction. `.async()` keeps the FSM non-blocking —
+                // the STOP_AT_LINE state below polls `Drive.isIdle()` /
+                // `Drive.hasFault()` for the outcome.
+                const DriveMode mode = blindModeToDriveMode(sal.motionMode);
+                Drive.stopAtLine(edge.distance_cm)
+                    .setReverse(reverse)
+                    .setMode(mode)
+                    .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                    .async();
+                _state       = State::STOP_AT_LINE;
+                _passThrough = false;    // consumed
+                break;
+            }
+
             // Pass-through LINE→BLIND handoff: when _passThrough is set, the
             // LineFollower is still enabled (T5's brake-on-gate=false path), so
             // we need to:
@@ -984,11 +1115,14 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             //                   (open-loop PWM, no ramp — start/end speeds pinned to the
             //                   cruise PWM short-circuits the trapezoidal profile)
             //
-            // DEFAULT cannot reach here (resolved above), but we route it through
-            // the SYNC_TSHAPE branch defensively to match the historical behaviour.
-            const Routes::BlindMode resolvedBlindMode = _resolveBlindMode(edge);
-
-            switch (resolvedBlindMode)
+            // DEFAULT and STOP_AT_LINE cannot reach this switch: `sal.motionMode`
+            // from `resolveStopAtLine(...)` is guaranteed to be one of the three
+            // concrete velocity bundles (SYNC_TSHAPE / GYRO_TSHAPE / RAW_FLAT). The
+            // resolver already folded the OFF-on-a-STOP_AT_LINE-edge case into the
+            // pipeline blind default, and the forced-REAR 1-board degrade keeps the
+            // edge's own mode — so the substitution that used to live here is gone.
+            // The defensive SYNC_TSHAPE default below remains as belt-and-braces.
+            switch (sal.motionMode)
             {
                 case Routes::BlindMode::GYRO_TSHAPE:
                 {

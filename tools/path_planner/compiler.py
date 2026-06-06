@@ -22,7 +22,12 @@ Primitive vocabulary (forward hops):
   distance. Emitted for :data:`EDGE_PROJECTION` traversals -- used when
   the waypoint has no physical intersection marker beneath the strip.
 * ``("forward", cm)`` -- dead-reckoned forward move. Emitted for
-  :data:`EDGE_BLIND` traversals.
+  :data:`EDGE_BLIND` traversals whose effective ``BlindMode`` is *not*
+  ``STOP_AT_LINE``.
+* ``("stop_at_line", cm)`` -- drive blind toward the expected crossing,
+  arm a line detector near the endpoint, and stop on the perpendicular
+  line (re-anchoring localization). Emitted for :data:`EDGE_BLIND`
+  traversals whose effective ``BlindMode`` is ``STOP_AT_LINE``.
 
 Primitive vocabulary (reverse hops, T12+):
 
@@ -34,10 +39,22 @@ faces along the edge) and dispatches the reverse-mirrored primitive:
 * ``("line_reverse", target_node, line_mode)``
 * ``("blind_reverse", target_node, distance_cm, blind_mode)``
 * ``("projection_reverse", target_node, distance_cm, projection_mode)``
+* ``("stop_at_line_reverse", target_node, distance_cm, blind_mode)`` --
+  a REAR blind hop is mode-sensitive (mirrors the FRONT branch): the
+  per-hop decision runs through
+  :func:`tools.path_planner.sim.runtime.resolve_stop_at_line` (call flag
+  ``AUTO``). A 2-board REAR ``STOP_AT_LINE`` hop emits
+  ``ACT_STOP_AT_LINE_REVERSE`` and re-anchors via the rear board's
+  crossing detection; any non-``STOP_AT_LINE`` REAR edge -- or a
+  forced-REAR ``STOP_AT_LINE`` hop on a 1-board chassis, where the
+  resolver returns ``seek=False`` (no rear board to seek with) -- keeps
+  the dead-reckoned ``ACT_BLIND_REVERSE``. The 4th tuple element is the
+  RAW edge ``blind_mode`` (``resolve_blind_mode(edge)``), not the
+  resolver's motion mode, identical to ``sim/runtime.py``.
 
 The emission shape must stay byte-identical to
 ``PathTrackerSim.go_to(...)`` so the offline simulator and the firmware
-agree on every hop (TC18 cross-module parity).
+agree on every hop (TC10/TC12 cross-module parity).
 """
 
 from __future__ import annotations
@@ -52,6 +69,7 @@ ACT_TURN_REL = "turn_relative"
 ACT_FOLLOW_INT = "follow_line_to_intersection"
 ACT_FOLLOW_DIST = "follow_line_to_distance"
 ACT_FORWARD = "forward"
+ACT_STOP_AT_LINE = "stop_at_line"
 
 Primitive = Tuple[str, Optional[float]]
 
@@ -112,7 +130,9 @@ def compile_path(
        * Emit one motion primitive based on ``edge['type']`` and
          direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
          ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
-         ``EDGE_BLIND`` -> ``(ACT_FORWARD, distance_cm)``.
+         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when the
+         edge's effective :class:`BlindMode` is ``STOP_AT_LINE`` (via
+         :func:`resolve_blind_mode`), else ``(ACT_FORWARD, distance_cm)``.
          REAR: ``EDGE_LINE`` ->
          ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
          ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
@@ -157,14 +177,17 @@ def compile_path(
         ACT_BLIND_REVERSE,
         ACT_LINE_REVERSE,
         ACT_PROJECTION_REVERSE,
+        ACT_STOP_AT_LINE_REVERSE,
         BIDIRECTIONAL_AUTO_ENABLED,
         LINE_BOARD_COUNT,
         Direction,
+        StopAtLine,
         _read_edge_dir_override,
         resolve_blind_mode,
         resolve_direction,
         resolve_line_mode,
         resolve_projection_mode,
+        resolve_stop_at_line,
     )
 
     current_heading = start_heading_deg
@@ -218,12 +241,37 @@ def compile_path(
                     resolve_projection_mode(edge),
                 ))
             elif edge_type == EDGE_BLIND:
-                out.append((
-                    ACT_BLIND_REVERSE,
-                    v,
-                    float(edge["distance_cm"]),
+                # REAR blind is mode-sensitive via the unified resolver: a
+                # 2-board REAR STOP_AT_LINE hop seeks with the rear board and
+                # re-anchors localization (ACT_STOP_AT_LINE_REVERSE), while a
+                # non-STOP_AT_LINE edge -- or a forced-REAR STOP_AT_LINE hop on
+                # a 1-board chassis (resolver returns seek=False) -- dead-reckons
+                # backward (ACT_BLIND_REVERSE). The 4th tuple element is the RAW
+                # edge mode (``resolve_blind_mode(edge)``), NOT ``_motion_mode``,
+                # to stay byte-identical to the REAR branch of
+                # ``PathTrackerSim.go_to`` in ``sim/runtime.py`` (TC10/TC12 gate
+                # the two emission streams against each other).
+                seek, _motion_mode = resolve_stop_at_line(
+                    StopAtLine.AUTO,
                     resolve_blind_mode(edge),
-                ))
+                    PIPELINE_CONFIG.blind,
+                    direction,
+                    LINE_BOARD_COUNT,
+                )
+                if seek:
+                    out.append((
+                        ACT_STOP_AT_LINE_REVERSE,
+                        v,
+                        float(edge["distance_cm"]),
+                        resolve_blind_mode(edge),
+                    ))
+                else:
+                    out.append((
+                        ACT_BLIND_REVERSE,
+                        v,
+                        float(edge["distance_cm"]),
+                        resolve_blind_mode(edge),
+                    ))
             else:
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
@@ -234,7 +282,24 @@ def compile_path(
             elif edge_type == EDGE_PROJECTION:
                 out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
             elif edge_type == EDGE_BLIND:
-                out.append((ACT_FORWARD, float(edge["distance_cm"])))
+                # FRONT blind is mode-sensitive via the unified resolver: a
+                # STOP_AT_LINE edge stops on the physical crossing (and
+                # re-anchors localization downstream) instead of dead-reckoning
+                # forward. Every other BlindMode keeps the plain forward hop.
+                # Mirrors the FRONT branch of ``PathTrackerSim.go_to`` in
+                # ``sim/runtime.py`` (T6); the two emission streams must stay
+                # byte-identical (``test_property_random_walks`` / TC12).
+                seek, _motion_mode = resolve_stop_at_line(
+                    StopAtLine.AUTO,
+                    resolve_blind_mode(edge),
+                    PIPELINE_CONFIG.blind,
+                    direction,
+                    LINE_BOARD_COUNT,
+                )
+                if seek:
+                    out.append((ACT_STOP_AT_LINE, float(edge["distance_cm"])))
+                else:
+                    out.append((ACT_FORWARD, float(edge["distance_cm"])))
             else:
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({u!r}, {v!r})"
@@ -248,6 +313,7 @@ __all__ = [
     "ACT_FOLLOW_INT",
     "ACT_FOLLOW_DIST",
     "ACT_FORWARD",
+    "ACT_STOP_AT_LINE",
     "EDGE_LINE",
     "EDGE_BLIND",
     "EDGE_PROJECTION",

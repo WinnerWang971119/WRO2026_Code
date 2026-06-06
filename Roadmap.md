@@ -126,11 +126,31 @@ foundation is reliable on hardware.
 | P3.7 | Hardware verify `PathTracker` end-to-end (toy + real-field printout) | sw | P3.3, P3.6 | nav metrics |
 | P3.8 | Verify lost-line + missed-intersection recoveries in lab | sw | P3.7 | recovery v1 |
 | P3.9 | Manipulator v0 build (mech track, parallel) | mech | — | mech v0 |
+| P3.10 | Bench-tune `Drive.stopAtLine` arm window + overshoot on the real chassis (B3.7); flag blind hops that drift as `STOP_AT_LINE` in `field_data` | sw | P3.7 | re-anchored blind hops |
 
 **Pull-forward candidates from PHASE2_DEFERRED:** If P3.7 exposes drift on
 the blind edges of the real field, consider pulling forward calibration
 nodes + blind-cost tiers + `wall_zero` (ADR-aligned with Phase 2.5
 deferred work) into a Phase 3.5 sub-task before Phase 4 starts.
+
+**Stop-on-line re-anchor (P3.10, B3.7):** `Drive.stopAtLine(cm)` plus the
+`BlindMode::STOP_AT_LINE` edge override land in this phase as an extension of
+existing modules (`Drive` + `PathTracker`), so no new module is added and the
+"no new modules in Phase 3" rule holds. The verb drives a blind hop, arms a
+line detector near the expected endpoint, stops on the crossing, and re-anchors
+`Localization` via `onIntersection()` — the cheapest mitigation for blind-edge
+drift (Risk #9) short of pulling forward the Phase 2.5 calibration nodes above.
+Reverse stop-at-line is now a supported path on a 2-board chassis (rear board
+seeks, re-anchors on success); logic is CI-tested (host C++ + Python parity via
+`StopAtLinePolicy`). The arm window, overshoot, and physical behavior are
+bench-tuned on the real chassis (see
+[ADR-027](./docs/decisions/027-drive-stop-at-line.md)). Reverse rear-board
+bench (B3.7-reverse) deferred until the rear board is wired.
+
+*Follow-up (out of scope here):* `_updateTurnProfile` has no async stall
+watchdog — the same class of gap that was fixed for the stop-at-line seek. A
+jammed `.async()` turn can still hang the FSM; tracked as a future hardening
+item.
 
 ## 5. Phase 4 — Perception
 
@@ -357,7 +377,7 @@ can lock in.
 | 6 | `field_data.py` revision mismatch vs official 2026 layout | M | H | Encoded from real WRO 2026 mat in P3.4/P3.5 via `pick_xy.py`; SHA256-stamped `routes.h` banner catches stale headers; review against official PDF before each competition freeze. | sw |
 | 7 | A blocking task breaks the 2-minute time guard | M | H | Iron rule 1 (no `delay()` in `update()`); Mission scheduler aborts overrunning tasks (ADR-008). | sw |
 | 8 | Practice field arrives late, blocking Phase 6 / Phase 8 tuning | M | M | Use printed reduced-scale field (P3.4) until full-scale arrives; budget tuning into Phase 8 buffer weeks. | mech |
-| 9 | Encoder slip / dead-reckoning drift during a long task | M | M | Architecture rejects pure dead-reckoning (ADR-001); `Localization` re-anchors at every intersection. If Phase 3 verification exposes blind-edge drift, pull forward Phase 2.5 calibration nodes / `wall_zero`. | sw |
+| 9 | Encoder slip / dead-reckoning drift during a long task | M | M | Architecture rejects pure dead-reckoning (ADR-001); `Localization` re-anchors at every intersection. Blind hops flagged `STOP_AT_LINE` re-anchor on a physical crossing via `Drive.stopAtLine` (ADR-027, B3.7). If Phase 3 verification exposes residual blind-edge drift, pull forward Phase 2.5 calibration nodes / `wall_zero`. | sw |
 | 10 | `Localization` written from outside the module | L | H | Coding criteria checklist in [ARCHITECTURE.md](./ARCHITECTURE.md); ADR-005; enforced in code review. | sw |
 | 11 | Lofaix (competition robot) not mech-ready by Phase 7 entry | M | H | Mech track must deliver Lofaix as a parallel deliverable during Phases 5-6. If slip, P7.0a-P7.0e compress the freeze window, but the `2026-07-21` regional date is fixed. Worst case: compete on the test rover with TT-tuned `Config.h`. | mech |
 | 12 | TT-tuned `Config.h` constants silently misapplied to Lofaix EV3 motors | L | H | Single-line `using ActiveMotor = ...;` toggle in `Config.h` makes the swap one explicit edit + reflash; Doxygen `@warning` on the alias declaration reminds the operator to re-run `Drive.calibrateMotorBias()` after the swap (see [ADR-022](./docs/decisions/022-dual-motor-profile.md)). | sw |
@@ -375,6 +395,7 @@ hardware. IDs are referenced from each phase's "Exit criteria" gates.
 | 3 | B3.4 | T- and +-intersections, 20 trials each | ≥19/20 correct detections per type |
 | 3 | B3.5 | `PathTracker.goTo(name)`, 10 random A→B traversals on real-field printout | ≤1 missed intersection across all 10 runs |
 | 3 | B3.6 | Inject lost-line + missed-intersection in lab | Recoveries trigger and bound within timeout |
+| 3 | B3.7 | `Drive.stopAtLine(cm)` toward a taped perpendicular line, with one intervening line crossed before the arm window, 10 trials | Stops within ±2 cm of the taped line; zero false-triggers on the intervening line; `LINE_NOT_FOUND` fault on a removed line (ADR-027). Reverse stop-at-line logic is CI-tested (host C++ + Python sim parity); physical rear-board bench (B3.7-reverse) is deferred until the rear board is wired. |
 | 4 | B4.1 | Each color sample (Y/B/G/W) shown to the camera's `readSingleColor()` 20× under workshop lighting | ≥18/20 correct per color |
 | 4 | B4.2 | Mosaic pattern card under workshop lighting, robot at fixed stop | All 9 cells correct on ≥9/10 captures |
 | 5 | B5.1 | Manipulator `setLift / setGripper / setArm` range sweep | Reaches commanded position within tolerance + timeout |

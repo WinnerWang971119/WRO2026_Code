@@ -42,6 +42,12 @@
  *                          `LineFollower.isDistanceReached()`.
  *  - `BLIND_FORWARD`     — waits for `Drive.isIdle()` after a dead-reckoned
  *                          forward move.
+ *  - `STOP_AT_LINE`      — waits for `Drive.isIdle()` after a
+ *                          `Drive.stopAtLine(...)` dispatch on a BLIND hop
+ *                          resolved to stop-at-line. On success re-anchors
+ *                          `Localization` via `onIntersection(...)` (a true
+ *                          re-anchor, not a dead-reckon advance); on
+ *                          `Drive.hasFault()` enters `Fault::DRIVE_FAULT`.
  *  - `FAULT`             — latched fault; cleared via `clearFault()` or
  *                          `abort()`.
  *
@@ -115,6 +121,19 @@ public:
      */
     PathTrackerGoToBuilder& setArrivalDirection(Direction d);
 
+    /**
+     * @brief Force stop-at-line behaviour for the BLIND hops on the path.
+     *        Defaults to StopAtLine::AUTO (defer to each edge's BlindMode
+     *        override).
+     * @param s  ON forces stop-at-line on a resolved BLIND hop even when the
+     *           edge is `BlindMode::DEFAULT`; OFF force-disables it even when
+     *           the edge says `STOP_AT_LINE`; AUTO defers to the edge.
+     * @note  The call-site ON/OFF wins over the per-edge BlindMode override;
+     *        AUTO defers to it (mirrors `setArrivalDirection` precedence).
+     *        Only affects hops whose resolved edge is `EdgeType::BLIND`.
+     */
+    PathTrackerGoToBuilder& setStopAtLine(StopAtLine s);
+
 private:
     PathTrackerClass& _owner;
     uint8_t           _goalId;
@@ -122,6 +141,7 @@ private:
     bool              _executed         = false;
     Direction         _routeDirection   = Direction::AUTO;
     Direction         _arrivalDirection = Direction::AUTO;
+    StopAtLine        _stopAtLine       = StopAtLine::AUTO;
 };
 
 class PathTrackerClass
@@ -198,6 +218,7 @@ private:
         LINE_OVERSHOOT,
         PROJECTION_FOLLOW,
         BLIND_FORWARD,
+        STOP_AT_LINE,
         FAULT
     };
 
@@ -214,18 +235,22 @@ private:
      *                          destination; wins over `route_direction`
      *                          for that hop. See `_resolveDirection` for
      *                          precedence semantics.
+     *  - `stop_at_line`      — call-site stop-at-line override for the path's
+     *                          BLIND hops; ON/OFF wins over the per-edge
+     *                          BlindMode, AUTO defers to it.
      *
-     * Both default to `Direction::AUTO` (= 0), so zero-initialized FIFO
-     * slots yield AUTO naturally — no constructor needed.
+     * All three default to their `AUTO` enumerator (= 0), so zero-initialized
+     * FIFO slots yield AUTO naturally — no constructor needed.
      *
      * Renamed from `GoalEntry` (PR3 internals cleanup) — the public
      * `goTo()` verb is unchanged.
      */
     struct NavEntry
     {
-        uint8_t   nodeId;
-        Direction route_direction;      ///< Forces every hop's direction (default AUTO).
-        Direction arrival_direction;    ///< Forces final-hop direction (default AUTO).
+        uint8_t    nodeId;
+        Direction  route_direction;      ///< Forces every hop's direction (default AUTO).
+        Direction  arrival_direction;    ///< Forces final-hop direction (default AUTO).
+        StopAtLine stop_at_line;         ///< Forces BLIND-hop stop-at-line (default AUTO).
     };
 
     bool _enqueue(uint8_t goalId, Direction routeDir, Direction arrivalDir);
@@ -239,10 +264,11 @@ private:
     void _drainBlocking();
 
     void _applyGoToBuilder(
-        uint8_t   goalId,
-        bool      blocking,
-        Direction routeDir,
-        Direction arrivalDir);
+        uint8_t    goalId,
+        bool       blocking,
+        Direction  routeDir,
+        Direction  arrivalDir,
+        StopAtLine stopAtLine);
 
     NavEntry _queue[Config::PATH_QUEUE_CAPACITY];
     uint8_t  _qHead  = 0;
@@ -264,6 +290,15 @@ private:
     /// the auto algorithm. See ADR-023 and issue #19.
     Direction _activeRouteDirection   = Direction::AUTO;
     Direction _activeArrivalDirection = Direction::AUTO;
+
+    /// @brief Call-site stop-at-line override cached for the IN-FLIGHT goal.
+    ///
+    /// Populated at `DEQUEUE` from the popped `NavEntry` (parallel to the
+    /// `Direction` overrides above) and consumed by the BLIND-hop dispatch in
+    /// `update()`: ON/OFF wins over the edge's `BlindMode` override, AUTO
+    /// defers to it. Defaults to `StopAtLine::AUTO` — a bare `goTo(...)` with
+    /// no modifier keeps it AUTO, so the per-edge BlindMode governs. See ADR-027.
+    StopAtLine _activeStopAtLine = StopAtLine::AUTO;
 
     /// @brief Pass-through eligibility for the in-flight LINE_OVERSHOOT.
     ///
