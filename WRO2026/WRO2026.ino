@@ -144,7 +144,16 @@ void cooperativeTick()
     Tasks.update();          // T8: housekeeping; no FSM in this plan
     PathTracker.update();
     Mission.update();
-    EventTrace.update();
+
+    // The calibration menu owns the OLED while open (FINDING #4): EventTrace's
+    // dirty-flag repaint would clearDisplay() and paint the event ring over the
+    // menu within ~one tick. Suppress its render while OPEN. The pending _dirty
+    // flag persists, so the first update() after the menu closes repaints the
+    // accumulated events.
+    if (_calMenuState != CalMenuState::OPEN)
+    {
+        EventTrace.update();
+    }
 }
 
 /**
