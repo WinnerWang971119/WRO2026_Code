@@ -150,14 +150,17 @@ uint8_t DriveClass::setSpeed(int16_t L, int16_t R)
 
 uint8_t DriveClass::setSpeedSync(int16_t L, int16_t R)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    return MiniR4.DriveDC.MoveSync(L, R);
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap each wheel through the
+    // shared PWM cap/deadband floor so this continuous path clamps uniformly with the RAW path
+    // and the profile emitter (finding #14) — the library documents the power range as -100..100.
+    return MiniR4.DriveDC.MoveSync(deadbandSnap(L), deadbandSnap(R));
 }
 
 uint8_t DriveClass::forwardGyro(int16_t power)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    return MiniR4.DriveDC.MoveGyro(power, _heldYaw);
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the power through the
+    // shared PWM cap/deadband floor for uniform clamping (finding #14).
+    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), _heldYaw);
 }
 
 uint8_t DriveClass::stop(bool brake)
@@ -213,10 +216,13 @@ uint8_t DriveClass::_execDriveDistRaw(int16_t power, float cm, bool brake, bool 
 
 uint8_t DriveClass::_execDriveDistSync(int16_t power, float cm, bool brake, bool blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint16_t encDeg = cmToEncDeg(cm);
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
+    // the shared PWM cap/deadband floor so this executor clamps uniformly with the RAW/profile
+    // paths (finding #14) — the library documents the power range as -100..100.
+    const int16_t  snapped = deadbandSnap(power);
+    const uint16_t encDeg  = cmToEncDeg(cm);
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveSyncDegs(power, power, encDeg, brake, !blocking);
+        MiniR4.DriveDC.MoveSyncDegs(snapped, snapped, encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -230,10 +236,12 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
                                        bool    brake,
                                        bool    blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
+    // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
+    // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
     const uint16_t encDeg = cmToEncDeg(cm);
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveGyroDegs(power, yaw, encDeg, brake, !blocking);
+        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), yaw, encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -263,8 +271,11 @@ uint8_t DriveClass::_execDriveTimeRaw(int16_t power, float sec, bool brake, bool
 
 uint8_t DriveClass::_execDriveTimeSync(int16_t power, float sec, bool brake, bool blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(power, power, sec, brake, !blocking);
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
+    // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
+    // #14) — the library documents the power range as -100..100.
+    const int16_t snapped = deadbandSnap(power);
+    const uint8_t rc = MiniR4.DriveDC.MoveSyncTime(snapped, snapped, sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -278,8 +289,10 @@ uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
                                        bool    brake,
                                        bool    blocking)
 {
-    // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(power, yaw, sec, brake, !blocking);
+    // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
+    // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
+    // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
+    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), yaw, sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
