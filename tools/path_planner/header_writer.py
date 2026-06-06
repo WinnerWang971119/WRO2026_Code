@@ -518,6 +518,12 @@ def emit_routes(
     field_data_source_path = Path(field_data_source_path)
 
     node_names: List[str] = sorted(field_data.NODES.keys())
+    n_nodes = len(node_names)
+    if n_nodes >= 255:
+        raise ValueError(
+            f"emit_routes: N_NODES={n_nodes} exceeds the uint8_t/NEXT_HOP_NONE(0xFF)"
+            " ceiling (max 254 nodes)"
+        )
     index_of = _build_index_lookup(node_names)
 
     if field_data.START_NODE not in index_of:
