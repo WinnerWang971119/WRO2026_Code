@@ -986,4 +986,10 @@ namespace Config
     constexpr uint32_t MISSION_HEARTBEAT_MS = 500;
 }    // namespace Config
 
+// Manipulator config + its validation checks (split out per ADR-031 / Issue #39).
+// ConfigChecks.h MUST be included LAST — it references both the manipulator symbols
+// (from ConfigManipulator.h) and the drivetrain symbols (MOTOR_LEFT_ID/RIGHT_ID, above).
+#include "ConfigManipulator.h"
+#include "ConfigChecks.h"
+
 #endif    // CONFIG_H
