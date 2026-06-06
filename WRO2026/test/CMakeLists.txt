@@ -17,10 +17,12 @@
 #   cmake --build build/test
 #   ctest --test-dir build/test --output-on-failure
 #
-# CI integration: NOT done in this PR. The follow-up will add a `host-compile-tests`
-# job to `.github/workflows/ci.yml` once this harness is validated locally. The job
-# should install a C++ compiler (g++ on ubuntu-latest is built-in), then run the
-# three commands above.
+# CI integration: this harness IS CI-enforced. The `host-tests` job
+# (name: "Host tests") in `.github/workflows/ci.yml` runs on every push and pull
+# request, using the built-in g++ on ubuntu-latest to run the three commands above:
+#   cmake -S WRO2026/test -B build/test
+#   cmake --build build/test
+#   ctest --test-dir build/test --output-on-failure
 # =========================================================================================
 
 cmake_minimum_required(VERSION 3.16)
