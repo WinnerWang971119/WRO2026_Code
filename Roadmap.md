@@ -186,7 +186,7 @@ composes PathTracker + Manipulator + camera module.
 | P5.1 | Replace `Manipulator` stub with real `setLift/setGripper/setArm` against v0 | sw | P4.7 | manipulator sw v1 |
 | P5.2 | Tune servo ranges, neutral positions, grip force | both | P5.1 | tuned manipulator |
 | P5.3 | Install permanent camera mount (serves both 3×3 + single-cell views); re-baseline calibration | both | P5.2 | locked geometry |
-| P5.4 | `Tasks.h/.cpp` framework (`start/update/isDone/abort` per scoring action) | sw | P5.1 | tasks framework |
+| P5.4 | `Tasks` framework (`TasksClass` singleton; blocking-method bodies registered by name; `Mission.task()` verb) — see [ADR-025](./docs/decisions/025-tasks-as-blocking-methods.md) | sw | P5.1 | tasks framework shipped |
 | P5.5 | First task FSM — tool delivery (drive → grip → drive → drop → verify) | sw | P5.4 | tool task |
 | P5.6 | Mission DSL `.task("name", args)` verb + dispatcher | sw | P5.4 | DSL extension |
 | P5.7 | End-to-end tool delivery on test mat, 5 trials | both | P5.5, P5.6 | first scoring run |

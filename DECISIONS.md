@@ -26,6 +26,8 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-008 — Greedy score-per-second scheduling + 2-minute time guard](./docs/decisions/008-mission-scheduling-and-time-guard.md) (Phase 4)
 - [ADR-009 — Three named failure modes get explicit bounded recovery](./docs/decisions/009-failure-recovery-first-class.md) (Phase 4)
 - [ADR-010 — Lightweight in-memory logging only — `EventTrace` + Serial heartbeat](./docs/decisions/010-lightweight-logging-only.md)
+- [ADR-025 — Tasks layer composes subsystem calls as blocking method bodies; no JSON authoring](./docs/decisions/025-tasks-as-blocking-methods.md)
+- [ADR-026 — `Tasks.runTask` is non-reentrant — nested dispatch is rejected](./docs/decisions/026-tasks-runtask-non-reentrant.md)
 
 ### Drive-layer
 
@@ -51,7 +53,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 19 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024 |
+| Implemented | 21 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026 |
 | Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
 | Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |

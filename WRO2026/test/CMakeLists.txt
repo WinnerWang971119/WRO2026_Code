@@ -106,24 +106,33 @@ endif()
 # `Arduino.h` and `MatrixMiniR4.h` are angle-bracket includes inside
 # LineFollower.h, so the include-path search alone picks `mocks/`. No
 # force-include needed for those two.
+#
+# **Applied PER TARGET, not directory-wide**, so the compile-fail target
+# (`test_tasks_dispatch_overflow`, WILL_FAIL TRUE) does NOT inherit them.
+# Directory-wide force-includes would silently disarm AC9-negative: any
+# unrelated typo in a mock header would cause the overflow build to fail
+# for the wrong reason and still count as "passing." See PR #35 review
+# finding S1 / C8.
 # -----------------------------------------------------------------------------------------
-if(MSVC)
-    add_compile_options(
-        "/FI${MOCKS_DIR}/Drive.h"
-        "/FI${MOCKS_DIR}/WROLineArray.h"
-        "/FI${MOCKS_DIR}/Intersection.h"
-    )
-else()
-    # Use the `SHELL:` prefix so CMake keeps each `-include <path>` pair atomic. Without it,
-    # CMake de-duplicates the repeated `-include` flag, collapsing the three to one and
-    # leaving the paths as bare arguments -- g++ then treats them as extra source files and
-    # fails with "cannot specify '-o' with '-c' ... with multiple files".
-    add_compile_options(
-        "SHELL:-include ${MOCKS_DIR}/Drive.h"
-        "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
-        "SHELL:-include ${MOCKS_DIR}/Intersection.h"
-    )
-endif()
+function(add_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${MOCKS_DIR}/Drive.h"
+            "/FI${MOCKS_DIR}/WROLineArray.h"
+            "/FI${MOCKS_DIR}/Intersection.h"
+        )
+    else()
+        # Use the `SHELL:` prefix so CMake keeps each `-include <path>` pair atomic. Without it,
+        # CMake de-duplicates the repeated `-include` flag, collapsing the three to one and
+        # leaving the paths as bare arguments -- g++ then treats them as extra source files and
+        # fails with "cannot specify '-o' with '-c' ... with multiple files".
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
+            "SHELL:-include ${MOCKS_DIR}/Intersection.h"
+        )
+    endif()
+endfunction()
 
 # =========================================================================================
 # Test executable #1 — LineFollower overshoot / brake-on-gate / junction-freeze.
@@ -135,6 +144,7 @@ add_executable(test_line_follower_overshoot
     ${MOCK_SOURCES}
 )
 target_include_directories(test_line_follower_overshoot PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_line_follower_overshoot)
 add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 
 # =========================================================================================
@@ -148,6 +158,7 @@ add_executable(test_path_tracker_passthrough_on
 target_compile_definitions(test_path_tracker_passthrough_on
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=true)
 target_include_directories(test_path_tracker_passthrough_on PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_passthrough_on)
 add_test(NAME path_tracker_passthrough_on COMMAND test_path_tracker_passthrough_on)
 
 # =========================================================================================
@@ -161,6 +172,7 @@ add_executable(test_path_tracker_passthrough_off
 target_compile_definitions(test_path_tracker_passthrough_off
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_passthrough_off PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_passthrough_off)
 add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough_off)
 
 # =========================================================================================
@@ -181,6 +193,7 @@ add_executable(test_path_tracker_bidirectional_on
 target_compile_definitions(test_path_tracker_bidirectional_on
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true)
 target_include_directories(test_path_tracker_bidirectional_on PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_bidirectional_on)
 add_test(NAME path_tracker_bidirectional_on COMMAND test_path_tracker_bidirectional_on)
 
 # =========================================================================================
@@ -198,4 +211,68 @@ add_executable(test_path_tracker_bidirectional_off
 target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false)
 target_include_directories(test_path_tracker_bidirectional_off PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_bidirectional_off)
 add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
+
+# =========================================================================================
+# Test executable #4 — Tasks framework dispatch (T9 of the Tasks plan).
+#
+# Exercises TC1..TC3, TC5..TC12 of the Tasks-framework plan
+# (`docs/plans/2026-05-26-tasks-framework-mission-task-verb.md`). Satisfies AC10
+# and all unit/integration ACs (AC2..AC9 positive). The compile-fail target
+# below covers TC4 / AC9 negative.
+#
+# Rationale for NOT linking the real `Tasks.cpp` / `Mission.cpp` (mirrors the
+# precedent established by `test_path_tracker_passthrough.cpp` and
+# `test_path_tracker_bidirectional.cpp`): the test inline-mirrors the slice of
+# Mission's TASK-case FSM + TasksClass's registry + dispatch + RAII guard so
+# the assertions don't need to mock the full PathTracker / Drive / LineFollower
+# / MatrixMiniR4 / EventTrace surface. Mirror sites are annotated
+# `// MIRROR: <path>:<line>` for drift detection at PR-review time. Real
+# production POD types (`TaskArgs`, `TaskRegistryEntry`) are pulled in from
+# `WRO2026/TasksTypes.h` so the union-layout / size invariants are bound to
+# the real definitions at compile time.
+# =========================================================================================
+add_executable(test_tasks_dispatch
+    ${TEST_DIR}/test_tasks_dispatch.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_tasks_dispatch)
+add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
+
+# =========================================================================================
+# Test executable #5 — TC4 / AC9 negative (compile-fail target).
+#
+# Proves the `static_assert` in `MissionClass::task<Args...>` fires when the
+# variadic argument pack exceeds `Config::MAX_TASK_ARG_BYTES`. The build is
+# expected to FAIL; ctest uses `WILL_FAIL TRUE` to interpret the build's
+# non-zero exit as a passing test.
+#
+# `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep the target out of the
+# default `cmake --build .` so a regular build does not break. The ctest
+# command below invokes the per-target build on demand.
+# =========================================================================================
+add_executable(test_tasks_dispatch_overflow
+    ${TEST_DIR}/test_tasks_dispatch_overflow.cpp
+)
+set_target_properties(test_tasks_dispatch_overflow PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_tasks_dispatch_overflow PRIVATE ${COMMON_INCLUDES})
+
+# DELIBERATELY no `add_mock_force_includes(...)` call here. The compile-fail
+# target with `WILL_FAIL TRUE` interprets ANY non-zero build exit code as a
+# passing test, so a typo in any force-included mock header would silently
+# disarm AC9-negative. The overflow TU only references TasksTypes.h + the
+# synthetic `Seventeen` struct + the inline `check_overflow` template, so it
+# does not need Drive/WROLineArray/Intersection mocks at all. The only path
+# that can fail this build is the `static_assert("Mission.task args exceed
+# MAX_TASK_ARG_BYTES")` itself — which is precisely what AC9-negative wants.
+
+add_test(NAME tasks_overflow_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_tasks_dispatch_overflow
+)
+set_tests_properties(tasks_overflow_compile_fail PROPERTIES WILL_FAIL TRUE)

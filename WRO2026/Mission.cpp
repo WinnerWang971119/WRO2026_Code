@@ -15,6 +15,7 @@
 #include "FieldMap.h"
 #include "LineFollower.h"
 #include "PathTracker.h"
+#include "Tasks.h"
 #include "routes.h"
 
 MissionClass Mission;
@@ -28,6 +29,7 @@ bool MissionClass::begin()
     _faultBeepIdx       = 0;
     _faultPhaseStart_ms = 0;
     _btnPrev            = false;
+    _buildError         = false;
     _lastPushOk         = false;
     return true;
 }
@@ -141,11 +143,21 @@ MissionClass& MissionClass::setArrivalDirection(Direction d)
 
 void MissionClass::start()
 {
+    if (_buildError)
+    {
+        Serial.println(F("[Mission] start refused: build error (unknown task name at queue time)"));
+        EventTrace.pushEvent("MIS BUILD ERR");
+        _enterFaultBeeping(millis());
+        return;
+    }
     if (_count == 0)
     {
         Serial.println(F("[Mission] start with empty queue; no-op"));
         return;
     }
+    // Clear the abort latch from any previous mission run so a task body
+    // polling Tasks.isAborted() in this run sees a clean state.
+    Tasks.clearAbort();
     _idx = 0;
     _stepState = StepState::ENTER;
     _state = State::RUNNING;
@@ -162,6 +174,12 @@ void MissionClass::abort()
     // BLIND_FORWARD) and its next update() would resume the route.
     // LineFollower must be disabled too so the tracer stops driving the
     // motors on the same tick.
+    // T7: Tasks.abort() sets the framework-level _aborted flag. In this
+    // plan the flag is wired but subsystems do not yet poll it; an
+    // in-flight task body unwinds because PathTracker.abort() / Drive.stop
+    // below halt the chassis and subsequent subsystem builders return
+    // false to the task body.
+    Tasks.abort();
     PathTracker.abort();
     LineFollower.setEnabled(false);
     Drive.stop(true);
@@ -170,6 +188,7 @@ void MissionClass::abort()
     _idx         = 0;
     _state       = State::IDLE;
     _stepState   = StepState::ENTER;
+    _buildError  = false;
     _lastPushOk  = false;
     Serial.println(F("[Mission] abort"));
 }
@@ -250,6 +269,13 @@ void MissionClass::_advanceStep()
 
 void MissionClass::update()
 {
+    // T6: short-circuit when called from inside a blocking task body
+    // (the body re-enters cooperativeTick() while waiting on PathTracker
+    // / Drive sync drains; without this guard the Mission FSM would
+    // recurse into the same TASK step). Tasks.inTask() is true between
+    // runTask() entry and return (RAII scope-exit guard inside Tasks).
+    if (Tasks.inTask()) { return; }
+
     switch (_state)
     {
         case State::IDLE:
@@ -377,6 +403,78 @@ void MissionClass::update()
                     }
                     break;
                 }
+
+                case StepType::TASK:
+                {
+                    if (_stepState == StepState::ENTER)
+                    {
+                        const TaskRegistryEntry* entry =
+                            Tasks.findTask(s.task_name == nullptr ? "" : s.task_name);
+                        if (entry == nullptr)
+                        {
+                            Serial.print(F("[Mission] unknown task '"));
+                            Serial.print(s.task_name == nullptr ? "?" : s.task_name);
+                            Serial.println(F("'"));
+                            EventTrace.pushEvent("NV TASK");
+                            _enterFaultBeeping(millis());
+                            return;
+                        }
+
+                        // Boundary event before dispatch. Tags are kept short
+                        // (3 chars + space) so the OLED's MAX_LINE_LEN=20 budget
+                        // leaves 15 chars for the task name — fits Phase-5/6
+                        // names like "mosaicPlace" / "parkInBay" / "debugYield"
+                        // without truncation.
+                        char buf[EventTraceClass::MAX_LINE_LEN];
+                        snprintf(buf, sizeof(buf), "T> %s",
+                                 s.task_name == nullptr ? "?" : s.task_name);
+                        EventTrace.pushEvent(buf);
+
+                        const bool ok = Tasks.runTask(s.task_name, s.task_args);
+
+                        // Post-runTask fault check — a PathTracker fault that latched
+                        // mid-task did NOT trigger the top-of-RUNNING check at line 248
+                        // because the inTask() guard short-circuited Mission.update().
+                        // Check here so a task-internal fault triggers the fault path
+                        // BEFORE we advance past the step (mirrors how GOTO never
+                        // advances on a faulted leg). Pass millis() fresh — `now`
+                        // captured at the top of update() is stale by however long
+                        // the (potentially multi-second) task body ran, and using
+                        // the stale value would collapse the FAULT_BEEPING beep
+                        // schedule.
+                        if (PathTracker.hasFault())
+                        {
+                            _emitFault();
+                            _enterFaultBeeping(millis());
+                            return;
+                        }
+
+                        // If the task body called Mission.abort() mid-flight,
+                        // _state is now IDLE and _count/_idx have been reset.
+                        // Bail BEFORE pushing a misleading "TASK OK" event or
+                        // advancing _idx past _count — the operator's abort
+                        // should not be papered over by a "task completed" log.
+                        if (_state != State::RUNNING)
+                        {
+                            return;
+                        }
+
+                        snprintf(buf, sizeof(buf), ok ? "T+ %s" : "T- %s",
+                                 s.task_name == nullptr ? "?" : s.task_name);
+                        EventTrace.pushEvent(buf);
+                        if (!ok)
+                        {
+                            Serial.print(F("[Mission] task '"));
+                            Serial.print(s.task_name == nullptr ? "?" : s.task_name);
+                            Serial.println(F("' yielded"));
+                        }
+                        _advanceStep();
+                    }
+                    // No ACTIVE branch — runTask is fake-blocking; the in-flight period
+                    // is fully covered by Tasks.inTask() short-circuiting Mission.update()
+                    // at the top. _stepState stays in ENTER until _advanceStep() resets it.
+                    break;
+                }
             }
             return;
         }
@@ -433,9 +531,10 @@ void MissionClass::update()
                 }
                 // Queue was cleared on fault entry; resetting indices is
                 // belt-and-braces in case a stale path slipped through.
-                _count = 0;
-                _idx   = 0;
-                _state = State::IDLE;
+                _count       = 0;
+                _idx         = 0;
+                _state       = State::IDLE;
+                _buildError  = false;    // clear so a new buildMission can re-arm
                 Serial.println(F("[Mission] fault cleared; mission ended"));
                 EventTrace.pushEvent("MIS RESET");
             }
