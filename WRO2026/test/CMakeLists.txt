@@ -108,10 +108,11 @@ endif()
 # force-include needed for those two.
 #
 # **Applied PER TARGET, not directory-wide**, so the compile-fail target
-# (`test_tasks_dispatch_overflow`, WILL_FAIL TRUE) does NOT inherit them.
-# Directory-wide force-includes would silently disarm AC9-negative: any
-# unrelated typo in a mock header would cause the overflow build to fail
-# for the wrong reason and still count as "passing." See PR #35 review
+# (`test_tasks_dispatch_overflow`, PASS_REGULAR_EXPRESSION on the static_assert
+# diagnostic) does NOT inherit them. Directory-wide force-includes would weaken
+# AC9-negative: any unrelated typo in a mock header would make the overflow build
+# fail without printing the `MAX_TASK_ARG_BYTES` message, so the target would no
+# longer isolate the intended static_assert. See PR #35 review
 # finding S1 / C8.
 # -----------------------------------------------------------------------------------------
 function(add_mock_force_includes target)
@@ -297,8 +298,21 @@ add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
 #
 # Proves the `static_assert` in `MissionClass::task<Args...>` fires when the
 # variadic argument pack exceeds `Config::MAX_TASK_ARG_BYTES`. The build is
-# expected to FAIL; ctest uses `WILL_FAIL TRUE` to interpret the build's
-# non-zero exit as a passing test.
+# expected to FAIL; ctest uses
+# `PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES"`
+# to require that the build output contains the intended static_assert
+# diagnostic. The regex anchors on the FULL assert message, not the bare
+# `MAX_TASK_ARG_BYTES` token — TasksTypes.h carries its own layout
+# static_assert that also mentions that token, so a TasksTypes.h / Config.h
+# break could surface the bare token and false-PASS; the full-message anchor
+# matches only the intended assert. When PASS_REGULAR_EXPRESSION is set, ctest
+# decides pass/fail purely on whether the regex matches the captured output and
+# IGNORES the process exit code — so the test PASSES only when the build prints
+# the full `Mission.task args exceed MAX_TASK_ARG_BYTES` message, and FAILS if
+# the build broke for any unrelated reason (toolchain break, stale generator,
+# an unrelated TasksTypes.h / Config.h edit). This distinguishes "the intended
+# static_assert fired" from "the toolchain broke" — which a bare WILL_FAIL,
+# passing on ANY non-zero exit, could not.
 #
 # `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep the target out of the
 # default `cmake --build .` so a regular build does not break. The ctest
@@ -313,17 +327,20 @@ set_target_properties(test_tasks_dispatch_overflow PROPERTIES
 )
 target_include_directories(test_tasks_dispatch_overflow PRIVATE ${COMMON_INCLUDES})
 
-# DELIBERATELY no `add_mock_force_includes(...)` call here. The compile-fail
-# target with `WILL_FAIL TRUE` interprets ANY non-zero build exit code as a
-# passing test, so a typo in any force-included mock header would silently
-# disarm AC9-negative. The overflow TU only references TasksTypes.h + the
-# synthetic `Seventeen` struct + the inline `check_overflow` template, so it
-# does not need Drive/WROLineArray/Intersection mocks at all. The only path
-# that can fail this build is the `static_assert("Mission.task args exceed
-# MAX_TASK_ARG_BYTES")` itself — which is precisely what AC9-negative wants.
+# DELIBERATELY no `add_mock_force_includes(...)` call here. A typo in any
+# force-included mock header would make this build fail for the wrong reason —
+# without printing the `MAX_TASK_ARG_BYTES` diagnostic — and PASS_REGULAR_EXPRESSION
+# would then correctly FAIL the test, but more importantly the target would no
+# longer isolate AC9-negative to the intended static_assert. The overflow TU only
+# references TasksTypes.h + the synthetic `Seventeen` struct + the inline
+# `check_overflow` template, so it does not need Drive/WROLineArray/Intersection
+# mocks at all. The only path that can produce the `static_assert("Mission.task
+# args exceed MAX_TASK_ARG_BYTES")` diagnostic is the assert itself — which is
+# precisely what AC9-negative wants.
 
 add_test(NAME tasks_overflow_compile_fail
     COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target test_tasks_dispatch_overflow
 )
-set_tests_properties(tasks_overflow_compile_fail PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(tasks_overflow_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES")
