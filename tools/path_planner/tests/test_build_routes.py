@@ -11,6 +11,7 @@ import pytest
 
 from tools.path_planner import build_routes
 from tools.path_planner import field_data as real_field_data
+from tools.path_planner.tests.fixtures import toy_field_data
 
 _FIELD_ATTRS = (
     "NODES",
@@ -29,6 +30,21 @@ _FIELD_ATTRS = (
 
 def _clone_field_data() -> SimpleNamespace:
     snapshot = {attr: copy.deepcopy(getattr(real_field_data, attr)) for attr in _FIELD_ATTRS}
+    return SimpleNamespace(**snapshot)
+
+
+def _clone_toy_field_data() -> SimpleNamespace:
+    """Deep-copy the stable toy fixture into a standalone field-data object.
+
+    Sourced from ``tools.path_planner.tests.fixtures.toy_field_data`` rather
+    than the live ``field_data`` module so editor saves to the canonical
+    ``field_data.json`` cannot change which nodes exist or how they connect
+    (see ADR-022 and the fixture's own docstring). Returning a fresh
+    :class:`SimpleNamespace` keeps mutations local to the caller so the
+    shared fixture module stays untouched for sibling tests.
+    """
+    snapshot = {attr: copy.deepcopy(getattr(toy_field_data, attr)) for attr in _FIELD_ATTRS}
+    snapshot["EDGES"] = copy.deepcopy(getattr(toy_field_data, "EDGES", []))
     return SimpleNamespace(**snapshot)
 
 
@@ -94,7 +110,12 @@ def test_run_verbose_logs_to_stderr(tmp_path, capsys):
 
 
 def test_run_disconnected_node_warns_but_succeeds(tmp_path, monkeypatch, capsys):
-    fd = _clone_field_data()
+    # Use the stable toy fixture, not the live field_data module: in the toy
+    # layout node "G" is a blind node whose only edge is the BLIND_EDGES pair
+    # ("B", "G"). Emptying BLIND_EDGES therefore isolates "G" deterministically,
+    # so build_graph's "no incident edges" UserWarning fires regardless of how
+    # the editor-mutable field_data.json evolves (trace #71).
+    fd = _clone_toy_field_data()
     fd.BLIND_EDGES = []
     monkeypatch.setattr("tools.path_planner.build_routes.field_data", fd)
     out_dir = tmp_path / "out"
@@ -106,3 +127,6 @@ def test_run_disconnected_node_warns_but_succeeds(tmp_path, monkeypatch, capsys)
     assert (out_dir / "routes.h").exists()
     assert (out_dir / "routes.cpp").exists()
     assert "WARN:" in captured.err
+    # The isolation of "G" must be the cause -- guard against the warning
+    # coming only from an unrelated incidental isolated node.
+    assert "'G'" in captured.err

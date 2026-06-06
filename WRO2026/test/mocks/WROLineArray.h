@@ -59,6 +59,7 @@ public:
         _junctionType = (uint8_t) JunctionType::NONE;
         _reverse      = false;
         _setReverseCallCount = 0;
+        _updateCallCount     = 0;
     }
 
     // ------------------------------------------------------------------ surface used by LineFollower / Intersection
@@ -66,6 +67,11 @@ public:
     float   getError()         { return _error; }
     bool    isOnline()         { return _isOnline; }
     uint8_t getJunctionType()  { return _junctionType; }
+
+    // Per-tick refresh hook. On hardware this re-samples the board; the mock's getters
+    // already return whatever the test set, so it just records the call so a test can
+    // assert the blocking-wait refresh happened (production calls it in its wait loops).
+    void update()              { _updateCallCount++; }
 
     void setReverseActive(bool reverse)
     {
@@ -83,6 +89,7 @@ public:
     void mockSetJunctionTypeRaw(uint8_t v)  { _junctionType = v; }
 
     uint32_t mockSetReverseCallCount() const { return _setReverseCallCount; }
+    uint32_t mockUpdateCallCount() const { return _updateCallCount; }
 
 private:
     float    _error        = 0.0f;
@@ -90,6 +97,7 @@ private:
     uint8_t  _junctionType = (uint8_t) JunctionType::NONE;
     bool     _reverse      = false;
     uint32_t _setReverseCallCount = 0;
+    uint32_t _updateCallCount     = 0;
 };
 
 extern WROLineArrayClass LineArray;

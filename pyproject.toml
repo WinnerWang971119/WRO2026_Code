@@ -20,3 +20,25 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tools"]
+
+[tool.pytest.ini_options]
+# Pin the discovery root so `pytest` (no args) only collects the path-planner
+# suite -- the WRO2026/ firmware tree has no Python tests.
+testpaths = ["tools/path_planner/tests"]
+# Warning policy is INTENTIONAL, not pytest's silent default (trace #73).
+#
+# We deliberately do NOT use `error` as the base filter: build_graph emits an
+# incidental UserWarning ("Node '<name>' has no incident edges ...") on every
+# fixture that carries an intentionally-disconnected node (e.g. the toy
+# fixture's P1, and the disconnected-node CLI test). Those warnings are
+# expected output, so escalating all warnings to errors would turn ~14 green
+# tests red. Tests that assert ON a warning still use pytest.warns /
+# catch_warnings locally; this block just makes the global stance explicit.
+#
+# `always` keeps every warning visible in the run summary (rather than the
+# once-per-location dedup) without making any fatal. To tighten later, flip the
+# base to `error` and prepend targeted `ignore::` lines for each known-benign
+# category instead of relaxing the whole suite.
+filterwarnings = [
+    "always",
+]

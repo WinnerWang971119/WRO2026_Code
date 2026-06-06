@@ -68,6 +68,24 @@ namespace
     // production and the host-compile test target link the same definition.
     // See ADR-024 and the PR #34 review.
 
+    /// Emit the standard REVERSE_UNAVAILABLE diagnostic. Shared by both guard sites
+    /// (the load-bearing pre-turn guard in `_onPlanNextHop` and the defensive post-turn
+    /// guard in `_dispatchEdgeAfterTurn`) so the two messages cannot drift; @p site names
+    /// which guard fired. The caller still issues `_enterFault(...)`.
+    void _printReverseUnavailable(uint8_t from, uint8_t to, Routes::EdgeType edgeType,
+                                  const __FlashStringHelper* site)
+    {
+        Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
+        Serial.print(edgeType == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+        Serial.print(F(" at u="));
+        Serial.print(from);
+        Serial.print(F(" v="));
+        Serial.print(to);
+        Serial.print(F(" requires rear board ("));
+        Serial.print(site);
+        Serial.println(F(")"));
+    }
+
     /**
      * @brief Map a `Routes::LineMode` to a `Config::SpeedPreset` for
      *        `LineFollower.setPreset(...)`.
@@ -462,9 +480,9 @@ void PathTrackerClass::update()
                 // See ADR-023 and issue #19.
                 //
                 // Wrap-normalize MUST match the sim's `normalize_turn` so the
-                // 359.5°/0.0° boundary classifies the same on both sides.
-                // TODO: extract the wrap-normalize loop (duplicated in
-                //       `_onPlanNextHop`) into a `WROMath` free helper.
+                // 359.5°/0.0° boundary classifies the same on both sides. Uses the
+                // shared `NavTypes.h::wrapDeltaDeg` helper (was an inlined loop here,
+                // in `_onPlanNextHop`, and in `DirectionPolicy.h`).
                 // -----------------------------------------------------------------
                 _passThrough = false;
                 if (Config::PATH_PASS_THROUGH_ENABLED && _nextHop != _destinationNode)
@@ -510,9 +528,7 @@ void PathTrackerClass::update()
                                 if (outboundBody < 0.0f) outboundBody += 360.0f;
                             }
 
-                            float delta = outboundBody - inboundBody;
-                            while (delta >   180.0f) { delta -= 360.0f; }
-                            while (delta <= -180.0f) { delta += 360.0f; }
+                            const float delta = wrapDeltaDeg(outboundBody - inboundBody);
 
                             // Pass-through requires BOTH (1) collinear body
                             // headings AND (2) matching direction across the
@@ -548,13 +564,20 @@ void PathTrackerClass::update()
                 // Making the direction explicit at every re-arm point removes
                 // the implicit coupling.
                 const bool overshootReverse = (_resolvedDirection == Direction::REAR);
+                // Dead-reckon with the axle offset of the board that LED this hop. A REAR
+                // hop tracked with the front board's offset lands off-node and feeds that
+                // error into the next dead-reckoned hop, so a reverse overshoot uses the
+                // rear board's own offset.
+                const float overshootAxleOffsetCm =
+                    overshootReverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                                     : Config::LINE_SENSOR_AXLE_OFFSET_CM;
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
                             .setTShapeRampDown(!_passThrough)
                             .setOvershootMode(true)
                             .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
-                            .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
+                            .setDistanceTarget(overshootAxleOffsetCm);
                 _state = State::LINE_OVERSHOOT;
             }
             return;
@@ -715,6 +738,14 @@ void PathTrackerClass::_onPlanNextHop()
     const Direction builderArrival = _activeArrivalDirection;
     const Direction builderRoute   = _activeRouteDirection;
 
+    // `edge.direction_override` is a per-DIRECTED-edge value: this hop reads
+    // `EDGES[cur][nxt]`. A field_data `direction:` override is baked onto the
+    // forward (u->v) edge only, so a hop the planner routes the other way
+    // (v->u) reads DEFAULT here and falls through to the AUTO heuristic below.
+    // That is intentional — front/rear depends on the entry direction, so an
+    // override authored for u->v must NOT bind v->u (mirroring it would reverse
+    // the chassis when forward is correct). Author a swapped EDGES entry to
+    // force the reverse sense. See graph_builder `_emit_directed_pair` warning.
     const Direction resolved = resolveDirection(
         edge.direction_override,
         Routes::PIPELINE_CONFIG.direction,
@@ -748,13 +779,7 @@ void PathTrackerClass::_onPlanNextHop()
     if (resolved == Direction::REAR && Config::LINE_BOARD_COUNT < 2 &&
         (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION))
     {
-        Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
-        Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
-        Serial.print(F(" at u="));
-        Serial.print(cur);
-        Serial.print(F(" v="));
-        Serial.print(nxt);
-        Serial.println(F(" requires rear board (pre-turn guard)"));
+        _printReverseUnavailable(cur, nxt, edge.type, F("pre-turn guard"));
         _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
         return;
     }
@@ -769,9 +794,7 @@ void PathTrackerClass::_onPlanNextHop()
     _resolvedDirection   = resolved;
     _resolvedBodyHeading = bodyTarget;
 
-    float delta = bodyTarget - currentWorld;
-    while (delta > 180.0f)   { delta -= 360.0f; }
-    while (delta <= -180.0f) { delta += 360.0f; }
+    const float delta = wrapDeltaDeg(bodyTarget - currentWorld);
 
     if (fabsf(delta) > Config::NAV_TURN_TOLERANCE_DEG)
     {
@@ -831,13 +854,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     {
         if (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION)
         {
-            Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
-            Serial.print(edge.type == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
-            Serial.print(F(" at u="));
-            Serial.print(cur);
-            Serial.print(F(" v="));
-            Serial.print(_nextHop);
-            Serial.println(F(" requires rear board"));
+            _printReverseUnavailable(cur, _nextHop, edge.type, F("post-turn guard"));
             _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
             return;
         }

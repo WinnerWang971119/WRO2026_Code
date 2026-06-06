@@ -337,7 +337,9 @@ class DeleteNode:
     """Delete a node from the model.
 
     Refuses if any entry in ``model.line_segments`` or ``model.blind_edges``
-    still references the node -- the user must delete those edges first.
+    still references the node, or if the node is the current
+    ``model.start_node`` -- the user must delete those edges (or re-point the
+    start node) first.
 
     .. note::
        This command only checks the in-memory edge lists.  The rich ``EDGES``
@@ -362,7 +364,9 @@ class DeleteNode:
         :param model: Target model.
         :raises KeyError: If ``self.name`` is absent from ``model.nodes``.
         :raises ValueError: If any line segment or blind edge still references
-            the node.  The message names the offending list and index.
+            the node, or if the node is the current ``model.start_node``.  The
+            message names the offending list and index (or the start-node
+            conflict).
         """
         if self.name not in model.nodes:
             raise KeyError(
@@ -381,6 +385,17 @@ class DeleteNode:
                     f"DeleteNode: cannot delete {self.name!r}; "
                     f"blind_edges[{index}] = {edge!r} still references it"
                 )
+
+        # Guard the start node last, so an otherwise-blocking edge reference
+        # still reports its own (more actionable) message first. Deleting the
+        # start node would leave ``model.start_node`` dangling, which
+        # validate() rejects at the next Save and blocks every later Save until
+        # a new start is picked -- refuse it here instead.
+        if self.name == model.start_node:
+            raise ValueError(
+                f"DeleteNode: cannot delete {self.name!r}; it is the current "
+                "start node -- pick a different start node first"
+            )
 
         self._deleted_xy = model.nodes[self.name]
         # ``node_types`` may be missing in a malformed model; default to a

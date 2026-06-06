@@ -153,17 +153,39 @@ def inflate_obstacles(
     return inflated
 
 
+# Minimum overlap length (cm) below which a segment is treated as merely
+# grazing an inflated obstacle rather than clipping it. A segment that only
+# touches the inflated polygon at a single point (tangent / shared endpoint
+# at the legal clearance) yields a zero-length intersection and must NOT be
+# dropped; anything that runs through the interior or along the boundary for
+# a measurable stretch does clip.
+_CLIP_OVERLAP_EPS_CM = 1e-9
+
+
 def edge_clips_obstacle(
     p1: Tuple[float, float],
     p2: Tuple[float, float],
     inflated_polygons: Sequence[Polygon],
 ) -> bool:
-    """Return ``True`` iff the segment ``p1 -> p2`` clips any polygon."""
+    """Return ``True`` iff the segment ``p1 -> p2`` clips any polygon.
+
+    A *clip* means the segment passes through the inflated obstacle's
+    interior, or runs collinearly along its boundary for a measurable
+    stretch. A segment that merely grazes the polygon at a single point --
+    a node placed exactly one robot-radius from a wall, i.e. the intended
+    minimal clearance -- is NOT a clip: ``LineString.intersects`` would
+    flag that boundary touch as a hit, so we instead measure the length of
+    the intersection and require it to exceed :data:`_CLIP_OVERLAP_EPS_CM`.
+    The length test (rather than ``LineString.crosses``) is deliberate:
+    ``crosses`` returns ``False`` for a collinear overlap that lies on the
+    boundary, which would wrongly admit an edge scraping along an obstacle
+    wall.
+    """
     if not inflated_polygons:
         return False
     line = LineString([p1, p2])
     for poly in inflated_polygons:
-        if line.intersects(poly):
+        if line.intersection(poly).length > _CLIP_OVERLAP_EPS_CM:
             return True
     return False
 
@@ -263,12 +285,24 @@ def _emit_directed_pair(
 
     * **Bidirectional** (``primitive_mode``): describes the segment
       itself; copied onto both directions.
-    * **Directional** (``pre_turn_mode``, ``pivot``): describes behavior
-      that depends on which end is the entry. Applied ONLY to the
-      forward (u -> v) edge. Mirroring these to the reverse edge would
-      steer the chassis with the wrong wheel pattern on backward
-      traversal (Codex P1). To override the reverse direction too, add a
-      separate ``EDGES`` entry with ``u`` and ``v`` swapped.
+    * **Directional** (``pre_turn_mode``, ``pivot``, ``direction``):
+      describes behavior that depends on which end is the entry. Applied
+      ONLY to the forward (u -> v) edge. Mirroring these to the reverse
+      edge would steer the chassis with the wrong wheel pattern on
+      backward traversal (Codex P1). To override the reverse direction
+      too, add a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
+
+    .. warning::
+       **A directional override is SINGLE-DIRECTION and silently skipped
+       on reverse traversal.** ``direction_override`` (and ``pivot`` /
+       ``pre_turn_mode``) lands on the u -> v edge only; the reverse
+       (v -> u) edge here gets just the symmetric ``primitive_mode``.
+       Because every pair is bidirectional and Dijkstra picks whichever
+       direction is shorter, ``NEXT_HOP`` may route v -> u -- in which
+       case the override does NOT apply and the hop falls back to
+       ``PIPELINE_CONFIG.direction`` with no warning. If you need the
+       override in both senses, author a second ``EDGES`` entry with
+       ``u`` and ``v`` swapped (see finding #40).
 
     Geometric attributes (``distance_cm``, ``heading_deg``) default to
     the Euclidean / atan2 of ``pu`` and ``pv``. When ``options`` supplies
@@ -361,6 +395,12 @@ def build_graph(field_data) -> nx.DiGraph:
         pu = field_data.NODES[u]
         pv = field_data.NODES[v]
         if edge_clips_obstacle(pu, pv, inflated):
+            warnings.warn(
+                f"LINE_SEGMENTS ('{u}','{v}') is clipped by an inflated "
+                "obstacle and was dropped.",
+                UserWarning,
+                stacklevel=2,
+            )
             continue
         _emit_directed_pair(g, u, v, pu, pv, EDGE_LINE)
 
@@ -431,6 +471,14 @@ def build_graph(field_data) -> nx.DiGraph:
                     stacklevel=2,
                 )
                 continue
+            # AUTHORING WARNING (finding #40): a directional override on this
+            # EDGES entry -- ``direction`` ("front"/"rear"), ``pivot``, or
+            # ``pre_turn_mode`` -- applies ONLY to the u -> v hop. The reverse
+            # (v -> u) edge below inherits just the symmetric ``primitive_mode``.
+            # Edges are bidirectional and Dijkstra picks the shorter sense, so
+            # if NEXT_HOP routes v -> u the override is SILENTLY ignored and the
+            # hop falls back to PIPELINE_CONFIG.direction. To force the override
+            # on the reverse hop too, add a second EDGES entry with u/v swapped.
             _emit_directed_pair(g, u, v, pu, pv, edge_type, options=edge)
 
     for node in g.nodes():
