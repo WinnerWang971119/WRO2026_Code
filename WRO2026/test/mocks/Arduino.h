@@ -12,13 +12,17 @@
  *
  *   - basic fixed-width integer types (via `<stdint.h>`)
  *   - `PI`, `abs()` macros
- *   - `delay`, `millis`, `yield` (no-op / monotonic counter)
+ *   - `delay` (advances the mock clock), `millis`, `yield`
  *   - `F()` flash-string macro (host: returns its argument unchanged)
- *   - a `Serial` singleton with `print`/`println(const char*)` no-ops
+ *   - a `Serial` singleton with `print`/`println` no-op overloads (`const char*`
+ *     plus the common numeric types)
  *
  * The mock `millis()` is incremented by a test-controllable global so the
  * `waitUntilDistanceReached` / `waitUntilIntersection` time-bounded paths can
- * be exercised deterministically.
+ * be exercised deterministically. `delay(ms)` additionally ADVANCES that clock
+ * by `ms`, so production blocking loops that poll `millis()` against a wall-clock
+ * timeout while sleeping with plain `delay()` (e.g. the manipulator belt-homing
+ * loop) terminate on host instead of spinning forever.
  */
 
 #ifndef WRO_TEST_MOCK_ARDUINO_H
@@ -63,9 +67,15 @@ inline uint32_t millis()
     return g_mockMillis;
 }
 
-inline void delay(uint32_t /*ms*/)
+inline void delay(uint32_t ms)
 {
-    // No-op on host. Tests don't depend on wall-clock delay.
+    // Advance the mock clock so production blocking loops that sleep with a plain
+    // `delay()` and bound themselves on `millis()` (e.g. the manipulator belt-home
+    // timed run) make forward progress and terminate on host. The advance is
+    // monotonic, matching real Arduino behavior where wall-clock time elapses
+    // across a `delay()`. Tests that need an exact clock can still pin it with
+    // `mockResetMillis()` / `mockAdvanceMillis()`.
+    g_mockMillis += ms;
 }
 
 inline void yield()
@@ -95,16 +105,29 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 // ---------------------------------------------------------------------------
 // `Serial` singleton — host stub.
 //
-// `LineFollower.cpp` calls `Serial.println(F("…"))` exactly twice (in the
-// fallback warning paths of `waitUntilDistanceReached` / `waitUntilIntersection`).
-// We provide a class with overloads accepting `const char*` and that's it.
+// `LineFollower.cpp` calls `Serial.println(F("…"))` (in the fallback warning paths
+// of `waitUntilDistanceReached` / `waitUntilIntersection`). The production
+// `Manipulator.cpp` warning paths additionally `print()` an index / value
+// alongside the message, so the stub carries matching numeric `print(...)`
+// overloads as well as the `println(...)` set.
+//
+// `uint16_t` arguments promote to `int` and resolve to the `int` overload, so a
+// distinct `uint16_t` overload is intentionally omitted — adding one would be
+// ambiguous against `int` on every host where `int` is wider than 16 bits.
 // ---------------------------------------------------------------------------
 
 class MockSerial
 {
 public:
     void begin(unsigned long /*baud*/) {}
+
     void print(const char* /*s*/) {}
+    void print(int /*n*/) {}
+    void print(unsigned int /*n*/) {}
+    void print(long /*n*/) {}
+    void print(unsigned long /*n*/) {}
+    void print(float /*v*/, int /*decimals*/ = 2) {}
+
     void println() {}
     void println(const char* /*s*/) {}
     void println(int /*n*/) {}

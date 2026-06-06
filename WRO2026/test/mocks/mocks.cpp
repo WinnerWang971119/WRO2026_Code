@@ -2,7 +2,7 @@
  * @file mocks.cpp
  * @brief Global singleton storage + the mock `millis()` clock for the host-compile harness.
  *
- * Single TU defines `Drive`, `LineArray`, `Intersection`, `Serial`, and the
+ * Single TU defines `Drive`, `LineArray`, `Intersection`, `MiniR4`, `Serial`, and the
  * `g_mockMillis` clock. Each test main links against this file.
  */
 
@@ -10,6 +10,7 @@
 #include "Drive.h"
 #include "WROLineArray.h"
 #include "Intersection.h"
+#include "MatrixMiniR4.h"
 
 // ---------------------------------------------------------------------------
 // Time / Serial globals.
@@ -25,3 +26,4 @@ MockSerial Serial;
 DriveClass        Drive;
 WROLineArrayClass LineArray;
 IntersectionClass Intersection;
+MockMatrixMiniR4  MiniR4;
