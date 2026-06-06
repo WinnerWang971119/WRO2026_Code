@@ -326,10 +326,11 @@ void loop()
                 _btnDownPressStartMs = 0;
                 renderCalMenu();
 
-                // Wait for BTN_DOWN release so the still-held button doesn't
-                // immediately count as a short-press cursor cycle on the very
-                // next loop tick.
-                while (MiniR4.BTN_DOWN.getState())
+                // Wait for BOTH buttons to release so neither a still-held
+                // BTN_DOWN counts as a short-press cursor cycle nor a still-held
+                // BTN_UP counts as a confirm rising edge on the very next loop
+                // tick (FINDING #5). Mirrors the confirm-exit release loop.
+                while (MiniR4.BTN_DOWN.getState() || MiniR4.BTN_UP.getState())
                 {
                     delay(20);
                 }
