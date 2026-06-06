@@ -849,6 +849,23 @@ static void test_TC2_pack_zero_args()
 // ---------------------------------------------------------------------------
 // TC3 — Pack 4 × uint32_t = 16 bytes (boundary case). Verifies the union
 // layout AND the memcpy recursion's stride math (dst + sizeof(T) per step).
+//
+// FINDING #79 (host-portability assumption, documentation only): this test
+// packs four uint32_t through `TaskArgs::bytes` (via the `_packArgs` memcpy)
+// and then reads them back through `TaskArgs::u32` — i.e. it writes one union
+// member and reads a different one. Per ISO C++ [class.union]/4 that is
+// undefined behaviour; it is only well-defined under the GCC/clang
+// union-aliasing extension that the firmware target (avr-g++ / Cortex-M4
+// arm-none-eabi-g++) and the host-compile harness (gcc/clang/MSVC) all honour
+// — exactly the relaxation documented on `TaskArgs` in TasksTypes.h. The
+// assertions ALSO assume a LITTLE-ENDIAN host: the per-arg `(uint32_t)1..4`
+// values are read back from `u32[0..3]` byte-for-byte, which only matches the
+// memcpy'd byte order on a little-endian machine. Both assumptions hold on the
+// production firmware (little-endian Cortex-M4) and on every CI host the
+// `host-tests` job runs (little-endian x86_64 gcc). A big-endian host, or a
+// toolchain WITHOUT the GCC union-aliasing extension, would need the
+// `memcpy(&dst_typed, &args.bytes[K], sizeof(dst_typed))` read form instead.
+// This is a comment only — the test logic is intentionally unchanged.
 // ---------------------------------------------------------------------------
 static void test_TC3_pack_exact_16_bytes()
 {
