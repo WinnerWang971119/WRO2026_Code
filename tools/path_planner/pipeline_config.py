@@ -68,6 +68,28 @@ class PipelineConfig:
     turn:       TurnMode       = TurnMode.COUNTER_ROT
     direction:  DirectionMode  = DirectionMode.DEFAULT
 
+    def __post_init__(self) -> None:
+        # Category fields may not be set to their own DEFAULT sentinel: DEFAULT
+        # means "inherit PIPELINE_CONFIG.<category> at runtime", which is
+        # self-referential when applied to the pipeline config itself and silently
+        # degrades to the C++ hardcoded fallback.  DirectionMode.DEFAULT is
+        # intentional here (means "defer to builder auto algorithm") and is exempt.
+        _CATEGORY_FIELDS: tuple[tuple[str, object], ...] = (
+            ("line",       LineMode.DEFAULT),
+            ("blind",      BlindMode.DEFAULT),
+            ("projection", ProjectionMode.DEFAULT),
+            ("turn",       TurnMode.DEFAULT),
+        )
+        for field_name, sentinel in _CATEGORY_FIELDS:
+            if getattr(self, field_name) == sentinel:
+                raise ValueError(
+                    f"PipelineConfig.{field_name} may not be set to "
+                    f"{type(sentinel).__name__}.DEFAULT: DEFAULT is an "
+                    f"edge-level sentinel that means 'inherit "
+                    f"PIPELINE_CONFIG.{field_name}', so setting the pipeline "
+                    f"config itself to DEFAULT is circular."
+                )
+
 
 # Mission-wide default. Edit here to swap defaults globally. Per-edge overrides
 # in field_data.EDGES take precedence over these.
