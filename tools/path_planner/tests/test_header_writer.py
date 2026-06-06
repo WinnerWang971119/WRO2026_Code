@@ -15,6 +15,36 @@ emitting from a STABLE toy field-data fixture (see
 the canonical ``field_data.py``. The toy goldens were regenerated as a
 one-off authorised rebaseline during T11; subsequent emits MUST be
 byte-identical.
+
+.. rubric:: When and how to rebaseline the goldens
+
+The golden files (``tools/path_planner/tests/golden/routes_toy.{h,cpp}``)
+are a **deliberate byte-baseline**.  They encode the exact output of the
+emitter for the stable toy field-data fixture.  The coupling is intentional:
+any authorised change to ``header_writer.py`` or to the defaults in
+``pipeline_config.py`` that intentionally alters the emitter output MUST
+be followed by a golden rebaseline — otherwise
+:func:`test_routes_h_matches_golden` / :func:`test_routes_cpp_matches_golden`
+will fail with a byte-equality error.
+
+**Rebaseline workflow (authorised changes only):**
+
+1. Make and review your emitter / pipeline_config change.
+2. Run the regeneration helper::
+
+       python tools/path_planner/tests/test_header_writer.py
+
+   This overwrites ``tools/path_planner/tests/golden/routes_toy.h`` and
+   ``tools/path_planner/tests/golden/routes_toy.cpp`` in-place.
+3. Review the diff (``git diff tools/path_planner/tests/golden/``) to
+   confirm only the expected lines changed.
+4. Commit the updated goldens together with your emitter change in the
+   same PR.  CI will confirm they are in lockstep.
+
+**Do NOT rebaseline to silence a test failure caused by an unintentional
+change.**  A byte-diff failure on an unrelated PR means the emitter or
+a pipeline_config default drifted without authorisation — investigate
+before touching the goldens.
 """
 
 from __future__ import annotations
@@ -156,6 +186,21 @@ def test_emit_writes_both_files(emit_targets):
     assert source_path.exists() and source_path.stat().st_size > 0
 
 
+# ---------------------------------------------------------------------------
+# Byte-golden tests.
+#
+# These compare the emitter's output against the frozen files in
+# ``tools/path_planner/tests/golden/``.  A failure here means the emitter
+# or a ``pipeline_config.py`` default changed without a corresponding
+# golden rebaseline.
+#
+# If the change was INTENTIONAL:  run the regeneration helper and commit
+# the updated goldens together with your change (see module docstring for
+# the full workflow).
+#
+# If the change was UNINTENTIONAL: investigate before touching the goldens.
+# ---------------------------------------------------------------------------
+
 def test_routes_h_matches_golden(emit_targets):
     header_path, _ = emit_targets
     _emit_with_toy_field(emit_targets)
@@ -197,9 +242,9 @@ def test_unreachable_pair_emits_0xff(emit_targets):
     """Removing BLIND_EDGES makes G unreachable; NEXT_HOP must show 0xFF."""
     fd = _clone_field_data()
     fd.BLIND_EDGES = []
-    # Real field_data carries an EDGES list with pivot edges; the pivot
-    # planner refuses to compensate when the destination has more than
-    # one out-edge. Strip it for this unreachable-pair test.
+    # Pin EDGES empty so this unreachable-pair test exercises only the
+    # geometry graph: no rich-edge overrides, no pivot tags, nothing that
+    # could perturb the NEXT_HOP table beyond the BLIND_EDGES removal above.
     fd.EDGES = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -292,6 +337,66 @@ def test_default_paths_are_under_repo():
     assert DEFAULT_HEADER_PATH == Path("WRO2026/routes.h")
     assert DEFAULT_SOURCE_PATH == Path("WRO2026/routes.cpp")
     assert FIELD_DATA_PATH == Path("tools/path_planner/field_data.py")
+
+
+# ---------------------------------------------------------------------------
+# Node-count ceiling guard (PR35 finding: 0xFF sentinel boundary).
+#
+# NEXT_HOP_NONE is 0xFF (255) and node ids run 0..N_NODES-1, so the sentinel
+# only aliases a valid id once N_NODES reaches 256. The guard must reject
+# 256+ and accept 255 -- the original `>= 255` test was off by one and
+# wrongly rejected an otherwise-valid 255-node field.
+# ---------------------------------------------------------------------------
+
+def test_emit_rejects_256_nodes():
+    """256 nodes alias id 255 onto NEXT_HOP_NONE(0xFF) and must be rejected.
+
+    With 256 nodes the valid ids run 0..255, so id 255 collides with the
+    0xFF sentinel and the table can no longer tell "no next hop" apart from
+    "go to node 255". The guard reads only ``field_data.NODES`` and fires
+    before any graph work, so the stub ``None`` graph / table is never
+    reached.
+    """
+    fd = SimpleNamespace(NODES={f"N{i}": (0.0, 0.0) for i in range(256)})
+    with pytest.raises(ValueError, match=r"ceiling \(max 255 nodes\)"):
+        emit_routes(fd, None, None, field_data_source_path=_TOY_FIELD_SOURCE)
+
+
+def test_emit_accepts_255_nodes(emit_targets):
+    """255 nodes is the true ceiling: ids 0..254 never reach the 0xFF sentinel.
+
+    Regression guard for the off-by-one ``>= 255`` check that wrongly
+    rejected a 255-node field. A straight N0->N1->...->N254 line chain emits
+    cleanly; the assertion is simply that emission succeeds and writes both
+    files.
+    """
+    header_path, source_path = emit_targets
+    names = [f"N{i}" for i in range(255)]
+    fd = SimpleNamespace(
+        NODES={name: (float(i), 0.0) for i, name in enumerate(names)},
+        NODE_TYPES={name: "line" for name in names},
+        LINE_SEGMENTS=[(names[i], names[i + 1]) for i in range(254)],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="N0",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        graph = build_graph(fd)
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    emit_routes(
+        fd, graph, next_hop,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    assert header_path.exists() and header_path.stat().st_size > 0
+    assert source_path.exists() and source_path.stat().st_size > 0
 
 
 # ---------------------------------------------------------------------------
@@ -411,6 +516,64 @@ def test_edge_pre_turn_mode_override_emit(emit_targets):
     assert "TurnMode::PIVOT_LEFT" in cpp_text
 
 
+def test_pivot_compensation_reaches_emitted_distance(emit_targets):
+    """TC9 / finding #42: the shortened pivot distance lands in routes.cpp.
+
+    Before Decision B, ``apply_pivot_compensations`` ran only on a
+    discarded weighted copy inside ``compute_all_pairs_next_hop``, so the
+    EDGES table in routes.cpp carried the UN-shortened ``distance_cm`` and
+    the robot overshot every pivot landing. Now the compensation mutates
+    the same ``graph`` object that ``_emit_toy`` hands to ``emit_routes``,
+    so the compensated distance must appear in the emitted source.
+
+    Three-node A->B->C fixture (mirrors
+    :func:`test_edge_pre_turn_mode_override_emit`): ``A->B`` is a 90 deg
+    LEFT pivot, ``B->C`` is the single forward continuation. For
+    TRACK_CM=15 and a 90 deg turn the forward chord component is 7.5 cm,
+    so ``B->C`` is shortened from 30.0 to 22.5 cm. ``22.500000f`` is the
+    compensated literal; ``30.000000f`` is the pre-compensation value that
+    must NOT survive on the forward B->C cell.
+    """
+    header_path, source_path = emit_targets
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 70.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type":        EDGE_BLIND,
+                "u":           "A",
+                "v":           "B",
+                "distance_cm": 40.0,
+                "heading_deg": 0.0,
+                "pivot":       Pivot.LEFT,
+            },
+            {
+                "type":        EDGE_BLIND,
+                "u":           "B",
+                "v":           "C",
+                "distance_cm": 30.0,
+                "heading_deg": 90.0,
+            },
+        ],
+    )
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    # The compensated B->C distance (22.5 cm) reached the emitted EDGES
+    # table -- proof the compensation now flows to emission, not just cost.
+    assert "22.500000f" in cpp_text, (
+        "compensated B->C distance (22.5 cm) missing from routes.cpp"
+    )
+
+
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the
 # test file itself contains zero literal occurrences of the deprecated
 # names -- otherwise the sweep would flag this test file. Word-boundary
@@ -499,3 +662,37 @@ def test_direction_override_emits_force_reverse_one_direction(emit_targets):
         f"Expected exactly 1 FORCE_REVERSE cell (A->B), got "
         f"{cpp_text.count('FORCE_REVERSE')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Golden regeneration helper (NOT collected by pytest).
+#
+# Run this module directly to overwrite the golden files after an
+# AUTHORISED change to the emitter or pipeline_config.py defaults:
+#
+#     python tools/path_planner/tests/test_header_writer.py
+#
+# Review the resulting ``git diff tools/path_planner/tests/golden/``
+# before committing.  Never run this to silence an unintentional failure.
+# ---------------------------------------------------------------------------
+
+def regenerate_goldens() -> None:
+    """Overwrite the on-disk golden files from the current emitter output.
+
+    Emits the stable toy field-data fixture (same inputs as the byte-golden
+    tests) directly into ``_GOLDEN_HEADER`` and ``_GOLDEN_SOURCE``.  Only
+    call this after an AUTHORISED change to ``header_writer.py`` or the
+    defaults in ``pipeline_config.py``.
+
+    This function is intentionally NOT a pytest test (no ``test_`` prefix)
+    so it is never collected or executed during ``pytest`` runs.
+    """
+    _emit_toy(_build_toy_field_data(), _GOLDEN_HEADER, _GOLDEN_SOURCE)
+    print(f"Regenerated golden files:")
+    print(f"  {_GOLDEN_HEADER}")
+    print(f"  {_GOLDEN_SOURCE}")
+    print("Review the diff (git diff tools/path_planner/tests/golden/) before committing.")
+
+
+if __name__ == "__main__":
+    regenerate_goldens()

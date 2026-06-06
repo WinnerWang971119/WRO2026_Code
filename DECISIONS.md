@@ -18,6 +18,8 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-004 — Motor-speed/position PID stays on the STM32](./docs/decisions/004-pid-stays-on-stm32.md)
 - [ADR-005 — `Localization` is the single source of truth for current node + heading](./docs/decisions/005-localization-single-source-of-truth.md)
 - [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md)
+- [ADR-028 — FieldMap accessors bounds-check every index and return a safe sentinel](./docs/decisions/028-fieldmap-accessor-bounds.md)
+- [ADR-029 — The validator is the single anti-ambiguity and input-finiteness gate](./docs/decisions/029-validator-anti-ambiguity.md)
 
 ### Mission-layer
 
@@ -54,7 +56,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 22 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027 |
+| Implemented | 24 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027, 028, 029 |
 | Partially implemented | 2 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator) |
 | Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |

@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import FieldDataError, validate
@@ -80,6 +80,96 @@ def test_obstacle_invalid_bounds() -> None:
     fd.OBSTACLES = [(50.0, 0.0, 40.0, 10.0, "wall")]
     with pytest.raises(FieldDataError, match=r"invalid bounds"):
         validate(fd)
+
+
+# -- TC4: non-finite numbers (NaN / Inf) rejected at every numeric gate -----
+#
+# `_is_number` is the single root gate for NODES coords, OBSTACLES bounds,
+# ROBOT_RADIUS_CM, COST_BLIND_MULTIPLIER, FIELD_MM and EDGES scalars. A NaN
+# is a float and not a bool, so it used to pass; worse, the obstacle bounds
+# check `x_min >= x_max` is always False when an operand is NaN, so a NaN
+# rectangle slipped through and reached the Euclidean planner math as a
+# corrupt edge weight. Requiring finiteness makes NaN/Inf fail with a clean
+# FieldDataError instead.
+
+
+def test_nan_node_coord_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODES["A"] = (float("nan"), 0.0)
+    with pytest.raises(FieldDataError, match=r"NODES\['A'\]"):
+        validate(fd)
+
+
+def test_inf_node_coord_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODES["A"] = (0.0, float("inf"))
+    with pytest.raises(FieldDataError, match=r"NODES\['A'\]"):
+        validate(fd)
+
+
+def test_nan_obstacle_bound_rejected() -> None:
+    fd = _clone_field_data()
+    fd.OBSTACLES = [(float("nan"), 0.0, 40.0, 10.0, "wall")]
+    with pytest.raises(FieldDataError, match=r"OBSTACLES\[0\]"):
+        validate(fd)
+
+
+def test_inf_obstacle_bound_rejected() -> None:
+    fd = _clone_field_data()
+    fd.OBSTACLES = [(0.0, 0.0, float("inf"), 10.0, "wall")]
+    with pytest.raises(FieldDataError, match=r"OBSTACLES\[0\]"):
+        validate(fd)
+
+
+# -- Finding #49: node names must survive emission into a C++ string literal --
+#
+# header_writer._node_row builds NodeInfo.name as `'"' + name + '"'` with no
+# escaping. A double-quote, backslash, or non-printable/control char produces a
+# malformed literal that fails the Arduino build on the auto-generated
+# routes.cpp. The validator rejects such names so the error surfaces at the
+# field-data layer instead.
+
+
+def test_node_name_with_double_quote_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES['A"B'] = (0.0, 0.0)
+    fd.NODE_TYPES['A"B'] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_node_name_with_backslash_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["A\\B"] = (0.0, 0.0)
+    fd.NODE_TYPES["A\\B"] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_node_name_with_non_printable_char_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["A\nB"] = (0.0, 0.0)
+    fd.NODE_TYPES["A\nB"] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_ordinary_node_name_accepted() -> None:
+    """A plain letters/digits/underscores name still validates."""
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["Node_1"] = (0.0, 0.0)
+    fd.NODE_TYPES["Node_1"] = "line"
+    assert validate(fd) is None
 
 
 def test_node_type_unknown_value() -> None:
@@ -202,6 +292,119 @@ def test_validator_rejects_line_mode_on_stop_at_line_blind_edge() -> None:
         validate(fd)
 
 
+# -- TC5: EDGES vs LINE_SEGMENTS / BLIND_EDGES anti-ambiguity cross-check ----
+#
+# Findings #38/#47: an EDGES entry whose unordered pair {u, v} already exists
+# in LINE_SEGMENTS or BLIND_EDGES with a conflicting type silently overwrites
+# the earlier edge's type and geometry in graph_builder (LINE then BLIND then
+# EDGES; networkx add_edge replaces attributes). The validator must reject the
+# conflict, while still accepting a same-type override.
+
+
+def test_validator_rejects_edge_blind_over_line_segment_pair() -> None:
+    """TC5: EDGE_BLIND on a pair already in LINE_SEGMENTS is rejected.
+
+    ('A','B') is a LINE_SEGMENTS pair in the toy field. Re-declaring it as a
+    BLIND edge via EDGES would silently flip the line edge's type/geometry in
+    graph_builder -- the exact corruption the LINE-vs-BLIND guard prevents,
+    bypassed through EDGES.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"LINE_SEGMENTS"):
+        validate(fd)
+
+
+def test_validator_rejects_edge_line_over_blind_edge_pair() -> None:
+    """TC5 (mirror): EDGE_LINE on a pair already in BLIND_EDGES is rejected.
+
+    ('B','G') is the toy field's single BLIND_EDGES pair. Re-declaring it as a
+    LINE edge via EDGES is the symmetric conflict and must fail too.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"BLIND_EDGES"):
+        validate(fd)
+
+
+def test_validator_rejects_edge_projection_over_line_segment_pair() -> None:
+    """TC5: EDGE_PROJECTION on a LINE_SEGMENTS pair is a conflict.
+
+    EDGE_PROJECTION maps to neither LINE_SEGMENTS nor BLIND_EDGES, so a
+    PROJECTION entry on an existing line pair still reclassifies the edge and
+    must be rejected. ('B','C') is a LINE_SEGMENTS pair in the toy field.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_PROJECTION,
+            "u": "B",
+            "v": "C",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"LINE_SEGMENTS"):
+        validate(fd)
+
+
+def test_validator_accepts_same_type_line_override() -> None:
+    """TC5 (positive): EDGE_LINE on a LINE_SEGMENTS pair is a valid override.
+
+    The intended use of a rich EDGES entry is as an override layer attaching
+    distance/heading/pivot to an existing edge. A matching-type entry on an
+    existing pair must NOT be rejected by the anti-ambiguity rule.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "primitive_mode": LineMode.FAST,
+        }
+    ]
+    assert validate(fd) is None
+
+
+def test_validator_accepts_same_type_blind_override() -> None:
+    """TC5 (positive, mirror): EDGE_BLIND on a BLIND_EDGES pair is accepted.
+
+    ('B','G') is the toy field's BLIND_EDGES pair; a matching-type BLIND
+    override is the legitimate path the STOP_AT_LINE edge relies on.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "primitive_mode": BlindMode.STOP_AT_LINE,
+        }
+    ]
+    assert validate(fd) is None
+
+
 def test_stop_at_line_fixture_loads_and_validates() -> None:
     """TC4: the committed STOP_AT_LINE fixture field loads and passes validation.
 
@@ -217,3 +420,153 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     assert any(
         edge.get("blind_mode") == "STOP_AT_LINE" for edge in data["EDGES"]
     )
+
+
+# -- Finding #36: pivot out-degree check moved into the validator ------------
+#
+# A single-wheel pivot entering 'v' is compensated by shortening 'v's ONE
+# forward continuation. The planner cannot pick among several before Dijkstra
+# runs, so it requires 'v' to have exactly one forward out-edge (excluding the
+# back-edge to the pivot's source 'u'). This used to fail late as a raw
+# ValueError from planner.apply_pivot_compensations (an uncaught traceback at
+# build time); finding #36 (decision B) moved it into the validator so a bad
+# pivot fails as a clean FieldDataError. The count is over the AUTHORED
+# adjacency, before obstacle / C-space inflation clipping.
+
+
+def test_validator_rejects_pivot_with_multiple_forward_out_edges() -> None:
+    """A pivot edge whose destination has >1 forward out-edge is rejected.
+
+    In the toy field, node 'E' is line-connected to A, B, C, and D. A pivot
+    edge A->E lands at E, whose authored out-neighbors are {A, B, C, D};
+    excluding the back-edge to the source 'A' leaves {B, C, D} -- three
+    forward continuations, so the pivot landing is ambiguous and must fail.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "E",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "pivot": Pivot.LEFT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+        validate(fd)
+
+
+def test_validator_rejects_pivot_with_zero_forward_out_edges() -> None:
+    """A pivot edge whose destination has no forward out-edge is rejected.
+
+    Node 'G' is a leaf: its only authored neighbor is 'B' (the single
+    BLIND_EDGES pair). A pivot edge B->G lands at G, whose out-neighbors are
+    {B}; excluding the back-edge to the source 'B' leaves an empty set --
+    zero forward continuations, which is equally ambiguous and must fail.
+    The entry is EDGE_BLIND so it is a legitimate same-type override of the
+    existing ('B','G') blind pair (it is the pivot count, not the type
+    cross-check, that rejects it).
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "pivot": Pivot.RIGHT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+        validate(fd)
+
+
+def test_validator_accepts_pivot_with_single_forward_out_edge() -> None:
+    """A pivot landing with exactly one forward out-edge validates.
+
+    Self-contained A->B->C chain: the pivot edge A->B lands at B, whose
+    authored out-neighbors are {A, C}; excluding the back-edge to the source
+    'A' leaves {C} -- exactly one forward continuation, so the pivot landing
+    is unambiguous and validation passes. This proves the rejection cases
+    above are not a blanket failure on any pivot tag.
+    """
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type": EDGE_BLIND,
+                "u": "A",
+                "v": "B",
+                "distance_cm": 100.0,
+                "heading_deg": 0.0,
+                "pivot": Pivot.LEFT,
+            },
+            {
+                "type": EDGE_BLIND,
+                "u": "B",
+                "v": "C",
+                "distance_cm": 100.0,
+                "heading_deg": 90.0,
+            },
+        ],
+    )
+    assert validate(fd) is None
+
+
+def test_malformed_later_edge_does_not_mask_with_pivot_error() -> None:
+    """A malformed LATER entry must fail with its own shape error, not a pivot one.
+
+    The pivot out-degree check (finding #36) scans the full authored EDGES
+    list, including entries that the per-entry shape loop has not reached
+    yet. Before the fix, a later entry with ``u`` set but ``v`` missing
+    contributed a ``None`` out-neighbor to an EARLIER pivot landing,
+    inflating its forward out-degree to 2 and raising a misleading
+    "exactly one forward out-edge" error instead of the precise
+    "missing required key 'v'" error for the malformed entry.
+
+    Fixture: A->B is a valid LEFT pivot landing at B (forward out = {C},
+    exactly one), B->C is the single continuation, and a third entry sets
+    ``u='B'`` but omits ``v``. The validator must blame EDGES[2], not the
+    pivot at EDGES[0].
+    """
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type": EDGE_BLIND, "u": "A", "v": "B",
+                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
+            },
+            {
+                "type": EDGE_BLIND, "u": "B", "v": "C",
+                "distance_cm": 100.0, "heading_deg": 90.0,
+            },
+            {  # malformed: missing 'v'; must be blamed, not the pivot above
+                "type": EDGE_BLIND, "u": "B",
+                "distance_cm": 50.0, "heading_deg": 45.0,
+            },
+        ],
+    )
+    with pytest.raises(FieldDataError, match=r"EDGES\[2\] missing required key 'v'"):
+        validate(fd)

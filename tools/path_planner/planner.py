@@ -27,10 +27,11 @@ Penalising blind edges keeps the planner on the line whenever a line
 detour is reasonable - the line follower is far more reliable than
 open-loop encoder moves.
 
-The raw ``distance_cm`` attribute on the *input* graph is left untouched;
-this module operates on a *copy* with an extra ``cost`` attribute and any
-single-wheel-pivot compensation baked in, so callers can re-use the
-original graph for visualisation or heading propagation downstream (T6).
+The weighted copy used by Dijkstra carries an extra ``cost`` attribute;
+the underlying geometry (``distance_cm`` / ``heading_deg``) is taken
+from the *input* graph AFTER pivot compensation has been applied to it
+in place, so the cost the planner optimises and the geometry the
+emitter consumes describe the same compensated edges.
 
 Single-wheel pivot compensation
 -------------------------------
@@ -43,8 +44,10 @@ chassis centre traces an arc instead of staying put, so it lands offset
 from where a counter-rotation would have left it. The planner
 compensates for that displacement by shortening the FOLLOWING edge's
 ``distance_cm`` (see :func:`compute_pivot_compensation`). The
-compensation is applied to a private weighted copy of the graph; the
-caller's graph is never mutated.
+compensation is applied to the input graph **in place** by
+:func:`compute_all_pairs_next_hop`, so the shortened distance reaches
+both the Dijkstra cost and the routes.cpp emitter that consumes the
+same graph object downstream.
 
 Sentinels
 ---------
@@ -160,17 +163,28 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
     .. note::
 
         This conservative implementation refuses to compensate when the
-        landing node has more than one forward out-edge. Out-edge choice
-        is only known once Dijkstra has picked a path, but
-        :func:`apply_pivot_compensations` runs *before* Dijkstra so it
-        cannot know which successor will fire -- applying the
-        adjustment to all successors would silently overcorrect every
+        landing node has anything other than exactly one forward
+        out-edge. Out-edge choice is only known once Dijkstra has picked
+        a path, but :func:`apply_pivot_compensations` runs *before*
+        Dijkstra so it cannot know which successor will fire -- applying
+        the adjustment to all successors would silently overcorrect every
         branch that is not the one we end up taking. The safe scope cut
-        for the 2026-05-17 hardware test is to require pivot
-        destinations to have exactly one forward out-edge so the choice
-        is unambiguous. The field-data author can structure the graph
-        accordingly. A future per-path pivot-aware planner could relax
-        this restriction.
+        is to require pivot destinations to have exactly one forward
+        out-edge so the choice is unambiguous. The field-data author can
+        structure the graph accordingly. A future per-path pivot-aware
+        planner could relax this restriction.
+
+        For the production pipeline the validator enforces this
+        precondition up front (finding #36): a pivot landing with the
+        wrong out-degree fails as a :class:`FieldDataError` at validation
+        time. This function therefore does NOT raise on a mismatch -- it
+        skips the offending pivot edge (leaving its following edge
+        uncompensated). The skip is a defensive guard for direct /
+        hand-built callers that assemble a graph without running
+        :func:`tools.path_planner.validator.validate`; it keeps
+        ``forward_out_edges[0]`` safe from an IndexError and never
+        mis-compensates a multi-successor landing by picking an arbitrary
+        branch.
 
         The back-edge from ``dst`` to ``src`` (always present when the
         edge was emitted by :func:`build_graph`'s bidirectional pair) is
@@ -178,15 +192,30 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         target -- the chassis is never going to immediately reverse the
         pivot it just executed.
 
-    :param graph: a directed graph (typically a private weighted copy --
-        callers must NOT pass the user-visible graph because edge
-        attributes are mutated in place).
+        Compensation is idempotent per following edge (finding #94): the
+        first application marks the edge with a private
+        ``_pivot_compensated`` attribute, and any later pivot resolving to
+        the SAME following edge is skipped rather than subtracting off the
+        already-shortened distance. Two pivots from non-adjacent sources
+        can land on one following edge on a hand-built directed graph
+        (each pivot's destination still having exactly one forward
+        out-edge), so this guard prevents the second pivot from
+        double-compensating. The marker is internal state only; the
+        ``routes.cpp`` emitter (:func:`tools.path_planner.header_writer.emit_routes`)
+        reads only the geometry and override keys and ignores it.
+
+    :param graph: a directed graph whose following-edge ``distance_cm`` /
+        ``heading_deg`` attributes are mutated **in place**. Under
+        Decision B (finding #42) :func:`compute_all_pairs_next_hop` passes
+        its own input graph here on purpose, so the compensated geometry
+        reaches both the Dijkstra cost and the routes.cpp emitter. Callers
+        that must preserve the original geometry should pass a copy.
     :param track_cm: chassis track width in centimetres. Forwarded to
         :func:`compute_pivot_compensation`.
-    :raises ValueError: when a pivot-tagged edge's destination node has
-        zero or more than one out-edge. The error message names the
-        destination node and its out-degree so the field-data author
-        can find the offending entry.
+    :return: ``None``. Pivot edges whose destination does not have
+        exactly one forward out-edge are skipped (left uncompensated)
+        rather than raising; the validator (finding #36) enforces the
+        one-forward-out-edge precondition for the production pipeline.
     """
     pivot_values = {int(Pivot.LEFT), int(Pivot.RIGHT)}
 
@@ -212,15 +241,35 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
             if d != src
         ]
         if len(forward_out_edges) != 1:
-            raise ValueError(
-                "pivot compensation requires destination node "
-                f"'{dst}' (entered from '{src}') to have exactly one "
-                f"forward out-edge, got {len(forward_out_edges)}. "
-                "Restructure the graph so pivot landings are unambiguous, "
-                f"or drop the pivot tag on edge ('{src}', '{dst}')."
-            )
+            # The validator (finding #36) now enforces this precondition for
+            # the production pipeline -- a pivot landing with anything other
+            # than one forward out-edge fails as a clean FieldDataError at
+            # validation time. This skip is defensive for direct / hand-built
+            # callers that bypass `validate` (e.g. unit tests assembling a
+            # raw DiGraph): it leaves the edge uncompensated rather than
+            # raising, so `forward_out_edges[0]` below can never IndexError on
+            # a 0-successor landing and a multi-successor landing is never
+            # mis-compensated by picking an arbitrary branch.
+            continue
 
         _next_src, _next_dst, next_edge_data = forward_out_edges[0]
+
+        # Idempotency guard (finding #94): if a previous pivot edge already
+        # compensated THIS following edge, do not subtract again. Two distinct
+        # pivots entering the same following edge would otherwise compute the
+        # second reduction off the first's already-shortened ``distance_cm``,
+        # compounding the subtraction. The validator's destination out-degree
+        # rule (finding #36) makes this unreachable in the production pipeline,
+        # but this function is public and reusable: a hand-built directed graph
+        # whose following edge is entered by two pivots from non-adjacent
+        # sources can slip past the per-pivot ``len(forward_out_edges) != 1``
+        # check, so we mark each following edge as compensated and skip a second
+        # application. The marker is private (underscore-prefixed) internal
+        # state; ``emit_routes`` / ``header_writer`` read only the geometry and
+        # override keys, so it rides along on the edge harmlessly.
+        if next_edge_data.get("_pivot_compensated"):
+            continue
+
         pre_heading = float(pivot_edge_data["heading_deg"])
         post_heading = float(next_edge_data["heading_deg"])
         # Normalise the turn delta into [-180, 180]. ((d + 180) % 360) - 180
@@ -236,6 +285,7 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         )
         next_edge_data["distance_cm"] = adj_dist
         next_edge_data["heading_deg"] = adj_heading
+        next_edge_data["_pivot_compensated"] = True
 
 
 # -- internal helpers ---------------------------------------------------------
@@ -297,9 +347,22 @@ def compute_all_pairs_next_hop(
 
     Edge cost = ``distance_cm * (cost_blind_multiplier if type == EDGE_BLIND
     else 1.0)``. Single-wheel-pivot compensation
-    (:func:`apply_pivot_compensations`) is applied to the private
-    weighted copy *before* Dijkstra runs, so reported costs reflect the
-    compensated geometry. The function does not mutate ``graph``.
+    (:func:`apply_pivot_compensations`) is applied to the input ``graph``
+    **in place** *before* the weighted copy is built, so the shortened
+    ``distance_cm`` feeds both the Dijkstra cost computed here and the
+    ``routes.cpp`` emitter that the caller drives with the same ``graph``
+    object afterward (Decision B, finding #42).
+
+    .. warning::
+
+        This function **mutates** ``graph``: every edge that follows a
+        single-wheel pivot has its ``distance_cm`` / ``heading_deg``
+        shortened to the compensated value. This is intentional -- the
+        caller (:func:`tools.path_planner.build_routes._run`) passes the
+        same ``graph`` to :func:`tools.path_planner.header_writer.emit_routes`
+        right after, so the compensated geometry must live on the shared
+        object. Callers that need the raw geometry afterward should pass a
+        copy. A single call applies the compensation exactly once.
 
     :param graph: directed graph as produced by
         :func:`tools.path_planner.graph_builder.build_graph`. Every edge
@@ -309,9 +372,12 @@ def compute_all_pairs_next_hop(
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
-    :raises ValueError: when ``cost_blind_multiplier`` is not positive, or
-        bubbled from :func:`apply_pivot_compensations` when a pivot-tagged
-        edge's destination has anything other than exactly one out-edge.
+    :raises ValueError: when ``cost_blind_multiplier`` is not positive.
+        A pivot-tagged edge whose destination does not have exactly one
+        forward out-edge is no longer an error here -- the validator
+        rejects it up front (finding #36), and
+        :func:`apply_pivot_compensations` skips it defensively for callers
+        that bypass validation.
     """
     if cost_blind_multiplier <= 0:
         raise ValueError(
@@ -323,17 +389,16 @@ def compute_all_pairs_next_hop(
             "expensive than equal-length LINE edges."
         )
 
+    # Apply pivot compensation to the INPUT graph in place BEFORE building
+    # the weighted copy. Decision B (finding #42): the caller passes this
+    # same ``graph`` object to ``emit_routes`` right after, so shortening
+    # the following edge's ``distance_cm`` here is what makes the
+    # compensated geometry reach routes.cpp -- not just the Dijkstra cost.
+    apply_pivot_compensations(graph, TRACK_CM)
+    # Build the weighted copy FROM the now-compensated graph so every
+    # ``cost`` is derived from the compensated ``distance_cm``. No separate
+    # cost-refresh pass is needed: compensation already ran above.
     weighted = _weighted_copy(graph, cost_blind_multiplier)
-    # Apply pivot compensation BEFORE Dijkstra so the edge costs the
-    # planner sees match the geometry the runtime will actually drive.
-    # The mutation lands on the private ``weighted`` copy only.
-    apply_pivot_compensations(weighted, TRACK_CM)
-    # ``cost`` was set from the pre-compensation distance, so refresh it
-    # for any edge whose ``distance_cm`` changed during compensation.
-    # Edges that did not change retain the original cost untouched.
-    for _u, _v, data in weighted.edges(data=True):
-        multiplier = cost_blind_multiplier if data["type"] == EDGE_BLIND else 1.0
-        data["cost"] = float(data["distance_cm"]) * multiplier
 
     nodes = list(graph.nodes())
 

@@ -59,7 +59,7 @@ agree on every hop (TC10/TC12 cross-module parity).
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import networkx as nx
 
@@ -71,7 +71,18 @@ ACT_FOLLOW_DIST = "follow_line_to_distance"
 ACT_FORWARD = "forward"
 ACT_STOP_AT_LINE = "stop_at_line"
 
-Primitive = Tuple[str, Optional[float]]
+# Forward hops produce 2-tuples; reverse hops (REAR direction, T12+) produce
+# 3-tuples (EDGE_LINE) or 4-tuples (EDGE_PROJECTION / EDGE_BLIND variants).
+# The second slot of a reverse tuple is the target node name (str), not a float.
+# BlindMode / LineMode / ProjectionMode are imported lazily inside compile_path
+# to avoid a circular dependency with sim.runtime; Any stands in for those
+# IntEnum types here so this module-level alias is importable without
+# triggering that circular import.
+Primitive = Union[
+    Tuple[str, Optional[float]],      # forward: turn_rel / follow_* / forward / stop_at_line
+    Tuple[str, str, Any],             # REAR EDGE_LINE: (act, target_node, line_mode)
+    Tuple[str, str, float, Any],      # REAR EDGE_PROJECTION / EDGE_BLIND: (act, target_node, dist, mode)
+]
 
 _TURN_EPSILON_DEG = 1e-6
 
@@ -89,13 +100,76 @@ def final_heading_after(
     start_heading_deg: float,
     graph: nx.DiGraph,
 ) -> float:
-    """Return the heading the chassis would have at ``path[-1]``."""
+    """Return the chassis body heading the robot would have at ``path[-1]``.
+
+    Mirrors :func:`compile_path`'s per-hop direction resolution so the two
+    can never disagree: every hop is run through
+    :func:`tools.path_planner.sim.runtime.resolve_direction` with the same
+    inputs ``compile_path`` uses (per-edge ``direction_override``, the global
+    :data:`PIPELINE_CONFIG.direction`, ``Direction.AUTO`` builder overrides,
+    the running heading, the edge's forward heading, the last-hop flag, and
+    the module-level kill-switch / board-count constants). The body-target
+    heading is ``edge_heading`` for FRONT hops and ``(edge_heading + 180) %
+    360`` for REAR hops, and the running heading advances only when the turn
+    delta exceeds the epsilon -- identical to ``compile_path`` -- so a REAR
+    final hop returns the ``+180`` chassis heading the robot is actually left
+    on rather than the raw forward edge heading.
+
+    :param path: ordered list of node names; first element is the chassis's
+        current node.
+    :param start_heading_deg: heading at ``path[0]`` in degrees.
+    :param graph: directed graph from :func:`build_graph`.
+    :return: chassis body heading in degrees at ``path[-1]``.
+    """
     if len(path) <= 1:
         return start_heading_deg
-    current = start_heading_deg
-    for u, v in zip(path[:-1], path[1:]):
-        current = graph.edges[u, v]["heading_deg"]
-    return current
+
+    # Local imports mirror ``compile_path``: ``sim.runtime`` imports the ACT_*
+    # tags and ``normalize_turn`` from this module, so the direction-resolution
+    # machinery is deferred to call time to avoid the circular dependency.
+    from tools.path_planner.pipeline_config import PIPELINE_CONFIG
+    from tools.path_planner.sim.runtime import (
+        BIDIRECTIONAL_AUTO_ENABLED,
+        LINE_BOARD_COUNT,
+        Direction,
+        _read_edge_dir_override,
+        resolve_direction,
+    )
+
+    current_heading = start_heading_deg
+    last_index = len(path) - 1
+
+    for i, (u, v) in enumerate(zip(path[:-1], path[1:])):
+        edge = graph.edges[u, v]
+        edge_heading = float(edge["heading_deg"])
+        is_last_hop = ((i + 1) == last_index)
+
+        direction = resolve_direction(
+            edge_dir_override=_read_edge_dir_override(edge),
+            pipeline_default=PIPELINE_CONFIG.direction,
+            builder_arrival=Direction.AUTO,
+            builder_route=Direction.AUTO,
+            current_heading=current_heading,
+            edge_heading=edge_heading,
+            is_last_hop=is_last_hop,
+            bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+            line_board_count=LINE_BOARD_COUNT,
+        )
+
+        if direction == Direction.REAR:
+            body_target = (edge_heading + 180.0) % 360.0
+        else:
+            body_target = edge_heading % 360.0
+
+        # Advance the running heading only when ``compile_path`` would emit a
+        # turn (delta above the epsilon) -- below the threshold the chassis is
+        # left on the prior heading, so mirroring the guard keeps the returned
+        # pose byte-identical to the heading ``compile_path`` drives.
+        delta = normalize_turn(body_target - current_heading)
+        if abs(delta) > _TURN_EPSILON_DEG:
+            current_heading = body_target
+
+    return current_heading
 
 
 def compile_path(

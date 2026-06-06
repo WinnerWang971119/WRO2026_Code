@@ -347,6 +347,17 @@ def _resolve_override(
         if override == enum_cls.DEFAULT:
             return default_value
         return override
+    # Bare string names (e.g. 'NORMAL') -- use key lookup so IntEnum does not
+    # reject them.  Mirrors header_writer._override_enum_value's str branch so
+    # the two consumers agree on the accepted type set (finding #41).
+    if isinstance(override, str):
+        try:
+            coerced = enum_cls[override]
+        except KeyError:
+            return default_value
+        if coerced == enum_cls.DEFAULT:
+            return default_value
+        return coerced
     # Tolerate raw int values (the graph attribute could be persisted as an
     # int in some fixtures); coerce via the enum so type stays consistent.
     coerced = enum_cls(override)
@@ -488,11 +499,15 @@ def resolve_direction(
 ) -> "Direction":
     """Resolve which physical direction the chassis takes through one hop.
 
-    Function-identical Python mirror of the C++ ``PathTracker::_resolveDirection``
-    helper (T5). The algorithm is fully specified in the plan
-    "API Contracts — Resolution algorithm" section; both implementations
-    must stay byte-for-byte equivalent so the offline sim and the robot
-    agree on every hop's direction (TC18 parity).
+    Function-identical Python mirror of the C++ ``resolveDirection`` helper in
+    ``WRO2026/DirectionPolicy.h`` (T5). The algorithm is fully specified in the
+    plan "API Contracts — Resolution algorithm" section; both implementations
+    must stay byte-for-byte equivalent so the offline sim and the robot agree on
+    every hop's direction. Cross-language parity is enforced by the shared-vector
+    golden in ``tools/path_planner/tests/test_direction_parity.py``, which feeds
+    one input set through this helper and asserts each result against a frozen
+    table of the C++ outputs. (TC18 only checks the compiler<->sim
+    *primitive-stream* parity, not this resolver algorithm.)
 
     Precedence (highest first):
 

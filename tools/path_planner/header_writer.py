@@ -92,6 +92,45 @@ _PROJECTION_MODE_DEFAULT = "ProjectionMode::DEFAULT"
 _TURN_MODE_DEFAULT       = "TurnMode::DEFAULT"
 _DIRECTION_MODE_DEFAULT  = "DirectionMode::DEFAULT"
 
+# The five per-category motion-mode enums, in the order their C++ bodies are
+# emitted into routes.h. The bodies are generated from these Python ``IntEnum``
+# definitions (single source of truth) so a member added/renamed in
+# ``pipeline_config.py`` can never drift out of sync with routes.h. NodeType and
+# EdgeType are intentionally excluded -- they are defined in graph_builder, not
+# pipeline_config, and stay hand-written here.
+_MODE_ENUMS: Tuple[type, ...] = (
+    LineMode,
+    BlindMode,
+    ProjectionMode,
+    TurnMode,
+    DirectionMode,
+)
+
+
+def _emit_mode_enum_lines() -> List[str]:
+    """Generate the C++ ``enum class`` bodies for the five mode enums.
+
+    Each line is built from the Python :class:`~enum.IntEnum` members
+    (``NAME = value`` in definition order). The enum-name column is padded so
+    the ``: uint8_t`` bases align, matching the surrounding hand-written enum
+    style in :func:`_build_routes_h_lines`.
+    """
+    name_width = max(len(enum_cls.__name__) for enum_cls in _MODE_ENUMS) + 1
+    lines: List[str] = []
+    for enum_cls in _MODE_ENUMS:
+        members = ", ".join(
+            member.name + " = " + str(member.value) for member in enum_cls
+        )
+        lines.append(
+            _INDENT
+            + "enum class "
+            + enum_cls.__name__.ljust(name_width)
+            + ": uint8_t { "
+            + members
+            + " };"
+        )
+    return lines
+
 
 def _format_float(value: float) -> str:
     return "{:.6f}f".format(float(value))
@@ -326,31 +365,7 @@ def _build_routes_h_lines(
     lines.append(
         _INDENT + "// 'inherit PIPELINE_CONFIG.<category>' at dispatch time."
     )
-    lines.append(
-        _INDENT
-        + "enum class LineMode       : uint8_t { DEFAULT = 0, NORMAL = 1, "
-        + "SLOW = 2, FAST = 3 };"
-    )
-    lines.append(
-        _INDENT
-        + "enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, "
-        + "GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };"
-    )
-    lines.append(
-        _INDENT
-        + "enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, "
-        + "SLOW = 2, FAST = 3 };"
-    )
-    lines.append(
-        _INDENT
-        + "enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, "
-        + "PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };"
-    )
-    lines.append(
-        _INDENT
-        + "enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, "
-        + "FORCE_REVERSE = 2 };"
-    )
+    lines.extend(_emit_mode_enum_lines())
     lines.append("")
     lines.append(
         _INDENT + "// Mission-wide motion-mode defaults, baked in from"
@@ -518,6 +533,13 @@ def emit_routes(
     field_data_source_path = Path(field_data_source_path)
 
     node_names: List[str] = sorted(field_data.NODES.keys())
+    n_nodes = len(node_names)
+    if n_nodes >= 256:
+        raise ValueError(
+            f"emit_routes: N_NODES={n_nodes} exceeds the uint8_t/NEXT_HOP_NONE(0xFF)"
+            " ceiling (max 255 nodes). Node ids are 0..N_NODES-1, so the 0xFF"
+            " sentinel only collides with a valid id once N_NODES reaches 256."
+        )
     index_of = _build_index_lookup(node_names)
 
     if field_data.START_NODE not in index_of:

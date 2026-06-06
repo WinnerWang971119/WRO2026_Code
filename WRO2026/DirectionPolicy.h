@@ -33,7 +33,13 @@
  * rationale.
  *
  * Cross-language parity: keep this function step-for-step identical with
- * `tools/path_planner/sim/runtime.py::resolve_direction`. TC18 enforces it.
+ * `tools/path_planner/sim/runtime.py::resolve_direction`. Enforced by the
+ * shared-vector golden in
+ * `tools/path_planner/tests/test_direction_parity.py`, which feeds one input
+ * set through the Python helper and asserts each result against a frozen table
+ * of this C++ algorithm's outputs (so a wrap/threshold divergence fails CI).
+ * TC18 only checks compiler<->sim *primitive-stream* parity, not the
+ * cross-language resolver algorithm.
  */
 inline Direction resolveDirection(
     Routes::DirectionMode edgeOverride,
@@ -66,7 +72,8 @@ inline Direction resolveDirection(
 
     // Wrap delta into (-180, +180] via the shared NavTypes.h helper (same wrap the
     // PathTracker pass-through / turn-needed checks use). Keep this behaviourally
-    // identical to the sim's `normalize_turn` in sim/runtime.py (TC18 parity).
+    // identical to the sim's `normalize_turn` in sim/runtime.py (parity golden:
+    // test_direction_parity.py).
     const float delta = wrapDeltaDeg(edgeHeading - currentHeading);
     if (fabsf(delta) > Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG) return Direction::REAR;
     return Direction::FRONT;
