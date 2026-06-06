@@ -367,10 +367,16 @@ void LineFollowerClass::update()
                 case Config::LostLineAction::CRAWL:
                 {
                     // Straight creep forward (no steering) so the strip may be reacquired.
-                    // `cruise / 2` is already in-range, but snap for consistency with the
-                    // main mix path so every PWM hitting the lower MCU goes through the
-                    // same gate.
-                    const int16_t crawl = deadbandSnap((int16_t) (cruise / 2));
+                    // Use Config::CRAWL_PWM directly — a fixed constant that is guaranteed
+                    // to be in [PWM_MIN_MAGNITUDE, PWM_MAX] regardless of the active cruise
+                    // preset. The previous cruise/2 derivation was broken for SPEED_SLOW
+                    // (15 < PWM_MIN_MAGNITUDE=20 → silently floored to 20 = 67% of SLOW
+                    // cruise, not the intended ~50%). Sign-preserve cruise direction so
+                    // reverse-mode CRAWL still creeps backward. Pass through deadbandSnap
+                    // for the same consistency gate as every other PWM on this path.
+                    const int16_t crawlSigned =
+                        (cruise < 0) ? (int16_t) -Config::CRAWL_PWM : (int16_t) Config::CRAWL_PWM;
+                    const int16_t crawl = deadbandSnap(crawlSigned);
                     Drive.setSpeed(crawl, crawl);
                     break;
                 }

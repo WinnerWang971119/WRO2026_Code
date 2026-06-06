@@ -648,6 +648,24 @@ namespace Config
     constexpr LostLineAction LOST_LINE_ACTION = LostLineAction::STOP;
 
     /**
+     * @brief Deliberate lost-line creep PWM used by the CRAWL recovery branch, in [-100, 100].
+     *
+     * Intentionally decoupled from the active SpeedPreset so that changing cruise speed never
+     * silently alters the CRAWL behavior. The original design intent was ~half of NORMAL cruise
+     * (SPEED_NORMAL = 50 → 25). Choosing 25 directly avoids the cruise/2-vs-PWM_MIN_MAGNITUDE
+     * floor ambiguity: with SPEED_SLOW = 30, cruise/2 = 15 falls below PWM_MIN_MAGNITUDE = 20
+     * and would be snapped up to 20 (67% of SLOW cruise), not the intended 50%. This constant
+     * sidesteps that by stating the creep PWM explicitly.
+     *
+     * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
+     *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
+     */
+    constexpr int16_t CRAWL_PWM = 25;
+    static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
+                  "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
+                  "recovery branch never hits the deadband floor or saturation cap silently.");
+
+    /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.
      *
      * The new sync helper is intentionally a thin orchestration wrapper around repeated
