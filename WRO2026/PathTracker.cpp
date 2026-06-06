@@ -371,6 +371,19 @@ void PathTrackerClass::_applyGoToBuilder(
     Direction  arrivalDir,
     StopAtLine stopAtLine)
 {
+    // No-op when a fault is already latched. This MUST run before the
+    // goal-id and isZeroed() checks below: those branches call
+    // `_enterFault(...)`, which would overwrite the existing
+    // `_fault.kind`/`fromNode`/`destNode` and destroy the original
+    // diagnostic. Guarding first preserves the latched fault so the
+    // operator still sees what tripped it (clear with clearFault()).
+    if (_fault.kind != Fault::NONE)
+    {
+        Serial.print(F("[PathTracker] goTo while faulted (kind="));
+        Serial.print(faultMnemonic(_fault.kind));
+        Serial.println(F("); clear with clearFault()"));
+        return;
+    }
     if (goalId == FieldMap::NODE_NONE || goalId >= Routes::N_NODES)
     {
         _enterFault(Fault::BAD_NODE, Localization.getCurrentNode(), goalId);
@@ -379,13 +392,6 @@ void PathTrackerClass::_applyGoToBuilder(
     if (!Localization.isZeroed())
     {
         _enterFault(Fault::NOT_ZEROED, Localization.getCurrentNode(), goalId);
-        return;
-    }
-    if (_fault.kind != Fault::NONE)
-    {
-        Serial.print(F("[PathTracker] goTo while faulted (kind="));
-        Serial.print(faultMnemonic(_fault.kind));
-        Serial.println(F("); clear with clearFault()"));
         return;
     }
     // Slot that `_enqueue` is about to fill (it advances `_qTail` past it on
