@@ -59,7 +59,7 @@ agree on every hop (TC10/TC12 cross-module parity).
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Union
 
 import networkx as nx
 
@@ -71,7 +71,18 @@ ACT_FOLLOW_DIST = "follow_line_to_distance"
 ACT_FORWARD = "forward"
 ACT_STOP_AT_LINE = "stop_at_line"
 
-Primitive = Tuple[str, Optional[float]]
+# Forward hops produce 2-tuples; reverse hops (REAR direction, T12+) produce
+# 3-tuples (EDGE_LINE) or 4-tuples (EDGE_PROJECTION / EDGE_BLIND variants).
+# The second slot of a reverse tuple is the target node name (str), not a float.
+# BlindMode / LineMode / ProjectionMode are imported lazily inside compile_path
+# to avoid a circular dependency with sim.runtime; Any stands in for those
+# IntEnum types here so this module-level alias is importable without
+# triggering that circular import.
+Primitive = Union[
+    Tuple[str, Optional[float]],      # forward: turn_rel / follow_* / forward / stop_at_line
+    Tuple[str, str, Any],             # REAR EDGE_LINE: (act, target_node, line_mode)
+    Tuple[str, str, float, Any],      # REAR EDGE_PROJECTION / EDGE_BLIND: (act, target_node, dist, mode)
+]
 
 _TURN_EPSILON_DEG = 1e-6
 
