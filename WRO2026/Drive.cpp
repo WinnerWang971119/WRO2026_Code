@@ -723,12 +723,26 @@ void DriveClass::_updateProfile()
             _moveDone = true;
             _turnDone = true;
         }
+        else if (_qCount > 0)
+        {
+            // Chained move WITH a follow-up queued: caller asked us to leave the chassis at
+            // endSpeed (typically cruise) so the next queued move can pick up without a
+            // zero-velocity gap. The last setpoint issued by `_profileSpeedAt(near 1.0)` was
+            // already at endSpeed — leave it. No motor command, no brake; the next move's first
+            // `_dispatchNext` tick overwrites the setpoint.
+            _moveDone = true;
+            _turnDone = true;
+        }
         else
         {
-            // Chained move: caller asked us to leave the chassis at endSpeed (typically
-            // cruise) so the next queued move can pick up without a zero-velocity gap. The
-            // last setpoint issued by `_profileSpeedAt(near 1.0)` was already at endSpeed —
-            // leave it. No motor command, no brake.
+            // Chained move ending at endSpeed but NOTHING is queued (`_qCount == 0`, the same
+            // queue-empty predicate `_dispatchNext` uses). The seamless-handoff optimization
+            // above assumed "the next queued move overwrites the cruise setpoint" — with an empty
+            // queue no such move exists, so latching cruise would leave the wheels driving at the
+            // endSpeed setpoint forever while every state accessor reports idle. Fall through to
+            // the brake/stop path instead. W1 (queue review) — finding #13.
+            MiniR4.DriveDC.Move(0, 0);
+            MiniR4.DriveDC.brake(_profileBrake);
             _moveDone = true;
             _turnDone = true;
         }
