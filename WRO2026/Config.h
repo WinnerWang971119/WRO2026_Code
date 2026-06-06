@@ -648,6 +648,24 @@ namespace Config
     constexpr LostLineAction LOST_LINE_ACTION = LostLineAction::STOP;
 
     /**
+     * @brief Deliberate lost-line creep PWM used by the CRAWL recovery branch, in [-100, 100].
+     *
+     * Intentionally decoupled from the active SpeedPreset so that changing cruise speed never
+     * silently alters the CRAWL behavior. The original design intent was ~half of NORMAL cruise
+     * (SPEED_NORMAL = 50 → 25). Choosing 25 directly avoids the cruise/2-vs-PWM_MIN_MAGNITUDE
+     * floor ambiguity: with SPEED_SLOW = 30, cruise/2 = 15 falls below PWM_MIN_MAGNITUDE = 20
+     * and would be snapped up to 20 (67% of SLOW cruise), not the intended 50%. This constant
+     * sidesteps that by stating the creep PWM explicitly.
+     *
+     * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
+     *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
+     */
+    constexpr int16_t CRAWL_PWM = 25;
+    static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
+                  "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
+                  "recovery branch never hits the deadband floor or saturation cap silently.");
+
+    /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.
      *
      * The new sync helper is intentionally a thin orchestration wrapper around repeated
@@ -981,6 +999,19 @@ namespace Config
 
     /** @brief Number of beeps emitted before Mission awaits BTN_DOWN to clear. */
     constexpr uint8_t MISSION_FAULT_BEEPS = 5;
+
+    /**
+     * @brief Upper bound (~65 s) on a Mission ``beep`` step's duration, in ms.
+     *
+     * The audible tone is emitted through ``MiniR4.Buzzer.Tone`` via the
+     * ``uint16_t``-duration ``_beep`` wrapper, while the BEEP advance gate
+     * compares against the stored duration. Clamping the stored value to the
+     * ``uint16_t`` range at the ``beep`` verb keeps the audio clock and the
+     * step clock in agreement — without it, a duration above 65535 ms would
+     * silence the tone after ``duration_ms % 65536`` ms while the step kept
+     * blocking for the full duration.
+     */
+    constexpr uint32_t MISSION_BEEP_MAX_MS = 65535;
 
     /** @brief Interval at which EventTrace emits its `HB ...` status heartbeat. */
     constexpr uint32_t MISSION_HEARTBEAT_MS = 500;

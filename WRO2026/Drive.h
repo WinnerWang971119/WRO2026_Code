@@ -1512,10 +1512,22 @@ public:
         cmd.brake   = _brake;
         cmd.heading = _headingSet ? _heading : _drive._heldYaw;
 
+        // Reject a non-positive acceleration at the public-API boundary (finding #16). A bad
+        // `.setAccel(0)` / negative would otherwise enqueue a PROFILE_DIST whose `_execProfileMove`
+        // rejects it with rc 0x01 only when it reaches the FRONT of the queue — and `_dispatchNext`
+        // treats any non-zero rc as a hard fault (stop + DISPATCH_FAILED + _clearQueue), discarding
+        // every other valid queued command. Fail fast here by falling back to a non-profiled move,
+        // mirroring the min-move-threshold fallback below.
+        const bool accelValid = _accel > 0.0f;
+        if (_tShape && !accelValid)
+        {
+            Serial.println(F("[Drive] driveDist: non-positive accel — falling back to non-profiled move"));
+        }
+
         // Decide profile vs non-profile, with the min-move-threshold no-op for tShape. Below
         // the threshold we silently fall back to a non-profiled constant-cruise move so the
         // constant-acceleration contract isn't violated on short hops.
-        if (_tShape && _cm >= Config::TSHAPE_MIN_MOVE_CM)
+        if (_tShape && accelValid && _cm >= Config::TSHAPE_MIN_MOVE_CM)
         {
             cmd.kind       = DriveCommand::Kind::PROFILE_DIST;
             // Resolve start/end speeds. The no-brake → endSpeed=cruise rule kicks in here:
@@ -1866,7 +1878,16 @@ public:
         cmd.brake   = _brake;
         cmd.heading = _headingSet ? _heading : _drive._heldYaw;
 
-        if (_tShape && _sec >= Config::TSHAPE_MIN_MOVE_SEC)
+        // Reject a non-positive acceleration at the public-API boundary (finding #16) — see
+        // DriveDistBuilder for the full rationale (a bad accel would otherwise poison the whole
+        // queue at dispatch time). Fall back to a non-profiled move, mirroring the min-move guard.
+        const bool accelValid = _accel > 0.0f;
+        if (_tShape && !accelValid)
+        {
+            Serial.println(F("[Drive] driveTime: non-positive accel — falling back to non-profiled move"));
+        }
+
+        if (_tShape && accelValid && _sec >= Config::TSHAPE_MIN_MOVE_SEC)
         {
             cmd.kind       = DriveCommand::Kind::PROFILE_TIME;
             // Sign-by-cruise on the default start speed — see DriveDistBuilder for rationale (F1).

@@ -99,7 +99,12 @@ public:
     MissionClass& print(const char* msg);
 
     /**
-     * @brief Enqueue a buzzer tone. Non-blocking via ``MiniR4.Buzzer.beep``.
+     * @brief Enqueue a buzzer tone. Non-blocking via ``MiniR4.Buzzer.Tone``.
+     *
+     * @param duration_ms  Tone length in ms. Clamped to
+     *                     ``Config::MISSION_BEEP_MAX_MS`` (~65 s) so the
+     *                     ``uint16_t`` audio clock and the step advance gate
+     *                     can never disagree — see that constant's docstring.
      */
     MissionClass& beep(uint16_t freq_hz, uint32_t duration_ms);
 
@@ -388,7 +393,7 @@ MissionClass& MissionClass::task(const char* name, Args... args)
     s.type      = StepType::TASK;
     s.task_name = name;
     _packArgs(s.task_args.bytes, args...);
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 

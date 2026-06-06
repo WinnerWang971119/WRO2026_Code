@@ -81,9 +81,14 @@ MissionClass& MissionClass::print(const char* msg)
 MissionClass& MissionClass::beep(uint16_t freq_hz, uint32_t duration_ms)
 {
     Step s{};
-    s.type        = StepType::BEEP;
-    s.freq_hz     = freq_hz;
-    s.duration_ms = duration_ms;
+    s.type    = StepType::BEEP;
+    s.freq_hz = freq_hz;
+    // Clamp at the verb so the stored duration can never exceed the uint16_t
+    // range the _beep wrapper / advance gate share. Above the ceiling the
+    // audible tone would stop after duration_ms % 65536 ms while the step kept
+    // blocking the full duration — see Config::MISSION_BEEP_MAX_MS.
+    s.duration_ms =
+        duration_ms > Config::MISSION_BEEP_MAX_MS ? Config::MISSION_BEEP_MAX_MS : duration_ms;
     _lastPushOk = _push(s);
     return *this;
 }
@@ -221,11 +226,12 @@ bool MissionClass::hasFault() const
 
 void MissionClass::_setLeds(uint8_t r, uint8_t g, uint8_t b)
 {
-    // MatrixMiniR4 exposes the on-board RGB pair via the LED module. The
-    // exact method name may differ across library revisions; this is the
-    // setColor(idx, r, g, b) signature in the current header.
-    MiniR4.LED.setColor(0, r, g, b);
+    // MatrixMiniR4 exposes the on-board RGB pair via the LED module. The two
+    // on-board RGB LEDs are fixed at indices 1 and 2 — MiniR4LED::setColor
+    // rejects any idx outside 1..2 (`if (idx < 1 || idx > 2) return false;`),
+    // so idx 0 is invalid and would be silently dropped.
     MiniR4.LED.setColor(1, r, g, b);
+    MiniR4.LED.setColor(2, r, g, b);
 }
 
 void MissionClass::_beep(uint16_t freq_hz, uint16_t duration_ms)

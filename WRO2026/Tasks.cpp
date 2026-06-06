@@ -161,6 +161,15 @@ void TasksClass::clearAbort()
 
 bool TasksClass::isAborted() const
 {
+    // Staged hook — the latch is set by abort() and cleared by begin()/clearAbort(),
+    // but NO production code polls this yet. The actual stop signal is delivered
+    // by PathTracker.abort() + Drive.stop(true); those fire synchronously while
+    // this flag merely records that an abort was requested.
+    //
+    // Intended first consumer: a future cooperative task body that should call
+    // Tasks.isAborted() at the top of its work loop and bail (return false) so
+    // long-running tasks honour mission aborts without busy-waiting. Until then
+    // this reader is exercised only by the host-test mirror (sim/).
     return _aborted;
 }
 

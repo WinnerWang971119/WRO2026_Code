@@ -371,6 +371,19 @@ void PathTrackerClass::_applyGoToBuilder(
     Direction  arrivalDir,
     StopAtLine stopAtLine)
 {
+    // No-op when a fault is already latched. This MUST run before the
+    // goal-id and isZeroed() checks below: those branches call
+    // `_enterFault(...)`, which would overwrite the existing
+    // `_fault.kind`/`fromNode`/`destNode` and destroy the original
+    // diagnostic. Guarding first preserves the latched fault so the
+    // operator still sees what tripped it (clear with clearFault()).
+    if (_fault.kind != Fault::NONE)
+    {
+        Serial.print(F("[PathTracker] goTo while faulted (kind="));
+        Serial.print(faultMnemonic(_fault.kind));
+        Serial.println(F("); clear with clearFault()"));
+        return;
+    }
     if (goalId == FieldMap::NODE_NONE || goalId >= Routes::N_NODES)
     {
         _enterFault(Fault::BAD_NODE, Localization.getCurrentNode(), goalId);
@@ -379,13 +392,6 @@ void PathTrackerClass::_applyGoToBuilder(
     if (!Localization.isZeroed())
     {
         _enterFault(Fault::NOT_ZEROED, Localization.getCurrentNode(), goalId);
-        return;
-    }
-    if (_fault.kind != Fault::NONE)
-    {
-        Serial.print(F("[PathTracker] goTo while faulted (kind="));
-        Serial.print(faultMnemonic(_fault.kind));
-        Serial.println(F("); clear with clearFault()"));
         return;
     }
     // Slot that `_enqueue` is about to fill (it advances `_qTail` past it on
@@ -886,6 +892,16 @@ void PathTrackerClass::_onPlanNextHop()
         {
             LineFollower.setEnabled(false).setBrake(false);
         }
+
+        // Clear any pass-through eligibility the LINE_FOLLOW peek latched. That
+        // peek used FieldMap edge headings; this branch fired because the live
+        // IMU heading disagrees, so a real pre-edge turn IS required. Leaving
+        // `_passThrough` set would make the post-turn `_dispatchEdgeAfterTurn`
+        // run its blind pass-through branch (cruise start-speed) from a dead
+        // stop with no soft-start ramp, jolting the chassis. The chassis is
+        // stopped after the turn, so the blind move must soft-start from
+        // TSHAPE_START_SPEED. (PR#35 findings #32 / #90.)
+        _passThrough = false;
 
         const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
 

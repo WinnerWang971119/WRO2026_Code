@@ -144,7 +144,16 @@ void cooperativeTick()
     Tasks.update();          // T8: housekeeping; no FSM in this plan
     PathTracker.update();
     Mission.update();
-    EventTrace.update();
+
+    // The calibration menu owns the OLED while open (FINDING #4): EventTrace's
+    // dirty-flag repaint would clearDisplay() and paint the event ring over the
+    // menu within ~one tick. Suppress its render while OPEN. The pending _dirty
+    // flag persists, so the first update() after the menu closes repaints the
+    // accumulated events.
+    if (_calMenuState != CalMenuState::OPEN)
+    {
+        EventTrace.update();
+    }
 }
 
 /**
@@ -317,10 +326,11 @@ void loop()
                 _btnDownPressStartMs = 0;
                 renderCalMenu();
 
-                // Wait for BTN_DOWN release so the still-held button doesn't
-                // immediately count as a short-press cursor cycle on the very
-                // next loop tick.
-                while (MiniR4.BTN_DOWN.getState())
+                // Wait for BOTH buttons to release so neither a still-held
+                // BTN_DOWN counts as a short-press cursor cycle nor a still-held
+                // BTN_UP counts as a confirm rising edge on the very next loop
+                // tick (FINDING #5). Mirrors the confirm-exit release loop.
+                while (MiniR4.BTN_DOWN.getState() || MiniR4.BTN_UP.getState())
                 {
                     delay(20);
                 }
