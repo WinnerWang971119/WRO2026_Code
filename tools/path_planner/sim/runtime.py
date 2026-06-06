@@ -499,11 +499,15 @@ def resolve_direction(
 ) -> "Direction":
     """Resolve which physical direction the chassis takes through one hop.
 
-    Function-identical Python mirror of the C++ ``PathTracker::_resolveDirection``
-    helper (T5). The algorithm is fully specified in the plan
-    "API Contracts — Resolution algorithm" section; both implementations
-    must stay byte-for-byte equivalent so the offline sim and the robot
-    agree on every hop's direction (TC18 parity).
+    Function-identical Python mirror of the C++ ``resolveDirection`` helper in
+    ``WRO2026/DirectionPolicy.h`` (T5). The algorithm is fully specified in the
+    plan "API Contracts — Resolution algorithm" section; both implementations
+    must stay byte-for-byte equivalent so the offline sim and the robot agree on
+    every hop's direction. Cross-language parity is enforced by the shared-vector
+    golden in ``tools/path_planner/tests/test_direction_parity.py``, which feeds
+    one input set through this helper and asserts each result against a frozen
+    table of the C++ outputs. (TC18 only checks the compiler<->sim
+    *primitive-stream* parity, not this resolver algorithm.)
 
     Precedence (highest first):
 
