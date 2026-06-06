@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import FieldDataError, validate
@@ -420,3 +420,106 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     assert any(
         edge.get("blind_mode") == "STOP_AT_LINE" for edge in data["EDGES"]
     )
+
+
+# -- Finding #36: pivot out-degree check moved into the validator ------------
+#
+# A single-wheel pivot entering 'v' is compensated by shortening 'v's ONE
+# forward continuation. The planner cannot pick among several before Dijkstra
+# runs, so it requires 'v' to have exactly one forward out-edge (excluding the
+# back-edge to the pivot's source 'u'). This used to fail late as a raw
+# ValueError from planner.apply_pivot_compensations (an uncaught traceback at
+# build time); finding #36 (decision B) moved it into the validator so a bad
+# pivot fails as a clean FieldDataError. The count is over the AUTHORED
+# adjacency, before obstacle / C-space inflation clipping.
+
+
+def test_validator_rejects_pivot_with_multiple_forward_out_edges() -> None:
+    """A pivot edge whose destination has >1 forward out-edge is rejected.
+
+    In the toy field, node 'E' is line-connected to A, B, C, and D. A pivot
+    edge A->E lands at E, whose authored out-neighbors are {A, B, C, D};
+    excluding the back-edge to the source 'A' leaves {B, C, D} -- three
+    forward continuations, so the pivot landing is ambiguous and must fail.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "E",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "pivot": Pivot.LEFT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+        validate(fd)
+
+
+def test_validator_rejects_pivot_with_zero_forward_out_edges() -> None:
+    """A pivot edge whose destination has no forward out-edge is rejected.
+
+    Node 'G' is a leaf: its only authored neighbor is 'B' (the single
+    BLIND_EDGES pair). A pivot edge B->G lands at G, whose out-neighbors are
+    {B}; excluding the back-edge to the source 'B' leaves an empty set --
+    zero forward continuations, which is equally ambiguous and must fail.
+    The entry is EDGE_BLIND so it is a legitimate same-type override of the
+    existing ('B','G') blind pair (it is the pivot count, not the type
+    cross-check, that rejects it).
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "pivot": Pivot.RIGHT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+        validate(fd)
+
+
+def test_validator_accepts_pivot_with_single_forward_out_edge() -> None:
+    """A pivot landing with exactly one forward out-edge validates.
+
+    Self-contained A->B->C chain: the pivot edge A->B lands at B, whose
+    authored out-neighbors are {A, C}; excluding the back-edge to the source
+    'A' leaves {C} -- exactly one forward continuation, so the pivot landing
+    is unambiguous and validation passes. This proves the rejection cases
+    above are not a blanket failure on any pivot tag.
+    """
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type": EDGE_BLIND,
+                "u": "A",
+                "v": "B",
+                "distance_cm": 100.0,
+                "heading_deg": 0.0,
+                "pivot": Pivot.LEFT,
+            },
+            {
+                "type": EDGE_BLIND,
+                "u": "B",
+                "v": "C",
+                "distance_cm": 100.0,
+                "heading_deg": 90.0,
+            },
+        ],
+    )
+    assert validate(fd) is None

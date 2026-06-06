@@ -72,6 +72,70 @@ def _segment_key(a: str, b: str) -> frozenset:
     return frozenset((a, b))
 
 
+def _authored_out_neighbors(field_data, node: str) -> set:
+    """Return the directed out-neighbors of ``node`` in the AUTHORED graph.
+
+    Mirrors the directed-edge emission of
+    :func:`tools.path_planner.graph_builder.build_graph` exactly, so the
+    count of forward out-edges this function reports matches what the
+    planner would see -- with one deliberate exception noted below.
+
+    ``build_graph`` emits every undirected pair bidirectionally:
+
+    * each ``LINE_SEGMENTS`` pair ``(a, b)`` -> ``a->b`` and ``b->a``;
+    * each ``BLIND_EDGES`` pair ``(a, b)`` -> ``a->b`` and ``b->a``;
+    * each ``EDGES`` entry ``{u, v}`` -> ``u->v`` and ``v->u``.
+
+    So ``node`` has an out-edge to every line/blind neighbor, an out-edge
+    to ``w`` for every EDGES entry with ``u == node``, and an out-edge to
+    ``u`` (the reverse leg) for every EDGES entry with ``v == node``.
+    Out-neighbors are collected into a ``set`` because ``networkx``'s
+    ``DiGraph.add_edge`` keeps at most one directed edge per ordered pair:
+    a node named in two source lists still contributes a single out-edge.
+
+    .. note::
+
+        This counts the AUTHORED topology, BEFORE obstacle / C-space
+        inflation clipping. The planner's old in-line check (now removed)
+        counted the POST-clip graph instead. The divergence is
+        intentional: a pivot landing should be unambiguous in the graph
+        the author actually wrote, independent of which edges inflation
+        happens to drop. Edges silently lost to obstacle clipping are a
+        separate concern, warned per finding #37; this check must not
+        depend on that clipping to decide a pivot is well-formed.
+
+    :param field_data: the field-data module (or any object exposing
+        ``LINE_SEGMENTS``, ``BLIND_EDGES``, and optionally ``EDGES``).
+    :param node: the node whose out-neighbors to collect.
+    :return: set of node names ``node`` has a directed out-edge to.
+    """
+    neighbors: set = set()
+
+    for a, b in getattr(field_data, "LINE_SEGMENTS", ()):
+        if a == node:
+            neighbors.add(b)
+        elif b == node:
+            neighbors.add(a)
+
+    for a, b in getattr(field_data, "BLIND_EDGES", ()):
+        if a == node:
+            neighbors.add(b)
+        elif b == node:
+            neighbors.add(a)
+
+    for entry in getattr(field_data, "EDGES", ()) or ():
+        if not isinstance(entry, dict):
+            continue  # malformed entry; the per-entry shape check reports it.
+        u = entry.get("u")
+        v = entry.get("v")
+        if u == node:
+            neighbors.add(v)
+        elif v == node:
+            neighbors.add(u)
+
+    return neighbors
+
+
 def _validate_edge_list(
     edges: Iterable,
     nodes: dict,
@@ -122,10 +186,19 @@ def _validate_edges_field(field_data) -> None:
     entry on an existing pair is a legitimate override layer and is
     accepted.
 
-    The cross-edge pivot-compensation check (does the upcoming turn
-    delta exceed the minimum useful angle?) is deliberately deferred to
-    :mod:`tools.path_planner.planner` (T5); this validator only checks
-    the per-entry shape.
+    The pivot out-degree check (finding #36) lives here: a pivot-tagged
+    entry's destination ``v`` must have exactly one forward out-edge in
+    the AUTHORED adjacency (excluding the back-edge to the pivot's source
+    ``u``), otherwise pivot compensation in
+    :mod:`tools.path_planner.planner` is ambiguous. The check counts the
+    authored topology before obstacle / C-space inflation, so a bad pivot
+    fails as a clean :class:`FieldDataError` at validation time rather
+    than as an uncaught ``ValueError`` from the planner at build time.
+
+    The cross-edge pivot-geometry refinement (does the upcoming turn
+    delta exceed the minimum useful angle?) is still owned by
+    :mod:`tools.path_planner.planner` (T5); this validator checks the
+    per-entry shape and the pivot landing's out-degree.
 
     Imports of :class:`Pivot`, :class:`LineMode`, :class:`BlindMode`,
     :class:`ProjectionMode`, and :class:`TurnMode` are performed inside
@@ -341,10 +414,36 @@ def _validate_edges_field(field_data) -> None:
                 )
             # NONE is allowed but redundant -- do not reject it as
             # DEFAULT-sentinel, because Pivot.NONE is the meaningful
-            # "counter-rotation" value, not a placeholder. The
-            # cross-edge geometry check (is the upcoming turn delta
-            # large enough for compensation to matter?) is deferred to
-            # planner.py (T5).
+            # "counter-rotation" value, not a placeholder.
+            #
+            # Pivot out-degree check (finding #36). A single-wheel pivot
+            # entering 'v' is compensated by shortening 'v's ONE forward
+            # continuation; the planner cannot pick among several before
+            # Dijkstra runs, so it requires 'v' to have exactly one forward
+            # out-edge (excluding the back-edge to the pivot's source 'u',
+            # which the chassis never immediately reverses). This used to be
+            # a raw ValueError raised from planner.apply_pivot_compensations
+            # at build time -- an uncaught traceback rather than a clean
+            # data error. It now lives here so a bad pivot fails as a
+            # FieldDataError at validation time (finding #36 decision B).
+            #
+            # The count is taken over the AUTHORED adjacency, BEFORE
+            # obstacle / C-space inflation clipping (the planner counted the
+            # post-clip graph). This is intentional: a pivot landing must be
+            # unambiguous in the graph the author wrote, not contingent on
+            # which edges inflation drops. Edges lost to clipping are warned
+            # separately (finding #37).
+            if pivot in (Pivot.LEFT, Pivot.RIGHT):
+                forward_out = _authored_out_neighbors(field_data, v) - {u}
+                if len(forward_out) != 1:
+                    raise FieldDataError(
+                        f"EDGES[{i}] pivot compensation requires destination "
+                        f"node '{v}' (entered from '{u}') to have exactly one "
+                        f"forward out-edge, got {len(forward_out)}. "
+                        "Restructure the graph so pivot landings are "
+                        f"unambiguous, or drop the pivot tag on edge "
+                        f"('{u}', '{v}')."
+                    )
 
 
 def validate(field_data) -> None:

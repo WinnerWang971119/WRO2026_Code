@@ -179,11 +179,16 @@ def test_pivot_compensation_clamps_to_nonneg_distance():
     assert adj_dist == pytest.approx(0.0)
 
 
-def test_apply_pivot_compensations_raises_on_multi_successor():
-    """A pivot edge whose destination has >1 forward out-edge is rejected.
+def test_apply_pivot_compensations_skips_multi_successor():
+    """A pivot landing with >1 forward out-edge is skipped, not raised.
 
-    The back-edge to ``src`` is excluded from the count -- a bidirectional
-    pair plus 2 real forward continuations still trips the guard.
+    The out-degree precondition is now enforced by the validator (finding
+    #36), so ``apply_pivot_compensations`` no longer raises on a mismatch:
+    for direct / hand-built callers that bypass ``validate`` it skips the
+    offending pivot edge, leaving every following edge uncompensated rather
+    than mis-compensating an arbitrary branch. The back-edge to ``src`` is
+    excluded from the count -- a bidirectional pair plus 2 real forward
+    continuations is still a multi-successor landing.
     """
     from tools.path_planner.graph_builder import Pivot
     from tools.path_planner.planner import apply_pivot_compensations
@@ -197,8 +202,10 @@ def test_apply_pivot_compensations_raises_on_multi_successor():
     g.add_edge("B", "C", distance_cm=20.0, heading_deg=90.0)
     g.add_edge("B", "D", distance_cm=15.0, heading_deg=-90.0)
 
-    with pytest.raises(ValueError, match="pivot"):
-        apply_pivot_compensations(g, track_cm=15.0)
+    # Must not raise; must not touch either successor's distance.
+    apply_pivot_compensations(g, track_cm=15.0)
+    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(20.0)
+    assert g.edges["B", "D"]["distance_cm"] == pytest.approx(15.0)
 
 
 # -- Codex P1 regression: directional overrides must not mirror to reverse --

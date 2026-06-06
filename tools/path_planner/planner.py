@@ -160,17 +160,28 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
     .. note::
 
         This conservative implementation refuses to compensate when the
-        landing node has more than one forward out-edge. Out-edge choice
-        is only known once Dijkstra has picked a path, but
-        :func:`apply_pivot_compensations` runs *before* Dijkstra so it
-        cannot know which successor will fire -- applying the
-        adjustment to all successors would silently overcorrect every
+        landing node has anything other than exactly one forward
+        out-edge. Out-edge choice is only known once Dijkstra has picked
+        a path, but :func:`apply_pivot_compensations` runs *before*
+        Dijkstra so it cannot know which successor will fire -- applying
+        the adjustment to all successors would silently overcorrect every
         branch that is not the one we end up taking. The safe scope cut
-        for the 2026-05-17 hardware test is to require pivot
-        destinations to have exactly one forward out-edge so the choice
-        is unambiguous. The field-data author can structure the graph
-        accordingly. A future per-path pivot-aware planner could relax
-        this restriction.
+        is to require pivot destinations to have exactly one forward
+        out-edge so the choice is unambiguous. The field-data author can
+        structure the graph accordingly. A future per-path pivot-aware
+        planner could relax this restriction.
+
+        For the production pipeline the validator enforces this
+        precondition up front (finding #36): a pivot landing with the
+        wrong out-degree fails as a :class:`FieldDataError` at validation
+        time. This function therefore does NOT raise on a mismatch -- it
+        skips the offending pivot edge (leaving its following edge
+        uncompensated). The skip is a defensive guard for direct /
+        hand-built callers that assemble a graph without running
+        :func:`tools.path_planner.validator.validate`; it keeps
+        ``forward_out_edges[0]`` safe from an IndexError and never
+        mis-compensates a multi-successor landing by picking an arbitrary
+        branch.
 
         The back-edge from ``dst`` to ``src`` (always present when the
         edge was emitted by :func:`build_graph`'s bidirectional pair) is
@@ -183,10 +194,10 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         attributes are mutated in place).
     :param track_cm: chassis track width in centimetres. Forwarded to
         :func:`compute_pivot_compensation`.
-    :raises ValueError: when a pivot-tagged edge's destination node has
-        zero or more than one out-edge. The error message names the
-        destination node and its out-degree so the field-data author
-        can find the offending entry.
+    :return: ``None``. Pivot edges whose destination does not have
+        exactly one forward out-edge are skipped (left uncompensated)
+        rather than raising; the validator (finding #36) enforces the
+        one-forward-out-edge precondition for the production pipeline.
     """
     pivot_values = {int(Pivot.LEFT), int(Pivot.RIGHT)}
 
@@ -212,13 +223,16 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
             if d != src
         ]
         if len(forward_out_edges) != 1:
-            raise ValueError(
-                "pivot compensation requires destination node "
-                f"'{dst}' (entered from '{src}') to have exactly one "
-                f"forward out-edge, got {len(forward_out_edges)}. "
-                "Restructure the graph so pivot landings are unambiguous, "
-                f"or drop the pivot tag on edge ('{src}', '{dst}')."
-            )
+            # The validator (finding #36) now enforces this precondition for
+            # the production pipeline -- a pivot landing with anything other
+            # than one forward out-edge fails as a clean FieldDataError at
+            # validation time. This skip is defensive for direct / hand-built
+            # callers that bypass `validate` (e.g. unit tests assembling a
+            # raw DiGraph): it leaves the edge uncompensated rather than
+            # raising, so `forward_out_edges[0]` below can never IndexError on
+            # a 0-successor landing and a multi-successor landing is never
+            # mis-compensated by picking an arbitrary branch.
+            continue
 
         _next_src, _next_dst, next_edge_data = forward_out_edges[0]
         pre_heading = float(pivot_edge_data["heading_deg"])
@@ -309,9 +323,12 @@ def compute_all_pairs_next_hop(
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
-    :raises ValueError: when ``cost_blind_multiplier`` is not positive, or
-        bubbled from :func:`apply_pivot_compensations` when a pivot-tagged
-        edge's destination has anything other than exactly one out-edge.
+    :raises ValueError: when ``cost_blind_multiplier`` is not positive.
+        A pivot-tagged edge whose destination does not have exactly one
+        forward out-edge is no longer an error here -- the validator
+        rejects it up front (finding #36), and
+        :func:`apply_pivot_compensations` skips it defensively for callers
+        that bypass validation.
     """
     if cost_blind_multiplier <= 0:
         raise ValueError(
