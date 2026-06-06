@@ -357,3 +357,98 @@ add_test(NAME tasks_overflow_compile_fail
 )
 set_tests_properties(tasks_overflow_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES")
+
+# =========================================================================================
+# Test executable #6 — Manipulator facade + ManipServo + ManipBelt (T9, AC1).
+#
+# Links the real production `Manipulator.cpp` against the host mocks. `ManipServo.h`
+# and `ManipBelt.h` are header-only (owned by Manipulator.cpp via `Manipulator.h`),
+# so there is no `.cpp` for them. Exercises TC1..TC12 + TC15 (TC16 host-untriggerable —
+# see the test file docblock).
+#
+# Manipulator's TUs pull `<MatrixMiniR4.h>` / `<Arduino.h>` via ANGLE brackets, so the
+# include-path search alone picks `mocks/` (it leads `COMMON_INCLUDES`). The
+# Drive / WROLineArray / Intersection mocks are NOT involved, so this target
+# DELIBERATELY does NOT call `add_mock_force_includes(...)` — Manipulator never
+# includes those production headers, so there is nothing to shadow.
+#
+# `-fsanitize=address,undefined` (compile + link) is added ONLY for GNU/Clang —
+# CI runs on g++, so it gets ASan/UBSan to back TC5's no-OOB-read assertion
+# (the `SORTER_BIN_ANGLE[bin]` out-of-range read is trapped). Local MSVC skips it.
+# =========================================================================================
+add_executable(test_manipulator
+    ${TEST_DIR}/test_manipulator.cpp
+    ${SKETCH_DIR}/Manipulator.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_manipulator PRIVATE ${COMMON_INCLUDES})
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_manipulator PRIVATE -fsanitize=address,undefined)
+    target_link_options(test_manipulator PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME manipulator COMMAND test_manipulator)
+
+# =========================================================================================
+# Test executable #7a — TC13 / AC2 negative (compile-fail target).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when the belt motor ID collides
+# with a drive motor. Built with `-DBELT_M_ID_DEFAULT=2` so `BELT_M_ID == MOTOR_LEFT_ID`
+# (both 2). The build is expected to FAIL; ctest uses PASS_REGULAR_EXPRESSION on the
+# metacharacter-free substring `collides with a drive motor` (the full assert message
+# carries regex metacharacters `( ) /`). When PASS_REGULAR_EXPRESSION is set, ctest
+# decides pass/fail purely on whether the regex matches the captured build output and
+# IGNORES the process exit code — so the test PASSES only when the intended assert
+# fires, and FAILS if the build broke for any unrelated reason.
+#
+# Mirrors `test_tasks_dispatch_overflow` EXACTLY: `EXCLUDE_FROM_ALL` +
+# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, and NO
+# `add_mock_force_includes(...)` so a typo in a mock header cannot mask the intended
+# diagnostic. Include dirs = sketch + mocks (via `COMMON_INCLUDES`) so the quoted
+# `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# =========================================================================================
+add_executable(test_manipulator_belt_collision
+    ${TEST_DIR}/test_manipulator_config_fail.cpp
+)
+set_target_properties(test_manipulator_belt_collision PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_manipulator_belt_collision PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_manipulator_belt_collision PRIVATE BELT_M_ID_DEFAULT=2)
+
+add_test(NAME manipulator_belt_collision_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_manipulator_belt_collision --config $<CONFIG>
+)
+set_tests_properties(manipulator_belt_collision_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "collides with a drive motor")
+
+# =========================================================================================
+# Test executable #7b — TC14 / AC2 negative (compile-fail target).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when two manipulator servo RC IDs
+# collide. Built with `-DSORTER_RC_ID_DEFAULT=1` so `SORTER_RC_ID == GRABBER_RC_ID`
+# (both 1). PASS_REGULAR_EXPRESSION uses the metacharacter-free substring
+# `pairwise distinct` (the full assert message carries no metachars there, but the
+# substring is kept minimal for parity with the sibling target).
+#
+# Same structure as `test_manipulator_belt_collision` above (and the overflow precedent):
+# EXCLUDE_FROM_ALL + EXCLUDE_FROM_DEFAULT_BUILD, no force-includes, sketch + mocks
+# include dirs.
+# =========================================================================================
+add_executable(test_manipulator_servo_dup
+    ${TEST_DIR}/test_manipulator_config_fail.cpp
+)
+set_target_properties(test_manipulator_servo_dup PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_manipulator_servo_dup PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_manipulator_servo_dup PRIVATE SORTER_RC_ID_DEFAULT=1)
+
+add_test(NAME manipulator_servo_dup_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_manipulator_servo_dup --config $<CONFIG>
+)
+set_tests_properties(manipulator_servo_dup_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "pairwise distinct")
