@@ -81,9 +81,14 @@ MissionClass& MissionClass::print(const char* msg)
 MissionClass& MissionClass::beep(uint16_t freq_hz, uint32_t duration_ms)
 {
     Step s{};
-    s.type        = StepType::BEEP;
-    s.freq_hz     = freq_hz;
-    s.duration_ms = duration_ms;
+    s.type    = StepType::BEEP;
+    s.freq_hz = freq_hz;
+    // Clamp at the verb so the stored duration can never exceed the uint16_t
+    // range the _beep wrapper / advance gate share. Above the ceiling the
+    // audible tone would stop after duration_ms % 65536 ms while the step kept
+    // blocking the full duration — see Config::MISSION_BEEP_MAX_MS.
+    s.duration_ms =
+        duration_ms > Config::MISSION_BEEP_MAX_MS ? Config::MISSION_BEEP_MAX_MS : duration_ms;
     _lastPushOk = _push(s);
     return *this;
 }

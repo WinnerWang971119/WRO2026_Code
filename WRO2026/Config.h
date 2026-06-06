@@ -982,6 +982,19 @@ namespace Config
     /** @brief Number of beeps emitted before Mission awaits BTN_DOWN to clear. */
     constexpr uint8_t MISSION_FAULT_BEEPS = 5;
 
+    /**
+     * @brief Upper bound (~65 s) on a Mission ``beep`` step's duration, in ms.
+     *
+     * The audible tone is emitted through ``MiniR4.Buzzer.Tone`` via the
+     * ``uint16_t``-duration ``_beep`` wrapper, while the BEEP advance gate
+     * compares against the stored duration. Clamping the stored value to the
+     * ``uint16_t`` range at the ``beep`` verb keeps the audio clock and the
+     * step clock in agreement — without it, a duration above 65535 ms would
+     * silence the tone after ``duration_ms % 65536`` ms while the step kept
+     * blocking for the full duration.
+     */
+    constexpr uint32_t MISSION_BEEP_MAX_MS = 65535;
+
     /** @brief Interval at which EventTrace emits its `HB ...` status heartbeat. */
     constexpr uint32_t MISSION_HEARTBEAT_MS = 500;
 }    // namespace Config
