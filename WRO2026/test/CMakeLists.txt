@@ -185,11 +185,21 @@ add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough
 # rationale on why the production .cpp sources for PathTracker / Mission are NOT
 # linked in here — the test mirrors the relevant slices inline, following the same
 # precedent as `test_path_tracker_passthrough.cpp`.
+#
+# `routes.cpp` IS linked (both ON and OFF builds) so the `extern` graph-data symbols
+# declared by `routes.h` (NODES / NEXT_HOP / EDGES / PIPELINE_CONFIG, pulled in
+# transitively via DirectionPolicy.h / PathTracker.h / FieldMap.h) have a definition.
+# It is pure const POD data with no hardware deps, so it compiles cleanly against the
+# mock surface and is the sole definer of those symbols. The PathTracker / Mission
+# *logic* is still mirrored inline — only the data definitions are linked in, so a
+# future fixture that odr-uses `FieldMap::getNextHop/getEdge/getNode` or reads
+# `PIPELINE_CONFIG` will link instead of failing on undefined references.
 # =========================================================================================
 add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SUT_SOURCES}
     ${MOCK_SOURCES}
+    ${SKETCH_DIR}/routes.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_on
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true)
@@ -208,6 +218,7 @@ add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SUT_SOURCES}
     ${MOCK_SOURCES}
+    ${SKETCH_DIR}/routes.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false)
