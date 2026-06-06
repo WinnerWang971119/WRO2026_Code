@@ -6,8 +6,11 @@
  * AC9 negative branch. The CMake target is declared with
  * ``EXCLUDE_FROM_ALL`` + ``EXCLUDE_FROM_DEFAULT_BUILD`` so the regular
  * build does NOT compile it; ``ctest`` invokes a build-on-demand command
- * with ``WILL_FAIL TRUE``, treating a non-zero compiler exit code as a
- * passing test.
+ * and passes only when the build output emits the
+ * ``"Mission.task args exceed MAX_TASK_ARG_BYTES"`` static_assert diagnostic
+ * (``PASS_REGULAR_EXPRESSION`` on that message) — the compiler exit code is
+ * not used. A build that fails for an unrelated reason will not print that
+ * message and therefore fails the test.
  *
  * Mirroring rationale: the production ``static_assert`` lives inside the
  * ``MissionClass::task<Args...>`` template body (Mission.h:311-312). Pulling

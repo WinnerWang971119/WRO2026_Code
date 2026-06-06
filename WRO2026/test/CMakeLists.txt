@@ -17,10 +17,12 @@
 #   cmake --build build/test
 #   ctest --test-dir build/test --output-on-failure
 #
-# CI integration: NOT done in this PR. The follow-up will add a `host-compile-tests`
-# job to `.github/workflows/ci.yml` once this harness is validated locally. The job
-# should install a C++ compiler (g++ on ubuntu-latest is built-in), then run the
-# three commands above.
+# CI integration: this harness IS CI-enforced. The `host-tests` job
+# (name: "Host tests") in `.github/workflows/ci.yml` runs on every push and pull
+# request, using the built-in g++ on ubuntu-latest to run the three commands above:
+#   cmake -S WRO2026/test -B build/test
+#   cmake --build build/test
+#   ctest --test-dir build/test --output-on-failure
 # =========================================================================================
 
 cmake_minimum_required(VERSION 3.16)
@@ -108,10 +110,11 @@ endif()
 # force-include needed for those two.
 #
 # **Applied PER TARGET, not directory-wide**, so the compile-fail target
-# (`test_tasks_dispatch_overflow`, WILL_FAIL TRUE) does NOT inherit them.
-# Directory-wide force-includes would silently disarm AC9-negative: any
-# unrelated typo in a mock header would cause the overflow build to fail
-# for the wrong reason and still count as "passing." See PR #35 review
+# (`test_tasks_dispatch_overflow`, PASS_REGULAR_EXPRESSION on the static_assert
+# diagnostic) does NOT inherit them. Directory-wide force-includes would weaken
+# AC9-negative: any unrelated typo in a mock header would make the overflow build
+# fail without printing the `MAX_TASK_ARG_BYTES` message, so the target would no
+# longer isolate the intended static_assert. See PR #35 review
 # finding S1 / C8.
 # -----------------------------------------------------------------------------------------
 function(add_mock_force_includes target)
@@ -184,11 +187,21 @@ add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough
 # rationale on why the production .cpp sources for PathTracker / Mission are NOT
 # linked in here — the test mirrors the relevant slices inline, following the same
 # precedent as `test_path_tracker_passthrough.cpp`.
+#
+# `routes.cpp` IS linked (both ON and OFF builds) so the `extern` graph-data symbols
+# declared by `routes.h` (NODES / NEXT_HOP / EDGES / PIPELINE_CONFIG, pulled in
+# transitively via DirectionPolicy.h / PathTracker.h / FieldMap.h) have a definition.
+# It is pure const POD data with no hardware deps, so it compiles cleanly against the
+# mock surface and is the sole definer of those symbols. The PathTracker / Mission
+# *logic* is still mirrored inline — only the data definitions are linked in, so a
+# future fixture that odr-uses `FieldMap::getNextHop/getEdge/getNode` or reads
+# `PIPELINE_CONFIG` will link instead of failing on undefined references.
 # =========================================================================================
 add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SUT_SOURCES}
     ${MOCK_SOURCES}
+    ${SKETCH_DIR}/routes.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_on
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true)
@@ -207,6 +220,7 @@ add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SUT_SOURCES}
     ${MOCK_SOURCES}
+    ${SKETCH_DIR}/routes.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false)
@@ -297,8 +311,21 @@ add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
 #
 # Proves the `static_assert` in `MissionClass::task<Args...>` fires when the
 # variadic argument pack exceeds `Config::MAX_TASK_ARG_BYTES`. The build is
-# expected to FAIL; ctest uses `WILL_FAIL TRUE` to interpret the build's
-# non-zero exit as a passing test.
+# expected to FAIL; ctest uses
+# `PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES"`
+# to require that the build output contains the intended static_assert
+# diagnostic. The regex anchors on the FULL assert message, not the bare
+# `MAX_TASK_ARG_BYTES` token — TasksTypes.h carries its own layout
+# static_assert that also mentions that token, so a TasksTypes.h / Config.h
+# break could surface the bare token and false-PASS; the full-message anchor
+# matches only the intended assert. When PASS_REGULAR_EXPRESSION is set, ctest
+# decides pass/fail purely on whether the regex matches the captured output and
+# IGNORES the process exit code — so the test PASSES only when the build prints
+# the full `Mission.task args exceed MAX_TASK_ARG_BYTES` message, and FAILS if
+# the build broke for any unrelated reason (toolchain break, stale generator,
+# an unrelated TasksTypes.h / Config.h edit). This distinguishes "the intended
+# static_assert fired" from "the toolchain broke" — which a bare WILL_FAIL,
+# passing on ANY non-zero exit, could not.
 #
 # `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep the target out of the
 # default `cmake --build .` so a regular build does not break. The ctest
@@ -313,17 +340,20 @@ set_target_properties(test_tasks_dispatch_overflow PROPERTIES
 )
 target_include_directories(test_tasks_dispatch_overflow PRIVATE ${COMMON_INCLUDES})
 
-# DELIBERATELY no `add_mock_force_includes(...)` call here. The compile-fail
-# target with `WILL_FAIL TRUE` interprets ANY non-zero build exit code as a
-# passing test, so a typo in any force-included mock header would silently
-# disarm AC9-negative. The overflow TU only references TasksTypes.h + the
-# synthetic `Seventeen` struct + the inline `check_overflow` template, so it
-# does not need Drive/WROLineArray/Intersection mocks at all. The only path
-# that can fail this build is the `static_assert("Mission.task args exceed
-# MAX_TASK_ARG_BYTES")` itself — which is precisely what AC9-negative wants.
+# DELIBERATELY no `add_mock_force_includes(...)` call here. A typo in any
+# force-included mock header would make this build fail for the wrong reason —
+# without printing the `MAX_TASK_ARG_BYTES` diagnostic — and PASS_REGULAR_EXPRESSION
+# would then correctly FAIL the test, but more importantly the target would no
+# longer isolate AC9-negative to the intended static_assert. The overflow TU only
+# references TasksTypes.h + the synthetic `Seventeen` struct + the inline
+# `check_overflow` template, so it does not need Drive/WROLineArray/Intersection
+# mocks at all. The only path that can produce the `static_assert("Mission.task
+# args exceed MAX_TASK_ARG_BYTES")` diagnostic is the assert itself — which is
+# precisely what AC9-negative wants.
 
 add_test(NAME tasks_overflow_compile_fail
     COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
             --target test_tasks_dispatch_overflow
 )
-set_tests_properties(tasks_overflow_compile_fail PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(tasks_overflow_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES")

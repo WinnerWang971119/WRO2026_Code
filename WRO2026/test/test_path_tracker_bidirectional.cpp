@@ -97,13 +97,16 @@
 #include <cstdio>
 
 // ===========================================================================
-// Test calls the real production helper via DirectionPolicy.h.
+// Test calls the real production helpers via DirectionPolicy.h.
 //
-// The dispatcher REVERSE_UNAVAILABLE guard is still replicated inline below
-// because its production site (PathTracker.cpp::_dispatchEdgeAfterTurn) is
-// tangled with Drive / LineFollower / Localization mocks. The shape is small
-// enough (~10 lines) that the drift risk is acceptable; the replica is
-// annotated with a back-pointer to the canonical site.
+// Both the direction resolver (`resolveDirection`) and the dispatcher
+// REVERSE_UNAVAILABLE predicate (`reverseUnavailable`) are now shared inline
+// functions in DirectionPolicy.h — production and this host-compile test link
+// the SAME symbols. The guard condition is no longer replicated inline, so it
+// cannot drift from its production site (PathTracker.cpp::_dispatchEdgeAfterTurn,
+// which calls the same `reverseUnavailable`). The only test-local glue left is
+// assembling the `FaultInfo` the production code would latch, since that side
+// is tangled with Drive / LineFollower / Localization mocks.
 // ===========================================================================
 
 /// Alias so existing tests that called the old replica name keep working
@@ -125,15 +128,18 @@ static inline Direction replica_resolveDirection(
                             isLastHop, bidirectionalAutoEnabled, lineBoardCount);
 }
 
-/// Replica of the REVERSE_UNAVAILABLE guard at the top of
+/// Exercises the REVERSE_UNAVAILABLE guard at the top of
 /// `PathTracker.cpp::_dispatchEdgeAfterTurn` (see the block comment
-/// "Reverse-availability guard (T7 / issue #19)" at PathTracker.cpp:792-819).
+/// "Reverse-availability guard (T7 / issue #19)").
 ///
-/// Returns the `FaultInfo` the production code would latch via
-/// `_enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt)` if the guard fires.
-/// Returns an empty FaultInfo (`kind == Fault::NONE`) when the guard does
-/// not fire — i.e. the dispatcher would have proceeded into the LINE /
-/// PROJECTION / BLIND branch.
+/// The load-bearing predicate is the shared `reverseUnavailable(...)` from
+/// DirectionPolicy.h — the SAME symbol both production guard sites call — so
+/// the condition can no longer drift from production (same guarantee
+/// `resolveDirection` gives). Only the `FaultInfo` assembly below is test
+/// glue, mirroring how `_enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt)`
+/// would latch when the guard fires; an empty FaultInfo (`kind ==
+/// Fault::NONE`) is returned when the guard does not fire — i.e. the
+/// dispatcher would have proceeded into the LINE / PROJECTION / BLIND branch.
 static PathTrackerClass::FaultInfo replica_dispatchEdgeAfterTurnGuard(
     Direction         resolvedDirection,
     uint8_t           lineBoardCount,
@@ -142,21 +148,12 @@ static PathTrackerClass::FaultInfo replica_dispatchEdgeAfterTurnGuard(
     uint8_t           nxt)
 {
     PathTrackerClass::FaultInfo info{};
-
-    if (resolvedDirection == Direction::REAR && lineBoardCount < 2)
+    if (reverseUnavailable(resolvedDirection, edgeType, lineBoardCount))
     {
-        if (edgeType == Routes::EdgeType::LINE || edgeType == Routes::EdgeType::PROJECTION)
-        {
-            info.kind     = PathTrackerClass::Fault::REVERSE_UNAVAILABLE;
-            info.fromNode = cur;
-            info.destNode = nxt;
-            return info;
-        }
-        // BLIND REAR is explicitly permitted on a 1-board chassis — falls
-        // through to the dispatcher's BLIND branch without latching a fault.
+        info.kind     = PathTrackerClass::Fault::REVERSE_UNAVAILABLE;
+        info.fromNode = cur;
+        info.destNode = nxt;
     }
-    // Either FRONT direction, or 2+ boards, or BLIND-on-1-board — the
-    // production switch dispatches normally without a fault.
     return info;
 }
 
