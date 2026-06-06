@@ -123,14 +123,23 @@ def _authored_out_neighbors(field_data, node: str) -> set:
         elif b == node:
             neighbors.add(a)
 
+    known_nodes = getattr(field_data, "NODES", {})
     for entry in getattr(field_data, "EDGES", ()) or ():
         if not isinstance(entry, dict):
             continue  # malformed entry; the per-entry shape check reports it.
         u = entry.get("u")
         v = entry.get("v")
-        if u == node:
+        # Only count a neighbor that is a real, known node name. A later
+        # malformed entry (missing or non-string ``u``/``v``) would otherwise
+        # contribute a ``None`` -- or a bogus value -- that inflates an
+        # EARLIER pivot landing's out-degree and raises a misleading
+        # "exactly one forward out-edge" error, masking the per-entry shape
+        # check that actually pinpoints the malformed entry. ``in`` on the
+        # NODES dict is False for ``None`` and any unknown key, so this gate
+        # keeps the count faithful to the authored topology.
+        if u == node and v in known_nodes:
             neighbors.add(v)
-        elif v == node:
+        elif v == node and u in known_nodes:
             neighbors.add(u)
 
     return neighbors

@@ -523,3 +523,50 @@ def test_validator_accepts_pivot_with_single_forward_out_edge() -> None:
         ],
     )
     assert validate(fd) is None
+
+
+def test_malformed_later_edge_does_not_mask_with_pivot_error() -> None:
+    """A malformed LATER entry must fail with its own shape error, not a pivot one.
+
+    The pivot out-degree check (finding #36) scans the full authored EDGES
+    list, including entries that the per-entry shape loop has not reached
+    yet. Before the fix, a later entry with ``u`` set but ``v`` missing
+    contributed a ``None`` out-neighbor to an EARLIER pivot landing,
+    inflating its forward out-degree to 2 and raising a misleading
+    "exactly one forward out-edge" error instead of the precise
+    "missing required key 'v'" error for the malformed entry.
+
+    Fixture: A->B is a valid LEFT pivot landing at B (forward out = {C},
+    exactly one), B->C is the single continuation, and a third entry sets
+    ``u='B'`` but omits ``v``. The validator must blame EDGES[2], not the
+    pivot at EDGES[0].
+    """
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type": EDGE_BLIND, "u": "A", "v": "B",
+                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
+            },
+            {
+                "type": EDGE_BLIND, "u": "B", "v": "C",
+                "distance_cm": 100.0, "heading_deg": 90.0,
+            },
+            {  # malformed: missing 'v'; must be blamed, not the pivot above
+                "type": EDGE_BLIND, "u": "B",
+                "distance_cm": 50.0, "heading_deg": 45.0,
+            },
+        ],
+    )
+    with pytest.raises(FieldDataError, match=r"EDGES\[2\] missing required key 'v'"):
+        validate(fd)
