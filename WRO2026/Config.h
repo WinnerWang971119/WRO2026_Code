@@ -479,19 +479,36 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /**
-     * @brief Distance from the line-sensor centerline to the wheel-axle line, in cm.
+     * @brief Distance from the FRONT line-sensor board's centerline to the wheel-axle
+     *        line, in cm.
      *
      * Positive = sensor is in front of (ahead of) the axle.
      *
      * Used by the PathTracker LINE_OVERSHOOT state: the intersection-detect event fires
      * when the SENSOR is over the junction marker, but we want the chassis CENTER (the
      * axle midpoint) to land on the node. After detecting the intersection, PathTracker
-     * re-arms LineFollower with `setDistanceTarget(LINE_SENSOR_AXLE_OFFSET_CM)` to roll
-     * forward by exactly this amount before stopping.
+     * re-arms LineFollower with the axle offset of the board that led the hop (front when
+     * FRONT, `LINE_SENSOR_AXLE_OFFSET_REAR_CM` when REAR) to roll forward by exactly that
+     * amount before stopping.
      *
      * @note TODO: measure on real chassis.
      */
     constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 5.0f;
+
+    /**
+     * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
+     *        in cm, used when a hop is followed in REVERSE (rear board leading).
+     *
+     * On a bidirectional chassis the rear board need not sit the same distance from the
+     * axle as the front, so a REAR hop must dead-reckon with its own offset. Reusing the
+     * front offset lands every reverse hop off-node and feeds that error into the next
+     * dead-reckoned hop. PathTracker selects this when the resolved direction is
+     * `Direction::REAR`.
+     *
+     * @note TODO: measure on real chassis. Defaults to the front offset until the rear
+     *       board is wired (T5); override once the two distances are known to differ.
+     */
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = LINE_SENSOR_AXLE_OFFSET_CM;
 
     // ---------------------------------------------------------------------------------------
     // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)

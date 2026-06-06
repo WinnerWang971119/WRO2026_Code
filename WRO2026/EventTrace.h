@@ -7,19 +7,22 @@
  * `EventTraceClass` is a tiny telemetry sink that owns a fixed-capacity ring buffer of short
  * status strings and renders the most recent entries on the MATRIX Mini R4's 128x32 OLED. It
  * exists so any subsystem can produce a one-line "I just transitioned" record (e.g. line lost,
- * intersection entered, turn finished) without having to know about the OLED, fonts, or layout.
+ * turn finished) without having to know about the OLED, fonts, or layout.
  *
  * Design rules:
  *  - **Bounded ring buffer.** Exactly `Config::EVENT_TRACE_CAPACITY` slots; older events drop
  *    off. The capacity is sized to fit the OLED screen at text size 1 (8-px-tall lines, 4 lines
  *    of 128x32 = 4 entries) — see the per-member docblocks for the geometry rationale.
- *  - **Edge-triggered polling of source modules.** `update()` polls Drive, LineFollower and
- *    Intersection for *transitions* in their public state, not for steady-state values. This
- *    keeps the OLED log free of duplicate spam while a condition persists.
+ *  - **Edge-triggered polling of source modules.** `update()` polls Drive and LineFollower
+ *    for *transitions* in their public state, not for steady-state values. This keeps the OLED
+ *    log free of duplicate spam while a condition persists.
  *      - LineFollower: level signal `isLineLost()` → derive rising/falling edges locally.
- *      - Intersection: already an edge-triggered, read-and-clear API.
  *      - Drive:        level signal `isTurnDone()` → derive a rising edge locally so a single
  *                      `TURN END` is logged when an async turn completes.
+ *      - Intersection: NOT traced. EventTrace does not poll `Intersection.getEdgeCount()`, so
+ *                      junction crossings never reach the OLED ring. The navigation layer owns
+ *                      the read-and-clear intersection API; surfacing it here is intentionally
+ *                      out of scope.
  *  - **Dirty-flag rendering.** The OLED is repainted only when `_dirty == true`, i.e. when a
  *    new event has actually been pushed (or `clear()` was called). This avoids burning I2C
  *    bandwidth on every loop tick.
@@ -29,8 +32,8 @@
  * Lifecycle (see WRO2026.ino):
  *  - `EventTrace.begin()` once in `setup()` after `MiniR4.begin()` and after each source
  *    module's own `begin()` has been called.
- *  - `EventTrace.update()` last in the main `loop()`, AFTER Drive/LineFollower/Intersection
- *    have updated their state for this tick.
+ *  - `EventTrace.update()` last in the main `loop()`, AFTER Drive/LineFollower have updated
+ *    their state for this tick.
  *
  * @note OLED is 128x32. Adafruit GFX text size 1 = 8-px-tall lines = 4 lines fit.
  *       `EVENT_TRACE_CAPACITY = 4` is sized for this — do not increase it without also
@@ -77,10 +80,10 @@ public:
      * Polls each source module for state transitions and pushes a short label for every edge
      * detected, then repaints the OLED if anything new arrived.
      *
-     * @note Non-blocking. Polls LineFollower (level -> edge), Intersection (already edge),
-     *       Drive (level -> edge). Renders only when `_dirty`.
-     * @note Must be called AFTER Drive/LineFollower/Intersection `update()` have run for this
-     *       tick, so the levels we sample are this tick's truth.
+     * @note Non-blocking. Polls LineFollower (level -> edge) and Drive (level -> edge).
+     *       Intersection is NOT polled — junctions are not traced. Renders only when `_dirty`.
+     * @note Must be called AFTER Drive/LineFollower `update()` have run for this tick, so the
+     *       levels we sample are this tick's truth.
      */
     void update();
 
@@ -132,16 +135,6 @@ private:
      * `update()` does not falsely synthesise a `TURN END` event.
      */
     bool _prevTurnDone = true;
-
-    /**
-     * @brief Last-observed value of `Intersection.getEdgeCount()`.
-     *
-     * EventTrace is a passive observer of intersection events: we cache the strictly-
-     * increasing counter and fire whenever it advances. This avoids consuming the
-     * read-and-clear `isAtIntersection()` flag — that bit is reserved for the navigation
-     * layer's exclusive state machine. See code review F6.
-     */
-    uint32_t _prevIntEdgeCount = 0;
 
     /**
      * @brief Last millis() at which a heartbeat status line was emitted to Serial.

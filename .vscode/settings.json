@@ -3,7 +3,7 @@
     "wro2026.pathPlanner.scriptPath": "${workspaceFolder}/tools/path_planner/build_routes.py",
     "wro2026.editor.scriptPath": "${workspaceFolder}/tools/path_planner/edit_field.py",
     "wro2026.sim.scriptPath": "${workspaceFolder}/tools/path_planner/sim/demo.py",
-    "wro2026.sim.goals": "C,G",
+    "wro2026.sim.goals": "Start, finial",
     "wro2026.arduino.cliPath": "C:/Users/wangd/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe",
     "wro2026.arduino.fqbn": "arduino:renesas_uno:unor4wifi",
     "wro2026.arduino.sketchPath": "WRO2026",
@@ -13,5 +13,6 @@
         "."
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "cmake.sourceDirectory": "C:/Users/wangd/Documents/WRO2026/WRO2026_Code/WRO2026/test"
 }

@@ -723,6 +723,12 @@ private:
     ///        transition). See `isPidFrozen()` for the public accessor.
     bool                _pidFrozen = false;
     float               _lastErr  = 0.0f;                         ///< Previous error sample, for the D-term.
+    /// @brief Set on the lost-line and junction-freeze-exit branches so the first online
+    ///        non-junction tick after a recovery seeds `_lastErr` with the fresh error
+    ///        (making that tick's `dErr` ~0) instead of differencing against the reset 0,
+    ///        which would inject a one-tick `LINE_KD*err` derivative kick. Consumed and
+    ///        cleared by the P+D block in `update()`. See trace finding #19.
+    bool                _seedLastErr = false;
     Config::SpeedPreset _preset   = Config::SpeedPreset::NORMAL;  ///< Active cruise preset; sourced by `update()`.
     bool                _reverse  = false;                        ///< When true, `update()` negates cruise to follow line in reverse.
     bool                _overshootMode = false;                   ///< When true, isOnline()==false dead-reckons symmetric cruise (no LOST_LINE_ACTION). See ADR-023.

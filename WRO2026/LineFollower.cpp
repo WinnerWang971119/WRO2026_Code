@@ -159,6 +159,7 @@ bool LineFollowerClass::begin()
     _enabled           = false;
     _lostLine          = false;
     _lastErr           = 0.0f;
+    _seedLastErr       = false;
     _preset            = Config::SpeedPreset::NORMAL;
     _reverse           = false;
     _useTShape         = false;
@@ -196,7 +197,12 @@ void LineFollowerClass::update()
         // is implicit: `|cruise - start| / accel`, clamped to `[MIN_CM, MAX_CM]`. The
         // shared `encDegToCm()` helper (WROMath.h) is the single source of truth for the
         // inverse of `cmToEncDeg` — this used to duplicate the math inline.
-        const int32_t now      = Drive.getEncL();
+        // Measure ramp-up progress from the both-wheel average, identical to the baseline
+        // the ramp-down branch (below) and the distance gate (bottom of update()) use. A
+        // single-wheel measure drifts from the symmetric gate measure on a curvy approach
+        // where one wheel slips or steers harder, producing a small cruise discontinuity at
+        // the ramp seam. See trace finding #20.
+        const int32_t now      = (Drive.getEncL() + Drive.getEncR()) / 2;
         const int32_t delta    = now - _tShapeStartEnc;
         // Use the absolute value so a momentary counter-rotation cannot drive `traveledCm`
         // negative and pull `cruise` below the starting PWM.
@@ -308,7 +314,13 @@ void LineFollowerClass::update()
     {
         // Clear the D-term history so the first tick after reacquisition does not see a stale
         // derivative computed against an old (possibly several-second-stale) error sample.
-        _lastErr = 0.0f;
+        // Keeping the explicit zero also honors the `getRawError()` contract (a caller polling
+        // immediately after the line drops sees 0.0f, not a stale sample). The `_seedLastErr`
+        // flag then suppresses the derivative for exactly one tick on reacquisition: the P+D
+        // block seeds `_lastErr = err` before computing `dErr`, so the first `dErr` is ~0
+        // instead of the full `err` that differencing against 0 would produce. See finding #19.
+        _lastErr     = 0.0f;
+        _seedLastErr = true;
 
         // Set `_lostLine = true` BEFORE the overshoot-mode branch so EventTrace's
         // LINE LOST event still fires correctly via `isLineLost()`, even when
@@ -363,9 +375,16 @@ void LineFollowerClass::update()
                     break;
                 }
             }
-            // Early-return preserves existing semantics — no distance-gate tick on the
-            // non-overshoot lost-line path.
-            return;
+            // Fall through to the distance-gate block below — do NOT early return. The
+            // LOST_LINE_ACTION dispatch above already commanded the wheels this tick; the
+            // encoder gate is purely encoder-based and stays valid while the line is lost,
+            // so a real gap / faded patch / brief drift can dead-reckon the remaining
+            // distance and complete the segment instead of hanging the full
+            // LINE_FOLLOW_WAIT_TIMEOUT_MS. Mirrors the overshoot path's intent (it also
+            // falls through here). The online-path middle block (junction-freeze + P+D) is
+            // skipped via `runOnlinePath = false` because the sensor is offline and sampling
+            // getJunctionType()/getError() against it would be invalid. See trace finding #17.
+            runOnlinePath = false;
         }
     }
 
@@ -419,12 +438,24 @@ void LineFollowerClass::update()
                 // this the dErr computed against a pre-freeze `_lastErr` (potentially
                 // several ticks stale) would produce a derivative kick on the first
                 // post-junction PID tick. Mirrors the lost-line branch's existing
-                // `_lastErr = 0.0f;` reset.
-                _lastErr   = 0.0f;
-                _pidFrozen = false;
+                // `_lastErr = 0.0f;` reset. The `_seedLastErr` flag below then suppresses
+                // the derivative for exactly this one tick so even the reset-to-0 cannot
+                // inject a `LINE_KD*err` kick on freeze exit. See trace finding #19.
+                _lastErr     = 0.0f;
+                _seedLastErr = true;
+                _pidFrozen   = false;
             }
 
-            const float err  = _array->getError();
+            const float err = _array->getError();
+            // First online non-junction tick after a lost-line / freeze recovery: seed the
+            // derivative baseline with the fresh error so this tick's `dErr` is ~0, rather
+            // than differencing against the reset 0 and producing a one-tick derivative kick.
+            // Steady-state behavior is unchanged — the flag is set only on recovery. See #19.
+            if (_seedLastErr)
+            {
+                _lastErr     = err;
+                _seedLastErr = false;
+            }
             const float dErr = err - _lastErr;
             _lastErr         = err;
 
@@ -612,7 +643,10 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         {
             _useTShape       = true;
             _tShapeAccel     = accel;
-            _tShapeStartEnc  = Drive.getEncL();
+            // Seed the ramp-up baseline from the both-wheel average so the ramp-up progress
+            // measure in update() matches the ramp-down + distance-gate baselines. See
+            // trace finding #20.
+            _tShapeStartEnc  = (Drive.getEncL() + Drive.getEncR()) / 2;
             _tShapeStartPwm  = 0;
             _tShapeTargetPwm = _reverse ? (int16_t) -presetToPwm(_preset)
                                         : presetToPwm(_preset);
@@ -673,6 +707,7 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         // active at disable time cannot leak into the next enable cycle — AC #8 / AC #10.
         _enabled              = false;
         _lastErr              = 0.0f;
+        _seedLastErr          = false;    // Clear derivative-seed flag — no stale state on re-enable.
         _lostLine             = false;
         _pidFrozen            = false;    // Clear junction-freeze flag — no stale state on re-enable.
         _useTShape            = false;    // Disabling cancels any active cruise ramp-up.
@@ -786,6 +821,12 @@ bool LineFollowerClass::waitUntilDistanceReached()
                                  "in setup()."));
                 _tickCallbackWarningEmitted = true;
             }
+            // Refresh the line array before update() so the P+D loop, lost-line detection,
+            // and the distance gate read fresh channels. With
+            // Config::LINE_ARRAY_TICK_CACHE_ENABLED == true (the shipped config) the cache
+            // is only refreshed by LineArray.update(); without this call the fallback spins
+            // on the sample frozen at entry. See trace finding #18.
+            LineArray.update();
             update();
         }
         yield();
@@ -848,6 +889,12 @@ bool LineFollowerClass::waitUntilIntersection()
                                  "Call LineFollower.setTickCallback(...) in setup()."));
                 _tickCallbackWarningEmitted = true;
             }
+            // Refresh the line array first (the documented loop order: LineArray →
+            // LineFollower → Intersection). With Config::LINE_ARRAY_TICK_CACHE_ENABLED ==
+            // true (the shipped config) getJunctionType() is a pure cache reader, so without
+            // this refresh the junction sample stays frozen on entry, no rising edge ever
+            // fires, and the wait can only time out. See trace finding #18.
+            LineArray.update();
             update();
             Intersection.update();
         }

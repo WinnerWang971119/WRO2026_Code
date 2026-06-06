@@ -11,10 +11,18 @@
 
 #include "Drive.h"
 #include "FieldMap.h"
-#include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
 #include "routes.h"
+
+namespace
+{
+/// Heartbeat heading is treated as stale if no successful live read has refreshed the
+/// Localization cache within this window (~3 heartbeats at the 500 ms cadence). A stale
+/// value is flagged so a frozen-but-plausible cached heading (idle, between hops, or a
+/// failing IMU) is not read as a current measurement.
+constexpr uint32_t HEADING_STALE_MS = 1500;
+}    // namespace
 
 /**
  * @brief Single global instance, declared `extern` in EventTrace.h.
@@ -31,9 +39,10 @@ bool EventTraceClass::begin()
     memset(_buf, 0, sizeof(_buf));
 
     // Prime the edge-detection cache so the first update() does not synthesise spurious events.
+    // NOTE: EventTrace does NOT trace intersections — `update()` polls only LineFollower and
+    // Drive. There is no Intersection edge cache to prime.
     _prevLineLost     = false;
     _prevTurnDone     = true;
-    _prevIntEdgeCount = Intersection.getEdgeCount();
     _lastHeartbeat_ms = millis();
 
     return true;
@@ -121,7 +130,16 @@ void EventTraceClass::_emitHeartbeat()
     Serial.print(F("HB t="));
     Serial.print(now);
     Serial.print(F(" yaw="));
-    Serial.print(Localization.getHeadingDeg(), 1);
+    // Cached read: the heartbeat must not issue a live IMU/I2C transaction (EventTrace's
+    // contract is non-blocking / no I/O). Navigation refreshes this cache via getHeadingDeg().
+    Serial.print(Localization.getLastHeadingDeg(), 1);
+    // Flag a stale cache (idle, between hops, or a failing IMU) so a frozen-but-plausible
+    // heading is not read as current. No I/O — compares the cache's last-update stamp.
+    const uint32_t headingUpdateMs = Localization.getLastHeadingUpdateMs();
+    if (headingUpdateMs == 0 || (now - headingUpdateMs) > HEADING_STALE_MS)
+    {
+        Serial.print(F("?"));
+    }
     Serial.print(F(" node="));
     Serial.println(name);
 }

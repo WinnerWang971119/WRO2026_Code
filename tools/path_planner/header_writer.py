@@ -408,7 +408,10 @@ def _build_routes_h_lines(
 
 
 def _emit_nodes_array(field_data, node_names: List[str]) -> List[str]:
-    name_column_width = max(len('"' + n + '"') for n in node_names)
+    # ``default=1`` mirrors the sibling _emit_next_hop_table alignment calc and
+    # keeps an empty-node fixture degrading gracefully instead of raising
+    # ValueError from max() over an empty sequence.
+    name_column_width = max((len('"' + n + '"') for n in node_names), default=1)
     out: List[str] = []
     out.append(_INDENT + "const NodeInfo NODES[N_NODES] = {")
     for i, name in enumerate(node_names):
