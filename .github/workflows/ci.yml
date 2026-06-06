@@ -57,3 +57,20 @@ jobs:
 
       - name: Compile WRO2026 sketch
         run: arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026
+
+  host-tests:
+    name: Host tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Configure host-test harness
+        run: cmake -S WRO2026/test -B build/test
+
+      - name: Build host-test harness
+        run: cmake --build build/test
+
+      - name: Run host tests
+        run: ctest --test-dir build/test --output-on-failure

@@ -196,6 +196,12 @@ class EditorApp:
         # ---- 3. History + dirty tracking + rename queue ----
         self._history: History = History()
         self._dirty: bool = False
+        # Net node renames awaiting flush into field_data.py EDGES on the next
+        # Save, keyed {current-EDGES-name: target-name}. Maintained as a delta:
+        # a fresh rename records forward, an undo records the inverse, a redo
+        # re-records forward (see _undo / _redo). It is NEVER rebuilt from the
+        # history stacks -- doing so was the source of the undo-saved-rename
+        # divergence, because History mutates (redo is cleared by any new edit).
         self._pending_renames: dict[str, str] = {}
 
         # ---- 4. Tk root window ----
@@ -260,12 +266,13 @@ class EditorApp:
 
         Used by :meth:`_initial_window_geometry` and
         :meth:`_size_canvas_to_field` to pick a starting size that mirrors
-        the field's real-world proportions. A non-positive height falls
-        back to ``1.0`` (square) so a degenerate model still yields a
-        usable window.
+        the field's real-world proportions. A non-positive width or height
+        falls back to ``1.0`` (square) so a degenerate model still yields a
+        usable window instead of a ``ZeroDivisionError`` in the sizing math
+        (``_initial_window_geometry`` divides ``canvas_w`` by this value).
         """
         width_mm, height_mm = self._model.field_mm
-        if height_mm <= 0.0:
+        if width_mm <= 0.0 or height_mm <= 0.0:
             return 1.0
         return float(width_mm) / float(height_mm)
 
@@ -354,20 +361,84 @@ class EditorApp:
         * ``Delete``                    -> :meth:`_handle_delete_key`
         * ``L``                         -> :meth:`_handle_edge_line_key`
         * ``B``                         -> :meth:`_handle_edge_blind_key`
+
+        Every binding is routed through :meth:`_shortcut_guard`, which drops
+        the event when keyboard focus is on a text-entry or dialog widget so
+        typing an ``l`` / ``b`` / ``Delete`` (or a Ctrl chord) into the rename
+        dialog or a coordinate Entry does not fire an editor action behind it
+        (#67). ``bind_all`` is kept (the canvas is a matplotlib widget that is
+        awkward to focus reliably); the focus check does the gating.
         """
-        self._root.bind_all("<Control-z>", lambda _e: self._undo())
-        self._root.bind_all("<Control-Z>", lambda _e: self._undo())
-        self._root.bind_all("<Control-y>", lambda _e: self._redo())
-        self._root.bind_all("<Control-Y>", lambda _e: self._redo())
-        self._root.bind_all("<Control-Shift-Z>", lambda _e: self._redo())
-        self._root.bind_all("<Control-Shift-z>", lambda _e: self._redo())
-        self._root.bind_all("<Control-s>", lambda _e: self._save())
-        self._root.bind_all("<Control-S>", lambda _e: self._save())
-        self._root.bind_all("<Delete>", lambda _e: self._handle_delete_key())
-        self._root.bind_all("<KeyPress-l>", lambda _e: self._handle_edge_line_key())
-        self._root.bind_all("<KeyPress-L>", lambda _e: self._handle_edge_line_key())
-        self._root.bind_all("<KeyPress-b>", lambda _e: self._handle_edge_blind_key())
-        self._root.bind_all("<KeyPress-B>", lambda _e: self._handle_edge_blind_key())
+        guard = self._shortcut_guard
+        self._root.bind_all("<Control-z>", guard(self._undo))
+        self._root.bind_all("<Control-Z>", guard(self._undo))
+        self._root.bind_all("<Control-y>", guard(self._redo))
+        self._root.bind_all("<Control-Y>", guard(self._redo))
+        self._root.bind_all("<Control-Shift-Z>", guard(self._redo))
+        self._root.bind_all("<Control-Shift-z>", guard(self._redo))
+        self._root.bind_all("<Control-s>", guard(self._save))
+        self._root.bind_all("<Control-S>", guard(self._save))
+        self._root.bind_all("<Delete>", guard(self._handle_delete_key))
+        self._root.bind_all("<KeyPress-l>", guard(self._handle_edge_line_key))
+        self._root.bind_all("<KeyPress-L>", guard(self._handle_edge_line_key))
+        self._root.bind_all("<KeyPress-b>", guard(self._handle_edge_blind_key))
+        self._root.bind_all("<KeyPress-B>", guard(self._handle_edge_blind_key))
+
+    def _shortcut_guard(self, handler):
+        """Wrap a shortcut *handler* so it only fires when focus is not text.
+
+        ``bind_all`` delivers key events to every widget, including the rename
+        ``simpledialog`` and the side-panel Entry / Spinbox / Combobox fields.
+        This wrapper inspects ``event.widget`` (the widget that actually owns
+        the keyboard focus for the event) and suppresses the handler when that
+        widget is a text-input class, so a literal keystroke typed into a field
+        never triggers an editor action (#67).
+
+        :param handler: Zero-argument callable to invoke on an allowed event.
+        :return: A Tk event callback (takes the event, returns ``None``).
+        """
+
+        def _wrapped(event=None) -> None:
+            if not self._shortcut_focus_allows(event):
+                return
+            handler()
+
+        return _wrapped
+
+    @staticmethod
+    def _shortcut_focus_allows(event) -> bool:
+        """Return ``True`` when a global shortcut may fire for *event*.
+
+        Returns ``False`` when the focused widget is a text-input or dialog
+        entry (Tk class name ending in ``Entry``, or a ``Text`` / ``Spinbox`` /
+        ``TCombobox``), so shortcuts are inert while the operator is typing.
+        Any non-text widget (the canvas, buttons, the root, a listbox) allows
+        the shortcut. A missing widget reference is treated as allowed so the
+        shortcuts still work when Tk does not populate ``event.widget``.
+
+        :param event: The Tk key event (may be ``None``).
+        :return: ``True`` if the shortcut should run, ``False`` to suppress.
+        """
+        widget = getattr(event, "widget", None)
+        if widget is None:
+            return True
+        # ``winfo_class`` is the reliable cross-widget way to identify the
+        # focused widget's type. Entry/ttk.Entry report "Entry"/"TEntry",
+        # Spinbox "Spinbox"/"TSpinbox", Combobox "TCombobox", and the Text
+        # widget "Text". A simpledialog's input is a plain Entry.
+        try:
+            widget_class = widget.winfo_class()
+        except Exception:  # noqa: BLE001 -- non-widget or torn-down focus
+            return True
+        text_input_classes = {
+            "Entry",
+            "TEntry",
+            "Spinbox",
+            "TSpinbox",
+            "TCombobox",
+            "Text",
+        }
+        return widget_class not in text_input_classes
 
     def _wire_window_close(self) -> None:
         """Intercept the window-manager close ("X") so we can warn on dirty."""
@@ -441,30 +512,39 @@ class EditorApp:
 
     def _undo(self) -> None:
         """Pop one command off the undo stack and re-render."""
+        # Peek the command BEFORE undo pops it so we can mirror its effect onto
+        # the pending-rename delta.
+        undone = self._history.undo_stack[-1] if self._history.can_undo else None
         if not self._history.undo(self._model):
             self._set_status("Nothing to undo.")
             return
         # Any undo brings the buffer back into "dirty vs saved" ambiguity --
         # we conservatively mark dirty so the user is prompted on close.
         self._mark_dirty()
-        # Rebuild _pending_renames from the surviving RenameNode commands so
-        # the next Save doesn't rewrite EDGES with a rename the user just
-        # undid (Codex PR29 #13). Must run after history.undo mutates the
-        # stack so we observe the post-undo state.
-        self._recompute_pending_renames()
+        # Undoing a rename reverts new -> old in the model, so the pending
+        # EDGES rewrite must move the same way. _record_pending_rename's
+        # chain-collapse cancels a not-yet-saved rename (A->B then its inverse
+        # collapses to {}) and inverts an already-saved one (leaving {B: A} so
+        # the next Save reverts field_data.py to match field_data.json) with
+        # the same call -- no need to know whether the rename was saved.
+        if isinstance(undone, RenameNode):
+            self._record_pending_rename(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
     def _redo(self) -> None:
         """Re-apply one command from the redo stack and re-render."""
+        # Peek the command BEFORE redo pops it (redo re-applies redo_stack[-1]).
+        redone = self._history.redo_stack[-1] if self._history.can_redo else None
         if not self._history.redo(self._model):
             self._set_status("Nothing to redo.")
             return
         self._mark_dirty()
-        # Mirror _undo: keep _pending_renames in lockstep with the history
-        # so a redone rename is back in the queue, and an irrelevant redo
-        # (e.g. a MoveNode) leaves the queue unchanged.
-        self._recompute_pending_renames()
+        # Re-applying a rename re-establishes old -> new; record it forward so
+        # the queue is symmetric with _undo. A non-rename redo leaves the queue
+        # untouched.
+        if isinstance(redone, RenameNode):
+            self._record_pending_rename(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -759,6 +839,20 @@ class EditorApp:
         if dlg.result is None:
             return
         name, node_type = dlg.result
+        # Forbid reusing a name that is still the source of an unflushed rename
+        # (#65). The pending-rename map keys on the original (old) name, so a
+        # new node reusing that freed name would let a later rename of the new
+        # node clobber the original mapping and corrupt the Save-time EDGES
+        # rewrite. Block it until the pending rename is flushed by a Save.
+        if name in self._pending_renames:
+            messagebox.showerror(
+                "Cannot add node",
+                f"Cannot reuse the name {name!r} -- it is the source of a "
+                "pending rename that has not been saved yet. Save first, then "
+                "reuse the name.",
+                parent=self._root,
+            )
+            return
         self._dispatch(AddNode(name, (x, y), node_type))
 
     def _handle_move_click(self, x: float, y: float) -> None:
@@ -1164,6 +1258,19 @@ class EditorApp:
 
         :param target: Node to delete.
         """
+        # Guard the start node up front so the operator gets a clear message
+        # instead of an opaque "START_NODE references unknown node" failure at
+        # the next Save (DeleteNode.apply enforces the same rule, but this
+        # surfaces it before the confirm dialog).
+        if target == self._model.start_node:
+            messagebox.showerror(
+                "Cannot delete node",
+                f"Cannot delete {target!r} -- it is the current start node. "
+                "Pick a different start node first.",
+                parent=self._root,
+            )
+            return
+
         edges_index = self._find_edges_reference(target)
         if edges_index is not None:
             messagebox.showerror(
@@ -1193,7 +1300,15 @@ class EditorApp:
         module was importable). Returns ``None`` when the node is unmentioned
         or when the module / attribute is unavailable.
 
-        :param node_name: Node to search for.
+        The cached ``EDGES`` list is only refreshed on a successful Save, so it
+        still holds the *pre-rename* names for any in-session rename that has
+        not been flushed yet. Resolve *node_name* back through the pending
+        rename map (target ``Y`` -> source ``X``) before scanning, so deleting
+        a renamed-but-unsaved node still sees the EDGES reference under its old
+        name and the guard fires.
+
+        :param node_name: Node to search for (its current, possibly renamed,
+            display name).
         :return: Index into ``EDGES`` or ``None``.
         """
         if self._field_data_module is None:
@@ -1201,10 +1316,19 @@ class EditorApp:
         edges = getattr(self._field_data_module, "EDGES", None)
         if not isinstance(edges, list):
             return None
+        # Map the current display name back to the name the cached EDGES table
+        # still uses. A pending rename X -> Y means EDGES holds 'X'; deleting
+        # 'Y' must search for 'X'. The map keys on the original source name and
+        # values are the latest target, so invert it for the lookup.
+        search_name = node_name
+        for source, target in self._pending_renames.items():
+            if target == node_name:
+                search_name = source
+                break
         for index, entry in enumerate(edges):
             if not isinstance(entry, dict):
                 continue
-            if entry.get("u") == node_name or entry.get("v") == node_name:
+            if entry.get("u") == search_name or entry.get("v") == search_name:
                 return index
         return None
 
@@ -1246,23 +1370,6 @@ class EditorApp:
             # but be defensive in case a future caller bypasses it).
             if old != new:
                 self._pending_renames[old] = new
-
-    def _recompute_pending_renames(self) -> None:
-        """Rebuild ``_pending_renames`` from the live history undo stack.
-
-        Walks ``self._history.undo_stack`` oldest-to-newest and replays each
-        :class:`RenameNode` through :meth:`_record_pending_rename`, so the
-        resulting queue matches what would have accumulated if the user had
-        only ever issued the renames that survive in history. Used by
-        :meth:`_undo` / :meth:`_redo` to keep the queue from drifting past
-        the model state -- without this, undoing a rename leaves the rename
-        in the queue and the next Save rewrites EDGES to a name that no
-        longer exists in JSON.
-        """
-        self._pending_renames.clear()
-        for command in self._history.undo_stack:
-            if isinstance(command, RenameNode):
-                self._record_pending_rename(command.old, command.new)
 
     # ------------------------------------------------------------------
     # Save / Save & Build
@@ -1337,6 +1444,12 @@ class EditorApp:
                     # delete-guard staying as accurate as it was pre-save.
                     pass
             self._pending_renames.clear()
+
+        # After a successful Save, field_data.json, field_data.py EDGES, and
+        # the model are all consistent, so the pending-rename delta is empty
+        # (cleared above when a flush ran; already empty otherwise). It now
+        # tracks only renames made AFTER this Save -- no history-derived anchor
+        # is needed, which is what makes undo-after-save robust.
 
         self._clear_dirty()
         self._set_status(_STATUS_SAVED)

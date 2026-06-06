@@ -64,11 +64,10 @@ inline Direction resolveDirection(
     if (!bidirectionalAutoEnabled) return Direction::FRONT;
     if (lineBoardCount < 2)        return Direction::FRONT;
 
-    // Wrap delta into (-180, +180] using the same loop pattern as
-    // PathTrackerClass::_onPlanNextHop (existing wrap site).
-    float delta = edgeHeading - currentHeading;
-    while (delta >   180.0f) { delta -= 360.0f; }
-    while (delta <= -180.0f) { delta += 360.0f; }
+    // Wrap delta into (-180, +180] via the shared NavTypes.h helper (same wrap the
+    // PathTracker pass-through / turn-needed checks use). Keep this behaviourally
+    // identical to the sim's `normalize_turn` in sim/runtime.py (TC18 parity).
+    const float delta = wrapDeltaDeg(edgeHeading - currentHeading);
     if (fabsf(delta) > Config::BIDIRECTIONAL_TURN_THRESHOLD_DEG) return Direction::REAR;
     return Direction::FRONT;
 }

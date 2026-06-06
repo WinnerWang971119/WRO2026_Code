@@ -89,6 +89,13 @@ TURN_EPSILON_DEG: float = 1e-6
 # or the cross-check goal-position test will diverge.
 LINE_SENSOR_AXLE_OFFSET_CM: float = 5.0
 
+# MUST mirror ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` in WRO2026/Config.h.
+# Used for REAR (reverse) overshoot so a rear-board hop dead-reckons with the
+# rear board's own axle offset instead of the front board's. Defaults equal to
+# the front offset until the rear board is measured (T5); keep the two C++ and
+# Python defaults in lockstep.
+LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = LINE_SENSOR_AXLE_OFFSET_CM
+
 # MUST mirror ``Config::NAV_TURN_TOLERANCE_DEG`` in WRO2026/Config.h.
 # Pytest TC9 verifies parity via regex grep on the header (no C parser).
 NAV_TURN_TOLERANCE_DEG: float = 0.5
@@ -185,6 +192,7 @@ __all__ = [
     "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_BOARD_COUNT",
     "LINE_SENSOR_AXLE_OFFSET_CM",
+    "LINE_SENSOR_AXLE_OFFSET_REAR_CM",
     "NAV_TURN_TOLERANCE_DEG",
     "PATH_PASS_THROUGH_ENABLED",
     "TURN_EPSILON_DEG",
@@ -721,6 +729,13 @@ class PathTrackerSim:
                 # (TC9c). Chassis advance is identical (5cm) regardless
                 # of direction; the primitive name differs only for
                 # downstream verification + telemetry. See ADR-023.
+                # Dead-reckon with the axle offset of the board that LED this hop;
+                # a REAR hop uses the rear board's own offset (mirrors PathTracker).
+                overshoot_offset_cm = (
+                    LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                    if direction == Direction.REAR
+                    else LINE_SENSOR_AXLE_OFFSET_CM
+                )
                 if _should_pass_through(
                     self._graph,
                     self._next_hop,
@@ -734,18 +749,18 @@ class PathTrackerSim:
                     bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                     line_board_count=LINE_BOARD_COUNT,
                 ):
-                    out.append((ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM))
+                    out.append((ACT_LINE_PASS, overshoot_offset_cm))
                 else:
-                    out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+                    out.append((ACT_LINE_OVERSHOOT, overshoot_offset_cm))
                 # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
                 # in the travel direction. When it detects the intersection at v,
                 # the chassis center is AXLE_OFFSET cm behind v in the travel
                 # direction. Advancing AXLE_OFFSET in the travel direction = reverse
                 # in body coordinates (body heading points opposite to travel).
                 if direction == Direction.REAR:
-                    self._chassis.reverse(LINE_SENSOR_AXLE_OFFSET_CM)
+                    self._chassis.reverse(overshoot_offset_cm)
                 else:
-                    self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
+                    self._chassis.forward(overshoot_offset_cm)
                 self._localization.on_intersection(nxt)
             elif edge_type == EDGE_PROJECTION:
                 if direction == Direction.REAR:

@@ -151,13 +151,15 @@ def _draw_background(
             stacklevel=3,
         )
         return
+    # Do not pass aspect="auto" here: imshow forwards it to
+    # ax.set_aspect("auto"), which would clobber the set_aspect("equal")
+    # locked in render_map and distort a non-square field.
     ax.imshow(
         img,
         extent=(0.0, width_cm, 0.0, height_cm),
         origin="lower",
         alpha=0.6,
         zorder=0,
-        aspect="auto",
     )
 
 
@@ -252,10 +254,10 @@ def _draw_nodes(ax: plt.Axes, graph: nx.DiGraph) -> None:
         xs = [e[0] for e in entries]
         ys = [e[1] for e in entries]
         color = _NODE_COLOR.get(node_type, "gray")
-        ax.scatter(
-            xs, ys, color=color, s=60, zorder=6,
-            label=f"node: {node_type}",
-        )
+        # No label= here: _attach_legend builds the node legend from an
+        # explicit handles list derived from _NODE_COLOR, so any scatter
+        # label would be silently discarded.
+        ax.scatter(xs, ys, color=color, s=60, zorder=6)
         for x, y, name in entries:
             ax.text(x + 1.5, y + 1.5, name, fontsize=8, zorder=7, color=color)
 

@@ -56,6 +56,12 @@ void IntersectionClass::update()
     // (code review F7). Anything outside `[NONE..UNKNOWN]` is treated as UNKNOWN — the same
     // category as a sensor flicker. Without this guard a corrupt I2C byte would be
     // `static_cast` directly into `_lastType`, broadcasting nonsense to consumers.
+    //
+    // @note This `getJunctionType()` read reuses the sample LineFollower.update() just took
+    // ONLY when `Config::LINE_ARRAY_TICK_CACHE_ENABLED` is true (the shipped default,
+    // Config.h:450) — then it is a pure cache reader and issues no extra I2C transaction. With
+    // the cache disabled this call re-reads the Wire1 bus, so Intersection observes a sample
+    // distinct from LineFollower's (see the shared-single-sample design rule in Intersection.h).
     const uint8_t rawByte         = _array->getJunctionType();
     const bool    rawInRange      = rawByte <= static_cast<uint8_t>(JunctionType::UNKNOWN);
     const uint8_t raw             = rawInRange ? rawByte

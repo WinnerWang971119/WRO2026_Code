@@ -160,3 +160,17 @@ class History:
         :return: Whether :meth:`redo` would do useful work.
         """
         return bool(self._redo_stack)
+
+    @property
+    def redo_stack(self) -> tuple[Command, ...]:
+        """Read-only view of the redo stack.
+
+        The next command :meth:`redo` will re-apply is the last element
+        (``redo_stack[-1]``), mirroring :meth:`undo`'s relationship to
+        :attr:`undo_stack`. Callers peek this to mirror a redone command's
+        effect onto auxiliary state (e.g. the editor's pending-rename delta)
+        without mutating the stack. Returning a tuple prevents that mutation.
+
+        :return: A tuple of :class:`Command` instances; ``[-1]`` is redone next.
+        """
+        return tuple(self._redo_stack)

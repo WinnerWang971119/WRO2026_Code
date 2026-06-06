@@ -24,4 +24,25 @@ enum class Direction : uint8_t
     REAR  = 2,    ///< Force reverse (chassis rear leads; LINE/PROJECTION use rear board).
 };
 
+/**
+ * @brief Wrap a heading delta (degrees) into the half-open range (-180, 180].
+ *
+ * Single source of truth for the `while (d > 180) d -= 360; while (d <= -180) d += 360;`
+ * loop that the direction-resolution policy (DirectionPolicy.h) and PathTracker's
+ * pass-through / turn-needed checks each previously inlined.
+ *
+ * Kept in this dependency-light header (rather than WROMath.h, which pulls in
+ * `Arduino.h` + `Config.h`) so `DirectionPolicy.h` — compiled directly by the host-test
+ * target — gains the helper without new heavy includes.
+ *
+ * @param deltaDeg Any finite heading difference in degrees.
+ * @return Equivalent delta in (-180, 180]  (so -180 maps to +180, +180 stays +180).
+ */
+inline float wrapDeltaDeg(float deltaDeg)
+{
+    while (deltaDeg > 180.0f) { deltaDeg -= 360.0f; }
+    while (deltaDeg <= -180.0f) { deltaDeg += 360.0f; }
+    return deltaDeg;
+}
+
 #endif    // NAV_TYPES_H
