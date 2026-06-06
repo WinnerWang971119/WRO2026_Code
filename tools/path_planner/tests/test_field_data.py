@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import FieldDataError, validate
@@ -241,6 +241,119 @@ def test_validator_rejects_line_mode_on_stop_at_line_blind_edge() -> None:
     ]
     with pytest.raises(FieldDataError, match="BlindMode"):
         validate(fd)
+
+
+# -- TC5: EDGES vs LINE_SEGMENTS / BLIND_EDGES anti-ambiguity cross-check ----
+#
+# Findings #38/#47: an EDGES entry whose unordered pair {u, v} already exists
+# in LINE_SEGMENTS or BLIND_EDGES with a conflicting type silently overwrites
+# the earlier edge's type and geometry in graph_builder (LINE then BLIND then
+# EDGES; networkx add_edge replaces attributes). The validator must reject the
+# conflict, while still accepting a same-type override.
+
+
+def test_validator_rejects_edge_blind_over_line_segment_pair() -> None:
+    """TC5: EDGE_BLIND on a pair already in LINE_SEGMENTS is rejected.
+
+    ('A','B') is a LINE_SEGMENTS pair in the toy field. Re-declaring it as a
+    BLIND edge via EDGES would silently flip the line edge's type/geometry in
+    graph_builder -- the exact corruption the LINE-vs-BLIND guard prevents,
+    bypassed through EDGES.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"LINE_SEGMENTS"):
+        validate(fd)
+
+
+def test_validator_rejects_edge_line_over_blind_edge_pair() -> None:
+    """TC5 (mirror): EDGE_LINE on a pair already in BLIND_EDGES is rejected.
+
+    ('B','G') is the toy field's single BLIND_EDGES pair. Re-declaring it as a
+    LINE edge via EDGES is the symmetric conflict and must fail too.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"BLIND_EDGES"):
+        validate(fd)
+
+
+def test_validator_rejects_edge_projection_over_line_segment_pair() -> None:
+    """TC5: EDGE_PROJECTION on a LINE_SEGMENTS pair is a conflict.
+
+    EDGE_PROJECTION maps to neither LINE_SEGMENTS nor BLIND_EDGES, so a
+    PROJECTION entry on an existing line pair still reclassifies the edge and
+    must be rejected. ('B','C') is a LINE_SEGMENTS pair in the toy field.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_PROJECTION,
+            "u": "B",
+            "v": "C",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"LINE_SEGMENTS"):
+        validate(fd)
+
+
+def test_validator_accepts_same_type_line_override() -> None:
+    """TC5 (positive): EDGE_LINE on a LINE_SEGMENTS pair is a valid override.
+
+    The intended use of a rich EDGES entry is as an override layer attaching
+    distance/heading/pivot to an existing edge. A matching-type entry on an
+    existing pair must NOT be rejected by the anti-ambiguity rule.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "primitive_mode": LineMode.FAST,
+        }
+    ]
+    assert validate(fd) is None
+
+
+def test_validator_accepts_same_type_blind_override() -> None:
+    """TC5 (positive, mirror): EDGE_BLIND on a BLIND_EDGES pair is accepted.
+
+    ('B','G') is the toy field's BLIND_EDGES pair; a matching-type BLIND
+    override is the legitimate path the STOP_AT_LINE edge relies on.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "primitive_mode": BlindMode.STOP_AT_LINE,
+        }
+    ]
+    assert validate(fd) is None
 
 
 def test_stop_at_line_fixture_loads_and_validates() -> None:

@@ -113,6 +113,15 @@ def _validate_edges_field(field_data) -> None:
     on any override (DEFAULT == "absent", so being explicit about it is
     a confusion).
 
+    An anti-ambiguity cross-check rejects an entry whose unordered pair
+    ``{u, v}`` already exists in ``LINE_SEGMENTS`` or ``BLIND_EDGES``
+    with a *conflicting* type (:data:`EDGE_LINE` matches LINE_SEGMENTS,
+    :data:`EDGE_BLIND` matches BLIND_EDGES, :data:`EDGE_PROJECTION`
+    matches neither): such an entry would silently overwrite the earlier
+    edge's type and geometry in :mod:`graph_builder`. A *matching*-type
+    entry on an existing pair is a legitimate override layer and is
+    accepted.
+
     The cross-edge pivot-compensation check (does the upcoming turn
     delta exceed the minimum useful angle?) is deliberately deferred to
     :mod:`tools.path_planner.planner` (T5); this validator only checks
@@ -163,6 +172,25 @@ def _validate_edges_field(field_data) -> None:
     }
     nodes = getattr(field_data, "NODES", {})
 
+    # Anti-ambiguity cross-check (findings #38/#47): an EDGES entry whose
+    # unordered pair {u, v} already exists in LINE_SEGMENTS or BLIND_EDGES
+    # with a *conflicting* type silently overwrites the earlier edge's type
+    # and geometry in graph_builder (LINE then BLIND then EDGES; networkx
+    # add_edge replaces attributes). EDGE_LINE matches LINE_SEGMENTS and
+    # EDGE_BLIND matches BLIND_EDGES; EDGE_PROJECTION matches neither, so a
+    # PROJECTION entry on a LINE/BLIND pair is a conflict. A *matching*-type
+    # entry (e.g. EDGE_LINE on a LINE_SEGMENTS pair) is a legitimate override
+    # layer (distance/heading/pivot/direction) and is accepted. This mirrors,
+    # via EDGES, the LINE-vs-BLIND guard in :func:`validate`.
+    line_segment_keys = {
+        _segment_key(a, b)
+        for a, b in getattr(field_data, "LINE_SEGMENTS", ())
+    }
+    blind_edge_keys = {
+        _segment_key(a, b)
+        for a, b in getattr(field_data, "BLIND_EDGES", ())
+    }
+
     for i, entry in enumerate(edges):
         if not isinstance(entry, dict):
             raise FieldDataError(
@@ -209,6 +237,27 @@ def _validate_edges_field(field_data) -> None:
             raise FieldDataError(
                 f"EDGES[{i}] references unknown node v='{v}' -- "
                 "add it to NODES or fix the entry"
+            )
+
+        # Conflicting-type cross-check (findings #38/#47). A matching-type
+        # override is allowed; only a type that reclassifies an existing
+        # LINE/BLIND pair (or a PROJECTION entry over either) is rejected.
+        pair_key = _segment_key(u, v)
+        if pair_key in line_segment_keys and edge_type != EDGE_LINE:
+            raise FieldDataError(
+                f"EDGES[{i}] ('{u}','{v}') is type {edge_type} but the pair "
+                "is already a LINE_SEGMENTS entry -- this silently overwrites "
+                "the line edge's type and geometry in graph_builder. Use "
+                "EDGE_LINE to override the existing line edge, or remove the "
+                "pair from LINE_SEGMENTS if it is not line-reachable"
+            )
+        if pair_key in blind_edge_keys and edge_type != EDGE_BLIND:
+            raise FieldDataError(
+                f"EDGES[{i}] ('{u}','{v}') is type {edge_type} but the pair "
+                "is already a BLIND_EDGES entry -- this silently overwrites "
+                "the blind edge's type and geometry in graph_builder. Use "
+                "EDGE_BLIND to override the existing blind edge, or remove the "
+                "pair from BLIND_EDGES if it is not blind-reachable"
             )
 
         if not _is_number(distance_cm) or distance_cm <= 0:

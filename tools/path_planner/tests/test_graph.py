@@ -126,9 +126,11 @@ def test_edges_distance_cm_override_is_honored() -> None:
     fd = _clone_field_data()
     # A=(10, 10) -> B=(200, 10): true Euclidean = 190.0 cm. Inject a
     # bidirectional rich-edge override claiming the strip is 99.0 cm.
-    # Use EDGE_PROJECTION so the entry is additive (not a duplicate of
-    # the existing LINE_SEGMENTS A-B pair); networkx replaces edge
-    # attrs on the second add_edge call, so the override is what sticks.
+    # Drop the LINE_SEGMENTS A-B pair so the EDGES entry is the sole
+    # carrier of the A-B edge; otherwise the EDGES PROJECTION type would
+    # conflict with the existing LINE pair (findings #38/#47) and the
+    # validator would reject it before build_graph could emit the edge.
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
     fd.EDGES = [
         {
             "type":         EDGE_PROJECTION,
@@ -155,6 +157,10 @@ def test_edges_heading_deg_override_is_honored_with_reverse() -> None:
     # A->B's geometric heading is 0.0 (due East). Inject an obviously wrong
     # 45.0 to prove the override path runs and the reverse is computed off
     # the override (45.0 + 180.0 == 225.0), not off the computed geometry.
+    # Drop the LINE_SEGMENTS A-B pair so the EDGES entry is the sole carrier
+    # of the A-B edge; otherwise the PROJECTION type conflicts with the
+    # existing LINE pair (findings #38/#47) and the validator rejects it.
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
     fd.EDGES = [
         {
             "type":         EDGE_PROJECTION,
