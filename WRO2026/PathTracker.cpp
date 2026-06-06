@@ -847,8 +847,7 @@ void PathTrackerClass::_onPlanNextHop()
     // redundancy — if a future FSM change introduces a path into the
     // dispatcher that bypasses this early site, the late guard still fires.
     // ------------------------------------------------------------------------
-    if (resolved == Direction::REAR && Config::LINE_BOARD_COUNT < 2 &&
-        (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION))
+    if (reverseUnavailable(resolved, edge.type, Config::LINE_BOARD_COUNT))
     {
         _printReverseUnavailable(cur, nxt, edge.type, F("pre-turn guard"));
         _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
@@ -921,14 +920,11 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     // BLIND REAR is permitted on a 1-board chassis: dead-reckoned reverse
     // does not require a rear line sensor — only negative PWM.
     // -----------------------------------------------------------------------
-    if (_resolvedDirection == Direction::REAR && Config::LINE_BOARD_COUNT < 2)
+    if (reverseUnavailable(_resolvedDirection, edge.type, Config::LINE_BOARD_COUNT))
     {
-        if (edge.type == Routes::EdgeType::LINE || edge.type == Routes::EdgeType::PROJECTION)
-        {
-            _printReverseUnavailable(cur, _nextHop, edge.type, F("post-turn guard"));
-            _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
-            return;
-        }
+        _printReverseUnavailable(cur, _nextHop, edge.type, F("post-turn guard"));
+        _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
+        return;
     }
 
     const bool reverse = (_resolvedDirection == Direction::REAR);
