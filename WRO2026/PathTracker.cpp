@@ -893,6 +893,16 @@ void PathTrackerClass::_onPlanNextHop()
             LineFollower.setEnabled(false).setBrake(false);
         }
 
+        // Clear any pass-through eligibility the LINE_FOLLOW peek latched. That
+        // peek used FieldMap edge headings; this branch fired because the live
+        // IMU heading disagrees, so a real pre-edge turn IS required. Leaving
+        // `_passThrough` set would make the post-turn `_dispatchEdgeAfterTurn`
+        // run its blind pass-through branch (cruise start-speed) from a dead
+        // stop with no soft-start ramp, jolting the chassis. The chassis is
+        // stopped after the turn, so the blind move must soft-start from
+        // TSHAPE_START_SPEED. (PR#35 findings #32 / #90.)
+        _passThrough = false;
+
         const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
 
         // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
