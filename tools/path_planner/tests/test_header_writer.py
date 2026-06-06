@@ -15,6 +15,36 @@ emitting from a STABLE toy field-data fixture (see
 the canonical ``field_data.py``. The toy goldens were regenerated as a
 one-off authorised rebaseline during T11; subsequent emits MUST be
 byte-identical.
+
+.. rubric:: When and how to rebaseline the goldens
+
+The golden files (``tools/path_planner/tests/golden/routes_toy.{h,cpp}``)
+are a **deliberate byte-baseline**.  They encode the exact output of the
+emitter for the stable toy field-data fixture.  The coupling is intentional:
+any authorised change to ``header_writer.py`` or to the defaults in
+``pipeline_config.py`` that intentionally alters the emitter output MUST
+be followed by a golden rebaseline — otherwise
+:func:`test_routes_h_matches_golden` / :func:`test_routes_cpp_matches_golden`
+will fail with a byte-equality error.
+
+**Rebaseline workflow (authorised changes only):**
+
+1. Make and review your emitter / pipeline_config change.
+2. Run the regeneration helper::
+
+       python tools/path_planner/tests/test_header_writer.py
+
+   This overwrites ``tools/path_planner/tests/golden/routes_toy.h`` and
+   ``tools/path_planner/tests/golden/routes_toy.cpp`` in-place.
+3. Review the diff (``git diff tools/path_planner/tests/golden/``) to
+   confirm only the expected lines changed.
+4. Commit the updated goldens together with your emitter change in the
+   same PR.  CI will confirm they are in lockstep.
+
+**Do NOT rebaseline to silence a test failure caused by an unintentional
+change.**  A byte-diff failure on an unrelated PR means the emitter or
+a pipeline_config default drifted without authorisation — investigate
+before touching the goldens.
 """
 
 from __future__ import annotations
@@ -156,6 +186,21 @@ def test_emit_writes_both_files(emit_targets):
     assert source_path.exists() and source_path.stat().st_size > 0
 
 
+# ---------------------------------------------------------------------------
+# Byte-golden tests.
+#
+# These compare the emitter's output against the frozen files in
+# ``tools/path_planner/tests/golden/``.  A failure here means the emitter
+# or a ``pipeline_config.py`` default changed without a corresponding
+# golden rebaseline.
+#
+# If the change was INTENTIONAL:  run the regeneration helper and commit
+# the updated goldens together with your change (see module docstring for
+# the full workflow).
+#
+# If the change was UNINTENTIONAL: investigate before touching the goldens.
+# ---------------------------------------------------------------------------
+
 def test_routes_h_matches_golden(emit_targets):
     header_path, _ = emit_targets
     _emit_with_toy_field(emit_targets)
@@ -197,9 +242,9 @@ def test_unreachable_pair_emits_0xff(emit_targets):
     """Removing BLIND_EDGES makes G unreachable; NEXT_HOP must show 0xFF."""
     fd = _clone_field_data()
     fd.BLIND_EDGES = []
-    # Real field_data carries an EDGES list with pivot edges; the pivot
-    # planner refuses to compensate when the destination has more than
-    # one out-edge. Strip it for this unreachable-pair test.
+    # Pin EDGES empty so this unreachable-pair test exercises only the
+    # geometry graph: no rich-edge overrides, no pivot tags, nothing that
+    # could perturb the NEXT_HOP table beyond the BLIND_EDGES removal above.
     fd.EDGES = []
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -499,3 +544,37 @@ def test_direction_override_emits_force_reverse_one_direction(emit_targets):
         f"Expected exactly 1 FORCE_REVERSE cell (A->B), got "
         f"{cpp_text.count('FORCE_REVERSE')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Golden regeneration helper (NOT collected by pytest).
+#
+# Run this module directly to overwrite the golden files after an
+# AUTHORISED change to the emitter or pipeline_config.py defaults:
+#
+#     python tools/path_planner/tests/test_header_writer.py
+#
+# Review the resulting ``git diff tools/path_planner/tests/golden/``
+# before committing.  Never run this to silence an unintentional failure.
+# ---------------------------------------------------------------------------
+
+def regenerate_goldens() -> None:
+    """Overwrite the on-disk golden files from the current emitter output.
+
+    Emits the stable toy field-data fixture (same inputs as the byte-golden
+    tests) directly into ``_GOLDEN_HEADER`` and ``_GOLDEN_SOURCE``.  Only
+    call this after an AUTHORISED change to ``header_writer.py`` or the
+    defaults in ``pipeline_config.py``.
+
+    This function is intentionally NOT a pytest test (no ``test_`` prefix)
+    so it is never collected or executed during ``pytest`` runs.
+    """
+    _emit_toy(_build_toy_field_data(), _GOLDEN_HEADER, _GOLDEN_SOURCE)
+    print(f"Regenerated golden files:")
+    print(f"  {_GOLDEN_HEADER}")
+    print(f"  {_GOLDEN_SOURCE}")
+    print("Review the diff (git diff tools/path_planner/tests/golden/) before committing.")
+
+
+if __name__ == "__main__":
+    regenerate_goldens()
