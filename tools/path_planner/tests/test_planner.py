@@ -311,3 +311,41 @@ def test_apply_pivot_compensations_ignores_back_edge():
     assert g.edges["B", "C"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
     # The back-edge B->A must NOT have been touched.
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
+
+
+def test_compute_all_pairs_next_hop_compensates_input_graph_in_place():
+    """TC9 / finding #42: pivot compensation reaches the SHARED graph.
+
+    Decision B: ``compute_all_pairs_next_hop`` now applies pivot
+    compensation to its input ``graph`` in place (not to a discarded
+    weighted copy). The caller passes that same ``graph`` object to
+    ``emit_routes`` immediately afterward, so the shortened distance must
+    survive on the graph -- otherwise routes.cpp emits the un-shortened
+    drive distance and the robot overshoots every pivot landing.
+
+    Bidirectional layout mirroring
+    :func:`test_apply_pivot_compensations_ignores_back_edge`: A->B is a
+    90 deg LEFT pivot, B has exactly one forward continuation B->C
+    (the back-edge B->A is excluded from the out-degree count). For
+    TRACK_CM=15 and a 90 deg pivot the forward chord component is 7.5 cm,
+    so B->C is shortened from 30.0 to 22.5 cm.
+    """
+    from tools.path_planner.graph_builder import Pivot
+
+    g = nx.DiGraph()
+    for name, (x, y) in (("A", (0.0, 0.0)), ("B", (10.0, 0.0)), ("C", (10.0, 30.0))):
+        g.add_node(name, x_cm=x, y_cm=y, type="line")
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=10.0, heading_deg=0.0,
+               pivot=int(Pivot.LEFT))
+    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=10.0, heading_deg=180.0)
+    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=30.0, heading_deg=90.0)
+    g.add_edge("C", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=270.0)
+
+    # Drive the FULL planner flow (not apply_pivot_compensations directly).
+    compute_all_pairs_next_hop(g, cost_blind_multiplier=1.0)
+
+    # The shared input graph now carries the compensated B->C distance.
+    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
+    # The pivot edge itself and the back-edge are untouched.
+    assert g.edges["A", "B"]["distance_cm"] == pytest.approx(10.0)
+    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)

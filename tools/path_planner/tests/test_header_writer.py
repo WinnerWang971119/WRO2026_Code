@@ -456,6 +456,64 @@ def test_edge_pre_turn_mode_override_emit(emit_targets):
     assert "TurnMode::PIVOT_LEFT" in cpp_text
 
 
+def test_pivot_compensation_reaches_emitted_distance(emit_targets):
+    """TC9 / finding #42: the shortened pivot distance lands in routes.cpp.
+
+    Before Decision B, ``apply_pivot_compensations`` ran only on a
+    discarded weighted copy inside ``compute_all_pairs_next_hop``, so the
+    EDGES table in routes.cpp carried the UN-shortened ``distance_cm`` and
+    the robot overshot every pivot landing. Now the compensation mutates
+    the same ``graph`` object that ``_emit_toy`` hands to ``emit_routes``,
+    so the compensated distance must appear in the emitted source.
+
+    Three-node A->B->C fixture (mirrors
+    :func:`test_edge_pre_turn_mode_override_emit`): ``A->B`` is a 90 deg
+    LEFT pivot, ``B->C`` is the single forward continuation. For
+    TRACK_CM=15 and a 90 deg turn the forward chord component is 7.5 cm,
+    so ``B->C`` is shortened from 30.0 to 22.5 cm. ``22.500000f`` is the
+    compensated literal; ``30.000000f`` is the pre-compensation value that
+    must NOT survive on the forward B->C cell.
+    """
+    header_path, source_path = emit_targets
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 70.0)},
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[
+            {
+                "type":        EDGE_BLIND,
+                "u":           "A",
+                "v":           "B",
+                "distance_cm": 40.0,
+                "heading_deg": 0.0,
+                "pivot":       Pivot.LEFT,
+            },
+            {
+                "type":        EDGE_BLIND,
+                "u":           "B",
+                "v":           "C",
+                "distance_cm": 30.0,
+                "heading_deg": 90.0,
+            },
+        ],
+    )
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    # The compensated B->C distance (22.5 cm) reached the emitted EDGES
+    # table -- proof the compensation now flows to emission, not just cost.
+    assert "22.500000f" in cpp_text, (
+        "compensated B->C distance (22.5 cm) missing from routes.cpp"
+    )
+
+
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the
 # test file itself contains zero literal occurrences of the deprecated
 # names -- otherwise the sweep would flag this test file. Word-boundary

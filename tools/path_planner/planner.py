@@ -27,10 +27,11 @@ Penalising blind edges keeps the planner on the line whenever a line
 detour is reasonable - the line follower is far more reliable than
 open-loop encoder moves.
 
-The raw ``distance_cm`` attribute on the *input* graph is left untouched;
-this module operates on a *copy* with an extra ``cost`` attribute and any
-single-wheel-pivot compensation baked in, so callers can re-use the
-original graph for visualisation or heading propagation downstream (T6).
+The weighted copy used by Dijkstra carries an extra ``cost`` attribute;
+the underlying geometry (``distance_cm`` / ``heading_deg``) is taken
+from the *input* graph AFTER pivot compensation has been applied to it
+in place, so the cost the planner optimises and the geometry the
+emitter consumes describe the same compensated edges.
 
 Single-wheel pivot compensation
 -------------------------------
@@ -43,8 +44,10 @@ chassis centre traces an arc instead of staying put, so it lands offset
 from where a counter-rotation would have left it. The planner
 compensates for that displacement by shortening the FOLLOWING edge's
 ``distance_cm`` (see :func:`compute_pivot_compensation`). The
-compensation is applied to a private weighted copy of the graph; the
-caller's graph is never mutated.
+compensation is applied to the input graph **in place** by
+:func:`compute_all_pairs_next_hop`, so the shortened distance reaches
+both the Dijkstra cost and the routes.cpp emitter that consumes the
+same graph object downstream.
 
 Sentinels
 ---------
@@ -189,9 +192,12 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         target -- the chassis is never going to immediately reverse the
         pivot it just executed.
 
-    :param graph: a directed graph (typically a private weighted copy --
-        callers must NOT pass the user-visible graph because edge
-        attributes are mutated in place).
+    :param graph: a directed graph whose following-edge ``distance_cm`` /
+        ``heading_deg`` attributes are mutated **in place**. Under
+        Decision B (finding #42) :func:`compute_all_pairs_next_hop` passes
+        its own input graph here on purpose, so the compensated geometry
+        reaches both the Dijkstra cost and the routes.cpp emitter. Callers
+        that must preserve the original geometry should pass a copy.
     :param track_cm: chassis track width in centimetres. Forwarded to
         :func:`compute_pivot_compensation`.
     :return: ``None``. Pivot edges whose destination does not have
@@ -311,9 +317,22 @@ def compute_all_pairs_next_hop(
 
     Edge cost = ``distance_cm * (cost_blind_multiplier if type == EDGE_BLIND
     else 1.0)``. Single-wheel-pivot compensation
-    (:func:`apply_pivot_compensations`) is applied to the private
-    weighted copy *before* Dijkstra runs, so reported costs reflect the
-    compensated geometry. The function does not mutate ``graph``.
+    (:func:`apply_pivot_compensations`) is applied to the input ``graph``
+    **in place** *before* the weighted copy is built, so the shortened
+    ``distance_cm`` feeds both the Dijkstra cost computed here and the
+    ``routes.cpp`` emitter that the caller drives with the same ``graph``
+    object afterward (Decision B, finding #42).
+
+    .. warning::
+
+        This function **mutates** ``graph``: every edge that follows a
+        single-wheel pivot has its ``distance_cm`` / ``heading_deg``
+        shortened to the compensated value. This is intentional -- the
+        caller (:func:`tools.path_planner.build_routes._run`) passes the
+        same ``graph`` to :func:`tools.path_planner.header_writer.emit_routes`
+        right after, so the compensated geometry must live on the shared
+        object. Callers that need the raw geometry afterward should pass a
+        copy. A single call applies the compensation exactly once.
 
     :param graph: directed graph as produced by
         :func:`tools.path_planner.graph_builder.build_graph`. Every edge
@@ -340,17 +359,16 @@ def compute_all_pairs_next_hop(
             "expensive than equal-length LINE edges."
         )
 
+    # Apply pivot compensation to the INPUT graph in place BEFORE building
+    # the weighted copy. Decision B (finding #42): the caller passes this
+    # same ``graph`` object to ``emit_routes`` right after, so shortening
+    # the following edge's ``distance_cm`` here is what makes the
+    # compensated geometry reach routes.cpp -- not just the Dijkstra cost.
+    apply_pivot_compensations(graph, TRACK_CM)
+    # Build the weighted copy FROM the now-compensated graph so every
+    # ``cost`` is derived from the compensated ``distance_cm``. No separate
+    # cost-refresh pass is needed: compensation already ran above.
     weighted = _weighted_copy(graph, cost_blind_multiplier)
-    # Apply pivot compensation BEFORE Dijkstra so the edge costs the
-    # planner sees match the geometry the runtime will actually drive.
-    # The mutation lands on the private ``weighted`` copy only.
-    apply_pivot_compensations(weighted, TRACK_CM)
-    # ``cost`` was set from the pre-compensation distance, so refresh it
-    # for any edge whose ``distance_cm`` changed during compensation.
-    # Edges that did not change retain the original cost untouched.
-    for _u, _v, data in weighted.edges(data=True):
-        multiplier = cost_blind_multiplier if data["type"] == EDGE_BLIND else 1.0
-        data["cost"] = float(data["distance_cm"]) * multiplier
 
     nodes = list(graph.nodes())
 
