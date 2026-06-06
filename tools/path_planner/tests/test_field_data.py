@@ -82,6 +82,47 @@ def test_obstacle_invalid_bounds() -> None:
         validate(fd)
 
 
+# -- TC4: non-finite numbers (NaN / Inf) rejected at every numeric gate -----
+#
+# `_is_number` is the single root gate for NODES coords, OBSTACLES bounds,
+# ROBOT_RADIUS_CM, COST_BLIND_MULTIPLIER, FIELD_MM and EDGES scalars. A NaN
+# is a float and not a bool, so it used to pass; worse, the obstacle bounds
+# check `x_min >= x_max` is always False when an operand is NaN, so a NaN
+# rectangle slipped through and reached the Euclidean planner math as a
+# corrupt edge weight. Requiring finiteness makes NaN/Inf fail with a clean
+# FieldDataError instead.
+
+
+def test_nan_node_coord_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODES["A"] = (float("nan"), 0.0)
+    with pytest.raises(FieldDataError, match=r"NODES\['A'\]"):
+        validate(fd)
+
+
+def test_inf_node_coord_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODES["A"] = (0.0, float("inf"))
+    with pytest.raises(FieldDataError, match=r"NODES\['A'\]"):
+        validate(fd)
+
+
+def test_nan_obstacle_bound_rejected() -> None:
+    fd = _clone_field_data()
+    fd.OBSTACLES = [(float("nan"), 0.0, 40.0, 10.0, "wall")]
+    with pytest.raises(FieldDataError, match=r"OBSTACLES\[0\]"):
+        validate(fd)
+
+
+def test_inf_obstacle_bound_rejected() -> None:
+    fd = _clone_field_data()
+    fd.OBSTACLES = [(0.0, 0.0, float("inf"), 10.0, "wall")]
+    with pytest.raises(FieldDataError, match=r"OBSTACLES\[0\]"):
+        validate(fd)
+
+
 def test_node_type_unknown_value() -> None:
     fd = _clone_field_data()
     fd.NODE_TYPES["A"] = "weird"

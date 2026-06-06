@@ -23,6 +23,7 @@ validator to avoid a circular import (``graph_builder`` imports
 
 from __future__ import annotations
 
+import math
 from typing import Any, Iterable
 
 _REQUIRED_ATTRS = (
@@ -51,8 +52,19 @@ class FieldDataError(Exception):
 
 
 def _is_number(value: Any) -> bool:
-    """Return True for ``int`` or ``float`` (but not ``bool``)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    """Return True for a finite ``int`` or ``float`` (but not ``bool``).
+
+    NaN and infinities are rejected: they slip through every downstream
+    numeric gate (``x_min >= x_max`` is False when an operand is NaN,
+    ``<= 0`` is False for NaN, etc.) and corrupt the planner graph with no
+    diagnostic. Requiring :func:`math.isfinite` here closes all gates at the
+    root. ``math.isfinite`` accepts ordinary ``int`` values unchanged.
+    """
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
 
 
 def _segment_key(a: str, b: str) -> frozenset:
