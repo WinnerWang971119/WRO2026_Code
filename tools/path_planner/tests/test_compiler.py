@@ -151,6 +151,78 @@ def test_final_heading_after_short_paths(toy_graph: nx.DiGraph) -> None:
     assert final_heading_after(["A"], 47.0, toy_graph) == pytest.approx(47.0, abs=1e-12)
 
 
+def test_final_heading_after_rear_final_hop_matches_compile_path() -> None:
+    """TC8 (#44): on a REAR final hop, ``final_heading_after`` returns the
+    chassis body heading (edge_heading + 180) and AGREES with ``compile_path``.
+
+    A single forced-REAR BLIND hop (``direction_override=FORCE_REVERSE``)
+    resolves REAR regardless of geometry, so the chassis turns to face the
+    edge with its rear sensor: the body heading the robot is left on is
+    ``(edge_heading + 180) % 360``, not the raw forward edge heading. The
+    fix makes ``final_heading_after`` resolve direction the same way
+    ``compile_path`` does, so the returned pose must equal both the
+    ``+180`` body heading and the heading ``compile_path`` actually drives
+    (recovered by replaying its primitive stream).
+    """
+    edge_heading = 90.0
+    # Plain (non-STOP_AT_LINE) BLIND edge forced REAR: the REAR branch emits
+    # ACT_BLIND_REVERSE, which ``_replay_primitives`` understands, keeping the
+    # test focused on the resolved heading rather than the seek-mode split.
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge(
+        "A", "B",
+        type=EDGE_BLIND,
+        distance_cm=40.0,
+        heading_deg=edge_heading,
+        direction_override=int(DirectionMode.FORCE_REVERSE),
+    )
+    g.add_edge(
+        "B", "A",
+        type=EDGE_BLIND,
+        distance_cm=40.0,
+        heading_deg=(edge_heading + 180.0) % 360.0,
+    )
+
+    start_heading = 0.0
+    end = final_heading_after(["A", "B"], start_heading, g)
+
+    # The REAR body heading is the forward edge heading rotated 180 deg.
+    assert end == pytest.approx((edge_heading + 180.0) % 360.0, abs=1e-9)
+
+    # ...and it matches the end heading ``compile_path`` leaves the chassis
+    # on (recovered by replaying its emitted primitives).
+    prims = compile_path(["A", "B"], start_heading, g, None)
+    replayed = _replay_primitives(prims, start_heading)
+    assert replayed[-1] == pytest.approx(end, abs=1e-9)
+
+
+def test_final_heading_after_forward_hop_returns_edge_heading() -> None:
+    """TC8 (forward case): a FRONT hop still returns the plain edge heading.
+
+    A bare BLIND edge with no directional override resolves FRONT (the auto
+    branch only flips to REAR past the turn threshold; a 90 deg edge from a
+    0 deg start stays FRONT). The returned heading must be the raw forward
+    edge heading and must agree with the heading ``compile_path`` drives.
+    """
+    edge_heading = 90.0
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=40.0, heading_deg=edge_heading)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=40.0, heading_deg=270.0)
+
+    start_heading = 0.0
+    end = final_heading_after(["A", "B"], start_heading, g)
+
+    assert end == pytest.approx(edge_heading, abs=1e-9)
+
+    prims = compile_path(["A", "B"], start_heading, g, None)
+    replayed = _replay_primitives(prims, start_heading)
+    assert replayed[-1] == pytest.approx(end, abs=1e-9)
+
+
 # -- compile_path: PROJECTION (TC4) -------------------------------------------
 
 
