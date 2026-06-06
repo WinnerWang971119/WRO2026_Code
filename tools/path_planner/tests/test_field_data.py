@@ -123,6 +123,55 @@ def test_inf_obstacle_bound_rejected() -> None:
         validate(fd)
 
 
+# -- Finding #49: node names must survive emission into a C++ string literal --
+#
+# header_writer._node_row builds NodeInfo.name as `'"' + name + '"'` with no
+# escaping. A double-quote, backslash, or non-printable/control char produces a
+# malformed literal that fails the Arduino build on the auto-generated
+# routes.cpp. The validator rejects such names so the error surfaces at the
+# field-data layer instead.
+
+
+def test_node_name_with_double_quote_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES['A"B'] = (0.0, 0.0)
+    fd.NODE_TYPES['A"B'] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_node_name_with_backslash_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["A\\B"] = (0.0, 0.0)
+    fd.NODE_TYPES["A\\B"] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_node_name_with_non_printable_char_rejected() -> None:
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["A\nB"] = (0.0, 0.0)
+    fd.NODE_TYPES["A\nB"] = "line"
+    with pytest.raises(FieldDataError, match=r"disallowed character"):
+        validate(fd)
+
+
+def test_ordinary_node_name_accepted() -> None:
+    """A plain letters/digits/underscores name still validates."""
+    fd = _clone_field_data()
+    fd.NODES = dict(fd.NODES)
+    fd.NODE_TYPES = dict(fd.NODE_TYPES)
+    fd.NODES["Node_1"] = (0.0, 0.0)
+    fd.NODE_TYPES["Node_1"] = "line"
+    assert validate(fd) is None
+
+
 def test_node_type_unknown_value() -> None:
     fd = _clone_field_data()
     fd.NODE_TYPES["A"] = "weird"

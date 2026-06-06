@@ -385,6 +385,19 @@ def validate(field_data) -> None:
             raise FieldDataError(
                 f"NODES key {name!r} must be a non-empty string"
             )
+        # The header writer emits each name verbatim into a C++ string
+        # literal (`NodeInfo.name = "<name>"`). A double-quote, backslash, or
+        # any non-printable/control char (newline, tab, ...) would produce a
+        # malformed literal that fails the Arduino build on the auto-generated
+        # routes.cpp -- far from the field-data root cause. Reject those here
+        # so the error names the offending node at the right layer.
+        if not name.isprintable() or '"' in name or "\\" in name:
+            raise FieldDataError(
+                f"NODES key {name!r} contains a disallowed character "
+                "(double-quote, backslash, or non-printable/control char) -- "
+                "node names are emitted into C++ string literals, so use only "
+                "printable characters without quotes or backslashes"
+            )
         if (
             not isinstance(coord, tuple)
             or len(coord) != 2
