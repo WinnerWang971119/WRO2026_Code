@@ -7,8 +7,34 @@
  * ``test_tasks_dispatch_overflow.cpp``). Satisfies AC10 and all
  * unit/integration ACs (AC2..AC9).
  *
- * Mirroring rationale (mirrors the precedent established by
- * ``test_path_tracker_passthrough.cpp`` and ``test_path_tracker_bidirectional.cpp``):
+ * PR #35 FINDING #78 — real-linking is DEFERRED, and these assertions still
+ * exercise the inline ``TasksMirror`` / ``MissionMirror`` below, NOT the
+ * production ``Tasks`` / ``Mission`` singletons. The goal of #78 was to link
+ * the REAL ``Tasks.cpp`` / ``Mission.cpp`` so the reentrancy guard, abort
+ * ordering, queue-full rejection, unknown-name handling, and yield path run
+ * against production code. That link is blocked at COMPILE time by the host
+ * mock surface, and the unblock lives in ``mocks/`` (out of scope for the #78
+ * change, which touched only this file and ``CMakeLists.txt``):
+ *
+ *   1. ``Tasks.cpp``'s task bodies call ``Serial.print(args.u8[0])`` with a
+ *      ``uint8_t``. The host ``Serial`` is the mock ``MockSerial`` in
+ *      ``mocks/Arduino.h``, whose only ``print`` overload is
+ *      ``print(const char*)`` — ``uint8_t`` does not convert to
+ *      ``const char*``, so the TU does not compile. Real-linking ``Tasks.cpp``
+ *      first needs a ``print(uint8_t)`` / ``print(int)`` overload on
+ *      ``MockSerial``, plus a capture buffer so the production Serial
+ *      diagnostics ("refusing reentrant call", "a=7 b=42", "unknown name")
+ *      can be asserted.
+ *   2. ``Mission.cpp`` drags in PathTracker.cpp, Drive (builders + faults +
+ *      abort + stopAtLine), EventTrace.cpp (``#include <MatrixMiniR4.h>`` →
+ *      ``MiniR4.OLED``), Localization, FieldMap and the ``MiniR4`` global
+ *      (LED / Buzzer / BTN). None of these are mocked today — the mock
+ *      ``MatrixMiniR4.h`` is empty (no ``MiniR4``) and the mock ``Drive.h`` is
+ *      a tiny LineFollower-only surface.
+ *
+ * Mirroring rationale (same precedent as ``test_path_tracker_passthrough.cpp``
+ * and ``test_path_tracker_bidirectional.cpp``, neither of which links its
+ * production .cpp either):
  *
  *   Rather than mock the full Mission + Tasks + PathTracker + Drive +
  *   LineFollower + MatrixMiniR4 (LED/Buzzer/BTN) + EventTrace + routes surface
