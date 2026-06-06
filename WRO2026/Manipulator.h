@@ -123,19 +123,13 @@ public:
      *
      * @note Idempotent via the `_executed` guard: a moved-out-of builder's destructor is a
      *       no-op.
+     * @note Declared here but DEFINED out-of-line below (after `class ManipulatorClass` is
+     *       complete): the body calls `_m._drain(_mask)`, and `_m` is a `ManipulatorClass&` that
+     *       is only forward-declared at this point. Defining the body inline here would name a
+     *       member of an incomplete type, which MSVC rejects (C2027); the out-of-line definition
+     *       sees the full class.
      */
-    ~ManipAction()
-    {
-        if (_executed)
-        {
-            return;
-        }
-        _executed = true;
-        if (_blocking)
-        {
-            _m._drain(_mask);
-        }
-    }
+    ~ManipAction();
 
 private:
     /**
@@ -385,6 +379,29 @@ private:
 
     friend class ManipAction;
 };
+
+/**
+ * @brief Out-of-line definition of the `ManipAction` RAII-wait destructor.
+ *
+ * Deferred to here (rather than inline in the class) because the body dereferences the
+ * `ManipulatorClass&` member `_m` to call `_m._drain(_mask)`, and `ManipulatorClass` is only
+ * forward-declared at the point of the class body — naming a member of an incomplete type there
+ * is ill-formed (MSVC C2027). With the full class now visible the call type-checks. `inline`
+ * keeps it legal to define in a header included by multiple translation units. Semantics are
+ * unchanged: idempotent via `_executed`, drain only when blocking.
+ */
+inline ManipAction::~ManipAction()
+{
+    if (_executed)
+    {
+        return;
+    }
+    _executed = true;
+    if (_blocking)
+    {
+        _m._drain(_mask);
+    }
+}
 
 /**
  * @brief Single global instance — defined in Manipulator.cpp.
