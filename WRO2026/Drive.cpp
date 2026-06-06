@@ -904,20 +904,15 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         float accelMs = cmToMs(resolveRamp(startSpeed));
         float decelMs = cmToMs(resolveRamp(endSpeed));
 
-        // Half-of-total cap — must not exceed half the move duration on either side.
-        if (accelMs > total * 0.5f)
-        {
-            accelMs = total * 0.5f;
-        }
-        if (decelMs > total * 0.5f)
-        {
-            decelMs = total * 0.5f;
-        }
-
-        // Triangle fallback: if the two ramps don't fit, collapse the cruise plateau and
-        // reduce the peak so the speed-vs-time integral still equals the cruise * total
+        // Triangle fallback: if the two FULL-peak ramps don't fit in the move, collapse the cruise
+        // plateau and reduce the peak so the speed-vs-time integral still equals the cruise * total
         // requested. The simple averaged-peak heuristic keeps the math easy and bounded:
-        // peak <= cruise always (clamp).
+        // peak <= cruise always (clamp). The triangle test MUST run on the UN-capped ramps —
+        // applying the half-of-total cap first floors each ramp at total*0.5, so their sum could
+        // never exceed `total` and the branch was unreachable (finding #15). After this branch the
+        // ramps are rescaled to sum to `total`, so the half-cap below is a no-op on this path; it
+        // only guards the non-triangle case where the ramps fit overall but one side alone would
+        // still over-run half the move.
         if (accelMs + decelMs > total)
         {
             int16_t peak = (int16_t) (((int32_t) startSpeed + (int32_t) endSpeed
@@ -946,6 +941,23 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
             _profilePeakSpd = cruise;
         }
 
+        // Half-of-total cap — must not exceed half the move duration on either side. Runs AFTER the
+        // triangle test (finding #15). In the triangle branch the ramps were rescaled to sum to
+        // `total`, but an asymmetric pair can still leave one side above total*0.5 (e.g. 2.25/3.75
+        // for a total of 6), so this cap may still trim the larger ramp; that only reshapes the apex
+        // (a small plateau at the reduced peak instead of a pure triangle) and is harmless because
+        // move completion is bound-gated on the time total, not on the velocity integral. In the
+        // full-trapezoid branch it bounds a lone over-long ramp (e.g. a large start-speed delta
+        // paired with a zero decel) so a plateau still exists.
+        if (accelMs > total * 0.5f)
+        {
+            accelMs = total * 0.5f;
+        }
+        if (decelMs > total * 0.5f)
+        {
+            decelMs = total * 0.5f;
+        }
+
         _profileAccelMs = (uint32_t) accelMs;
         _profileDecelMs = (uint32_t) decelMs;
         _profileTotalMs = (uint32_t) total;
@@ -964,15 +976,11 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         float accelCm = resolveRamp(startSpeed);
         float decelCm = resolveRamp(endSpeed);
 
-        if (accelCm > totalCm * 0.5f)
-        {
-            accelCm = totalCm * 0.5f;
-        }
-        if (decelCm > totalCm * 0.5f)
-        {
-            decelCm = totalCm * 0.5f;
-        }
-
+        // Triangle fallback — same reordering as the time variant (finding #15): the triangle test
+        // MUST run on the UN-capped ramp distances, otherwise the half-of-total cap floors each at
+        // totalCm*0.5 and their sum can never exceed `totalCm`, making the peak-reduction branch
+        // unreachable (short moves would then run at full cruise peak with no plateau). The branch
+        // rescales the ramps to sum to `totalCm`, so the half-cap below is a no-op on this path.
         if (accelCm + decelCm > totalCm)
         {
             int16_t peak = (int16_t) (((int32_t) startSpeed + (int32_t) endSpeed
@@ -998,6 +1006,21 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         else
         {
             _profilePeakSpd = cruise;
+        }
+
+        // Half-of-total cap — runs AFTER the triangle test (finding #15). In the triangle branch
+        // the ramps were rescaled to sum to totalCm, but an asymmetric pair can still leave one side
+        // above totalCm*0.5, so this cap may still trim the larger ramp; that only reshapes the apex
+        // (a small plateau at the reduced peak instead of a pure triangle) and is harmless because
+        // move completion is bound-gated on the encoder total, not on the velocity integral. In the
+        // full-trapezoid branch it bounds a lone over-long ramp so a cruise plateau still exists.
+        if (accelCm > totalCm * 0.5f)
+        {
+            accelCm = totalCm * 0.5f;
+        }
+        if (decelCm > totalCm * 0.5f)
+        {
+            decelCm = totalCm * 0.5f;
         }
 
         // Store ramp + total distances as positive magnitudes — `_updateProfile` and
