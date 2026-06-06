@@ -388,7 +388,7 @@ MissionClass& MissionClass::task(const char* name, Args... args)
     s.type      = StepType::TASK;
     s.task_name = name;
     _packArgs(s.task_args.bytes, args...);
-    _push(s);
+    _lastPushOk = _push(s);
     return *this;
 }
 
