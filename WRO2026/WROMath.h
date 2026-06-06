@@ -132,6 +132,8 @@ inline int16_t presetToPwm(Config::SpeedPreset preset)
  *           negative float to `uint16_t` is undefined behavior in C++ when the truncated
  *           value is out of range. Call sites pass non-negative `cm` and use a separate
  *           sign on `power` for reverse moves; the clamp is defence-in-depth.
+ *           Results that would exceed UINT16_MAX are likewise clamped to UINT16_MAX —
+ *           float→uint16_t is UB above the representable range (wraps in practice).
  * @return Encoder degrees the wheel must rotate to cover that distance.
  *
  * @note Source of truth for this conversion — both `_execDriveDistRaw/Sync/Gyro` and
@@ -145,7 +147,12 @@ inline uint16_t cmToEncDeg(float cm)
         cm = 0.0f;
     }
     const float revs = (cm * 10.0f) / ((float) PI * Config::WHEEL_DIAM_MM);
-    return (uint16_t) (revs * 360.0f);
+    const float degs = revs * 360.0f;
+    if (degs > (float) UINT16_MAX)
+    {
+        return UINT16_MAX;  // large cm: clamp to ceiling — float→uint16_t is UB above range
+    }
+    return (uint16_t) degs;
 }
 
 /**
