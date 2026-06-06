@@ -192,6 +192,18 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         target -- the chassis is never going to immediately reverse the
         pivot it just executed.
 
+        Compensation is idempotent per following edge (finding #94): the
+        first application marks the edge with a private
+        ``_pivot_compensated`` attribute, and any later pivot resolving to
+        the SAME following edge is skipped rather than subtracting off the
+        already-shortened distance. Two pivots from non-adjacent sources
+        can land on one following edge on a hand-built directed graph
+        (each pivot's destination still having exactly one forward
+        out-edge), so this guard prevents the second pivot from
+        double-compensating. The marker is internal state only; the
+        ``routes.cpp`` emitter (:func:`tools.path_planner.header_writer.emit_routes`)
+        reads only the geometry and override keys and ignores it.
+
     :param graph: a directed graph whose following-edge ``distance_cm`` /
         ``heading_deg`` attributes are mutated **in place**. Under
         Decision B (finding #42) :func:`compute_all_pairs_next_hop` passes
@@ -241,6 +253,23 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
             continue
 
         _next_src, _next_dst, next_edge_data = forward_out_edges[0]
+
+        # Idempotency guard (finding #94): if a previous pivot edge already
+        # compensated THIS following edge, do not subtract again. Two distinct
+        # pivots entering the same following edge would otherwise compute the
+        # second reduction off the first's already-shortened ``distance_cm``,
+        # compounding the subtraction. The validator's destination out-degree
+        # rule (finding #36) makes this unreachable in the production pipeline,
+        # but this function is public and reusable: a hand-built directed graph
+        # whose following edge is entered by two pivots from non-adjacent
+        # sources can slip past the per-pivot ``len(forward_out_edges) != 1``
+        # check, so we mark each following edge as compensated and skip a second
+        # application. The marker is private (underscore-prefixed) internal
+        # state; ``emit_routes`` / ``header_writer`` read only the geometry and
+        # override keys, so it rides along on the edge harmlessly.
+        if next_edge_data.get("_pivot_compensated"):
+            continue
+
         pre_heading = float(pivot_edge_data["heading_deg"])
         post_heading = float(next_edge_data["heading_deg"])
         # Normalise the turn delta into [-180, 180]. ((d + 180) % 360) - 180
@@ -256,6 +285,7 @@ def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
         )
         next_edge_data["distance_cm"] = adj_dist
         next_edge_data["heading_deg"] = adj_heading
+        next_edge_data["_pivot_compensated"] = True
 
 
 # -- internal helpers ---------------------------------------------------------

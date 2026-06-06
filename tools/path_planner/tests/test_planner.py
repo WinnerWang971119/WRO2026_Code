@@ -313,6 +313,55 @@ def test_apply_pivot_compensations_ignores_back_edge():
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
 
 
+def test_apply_pivot_compensations_idempotent_on_shared_following_edge():
+    """Finding #94: two pivots sharing one following edge compensate it ONCE.
+
+    ``apply_pivot_compensations`` reads ``next_edge_data['distance_cm']``
+    live and writes the shortened value back. If two distinct pivot edges
+    resolve to the SAME following edge, the naive code computes the second
+    reduction off the first's already-shortened distance, compounding the
+    subtraction. The production flow's destination out-degree rule (finding
+    #36) prevents this, but the function is public and reusable, so a
+    hand-built directed graph can reach it.
+
+    Layout: two pivot edges ``P1 -> M`` and ``P2 -> M`` land on the SAME
+    node ``M`` from non-adjacent sources. ``M`` has exactly ONE forward
+    out-edge, the shared following edge ``M -> N`` (the pivots are
+    one-directional, so ``M`` has no back-edge to either source and the
+    per-pivot ``len(forward_out_edges) != 1`` check passes for both).
+
+    For a 90 deg pivot (heading 0 deg entering ``M``, ``M -> N`` heading
+    90 deg) with TRACK_CM=15 the forward chord component is 7.5 cm, so a
+    SINGLE compensation shortens ``M -> N`` from 30.0 to 22.5 cm. The buggy
+    double application would land at 22.5 - 7.5 = 15.0 cm. The idempotency
+    marker must keep the result at 22.5, never 15.0.
+    """
+    from tools.path_planner.graph_builder import Pivot
+    from tools.path_planner.planner import apply_pivot_compensations
+
+    g = nx.DiGraph()
+    for name in ("P1", "P2", "M", "N"):
+        g.add_node(name)
+    # Two pivot edges from non-adjacent sources, both landing on M, both
+    # heading 0 deg. One-directional (no back-edge M->P1 / M->P2), so M's
+    # only out-edge is the shared following edge M->N.
+    g.add_edge("P1", "M", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
+    g.add_edge("P2", "M", distance_cm=12.0, heading_deg=0.0, pivot=int(Pivot.RIGHT))
+    # The single shared following edge off M: heading 90 deg -> 90 deg turn.
+    g.add_edge("M", "N", distance_cm=30.0, heading_deg=90.0)
+
+    apply_pivot_compensations(g, track_cm=15.0)
+
+    # Compensated exactly ONCE: 30.0 - 7.5 = 22.5, NOT the double 15.0.
+    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
+    assert g.edges["M", "N"]["distance_cm"] != pytest.approx(15.0, abs=1e-6)
+
+    # Calling again on the already-compensated graph must not subtract
+    # further -- the marker makes the operation idempotent across calls too.
+    apply_pivot_compensations(g, track_cm=15.0)
+    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
+
+
 def test_compute_all_pairs_next_hop_compensates_input_graph_in_place():
     """TC9 / finding #42: pivot compensation reaches the SHARED graph.
 
