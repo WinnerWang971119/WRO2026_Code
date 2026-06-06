@@ -1873,3 +1873,88 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
             f"got (seek={actual_seek}, motionMode={actual_motion!r}) "
             f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r})"
         )
+
+
+# ===========================================================================
+# TC7 -- _resolve_override / resolve_line_mode accept bare string mode names
+#
+# Finding #41: IntEnum(str) raises ValueError for 'NORMAL'; only IntEnum['NORMAL']
+# works for name-based lookup.  After the fix _resolve_override must accept
+# string tags via enum_cls[name], matching header_writer._override_enum_value.
+# ===========================================================================
+
+
+def test_resolve_line_mode_accepts_bare_string_name():
+    """TC7: an edge with primitive_mode='NORMAL' (bare string) resolves without ValueError.
+
+    Before finding #41 was fixed, ``_resolve_override`` would call
+    ``LineMode('NORMAL')`` which raises ValueError because LineMode is an
+    IntEnum and only accepts integer values for value-based lookup.
+    The fix adds a str branch that uses ``LineMode['NORMAL']`` (name lookup)
+    to match the handling in header_writer._override_enum_value.
+
+    Asserts:
+    - ``resolve_line_mode({'primitive_mode': 'NORMAL'})`` returns ``LineMode.NORMAL``
+      without raising.
+    - A string 'DEFAULT' still collapses to the pipeline default (same as the enum
+      sentinel), so the DEFAULT fallback path works for strings too.
+    - An unknown string name falls back to the pipeline default rather than crashing.
+    """
+    # Known concrete string name -> correct enum member, no ValueError.
+    edge_str_normal = {"primitive_mode": "NORMAL"}
+    result = resolve_line_mode(edge_str_normal)
+    assert result == LineMode.NORMAL, (
+        f"Expected LineMode.NORMAL for primitive_mode='NORMAL'; got {result!r}"
+    )
+
+    # 'DEFAULT' string -> falls back to pipeline default (same as enum DEFAULT).
+    edge_str_default = {"primitive_mode": "DEFAULT"}
+    assert resolve_line_mode(edge_str_default) == PIPELINE_CONFIG.line
+
+    # Unknown string -> falls back to pipeline default without raising.
+    edge_str_unknown = {"primitive_mode": "NONEXISTENT_MODE"}
+    assert resolve_line_mode(edge_str_unknown) == PIPELINE_CONFIG.line
+
+
+def test_resolve_line_mode_string_name_end_to_end_via_sim():
+    """TC7 (end-to-end): go_to over an EDGE_LINE with primitive_mode='NORMAL' completes.
+
+    Builds a 2-node graph where the A->B edge carries ``primitive_mode='NORMAL'``
+    as a bare string (the form graph_builder forwards verbatim when field_data
+    uses string tags and validation is skipped, as in test fixtures).  Confirms
+    the sim's go_to path does not crash and emits the standard LINE primitives.
+    """
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (30.0, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    g = nx.DiGraph()
+    g.add_node("A")
+    g.add_node("B")
+    g.add_edge(
+        "A", "B",
+        type=EDGE_LINE,
+        distance_cm=30.0,
+        heading_deg=0.0,
+        primitive_mode="NORMAL",
+    )
+    g.add_edge(
+        "B", "A",
+        type=EDGE_LINE,
+        distance_cm=30.0,
+        heading_deg=180.0,
+    )
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    # Must not raise ValueError; must emit the standard FOLLOW_INT + OVERSHOOT pair.
+    prims = sim.go_to("B")
+
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+    ]
+    assert sim.localization.current_node() == "B"

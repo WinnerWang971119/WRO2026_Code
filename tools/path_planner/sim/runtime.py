@@ -347,6 +347,17 @@ def _resolve_override(
         if override == enum_cls.DEFAULT:
             return default_value
         return override
+    # Bare string names (e.g. 'NORMAL') -- use key lookup so IntEnum does not
+    # reject them.  Mirrors header_writer._override_enum_value's str branch so
+    # the two consumers agree on the accepted type set (finding #41).
+    if isinstance(override, str):
+        try:
+            coerced = enum_cls[override]
+        except KeyError:
+            return default_value
+        if coerced == enum_cls.DEFAULT:
+            return default_value
+        return coerced
     # Tolerate raw int values (the graph attribute could be persisted as an
     # int in some fixtures); coerce via the enum so type stays consistent.
     coerced = enum_cls(override)
