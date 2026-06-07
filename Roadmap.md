@@ -51,7 +51,7 @@ target still holds.
 | **Foundation** | Drive / LineFollower / Intersection / WROLineArray / FieldMap / Localization / PathTracker / Mission DSL / Python path planner / CI | shipped |
 | 3 | Hardware verification of the shipped stack + real 2026 field encoded | next |
 | 4 | Perception: one camera module (3×3 mosaic + single-cell color) — runs in parallel with mech building manipulator v0 | pending |
-| 5 | Manipulator software on v0 mechanism + first end-to-end Task | pending |
+| 5 | Manipulator software on v0 mechanism + first end-to-end Task | sw API pulled forward; numeric calibration + task FSMs pending |
 | 6 | Tasks layer + Mission scheduler + recoveries + full 2-minute run | pending |
 | 7 | Lofaix bring-up + regional sprint (compete `2026-07-21`) | pending |
 | 8 | National refinement (compete `2026-08-24`) | pending |
@@ -184,12 +184,19 @@ of the manipulator mechanism, so it lands while mech finishes manipulator v0.
 
 ## 6. Phase 5 — Manipulator + First Task
 
+**Note (pulled forward):** The Manipulator software layer — originally
+scoped to Phase 5 — was implemented ahead of schedule while the
+CAD/blueprint was complete and the mechanism was being built. The full API
+(`grab`, `release`, `sortTo`, `dump`, `reset` coordinated verbs; actuator
+primitives; `setTickCallback`) is in place; numeric servo/motor calibration
+is deferred to bring-up once the physical mechanism is assembled.
+
 **Goal:** Drive the manipulator v0 mechanism from software; build and run
 one end-to-end Task (probably tool delivery as the simplest) that
 composes PathTracker + Manipulator + camera module.
 
 **Exit criteria (hard gates):**
-- [ ] `Manipulator.setLift(h)` / `setGripper(angle)` / `setArm(angle)` non-blocking; reach commanded position within tolerance + timeout.
+- [ ] `Manipulator` coordinated verbs (`grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()`) and actuator primitives (`grabber`, `sorter`, `dumper.setAngle()/open()/close()/home()`, `belt.toStation()/beltTo()/runFor()/home()`) reach their commanded pose within tolerance + timeout on the assembled v0 mechanism; `.async()` opt-out functions correctly.
 - [ ] Permanent color + camera mounts installed; calibration tables re-baselined.
 - [ ] First `Tasks` FSM (tool delivery) reaches `isDone()` in ≥4/5 lab trials.
 - [ ] Mission DSL gains a `.task("name", args)` verb that dispatches into the Tasks layer.
@@ -203,7 +210,7 @@ composes PathTracker + Manipulator + camera module.
 
 | ID | Task | Track | Blocked By | Output |
 |----|------|-------|------------|--------|
-| P5.1 | Replace `Manipulator` stub with real `setLift/setGripper/setArm` against v0 | sw | P4.7 | manipulator sw v1 |
+| P5.1 | Calibrate `Config::ServoCfg` angles/ms-per-deg and `BeltStationCfg` targets against the built v0 mechanism; tune verb choreography (`grab`/`release`/`sortTo`/`dump`/`reset`) for reliable actuation | sw | P4.7 | manipulator calibrated |
 | P5.2 | Tune servo ranges, neutral positions, grip force | both | P5.1 | tuned manipulator |
 | P5.3 | Install permanent camera mount (serves both 3×3 + single-cell views); re-baseline calibration | both | P5.2 | locked geometry |
 | P5.4 | `Tasks` framework (`TasksClass` singleton; blocking-method bodies registered by name; `Mission.task()` verb) — see [ADR-025](./docs/decisions/025-tasks-as-blocking-methods.md) | sw | P5.1 | tasks framework shipped |
@@ -354,7 +361,7 @@ can lock in.
 | Decision | Owner | Decide-by | Options | Notes |
 |---|---|---|---|---|
 | Camera | sw lead | Phase 4 entry | HuskyLens (built-in color recog, faster) ; raw camera + on-device pixel classify | Drives the camera module impl; lighting calibration required either way (ADR-006). Camera is the **sole** color sensor — no dedicated ColorReader (ADR-021). |
-| Manipulator mechanism geometry | mech lead | Phase 5 entry | TBD lift / gripper / arm geometry on 3 RC channels | Locks `Manipulator.setLift/setGripper/setArm` parameters (ADR-007). |
+| Manipulator mechanism geometry | mech lead | Phase 5 entry | TBD grabber / sorter / dumper / belt geometry | Locks `Config::ServoCfg` / `BeltStationCfg` calibration values (servo home/open/close/detent angles, belt station targets); API settled per ADR-032 (supersedes ADR-007). |
 
 ### Closed in Foundation
 
@@ -398,7 +405,7 @@ hardware. IDs are referenced from each phase's "Exit criteria" gates.
 | 3 | B3.7 | `Drive.stopAtLine(cm)` toward a taped perpendicular line, with one intervening line crossed before the arm window, 10 trials | Stops within ±2 cm of the taped line; zero false-triggers on the intervening line; `LINE_NOT_FOUND` fault on a removed line (ADR-027). Reverse stop-at-line logic is CI-tested (host C++ + Python sim parity); physical rear-board bench (B3.7-reverse) is deferred until the rear board is wired. |
 | 4 | B4.1 | Each color sample (Y/B/G/W) shown to the camera's `readSingleColor()` 20× under workshop lighting | ≥18/20 correct per color |
 | 4 | B4.2 | Mosaic pattern card under workshop lighting, robot at fixed stop | All 9 cells correct on ≥9/10 captures |
-| 5 | B5.1 | Manipulator `setLift / setGripper / setArm` range sweep | Reaches commanded position within tolerance + timeout |
+| 5 | B5.1 | `grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()` full range sweep; also sweep each actuator primitive (`grabber`, `sorter`, `dumper`, `belt`) individually | Each verb/primitive reaches its commanded pose within tolerance + timeout |
 | 5 | B5.2 | Tool delivery Task end-to-end on test mat, 5 trials | ≥4/5 complete with score awarded |
 | 6 | B6.1 | Full 2-minute run on practice field, 10 trials | ≥8/10 succeed on regional-target scope (mosaic ≥6/9 tiles + cement + tool) |
 | 6 | B6.2 | Inject failed-grip in lab | Retry-once then yield, scheduler advances |

@@ -28,7 +28,7 @@ WRO2026_Code/
 │   ├── PathTracker.h / .cpp  # FSM consuming NEXT_HOP, fluent goTo() builder
 │   │
 │   ├── Mission.h / .cpp      # operator DSL: goTo/wait/print/beep/led
-│   ├── Manipulator.h / .cpp  # stub — Phase 3 mechanism TBD
+│   ├── Manipulator.h / .cpp  # 3 RC servos + belt DC motor; coordinated verbs + actuator primitives
 │   │
 │   ├── EventTrace.h / .cpp   # OLED ring buffer + 500 ms Serial heartbeat
 │   ├── WROMath.h             # free helpers (cmToEncDeg, presetToPwm, ...)
@@ -93,7 +93,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | `PathTracker` | FSM dispatching per-edge primitives; STOP_AT_LINE hops re-anchor via `Localization.onIntersection()` | `goTo(name).async().setStopAtLine(AUTO\|ON\|OFF)`, `update()`, `isIdle()`, `hasFault()`, `getFault()`, `clearFault()`, `abort()` |
 | `Mission` | operator-authored DSL | `goTo(name).setStopAtLine(...)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `task(name,args)`, `start()`, `abort()` |
 | `Tasks` | composite multi-step routines + name-string registry | `runTask(name, args)`, `findTask(name)`, `abort()`, `isAborted()`, `inTask()`, registry table in `Tasks.cpp` |
-| `Manipulator` | actuator control (stub) | `setLift(h)`, `setGripper(angle)`, `setArm(angle)`, `update()`, `isDone()` — all currently no-op |
+| `Manipulator` | 3 RC servos (grabber, sorter, dumper) + 1 belt DC motor | coordinated verbs `grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()` (blocking-by-default builders with `.async()`); actuator primitives `grabber/sorter/dumper.setAngle()/open()/close()/home()`, `belt.toStation()/beltTo()/runFor()/home()`; `begin()`, `update()`, `isDone()`, `setTickCallback(...)` |
 | `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()` — polled in `update()` |
 | `WROMath` | unit conversions | `cmToEncDeg`, `encDegToCm`, `presetToPwm`, `deadbandSnap` |
 | `StateMachine<State>` | generic FSM helper (header-only template, unused) | `enter(s)`, `current()`, `elapsed()`, `changed()`, `ack()` |

@@ -24,12 +24,13 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 ### Mission-layer
 
 - [ADR-006 — Read the mosaic with a camera at a line-anchored stop](./docs/decisions/006-mosaic-via-camera.md) (Phase 3)
-- [ADR-007 — Manipulator exposes control primitives only until the mechanism is built](./docs/decisions/007-manipulator-control-primitives-only.md) (Phase 3)
+- [ADR-007 — Manipulator exposes control primitives only until the mechanism is built](./docs/decisions/007-manipulator-control-primitives-only.md) (**Superseded by ADR-032**)
 - [ADR-008 — Greedy score-per-second scheduling + 2-minute time guard](./docs/decisions/008-mission-scheduling-and-time-guard.md) (Phase 4)
 - [ADR-009 — Three named failure modes get explicit bounded recovery](./docs/decisions/009-failure-recovery-first-class.md) (Phase 4)
 - [ADR-010 — Lightweight in-memory logging only — `EventTrace` + Serial heartbeat](./docs/decisions/010-lightweight-logging-only.md)
 - [ADR-025 — Tasks layer composes subsystem calls as blocking method bodies; no JSON authoring](./docs/decisions/025-tasks-as-blocking-methods.md)
 - [ADR-026 — `Tasks.runTask` is non-reentrant — nested dispatch is rejected](./docs/decisions/026-tasks-runtask-non-reentrant.md)
+- [ADR-032 — Manipulator API: verb-level builders over ManipServo + ManipBelt actuator classes](./docs/decisions/032-manipulator-api-pattern.md)
 
 ### Drive-layer
 
@@ -55,16 +56,17 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 ### Tooling & testing
 
 - [ADR-030 — Host-compile harness links the real production symbols; CI-enforced via the `host-tests` ctest job](./docs/decisions/030-harness-links-real-sources-ci-enforced.md)
+- [ADR-031 — Config split per domain: umbrella Config.h + per-domain sub-headers + ConfigChecks.h last](./docs/decisions/031-config-split-per-domain.md)
 
 ## Status summary
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 24 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027, 028, 029 |
+| Implemented | 26 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027, 028, 029, 031, 032 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
-| Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
+| Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
-| Superseded | 0 | (ADR-010 supersedes the older "no logging at all" stance from the Phase 0 draft) |
+| Superseded | 1 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done) |
 
 ## Conventions
 
