@@ -206,6 +206,25 @@ public:
     LineFollowerEnableBuilder& setTShapeRampDown(bool on);
 
     /**
+     * @brief Opt out of BOTH cruise ramps in one call — run this enable session flat.
+     *
+     * Convenience over `setTShapeRampUp(false).setTShapeRampDown(false)`: clears the
+     * ramp-up (0 → cruise on the enable transition) AND the ramp-down (cruise →
+     * `Config::PWM_MIN_MAGNITUDE` before a distance gate). The result is full cruise PWM
+     * from the first post-enable tick through to the gate brake.
+     *
+     * Provided for fluent parity with `DriveDistBuilder::flat()` / `DriveTimeBuilder::flat()`
+     * (ADR-033). Unlike the Drive builders — where `tShape` is a single flag — LineFollower
+     * has two independent ramp phases, so this method is sugar over the two existing
+     * setters rather than a new capability.
+     *
+     * @return `*this` for fluent chaining.
+     * @note **Ordering matters.** `tShape()`/`setAccel(...)` re-enable the ramp-up if chained
+     *       AFTER `.flat()`. Treat `.flat()` as mutually exclusive with the ramp setters.
+     */
+    LineFollowerEnableBuilder& flat();
+
+    /**
      * @brief Override the per-PWM-per-cm acceleration rate for this enable's ramp.
      *
      * Implies `tShape()`. If `tShape()` was not also chained, this setter has no effect on

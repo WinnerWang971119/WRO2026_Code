@@ -294,9 +294,8 @@ public:
      * (`tShape`) on, power `Config::SPEED_NORMAL`, brake `true`, heading = current `_heldYaw`
      * (only consulted in `DriveMode::GYRO`). The SYNC + tShape default reflects the auto-path
      * planner being the dominant consumer — see DECISIONS.md "Sync + T-shape as default
-     * move profile". Opt out per call: `.setMode(DriveMode::RAW)`, `.tShape(false)` is not
-     * exposed (set acceleration absurdly high or chain `.setStartSpeed(cruise).setEndSpeed(cruise)`
-     * if a flat profile is wanted on a one-off — usually just stay with the default).
+     * move profile". Opt out per call: `.setMode(DriveMode::RAW)` for open-loop, or `.flat()`
+     * for a constant-cruise move with no accel/decel ramps (usually just stay with the default).
      *
      * Example:
      * @code
@@ -1376,10 +1375,10 @@ public:
      *
      * @note **`tShape` is on by default** — this setter is idempotent and exists for
      *       explicit-readability and parity with `setStartSpeed`/`setEndSpeed`/`setAccel`.
-     *       To opt OUT of the profile on a one-off, chain
-     *       `.setStartSpeed(cruise).setEndSpeed(cruise)` so the ramp formula short-circuits
-     *       (the no-ramp epsilon `Config::TSHAPE_NO_RAMP_EPSILON_PWM` then fires on both
-     *       sides). Defaulting it on is intentional — see DECISIONS.md "Sync + T-shape as
+     *       To opt OUT of the profile, call `.flat()` (the named opt-out from ADR-033).
+     *       The older `.setStartSpeed(cruise).setEndSpeed(cruise)` short-circuit still works
+     *       — it zeroes both ramps via `Config::TSHAPE_NO_RAMP_EPSILON_PWM` — but `.flat()`
+     *       is clearer. Defaulting it on is intentional — see DECISIONS.md "Sync + T-shape as
      *       default move profile".
      *
      * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
@@ -1400,6 +1399,27 @@ public:
     DriveDistBuilder& tShape()
     {
         _tShape = true;
+        return *this;
+    }
+
+    /**
+     * @brief Opt OUT of the trapezoidal profile — run this move at constant cruise.
+     *
+     * Clears the `tShape` flag so the builder enqueues a non-profiled `DRIVE_DIST`
+     * (flat cruise PWM, no accel/decel ramps) instead of a `PROFILE_DIST`. This is the
+     * named opt-out anticipated by ADR-017's trigger-to-revisit; it replaces the older
+     * `.setStartSpeed(cruise).setEndSpeed(cruise)` short-circuit for the common case.
+     *
+     * @return Reference to this builder for chaining.
+     * @note **Ordering matters.** `setStartSpeed`/`setEndSpeed`/`setAccel` each imply
+     *       `tShape()` and will re-enable the profile if chained AFTER `.flat()`. Treat
+     *       `.flat()` and those ramp setters as mutually exclusive — last writer wins.
+     * @note Below `Config::TSHAPE_MIN_MOVE_CM` the profiled path already degrades to a
+     *       flat `DRIVE_DIST` on its own, so `.flat()` is a no-op effect there.
+     */
+    DriveDistBuilder& flat()
+    {
+        _tShape = false;
         return *this;
     }
 
@@ -1758,9 +1778,9 @@ public:
     /**
      * @brief Enable trapezoidal velocity profile for this time-bounded move.
      *
-     * @note **`tShape` is on by default** — this setter is idempotent. To opt OUT, chain
-     *       `.setStartSpeed(cruise).setEndSpeed(cruise)`; see `DriveDistBuilder::tShape()`
-     *       for the full rationale and DECISIONS.md "Sync + T-shape as default move profile".
+     * @note **`tShape` is on by default** — this setter is idempotent. To opt OUT, call
+     *       `.flat()`; see `DriveDistBuilder::tShape()` / `flat()` for the full rationale
+     *       and DECISIONS.md "Sync + T-shape as default move profile".
      *
      * Speed ramps from `startSpeed` (default 0) up to the resolved cruise, plateaus, then
      * ramps back down to `endSpeed` (default 0, but defaults to cruise when
@@ -1782,6 +1802,27 @@ public:
     DriveTimeBuilder& tShape()
     {
         _tShape = true;
+        return *this;
+    }
+
+    /**
+     * @brief Opt OUT of the trapezoidal profile — run this move at constant cruise.
+     *
+     * Clears the `tShape` flag so the builder enqueues a non-profiled `DRIVE_TIME`
+     * (flat cruise PWM for the whole duration, no accel/decel ramps) instead of a
+     * `PROFILE_TIME`. Mirror of `DriveDistBuilder::flat()` — see that overload and
+     * ADR-017 for the rationale.
+     *
+     * @return Reference to this builder for chaining.
+     * @note **Ordering matters.** `setStartSpeed`/`setEndSpeed`/`setAccel` each imply
+     *       `tShape()` and will re-enable the profile if chained AFTER `.flat()`. Treat
+     *       `.flat()` and those ramp setters as mutually exclusive — last writer wins.
+     * @note Below `Config::TSHAPE_MIN_MOVE_SEC` the profiled path already degrades to a
+     *       flat `DRIVE_TIME` on its own, so `.flat()` is a no-op effect there.
+     */
+    DriveTimeBuilder& flat()
+    {
+        _tShape = false;
         return *this;
     }
 
