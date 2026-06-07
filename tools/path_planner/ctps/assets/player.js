@@ -39,6 +39,11 @@
     // ----- transform (world cm -> canvas px), aspect-preserving ----------
     var BOUNDS = normalizeBounds(field.bounds);
     var STATIC_LAYER = null; // ImageData snapshot of the static field render.
+    // Optional printed field map (base64 data URI injected as the MAP_IMAGE
+    // global). Loaded asynchronously; until it is ready the static layer falls
+    // back to the vector field render so a map-less track still plays.
+    var mapImage = null;
+    var mapReady = false;
     var view = {
         scale: 1.0,
         offsetX: 0.0,
@@ -274,18 +279,53 @@
     }
 
     /**
-     * Render the static layer (background, bounds, obstacles, trajectory,
-     * nodes) and cache it as ImageData so per-frame redraws only restore the
-     * background and stamp the moving robot marker on top.
+     * Draw the printed field map over the bounds rectangle. The map is authored
+     * to span the whole field (matching the visualizer's
+     * extent=(0, width_cm, 0, height_cm)), so it covers the bounds rect exactly;
+     * worldToPixelY flips Y so the image top edge lands on the North (max-Y)
+     * field edge.
+     */
+    function drawMap() {
+        if (!mapReady || !mapImage) {
+            return;
+        }
+        var px0 = worldToPixelX(BOUNDS.x0);
+        var py0 = worldToPixelY(BOUNDS.y1); // top edge = max Y in canvas space
+        var w = (BOUNDS.x1 - BOUNDS.x0) * view.scale;
+        var h = (BOUNDS.y1 - BOUNDS.y0) * view.scale;
+        ctx.drawImage(mapImage, px0, py0, w, h);
+    }
+
+    /**
+     * Render the static layer and cache it as ImageData so per-frame redraws
+     * only restore the background and stamp the moving robot marker on top.
+     *
+     * With a printed map loaded, the map shows the field and obstacles, so the
+     * overlay is just the trajectory and node markers (robot is added per
+     * frame). Without a map, fall back to the full vector render (bounds frame +
+     * obstacle boxes) so a map-less track — LRS, fixtures, or a missing map
+     * file — still draws a usable field.
      */
     function renderStaticLayer() {
         ctx.fillStyle = "#11151c";
         ctx.fillRect(0, 0, view.pixelWidth, view.pixelHeight);
-        drawBounds();
-        drawObstacles();
+        if (mapReady) {
+            drawMap();
+        } else {
+            drawBounds();
+            drawObstacles();
+        }
         drawTrajectory();
         drawNodes();
-        STATIC_LAYER = ctx.getImageData(0, 0, view.pixelWidth, view.pixelHeight);
+        // Snapshot the FULL backing store in DEVICE pixels. getImageData and
+        // putImageData ignore the canvas transform and address the backing
+        // store directly, so the snapshot must use canvas.width/height (device
+        // px), not view.pixelWidth/height (CSS px). On a HiDPI display
+        // (devicePixelRatio > 1) a CSS-px snapshot covers only the top-left
+        // 1/dpr of the canvas, leaving the rest un-restored — every scrubbed
+        // robot arrow then persists as an afterimage. Device-px capture clears
+        // the whole frame on each redraw.
+        STATIC_LAYER = ctx.getImageData(0, 0, canvas.width, canvas.height);
     }
 
     /** Draw the oriented robot marker (an arrow triangle) at a pose. */
@@ -544,6 +584,28 @@
         drawFrame();
     }
 
+    /**
+     * Kick off loading the optional field-map background. Reads the inline
+     * MAP_IMAGE global (a base64 data URI, or null when no map was embedded);
+     * does nothing when absent. resizeCanvas() has already rendered the static
+     * layer once (map-less) by the time the image's async onload fires, so the
+     * handler re-renders the static layer with the map and redraws the frame.
+     */
+    function loadMapImage() {
+        var src = (typeof MAP_IMAGE !== "undefined") ? MAP_IMAGE : null;
+        if (!src) {
+            return;
+        }
+        var img = new Image();
+        img.onload = function () {
+            mapImage = img;
+            mapReady = true;
+            renderStaticLayer();
+            drawFrame();
+        };
+        img.src = src;
+    }
+
     // ----- wiring ---------------------------------------------------------
 
     function init() {
@@ -569,6 +631,7 @@
         window.addEventListener("resize", resizeCanvas);
         resizeCanvas();
         seekTo(0);
+        loadMapImage();
     }
 
     if (document.readyState === "loading") {

@@ -68,6 +68,11 @@ from tools.path_planner.ctps import player_html, track_builder, trace_loader  # 
 #: Default output path for the rendered HTML player, relative to the repo root.
 _DEFAULT_OUT: Path = _REPO_ROOT / "tools" / "path_planner" / "output" / "ctps.html"
 
+#: path_planner root. ``field_data.MAP_PNG`` (e.g. "maps/map.png") resolves
+#: relative to this, matching the visualizer's map resolution so the player's
+#: embedded background and the static map render agree.
+_PLANNER_ROOT: Path = _REPO_ROOT / "tools" / "path_planner"
+
 #: CMake source dir for the host test harness (holds the ``ctps_dump`` target).
 _TEST_DIR: Path = _REPO_ROOT / "WRO2026" / "test"
 
@@ -280,6 +285,26 @@ def _produce_trace_json(fixture: bool) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_map_png() -> Optional[Path]:
+    """Return the absolute path to ``field_data.MAP_PNG``, or ``None``.
+
+    Mirrors the visualizer's resolution: a non-absolute ``MAP_PNG`` (e.g.
+    ``"maps/map.png"``) is taken relative to :data:`_PLANNER_ROOT`. Returns
+    ``None`` when unset or empty so the player renders without a map. A path
+    that does not exist is returned as-is; :func:`player_html.render` warns and
+    falls back to the vector field.
+
+    :return: the resolved map path, or ``None`` if ``MAP_PNG`` is not set.
+    """
+    raw = getattr(field_data, "MAP_PNG", None)
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = _PLANNER_ROOT / p
+    return p
+
+
 def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int:
     """Load -> build -> render the trace JSON, then optionally open the page.
 
@@ -330,7 +355,7 @@ def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int
         )
         return 1
 
-    out = player_html.render(track, out_path)
+    out = player_html.render(track, out_path, map_png=_resolve_map_png())
 
     if open_browser:
         _open_in_browser(out)

@@ -20,6 +20,7 @@ Covered cases (CTPS plan, T10):
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import warnings
@@ -167,3 +168,61 @@ def test_tc12_player_js_seek_is_bounded_binary_search():
     # No unbounded per-frame full keyframe scan in the seek path: poseAt must
     # not iterate the whole keyframes array with a for-loop.
     assert not re.search(r"for\s*\([^)]*keyframes\.length", pose_at.group(0))
+
+
+# ---------------------------------------------------------------------------
+# Map background — optional, self-contained data URI (or null fallback)
+# ---------------------------------------------------------------------------
+
+
+def test_map_png_embeds_self_contained_data_uri(tmp_path):
+    """render(map_png=...) embeds the image as an offline ``data:`` URI.
+
+    Key assertion: the page carries ``const MAP_IMAGE = "data:image/png;base64,
+    <b64>"`` for the supplied bytes, stays self-contained (no http/https), and
+    the embedded ``const TRACK`` still round-trips unchanged alongside the map.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    map_file = tmp_path / "field.png"
+    raw = b"\x89PNG\r\n\x1a\nctps-test-map-bytes"
+    map_file.write_bytes(raw)
+
+    out_path = tmp_path / "with_map.html"
+    render(track_dict, out_path, map_png=map_file)
+    html = out_path.read_text(encoding="utf-8")
+
+    expected_b64 = base64.b64encode(raw).decode("ascii")
+    assert f'const MAP_IMAGE = "data:image/png;base64,{expected_b64}";' in html
+    # Still offline / self-contained.
+    assert "http://" not in html
+    assert "https://" not in html
+    # The track survives unchanged next to the embedded map.
+    assert _extract_embedded_track(html) == track_dict
+
+
+def test_no_map_png_emits_null(tmp_path):
+    """Without ``map_png`` the player embeds ``MAP_IMAGE = null`` (vector fallback)."""
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "no_map.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const MAP_IMAGE = null;" in html
+    assert "data:image" not in html
+
+
+def test_missing_map_png_warns_and_falls_back(tmp_path):
+    """A ``map_png`` that does not exist warns and degrades to ``MAP_IMAGE = null``."""
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "missing_map.html"
+    with pytest.warns(UserWarning, match="map image not found"):
+        render(track_dict, out_path, map_png=tmp_path / "does_not_exist.png")
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const MAP_IMAGE = null;" in html
