@@ -109,8 +109,10 @@ def _toolchain_hint() -> str:
 def _find_vcvars() -> Optional[Path]:
     """Locate ``vcvars64.bat`` via ``vswhere.exe``.
 
-    Runs ``vswhere -latest -property installationPath`` and joins the reported
-    install root with ``VC/Auxiliary/Build/vcvars64.bat``. Returns ``None`` when
+    Runs ``vswhere -latest -products * -requires <VC tools> -property
+    installationPath`` (``-products *`` so standalone Build Tools installs are
+    not filtered out) and joins the reported install root with
+    ``VC/Auxiliary/Build/vcvars64.bat``. Returns ``None`` when
     ``vswhere`` is absent, fails, reports nothing, or the resolved batch file
     does not exist — every miss is a clean ``None`` so the caller emits one
     unified "no toolchain" message.
@@ -125,6 +127,13 @@ def _find_vcvars() -> Optional[Path]:
             [
                 str(_VSWHERE),
                 "-latest",
+                # -products * is REQUIRED: vswhere excludes standalone
+                # "Build Tools" installs by default, returning an empty
+                # installationPath on machines without full Visual Studio.
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
                 "-property",
                 "installationPath",
             ],
@@ -165,9 +174,12 @@ def _build_dump(vcvars: Path) -> int:
     """
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Quote every path; ``&&`` chains inside the single cmd string. The outer
-    # quotes are stripped by cmd, the inner ``\"`` survive into the chained
-    # commands so spaces in any path are preserved.
+    # Each path is quoted and ``&&`` chains the steps in one cmd line. This is
+    # run via ``shell=True`` (NOT a ["cmd","/c",inner] list): on Windows the
+    # list form sends inner through subprocess.list2cmdline, which backslash-
+    # escapes the inner quotes (``\"vcvars\"``) so cmd cannot find the batch
+    # file. ``shell=True`` instead executes ``cmd /c "<inner>"`` verbatim, the
+    # canonical form where cmd strips the outer pair and keeps the inner quotes.
     inner = (
         f'"{vcvars}"'
         f' && cmake -S "{_TEST_DIR}" -B "{_BUILD_DIR}" -G Ninja'
@@ -175,8 +187,9 @@ def _build_dump(vcvars: Path) -> int:
     )
 
     completed = subprocess.run(
-        ["cmd", "/c", inner],
+        inner,
         cwd=str(_REPO_ROOT),
+        shell=True,
         check=False,
     )
     return completed.returncode
