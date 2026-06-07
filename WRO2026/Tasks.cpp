@@ -5,6 +5,9 @@
  */
 
 #include "Tasks.h"
+#include "Manipulator.h"
+#include "PathTracker.h"
+#include "Drive.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp
@@ -28,6 +31,9 @@ const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
     { "debugYield", &TasksClass::debugYield },
+    { "servoTest", &TasksClass::servoTest },
+    { "home", &TasksClass::home },
+    { "testChassis", &TasksClass::testChassis },
     //Add new tasks here
 };
 
@@ -200,4 +206,35 @@ bool TasksClass::debugYield(const TaskArgs& /*args*/)
     // same branch.
     Serial.println(F("[Tasks] debugYield"));
     return false;
+}
+
+bool TasksClass::servoTest(const TaskArgs& pos)
+{
+    Manipulator.sorter.setAngle(static_cast<uint16_t>(pos.u8[0]));
+    //Wait until done
+    while (!Manipulator.sorter.isDone())
+    {
+        Manipulator.update();  // Keep the belt and other servos ticking while we wait
+    }
+    return true;
+}
+
+bool TasksClass::home(const TaskArgs& /*args*/)
+{
+    // belt.home() is the whole routine: stall to the LEFT/HOME end-stop, re-zero the
+    // encoder there, then drive on to the MID rest position. It's non-blocking, so poll
+    // update() until the full sequence lands (the belt's own watchdogs bound each stage).
+    Manipulator.belt.home();
+    while (!Manipulator.belt.isDone())
+    {
+        Manipulator.update();
+    }
+
+    return true;
+}
+
+bool TasksClass::testChassis(const TaskArgs& /*args*/)
+{
+    Drive.driveDist(10).setPower(70);
+    return true;
 }

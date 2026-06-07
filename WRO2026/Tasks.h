@@ -189,6 +189,42 @@ private:
      */
     bool debugYield(const TaskArgs& args);
 
+    /**
+     * @brief Drive the sorter servo to an absolute angle and block until it settles.
+     *
+     * Bring-up helper: sets `Manipulator.sorter` to `args.u8[0]` degrees and polls
+     * `Manipulator.update()` until the servo's settle timer reports done. Used to sweep
+     * and confirm sorter bin angles by hand at the bench.
+     *
+     * @param args `u8[0]` = target angle in degrees.
+     * @return Always `true`.
+     */
+    bool servoTest(const TaskArgs& args);
+
+    /**
+     * @brief Home the conveyor belt via `ManipBelt::home()`, then return.
+     *
+     * Thin wrapper: calls `Manipulator.belt.home()` — which stalls to the LEFT/HOME
+     * end-stop, re-zeros the encoder, and drives on to the MID rest position — and polls
+     * `Manipulator.update()` until the whole sequence lands. The belt's own per-stage
+     * watchdogs bound the moves, so the wait always terminates.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool home(const TaskArgs& args);
+
+    /**
+     * @brief Drive the chassis a short fixed distance — a smoke test for the drive path.
+     *
+     * Bring-up helper: issues a single `Drive.driveDist(10).setPower(70)` so the rover
+     * moves under its own control loop end-to-end. The arg is ignored.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool testChassis(const TaskArgs& args);
+
     bool _inTask  = false;
     bool _aborted = false;
 };
