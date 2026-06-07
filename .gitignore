@@ -12,3 +12,6 @@ toclaude.md
 
 # Host-compile harness build output (WRO2026/test — see ADR-023 / issue #19).
 build/
+
+# CTPS generated artifacts
+**/mission_trace.json
