@@ -182,8 +182,9 @@ def test_tc3_drive_before_goto_emits_drift_warn():
 
     Key assertion: a ``drift_warn`` event is present, its label names the node
     the chassis drifted off ("B"), and the reported offset exceeds
-    :data:`DRIFT_THRESHOLD_CM`. The 15 cm raw move stacks on the ~5 cm line
-    overshoot baseline, clearing the 10 cm threshold.
+    :data:`DRIFT_THRESHOLD_CM`. A clean goto now lands the axle ON the node
+    (no overshoot baseline — drift ≈ 0 without a raw move), so the 15 cm raw
+    move alone is the drift and clears the 10 cm threshold.
     """
     trace = load(_FIXTURES / "ctps_drive_drift.json")
     track = _build_quiet(trace, toy_field_data)
@@ -194,7 +195,7 @@ def test_tc3_drive_before_goto_emits_drift_warn():
     warn = drift_events[0]
     assert "B" in warn["label"]
 
-    # Pull the centimetre figure out of the label ("chassis 20.0 cm off node B").
+    # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
     reported_cm = float(warn["label"].split("cm")[0].split()[-1])
     assert reported_cm > DRIFT_THRESHOLD_CM
 
@@ -207,9 +208,9 @@ def test_tc3_drive_before_goto_emits_drift_warn():
 def test_tc4_small_drive_before_goto_no_drift_warn():
     """TC4: a 2 cm raw drive before goto B stays under DRIFT_THRESHOLD_CM.
 
-    Key assertion: NO ``drift_warn`` event is emitted. The 2 cm move plus the
-    ~5 cm line overshoot baseline (~7 cm total) sits below the 10 cm threshold,
-    so the drift check stays silent.
+    Key assertion: NO ``drift_warn`` event is emitted. A clean goto lands the
+    axle ON the node (no overshoot baseline), so the 2 cm raw move alone is the
+    drift — below the 10 cm threshold — and the drift check stays silent.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)

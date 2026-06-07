@@ -596,8 +596,8 @@ def test_tc11_position_invariant_line_pass_equals_overshoot():
     snapshot immediately after the B-intersection primitive:
       - Collinear A→B→C→D (LINE_PASS at B, inspected via step_through).
       - 90°-turn A→B (LINE_OVERSHOOT at B; B is the goal).
-    Both chassis must be at (50 + LINE_SENSOR_AXLE_OFFSET_CM, 0) after the
-    B-intersection step.
+    Both chassis must be at (50, 0) after the B-intersection step — the wheel
+    axle lands ON node B (net advance == the edge length, not past it).
     """
     # Common geometry: A at origin, B at 50cm along +x.
     a_pos = (0.0, 0.0)
@@ -634,10 +634,11 @@ def test_tc11_position_invariant_line_pass_equals_overshoot():
     assert (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM) in prims_turn
     overshoot_x, overshoot_y = chassis_turn.x_cm, chassis_turn.y_cm
 
-    # After the B-intersection both chassis started at A=(0,0), followed
-    # A→B (50cm along +x), then advanced LINE_SENSOR_AXLE_OFFSET_CM further
-    # along heading 0°.  Expected: (50 + LINE_SENSOR_AXLE_OFFSET_CM, 0).
-    expected_x = b_pos[0] + LINE_SENSOR_AXLE_OFFSET_CM
+    # After the B-intersection both chassis started at A=(0,0) and followed
+    # A→B: the follow phase stops the axle (50 - offset) short of B, then the
+    # overshoot rolls the final offset so the axle lands ON node B. The net
+    # advance is the 50 cm edge for both code paths. Expected: (50, 0).
+    expected_x = b_pos[0]
     expected_y = b_pos[1]
 
     assert pass_x == pytest.approx(expected_x, abs=_POS_TOL_CM)

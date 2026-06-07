@@ -12,10 +12,11 @@ Geometry comes from the **existing parity-locked** sim, never a re-implementatio
   :meth:`tools.path_planner.sim.runtime.PathTrackerSim.step_through`, which walks
   the precomputed ``NEXT_HOP`` table and yields ``(primitive, snapshot)`` for
   every dispatched primitive. Keyframe poses are read from the **snapshot**, the
-  authoritative pose — never recomputed from a primitive's offset argument
-  (``step_through`` hard-codes the FRONT axle offset in the overshoot primitive's
-  value even on REAR hops, a latent sim quirk; the snapshot pose is still
-  correct).
+  authoritative pose — never recomputed from a primitive's offset argument. The
+  LINE_OVERSHOOT step lands the wheel axle ON the intersection node: the follow
+  phase stops the axle one sensor-offset short, then the overshoot rolls it onto
+  the node (net advance == edge length), matching the firmware re-anchor. A clean
+  ``goto`` therefore ends with the chassis on the node (drift ≈ 0).
 * Raw ``drive`` moves apply directly to the **shared** :class:`VirtualChassis`
   without advancing the logical ``current_node`` — that desync is exactly what
   the drift check surfaces.

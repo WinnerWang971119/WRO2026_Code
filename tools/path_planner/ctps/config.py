@@ -31,12 +31,12 @@ MANIP_NOMINAL_S: float = 0.5
 #: engine emits a drift warning.
 #:
 #: Rationale: drift is measured AFTER each ``goto``'s final hop, comparing the
-#: chassis pose to NODES[current_node].  On the live field (every goal reached by
-#: a blind/projection final hop) a CLEAN ``goto`` lands ON the node, so drift ≈ 0.
-#: NOTE: when a goal's final hop is a LINE edge, the LINE_OVERSHOOT step leaves
-#: the chassis ~LINE_SENSOR_AXLE_OFFSET_CM (≈5 cm) past the node even on a clean
-#: run, so on such fields the clean-run baseline is ~5 cm rather than 0.  A raw
-#: Drive move between hops injects an additional offset that ``goto`` does not
-#: correct.  10 cm clears float/rounding noise and a benign dead-reckon residual
-#: while still catching a raw-move desync; revisit once the live field lands.
+#: chassis pose to NODES[current_node].  A CLEAN ``goto`` lands the wheel axle ON
+#: the node regardless of final-hop type — a LINE edge's LINE_OVERSHOOT step rolls
+#: the axle exactly onto the node (net advance == edge length, matching the
+#: firmware re-anchor), and blind/projection/stop-at-line hops land on the node by
+#: construction — so drift ≈ 0.  A raw Drive move between hops injects an offset
+#: that ``goto`` does not correct.  10 cm clears float/rounding noise and a benign
+#: dead-reckon residual while still catching a raw-move desync; revisit once the
+#: live field lands.
 DRIFT_THRESHOLD_CM: float = 10.0
