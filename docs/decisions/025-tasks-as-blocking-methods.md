@@ -69,6 +69,11 @@ greedy scheduler (ADR-008) can target specific slow tasks at that point.
 - Sim parity (issue #33 CTPS): the name-string registry is enumerable; a Python
   mirror of each task body follows naturally because both languages support
   sequential script-style flow. Sim work is a follow-up to this ADR.
+  **Superseded by ADR-031:** this "Python mirror of each task body" direction was
+  not taken. CTPS records the real C++ at the hardware-facade boundary
+  (a `CTPS_RECORD` hook plus recording mocks) and ingests a derived trace, so
+  there is no Python re-implementation of task bodies. See
+  [ADR-031](./031-ctps-derived-mission-trace.md).
 
 ## Trigger to revisit
 
@@ -78,7 +83,9 @@ greedy scheduler (ADR-008) can target specific slow tasks at that point.
 - Registry grows past 16 tasks, making the hand-mirrored memcpy arg layout
   convention awkward; consider promoting to per-task strongly-typed param structs.
 - Sim parity (issue #33 CTPS) ships and the Python mirror diverges enough that
-  codegen from a shared source becomes warranted.
+  codegen from a shared source becomes warranted. (Moot under ADR-031: CTPS
+  records the real C++ rather than mirroring task bodies in Python, so there is
+  no second source to diverge.)
 
 ## See also
 
@@ -86,5 +93,6 @@ greedy scheduler (ADR-008) can target specific slow tasks at that point.
 - [ADR-008 — Greedy score-per-second scheduling + 2-minute time guard](./008-mission-scheduling-and-time-guard.md) (partially implemented)
 - [ADR-009 — Three named failure modes get explicit bounded recovery](./009-failure-recovery-first-class.md)
 - [ADR-016 — Drive builders block by default; `.async()` opts out](./016-sync-default-builders.md)
+- [ADR-031 — CTPS ingests a derived mission trace recorded from the real C++](./031-ctps-derived-mission-trace.md) — supersedes the "Python mirror of each task body" sim-parity sub-decision above.
 - [`022-field-data-json-loader.md`](./022-field-data-json-loader.md) — JSON works for geometry data but is explicitly rejected for enum-rich task bodies; contrast with this ADR.
 - [`docs/plans/2026-05-26-tasks-framework-mission-task-verb.md`](../plans/2026-05-26-tasks-framework-mission-task-verb.md) — the originating implementation plan.

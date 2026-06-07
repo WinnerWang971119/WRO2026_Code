@@ -55,16 +55,17 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 ### Tooling & testing
 
 - [ADR-030 — Host-compile harness links the real production symbols; CI-enforced via the `host-tests` ctest job](./docs/decisions/030-harness-links-real-sources-ci-enforced.md)
+- [ADR-031 — CTPS ingests a derived mission trace recorded from the real C++; no Python re-implementation of task bodies](./docs/decisions/031-ctps-derived-mission-trace.md) (supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision)
 
 ## Status summary
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 24 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027, 028, 029 |
+| Implemented | 25 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 031), 026, 027, 028, 029, 031 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 3 | 006 (Phase 4 camera selection), 007 (Phase 5 manipulator), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
-| Superseded | 0 | (ADR-010 supersedes the older "no logging at all" stance from the Phase 0 draft) |
+| Superseded | 0 | (ADR-010 supersedes the older "no logging at all" stance from the Phase 0 draft; ADR-031 supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision — ADR-025 itself stays Implemented) |
 
 ## Conventions
 
