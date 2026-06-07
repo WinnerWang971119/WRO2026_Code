@@ -8,6 +8,7 @@
 #include "Manipulator.h"
 #include "PathTracker.h"
 #include "Drive.h"
+#include "LineFollower.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp
@@ -235,6 +236,6 @@ bool TasksClass::home(const TaskArgs& /*args*/)
 
 bool TasksClass::testChassis(const TaskArgs& /*args*/)
 {
-    Drive.driveDist(10).setPower(70);
-    return true;
+    LineFollower.setEnabled(true).setDistanceTarget(50);
+    return LineFollower.waitUntilDistanceReached();
 }

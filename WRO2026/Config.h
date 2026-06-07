@@ -85,10 +85,10 @@ namespace Config
                   "See the block comment above this assert and PR #20 codex P1 review.");
 
     /** @brief Reverse the left motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_LEFT_REVERSE = true;
+    constexpr bool MOTOR_LEFT_REVERSE = false;
 
     /** @brief Reverse the right motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_RIGHT_REVERSE = false;
+    constexpr bool MOTOR_RIGHT_REVERSE = true;
 
     // ---------------------------------------------------------------------------------------
     // Motor profile + PID gains (selected via ActiveMotor)
@@ -123,9 +123,9 @@ namespace Config
     {
         static constexpr uint16_t PPR = 360;
         static constexpr uint16_t RPM = 300;
-        static constexpr float    MOVESYNC_KP = 0.002f;
+        static constexpr float    MOVESYNC_KP = 0.02f;
         static constexpr float    MOVESYNC_KI = 0.0f;
-        static constexpr float    MOVESYNC_KD = 0.004f;
+        static constexpr float    MOVESYNC_KD = 0.025f;
         static constexpr float    MOVEGYRO_KP = 0.52f;
         static constexpr float    MOVEGYRO_KI = 0.0f;
         static constexpr float    MOVEGYRO_KD = 0.15f;
@@ -161,11 +161,11 @@ namespace Config
     constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;
 
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 8.0f;
+    constexpr float LINE_KP = 4.0f;
     /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
     constexpr float LINE_KI = 0.0f;
     /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 4.0f;
+    constexpr float LINE_KD = 0.0f;
 
     // ---------------------------------------------------------------------------------------
     // Geometry (TODO: measure on real chassis)
@@ -202,10 +202,10 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 40;
+    constexpr int16_t SPEED_SLOW = 70;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 70;
+    constexpr int16_t SPEED_NORMAL = 85;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
     constexpr int16_t SPEED_FAST = 90;
@@ -237,7 +237,7 @@ namespace Config
      * so P+D corrections always result in motion. Zero commands pass through —
      * the caller intended to stop, deadband is irrelevant.
      */
-    constexpr int16_t PWM_MIN_MAGNITUDE = 30;
+    constexpr int16_t PWM_MIN_MAGNITUDE = 50;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -284,7 +284,7 @@ namespace Config
      * auto-direction step in `PathTracker::_resolveDirection`).
      * When set to 1, `LINE_REAR_I2C_PORT` is ignored at compile time.
      */
-    constexpr uint8_t LINE_BOARD_COUNT = 1;
+    constexpr uint8_t LINE_BOARD_COUNT = 2;
 
     static_assert(LINE_BOARD_COUNT == 1 || LINE_BOARD_COUNT == 2,
                   "Config::LINE_BOARD_COUNT must be 1 or 2 — WROLineArrayClass has fixed [2][8] "
@@ -660,7 +660,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 35;
+    constexpr int16_t CRAWL_PWM = 60;
     static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
                   "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
                   "recovery branch never hits the deadband floor or saturation cap silently.");
@@ -980,6 +980,21 @@ namespace Config
 
     /** @brief Maximum number of pending Mission steps (no dynamic alloc). */
     constexpr uint8_t MAX_MISSION_STEPS = 64;
+
+    /**
+     * @brief Bench-test switch: re-fire the mission with a fresh BTN_UP press
+     *        instead of one run per power cycle.
+     *
+     * Production default is ``false`` — BTN_UP arms the hand-authored mission
+     * exactly once (see WRO2026.ino), so a stray press cannot restart the
+     * route. Set ``true`` on the bench to re-run the same mission repeatedly
+     * without power-cycling: once the mission returns to idle (a clean finish
+     * or a cleared fault, never mid-run), a fresh BTN_UP rising edge re-arms
+     * and re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so
+     * the BTN_DOWN calibration menu stays suppressed after the first arm
+     * exactly as in production. Leave ``false`` for competition.
+     */
+    constexpr bool MISSION_ALLOW_REARM = true;
 
     // ---------------------------------------------------------------------------------------
     // Tasks framework

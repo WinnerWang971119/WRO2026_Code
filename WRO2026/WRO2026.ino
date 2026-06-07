@@ -346,18 +346,27 @@ void loop()
         }
     }
 
-    // BTN_UP rising edge arms the mission exactly once. The press captures
-    // the IMU yaw NOW (operator has placed the chassis on `Routes::START_NODE`
-    // facing `START_HEADING_DEG`); subsequent presses do nothing.
+    // BTN_UP rising edge arms the mission. The press captures the IMU yaw NOW
+    // (operator has placed the chassis on `Routes::START_NODE` facing
+    // `START_HEADING_DEG`). In production (`Config::MISSION_ALLOW_REARM` false)
+    // it arms exactly once per power cycle; subsequent presses do nothing.
     //
     // `_missionArmed` is set ONLY on a successful zero so a transient
     // failure does not permanently lock the operator out of retrying.
+    //
+    // Bench-test re-arm: when `Config::MISSION_ALLOW_REARM` is true, a fresh
+    // BTN_UP press also re-fires once the mission has returned to idle — a
+    // clean finish or a cleared fault, never mid-run (Mission.isIdle() is
+    // false while RUNNING or faulting). `_missionArmed` stays latched, so the
+    // BTN_DOWN calibration-menu path stays suppressed after the first arm.
     //
     // Guard: while BTN_DOWN is being held toward the 2-s menu-entry threshold,
     // ignore BTN_UP so that accidental thumb-on-both-buttons cannot spuriously
     // arm the mission when the operator believes they are entering the cal menu.
     const bool btnUpNow = MiniR4.BTN_UP.getState();
-    if (btnUpNow && !_btnUpPrev && !_missionArmed && _btnDownPressStartMs == 0)
+    const bool armable =
+        !_missionArmed || (Config::MISSION_ALLOW_REARM && Mission.isIdle());
+    if (btnUpNow && !_btnUpPrev && armable && _btnDownPressStartMs == 0)
     {
         if (!Localization.zeroHeadingFromCurrent())
         {
