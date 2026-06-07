@@ -299,6 +299,70 @@ static void test_T10d_junction_freeze_fires_while_overshoot_mode_enabled()
 }
 
 // ===========================================================================
+// T-rampup — tShape ramp-up STARTS at the deadband floor (TSHAPE_START_SPEED),
+// not 0. Regression for the start-speed bug: the ramp-up seeded
+// `_tShapeStartPwm = 0`, so on a fresh off->on enable the first tick commands
+// cruise 0 (on a centered line, P+D corr is 0 → setSpeed(0, 0)), the chassis
+// does not move, and the distance-gated ramp cannot advance. The fix seeds the
+// start from `Config::TSHAPE_START_SPEED` (== PWM_MIN_MAGNITUDE, the motor
+// deadband floor), sign-corrected for reverse — mirroring the ramp-DOWN floor
+// and Drive's sibling trapezoid. See Config.h TSHAPE_START_SPEED doc + ADR-018.
+//
+// These tests deliberately leave ramp-up ON (every other test in this file
+// disables it via setTShapeRampUp(false), which is why the bug slipped past CI).
+// ===========================================================================
+
+static void test_rampup_starts_at_deadband_floor_forward()
+{
+    TEST_SCOPE("ramp-up: first tick commands TSHAPE_START_SPEED, not 0 (forward)");
+
+    resetWorld();
+
+    // Line online, centered (err 0), no junction → the P+D path runs with
+    // corr == 0, so L == R == cruise. Encoders are 0 after resetWorld(), so the
+    // ramp-up traveled fraction is 0 and the first-tick cruise == the ramp START
+    // pwm. Distance target armed (mirrors a PROJECTION_FOLLOW segment) but the
+    // 50 cm gate is far away, so it cannot trip on tick 1.
+    LineArray.mockSetOnline(true);
+    LineArray.mockSetError(0.0f);
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+
+    LineFollower.setEnabled(true).setDistanceTarget(50.0f);    // ramp-up default ON
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    LineFollower.update();
+
+    const int16_t expected = deadbandSnap(Config::TSHAPE_START_SPEED);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, expected);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedR, expected);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, Drive.mockRecord().lastSetSpeedR);
+}
+
+static void test_rampup_starts_at_deadband_floor_reverse()
+{
+    TEST_SCOPE("ramp-up: first tick commands -TSHAPE_START_SPEED (reverse)");
+
+    resetWorld();
+
+    LineArray.mockSetOnline(true);
+    LineArray.mockSetError(0.0f);
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+
+    // Fresh enable in reverse with ramp-up ON. The start pwm must be NEGATED so
+    // the ramp stays on the negative-direction side from tick 1 (a positive
+    // start would drive the chassis briefly FORWARD before reversing).
+    LineFollower.setEnabled(true).setReverse(true).setDistanceTarget(50.0f);
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    LineFollower.update();
+
+    const int16_t expected = deadbandSnap((int16_t) -Config::TSHAPE_START_SPEED);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, expected);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedR, expected);
+    ASSERT_EQ(Drive.mockRecord().lastSetSpeedL, Drive.mockRecord().lastSetSpeedR);
+}
+
+// ===========================================================================
 // Test entry point.
 // ===========================================================================
 
@@ -309,5 +373,7 @@ int main()
     test_T10b_brake_on_gate_false_keeps_controller_enabled();
     test_T10b_inverse_brake_on_gate_true_self_disables();
     test_T10d_junction_freeze_fires_while_overshoot_mode_enabled();
+    test_rampup_starts_at_deadband_floor_forward();
+    test_rampup_starts_at_deadband_floor_reverse();
     TEST_REPORT();
 }

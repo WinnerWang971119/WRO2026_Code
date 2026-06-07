@@ -6,10 +6,12 @@
 ## Rule
 
 `LineFollower.setEnabled(true).setDistanceTarget(cm)` applies:
-- Cruise **ramp-up** on the off→on transition only (skipped on re-enable).
+- Cruise **ramp-up** from `Config::TSHAPE_START_SPEED` (the motor deadband floor, == `PWM_MIN_MAGNITUDE`, sign-corrected for reverse) up to cruise PWM, on the off→on transition only (skipped on re-enable).
 - Cruise **plateau**.
 - Cruise **ramp-down** from cruise PWM to `Config::PWM_MIN_MAGNITUDE` over the approach distance.
 - Final **active brake** at the gate, fired at floor PWM (not from cruise).
+
+The ramp-up START floor is symmetric with the ramp-down END floor on purpose: starting the ramp from 0 makes the first tick command sub-deadband PWM (snapped flat by `deadbandSnap`), and on a centered line the very first tick is `setSpeed(0, 0)` — the chassis cannot break static friction and the distance-gated ramp cannot advance. Same rationale as `Config::TSHAPE_START_SPEED` for Drive's sibling profile (ADR-014).
 
 Ramp distances are fitted to available distance. With no ramp-up (re-arm case like `LINE_OVERSHOOT`) the ramp-down consumes the whole travel; with both ramps active each is clamped to half. Manual opt-outs via `setTShapeRampUp(bool)` / `setTShapeRampDown(bool)`.
 

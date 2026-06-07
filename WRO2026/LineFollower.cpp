@@ -663,7 +663,17 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
             // measure in update() matches the ramp-down + distance-gate baselines. See
             // trace finding #20.
             _tShapeStartEnc  = (Drive.getEncL() + Drive.getEncR()) / 2;
-            _tShapeStartPwm  = 0;
+            // Start the ramp from the motor deadband floor (Config::TSHAPE_START_SPEED
+            // == PWM_MIN_MAGNITUDE), sign-corrected for reverse — NOT 0. Starting at 0
+            // made the first tick command setSpeed(0, 0) on a centered line (cruise 0,
+            // P+D corr ~0), so the chassis never broke static friction and the
+            // distance-gated ramp could not advance; the sub-deadband head of the ramp
+            // was also wasted as a snapped-flat plateau at PWM_MIN_MAGNITUDE. Mirrors
+            // the ramp-DOWN floor (`targetFloor` in update()) and Drive's sibling
+            // trapezoid (_startSpeed defaults to TSHAPE_START_SPEED). See the
+            // Config::TSHAPE_START_SPEED doc and ADR-018.
+            _tShapeStartPwm  = _reverse ? (int16_t) -Config::TSHAPE_START_SPEED
+                                        : (int16_t) Config::TSHAPE_START_SPEED;
             _tShapeTargetPwm = _reverse ? (int16_t) -presetToPwm(_preset)
                                         : presetToPwm(_preset);
         }
