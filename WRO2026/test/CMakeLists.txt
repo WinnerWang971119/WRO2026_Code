@@ -280,53 +280,22 @@ target_include_directories(test_stop_at_line_armmath PRIVATE ${COMMON_INCLUDES})
 add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 
 # =========================================================================================
-# Test executable #4 — Tasks framework dispatch (T9 of the Tasks plan).
+# Test executable #4 — Tasks framework dispatch, real-linked (#46 Phase 1).
 #
-# Exercises TC1..TC3, TC5..TC12 of the Tasks-framework plan
-# (`docs/plans/2026-05-26-tasks-framework-mission-task-verb.md`). Satisfies AC10
-# and all unit/integration ACs (AC2..AC9 positive). The compile-fail target
-# below covers TC4 / AC9 negative.
+# Links the REAL `Tasks.cpp` and asserts its registry/dispatch behaviour through
+# the capturing `MockSerial` in `mocks/Arduino.h`. `Tasks.cpp`'s bodies call
+# only `Serial.print(...)` (no Drive / PathTracker / EventTrace), so the existing
+# mock surface plus the `print(uint8_t)` + capture buffer (T2) is enough to link.
 #
-# PR #35 FINDING #78 — real-linking `Tasks.cpp` / `Mission.cpp` is DEFERRED, not
-# forgotten. The behavioural assertions below still run against an inline
-# `TasksMirror` / `MissionMirror`, so a logic regression in the production
-# Tasks/Mission code is invisible to this target. The goal of #78 was to link
-# the REAL singletons so the reentrancy guard, abort ordering, queue-full
-# rejection, unknown-name handling, and yield path run against PRODUCTION code.
-# That link is blocked at COMPILE time by the host mock surface — and the fix
-# lives in `mocks/`, which is out of scope for the #78 change (it touched only
-# this file and `test_tasks_dispatch.cpp`):
-#
-#   1. `Tasks.cpp`'s task bodies call `Serial.print(args.u8[0])` with a
-#      `uint8_t` (demoEcho / debugYield). The host `Serial` is the mock
-#      `MockSerial` in `mocks/Arduino.h`, whose only `print` overload is
-#      `print(const char*)` — `uint8_t` does not convert to `const char*`, so
-#      the TU does not compile. Real-linking `Tasks.cpp` first needs a
-#      `print(uint8_t)` / `print(int)` overload added to `MockSerial`.
-#   2. `MockSerial::print` is a no-op with no capture buffer, so the production
-#      Serial diagnostics ("refusing reentrant call", "a=7 b=42", "unknown
-#      name") cannot be asserted without a capture sink added to the mock.
-#   3. `Mission.cpp` drags in PathTracker.cpp, Drive (builders + faults + abort
-#      + stopAtLine), EventTrace.cpp (which `#include <MatrixMiniR4.h>` and
-#      calls `MiniR4.OLED`), Localization, FieldMap and the `MiniR4` global
-#      (LED / Buzzer / BTN). None of these are mocked today — the mock
-#      `MatrixMiniR4.h` is empty (no `MiniR4`) and the mock `Drive.h` is a tiny
-#      LineFollower-only surface. Real-linking Mission needs a whole new
-#      `MiniR4` + Drive-builder + EventTrace mock layer.
-#
-# So the test inline-mirrors the slice of Mission's TASK-case FSM + TasksClass's
-# registry + dispatch + RAII guard (same precedent as
-# `test_path_tracker_passthrough.cpp` / `test_path_tracker_bidirectional.cpp`,
-# neither of which links its production .cpp either). Mirror sites are annotated
-# `// MIRROR: <path>:<line>` for drift detection at PR-review time. Real
-# production POD types (`TaskArgs`, `TaskRegistryEntry`) are pulled in from
-# `WRO2026/TasksTypes.h` so the union-layout / size invariants are bound to
-# the real definitions at compile time. The remaining behavioural-link work is
-# unblocked by a follow-up that extends `mocks/Arduino.h` (capturing,
-# integer-`print`-capable Serial) and links `${SKETCH_DIR}/Tasks.cpp` here.
+# Tasks-owned behaviour only: registry lookup, `runTask` dispatch + capture, the
+# unknown-name path, the `debugYield` yield path, and the `inTask()` RAII
+# invariant. Mission-owned behaviour (queue FSM, abort ordering) stays out of
+# scope — that needs `Mission.cpp`, which drags in PathTracker / Drive /
+# EventTrace / the `MiniR4` global and is #46 Phase 2.
 # =========================================================================================
 add_executable(test_tasks_dispatch
     ${TEST_DIR}/test_tasks_dispatch.cpp
+    ${SKETCH_DIR}/Tasks.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
