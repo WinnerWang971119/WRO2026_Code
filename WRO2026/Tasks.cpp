@@ -5,6 +5,7 @@
  */
 
 #include "Tasks.h"
+#include "PathTracker.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp
@@ -28,6 +29,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
     { "debugYield", &TasksClass::debugYield },
+    { "testOne", &TasksClass::testOne },
     //Add new tasks here
 };
 
@@ -200,4 +202,13 @@ bool TasksClass::debugYield(const TaskArgs& /*args*/)
     // same branch.
     Serial.println(F("[Tasks] debugYield"));
     return false;
+}
+
+bool TasksClass::testOne(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("Inter1");
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
+    return true;
 }

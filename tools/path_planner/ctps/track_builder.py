@@ -205,16 +205,16 @@ def _drive_label(cmd: Command) -> str:
     The argument shown matches the method's geometry parameter so the side
     panel reads naturally:
 
-    * ``driveDist(<cm>)`` / ``turnDeg(<deg>)`` / ``turnToYaw(<deg>)``.
-    * any other method (``stop``, ``stopAtLine``, unknown) renders as
-      ``<method>()``.
+    * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``turnDeg(<deg>)`` /
+      ``turnToYaw(<deg>)``.
+    * any other method (``stop``, unknown) renders as ``<method>()``.
 
     :param cmd: the ``drive`` command.
     :return: the side-panel label string.
     """
     method = cmd.method
-    if method == "driveDist":
-        return f"driveDist({cmd.cm})"
+    if method == "driveDist" or method == "stopAtLine":
+        return f"{method}({cmd.cm})"
     if method == "turnDeg":
         return f"turnDeg({cmd.deg})"
     if method == "turnToYaw":
@@ -357,7 +357,13 @@ def build(trace: Trace, field_data) -> Track:
             # (before any geometry advance).
             event_t = t
             method = cmd.method
-            if method == "driveDist":
+            if method == "driveDist" or method == "stopAtLine":
+                # Both carry a forward distance in ``cm``. For ``stopAtLine``
+                # that is the nominal ``expectedCm`` to the line crossing — the
+                # robot drives ~that far before the sensor trips, so it is the
+                # best playback estimate of the advance. (Drift from the true
+                # stop point is unmodeled; see the CTPS plan for a future
+                # estimate-tagged keyframe.)
                 chassis.forward(float(cmd.cm))
                 append_geometry_keyframe(
                     chassis.x_cm, chassis.y_cm, chassis.heading_deg
@@ -372,7 +378,7 @@ def build(trace: Trace, field_data) -> Track:
                 append_geometry_keyframe(
                     chassis.x_cm, chassis.y_cm, chassis.heading_deg
                 )
-            # else: stop / stopAtLine / unknown -> no geometry change.
+            # else: stop / unknown -> no geometry change.
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )

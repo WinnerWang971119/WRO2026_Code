@@ -204,17 +204,21 @@ uv run --extra dev pytest tools/path_planner/tests/ -v
 
 ## Determinism
 
-Re-running `build_routes.py` against an unchanged `field_data.py`
-produces a **byte-identical** `routes.h` / `routes.cpp` pair (AC2). The
-`routes.h` banner embeds the SHA256 of `field_data.py`'s **LF-normalized**
-bytes (CRLF sequences collapsed to LF first, so the digest matches across
-Windows and Linux checkouts regardless of git autocrlf), so reviewers can
-verify "the committed header is current with the committed
-`field_data.py`" at a glance:
+Re-running `build_routes.py` against unchanged inputs produces a
+**byte-identical** `routes.h` / `routes.cpp` pair (AC2). The `routes.h`
+banner embeds the SHA256 of both field-data sources — `field_data.py`
+(rich `EDGES` table) **and** `field_data.json` (geometry) — over their
+**LF-normalized** bytes (CRLF sequences collapsed to LF first, so the digest
+matches across Windows and Linux checkouts regardless of git autocrlf),
+joined with a NUL byte. Geometry lives in the JSON, so it must be folded in
+or a coordinate edit would leave the stamp unchanged. Reviewers can verify
+"the committed header is current with both committed sources" at a glance:
 
 ```powershell
-python -c "import hashlib, pathlib; \
-print(hashlib.sha256(pathlib.Path('tools/path_planner/field_data.py').read_bytes().replace(b'\r\n', b'\n')).hexdigest())"
+python -c "import hashlib, pathlib; h=hashlib.sha256(); \
+[h.update((b'\0' if i else b'') + pathlib.Path(p).read_bytes().replace(b'\r\n', b'\n')) \
+ for i, p in enumerate(['tools/path_planner/field_data.py', 'tools/path_planner/field_data.json'])]; \
+print(h.hexdigest())"
 ```
 
 If that hex string does not appear at the top of `routes.h`, regen.
@@ -239,9 +243,10 @@ After any edit:
    gaps, no edge clips an obstacle).
 3. Commit `field_data.json`, `field_data.py` (if EDGES changed),
    `WRO2026/routes.h`, and `WRO2026/routes.cpp` **together** in the same
-   commit. The `routes.h` banner SHA256 must equal the **LF-normalized**
-   SHA256 of `field_data.py` — see the Determinism section above for
-   the one-liner. If reviewers see a mismatch, the commit is incomplete.
+   commit. The `routes.h` banner SHA256 must equal the combined
+   **LF-normalized** SHA256 of `field_data.py` + `field_data.json` — see the
+   Determinism section above for the one-liner. If reviewers see a mismatch,
+   the commit is incomplete.
 
 ## Authoring real-field NODES
 

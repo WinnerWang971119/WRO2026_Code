@@ -217,3 +217,32 @@ def test_tc4_small_drive_before_goto_no_drift_warn():
 
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
     assert drift_events == []
+
+
+# ---------------------------------------------------------------------------
+# TC5 — stopAtLine advances the chassis by its nominal expectedCm
+# ---------------------------------------------------------------------------
+
+
+def test_tc5_stop_at_line_advances_chassis_by_expected_cm():
+    """TC5: a ``stopAtLine`` drive moves the chassis forward by its ``cm``.
+
+    Regression guard for the PR-49 finding that ``stopAtLine`` traces rendered
+    as no movement. The recorder serialises the nominal ``expectedCm`` to the
+    crossing as ``cm``; playback must replay that as a forward advance (like
+    ``driveDist``), emitting one geometry keyframe past the seeded start pose.
+    """
+    from math import hypot
+
+    trace = load(_FIXTURES / "ctps_stop_at_line.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    # Seed pose + exactly one advanced geometry keyframe.
+    assert len(track.keyframes) == 2
+    seed, moved = track.keyframes[0], track.keyframes[1]
+
+    advance = hypot(moved["x"] - seed["x"], moved["y"] - seed["y"])
+    assert advance == pytest.approx(12.0, abs=_POSE_TOL)
+
+    # The drive still surfaces as a timeline event.
+    assert any(ev["type"] == "drive" for ev in track.events)

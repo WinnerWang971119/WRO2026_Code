@@ -94,7 +94,7 @@ namespace
      * @brief Build the synthetic self-test fixture mission.
      *
      * Exercises the FULL op vocabulary against the toy `routes.*` graph using
-     * two valid node names (`"Start"` and `"finial"`) so the real `Mission.cpp`
+     * two valid node names (`"Start"` and `"final"`) so the real `Mission.cpp`
      * GOTO hook fires and the recording `PathTracker` mock captures a `goto`.
      * The Mission verbs cover `goto` / `wait` / `beep` / `led` / `print` /
      * `task` (the real `demoEcho` registry task → `task_start` + `task_end`).
@@ -105,8 +105,8 @@ namespace
      */
     void buildMissionFixture()
     {
-        // Two valid toy nodes (see routes.cpp NODES[]): index 2 == "Start",
-        // index 3 == "finial". Both resolve via FieldMap::findNodeByName so the
+        // Two valid toy nodes (see routes.cpp NODES[]): index 4 == "Start",
+        // index 5 == "final". Both resolve via FieldMap::findNodeByName so the
         // GOTO hook fires and the PathTracker mock records a `goto`.
         Mission.goTo("Start")
             .wait(500)
@@ -114,7 +114,7 @@ namespace
             .led(0, 255, 0, 300)
             .print("AT")
             .task("demoEcho", uint8_t(7), uint8_t(42))
-            .goTo("finial")
+            .goTo("final")
             .print("DONE");
         Mission.start();
     }
@@ -272,6 +272,18 @@ namespace
                 return 1;
             }
             cursor = found + 1;
+        }
+
+        // The ordered walk above only proves the FIRST goTo fired. Assert the
+        // second, renamed goTo("final") recorded too, so a bad second node
+        // faults the self-test instead of slipping past coverage.
+        const size_t gotoFinal =
+            findFrom(0, [](const ctps::Record& r)
+                     { return r.op == ctps::Op::GOTO && r.target == "final"; });
+        if (gotoFinal >= log.size())
+        {
+            std::cerr << "ctps_dump self-test: missing goto with target 'final'\n";
+            return 1;
         }
 
         // TC8 — at least one TASK_START whose args_hex begins "072a". Both the

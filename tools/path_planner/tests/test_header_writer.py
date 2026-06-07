@@ -69,6 +69,7 @@ from tools.path_planner.graph_builder import (
 from tools.path_planner.header_writer import (
     DEFAULT_HEADER_PATH,
     DEFAULT_SOURCE_PATH,
+    FIELD_DATA_JSON_PATH,
     FIELD_DATA_PATH,
     NEXT_HOP_NONE_HEX,
     compute_source_hash,
@@ -337,6 +338,33 @@ def test_default_paths_are_under_repo():
     assert DEFAULT_HEADER_PATH == Path("WRO2026/routes.h")
     assert DEFAULT_SOURCE_PATH == Path("WRO2026/routes.cpp")
     assert FIELD_DATA_PATH == Path("tools/path_planner/field_data.py")
+    assert FIELD_DATA_JSON_PATH == Path("tools/path_planner/field_data.json")
+
+
+def test_source_hash_covers_every_supplied_file(tmp_path):
+    """A multi-file stamp must change when ANY input changes.
+
+    Guards the field_data.json migration: geometry lives in the JSON, so the
+    banner stamp must fold both files in. A single-file digest stays stable
+    (no separator) so legacy callers and the toy goldens are unaffected.
+    """
+    py = tmp_path / "field_data.py"
+    js = tmp_path / "field_data.json"
+    py.write_bytes(b"EDGES = []\n")
+    js.write_bytes(b'{"NODES": {"A": [0, 0]}}\n')
+
+    single = compute_source_hash(py)
+    combined = compute_source_hash(py, js)
+    assert combined != single
+
+    # Editing the JSON geometry alone must move the combined digest.
+    js.write_bytes(b'{"NODES": {"A": [1, 1]}}\n')
+    assert compute_source_hash(py, js) != combined
+
+    # ...and editing the .py alone must move it too.
+    moved_json = compute_source_hash(py, js)
+    py.write_bytes(b"EDGES = [1]\n")
+    assert compute_source_hash(py, js) != moved_json
 
 
 # ---------------------------------------------------------------------------

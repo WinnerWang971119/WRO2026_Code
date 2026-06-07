@@ -189,6 +189,8 @@ private:
      */
     bool debugYield(const TaskArgs& args);
 
+    bool testOne(const TaskArgs& args);
+
     bool _inTask  = false;
     bool _aborted = false;
 };
