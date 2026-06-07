@@ -334,8 +334,9 @@ namespace
         }
         else
         {
+            // buildMission() self-arms via Mission.start() (see MissionScript.cpp),
+            // so the authored and fixture paths each start exactly once.
             buildMission();
-            Mission.start();
         }
 
         if (!drainMission())
