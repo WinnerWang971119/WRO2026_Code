@@ -31,7 +31,7 @@ namespace Config
     // via -D without macro-corrupting a constexpr (mirrors Config.h:926/942).
 
     /** @brief RC-bus channel for the grabber servo. TODO confirm wiring at bring-up. */
-    constexpr uint8_t GRABBER_RC_ID = 1;   // TODO confirm wiring at bring-up
+    constexpr uint8_t GRABBER_RC_ID = 2;   // TODO confirm wiring at bring-up
 
     /**
      * @brief RC-bus channel for the sorter servo.
@@ -42,12 +42,12 @@ namespace Config
      *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` idiom).
      */
 #ifndef SORTER_RC_ID_DEFAULT
-#define SORTER_RC_ID_DEFAULT 2
+#define SORTER_RC_ID_DEFAULT 4
 #endif
     constexpr uint8_t SORTER_RC_ID = SORTER_RC_ID_DEFAULT;
 
     /** @brief RC-bus channel for the dumper servo. TODO confirm wiring at bring-up. */
-    constexpr uint8_t DUMPER_RC_ID = 3;   // TODO confirm wiring at bring-up
+    constexpr uint8_t DUMPER_RC_ID = 1;   // TODO confirm wiring at bring-up
 
     /**
      * @brief M-bus channel for the conveyor-belt motor.
@@ -78,16 +78,16 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 90, 30, 150, 2.0f, 80, false };  // TODO calibrate
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 0, 30, 150, 5.0f, 80, false };  // TODO calibrate
     /** @brief Dumper servo calibration. TODO calibrate. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  90, 90, 150, 2.0f, 80, false };  // TODO calibrate
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  80, 90, 150, 5.0f, 80, false };  // TODO calibrate
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 2.0f, 80, false };  // open/close unused; TODO
+    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 5.2f, 95, false };  // open/close unused; TODO
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
-    constexpr uint8_t  SORTER_BIN_COUNT = 3;                          // TODO finalize
+    constexpr uint8_t  SORTER_BIN_COUNT = 4;                          // TODO finalize
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 30, 90, 150 };  // TODO calibrate
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 104, 126};  // TODO calibrate
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
@@ -96,15 +96,31 @@ namespace Config
     /** @brief Belt free-run speed spec (RPM). TODO confirm. */
     constexpr uint16_t BELT_RPM             = 300;    // TODO confirm
     /** @brief Magnitude of a POSITION-mode belt move (PWM). TODO. */
-    constexpr int16_t  BELT_MOVE_SPEED      = 40;     // POSITION-move magnitude; TODO
+    constexpr int16_t  BELT_MOVE_SPEED      = 50;     // POSITION-move magnitude; TODO
     /** @brief Magnitude of the stall-home drive toward HOME (PWM). TODO. */
-    constexpr int16_t  BELT_HOME_SPEED      = 25;     // stall-home magnitude (toward HOME); TODO
+    constexpr int16_t  BELT_STALL_SPEED      = 25;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
-    constexpr uint32_t BELT_HOME_MS         = 1500;   // stall-home timed run; TODO
+    constexpr uint32_t BELT_RESET_MS         = 2000;   // stall-home timed run; TODO
     /** @brief Wall-clock ceiling for the `begin()` homing routine (ms). */
-    constexpr uint32_t BELT_HOME_TIMEOUT_MS = BELT_HOME_MS + 1000;  // wall-clock ceiling for begin() home
+    constexpr uint32_t BELT_RESET_TIMEOUT_MS = BELT_RESET_MS + 1000;  // wall-clock ceiling for begin() home
     /** @brief Watchdog ceiling for a POSITION-mode belt move (ms). TODO. */
     constexpr uint32_t BELT_MOVE_TIMEOUT_MS = 4000;   // POSITION-move watchdog; TODO
+    /**
+     * @brief Settle dwell between the home stall (which is braked to a stop) and the chained
+     *        MID move. Gives the lower MCU a clean tick gap to switch from the stall's
+     *        `setSpeed()` drive into the `rotateFor()` position move — mirroring how ordinary
+     *        back-to-back moves are separated across ticks. TODO tune at bring-up.
+     */
+    constexpr uint32_t BELT_HOME_SETTLE_MS = 150;   // dwell after the stall before the MID rotate; TODO
+    /**
+     * @brief Wall-clock ceiling for the FULL `home()` sequence: stall into the LEFT/HOME
+     *        end-stop, re-zero the encoder, settle, then drive to the MID rest position.
+     * @note Must exceed `BELT_RESET_MS` (stall) + `BELT_HOME_SETTLE_MS` (settle) +
+     *       `BELT_MOVE_TIMEOUT_MS` (the MID POSITION move's own watchdog), since `home()`
+     *       chains all three. Used by `ManipBelt::begin()`'s boot poll and `Manipulator::_drain()`.
+     */
+    constexpr uint32_t BELT_HOME_TIMEOUT_MS =
+        BELT_RESET_MS + BELT_HOME_SETTLE_MS + BELT_MOVE_TIMEOUT_MS + 1000;  // stall + settle + MID move + margin
 
     /** @brief How a belt station is reached: by absolute encoder target or by a timed run. */
     enum class BeltMode : uint8_t { POSITION, TIMED };
@@ -118,15 +134,21 @@ namespace Config
         int16_t  speed;   ///< signed: +toward FAR_END, -toward HOME (magnitude = PWM).
     };
 
-    /** @brief Logical belt stations, indexing `BELT_STATIONS`. TODO finalize. */
-    enum class BeltStation : uint8_t { HOME = 0, MID = 1, FAR_END = 2 };  // TODO finalize
+    /**
+     * @brief Logical belt stations, indexing `BELT_STATIONS`. TODO finalize.
+     * @note `LEFT` is the near/reset end-stop (the HOME end where `home()` stall-zeroes
+     *       the encoder); `MID` is the operating rest position; `FAR_END` is the opposite
+     *       hard stop. `LEFT` is named for its physical side — it sits at the belt's HOME
+     *       end, so its row drives toward HOME (`-BELT_STALL_SPEED`).
+     */
+    enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 };  // TODO finalize
     /** @brief Number of belt stations (length of `BELT_STATIONS`). */
     constexpr uint8_t BELT_STATION_COUNT = 3;
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
-        { BeltMode::TIMED,    0,   BELT_HOME_MS, -BELT_HOME_SPEED },  // HOME  (timed into near end); TODO
-        { BeltMode::POSITION, 400, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
-        { BeltMode::TIMED,    0,   1500,          BELT_MOVE_SPEED },  // FAR_END (stalls -> timed); TODO
+        { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
+        { BeltMode::POSITION, 100, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
+        { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // FAR_END (stalls -> timed); TODO
     };
 }    // namespace Config
 

@@ -79,6 +79,7 @@ public:
         _shadow  = _cfg.homeDeg;
         _startMs = millis();
         _estMs   = 0;
+        home();
     }
 
     /**
