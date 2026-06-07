@@ -1015,6 +1015,36 @@ namespace Config
 
     /** @brief Interval at which EventTrace emits its `HB ...` status heartbeat. */
     constexpr uint32_t MISSION_HEARTBEAT_MS = 500;
+
+    // ---------------------------------------------------------------------------------------
+    // Boot feedback (buzzer + on-board RGB LED)
+    //
+    // The last block of setup() signals boot status. A successful boot (every module
+    // begin() returned true) chirps BOOT_OK_BEEPS short bright tones and lights both
+    // on-board RGB LEDs green; a failed boot emits one long low tone and lights them
+    // red. Tones are emitted via MiniR4.Buzzer.Tone, which wraps the non-blocking
+    // Arduino tone() — so the OK sequence delays BEEP_MS + GAP_MS between chirps to
+    // keep them audibly separate. This is safe because setup() is fully blocking and
+    // runs before the cooperative tick begins.
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Number of short chirps emitted on a successful boot. */
+    constexpr uint8_t BOOT_OK_BEEPS = 3;
+
+    /** @brief Frequency (Hz) of each boot-OK chirp. */
+    constexpr uint16_t BOOT_OK_BEEP_HZ = 2000;
+
+    /** @brief On-duration (ms) of each boot-OK chirp. */
+    constexpr uint16_t BOOT_OK_BEEP_MS = 150;
+
+    /** @brief Silent gap (ms) between consecutive boot-OK chirps. */
+    constexpr uint16_t BOOT_OK_BEEP_GAP_MS = 100;
+
+    /** @brief Frequency (Hz) of the single long boot-FAIL tone (low/ominous). */
+    constexpr uint16_t BOOT_FAIL_BEEP_HZ = 600;
+
+    /** @brief Duration (ms) of the single long boot-FAIL tone. */
+    constexpr uint16_t BOOT_FAIL_BEEP_MS = 2000;
 }    // namespace Config
 
 // Manipulator config + its validation checks (split out per ADR-031 / Issue #39).

@@ -8,6 +8,8 @@
  *
  * Operator flow:
  *   1. Power on. Module begin()s run; OLED shows `BOOT OK` (or `BOOT FAIL`).
+ *      On success the buzzer chirps 3x and the RGB LEDs turn green; on failure
+ *      it emits one long low tone and the LEDs turn red.
  *   2. Place chassis on `Routes::START_NODE` (`A`) facing `START_HEADING_DEG`.
  *   2a. Optional pre-mission calibration: hold BTN_DOWN for >= 2 s to
  *       open the OLED CALIBRATION menu. BTN_DOWN short-presses cycle
@@ -208,11 +210,29 @@ void setup()
         if (!tasksOk)  { Serial.println(F("  - Tasks"));        EventTrace.pushEvent("FAIL TASKS"); }
         if (!traceOk)  { Serial.println(F("  - EventTrace"));   EventTrace.pushEvent("FAIL TRACE"); }
         EventTrace.pushEvent("BOOT FAIL");
+
+        // Boot-fail signal: solid red on both on-board RGB LEDs + one long low
+        // tone. Tone() is non-blocking; the tone plays out via the hardware timer
+        // while loop() idles in its _setupFailed early-return.
+        MiniR4.LED.setColor(1, 255, 0, 0);
+        MiniR4.LED.setColor(2, 255, 0, 0);
+        MiniR4.Buzzer.Tone(Config::BOOT_FAIL_BEEP_HZ, Config::BOOT_FAIL_BEEP_MS);
     }
     else
     {
         EventTrace.pushEvent("BOOT OK");
         Serial.println(F("WRO2026 PR3 ready. Place at A, then press BTN_UP."));
+
+        // Boot-OK signal: solid green on both on-board RGB LEDs + BOOT_OK_BEEPS
+        // short chirps. Tone() is non-blocking, so delay each chirp's on-time plus
+        // a gap to keep the chirps audibly separate (safe — setup() is blocking).
+        MiniR4.LED.setColor(1, 0, 255, 0);
+        MiniR4.LED.setColor(2, 0, 255, 0);
+        for (uint8_t i = 0; i < Config::BOOT_OK_BEEPS; ++i)
+        {
+            MiniR4.Buzzer.Tone(Config::BOOT_OK_BEEP_HZ, Config::BOOT_OK_BEEP_MS);
+            delay(Config::BOOT_OK_BEEP_MS + Config::BOOT_OK_BEEP_GAP_MS);
+        }
     }
 }
 
