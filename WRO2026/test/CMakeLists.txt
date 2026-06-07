@@ -384,3 +384,75 @@ add_test(NAME tasks_overflow_compile_fail
 )
 set_tests_properties(tasks_overflow_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "Mission.task args exceed MAX_TASK_ARG_BYTES")
+
+# =========================================================================================
+# CTPS dump #6 — `ctps_dump` (Mechanism #4, task T4).
+#
+# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + `routes.cpp`
+# against the recording mocks under `ctps_mocks/` (NOT the sibling `mocks/`
+# LineFollower harness). Running the executable executes a mission to completion
+# and serializes the captured, ordered command stream to the Data-Model-A JSON.
+# `--self-test` asserts the op stream + the tick-budget hang-guard (TC8 / TC9 /
+# AC4 / AC6); the JSON modes (`--fixture` / default) feed the CTPS player loader.
+#
+# This is an INDEPENDENT include + force-include surface from the LineFollower
+# harness above: `ctps_mocks/` (not `mocks/`) must come FIRST so the recording
+# `Arduino.h` / `MatrixMiniR4.h` / `Drive.h` / `PathTracker.h` / `Manipulator.h`
+# / `EventTrace.h` / `LineFollower.h` shadow the production hardware-bound
+# versions. `${MOCKS_DIR}` is DELIBERATELY NOT on this target's include path —
+# pulling it in would let `mocks/MatrixMiniR4.h` (which has no `MiniR4`) shadow
+# the recording one and break the Mission.cpp / EventTrace compile.
+# =========================================================================================
+set(CTPS_MOCKS_DIR ${TEST_DIR}/ctps_mocks)
+
+# -----------------------------------------------------------------------------------------
+# Force-include the recording mock headers BEFORE any source-file parsing — the same
+# load-bearing trick as `add_mock_force_includes`, but pointed at `ctps_mocks/` and using
+# ABSOLUTE `${CTPS_MOCKS_DIR}/` paths.
+#
+# Why absolute, not bare names: the REAL `Drive.h` / `PathTracker.h` / `EventTrace.h` /
+# `LineFollower.h` sit next to `Mission.cpp` in `${SKETCH_DIR}`, so a bare-name
+# force-include (`/FIDrive.h`) would resolve source-relative to the REAL header. Each
+# mock's include guard matches the production guard exactly (`DRIVE_H`, `PATHTRACKER_H`,
+# `EVENTTRACE_H`, `LINEFOLLOWER_H`), so once force-included the real header no-ops when
+# re-requested transitively.
+#
+# `MatrixMiniR4.h` / `Arduino.h` are angle-bracket includes inside the sketch headers, so
+# the `${CTPS_MOCKS_DIR}`-first include order alone picks the recording versions — no
+# force-include needed for those two.
+# -----------------------------------------------------------------------------------------
+function(add_ctps_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${CTPS_MOCKS_DIR}/Drive.h"
+            "/FI${CTPS_MOCKS_DIR}/PathTracker.h"
+            "/FI${CTPS_MOCKS_DIR}/EventTrace.h"
+            "/FI${CTPS_MOCKS_DIR}/LineFollower.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${CTPS_MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/PathTracker.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/EventTrace.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/LineFollower.h"
+        )
+    endif()
+endfunction()
+
+add_executable(ctps_dump
+    ${TEST_DIR}/ctps_dump.cpp
+    ${SKETCH_DIR}/Mission.cpp
+    ${SKETCH_DIR}/Tasks.cpp
+    ${SKETCH_DIR}/MissionScript.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${CTPS_MOCKS_DIR}/ctps_record.cpp
+)
+# `${CTPS_MOCKS_DIR}` FIRST; `${MOCKS_DIR}` intentionally omitted (see the block comment).
+target_include_directories(ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
+add_ctps_mock_force_includes(ctps_dump)
+add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
+set_tests_properties(ctps_dump_selftest PROPERTIES
+    PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
