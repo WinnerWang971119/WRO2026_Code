@@ -146,7 +146,7 @@ namespace Config
      *          per-physical-chassis measurements and MUST be re-captured via
      *          Drive.calibrateMotorBias() after a swap. See ADR-011 + ADR-022.
      */
-    using ActiveMotor = LegoEV3;
+    using ActiveMotor = MatrixTT;
 
     constexpr uint16_t MOTOR_PPR    = ActiveMotor::PPR;
     constexpr uint16_t MOTOR_RPM    = ActiveMotor::RPM;
@@ -172,10 +172,10 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /** @brief Drive-wheel diameter in millimetres. @note TODO: measure on real chassis. */
-    constexpr float WHEEL_DIAM_MM = 60.0f;
+    constexpr float WHEEL_DIAM_MM = 63.0f;
 
     /** @brief Wheel-to-wheel track width in millimetres. @note TODO: measure on real chassis. */
-    constexpr float TRACK_MM = 170.0f;
+    constexpr float TRACK_MM = 180.0f;
 
     // ---------------------------------------------------------------------------------------
     // Speed presets (consumed by the fluent Drive / LineFollower APIs)
@@ -202,13 +202,13 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 30;
+    constexpr int16_t SPEED_SLOW = 40;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 50;
+    constexpr int16_t SPEED_NORMAL = 70;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
-    constexpr int16_t SPEED_FAST = 80;
+    constexpr int16_t SPEED_FAST = 90;
 
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).
@@ -237,7 +237,7 @@ namespace Config
      * so P+D corrections always result in motion. Zero commands pass through —
      * the caller intended to stop, deadband is irrelevant.
      */
-    constexpr int16_t PWM_MIN_MAGNITUDE = 20;
+    constexpr int16_t PWM_MIN_MAGNITUDE = 30;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -284,7 +284,7 @@ namespace Config
      * auto-direction step in `PathTracker::_resolveDirection`).
      * When set to 1, `LINE_REAR_I2C_PORT` is ignored at compile time.
      */
-    constexpr uint8_t LINE_BOARD_COUNT = 2;
+    constexpr uint8_t LINE_BOARD_COUNT = 1;
 
     static_assert(LINE_BOARD_COUNT == 1 || LINE_BOARD_COUNT == 2,
                   "Config::LINE_BOARD_COUNT must be 1 or 2 — WROLineArrayClass has fixed [2][8] "
@@ -493,7 +493,7 @@ namespace Config
      *
      * @note TODO: measure on real chassis.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 5.0f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
 
     /**
      * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
@@ -508,7 +508,7 @@ namespace Config
      * @note TODO: measure on real chassis. Defaults to the front offset until the rear
      *       board is wired (T5); override once the two distances are known to differ.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = LINE_SENSOR_AXLE_OFFSET_CM;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
 
     // ---------------------------------------------------------------------------------------
     // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
@@ -660,7 +660,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 25;
+    constexpr int16_t CRAWL_PWM = 35;
     static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
                   "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
                   "recovery branch never hits the deadband floor or saturation cap silently.");
