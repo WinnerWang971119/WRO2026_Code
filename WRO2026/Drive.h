@@ -1375,7 +1375,7 @@ public:
      *
      * @note **`tShape` is on by default** — this setter is idempotent and exists for
      *       explicit-readability and parity with `setStartSpeed`/`setEndSpeed`/`setAccel`.
-     *       To opt OUT of the profile, call `.flat()` (the named opt-out from ADR-033).
+     *       To opt OUT of the profile, call `.flat()` (the named opt-out from ADR-034).
      *       The older `.setStartSpeed(cruise).setEndSpeed(cruise)` short-circuit still works
      *       — it zeroes both ramps via `Config::TSHAPE_NO_RAMP_EPSILON_PWM` — but `.flat()`
      *       is clearer. Defaulting it on is intentional — see DECISIONS.md "Sync + T-shape as

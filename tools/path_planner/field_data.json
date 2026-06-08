@@ -17,25 +17,48 @@
       240.3,
       36.9
     ],
+    "Inter3": [
+      69.38007617124765,
+      93.67764878630754
+    ],
+    "Inter4": [
+      251.45688982700864,
+      94.26499334648742
+    ],
     "Start": [
       24.154545037397327,
       23.51148225469729
     ],
-    "finial": [
+    "final": [
       91.40549717799293,
       59.90533657596476
+    ],
+    "position1": [
+      165.11723948056715,
+      119.22713715413207
     ]
   },
   "NODE_TYPES": {
     "Inter1": "line",
     "Inter2": "line",
+    "Inter3": "line",
+    "Inter4": "line",
     "Start": "blind",
-    "finial": "blind"
+    "final": "blind",
+    "position1": "blind"
   },
   "LINE_SEGMENTS": [
     [
       "Inter1",
       "Inter2"
+    ],
+    [
+      "Inter1",
+      "Inter3"
+    ],
+    [
+      "Inter2",
+      "Inter4"
     ]
   ],
   "BLIND_EDGES": [
@@ -45,20 +68,32 @@
     ],
     [
       "Inter1",
-      "finial"
+      "final"
     ],
     [
       "Inter2",
-      "finial"
+      "final"
+    ],
+    [
+      "Inter3",
+      "Start"
+    ],
+    [
+      "Inter3",
+      "final"
+    ],
+    [
+      "Inter3",
+      "position1"
+    ],
+    [
+      "Inter4",
+      "position1"
+    ],
+    [
+      "final",
+      "position1"
     ]
   ],
-  "OBSTACLES": [
-    [
-      127.95198799699928,
-      24.000000000000007,
-      144.75618904726184,
-      26.85714285714286,
-      "obstacle"
-    ]
-  ]
+  "OBSTACLES": []
 }

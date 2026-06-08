@@ -15,3 +15,6 @@ build/
 
 # Claude Code local state — scheduler lock, git worktrees, per-machine settings.
 .claude/
+
+# CTPS generated artifacts
+**/mission_trace.json

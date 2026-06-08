@@ -247,6 +247,14 @@ private:
      */
     bool testChassis(const TaskArgs& args);
 
+    /**
+     * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool testOne(const TaskArgs& args);
+
     bool _inTask  = false;
     bool _aborted = false;
 

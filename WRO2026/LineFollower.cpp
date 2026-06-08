@@ -98,7 +98,7 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::flat()
 {
     // Sugar over the two existing opt-outs — LineFollower has two independent ramp
     // phases (ramp-up on enable, ramp-down before a distance gate), so a flat session
-    // means clearing both. See header doxygen and ADR-033.
+    // means clearing both. See header doxygen and ADR-034.
     _tShapeRampUp   = false;
     _tShapeRampDown = false;
     return *this;

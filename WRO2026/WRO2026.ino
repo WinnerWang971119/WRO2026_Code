@@ -50,6 +50,7 @@
 #include "Localization.h"
 #include "Manipulator.h"
 #include "Mission.h"
+#include "MissionScript.h"
 #include "PathTracker.h"
 #include "Tasks.h"
 #include "WROLineArray.h"
@@ -156,19 +157,6 @@ void cooperativeTick()
     {
         EventTrace.update();
     }
-}
-
-/**
- * @brief Hand-typed PR3 mission. Edit this function to change tomorrow's run.
- *
- * Every `Mission.<verb>(...)` enqueues a step. `Mission.start()` arms the
- * queue and returns immediately; `loop()` drains it via `Mission.update()`.
- */
-void buildMission()
-{
-    Mission
-        .task("testChassis", 10);
-    Mission.start();
 }
 
 void setup()

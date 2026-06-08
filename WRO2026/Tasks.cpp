@@ -35,6 +35,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "servoTest", &TasksClass::servoTest },
     { "home", &TasksClass::home },
     { "testChassis", &TasksClass::testChassis },
+    { "testOne", &TasksClass::testOne },
     //Add new tasks here
 };
 
@@ -284,4 +285,13 @@ bool TasksClass::testChassis(const TaskArgs& /*args*/)
 {
     LineFollower.setEnabled(true).setDistanceTarget(50);
     return LineFollower.waitUntilDistanceReached();
+}
+
+bool TasksClass::testOne(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("Inter1");
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
+    return true;
 }

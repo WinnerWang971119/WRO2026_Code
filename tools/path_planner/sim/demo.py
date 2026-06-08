@@ -195,9 +195,9 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument(
         "--goals",
-        default="Inter1,finial",
+        default="Inter1,final",
         help="Comma-separated list of goal node names from the live "
-             "field_data.json. Default: Inter1,finial.",
+             "field_data.json. Default: Inter1,final.",
     )
     parser.add_argument(
         "--plot",

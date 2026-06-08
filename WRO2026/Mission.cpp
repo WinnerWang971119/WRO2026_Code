@@ -18,6 +18,10 @@
 #include "Tasks.h"
 #include "routes.h"
 
+#ifdef CTPS_RECORD
+#include "ctps_record.h"
+#endif
+
 MissionClass Mission;
 
 bool MissionClass::begin()
@@ -166,6 +170,9 @@ void MissionClass::start()
 {
     if (_buildError)
     {
+#ifdef CTPS_RECORD
+        ctps::recordBuildError();
+#endif
         Serial.println(F("[Mission] start refused: build error (unknown task name at queue time)"));
         EventTrace.pushEvent("MIS BUILD ERR");
         _enterFaultBeeping(millis());
@@ -372,6 +379,9 @@ void MissionClass::update()
                 {
                     if (_stepState == StepState::ENTER)
                     {
+#ifdef CTPS_RECORD
+                        ctps::recordWait(s.duration_ms);
+#endif
                         _stepStart_ms = now;
                         _stepState    = StepState::ACTIVE;
                     }
@@ -384,6 +394,9 @@ void MissionClass::update()
 
                 case StepType::PRINT:
                 {
+#ifdef CTPS_RECORD
+                    ctps::recordPrint(s.text ? s.text : "");
+#endif
                     Serial.print(F("[Mission] "));
                     Serial.println(s.text == nullptr ? "" : s.text);
                     EventTrace.pushEvent(s.text == nullptr ? "" : s.text);
@@ -395,6 +408,9 @@ void MissionClass::update()
                 {
                     if (_stepState == StepState::ENTER)
                     {
+#ifdef CTPS_RECORD
+                        ctps::recordBeep(s.freq_hz, s.duration_ms);
+#endif
                         _beep(s.freq_hz, (uint16_t) s.duration_ms);
                         _stepStart_ms = now;
                         _stepState    = StepState::ACTIVE;
@@ -410,6 +426,9 @@ void MissionClass::update()
                 {
                     if (_stepState == StepState::ENTER)
                     {
+#ifdef CTPS_RECORD
+                        ctps::recordLed(s.r, s.g, s.b, s.duration_ms);
+#endif
                         _setLeds(s.r, s.g, s.b);
                         if (s.duration_ms == 0)
                         {
@@ -453,6 +472,12 @@ void MissionClass::update()
                                  s.task_name == nullptr ? "?" : s.task_name);
                         EventTrace.pushEvent(buf);
 
+#ifdef CTPS_RECORD
+                        ctps::recordTaskStart(s.task_name ? s.task_name : "",
+                                              s.task_args.bytes,
+                                              sizeof(s.task_args.bytes));
+#endif
+
                         const bool ok = Tasks.runTask(s.task_name, s.task_args);
 
                         // Post-runTask fault check — a PathTracker fault that latched
@@ -491,6 +516,9 @@ void MissionClass::update()
                             Serial.print(s.task_name == nullptr ? "?" : s.task_name);
                             Serial.println(F("' yielded"));
                         }
+#ifdef CTPS_RECORD
+                        ctps::recordTaskEnd(s.task_name ? s.task_name : "", ok);
+#endif
                         _advanceStep();
                     }
                     // No ACTIVE branch — runTask is fake-blocking; the in-flight period

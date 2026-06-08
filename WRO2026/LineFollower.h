@@ -214,7 +214,7 @@ public:
      * from the first post-enable tick through to the gate brake.
      *
      * Provided for fluent parity with `DriveDistBuilder::flat()` / `DriveTimeBuilder::flat()`
-     * (ADR-033). Unlike the Drive builders — where `tShape` is a single flag — LineFollower
+     * (ADR-034). Unlike the Drive builders — where `tShape` is a single flag — LineFollower
      * has two independent ramp phases, so this method is sugar over the two existing
      * setters rather than a new capability.
      *

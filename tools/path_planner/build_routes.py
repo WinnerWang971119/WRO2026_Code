@@ -62,6 +62,7 @@ from tools.path_planner.graph_builder import build_graph  # noqa: E402
 from tools.path_planner.header_writer import (  # noqa: E402
     DEFAULT_HEADER_PATH,
     DEFAULT_SOURCE_PATH,
+    FIELD_DATA_JSON_PATH,
     emit_routes,
 )
 from tools.path_planner.pipeline_config import PIPELINE_CONFIG  # noqa: F401 -- baked into routes.cpp by header_writer
@@ -211,6 +212,9 @@ def _run(
         next_hop,
         header_path=header_path,
         source_path=source_path,
+        # Geometry lives in field_data.json (loaded by field_data.py); fold it
+        # into the banner stamp so geometry edits change the Source SHA256.
+        extra_source_paths=(FIELD_DATA_JSON_PATH,),
     )
 
     # 6. Render the visualization. Failure is non-fatal but still flagged

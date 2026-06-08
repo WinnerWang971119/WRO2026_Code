@@ -1,4 +1,4 @@
-# ADR-033: `.flat()` is the named opt-out from the default trapezoidal profile
+# ADR-034: `.flat()` is the named opt-out from the default trapezoidal profile
 
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 3)
