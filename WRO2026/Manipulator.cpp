@@ -74,7 +74,7 @@ bool ManipulatorClass::begin()
     }
 
     // Belt configures the motor and stall-homes into its end-stop, blocking-bounded inside
-    // ManipBelt::begin() (it self-bounds with BELT_RESET_TIMEOUT_MS and plain delay for the
+    // ManipBelt::begin() (it self-bounds with BELT_HOME_TIMEOUT_MS and plain delay for the
     // same pre-tick-callback reason). Its bool is the sole failable init here.
     const bool beltOk = belt.begin();
     return beltOk;
