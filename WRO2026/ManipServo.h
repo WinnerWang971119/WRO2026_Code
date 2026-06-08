@@ -61,15 +61,20 @@ public:
     }
 
     /**
-     * @brief Apply the hardware direction flag and seed the move timer.
+     * @brief Apply the hardware direction flag, seed the move timer, and command the home pose.
      *
      * Calls `MiniR4RC::setHWDir(cfg.reverse)` exactly once on the configured RC channel (hardware
-     * owns direction — there is no software negation). Then re-seeds the angle shadow to
-     * `cfg.homeDeg`, stamps the issue time, and zeroes the move budget so `isDone()` reports `true`
-     * immediately after `begin()`.
+     * owns direction — there is no software negation), re-seeds the angle shadow to `cfg.homeDeg`,
+     * then issues `home()` so the servo drives to its rest pose at boot (AC8 known-safe state).
      *
-     * @note Does NOT command any angle — the servo holds whatever pose it powered up in until the
-     *       first `setAngle()` / `open()` / `close()` / `home()`.
+     * @note Commands `cfg.homeDeg` via `home()`. Because the shadow was just re-seeded to
+     *       `cfg.homeDeg`, the move budget is `0 * msPerDeg + cfg.settleMs`, so `isDone()` reports
+     *       `true` only after `cfg.settleMs` (NOT immediately) — poll it before assuming the servo
+     *       has settled.
+     * @note Empirically the servo does not reach the home pose unless the angle is written here in
+     *       `begin()` (the later `home()` in `Manipulator::begin()` is not sufficient on its own),
+     *       so this write is left in place deliberately — "if it works, it works" — pending a
+     *       hardware-level root cause for the duplicate home.
      * @note The vendor `setHWDir` returns `bool`; on a failed call this retries once after a 1 ms
      *       delay (the transient-failure retry pattern used throughout the MMLower callers).
      */
