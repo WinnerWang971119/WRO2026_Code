@@ -220,5 +220,3 @@ All Roadmap §4 hard gates pass:
 - [ ] B3.7 stop-at-line ±2 cm, zero false-triggers, faults on removed line.
 - [ ] O1 EventTrace + heartbeat readable over 60 s.
 - [ ] §9 pull-forward decision recorded (pull forward or stay deferred, with reason).
-</content>
-</invoke>
