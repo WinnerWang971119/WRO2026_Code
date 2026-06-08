@@ -178,9 +178,12 @@ namespace ctps
 
     /**
      * @brief Record a Manipulator command (recorded by the Manipulator mock).
-     * @param method Facade method name (`setLift` / `setGripper` / `setArm`).
-     *               `nullptr` is stored as an empty string.
-     * @param arg    Command argument (servo angle / lift level).
+     * @param method Facade method name: a production verb (`grab` / `release` /
+     *               `dump` / `sortTo` / `reset`) or a fixture-only setter
+     *               (`setLift` / `setGripper` / `setArm`). `nullptr` is stored as
+     *               an empty string.
+     * @param arg    Command argument (`sortTo` bin / servo angle / lift level; the
+     *               arg-less verbs record `0`).
      */
     void recordManip(const char* method, uint8_t arg);
 

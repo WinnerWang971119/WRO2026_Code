@@ -333,6 +333,12 @@ def build(trace: Trace, field_data) -> Track:
                 # Stop processing further commands and end the track.
                 break
 
+            # A successful goto intentionally emits NO discrete command event:
+            # the per-hop keyframes appended above ARE its narration — the player
+            # animates the chassis driving the route. The event list is reserved
+            # for what the motion alone cannot convey: the UNREACHABLE fault above
+            # and the drift warning below. (The player's `goto` event renderer
+            # serves that fault banner, not a per-hop caption for healthy moves.)
             # Drift check after the final hop: a clean goto lands ON the node
             # (drift ~ 0); a preceding raw drive injects an offset that goto
             # does not correct.

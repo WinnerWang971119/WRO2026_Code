@@ -8,7 +8,8 @@
  * (which binds Drive / WROLineArray / Intersection and the `MiniR4` global).
  *
  * Every verb is a no-op; every query returns a benign default. The `setEnabled`
- * builder mirrors the real move-only, `[[nodiscard]]` chain surface so a chained
+ * builder mirrors the real immovable (copy- and move-deleted), `[[nodiscard]]`
+ * chain surface so a chained
  * `LineFollower.setEnabled(true).tShape().setPreset(...)` compiles unchanged.
  *
  * NOTE: this is the FOLLOWER facade mock. It must NOT be force-included into the
@@ -30,9 +31,10 @@ class WROLineArrayClass;    // forward decl — getArray() returns a pointer onl
 /**
  * @brief No-op mock of `LineFollowerEnableBuilder`.
  *
- * Move-only and `[[nodiscard]]` to match the real builder; construction and
- * destruction do nothing (the real dtor applies the enable state at
- * end-of-statement).
+ * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]` to match
+ * the real builder — `setEnabled()` returns it by value via guaranteed copy
+ * elision (C++17), not a move. Construction and destruction do nothing (the real
+ * dtor applies the enable state at end-of-statement).
  */
 class [[nodiscard]] LineFollowerEnableBuilder
 {

@@ -13,8 +13,9 @@
  * records nothing. Every verb is a no-op; every state query reports
  * idle / fault-free so a blocking task body advances without a tick loop.
  *
- * The `goTo` builder mirrors the real move-only, `[[nodiscard]]` chain surface
- * (all setters no-op, returning `*this`) so an arbitrarily chained call
+ * The `goTo` builder mirrors the real immovable (copy- and move-deleted),
+ * `[[nodiscard]]` chain surface (all setters no-op, returning `*this`) so an
+ * arbitrarily chained call
  * (`PathTracker.goTo("N").async().setStopAtLine(...)`) compiles unchanged.
  */
 
@@ -30,8 +31,10 @@
 /**
  * @brief No-op mock of `PathTrackerGoToBuilder`.
  *
- * Move-only and `[[nodiscard]]` to match the real builder's call-as-temporary
- * contract. Construction and destruction do nothing — there is no queue.
+ * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]`, matching
+ * the real builder's call-as-temporary contract — `goTo()` returns it by value via
+ * guaranteed copy elision (C++17), not a move. Construction and destruction do
+ * nothing — there is no queue.
  */
 class [[nodiscard]] PathTrackerGoToBuilder
 {
