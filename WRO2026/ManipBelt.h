@@ -99,9 +99,9 @@ public:
      *      ceiling for the lower-MCU speed/position loops.
      *   2. `setReverse(false)` — placeholder hardware direction (the sign convention is
      *      carried by speed; flip this at bring-up if the motor wiring is reversed).
-     *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, then
-     *      `resetCounter()`), polled by `update()` + `delay(2)` until `isDone()` or the
-     *      `Config::BELT_HOME_TIMEOUT_MS` ceiling.
+     *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, `resetCounter()`,
+     *      settle, then drive to MID), polled by `update()` + `delay(2)` until `isDone()`
+     *      or the `Config::BELT_HOME_TIMEOUT_MS` ceiling.
      *
      * @return `true` if the motor configured and the belt homed within the timeout;
      *         `false` if a vendor call persistently failed or homing timed out.

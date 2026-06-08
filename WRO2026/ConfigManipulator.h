@@ -101,8 +101,13 @@ namespace Config
     constexpr int16_t  BELT_STALL_SPEED      = 25;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
     constexpr uint32_t BELT_RESET_MS         = 2000;   // stall-home timed run; TODO
-    /** @brief Wall-clock ceiling for the `begin()` homing routine (ms). */
-    constexpr uint32_t BELT_RESET_TIMEOUT_MS = BELT_RESET_MS + 1000;  // wall-clock ceiling for begin() home
+    /**
+     * @brief Wall-clock ceiling for the servo settle-home poll in `ManipulatorClass::begin()`
+     *        (grabber/sorter/dumper). NOT the belt home ceiling: `ManipBelt::begin()` bounds its
+     *        full stall+reset+settle+MID home with `BELT_HOME_TIMEOUT_MS`. Sized off the belt
+     *        reset timing (+1 s margin) and reused here as a generic boot-home backstop.
+     */
+    constexpr uint32_t BELT_RESET_TIMEOUT_MS = BELT_RESET_MS + 1000;  // servo settle-home ceiling
     /** @brief Watchdog ceiling for a POSITION-mode belt move (ms). TODO. */
     constexpr uint32_t BELT_MOVE_TIMEOUT_MS = 4000;   // POSITION-move watchdog; TODO
     /**
