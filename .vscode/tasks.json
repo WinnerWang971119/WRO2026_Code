@@ -184,6 +184,27 @@
                 "clear": true
             },
             "problemMatcher": []
+        },
+        {
+            "label": "CTPS: build & view",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "tools.path_planner.ctps"
+            ],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
         }
     ]
 }

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "start_node": "A",
+  "start_heading_deg": 0.0,
+  "build_error": false,
+  "commands": [
+    { "seq": 0, "op": "task_start", "name": "PickAndPlace", "args_hex": "00000000000000000000000000000000" },
+    { "seq": 1, "op": "manip", "method": "setGripper", "arg": 180 },
+    { "seq": 2, "op": "goto", "target": "B" },
+    { "seq": 3, "op": "manip", "method": "setLift", "arg": 120 },
+    { "seq": 4, "op": "task_end", "name": "PickAndPlace", "result": "ok" }
+  ]
+}

@@ -205,11 +205,12 @@ def test_goto_B_matches_compile_path(toy_field, fresh_sim, toy_graph_and_table):
     expected = compile_path(walked, toy_field.START_HEADING_DEG, graph, toy_field)
     assert primitives == _interleave_overshoot(expected)
     bx, by = toy_field.NODES["B"]
-    # Position contract: each LINE edge over-advances by LINE_SENSOR_AXLE_OFFSET_CM.
-    n_line = _line_count(expected)
-    extra = n_line * LINE_SENSOR_AXLE_OFFSET_CM
-    expected_x = bx + extra  # path A->B is heading 0, so the overshoot is along +x.
-    assert math.hypot(fresh_sim.chassis.x_cm - expected_x, fresh_sim.chassis.y_cm - by) < _POSITION_TOL_CM
+    # Position contract: the LINE_OVERSHOOT step rolls only the final
+    # sensor-to-axle offset, so the wheel axle lands ON the node (net advance
+    # == edge length), matching the firmware re-anchor
+    # (PathTracker.cpp LINE_FOLLOW->LINE_OVERSHOOT). The chassis ends at the
+    # node coordinates with no residual offset.
+    assert math.hypot(fresh_sim.chassis.x_cm - bx, fresh_sim.chassis.y_cm - by) < _POSITION_TOL_CM
     assert fresh_sim.localization.current_node() == "B"
 
 
@@ -311,14 +312,13 @@ def test_goto_before_zero_raises(toy_field, toy_graph_and_table):
 
 
 def test_every_reachable_goal_lands_at_node(toy_field, toy_graph_and_table):
-    """Every reachable goal updates Localization to that goal.
+    """Every reachable goal lands the chassis ON that goal node.
 
-    Position tolerance is relaxed (vs the pre-T9 sub-mm bound) because the
-    LINE_OVERSHOOT step deliberately over-advances the chassis by
-    ``LINE_SENSOR_AXLE_OFFSET_CM`` past every intersection -- the sim's
-    chassis carries the cumulative overshoot, so a node-level position
-    equality check is no longer the right invariant. The contract is
-    instead: Localization.current_node() advances to the goal.
+    The LINE_OVERSHOOT step rolls only the final sensor-to-axle offset, so the
+    wheel axle ends on the node (net advance == edge length), matching the
+    firmware re-anchor. With no raw drive injected between hops the chassis
+    therefore coincides with the goal node within ``_POSITION_TOL_CM`` AND
+    Localization.current_node() advances to the goal.
     """
     graph, next_hop = toy_graph_and_table
     targets = [
@@ -332,6 +332,8 @@ def test_every_reachable_goal_lands_at_node(toy_field, toy_graph_and_table):
         sim.localization.zero_heading_from_current()
         sim.go_to(goal)
         assert sim.localization.current_node() == goal
+        gx, gy = toy_field.NODES[goal]
+        assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM
 
 
 def test_walk_next_hop_self(toy_graph_and_table):
@@ -404,8 +406,9 @@ def test_sim_line_edge_emits_overshoot_step():
     A 30 cm LINE edge A->B heading 0 must produce, in order:
         (ACT_FOLLOW_INT, None)
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)
-    and advance the chassis x by 30 + LINE_SENSOR_AXLE_OFFSET_CM cm (heading 0,
-    so the advance lies entirely along +x).
+    and leave the chassis x at 30 cm — the wheel axle lands ON node B (the
+    overshoot rolls only the final offset; net advance == the 30 cm edge,
+    heading 0 so motion is along +x).
     """
     fd = _minimal_field(
         nodes={"A": (0.0, 0.0), "B": (30.0, 0.0)},
@@ -424,7 +427,7 @@ def test_sim_line_edge_emits_overshoot_step():
         (ACT_FOLLOW_INT, None),
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
     ]
-    assert chassis.x_cm == pytest.approx(30.0 + LINE_SENSOR_AXLE_OFFSET_CM, abs=1e-9)
+    assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
     assert sim.localization.current_node() == "B"
 
@@ -651,9 +654,9 @@ def test_line_overshoot_no_rampup_only_rampdown():
     fitted to the 5 cm hop carries the chassis from cruise PWM down to
     ``Config::PWM_MIN_MAGNITUDE`` before the gate's active brake fires.
     The sim does not model PWM, so the equivalent FSM-level contract is
-    that the LINE_OVERSHOOT step advances the chassis by exactly
-    ``LINE_SENSOR_AXLE_OFFSET_CM`` past the intersection marker and
-    Localization advances to the next node.
+    that the LINE_OVERSHOOT step rolls the final ``LINE_SENSOR_AXLE_OFFSET_CM``
+    so the wheel axle lands ON the node (net advance == the edge length, not
+    past it) and Localization advances to the next node.
     """
     fd = _minimal_field(
         nodes={"A": (0.0, 0.0), "B": (30.0, 0.0)},
@@ -675,8 +678,9 @@ def test_line_overshoot_no_rampup_only_rampdown():
         (ACT_FOLLOW_INT, None),
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
     ]
-    # Position contract: 30 cm FOLLOW_INT + 5 cm LINE_OVERSHOOT along +x.
-    assert chassis.x_cm == pytest.approx(30.0 + LINE_SENSOR_AXLE_OFFSET_CM, abs=1e-9)
+    # Position contract: net advance == the 30 cm edge; the axle lands ON node B
+    # (25 cm FOLLOW_INT + 5 cm LINE_OVERSHOOT along +x = 30 cm, not past it).
+    assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
     assert sim.localization.current_node() == "B"
 

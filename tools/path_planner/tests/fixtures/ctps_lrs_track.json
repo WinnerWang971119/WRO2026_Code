@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "field": {
+    "nodes": {
+      "S": [0.0, 0.0],
+      "M": [60.0, 0.0],
+      "E": [60.0, 60.0]
+    },
+    "obstacles": [],
+    "bounds": [0.0, 0.0, 100.0, 100.0]
+  },
+  "duration_s": 9.0,
+  "keyframes": [
+    { "t": 0.0, "x": 0.0, "y": 0.0, "h": 0.0 },
+    { "t": 2.0, "x": 60.0, "y": 0.0, "h": 0.0 },
+    { "t": 3.0, "x": 60.0, "y": 0.0, "h": 90.0 },
+    { "t": 9.0, "x": 60.0, "y": 60.0, "h": 90.0 }
+  ],
+  "events": [
+    { "t": 0.0, "type": "print", "label": "LRS replay start" },
+    { "t": 2.0, "type": "goto", "label": "S->M" },
+    { "t": 3.0, "type": "drive", "label": "turnDeg(90.0)" },
+    { "t": 9.0, "type": "drift_warn", "label": "chassis 14.2 cm off node E" }
+  ]
+}

@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import networkx as nx
 
@@ -56,6 +56,7 @@ from tools.path_planner.pipeline_config import (
 DEFAULT_HEADER_PATH = Path("WRO2026/routes.h")
 DEFAULT_SOURCE_PATH = Path("WRO2026/routes.cpp")
 FIELD_DATA_PATH = Path("tools/path_planner/field_data.py")
+FIELD_DATA_JSON_PATH = Path("tools/path_planner/field_data.json")
 
 NEXT_HOP_NONE_HEX = "0xFF"
 
@@ -297,19 +298,35 @@ def _node_row(
     )
 
 
-def compute_source_hash(field_data_source_path: Path) -> str:
-    """Return the SHA256 hex digest of ``field_data.py``'s LF-normalized bytes.
+def compute_source_hash(*field_data_source_paths: Path) -> str:
+    """Return the SHA256 hex digest of one or more field-data sources.
 
-    The digest is computed over the file's content with CRLF sequences collapsed
-    to LF so the hash is stable across Windows (which checks the file out as
-    CRLF under git's autocrlf=true) and Linux/CI (which checks it out as LF).
-    Without this normalization, the embedded ``Source SHA256:`` stamp in
-    routes.h / routes.cpp diverges between platforms and CI's
-    idempotent-re-emit check fails on every Windows-authored regen.
+    Each path's bytes are read with CRLF sequences collapsed to LF so the hash
+    is stable across Windows (which checks files out as CRLF under git's
+    autocrlf=true) and Linux/CI (which checks them out as LF). Without this
+    normalization, the embedded ``Source SHA256:`` stamp in routes.h /
+    routes.cpp diverges between platforms and CI's idempotent-re-emit check
+    fails on every Windows-authored regen.
+
+    When more than one path is supplied the LF-normalized contents are hashed
+    in argument order with a NUL byte separating files, so the stamp covers
+    every input that feeds the emitter. The single-path digest is unchanged
+    (no separator) so legacy callers and goldens stay stable. Geometry now
+    lives in ``field_data.json`` while the rich ``EDGES`` table stays in
+    ``field_data.py``; pass both so editing either bumps the stamp.
+
+    :param field_data_source_paths: one or more source files to hash, in order.
+    :return: the 64-character hex SHA256 digest.
     """
-    raw = Path(field_data_source_path).read_bytes()
-    normalized = raw.replace(b"\r\n", b"\n")
-    return hashlib.sha256(normalized).hexdigest()
+    if not field_data_source_paths:
+        raise ValueError("compute_source_hash: at least one source path is required")
+    digest = hashlib.sha256()
+    for index, source_path in enumerate(field_data_source_paths):
+        if index:
+            digest.update(b"\0")
+        raw = Path(source_path).read_bytes()
+        digest.update(raw.replace(b"\r\n", b"\n"))
+    return digest.hexdigest()
 
 
 def _routes_h_banner(source_hash: str) -> List[str]:
@@ -526,8 +543,15 @@ def emit_routes(
     header_path: Path = DEFAULT_HEADER_PATH,
     source_path: Path = DEFAULT_SOURCE_PATH,
     field_data_source_path: Path = FIELD_DATA_PATH,
+    extra_source_paths: Sequence[Path] = (),
 ) -> Tuple[Path, Path]:
-    """Emit ``routes.h`` and ``routes.cpp`` to disk; return their paths."""
+    """Emit ``routes.h`` and ``routes.cpp`` to disk; return their paths.
+
+    ``extra_source_paths`` are additional files folded into the banner
+    ``Source SHA256:`` stamp alongside ``field_data_source_path`` (e.g. the
+    JSON geometry that ``field_data.py`` loads). Defaults to empty so the
+    toy-field goldens, which hash a single anchor file, stay byte-stable.
+    """
     header_path = Path(header_path)
     source_path = Path(source_path)
     field_data_source_path = Path(field_data_source_path)
@@ -550,7 +574,7 @@ def emit_routes(
         )
     start_node_index = index_of[field_data.START_NODE]
 
-    source_hash = compute_source_hash(field_data_source_path)
+    source_hash = compute_source_hash(field_data_source_path, *extra_source_paths)
 
     header_lines = _build_routes_h_lines(
         field_data, node_names, source_hash, start_node_index
@@ -577,6 +601,7 @@ __all__ = [
     "DEFAULT_HEADER_PATH",
     "DEFAULT_SOURCE_PATH",
     "FIELD_DATA_PATH",
+    "FIELD_DATA_JSON_PATH",
     "NEXT_HOP_NONE_HEX",
     "compute_source_hash",
     "emit_routes",

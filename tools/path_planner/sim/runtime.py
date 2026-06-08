@@ -884,22 +884,6 @@ class PathTrackerSim:
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
-                if direction == Direction.REAR:
-                    out.append((ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)))
-                    self._chassis.reverse(distance_cm)
-                else:
-                    out.append((ACT_FOLLOW_INT, None))
-                    self._chassis.follow_line_to_intersection(distance_cm)
-                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when
-                # the resolved body-heading of the next-next hop is
-                # collinear with the inbound body-heading (delta <=
-                # NAV_TURN_TOLERANCE_DEG), else ACT_LINE_OVERSHOOT. The
-                # peek MUST use resolved body-headings, not raw forward
-                # edge headings, so mixed REAR<->FORWARD transitions on
-                # anti-parallel forward edges still pass through cleanly
-                # (TC9c). Chassis advance is identical (5cm) regardless
-                # of direction; the primitive name differs only for
-                # downstream verification + telemetry. See ADR-023.
                 # Dead-reckon with the axle offset of the board that LED this hop;
                 # a REAR hop uses the rear board's own offset (mirrors PathTracker).
                 overshoot_offset_cm = (
@@ -907,6 +891,31 @@ class PathTrackerSim:
                     if direction == Direction.REAR
                     else LINE_SENSOR_AXLE_OFFSET_CM
                 )
+                # The line follower stops the chassis when the SENSOR reaches the
+                # intersection marker, but the sensor leads the wheel axle by
+                # `overshoot_offset_cm`, so the axle is still that far short of the
+                # node at detect (PathTracker.cpp LINE_FOLLOW: "the chassis center
+                # is still that distance short of the junction node"). Advance only
+                # `distance_cm - overshoot_offset_cm` in the follow phase; the
+                # LINE_OVERSHOOT step below rolls the remaining offset so the wheel
+                # axle -- not the sensor -- lands ON the node. Net advance over the
+                # hop is exactly `distance_cm`, matching the firmware re-anchor.
+                follow_cm = distance_cm - overshoot_offset_cm
+                if direction == Direction.REAR:
+                    out.append((ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)))
+                    self._chassis.reverse(follow_cm)
+                else:
+                    out.append((ACT_FOLLOW_INT, None))
+                    self._chassis.follow_line_to_intersection(follow_cm)
+                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when
+                # the resolved body-heading of the next-next hop is
+                # collinear with the inbound body-heading (delta <=
+                # NAV_TURN_TOLERANCE_DEG), else ACT_LINE_OVERSHOOT. The
+                # peek MUST use resolved body-headings, not raw forward
+                # edge headings, so mixed REAR<->FORWARD transitions on
+                # anti-parallel forward edges still pass through cleanly
+                # (TC9c). The primitive name differs only for downstream
+                # verification + telemetry. See ADR-023.
                 if _should_pass_through(
                     self._graph,
                     self._next_hop,
@@ -1064,14 +1073,25 @@ class PathTrackerSim:
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
+                # Mirror go_to: advance only `distance_cm - overshoot_offset_cm`
+                # in the follow phase (the sensor reaches the marker; the axle is
+                # still `overshoot_offset_cm` short), then roll the offset in the
+                # LINE_OVERSHOOT step so the axle lands ON the node. Net advance is
+                # exactly `distance_cm`. A REAR hop uses the rear board's own offset.
+                overshoot_offset_cm = (
+                    LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                    if direction == Direction.REAR
+                    else LINE_SENSOR_AXLE_OFFSET_CM
+                )
+                follow_cm = distance_cm - overshoot_offset_cm
                 if direction == Direction.REAR:
-                    self._chassis.reverse(distance_cm)
+                    self._chassis.reverse(follow_cm)
                     yield (
                         (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)),
                         self._snapshot_chassis(),
                     )
                 else:
-                    self._chassis.follow_line_to_intersection(distance_cm)
+                    self._chassis.follow_line_to_intersection(follow_cm)
                     yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
                 # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS on
                 # collinear next-hop body heading, else ACT_LINE_OVERSHOOT.
@@ -1095,14 +1115,14 @@ class PathTrackerSim:
                 # direction. Advancing AXLE_OFFSET in the travel direction = reverse
                 # in body coordinates (body heading points opposite to travel).
                 if direction == Direction.REAR:
-                    self._chassis.reverse(LINE_SENSOR_AXLE_OFFSET_CM)
+                    self._chassis.reverse(overshoot_offset_cm)
                 else:
-                    self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
+                    self._chassis.forward(overshoot_offset_cm)
                 self._localization.on_intersection(nxt)
                 yield (
                     (
                         ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
-                        LINE_SENSOR_AXLE_OFFSET_CM,
+                        overshoot_offset_cm,
                     ),
                     self._snapshot_chassis(),
                 )

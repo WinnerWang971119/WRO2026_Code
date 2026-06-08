@@ -35,9 +35,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 enable_testing()
 
 # Absolute paths to source roots so the harness works regardless of build dir.
-set(SKETCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(TEST_DIR   ${CMAKE_CURRENT_SOURCE_DIR})
-set(MOCKS_DIR  ${TEST_DIR}/mocks)
+set(SKETCH_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(TEST_DIR       ${CMAKE_CURRENT_SOURCE_DIR})
+set(MOCKS_DIR      ${TEST_DIR}/mocks)
+# Task-body facade mocks (PathTracker / LineFollower / Manipulator) live in their
+# OWN dir, NOT `mocks/`. `mocks/` is on every target's include path, so a mock
+# there would shadow the REAL header for the sibling tests that compile the real
+# `LineFollower.cpp` / `Manipulator.cpp`. Keeping these out of `mocks/` and
+# force-including them only into `test_tasks_dispatch` avoids that collision.
+set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
 
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
@@ -133,6 +139,47 @@ function(add_mock_force_includes target)
             "SHELL:-include ${MOCKS_DIR}/Drive.h"
             "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
             "SHELL:-include ${MOCKS_DIR}/Intersection.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
+# Force-include the FULL task-body facade mock surface — the same trick as
+# `add_mock_force_includes`, extended with the `PathTracker` / `LineFollower` /
+# `Manipulator` mocks that a `Tasks.cpp` task body drives.
+#
+# Used ONLY by `test_tasks_dispatch` (NOT the LineFollower / PathTracker mirror
+# tests, which compile the REAL `LineFollower.cpp` and must keep the real
+# `LineFollower.h` declarations — force-including the mock there would clash with
+# the production class definition the controller TU compiles against).
+#
+# Each mock's include guard matches the production header exactly (`PATHTRACKER_H`,
+# `LINEFOLLOWER_H`, `MANIPULATOR_H`, ...), so a task body's quote-include of the
+# real header (source-relative to `Tasks.cpp` in `${SKETCH_DIR}`) resolves to the
+# already-force-included mock instead. The `PathTracker` / `LineFollower` /
+# `Manipulator` globals are `inline`-defined in those mock headers, so no extra
+# TU is linked — see each mock's global comment.
+# -----------------------------------------------------------------------------------------
+function(add_task_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${MOCKS_DIR}/Drive.h"
+            "/FI${MOCKS_DIR}/WROLineArray.h"
+            "/FI${MOCKS_DIR}/Intersection.h"
+            "/FI${TASK_MOCKS_DIR}/PathTracker.h"
+            "/FI${TASK_MOCKS_DIR}/LineFollower.h"
+            "/FI${TASK_MOCKS_DIR}/Manipulator.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
+            "SHELL:-include ${MOCKS_DIR}/Intersection.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/PathTracker.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/LineFollower.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/Manipulator.h"
         )
     endif()
 endfunction()
@@ -280,57 +327,29 @@ target_include_directories(test_stop_at_line_armmath PRIVATE ${COMMON_INCLUDES})
 add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 
 # =========================================================================================
-# Test executable #4 — Tasks framework dispatch (T9 of the Tasks plan).
+# Test executable #4 — Tasks framework dispatch, real-linked (#46 Phase 1).
 #
-# Exercises TC1..TC3, TC5..TC12 of the Tasks-framework plan
-# (`docs/plans/2026-05-26-tasks-framework-mission-task-verb.md`). Satisfies AC10
-# and all unit/integration ACs (AC2..AC9 positive). The compile-fail target
-# below covers TC4 / AC9 negative.
+# Links the REAL `Tasks.cpp` and asserts its registry/dispatch behaviour through
+# the capturing `MockSerial` in `mocks/Arduino.h`. Task bodies drive the facade
+# singletons directly (e.g. `testOne` calls `PathTracker.goTo(...)`), so this
+# target force-includes the FULL task-body facade mock surface via
+# `add_task_mock_force_includes` — the `PathTracker` / `Drive` / `LineFollower` /
+# `Manipulator` mocks (with `inline` globals) so Tasks.cpp links without dragging
+# in the real `PathTracker.cpp` / `Drive.cpp` / Localization / routes chain.
 #
-# PR #35 FINDING #78 — real-linking `Tasks.cpp` / `Mission.cpp` is DEFERRED, not
-# forgotten. The behavioural assertions below still run against an inline
-# `TasksMirror` / `MissionMirror`, so a logic regression in the production
-# Tasks/Mission code is invisible to this target. The goal of #78 was to link
-# the REAL singletons so the reentrancy guard, abort ordering, queue-full
-# rejection, unknown-name handling, and yield path run against PRODUCTION code.
-# That link is blocked at COMPILE time by the host mock surface — and the fix
-# lives in `mocks/`, which is out of scope for the #78 change (it touched only
-# this file and `test_tasks_dispatch.cpp`):
-#
-#   1. `Tasks.cpp`'s task bodies call `Serial.print(args.u8[0])` with a
-#      `uint8_t` (demoEcho / debugYield). The host `Serial` is the mock
-#      `MockSerial` in `mocks/Arduino.h`, whose only `print` overload is
-#      `print(const char*)` — `uint8_t` does not convert to `const char*`, so
-#      the TU does not compile. Real-linking `Tasks.cpp` first needs a
-#      `print(uint8_t)` / `print(int)` overload added to `MockSerial`.
-#   2. `MockSerial::print` is a no-op with no capture buffer, so the production
-#      Serial diagnostics ("refusing reentrant call", "a=7 b=42", "unknown
-#      name") cannot be asserted without a capture sink added to the mock.
-#   3. `Mission.cpp` drags in PathTracker.cpp, Drive (builders + faults + abort
-#      + stopAtLine), EventTrace.cpp (which `#include <MatrixMiniR4.h>` and
-#      calls `MiniR4.OLED`), Localization, FieldMap and the `MiniR4` global
-#      (LED / Buzzer / BTN). None of these are mocked today — the mock
-#      `MatrixMiniR4.h` is empty (no `MiniR4`) and the mock `Drive.h` is a tiny
-#      LineFollower-only surface. Real-linking Mission needs a whole new
-#      `MiniR4` + Drive-builder + EventTrace mock layer.
-#
-# So the test inline-mirrors the slice of Mission's TASK-case FSM + TasksClass's
-# registry + dispatch + RAII guard (same precedent as
-# `test_path_tracker_passthrough.cpp` / `test_path_tracker_bidirectional.cpp`,
-# neither of which links its production .cpp either). Mirror sites are annotated
-# `// MIRROR: <path>:<line>` for drift detection at PR-review time. Real
-# production POD types (`TaskArgs`, `TaskRegistryEntry`) are pulled in from
-# `WRO2026/TasksTypes.h` so the union-layout / size invariants are bound to
-# the real definitions at compile time. The remaining behavioural-link work is
-# unblocked by a follow-up that extends `mocks/Arduino.h` (capturing,
-# integer-`print`-capable Serial) and links `${SKETCH_DIR}/Tasks.cpp` here.
+# Tasks-owned behaviour only: registry lookup, `runTask` dispatch + capture, the
+# unknown-name path, the `debugYield` yield path, and the `inTask()` RAII
+# invariant. Mission-owned behaviour (queue FSM, abort ordering) stays out of
+# scope — that needs `Mission.cpp`, which drags in EventTrace / the `MiniR4`
+# global and is #46 Phase 2.
 # =========================================================================================
 add_executable(test_tasks_dispatch
     ${TEST_DIR}/test_tasks_dispatch.cpp
+    ${SKETCH_DIR}/Tasks.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_tasks_dispatch)
+add_task_mock_force_includes(test_tasks_dispatch)
 add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
 
 # =========================================================================================
@@ -479,3 +498,75 @@ add_test(NAME manipulator_servo_dup_compile_fail
 )
 set_tests_properties(manipulator_servo_dup_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "pairwise distinct")
+
+# =========================================================================================
+# CTPS dump #8 — `ctps_dump` (Mechanism #4, task T4).
+#
+# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + `routes.cpp`
+# against the recording mocks under `ctps_mocks/` (NOT the sibling `mocks/`
+# LineFollower harness). Running the executable executes a mission to completion
+# and serializes the captured, ordered command stream to the Data-Model-A JSON.
+# `--self-test` asserts the op stream + the tick-budget hang-guard (TC8 / TC9 /
+# AC4 / AC6); the JSON modes (`--fixture` / default) feed the CTPS player loader.
+#
+# This is an INDEPENDENT include + force-include surface from the LineFollower
+# harness above: `ctps_mocks/` (not `mocks/`) must come FIRST so the recording
+# `Arduino.h` / `MatrixMiniR4.h` / `Drive.h` / `PathTracker.h` / `Manipulator.h`
+# / `EventTrace.h` / `LineFollower.h` shadow the production hardware-bound
+# versions. `${MOCKS_DIR}` is DELIBERATELY NOT on this target's include path —
+# pulling it in would let `mocks/MatrixMiniR4.h` (which has no `MiniR4`) shadow
+# the recording one and break the Mission.cpp / EventTrace compile.
+# =========================================================================================
+set(CTPS_MOCKS_DIR ${TEST_DIR}/ctps_mocks)
+
+# -----------------------------------------------------------------------------------------
+# Force-include the recording mock headers BEFORE any source-file parsing — the same
+# load-bearing trick as `add_mock_force_includes`, but pointed at `ctps_mocks/` and using
+# ABSOLUTE `${CTPS_MOCKS_DIR}/` paths.
+#
+# Why absolute, not bare names: the REAL `Drive.h` / `PathTracker.h` / `EventTrace.h` /
+# `LineFollower.h` sit next to `Mission.cpp` in `${SKETCH_DIR}`, so a bare-name
+# force-include (`/FIDrive.h`) would resolve source-relative to the REAL header. Each
+# mock's include guard matches the production guard exactly (`DRIVE_H`, `PATHTRACKER_H`,
+# `EVENTTRACE_H`, `LINEFOLLOWER_H`), so once force-included the real header no-ops when
+# re-requested transitively.
+#
+# `MatrixMiniR4.h` / `Arduino.h` are angle-bracket includes inside the sketch headers, so
+# the `${CTPS_MOCKS_DIR}`-first include order alone picks the recording versions — no
+# force-include needed for those two.
+# -----------------------------------------------------------------------------------------
+function(add_ctps_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${CTPS_MOCKS_DIR}/Drive.h"
+            "/FI${CTPS_MOCKS_DIR}/PathTracker.h"
+            "/FI${CTPS_MOCKS_DIR}/EventTrace.h"
+            "/FI${CTPS_MOCKS_DIR}/LineFollower.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${CTPS_MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/PathTracker.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/EventTrace.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/LineFollower.h"
+        )
+    endif()
+endfunction()
+
+add_executable(ctps_dump
+    ${TEST_DIR}/ctps_dump.cpp
+    ${SKETCH_DIR}/Mission.cpp
+    ${SKETCH_DIR}/Tasks.cpp
+    ${SKETCH_DIR}/MissionScript.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${CTPS_MOCKS_DIR}/ctps_record.cpp
+)
+# `${CTPS_MOCKS_DIR}` FIRST; `${MOCKS_DIR}` intentionally omitted (see the block comment).
+target_include_directories(ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
+add_ctps_mock_force_includes(ctps_dump)
+add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
+set_tests_properties(ctps_dump_selftest PROPERTIES
+    PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")

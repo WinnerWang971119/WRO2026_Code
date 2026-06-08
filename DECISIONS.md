@@ -57,16 +57,17 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 - [ADR-030 — Host-compile harness links the real production symbols; CI-enforced via the `host-tests` ctest job](./docs/decisions/030-harness-links-real-sources-ci-enforced.md)
 - [ADR-031 — Config split per domain: umbrella Config.h + per-domain sub-headers + ConfigChecks.h last](./docs/decisions/031-config-split-per-domain.md)
+- [ADR-033 — CTPS ingests a derived mission trace recorded from the real C++; no Python re-implementation of task bodies](./docs/decisions/033-ctps-derived-mission-trace.md) (supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision)
 
 ## Status summary
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 26 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025, 026, 027, 028, 029, 031, 032 |
+| Implemented | 27 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
-| Superseded | 1 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done) |
+| Superseded | 1 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done). Sub-decision supersessions (parent ADR stays Implemented): ADR-010 supersedes the Phase 0 "no logging at all" stance; ADR-033 supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision. |
 
 ## Conventions
 

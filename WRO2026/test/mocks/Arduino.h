@@ -14,8 +14,8 @@
  *   - `PI`, `abs()` macros
  *   - `delay` (advances the mock clock), `millis`, `yield`
  *   - `F()` flash-string macro (host: returns its argument unchanged)
- *   - a `Serial` singleton with `print`/`println` no-op overloads (`const char*`
- *     plus the common numeric types)
+ *   - a `Serial` singleton whose `print`/`println` overloads capture all
+ *     written text into an inspectable buffer (`Serial.captured()`)
  *
  * The mock `millis()` is incremented by a test-controllable global so the
  * `waitUntilDistanceReached` / `waitUntilIntersection` time-bounded paths can
@@ -32,6 +32,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <cstdlib>    // std::abs — pulled in BEFORE the `abs` macro below would have masked it.
+#include <string>     // std::string capture buffer + std::to_string for integer overloads.
 
 // ---------------------------------------------------------------------------
 // Math constants used by `WROMath.h` (real Arduino.h defines PI).
@@ -105,15 +106,31 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 // ---------------------------------------------------------------------------
 // `Serial` singleton — host stub.
 //
-// `LineFollower.cpp` calls `Serial.println(F("…"))` (in the fallback warning paths
-// of `waitUntilDistanceReached` / `waitUntilIntersection`). The production
-// `Manipulator.cpp` warning paths additionally `print()` an index / value
-// alongside the message, so the stub carries matching numeric `print(...)`
-// overloads as well as the `println(...)` set.
+// Originally a pure no-op shim for the two `Serial.println(F("…"))` calls in
+// `LineFollower.cpp`. It now also CAPTURES everything written so host tests can
+// assert on production Serial output (e.g. `Tasks.cpp` emits
+// `"[Tasks] demoEcho a=7 b=42"`; `Mission.cpp` emits `"[Mission] start; steps=3"`).
+// `Manipulator.cpp` only emits `println(const char*)` warning strings, so its
+// output is captured by the `const char*` overload — no numeric print needed.
 //
-// `uint16_t` arguments promote to `int` and resolve to the `int` overload, so a
-// distinct `uint16_t` overload is intentionally omitted — adding one would be
-// ambiguous against `int` on every host where `int` is wider than 16 bits.
+// Capture rules:
+//   - Every `print(...)` overload appends its text to `_captured`.
+//   - Every `println(...)` overload appends its text followed by a single '\n'.
+//   - Integer overloads stringify via `std::to_string(...)`.
+//   - `begin(unsigned long)` stays a no-op (baud rate is not observable output).
+//
+// Overload set mirrors the Arduino `Print` API and is kept SYMMETRIC between
+// `print` and `println` so a call like `Serial.print(someUint8)` binds to the
+// exact `print(uint8_t)` overload (no integral promotion, no ambiguity). The
+// integer types here cover every value actually printed by the production
+// callers: `const char*` (string literals via `F(...)`) and `uint8_t`
+// (`TaskArgs::u8[]`, `Mission::_count`, `PathTracker::FaultInfo::{fromNode,
+// destNode}`); the wider `int / unsigned int / long / unsigned long` siblings
+// and the `float` overload are retained for symmetry with the pre-existing
+// `println` set. A `uint16_t` argument promotes to `int` and binds the `int`
+// overload, so no distinct `uint16_t` overload is needed. No `char` overload is
+// added because no caller prints a bare `char` — adding one would make
+// `print(uint8_t)` ambiguous since `uint8_t == unsigned char`.
 // ---------------------------------------------------------------------------
 
 class MockSerial
@@ -121,20 +138,54 @@ class MockSerial
 public:
     void begin(unsigned long /*baud*/) {}
 
-    void print(const char* /*s*/) {}
-    void print(int /*n*/) {}
-    void print(unsigned int /*n*/) {}
-    void print(long /*n*/) {}
-    void print(unsigned long /*n*/) {}
-    void print(float /*v*/, int /*decimals*/ = 2) {}
+    // --- print: append text, no trailing newline. ---
+    void print(const char* s) { if (s != nullptr) _captured.append(s); }
+    void print(int n) { _captured.append(std::to_string(n)); }
+    void print(unsigned int n) { _captured.append(std::to_string(n)); }
+    void print(long n) { _captured.append(std::to_string(n)); }
+    void print(unsigned long n) { _captured.append(std::to_string(n)); }
+    void print(uint8_t n) { _captured.append(std::to_string(static_cast<unsigned>(n))); }
+    void print(float v, int /*decimals*/ = 2) { _captured.append(std::to_string(v)); }
 
-    void println() {}
-    void println(const char* /*s*/) {}
-    void println(int /*n*/) {}
-    void println(unsigned int /*n*/) {}
-    void println(long /*n*/) {}
-    void println(unsigned long /*n*/) {}
-    void println(float /*v*/, int /*decimals*/ = 2) {}
+    // --- println: append text, then a single '\n'. ---
+    void println() { _captured.push_back('\n'); }
+    void println(const char* s)
+    {
+        if (s != nullptr)
+        {
+            _captured.append(s);
+        }
+        _captured.push_back('\n');
+    }
+    void println(int n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
+    void println(unsigned int n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
+    void println(long n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
+    void println(unsigned long n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
+    void println(uint8_t n)
+    {
+        _captured.append(std::to_string(static_cast<unsigned>(n)));
+        _captured.push_back('\n');
+    }
+    void println(float v, int /*decimals*/ = 2)
+    {
+        _captured.append(std::to_string(v));
+        _captured.push_back('\n');
+    }
+
+    // --- Capture inspection (test-only). ---
+    /**
+     * @brief Accumulated text written via every print/println call.
+     * @return Const reference to the capture buffer.
+     */
+    const std::string& captured() const { return _captured; }
+
+    /**
+     * @brief Reset the capture buffer (call between test cases).
+     */
+    void clearCapture() { _captured.clear(); }
+
+private:
+    std::string _captured;
 };
 
 extern MockSerial Serial;
