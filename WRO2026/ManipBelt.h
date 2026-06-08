@@ -27,12 +27,13 @@
  *    fixed duration and completion is purely timer-based. The deliberate stall at the
  *    end is the intended behavior — the hard stop, not the encoder, defines the pose.
  *
- * **Home routine.** There is no limit switch. `home()` is the single homing primitive: a
- * TIMED stall toward the LEFT/HOME end-stop (negative speed per the sign convention) followed
+ * **Reset + home routines.** There is no limit switch. `reset()` is the low-level primitive:
+ * a TIMED stall toward the LEFT/HOME end-stop (negative speed per the sign convention) followed
  * by `resetCounter()` (which re-establishes the encoder zero that makes POSITION targets
- * repeatable), and then an automatic POSITION move on to the MID rest / "home" position. The
- * whole two-stage sequence is driven by `update()`; `begin()` runs it blocking-bounded at
- * setup time, so the belt powers up LEFT end-stop → encoder zero → MID.
+ * repeatable). `home()` builds on it — it calls `reset()` then chains an automatic move on to
+ * the MID rest / "home" position via `toStation(MID)` once the reset settles. The whole
+ * sequence is driven by `update()`; `begin()` runs `home()` blocking-bounded at setup time, so
+ * the belt powers up LEFT end-stop → encoder zero → MID.
  *
  * **Sign convention** (from `ConfigManipulator.h`): `+speed` drives toward FAR_END,
  * `-speed` drives toward HOME.
@@ -187,6 +188,9 @@ public:
      */
     void beltTo(int32_t absDeg)
     {
+        _resetPending   = false;    // a non-reset move must not inherit a stale reset/home latch
+        _pendingStation = -1;
+
         const int32_t current = _getDegrees();
         const int32_t delta   = absDeg - current;
 
@@ -223,6 +227,9 @@ public:
      */
     void runFor(uint32_t ms, int16_t speed)
     {
+        _resetPending   = false;    // a non-reset move must not inherit a stale reset/home latch
+        _pendingStation = -1;
+
         if (!_setSpeed(speed)) {
             Serial.println(F("[ManipBelt] runFor: setSpeed failed"));
             _state = State::IDLE;    // treat as done so a blocking drain does not hang
@@ -235,52 +242,66 @@ public:
     }
 
     /**
-     * @brief Full home routine: stall into the LEFT/HOME end-stop, re-zero the encoder,
-     *        then drive on to the MID rest position. The single homing primitive.
+     * @brief Stall into the LEFT/HOME end-stop and re-zero the encoder there. NON-blocking.
      *
-     * Stage 1 — a TIMED move toward HOME at `-|Config::BELT_STALL_SPEED|` for
-     * `Config::BELT_RESET_MS`. When that timer elapses, `update()` brakes the belt and calls
-     * `resetCounter()` so `getDegrees()` reads zero — the reference that makes absolute
-     * POSITION targets repeatable.
+     * The reset primitive: it runs the belt toward HOME at `-|Config::BELT_STALL_SPEED|`
+     * (negative speed per the sign convention) as a TIMED move for `Config::BELT_RESET_MS`,
+     * jamming it against the mechanical LEFT/HOME end-stop. When that timer elapses,
+     * `update()` brakes the belt and calls `resetCounter()` so `getDegrees()` reads zero —
+     * the reference that makes absolute POSITION targets repeatable.
      *
-     * Stage 2 — `update()` then automatically chains into a move to the MID station
-     * (`Config::BeltStation::MID`), the belt's operating rest / "home" position, issued as a
-     * RELATIVE rotate from the just-zeroed LEFT end (so a stale post-reset encoder read can't
-     * throw it off). `isDone()` stays `false` until BOTH stages finish.
-     *
-     * `begin()` calls this at boot, so the belt powers up: LEFT end-stop → encoder zero → MID.
-     *
-     * @note Non-blocking on its own (the whole two-stage sequence is driven by `update()`);
-     *       `begin()` wraps it in a wall-clock-bounded blocking poll
-     *       (`Config::BELT_HOME_TIMEOUT_MS`, which covers BOTH stages).
+     * @note Non-blocking on its own (the stall is driven to completion by `update()`, which
+     *       brakes + `resetCounter()`s on TIMED completion).
      * @note There is no limit switch — the mechanical end-stop, not a sensor, defines the
      *       LEFT/HOME reference. The brief stall at that end is intended.
-     * @note If the station table has no MID entry, stage 2 is skipped (stall + reset only).
+     * @note The watchdog is the TIMED timer itself: `Config::BELT_RESET_MS` bounds the stall,
+     *       so a wedged belt can never hang the reset.
+     * @note Clears any pending chained station — a bare `reset()` re-zeroes only; use `home()`
+     *       to also drive on to the MID rest position afterward.
      */
-    void home()
+    void reset()
     {
         const int16_t mag = (int16_t)abs(Config::BELT_STALL_SPEED);
         if (!_setSpeed((int16_t)(-mag))) {
-            Serial.println(F("[ManipBelt] home: setSpeed failed"));
-            // Cannot drive — surface as "not homing"; begin() will time out and report.
-            _state = State::IDLE;
+            Serial.println(F("[ManipBelt] reset: setSpeed failed"));
+            // Cannot drive — surface as "not resetting"; begin() will time out and report.
+            _state          = State::IDLE;
+            _resetPending   = false;
+            _pendingStation = -1;
             return;
         }
 
-        _state    = State::TIMED_MOVE;
-        _startMs  = millis();
-        _durMs    = Config::BELT_RESET_MS;
-        _homing   = true;    // tells update() to brake + resetCounter() on completion
+        _state          = State::TIMED_MOVE;
+        _startMs        = millis();
+        _durMs          = Config::BELT_RESET_MS;
+        _resetPending   = true;    // tells update() to brake + resetCounter() on completion
+        _pendingStation = -1;      // a bare reset() chains nothing; home() arms this after
+    }
 
-        // Stage 2 setup: after the reset, chain on to the MID rest position. Capture its
-        // absolute target now; the move itself is kicked off from update() once the reset
-        // has run. Skip the chain if the table lacks a MID entry (stall + reset only).
+    /**
+     * @brief Full home routine: `reset()` then a chained `toStation(MID)`. The single
+     *        operating-home primitive.
+     *
+     * Calls `reset()` to establish the LEFT/HOME zero reference (stall into the end-stop +
+     * `resetCounter()`), then arms a chained move on to the MID rest / "home" position. Once
+     * `update()` brakes the reset stall and re-zeroes the encoder, it dwells through
+     * `State::SETTLE` and finally issues the MID move via `toStation(MID)`. `isDone()` stays
+     * `false` until that chained move finishes.
+     *
+     * `begin()` calls this at boot, so the belt powers up: LEFT end-stop → encoder zero → MID.
+     *
+     * @note Non-blocking on its own (the whole sequence is driven by `update()`); `begin()`
+     *       wraps it in a wall-clock-bounded blocking poll (`Config::BELT_HOME_TIMEOUT_MS`,
+     *       which covers the stall + settle + MID move).
+     * @note If `reset()` could not start the stall, or the station table has no MID entry, the
+     *       chain is skipped (reset only).
+     */
+    void home()
+    {
+        reset();                                   // establish the LEFT/HOME zero reference
         const uint8_t midIdx = (uint8_t)Config::BeltStation::MID;
-        if (_table != nullptr && midIdx < _count) {
-            _restAfterHome = true;
-            _restDeg       = _table[midIdx].deg;
-        } else {
-            _restAfterHome = false;
+        if (_state == State::TIMED_MOVE && _table != nullptr && midIdx < _count) {
+            _pendingStation = (int8_t)midIdx;      // ...then drive on to MID once the reset settles
         }
     }
 
@@ -290,12 +311,11 @@ public:
      * Must be called every iteration of the owning module's tick while a move may be in
      * flight. Behaviour by state:
      *   - **TIMED_MOVE** — when `millis() - _startMs >= _durMs`, brake the drive to a stop.
-     *     For a homing run, `resetCounter()` (re-zero); if `home()` captured a rest target,
-     *     enter **HOME_SETTLE** rather than IDLE. Any other TIMED completion returns to IDLE.
-     *   - **HOME_SETTLE** — after `Config::BELT_HOME_SETTLE_MS` from the braked stall, issue
-     *     the MID move as a RELATIVE `rotateFor()` from the just-zeroed LEFT end (no
-     *     `getDegrees()` read — a read right after the reset can race the lower MCU) and enter
-     *     POS_MOVE. The dwell gives the lower MCU a clean tick gap to switch from the stall's
+     *     For a reset stall, `resetCounter()` (re-zero); if a station was chained (`home()`),
+     *     enter **SETTLE** rather than IDLE. Any other TIMED completion returns to IDLE.
+     *   - **SETTLE** — after `Config::BELT_HOME_SETTLE_MS` from the braked stall, issue the
+     *     chained move via `toStation()` and enter POS_MOVE/TIMED (or IDLE if nothing was
+     *     chained). The dwell gives the lower MCU a clean tick gap to switch from the stall's
      *     `setSpeed()` into the rotate (a same-tick stop->rotate failed to engage on hardware).
      *   - **POS_MOVE** — read `ChkRotateEnd(bool&)`; if the lower MCU reports the rotate
      *     is done, brake and return to IDLE. Otherwise, if `millis() - _startMs >=
@@ -311,16 +331,16 @@ public:
             case State::TIMED_MOVE: {
                 if ((uint32_t)(millis() - _startMs) >= _durMs) {
                     _setBrake(true);    // stop the timed drive (stall or end-station run)
-                    if (_homing) {
-                        _homing = false;
+                    if (_resetPending) {
+                        _resetPending = false;
                         _resetCounter();    // re-establish the encoder zero at LEFT/HOME
-                        if (_restAfterHome) {
-                            // Stage 2 is deferred to HOME_SETTLE: we just braked the stall's
-                            // setSpeed() drive, so give the lower MCU a clean tick gap before
-                            // issuing the MID rotate (back-to-back stop->rotate in ONE tick is
-                            // what failed on hardware — the rotate never engaged). The dwell
-                            // mirrors how ordinary moves are separated across ticks.
-                            _state   = State::HOME_SETTLE;
+                        if (_pendingStation >= 0) {
+                            // A station was chained (home()): defer it to SETTLE. We just braked
+                            // the stall's setSpeed() drive, so give the lower MCU a clean tick gap
+                            // before issuing the chained move (back-to-back stop->rotate in ONE
+                            // tick is what failed on hardware — the rotate never engaged). The
+                            // dwell mirrors how ordinary moves are separated across ticks.
+                            _state   = State::SETTLE;
                             _startMs = millis();
                             break;
                         }
@@ -330,26 +350,18 @@ public:
                 break;
             }
 
-            case State::HOME_SETTLE: {
+            case State::SETTLE: {
                 if ((uint32_t)(millis() - _startMs) >= Config::BELT_HOME_SETTLE_MS) {
-                    // Settled. Drive on to MID as a RELATIVE rotate of _restDeg from the
-                    // just-zeroed LEFT end — no getDegrees() read (a read right after the
-                    // reset can race the lower MCU and overshoot MID).
-                    _restAfterHome        = false;
-                    const uint16_t degree = (uint16_t)labs(_restDeg);
-                    if (degree > (uint16_t)POS_DEADBAND_DEG) {
-                        const int16_t mag   = (int16_t)abs(Config::BELT_MOVE_SPEED);
-                        const int16_t speed = (_restDeg >= 0) ? mag : (int16_t)(-mag);
-                        const bool    ok    = _rotateFor(speed, degree);
-                        if (ok) {
-                            _state   = State::POS_MOVE;
-                            _startMs = millis();
-                            break;
-                        }
-                        Serial.println(F("[ManipBelt] home: MID move rotateFor failed"));
-                    }
-                    // MID is at zero / command failed → done, stay parked at LEFT.
-                    _state = State::IDLE;
+                    // Settled. Drive on to the chained station via toStation() — reusing the
+                    // normal path (no copy-pasted rotate math). toStation() reads getDegrees(),
+                    // but the 150 ms settle gives the lower MCU a clean gap after the reset brake
+                    // so the post-reset encoder read is stable (this replaces the old
+                    // relative-rotate-of-known-degree approach). Capture and clear the pending
+                    // station first so toStation() does not inherit a stale latch.
+                    const int8_t s = _pendingStation;
+                    _pendingStation = -1;
+                    if (s >= 0) { toStation((Config::BeltStation)s); }   // -> POS_MOVE/TIMED or IDLE
+                    else { _state = State::IDLE; }
                 }
                 break;
             }
@@ -397,7 +409,7 @@ private:
         IDLE,
         POS_MOVE,
         TIMED_MOVE,
-        HOME_SETTLE    ///< Between the braked home stall and the chained MID rotate (dwell).
+        SETTLE    ///< Dwell between the braked reset stall and the chained station move.
     };
 
     /// @brief Encoder-degree tolerance below which a POSITION move is treated as already
@@ -411,9 +423,8 @@ private:
     State    _state   = State::IDLE;    ///< Current move state.
     uint32_t _startMs = 0;              ///< `millis()` at the start of the in-flight move.
     uint32_t _durMs   = 0;              ///< TIMED-move duration (ms); unused in POS_MOVE.
-    bool     _homing  = false;          ///< TIMED move is a stall-home → resetCounter() on done.
-    bool     _restAfterHome = false;    ///< After a stall-home reset, chain into a POSITION move to _restDeg (MID).
-    int32_t  _restDeg = 0;              ///< Absolute target for the post-home rest move (the MID station).
+    bool     _resetPending = false;     ///< TIMED move is a reset stall → resetCounter() on done.
+    int8_t   _pendingStation = -1;      ///< -1 = none; else a `Config::BeltStation` index to chain after the reset settles.
 
     // -------------------------------------------------------------------------------------
     // Vendor dispatch helpers.

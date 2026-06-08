@@ -58,7 +58,7 @@
 /// clean.
 ///
 /// Post-`begin()` baseline: the clock sits at ~6300 ms — begin()'s internal settle plus the
-/// full belt home (TIMED stall ~2000 ms, the HOME_SETTLE dwell ~150 ms, then the MID move
+/// full belt home (TIMED stall ~2000 ms, the SETTLE dwell ~150 ms, then the MID move
 /// which, with ChkRotateEnd held false in the mock, completes via its ~4000 ms watchdog), all
 /// of which advance `g_mockMillis` via the `delay()`-driven poll loops. We do NOT re-zero the
 /// clock afterward: each servo's
@@ -298,17 +298,22 @@ static void test_TC7_belt_timed_move_to_far_end()
 }
 
 // ===========================================================================
-// TC8 — belt home() is a three-phase sequence: TIMED stall toward LEFT/HOME (braked +
-//       resetCounter zeroes the encoder) -> HOME_SETTLE dwell -> RELATIVE rotate to MID.
+// TC8 — belt home() is a three-phase sequence: reset() TIMED stall toward LEFT/HOME (braked
+//       + resetCounter zeroes the encoder) -> SETTLE dwell -> chained toStation(MID).
 //
-// On stall completion update() brakes + resetCounter()s and enters HOME_SETTLE (NOT a
-// move yet). After BELT_HOME_SETTLE_MS the MID rotate is issued (rotateFor). isDone() stays
-// false until the MID move ends (ChkRotateEnd / watchdog).
+// home() now splits into reset() + a chained station move: on stall completion update()
+// brakes + resetCounter()s and enters SETTLE (NOT a move yet). After BELT_HOME_SETTLE_MS the
+// MID move is issued via toStation(MID) -> beltTo(midDeg). Because the encoder was just zeroed
+// (getDegrees()==0) and MID's absolute target is midDeg, beltTo computes delta = midDeg - 0 =
+// midDeg and issues rotateFor(+speed, midDeg) — so the externally observable rotate
+// (rotateForCallCount==1, lastRotateDegree==midDeg, lastRotateSpeed>0) is identical to the
+// old relative-rotate path. isDone() stays false until the MID move ends (ChkRotateEnd /
+// watchdog).
 // ===========================================================================
 
 static void test_TC8_belt_home_resets_settles_then_moves_to_mid()
 {
-    TEST_SCOPE("TC8: belt.home() -> stall+reset -> settle -> MID rotate -> done");
+    TEST_SCOPE("TC8: belt.home() -> reset+stall -> settle -> toStation(MID) rotate -> done");
 
     resetWorld();
     clearTickCallback();
@@ -317,11 +322,11 @@ static void test_TC8_belt_home_resets_settles_then_moves_to_mid()
     MiniR4.M1.mockSetDegrees(250);
     MiniR4.M1.mockRotateEnded = false;    // hold the MID move in flight until we signal it
 
-    Manipulator.belt.home();    // phase 1: TIMED toward LEFT/HOME for BELT_RESET_MS
+    Manipulator.belt.home();    // phase 1: reset() TIMED toward LEFT/HOME for BELT_RESET_MS
     ASSERT_FALSE(Manipulator.belt.isDone());
 
     // Advance past the stall duration; the completing update() brakes + zeroes and enters
-    // HOME_SETTLE (the MID rotate is deferred to give the lower MCU a clean tick gap).
+    // SETTLE (the MID move is deferred to give the lower MCU a clean tick gap).
     mockAdvanceMillis(Config::BELT_RESET_MS);
     Manipulator.belt.update();
 
@@ -332,8 +337,9 @@ static void test_TC8_belt_home_resets_settles_then_moves_to_mid()
     ASSERT_EQ(MiniR4.M1.rotateForCallCount, (uint32_t) 0);
     ASSERT_FALSE(Manipulator.belt.isDone());
 
-    // Advance past the settle dwell; update() now issues the MID move as a RELATIVE rotate of
-    // the MID station degree from the zeroed end.
+    // Advance past the settle dwell; update() now issues the MID move via toStation(MID) ->
+    // beltTo(midDeg). The encoder reads 0 (just zeroed), so beltTo's delta == midDeg and it
+    // emits rotateFor(+speed, midDeg) — observably identical to the prior relative rotate.
     mockAdvanceMillis(Config::BELT_HOME_SETTLE_MS);
     Manipulator.belt.update();
 
@@ -385,9 +391,12 @@ static void test_TC9_belt_position_watchdog_fires()
 // ===========================================================================
 // TC10 (AC7) — blocking verb drains until the actuator settles.
 //
-// With a tick callback registered, _drain spins: callback() + delay(2) each iteration.
-// delay(2) advances g_mockMillis, so the grabber's slew+settle timer eventually
-// elapses and the blocking grab() statement returns only once grabber.isDone().
+// With a tick callback registered, _drain spins: callback() + yield() each iteration.
+// yield() is a host no-op (it does NOT advance the mock clock — production relies on
+// real millis() advancing while the callback ticks the modules), so the callback itself
+// must model wall-clock passing. We register a callback that advances the mock clock by
+// 2 ms each spin, so the grabber's slew+settle timer eventually elapses and the blocking
+// grab() statement returns only once grabber.isDone().
 // ===========================================================================
 
 static void test_TC10_blocking_grab_drains_until_done()
@@ -396,9 +405,12 @@ static void test_TC10_blocking_grab_drains_until_done()
 
     resetWorld();
 
-    // Register an empty tick callback so _drain uses the callback path (its delay(2)
-    // advances the mock clock and the grabber timer elapses).
-    Manipulator.setTickCallback([]() {});
+    // Register a tick callback that advances the mock clock so _drain's callback path makes
+    // wall-clock progress. _drain now calls yield() (a host no-op) instead of delay(2), so
+    // unlike before the spin no longer advances g_mockMillis on its own — the callback must.
+    // This models production, where real millis() advances during the drain while the callback
+    // ticks every module.
+    Manipulator.setTickCallback([]() { mockAdvanceMillis(2); });
 
     // Blocking verb (no .async()) as a full statement — the temporary ManipAction's
     // destructor drains at end-of-statement.
@@ -460,17 +472,17 @@ static void test_TC12_reset_homes_all_servos_and_belt()
     ASSERT_EQ(rcFor(Config::SORTER.rcId).lastAngle, (uint16_t) Config::SORTER.homeDeg);
     ASSERT_EQ(rcFor(Config::DUMPER.rcId).lastAngle, (uint16_t) Config::DUMPER.homeDeg);
 
-    // belt.home() ran: the TIMED stall toward LEFT/HOME was kicked off (setSpeed issued,
-    // belt now in flight). Drive it through the full stall -> settle -> MID sequence.
+    // belt.home() ran: reset()'s TIMED stall toward LEFT/HOME was kicked off (setSpeed issued,
+    // belt now in flight). Drive it through the full reset -> settle -> MID sequence.
     ASSERT_FALSE(Manipulator.belt.isDone());
     MiniR4.M1.mockRotateEnded = false;    // hold the chained MID move in flight
     mockAdvanceMillis(Config::BELT_RESET_MS);
-    Manipulator.belt.update();            // stall done -> reset, enter HOME_SETTLE
+    Manipulator.belt.update();            // stall done -> reset(), enter SETTLE
     // The completing stall re-zeroed the encoder via resetCounter().
     ASSERT_EQ(MiniR4.M1.resetCounterCallCount, beltResetsBefore + 1);
     ASSERT_FALSE(Manipulator.belt.isDone());    // settling
     mockAdvanceMillis(Config::BELT_HOME_SETTLE_MS);
-    Manipulator.belt.update();            // settle done -> MID rotate issued (still in flight)
+    Manipulator.belt.update();            // settle done -> toStation(MID) issued (still in flight)
     ASSERT_FALSE(Manipulator.belt.isDone());
     // Finish the chained MID move.
     MiniR4.M1.mockRotateEnded = true;
@@ -492,7 +504,7 @@ static void test_TC12_reset_homes_all_servos_and_belt()
 //      (setSpeed/rotateFor/setBrake/resetCounter/setPPR_RPM/setReverse/ChkRotateEnd)
 //      returns true unconditionally, and there is no hook to hold the home incomplete.
 //   2. home() is a three-phase sequence: a TIMED stall (completes at >= BELT_RESET_MS =
-//      2000 ms), a HOME_SETTLE dwell (BELT_HOME_SETTLE_MS), then a MID POSITION move. The
+//      2000 ms), a SETTLE dwell (BELT_HOME_SETTLE_MS), then a MID POSITION move. The
 //      mock holds ChkRotateEnd false, so the MID phase completes via its own POSITION
 //      watchdog (BELT_MOVE_TIMEOUT_MS = 4000 ms after it starts). begin()'s poll loop
 //      advances the clock with delay(2) each spin, bounded by `millis()-start <

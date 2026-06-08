@@ -77,6 +77,26 @@ public:
     void update();
 
     /**
+     * @brief Register the cooperative-tick callback driven during blocking task waits.
+     *
+     * Some task bodies (``servoTest``, ``home``) block until an actuator settles. While
+     * they spin they must keep every module ticking — otherwise EventTrace stops
+     * rendering, the belt's own ``update()`` stops advancing, etc. — so the wait invokes
+     * this callback each iteration (mirroring ``ManipulatorClass::setTickCallback`` and
+     * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes ``cooperativeTick``
+     * here in ``setup()`` after every module's ``begin()`` has run.
+     *
+     * @param cb Cooperative-tick function pointer, or ``nullptr`` to clear it (the
+     *           blocking waits then degrade to ticking only ``Manipulator.update()`` and
+     *           warn once).
+     *
+     * @note ``cooperativeTick()`` calls ``Mission.update()``, which short-circuits while
+     *       ``Tasks.inTask()`` is true, so driving it from inside a task wait does NOT
+     *       re-enter the task.
+     */
+    void setTickCallback(void (*cb)());
+
+    /**
      * @brief Look up ``name`` in the static registry and dispatch its body.
      *
      * @param name  Null-terminated task name. Resolved by ``strcmp`` linear
@@ -215,18 +235,27 @@ private:
     bool home(const TaskArgs& args);
 
     /**
-     * @brief Drive the chassis a short fixed distance — a smoke test for the drive path.
+     * @brief Line-follow a short fixed distance — a smoke test for the line + drive path.
      *
-     * Bring-up helper: issues a single `Drive.driveDist(10).setPower(70)` so the rover
-     * moves under its own control loop end-to-end. The arg is ignored.
+     * Bring-up helper: enables the LineFollower with a hard-coded 50 cm distance target and
+     * blocks (driving the cooperative tick) until the distance gate trips. The arg is
+     * ignored — the 50 cm target is fixed in the body, not taken from `args`.
      *
      * @param args Ignored.
-     * @return Always `true`.
+     * @return `true` once the 50 cm gate trips; `false` if the follow times out or Drive was
+     *         not idle when the task ran.
      */
     bool testChassis(const TaskArgs& args);
 
     bool _inTask  = false;
     bool _aborted = false;
+
+    /**
+     * @brief Cooperative-tick callback driven during blocking task waits (``servoTest`` /
+     *        ``home``). ``nullptr`` until the sketch registers ``cooperativeTick`` via
+     *        ``setTickCallback`` in ``setup()``.
+     */
+    void (*_tickCallback)() = nullptr;
 };
 
 extern TasksClass Tasks;

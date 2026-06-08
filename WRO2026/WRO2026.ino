@@ -193,6 +193,7 @@ void setup()
     PathTracker.setTickCallback(cooperativeTick);
     LineFollower.setTickCallback(cooperativeTick);
     Manipulator.setTickCallback(cooperativeTick);
+    Tasks.setTickCallback(cooperativeTick);
 
     _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && traceOk);
 

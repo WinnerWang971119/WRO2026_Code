@@ -122,6 +122,15 @@ namespace Config
     constexpr uint32_t BELT_HOME_TIMEOUT_MS =
         BELT_RESET_MS + BELT_HOME_SETTLE_MS + BELT_MOVE_TIMEOUT_MS + 1000;  // stall + settle + MID move + margin
 
+    /**
+     * @brief Backstop ceiling for a servo-only blocking drain (no belt in the mask).
+     *
+     * Sized to comfortably exceed the largest single servo sweep
+     * (max msPerDeg * 180 + settleMs ≈ 1.1 s). Belt-masked drains use the longer
+     * BELT_HOME_TIMEOUT_MS instead, since the belt's home() chains stall+reset+MID.
+     */
+    constexpr uint32_t MANIP_SERVO_DRAIN_TIMEOUT_MS = 2000;
+
     /** @brief How a belt station is reached: by absolute encoder target or by a timed run. */
     enum class BeltMode : uint8_t { POSITION, TIMED };
 
