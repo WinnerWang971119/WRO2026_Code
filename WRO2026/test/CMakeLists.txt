@@ -35,9 +35,15 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 enable_testing()
 
 # Absolute paths to source roots so the harness works regardless of build dir.
-set(SKETCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
-set(TEST_DIR   ${CMAKE_CURRENT_SOURCE_DIR})
-set(MOCKS_DIR  ${TEST_DIR}/mocks)
+set(SKETCH_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/..)
+set(TEST_DIR       ${CMAKE_CURRENT_SOURCE_DIR})
+set(MOCKS_DIR      ${TEST_DIR}/mocks)
+# Task-body facade mocks (PathTracker / LineFollower / Manipulator) live in their
+# OWN dir, NOT `mocks/`. `mocks/` is on every target's include path, so a mock
+# there would shadow the REAL header for the sibling tests that compile the real
+# `LineFollower.cpp` / `Manipulator.cpp`. Keeping these out of `mocks/` and
+# force-including them only into `test_tasks_dispatch` avoids that collision.
+set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
 
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
@@ -133,6 +139,47 @@ function(add_mock_force_includes target)
             "SHELL:-include ${MOCKS_DIR}/Drive.h"
             "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
             "SHELL:-include ${MOCKS_DIR}/Intersection.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
+# Force-include the FULL task-body facade mock surface — the same trick as
+# `add_mock_force_includes`, extended with the `PathTracker` / `LineFollower` /
+# `Manipulator` mocks that a `Tasks.cpp` task body drives.
+#
+# Used ONLY by `test_tasks_dispatch` (NOT the LineFollower / PathTracker mirror
+# tests, which compile the REAL `LineFollower.cpp` and must keep the real
+# `LineFollower.h` declarations — force-including the mock there would clash with
+# the production class definition the controller TU compiles against).
+#
+# Each mock's include guard matches the production header exactly (`PATHTRACKER_H`,
+# `LINEFOLLOWER_H`, `MANIPULATOR_H`, ...), so a task body's quote-include of the
+# real header (source-relative to `Tasks.cpp` in `${SKETCH_DIR}`) resolves to the
+# already-force-included mock instead. The `PathTracker` / `LineFollower` /
+# `Manipulator` globals are `inline`-defined in those mock headers, so no extra
+# TU is linked — see each mock's global comment.
+# -----------------------------------------------------------------------------------------
+function(add_task_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${MOCKS_DIR}/Drive.h"
+            "/FI${MOCKS_DIR}/WROLineArray.h"
+            "/FI${MOCKS_DIR}/Intersection.h"
+            "/FI${TASK_MOCKS_DIR}/PathTracker.h"
+            "/FI${TASK_MOCKS_DIR}/LineFollower.h"
+            "/FI${TASK_MOCKS_DIR}/Manipulator.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${MOCKS_DIR}/WROLineArray.h"
+            "SHELL:-include ${MOCKS_DIR}/Intersection.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/PathTracker.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/LineFollower.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/Manipulator.h"
         )
     endif()
 endfunction()
@@ -283,15 +330,18 @@ add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 # Test executable #4 — Tasks framework dispatch, real-linked (#46 Phase 1).
 #
 # Links the REAL `Tasks.cpp` and asserts its registry/dispatch behaviour through
-# the capturing `MockSerial` in `mocks/Arduino.h`. `Tasks.cpp`'s bodies call
-# only `Serial.print(...)` (no Drive / PathTracker / EventTrace), so the existing
-# mock surface plus the `print(uint8_t)` + capture buffer (T2) is enough to link.
+# the capturing `MockSerial` in `mocks/Arduino.h`. Task bodies drive the facade
+# singletons directly (e.g. `testOne` calls `PathTracker.goTo(...)`), so this
+# target force-includes the FULL task-body facade mock surface via
+# `add_task_mock_force_includes` — the `PathTracker` / `Drive` / `LineFollower` /
+# `Manipulator` mocks (with `inline` globals) so Tasks.cpp links without dragging
+# in the real `PathTracker.cpp` / `Drive.cpp` / Localization / routes chain.
 #
 # Tasks-owned behaviour only: registry lookup, `runTask` dispatch + capture, the
 # unknown-name path, the `debugYield` yield path, and the `inTask()` RAII
 # invariant. Mission-owned behaviour (queue FSM, abort ordering) stays out of
-# scope — that needs `Mission.cpp`, which drags in PathTracker / Drive /
-# EventTrace / the `MiniR4` global and is #46 Phase 2.
+# scope — that needs `Mission.cpp`, which drags in EventTrace / the `MiniR4`
+# global and is #46 Phase 2.
 # =========================================================================================
 add_executable(test_tasks_dispatch
     ${TEST_DIR}/test_tasks_dispatch.cpp
@@ -299,7 +349,7 @@ add_executable(test_tasks_dispatch
     ${MOCK_SOURCES}
 )
 target_include_directories(test_tasks_dispatch PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_tasks_dispatch)
+add_task_mock_force_includes(test_tasks_dispatch)
 add_test(NAME test_tasks_dispatch COMMAND test_tasks_dispatch)
 
 # =========================================================================================
