@@ -160,7 +160,9 @@ static void test_TC1_grabber_setangle_clamps_to_180()
 // Slew+settle budget for grabber home -> 180, computed from Config (drift-proof).
 static uint32_t grabberSetAngle180Est()
 {
-    return (uint32_t) ((180.0f - (float) Config::GRABBER.homeDeg) * Config::GRABBER.msPerDeg)
+    // Mirror production ManipServo::setAngle() exactly: fabs() of the delta, so a misconfigured
+    // homeDeg > 180 can't drive the cast negative and underflow into a huge uint32_t.
+    return (uint32_t) (fabs(180.0f - (float) Config::GRABBER.homeDeg) * Config::GRABBER.msPerDeg)
            + Config::GRABBER.settleMs;
 }
 
