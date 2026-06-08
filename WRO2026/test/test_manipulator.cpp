@@ -118,7 +118,14 @@ static MockRC& rcFor(uint8_t rcId)
     case 2:  return MiniR4.RC2;
     case 3:  return MiniR4.RC3;
     case 4:  return MiniR4.RC4;
-    default: return MiniR4.RC1;    // unreachable for a valid 1..4 config
+    default:
+        // A configured rcId outside 1..4 is a wiring/config bug. Fail loudly instead of
+        // silently aliasing to RC1, which would assert against the wrong channel and let
+        // the bad Config::<servo>.rcId slip through green.
+        std::fprintf(stderr,
+                     "FATAL: rcFor: invalid rcId %u (Config::<servo>.rcId must be 1..4)\n",
+                     (unsigned) rcId);
+        std::abort();
     }
 }
 
