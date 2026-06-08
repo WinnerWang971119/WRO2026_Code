@@ -985,16 +985,24 @@ namespace Config
      * @brief Bench-test switch: re-fire the mission with a fresh BTN_UP press
      *        instead of one run per power cycle.
      *
-     * Production default is ``false`` — BTN_UP arms the hand-authored mission
-     * exactly once (see WRO2026.ino), so a stray press cannot restart the
-     * route. Set ``true`` on the bench to re-run the same mission repeatedly
-     * without power-cycling: once the mission returns to idle (a clean finish
-     * or a cleared fault, never mid-run), a fresh BTN_UP rising edge re-arms
-     * and re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so
-     * the BTN_DOWN calibration menu stays suppressed after the first arm
-     * exactly as in production. Leave ``false`` for competition.
+     * Production / competition default is ``false`` — BTN_UP arms the hand-authored
+     * mission exactly once (see WRO2026.ino), so a stray press cannot restart the
+     * route. When ``true`` (bench), once the mission returns to idle (a clean finish
+     * or a cleared fault, never mid-run) a fresh BTN_UP rising edge re-arms and
+     * re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so the
+     * BTN_DOWN calibration menu stays suppressed after the first arm exactly as in
+     * production.
+     *
+     * @note Override-hook: guarded by ``#ifndef MISSION_ALLOW_REARM_DEFAULT`` so the
+     *       SHIPPED source default is the competition-safe ``false`` — merging this
+     *       branch can never silently ship the bench value. Enable on the bench with
+     *       ``-DMISSION_ALLOW_REARM_DEFAULT=true`` (arduino-cli:
+     *       ``--build-property build.extra_flags=-DMISSION_ALLOW_REARM_DEFAULT=true``).
      */
-    constexpr bool MISSION_ALLOW_REARM = true;
+#ifndef MISSION_ALLOW_REARM_DEFAULT
+#define MISSION_ALLOW_REARM_DEFAULT false
+#endif
+    constexpr bool MISSION_ALLOW_REARM = MISSION_ALLOW_REARM_DEFAULT;
 
     // ---------------------------------------------------------------------------------------
     // Tasks framework
