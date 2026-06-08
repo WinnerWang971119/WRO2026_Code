@@ -1,4 +1,4 @@
-# ADR-031: CTPS ingests a derived mission trace recorded from the real C++
+# ADR-033: CTPS ingests a derived mission trace recorded from the real C++
 
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #33 CTPS)

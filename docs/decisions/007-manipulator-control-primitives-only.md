@@ -1,6 +1,6 @@
 # ADR-007: Manipulator exposes control primitives only — no high-level action verbs until the mechanism is built
 
-**Status:** Pending implementation (Phase 3 — currently stubbed)
+**Status:** Superseded by ADR-032
 **Date decided:** 2026-05 (Phase 0)
 
 ## Rule
@@ -23,3 +23,4 @@ Manipulator mechanism v0 lands (Phase 3 entry). At that point the primitive para
 ## See also
 
 - [Roadmap.md](../../Roadmap.md) — Phase 3 manipulator
+- [ADR-032](./032-manipulator-api-pattern.md) — superseding decision: verb-level builder API now that the CAD is done

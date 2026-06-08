@@ -12,14 +12,17 @@
  *
  *   - basic fixed-width integer types (via `<stdint.h>`)
  *   - `PI`, `abs()` macros
- *   - `delay`, `millis`, `yield` (no-op / monotonic counter)
+ *   - `delay` (advances the mock clock), `millis`, `yield`
  *   - `F()` flash-string macro (host: returns its argument unchanged)
  *   - a `Serial` singleton whose `print`/`println` overloads capture all
  *     written text into an inspectable buffer (`Serial.captured()`)
  *
  * The mock `millis()` is incremented by a test-controllable global so the
  * `waitUntilDistanceReached` / `waitUntilIntersection` time-bounded paths can
- * be exercised deterministically.
+ * be exercised deterministically. `delay(ms)` additionally ADVANCES that clock
+ * by `ms`, so production blocking loops that poll `millis()` against a wall-clock
+ * timeout while sleeping with plain `delay()` (e.g. the manipulator belt-homing
+ * loop) terminate on host instead of spinning forever.
  */
 
 #ifndef WRO_TEST_MOCK_ARDUINO_H
@@ -65,9 +68,15 @@ inline uint32_t millis()
     return g_mockMillis;
 }
 
-inline void delay(uint32_t /*ms*/)
+inline void delay(uint32_t ms)
 {
-    // No-op on host. Tests don't depend on wall-clock delay.
+    // Advance the mock clock so production blocking loops that sleep with a plain
+    // `delay()` and bound themselves on `millis()` (e.g. the manipulator belt-home
+    // timed run) make forward progress and terminate on host. The advance is
+    // monotonic, matching real Arduino behavior where wall-clock time elapses
+    // across a `delay()`. Tests that need an exact clock can still pin it with
+    // `mockResetMillis()` / `mockAdvanceMillis()`.
+    g_mockMillis += ms;
 }
 
 inline void yield()
@@ -101,6 +110,8 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 // `LineFollower.cpp`. It now also CAPTURES everything written so host tests can
 // assert on production Serial output (e.g. `Tasks.cpp` emits
 // `"[Tasks] demoEcho a=7 b=42"`; `Mission.cpp` emits `"[Mission] start; steps=3"`).
+// `Manipulator.cpp` only emits `println(const char*)` warning strings, so its
+// output is captured by the `const char*` overload — no numeric print needed.
 //
 // Capture rules:
 //   - Every `print(...)` overload appends its text to `_captured`.
@@ -116,9 +127,10 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 // (`TaskArgs::u8[]`, `Mission::_count`, `PathTracker::FaultInfo::{fromNode,
 // destNode}`); the wider `int / unsigned int / long / unsigned long` siblings
 // and the `float` overload are retained for symmetry with the pre-existing
-// `println` set. No `char` overload is added because no caller prints a bare
-// `char` — adding one would make `print(uint8_t)` ambiguous since
-// `uint8_t == unsigned char`.
+// `println` set. A `uint16_t` argument promotes to `int` and binds the `int`
+// overload, so no distinct `uint16_t` overload is needed. No `char` overload is
+// added because no caller prints a bare `char` — adding one would make
+// `print(uint8_t)` ambiguous since `uint8_t == unsigned char`.
 // ---------------------------------------------------------------------------
 
 class MockSerial
