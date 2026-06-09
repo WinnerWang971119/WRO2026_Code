@@ -145,6 +145,369 @@ def _authored_out_neighbors(field_data, node: str) -> set:
     return neighbors
 
 
+# -- pivot regime classification (issue #44, T2) -----------------------------
+
+# Over-travel budget on a LINE / sensor-terminated INCOMING side. A LINE edge
+# re-anchors the chassis on the junction line, so the incoming pivot
+# correction is realised as a REDUCTION of the post-detect LINE_OVERSHOOT
+# advance -- valid only while the over-travel ``delta`` it cancels stays
+# within that advance. The advance is the line-sensor-to-axle offset, which
+# differs front (``LINE_SENSOR_AXLE_OFFSET_CM = 12.02``) vs rear
+# (``LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68``). Which board leads a hop is a
+# RUNTIME direction decision the offline validator cannot see, so the only
+# value safe to guarantee is the MIN of the two: a ``delta`` that fits the
+# rear budget fits the front budget too. Mirrors Config.h; not single-sourced
+# because the offline pipeline never reads the firmware overshoot constants
+# (only ``TRACK_MM``, via ``parse_track_cm_from_config``).
+_LINE_OVERSHOOT_BUDGET_CM = 7.68
+
+# Above this absolute turn angle the over-travel formula
+# ``delta = (track/2) * tan(|theta| / 2)`` blows up: ``tan`` diverges toward a
+# full one-wheel reversal at 180 deg. Reject at/above this threshold rather
+# than emit an unboundedly large (garbage) trim. At 179 deg the multiplier is
+# already ~115x the half-track, far beyond any realisable maneuver.
+_PIVOT_MAX_TURN_DEG = 179.0
+
+# Below this absolute turn angle there is effectively no turn, so tagging the
+# edge as a pivot is meaningless (and ``delta`` rounds to ~0). A "pivot" that
+# does not turn is an authoring mistake -- the author meant a different edge
+# or forgot to set the geometry -- so it fails rather than silently no-ops.
+_PIVOT_MIN_TURN_DEG = 1.0
+
+
+def _normalized_turn_deg(incoming_heading: float, outgoing_heading: float) -> float:
+    """Return the signed turn angle at a pivot landing, normalized to (-180, 180].
+
+    The turn the chassis executes at the landing node is the change of
+    travel heading from the INCOMING edge (``u -> v``) to the OUTGOING edge
+    (``v -> w``). Both headings follow the graph_builder convention (degrees
+    in ``[0, 360)``, CCW from +x). The delta is wrapped into ``(-180, 180]``
+    via the standard ``((d + 180) % 360) - 180`` trick so a turn measures
+    the same regardless of how the two absolute headings straddle 0/360.
+    This matches the turn-angle derivation in
+    :func:`tools.path_planner.planner.apply_pivot_compensations`.
+
+    :param incoming_heading: heading of the pivot-tagged edge ``u -> v``.
+    :param outgoing_heading: heading of the single forward edge ``v -> w``.
+    :return: signed turn magnitude in ``(-180, 180]`` degrees.
+    """
+    return ((outgoing_heading - incoming_heading + 180.0) % 360.0) - 180.0
+
+
+def _resolve_authored_directed_edge(field_data, a: str, b: str):
+    """Resolve the authored directed edge ``a -> b`` to ``(type, distance_cm, heading_deg, primitive_mode)``.
+
+    Mirrors :func:`tools.path_planner.graph_builder._emit_directed_pair`'s
+    emission so the validator measures the same geometry -- and the same
+    regime-bearing ``primitive_mode`` -- the planner will later see. The
+    resolution order matches ``build_graph``'s edge-source precedence --
+    LINE_SEGMENTS, then BLIND_EDGES, then EDGES -- where a later source's
+    directed edge overwrites an earlier one's attributes (networkx
+    ``add_edge`` replaces). An EDGES entry therefore wins:
+
+    * a forward leg ``{u: a, v: b}`` contributes the entry's explicit
+      ``type`` / ``distance_cm`` / ``heading_deg`` verbatim;
+    * a reverse leg ``{u: b, v: a}`` contributes the entry's ``type`` and
+      ``distance_cm`` with the heading reversed (``+180`` mod 360), exactly
+      as ``_emit_directed_pair`` emits the back-edge.
+
+    ``primitive_mode`` is a *bidirectional* edge attribute in graph_builder
+    (:data:`tools.path_planner.graph_builder._BIDIRECTIONAL_OPTIONAL_KEYS`):
+    it describes the segment itself, not the entry direction, so it is
+    copied onto BOTH the forward and reverse directed edges. This resolver
+    surfaces it for either leg so the outgoing-side regime classification
+    can see a STOP_AT_LINE override authored on the winning edge in either
+    sense. It is absent (``None``) for plain LINE_SEGMENTS / BLIND_EDGES
+    geometry and for any EDGES entry that does not set it.
+
+    Falling back to LINE_SEGMENTS / BLIND_EDGES, an undirected pair
+    ``{a, b}`` yields the edge type (LINE / BLIND) with distance and heading
+    computed from the node coordinates (Euclidean length, ``atan2`` heading
+    of ``a -> b``) and no ``primitive_mode``.
+
+    :param field_data: the field-data module (or namespace) exposing
+        ``NODES``, ``LINE_SEGMENTS``, ``BLIND_EDGES``, and optionally
+        ``EDGES``.
+    :param a: source node of the directed edge.
+    :param b: destination node of the directed edge.
+    :return: ``(edge_type, distance_cm, heading_deg, primitive_mode)`` for
+        ``a -> b`` (``primitive_mode`` is ``None`` when unset), or ``None``
+        if no authored edge connects the ordered pair.
+    """
+    nodes = getattr(field_data, "NODES", {})
+
+    edge_type = None
+    distance_cm = None
+    heading_deg = None
+    primitive_mode = None
+
+    # LINE_SEGMENTS / BLIND_EDGES are undirected; compute directed geometry
+    # for a -> b from node coordinates. EDGE_LINE / EDGE_BLIND string tags are
+    # taken from graph_builder so the regime matrix compares like for like.
+    from tools.path_planner.graph_builder import (  # local: avoid circular import
+        EDGE_BLIND,
+        EDGE_LINE,
+    )
+
+    for seg_a, seg_b in getattr(field_data, "LINE_SEGMENTS", ()):
+        if _segment_key(seg_a, seg_b) == _segment_key(a, b):
+            pa = nodes[a]
+            pb = nodes[b]
+            edge_type = EDGE_LINE
+            distance_cm = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            heading_deg = math.degrees(math.atan2(pb[1] - pa[1], pb[0] - pa[0])) % 360.0
+            break
+
+    for seg_a, seg_b in getattr(field_data, "BLIND_EDGES", ()):
+        if _segment_key(seg_a, seg_b) == _segment_key(a, b):
+            pa = nodes[a]
+            pb = nodes[b]
+            edge_type = EDGE_BLIND
+            distance_cm = math.hypot(pb[0] - pa[0], pb[1] - pa[1])
+            heading_deg = math.degrees(math.atan2(pb[1] - pa[1], pb[0] - pa[0])) % 360.0
+            break
+
+    # EDGES wins (last writer in build_graph). Scan in order so a later entry
+    # over the same ordered pair takes precedence, matching networkx replace.
+    # ``primitive_mode`` is read with the SAME source-precedence/last-writer
+    # semantics as type/distance/heading, on either leg -- it is a symmetric
+    # (bidirectional) attribute, so a STOP_AT_LINE authored on the winning
+    # edge is surfaced regardless of which sense ``a -> b`` traverses it.
+    for entry in getattr(field_data, "EDGES", ()) or ():
+        if not isinstance(entry, dict):
+            continue  # malformed entry; the per-entry shape check reports it.
+        eu = entry.get("u")
+        ev = entry.get("v")
+        if "type" not in entry or "distance_cm" not in entry or "heading_deg" not in entry:
+            continue  # malformed entry; the per-entry shape check reports it.
+        if eu == a and ev == b:
+            edge_type = entry["type"]
+            distance_cm = float(entry["distance_cm"])
+            heading_deg = float(entry["heading_deg"])
+            primitive_mode = entry.get("primitive_mode")
+        elif eu == b and ev == a:
+            edge_type = entry["type"]
+            distance_cm = float(entry["distance_cm"])
+            heading_deg = (float(entry["heading_deg"]) + 180.0) % 360.0
+            primitive_mode = entry.get("primitive_mode")
+
+    if edge_type is None:
+        return None
+    return edge_type, distance_cm, heading_deg, primitive_mode
+
+
+def _validate_pivot_regimes(field_data) -> None:
+    """Reject pivot edges whose two-sided over-travel geometry is unrealisable.
+
+    Runs after the per-entry EDGES shape check and finding #36 (the
+    single-forward-out-edge precondition), so by the time this pass touches a
+    pivot edge ``u -> v`` it can rely on ``v`` having exactly one forward
+    continuation ``v -> w``. For every pivot-tagged edge (``entry["pivot"]``
+    is :attr:`Pivot.LEFT` / :attr:`Pivot.RIGHT`) this:
+
+    1. derives the turn angle ``theta`` at ``v`` from the two edges' headings
+       -- ``theta = normalize(heading(v->w) - heading(u->v))`` into
+       ``(-180, 180]`` (see :func:`_normalized_turn_deg`);
+    2. classifies each side's edge type into a *regime* -- SENSOR-terminated
+       (LINE / a BLIND STOP_AT_LINE override; self-corrects on the physical
+       line) vs DISTANCE-terminated (plain BLIND / PROJECTION; dead-reckoned,
+       where the over-travel trim actually bites);
+    3. computes the single-wheel over-travel
+       ``delta = (track/2) * tan(|theta| / 2)`` (issue #44 closed form,
+       :func:`tools.path_planner.planner.compute_pivot_compensation`) using
+       the chassis track parsed from the firmware header; and
+    4. fails fast with a precise :class:`FieldDataError` on any configuration
+       the geometry cannot realise.
+
+    Fail-fast conditions (each a distinct, precisely-worded error):
+
+    * **Degenerate turn angle.** ``|theta|`` at/above
+      :data:`_PIVOT_MAX_TURN_DEG` (a near-full one-wheel reversal, where
+      ``tan`` diverges) or below :data:`_PIVOT_MIN_TURN_DEG` (no turn at all,
+      so the pivot tag is meaningless).
+    * **Trim exceeds a dead-reckoned drive.** On a DISTANCE-terminated side
+      the trim is subtracted from that side's encoder drive, so ``delta``
+      must stay strictly below the edge length -- otherwise the chassis would
+      drive a negative distance. Checked on the incoming edge when ``u -> v``
+      is dead-reckoned and on the outgoing edge when ``v -> w`` is.
+    * **Trim exceeds the line overshoot budget.** When the INCOMING edge is
+      LINE / sensor-terminated, the incoming correction is a reduction of the
+      post-detect LINE_OVERSHOOT advance, valid only while
+      ``delta <= `` :data:`_LINE_OVERSHOOT_BUDGET_CM` (the MIN of the front
+      and rear sensor-to-axle offsets, since edge direction is a runtime
+      choice the offline validator cannot see).
+    * **Unsupported regime combo.** Either side's edge type fails to classify
+      as sensor- or distance-terminated (an edge type outside the supported
+      regime matrix), so the geometry is not modelled and the pivot is
+      rejected rather than silently mis-compensated.
+
+    The supported incoming x outgoing matrix (LINE / STOP_AT_LINE = sensor;
+    BLIND-plain / PROJECTION = distance) is::
+
+        incoming \\ outgoing | sensor                 | distance
+        --------------------+------------------------+-----------------------
+        LINE (re-anchor)    | overshoot-reduce in     | overshoot-reduce in
+                            | out no-op               | + out trim
+        BLIND/PROJECTION    | approach trim in        | approach trim in
+                            | out no-op               | + out trim
+
+    The cross-pivot turn-magnitude refinement (is the upcoming turn worth a
+    pivot at all?) stays in :mod:`tools.path_planner.planner`; this pass owns
+    the fail-fast on geometry the chassis cannot physically realise.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``EDGES[i]`` key path and a
+        one-line fix hint on the first unrealisable pivot.
+    """
+    edges = getattr(field_data, "EDGES", None)
+    if not edges:
+        return  # no authored edges -> no pivots to classify (inert on real field).
+
+    # Deferred imports to avoid a circular import with graph_builder (which
+    # imports `validate` from this module). `parse_track_cm_from_config` is the
+    # single source of truth for the chassis track (issue #44): import it here
+    # rather than re-reading Config.h or hard-coding a literal.
+    from tools.path_planner.graph_builder import (
+        EDGE_BLIND,
+        EDGE_LINE,
+        EDGE_PROJECTION,
+        Pivot,
+    )
+    from tools.path_planner.pipeline_config import BlindMode
+    from tools.path_planner.planner import parse_track_cm_from_config
+
+    track_cm = parse_track_cm_from_config()
+
+    # Regime classifier. SENSOR-terminated edges re-anchor on the physical
+    # junction line (LINE always; a BLIND edge only when its per-edge
+    # primitive_mode override is STOP_AT_LINE). DISTANCE-terminated edges are
+    # dead-reckoned: plain BLIND and every PROJECTION. Returns "sensor",
+    # "distance", or None (unclassifiable -> unsupported combo).
+    def _regime(edge_type, primitive_mode) -> str | None:
+        if edge_type == EDGE_LINE:
+            return "sensor"
+        if edge_type == EDGE_PROJECTION:
+            return "distance"
+        if edge_type == EDGE_BLIND:
+            if isinstance(primitive_mode, BlindMode) and primitive_mode == BlindMode.STOP_AT_LINE:
+                return "sensor"
+            return "distance"
+        return None
+
+    for i, entry in enumerate(edges):
+        if not isinstance(entry, dict):
+            continue  # malformed entry; the per-entry shape check already reported it.
+        pivot = entry.get("pivot")
+        if not isinstance(pivot, Pivot) or pivot not in (Pivot.LEFT, Pivot.RIGHT):
+            continue  # only LEFT / RIGHT pivots carry over-travel geometry.
+
+        u = entry["u"]
+        v = entry["v"]
+
+        # Incoming edge = the pivot-tagged edge itself; its geometry is the
+        # entry's explicit type / distance / heading.
+        in_type = entry["type"]
+        in_distance = float(entry["distance_cm"])
+        in_heading = float(entry["heading_deg"])
+        in_primitive = entry.get("primitive_mode")
+
+        # Outgoing edge = the single forward out-edge from v (excluding the
+        # back-edge to u). Finding #36 already guaranteed exactly one such w,
+        # so this set has exactly one member by the time we get here.
+        forward_out = _authored_out_neighbors(field_data, v) - {u}
+        # Defensive: finding #36 guarantees |forward_out| == 1, but if a future
+        # reordering ever ran this pass first, do not crash on a bad set -- let
+        # finding #36 own the error message for that shape.
+        if len(forward_out) != 1:
+            continue
+        w = next(iter(forward_out))
+
+        resolved_out = _resolve_authored_directed_edge(field_data, v, w)
+        if resolved_out is None:
+            # The forward neighbor exists per _authored_out_neighbors but no
+            # authored directed edge resolves v -> w. This should not happen
+            # for a well-formed graph; skip rather than crash so a genuinely
+            # malformed adjacency surfaces through the existing shape checks.
+            continue
+        out_type, out_distance, out_heading, out_primitive = resolved_out
+
+        # 1. Degenerate turn angle -----------------------------------------
+        theta = _normalized_turn_deg(in_heading, out_heading)
+        abs_theta = abs(theta)
+        if abs_theta >= _PIVOT_MAX_TURN_DEG or abs_theta < _PIVOT_MIN_TURN_DEG:
+            raise FieldDataError(
+                f"EDGES[{i}] pivot on edge ('{u}','{v}') has a degenerate turn "
+                f"angle theta={theta:.2f} deg into continuation '{w}' (must be "
+                f"in [{_PIVOT_MIN_TURN_DEG}, {_PIVOT_MAX_TURN_DEG}) deg). A "
+                f"near-180 deg turn makes the single-wheel over-travel "
+                f"(track/2)*tan(theta/2) diverge, and a ~0 deg turn is no pivot "
+                f"at all -- fix the headings of ('{u}','{v}') / ('{v}','{w}') "
+                f"or drop the pivot tag."
+            )
+
+        # 4. Unsupported incoming x outgoing combo -------------------------
+        # Classify both sides symmetrically: a STOP_AT_LINE override makes a
+        # BLIND edge sensor-terminated on EITHER side. The outgoing edge's
+        # primitive_mode IS in scope (AC7) -- a STOP_AT_LINE continuation
+        # self-corrects on the line and must take no outgoing trim, so it must
+        # classify "sensor" and skip the delta >= out_distance check below.
+        # _resolve_authored_directed_edge surfaces that override (it is a
+        # bidirectional attribute in graph_builder) with the same
+        # last-writer precedence it uses for type/distance/heading.
+        in_regime = _regime(in_type, in_primitive)
+        out_regime = _regime(out_type, out_primitive)
+        if in_regime is None or out_regime is None:
+            raise FieldDataError(
+                f"EDGES[{i}] pivot on edge ('{u}','{v}') has an unsupported "
+                f"regime combo: incoming type {in_type!r} x outgoing type "
+                f"{out_type!r} (continuation '{w}'). The two-sided pivot "
+                f"compensation only models SENSOR-terminated (LINE / BLIND "
+                f"STOP_AT_LINE) and DISTANCE-terminated (BLIND / PROJECTION) "
+                f"edges -- reclassify the offending edge or drop the pivot tag."
+            )
+
+        delta = (track_cm / 2.0) * math.tan(math.radians(abs_theta / 2.0))
+
+        # 2. delta >= edge length on a DISTANCE-terminated side ------------
+        # The trim is subtracted from a dead-reckoned drive, so it cannot
+        # reach or exceed that drive's length (the chassis cannot travel a
+        # non-positive distance). Check incoming and outgoing independently.
+        if in_regime == "distance" and delta >= in_distance:
+            raise FieldDataError(
+                f"EDGES[{i}] pivot on edge ('{u}','{v}') over-travels "
+                f"delta={delta:.3f} cm, which is >= the INCOMING dead-reckoned "
+                f"edge length {in_distance:.3f} cm (type {in_type!r}). The "
+                f"approach trim cannot meet or exceed the drive it shortens -- "
+                f"lengthen ('{u}','{v}'), soften the turn, or drop the pivot tag."
+            )
+        if out_regime == "distance" and delta >= out_distance:
+            raise FieldDataError(
+                f"EDGES[{i}] pivot on edge ('{u}','{v}') over-travels "
+                f"delta={delta:.3f} cm into continuation '{w}', which is >= the "
+                f"OUTGOING dead-reckoned edge length {out_distance:.3f} cm "
+                f"(type {out_type!r}). The out trim cannot meet or exceed the "
+                f"drive it shortens -- lengthen ('{v}','{w}'), soften the turn, "
+                f"or drop the pivot tag."
+            )
+
+        # 3. delta > line-incoming overshoot budget ------------------------
+        # A LINE / sensor-terminated INCOMING edge realises its correction as
+        # a reduction of the post-detect LINE_OVERSHOOT advance, valid only
+        # while delta stays within the (rear) sensor-to-axle budget.
+        if in_regime == "sensor" and delta > _LINE_OVERSHOOT_BUDGET_CM:
+            raise FieldDataError(
+                f"EDGES[{i}] pivot on edge ('{u}','{v}') over-travels "
+                f"delta={delta:.3f} cm, which exceeds the LINE overshoot budget "
+                f"{_LINE_OVERSHOOT_BUDGET_CM:.2f} cm (min of front 12.02 / rear "
+                f"7.68 sensor-to-axle offset; edge direction is a runtime "
+                f"choice). A sensor-terminated incoming edge can only absorb a "
+                f"trim up to its overshoot advance -- soften the turn or drop "
+                f"the pivot tag on ('{u}','{v}')."
+            )
+
+
 def _validate_edge_list(
     edges: Iterable,
     nodes: dict,
@@ -453,6 +816,12 @@ def _validate_edges_field(field_data) -> None:
                         f"unambiguous, or drop the pivot tag on edge "
                         f"('{u}', '{v}')."
                     )
+
+    # Two-sided pivot over-travel geometry check (issue #44, T2). Runs after
+    # the full per-entry loop above so every entry has cleared its shape check
+    # and finding #36's single-forward-out-edge precondition first -- the
+    # regime pass relies on that uniqueness to read the post-turn heading.
+    _validate_pivot_regimes(field_data)
 
 
 def validate(field_data) -> None:
