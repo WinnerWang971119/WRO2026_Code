@@ -20,6 +20,17 @@ Pipeline-mode extension (T7): emits mission-wide motion-mode defaults
 carries a ``DEFAULT = 0`` sentinel meaning "inherit
 ``PIPELINE_CONFIG.<category>``" at runtime dispatch.
 
+Pivot-compensation extension (issue #44): ``EdgeInfo`` carries a trailing
+``float pivot_trim_cm`` field. The planner's compensation pass writes the
+pivot over-travel δ onto the PIVOT-tagged edge as a ``pivot_trim_cm``
+attribute; every other edge defaults to ``0.0``. The emitter reads it
+straight off the edge in :func:`_edge_cell` (it is a raw float, not an
+enum-mode override) and appends it as the last positional value of each
+``EdgeInfo`` aggregate initialiser. A generated ``static_assert`` on
+``offsetof(EdgeInfo, pivot_trim_cm)`` pins the field's position so a future
+field reorder fails the build instead of silently binding the float to the
+wrong member.
+
 Determinism contract: byte-identical re-emit on identical inputs.
 
 * Node ordering: alphabetical by name. Index 0 is the alphabetically
@@ -92,6 +103,22 @@ _BLIND_MODE_DEFAULT      = "BlindMode::DEFAULT"
 _PROJECTION_MODE_DEFAULT = "ProjectionMode::DEFAULT"
 _TURN_MODE_DEFAULT       = "TurnMode::DEFAULT"
 _DIRECTION_MODE_DEFAULT  = "DirectionMode::DEFAULT"
+
+# Byte offset of the trailing ``pivot_trim_cm`` field inside the generated POD
+# ``EdgeInfo`` struct, used by the layout-drift ``static_assert`` emitted next
+# to the struct definition. Derived from the standard-layout member order:
+#
+#   EdgeType type            : uint8_t enum, align 1  -> offset 0  (1 byte)
+#   float    distance_cm     : align 4                -> offset 4  (+3 pad)
+#   float    heading_deg     : align 4                -> offset 8
+#   LineMode/.../DirectionMode (5x uint8_t enum)      -> offsets 12..16
+#   float    pivot_trim_cm   : align 4                -> offset 20 (+3 pad)
+#
+# This value is deterministic for the POD layout above across the host MSVC/g++
+# toolchains and the arm-gcc Arduino build (all use 4-byte float alignment); if
+# a future field reorder or insertion shifts it, the emitted ``static_assert``
+# turns the positional-init mismatch into a hard compile error.
+_EDGE_INFO_PIVOT_TRIM_OFFSET = 20
 
 # The five per-category motion-mode enums, in the order their C++ bodies are
 # emitted into routes.h. The bodies are generated from these Python ``IntEnum``
@@ -244,6 +271,10 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
 
 
 def _none_edge_cell() -> str:
+    # Field order MUST match the C++ ``EdgeInfo`` struct positionally, including
+    # the trailing ``pivot_trim_cm`` (0.0 here -- a NONE cell is never a pivot
+    # edge). Both this and ``_edge_cell`` must carry the field or the aggregate
+    # initialiser misaligns; the emitted ``static_assert`` guards against drift.
     return (
         "{ EdgeType::NONE, "
         + _format_float(0.0) + ", " + _format_float(0.0) + ", "
@@ -251,7 +282,8 @@ def _none_edge_cell() -> str:
         + _BLIND_MODE_DEFAULT + ", "
         + _PROJECTION_MODE_DEFAULT + ", "
         + _TURN_MODE_DEFAULT + ", "
-        + _DIRECTION_MODE_DEFAULT
+        + _DIRECTION_MODE_DEFAULT + ", "
+        + _format_float(0.0)
         + " }"
     )
 
@@ -270,13 +302,21 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
         turn_override,
         direction_override,
     ) = _resolve_overrides(edge)
+    # ``pivot_trim_cm`` (δ) is a plain float written straight onto the
+    # PIVOT-tagged edge by the planner's compensation pass; non-pivot edges
+    # never carry the attribute, so default to 0.0. It is read directly here
+    # rather than threaded through ``_resolve_overrides`` -- that helper exists
+    # to resolve the enum-mode override slots, and a raw float does not belong
+    # in that tuple.
+    pivot_trim = _format_float(edge.get("pivot_trim_cm", 0.0))
     return (
         "{ " + enum_name + ", " + distance + ", " + heading + ", "
         + line_override + ", "
         + blind_override + ", "
         + projection_override + ", "
         + turn_override + ", "
-        + direction_override
+        + direction_override + ", "
+        + pivot_trim
         + " }"
     )
 
@@ -360,6 +400,7 @@ def _build_routes_h_lines(
     lines.append("#define ROUTES_H")
     lines.append("")
     lines.append("#include <stdint.h>")
+    lines.append("#include <stddef.h>  // offsetof for the EdgeInfo layout guard")
     lines.append("")
     lines.append("namespace Routes {")
     lines.append(_INDENT + "constexpr uint8_t N_NODES = " + str(n_nodes) + ";")
@@ -413,7 +454,32 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "ProjectionMode projection_mode_override;")
     lines.append(_INDENT * 2 + "TurnMode       pre_turn_mode_override;")
     lines.append(_INDENT * 2 + "DirectionMode  direction_override;")
+    lines.append(
+        _INDENT * 2
+        + "float          pivot_trim_cm;  // δ on the pivot-tagged edge; "
+        + "0.0 on non-pivot edges"
+    )
     lines.append(_INDENT + "};")
+    lines.append("")
+    # Positional-init drift guard. ``_edge_cell`` / ``_none_edge_cell`` emit
+    # EdgeInfo as a brace-enclosed aggregate initialiser, so each value is
+    # bound to a member purely by position. If the Python tuple order and the
+    # C++ field order ever drift apart, ``pivot_trim_cm`` would silently take a
+    # neighbouring field's bytes instead of failing. Pinning the offset of the
+    # trailing field makes any such reorder a hard compile error rather than a
+    # wrong float at runtime. ``offsetof`` (not ``sizeof``) is used so the guard
+    # tracks the field position directly and stays robust to tail padding.
+    lines.append(
+        _INDENT
+        + "static_assert(offsetof(EdgeInfo, pivot_trim_cm) == "
+        + str(_EDGE_INFO_PIVOT_TRIM_OFFSET)
+        + ","
+    )
+    lines.append(
+        _INDENT * 2
+        + '"EdgeInfo layout drift: pivot_trim_cm must stay the trailing field; '
+        + 'the emitter\'s positional initialiser order no longer matches the struct");'
+    )
     lines.append("")
     lines.append(_INDENT + "extern const NodeInfo NODES[N_NODES];")
     lines.append(_INDENT + "extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];")
