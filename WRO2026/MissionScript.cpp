@@ -11,9 +11,6 @@
 void buildMission()
 {
     Mission
-        .task("testOne")
-        .goTo("final")
-        .wait(500)
-        .goTo("Inter4");
+        .task("testChassis", 10);
     Mission.start();
 }

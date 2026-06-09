@@ -5,7 +5,10 @@
  */
 
 #include "Tasks.h"
+#include "Manipulator.h"
 #include "PathTracker.h"
+#include "Drive.h"
+#include "LineFollower.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp
@@ -29,6 +32,9 @@ const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
     { "debugYield", &TasksClass::debugYield },
+    { "servoTest", &TasksClass::servoTest },
+    { "home", &TasksClass::home },
+    { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
     //Add new tasks here
 };
@@ -72,6 +78,11 @@ void TasksClass::update()
     // plan; bodies run to completion inside `runTask`. Kept non-trivial as
     // a stable hook for the cooperative tick list — see Tasks.h class
     // docstring.
+}
+
+void TasksClass::setTickCallback(void (*cb)())
+{
+    _tickCallback = cb;
 }
 
 const TaskRegistryEntry* TasksClass::findTask(const char* name) const
@@ -202,6 +213,78 @@ bool TasksClass::debugYield(const TaskArgs& /*args*/)
     // same branch.
     Serial.println(F("[Tasks] debugYield"));
     return false;
+}
+
+bool TasksClass::servoTest(const TaskArgs& pos)
+{
+    Manipulator.sorter.setAngle(static_cast<uint16_t>(pos.u8[0]));
+
+    // Wait until done. Drive the registered cooperative-tick callback each iteration so every
+    // module keeps ticking during the block (the same pattern as Manipulator::_drain); fall
+    // back to ticking only Manipulator.update() with a one-shot warning if no callback is set.
+    // yield() services the R4 background; we never block with a fixed delay().
+    static bool noCallbackWarned = false;
+    while (!Manipulator.sorter.isDone())
+    {
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!noCallbackWarned)
+            {
+                Serial.println(F("[Tasks] servoTest: no tick callback set — only "
+                                 "Manipulator.update() will tick during the wait. Call "
+                                 "Tasks.setTickCallback(...) in setup()."));
+                noCallbackWarned = true;
+            }
+            Manipulator.update();
+        }
+        yield();
+    }
+    return true;
+}
+
+bool TasksClass::home(const TaskArgs& /*args*/)
+{
+    // belt.home() is the whole routine: reset() (stall to the LEFT/HOME end-stop + re-zero
+    // the encoder there), settle, then drive on to the MID rest position. It's non-blocking,
+    // so poll until the full sequence lands (the belt's own watchdogs bound each stage).
+    //
+    // Drive the registered cooperative-tick callback each iteration so every module keeps
+    // ticking during the block (the same pattern as Manipulator::_drain); fall back to ticking
+    // only Manipulator.update() with a one-shot warning if no callback is set. yield() services
+    // the R4 background; we never block with a fixed delay().
+    Manipulator.belt.home();
+    static bool noCallbackWarned = false;
+    while (!Manipulator.belt.isDone())
+    {
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!noCallbackWarned)
+            {
+                Serial.println(F("[Tasks] home: no tick callback set — only "
+                                 "Manipulator.update() will tick during the wait. Call "
+                                 "Tasks.setTickCallback(...) in setup()."));
+                noCallbackWarned = true;
+            }
+            Manipulator.update();
+        }
+        yield();
+    }
+
+    return true;
+}
+
+bool TasksClass::testChassis(const TaskArgs& /*args*/)
+{
+    LineFollower.setEnabled(true).setDistanceTarget(50);
+    return LineFollower.waitUntilDistanceReached();
 }
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)

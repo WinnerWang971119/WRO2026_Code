@@ -13,5 +13,8 @@ toclaude.md
 # Host-compile harness build output (WRO2026/test — see ADR-023 / issue #19).
 build/
 
+# Claude Code local state — scheduler lock, git worktrees, per-machine settings.
+.claude/
+
 # CTPS generated artifacts
 **/mission_trace.json

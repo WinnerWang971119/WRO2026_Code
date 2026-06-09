@@ -40,11 +40,12 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-014 — T-shape trapezoidal velocity profile, acceleration-based, opt-in](./docs/decisions/014-tshape-trapezoidal-velocity-profile.md)
 - [ADR-015 — Drive owns a FIFO command queue; destructors enqueue](./docs/decisions/015-drive-command-queue.md)
 - [ADR-016 — Drive builders block by default; `.async()` opts out](./docs/decisions/016-sync-default-builders.md)
-- [ADR-017 — `DriveMode::SYNC` + `tShape` are the project-wide default](./docs/decisions/017-sync-plus-tshape-default-profile.md)
+- [ADR-017 — `DriveMode::SYNC` + `tShape` are the project-wide default](./docs/decisions/017-sync-plus-tshape-default-profile.md) (Refined by ADR-034)
 - [ADR-018 — LineFollower distance-gated stops use symmetric trapezoidal + active brake](./docs/decisions/018-linefollower-distance-gated-stops.md) (Refined by ADR-023)
 - [ADR-022 — Dual motor profile via per-motor structs + ActiveMotor alias](./docs/decisions/022-dual-motor-profile.md)
 - [ADR-023 — Pass-through collinear intersections + runtime overshoot-mode probe](./docs/decisions/023-pass-through-collinear-intersections.md)
 - [ADR-027 — `Drive.stopAtLine()` reads the line-sensor leaf; re-anchors localization; arm-window rule; reverse supported (2-board) via `StopAtLinePolicy` unified resolver](./docs/decisions/027-drive-stop-at-line.md)
+- [ADR-034 — `.flat()` is the named opt-out from the default trapezoidal profile](./docs/decisions/034-flat-opt-out-tshape.md)
 
 ### Perception
 
@@ -63,7 +64,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 27 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017, 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033 |
+| Implemented | 28 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |

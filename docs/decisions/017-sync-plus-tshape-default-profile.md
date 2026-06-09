@@ -1,6 +1,6 @@
 # ADR-017: `DriveMode::SYNC` + `tShape` are the project-wide default for every bounded move
 
-**Status:** Implemented
+**Status:** Implemented (opt-out affordance refined by ADR-034)
 **Date decided:** 2026-05 (Phase 1.5)
 
 ## Rule
@@ -10,9 +10,10 @@ Every Drive distance/time builder defaults to `DriveMode::SYNC` with `tShape` on
 Opt-outs:
 - `.setMode(DriveMode::RAW)` — open-loop PWM (the only path that applies `_applyBias`).
 - `.setMode(DriveMode::GYRO)` — yaw-locked, for long open straights with no line reference.
-- `.setStartSpeed(cruise).setEndSpeed(cruise)` — short-circuits both ramps via the no-ramp epsilon, for a flat profile.
+- `.flat()` — the named opt-out (added by ADR-034): clears the profile so the move runs at constant cruise.
+- `.setStartSpeed(cruise).setEndSpeed(cruise)` — still works; short-circuits both ramps via the no-ramp epsilon. `.flat()` is the clearer spelling for the common case.
 
-We deliberately did **not** add a `.flat()` or `.tShape(false)` setter — explicit start/end-speed is more honest and avoids the footgun of `.tShape().tShape(false)` ambiguity.
+We deliberately did **not** add a `.tShape(false)` setter — it invites the `.tShape().tShape(false)` ambiguity. The opt-out is a distinctly-named `.flat()` instead (ADR-034).
 
 ## Why
 
@@ -32,9 +33,10 @@ SYNC over GYRO: SYNC closes the loop on left-vs-right encoder match — cancels 
 
 ## Trigger to revisit
 
-If a real use case for `.flat()` or `.tShape(false)` comes up often, add the affordance with a clear name. If a planner needs GYRO more than SYNC for most segments, swap the default — but that requires re-examining the line-follow loop's sensitivity to yaw-lock.
+The `.flat()` affordance landed in ADR-034 (this trigger fired). If a planner needs GYRO more than SYNC for most segments, swap the default — but that requires re-examining the line-follow loop's sensitivity to yaw-lock.
 
 ## See also
 
 - [ADR-014](./014-tshape-trapezoidal-velocity-profile.md) — profile semantics
 - [ADR-016](./016-sync-default-builders.md) — blocking-by-default complement
+- [ADR-034](./034-flat-opt-out-tshape.md) — the named `.flat()` opt-out this ADR's trigger anticipated

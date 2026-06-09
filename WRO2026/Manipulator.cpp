@@ -57,11 +57,11 @@ bool ManipulatorClass::begin()
     // this wait through _drain()'s callback. A plain millis()/delay() poll is the only option
     // this early, and the caller is off the cooperative tick chain by definition. The three
     // servos are pure timers (no per-tick work), so we just wait out their settle budgets.
-    // Reuse BELT_HOME_TIMEOUT_MS as the generic setup-home ceiling so a wedged servo timer
+    // Reuse BELT_RESET_TIMEOUT_MS as the generic setup-home ceiling so a wedged servo timer
     // can never hang the boot path.
     const uint32_t start = millis();
     while (!(grabber.isDone() && sorter.isDone() && dumper.isDone())
-           && (uint32_t)(millis() - start) < Config::BELT_HOME_TIMEOUT_MS)
+           && (uint32_t)(millis() - start) < Config::BELT_RESET_TIMEOUT_MS)
     {
         delay(2);
     }
@@ -142,13 +142,20 @@ void ManipulatorClass::_drain(uint8_t mask)
     // only this module's update() and warn once.
     //
     // Bounded-spin guard: a wedged servo timer or a stalled belt must never trap the mission.
-    // The ceiling is Config::BELT_MOVE_TIMEOUT_MS — by then the belt's own POSITION watchdog has
-    // already forced its state machine to IDLE and the servo timers have long since elapsed, so a
-    // healthy drain converges well inside it. On expiry we stop the belt (a safe brake via a
-    // zero-speed run, finalised on the next update()) and warn so a stuck actuator can never hang
-    // the drain indefinitely.
+    // The ceiling depends on whether the belt is in the mask. If it is, the longest a single
+    // masked actuator can legitimately take is the belt's full home sequence (stall + reset +
+    // settle + drive to MID, which home() chains), so the ceiling is Config::BELT_HOME_TIMEOUT_MS
+    // to cover all of those phases. A servo-only drain (no belt in the mask) can only be waiting
+    // on a servo settle timer, so it uses the much shorter Config::MANIP_SERVO_DRAIN_TIMEOUT_MS —
+    // a tighter backstop than the belt-home ceiling. By the deadline the belt's own watchdogs have
+    // forced its state machine to IDLE and the servo timers have long since elapsed, so a healthy
+    // drain converges well inside it. On expiry we stop the belt (a safe brake via a zero-speed
+    // run, finalised on the next update()) and warn so a stuck actuator can never hang the drain
+    // indefinitely.
     static bool noCallbackWarned = false;
-    const uint32_t deadline = millis() + (uint32_t) Config::BELT_MOVE_TIMEOUT_MS;
+    const uint32_t ceiling  = (mask & M_BELT) ? (uint32_t) Config::BELT_HOME_TIMEOUT_MS
+                                              : (uint32_t) Config::MANIP_SERVO_DRAIN_TIMEOUT_MS;
+    const uint32_t deadline = millis() + ceiling;
 
     while (!_maskDone(mask))
     {
@@ -174,6 +181,10 @@ void ManipulatorClass::_drain(uint8_t mask)
             }
             update();
         }
-        delay(2);
+        // The spin must not block with a fixed delay — yield() services the R4 background
+        // (USB/Wi-Fi) cooperatively, matching LineFollower::waitUntilDistanceReached and
+        // Drive::_drainBlocking. Wall-clock progress comes from the registered tick callback
+        // (which advances real millis() via the modules it spins), not from sleeping here.
+        yield();
     }
 }

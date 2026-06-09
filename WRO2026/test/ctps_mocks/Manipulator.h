@@ -17,9 +17,13 @@
  *     `sortTo` records the bin) into the shared `g_ctpsLog`, preserving execution
  *     order relative to surrounding `task_start` / `drive` / `task_end` records.
  *   - The primitive actuator handles (`grabber` / `sorter` / `dumper` / `belt`)
- *     are intentionally NOT mocked: production task bodies use the verbs, only
- *     calibration / bring-up code pokes a raw joint, and pulling them in would
- *     drag `ManipServo` / `ManipBelt` / `Config` into the dump TU for no gain.
+ *     are exposed as no-op stubs — NOT recording seams. The competition mission
+ *     drives the manipulator through the verbs above; only bring-up task bodies
+ *     (`servoTest` / `home`) poke a raw joint, and they are never part of a
+ *     recorded run. But the dump compiles the WHOLE of `Tasks.cpp` as one TU, so
+ *     those handles must exist to link — hence the `ManipServo` / `ManipBelt`
+ *     stubs below (guarded with the production guards so the real, `MiniR4`-bound
+ *     actuator headers no-op if reached). They record nothing.
  *
  * The `setLift` / `setGripper` / `setArm` setters are FIXTURE-ONLY: they do not
  * exist on the production facade. They are kept because the `ctps_dump`
@@ -33,6 +37,49 @@
 #include <stdint.h>
 
 #include "ctps_record.h"
+
+// ---------------------------------------------------------------------------
+// Raw-joint actuator stubs. Guarded with the PRODUCTION guards (`MANIPSERVO_H` /
+// `MANIPBELT_H`) so the real `ManipServo.h` / `ManipBelt.h` (which bind the
+// `MiniR4` RC + DC channels) no-op if reached. Bring-up task bodies
+// (`servoTest` / `home`) poke these directly; they are pure no-ops and record
+// nothing (raw-joint moves are not part of a recorded competition trace).
+// ---------------------------------------------------------------------------
+
+#ifndef MANIPSERVO_H
+#define MANIPSERVO_H
+/** @brief No-op mock of one RC-servo joint (grabber / sorter / dumper). */
+class ManipServo
+{
+public:
+    ManipServo() = default;
+
+    void     open() {}
+    void     close() {}
+    void     home() {}
+    void     setAngle(uint16_t deg) { _shadow = deg; }
+    bool     isDone() const { return true; }
+    uint16_t commandedAngle() const { return _shadow; }
+
+private:
+    uint16_t _shadow = 0;
+};
+#endif    // MANIPSERVO_H
+
+#ifndef MANIPBELT_H
+#define MANIPBELT_H
+/** @brief No-op mock of the conveyor-belt actuator. */
+class ManipBelt
+{
+public:
+    ManipBelt() = default;
+
+    bool begin() { return true; }
+    void home() {}
+    void update() {}
+    bool isDone() const { return true; }
+};
+#endif    // MANIPBELT_H
 
 /**
  * @brief No-op mock of the production `ManipAction` RAII-wait builder.
@@ -122,6 +169,13 @@ public:
 
     /** @brief Always done — the mock motion completes instantly. */
     bool isDone() const { return true; }
+
+    // --- Raw-joint handles (bring-up tasks only; no-op, record nothing) ---
+
+    ManipServo grabber;
+    ManipServo sorter;
+    ManipServo dumper;
+    ManipBelt  belt;
 };
 
 /** @brief Single global instance — defined in ctps_record.cpp. */

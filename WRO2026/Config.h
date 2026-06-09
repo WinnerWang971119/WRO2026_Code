@@ -85,10 +85,10 @@ namespace Config
                   "See the block comment above this assert and PR #20 codex P1 review.");
 
     /** @brief Reverse the left motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_LEFT_REVERSE = true;
+    constexpr bool MOTOR_LEFT_REVERSE = false;
 
     /** @brief Reverse the right motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_RIGHT_REVERSE = false;
+    constexpr bool MOTOR_RIGHT_REVERSE = true;
 
     // ---------------------------------------------------------------------------------------
     // Motor profile + PID gains (selected via ActiveMotor)
@@ -123,9 +123,9 @@ namespace Config
     {
         static constexpr uint16_t PPR = 360;
         static constexpr uint16_t RPM = 300;
-        static constexpr float    MOVESYNC_KP = 0.002f;
+        static constexpr float    MOVESYNC_KP = 0.02f;
         static constexpr float    MOVESYNC_KI = 0.0f;
-        static constexpr float    MOVESYNC_KD = 0.004f;
+        static constexpr float    MOVESYNC_KD = 0.025f;
         static constexpr float    MOVEGYRO_KP = 0.52f;
         static constexpr float    MOVEGYRO_KI = 0.0f;
         static constexpr float    MOVEGYRO_KD = 0.15f;
@@ -146,7 +146,7 @@ namespace Config
      *          per-physical-chassis measurements and MUST be re-captured via
      *          Drive.calibrateMotorBias() after a swap. See ADR-011 + ADR-022.
      */
-    using ActiveMotor = LegoEV3;
+    using ActiveMotor = MatrixTT;
 
     constexpr uint16_t MOTOR_PPR    = ActiveMotor::PPR;
     constexpr uint16_t MOTOR_RPM    = ActiveMotor::RPM;
@@ -161,21 +161,21 @@ namespace Config
     constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;
 
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 8.0f;
+    constexpr float LINE_KP = 4.0f;
     /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
     constexpr float LINE_KI = 0.0f;
     /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 4.0f;
+    constexpr float LINE_KD = 0.0f;
 
     // ---------------------------------------------------------------------------------------
     // Geometry (TODO: measure on real chassis)
     // ---------------------------------------------------------------------------------------
 
     /** @brief Drive-wheel diameter in millimetres. @note TODO: measure on real chassis. */
-    constexpr float WHEEL_DIAM_MM = 60.0f;
+    constexpr float WHEEL_DIAM_MM = 63.0f;
 
     /** @brief Wheel-to-wheel track width in millimetres. @note TODO: measure on real chassis. */
-    constexpr float TRACK_MM = 170.0f;
+    constexpr float TRACK_MM = 180.0f;
 
     // ---------------------------------------------------------------------------------------
     // Speed presets (consumed by the fluent Drive / LineFollower APIs)
@@ -202,13 +202,13 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 30;
+    constexpr int16_t SPEED_SLOW = 70;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 50;
+    constexpr int16_t SPEED_NORMAL = 85;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
-    constexpr int16_t SPEED_FAST = 80;
+    constexpr int16_t SPEED_FAST = 90;
 
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).
@@ -237,7 +237,7 @@ namespace Config
      * so P+D corrections always result in motion. Zero commands pass through —
      * the caller intended to stop, deadband is irrelevant.
      */
-    constexpr int16_t PWM_MIN_MAGNITUDE = 20;
+    constexpr int16_t PWM_MIN_MAGNITUDE = 50;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -493,7 +493,7 @@ namespace Config
      *
      * @note TODO: measure on real chassis.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 5.0f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
 
     /**
      * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
@@ -508,7 +508,7 @@ namespace Config
      * @note TODO: measure on real chassis. Defaults to the front offset until the rear
      *       board is wired (T5); override once the two distances are known to differ.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = LINE_SENSOR_AXLE_OFFSET_CM;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
 
     // ---------------------------------------------------------------------------------------
     // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
@@ -660,7 +660,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 25;
+    constexpr int16_t CRAWL_PWM = 60;
     static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
                   "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
                   "recovery branch never hits the deadband floor or saturation cap silently.");
@@ -981,6 +981,29 @@ namespace Config
     /** @brief Maximum number of pending Mission steps (no dynamic alloc). */
     constexpr uint8_t MAX_MISSION_STEPS = 64;
 
+    /**
+     * @brief Bench-test switch: re-fire the mission with a fresh BTN_UP press
+     *        instead of one run per power cycle.
+     *
+     * Production / competition default is ``false`` — BTN_UP arms the hand-authored
+     * mission exactly once (see WRO2026.ino), so a stray press cannot restart the
+     * route. When ``true`` (bench), once the mission returns to idle (a clean finish
+     * or a cleared fault, never mid-run) a fresh BTN_UP rising edge re-arms and
+     * re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so the
+     * BTN_DOWN calibration menu stays suppressed after the first arm exactly as in
+     * production.
+     *
+     * @note Override-hook: guarded by ``#ifndef MISSION_ALLOW_REARM_DEFAULT`` so the
+     *       SHIPPED source default is the competition-safe ``false`` — merging this
+     *       branch can never silently ship the bench value. Enable on the bench with
+     *       ``-DMISSION_ALLOW_REARM_DEFAULT=true`` (arduino-cli:
+     *       ``--build-property build.extra_flags=-DMISSION_ALLOW_REARM_DEFAULT=true``).
+     */
+#ifndef MISSION_ALLOW_REARM_DEFAULT
+#define MISSION_ALLOW_REARM_DEFAULT false
+#endif
+    constexpr bool MISSION_ALLOW_REARM = MISSION_ALLOW_REARM_DEFAULT;
+
     // ---------------------------------------------------------------------------------------
     // Tasks framework
     // ---------------------------------------------------------------------------------------
@@ -1015,6 +1038,36 @@ namespace Config
 
     /** @brief Interval at which EventTrace emits its `HB ...` status heartbeat. */
     constexpr uint32_t MISSION_HEARTBEAT_MS = 500;
+
+    // ---------------------------------------------------------------------------------------
+    // Boot feedback (buzzer + on-board RGB LED)
+    //
+    // The last block of setup() signals boot status. A successful boot (every module
+    // begin() returned true) chirps BOOT_OK_BEEPS short bright tones and lights both
+    // on-board RGB LEDs green; a failed boot emits one long low tone and lights them
+    // red. Tones are emitted via MiniR4.Buzzer.Tone, which wraps the non-blocking
+    // Arduino tone() — so the OK sequence delays BEEP_MS + GAP_MS between chirps to
+    // keep them audibly separate. This is safe because setup() is fully blocking and
+    // runs before the cooperative tick begins.
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Number of short chirps emitted on a successful boot. */
+    constexpr uint8_t BOOT_OK_BEEPS = 3;
+
+    /** @brief Frequency (Hz) of each boot-OK chirp. */
+    constexpr uint16_t BOOT_OK_BEEP_HZ = 2000;
+
+    /** @brief On-duration (ms) of each boot-OK chirp. */
+    constexpr uint16_t BOOT_OK_BEEP_MS = 150;
+
+    /** @brief Silent gap (ms) between consecutive boot-OK chirps. */
+    constexpr uint16_t BOOT_OK_BEEP_GAP_MS = 100;
+
+    /** @brief Frequency (Hz) of the single long boot-FAIL tone (low/ominous). */
+    constexpr uint16_t BOOT_FAIL_BEEP_HZ = 600;
+
+    /** @brief Duration (ms) of the single long boot-FAIL tone. */
+    constexpr uint16_t BOOT_FAIL_BEEP_MS = 2000;
 }    // namespace Config
 
 // Manipulator config + its validation checks (split out per ADR-031 / Issue #39).
