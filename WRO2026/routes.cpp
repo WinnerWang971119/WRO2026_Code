@@ -36,67 +36,67 @@ namespace Routes {
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         // [from][to]; type=NONE if no direct edge
         { // from Inter1 (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::LINE, 172.400000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::LINE, 56.796937f, 88.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::BLIND, 45.748412f, 197.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::BLIND, 32.890027f, 44.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::LINE, 172.400000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::LINE, 56.796937f, 88.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::BLIND, 45.748412f, 197.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::BLIND, 32.890027f, 44.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from Inter2 (index 1)
-            { EdgeType::LINE, 172.400000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::LINE, 58.439872f, 78.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::BLIND, 150.661271f, 171.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::LINE, 172.400000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::LINE, 58.439872f, 78.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::BLIND, 150.661271f, 171.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from Inter3 (index 2)
-            { EdgeType::LINE, 56.796937f, 268.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::BLIND, 83.478378f, 237.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::BLIND, 40.319824f, 303.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::BLIND, 99.087743f, 14.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::LINE, 56.796937f, 268.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::BLIND, 83.478378f, 237.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::BLIND, 40.319824f, 303.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::BLIND, 99.087743f, 14.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from Inter4 (index 3)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::LINE, 58.439872f, 258.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::BLIND, 89.875713f, 163.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::LINE, 58.439872f, 258.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::BLIND, 89.875713f, 163.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from Start (index 4)
-            { EdgeType::BLIND, 45.748412f, 17.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::BLIND, 83.478378f, 57.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::BLIND, 45.748412f, 17.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::BLIND, 83.478378f, 57.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from final (index 5)
-            { EdgeType::BLIND, 32.890027f, 224.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::BLIND, 150.661271f, 351.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::BLIND, 40.319824f, 123.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::BLIND, 94.617636f, 38.826446f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::BLIND, 32.890027f, 224.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::BLIND, 150.661271f, 351.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::BLIND, 40.319824f, 123.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::BLIND, 94.617636f, 38.826446f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
         { // from position1 (index 6)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter2
-            { EdgeType::BLIND, 99.087743f, 194.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter3
-            { EdgeType::BLIND, 89.875713f, 343.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to Start
-            { EdgeType::BLIND, 94.617636f, 218.826446f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to final
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT }, // to position1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter2
+            { EdgeType::BLIND, 99.087743f, 194.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter3
+            { EdgeType::BLIND, 89.875713f, 343.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Inter4
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to Start
+            { EdgeType::BLIND, 94.617636f, 218.826446f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to final
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, TurnMode::DEFAULT, DirectionMode::DEFAULT, 0.000000f }, // to position1
         },
     };
 }  // namespace Routes

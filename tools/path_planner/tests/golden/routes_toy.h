@@ -6,6 +6,7 @@
 #define ROUTES_H
 
 #include <stdint.h>
+#include <stddef.h>  // offsetof for the EdgeInfo layout guard
 
 namespace Routes {
     constexpr uint8_t N_NODES = 6;
@@ -47,7 +48,11 @@ namespace Routes {
         ProjectionMode projection_mode_override;
         TurnMode       pre_turn_mode_override;
         DirectionMode  direction_override;
+        float          pivot_trim_cm;  // δ on the pivot-tagged edge; 0.0 on non-pivot edges
     };
+
+    static_assert(offsetof(EdgeInfo, pivot_trim_cm) == 20,
+        "EdgeInfo layout drift: pivot_trim_cm must stay the trailing field; the emitter's positional initialiser order no longer matches the struct");
 
     extern const NodeInfo NODES[N_NODES];
     extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];
