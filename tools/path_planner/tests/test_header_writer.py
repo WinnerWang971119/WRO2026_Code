@@ -57,6 +57,7 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import networkx as nx
 import pytest
 
 from tools.path_planner import field_data as real_field_data
@@ -170,6 +171,48 @@ def emit_targets(tmp_path: Path) -> tuple[Path, Path]:
 def _emit_with_toy_field(emit_targets: tuple[Path, Path]) -> tuple[Path, Path]:
     header_path, source_path = emit_targets
     return _emit_toy(_build_toy_field_data(), header_path, source_path)
+
+
+def _edge_cell_text(cpp_text: str, from_name: str, to_name: str) -> str:
+    """Return the single ``EdgeInfo`` aggregate-initialiser cell for ``from->to``.
+
+    The emitter writes the EDGES table as one ``{ // from <name> (index N)``
+    block per source node, with one cell line per destination ending in
+    ``// to <name>`` (see :func:`header_writer._emit_edges_table`). This
+    slices to the EDGES table (the NEXT_HOP table reuses the same
+    ``// from <name>`` annotation, so the search must start after the
+    ``const EdgeInfo EDGES`` marker), walks to the ``from_name`` block, then
+    returns the cell text (everything up to the trailing ``}``) of the line
+    annotated ``// to <to_name>`` so a test can assert on a single cell's
+    fields -- including the trailing ``pivot_trim_cm`` -- without matching the
+    wrong table or source row.
+    """
+    edges_marker = "const EdgeInfo EDGES"
+    edges_start = cpp_text.index(edges_marker)
+    lines = cpp_text[edges_start:].splitlines()
+    # In the EDGES table, a from-block header is ``{ // from <name> (``; the
+    # leading ``{ `` distinguishes it from the NEXT_HOP rows that end in the
+    # same annotation. (Already moot here because we sliced past NEXT_HOP,
+    # but keeping the precise marker makes the intent explicit.)
+    from_marker = "{ // from " + from_name + " ("
+    to_marker = "// to " + to_name
+    in_block = False
+    for line in lines:
+        if from_marker in line:
+            in_block = True
+            continue
+        if in_block:
+            # A new ``{ // from <other> (`` header ends the current block.
+            if "// from " in line:
+                break
+            if line.rstrip().endswith(to_marker):
+                # Strip the trailing ", // to <name>" annotation, leaving the
+                # brace-enclosed cell ending at "}".
+                brace_end = line.rfind("}")
+                return line[: brace_end + 1].strip()
+    raise AssertionError(
+        "no EDGES cell found for " + from_name + "->" + to_name
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -544,23 +587,23 @@ def test_edge_pre_turn_mode_override_emit(emit_targets):
     assert "TurnMode::PIVOT_LEFT" in cpp_text
 
 
-def test_pivot_compensation_reaches_emitted_distance(emit_targets):
-    """TC9 / finding #42: the shortened pivot distance lands in routes.cpp.
+def test_pivot_trim_stored_on_pivot_edge_not_following(emit_targets):
+    """TC9 / issue #44: the pivot trim lands on the pivot edge, B->C stays full.
 
-    Before Decision B, ``apply_pivot_compensations`` ran only on a
-    discarded weighted copy inside ``compute_all_pairs_next_hop``, so the
-    EDGES table in routes.cpp carried the UN-shortened ``distance_cm`` and
-    the robot overshot every pivot landing. Now the compensation mutates
-    the same ``graph`` object that ``_emit_toy`` hands to ``emit_routes``,
-    so the compensated distance must appear in the emitted source.
+    This is the #44 emission regression guard. The old (buggy) behavior
+    shortened the FOLLOWING edge ``B->C`` from 30.0 to 22.5 cm in place,
+    corrupting the geometry of any non-pivot route through that cell. The
+    fix stores the over-travel delta on the PIVOT-tagged edge ``A->B`` as a
+    new ``pivot_trim_cm`` field and leaves ``B->C`` at its full geometric
+    distance.
 
     Three-node A->B->C fixture (mirrors
     :func:`test_edge_pre_turn_mode_override_emit`): ``A->B`` is a 90 deg
-    LEFT pivot, ``B->C`` is the single forward continuation. For
-    TRACK_CM=15 and a 90 deg turn the forward chord component is 7.5 cm,
-    so ``B->C`` is shortened from 30.0 to 22.5 cm. ``22.500000f`` is the
-    compensated literal; ``30.000000f`` is the pre-compensation value that
-    must NOT survive on the forward B->C cell.
+    LEFT pivot, ``B->C`` is the single forward continuation. The fixture
+    omits ``track_cm``, so the planner parses the live ``Config::TRACK_MM``
+    (180 mm = 18.0 cm) and the delta is ``(18/2)*tan(45) = 9.0 cm``. The
+    emitter writes ``9.000000f`` as the trailing ``pivot_trim_cm`` value of
+    the A->B cell, while B->C's ``distance_cm`` stays ``30.000000f``.
     """
     header_path, source_path = emit_targets
     fd = SimpleNamespace(
@@ -595,11 +638,174 @@ def test_pivot_compensation_reaches_emitted_distance(emit_targets):
     )
     _emit_toy(fd, header_path, source_path)
     cpp_text = source_path.read_text(encoding="utf-8")
-    # The compensated B->C distance (22.5 cm) reached the emitted EDGES
-    # table -- proof the compensation now flows to emission, not just cost.
-    assert "22.500000f" in cpp_text, (
-        "compensated B->C distance (22.5 cm) missing from routes.cpp"
+
+    # The pivot trim (delta = 9.0 cm for an 18.0 cm track at 90 deg) is the
+    # trailing pivot_trim_cm value of the A->B cell.
+    a_to_b_cell = _edge_cell_text(cpp_text, "A", "B")
+    assert a_to_b_cell.rstrip().endswith("9.000000f }"), (
+        "A->B pivot cell must carry pivot_trim_cm == 9.000000f; got: "
+        + a_to_b_cell
     )
+
+    # The following edge B->C is NOT shortened: its distance_cm stays at the
+    # full 30.0 cm geometry and its trailing pivot_trim_cm is 0.0 (#44 fix).
+    b_to_c_cell = _edge_cell_text(cpp_text, "B", "C")
+    assert "30.000000f" in b_to_c_cell, (
+        "B->C following-edge distance (30.0 cm) must survive unshortened; got: "
+        + b_to_c_cell
+    )
+    assert "22.500000f" not in cpp_text, (
+        "no edge may carry the old shortened 22.5 cm distance under the #44 fix"
+    )
+    assert b_to_c_cell.rstrip().endswith("0.000000f }"), (
+        "B->C is not a pivot edge, so its trailing pivot_trim_cm must be 0.0; "
+        "got: " + b_to_c_cell
+    )
+
+
+def _pivot_shared_following_edge_fixture(tagged: bool) -> tuple[SimpleNamespace, nx.DiGraph]:
+    """Build a graph where a pivot route AND a non-pivot route share ``B->C``.
+
+    Topology (built directly as a ``DiGraph`` so the edge set is exact, not
+    subject to ``build_graph``'s bidirectional mirroring)::
+
+        A --[pivot LEFT, 0 deg]--> B --[90 deg]--> C   (pivot route)
+        X --[0 deg, one-directional]--> B               (non-pivot route X->B->C)
+
+    ``B``'s only FORWARD out-edge is ``B->C`` (the back-edge ``B->A`` is
+    excluded as the pivot's source, and ``X->B`` is one-directional so there
+    is no ``B->X`` to inflate the count). That keeps the
+    ``apply_pivot_compensations`` single-forward-out-edge precondition
+    satisfied, so the 90 deg pivot is trimmed.
+
+    ``tagged`` toggles the ``pivot`` attribute on ``A->B``: ``True`` is the
+    pivot variant under test; ``False`` is the no-trim baseline used to prove
+    the shared ``B->C`` geometry and the ``NEXT_HOP`` table are byte-identical
+    whether or not the pivot fires.
+    """
+    g = nx.DiGraph()
+    for name, (x, y) in (
+        ("A", (0.0, 0.0)),
+        ("B", (50.0, 0.0)),
+        ("C", (50.0, 70.0)),
+        ("X", (0.0, 50.0)),
+    ):
+        g.add_node(name, x_cm=x, y_cm=y, type="line")
+    a_to_b_attrs = dict(type=EDGE_LINE, distance_cm=40.0, heading_deg=0.0)
+    if tagged:
+        a_to_b_attrs["pivot"] = int(Pivot.LEFT)
+    g.add_edge("A", "B", **a_to_b_attrs)
+    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=40.0, heading_deg=180.0)
+    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=30.0, heading_deg=90.0)
+    g.add_edge("C", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=270.0)
+    # Non-pivot route X -> B -> C. One-directional X->B (no B->X back-edge), so
+    # B keeps exactly one forward continuation (B->C) for the pivot trim.
+    g.add_edge("X", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0)
+
+    fd = SimpleNamespace(
+        NODES={"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 70.0), "X": (0.0, 50.0)},
+        NODE_TYPES={"A": "line", "B": "line", "C": "line", "X": "line"},
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+    )
+    return fd, g
+
+
+def test_pivot_trim_only_on_pivot_edge_shared_following_unaffected(emit_targets):
+    """TC4: a non-pivot route through the shared following edge stays raw.
+
+    Issue #44 golden-level regression. A pivot route ``A->B->C`` and a
+    non-pivot route ``X->B->C`` share the following edge ``B->C``. The fix
+    stores the over-travel trim on the PIVOT edge ``A->B`` only; the shared
+    ``B->C`` cell keeps its RAW 30.0 cm geometry (``pivot_trim_cm == 0.0``),
+    so the non-pivot ``X->B->C`` route drives the full distance. The emitted
+    ``NEXT_HOP`` table is byte-identical to the no-trim baseline -- the trim
+    rides as a separate scalar and never perturbs routing.
+    """
+    header_path, source_path = emit_targets
+    fd, graph = _pivot_shared_following_edge_fixture(tagged=True)
+    # No track_cm -> live Config::TRACK_MM (18.0 cm); delta@90 = 9.0 cm.
+    next_hop = compute_all_pairs_next_hop(graph, cost_blind_multiplier=1.0)
+    emit_routes(
+        fd, graph, next_hop,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # The trim lands ONLY on the pivot edge A->B (delta = 9.0 cm).
+    a_to_b_cell = _edge_cell_text(cpp_text, "A", "B")
+    assert a_to_b_cell.rstrip().endswith("9.000000f }"), (
+        "A->B pivot cell must carry pivot_trim_cm == 9.000000f; got: "
+        + a_to_b_cell
+    )
+
+    # The shared following edge B->C keeps the RAW geometry: full 30.0 cm
+    # distance, zero trim -- the non-pivot X->B->C route is unaffected.
+    b_to_c_cell = _edge_cell_text(cpp_text, "B", "C")
+    assert "30.000000f" in b_to_c_cell, (
+        "shared B->C distance (30.0 cm) must stay raw; got: " + b_to_c_cell
+    )
+    assert b_to_c_cell.rstrip().endswith("0.000000f }"), (
+        "shared B->C must carry pivot_trim_cm == 0.0 (trim is on A->B); got: "
+        + b_to_c_cell
+    )
+    assert "22.500000f" not in cpp_text and "21.000000f" not in cpp_text, (
+        "no edge may carry a shortened (trimmed) distance under the #44 fix"
+    )
+
+    # NEXT_HOP must match the no-trim baseline: the trim is a separate scalar
+    # and never changes routing. Re-emit the untagged variant and compare the
+    # NEXT_HOP blocks of both routes.cpp byte-for-byte.
+    baseline_fd, baseline_graph = _pivot_shared_following_edge_fixture(tagged=False)
+    baseline_next_hop = compute_all_pairs_next_hop(
+        baseline_graph, cost_blind_multiplier=1.0
+    )
+    baseline_header = header_path.parent / "routes_baseline.h"
+    baseline_source = header_path.parent / "routes_baseline.cpp"
+    emit_routes(
+        baseline_fd, baseline_graph, baseline_next_hop,
+        header_path=baseline_header, source_path=baseline_source,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    baseline_cpp = baseline_source.read_text(encoding="utf-8")
+
+    def _next_hop_block(text: str) -> str:
+        start = text.index("const uint8_t NEXT_HOP")
+        end = text.index("};", start)
+        return text[start:end]
+
+    assert _next_hop_block(cpp_text) == _next_hop_block(baseline_cpp), (
+        "NEXT_HOP must be byte-identical with and without the pivot trim"
+    )
+    # And the pivot variant's X->B->C routing is intact: from X, the next hop
+    # toward C is B.
+    assert next_hop["X"]["C"] == "B"
+    assert next_hop["A"]["C"] == "B"
+
+
+def test_edge_info_layout_guard_emitted_in_header(emit_targets):
+    """TC10: routes.h carries the EdgeInfo field-order static_assert + stddef.
+
+    The emitter pins ``pivot_trim_cm`` as the trailing ``EdgeInfo`` field with
+    a generated ``static_assert(offsetof(EdgeInfo, pivot_trim_cm) == 20, ...)``
+    and the ``#include <stddef.h>`` that ``offsetof`` needs, so a future field
+    reorder fails the compile instead of silently binding the float to the
+    wrong member. This is a pure-Python presence check; the compile-fail
+    behavior of the guard is exercised by the C++ build elsewhere.
+    """
+    header_path, _ = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
+    assert "#include <stddef.h>" in header_text, (
+        "offsetof requires <stddef.h>; the guard's include must be emitted"
+    )
+    assert "static_assert(offsetof(EdgeInfo, pivot_trim_cm) == 20," in header_text, (
+        "the EdgeInfo field-order static_assert pinning pivot_trim_cm at "
+        "offset 20 must be emitted"
+    )
+    # The struct must actually declare the trailing field the guard pins.
+    assert "float          pivot_trim_cm;" in header_text
 
 
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the

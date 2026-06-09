@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import warnings
+from pathlib import Path
 from types import SimpleNamespace
 
 import networkx as nx
@@ -128,55 +129,139 @@ def test_compute_path_cost_missing_edge_raises() -> None:
 
 
 def test_pivot_compensation_zero_turn_no_displacement():
-    """A 0 deg pivot compensates to no geometry change on the following edge."""
+    """A 0 deg pivot has no forward over-travel: delta == 0 (new 2-arg scalar)."""
     from tools.path_planner.planner import compute_pivot_compensation
 
-    adj_dist, adj_heading = compute_pivot_compensation(
-        turn_deg=0.0,
-        track_cm=15.0,
-        next_edge_dist=42.0,
-        next_edge_heading=90.0,
-    )
-    assert adj_dist == pytest.approx(42.0)
-    assert adj_heading == pytest.approx(90.0)
+    delta = compute_pivot_compensation(turn_deg=0.0, track_cm=15.0)
+    assert delta == pytest.approx(0.0)
 
 
 def test_pivot_compensation_90deg_with_track_15cm_yields_75cm_reduction():
-    """90 deg pivot, TRACK_CM=15 -> chord 10.6066cm, forward projection 7.5cm.
+    """90 deg pivot, TRACK_CM=15 -> delta = (15/2)*tan(45 deg) = 7.5 cm.
 
-    chord_cm = 2 * (15/2) * sin(45 deg) = 15 * sqrt(2)/2 ~= 10.6066
-    forward_component = chord_cm * sin(45 deg) = 10.6066 * sqrt(2)/2 = 7.5000
-    adjusted_dist = 30 - 7.5 = 22.5
+    The new closed form is delta = (track_cm / 2) * tan(|theta| / 2). At
+    theta == 90 deg this is (15/2) * tan(45 deg) = 7.5 * 1.0 = 7.5 cm -- the
+    one angle where it still agrees with the old chord-decomposition value.
     """
     from tools.path_planner.planner import compute_pivot_compensation
 
-    adj_dist, adj_heading = compute_pivot_compensation(
-        turn_deg=90.0,
-        track_cm=15.0,
-        next_edge_dist=30.0,
-        next_edge_heading=90.0,
-    )
-    assert adj_dist == pytest.approx(22.5, abs=1e-6)
-    assert adj_heading == pytest.approx(90.0)
+    delta = compute_pivot_compensation(turn_deg=90.0, track_cm=15.0)
+    assert delta == pytest.approx(7.5, abs=1e-6)
 
 
 def test_pivot_compensation_neg_90deg_yields_same_magnitude():
-    """Negative turn (right pivot) yields same magnitude as positive turn."""
+    """Negative turn (right pivot) yields same magnitude as positive turn.
+
+    Only |turn_deg| enters the formula, so a -90 deg right pivot over-travels
+    by the same delta as a +90 deg left pivot.
+    """
     from tools.path_planner.planner import compute_pivot_compensation
 
-    pos, _ = compute_pivot_compensation(+90.0, 15.0, 30.0, 0.0)
-    neg, _ = compute_pivot_compensation(-90.0, 15.0, 30.0, 0.0)
+    pos = compute_pivot_compensation(+90.0, 15.0)
+    neg = compute_pivot_compensation(-90.0, 15.0)
     assert pos == pytest.approx(neg)
+    assert pos == pytest.approx(7.5, abs=1e-6)
 
 
-def test_pivot_compensation_clamps_to_nonneg_distance():
-    """If the forward component exceeds next_edge_dist, adjusted_dist clamps to 0."""
+def test_pivot_compensation_grows_monotonically_with_angle():
+    """delta increases monotonically with |theta| over (0, 180).
+
+    Replaces the old 180-deg clamp test: the helper no longer clamps a
+    following-edge distance (it returns a bare scalar), and the near-180
+    divergence is the validator's fail-fast (T7), not this helper's concern.
+    What stays true and worth pinning is that (track/2)*tan(|theta|/2) is
+    strictly increasing in |theta| on (0, 180), so a sharper pivot always
+    over-travels further.
+    """
     from tools.path_planner.planner import compute_pivot_compensation
 
-    # 180 deg pivot with TRACK_CM=15: chord = 15, forward_component = 15 * 1 = 15
-    # next_edge_dist = 5 -> adjusted should clamp to 0
-    adj_dist, _ = compute_pivot_compensation(180.0, 15.0, 5.0, 0.0)
-    assert adj_dist == pytest.approx(0.0)
+    track_cm = 18.0
+    angles = [10.0, 30.0, 60.0, 90.0, 120.0, 150.0, 170.0]
+    deltas = [compute_pivot_compensation(theta, track_cm) for theta in angles]
+    assert deltas == sorted(deltas)
+    # Strictly increasing: no two adjacent angles collapse to the same delta.
+    for prev, curr in zip(deltas[:-1], deltas[1:]):
+        assert curr > prev
+    # The sign of the turn is irrelevant -- a right pivot grows identically.
+    neg_deltas = [compute_pivot_compensation(-theta, track_cm) for theta in angles]
+    assert neg_deltas == pytest.approx(deltas)
+
+
+def test_pivot_compensation_tangent_form_matches_expected_values():
+    """TC1: delta == (T/2)*tan(theta/2) at theta = 0/60/90/120 with T = 18.
+
+    Locks the corrected closed form against hand-computed values and confirms
+    it equals the OLD chord-decomposition estimate (T*sin^2(theta/2)) ONLY at
+    theta == 90 deg (both = 0.5*T) and DIFFERS at 60 / 120 deg, where the old
+    form gave 0.25*T / 0.75*T but the tangent form gives ~0.2887*T / ~0.8660*T.
+    """
+    from tools.path_planner.planner import compute_pivot_compensation
+
+    track_cm = 18.0
+    half = track_cm / 2.0
+
+    # theta = 0 -> tan(0) = 0 -> delta = 0.
+    assert compute_pivot_compensation(0.0, track_cm) == pytest.approx(0.0)
+
+    # theta = 90 -> tan(45) = 1 -> delta = 0.5 * T = 9.0. Old form agrees here.
+    expected_90 = half * math.tan(math.radians(45.0))
+    delta_90 = compute_pivot_compensation(90.0, track_cm)
+    assert delta_90 == pytest.approx(expected_90, abs=1e-9)
+    assert delta_90 == pytest.approx(0.5 * track_cm, abs=1e-9)
+    old_90 = track_cm * math.sin(math.radians(45.0)) ** 2
+    assert delta_90 == pytest.approx(old_90, abs=1e-9)  # equal at 90 deg only
+
+    # theta = 60 -> tan(30) ~= 0.5774 -> delta = T/2 * tan(30) ~= 0.2887 * T.
+    expected_60 = half * math.tan(math.radians(30.0))
+    delta_60 = compute_pivot_compensation(60.0, track_cm)
+    assert delta_60 == pytest.approx(expected_60, abs=1e-9)
+    assert delta_60 == pytest.approx(0.288675 * track_cm, abs=1e-4)
+    old_60 = track_cm * math.sin(math.radians(30.0)) ** 2  # = 0.25 * T = 4.5
+    assert delta_60 != pytest.approx(old_60, abs=1e-3)  # differs from old form
+
+    # theta = 120 -> tan(60) ~= 1.7321 -> delta = T/2 * tan(60) ~= 0.8660 * T.
+    expected_120 = half * math.tan(math.radians(60.0))
+    delta_120 = compute_pivot_compensation(120.0, track_cm)
+    assert delta_120 == pytest.approx(expected_120, abs=1e-9)
+    assert delta_120 == pytest.approx(0.866025 * track_cm, abs=1e-4)
+    old_120 = track_cm * math.sin(math.radians(60.0)) ** 2  # = 0.75 * T = 13.5
+    assert delta_120 != pytest.approx(old_120, abs=1e-3)  # differs from old form
+
+
+def test_compute_pivot_compensation_track_drives_delta(tmp_path):
+    """TC3: an edited Config::TRACK_MM flows through parse -> delta.
+
+    The planner single-sources the chassis track from ``Config::TRACK_MM``
+    (issue #44). Parsing a temp header with a different ``TRACK_MM`` must
+    yield the matching cm value, and feeding that into the delta helper must
+    reflect the edited track: ``TRACK_MM = 200.0f`` -> 20.0 cm -> delta@90 =
+    10.0 cm. Also confirms no second hard-coded track literal survives in
+    ``planner.py`` (the stale ``TRACK_CM = 15`` constant is gone).
+    """
+    from tools.path_planner import planner as planner_module
+    from tools.path_planner.planner import (
+        compute_pivot_compensation,
+        parse_track_cm_from_config,
+    )
+
+    config_path = tmp_path / "Config.h"
+    config_path.write_text(
+        "namespace Config {\n"
+        "    constexpr float TRACK_MM = 200.0f;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    track_cm = parse_track_cm_from_config(config_path)
+    assert track_cm == pytest.approx(20.0)
+    # delta at 90 deg = (track/2) * tan(45) = track/2 = 10.0 cm for a 20 cm track.
+    assert compute_pivot_compensation(90.0, track_cm) == pytest.approx(10.0, abs=1e-6)
+
+    # No second hard-coded track literal survives in the planner source: the
+    # stale ``TRACK_CM = 15`` / ``= 15.0`` assignment was removed when the
+    # value moved to the firmware header.
+    source = Path(planner_module.__file__).read_text(encoding="utf-8")
+    assert "TRACK_CM = 15" not in source
+    assert "TRACK_CM = 15.0" not in source
 
 
 def test_apply_pivot_compensations_skips_multi_successor():
@@ -288,7 +373,16 @@ def test_apply_pivot_compensations_ignores_back_edge():
 
     Codex P1 regression: counting all out-edges (including the back-edge
     to ``src``) makes pivot compensation unusable on the bidirectional
-    graphs ``build_graph`` actually produces.
+    graphs ``build_graph`` actually produces -- the landing node ``B`` must
+    resolve to its single FORWARD continuation ``B->C`` (the back-edge
+    ``B->A`` excluded) to measure the turn.
+
+    Issue #44: the trim is now STORED on the pivot edge ``A->B`` as
+    ``pivot_trim_cm`` rather than subtracted from the following edge's
+    distance. The 90 deg pivot's over-travel delta = (15/2)*tan(45) = 7.5 cm
+    for TRACK_CM=15, so ``A->B`` gains ``pivot_trim_cm == 7.5`` while every
+    edge's ``distance_cm`` -- the following edge ``B->C`` included -- stays
+    byte-identical to the input graph.
     """
     from tools.path_planner.graph_builder import Pivot
     from tools.path_planner.planner import apply_pivot_compensations
@@ -306,23 +400,26 @@ def test_apply_pivot_compensations_ignores_back_edge():
 
     apply_pivot_compensations(g, track_cm=15.0)
 
-    # The B->C edge should have been shortened by the 90 deg pivot's
-    # forward chord component (7.5 cm for TRACK_CM=15, |theta|=90 deg).
-    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
-    # The back-edge B->A must NOT have been touched.
+    # The trim lands on the PIVOT edge A->B: 7.5 cm for TRACK_CM=15,
+    # |theta|=90 deg, via delta = (15/2)*tan(45).
+    assert g.edges["A", "B"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
+    # The following edge B->C is NOT shortened -- its geometry is untouched.
+    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(30.0)
+    assert "pivot_trim_cm" not in g.edges["B", "C"]
+    # The back-edge B->A must NOT have been touched at all.
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
+    assert "pivot_trim_cm" not in g.edges["B", "A"]
 
 
 def test_apply_pivot_compensations_idempotent_on_shared_following_edge():
-    """Finding #94: two pivots sharing one following edge compensate it ONCE.
+    """Finding #94 (issue #44): two pivots sharing one following edge leave it intact.
 
-    ``apply_pivot_compensations`` reads ``next_edge_data['distance_cm']``
-    live and writes the shortened value back. If two distinct pivot edges
-    resolve to the SAME following edge, the naive code computes the second
-    reduction off the first's already-shortened distance, compounding the
-    subtraction. The production flow's destination out-degree rule (finding
-    #36) prevents this, but the function is public and reusable, so a
-    hand-built directed graph can reach it.
+    The #44 fix moves the trim off the shared following edge and onto each
+    pivot edge as its own ``pivot_trim_cm``. The cross-pivot
+    double-compensation finding #94 guarded against -- two pivots from
+    non-adjacent sources both subtracting from one shared edge -- is now
+    structurally impossible: the following edge ``M -> N`` is never mutated,
+    so there is nothing to compound.
 
     Layout: two pivot edges ``P1 -> M`` and ``P2 -> M`` land on the SAME
     node ``M`` from non-adjacent sources. ``M`` has exactly ONE forward
@@ -331,10 +428,10 @@ def test_apply_pivot_compensations_idempotent_on_shared_following_edge():
     per-pivot ``len(forward_out_edges) != 1`` check passes for both).
 
     For a 90 deg pivot (heading 0 deg entering ``M``, ``M -> N`` heading
-    90 deg) with TRACK_CM=15 the forward chord component is 7.5 cm, so a
-    SINGLE compensation shortens ``M -> N`` from 30.0 to 22.5 cm. The buggy
-    double application would land at 22.5 - 7.5 = 15.0 cm. The idempotency
-    marker must keep the result at 22.5, never 15.0.
+    90 deg) with TRACK_CM=15 the over-travel delta = (15/2)*tan(45) = 7.5 cm.
+    Each pivot edge carries its OWN 7.5 cm trim; ``M -> N`` keeps its full
+    30.0 cm distance. Idempotency now means a second pass re-stores the same
+    per-pivot scalar and never touches the following edge.
     """
     from tools.path_planner.graph_builder import Pivot
     from tools.path_planner.planner import apply_pivot_compensations
@@ -352,32 +449,41 @@ def test_apply_pivot_compensations_idempotent_on_shared_following_edge():
 
     apply_pivot_compensations(g, track_cm=15.0)
 
-    # Compensated exactly ONCE: 30.0 - 7.5 = 22.5, NOT the double 15.0.
-    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
-    assert g.edges["M", "N"]["distance_cm"] != pytest.approx(15.0, abs=1e-6)
+    # Each pivot edge owns its 7.5 cm trim; the shared following edge is
+    # untouched -- no shortening, no double application possible.
+    assert g.edges["P1", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
+    assert g.edges["P2", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
+    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(30.0, abs=1e-6)
+    assert "pivot_trim_cm" not in g.edges["M", "N"]
 
-    # Calling again on the already-compensated graph must not subtract
-    # further -- the marker makes the operation idempotent across calls too.
+    # Calling again on the already-trimmed graph must re-store the same
+    # per-pivot scalar and still leave the following edge alone.
     apply_pivot_compensations(g, track_cm=15.0)
-    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
+    assert g.edges["P1", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
+    assert g.edges["P2", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
+    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(30.0, abs=1e-6)
 
 
 def test_compute_all_pairs_next_hop_compensates_input_graph_in_place():
-    """TC9 / finding #42: pivot compensation reaches the SHARED graph.
+    """TC9 / finding #42 (issue #44): pivot trim reaches the SHARED graph.
 
-    Decision B: ``compute_all_pairs_next_hop`` now applies pivot
-    compensation to its input ``graph`` in place (not to a discarded
-    weighted copy). The caller passes that same ``graph`` object to
-    ``emit_routes`` immediately afterward, so the shortened distance must
-    survive on the graph -- otherwise routes.cpp emits the un-shortened
-    drive distance and the robot overshoots every pivot landing.
+    ``compute_all_pairs_next_hop`` applies pivot compensation to its input
+    ``graph`` in place (not to a discarded weighted copy), because the caller
+    hands that same ``graph`` object to ``emit_routes`` immediately
+    afterward. The issue #44 fix changes WHAT gets written: the trim now
+    lands on the pivot edge ``A->B`` as ``pivot_trim_cm``, and NO edge's
+    ``distance_cm`` is mutated -- so routes.cpp emits the true geometric
+    distance on every edge plus the per-pivot trim scalar.
 
     Bidirectional layout mirroring
     :func:`test_apply_pivot_compensations_ignores_back_edge`: A->B is a
     90 deg LEFT pivot, B has exactly one forward continuation B->C
-    (the back-edge B->A is excluded from the out-degree count). For
-    TRACK_CM=15 and a 90 deg pivot the forward chord component is 7.5 cm,
-    so B->C is shortened from 30.0 to 22.5 cm.
+    (the back-edge B->A is excluded from the out-degree count). This test
+    omits ``track_cm`` so the planner parses the live ``Config::TRACK_MM``
+    (180 mm = 18.0 cm) -- the same value the production pipeline drives with.
+    For an 18.0 cm track and a 90 deg pivot the over-travel
+    delta = (18/2)*tan(45) = 9.0 cm, stored on A->B; B->C keeps its full
+    30.0 cm distance.
     """
     from tools.path_planner.graph_builder import Pivot
 
@@ -391,10 +497,17 @@ def test_compute_all_pairs_next_hop_compensates_input_graph_in_place():
     g.add_edge("C", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=270.0)
 
     # Drive the FULL planner flow (not apply_pivot_compensations directly).
+    # No track_cm -> the planner reads Config::TRACK_MM (18.0 cm).
     compute_all_pairs_next_hop(g, cost_blind_multiplier=1.0)
 
-    # The shared input graph now carries the compensated B->C distance.
-    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(22.5, abs=1e-6)
-    # The pivot edge itself and the back-edge are untouched.
+    # The trim is stored on the PIVOT edge A->B: delta = (18/2)*tan(45) = 9.0.
+    assert g.edges["A", "B"]["pivot_trim_cm"] == pytest.approx(9.0, abs=1e-6)
+    # The following edge B->C keeps its FULL geometric distance (the #44 fix):
+    # it is no longer shortened, and carries no trim of its own.
+    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(30.0)
+    assert "pivot_trim_cm" not in g.edges["B", "C"]
+    # The pivot edge's own distance and the back-edge are untouched.
     assert g.edges["A", "B"]["distance_cm"] == pytest.approx(10.0)
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
+    # The back-edge B->A is not a pivot edge, so it never carries a trim.
+    assert "pivot_trim_cm" not in g.edges["B", "A"]
