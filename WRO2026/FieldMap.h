@@ -48,7 +48,8 @@ namespace FieldMap
             Routes::BlindMode::DEFAULT,    // blind_mode_override
             Routes::ProjectionMode::DEFAULT, // projection_mode_override
             Routes::TurnMode::DEFAULT,     // pre_turn_mode_override
-            Routes::DirectionMode::DEFAULT // direction_override
+            Routes::DirectionMode::DEFAULT, // direction_override
+            0.0f                           // pivot_trim_cm (no pivot on a NONE sentinel)
         };
         return kNoEdge;
     }

@@ -261,6 +261,44 @@ private:
     void _onPlanNextHop();
     void _dispatchEdgeAfterTurn();
 
+    /**
+     * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
+     *        pivot edge, applying ADR-035 two-sided pivot trims.
+     *
+     * Called only on distance-terminated dispatches (BLIND dead-reckon
+     * `driveDist`, PROJECTION distance gate). Folds three ADR-035 effects into a
+     * LOCAL effective distance — `EDGES[*][*].distance_cm` is never mutated:
+     *   1. OUTGOING trim: if a δ is carried from the previous pivot hop, subtract
+     *      it (the outgoing over-travel of that pivot), then clear the carry.
+     *   2. APPROACH trim: if this edge itself drives INTO a pivot node
+     *      (`edge.pivot_trim_cm > 0`), subtract δ so the chassis stops δ short.
+     *   3. LATCH: if this edge is a pivot edge, latch its δ into
+     *      `_carriedPivotTrimCm` for the NEXT hop's outgoing trim.
+     * The result is clamped to `PIVOT_TRIM_MIN_DRIVE_CM` so a bad table can never
+     * command a non-positive drive (which `Drive.driveDist` would reject).
+     *
+     * @param edge The directed edge being dispatched (`getEdge(cur, _nextHop)`).
+     * @return The trimmed, clamped distance to feed the distance-terminated builder.
+     */
+    float _pivotTrimDistance(const Routes::EdgeInfo& edge);
+
+    /**
+     * @brief Resolve the ADR-035 carried δ on a SENSOR-terminated pivot hop.
+     *
+     * Sensor-terminated dispatches (LINE follow, STOP_AT_LINE seek) self-correct
+     * on the physical line, so they take NO outgoing trim: any δ carried from the
+     * previous pivot hop is simply DROPPED (it lives exactly one hop). When
+     * @p latchOwn is true, this edge's own δ is still latched into
+     * `_carriedPivotTrimCm` for the next hop — a pivot reached via a STOP_AT_LINE
+     * seek still over-travels on the OUTGOING side. (LINE edges latch their own δ
+     * later, at overshoot-arm time, alongside the overshoot reduction, so they
+     * pass `latchOwn = false` here.)
+     *
+     * @param edge     The directed edge being dispatched.
+     * @param latchOwn Whether to latch this edge's own δ for the outgoing hop.
+     */
+    void _resolveSensorEdgePivotCarry(const Routes::EdgeInfo& edge, bool latchOwn);
+
     void _drainBlocking();
 
     void _applyGoToBuilder(
@@ -330,6 +368,25 @@ private:
     /// (T6) also uses it as the inbound-body heading when classifying the
     /// next-next hop's geometry.
     float _resolvedBodyHeading = 0.0f;
+
+    /// @brief δ (cm) carried ONE hop for the outgoing pivot trim; 0 = none.
+    ///        See ADR-035 / issue #44 (two-sided pivot compensation).
+    ///
+    /// A single-wheel pivot at node `v` over-travels by `δ` on BOTH adjacent
+    /// drives. `δ` is stored on the pivot-tagged edge `u→v` as
+    /// `EdgeInfo::pivot_trim_cm`. The INCOMING side is trimmed while the pivot
+    /// edge is dispatched (approach trim on a dead-reckon edge, or an
+    /// overshoot-advance reduction on a LINE edge). The OUTGOING side cannot
+    /// see `u→v` once the FSM has advanced to `v`, so `δ` is latched here at
+    /// the pivot-edge dispatch and consumed on the NEXT hop `v→w`:
+    ///   - `v→w` distance-terminated (dead-reckon `driveDist` / PROJECTION
+    ///     gate)  → subtract `δ` from the effective drive (outgoing trim).
+    ///   - `v→w` sensor-terminated (LINE / STOP_AT_LINE) → no trim; the carry
+    ///     is simply DROPPED (the line re-anchors v→w, so δ is inert there).
+    /// Either way the carry lives exactly one hop. Reset to 0 on abort, on a
+    /// fault, on DEQUEUE of a fresh goal, and on the IDLE/done transition so a
+    /// pivot edge that is the FINAL hop cannot leak δ into the next goal.
+    float _carriedPivotTrimCm = 0.0f;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;
