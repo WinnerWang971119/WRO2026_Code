@@ -41,6 +41,7 @@ from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
     EDGE_PROJECTION,
+    Pivot,
     build_graph,
 )
 from tools.path_planner.pipeline_config import (
@@ -51,7 +52,10 @@ from tools.path_planner.pipeline_config import (
     ProjectionMode,
     TurnMode,
 )
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import (
+    compute_all_pairs_next_hop,
+    compute_pivot_compensation,
+)
 from tools.path_planner.sim import (
     LocalizationSim,
     PathTrackerSim,
@@ -70,6 +74,7 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
+    LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     StopAtLine,
     resolve_blind_mode,
     resolve_direction,
@@ -146,7 +151,7 @@ def fresh_sim(toy_field, toy_graph_and_table):
 
 
 def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
-    """Insert ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` after each LINE primitive.
+    """Insert the per-hop ``(ACT_LINE_OVERSHOOT, offset)`` after each LINE primitive.
 
     The runtime sim (post-T9) emits a LINE_OVERSHOOT step after every
     EDGE_LINE traversal so the wheel axle (not the line sensor) lands on
@@ -155,9 +160,20 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     against ``compile_path``'s output we must re-add the LINE_OVERSHOOT
     steps in the same positions the sim emits them.
 
+    The overshoot advance is the axle offset of the BOARD that LED the hop,
+    so the helper picks the offset per primitive (mirroring the sim, which
+    reads ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` for a REAR hop and
+    ``LINE_SENSOR_AXLE_OFFSET_CM`` for a FRONT hop):
+
+    * FRONT LINE hop -> ``ACT_FOLLOW_INT`` -> overshoot ``LINE_SENSOR_AXLE_OFFSET_CM``.
+    * REAR LINE hop  -> ``ACT_LINE_REVERSE`` -> overshoot ``LINE_SENSOR_AXLE_OFFSET_REAR_CM``.
+
     Post-T12, EDGE_LINE traversals on REAR hops emit ``ACT_LINE_REVERSE``
     instead of ``ACT_FOLLOW_INT`` but still trigger the LINE_OVERSHOOT
-    FSM transition; the helper therefore matches either primitive name.
+    FSM transition; the helper therefore matches either primitive name and
+    emits that hop's own board offset (ADR-035 reconciliation: FRONT 12.02
+    cm, REAR 7.68 cm -- previously both stale 5.0, which masked the
+    per-board distinction and only worked while FRONT == REAR).
 
     Parity limitation — pass-through fixtures only:
 
@@ -185,8 +201,12 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     out: List[Primitive] = []
     for prim in primitives:
         out.append(prim)
-        if prim[0] in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
+        if prim[0] == ACT_FOLLOW_INT:
+            # FRONT line hop: front board led, so roll the FRONT axle offset.
             out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+        elif prim[0] == ACT_LINE_REVERSE:
+            # REAR line hop: rear board led, so roll the REAR axle offset.
+            out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM))
     return out
 
 
@@ -1230,7 +1250,9 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
     fixture where compiler and sim must produce the same sequence:
         (ACT_TURN_REL, 180.0)                   -- turn to face 180deg (body heading for REAR)
         (ACT_LINE_REVERSE, 'B', LineMode.NORMAL) -- REAR traverse
-        (ACT_LINE_OVERSHOOT, 5.0)                -- sim-only overshoot step
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM)  -- sim-only overshoot step
+                                                 -- (7.68 cm: a REAR hop rolls the REAR
+                                                 --  board's own axle offset, ADR-035)
 
     Verifies the TC18 contract for the REAR case.
     """
@@ -1962,3 +1984,361 @@ def test_resolve_line_mode_string_name_end_to_end_via_sim():
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
     ]
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# ADR-035 / issue #44 -- two-sided pivot-compensation sim parity (TC5 - TC8)
+#
+# These are TRUE end-to-end parity tests: the REAL planner stores the pivot
+# over-travel ``delta`` on the pivot-tagged edge (build a raw graph with a
+# pivot-tagged edge + run ``compute_all_pairs_next_hop`` with an explicit
+# ``track_cm`` so ``apply_pivot_compensations`` populates ``pivot_trim_cm``),
+# then the sim consumes it at dispatch. The default competition track is 18.0
+# cm, giving ``delta = (T/2) * tan(theta/2) = 9.0`` cm at a 90 deg pivot.
+#
+# Geometry note (load-bearing): :class:`VirtualChassis` models the turn as a
+# pure in-place rotation (zero translation), so for a PIVOT hop the trimmed
+# drives leave the point-model chassis ``delta`` short on the incoming leg AND
+# ``delta`` short on the outgoing leg -- a residual of ``delta * (h_in +
+# h_out)``. The firmware closes that residual with the pivot maneuver's OWN
+# physical translation (``delta`` along ``h_in`` to reach ``v``, then ``delta``
+# along ``h_out`` of over-travel past ``v``), which the point-sim does not
+# replay. So the drift-is-zero acceptance is asserted by adding that documented
+# physical pivot translation back to the sim's point position and checking the
+# axle lands on the node within ``_POSITION_TOL_CM``. The load-bearing
+# firmware-parity contract -- both adjacent drives trimmed by ``delta`` -- is
+# asserted DIRECTLY on the emitted primitive payloads. We never re-introduce a
+# per-junction offset into the sim and never relax ``_POSITION_TOL_CM``.
+#
+# Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim
+#   ._pivot_trim_distance / ._resolve_sensor_edge_pivot_carry / go_to.
+# Planner under test: tools/path_planner/planner.py -- apply_pivot_compensations
+#   (invoked by compute_all_pairs_next_hop).
+# ===========================================================================
+
+# Competition chassis track (cm): Config::TRACK_MM = 180 mm. Passed explicitly
+# so the fixtures do not depend on the host being able to read Config.h, and so
+# the asserted delta is deterministic. compute_pivot_compensation(90, 18) == 9.0.
+_TC_PIVOT_TRACK_CM: float = 18.0
+
+# Pivot heading (deg) for the dead-reckon TC6 / sensor-outgoing TC8 fixtures: a
+# 90 deg turn yields delta = 9.0 cm.
+_TC_PIVOT_TURN_90_DEG: float = 90.0
+
+# Pivot heading (deg) for the line-incoming TC7 fixture: a 70 deg turn yields
+# delta = (18/2) * tan(35 deg) ~= 6.30 cm, comfortably within the REAR overshoot
+# budget (LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68). A 90 deg LINE-incoming pivot
+# would give delta = 9.0 > 7.68 and the validator would reject it (#44 plan,
+# AC6), so the line-incoming fixture is authored with a within-budget angle.
+_TC_PIVOT_TURN_70_DEG: float = 70.0
+
+
+def _build_pivot_chain(
+    incoming_type: str,
+    outgoing_type: str,
+    *,
+    incoming_dist_cm: float,
+    outgoing_dist_cm: float,
+    turn_deg: float,
+    track_cm: float = _TC_PIVOT_TRACK_CM,
+):
+    """Build an A->B->C pivot chain through the REAL planner and return its sim.
+
+    The forward edge ``A->B`` carries ``pivot=Pivot.LEFT`` and turns ``turn_deg``
+    degrees at ``B`` (``A->B`` heading 0 deg, ``B->C`` heading ``turn_deg``), so
+    :func:`apply_pivot_compensations` (invoked inside
+    :func:`compute_all_pairs_next_hop`) stores ``pivot_trim_cm = (track/2) *
+    tan(|turn_deg|/2)`` on ``A->B``. Node ``B`` has exactly one forward out-edge
+    (``B->C``; the ``B->A`` back-edge is excluded), satisfying finding #36 so the
+    trim is populated authentically.
+
+    Nodes are placed geometrically so each node's ``(x, y)`` is consistent with
+    its incident edge headings -- the drift cross-check depends on it.
+
+    :returns: ``(sim, chassis, graph, next_hop, delta, nodes)`` where ``delta``
+        is the planner-stored ``pivot_trim_cm`` on ``A->B``.
+    """
+    hdg_in = 0.0
+    hdg_out = float(turn_deg)
+
+    graph = nx.DiGraph()
+    for name in ("A", "B", "C"):
+        graph.add_node(name)
+    graph.add_edge(
+        "A", "B",
+        type=incoming_type,
+        distance_cm=float(incoming_dist_cm),
+        heading_deg=hdg_in,
+        pivot=int(Pivot.LEFT),
+    )
+    graph.add_edge(
+        "B", "A",
+        type=incoming_type,
+        distance_cm=float(incoming_dist_cm),
+        heading_deg=(hdg_in + 180.0) % 360.0,
+    )
+    graph.add_edge(
+        "B", "C",
+        type=outgoing_type,
+        distance_cm=float(outgoing_dist_cm),
+        heading_deg=hdg_out,
+    )
+    graph.add_edge(
+        "C", "B",
+        type=outgoing_type,
+        distance_cm=float(outgoing_dist_cm),
+        heading_deg=(hdg_out + 180.0) % 360.0,
+    )
+
+    # Run the REAL planner: this invokes apply_pivot_compensations, storing the
+    # delta on the A->B pivot edge. cost_blind_multiplier is arbitrary here (no
+    # competing routes), so any positive value resolves the same chain.
+    next_hop = compute_all_pairs_next_hop(graph, 3.0, track_cm=track_cm)
+    delta = graph.edges["A", "B"].get("pivot_trim_cm")
+
+    bx = incoming_dist_cm * math.cos(math.radians(hdg_in))
+    by = incoming_dist_cm * math.sin(math.radians(hdg_in))
+    cx = bx + outgoing_dist_cm * math.cos(math.radians(hdg_out))
+    cy = by + outgoing_dist_cm * math.sin(math.radians(hdg_out))
+    nodes = {"A": (0.0, 0.0), "B": (bx, by), "C": (cx, cy)}
+
+    fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=hdg_in)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis, graph, next_hop, delta, nodes
+
+
+def _pivot_corrected_position(chassis, delta, hdg_in_deg, hdg_out_deg):
+    """Return the sim point-position plus the pivot's physical translation.
+
+    The point-model :class:`VirtualChassis` rotates in place, so a pivot hop's
+    trimmed drives leave it ``delta`` short along ``h_in`` and ``delta`` short
+    along ``h_out``. The firmware's pivot maneuver physically translates the
+    axle by exactly that (``delta`` along ``h_in`` to reach ``v``, then
+    ``delta`` along ``h_out`` of over-travel). Add it back to recover the axle's
+    true landing for the drift cross-check.
+    """
+    hin = (math.cos(math.radians(hdg_in_deg)), math.sin(math.radians(hdg_in_deg)))
+    hout = (math.cos(math.radians(hdg_out_deg)), math.sin(math.radians(hdg_out_deg)))
+    px = chassis.x_cm + delta * hin[0] + delta * hout[0]
+    py = chassis.y_cm + delta * hin[1] + delta * hout[1]
+    return px, py
+
+
+# ---------------------------------------------------------------------------
+# TC5 -- #44 regression: a non-pivot route drives the FULL edge distance
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc5_non_pivot_route_drives_full_distance():
+    """TC5 (#44 regression): a route that does NOT traverse the pivot edge drives FULL distance.
+
+    The planner stores ``delta = 9.0`` on the pivot edge ``A->B`` (90 deg pivot,
+    track 18 cm). The shared following edge ``B->C`` carries NO ``pivot_trim_cm``
+    (the #44 fix keeps delta on the pivot edge, never on ``v->w``). Driving the
+    non-pivot route ``B->C`` (which never traverses ``A->B``) must emit the FULL
+    35 cm distance-terminated payload -- delta is never subtracted when the hop
+    carries no pivot trim and no pivot was traversed to latch a carry.
+
+    This is the core #44 guard at the sim level: a non-pivot route through the
+    shared following edge cell is unaffected by the pivot's compensation.
+    """
+    sim, chassis, graph, next_hop, delta, nodes = _build_pivot_chain(
+        EDGE_BLIND, EDGE_BLIND,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_90_DEG,
+    )
+    # The planner stored delta on the pivot edge only -- never on B->C.
+    assert delta == pytest.approx(9.0, abs=1e-6)
+    assert "pivot_trim_cm" not in graph.edges["B", "C"]
+
+    # Re-seed the sim to START at B so the route B->C never traverses A->B.
+    fd = _minimal_field(nodes=nodes, start_node="B", start_heading_deg=_TC_PIVOT_TURN_90_DEG)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("C")
+
+    # The B->C BLIND hop drives the FULL 35 cm -- no under-drive, no delta.
+    assert prims == [(ACT_FORWARD, pytest.approx(35.0, abs=1e-9))]
+    # Chassis lands exactly on C (no pivot translation involved on a clean hop).
+    cx, cy = nodes["C"]
+    assert math.hypot(chassis.x_cm - cx, chassis.y_cm - cy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC6 -- dead-reckon-incoming pivot end-to-end (both drives trimmed, drift ~ 0)
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc6_dead_reckon_incoming_pivot_both_drives_trimmed():
+    """TC6: a BLIND->BLIND pivot trims BOTH the approach and the outgoing drive; drift ~ 0.
+
+    The pivot edge ``A->B`` (BLIND, dead-reckon incoming) carries
+    ``delta = 9.0``; ``B->C`` (BLIND) is the outgoing dead-reckon hop. The sim:
+
+    * trims the approach drive to ``L_uv - delta`` = 40 - 9 = 31 cm,
+    * latches ``delta`` for one hop,
+    * trims the outgoing drive to ``L_vw - delta`` = 35 - 9 = 26 cm.
+
+    Both emitted ``ACT_FORWARD`` payloads carry the trimmed distances (the
+    load-bearing ADR-035 dispatch contract). The point-sim lands ``delta``
+    short on each leg; adding the pivot maneuver's physical translation
+    (``delta`` along each leg) recovers node C with ZERO residual within
+    ``_POSITION_TOL_CM``.
+    """
+    sim, chassis, graph, next_hop, delta, nodes = _build_pivot_chain(
+        EDGE_BLIND, EDGE_BLIND,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_90_DEG,
+    )
+    assert delta == pytest.approx(9.0, abs=1e-6)
+
+    prims = sim.go_to("C")
+
+    # Both adjacent dead-reckon drives are trimmed by delta (the contract).
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),
+        (ACT_TURN_REL, pytest.approx(_TC_PIVOT_TURN_90_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(35.0 - delta, abs=1e-9)),
+    ]
+
+    # Drift ~ 0: the point-sim is delta short on each leg; the pivot's own
+    # physical translation closes it, landing the axle on C with zero residual.
+    px, py = _pivot_corrected_position(chassis, delta, 0.0, _TC_PIVOT_TURN_90_DEG)
+    cx, cy = nodes["C"]
+    assert math.hypot(px - cx, py - cy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC7 -- line-incoming pivot parity (overshoot reduced + outgoing trimmed)
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc7_line_incoming_pivot_overshoot_reduced_and_outgoing_trimmed():
+    """TC7: a LINE-incoming pivot reduces the OVERSHOOT advance by delta and trims the outgoing hop.
+
+    The pivot edge ``A->B`` is a LINE edge (re-anchors on the junction line, so
+    it cannot stop short on its approach). With a 70 deg pivot at track 18 cm,
+    ``delta = (18/2) * tan(35 deg) ~= 6.30`` cm -- within the REAR overshoot
+    budget (LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68), so the validator would
+    accept it (a 90 deg LINE-incoming pivot's delta = 9.0 > 7.68 would be
+    rejected). The sim therefore:
+
+    * reduces the LINE_OVERSHOOT advance to ``LINE_SENSOR_AXLE_OFFSET_CM -
+      delta`` (the axle settles delta short of B), and
+    * trims the outgoing ``B->C`` BLIND hop to ``L_vw - delta``.
+
+    Both adjacent corrections are asserted on the emitted payloads; the axle
+    lands on C within ``_POSITION_TOL_CM`` once the pivot's physical translation
+    is added back.
+    """
+    sim, chassis, graph, next_hop, delta, nodes = _build_pivot_chain(
+        EDGE_LINE, EDGE_BLIND,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_70_DEG,
+    )
+    expected_delta = compute_pivot_compensation(_TC_PIVOT_TURN_70_DEG, _TC_PIVOT_TRACK_CM)
+    assert delta == pytest.approx(expected_delta, abs=1e-9)
+    # Within the line-incoming overshoot budget (REAR is the tighter of the two).
+    assert delta <= LINE_SENSOR_AXLE_OFFSET_REAR_CM
+
+    prims = sim.go_to("C")
+
+    # LINE incoming: FOLLOW_INT then a reduced LINE_OVERSHOOT (offset - delta),
+    # then the turn, then the outgoing BLIND hop trimmed by delta.
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, pytest.approx(LINE_SENSOR_AXLE_OFFSET_CM - delta, abs=1e-9)),
+        (ACT_TURN_REL, pytest.approx(_TC_PIVOT_TURN_70_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(35.0 - delta, abs=1e-9)),
+    ]
+
+    # Drift ~ 0 once the pivot's physical translation is added back.
+    px, py = _pivot_corrected_position(chassis, delta, 0.0, _TC_PIVOT_TURN_70_DEG)
+    cx, cy = nodes["C"]
+    assert math.hypot(px - cx, py - cy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "C"
+
+
+def test_pivot_tc7_non_pivot_line_traversal_drives_full_overshoot():
+    """TC7 (control): a non-pivot LINE traversal of the same line node drives FULL overshoot.
+
+    The pivot tag lives on the FORWARD edge ``A->B`` only (directional, never
+    mirrored to the reverse). Driving the reverse LINE edge ``B->A`` -- a
+    non-pivot traversal through the same line node B -- must roll the FULL
+    ``LINE_SENSOR_AXLE_OFFSET_CM`` overshoot, with no delta reduction. This is
+    the "non-pivot route through the same line node is unaffected" clause of
+    AC5 / #44.
+    """
+    sim, chassis, graph, next_hop, delta, nodes = _build_pivot_chain(
+        EDGE_LINE, EDGE_BLIND,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_70_DEG,
+    )
+    # The reverse LINE edge carries no pivot trim (forward-only).
+    assert "pivot_trim_cm" not in graph.edges["B", "A"]
+
+    # Re-seed at B and drive B->A (non-pivot LINE traversal of line node B).
+    fd = _minimal_field(nodes=nodes, start_node="B", start_heading_deg=180.0)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("A")
+
+    # FULL overshoot -- delta is never subtracted on a non-pivot line hop.
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+    ]
+    assert sim.localization.current_node() == "A"
+
+
+# ---------------------------------------------------------------------------
+# TC8 -- pivot with a sensor-terminated OUTGOING hop gets no outgoing trim
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc8_sensor_terminated_outgoing_gets_no_delta_subtraction():
+    """TC8: a pivot whose OUTGOING continuation is sensor-terminated takes no outgoing trim.
+
+    The pivot edge ``A->B`` is BLIND (dead-reckon incoming, so its OWN approach
+    delta IS applied: 40 - 9 = 31 cm). The outgoing ``B->C`` is a LINE edge
+    (sensor-terminated -- it self-corrects on the physical junction line), so it
+    must drive its FULL geometry: a full ``ACT_LINE_OVERSHOOT`` of
+    ``LINE_SENSOR_AXLE_OFFSET_CM`` with NO delta reduction. The carried delta is
+    dropped by ``_resolve_sensor_edge_pivot_carry`` on the sensor hop.
+
+    Verifies AC7: the outgoing trim applies only on distance-terminated drives;
+    a sensor-terminated outgoing edge gets no subtraction, while the pivot's own
+    incoming side is still handled.
+    """
+    sim, chassis, graph, next_hop, delta, nodes = _build_pivot_chain(
+        EDGE_BLIND, EDGE_LINE,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_90_DEG,
+    )
+    assert delta == pytest.approx(9.0, abs=1e-6)
+
+    prims = sim.go_to("C")
+
+    # Incoming BLIND approach IS trimmed (the pivot's own incoming side);
+    # the outgoing LINE hop self-corrects -> FULL overshoot, NO delta subtracted.
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),
+        (ACT_TURN_REL, pytest.approx(_TC_PIVOT_TURN_90_DEG, abs=1e-9)),
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+    ]
+    # The sensor hop re-anchors localization on the physical junction at C.
+    assert sim.localization.current_node() == "C"
