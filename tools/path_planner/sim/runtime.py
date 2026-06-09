@@ -111,14 +111,40 @@ TURN_EPSILON_DEG: float = 1e-6
 # the C++ side changes, update this value too -- the sim's LINE_OVERSHOOT
 # advance must match the runtime's ``LineFollower.setDistanceTarget`` budget
 # or the cross-check goal-position test will diverge.
-LINE_SENSOR_AXLE_OFFSET_CM: float = 5.0
+#
+# ADR-035 reconciliation: this was historically a placeholder ``5.0`` while
+# the comment already claimed it mirrors ``Config::LINE_SENSOR_AXLE_OFFSET_CM``.
+# Config.h carries the authoritative physical measurement FRONT = 12.02 cm,
+# and the firmware (ADR-035, two-sided pivot compensation) reduces THIS offset
+# by a line-incoming pivot trim ``delta`` (validated ``delta <= 12.02``). With
+# the stale 5.0 a line-incoming pivot up to 7.68 cm would drive the reduced
+# overshoot NEGATIVE in the sim and diverge from the firmware. The offset is
+# therefore aligned to Config.h's real value. This preserves drift == 0 on
+# every NON-pivot hop because each hop still nets exactly the edge length
+# (``(distance_cm - offset)`` followed by ``offset`` is ``distance_cm``,
+# independent of the offset magnitude).
+LINE_SENSOR_AXLE_OFFSET_CM: float = 12.02
 
 # MUST mirror ``Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM`` in WRO2026/Config.h.
 # Used for REAR (reverse) overshoot so a rear-board hop dead-reckons with the
-# rear board's own axle offset instead of the front board's. Defaults equal to
-# the front offset until the rear board is measured (T5); keep the two C++ and
-# Python defaults in lockstep.
-LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = LINE_SENSOR_AXLE_OFFSET_CM
+# rear board's own axle offset instead of the front board's. ADR-035: aligned
+# to Config.h's authoritative REAR measurement (7.68 cm); the validator caps a
+# line-incoming pivot ``delta`` at ``MIN(12.02, 7.68) = 7.68`` so the reduced
+# REAR overshoot stays non-negative. Keep the two C++ and Python values in
+# lockstep.
+LINE_SENSOR_AXLE_OFFSET_REAR_CM: float = 7.68
+
+# Floor (cm) for a pivot-trimmed dead-reckon advance / reduced LINE overshoot.
+# Mirrors ``PathTracker.cpp``'s file-local ``PIVOT_TRIM_MIN_DRIVE_CM`` (ADR-035).
+# The validator guarantees ``delta < edge length`` on every dead-reckon side and
+# ``delta <= overshoot budget`` on every LINE-incoming side, so a correctly built
+# routes table never drives the effective distance to (or below) zero. This is a
+# DEFENSIVE floor only: a future bad table / validator-config mismatch that
+# produced a non-positive effective distance would, on the robot, make
+# ``Drive.driveDist`` reject the negative cm and stall the FSM. Clamping to a
+# tiny positive advance keeps the sim's geometry forward and in parity with the
+# firmware's clamp instead of producing a negative displacement.
+PIVOT_TRIM_MIN_DRIVE_CM: float = 0.5
 
 # MUST mirror ``Config::NAV_TURN_TOLERANCE_DEG`` in WRO2026/Config.h.
 # Pytest TC9 verifies parity via regex grep on the header (no C parser).
@@ -249,6 +275,7 @@ __all__ = [
     "LINE_SENSOR_AXLE_OFFSET_REAR_CM",
     "NAV_TURN_TOLERANCE_DEG",
     "PATH_PASS_THROUGH_ENABLED",
+    "PIVOT_TRIM_MIN_DRIVE_CM",
     "TURN_EPSILON_DEG",
     "Direction",
     "LocalizationSim",
@@ -592,6 +619,27 @@ def _read_edge_dir_override(edge) -> DirectionMode:
     return DirectionMode(raw)
 
 
+def _read_edge_pivot_trim(edge) -> float:
+    """Return an edge's ADR-035 ``pivot_trim_cm`` (delta), or ``0.0`` when absent.
+
+    The planner's ``apply_pivot_compensations`` writes ``pivot_trim_cm`` ONLY
+    onto the pivot-tagged edge; every other edge omits the key entirely. This
+    mirrors the firmware's ``EdgeInfo::pivot_trim_cm`` read, which the emitter
+    fills with ``0.0`` on every non-pivot cell -- so a missing key here is the
+    sim equivalent of that ``0.0`` default. Tolerates a dict-like edge (the
+    graph attribute mapping) and coerces to ``float``.
+
+    :param edge: directed graph edge attribute mapping (e.g.
+        ``graph.edges[u, v]``).
+    :return: the stored delta as a float, or ``0.0`` if the edge carries no
+        pivot trim.
+    """
+    raw = edge.get("pivot_trim_cm") if hasattr(edge, "get") else None
+    if raw is None:
+        return 0.0
+    return float(raw)
+
+
 def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
     """Return the body heading the chassis assumes for one hop.
 
@@ -775,6 +823,12 @@ class PathTrackerSim:
         self._next_hop = next_hop
         self._chassis = chassis
         self._localization = LocalizationSim(field_data)
+        # ADR-035: pivot over-travel delta carried one hop from a pivot edge to
+        # the OUTGOING dead-reckon drive. Mirrors ``PathTrackerClass::
+        # _carriedPivotTrimCm`` (cleared at construction; re-cleared at the start
+        # of every ``go_to`` / ``step_through`` so a final-hop pivot cannot leak
+        # delta into the next goal).
+        self._carried_pivot_trim_cm: float = 0.0
 
     @property
     def localization(self) -> LocalizationSim:
@@ -801,6 +855,80 @@ class PathTrackerSim:
     def resolve_pre_turn_mode(self, edge) -> TurnMode:
         """See module-level :func:`resolve_pre_turn_mode`."""
         return resolve_pre_turn_mode(edge)
+
+    # -- ADR-035 pivot-trim (mirror of PathTracker.cpp) -----------------------
+
+    def _pivot_trim_distance(self, edge) -> float:
+        """Return the LOCAL effective distance for a DISTANCE-terminated hop.
+
+        Byte-for-byte mirror of ``PathTrackerClass::_pivotTrimDistance`` (ADR-035,
+        issue #44). The edge's ``distance_cm`` (the shared ``EDGES[*][*]`` cell)
+        is NEVER mutated; the trim is folded into a local effective distance only.
+
+        Order of operations matches the firmware exactly:
+
+        1. **Outgoing-consume:** subtract any ``delta`` carried from the previous
+           pivot hop (the single-wheel pivot over-travelled by ``delta`` on this,
+           its outgoing, drive), then reset the carry -- it lives one hop only.
+        2. **Approach:** if THIS edge drives into a pivot node (its
+           ``pivot_trim_cm > 0``), stop ``delta`` short of it.
+        3. **Latch:** if THIS edge is a pivot edge, carry its ``delta`` to the
+           next hop so the following dead-reckon drive is trimmed too (done
+           regardless of whether the approach trim applied).
+
+        A defensive floor (:data:`PIVOT_TRIM_MIN_DRIVE_CM`) keeps the result
+        positive if a future bad table ever over-trims, mirroring the firmware
+        clamp; the validator otherwise guarantees ``delta < edge length`` here.
+
+        :param edge: directed graph edge attribute mapping for the hop.
+        :return: the effective (possibly trimmed) advance distance in cm.
+        """
+        effective_dist_cm = float(edge["distance_cm"])
+
+        # (1) Outgoing trim: consume the carry from the previous pivot hop.
+        if self._carried_pivot_trim_cm > 0.0:
+            effective_dist_cm -= self._carried_pivot_trim_cm
+            self._carried_pivot_trim_cm = 0.0
+
+        # (2) Approach trim: stop delta short of a pivot this edge drives into.
+        edge_trim = _read_edge_pivot_trim(edge)
+        if edge_trim > 0.0:
+            effective_dist_cm -= edge_trim
+
+        # (3) Latch: carry this edge's delta to the next hop's outgoing drive.
+        if edge_trim > 0.0:
+            self._carried_pivot_trim_cm = edge_trim
+
+        # Defensive clamp (mirrors PathTracker.cpp). A correctly built table
+        # keeps this well positive; degrade to a tiny positive advance rather
+        # than emit a negative displacement on a bad table / config mismatch.
+        if effective_dist_cm < PIVOT_TRIM_MIN_DRIVE_CM:
+            effective_dist_cm = PIVOT_TRIM_MIN_DRIVE_CM
+
+        return effective_dist_cm
+
+    def _resolve_sensor_edge_pivot_carry(self, edge, latch_own: bool) -> None:
+        """Drop any carried ``delta`` for a SENSOR-terminated hop; optionally latch.
+
+        Mirror of ``PathTrackerClass::_resolveSensorEdgePivotCarry`` (ADR-035).
+        Sensor-terminated hops (LINE follow-to-intersection, STOP_AT_LINE seek)
+        take no outgoing distance trim -- they self-correct on the physical line
+        -- so any ``delta`` carried from a previous pivot is dropped (the carry
+        lives one hop only).
+
+        A pivot reached via a STOP_AT_LINE seek still over-travels on its
+        OUTGOING side, so it latches its own ``delta`` (``latch_own=True``). LINE
+        edges latch later, at overshoot-arm time alongside the overshoot-advance
+        reduction, and pass ``latch_own=False``.
+
+        :param edge: directed graph edge attribute mapping for the hop.
+        :param latch_own: latch THIS edge's ``pivot_trim_cm`` for the next hop.
+        """
+        self._carried_pivot_trim_cm = 0.0
+        if latch_own:
+            edge_trim = _read_edge_pivot_trim(edge)
+            if edge_trim > 0.0:
+                self._carried_pivot_trim_cm = edge_trim
 
     def go_to(
         self,
@@ -851,6 +979,12 @@ class PathTrackerSim:
                 "LocalizationSim.zero_heading_from_current()"
             )
 
+        # ADR-035: each goal starts with a clean pivot carry. A pivot edge that
+        # was the FINAL hop of the PREVIOUS goal latched delta with no following
+        # drive to consume it -- clear it here (mirror of the firmware's DEQUEUE
+        # / goal-complete resets) so it cannot trim this goal's first hop.
+        self._carried_pivot_trim_cm = 0.0
+
         out: List[Primitive] = []
         current = self._localization.current_node()
 
@@ -884,6 +1018,14 @@ class PathTrackerSim:
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
+                # ADR-035: a LINE edge is SENSOR-terminated -- it re-anchors on
+                # the junction line, so it takes NO outgoing trim. Drop any delta
+                # carried from a previous pivot. This edge's OWN delta is handled
+                # below (overshoot reduction + latch), so latch_own=False here --
+                # mirrors `_resolveSensorEdgePivotCarry(edge, latchOwn=false)` in
+                # the firmware's LINE dispatch.
+                self._resolve_sensor_edge_pivot_carry(edge, latch_own=False)
+
                 # Dead-reckon with the axle offset of the board that LED this hop;
                 # a REAR hop uses the rear board's own offset (mirrors PathTracker).
                 overshoot_offset_cm = (
@@ -900,7 +1042,34 @@ class PathTrackerSim:
                 # LINE_OVERSHOOT step below rolls the remaining offset so the wheel
                 # axle -- not the sensor -- lands ON the node. Net advance over the
                 # hop is exactly `distance_cm`, matching the firmware re-anchor.
-                follow_cm = distance_cm - overshoot_offset_cm
+                #
+                # GUARD: a LINE edge shorter than `overshoot_offset_cm` would push
+                # `follow_cm` negative. The whole edge is then rolled as overshoot
+                # (follow_cm clamped to 0) so the net advance stays `distance_cm`
+                # and the sim never emits a negative follow displacement. No
+                # field/toy LINE edge is currently this short (all >= 30 cm vs the
+                # 12.02 cm FRONT offset); this is defensive only.
+                follow_cm = max(0.0, distance_cm - overshoot_offset_cm)
+
+                # ADR-035 LINE-incoming pivot trim (two-sided compensation). If
+                # THIS edge drives into a pivot node (`pivot_trim_cm = delta > 0`),
+                # a LINE edge cannot stop short on its approach (it re-anchors on
+                # the junction line), so instead shorten the OVERSHOOT advance by
+                # delta -- the axle settles delta short of the node -- then latch
+                # delta so the OUTGOING dead-reckon hop is trimmed too. Net hop
+                # becomes `distance_cm - delta` (the LINE row of the ADR-035
+                # regime matrix). Mirrors PathTracker.cpp's LINE_FOLLOW overshoot
+                # arming: `overshootTargetCm = offset - delta`, clamped to the
+                # PIVOT_TRIM_MIN_DRIVE_CM floor; `follow_cm` is unchanged by delta.
+                overshoot_advance_cm = overshoot_offset_cm
+                inbound_pivot_trim = _read_edge_pivot_trim(edge)
+                if inbound_pivot_trim > 0.0:
+                    overshoot_advance_cm = overshoot_offset_cm - inbound_pivot_trim
+                    if overshoot_advance_cm < PIVOT_TRIM_MIN_DRIVE_CM:
+                        overshoot_advance_cm = PIVOT_TRIM_MIN_DRIVE_CM
+                    # Latch this edge's delta for the next hop's outgoing trim.
+                    self._carried_pivot_trim_cm = inbound_pivot_trim
+
                 if direction == Direction.REAR:
                     out.append((ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)))
                     self._chassis.reverse(follow_cm)
@@ -916,6 +1085,9 @@ class PathTrackerSim:
                 # anti-parallel forward edges still pass through cleanly
                 # (TC9c). The primitive name differs only for downstream
                 # verification + telemetry. See ADR-023.
+                #
+                # The payload is the (possibly pivot-reduced) overshoot advance,
+                # matching the distance the firmware commands into the gate.
                 if _should_pass_through(
                     self._graph,
                     self._next_hop,
@@ -929,28 +1101,34 @@ class PathTrackerSim:
                     bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                     line_board_count=LINE_BOARD_COUNT,
                 ):
-                    out.append((ACT_LINE_PASS, overshoot_offset_cm))
+                    out.append((ACT_LINE_PASS, overshoot_advance_cm))
                 else:
-                    out.append((ACT_LINE_OVERSHOOT, overshoot_offset_cm))
+                    out.append((ACT_LINE_OVERSHOOT, overshoot_advance_cm))
                 # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
                 # in the travel direction. When it detects the intersection at v,
                 # the chassis center is AXLE_OFFSET cm behind v in the travel
                 # direction. Advancing AXLE_OFFSET in the travel direction = reverse
                 # in body coordinates (body heading points opposite to travel).
                 if direction == Direction.REAR:
-                    self._chassis.reverse(overshoot_offset_cm)
+                    self._chassis.reverse(overshoot_advance_cm)
                 else:
-                    self._chassis.forward(overshoot_offset_cm)
+                    self._chassis.forward(overshoot_advance_cm)
                 self._localization.on_intersection(nxt)
             elif edge_type == EDGE_PROJECTION:
+                # ADR-035: PROJECTION is DISTANCE-terminated (encoder gate, no
+                # physical marker), so it takes the outgoing trim (carried delta),
+                # the approach trim (this edge's own delta), and latches this
+                # edge's delta -- all folded into a LOCAL effective distance.
+                # `distance_cm` (the shared table cell) is never mutated.
+                effective_dist_cm = self._pivot_trim_distance(edge)
                 if direction == Direction.REAR:
                     out.append(
-                        (ACT_PROJECTION_REVERSE, nxt, distance_cm, resolve_projection_mode(edge))
+                        (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge))
                     )
-                    self._chassis.reverse(distance_cm)
+                    self._chassis.reverse(effective_dist_cm)
                 else:
-                    out.append((ACT_FOLLOW_DIST, distance_cm))
-                    self._chassis.follow_line_to_distance(distance_cm)
+                    out.append((ACT_FOLLOW_DIST, effective_dist_cm))
+                    self._chassis.follow_line_to_distance(effective_dist_cm)
                 self._localization.on_dead_reckoned_advance(nxt)
             elif edge_type == EDGE_BLIND:
                 # Mode-sensitive blind dispatch (mirrors the blind branch of
@@ -975,6 +1153,13 @@ class PathTrackerSim:
                     # ``on_intersection`` (the "better localization") instead
                     # of dead-reckoning. The chassis still advances
                     # ``distance_cm`` forward to the node.
+                    #
+                    # ADR-035: a STOP_AT_LINE seek is SENSOR-terminated -- it
+                    # self-corrects on the line, so no incoming/outgoing distance
+                    # trim. Drop any carried delta, but STILL latch this edge's
+                    # own delta (a pivot reached via a seek over-travels on its
+                    # OUTGOING side). The seek drives the FULL `distance_cm`.
+                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
                     out.append((ACT_STOP_AT_LINE, distance_cm))
                     self._chassis.forward(distance_cm)
                     self._localization.on_intersection(nxt)
@@ -984,6 +1169,8 @@ class PathTrackerSim:
                     # ``on_intersection`` (mirrors the firmware reverse seek +
                     # ``Localization.onIntersection``; AC1). The chassis
                     # advances backward by ``distance_cm`` to the node.
+                    # ADR-035: sensor-terminated -- drop carried delta, latch own.
+                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
                     out.append(
                         (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
                     )
@@ -991,19 +1178,28 @@ class PathTrackerSim:
                     self._localization.on_intersection(nxt)
                 elif direction == Direction.FRONT:
                     # Dead-reckoned forward blind move (byte-identical to the
-                    # pre-resolver FRONT non-STOP_AT_LINE output).
-                    out.append((ACT_FORWARD, distance_cm))
-                    self._chassis.forward(distance_cm)
+                    # pre-resolver FRONT non-STOP_AT_LINE output when no pivot
+                    # trim applies). ADR-035: DISTANCE-terminated -- outgoing
+                    # trim (carried delta) + approach trim (own delta) + latch,
+                    # folded into a LOCAL effective distance; the table cell is
+                    # untouched and the emitted value matches what the firmware
+                    # commands into Drive.driveDist.
+                    effective_dist_cm = self._pivot_trim_distance(edge)
+                    out.append((ACT_FORWARD, effective_dist_cm))
+                    self._chassis.forward(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                 else:
                     # Dead-reckoned reverse blind move (byte-identical to the
-                    # pre-resolver REAR output): a non-STOP_AT_LINE REAR edge,
-                    # or a forced-REAR STOP_AT_LINE hop on a 1-board chassis
-                    # with no rear board to seek with (AC2).
+                    # pre-resolver REAR output when no pivot trim applies): a
+                    # non-STOP_AT_LINE REAR edge, or a forced-REAR STOP_AT_LINE
+                    # hop on a 1-board chassis with no rear board to seek with
+                    # (AC2). ADR-035: DISTANCE-terminated -- same trim/latch as
+                    # the FRONT dead-reckon branch above.
+                    effective_dist_cm = self._pivot_trim_distance(edge)
                     out.append(
-                        (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
+                        (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge))
                     )
-                    self._chassis.reverse(distance_cm)
+                    self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
@@ -1042,6 +1238,9 @@ class PathTrackerSim:
                 "LocalizationSim.zero_heading_from_current()"
             )
 
+        # ADR-035: clean pivot carry per goal (see go_to for the rationale).
+        self._carried_pivot_trim_cm = 0.0
+
         current = self._localization.current_node()
         while current != goal_name:
             nxt = self._next_hop[current][goal_name]
@@ -1073,6 +1272,12 @@ class PathTrackerSim:
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
             if edge_type == EDGE_LINE:
+                # ADR-035: LINE is sensor-terminated -- drop carried delta, do
+                # NOT latch here (latch happens below alongside the overshoot
+                # reduction). Mirror of go_to's LINE branch; see there for the
+                # full rationale.
+                self._resolve_sensor_edge_pivot_carry(edge, latch_own=False)
+
                 # Mirror go_to: advance only `distance_cm - overshoot_offset_cm`
                 # in the follow phase (the sensor reaches the marker; the axle is
                 # still `overshoot_offset_cm` short), then roll the offset in the
@@ -1083,7 +1288,21 @@ class PathTrackerSim:
                     if direction == Direction.REAR
                     else LINE_SENSOR_AXLE_OFFSET_CM
                 )
-                follow_cm = distance_cm - overshoot_offset_cm
+                # GUARD (see go_to): clamp follow_cm >= 0 for an edge shorter than
+                # the offset so the whole distance rolls as overshoot.
+                follow_cm = max(0.0, distance_cm - overshoot_offset_cm)
+
+                # ADR-035 LINE-incoming pivot trim: reduce the overshoot advance
+                # by this edge's delta and latch it (see go_to for the full
+                # derivation). Net hop becomes `distance_cm - delta`.
+                overshoot_advance_cm = overshoot_offset_cm
+                inbound_pivot_trim = _read_edge_pivot_trim(edge)
+                if inbound_pivot_trim > 0.0:
+                    overshoot_advance_cm = overshoot_offset_cm - inbound_pivot_trim
+                    if overshoot_advance_cm < PIVOT_TRIM_MIN_DRIVE_CM:
+                        overshoot_advance_cm = PIVOT_TRIM_MIN_DRIVE_CM
+                    self._carried_pivot_trim_cm = inbound_pivot_trim
+
                 if direction == Direction.REAR:
                     self._chassis.reverse(follow_cm)
                     yield (
@@ -1115,29 +1334,32 @@ class PathTrackerSim:
                 # direction. Advancing AXLE_OFFSET in the travel direction = reverse
                 # in body coordinates (body heading points opposite to travel).
                 if direction == Direction.REAR:
-                    self._chassis.reverse(overshoot_offset_cm)
+                    self._chassis.reverse(overshoot_advance_cm)
                 else:
-                    self._chassis.forward(overshoot_offset_cm)
+                    self._chassis.forward(overshoot_advance_cm)
                 self._localization.on_intersection(nxt)
                 yield (
                     (
                         ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
-                        overshoot_offset_cm,
+                        overshoot_advance_cm,
                     ),
                     self._snapshot_chassis(),
                 )
             elif edge_type == EDGE_PROJECTION:
+                # ADR-035: PROJECTION is distance-terminated -- trim/latch via a
+                # LOCAL effective distance (see go_to).
+                effective_dist_cm = self._pivot_trim_distance(edge)
                 if direction == Direction.REAR:
-                    self._chassis.reverse(distance_cm)
+                    self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (
-                        (ACT_PROJECTION_REVERSE, nxt, distance_cm, resolve_projection_mode(edge)),
+                        (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge)),
                         self._snapshot_chassis(),
                     )
                 else:
-                    self._chassis.follow_line_to_distance(distance_cm)
+                    self._chassis.follow_line_to_distance(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FOLLOW_DIST, distance_cm), self._snapshot_chassis()
+                    yield (ACT_FOLLOW_DIST, effective_dist_cm), self._snapshot_chassis()
             elif edge_type == EDGE_BLIND:
                 # Mode-sensitive blind dispatch -- mirrors the ``go_to``
                 # EDGE_BLIND branch exactly (see there for rationale); the
@@ -1153,10 +1375,14 @@ class PathTrackerSim:
                     LINE_BOARD_COUNT,
                 )
                 if seek and direction == Direction.FRONT:
+                    # ADR-035: sensor-terminated -- drop carried delta, latch own,
+                    # advance the FULL distance (see go_to).
+                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
                     self._chassis.forward(distance_cm)
                     self._localization.on_intersection(nxt)
                     yield (ACT_STOP_AT_LINE, distance_cm), self._snapshot_chassis()
                 elif seek and direction == Direction.REAR:
+                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
                     self._chassis.reverse(distance_cm)
                     self._localization.on_intersection(nxt)
                     yield (
@@ -1164,14 +1390,18 @@ class PathTrackerSim:
                         self._snapshot_chassis(),
                     )
                 elif direction == Direction.FRONT:
-                    self._chassis.forward(distance_cm)
+                    # ADR-035: distance-terminated -- trim/latch via a LOCAL
+                    # effective distance (see go_to).
+                    effective_dist_cm = self._pivot_trim_distance(edge)
+                    self._chassis.forward(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FORWARD, distance_cm), self._snapshot_chassis()
+                    yield (ACT_FORWARD, effective_dist_cm), self._snapshot_chassis()
                 else:
-                    self._chassis.reverse(distance_cm)
+                    effective_dist_cm = self._pivot_trim_distance(edge)
+                    self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (
-                        (ACT_BLIND_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
+                        (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge)),
                         self._snapshot_chassis(),
                     )
             else:    # pragma: no cover
