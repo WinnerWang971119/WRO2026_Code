@@ -114,6 +114,7 @@ __all__ = [
     "inflate_obstacles",
     "edge_clips_obstacle",
     "build_graph",
+    "directed_edge_heading",
 ]
 
 
@@ -129,6 +130,29 @@ def _reverse_heading(heading_deg: float) -> float:
 
 def _euclid(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+
+def directed_edge_heading(graph: "nx.DiGraph", u: str, v: str) -> float:
+    """Return the heading of the directed edge ``u -> v`` in degrees.
+
+    Reads the ``heading_deg`` attribute stored on the edge by
+    :func:`build_graph`, which respects any ``heading_deg`` override
+    supplied via ``field_data.EDGES``.  The heading follows the module
+    convention: ``[0, 360)``; ``0 deg`` = East (+x); CCW positive.
+
+    This is the single reusable source for all downstream heading
+    arithmetic (planner ``build_pivot_turns``, validator
+    ``_validate_pivot_turns``).  Callers must **not** re-implement the
+    ``atan2`` / ``% 360`` / ``+ 180`` logic -- subtract this helper's
+    return values and pass the difference through a normalizer.
+
+    :param graph: directed graph returned by :func:`build_graph`.
+    :param u:     source node name.
+    :param v:     destination node name.
+    :return:      heading in ``[0, 360)`` degrees.
+    :raises KeyError: if the edge ``u -> v`` does not exist in *graph*.
+    """
+    return float(graph[u][v]["heading_deg"])
 
 
 def inflate_obstacles(
