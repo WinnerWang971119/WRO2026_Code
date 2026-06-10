@@ -78,7 +78,7 @@ Public surface:
 from __future__ import annotations
 
 from enum import IntEnum
-from typing import List, Optional
+from typing import Iterator, List, Optional
 
 import networkx as nx
 
@@ -930,64 +930,44 @@ class PathTrackerSim:
             if edge_trim > 0.0:
                 self._carried_pivot_trim_cm = edge_trim
 
-    def go_to(
+    # -- shared per-hop dispatch (single source for go_to + step_through) ------
+
+    def _walk_hops(
         self,
         goal_name: str,
         *,
-        route_direction: "Direction" = Direction.AUTO,
-        arrival_direction: "Direction" = Direction.AUTO,
-    ) -> List[Primitive]:
-        """Walk from the current node to ``goal_name``.
+        route_direction: "Direction",
+        arrival_direction: "Direction",
+    ) -> Iterator[Primitive]:
+        """Yield the primitive stream from the current node to ``goal_name``.
 
-        Emits per edge: an optional ``ACT_TURN_REL`` to align heading,
-        then the per-type motion primitive. For EDGE_LINE traversals, an
-        ``ACT_LINE_OVERSHOOT`` step is appended after ``ACT_FOLLOW_INT``,
-        mirroring the runtime LINE_OVERSHOOT FSM transition that
-        advances the chassis by :data:`LINE_SENSOR_AXLE_OFFSET_CM` so
-        the wheel axle (not the line sensor) lands on the node.
-        EDGE_PROJECTION emits ``ACT_FOLLOW_DIST`` and advances Localization
-        via :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot
-        step -- the encoder gate already lands the chassis on the node).
+        Single source of the per-hop dispatch shared by :meth:`go_to` and
+        :meth:`step_through`. Walks NEXT_HOP one edge at a time, resolves each
+        hop's direction + per-edge modes, applies the pivot-trim latch/carry,
+        mutates the chassis + localization, and ``yield``\\s every primitive in
+        emission order. Each primitive is yielded **after** its own chassis
+        mutation (and any localization re-anchor), so a consumer that snapshots
+        the chassis at each yield sees the same post-mutation state the old
+        inline :meth:`step_through` captured.
 
-        Per-edge direction resolution mirrors the runtime
-        ``PathTracker::_resolveDirection``: :func:`resolve_direction` is
-        called for every hop with ``route_direction`` /
-        ``arrival_direction`` as the builder inputs. REAR hops:
+        The two public entry points differ only in how they consume this
+        stream — :meth:`go_to` collects the primitives into a flat list, while
+        :meth:`step_through` pairs each with a :meth:`_snapshot_chassis` copy.
+        Neither the resolution logic nor the pivot latch/carry threading lives
+        in the callers, so a change to the per-hop dispatch lands in one place.
 
-        * Turn the chassis to ``(edge.heading_deg + 180°) mod 360`` (so
-          the rear sensor faces along the edge) before dispatch.
-        * Emit ``ACT_LINE_REVERSE`` / ``ACT_PROJECTION_REVERSE`` /
-          ``ACT_BLIND_REVERSE`` instead of the forward primitive.
-        * Advance the chassis backward via ``VirtualChassis.reverse``
-          for BLIND (mirrors how FRONT uses ``forward``).
+        Goal validation and the per-goal pivot-carry reset are the caller's
+        responsibility (each entry point performs them before iterating this
+        generator); this method assumes a clean carry and a known goal.
 
-        :param goal_name: destination node name (must be in
-            ``field_data.NODES``).
-        :param route_direction: builder override applied to every hop
-            (``Direction.AUTO`` = no override; runs the auto algorithm).
-        :param arrival_direction: builder override applied only to the
-            final hop (``Direction.AUTO`` = no override).
-        :raises KeyError: if ``goal_name`` is not a known node.
-        :raises RuntimeError: if ``zero_heading_from_current()`` was not called.
+        :param goal_name: destination node name (already validated by the
+            caller to be in ``field_data.NODES``).
+        :param route_direction: builder override applied to every hop.
+        :param arrival_direction: builder override applied only to the final
+            hop.
         :raises UnreachableGoalError: if any intermediate hop is unreachable.
         """
-        if goal_name not in self._field_data.NODES:
-            raise KeyError(f"goal {goal_name!r} not in field_data.NODES")
-        if not self._localization.is_zeroed():
-            raise RuntimeError(
-                "PathTrackerSim.go_to() called before "
-                "LocalizationSim.zero_heading_from_current()"
-            )
-
-        # ADR-035: each goal starts with a clean pivot carry. A pivot edge that
-        # was the FINAL hop of the PREVIOUS goal latched delta with no following
-        # drive to consume it -- clear it here (mirror of the firmware's DEQUEUE
-        # / goal-complete resets) so it cannot trim this goal's first hop.
-        self._carried_pivot_trim_cm = 0.0
-
-        out: List[Primitive] = []
         current = self._localization.current_node()
-
         while current != goal_name:
             nxt = self._next_hop[current][goal_name]
             if nxt is None:
@@ -1011,9 +991,9 @@ class PathTrackerSim:
 
             delta = wrap_pm180(body_heading - self._chassis.heading_deg)
             if abs(delta) > TURN_EPSILON_DEG:
-                out.append((ACT_TURN_REL, delta))
                 self._chassis.turn_relative(delta)
                 self._chassis.heading_deg = _normalize(body_heading)
+                yield (ACT_TURN_REL, delta)
 
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
@@ -1071,24 +1051,23 @@ class PathTrackerSim:
                     self._carried_pivot_trim_cm = inbound_pivot_trim
 
                 if direction == Direction.REAR:
-                    out.append((ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)))
                     self._chassis.reverse(follow_cm)
+                    yield (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge))
                 else:
-                    out.append((ACT_FOLLOW_INT, None))
                     self._chassis.follow_line_to_intersection(follow_cm)
+                    yield (ACT_FOLLOW_INT, None)
                 # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS when
-                # the resolved body-heading of the next-next hop is
-                # collinear with the inbound body-heading (delta <=
-                # NAV_TURN_TOLERANCE_DEG), else ACT_LINE_OVERSHOOT. The
-                # peek MUST use resolved body-headings, not raw forward
-                # edge headings, so mixed REAR<->FORWARD transitions on
-                # anti-parallel forward edges still pass through cleanly
-                # (TC9c). The primitive name differs only for downstream
-                # verification + telemetry. See ADR-023.
+                # the resolved body-heading of the next-next hop is collinear
+                # with the inbound body-heading (delta <= NAV_TURN_TOLERANCE_DEG),
+                # else ACT_LINE_OVERSHOOT. The peek MUST use resolved
+                # body-headings, not raw forward edge headings, so mixed
+                # REAR<->FORWARD transitions on anti-parallel forward edges still
+                # pass through cleanly (TC9c). The primitive name differs only for
+                # downstream verification + telemetry. See ADR-023.
                 #
                 # The payload is the (possibly pivot-reduced) overshoot advance,
                 # matching the distance the firmware commands into the gate.
-                if _should_pass_through(
+                pass_through = _should_pass_through(
                     self._graph,
                     self._next_hop,
                     nxt,
@@ -1100,10 +1079,7 @@ class PathTrackerSim:
                     builder_arrival=arrival_direction,
                     bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
                     line_board_count=LINE_BOARD_COUNT,
-                ):
-                    out.append((ACT_LINE_PASS, overshoot_advance_cm))
-                else:
-                    out.append((ACT_LINE_OVERSHOOT, overshoot_advance_cm))
+                )
                 # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
                 # in the travel direction. When it detects the intersection at v,
                 # the chassis center is AXLE_OFFSET cm behind v in the travel
@@ -1114,6 +1090,10 @@ class PathTrackerSim:
                 else:
                     self._chassis.forward(overshoot_advance_cm)
                 self._localization.on_intersection(nxt)
+                yield (
+                    ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
+                    overshoot_advance_cm,
+                )
             elif edge_type == EDGE_PROJECTION:
                 # ADR-035: PROJECTION is DISTANCE-terminated (encoder gate, no
                 # physical marker), so it takes the outgoing trim (carried delta),
@@ -1122,14 +1102,13 @@ class PathTrackerSim:
                 # `distance_cm` (the shared table cell) is never mutated.
                 effective_dist_cm = self._pivot_trim_distance(edge)
                 if direction == Direction.REAR:
-                    out.append(
-                        (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge))
-                    )
                     self._chassis.reverse(effective_dist_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge))
                 else:
-                    out.append((ACT_FOLLOW_DIST, effective_dist_cm))
                     self._chassis.follow_line_to_distance(effective_dist_cm)
-                self._localization.on_dead_reckoned_advance(nxt)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FOLLOW_DIST, effective_dist_cm)
             elif edge_type == EDGE_BLIND:
                 # Mode-sensitive blind dispatch (mirrors the blind branch of
                 # ``compile_path`` -- T7 must stay byte-identical,
@@ -1160,9 +1139,9 @@ class PathTrackerSim:
                     # own delta (a pivot reached via a seek over-travels on its
                     # OUTGOING side). The seek drives the FULL `distance_cm`.
                     self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
-                    out.append((ACT_STOP_AT_LINE, distance_cm))
                     self._chassis.forward(distance_cm)
                     self._localization.on_intersection(nxt)
+                    yield (ACT_STOP_AT_LINE, distance_cm)
                 elif seek and direction == Direction.REAR:
                     # 2-board REAR stop-at-line: the rear board detects the
                     # crossing, so the chassis re-anchors via
@@ -1171,11 +1150,9 @@ class PathTrackerSim:
                     # advances backward by ``distance_cm`` to the node.
                     # ADR-035: sensor-terminated -- drop carried delta, latch own.
                     self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
-                    out.append(
-                        (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
-                    )
                     self._chassis.reverse(distance_cm)
                     self._localization.on_intersection(nxt)
+                    yield (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
                 elif direction == Direction.FRONT:
                     # Dead-reckoned forward blind move (byte-identical to the
                     # pre-resolver FRONT non-STOP_AT_LINE output when no pivot
@@ -1185,9 +1162,9 @@ class PathTrackerSim:
                     # untouched and the emitted value matches what the firmware
                     # commands into Drive.driveDist.
                     effective_dist_cm = self._pivot_trim_distance(edge)
-                    out.append((ACT_FORWARD, effective_dist_cm))
                     self._chassis.forward(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FORWARD, effective_dist_cm)
                 else:
                     # Dead-reckoned reverse blind move (byte-identical to the
                     # pre-resolver REAR output when no pivot trim applies): a
@@ -1196,11 +1173,9 @@ class PathTrackerSim:
                     # (AC2). ADR-035: DISTANCE-terminated -- same trim/latch as
                     # the FRONT dead-reckon branch above.
                     effective_dist_cm = self._pivot_trim_distance(edge)
-                    out.append(
-                        (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge))
-                    )
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge))
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
@@ -1208,7 +1183,72 @@ class PathTrackerSim:
 
             current = nxt
 
-        return out
+    def go_to(
+        self,
+        goal_name: str,
+        *,
+        route_direction: "Direction" = Direction.AUTO,
+        arrival_direction: "Direction" = Direction.AUTO,
+    ) -> List[Primitive]:
+        """Walk from the current node to ``goal_name``.
+
+        Emits per edge: an optional ``ACT_TURN_REL`` to align heading,
+        then the per-type motion primitive. For EDGE_LINE traversals, an
+        ``ACT_LINE_OVERSHOOT`` step is appended after ``ACT_FOLLOW_INT``,
+        mirroring the runtime LINE_OVERSHOOT FSM transition that
+        advances the chassis by :data:`LINE_SENSOR_AXLE_OFFSET_CM` so
+        the wheel axle (not the line sensor) lands on the node.
+        EDGE_PROJECTION emits ``ACT_FOLLOW_DIST`` and advances Localization
+        via :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot
+        step -- the encoder gate already lands the chassis on the node).
+
+        Per-edge direction resolution mirrors the runtime
+        ``PathTracker::_resolveDirection``: :func:`resolve_direction` is
+        called for every hop with ``route_direction`` /
+        ``arrival_direction`` as the builder inputs. REAR hops:
+
+        * Turn the chassis to ``(edge.heading_deg + 180°) mod 360`` (so
+          the rear sensor faces along the edge) before dispatch.
+        * Emit ``ACT_LINE_REVERSE`` / ``ACT_PROJECTION_REVERSE`` /
+          ``ACT_BLIND_REVERSE`` instead of the forward primitive.
+        * Advance the chassis backward via ``VirtualChassis.reverse``
+          for BLIND (mirrors how FRONT uses ``forward``).
+
+        :param goal_name: destination node name (must be in
+            ``field_data.NODES``).
+        :param route_direction: builder override applied to every hop
+            (``Direction.AUTO`` = no override; runs the auto algorithm).
+        :param arrival_direction: builder override applied only to the
+            final hop (``Direction.AUTO`` = no override).
+        :raises KeyError: if ``goal_name`` is not a known node.
+        :raises RuntimeError: if ``zero_heading_from_current()`` was not called.
+        :raises UnreachableGoalError: if any intermediate hop is unreachable.
+        """
+        if goal_name not in self._field_data.NODES:
+            raise KeyError(f"goal {goal_name!r} not in field_data.NODES")
+        if not self._localization.is_zeroed():
+            raise RuntimeError(
+                "PathTrackerSim.go_to() called before "
+                "LocalizationSim.zero_heading_from_current()"
+            )
+
+        # ADR-035: each goal starts with a clean pivot carry. A pivot edge that
+        # was the FINAL hop of the PREVIOUS goal latched delta with no following
+        # drive to consume it -- clear it here (mirror of the firmware's DEQUEUE
+        # / goal-complete resets) so it cannot trim this goal's first hop. Done
+        # here (not in ``_walk_hops``) so the carry-reset semantics stay owned by
+        # the public entry point.
+        self._carried_pivot_trim_cm = 0.0
+
+        # Collect the shared per-hop primitive stream. ``go_to`` discards the
+        # snapshots ``step_through`` keeps -- both consume the same generator.
+        return list(
+            self._walk_hops(
+                goal_name,
+                route_direction=route_direction,
+                arrival_direction=arrival_direction,
+            )
+        )
 
     def walked_path(self, goal_name: str) -> List[str]:
         return walk_next_hop(self._next_hop, self._localization.current_node(), goal_name)
@@ -1241,174 +1281,17 @@ class PathTrackerSim:
         # ADR-035: clean pivot carry per goal (see go_to for the rationale).
         self._carried_pivot_trim_cm = 0.0
 
-        current = self._localization.current_node()
-        while current != goal_name:
-            nxt = self._next_hop[current][goal_name]
-            if nxt is None:
-                raise UnreachableGoalError(current, goal_name, current=current)
-            edge = self._graph.edges[current, nxt]
-            edge_heading = float(edge["heading_deg"])
-            is_last_hop = (nxt == goal_name)
-
-            direction = resolve_direction(
-                edge_dir_override=_read_edge_dir_override(edge),
-                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
-                builder_arrival=arrival_direction,
-                builder_route=route_direction,
-                current_heading=self._chassis.heading_deg,
-                edge_heading=edge_heading,
-                is_last_hop=is_last_hop,
-                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
-                line_board_count=LINE_BOARD_COUNT,
-            )
-            body_heading = _body_heading_for(direction, edge_heading)
-
-            delta = wrap_pm180(body_heading - self._chassis.heading_deg)
-            if abs(delta) > TURN_EPSILON_DEG:
-                self._chassis.turn_relative(delta)
-                self._chassis.heading_deg = _normalize(body_heading)
-                yield (ACT_TURN_REL, delta), self._snapshot_chassis()
-
-            edge_type = edge["type"]
-            distance_cm = float(edge["distance_cm"])
-            if edge_type == EDGE_LINE:
-                # ADR-035: LINE is sensor-terminated -- drop carried delta, do
-                # NOT latch here (latch happens below alongside the overshoot
-                # reduction). Mirror of go_to's LINE branch; see there for the
-                # full rationale.
-                self._resolve_sensor_edge_pivot_carry(edge, latch_own=False)
-
-                # Mirror go_to: advance only `distance_cm - overshoot_offset_cm`
-                # in the follow phase (the sensor reaches the marker; the axle is
-                # still `overshoot_offset_cm` short), then roll the offset in the
-                # LINE_OVERSHOOT step so the axle lands ON the node. Net advance is
-                # exactly `distance_cm`. A REAR hop uses the rear board's own offset.
-                overshoot_offset_cm = (
-                    LINE_SENSOR_AXLE_OFFSET_REAR_CM
-                    if direction == Direction.REAR
-                    else LINE_SENSOR_AXLE_OFFSET_CM
-                )
-                # GUARD (see go_to): clamp follow_cm >= 0 for an edge shorter than
-                # the offset so the whole distance rolls as overshoot.
-                follow_cm = max(0.0, distance_cm - overshoot_offset_cm)
-
-                # ADR-035 LINE-incoming pivot trim: reduce the overshoot advance
-                # by this edge's delta and latch it (see go_to for the full
-                # derivation). Net hop becomes `distance_cm - delta`.
-                overshoot_advance_cm = overshoot_offset_cm
-                inbound_pivot_trim = _read_edge_pivot_trim(edge)
-                if inbound_pivot_trim > 0.0:
-                    overshoot_advance_cm = overshoot_offset_cm - inbound_pivot_trim
-                    if overshoot_advance_cm < PIVOT_TRIM_MIN_DRIVE_CM:
-                        overshoot_advance_cm = PIVOT_TRIM_MIN_DRIVE_CM
-                    self._carried_pivot_trim_cm = inbound_pivot_trim
-
-                if direction == Direction.REAR:
-                    self._chassis.reverse(follow_cm)
-                    yield (
-                        (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge)),
-                        self._snapshot_chassis(),
-                    )
-                else:
-                    self._chassis.follow_line_to_intersection(follow_cm)
-                    yield (ACT_FOLLOW_INT, None), self._snapshot_chassis()
-                # LINE_OVERSHOOT FSM transition -- emit ACT_LINE_PASS on
-                # collinear next-hop body heading, else ACT_LINE_OVERSHOOT.
-                # See go_to for rationale and ADR-023.
-                pass_through = _should_pass_through(
-                    self._graph,
-                    self._next_hop,
-                    nxt,
-                    goal_name,
-                    inbound_body_heading=body_heading,
-                    inbound_direction=direction,
-                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
-                    builder_route=route_direction,
-                    builder_arrival=arrival_direction,
-                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
-                    line_board_count=LINE_BOARD_COUNT,
-                )
-                # REAR overshoot: rear board (at -AXLE_OFFSET in body-forward) leads
-                # in the travel direction. When it detects the intersection at v,
-                # the chassis center is AXLE_OFFSET cm behind v in the travel
-                # direction. Advancing AXLE_OFFSET in the travel direction = reverse
-                # in body coordinates (body heading points opposite to travel).
-                if direction == Direction.REAR:
-                    self._chassis.reverse(overshoot_advance_cm)
-                else:
-                    self._chassis.forward(overshoot_advance_cm)
-                self._localization.on_intersection(nxt)
-                yield (
-                    (
-                        ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
-                        overshoot_advance_cm,
-                    ),
-                    self._snapshot_chassis(),
-                )
-            elif edge_type == EDGE_PROJECTION:
-                # ADR-035: PROJECTION is distance-terminated -- trim/latch via a
-                # LOCAL effective distance (see go_to).
-                effective_dist_cm = self._pivot_trim_distance(edge)
-                if direction == Direction.REAR:
-                    self._chassis.reverse(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (
-                        (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge)),
-                        self._snapshot_chassis(),
-                    )
-                else:
-                    self._chassis.follow_line_to_distance(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FOLLOW_DIST, effective_dist_cm), self._snapshot_chassis()
-            elif edge_type == EDGE_BLIND:
-                # Mode-sensitive blind dispatch -- mirrors the ``go_to``
-                # EDGE_BLIND branch exactly (see there for rationale); the
-                # emission stream stays byte-identical (TC12) and the two
-                # ``seek`` branches re-anchor via ``on_intersection`` (AC1/AC3)
-                # while the dead-reckon branches advance via
-                # ``on_dead_reckoned_advance`` (AC2).
-                seek, _motion_mode = resolve_stop_at_line(
-                    StopAtLine.AUTO,
-                    resolve_blind_mode(edge),
-                    PIPELINE_CONFIG.blind,
-                    direction,
-                    LINE_BOARD_COUNT,
-                )
-                if seek and direction == Direction.FRONT:
-                    # ADR-035: sensor-terminated -- drop carried delta, latch own,
-                    # advance the FULL distance (see go_to).
-                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
-                    self._chassis.forward(distance_cm)
-                    self._localization.on_intersection(nxt)
-                    yield (ACT_STOP_AT_LINE, distance_cm), self._snapshot_chassis()
-                elif seek and direction == Direction.REAR:
-                    self._resolve_sensor_edge_pivot_carry(edge, latch_own=True)
-                    self._chassis.reverse(distance_cm)
-                    self._localization.on_intersection(nxt)
-                    yield (
-                        (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge)),
-                        self._snapshot_chassis(),
-                    )
-                elif direction == Direction.FRONT:
-                    # ADR-035: distance-terminated -- trim/latch via a LOCAL
-                    # effective distance (see go_to).
-                    effective_dist_cm = self._pivot_trim_distance(edge)
-                    self._chassis.forward(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FORWARD, effective_dist_cm), self._snapshot_chassis()
-                else:
-                    effective_dist_cm = self._pivot_trim_distance(edge)
-                    self._chassis.reverse(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (
-                        (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge)),
-                        self._snapshot_chassis(),
-                    )
-            else:    # pragma: no cover
-                raise ValueError(
-                    f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
-                )
-            current = nxt
+        # Drive the shared per-hop generator and pair each primitive with a
+        # chassis snapshot. ``_walk_hops`` yields every primitive AFTER its own
+        # chassis mutation (and any localization re-anchor), so the snapshot
+        # taken here captures the identical post-mutation state the previous
+        # inline implementation recorded.
+        for primitive in self._walk_hops(
+            goal_name,
+            route_direction=route_direction,
+            arrival_direction=arrival_direction,
+        ):
+            yield primitive, self._snapshot_chassis()
 
     def _snapshot_chassis(self) -> VirtualChassis:
         return VirtualChassis(

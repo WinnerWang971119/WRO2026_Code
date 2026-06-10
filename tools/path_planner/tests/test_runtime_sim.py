@@ -2342,3 +2342,81 @@ def test_pivot_tc8_sensor_terminated_outgoing_gets_no_delta_subtraction():
     ]
     # The sensor hop re-anchors localization on the physical junction at C.
     assert sim.localization.current_node() == "C"
+
+
+# ---------------------------------------------------------------------------
+# TC21 -- go_to / step_through emit identical primitives (shared helper)
+# ---------------------------------------------------------------------------
+#
+# Both public entry points walk NEXT_HOP through the single private per-hop
+# producer ``_walk_hops``; ``go_to`` collects the flat primitive list while
+# ``step_through`` pairs each primitive with a chassis snapshot. This pins the
+# equivalence the per-turn pivot dispatch (T10) relies on: the pivot change
+# lands in one site, so the two streams must stay byte-identical.
+
+
+def _step_through_primitives(sim, goal, **kwargs):
+    """Return only the primitive halves of ``sim.step_through(goal)``'s output."""
+    return [primitive for primitive, _snapshot in sim.step_through(goal, **kwargs)]
+
+
+def test_tc21_goto_step_through_emit_identical_primitives_multi_hop(
+    toy_field, toy_graph_and_table
+):
+    """TC21: go_to and step_through emit byte-identical primitives on a multi-hop route.
+
+    The toy route ``A -> B -> G`` spans a LINE hop (with its LINE_OVERSHOOT
+    step), a heading turn, and a BLIND hop -- enough edge variety that any
+    divergence between the two entry points' per-hop dispatch would surface.
+    Two independent sims drive the same route so the walks do not share mutable
+    chassis / localization state; the primitive streams must match exactly.
+    """
+    graph, next_hop = toy_graph_and_table
+
+    chassis_a = VirtualChassis.from_field_data(toy_field)
+    sim_a = PathTrackerSim(toy_field, graph, next_hop, chassis_a)
+    sim_a.localization.zero_heading_from_current()
+
+    chassis_b = VirtualChassis.from_field_data(toy_field)
+    sim_b = PathTrackerSim(toy_field, graph, next_hop, chassis_b)
+    sim_b.localization.zero_heading_from_current()
+
+    go_to_prims = sim_a.go_to("G")
+    step_prims = _step_through_primitives(sim_b, "G")
+
+    # The route is genuinely multi-hop (guards against a 0/1-hop fixture
+    # silently passing a trivial equality).
+    assert len(go_to_prims) >= 3
+    assert go_to_prims == step_prims
+    assert sim_a.localization.current_node() == "G"
+    assert sim_b.localization.current_node() == "G"
+
+
+def test_tc21_goto_step_through_identical_on_pivot_chain():
+    """TC21: parity holds across the pivot-trim latch/carry path (the T10 site).
+
+    A BLIND->PROJECTION pivot chain populates the carried-delta latch on the
+    OUTGOING hop, exercising the exact per-hop pivot dispatch T10 will rewrite.
+    ``_build_pivot_chain`` builds a fresh sim each call, so the two sims are
+    independent. The streams must be identical even with the pivot trim active.
+    """
+    sim_go, _chassis_go, _g_go, _nh_go, delta, _nodes_go = _build_pivot_chain(
+        EDGE_BLIND, EDGE_PROJECTION,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_90_DEG,
+    )
+    sim_step, _chassis_step, _g_step, _nh_step, _delta2, _nodes_step = _build_pivot_chain(
+        EDGE_BLIND, EDGE_PROJECTION,
+        incoming_dist_cm=40.0,
+        outgoing_dist_cm=35.0,
+        turn_deg=_TC_PIVOT_TURN_90_DEG,
+    )
+    assert delta == pytest.approx(9.0, abs=1e-6)
+
+    go_to_prims = sim_go.go_to("C")
+    step_prims = _step_through_primitives(sim_step, "C")
+
+    assert go_to_prims == step_prims
+    assert sim_go.localization.current_node() == "C"
+    assert sim_step.localization.current_node() == "C"
