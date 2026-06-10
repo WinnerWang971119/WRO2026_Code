@@ -96,7 +96,7 @@ def test_round_trip_to_from_json_dict_equality() -> None:
 
 
 def test_to_json_dict_top_level_key_order() -> None:
-    """to_json_dict() must emit exactly the 11 keys in the canonical order."""
+    """to_json_dict() must emit exactly the 12 keys in the canonical order."""
     model = make_model()
     expected_keys = (
         "FIELD_MM",
@@ -109,6 +109,7 @@ def test_to_json_dict_top_level_key_order() -> None:
         "NODE_TYPES",
         "LINE_SEGMENTS",
         "BLIND_EDGES",
+        "pivot_turns",
         "OBSTACLES",
     )
     assert tuple(model.to_json_dict().keys()) == expected_keys
@@ -125,6 +126,95 @@ def test_to_json_dict_nodes_sorted_alphabetically() -> None:
 
     json_nodes = list(model.to_json_dict()["NODES"].keys())
     assert json_nodes == sorted(json_nodes)
+
+
+# ---------------------------------------------------------------------------
+# pivot_turns preservation: the editor has no GUI control for pivots, so the
+# model must carry the field verbatim across open (from_json_dict) -> save
+# (to_json_dict) without stripping it.
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_turns_defaults_to_empty_list() -> None:
+    """A model constructed without pivot_turns has an empty list, not an error.
+
+    The dataclass field is defaulted so existing call sites that build a
+    FieldModel without pivots stay valid.
+    """
+    model = make_model()
+    assert model.pivot_turns == []
+
+
+def test_pivot_turns_survives_to_from_json_round_trip() -> None:
+    """from_json_dict(to_json_dict()) preserves an authored pivot_turns list.
+
+    Open -> save must not drop the field. The triple is carried as a
+    (u, v, w) tuple in memory and a 3-element list in JSON.
+    """
+    model = make_model()
+    model.pivot_turns = [("A", "B", "C")]
+
+    restored = FieldModel.from_json_dict(model.to_json_dict())
+
+    assert restored.pivot_turns == [("A", "B", "C")]
+    assert restored == model
+
+
+def test_pivot_turns_emitted_as_lists_in_json_dict() -> None:
+    """to_json_dict() renders pivot_turns as JSON-native lists of strings."""
+    model = make_model()
+    model.pivot_turns = [("A", "B", "C")]
+
+    json_dict = model.to_json_dict()
+
+    assert json_dict["pivot_turns"] == [["A", "B", "C"]]
+    # No tuples leak into the JSON-native output.
+    assert all(isinstance(turn, list) for turn in json_dict["pivot_turns"])
+
+
+def test_from_json_dict_tolerates_absent_pivot_turns() -> None:
+    """A JSON dict predating pivot_turns loads with an empty list.
+
+    Older field_data.json files omit the optional key; from_json_dict must
+    default it rather than raise KeyError.
+    """
+    data = make_model().to_json_dict()
+    del data["pivot_turns"]
+
+    model = FieldModel.from_json_dict(data)
+
+    assert model.pivot_turns == []
+
+
+def test_pivot_turns_open_save_open_preservation(tmp_path) -> None:
+    """An on-disk field with pivots survives a loader/model open -> save -> open.
+
+    Exercises the full editor preservation path the GUI uses: load the JSON
+    (loader), build the model (from_json_dict), save it (to_json_dict ->
+    dump_field_json), then reload. The pivot must come back unchanged.
+    """
+    import json
+    from pathlib import Path
+
+    from tools.path_planner.editor.loader import dump_field_json, load_field_json
+
+    # Author a small field carrying a pivot directly in JSON.
+    source = make_model().to_json_dict()
+    source["pivot_turns"] = [["A", "B", "C"]]
+    src_path = Path(tmp_path) / "field_with_pivots.json"
+    src_path.write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    # Open -> build model -> save (the editor's Save flow).
+    opened = FieldModel.from_json_dict(load_field_json(src_path))
+    assert opened.pivot_turns == [("A", "B", "C")]
+
+    saved_path = Path(tmp_path) / "field_with_pivots_saved.json"
+    dump_field_json(opened.to_json_dict(), saved_path)
+
+    # Reopen and confirm the pivot survived the full round-trip.
+    reopened = FieldModel.from_json_dict(load_field_json(saved_path))
+    assert reopened.pivot_turns == [("A", "B", "C")]
+    assert reopened == opened
 
 
 # ---------------------------------------------------------------------------

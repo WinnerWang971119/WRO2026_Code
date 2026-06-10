@@ -23,8 +23,15 @@ the module-level attributes the existing
       "NODE_TYPES":            {"<name>": "line" | "blind", ...},
       "LINE_SEGMENTS":         [["<a>", "<b>"], ...],
       "BLIND_EDGES":           [["<a>", "<b>"], ...],
+      "pivot_turns":           [["<u>", "<v>", "<w>"], ...],
       "OBSTACLES":             [[x_min, y_min, x_max, y_max, "<kind>"], ...]
     }
+
+``pivot_turns`` is **optional** (absent or ``[]`` means no pivots). Each
+entry is a 3-element node-name array ``["<u>", "<v>", "<w>"]`` declaring a
+single-wheel pivot on the turn that arrives at ``v`` from ``u`` and leaves
+to ``w``. Same array-of-arrays shape as ``LINE_SEGMENTS`` / ``BLIND_EDGES``,
+so the loader's tuple discipline (below) applies to it identically.
 
 The rich ``EDGES`` table that lives in ``field_data.py`` is deliberately
 **not** part of the JSON schema -- it carries enum references
@@ -87,8 +94,16 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "NODE_TYPES",
     "LINE_SEGMENTS",
     "BLIND_EDGES",
+    "pivot_turns",
     "OBSTACLES",
 )
+
+# Top-level keys that are optional in the JSON schema: absent / empty is a
+# valid field. The dump writer emits them only when present so a field that
+# never authored one round-trips byte-identically (absent stays absent),
+# while a field that did keeps it in the canonical slot above. ``pivot_turns``
+# (per-turn single-wheel pivots) is the sole such key today.
+_OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"pivot_turns"})
 
 
 def load_field_json(path: Path | None = None) -> dict:
@@ -105,6 +120,7 @@ def load_field_json(path: Path | None = None) -> dict:
     * ``NODES[name]`` -- list of two numbers -> ``(x_cm, y_cm)``.
     * ``LINE_SEGMENTS[i]`` -- list of two strings -> ``(a, b)``.
     * ``BLIND_EDGES[i]`` -- list of two strings -> ``(a, b)``.
+    * ``pivot_turns[i]`` -- list of three strings -> ``(u, v, w)``.
     * ``OBSTACLES[i]`` -- list of five elements ->
       ``(x_min, y_min, x_max, y_max, kind)``.
 
@@ -197,7 +213,8 @@ def _convert_arrays_to_tuples(parsed: dict) -> dict:
 
     The conversion is shallow except where the validator descends:
     ``NODES`` values, ``LINE_SEGMENTS`` / ``BLIND_EDGES`` /
-    ``OBSTACLES`` entries, and the top-level ``FIELD_MM`` pair.
+    ``pivot_turns`` / ``OBSTACLES`` entries, and the top-level ``FIELD_MM``
+    pair.
 
     Fields that are absent in ``parsed`` are absent in the result -- this
     function is not a validator. Missing-key errors are surfaced
@@ -232,6 +249,12 @@ def _convert_arrays_to_tuples(parsed: dict) -> dict:
             for edge in result["BLIND_EDGES"]
         ]
 
+    if "pivot_turns" in result and isinstance(result["pivot_turns"], list):
+        result["pivot_turns"] = [
+            tuple(turn) if isinstance(turn, list) and len(turn) == 3 else turn
+            for turn in result["pivot_turns"]
+        ]
+
     if "OBSTACLES" in result and isinstance(result["OBSTACLES"], list):
         result["OBSTACLES"] = [
             tuple(obs) if isinstance(obs, list) and len(obs) == 5 else obs
@@ -249,15 +272,23 @@ def _build_ordered_payload(data: dict) -> dict:
     a fresh dict in :data:`_TOP_LEVEL_KEY_ORDER` and, for ``NODES`` /
     ``NODE_TYPES``, in alphabetical key order. List members are passed
     through verbatim so caller-controlled ordering (``LINE_SEGMENTS``,
-    ``BLIND_EDGES``, ``OBSTACLES``) is preserved.
+    ``BLIND_EDGES``, ``pivot_turns``, ``OBSTACLES``) is preserved.
 
-    :param data: Source dict. Must contain every key in
-        :data:`_TOP_LEVEL_KEY_ORDER`.
+    Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (currently ``pivot_turns``)
+    are emitted only when present in ``data``: a field that never authored
+    one is omitted entirely so ``dump(load(x)) == dump(x)`` holds for a
+    pivot-free input that lacked the key on disk (absent stays absent).
+
+    :param data: Source dict. Must contain every required key in
+        :data:`_TOP_LEVEL_KEY_ORDER` (i.e. every key not in
+        :data:`_OPTIONAL_TOP_LEVEL_KEYS`).
     :return: A new dict with the canonical key ordering.
     :raises KeyError: when a required top-level key is missing.
     """
     ordered: dict[str, Any] = {}
     for key in _TOP_LEVEL_KEY_ORDER:
+        if key in _OPTIONAL_TOP_LEVEL_KEYS and key not in data:
+            continue
         value = data[key]
         if key in ("NODES", "NODE_TYPES") and isinstance(value, dict):
             ordered[key] = {name: value[name] for name in sorted(value)}

@@ -283,6 +283,91 @@ def test_tc10_migrate_idempotent_byte_identical(
 
 
 # ---------------------------------------------------------------------------
+# pivot_turns: --migrate emits the per-turn pivot key when the source module
+# exposes PIVOT_TURNS, and the rewritten field_data.py re-exports it.
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_emits_pivot_turns_when_source_exposes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A source module with PIVOT_TURNS migrates the key into the JSON sidecar.
+
+    The pivot key is optional, so it is captured separately from the eleven
+    required attrs. This test feeds a synthetic module exposing PIVOT_TURNS
+    and a capture fn mirroring migrate._capture_module_attributes (the eleven
+    required attrs plus the optional lowercase pivot_turns key), then asserts
+    the written JSON carries pivot_turns and the rewritten file re-exports it.
+    """
+    import json
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    # The synthetic source has no PIVOT_TURNS; attach one for this test.
+    pre_module.PIVOT_TURNS = [("A", "B", "G")]
+
+    def _capture_with_pivots() -> dict[str, Any]:
+        captured = {attr: getattr(pre_module, attr) for attr in migrate._ATTRS_TO_CAPTURE}
+        captured["pivot_turns"] = pre_module.PIVOT_TURNS
+        return captured
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    monkeypatch.setattr(migrate, "_capture_module_attributes", _capture_with_pivots)
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert written["pivot_turns"] == [["A", "B", "G"]]
+    keys = list(written.keys())
+    assert keys.index("BLIND_EDGES") < keys.index("pivot_turns") < keys.index("OBSTACLES")
+
+    # The rewritten field_data.py must re-export the key (with a safe default).
+    rewritten_source = pre_py.read_text(encoding="utf-8")
+    assert 'PIVOT_TURNS           = _data.get("pivot_turns", [])' in rewritten_source
+
+    # The rewritten module loads it back through the migrated JSON.
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.PIVOT_TURNS == [("A", "B", "G")]
+
+
+def test_migrate_omits_pivot_turns_when_source_lacks_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pivot-free source migrates to JSON WITHOUT a pivot_turns key.
+
+    The optional key is dropped on dump when absent, and the rewritten file's
+    re-export defaults to an empty list, so a field that never authored pivots
+    stays clean.
+    """
+    import json
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    monkeypatch.setattr(
+        migrate, "_capture_module_attributes", _make_capture_fn(pre_module)
+    )
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "pivot_turns" not in written
+
+    # The rewritten module still exposes PIVOT_TURNS, defaulted to [].
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.PIVOT_TURNS == []
+
+
+# ---------------------------------------------------------------------------
 # TC11: build_routes byte-identical graph payload before vs after migration
 # ---------------------------------------------------------------------------
 
