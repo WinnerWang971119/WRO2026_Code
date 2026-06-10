@@ -14,22 +14,23 @@ Every node is either a ``LINE`` or ``BLIND`` type; the runtime reaches
 each one via the corresponding edge type.
 
 Pipeline-mode extension (T7): emits mission-wide motion-mode defaults
-(``PIPELINE_CONFIG``) plus four optional per-edge override slots
+(``PIPELINE_CONFIG``) plus three optional per-edge override slots
 (``line_mode_override``, ``blind_mode_override``,
-``projection_mode_override``, ``pre_turn_mode_override``). Each enum
+``projection_mode_override``) and a ``direction_override`` slot. Each enum
 carries a ``DEFAULT = 0`` sentinel meaning "inherit
 ``PIPELINE_CONFIG.<category>``" at runtime dispatch.
 
-Pivot-compensation extension (issue #44): ``EdgeInfo`` carries a trailing
-``float pivot_trim_cm`` field. The planner's compensation pass writes the
-pivot over-travel δ onto the PIVOT-tagged edge as a ``pivot_trim_cm``
-attribute; every other edge defaults to ``0.0``. The emitter reads it
-straight off the edge in :func:`_edge_cell` (it is a raw float, not an
-enum-mode override) and appends it as the last positional value of each
-``EdgeInfo`` aggregate initialiser. A generated ``static_assert`` on
-``offsetof(EdgeInfo, pivot_trim_cm)`` pins the field's position so a future
-field reorder fails the build instead of silently binding the float to the
-wrong member.
+Per-turn pivot extension (ADR-036, supersedes the per-edge issue-#44
+model): single-wheel pivots are no longer a per-edge field. The planner's
+:func:`build_pivot_turns` resolves every authored turn triple ``(u, v, w)``
+into a :class:`~tools.path_planner.planner.PivotTurnRecord` (geometry-derived
+wheel + over-travel δ). The emitter serialises those records into a sparse,
+sorted ``PivotTurn PIVOT_TURNS[]`` table plus an ``N_PIVOT_TURNS`` truth
+count -- one record per turn the route may take, not an ``N**3`` dense array.
+The old per-edge ``pivot_trim_cm`` / ``pre_turn_mode_override`` fields and
+their ``offsetof`` layout guard are removed from ``EdgeInfo`` entirely; the
+firmware resolves the wheel and the trim from one ``PivotTurn`` lookup, so
+the two can never disagree.
 
 Determinism contract: byte-identical re-emit on identical inputs.
 
@@ -50,7 +51,15 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 import networkx as nx
 
@@ -63,6 +72,14 @@ from tools.path_planner.pipeline_config import (
     ProjectionMode,
     TurnMode,
 )
+
+if TYPE_CHECKING:
+    # Type-only import: the emitter consumes pivot records structurally
+    # (it reads ``.u`` / ``.v`` / ``.w`` / ``.wheel`` / ``.trim_cm``), so a
+    # runtime dependency on the planner module is unnecessary and would
+    # tighten the import graph for no benefit. Importing under TYPE_CHECKING
+    # keeps the annotation precise without the runtime coupling.
+    from tools.path_planner.planner import PivotTurnRecord
 
 DEFAULT_HEADER_PATH = Path("WRO2026/routes.h")
 DEFAULT_SOURCE_PATH = Path("WRO2026/routes.cpp")
@@ -86,9 +103,9 @@ _NODE_TYPE_TO_ENUM: Dict[str, str] = {
 }
 
 # Which override slot on EdgeInfo a ``primitive_mode`` value should land
-# on, keyed by the edge's transport type. ``pre_turn_mode`` always lands
-# on ``pre_turn_mode_override`` regardless of edge type (it describes the
-# turn that precedes the edge, not the edge traversal itself).
+# on, keyed by the edge's transport type. The turn mode is no longer a
+# per-edge field -- single-wheel pivots moved to the sparse ``PIVOT_TURNS``
+# table (ADR-036) -- so there is no longer a per-edge turn slot here.
 _PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE: Dict[str, str] = {
     EDGE_LINE:       "line_mode_override",
     EDGE_BLIND:      "blind_mode_override",
@@ -101,24 +118,13 @@ _PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE: Dict[str, str] = {
 _LINE_MODE_DEFAULT       = "LineMode::DEFAULT"
 _BLIND_MODE_DEFAULT      = "BlindMode::DEFAULT"
 _PROJECTION_MODE_DEFAULT = "ProjectionMode::DEFAULT"
-_TURN_MODE_DEFAULT       = "TurnMode::DEFAULT"
 _DIRECTION_MODE_DEFAULT  = "DirectionMode::DEFAULT"
 
-# Byte offset of the trailing ``pivot_trim_cm`` field inside the generated POD
-# ``EdgeInfo`` struct, used by the layout-drift ``static_assert`` emitted next
-# to the struct definition. Derived from the standard-layout member order:
-#
-#   EdgeType type            : uint8_t enum, align 1  -> offset 0  (1 byte)
-#   float    distance_cm     : align 4                -> offset 4  (+3 pad)
-#   float    heading_deg     : align 4                -> offset 8
-#   LineMode/.../DirectionMode (5x uint8_t enum)      -> offsets 12..16
-#   float    pivot_trim_cm   : align 4                -> offset 20 (+3 pad)
-#
-# This value is deterministic for the POD layout above across the host MSVC/g++
-# toolchains and the arm-gcc Arduino build (all use 4-byte float alignment); if
-# a future field reorder or insertion shifts it, the emitted ``static_assert``
-# turns the positional-init mismatch into a hard compile error.
-_EDGE_INFO_PIVOT_TRIM_OFFSET = 20
+# C++ qualified-name prefix for ``TurnMode`` enum literals emitted into the
+# ``PIVOT_TURNS`` table (e.g. ``TurnMode::PIVOT_LEFT``). The pivot wheel is
+# emitted from the record's ``TurnMode`` member by name, consistent with how
+# ``_emit_pipeline_config`` qualifies its ``TurnMode`` value.
+_TURN_MODE_PREFIX = "TurnMode::"
 
 # The five per-category motion-mode enums, in the order their C++ bodies are
 # emitted into routes.h. The bodies are generated from these Python ``IntEnum``
@@ -185,7 +191,7 @@ def _override_enum_value(
     mode_tag,
     default_sentinel: str,
 ) -> str:
-    """Resolve a ``primitive_mode`` / ``pre_turn_mode`` tag to a C++ enum literal.
+    """Resolve a ``primitive_mode`` / ``direction`` tag to a C++ enum literal.
 
     Accepts either an :class:`enum.IntEnum` member from ``pipeline_config``
     or the bare string name of one (e.g. ``"FAST"`` or
@@ -211,23 +217,24 @@ def _override_enum_value(
     return enum_cls.__name__ + "::" + member.name
 
 
-def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
-    """Compute the five override-enum literals for one edge.
+def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
+    """Compute the four override-enum literals for one edge.
 
     Returns
-    ``(line_override, blind_override, projection_override, turn_override, direction_override)``
+    ``(line_override, blind_override, projection_override, direction_override)``
     in the same order they appear on the C++ ``EdgeInfo`` struct. The
     ``primitive_mode`` attribute lands on exactly one slot, picked by the
     edge's ``type``; the other two primitive slots stay DEFAULT. The
-    ``pre_turn_mode`` attribute always lands on the turn slot. The
-    ``direction_override`` attribute (populated by T4 in ``graph_builder``)
-    always lands on the direction slot; absent today, so defaults to
-    ``DirectionMode::DEFAULT``.
+    ``direction_override`` attribute always lands on the direction slot;
+    absent today, so defaults to ``DirectionMode::DEFAULT``.
+
+    The turn mode is no longer a per-edge override: single-wheel pivots
+    moved to the sparse ``PIVOT_TURNS`` table (ADR-036), so ``pre_turn_mode``
+    is neither read here nor emitted on ``EdgeInfo``.
     """
     line_override       = _LINE_MODE_DEFAULT
     blind_override      = _BLIND_MODE_DEFAULT
     projection_override = _PROJECTION_MODE_DEFAULT
-    turn_override       = _TURN_MODE_DEFAULT
     direction_override  = _DIRECTION_MODE_DEFAULT
 
     primitive_mode = edge_attrs.get("primitive_mode")
@@ -249,12 +256,6 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
         # Unknown edge_type -> drop the override silently; validator owns
         # the strict check.
 
-    pre_turn_mode = edge_attrs.get("pre_turn_mode")
-    if pre_turn_mode is not None:
-        turn_override = _override_enum_value(
-            TurnMode, pre_turn_mode, _TURN_MODE_DEFAULT
-        )
-
     direction_mode = edge_attrs.get("direction_override")
     if direction_mode is not None:
         direction_override = _override_enum_value(
@@ -265,25 +266,23 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
         line_override,
         blind_override,
         projection_override,
-        turn_override,
         direction_override,
     )
 
 
 def _none_edge_cell() -> str:
-    # Field order MUST match the C++ ``EdgeInfo`` struct positionally, including
-    # the trailing ``pivot_trim_cm`` (0.0 here -- a NONE cell is never a pivot
-    # edge). Both this and ``_edge_cell`` must carry the field or the aggregate
-    # initialiser misaligns; the emitted ``static_assert`` guards against drift.
+    # Field order MUST match the C++ ``EdgeInfo`` struct positionally (ADR-036:
+    # ``pivot_trim_cm`` / ``pre_turn_mode_override`` are gone -- pivots live in
+    # the sparse ``PIVOT_TURNS`` table now). Both this and ``_edge_cell`` must
+    # emit the same four override slots in the same order or the brace-enclosed
+    # aggregate initialiser misaligns.
     return (
         "{ EdgeType::NONE, "
         + _format_float(0.0) + ", " + _format_float(0.0) + ", "
         + _LINE_MODE_DEFAULT + ", "
         + _BLIND_MODE_DEFAULT + ", "
         + _PROJECTION_MODE_DEFAULT + ", "
-        + _TURN_MODE_DEFAULT + ", "
-        + _DIRECTION_MODE_DEFAULT + ", "
-        + _format_float(0.0)
+        + _DIRECTION_MODE_DEFAULT
         + " }"
     )
 
@@ -299,24 +298,14 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
         line_override,
         blind_override,
         projection_override,
-        turn_override,
         direction_override,
     ) = _resolve_overrides(edge)
-    # ``pivot_trim_cm`` (δ) is a plain float written straight onto the
-    # PIVOT-tagged edge by the planner's compensation pass; non-pivot edges
-    # never carry the attribute, so default to 0.0. It is read directly here
-    # rather than threaded through ``_resolve_overrides`` -- that helper exists
-    # to resolve the enum-mode override slots, and a raw float does not belong
-    # in that tuple.
-    pivot_trim = _format_float(edge.get("pivot_trim_cm", 0.0))
     return (
         "{ " + enum_name + ", " + distance + ", " + heading + ", "
         + line_override + ", "
         + blind_override + ", "
         + projection_override + ", "
-        + turn_override + ", "
-        + direction_override + ", "
-        + pivot_trim
+        + direction_override
         + " }"
     )
 
@@ -389,9 +378,14 @@ def _build_routes_h_lines(
     node_names: List[str],
     source_hash: str,
     start_node_index: int,
+    pivot_count: int,
 ) -> List[str]:
     n_nodes = len(node_names)
     start_heading = _format_float(field_data.START_HEADING_DEG)
+    # The array bound is never zero: a zero-length array bound is ill-formed
+    # in standard C++, so a pivot-free field still emits a single zeroed
+    # placeholder element while ``N_PIVOT_TURNS`` reports the truth count (0).
+    pivot_array_len = max(1, pivot_count)
 
     lines: List[str] = []
     lines.extend(_routes_h_banner(source_hash))
@@ -400,7 +394,6 @@ def _build_routes_h_lines(
     lines.append("#define ROUTES_H")
     lines.append("")
     lines.append("#include <stdint.h>")
-    lines.append("#include <stddef.h>  // offsetof for the EdgeInfo layout guard")
     lines.append("")
     lines.append("namespace Routes {")
     lines.append(_INDENT + "constexpr uint8_t N_NODES = " + str(n_nodes) + ";")
@@ -452,38 +445,56 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "LineMode       line_mode_override;")
     lines.append(_INDENT * 2 + "BlindMode      blind_mode_override;")
     lines.append(_INDENT * 2 + "ProjectionMode projection_mode_override;")
-    lines.append(_INDENT * 2 + "TurnMode       pre_turn_mode_override;")
     lines.append(_INDENT * 2 + "DirectionMode  direction_override;")
-    lines.append(
-        _INDENT * 2
-        + "float          pivot_trim_cm;  // δ on the pivot-tagged edge; "
-        + "0.0 on non-pivot edges"
-    )
     lines.append(_INDENT + "};")
     lines.append("")
-    # Positional-init drift guard. ``_edge_cell`` / ``_none_edge_cell`` emit
-    # EdgeInfo as a brace-enclosed aggregate initialiser, so each value is
-    # bound to a member purely by position. If the Python tuple order and the
-    # C++ field order ever drift apart, ``pivot_trim_cm`` would silently take a
-    # neighbouring field's bytes instead of failing. Pinning the offset of the
-    # trailing field makes any such reorder a hard compile error rather than a
-    # wrong float at runtime. ``offsetof`` (not ``sizeof``) is used so the guard
-    # tracks the field position directly and stays robust to tail padding.
     lines.append(
-        _INDENT
-        + "static_assert(offsetof(EdgeInfo, pivot_trim_cm) == "
-        + str(_EDGE_INFO_PIVOT_TRIM_OFFSET)
-        + ","
+        _INDENT + "// Single-wheel pivot turn (ADR-036). A pivot is a property"
     )
     lines.append(
-        _INDENT * 2
-        + '"EdgeInfo layout drift: pivot_trim_cm must stay the trailing field; '
-        + 'the emitter\'s positional initialiser order no longer matches the struct");'
+        _INDENT + "// of a turn (arrive from u, pivot at v, leave to w), not of"
     )
+    lines.append(
+        _INDENT + "// an edge: the firmware resolves the wheel and the over-"
+    )
+    lines.append(
+        _INDENT + "// travel trim from ONE record, so the two cannot disagree."
+    )
+    lines.append(_INDENT + "struct PivotTurn {")
+    lines.append(_INDENT * 2 + "uint8_t  u;          // node index: arrive-from")
+    lines.append(_INDENT * 2 + "uint8_t  v;          // node index: pivot-at")
+    lines.append(_INDENT * 2 + "uint8_t  w;          // node index: leave-to")
+    lines.append(
+        _INDENT * 2 + "TurnMode wheel;      // PIVOT_LEFT | PIVOT_RIGHT (uint8_t enum)"
+    )
+    lines.append(_INDENT * 2 + "float    trim_cm;    // delta over-travel, cm")
+    lines.append(_INDENT + "};")
     lines.append("")
     lines.append(_INDENT + "extern const NodeInfo NODES[N_NODES];")
     lines.append(_INDENT + "extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];")
     lines.append(_INDENT + "extern const EdgeInfo EDGES   [N_NODES][N_NODES];")
+    lines.append("")
+    lines.append(
+        _INDENT + "// Sparse, sorted single-wheel pivot table (ADR-036). Sorted by"
+    )
+    lines.append(
+        _INDENT + "// (u, v, w) node-index tuple for a deterministic golden and a"
+    )
+    lines.append(
+        _INDENT + "// short bounded linear scan in FieldMap::findPivotTurn."
+    )
+    lines.append(
+        _INDENT
+        + "constexpr uint8_t N_PIVOT_TURNS = "
+        + str(pivot_count)
+        + ";"
+    )
+    lines.append(
+        _INDENT
+        + "extern const PivotTurn PIVOT_TURNS["
+        + str(pivot_array_len)
+        + "];"
+    )
     lines.append("")
     lines.append(
         _INDENT + "// Sentinel for unreachable next-hop entries; PathTracker"
@@ -575,6 +586,121 @@ def _emit_pipeline_config() -> List[str]:
     ]
 
 
+def _wheel_enum_literal(wheel) -> str:
+    """Render a pivot record's ``wheel`` as a ``TurnMode::<NAME>`` literal.
+
+    Accepts a :class:`~tools.path_planner.pipeline_config.TurnMode` member
+    (the normal case from :func:`build_pivot_turns`) or the bare string name
+    / integer value of one, mirroring :func:`_override_enum_value`'s
+    tolerance of legacy / hand-built fixtures. An unresolvable value falls
+    back to ``TurnMode::DEFAULT`` rather than raising -- the validator owns
+    strict checking, and the emitter stays robust.
+    """
+    if isinstance(wheel, TurnMode):
+        return _TURN_MODE_PREFIX + wheel.name
+    if isinstance(wheel, str):
+        try:
+            return _TURN_MODE_PREFIX + TurnMode[wheel].name
+        except KeyError:
+            return _TURN_MODE_PREFIX + TurnMode.DEFAULT.name
+    try:
+        return _TURN_MODE_PREFIX + TurnMode(int(wheel)).name
+    except (ValueError, TypeError):
+        return _TURN_MODE_PREFIX + TurnMode.DEFAULT.name
+
+
+def _resolve_pivot_rows(
+    pivot_records: Sequence["PivotTurnRecord"],
+    index_of: Mapping[str, int],
+) -> List[Tuple[int, int, int, str, float]]:
+    """Resolve pivot records to sorted ``(u, v, w, wheel_literal, trim_cm)`` rows.
+
+    Each record's node NAMES (``u`` / ``v`` / ``w``) are mapped to their
+    integer indices via ``index_of`` (the same NODES-order lookup the rest of
+    the emitter uses). Rows are sorted by the ``(u, v, w)`` index tuple so the
+    emitted ``PIVOT_TURNS`` table is deterministic for golden byte-compares
+    and supports the firmware's ordered linear scan.
+
+    A record naming a node absent from ``index_of`` is skipped defensively
+    (mirrors :func:`build_pivot_turns`' edge-existence guard): the validator
+    guarantees every triple's nodes exist, so this only fires for a hand-built
+    caller that bypasses validation, and skipping keeps the emitter from
+    raising :class:`KeyError`. The truth count ``N_PIVOT_TURNS`` is derived
+    from the returned rows, so a skipped record drops out of the count too.
+    """
+    rows: List[Tuple[int, int, int, str, float]] = []
+    for record in pivot_records:
+        if (
+            record.u not in index_of
+            or record.v not in index_of
+            or record.w not in index_of
+        ):
+            continue
+        rows.append(
+            (
+                index_of[record.u],
+                index_of[record.v],
+                index_of[record.w],
+                _wheel_enum_literal(record.wheel),
+                float(record.trim_cm),
+            )
+        )
+    # Sort by the (u, v, w) index tuple only; the wheel/trim payload never
+    # participates in ordering so two records with the same triple (which the
+    # validator rejects as a duplicate) would still sort deterministically.
+    rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    return rows
+
+
+def _emit_pivot_turns(
+    pivot_rows: Sequence[Tuple[int, int, int, str, float]],
+) -> List[str]:
+    """Emit the ``const PivotTurn PIVOT_TURNS[...]`` definition.
+
+    ``pivot_rows`` are the already-resolved, already-sorted rows from
+    :func:`_resolve_pivot_rows`. When empty, a single zeroed placeholder
+    element is emitted (the array bound is ``max(1, count)``; a zero-length
+    array bound is ill-formed in standard C++) while ``N_PIVOT_TURNS`` in
+    routes.h reports the truth count of ``0``.
+    """
+    array_len = max(1, len(pivot_rows))
+    out: List[str] = []
+    out.append(
+        _INDENT
+        + "const PivotTurn PIVOT_TURNS["
+        + str(array_len)
+        + "] = {"
+    )
+    if pivot_rows:
+        out.append(_INDENT * 2 + "// sorted by (u, v, w) node index")
+        for u, v, w, wheel_literal, trim_cm in pivot_rows:
+            out.append(
+                _INDENT * 2
+                + "{ "
+                + str(u) + ", " + str(v) + ", " + str(w) + ", "
+                + wheel_literal + ", "
+                + _format_float(trim_cm)
+                + " },"
+            )
+    else:
+        # Pivot-free field: one zeroed placeholder so the array bound is >= 1.
+        # N_PIVOT_TURNS == 0 tells FieldMap::findPivotTurn to scan nothing, so
+        # this element is never read at runtime.
+        out.append(
+            _INDENT * 2
+            + "// placeholder: N_PIVOT_TURNS == 0, never read at runtime"
+        )
+        out.append(
+            _INDENT * 2
+            + "{ 0, 0, 0, "
+            + _TURN_MODE_PREFIX + TurnMode.DEFAULT.name + ", "
+            + _format_float(0.0)
+            + " },"
+        )
+    out.append(_INDENT + "};")
+    return out
+
+
 def _build_routes_cpp_lines(
     field_data,
     graph: nx.DiGraph,
@@ -582,6 +708,7 @@ def _build_routes_cpp_lines(
     node_names: List[str],
     index_of: Mapping[str, int],
     source_hash: str,
+    pivot_rows: Sequence[Tuple[int, int, int, str, float]],
 ) -> List[str]:
     lines: List[str] = []
     lines.extend(_routes_cpp_banner(source_hash))
@@ -597,6 +724,8 @@ def _build_routes_cpp_lines(
     lines.extend(_emit_next_hop_table(next_hop_table, node_names, index_of))
     lines.append("")
     lines.extend(_emit_edges_table(graph, node_names))
+    lines.append("")
+    lines.extend(_emit_pivot_turns(pivot_rows))
     lines.append("}  // namespace Routes")
     return lines
 
@@ -606,12 +735,23 @@ def emit_routes(
     graph: nx.DiGraph,
     next_hop_table: Mapping[str, Mapping[str, Optional[str]]],
     *,
+    pivot_records: Optional[Sequence["PivotTurnRecord"]] = None,
     header_path: Path = DEFAULT_HEADER_PATH,
     source_path: Path = DEFAULT_SOURCE_PATH,
     field_data_source_path: Path = FIELD_DATA_PATH,
     extra_source_paths: Sequence[Path] = (),
 ) -> Tuple[Path, Path]:
     """Emit ``routes.h`` and ``routes.cpp`` to disk; return their paths.
+
+    ``pivot_records`` is the list of
+    :class:`~tools.path_planner.planner.PivotTurnRecord` produced by
+    :func:`~tools.path_planner.planner.build_pivot_turns` and threaded in by
+    the orchestrator (``build_routes``). Each record's node NAMES are mapped
+    to NODES-order indices and emitted as a sparse, sorted ``PIVOT_TURNS[]``
+    table plus an ``N_PIVOT_TURNS`` truth count. ``None`` (the default) is
+    treated as an empty list -- ``N_PIVOT_TURNS == 0`` with a single zeroed
+    placeholder element -- so callers and tests that predate the orchestrator
+    wiring keep working unchanged.
 
     ``extra_source_paths`` are additional files folded into the banner
     ``Source SHA256:`` stamp alongside ``field_data_source_path`` (e.g. the
@@ -642,11 +782,22 @@ def emit_routes(
 
     source_hash = compute_source_hash(field_data_source_path, *extra_source_paths)
 
+    # Resolve pivot records to sorted (u, v, w, wheel, trim) index rows ONCE so
+    # the count in routes.h and the table in routes.cpp are derived from the
+    # same list (a record skipped for an unknown node drops out of both).
+    pivot_rows = _resolve_pivot_rows(pivot_records or (), index_of)
+
     header_lines = _build_routes_h_lines(
-        field_data, node_names, source_hash, start_node_index
+        field_data, node_names, source_hash, start_node_index, len(pivot_rows)
     )
     cpp_lines = _build_routes_cpp_lines(
-        field_data, graph, next_hop_table, node_names, index_of, source_hash
+        field_data,
+        graph,
+        next_hop_table,
+        node_names,
+        index_of,
+        source_hash,
+        pivot_rows,
     )
 
     header_path.parent.mkdir(parents=True, exist_ok=True)
