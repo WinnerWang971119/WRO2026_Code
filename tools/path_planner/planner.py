@@ -29,36 +29,32 @@ open-loop encoder moves.
 
 The weighted copy used by Dijkstra carries an extra ``cost`` attribute;
 the underlying geometry (``distance_cm`` / ``heading_deg``) is taken
-from the *input* graph. Pivot compensation no longer mutates that
-geometry (see below), so the cost the planner optimises and the geometry
-the emitter consumes describe the same un-shortened edges; the
-correction rides along as a separate ``pivot_trim_cm`` scalar on the
-pivot edge itself.
+from the *input* graph. Pivot compensation never mutates that geometry
+(see below), so the cost the planner optimises and the geometry the
+emitter consumes describe the same un-shortened edges.
 
-Single-wheel pivot compensation
--------------------------------
+Single-wheel pivot compensation (per-turn model)
+------------------------------------------------
 
-Edges in the graph may carry a ``pivot`` attribute (the integer value of
-a :class:`tools.path_planner.graph_builder.Pivot` member). When set to
-``Pivot.LEFT`` or ``Pivot.RIGHT``, the turn entering that edge is
-executed as a single-wheel pivot rather than a counter-rotation. The
-chassis centre swings forward through one wheel, so it lands offset from
-where a counter-rotation would have left it: it over-travels along the
-post-turn heading by ::
+A single-wheel pivot is a property of a *turn* -- a 3-node triple
+``(u, v, w)`` declared in :data:`tools.path_planner.field_data.PIVOT_TURNS`
+-- not of an edge. The chassis arrives at ``v`` from ``u``, pivots about
+one wheel, and leaves toward ``w``. Because the centre swings forward
+through one wheel, the chassis lands offset from where a counter-rotation
+would have left it: it over-travels along the post-turn heading by ::
 
     delta = (track_cm / 2) * tan(|theta| / 2)
 
-where ``theta`` is the interior turn angle (see
-:func:`compute_pivot_compensation`). Rather than fold this trim into the
-FOLLOWING edge's ``distance_cm`` -- which corrupts the geometry of any
-non-pivot route that happens to share that edge cell (issue #44) --
-:func:`apply_pivot_compensations` stores the scalar ``delta`` onto the
-PIVOT-tagged edge itself as a ``pivot_trim_cm`` attribute. Both the
-pivot edge's and the following edge's ``distance_cm`` / ``heading_deg``
-are left byte-identical to the pre-compensation graph, so the Dijkstra
-cost and every shared route read the original distances; only the
-firmware consumer of ``pivot_trim_cm`` (wired up by the emitter in a
-later task) applies the trim, and only when the pivot actually fires.
+where ``theta`` is the signed interior turn angle at ``v`` (see
+:func:`compute_pivot_compensation`). :func:`build_pivot_turns` derives
+``theta`` from the two edge headings, the wheel from ``sign(theta)``, and
+the over-travel ``delta`` per triple, returning a sparse list of
+:class:`PivotTurnRecord` for the header emitter to serialise into a small
+``PIVOT_TURNS[]`` wire table. The graph itself is never mutated: every
+``distance_cm`` / ``heading_deg`` is left byte-identical to the input, so
+the Dijkstra cost and every shared route read the original distances. The
+firmware applies a record's trim only when the route actually takes that
+turn.
 
 Sentinels
 ---------
@@ -75,12 +71,15 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, Pivot
+from tools.path_planner.compiler import normalize_turn
+from tools.path_planner.graph_builder import EDGE_BLIND, directed_edge_heading
+from tools.path_planner.pipeline_config import TurnMode
 
 # Public type alias: outer key = source node, inner key = target node,
 # value = next node on the shortest path (or None if unreachable).
@@ -175,10 +174,10 @@ def compute_pivot_compensation(turn_deg: float, track_cm: float) -> float:
     ``theta == 120 deg`` ``~0.866 * track_cm``.
 
     The helper is pure (no graph dependency) and side-effect free: callers
-    decide where to store the returned scalar.
-    :func:`apply_pivot_compensations` writes it onto the pivot edge as
-    ``pivot_trim_cm`` rather than folding it into any edge's
-    ``distance_cm`` (issue #44).
+    decide where to store the returned scalar. :func:`build_pivot_turns`
+    bakes it into each :class:`PivotTurnRecord`'s ``trim_cm`` (the firmware
+    subtracts it from the relevant drive when the route takes the turn)
+    rather than folding it into any edge's ``distance_cm`` (issue #44).
 
     :param turn_deg: signed turn magnitude (degrees, CCW positive). Only
         ``|turn_deg|`` enters the formula, so the sign is accepted but
@@ -198,144 +197,143 @@ def compute_pivot_compensation(turn_deg: float, track_cm: float) -> float:
     return delta
 
 
-def apply_pivot_compensations(graph: nx.DiGraph, track_cm: float) -> None:
-    """Tag every single-wheel-pivot edge with its forward over-travel trim.
+@dataclass(frozen=True)
+class PivotTurnRecord:
+    """One resolved single-wheel pivot turn ``(u, v, w)`` for the wire table.
 
-    For every edge ``(src, dst)`` in ``graph`` whose ``pivot`` attribute
-    is set to :attr:`Pivot.LEFT` or :attr:`Pivot.RIGHT` (compared by
-    integer value, since :func:`graph_builder._extract_directional_attrs`
-    stores the int rather than the IntEnum), this function locates the
-    *single* forward out-edge from ``dst`` (to read the post-turn
-    heading), computes the over-travel scalar ::
+    A pivot is declared per turn in
+    :data:`tools.path_planner.field_data.PIVOT_TURNS` as a node-name
+    triple. :func:`build_pivot_turns` resolves each triple into one of
+    these records: the geometry-derived pivot wheel and the forward
+    over-travel ``trim_cm``. The header writer (T4) serialises a sorted
+    list of these into the sparse ``PIVOT_TURNS[]`` array in
+    ``routes.h`` / ``routes.cpp``; the firmware applies the trim only
+    when the route actually takes the turn ``u -> v -> w``.
 
-        delta = (track_cm / 2) * tan(|theta| / 2)
+    Frozen (immutable, hashable) so a record can be safely sorted, kept
+    in a set for duplicate detection, and compared byte-for-byte in
+    golden tests.
 
-    via :func:`compute_pivot_compensation`, and STORES it on the
-    PIVOT-tagged edge itself as ``pivot_edge_data["pivot_trim_cm"] =
-    delta``. It does **not** mutate the following edge -- neither its
-    ``distance_cm`` nor its ``heading_deg`` -- nor the pivot edge's own
-    distance/heading. Every edge's geometry stays byte-identical to the
-    pre-compensation graph; only the new ``pivot_trim_cm`` key is added.
-
-    This is the issue #44 fix: the previous version shortened the
-    following edge's ``distance_cm`` in place, which corrupted the
-    geometry of any non-pivot route that happened to share that edge
-    cell. Storing the trim on the pivot edge keeps the correction local
-    to the pivot maneuver -- it only fires when the pivot does.
-
-    The turn magnitude ``theta`` is the heading delta between the
-    pivot-tagged edge and its following edge, normalised to
-    ``[-180, 180]`` degrees.
-
-    .. note::
-
-        Locating the following edge still requires the landing node to
-        have exactly one forward out-edge. Out-edge choice is only known
-        once Dijkstra has picked a path, but this function runs *before*
-        Dijkstra, so a multi-successor landing has no single post-turn
-        heading to measure the turn against. The safe scope cut is to
-        require pivot destinations to have exactly one forward out-edge;
-        the field-data author can structure the graph accordingly. A
-        future per-path pivot-aware planner could relax this.
-
-        For the production pipeline the validator enforces this
-        precondition up front (finding #36): a pivot landing with the
-        wrong out-degree fails as a :class:`FieldDataError` at validation
-        time. This function therefore does NOT raise on a mismatch -- it
-        skips the offending pivot edge (leaving it un-trimmed). The skip
-        is a defensive guard for direct / hand-built callers that assemble
-        a graph without running
-        :func:`tools.path_planner.validator.validate`; it keeps
-        ``forward_out_edges[0]`` safe from an IndexError and never
-        measures the turn against an arbitrary branch.
-
-        The back-edge from ``dst`` to ``src`` (always present when the
-        edge was emitted by :func:`build_graph`'s bidirectional pair) is
-        excluded from the out-edge count and from the heading lookup --
-        the chassis is never going to immediately reverse the pivot it
-        just executed.
-
-        Storing the trim is idempotent per pivot edge: the trim now lives
-        on the pivot edge itself, so re-running this function (or a second
-        pass over the same graph) re-stores the same scalar and never
-        compounds. The cross-pivot double-compensation that finding #94
-        guarded against -- two pivots from non-adjacent sources landing on
-        one shared following edge -- is structurally gone now that each
-        pivot carries its own trim instead of subtracting from the shared
-        edge; this function still skips a pivot edge that already carries
-        ``pivot_trim_cm`` so the operation is a no-op on a second call.
-
-    :param graph: a directed graph that gains a ``pivot_trim_cm`` scalar
-        on each qualifying pivot edge **in place**. No ``distance_cm`` /
-        ``heading_deg`` is mutated, so the same object is safe to hand to
-        both the Dijkstra cost step and the routes.cpp emitter
-        afterwards. :func:`compute_all_pairs_next_hop` relies on that.
-    :param track_cm: chassis track width in centimetres. Forwarded to
-        :func:`compute_pivot_compensation`.
-    :return: ``None``. Pivot edges whose destination does not have
-        exactly one forward out-edge are skipped (left un-trimmed) rather
-        than raising; the validator (finding #36) enforces the
-        one-forward-out-edge precondition for the production pipeline.
+    :ivar u: arrive-from node name.
+    :ivar v: pivot-at node name (where the single-wheel turn happens).
+    :ivar w: leave-to node name.
+    :ivar wheel: the pivot wheel, :attr:`TurnMode.PIVOT_LEFT` or
+        :attr:`TurnMode.PIVOT_RIGHT`, derived from ``sign(theta)``.
+    :ivar trim_cm: forward over-travel ``delta`` in centimetres
+        (``(track_cm / 2) * tan(|theta| / 2)``).
     """
-    pivot_values = {int(Pivot.LEFT), int(Pivot.RIGHT)}
 
-    # Snapshot the edge list so in-place attribute mutation during
-    # iteration cannot disturb the loop variable. We only ever write to
-    # the pivot-tagged edge itself (never the following edge), but making
-    # this explicit removes any doubt.
-    pivot_edges = [
-        (src, dst, data)
-        for src, dst, data in graph.edges(data=True)
-        if int(data.get("pivot", Pivot.NONE)) in pivot_values
-    ]
+    u: str
+    v: str
+    w: str
+    wheel: TurnMode
+    trim_cm: float
 
-    for src, dst, pivot_edge_data in pivot_edges:
-        # Idempotency guard: if this pivot edge already carries its trim,
-        # re-storing it is a no-op, so skip the work. The trim now lives on
-        # the pivot edge itself (not the shared following edge), so a second
-        # pass -- or a second pivot landing on the same node -- can never
-        # compound the correction; each pivot owns its own scalar. This guard
-        # just keeps the function a clean no-op on a repeated call.
-        if "pivot_trim_cm" in pivot_edge_data:
+
+def build_pivot_turns(
+    graph: nx.DiGraph,
+    track_cm: Optional[float] = None,
+) -> List[PivotTurnRecord]:
+    """Resolve every authored pivot triple into a :class:`PivotTurnRecord`.
+
+    A single-wheel pivot is a property of a *turn*, not an edge: the
+    chassis arrives at ``v`` from ``u``, pivots about one wheel, and
+    leaves toward ``w``. For each ``(u, v, w)`` triple in
+    :data:`tools.path_planner.field_data.PIVOT_TURNS` this:
+
+    1. measures the signed turn angle at ``v`` --
+       ``theta = normalize(heading(v->w) - heading(u->v))`` into
+       ``(-180, 180]`` -- using
+       :func:`tools.path_planner.graph_builder.directed_edge_heading`
+       (which honours field-data heading overrides) and the canonical
+       :func:`tools.path_planner.compiler.normalize_turn`;
+    2. computes the forward over-travel
+       ``delta = (track_cm / 2) * tan(|theta| / 2)`` via
+       :func:`compute_pivot_compensation` (reused, never re-derived); and
+    3. derives the pivot wheel from ``sign(theta)``:
+       ``theta > 0`` (CCW / left turn) -> :attr:`TurnMode.PIVOT_LEFT`
+       (brake the left wheel, drive the right; the nose swings CCW),
+       ``theta < 0`` -> :attr:`TurnMode.PIVOT_RIGHT`. ADR-036 derives this
+       mapping from the wheel-byte semantics plus the forward-travel
+       assumption -- authors never type a wheel.
+
+    The graph is **never mutated**: every ``distance_cm`` / ``heading_deg``
+    stays byte-identical to the input, so the same object is safe to hand
+    to both the Dijkstra cost step and the ``routes.cpp`` emitter. Pivot
+    derivation is decoupled from :func:`compute_all_pairs_next_hop`; the
+    orchestrator (``build_routes``) calls this separately and threads the
+    returned records into the header emitter.
+
+    Edge existence for both legs is guaranteed by the validator
+    (``_validate_pivot_turns``) running first, but this code guards
+    defensively per existing style: a triple whose ``u -> v`` or
+    ``v -> w`` is absent from ``graph`` is skipped (not derived) rather
+    than raising a :class:`KeyError`, so a direct / hand-built caller that
+    bypasses :func:`tools.path_planner.validator.validate` degrades
+    cleanly instead of crashing.
+
+    :param graph: directed graph as produced by
+        :func:`tools.path_planner.graph_builder.build_graph`. Read-only.
+    :param track_cm: chassis track width in centimetres, forwarded to
+        :func:`compute_pivot_compensation`. ``None`` (the default) parses
+        ``Config::TRACK_MM`` from ``WRO2026/Config.h`` via
+        :func:`parse_track_cm_from_config` -- the single source of truth
+        (issue #44). Bypass callers (e.g. CTPS) pass it explicitly so no
+        new hard Config.h dependency is baked in.
+    :return: list of :class:`PivotTurnRecord`, one per resolvable triple,
+        in :data:`field_data.PIVOT_TURNS` authoring order. Empty when the
+        field declares no pivots (the real field today).
+    :raises FileNotFoundError: when ``track_cm`` is ``None`` and
+        ``WRO2026/Config.h`` cannot be found (no stale-literal fallback).
+    """
+    # Deferred import (mirrors the validator's pattern): keeps the planner
+    # module import lightweight and avoids loading field_data.json -- and
+    # the editor loader it pulls in -- at every planner import. The library
+    # layer (validator / compiler / graph_builder) all defer or parameterise
+    # field_data the same way; only orchestrator / CLI modules import it
+    # eagerly.
+    from tools.path_planner import field_data
+
+    # Resolve the chassis track from the firmware header when the caller
+    # did not pass one. There is no stale literal fallback (issue #44):
+    # parse_track_cm_from_config raises if Config::TRACK_MM is missing.
+    if track_cm is None:
+        track_cm = parse_track_cm_from_config()
+
+    records: List[PivotTurnRecord] = []
+    for u, v, w in field_data.PIVOT_TURNS:
+        # Defensive edge-existence guard: the validator enforces both legs
+        # exist up front, so this only fires for hand-built callers that
+        # bypass `validate`. Skip the triple rather than letting
+        # directed_edge_heading raise a KeyError.
+        if not (graph.has_edge(u, v) and graph.has_edge(v, w)):
             continue
 
-        # Exclude the back-edge to ``src``: build_graph emits every edge
-        # bidirectionally, so dst->src is always present and is never a
-        # legitimate next-edge candidate (the chassis would not pivot
-        # only to immediately reverse). Counting it would make pivot
-        # compensation impossible to apply on any realistic graph.
-        forward_out_edges = [
-            (s, d, data)
-            for s, d, data in graph.out_edges(dst, data=True)
-            if d != src
-        ]
-        if len(forward_out_edges) != 1:
-            # The validator (finding #36) now enforces this precondition for
-            # the production pipeline -- a pivot landing with anything other
-            # than one forward out-edge fails as a clean FieldDataError at
-            # validation time. This skip is defensive for direct / hand-built
-            # callers that bypass `validate` (e.g. unit tests assembling a
-            # raw DiGraph): it leaves the pivot edge un-trimmed rather than
-            # raising, so `forward_out_edges[0]` below can never IndexError on
-            # a 0-successor landing and a multi-successor landing's turn is
-            # never measured against an arbitrary branch.
-            continue
+        # theta = the signed turn at v: how far the travel heading rotates
+        # from the incoming edge (u -> v) to the outgoing edge (v -> w).
+        # directed_edge_heading reads the stored heading_deg (honouring any
+        # field_data override); normalize_turn is the one canonical
+        # normalizer, folding the delta into (-180, 180].
+        in_heading = directed_edge_heading(graph, u, v)
+        out_heading = directed_edge_heading(graph, v, w)
+        theta = normalize_turn(out_heading - in_heading)
 
-        _next_src, _next_dst, next_edge_data = forward_out_edges[0]
+        # delta = forward over-travel; reuse the closed-form helper, never
+        # re-derive (T/2)*tan(theta/2) inline (issue #44, TC2).
+        trim_cm = compute_pivot_compensation(turn_deg=theta, track_cm=track_cm)
 
-        pre_heading = float(pivot_edge_data["heading_deg"])
-        post_heading = float(next_edge_data["heading_deg"])
-        # Normalise the turn delta into [-180, 180]. ((d + 180) % 360) - 180
-        # is the standard trick; works for any IEEE-754 float input.
-        turn_deg = ((post_heading - pre_heading + 180.0) % 360.0) - 180.0
+        # Wheel from sign(theta): a CCW (left) turn pivots about the LEFT
+        # wheel, a CW (right) turn about the RIGHT wheel (ADR-036). theta
+        # is never exactly 0 here -- the validator's raised min-angle floor
+        # rejects a degenerate ~0 deg "turn" -- so the >0 / else split is
+        # unambiguous.
+        wheel = TurnMode.PIVOT_LEFT if theta > 0 else TurnMode.PIVOT_RIGHT
 
-        delta = compute_pivot_compensation(turn_deg=turn_deg, track_cm=track_cm)
+        records.append(
+            PivotTurnRecord(u=u, v=v, w=w, wheel=wheel, trim_cm=trim_cm)
+        )
 
-        # Store the over-travel trim on the PIVOT edge itself -- do NOT
-        # touch the following edge's distance/heading (issue #44). The
-        # emitter (a later task) reads this scalar and applies the trim
-        # only when the pivot actually fires.
-        pivot_edge_data["pivot_trim_cm"] = delta
+    return records
 
 
 # -- internal helpers ---------------------------------------------------------
@@ -397,49 +395,26 @@ def compute_all_pairs_next_hop(
       next-hop reconstructs the optimal path.
 
     Edge cost = ``distance_cm * (cost_blind_multiplier if type == EDGE_BLIND
-    else 1.0)``. Single-wheel-pivot compensation
-    (:func:`apply_pivot_compensations`) is applied to the input ``graph``
-    **in place** *before* the weighted copy is built. As of the issue #44
-    fix it no longer touches any edge's ``distance_cm`` / ``heading_deg``
-    -- it only tags each pivot edge with a ``pivot_trim_cm`` scalar -- so
-    the Dijkstra cost computed here and the ``routes.cpp`` emitter driven
-    by the caller both read the original, un-shortened distances.
-
-    .. note::
-
-        This function still mutates ``graph``, but only by ADDING a
-        ``pivot_trim_cm`` key to single-wheel-pivot edges. No existing
-        geometry attribute is changed, so a caller that re-uses ``graph``
-        afterward (e.g. :func:`tools.path_planner.build_routes._run`
-        handing it to
-        :func:`tools.path_planner.header_writer.emit_routes`) sees the
-        same distances it passed in, plus the trim scalars. The store is
-        idempotent: a second call re-stores the same scalars.
+    else 1.0)``. This function is **pivot-agnostic**: single-wheel-pivot
+    derivation is decoupled into :func:`build_pivot_turns`, which the
+    orchestrator calls separately. Nothing here mutates ``graph``, so the
+    Dijkstra cost computed here and the ``routes.cpp`` emitter driven by
+    the caller both read the same original, un-shortened distances.
 
     :param graph: directed graph as produced by
         :func:`tools.path_planner.graph_builder.build_graph`. Every edge
-        must carry ``type`` and ``distance_cm``.
+        must carry ``type`` and ``distance_cm``. Read-only.
     :param cost_blind_multiplier: positive multiplier applied to
         :data:`tools.path_planner.graph_builder.EDGE_BLIND` edges.
-    :param track_cm: chassis track width in centimetres, forwarded to
-        :func:`apply_pivot_compensations`. ``None`` (the default) parses
-        ``Config::TRACK_MM`` from ``WRO2026/Config.h`` via
-        :func:`parse_track_cm_from_config` -- the single source of truth
-        (issue #44). :func:`tools.path_planner.build_routes._run` parses
-        it once and passes it in explicitly; callers that only want the
-        next-hop table (and have no pivot edges to compensate, or accept
-        the header-derived default) may omit it.
+    :param track_cm: accepted but unused -- retained only so the
+        orchestrator's existing ``track_cm=`` call site keeps working
+        until T16 drops it there. Pivot trim no longer lives in this
+        function (it moved to :func:`build_pivot_turns`); nothing here
+        reads the track width, so the value is ignored.
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
     :raises ValueError: when ``cost_blind_multiplier`` is not positive.
-        A pivot-tagged edge whose destination does not have exactly one
-        forward out-edge is no longer an error here -- the validator
-        rejects it up front (finding #36), and
-        :func:`apply_pivot_compensations` skips it defensively for callers
-        that bypass validation.
-    :raises FileNotFoundError: when ``track_cm`` is ``None`` and
-        ``WRO2026/Config.h`` cannot be found (no stale-literal fallback).
     """
     if cost_blind_multiplier <= 0:
         raise ValueError(
@@ -451,22 +426,17 @@ def compute_all_pairs_next_hop(
             "expensive than equal-length LINE edges."
         )
 
-    # Resolve the chassis track from the firmware header when the caller
-    # did not pass one. There is no stale literal fallback (issue #44):
-    # parse_track_cm_from_config raises if Config::TRACK_MM is missing.
-    if track_cm is None:
-        track_cm = parse_track_cm_from_config()
+    # ``track_cm`` is intentionally not consulted here any more: pivot
+    # derivation moved out of the next-hop pass into build_pivot_turns
+    # (the orchestrator calls it separately). The parameter stays in the
+    # signature only so the current build_routes call site keeps working
+    # until T16 removes it; deleting it here would break that call before
+    # T16 lands.
+    del track_cm
 
-    # Tag pivot edges with their over-travel trim BEFORE building the
-    # weighted copy. This adds a ``pivot_trim_cm`` scalar to each pivot
-    # edge but leaves every ``distance_cm`` / ``heading_deg`` untouched,
-    # so the trim never leaks into the Dijkstra cost or any shared route's
-    # geometry (issue #44).
-    apply_pivot_compensations(graph, track_cm)
-    # Build the weighted copy from the graph. Geometry is unchanged by the
-    # pivot tagging above, so every ``cost`` is derived from the original
-    # ``distance_cm``; the ``pivot_trim_cm`` scalar rides along on the
-    # pivot edges and is ignored by the cost model.
+    # Build the weighted copy from the (unmutated) graph. Every ``cost`` is
+    # derived from the original ``distance_cm``; no pivot geometry rides
+    # along, so the cost model and the emitter see identical distances.
     weighted = _weighted_copy(graph, cost_blind_multiplier)
 
     nodes = list(graph.nodes())
@@ -511,14 +481,13 @@ def compute_path_cost(
 
     .. note::
 
-        Unlike :func:`compute_all_pairs_next_hop`, this function reads
-        ``distance_cm`` straight off the *input* graph and does not
-        apply pivot compensation. If a caller needs the compensated
-        cost, they should run :func:`apply_pivot_compensations` on a
-        copy of the graph first and pass that copy in here. Today this
-        function is only used by tests to cross-check Dijkstra against a
-        hand-computed cost on graphs without pivot tags, so the
-        divergence is intentional.
+        This function reads ``distance_cm`` straight off the input graph.
+        Pivot compensation never enters the cost: under the per-turn model
+        the over-travel trim lives in the sparse :class:`PivotTurnRecord`
+        table (:func:`build_pivot_turns`), not on any edge, and the
+        firmware applies it at drive time -- it does not shorten the
+        planned distance the Dijkstra cost optimises. This function is used
+        by tests to cross-check Dijkstra against a hand-computed cost.
 
     :param graph: directed graph carrying ``type`` and ``distance_cm``
         on every edge.
