@@ -811,9 +811,11 @@ class PathTrackerSim:
         # triples explicitly. ``track_cm`` stays None so it resolves
         # ``Config::TRACK_MM`` via ``parse_track_cm_from_config()`` -- the same
         # single source the emitter used, so the trims are byte-identical to the
-        # firmware's ``PIVOT_TURNS`` records.
+        # firmware's ``PIVOT_TURNS`` records. ``getattr`` with an empty default
+        # keeps the sim constructible from a pre-pivot fixture (one authored
+        # before ``PIVOT_TURNS`` existed) -- such a field simply has no pivots.
         records = build_pivot_turns(
-            self._graph, pivot_turns=self._field_data.PIVOT_TURNS
+            self._graph, pivot_turns=getattr(self._field_data, "PIVOT_TURNS", [])
         )
         self._pivot_records: Dict[Tuple[str, str, str], PivotTurnRecord] = {
             (r.u, r.v, r.w): r for r in records
