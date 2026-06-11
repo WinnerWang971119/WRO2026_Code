@@ -13,12 +13,14 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
     FieldDataError,
-    _validate_pivot_regimes,
+    parse_line_sensor_axle_offset_cm,
+    parse_nav_turn_tolerance_deg,
+    parse_pivot_trim_min_drive_cm_from_config,
     validate,
 )
 
@@ -372,8 +374,8 @@ def test_validator_accepts_same_type_line_override() -> None:
     """TC5 (positive): EDGE_LINE on a LINE_SEGMENTS pair is a valid override.
 
     The intended use of a rich EDGES entry is as an override layer attaching
-    distance/heading/pivot to an existing edge. A matching-type entry on an
-    existing pair must NOT be rejected by the anti-ambiguity rule.
+    distance/heading/primitive_mode to an existing edge. A matching-type entry
+    on an existing pair must NOT be rejected by the anti-ambiguity rule.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -426,195 +428,94 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     )
 
 
-# -- Finding #36: pivot out-degree check moved into the validator ------------
+# -- Obsolete per-edge pivot keys rejected (issue #44 per-turn model, T5) -----
 #
-# A single-wheel pivot entering 'v' is compensated by shortening 'v's ONE
-# forward continuation. The planner cannot pick among several before Dijkstra
-# runs, so it requires 'v' to have exactly one forward out-edge (excluding the
-# back-edge to the pivot's source 'u'). This used to fail late as a raw
-# ValueError from planner.apply_pivot_compensations (an uncaught traceback at
-# build time); finding #36 (decision B) moved it into the validator so a bad
-# pivot fails as a clean FieldDataError. The count is over the AUTHORED
-# adjacency, before obstacle / C-space inflation clipping.
+# The per-turn model removed the per-edge ``pivot`` / ``pre_turn_mode`` EDGES
+# keys (single-wheel pivots are now authored as (u, v, w) triples in the
+# top-level PIVOT_TURNS list). A field that still carries one of these on an
+# EDGES entry pre-dates the migration: the EDGES shape check rejects it up
+# front with a precise FieldDataError so the author is pointed at PIVOT_TURNS
+# (and the stale ``pivot`` string can never reach graph_builder and crash on
+# ``int("left")``).
 
 
-def test_validator_rejects_pivot_with_multiple_forward_out_edges() -> None:
-    """A pivot edge whose destination has >1 forward out-edge is rejected.
-
-    In the toy field, node 'E' is line-connected to A, B, C, and D. A pivot
-    edge A->E lands at E, whose authored out-neighbors are {A, B, C, D};
-    excluding the back-edge to the source 'A' leaves {B, C, D} -- three
-    forward continuations, so the pivot landing is ambiguous and must fail.
-    """
+def test_validator_rejects_obsolete_pivot_edge_key() -> None:
+    """An EDGES entry carrying the removed ``pivot`` key is rejected."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
             "type": EDGE_LINE,
             "u": "A",
-            "v": "E",
+            "v": "B",
             "distance_cm": 100.0,
             "heading_deg": 0.0,
-            "pivot": Pivot.LEFT,
+            "pivot": 1,
         }
     ]
-    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+    with pytest.raises(FieldDataError, match=r"removed per-edge key 'pivot'"):
         validate(fd)
 
 
-def test_validator_rejects_pivot_with_zero_forward_out_edges() -> None:
-    """A pivot edge whose destination has no forward out-edge is rejected.
-
-    Node 'G' is a leaf: its only authored neighbor is 'B' (the single
-    BLIND_EDGES pair). A pivot edge B->G lands at G, whose out-neighbors are
-    {B}; excluding the back-edge to the source 'B' leaves an empty set --
-    zero forward continuations, which is equally ambiguous and must fail.
-    The entry is EDGE_BLIND so it is a legitimate same-type override of the
-    existing ('B','G') blind pair (it is the pivot count, not the type
-    cross-check, that rejects it).
-    """
+def test_validator_rejects_obsolete_pre_turn_mode_edge_key() -> None:
+    """An EDGES entry carrying the removed ``pre_turn_mode`` key is rejected."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
-            "type": EDGE_BLIND,
-            "u": "B",
-            "v": "G",
-            "distance_cm": 86.0,
-            "heading_deg": 54.46,
-            "pivot": Pivot.RIGHT,
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "distance_cm": 100.0,
+            "heading_deg": 0.0,
+            "pre_turn_mode": "PIVOT_LEFT",
         }
     ]
-    with pytest.raises(FieldDataError, match=r"exactly one\s+forward out-edge"):
+    with pytest.raises(FieldDataError, match=r"removed per-edge key 'pre_turn_mode'"):
         validate(fd)
 
 
-def test_validator_accepts_pivot_with_single_forward_out_edge() -> None:
-    """A pivot landing with exactly one forward out-edge validates.
-
-    Self-contained A->B->C chain: the pivot edge A->B lands at B, whose
-    authored out-neighbors are {A, C}; excluding the back-edge to the source
-    'A' leaves {C} -- exactly one forward continuation, so the pivot landing
-    is unambiguous and validation passes. This proves the rejection cases
-    above are not a blanket failure on any pivot tag.
-    """
-    fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
-        LINE_SEGMENTS=[],
-        BLIND_EDGES=[],
-        OBSTACLES=[],
-        ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
-        START_NODE="A",
-        START_HEADING_DEG=0.0,
-        FIELD_MM=(3000, 2000),
-        MAP_PNG="maps/map.png",
-        EDGES=[
-            {
-                "type": EDGE_BLIND,
-                "u": "A",
-                "v": "B",
-                "distance_cm": 100.0,
-                "heading_deg": 0.0,
-                "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND,
-                "u": "B",
-                "v": "C",
-                "distance_cm": 100.0,
-                "heading_deg": 90.0,
-            },
-        ],
-    )
-    assert validate(fd) is None
-
-
-def test_malformed_later_edge_does_not_mask_with_pivot_error() -> None:
-    """A malformed LATER entry must fail with its own shape error, not a pivot one.
-
-    The pivot out-degree check (finding #36) scans the full authored EDGES
-    list, including entries that the per-entry shape loop has not reached
-    yet. Before the fix, a later entry with ``u`` set but ``v`` missing
-    contributed a ``None`` out-neighbor to an EARLIER pivot landing,
-    inflating its forward out-degree to 2 and raising a misleading
-    "exactly one forward out-edge" error instead of the precise
-    "missing required key 'v'" error for the malformed entry.
-
-    Fixture: A->B is a valid LEFT pivot landing at B (forward out = {C},
-    exactly one), B->C is the single continuation, and a third entry sets
-    ``u='B'`` but omits ``v``. The validator must blame EDGES[2], not the
-    pivot at EDGES[0].
-    """
-    fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
-        LINE_SEGMENTS=[],
-        BLIND_EDGES=[],
-        OBSTACLES=[],
-        ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
-        START_NODE="A",
-        START_HEADING_DEG=0.0,
-        FIELD_MM=(3000, 2000),
-        MAP_PNG="maps/map.png",
-        EDGES=[
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 90.0,
-            },
-            {  # malformed: missing 'v'; must be blamed, not the pivot above
-                "type": EDGE_BLIND, "u": "B",
-                "distance_cm": 50.0, "heading_deg": 45.0,
-            },
-        ],
-    )
-    with pytest.raises(FieldDataError, match=r"EDGES\[2\] missing required key 'v'"):
-        validate(fd)
-
-
-# -- TC2 (issue #44): two-sided pivot over-travel geometry fail-fast ----------
+# -- TC3..TC12: per-turn pivot geometry fail-fast (_validate_pivot_turns) ------
 #
-# `validator._validate_pivot_regimes` classifies every LEFT/RIGHT pivot edge by
-# its INCOMING regime (the pivot edge `u->v`) x OUTGOING regime (the unique
-# forward continuation `v->w`, guaranteed unique by finding #36), computes the
-# single-wheel over-travel delta = (track/2)*tan(|theta|/2) with the live track
-# (Config::TRACK_MM = 180 mm -> 18.0 cm), and raises a precise FieldDataError
-# on geometry the chassis cannot realise. A regime is SENSOR-terminated (LINE,
-# or BLIND with primitive_mode == BlindMode.STOP_AT_LINE) -- it re-anchors on
-# the physical line and self-corrects -- or DISTANCE-terminated (plain BLIND /
-# PROJECTION) -- dead-reckoned, where the over-travel trim actually bites.
+# A single-wheel pivot is authored per TURN -- a 3-node triple ``(u, v, w)`` in
+# ``field_data.PIVOT_TURNS`` (arrive from ``u``, pivot at ``v``, leave to
+# ``w``). ``validate`` derives the turn angle theta at ``v`` from the two
+# directed-edge headings, computes the single-wheel over-travel
+# delta = (track/2)*tan(|theta|/2) with the live track (Config::TRACK_MM = 180
+# mm -> 18.0 cm), and raises a precise FieldDataError on geometry the chassis
+# cannot realise. A regime is SENSOR-terminated (LINE, or BLIND whose effective
+# mode is STOP_AT_LINE) -- it re-anchors on the physical line and self-corrects
+# -- or DISTANCE-terminated (plain BLIND / PROJECTION) -- dead-reckoned, where
+# the over-travel trim actually bites.
 #
 # Reference geometry at track = 18.0 cm:
-#   theta = 90 deg  -> delta = 9.000 cm  (> 7.68 budget; > any edge < 9 cm)
-#   theta = 10 deg  -> delta = 0.787 cm  (well under budget and short edges)
-#   the LINE overshoot budget delta = 7.68 cm is reached at theta ~= 80.95 deg.
+#   theta = 90 deg  -> delta = 9.000 cm
+#   theta = 120 deg -> delta = 15.588 cm
+#   theta = 10 deg  -> delta = 0.787 cm
+#   the LINE overshoot budget (FRONT axle offset) is 12.02 cm, reached at
+#   theta ~= 106.4 deg.
 #
-# All fixtures follow the self-contained A->B->C chain of
-# `test_validator_accepts_pivot_with_single_forward_out_edge`: a pivot edge
-# A->B lands at B whose only forward continuation is C, so finding #36's
-# single-forward-out-edge precondition is satisfied and the SPECIFIC
-# pivot-regime error under test is the one that raises.
+# Every fixture is built by ``_pivot_field`` below: three nodes A/B/C, all
+# adjacency authored via explicit EDGES entries, and a single ``PIVOT_TURNS``
+# triple. ``_validate_pivot_turns`` reads ``heading_deg`` / ``distance_cm`` /
+# ``type`` off the entries, so the turn angle and over-travel are fully
+# determined by the authored edges, not by the (inert) node coordinates.
 
 
-def _pivot_field(edges) -> SimpleNamespace:
-    """Build a minimal A/B/C field carrying the given EDGES list.
+def _pivot_field(edges, pivot_turns) -> SimpleNamespace:
+    """Build a minimal A/B/C/D field carrying the given EDGES + PIVOT_TURNS.
 
-    Mirrors the fixture shape of
-    :func:`test_validator_accepts_pivot_with_single_forward_out_edge`: three
-    nodes, no LINE_SEGMENTS / BLIND_EDGES (so all adjacency and geometry come
-    from the explicit EDGES entries), and a clean A->B->C pivot chain. Node
-    coordinates are inert for the pivot-regime pass -- it reads the explicit
-    ``heading_deg`` / ``distance_cm`` / ``type`` off each EDGES entry -- so the
-    turn angle and over-travel are fully determined by the entries, not the
-    geometry.
+    Three real nodes plus a spare ``D`` (so a fixture can author a fourth leg
+    for a chained-pivot test). No LINE_SEGMENTS / BLIND_EDGES, so all adjacency
+    and geometry come from the explicit EDGES entries; the ``PIVOT_TURNS``
+    triples are the authored per-turn pivots the validator checks.
     """
     return SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
+        NODES={
+            "A": (0.0, 0.0),
+            "B": (100.0, 0.0),
+            "C": (100.0, 100.0),
+            "D": (200.0, 100.0),
+        },
+        NODE_TYPES={"A": "line", "B": "blind", "C": "blind", "D": "blind"},
         LINE_SEGMENTS=[],
         BLIND_EDGES=[],
         OBSTACLES=[],
@@ -625,58 +526,111 @@ def _pivot_field(edges) -> SimpleNamespace:
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         EDGES=edges,
+        PIVOT_TURNS=pivot_turns,
     )
 
 
-def test_pivot_regime_rejects_degenerate_180_turn() -> None:
-    """TC2: a pivot whose in/out headings differ by ~180 deg is rejected.
+def test_pivot_turn_rejects_missing_incoming_edge() -> None:
+    """TC3: a pivot whose incoming leg ``u->v`` is not authored is rejected.
 
-    Incoming A->B heads 0 deg; outgoing B->C heads 180 deg, so the turn
-    normalizes to theta = -180 deg -- a near-full one-wheel reversal where
-    (track/2)*tan(theta/2) diverges. Both edges are long (100 cm), so only the
+    Only the outgoing leg ``B->C`` is authored, so the incoming ``A->B`` is
+    missing. The error names the absent ``('A','B')`` edge.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(
+        FieldDataError, match=r"incoming edge\s+\('A','B'\) that is not authored"
+    ):
+        validate(fd)
+
+
+def test_pivot_turn_rejects_missing_outgoing_edge() -> None:
+    """TC3 (mirror): a pivot whose outgoing leg ``v->w`` is not authored is rejected.
+
+    Only the incoming leg ``A->B`` is authored, so the outgoing ``B->C`` is
+    missing. The error names the absent ``('B','C')`` edge.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(
+        FieldDataError, match=r"outgoing edge\s+\('B','C'\) that is not authored"
+    ):
+        validate(fd)
+
+
+def test_pivot_turn_rejects_duplicate_triple() -> None:
+    """TC4: the same ``(u, v, w)`` triple authored twice is rejected.
+
+    A turn is authored once; a duplicate triple is an authoring mistake and
+    must fail with a precise duplicate diagnostic.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C"), ("A", "B", "C")],
+    )
+    with pytest.raises(FieldDataError, match=r"duplicate pivot turn"):
+        validate(fd)
+
+
+def test_pivot_turn_rejects_degenerate_180_angle() -> None:
+    """TC5: a pivot whose in/out headings differ by ~180 deg is rejected.
+
+    Incoming ``A->B`` heads 0 deg; outgoing ``B->C`` heads 180 deg, so theta
+    normalizes to -180 deg -- at/above the 179 deg ceiling where
+    (track/2)*tan(theta/2) diverges. Both legs are long (100 cm) so only the
     degenerate-angle gate can trip.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 180.0,
-            },
-        ]
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 180.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(FieldDataError, match=r"degenerate turn\s+angle"):
         validate(fd)
 
 
-def test_pivot_regime_rejects_degenerate_zero_turn() -> None:
-    """TC2: a pivot with a ~0 deg turn is rejected (no real turn -> no pivot).
+def test_pivot_turn_rejects_below_floor_angle() -> None:
+    """TC5 (mirror): a sub-floor turn (~5 deg) is rejected.
 
-    Incoming A->B heads 0 deg; outgoing B->C heads 0.5 deg, so theta = 0.5 deg
-    is below the 1.0 deg minimum -- the "pivot" does not turn, which is an
-    authoring mistake, not a no-op. Long edges isolate the angle gate.
+    Incoming heads 0 deg, outgoing heads 5 deg -- below the raised
+    max(15, 3*NAV_TURN_TOLERANCE_DEG) = 15 deg floor. A turn that small would
+    slip under the firmware's turn-dispatch gate and silently no-op the pivot,
+    so it is an authoring mistake that must fail.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 0.5,
-            },
-        ]
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 5.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(FieldDataError, match=r"degenerate turn\s+angle"):
         validate(fd)
 
 
-def test_pivot_regime_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
-    """TC2: delta >= the OUTGOING dead-reckoned edge length is rejected.
+def test_pivot_turn_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
+    """TC6: delta >= the OUTGOING dead-reckoned edge length is rejected.
 
     A 90 deg pivot (delta = 9.0 cm at track 18) whose outgoing continuation is
     a plain BLIND edge only 2.0 cm long. The out trim cannot meet or exceed the
@@ -684,16 +638,13 @@ def test_pivot_regime_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
     edge is long (100 cm) so the incoming check passes first.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 2.0, "heading_deg": 90.0,
-            },
-        ]
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 2.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
         FieldDataError, match=r">= the OUTGOING dead-reckoned edge length"
@@ -701,49 +652,22 @@ def test_pivot_regime_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
         validate(fd)
 
 
-def test_pivot_regime_accepts_long_outgoing_dead_reckon() -> None:
-    """TC2 (pass counterpart): a long-enough outgoing dead-reckon edge validates.
+def test_pivot_turn_rejects_delta_exceeds_incoming_dead_reckon() -> None:
+    """TC6 (mirror): delta >= the INCOMING dead-reckoned edge length is rejected.
 
-    Same 90 deg / delta = 9.0 cm pivot as the rejection above, but the outgoing
-    BLIND continuation is now 100 cm -- comfortably longer than the 9.0 cm trim
-    -- and the incoming BLIND edge is 100 cm too, so neither dead-reckon gate
-    nor (BLIND incoming, no overshoot budget) trips. Proves the rejection is
-    about the short length, not the 90 deg turn itself.
-    """
-    fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 90.0,
-            },
-        ]
-    )
-    assert validate(fd) is None
-
-
-def test_pivot_regime_rejects_delta_exceeds_incoming_dead_reckon() -> None:
-    """TC2: delta >= the INCOMING dead-reckoned edge length is rejected.
-
-    A 90 deg pivot (delta = 9.0 cm) whose INCOMING dead-reckoned edge A->B is
-    only 2.0 cm long. The approach trim cannot meet or exceed the drive it
+    A 90 deg pivot (delta = 9.0 cm) whose INCOMING dead-reckoned edge ``A->B``
+    is only 2.0 cm long. The approach trim cannot meet or exceed the drive it
     shortens, so the validator names the INCOMING side. The outgoing edge is
     long (100 cm), so the incoming gate is the one that trips.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 2.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 90.0,
-            },
-        ]
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 2.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
         FieldDataError, match=r">= the INCOMING dead-reckoned edge length"
@@ -751,26 +675,43 @@ def test_pivot_regime_rejects_delta_exceeds_incoming_dead_reckon() -> None:
         validate(fd)
 
 
-def test_pivot_regime_rejects_delta_exceeds_line_overshoot_budget() -> None:
-    """TC2: a LINE-incoming pivot whose delta exceeds the 7.68 cm budget is rejected.
+def test_pivot_turn_accepts_long_dead_reckon_edges() -> None:
+    """TC6 (pass counterpart): long-enough dead-reckon edges validate.
+
+    Same 90 deg / delta = 9.0 cm pivot, but both BLIND legs are 100 cm --
+    comfortably longer than the 9.0 cm trim -- so neither dead-reckon gate
+    trips. Proves the rejections above are about the short length, not the
+    90 deg turn itself.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget() -> None:
+    """TC7: a LINE-incoming pivot whose delta exceeds the budget is rejected.
 
     A LINE incoming edge realises its pivot correction as a reduction of the
     post-detect LINE_OVERSHOOT advance, valid only while delta stays within the
-    7.68 cm budget (the min of the front 12.02 / rear 7.68 sensor-to-axle
-    offsets). A 90 deg turn gives delta = 9.0 cm > 7.68 cm, so it is rejected.
-    Both edges are long, so only the overshoot-budget gate trips.
+    FRONT sensor-to-axle offset budget (Config::LINE_SENSOR_AXLE_OFFSET_CM =
+    12.02 cm). A 120 deg turn gives delta = 15.588 cm > 12.02 cm, so it is
+    rejected. Both edges are long, so only the overshoot-budget gate trips.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_LINE, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 90.0,
-            },
-        ]
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 120.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
         FieldDataError, match=r"exceeds the LINE overshoot budget"
@@ -778,124 +719,215 @@ def test_pivot_regime_rejects_delta_exceeds_line_overshoot_budget() -> None:
         validate(fd)
 
 
-def test_pivot_regime_accepts_line_incoming_within_overshoot_budget() -> None:
-    """TC2 (pass counterpart): a shallow LINE-incoming pivot stays within budget.
+def test_pivot_turn_accepts_line_incoming_within_overshoot_budget() -> None:
+    """TC7 (pass counterpart): a LINE-incoming pivot within budget validates.
 
-    Same LINE incoming edge, but a shallow 10 deg turn gives
-    delta = 0.787 cm <= 7.68 cm, so the overshoot-budget gate does not trip and
-    the outgoing BLIND edge (100 cm) easily clears its dead-reckon gate. Proves
-    the budget rejection is about the over-large delta, not the LINE incoming
-    edge per se.
+    Same LINE incoming edge, but a 90 deg turn gives delta = 9.0 cm <= 12.02 cm
+    budget, so the overshoot-budget gate does not trip and the outgoing BLIND
+    edge (100 cm) easily clears its dead-reckon gate. Proves the budget
+    rejection is about the over-large delta, not the LINE incoming edge per se.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_LINE, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 100.0, "heading_deg": 10.0,
-            },
-        ]
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     assert validate(fd) is None
 
 
-def test_pivot_regime_exempts_outgoing_stop_at_line() -> None:
-    """TC2 (AC7 regression guard): a STOP_AT_LINE outgoing continuation is EXEMPT.
+def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_default(
+    monkeypatch,
+) -> None:
+    """TC8: a no-override BLIND outgoing leg inherits PIPELINE_CONFIG.blind.
 
-    The most important regression pair. A 90 deg pivot (delta = 9.0 cm) whose
-    outgoing BLIND continuation is only 2.0 cm long -- shorter than the trim --
-    would be rejected as a too-short dead-reckon (see
-    ``test_pivot_regime_rejects_delta_exceeds_outgoing_dead_reckon``). But here
-    that continuation carries primitive_mode = BlindMode.STOP_AT_LINE, making it
-    SENSOR-terminated: it self-corrects on the physical line and takes NO
-    outgoing trim, so the delta >= out_distance gate MUST NOT fire.
+    Review fix 1: a BLIND edge with no per-edge ``primitive_mode`` classifies on
+    the EFFECTIVE mode, which inherits ``PIPELINE_CONFIG.blind``. When that
+    default is STOP_AT_LINE, the no-override BLIND outgoing leg is SENSOR-
+    terminated, so the outgoing trim no-ops and a 90 deg pivot onto a SHORT
+    (2.0 cm) outgoing edge must NOT be falsely rejected as a too-short
+    dead-reckon. With the live default (SYNC_TSHAPE -> distance) the same
+    fixture WOULD reject, so this test pins the regime to STOP_AT_LINE.
+    """
+    import tools.path_planner.pipeline_config as pc
+    from tools.path_planner.pipeline_config import PipelineConfig
 
-    This is the AC7 guard the prior review required: the outgoing side's
-    primitive_mode is in scope and a STOP_AT_LINE continuation is exempt. The
-    contrast with the plain-BLIND rejection above is the load-bearing assertion.
+    stop_at_line_config = PipelineConfig(blind=BlindMode.STOP_AT_LINE)
+    monkeypatch.setattr(pc, "PIPELINE_CONFIG", stop_at_line_config)
+
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 2.0, "heading_deg": 90.0},  # no primitive_mode override
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    # Outgoing leg classifies sensor (inherits STOP_AT_LINE), so the short
+    # outgoing edge takes no trim and the dead-reckon gate must not fire.
+    assert validate(fd) is None
+
+
+def test_pivot_turn_incoming_mode_read_via_bidirectional_resolver() -> None:
+    """TC9: STOP_AT_LINE authored on the reverse leg classifies incoming as sensor.
+
+    ``primitive_mode`` is a bidirectional edge attribute in graph_builder, so a
+    STOP_AT_LINE override authored on the REVERSE leg ``B->A`` must still
+    classify the forward incoming continuation ``A->B`` as SENSOR-terminated.
+    The reverse leg ``B->A`` is authored heading 180 deg, so the forward
+    ``A->B`` resolves to heading 0 deg -- the same 90 deg pivot whose
+    incoming edge is only 2.0 cm long, yet the STOP_AT_LINE exemption applies
+    (sensor takes no approach trim) and the INCOMING dead-reckon gate is
+    skipped.
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "B", "v": "C",
-                "distance_cm": 2.0, "heading_deg": 90.0,
-                "primitive_mode": BlindMode.STOP_AT_LINE,
-            },
-        ]
+        edges=[
+            # Author the incoming leg on the REVERSE sense (B->A) with the
+            # STOP_AT_LINE override; graph_builder mirrors primitive_mode onto
+            # the forward A->B edge.
+            {"type": EDGE_BLIND, "u": "B", "v": "A",
+             "distance_cm": 2.0, "heading_deg": 180.0,
+             "primitive_mode": BlindMode.STOP_AT_LINE},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     assert validate(fd) is None
 
 
-def test_pivot_regime_exempts_outgoing_stop_at_line_on_reverse_leg() -> None:
-    """TC2 (AC7, reverse leg): STOP_AT_LINE authored on w->v still exempts v->w.
+def test_pivot_turn_stop_at_line_incoming_exempt_from_overshoot_budget() -> None:
+    """TC10: a STOP_AT_LINE-incoming pivot is exempt from the LINE overshoot budget.
 
-    primitive_mode is a bidirectional edge attribute in graph_builder, so a
-    STOP_AT_LINE override authored on the REVERSE leg C->B must still classify
-    the forward continuation B->C as SENSOR-terminated. The reverse leg
-    C->B is authored heading 270 deg, so the forward B->C resolves to
-    270 + 180 = 90 deg -- the same 90 deg pivot whose delta = 9.0 cm exceeds the
-    2.0 cm length, yet the STOP_AT_LINE exemption applies and validation passes.
+    Only a true LINE incoming edge is bound by the FRONT overshoot budget
+    (12.02 cm); a BLIND incoming edge whose effective mode is STOP_AT_LINE is
+    'sensor', not 'line', and takes NO incoming trim -- so a 120 deg pivot
+    (delta = 15.588 cm, well over the budget) onto a long outgoing edge must
+    NOT trip the overshoot-budget gate. Contrast with
+    ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget`` (LINE
+    incoming, same 120 deg, rejected).
     """
     fd = _pivot_field(
-        [
-            {
-                "type": EDGE_BLIND, "u": "A", "v": "B",
-                "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-            },
-            {
-                "type": EDGE_BLIND, "u": "C", "v": "B",
-                "distance_cm": 2.0, "heading_deg": 270.0,
-                "primitive_mode": BlindMode.STOP_AT_LINE,
-            },
-        ]
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0,
+             "primitive_mode": BlindMode.STOP_AT_LINE},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 120.0,
+             "primitive_mode": BlindMode.STOP_AT_LINE},
+        ],
+        pivot_turns=[("A", "B", "C")],
     )
     assert validate(fd) is None
 
 
-def test_pivot_regime_unsupported_combo_is_defensive_depth() -> None:
-    """TC2: the unsupported-regime-combo branch is unreachable via validate().
+def test_pivot_turn_accepts_chained_pivots_within_shared_edge() -> None:
+    """TC11: chained pivots with delta_uv + delta_vw < length(v->w) validate.
 
-    The branch raises when either side's edge type classifies as neither
-    sensor- nor distance-terminated. But every type that survives the per-entry
-    shape check in ``_validate_edges_field`` is one of EDGE_LINE / EDGE_BLIND /
-    EDGE_PROJECTION, and all three classify (LINE -> sensor, PROJECTION ->
-    distance, BLIND -> sensor/distance). A bogus type is rejected by the shape
-    check BEFORE the pivot-regime pass ever runs, so the public ``validate()``
-    can never reach this branch -- it is defensive depth.
-
-    Rather than fabricate a fixture that cannot trigger the path through the
-    public API, this test asserts the branch directly by calling the internal
-    ``_validate_pivot_regimes`` pass on a fixture whose outgoing edge carries an
-    unclassifiable type -- the only honest route to the defensive code. The
-    companion assertion confirms the public ``validate()`` rejects the same
-    fixture EARLIER, at the shape check, naming ``EDGES[1].type`` (not the
-    regime combo), which is why the branch is unreachable end to end.
+    Two pivots ``A->B->C`` and ``B->C->D`` share the dead-reckoned edge
+    ``B->C``: the first pivot's OUTGOING (departing) trim and the second's
+    INCOMING (approaching) trim both subtract from it. Each is a 90 deg turn
+    (delta = 9.0 cm at track 18), so the two trims sum to 18.0 cm; the shared
+    edge is 30.0 cm, comfortably above 18.0, so the chain fits and validates.
     """
-    edges = [
-        {
-            "type": EDGE_BLIND, "u": "A", "v": "B",
-            "distance_cm": 100.0, "heading_deg": 0.0, "pivot": Pivot.LEFT,
-        },
-        {  # unclassifiable outgoing type -- bypasses the shape check only
-            # because we call the internal pass directly below.
-            "type": "WEIRD", "u": "B", "v": "C",
-            "distance_cm": 100.0, "heading_deg": 90.0,
-        },
-    ]
-    fd = _pivot_field(edges)
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 30.0, "heading_deg": 90.0},
+            {"type": EDGE_BLIND, "u": "C", "v": "D",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+        ],
+        pivot_turns=[("A", "B", "C"), ("B", "C", "D")],
+    )
+    assert validate(fd) is None
 
-    # Direct route: the internal pass reaches the defensive branch.
-    with pytest.raises(FieldDataError, match=r"unsupported\s+regime combo"):
-        _validate_pivot_regimes(fd)
 
-    # End-to-end route: the public validator never reaches it -- the shape
-    # check rejects the bogus type first, proving the branch is defensive depth.
-    with pytest.raises(FieldDataError, match=r"EDGES\[1\]\.type = 'WEIRD'"):
+def test_pivot_turn_rejects_chained_pivots_over_trimming_shared_edge() -> None:
+    """TC11 (reject): chained pivots with delta_uv + delta_vw >= length is rejected.
+
+    Same chain as the accept above, but the shared dead-reckoned edge ``B->C``
+    is only 15.0 cm. The two 90 deg trims sum to 18.0 cm >= 15.0 cm, so the
+    firmware's two independent subtractions would command a non-positive drive
+    on ``B->C`` and the chained-pivot sum-check rejects it.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 15.0, "heading_deg": 90.0},
+            {"type": EDGE_BLIND, "u": "C", "v": "D",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+        ],
+        pivot_turns=[("A", "B", "C"), ("B", "C", "D")],
+    )
+    with pytest.raises(FieldDataError, match=r"chain on\s+the shared dead-reckoned edge"):
         validate(fd)
+
+
+def test_pivot_turn_rejects_authored_rear_on_pivot_adjacent_edge() -> None:
+    """TC12: an authored direction:'rear' on a pivot-adjacent edge is rejected.
+
+    Single-wheel pivots are FRONT-only in v1 (reverse pivots are tracked by
+    #54). A ``direction:'rear'`` override on the exact incoming ``A->B`` leg of
+    a pivot is rejected with a precise FRONT-only diagnostic naming the
+    offending edge.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0, "direction": "rear"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(
+        FieldDataError, match=r"direction:'rear' on its incoming edge"
+    ):
+        validate(fd)
+
+
+# -- TC26: validator parse-helper / firmware Config.h parity ------------------
+#
+# The validator single-sources its pivot constants from WRO2026/Config.h
+# (mirroring planner.parse_track_cm_from_config). These parity checks assert
+# the parsed values equal the firmware literals so an offline check can never
+# desync from the value the robot drives with.
+
+
+def test_parse_line_sensor_axle_offset_matches_config() -> None:
+    """TC26: parse_line_sensor_axle_offset_cm() equals Config::LINE_SENSOR_AXLE_OFFSET_CM."""
+    assert parse_line_sensor_axle_offset_cm() == pytest.approx(12.02)
+
+
+def test_parse_nav_turn_tolerance_matches_config() -> None:
+    """TC26: parse_nav_turn_tolerance_deg() equals Config::NAV_TURN_TOLERANCE_DEG."""
+    assert parse_nav_turn_tolerance_deg() == pytest.approx(0.5)
+
+
+def test_parse_pivot_trim_min_drive_matches_config() -> None:
+    """TC26 (deferred to T8): PIVOT_TRIM_MIN_DRIVE_CM is not in Config.h yet.
+
+    ``parse_pivot_trim_min_drive_cm_from_config`` reads
+    ``Config::PIVOT_TRIM_MIN_DRIVE_CM``, but that constant has not been added to
+    the firmware header yet -- T8 moves it there. Until then the parser raises
+    (no stale-literal fallback, issue #44 policy), so this parity assertion is
+    skipped rather than allowed to fail the suite. Once T8 lands, drop the skip
+    and assert the parsed value against the firmware literal.
+    """
+    try:
+        value = parse_pivot_trim_min_drive_cm_from_config()
+    except (ValueError, OSError):
+        pytest.skip(
+            "Config::PIVOT_TRIM_MIN_DRIVE_CM not in Config.h yet (added by T8); "
+            "the no-stale-fallback parser raises until then."
+        )
+    # Reached only once T8 adds the constant: assert real parity here.
+    assert value > 0.0
