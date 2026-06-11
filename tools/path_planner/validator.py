@@ -145,12 +145,13 @@ def parse_pivot_trim_min_drive_cm_from_config(
 ) -> float:
     """Return ``Config::PIVOT_TRIM_MIN_DRIVE_CM`` (firmware's trim-underflow floor) in cm.
 
-    The firmware clamps a trimmed dead-reckon drive to this tiny positive
-    floor so a bad table can never command a non-positive distance. The
-    validator does not itself gate on this value (its ``delta < length`` and
-    chained sum-checks already guarantee a positive remaining drive); this
-    parser exists so the sim and the parity test (TC26) read the SAME
-    single-sourced constant the firmware uses, mirroring ``TRACK_MM`` today.
+    The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
+    advance) to this tiny positive floor so a bad table can never command a
+    non-positive distance. The validator gates on the SAME floor: it rejects any
+    pivot whose trim would leave less than this much of the edge it shortens, so
+    a delta that merely satisfies ``delta < length`` yet trips the runtime clamp
+    fails offline instead of overshooting on a table that validated clean. The
+    sim and the parity test (TC26) read the same single-sourced constant.
 
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
     :return: the trim-underflow minimum drive distance in centimetres.
@@ -421,6 +422,14 @@ def _validate_pivot_turns(field_data) -> None:
     pivot_min_turn_deg = max(
         _PIVOT_MIN_TURN_FLOOR_DEG, 3.0 * parse_nav_turn_tolerance_deg()
     )
+    # The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
+    # advance) to this floor (PathTracker._pivotTrimDistance and the LINE_FOLLOW
+    # overshoot branch; the sim mirrors both). A delta that merely satisfies
+    # delta < length leaves length - delta in (0, floor), which the runtime
+    # clamps -- driving the floor instead of the geometric remainder and printing
+    # "Check validator/config" on a table that validated clean. Gate on the same
+    # floor here so such a pivot is rejected offline.
+    pivot_trim_min_drive_cm = parse_pivot_trim_min_drive_cm_from_config()
 
     # The authored topology graph -- built without re-entering validate (see
     # _build_authored_graph). All directed-edge geometry comes from here.
@@ -579,41 +588,48 @@ def _validate_pivot_turns(field_data) -> None:
         # Single-source the delta formula (no inline re-derive).
         delta = compute_pivot_compensation(theta, track_cm)
 
-        # 3. delta >= edge length on a DISTANCE-terminated side -------------
-        # The trim shortens a dead-reckoned drive, so it cannot reach or exceed
-        # that drive's length (the chassis cannot travel a non-positive
-        # distance). Incoming and outgoing are checked independently.
-        if in_regime == "distance" and delta >= in_distance:
+        # 3. delta leaves < the trim floor on a DISTANCE-terminated side ----
+        # The trim shortens a dead-reckoned drive; the firmware clamps the
+        # remainder to PIVOT_TRIM_MIN_DRIVE_CM, so a remainder below that floor
+        # would overshoot the node on a table that validated clean. Reject when
+        # length - delta < the floor. Incoming and outgoing are independent.
+        if in_regime == "distance" and in_distance - delta < pivot_trim_min_drive_cm:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
-                f"delta={delta:.3f} cm, which is >= the INCOMING dead-reckoned "
-                f"edge length {in_distance:.3f} cm (type {in_type!r}). The "
-                f"approach trim cannot meet or exceed the drive it shortens -- "
-                f"lengthen ('{u}','{v}'), soften the turn, or remove the pivot "
-                f"turn."
+                f"delta={delta:.3f} cm, leaving {in_distance - delta:.3f} cm of "
+                f"the INCOMING dead-reckoned edge length {in_distance:.3f} cm "
+                f"(type {in_type!r}) -- below the firmware's trim-underflow floor "
+                f"{pivot_trim_min_drive_cm:.3f} cm. The runtime would clamp to "
+                f"that floor and overshoot the node -- lengthen ('{u}','{v}'), "
+                f"soften the turn, or remove the pivot turn."
             )
-        if out_regime == "distance" and delta >= out_distance:
+        if out_regime == "distance" and out_distance - delta < pivot_trim_min_drive_cm:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
-                f"delta={delta:.3f} cm, which is >= the OUTGOING dead-reckoned "
-                f"edge length {out_distance:.3f} cm (type {out_type!r}). The "
-                f"out trim cannot meet or exceed the drive it shortens -- "
-                f"lengthen ('{v}','{w}'), soften the turn, or remove the pivot "
-                f"turn."
+                f"delta={delta:.3f} cm, leaving {out_distance - delta:.3f} cm of "
+                f"the OUTGOING dead-reckoned edge length {out_distance:.3f} cm "
+                f"(type {out_type!r}) -- below the firmware's trim-underflow floor "
+                f"{pivot_trim_min_drive_cm:.3f} cm. The runtime would clamp to "
+                f"that floor and overshoot the node -- lengthen ('{v}','{w}'), "
+                f"soften the turn, or remove the pivot turn."
             )
 
-        # 4. delta > LINE-incoming overshoot budget -------------------------
+        # 4. delta leaves < the trim floor of the LINE overshoot budget -----
         # ONLY a true LINE incoming edge realises its correction as a reduction
         # of the post-detect LINE_OVERSHOOT advance, bounded by the FRONT
         # sensor-to-axle offset (review fix 3/4: STOP_AT_LINE-incoming is
-        # 'sensor', not 'line', and is EXEMPT -- it takes no incoming trim).
-        if in_regime == "line" and delta > line_overshoot_budget_cm:
+        # 'sensor', not 'line', and is EXEMPT -- it takes no incoming trim). The
+        # firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
+        # reject when budget - delta < the floor.
+        if in_regime == "line" and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
-                f"delta={delta:.3f} cm, which exceeds the LINE overshoot budget "
-                f"{line_overshoot_budget_cm:.2f} cm (the FRONT sensor-to-axle "
-                f"offset; v1 pivots are FRONT-only). A LINE-incoming pivot can "
-                f"only absorb a trim up to its overshoot advance -- soften the "
+                f"delta={delta:.3f} cm, leaving "
+                f"{line_overshoot_budget_cm - delta:.3f} cm of the LINE overshoot "
+                f"budget {line_overshoot_budget_cm:.2f} cm (the FRONT sensor-to-axle "
+                f"offset; v1 pivots are FRONT-only) -- below the firmware's "
+                f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. The runtime "
+                f"would clamp the overshoot advance to that floor -- soften the "
                 f"turn or remove the pivot turn on ('{u}','{v}','{w}')."
             )
 
@@ -630,9 +646,10 @@ def _validate_pivot_turns(field_data) -> None:
     # 5. Chained pivots sharing a dead-reckoned edge --------------------------
     # A chain u -> v -> w -> x (pivots at v and w) subtracts TWO trims from the
     # shared edge (v, w): the v-pivot's OUTGOING (departing) trim and the
-    # w-pivot's INCOMING (approaching) trim. They must fit together --
-    # delta_uv + delta_vw < length(v -> w) -- or the firmware's two
-    # independent subtractions would command a non-positive drive.
+    # w-pivot's INCOMING (approaching) trim. They must leave at least the
+    # firmware's trim floor between them -- length(v -> w) - (delta_uv + delta_vw)
+    # >= the floor -- or the firmware's two independent subtractions clamp (or
+    # command a non-positive drive).
     for edge, departing in out_edge_deltas.items():
         approaching = in_edge_deltas.get(edge)
         if not approaching:
@@ -643,16 +660,18 @@ def _validate_pivot_turns(field_data) -> None:
             for app_i, app_delta in approaching:
                 if dep_i == app_i:
                     continue  # same triple cannot both depart and approach the same edge.
-                if dep_delta + app_delta >= edge_len:
+                if edge_len - (dep_delta + app_delta) < pivot_trim_min_drive_cm:
                     raise FieldDataError(
                         f"PIVOT_TURNS[{dep_i}] and PIVOT_TURNS[{app_i}] chain on "
                         f"the shared dead-reckoned edge ('{v}','{w}'): the "
                         f"departing trim {dep_delta:.3f} cm + the approaching "
                         f"trim {app_delta:.3f} cm = {dep_delta + app_delta:.3f} "
-                        f"cm is >= the edge length {edge_len:.3f} cm. The two "
-                        f"trims cannot meet or exceed the drive they share -- "
-                        f"lengthen ('{v}','{w}'), soften one turn, or remove one "
-                        f"of the chained pivot turns."
+                        f"cm leaves {edge_len - (dep_delta + app_delta):.3f} cm of "
+                        f"the edge length {edge_len:.3f} cm -- below the firmware's "
+                        f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. "
+                        f"The runtime would clamp the shared drive to that floor -- "
+                        f"lengthen ('{v}','{w}'), soften one turn, or remove one of "
+                        f"the chained pivot turns."
                     )
 
 

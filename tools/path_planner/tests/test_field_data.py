@@ -647,7 +647,7 @@ def test_pivot_turn_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
         pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
-        FieldDataError, match=r">= the OUTGOING dead-reckoned edge length"
+        FieldDataError, match=r"the OUTGOING dead-reckoned edge length"
     ):
         validate(fd)
 
@@ -670,7 +670,7 @@ def test_pivot_turn_rejects_delta_exceeds_incoming_dead_reckon() -> None:
         pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
-        FieldDataError, match=r">= the INCOMING dead-reckoned edge length"
+        FieldDataError, match=r"the INCOMING dead-reckoned edge length"
     ):
         validate(fd)
 
@@ -695,6 +695,30 @@ def test_pivot_turn_accepts_long_dead_reckon_edges() -> None:
     assert validate(fd) is None
 
 
+def test_pivot_turn_rejects_delta_within_trim_floor_of_dead_reckon() -> None:
+    """TC6b: a delta leaving < PIVOT_TRIM_MIN_DRIVE_CM of the edge is rejected.
+
+    The firmware/sim clamp a trimmed dead-reckon drive to the trim-underflow
+    floor (Config::PIVOT_TRIM_MIN_DRIVE_CM = 0.5 cm). A 90 deg pivot (delta =
+    9.0 cm at track 18) onto a 9.3 cm BLIND edge leaves 0.3 cm < 0.5 cm: the old
+    raw ``delta >= length`` gate accepted it, but the runtime would clamp to the
+    floor and overshoot the node. The validator now rejects on the same floor.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 9.3, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(
+        FieldDataError, match=r"below the firmware's trim-underflow floor"
+    ):
+        validate(fd)
+
+
 def test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget() -> None:
     """TC7: a LINE-incoming pivot whose delta exceeds the budget is rejected.
 
@@ -714,7 +738,7 @@ def test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget() -> None:
         pivot_turns=[("A", "B", "C")],
     )
     with pytest.raises(
-        FieldDataError, match=r"exceeds the LINE overshoot budget"
+        FieldDataError, match=r"the LINE overshoot budget"
     ):
         validate(fd)
 
@@ -737,6 +761,30 @@ def test_pivot_turn_accepts_line_incoming_within_overshoot_budget() -> None:
         pivot_turns=[("A", "B", "C")],
     )
     assert validate(fd) is None
+
+
+def test_pivot_turn_rejects_line_delta_within_trim_floor_of_budget() -> None:
+    """TC7b: a LINE-incoming delta within the trim floor of the budget is rejected.
+
+    The review's exact case: track 18 cm, FRONT overshoot budget 12.02 cm. A
+    ~105 deg turn gives delta ~= 11.73 cm, so the reduced overshoot advance is
+    ~0.29 cm < the 0.5 cm trim floor. The old ``delta > budget`` gate accepted
+    it (11.73 <= 12.02), but the firmware clamps the advance and overshoots the
+    node; the validator now rejects on the same floor.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 105.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(
+        FieldDataError, match=r"below the firmware's trim-underflow floor"
+    ):
+        validate(fd)
 
 
 def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_default(
