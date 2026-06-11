@@ -233,6 +233,8 @@ class PivotTurnRecord:
 def build_pivot_turns(
     graph: nx.DiGraph,
     track_cm: Optional[float] = None,
+    *,
+    pivot_turns: Optional[List] = None,
 ) -> List[PivotTurnRecord]:
     """Resolve every authored pivot triple into a :class:`PivotTurnRecord`.
 
@@ -280,19 +282,33 @@ def build_pivot_turns(
         :func:`parse_track_cm_from_config` -- the single source of truth
         (issue #44). Bypass callers (e.g. CTPS) pass it explicitly so no
         new hard Config.h dependency is baked in.
+    :param pivot_turns: the ``(u, v, w)`` triples to resolve. ``None`` (the
+        default) reads the module-global
+        :data:`tools.path_planner.field_data.PIVOT_TURNS` -- the existing
+        behavior, byte-for-byte unchanged. A caller constructed against a
+        *different* field (e.g. the sim, which is built with a toy/synthetic
+        fixture) passes its own field's triples here so the real field's
+        pivots are not resolved against the wrong graph.
     :return: list of :class:`PivotTurnRecord`, one per resolvable triple,
-        in :data:`field_data.PIVOT_TURNS` authoring order. Empty when the
-        field declares no pivots (the real field today).
+        in authoring order (``field_data.PIVOT_TURNS`` order for the
+        default, or ``pivot_turns`` order when supplied). Empty when no
+        pivots are declared (the real field today).
     :raises FileNotFoundError: when ``track_cm`` is ``None`` and
         ``WRO2026/Config.h`` cannot be found (no stale-literal fallback).
     """
-    # Deferred import (mirrors the validator's pattern): keeps the planner
-    # module import lightweight and avoids loading field_data.json -- and
-    # the editor loader it pulls in -- at every planner import. The library
-    # layer (validator / compiler / graph_builder) all defer or parameterise
-    # field_data the same way; only orchestrator / CLI modules import it
-    # eagerly.
-    from tools.path_planner import field_data
+    # Choose the triples source. ``None`` reads the module-global
+    # field_data.PIVOT_TURNS (the existing behavior); a caller built against a
+    # different field passes its own triples so the real field's pivots are not
+    # resolved against a foreign graph. The field_data import stays DEFERRED and
+    # only fires on the None default -- mirroring the validator's pattern, it
+    # keeps the planner import lightweight (no field_data.json / editor loader
+    # at import time) and leaves every existing caller byte-for-byte unchanged.
+    if pivot_turns is None:
+        from tools.path_planner import field_data
+
+        triples = field_data.PIVOT_TURNS
+    else:
+        triples = pivot_turns
 
     # Resolve the chassis track from the firmware header when the caller
     # did not pass one. There is no stale literal fallback (issue #44):
@@ -301,7 +317,7 @@ def build_pivot_turns(
         track_cm = parse_track_cm_from_config()
 
     records: List[PivotTurnRecord] = []
-    for u, v, w in field_data.PIVOT_TURNS:
+    for u, v, w in triples:
         # Defensive edge-existence guard: the validator enforces both legs
         # exist up front, so this only fires for hand-built callers that
         # bypass `validate`. Skip the triple rather than letting
