@@ -395,7 +395,6 @@ def _weighted_copy(graph: nx.DiGraph, cost_blind_multiplier: float) -> nx.DiGrap
 def compute_all_pairs_next_hop(
     graph: nx.DiGraph,
     cost_blind_multiplier: float,
-    track_cm: Optional[float] = None,
 ) -> NextHopTable:
     """Return the all-pairs next-hop routing table for ``graph``.
 
@@ -422,11 +421,6 @@ def compute_all_pairs_next_hop(
         must carry ``type`` and ``distance_cm``. Read-only.
     :param cost_blind_multiplier: positive multiplier applied to
         :data:`tools.path_planner.graph_builder.EDGE_BLIND` edges.
-    :param track_cm: accepted but unused -- retained only so the
-        orchestrator's existing ``track_cm=`` call site keeps working
-        until T16 drops it there. Pivot trim no longer lives in this
-        function (it moved to :func:`build_pivot_turns`); nothing here
-        reads the track width, so the value is ignored.
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
@@ -441,14 +435,6 @@ def compute_all_pairs_next_hop(
             "cannot handle. A positive multiplier keeps BLIND edges more "
             "expensive than equal-length LINE edges."
         )
-
-    # ``track_cm`` is intentionally not consulted here any more: pivot
-    # derivation moved out of the next-hop pass into build_pivot_turns
-    # (the orchestrator calls it separately). The parameter stays in the
-    # signature only so the current build_routes call site keeps working
-    # until T16 removes it; deleting it here would break that call before
-    # T16 lands.
-    del track_cm
 
     # Build the weighted copy from the (unmutated) graph. Every ``cost`` is
     # derived from the original ``distance_cm``; no pivot geometry rides
