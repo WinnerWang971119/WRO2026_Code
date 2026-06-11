@@ -334,15 +334,24 @@ def build_pivot_turns(
         out_heading = directed_edge_heading(graph, v, w)
         theta = normalize_turn(out_heading - in_heading)
 
+        # A collinear turn (theta == 0, including -0.0) is not a pivot: there is
+        # no rotation to compensate and no wheel to pivot about, and emitting a
+        # record would wrongly force a single-wheel maneuver on a straight-
+        # through. The validator's raised min-angle floor rejects it in
+        # production; guard here too so a direct/bypass caller that declares a
+        # degenerate triple neither emits a spurious zero-trim record nor
+        # silently maps -0.0 to PIVOT_RIGHT through the sign split below.
+        if theta == 0.0:
+            continue
+
         # delta = forward over-travel; reuse the closed-form helper, never
         # re-derive (T/2)*tan(theta/2) inline (issue #44, TC2).
         trim_cm = compute_pivot_compensation(turn_deg=theta, track_cm=track_cm)
 
-        # Wheel from sign(theta): a CCW (left) turn pivots about the LEFT
-        # wheel, a CW (right) turn about the RIGHT wheel (ADR-036). theta
-        # is never exactly 0 here -- the validator's raised min-angle floor
-        # rejects a degenerate ~0 deg "turn" -- so the >0 / else split is
-        # unambiguous.
+        # Wheel from sign(theta): a CCW (left) turn pivots about the LEFT wheel,
+        # a CW (right) turn about the RIGHT wheel (ADR-036). theta is non-zero
+        # here -- the collinear guard above skipped theta == 0 -- so the
+        # >0 / else split is unambiguous.
         wheel = TurnMode.PIVOT_LEFT if theta > 0 else TurnMode.PIVOT_RIGHT
 
         records.append(

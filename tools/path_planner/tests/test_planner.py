@@ -343,6 +343,19 @@ def test_build_pivot_turns_derives_trim_and_wheel(patch_pivot_turns, theta, expe
     assert record.trim_cm == pytest.approx(expected_trim, abs=1e-9)
 
 
+def test_build_pivot_turns_skips_collinear_zero_turn(patch_pivot_turns):
+    """TC1b: a collinear triple (theta == 0) is not a pivot and emits no record.
+
+    A direct/bypass caller (the validator's raised min-angle floor rejects this
+    in production) that declares collinear legs must not produce a spurious
+    zero-trim record, and must never fall through the ``sign(theta)`` split to a
+    default ``PIVOT_RIGHT``. ``build_pivot_turns`` skips the triple entirely.
+    """
+    patch_pivot_turns([("A", "B", "C")])
+    records = build_pivot_turns(_triple_graph(0.0), track_cm=18.0)
+    assert records == []
+
+
 def test_build_pivot_turns_reuses_compute_pivot_compensation(patch_pivot_turns):
     """TC2: build_pivot_turns reuses compute_pivot_compensation verbatim.
 
