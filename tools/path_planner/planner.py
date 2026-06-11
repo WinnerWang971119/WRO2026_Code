@@ -70,7 +70,6 @@ Sentinels
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -78,6 +77,7 @@ from typing import Dict, List, Optional
 import networkx as nx
 
 from tools.path_planner.compiler import normalize_turn
+from tools.path_planner.config_parse import parse_config_float
 from tools.path_planner.graph_builder import EDGE_BLIND, directed_edge_heading
 from tools.path_planner.pipeline_config import TurnMode
 
@@ -89,16 +89,12 @@ NextHopTable = Dict[str, Dict[str, Optional[str]]]
 # -- chassis track (single-sourced from the firmware header) ------------------
 
 # The firmware owns the one true chassis track width as
-# ``constexpr float TRACK_MM`` in ``WRO2026/Config.h``. We parse it out of
-# that header at build time rather than mirroring a literal here, so the
-# planner can never drift from the value the robot actually drives with
-# (issue #44: the old hard-coded 15.0 cm literal was stale -- the header
-# says 180 mm = 18 cm). The regex matches the ``constexpr float TRACK_MM``
-# declaration and captures the numeric literal, tolerating an optional
-# trailing ``f`` suffix and surrounding whitespace.
-_TRACK_MM_PATTERN = re.compile(
-    r"constexpr\s+float\s+TRACK_MM\s*=\s*([0-9]*\.?[0-9]+)\s*[fF]?\s*;"
-)
+# ``constexpr float TRACK_MM`` in ``WRO2026/Config.h``. We parse it out of that
+# header at build time rather than mirroring a literal here, so the planner can
+# never drift from the value the robot actually drives with (issue #44: the old
+# hard-coded 15.0 cm literal was stale -- the header says 180 mm = 18 cm). The
+# parse is delegated to the shared, anchored ``config_parse.parse_config_float``
+# so the planner and validator read the header the same way.
 
 # ``planner.py`` lives at ``<repo>/tools/path_planner/planner.py``; the
 # firmware header lives at ``<repo>/WRO2026/Config.h``. Resolve it relative
@@ -128,27 +124,7 @@ def parse_track_cm_from_config(config_path: Path = _CONFIG_H_PATH) -> float:
     :raises ValueError: when no ``constexpr float TRACK_MM = ...;``
         declaration is found in the header.
     """
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise OSError(
-            f"Cannot parse chassis track width: firmware header at "
-            f"{config_path} is unreadable ({exc}). Config::TRACK_MM is the "
-            f"single source of truth for the planner's pivot compensation "
-            f"(issue #44); there is no fallback literal."
-        ) from exc
-
-    match = _TRACK_MM_PATTERN.search(text)
-    if match is None:
-        raise ValueError(
-            f"Cannot parse chassis track width: no "
-            f"'constexpr float TRACK_MM = <value>;' declaration found in "
-            f"{config_path}. The planner refuses to fall back to a stale "
-            f"literal (issue #44) -- fix the header or the parser, do not "
-            f"hard-code a track width."
-        )
-
-    track_mm = float(match.group(1))
+    track_mm = parse_config_float("TRACK_MM", config_path)
     return track_mm / 10.0
 
 

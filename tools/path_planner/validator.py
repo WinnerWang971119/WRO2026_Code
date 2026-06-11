@@ -35,9 +35,10 @@ imports :func:`validate` from this module).
 from __future__ import annotations
 
 import math
-import re
 from pathlib import Path
 from typing import Any, Iterable
+
+from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH, parse_config_float
 
 _REQUIRED_ATTRS = (
     "NODES",
@@ -109,72 +110,15 @@ def _segment_key(a: str, b: str) -> frozenset:
 # the edge.
 
 
-# ``planner.py`` already single-sources the chassis track width
-# (``Config::TRACK_MM``) out of the firmware header. The same header owns the
-# over-travel budget constants the pivot checks need; this module parses them
-# the same way -- with a no-stale-fallback policy -- so an edit to ``Config.h``
-# can never silently desync the offline validator from the firmware and sim
-# (parity test TC26 asserts these parsed values equal the header literals).
-_CONFIG_H_PATH = Path(__file__).resolve().parents[2] / "WRO2026" / "Config.h"
-
-
-def _config_float_pattern(name: str) -> re.Pattern:
-    """Return a regex capturing ``constexpr float <name> = <value>[f];`` in Config.h.
-
-    Mirrors :data:`tools.path_planner.planner._TRACK_MM_PATTERN`: tolerates an
-    optional trailing ``f``/``F`` suffix and surrounding whitespace, and
-    captures the numeric literal (integer or decimal).
-
-    :param name: the C++ ``constexpr float`` identifier to match.
-    :return: a compiled :class:`re.Pattern` with the value in group 1.
-    """
-    return re.compile(
-        r"constexpr\s+float\s+" + re.escape(name) + r"\s*=\s*([0-9]*\.?[0-9]+)\s*[fF]?\s*;"
-    )
-
-
-def _parse_config_float(name: str, config_path: Path = _CONFIG_H_PATH) -> float:
-    """Parse a ``constexpr float <name>`` literal out of ``WRO2026/Config.h``.
-
-    The firmware header is the single source of truth for the chassis
-    constants the offline pivot checks reuse. This reads the named
-    ``constexpr float`` declaration and returns its value verbatim (no unit
-    conversion -- callers convert if needed).
-
-    Fails loudly with no stale fallback (issue #44 policy): a missing header
-    or a missing declaration raises rather than returning a guessed value,
-    because a wrong constant silently mis-validates every pivot in the field.
-    Both ``parse_line_sensor_axle_offset_cm`` and
-    ``parse_pivot_trim_min_drive_cm_from_config`` route through here so a
-    parity test (TC26) can assert the validator, sim, and firmware agree.
-
-    :param name: the ``constexpr float`` identifier to read.
-    :param config_path: path to ``Config.h``; defaults to the firmware header
-        resolved relative to this module (independent of the cwd).
-    :return: the parsed float value, in the header's own units.
-    :raises OSError: when ``config_path`` cannot be read.
-    :raises ValueError: when no matching declaration is found.
-    """
-    try:
-        text = config_path.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise OSError(
-            f"Cannot parse '{name}': firmware header at {config_path} is "
-            f"unreadable ({exc}). Config.h is the single source of truth for "
-            f"the validator's pivot constants (issue #44); there is no "
-            f"fallback literal."
-        ) from exc
-
-    match = _config_float_pattern(name).search(text)
-    if match is None:
-        raise ValueError(
-            f"Cannot parse '{name}': no 'constexpr float {name} = <value>;' "
-            f"declaration found in {config_path}. The validator refuses to "
-            f"fall back to a stale literal (issue #44) -- fix the header or "
-            f"the parser, do not hard-code the value."
-        )
-
-    return float(match.group(1))
+# The firmware header owns the over-travel budget constants the pivot checks
+# need (the line-sensor-to-axle offset, the trim-underflow floor, the
+# turn-dispatch tolerance). Like ``planner.py`` does for ``TRACK_MM``, this
+# module reads them from ``Config.h`` via the shared, anchored
+# ``config_parse.parse_config_float`` -- with a no-stale-fallback policy -- so an
+# edit to ``Config.h`` can never silently desync the offline validator from the
+# firmware and sim (parity test TC26 asserts these parsed values equal the header
+# literals). The alias keeps this module's public parse-function signatures stable.
+_CONFIG_H_PATH = DEFAULT_CONFIG_H_PATH
 
 
 def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> float:
@@ -193,7 +137,7 @@ def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> floa
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
     :return: the FRONT sensor-to-axle offset in centimetres.
     """
-    return _parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", config_path)
+    return parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", config_path)
 
 
 def parse_pivot_trim_min_drive_cm_from_config(
@@ -211,7 +155,7 @@ def parse_pivot_trim_min_drive_cm_from_config(
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
     :return: the trim-underflow minimum drive distance in centimetres.
     """
-    return _parse_config_float("PIVOT_TRIM_MIN_DRIVE_CM", config_path)
+    return parse_config_float("PIVOT_TRIM_MIN_DRIVE_CM", config_path)
 
 
 def parse_nav_turn_tolerance_deg(config_path: Path = _CONFIG_H_PATH) -> float:
@@ -225,7 +169,7 @@ def parse_nav_turn_tolerance_deg(config_path: Path = _CONFIG_H_PATH) -> float:
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
     :return: the turn-dispatch tolerance in degrees.
     """
-    return _parse_config_float("NAV_TURN_TOLERANCE_DEG", config_path)
+    return parse_config_float("NAV_TURN_TOLERANCE_DEG", config_path)
 
 
 # Above this absolute turn angle the over-travel formula
