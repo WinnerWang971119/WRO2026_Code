@@ -913,21 +913,12 @@ def test_parse_nav_turn_tolerance_matches_config() -> None:
 
 
 def test_parse_pivot_trim_min_drive_matches_config() -> None:
-    """TC26 (deferred to T8): PIVOT_TRIM_MIN_DRIVE_CM is not in Config.h yet.
+    """TC26: parse_pivot_trim_min_drive_cm_from_config() equals Config::PIVOT_TRIM_MIN_DRIVE_CM.
 
-    ``parse_pivot_trim_min_drive_cm_from_config`` reads
-    ``Config::PIVOT_TRIM_MIN_DRIVE_CM``, but that constant has not been added to
-    the firmware header yet -- T8 moves it there. Until then the parser raises
-    (no stale-literal fallback, issue #44 policy), so this parity assertion is
-    skipped rather than allowed to fail the suite. Once T8 lands, drop the skip
-    and assert the parsed value against the firmware literal.
+    T8 added ``constexpr float PIVOT_TRIM_MIN_DRIVE_CM = 0.5f`` to the firmware
+    header, so the parser no longer raises and the old skip is gone. Pin the
+    parsed value to the firmware literal (and the sim's mirror of it in
+    ``sim/runtime.py``) so a Config.h edit that desyncs the validator/sim/
+    firmware floor fails the suite instead of slipping through a ``> 0.0`` check.
     """
-    try:
-        value = parse_pivot_trim_min_drive_cm_from_config()
-    except (ValueError, OSError):
-        pytest.skip(
-            "Config::PIVOT_TRIM_MIN_DRIVE_CM not in Config.h yet (added by T8); "
-            "the no-stale-fallback parser raises until then."
-        )
-    # Reached only once T8 adds the constant: assert real parity here.
-    assert value > 0.0
+    assert parse_pivot_trim_min_drive_cm_from_config() == pytest.approx(0.5)
