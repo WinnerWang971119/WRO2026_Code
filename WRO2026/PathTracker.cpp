@@ -14,6 +14,7 @@
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
+#include "PivotTrimPolicy.h"
 #include "StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
@@ -1044,43 +1045,37 @@ float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
     // ADR-036 (issue #44) — per-turn pivot compensation, distance-terminated side.
     // LOCAL effective distance only; EDGES[*][*].distance_cm is never mutated. The
     // one-hop carry / latch is owned by the `_pendingPivot` contract resolved in
-    // `_onPlanNextHop()`; this function only SUBTRACTS the two already-resolved
-    // trims and clamps.
-    float effectiveDistCm = edge.distance_cm;
+    // `_onPlanNextHop()`; this wrapper only gathers the two already-resolved trims
+    // and delegates the subtract-and-clamp to the shared `resolvePivotTrim` policy
+    // (PivotTrimPolicy.h) so the host test links the SAME symbol.
+    //
+    // DEPARTING trim: this hop LEAVES a pivot node (`cur`) — its outgoing
+    // over-travel δ, so the axle lands exactly on the node. APPROACHING trim: this
+    // dead-reckon edge drives INTO a pivot node (`nxt`) — its δ, so the chassis
+    // stops δ short and the pivot starts at the geometric pivot point. On a chain
+    // u→v→w→x the hop v→w nets `length − δ_v(departing) − δ_w(approaching)`.
+    const float departingTrim   = _departingPivot.active ? _departingPivot.trim_cm : 0.0f;
+    const float approachingTrim =
+        _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
 
-    // DEPARTING trim: this hop LEAVES a pivot node (`cur`) — subtract its
-    // outgoing over-travel δ so the axle lands exactly on the node.
-    if (_departingPivot.active)
-    {
-        effectiveDistCm -= _departingPivot.trim_cm;
-    }
+    const PivotTrimResolution trim = resolvePivotTrim(
+        edge.distance_cm, departingTrim, approachingTrim, Config::PIVOT_TRIM_MIN_DRIVE_CM);
 
-    // APPROACHING trim: this dead-reckon edge drives INTO a pivot node (`nxt`) —
-    // subtract its δ so the chassis stops δ short and the pivot starts at the
-    // geometric pivot point. On a chain u→v→w→x the hop v→w nets
-    // `length − δ_v(departing) − δ_w(approaching)`.
-    if (_approachingPivot.active)
-    {
-        effectiveDistCm -= _approachingPivot.trim_cm;
-    }
-
-    // Defensive clamp. The validator guarantees δ < edge length on every
-    // dead-reckon side (and the chained sum-check on a shared edge), so a
-    // correctly-built table keeps effectiveDistCm well positive. A non-positive
-    // result here means a future bad table / validator mismatch — degrade to a
-    // tiny positive advance (with a trace) rather than hand Drive.driveDist a
-    // negative cm, which it rejects and no-ops (stalling the FSM).
-    if (effectiveDistCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
+    // Defensive clamp trace. The validator guarantees δ leaves at least the floor
+    // on every dead-reckon side (and the chained sum-check on a shared edge), so a
+    // correctly-built table never clamps here. A clamp means a future bad table /
+    // validator mismatch — trace it (the policy already degraded to the floor so
+    // Drive.driveDist never sees a non-positive cm, which it rejects and no-ops).
+    if (trim.clamped)
     {
         Serial.print(F("[PathTracker] ADR-036: dead-reckon trim underflow (raw="));
         Serial.print(edge.distance_cm);
         Serial.print(F(" eff="));
-        Serial.print(effectiveDistCm);
+        Serial.print(trim.effectiveCm);
         Serial.println(F("); clamping. Check validator/config."));
-        effectiveDistCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
     }
 
-    return effectiveDistCm;
+    return trim.driveCm;
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()

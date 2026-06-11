@@ -282,7 +282,9 @@ private:
      * so a bad table can never command a non-positive drive (which
      * `Drive.driveDist` would reject). No carry/latch lives here anymore — the
      * one-hop carry is owned by the `_pendingPivot` latch contract resolved in
-     * `_onPlanNextHop()`.
+     * `_onPlanNextHop()`. The subtract-and-clamp itself is the shared
+     * `resolvePivotTrim` policy (PivotTrimPolicy.h); this method only gathers the
+     * latched trims and traces an underflow.
      *
      * @param edge The directed edge being dispatched (`getEdge(cur, _nextHop)`).
      * @return The trimmed, clamped distance to feed the distance-terminated builder.
