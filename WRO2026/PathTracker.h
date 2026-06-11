@@ -289,6 +289,19 @@ private:
      */
     float _pivotTrimDistance(const Routes::EdgeInfo& edge);
 
+    /**
+     * @brief Clear all three pivot-latch members to the inactive sentinel (ADR-036).
+     *
+     * Resets `_pendingPivot`, `_departingPivot`, and `_approachingPivot` to a
+     * default-constructed `PivotRef{}` (`active == false`). Called at every point
+     * the latch must not survive: boot (`begin`), abort, fault (`_enterFault`),
+     * DEQUEUE of a fresh goal, and the goal-complete IDLE/DEQUEUE transition.
+     * Centralising the reset keeps the three members in lock-step — a site that
+     * cleared only some of them would leak a pivot across a `goTo(...)` boundary,
+     * the exact cross-goal bleed these resets guard against.
+     */
+    void _resetPivotLatch();
+
     void _drainBlocking();
 
     void _applyGoToBuilder(

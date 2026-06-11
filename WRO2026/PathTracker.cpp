@@ -235,9 +235,7 @@ bool PathTrackerClass::begin()
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
     // ADR-036: no pivot latched at boot.
-    _pendingPivot            = PivotRef{};
-    _departingPivot          = PivotRef{};
-    _approachingPivot        = PivotRef{};
+    _resetPivotLatch();
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
     _activeStopAtLine        = StopAtLine::AUTO;
@@ -295,9 +293,7 @@ void PathTrackerClass::abort()
     _resolvedBodyHeading    = 0.0f;
     // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
     // outgoing trim into the next goal's first dead-reckon drive.
-    _pendingPivot           = PivotRef{};
-    _departingPivot         = PivotRef{};
-    _approachingPivot       = PivotRef{};
+    _resetPivotLatch();
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
@@ -498,9 +494,7 @@ void PathTrackerClass::update()
             // active with no following hop to consume it — clear all three here
             // so a pivot never fires across a `goTo(...)` boundary and a stop at
             // the pivot node degrades to a normal turn.
-            _pendingPivot           = PivotRef{};
-            _departingPivot         = PivotRef{};
-            _approachingPivot       = PivotRef{};
+            _resetPivotLatch();
             _state                  = State::PLAN_NEXT_HOP;
             return;
         }
@@ -802,9 +796,7 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeArrivalDirection = Direction::AUTO;
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
     // cannot bleed into a post-clearFault() goal.
-    _pendingPivot           = PivotRef{};
-    _departingPivot         = PivotRef{};
-    _approachingPivot       = PivotRef{};
+    _resetPivotLatch();
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -826,9 +818,7 @@ void PathTrackerClass::_onPlanNextHop()
         // `_pendingPivot` is still active with no following hop to consume it —
         // drop all three so a later `goTo(...)` (or the next queued goal, on the
         // DEQUEUE path) does not inherit a stale latch.
-        _pendingPivot     = PivotRef{};
-        _departingPivot   = PivotRef{};
-        _approachingPivot = PivotRef{};
+        _resetPivotLatch();
         _state           = (_qCount > 0) ? State::DEQUEUE : State::IDLE;
         return;
     }
@@ -1038,6 +1028,15 @@ void PathTrackerClass::_onPlanNextHop()
     {
         _dispatchEdgeAfterTurn();
     }
+}
+
+void PathTrackerClass::_resetPivotLatch()
+{
+    // ADR-036: all three latch members move together. Clearing only some would
+    // leak a pivot across a goal boundary — the bleed these resets prevent.
+    _pendingPivot     = PivotRef{};
+    _departingPivot   = PivotRef{};
+    _approachingPivot = PivotRef{};
 }
 
 float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
