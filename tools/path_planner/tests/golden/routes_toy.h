@@ -6,7 +6,6 @@
 #define ROUTES_H
 
 #include <stdint.h>
-#include <stddef.h>  // offsetof for the EdgeInfo layout guard
 
 namespace Routes {
     constexpr uint8_t N_NODES = 6;
@@ -46,17 +45,30 @@ namespace Routes {
         LineMode       line_mode_override;
         BlindMode      blind_mode_override;
         ProjectionMode projection_mode_override;
-        TurnMode       pre_turn_mode_override;
         DirectionMode  direction_override;
-        float          pivot_trim_cm;  // δ on the pivot-tagged edge; 0.0 on non-pivot edges
     };
 
-    static_assert(offsetof(EdgeInfo, pivot_trim_cm) == 20,
-        "EdgeInfo layout drift: pivot_trim_cm must stay the trailing field; the emitter's positional initialiser order no longer matches the struct");
+    // Single-wheel pivot turn (ADR-036). A pivot is a property
+    // of a turn (arrive from u, pivot at v, leave to w), not of
+    // an edge: the firmware resolves the wheel and the over-
+    // travel trim from ONE record, so the two cannot disagree.
+    struct PivotTurn {
+        uint8_t  u;          // node index: arrive-from
+        uint8_t  v;          // node index: pivot-at
+        uint8_t  w;          // node index: leave-to
+        TurnMode wheel;      // PIVOT_LEFT | PIVOT_RIGHT (uint8_t enum)
+        float    trim_cm;    // delta over-travel, cm
+    };
 
     extern const NodeInfo NODES[N_NODES];
     extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];
     extern const EdgeInfo EDGES   [N_NODES][N_NODES];
+
+    // Sparse, sorted single-wheel pivot table (ADR-036). Sorted by
+    // (u, v, w) node-index tuple for a deterministic golden and a
+    // short bounded linear scan in FieldMap::findPivotTurn.
+    constexpr uint8_t N_PIVOT_TURNS = 0;
+    extern const PivotTurn PIVOT_TURNS[1];
 
     // Sentinel for unreachable next-hop entries; PathTracker
     // treats this as 'no path; halt and report'.
