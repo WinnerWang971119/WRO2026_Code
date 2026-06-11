@@ -13,9 +13,12 @@ import pytest
 
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, build_graph
+from tools.path_planner.pipeline_config import TurnMode
 from tools.path_planner.planner import (
+    build_pivot_turns,
     compute_all_pairs_next_hop,
     compute_path_cost,
+    compute_pivot_compensation,
 )
 
 _FIELD_ATTRS = (
@@ -264,76 +267,116 @@ def test_compute_pivot_compensation_track_drives_delta(tmp_path):
     assert "TRACK_CM = 15.0" not in source
 
 
-def test_apply_pivot_compensations_skips_multi_successor():
-    """A pivot landing with >1 forward out-edge is skipped, not raised.
+# -- TC1 / TC2: per-turn pivot derivation (build_pivot_turns) ---------------
+#
+# A single-wheel pivot is a property of a TURN, not an edge: a 3-node triple
+# ``(u, v, w)`` declared in ``field_data.PIVOT_TURNS``. ``build_pivot_turns``
+# reads that module-level list, so each derivation test monkeypatches it onto
+# the real ``field_data`` module (restored by the autouse fixture below) and
+# hands a hand-built 3-node graph whose two edge headings pin ``theta`` exactly.
 
-    The out-degree precondition is now enforced by the validator (finding
-    #36), so ``apply_pivot_compensations`` no longer raises on a mismatch:
-    for direct / hand-built callers that bypass ``validate`` it skips the
-    offending pivot edge, leaving every following edge uncompensated rather
-    than mis-compensating an arbitrary branch. The back-edge to ``src`` is
-    excluded from the count -- a bidirectional pair plus 2 real forward
-    continuations is still a multi-successor landing.
+
+@pytest.fixture
+def patch_pivot_turns(monkeypatch):
+    """Return a setter that points ``field_data.PIVOT_TURNS`` at a triple list.
+
+    ``build_pivot_turns`` reads the pivot triples off the module-level
+    ``field_data.PIVOT_TURNS`` (deferred import), not off the graph, so a
+    derivation test must replace that attribute. ``monkeypatch.setattr``
+    restores the original (empty) list after the test, keeping the real
+    field's pivot-free state intact for every other test in the suite.
     """
-    from tools.path_planner.graph_builder import Pivot
-    from tools.path_planner.planner import apply_pivot_compensations
+    from tools.path_planner import field_data
 
+    def _set(triples) -> None:
+        monkeypatch.setattr(field_data, "PIVOT_TURNS", list(triples), raising=False)
+
+    return _set
+
+
+def _triple_graph(theta_deg: float) -> nx.DiGraph:
+    """Three-node A->B->C graph: ``u->v`` heads 0 deg, ``v->w`` heads ``theta``.
+
+    The incoming leg ``A->B`` is fixed at heading 0 deg and the outgoing leg
+    ``B->C`` at ``theta_deg`` (mod 360), so the signed turn at ``B`` is exactly
+    ``normalize(theta - 0) == theta``. Distances are inert for the geometry
+    derivation, so both legs are a flat 100 cm.
+    """
     g = nx.DiGraph()
-    g.add_node("A")
-    g.add_node("B")
-    g.add_node("C")
-    g.add_node("D")
-    g.add_edge("A", "B", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
-    g.add_edge("B", "C", distance_cm=20.0, heading_deg=90.0)
-    g.add_edge("B", "D", distance_cm=15.0, heading_deg=-90.0)
+    for name in ("A", "B", "C"):
+        g.add_node(name)
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=100.0, heading_deg=0.0)
+    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=100.0, heading_deg=theta_deg % 360.0)
+    return g
 
-    # Must not raise; must not touch either successor's distance.
-    apply_pivot_compensations(g, track_cm=15.0)
-    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(20.0)
-    assert g.edges["B", "D"]["distance_cm"] == pytest.approx(15.0)
+
+@pytest.mark.parametrize(
+    "theta, expected_wheel",
+    [
+        (90.0, TurnMode.PIVOT_LEFT),
+        (-90.0, TurnMode.PIVOT_RIGHT),
+        (60.0, TurnMode.PIVOT_LEFT),
+        (120.0, TurnMode.PIVOT_LEFT),
+    ],
+)
+def test_build_pivot_turns_derives_trim_and_wheel(patch_pivot_turns, theta, expected_wheel):
+    """TC1: build_pivot_turns derives trim + wheel from the turn geometry.
+
+    For a 3-node triple whose signed turn at ``v`` is ``theta`` and a track of
+    18 cm, the resolved record must carry the over-travel
+    ``trim_cm == (track/2)*tan(|theta|/2)`` and the wheel from ``sign(theta)``
+    (CCW / theta > 0 -> PIVOT_LEFT, CW / theta < 0 -> PIVOT_RIGHT). The
+    expected trim is taken from the canonical
+    :func:`compute_pivot_compensation` helper so the test never re-inlines the
+    closed form.
+    """
+    track_cm = 18.0
+    patch_pivot_turns([("A", "B", "C")])
+    records = build_pivot_turns(_triple_graph(theta), track_cm=track_cm)
+
+    assert len(records) == 1
+    record = records[0]
+    assert (record.u, record.v, record.w) == ("A", "B", "C")
+    assert record.wheel == expected_wheel
+    # trim == (track/2)*tan(|theta|/2), pulled from the canonical helper.
+    expected_trim = compute_pivot_compensation(theta, track_cm)
+    assert record.trim_cm == pytest.approx(expected_trim, abs=1e-9)
+
+
+def test_build_pivot_turns_skips_collinear_zero_turn(patch_pivot_turns):
+    """TC1b: a collinear triple (theta == 0) is not a pivot and emits no record.
+
+    A direct/bypass caller (the validator's raised min-angle floor rejects this
+    in production) that declares collinear legs must not produce a spurious
+    zero-trim record, and must never fall through the ``sign(theta)`` split to a
+    default ``PIVOT_RIGHT``. ``build_pivot_turns`` skips the triple entirely.
+    """
+    patch_pivot_turns([("A", "B", "C")])
+    records = build_pivot_turns(_triple_graph(0.0), track_cm=18.0)
+    assert records == []
+
+
+def test_build_pivot_turns_reuses_compute_pivot_compensation(patch_pivot_turns):
+    """TC2: build_pivot_turns reuses compute_pivot_compensation verbatim.
+
+    The derived ``trim_cm`` must be byte-identical to a direct call of
+    :func:`compute_pivot_compensation` at the same ``theta`` / ``track_cm`` --
+    proving the planner has exactly ONE over-travel formula and that
+    ``build_pivot_turns`` does not carry a second, possibly-divergent copy.
+    Tested across several angles, including the 90 deg point where the old
+    chord form happened to agree and the 60 / 120 deg points where it did not.
+    """
+    track_cm = 18.0
+    for theta in (45.0, 60.0, 90.0, 120.0, -75.0):
+        patch_pivot_turns([("A", "B", "C")])
+        records = build_pivot_turns(_triple_graph(theta), track_cm=track_cm)
+        assert len(records) == 1
+        # Value-identical to a direct helper call -- no second formula.
+        direct = compute_pivot_compensation(theta, track_cm)
+        assert records[0].trim_cm == direct
 
 
 # -- Codex P1 regression: directional overrides must not mirror to reverse --
-
-
-def test_emit_directed_pair_pivot_not_mirrored_to_reverse():
-    """`pre_turn_mode` and `pivot` are direction-dependent and must stay forward-only.
-
-    Codex P1 regression: mirroring these onto the reverse edge would steer
-    the chassis with the wrong wheel pattern on backward traversal.
-    """
-    from tools.path_planner.graph_builder import EDGE_LINE, Pivot, _emit_directed_pair
-
-    g = nx.DiGraph()
-    g.add_node("U")
-    g.add_node("V")
-    _emit_directed_pair(
-        g,
-        "U",
-        "V",
-        pu=(0.0, 0.0),
-        pv=(10.0, 0.0),
-        edge_type=EDGE_LINE,
-        options={
-            "pivot": Pivot.LEFT,
-            "pre_turn_mode": "PIVOT_LEFT",
-            "primitive_mode": "NORMAL",
-        },
-    )
-    forward = g.edges["U", "V"]
-    reverse = g.edges["V", "U"]
-
-    # Forward edge carries every override.
-    assert forward.get("pivot") == int(Pivot.LEFT)
-    assert forward.get("pre_turn_mode") == "PIVOT_LEFT"
-    assert forward.get("primitive_mode") == "NORMAL"
-
-    # Reverse edge must NOT inherit the directional overrides.
-    assert "pivot" not in reverse
-    assert "pre_turn_mode" not in reverse
-    # `primitive_mode` is direction-symmetric (selects how to follow the
-    # segment, not which way) so it stays mirrored.
-    assert reverse.get("primitive_mode") == "NORMAL"
 
 
 def test_direction_override_not_mirrored_to_reverse_edge():
@@ -366,148 +409,3 @@ def test_direction_override_not_mirrored_to_reverse_edge():
     assert fwd["direction_override"] == 2
     # Reverse edge must NOT have the override copied (absent or DEFAULT==0).
     assert rev.get("direction_override", 0) == 0
-
-
-def test_apply_pivot_compensations_ignores_back_edge():
-    """Bidirectional graph: pivot dst with back-edge + 1 forward edge must compensate.
-
-    Codex P1 regression: counting all out-edges (including the back-edge
-    to ``src``) makes pivot compensation unusable on the bidirectional
-    graphs ``build_graph`` actually produces -- the landing node ``B`` must
-    resolve to its single FORWARD continuation ``B->C`` (the back-edge
-    ``B->A`` excluded) to measure the turn.
-
-    Issue #44: the trim is now STORED on the pivot edge ``A->B`` as
-    ``pivot_trim_cm`` rather than subtracted from the following edge's
-    distance. The 90 deg pivot's over-travel delta = (15/2)*tan(45) = 7.5 cm
-    for TRACK_CM=15, so ``A->B`` gains ``pivot_trim_cm == 7.5`` while every
-    edge's ``distance_cm`` -- the following edge ``B->C`` included -- stays
-    byte-identical to the input graph.
-    """
-    from tools.path_planner.graph_builder import Pivot
-    from tools.path_planner.planner import apply_pivot_compensations
-
-    g = nx.DiGraph()
-    g.add_node("A")
-    g.add_node("B")
-    g.add_node("C")
-    # Forward pivot edge A->B, plus the bidirectional back-edge B->A.
-    g.add_edge("A", "B", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
-    g.add_edge("B", "A", distance_cm=10.0, heading_deg=180.0)
-    # Single real continuation off B (plus the back-edge above).
-    g.add_edge("B", "C", distance_cm=30.0, heading_deg=90.0)
-    g.add_edge("C", "B", distance_cm=30.0, heading_deg=270.0)
-
-    apply_pivot_compensations(g, track_cm=15.0)
-
-    # The trim lands on the PIVOT edge A->B: 7.5 cm for TRACK_CM=15,
-    # |theta|=90 deg, via delta = (15/2)*tan(45).
-    assert g.edges["A", "B"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
-    # The following edge B->C is NOT shortened -- its geometry is untouched.
-    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(30.0)
-    assert "pivot_trim_cm" not in g.edges["B", "C"]
-    # The back-edge B->A must NOT have been touched at all.
-    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
-    assert "pivot_trim_cm" not in g.edges["B", "A"]
-
-
-def test_apply_pivot_compensations_idempotent_on_shared_following_edge():
-    """Finding #94 (issue #44): two pivots sharing one following edge leave it intact.
-
-    The #44 fix moves the trim off the shared following edge and onto each
-    pivot edge as its own ``pivot_trim_cm``. The cross-pivot
-    double-compensation finding #94 guarded against -- two pivots from
-    non-adjacent sources both subtracting from one shared edge -- is now
-    structurally impossible: the following edge ``M -> N`` is never mutated,
-    so there is nothing to compound.
-
-    Layout: two pivot edges ``P1 -> M`` and ``P2 -> M`` land on the SAME
-    node ``M`` from non-adjacent sources. ``M`` has exactly ONE forward
-    out-edge, the shared following edge ``M -> N`` (the pivots are
-    one-directional, so ``M`` has no back-edge to either source and the
-    per-pivot ``len(forward_out_edges) != 1`` check passes for both).
-
-    For a 90 deg pivot (heading 0 deg entering ``M``, ``M -> N`` heading
-    90 deg) with TRACK_CM=15 the over-travel delta = (15/2)*tan(45) = 7.5 cm.
-    Each pivot edge carries its OWN 7.5 cm trim; ``M -> N`` keeps its full
-    30.0 cm distance. Idempotency now means a second pass re-stores the same
-    per-pivot scalar and never touches the following edge.
-    """
-    from tools.path_planner.graph_builder import Pivot
-    from tools.path_planner.planner import apply_pivot_compensations
-
-    g = nx.DiGraph()
-    for name in ("P1", "P2", "M", "N"):
-        g.add_node(name)
-    # Two pivot edges from non-adjacent sources, both landing on M, both
-    # heading 0 deg. One-directional (no back-edge M->P1 / M->P2), so M's
-    # only out-edge is the shared following edge M->N.
-    g.add_edge("P1", "M", distance_cm=10.0, heading_deg=0.0, pivot=int(Pivot.LEFT))
-    g.add_edge("P2", "M", distance_cm=12.0, heading_deg=0.0, pivot=int(Pivot.RIGHT))
-    # The single shared following edge off M: heading 90 deg -> 90 deg turn.
-    g.add_edge("M", "N", distance_cm=30.0, heading_deg=90.0)
-
-    apply_pivot_compensations(g, track_cm=15.0)
-
-    # Each pivot edge owns its 7.5 cm trim; the shared following edge is
-    # untouched -- no shortening, no double application possible.
-    assert g.edges["P1", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
-    assert g.edges["P2", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
-    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(30.0, abs=1e-6)
-    assert "pivot_trim_cm" not in g.edges["M", "N"]
-
-    # Calling again on the already-trimmed graph must re-store the same
-    # per-pivot scalar and still leave the following edge alone.
-    apply_pivot_compensations(g, track_cm=15.0)
-    assert g.edges["P1", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
-    assert g.edges["P2", "M"]["pivot_trim_cm"] == pytest.approx(7.5, abs=1e-6)
-    assert g.edges["M", "N"]["distance_cm"] == pytest.approx(30.0, abs=1e-6)
-
-
-def test_compute_all_pairs_next_hop_compensates_input_graph_in_place():
-    """TC9 / finding #42 (issue #44): pivot trim reaches the SHARED graph.
-
-    ``compute_all_pairs_next_hop`` applies pivot compensation to its input
-    ``graph`` in place (not to a discarded weighted copy), because the caller
-    hands that same ``graph`` object to ``emit_routes`` immediately
-    afterward. The issue #44 fix changes WHAT gets written: the trim now
-    lands on the pivot edge ``A->B`` as ``pivot_trim_cm``, and NO edge's
-    ``distance_cm`` is mutated -- so routes.cpp emits the true geometric
-    distance on every edge plus the per-pivot trim scalar.
-
-    Bidirectional layout mirroring
-    :func:`test_apply_pivot_compensations_ignores_back_edge`: A->B is a
-    90 deg LEFT pivot, B has exactly one forward continuation B->C
-    (the back-edge B->A is excluded from the out-degree count). This test
-    omits ``track_cm`` so the planner parses the live ``Config::TRACK_MM``
-    (180 mm = 18.0 cm) -- the same value the production pipeline drives with.
-    For an 18.0 cm track and a 90 deg pivot the over-travel
-    delta = (18/2)*tan(45) = 9.0 cm, stored on A->B; B->C keeps its full
-    30.0 cm distance.
-    """
-    from tools.path_planner.graph_builder import Pivot
-
-    g = nx.DiGraph()
-    for name, (x, y) in (("A", (0.0, 0.0)), ("B", (10.0, 0.0)), ("C", (10.0, 30.0))):
-        g.add_node(name, x_cm=x, y_cm=y, type="line")
-    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=10.0, heading_deg=0.0,
-               pivot=int(Pivot.LEFT))
-    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=10.0, heading_deg=180.0)
-    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=30.0, heading_deg=90.0)
-    g.add_edge("C", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=270.0)
-
-    # Drive the FULL planner flow (not apply_pivot_compensations directly).
-    # No track_cm -> the planner reads Config::TRACK_MM (18.0 cm).
-    compute_all_pairs_next_hop(g, cost_blind_multiplier=1.0)
-
-    # The trim is stored on the PIVOT edge A->B: delta = (18/2)*tan(45) = 9.0.
-    assert g.edges["A", "B"]["pivot_trim_cm"] == pytest.approx(9.0, abs=1e-6)
-    # The following edge B->C keeps its FULL geometric distance (the #44 fix):
-    # it is no longer shortened, and carries no trim of its own.
-    assert g.edges["B", "C"]["distance_cm"] == pytest.approx(30.0)
-    assert "pivot_trim_cm" not in g.edges["B", "C"]
-    # The pivot edge's own distance and the back-edge are untouched.
-    assert g.edges["A", "B"]["distance_cm"] == pytest.approx(10.0)
-    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(10.0)
-    # The back-edge B->A is not a pivot edge, so it never carries a trim.
-    assert "pivot_trim_cm" not in g.edges["B", "A"]

@@ -67,6 +67,7 @@ from tools.path_planner.header_writer import (  # noqa: E402
 )
 from tools.path_planner.pipeline_config import PIPELINE_CONFIG  # noqa: F401 -- baked into routes.cpp by header_writer
 from tools.path_planner.planner import (  # noqa: E402
+    build_pivot_turns,
     compute_all_pairs_next_hop,
     parse_track_cm_from_config,
 )
@@ -202,15 +203,19 @@ def _run(
     for w in caught:
         print(f"WARN: {w.message}", file=sys.stderr)
 
-    # 3. Compute the all-pairs next-hop table. Pass the header-parsed
-    #    track so pivot edges are tagged with the correct over-travel trim
-    #    (issue #44) -- compute_all_pairs_next_hop would otherwise re-parse
-    #    the same header itself, but threading the single parsed value
-    #    keeps the source of truth in one place.
+    # 3. Compute the all-pairs next-hop table (pivot-agnostic since T2
+    #    decoupled pivot derivation into build_pivot_turns below).
     log("computing all-pairs next-hop table ...")
     next_hop = compute_all_pairs_next_hop(
-        graph, field_data.COST_BLIND_MULTIPLIER, track_cm=track_cm
+        graph, field_data.COST_BLIND_MULTIPLIER
     )
+
+    # 3b. Derive per-turn pivot records from the authored (u,v,w) triples.
+    #     Uses the same track_cm resolved from Config.h above; graph is
+    #     read-only so both this call and the emitter below see un-mutated
+    #     edge distances.
+    log("building pivot-turn records ...")
+    pivot_records = build_pivot_turns(graph, track_cm)
 
     # 4. Resolve output paths. The DEFAULT_* names below are this
     #    module's own bindings (imported at module load time). Tests
@@ -231,6 +236,7 @@ def _run(
         field_data,
         graph,
         next_hop,
+        pivot_records=pivot_records,
         header_path=header_path,
         source_path=source_path,
         # Geometry lives in field_data.json (loaded by field_data.py); fold it

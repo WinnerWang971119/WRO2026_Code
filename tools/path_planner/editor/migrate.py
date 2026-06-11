@@ -221,6 +221,13 @@ def _capture_module_attributes() -> dict[str, Any]:
     captured: dict[str, Any] = {}
     for attr in _ATTRS_TO_CAPTURE:
         captured[attr] = getattr(module, attr)
+    # ``PIVOT_TURNS`` is optional: it predates the per-turn pivot model, so an
+    # older field_data.py may not expose it. Capture it under its lowercase
+    # JSON key only when present so a pivot-free migration omits the key
+    # entirely (dump_field_json drops absent optional keys).
+    pivot_turns = getattr(module, "PIVOT_TURNS", None)
+    if pivot_turns is not None:
+        captured["pivot_turns"] = pivot_turns
     return captured
 
 
@@ -232,6 +239,11 @@ def _build_json_payload(captured: dict[str, Any]) -> dict[str, Any]:
     than ``[3000.0, 2000.0]``.  ``dump_field_json`` accepts tuples (it
     serialises them as JSON arrays) and re-orders the top-level keys, so
     this helper exists purely to express the intent: "no transformation."
+
+    The optional ``pivot_turns`` key (present in ``captured`` only when the
+    source module exposed ``PIVOT_TURNS``) is forwarded the same way;
+    ``dump_field_json`` drops it when absent, so a pivot-free migration
+    produces JSON without the key.
 
     :param captured: Result of :func:`_capture_module_attributes`.
     :return: A new dict with the same keys and values.
@@ -354,7 +366,7 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
         docstring,
         "",
         "from tools.path_planner.editor.loader import load_field_json",
-        "from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot  # noqa: F401",
+        "from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION  # noqa: F401",
         "from tools.path_planner.pipeline_config import LineMode, BlindMode, ProjectionMode, TurnMode  # noqa: F401",
         "",
         "_data = load_field_json()",
@@ -369,6 +381,7 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
         'LINE_SEGMENTS         = _data["LINE_SEGMENTS"]',
         'BLIND_EDGES           = _data["BLIND_EDGES"]',
         'OBSTACLES             = _data["OBSTACLES"]',
+        'PIVOT_TURNS           = _data.get("pivot_turns", [])',
         "",
     ]
     header = "\n".join(header_lines) + "\n"

@@ -1,7 +1,14 @@
 # ADR-035: Two-sided pivot compensation with `delta = (T/2)*tan(theta/2)`
 
-**Status:** Implemented
+**Status:** Superseded by [ADR-036](./036-per-turn-pivot-compensation.md)
 **Date decided:** 2026-06 (issue #44, Phase 3)
+
+> **Superseded by [ADR-036](./036-per-turn-pivot-compensation.md).** The per-edge
+> `pivot_trim_cm` / `pre_turn_mode_override` model below is replaced by a per-turn
+> `(u, v, w)` model with a sparse `PivotTurn[]` table and a single firmware lookup. The
+> `delta = (T/2)*tan(theta/2)` magnitude, its derivation, the regime matrix, and the
+> dead-reckon / LINE mechanics carry over to ADR-036 unchanged. The body below is kept
+> verbatim as history.
 
 ## Rule
 

@@ -510,6 +510,26 @@ namespace Config
      */
     constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
 
+    /**
+     * @brief Floor (cm) for a pivot-trimmed dead-reckon drive / LINE overshoot advance (ADR-036).
+     *
+     * PathTracker subtracts the resolved pivot over-travel δ from a dead-reckon
+     * drive (and from the LINE overshoot advance) to compensate a single-wheel
+     * pivot. The offline validator already guarantees `δ < edge length` on every
+     * dead-reckon side and `δ ≤ overshoot budget` on every LINE-incoming side, so
+     * a correctly-built routes table never drives the effective distance to (or
+     * below) zero. This is a DEFENSIVE floor only: if a future bad table or a
+     * validator/config mismatch ever produced a non-positive effective distance,
+     * `Drive.driveDist` would reject a negative cm and silently no-op the hop,
+     * stalling the FSM. Clamping to a tiny positive advance keeps motion forward
+     * (with a Serial trace) instead of dropping the drive into UB / a stall.
+     *
+     * @note Single-sourced here so the offline validator / sim
+     *       (`parse_pivot_trim_min_drive_cm_from_config`) read the same value the
+     *       firmware uses (TC26 parity).
+     */
+    constexpr float PIVOT_TRIM_MIN_DRIVE_CM = 0.5f;
+
     // ---------------------------------------------------------------------------------------
     // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
     //
