@@ -54,10 +54,12 @@
  * Per-edge motion-mode resolution:
  *  - Each `Routes::EdgeInfo` carries per-category override fields
  *    (`line_mode_override`, `blind_mode_override`,
- *    `projection_mode_override`, `pre_turn_mode_override`). `DEFAULT` means
+ *    `projection_mode_override`, `direction_override`). `DEFAULT` means
  *    "inherit `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves
  *    DEFAULT → concrete at edge-dispatch time and chains the appropriate
- *    builder setters.
+ *    builder setters. The pre-edge turn wheel is no longer an `EdgeInfo`
+ *    field: it is resolved per turn from the `Routes::PivotTurn` table
+ *    (ADR-036) when the hop departs a pivot node, else the pipeline default.
  *
  * Iron rules (match `Drive`'s discipline):
  *  1. `update()` is non-blocking; every Drive call is `.async()`.
@@ -263,41 +265,29 @@ private:
 
     /**
      * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
-     *        pivot edge, applying ADR-035 two-sided pivot trims.
+     *        hop, applying the per-turn pivot trims (ADR-036).
      *
      * Called only on distance-terminated dispatches (BLIND dead-reckon
-     * `driveDist`, PROJECTION distance gate). Folds three ADR-035 effects into a
-     * LOCAL effective distance — `EDGES[*][*].distance_cm` is never mutated:
-     *   1. OUTGOING trim: if a δ is carried from the previous pivot hop, subtract
-     *      it (the outgoing over-travel of that pivot), then clear the carry.
-     *   2. APPROACH trim: if this edge itself drives INTO a pivot node
-     *      (`edge.pivot_trim_cm > 0`), subtract δ so the chassis stops δ short.
-     *   3. LATCH: if this edge is a pivot edge, latch its δ into
-     *      `_carriedPivotTrimCm` for the NEXT hop's outgoing trim.
-     * The result is clamped to `PIVOT_TRIM_MIN_DRIVE_CM` so a bad table can never
-     * command a non-positive drive (which `Drive.driveDist` would reject).
+     * `driveDist`, PROJECTION distance gate). Subtracts the two RESOLVED pivot
+     * trims latched at plan time into a LOCAL effective distance —
+     * `EDGES[*][*].distance_cm` is never mutated:
+     *   1. DEPARTING trim: if this hop LEAVES a pivot node (`_departingPivot`
+     *      active), subtract its δ (the outgoing over-travel of the pivot we
+     *      just turned through).
+     *   2. APPROACHING trim: if this dead-reckon edge drives INTO a pivot node
+     *      (`_approachingPivot` active), subtract its δ so the chassis stops δ
+     *      short and the pivot starts at the geometric pivot point.
+     * On a chain `u→v→w→x` the hop `v→w` nets `length − δ_v(departing) −
+     * δ_w(approaching)`. The result is clamped to `Config::PIVOT_TRIM_MIN_DRIVE_CM`
+     * so a bad table can never command a non-positive drive (which
+     * `Drive.driveDist` would reject). No carry/latch lives here anymore — the
+     * one-hop carry is owned by the `_pendingPivot` latch contract resolved in
+     * `_onPlanNextHop()`.
      *
      * @param edge The directed edge being dispatched (`getEdge(cur, _nextHop)`).
      * @return The trimmed, clamped distance to feed the distance-terminated builder.
      */
     float _pivotTrimDistance(const Routes::EdgeInfo& edge);
-
-    /**
-     * @brief Resolve the ADR-035 carried δ on a SENSOR-terminated pivot hop.
-     *
-     * Sensor-terminated dispatches (LINE follow, STOP_AT_LINE seek) self-correct
-     * on the physical line, so they take NO outgoing trim: any δ carried from the
-     * previous pivot hop is simply DROPPED (it lives exactly one hop). When
-     * @p latchOwn is true, this edge's own δ is still latched into
-     * `_carriedPivotTrimCm` for the next hop — a pivot reached via a STOP_AT_LINE
-     * seek still over-travels on the OUTGOING side. (LINE edges latch their own δ
-     * later, at overshoot-arm time, alongside the overshoot reduction, so they
-     * pass `latchOwn = false` here.)
-     *
-     * @param edge     The directed edge being dispatched.
-     * @param latchOwn Whether to latch this edge's own δ for the outgoing hop.
-     */
-    void _resolveSensorEdgePivotCarry(const Routes::EdgeInfo& edge, bool latchOwn);
 
     void _drainBlocking();
 
@@ -369,24 +359,48 @@ private:
     /// next-next hop's geometry.
     float _resolvedBodyHeading = 0.0f;
 
-    /// @brief δ (cm) carried ONE hop for the outgoing pivot trim; 0 = none.
-    ///        See ADR-035 / issue #44 (two-sided pivot compensation).
+    /// @brief A RESOLVED COPY of a `Routes::PivotTurn` record (ADR-036).
     ///
-    /// A single-wheel pivot at node `v` over-travels by `δ` on BOTH adjacent
-    /// drives. `δ` is stored on the pivot-tagged edge `u→v` as
-    /// `EdgeInfo::pivot_trim_cm`. The INCOMING side is trimmed while the pivot
-    /// edge is dispatched (approach trim on a dead-reckon edge, or an
-    /// overshoot-advance reduction on a LINE edge). The OUTGOING side cannot
-    /// see `u→v` once the FSM has advanced to `v`, so `δ` is latched here at
-    /// the pivot-edge dispatch and consumed on the NEXT hop `v→w`:
-    ///   - `v→w` distance-terminated (dead-reckon `driveDist` / PROJECTION
-    ///     gate)  → subtract `δ` from the effective drive (outgoing trim).
-    ///   - `v→w` sensor-terminated (LINE / STOP_AT_LINE) → no trim; the carry
-    ///     is simply DROPPED (the line re-anchors v→w, so δ is inert there).
-    /// Either way the carry lives exactly one hop. Reset to 0 on abort, on a
-    /// fault, on DEQUEUE of a fresh goal, and on the IDLE/done transition so a
-    /// pivot edge that is the FINAL hop cannot leak δ into the next goal.
-    float _carriedPivotTrimCm = 0.0f;
+    /// Never a pointer into the `PIVOT_TURNS` table kept across hops — the
+    /// firmware resolves the turn once, copies the wheel + δ out, and consumes
+    /// the copy at the maneuver and the drive. `active == false` is the
+    /// "no pivot" sentinel (every field at its default).
+    struct PivotRef
+    {
+        bool             active  = false;
+        Routes::TurnMode wheel   = Routes::TurnMode::DEFAULT;
+        float            trim_cm = 0.0f;
+    };
+
+    /// @brief The per-turn pivot latch contract (ADR-036, supersedes ADR-035).
+    ///
+    /// A pivot is a property of a 3-node turn `(u, v, w)`, not of an edge. At
+    /// plan time `_onPlanNextHop()` resolves the approaching pivot via a one-hop
+    /// lookahead (`findPivotTurn(cur, nxt, getNextHop(nxt, dest))`) and latches
+    /// it. The single `_pendingPivot` carry suffices ONLY because the departing
+    /// pivot is snapshotted BEFORE `_pendingPivot` is overwritten — see the
+    /// "snapshot BEFORE overwrite" sequence in `_onPlanNextHop()`.
+    ///
+    ///  - `_pendingPivot`     — carry: the approaching pivot latched LAST hop,
+    ///                          which becomes THIS hop's departing pivot. The
+    ///                          critical one to clear across goals so a stop at
+    ///                          `v` degrades to a normal turn and a pivot never
+    ///                          fires across a `goTo()` boundary.
+    ///  - `_departingPivot`   — the pivot we LEAVE at `cur` this hop (snapshot of
+    ///                          `_pendingPivot`). Supplies the pre-turn maneuver
+    ///                          wheel and the departing (outgoing) dead-reckon trim.
+    ///  - `_approachingPivot` — the pivot we ENTER at `nxt` this hop (fresh
+    ///                          lookahead). Supplies the approach trim on a
+    ///                          dead-reckon edge or the LINE overshoot reduction.
+    ///
+    /// All three are members (not locals) because they are set at plan time and
+    /// must survive the `TURNING` state into the drive dispatch (and, for the
+    /// approaching pivot, into the `LINE_FOLLOW` overshoot-arm in a different FSM
+    /// state). Reset to inactive on abort, on a fault, on DEQUEUE of a fresh
+    /// goal, and on the IDLE/done transition.
+    PivotRef _pendingPivot;
+    PivotRef _departingPivot;
+    PivotRef _approachingPivot;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;
