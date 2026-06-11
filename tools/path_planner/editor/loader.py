@@ -35,7 +35,7 @@ so the loader's tuple discipline (below) applies to it identically.
 
 The rich ``EDGES`` table that lives in ``field_data.py`` is deliberately
 **not** part of the JSON schema -- it carries enum references
-(``Pivot.LEFT``, ``LineMode.FAST``, ...) and free-form Python comments
+(``LineMode.FAST``, ``TurnMode.PIVOT_LEFT``, ...) and free-form Python comments
 that JSON cannot represent losslessly. The migration tool keeps that
 block in ``field_data.py`` and uses LibCST to rewrite it in place when
 the editor renames a referenced node (see Issue #10 plan T6).

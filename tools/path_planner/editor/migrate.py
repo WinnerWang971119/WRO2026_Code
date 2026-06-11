@@ -366,7 +366,7 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
         docstring,
         "",
         "from tools.path_planner.editor.loader import load_field_json",
-        "from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot  # noqa: F401",
+        "from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION  # noqa: F401",
         "from tools.path_planner.pipeline_config import LineMode, BlindMode, ProjectionMode, TurnMode  # noqa: F401",
         "",
         "_data = load_field_json()",
