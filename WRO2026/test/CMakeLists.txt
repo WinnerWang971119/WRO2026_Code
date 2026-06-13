@@ -500,6 +500,53 @@ set_tests_properties(manipulator_servo_dup_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "pairwise distinct")
 
 # =========================================================================================
+# Test executable #9 — Vision (HUE12) module: VisionFrame.h + Vision.cpp (T7, TC1..TC21).
+#
+# Links the real production `Vision.cpp` (the ONLY sketch .cpp under test —
+# `VisionFrame.h` / `ConfigVision.h` / `Vision.h` are header-only / included) against the
+# host mocks. `Vision.cpp` pulls `<Arduino.h>` via ANGLE brackets, so the include-path
+# search alone picks `mocks/` (it leads `COMMON_INCLUDES`): the mock supplies the mock
+# clock, the capturing USB `Serial`, AND the streaming `Serial1` UART mock + per-`delay()`
+# tick counter (`mockTickCount`) that the integration cases drive. The `Serial1` /
+# `mockTickCount` globals are defined in `mocks.cpp` (already in `${MOCK_SOURCES}`), so no
+# extra source is needed.
+#
+# `Vision.cpp` does NOT include Drive.h / WROLineArray.h / Intersection.h (it talks to
+# `Serial1` directly and never `#include <MatrixMiniR4.h>`), so this target DELIBERATELY does
+# NOT call `add_mock_force_includes(...)` — there is no production header to shadow.
+#
+# `-fsanitize=address,undefined` (compile + link) is added ONLY for GNU/Clang — copied
+# verbatim from `test_manipulator` — so the no-overrun claims (TC10 corrupt length byte,
+# TC17 out-of-range getter) are machine-checked. Local MSVC skips it (the guard is false);
+# the suite still BUILDS and all cases PASS under MSVC.
+# =========================================================================================
+add_executable(test_vision
+    ${TEST_DIR}/test_vision.cpp
+    ${SKETCH_DIR}/Vision.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_vision PRIVATE ${COMMON_INCLUDES})
+
+# TC19 cell->slot direction proof. `Vision.cpp` reads `VISION_CELL_TO_SLOT` at RUNTIME inside
+# readMosaic(), so the non-identity override MUST be a TARGET-WIDE compile definition (seen by
+# BOTH test_vision.cpp and Vision.cpp) — a per-file `#define` would leave Vision.cpp on the
+# identity map and produce a spurious mismatch. The map is the self-inverse permutation
+# cell c -> slot (11 - c): every slot 0..11 referenced once, so ConfigChecks.h's
+# uniqueness/range static_asserts still hold. Mirrors the `PATH_PASS_THROUGH_ENABLED_DEFAULT`
+# / `BELT_M_ID_DEFAULT` compile-definition override idiom used by the sibling targets.
+# The braces/commas are wrapped in CMake's `[=[ ... ]=]` bracket-argument so CMake passes the
+# whole brace-init list as one definition value (quoted into the vcxproj for MSVC, escaped for
+# GNU/Clang) without splitting on the commas.
+target_compile_definitions(test_vision PRIVATE
+    [=[VISION_CELL_TO_SLOT_DEFAULT={11,10,9,8,7,6,5,4,3,2,1,0}]=])
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(test_vision PRIVATE -fsanitize=address,undefined)
+    target_link_options(test_vision PRIVATE -fsanitize=address,undefined)
+endif()
+add_test(NAME test_vision COMMAND test_vision)
+
+# =========================================================================================
 # CTPS dump #8 — `ctps_dump` (Mechanism #4, task T4).
 #
 # Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + `routes.cpp`
