@@ -14,8 +14,8 @@ updated.
 
 The robot competes in WRO RoboMission Senior 2026 ("Mosaic Masters"): one
 2-minute autonomous run on a fixed field, scoring up to 233 points by
-delivering three tools, placing colored mosaic tiles into a randomized 3×3
-frame, delivering colored cement blocks, and returning the brick trowel to
+delivering three tools, placing colored mosaic tiles into a randomized 4×3
+(12-cell) frame, delivering colored cement blocks, and returning the brick trowel to
 the start zone. Three deadlines: regional `2026-07-21`, national
 `2026-08-24`, world final `2026-11-30`. The team is 2-3 people running
 two parallel tracks: mechanical (chassis, manipulator, sensor mounts) and
@@ -50,7 +50,7 @@ target still holds.
 |---|---|---|
 | **Foundation** | Drive / LineFollower / Intersection / WROLineArray / FieldMap / Localization / PathTracker / Mission DSL / Python path planner / CI | shipped |
 | 3 | Hardware verification of the shipped stack + real 2026 field encoded | next |
-| 4 | Perception: one camera module (3×3 mosaic + single-cell color) — runs in parallel with mech building manipulator v0 | pending |
+| 4 | Perception: Vision module (4×3 / 12-cell mosaic read + on-device hue classification) — runs in parallel with mech building manipulator v0 | shipped |
 | 5 | Manipulator software on v0 mechanism + first end-to-end Task | sw API pulled forward; numeric calibration + task FSMs pending |
 | 6 | Tasks layer + Mission scheduler + recoveries + full 2-minute run | pending |
 | 7 | Lofaix bring-up + regional sprint (compete `2026-07-21`) | pending |
@@ -154,22 +154,23 @@ item.
 
 ## 5. Phase 4 — Perception
 
-**Goal:** Read individual cell colors AND the 3×3 mosaic pattern
-reliably under workshop lighting — both through a **single camera
-module**. Per [ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md)
-there is no dedicated color sensor. The camera module runs independently
-of the manipulator mechanism, so it lands while mech finishes manipulator v0.
+**Goal:** Read the 4×3 (12-cell) mosaic pattern reliably under workshop
+lighting via the `Vision` module. Per
+[ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md) there is no
+dedicated color sensor. The Vision module (`Vision.h/.cpp`) shipped in Phase 3;
+Phase 4 tasks now focus on hardware bring-up, calibration, and benchmark
+verification. A single-region cement-block color read is deferred — see ADR-021.
 
 **Exit criteria (hard gates):**
-- [ ] Camera hardware selected and decision logged in [DECISIONS.md](./DECISIONS.md) (ADR-006 implementation closes).
-- [ ] Camera module's single-cell color read returns `{Y, B, G, W, NONE}` correctly on ≥18/20 samples per color under workshop lighting (replaces what was the ColorReader benchmark, B4.1).
-- [ ] Camera module's `capturePattern(out[9])` classifies all 9 cells correctly on ≥9/10 captures under workshop lighting (B4.2).
-- [ ] Module exposes the `update()` cooperative-tick interface and respects Rule 1 (no `delay()` in tick paths).
-- [ ] One calibration table in `Config.h` covers both use cases (single-cell and 3×3).
+- [ ] Camera hardware (HUE12) connected and Vision module verified on real chassis.
+- [ ] `Vision.readMosaic()` classifies all 12 cells correctly on ≥9/10 captures under workshop lighting (B4.2).
+- [ ] Per-color hue-band calibration (`Config::HUE_BANDS` in `ConfigVision.h`) passes ≥18/20 samples per color under workshop lighting (B4.1).
+- [ ] Module spins `cooperativeTick` during blocking read; `readMosaic` never called from inside a cooperative tick.
+- [ ] One `HUE_BANDS` calibration table in `ConfigVision.h` covers all colors {Y, B, G, W}.
 
 **Tracks running in parallel:**
-- Mechanical: finalize manipulator v0; design permanent camera mount that serves both 3×3-mosaic view AND single-cell view at the cement-block pick point (geometry locks in Phase 5).
-- Software: camera module (`CameraMosaic` / `CameraColor` / `Camera` — name decided when written) covering both operations; one calibration baseline committed to `Config.h` like `LINE_CALIB_*`.
+- Mechanical: finalize manipulator v0; design permanent camera mount for the 4×3 mosaic view (geometry locks in Phase 5).
+- Software: calibration and hardware verification of the `Vision` module; `HUE_BANDS` table committed to `ConfigVision.h`.
 
 **Tasks (ordered):**
 
@@ -177,9 +178,9 @@ of the manipulator mechanism, so it lands while mech finishes manipulator v0.
 |----|------|-------|------------|--------|
 | P4.1 | Decide camera (HuskyLens vs raw) — write the ADR-006 implementation closure | sw | P3.7 | camera selection |
 | P4.2 | Mount camera in placeholder position for calibration (both use cases) | both | P4.1 | placeholder mount |
-| P4.3 | Camera module — `capturePattern(out[9])` for the 3×3 mosaic | sw | P4.1, P4.2 | mosaic read |
-| P4.4 | Camera module — `readSingleColor() → ColorEnum` for cement / tile | sw | P4.3 | single-cell read |
-| P4.5 | Workshop-lighting calibration table — single source for both reads | sw | P4.3, P4.4 | calibration data |
+| P4.3 | Verify `Vision.readMosaic()` on real chassis at the mosaic stop position | sw | P4.1, P4.2 | mosaic read verified |
+| P4.4 | Calibrate `Config::HUE_BANDS` in `ConfigVision.h` under workshop lighting (all 12 cells, all 4 colors) | sw | P4.3 | calibration data |
+| P4.5 | Run benchmarks B4.1 and B4.2; commit `ConfigVision.h` baselines | sw | P4.4 | benchmarks passed |
 | P4.6 | Manipulator v0 final assembly + bench range-of-motion check | mech | P3.9 | mech v0 ready |
 
 ## 6. Phase 5 — Manipulator + First Task
@@ -212,7 +213,7 @@ composes PathTracker + Manipulator + camera module.
 |----|------|-------|------------|--------|
 | P5.1 | Calibrate `Config::ServoCfg` angles/ms-per-deg and `BeltStationCfg` targets against the built v0 mechanism; tune verb choreography (`grab`/`release`/`sortTo`/`dump`/`reset`) for reliable actuation | sw | P4.7 | manipulator calibrated |
 | P5.2 | Tune servo ranges, neutral positions, grip force | both | P5.1 | tuned manipulator |
-| P5.3 | Install permanent camera mount (serves both 3×3 + single-cell views); re-baseline calibration | both | P5.2 | locked geometry |
+| P5.3 | Install permanent camera mount (4×3 mosaic view); re-baseline `HUE_BANDS` calibration | both | P5.2 | locked geometry |
 | P5.4 | `Tasks` framework (`TasksClass` singleton; blocking-method bodies registered by name; `Mission.task()` verb) — see [ADR-025](./docs/decisions/025-tasks-as-blocking-methods.md) | sw | P5.1 | tasks framework shipped |
 | P5.5 | First task FSM — tool delivery (drive → grip → drive → drop → verify) | sw | P5.4 | tool task |
 | P5.6 | Mission DSL `.task("name", args)` verb + dispatcher | sw | P5.4 | DSL extension |
@@ -226,11 +227,11 @@ picks task order; 2-minute time guard + return-to-start works; the third
 named failure recovery (failed grip) lands.
 
 **Exit criteria (hard gates):**
-- [ ] `Tasks` covers: mosaic pattern read, mosaic tile placement (×9 attempts), cement delivery, brick-trowel return, tool delivery (already in Phase 5).
+- [ ] `Tasks` covers: mosaic pattern read, mosaic tile placement (×12 attempts), cement delivery, brick-trowel return, tool delivery (already in Phase 5).
 - [ ] `Mission` scheduler runs greedy score-per-second ordering and aborts overrunning tasks (ADR-008 implementation closes).
 - [ ] 2-minute time guard triggers at `t = 100 s` to start return-to-start.
 - [ ] Failed-grip recovery (ADR-009 third branch) triggers and yields in lab tests.
-- [ ] Full 2-minute run on practice field scores meeting the **regional target**: mosaic placement working (≥6 of 9 tiles) + cement delivery + tool delivery, succeeding on ≥8 of 10 lab attempts.
+- [ ] Full 2-minute run on practice field scores meeting the **regional target**: mosaic placement working (≥6 of 12 tiles) + cement delivery + tool delivery, succeeding on ≥8 of 10 lab attempts.
 - [ ] Simulator can execute the full Mission script — scheduler ordering, time guard, recoveries — end-to-end against the live field, matching the robot's traversal step-for-step. The sim is the dry-run check before every hardware session.
 
 **Tracks running in parallel:**
@@ -241,9 +242,9 @@ named failure recovery (failed grip) lands.
 
 | ID | Task | Track | Blocked By | Output |
 |----|------|-------|------------|--------|
-| P6.1 | Tasks — mosaic pattern read (uses CameraMosaic) | sw | P5.5 | mosaic read task |
+| P6.1 | Tasks — mosaic pattern read (uses Vision) | sw | P5.5 | mosaic read task |
 | P6.2 | Tasks — mosaic tile placement (composes pattern + manipulator) | sw | P6.1 | mosaic place task |
-| P6.3 | Tasks — cement delivery (uses camera `readSingleColor()` for block ID) | sw | P5.5 | cement task |
+| P6.3 | Tasks — cement delivery (block color ID via deferred single-region read; see ADR-021) | sw | P5.5 | cement task |
 | P6.4 | Tasks — brick-trowel return | sw | P5.5 | return task |
 | P6.5 | Mission scheduler — greedy score/sec + per-task estimates | sw | P6.2, P6.3, P6.4 | scheduler |
 | P6.6 | Mission 2-minute time guard + forced return-to-start at t=100s | sw | P6.5 | time guard |
@@ -403,11 +404,11 @@ hardware. IDs are referenced from each phase's "Exit criteria" gates.
 | 3 | B3.5 | `PathTracker.goTo(name)`, 10 random A→B traversals on real-field printout | ≤1 missed intersection across all 10 runs |
 | 3 | B3.6 | Inject lost-line + missed-intersection in lab | Recoveries trigger and bound within timeout |
 | 3 | B3.7 | `Drive.stopAtLine(cm)` toward a taped perpendicular line, with one intervening line crossed before the arm window, 10 trials | Stops within ±2 cm of the taped line; zero false-triggers on the intervening line; `LINE_NOT_FOUND` fault on a removed line (ADR-027). Reverse stop-at-line logic is CI-tested (host C++ + Python sim parity); physical rear-board bench (B3.7-reverse) is deferred until the rear board is wired. |
-| 4 | B4.1 | Each color sample (Y/B/G/W) shown to the camera's `readSingleColor()` 20× under workshop lighting | ≥18/20 correct per color |
-| 4 | B4.2 | Mosaic pattern card under workshop lighting, robot at fixed stop | All 9 cells correct on ≥9/10 captures |
+| 4 | B4.1 | Each color sample (Y/B/G/W) presented to the Vision module's hue classifier 20× under workshop lighting | ≥18/20 correct per color |
+| 4 | B4.2 | 12-cell mosaic pattern card under workshop lighting, robot at fixed stop | All 12 cells correct on ≥9/10 `readMosaic()` calls |
 | 5 | B5.1 | `grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()` full range sweep; also sweep each actuator primitive (`grabber`, `sorter`, `dumper`, `belt`) individually | Each verb/primitive reaches its commanded pose within tolerance + timeout |
 | 5 | B5.2 | Tool delivery Task end-to-end on test mat, 5 trials | ≥4/5 complete with score awarded |
-| 6 | B6.1 | Full 2-minute run on practice field, 10 trials | ≥8/10 succeed on regional-target scope (mosaic ≥6/9 tiles + cement + tool) |
+| 6 | B6.1 | Full 2-minute run on practice field, 10 trials | ≥8/10 succeed on regional-target scope (mosaic ≥6/12 tiles + cement + tool) |
 | 6 | B6.2 | Inject failed-grip in lab | Retry-once then yield, scheduler advances |
 | 7 | B7.1 | Venue practice run after lighting recalibration | One full run completed; matches B6.1 success rate |
 | 8 | B8.1 | Ten full runs after post-mortem fixes | Mean score strictly higher than B7.1 baseline |
@@ -423,10 +424,10 @@ concept, check this table first.
 |---|---|
 | Field (printed playing surface with black lines) | `field_data.py` → `routes.h` → `FieldMap` |
 | Intersection / waypoint (line crossing used as checkpoint) | `Intersection`, `Localization` |
-| Mosaic frame (3×3 fixture holding the pattern) | camera module, `Tasks` |
+| Mosaic frame (4×3 fixture holding the 12-cell pattern) | `Vision`, `Tasks` |
 | Mosaic tile (single colored piece placed into one cell) | `Tasks`, `Manipulator` |
 | Tools (the three deliverable items) | `Tasks`, `Manipulator` |
-| Cement blocks (colored blocks delivered to deposit zones) | `Tasks`, camera module (`readSingleColor`), `Manipulator` |
+| Cement blocks (colored blocks delivered to deposit zones) | `Tasks`, `Vision` (single-region read deferred — see ADR-021), `Manipulator` |
 | Brick trowel (returned to start zone at end) | `Tasks`, `Mission` |
 | Deposit zones (color-matched drop locations) | `field_data.py` / `routes.h`, `Tasks` |
 | 2-minute run (full autonomous round, scored up to 233) | `Mission` |

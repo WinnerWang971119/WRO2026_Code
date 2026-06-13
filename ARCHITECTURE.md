@@ -29,6 +29,9 @@ WRO2026_Code/
 │   │
 │   ├── Mission.h / .cpp      # operator DSL: goTo/wait/print/beep/led
 │   ├── Manipulator.h / .cpp  # 3 RC servos + belt DC motor; coordinated verbs + actuator primitives
+│   ├── Vision.h / .cpp       # HUE12 mosaic read over Serial1; capture-once latch; on-R4 hue classification
+│   ├── VisionFrame.h         # bounded-resync UART frame parser
+│   ├── ConfigVision.h        # HUE_BANDS table, baud, frame constants
 │   │
 │   ├── EventTrace.h / .cpp   # OLED ring buffer + 500 ms Serial heartbeat
 │   ├── WROMath.h             # free helpers (cmToEncDeg, presetToPwm, ...)
@@ -94,6 +97,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 | `Mission` | operator-authored DSL | `goTo(name).setStopAtLine(...)`, `wait(ms)`, `print(msg)`, `beep(hz,ms)`, `led(r,g,b,ms)`, `task(name,args)`, `start()`, `abort()` |
 | `Tasks` | composite multi-step routines + name-string registry | `runTask(name, args)`, `findTask(name)`, `abort()`, `isAborted()`, `inTask()`, registry table in `Tasks.cpp` |
 | `Manipulator` | 3 RC servos (grabber, sorter, dumper) + 1 belt DC motor | coordinated verbs `grab()`, `release()`, `sortTo(bin)`, `dump()`, `reset()` (blocking-by-default builders with `.async()`); actuator primitives `grabber/sorter/dumper.setAngle()/open()/close()/home()`, `belt.toStation()/beltTo()/runFor()/home()`; `begin()`, `update()`, `isDone()`, `setTickCallback(...)` |
+| `Vision` | HUE12 mosaic read over `Serial1`; bounded-resync UART parser; capture-once 12-cell latch; on-R4 hue classification via `Config::HUE_BANDS` | `readMosaic() → bool`, `getColor(cell) → Config::Color`, `begin()`, `setTickCallback(...)` |
 | `EventTrace` | OLED ring + Serial heartbeat (side-channel) | `pushEvent(msg)`, `clear()` — polled in `update()` |
 | `WROMath` | unit conversions | `cmToEncDeg`, `encDegToCm`, `presetToPwm`, `deadbandSnap` |
 | `StateMachine<State>` | generic FSM helper (header-only template, unused) | `enter(s)`, `current()`, `elapsed()`, `changed()`, `ack()` |
@@ -102,7 +106,6 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 
 | Module | Phase | Reason |
 |---|---|---|
-| Camera module (`CameraMosaic` / `CameraColor` — name TBD) | 4 | Awaiting camera selection (HuskyLens vs raw, [ADR-006](./docs/decisions/006-mosaic-via-camera.md)). Handles **both** the 3×3 mosaic pattern read and single-cell color reads ([ADR-021](./docs/decisions/021-camera-as-sole-color-sensor.md)) — no dedicated `ColorReader` module is planned. |
 | Per-task FSMs (preemptable task bodies) | 6 | Tasks layer ships with blocking method bodies (ADR-025). Converting specific slow tasks to per-task FSMs is deferred to the Phase 6 greedy scheduler (ADR-008). |
 
 ## The two iron rules
@@ -111,7 +114,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 
 Every module that performs ongoing work exposes a non-blocking `update()` method. The main loop's `cooperativeTick()` calls each one in turn. If you need to "wait 100 ms," store a `millis()` timestamp and check elapsed time on each `update()` call.
 
-The only `delay()` sites permitted in the codebase are command-time orchestration — `Drive::_drainBlocking()` (sync-default builders), `Drive::calibrateMotorBias()`, and `WROLineArray::calibrate()`. These run from `setup()` or top-level operator actions, never from a cooperative tick. The drain re-enters every module's `update()` via the registered tick callback so OLED/heartbeat/sensors keep running.
+The only `delay()` / blocking sites permitted in the codebase are command-time orchestration — `Drive::_drainBlocking()` (sync-default builders), `Drive::calibrateMotorBias()`, `WROLineArray::calibrate()`, and `Vision::readMosaic()`. These run from `setup()` or top-level operator actions (i.e., task bodies after `Drive.isIdle()`), never from a cooperative tick. Each blocking site spins the registered tick callback so OLED/heartbeat/sensors keep running during the wait.
 
 ### Rule 2 — Global singletons via `extern`
 
