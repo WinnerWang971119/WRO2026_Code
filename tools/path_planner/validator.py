@@ -111,8 +111,8 @@ def _segment_key(a: str, b: str) -> frozenset:
 
 
 # The firmware header owns the over-travel budget constants the pivot checks
-# need (the line-sensor-to-axle offset, the trim-underflow floor, the
-# turn-dispatch tolerance). Like ``planner.py`` does for ``TRACK_MM``, this
+# need (the line-sensor-to-axle offset, the trim-underflow floor, the minimum
+# authored pivot angle). Like ``planner.py`` does for ``TRACK_MM``, this
 # module reads them from ``Config.h`` via the shared, anchored
 # ``config_parse.parse_config_float`` -- with a no-stale-fallback policy -- so an
 # edit to ``Config.h`` can never silently desync the offline validator from the
@@ -159,18 +159,21 @@ def parse_pivot_trim_min_drive_cm_from_config(
     return parse_config_float("PIVOT_TRIM_MIN_DRIVE_CM", config_path)
 
 
-def parse_nav_turn_tolerance_deg(config_path: Path = _CONFIG_H_PATH) -> float:
-    """Return ``Config::NAV_TURN_TOLERANCE_DEG`` -- the firmware's turn-dispatch gate.
+def parse_pivot_min_turn_deg_from_config(config_path: Path = _CONFIG_H_PATH) -> float:
+    """Return ``Config::PIVOT_MIN_TURN_DEG`` -- the minimum authored pivot angle.
 
-    The pre-turn maneuver only dispatches when the body-target / current-world
-    heading delta exceeds this tolerance, so a pivot whose turn is below it
-    would silently no-op the maneuver. The validator derives a RAISED minimum
-    pivot angle from this value (see :data:`_PIVOT_MIN_TURN_FLOOR_DEG`).
+    The validator rejects any authored pivot turn whose geometric ``|theta|`` is
+    below this floor. It is a TUNABLE Config.h knob (not derived from the
+    firmware tolerance): a pivot fires at runtime only when the pre-turn maneuver
+    dispatches (heading delta ``> NAV_TURN_TOLERANCE_DEG``, PathTracker), so a
+    too-shallow turn would silently no-op the pivot while its ``delta`` trim is
+    still subtracted. Single-sourced here so a retune of the floor cannot desync
+    the offline check from the firmware header (TC26 parity).
 
     :param config_path: path to ``Config.h`` (defaults to the firmware header).
-    :return: the turn-dispatch tolerance in degrees.
+    :return: the minimum authored pivot turn angle in degrees.
     """
-    return parse_config_float("NAV_TURN_TOLERANCE_DEG", config_path)
+    return parse_config_float("PIVOT_MIN_TURN_DEG", config_path)
 
 
 # Above this absolute turn angle the over-travel formula
@@ -180,19 +183,6 @@ def parse_nav_turn_tolerance_deg(config_path: Path = _CONFIG_H_PATH) -> float:
 # already ~115x the half-track, far beyond any realisable maneuver. A pure
 # literal (no Config.h read), so it is a module constant.
 _PIVOT_MAX_TURN_DEG = 179.0
-
-# Floor of the validator-only raised minimum pivot angle. The effective floor
-# is ``max(_PIVOT_MIN_TURN_FLOOR_DEG, 3 x NAV_TURN_TOLERANCE_DEG)``, computed
-# lazily inside :func:`_validate_pivot_turns` so a pivot-free field never reads
-# Config.h. Below this absolute turn a "pivot" barely turns: ``delta`` rounds
-# to ~0 and -- more importantly -- the firmware's pre-turn maneuver only fires
-# when the heading delta exceeds ``NAV_TURN_TOLERANCE_DEG`` (PathTracker), so a
-# turn at or below that gate would silently skip the pivot. Keeping a real
-# pivot comfortably above the dispatch gate makes a sub-floor "pivot" an
-# authoring mistake that fails rather than silently no-ops. This is a
-# VALIDATOR-ONLY Python constant DERIVED from the firmware tolerance -- not a
-# new firmware constant.
-_PIVOT_MIN_TURN_FLOOR_DEG = 15.0
 
 
 def _build_authored_graph(field_data):
@@ -346,7 +336,7 @@ def _validate_pivot_turns(field_data) -> None:
     * **Duplicate triple.** The same ``(u, v, w)`` authored twice.
     * **Degenerate / sub-gate turn angle.** ``|theta|`` at/above
       :data:`_PIVOT_MAX_TURN_DEG` (a near-full one-wheel reversal where ``tan``
-      diverges) or below :data:`_PIVOT_MIN_TURN_FLOOR_DEG` (the raised floor -- the
+      diverges) or below ``Config::PIVOT_MIN_TURN_DEG`` (the tunable floor -- the
       turn would slip under the firmware's dispatch gate).
     * **Unsupported regime combo.** Either side's edge type fails to classify.
     * **Trim exceeds a dead-reckoned drive.** On a ``"distance"`` side ``delta``
@@ -412,16 +402,14 @@ def _validate_pivot_turns(field_data) -> None:
 
     track_cm = parse_track_cm_from_config()
 
-    # Single-source the over-travel budget + raised min-angle floor from the
-    # firmware header, parsed lazily HERE (not at import) so a pivot-free field
-    # never pays the read (the nit: kill the per-build dead read). The LINE
-    # budget is the FRONT sensor-to-axle offset (FRONT-only); the min-angle
-    # floor is raised to max(15, 3 x NAV_TURN_TOLERANCE_DEG) so a real pivot's
-    # turn clears the firmware's turn-dispatch gate.
+    # Single-source the over-travel budget + min-angle floor from the firmware
+    # header, parsed lazily HERE (not at import) so a pivot-free field never pays
+    # the read (the nit: kill the per-build dead read). The LINE budget is the
+    # FRONT sensor-to-axle offset (FRONT-only); the min-angle floor is the tunable
+    # Config::PIVOT_MIN_TURN_DEG knob -- an authored pivot below it would slip
+    # under the firmware's turn-dispatch gate and silently no-op.
     line_overshoot_budget_cm = parse_line_sensor_axle_offset_cm()
-    pivot_min_turn_deg = max(
-        _PIVOT_MIN_TURN_FLOOR_DEG, 3.0 * parse_nav_turn_tolerance_deg()
-    )
+    pivot_min_turn_deg = parse_pivot_min_turn_deg_from_config()
     # The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
     # advance) to this floor (PathTracker._pivotTrimDistance and the LINE_FOLLOW
     # overshoot branch; the sim mirrors both). A delta that merely satisfies

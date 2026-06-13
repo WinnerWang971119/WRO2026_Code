@@ -530,6 +530,26 @@ namespace Config
      */
     constexpr float PIVOT_TRIM_MIN_DRIVE_CM = 0.5f;
 
+    /**
+     * @brief Minimum authored pivot turn angle, in degrees (offline validator guard, ADR-036).
+     *
+     * The offline validator rejects any authored pivot turn `(u, v, w)` whose
+     * geometric angle `|θ|` is below this floor. A pivot only fires at runtime
+     * when the pre-turn maneuver dispatches (heading delta `> NAV_TURN_TOLERANCE_DEG`,
+     * PathTracker), so a turn near that gate would silently no-op the pivot while
+     * its δ trim is still subtracted — under-driving the adjacent hop. Keeping a
+     * real pivot comfortably above the gate makes a too-shallow "pivot" a
+     * build-time authoring error instead of a silent runtime mis-position.
+     *
+     * @note This is a TUNABLE knob, not a derived value: set it to the smallest
+     *       pivot the chassis should be allowed to author. It must stay above
+     *       `NAV_TURN_TOLERANCE_DEG` (the firmware dispatch gate). NOT read by the
+     *       firmware at runtime — the validator/sim single-source it from here
+     *       (`parse_pivot_min_turn_deg_from_config`) so a retune cannot desync the
+     *       offline check (TC26 parity).
+     */
+    constexpr float PIVOT_MIN_TURN_DEG = 5.0f;
+
     // ---------------------------------------------------------------------------------------
     // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
     //

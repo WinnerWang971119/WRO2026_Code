@@ -1217,6 +1217,21 @@ class PathTrackerSim:
 
             current = nxt
 
+    def _reset_pivot_latch(self) -> None:
+        """Clear the three pivot-latch members to their inactive state.
+
+        ADR-036: each goal starts with a clean pivot latch so a pivot whose
+        FINAL hop was the previous goal's last hop (leaving ``_pending_pivot``
+        active with no following hop to consume it) never fires across a
+        ``go_to`` boundary -- a stop at the pivot node degrades to a normal
+        turn. Mirror of the firmware's ``_resetPivotLatch()``; factored out so
+        the two public entry points (:meth:`go_to`, :meth:`step_through`) cannot
+        drift if a fourth latch member is ever added (parity contract).
+        """
+        self._pending_pivot = None
+        self._departing_pivot = None
+        self._approaching_pivot = None
+
     def go_to(
         self,
         goal_name: str,
@@ -1266,16 +1281,11 @@ class PathTrackerSim:
                 "LocalizationSim.zero_heading_from_current()"
             )
 
-        # ADR-036: each goal starts with a clean pivot latch. A pivot whose FINAL
-        # hop was the PREVIOUS goal's last hop left ``_pending_pivot`` active with
-        # no following hop to consume it -- reset all three here (mirror of the
-        # firmware's DEQUEUE / goal-complete resets) so a pivot never fires across
-        # a ``go_to`` boundary and a stop at the pivot node degrades to a normal
-        # turn. Done here (not in ``_walk_hops``) so the reset semantics stay
-        # owned by the public entry point.
-        self._pending_pivot = None
-        self._departing_pivot = None
-        self._approaching_pivot = None
+        # ADR-036: each goal starts with a clean pivot latch (mirror of the
+        # firmware's DEQUEUE / goal-complete resets). Done here (not in
+        # ``_walk_hops``) so the reset semantics stay owned by the public entry
+        # point. See :meth:`_reset_pivot_latch` for the rationale.
+        self._reset_pivot_latch()
 
         # Collect the shared per-hop primitive stream. ``go_to`` discards the
         # snapshots ``step_through`` keeps -- both consume the same generator.
@@ -1316,9 +1326,7 @@ class PathTrackerSim:
             )
 
         # ADR-036: clean pivot latch per goal (see go_to for the rationale).
-        self._pending_pivot = None
-        self._departing_pivot = None
-        self._approaching_pivot = None
+        self._reset_pivot_latch()
 
         # Drive the shared per-hop generator and pair each primitive with a
         # chassis snapshot. ``_walk_hops`` yields every primitive AFTER its own

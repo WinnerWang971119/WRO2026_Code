@@ -19,7 +19,7 @@ from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
     FieldDataError,
     parse_line_sensor_axle_offset_cm,
-    parse_nav_turn_tolerance_deg,
+    parse_pivot_min_turn_deg_from_config,
     parse_pivot_trim_min_drive_cm_from_config,
     validate,
 )
@@ -609,12 +609,34 @@ def test_pivot_turn_rejects_degenerate_180_angle() -> None:
 
 
 def test_pivot_turn_rejects_below_floor_angle() -> None:
-    """TC5 (mirror): a sub-floor turn (~5 deg) is rejected.
+    """TC5 (mirror): a sub-floor turn (~3 deg) is rejected.
 
-    Incoming heads 0 deg, outgoing heads 5 deg -- below the raised
-    max(15, 3*NAV_TURN_TOLERANCE_DEG) = 15 deg floor. A turn that small would
-    slip under the firmware's turn-dispatch gate and silently no-op the pivot,
-    so it is an authoring mistake that must fail.
+    Incoming heads 0 deg, outgoing heads 3 deg -- below the configurable
+    Config::PIVOT_MIN_TURN_DEG = 5 deg floor. A turn that small would slip under
+    the firmware's turn-dispatch gate and silently no-op the pivot, so it is an
+    authoring mistake that must fail. (3 deg, not 5 deg: 5 deg now sits exactly
+    AT the floor and is accepted -- see the pass counterpart below.)
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 3.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    with pytest.raises(FieldDataError, match=r"degenerate turn\s+angle"):
+        validate(fd)
+
+
+def test_pivot_turn_accepts_angle_at_floor() -> None:
+    """TC5 (pass counterpart): a turn exactly AT the floor (5 deg) validates.
+
+    The floor check rejects ``|theta| < PIVOT_MIN_TURN_DEG``, so a turn at the
+    5 deg floor is accepted. Both BLIND legs are long (100 cm) so the tiny
+    delta (~0.39 cm at track 18) clears the dead-reckon gate -- this pins the
+    inclusive floor boundary the configurable knob introduced.
     """
     fd = _pivot_field(
         edges=[
@@ -625,8 +647,7 @@ def test_pivot_turn_rejects_below_floor_angle() -> None:
         ],
         pivot_turns=[("A", "B", "C")],
     )
-    with pytest.raises(FieldDataError, match=r"degenerate turn\s+angle"):
-        validate(fd)
+    assert validate(fd) is None
 
 
 def test_pivot_turn_rejects_delta_exceeds_outgoing_dead_reckon() -> None:
@@ -955,9 +976,15 @@ def test_parse_line_sensor_axle_offset_matches_config() -> None:
     assert parse_line_sensor_axle_offset_cm() == pytest.approx(12.02)
 
 
-def test_parse_nav_turn_tolerance_matches_config() -> None:
-    """TC26: parse_nav_turn_tolerance_deg() equals Config::NAV_TURN_TOLERANCE_DEG."""
-    assert parse_nav_turn_tolerance_deg() == pytest.approx(0.5)
+def test_parse_pivot_min_turn_deg_matches_config() -> None:
+    """TC26: parse_pivot_min_turn_deg_from_config() equals Config::PIVOT_MIN_TURN_DEG.
+
+    The minimum authored pivot angle is a tunable Config.h knob the validator
+    single-sources (it replaced the old ``3 x NAV_TURN_TOLERANCE_DEG`` derived
+    floor). Pin the parsed value to the firmware literal so a retune of the floor
+    that desyncs the offline check fails the suite.
+    """
+    assert parse_pivot_min_turn_deg_from_config() == pytest.approx(5.0)
 
 
 def test_parse_pivot_trim_min_drive_matches_config() -> None:

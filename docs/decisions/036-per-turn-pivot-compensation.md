@@ -55,12 +55,16 @@ The chain is code-citation → physical motion → sign, auditable end to end.
 ## Min-angle / IMU-heading assumption
 
 The pre-turn maneuver dispatches only when `|bodyTarget − currentWorld| >
-NAV_TURN_TOLERANCE_DEG` (PathTracker.cpp:951). The raised min-angle floor
-(`≥ 3 × NAV_TURN_TOLERANCE_DEG`, validator-only) guarantees a real pivot's turn exceeds
-that gate **only under the assumption that post-arrival IMU heading matches the inbound
-edge heading within tolerance** — the same assumption the existing yaw-vs-peek
-divergence guard (PathTracker.cpp:953) already manages. If IMU drift exceeds it, the
-divergence guard, not the pivot logic, is the mitigation.
+NAV_TURN_TOLERANCE_DEG` (PathTracker.cpp:951). The validator rejects any authored pivot
+whose geometric `|θ|` is below `Config::PIVOT_MIN_TURN_DEG` (a tunable knob, default
+5°, single-sourced into the validator via `parse_pivot_min_turn_deg_from_config`), so a
+real pivot clears that gate. This replaced an earlier `≥ 3 × NAV_TURN_TOLERANCE_DEG`
+derived floor: the derived form silently scaled with the tolerance and baked in a
+fixed margin assumption, whereas an explicit configurable angle is re-tuned directly
+when the chassis or tolerance changes. Clearing the gate still assumes post-arrival IMU
+heading matches the inbound edge heading within tolerance — the same assumption the
+existing yaw-vs-peek divergence guard (PathTracker.cpp:953) manages; if IMU drift
+exceeds it, that guard, not the pivot logic, is the mitigation.
 
 ## Why
 

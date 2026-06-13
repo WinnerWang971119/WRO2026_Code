@@ -211,8 +211,16 @@ class FieldModel:
         validator treats a missing ``EDGES`` as benign (backward-compatible
         with pre-PR4 fixtures).
 
-        :return: A :class:`types.SimpleNamespace` with exactly the 11
-            attributes ``validator._REQUIRED_ATTRS`` lists.
+        ``PIVOT_TURNS`` IS exposed: the model persists it via
+        :meth:`to_json_dict`, so the proxy must carry it too or
+        :func:`validator._validate_pivot_turns` hits its
+        ``getattr(..., 'PIVOT_TURNS', None)`` early-return and the editor's
+        Save silently skips every pivot geometry rule (the docstring's "full
+        PR3/PR4 schema rules" promise would not hold for pivots).
+
+        :return: A :class:`types.SimpleNamespace` with the 11 required
+            attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
+            ``PIVOT_TURNS``.
         """
         return types.SimpleNamespace(
             NODES=self.nodes,
@@ -226,6 +234,7 @@ class FieldModel:
             START_HEADING_DEG=self.start_heading_deg,
             FIELD_MM=self.field_mm,
             MAP_PNG=self.map_png,
+            PIVOT_TURNS=self.pivot_turns,
         )
 
     def validate(self) -> None:
@@ -263,11 +272,16 @@ class FieldModel:
         - ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``pivot_turns``, and
           ``OBSTACLES`` preserve the original list order (spatial / authoring
           order is semantically meaningful for the renderer and the planner).
+        - ``pivot_turns`` is OPTIONAL: it is emitted (in its canonical slot,
+          between ``BLIND_EDGES`` and ``OBSTACLES``) only when non-empty. A
+          pivot-free field omits the key entirely, matching the loader's
+          ``dump_field_json`` "absent stays absent" round-trip so a save
+          through the model produces no spurious ``pivot_turns: []`` diff.
 
         :return: A :class:`dict` whose values are JSON-native types (``str``,
             ``float``, ``int``, ``list``, ``dict``).  No tuples are present.
         """
-        return {
+        result = {
             "FIELD_MM": list(self.field_mm),
             "MAP_PNG": self.map_png,
             "ROBOT_RADIUS_CM": float(self.robot_radius_cm),
@@ -284,6 +298,8 @@ class FieldModel:
             },
             "LINE_SEGMENTS": [list(seg) for seg in self.line_segments],
             "BLIND_EDGES": [list(edge) for edge in self.blind_edges],
-            "pivot_turns": [list(turn) for turn in self.pivot_turns],
-            "OBSTACLES": [list(obs) for obs in self.obstacles],
         }
+        if self.pivot_turns:
+            result["pivot_turns"] = [list(turn) for turn in self.pivot_turns]
+        result["OBSTACLES"] = [list(obs) for obs in self.obstacles]
+        return result
