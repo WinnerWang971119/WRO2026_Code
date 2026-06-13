@@ -78,6 +78,14 @@ namespace Config
     // -----------------------------------------------------------------------------------------
 
     /** @brief Identified mosaic cell colour. `UNKNOWN` means classification failed. */
+    // `WHITE` collides with the Adafruit backwards-compat `#define WHITE SSD1306_WHITE`
+    // in MiniR4OLED.h, which is active in any TU that includes <MatrixMiniR4.h> before
+    // this header (e.g. WRO2026.ino, EventTrace.cpp). Guard only the declaration: save
+    // and #undef the macro for the enum, then restore it so OLED code calling
+    // setTextColor(WHITE) still compiles. No <MatrixMiniR4.h>-including TU names
+    // Config::Color::WHITE, so restoring the macro afterwards is safe.
+#pragma push_macro("WHITE")
+#undef WHITE
     enum class Color : uint8_t
     {
         UNKNOWN = 0,
@@ -86,6 +94,7 @@ namespace Config
         GREEN,
         WHITE
     };
+#pragma pop_macro("WHITE")
 
     /**
      * @brief Saturation threshold below which a chromatic hue reading is re-classified as White.
