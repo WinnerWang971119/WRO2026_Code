@@ -11,8 +11,8 @@ The project uses **one** color-classification device: the HUE12 camera module
 - The 4×3 mosaic frame pattern read (`readMosaic()` → latch; `getColor(cell)` for
   each of the 12 cells). See [ADR-006](./006-mosaic-via-camera.md).
 - On-device hue classification via a single `Config::HUE_BANDS` table in
-  `ConfigVision.h` — White reads are STA-gated (white only classified when the
-  STA white-detection flag is set).
+  `ConfigVision.h` — White reads are STA-gated (a chromatic hue whose saturation
+  is below `VISION_WHITE_STA_MAX` is classified White).
 
 No dedicated `ColorReader.h/.cpp` module will be built. No separate color sensor
 will be mounted.

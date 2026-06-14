@@ -65,7 +65,7 @@ public:
         NONE         = 0,   ///< No fault — normal operation.
         READ_TIMEOUT = 1,   ///< UART read did not complete within `Config::VISION_READ_TIMEOUT_MS`.
         BAD_CHECKSUM = 2,   ///< Received frame failed its integrity check.
-        BAD_CELL     = 3    ///< A cell index in the decoded frame was out of range.
+        BAD_CELL     = 3    ///< An active mosaic cell classified as UNKNOWN (device NONE/Black or uncalibrated band).
     };
 
     /**
