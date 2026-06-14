@@ -160,6 +160,105 @@ def test_tc3_dump_is_byte_deterministic(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# pivot_turns: optional per-turn pivot authoring key round-trips through the
+# loader as (u, v, w) tuples, in its canonical slot, byte-deterministically.
+# ---------------------------------------------------------------------------
+
+
+def _small_fixture_with_pivots(tmp_path: Path) -> Path:
+    """Write a copy of the small fixture carrying a pivot_turns list.
+
+    The pivot is authored as a 3-element node-name array, the same
+    array-of-arrays shape LINE_SEGMENTS / BLIND_EDGES use. ('A', 'B', 'G')
+    are nodes the small fixture already defines, so the loaded dict stays
+    validator-clean independently of this test's focus on tuple discipline.
+    """
+    data = json.loads(_SMALL_FIXTURE.read_text(encoding="utf-8"))
+    # Insert between BLIND_EDGES and OBSTACLES to mirror the canonical order;
+    # the loader re-orders on dump regardless, so input order is not load-bearing.
+    data["pivot_turns"] = [["A", "B", "G"]]
+    target = tmp_path / "field_data_with_pivots.json"
+    target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return target
+
+
+def test_pivot_turns_loads_as_three_tuples(tmp_path: Path) -> None:
+    """load_field_json converts each pivot_turns 3-array to a (u, v, w) tuple.
+
+    Mirrors the LINE_SEGMENTS / BLIND_EDGES tuple discipline: JSON has no
+    tuple type, so the loader must materialise tuples for the downstream
+    consumers that compare and hash these triples.
+    """
+    fixture = _small_fixture_with_pivots(tmp_path)
+    data = load_field_json(fixture)
+
+    assert isinstance(data["pivot_turns"], list)
+    assert len(data["pivot_turns"]) == 1
+    turn = data["pivot_turns"][0]
+    assert isinstance(turn, tuple), f"pivot_turns[0] expected tuple, got {type(turn)}"
+    assert turn == ("A", "B", "G")
+
+
+def test_pivot_turns_round_trip_data_equality(tmp_path: Path) -> None:
+    """load -> dump -> load preserves pivot_turns as an equal list of tuples."""
+    fixture = _small_fixture_with_pivots(tmp_path)
+    first_load = load_field_json(fixture)
+
+    dumped_path = tmp_path / "field_data_pivots_rt.json"
+    dump_field_json(first_load, dumped_path)
+    second_load = load_field_json(dumped_path)
+
+    assert first_load == second_load
+    assert second_load["pivot_turns"] == [("A", "B", "G")]
+
+
+def test_pivot_turns_dumped_in_canonical_slot(tmp_path: Path) -> None:
+    """dump_field_json emits pivot_turns between BLIND_EDGES and OBSTACLES."""
+    fixture = _small_fixture_with_pivots(tmp_path)
+    first_load = load_field_json(fixture)
+
+    dumped_path = tmp_path / "field_data_pivots_order.json"
+    dump_field_json(first_load, dumped_path)
+    keys = list(json.loads(dumped_path.read_text(encoding="utf-8")).keys())
+
+    assert "pivot_turns" in keys
+    assert keys.index("BLIND_EDGES") < keys.index("pivot_turns") < keys.index("OBSTACLES")
+
+
+def test_pivot_turns_absent_round_trips_absent(tmp_path: Path) -> None:
+    """A field that never authored pivot_turns round-trips without the key.
+
+    The small fixture omits pivot_turns; the loader must not synthesise it and
+    the dump must not inject an empty list, so dump(load(x)) == dump(x) holds
+    byte-for-byte for a pivot-free input (absent stays absent).
+    """
+    first_load = load_field_json(_SMALL_FIXTURE)
+    assert "pivot_turns" not in first_load
+
+    dumped_path = tmp_path / "field_data_no_pivots.json"
+    dump_field_json(first_load, dumped_path)
+    second_load = load_field_json(dumped_path)
+
+    assert "pivot_turns" not in second_load
+    assert first_load == second_load
+
+
+def test_pivot_turns_present_dump_is_byte_deterministic(tmp_path: Path) -> None:
+    """dump(load(dump(d))) is byte-identical to dump(d) when pivot_turns is set."""
+    fixture = _small_fixture_with_pivots(tmp_path)
+    first_load = load_field_json(fixture)
+
+    dump1_path = tmp_path / "pivots_dump1.json"
+    dump_field_json(first_load, dump1_path)
+
+    second_load = load_field_json(dump1_path)
+    dump2_path = tmp_path / "pivots_dump2.json"
+    dump_field_json(second_load, dump2_path)
+
+    assert dump1_path.read_bytes() == dump2_path.read_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Error path: missing file must mention --migrate
 # ---------------------------------------------------------------------------
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import copy
 import types
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 
@@ -43,6 +43,12 @@ class FieldModel:
         ``(node_a, node_b)``.
     :param obstacles: Axis-aligned rectangles as
         ``(x_min, y_min, x_max, y_max, kind)``.
+    :param pivot_turns: Per-turn single-wheel pivots, each as a directed
+        ``(u, v, w)`` node-name triple (arrive from ``u``, pivot at ``v``,
+        leave to ``w``). The editor has no GUI control for these; the field
+        is carried verbatim so an open -> save round-trip preserves any
+        pivots authored directly in ``field_data.json``. Defaults to an empty
+        list when the JSON omits the optional ``pivot_turns`` key.
     """
 
     # Ordered list of top-level JSON keys.  ``to_json_dict`` produces keys in
@@ -59,6 +65,7 @@ class FieldModel:
         "NODE_TYPES",
         "LINE_SEGMENTS",
         "BLIND_EDGES",
+        "pivot_turns",
         "OBSTACLES",
     )
 
@@ -73,6 +80,10 @@ class FieldModel:
     line_segments: list[tuple[str, str]]
     blind_edges: list[tuple[str, str]]
     obstacles: list[tuple[float, float, float, float, str]]
+    # Optional, preserved-only (no GUI control). Defaulted so existing call
+    # sites that construct a FieldModel without pivots stay valid; placed last
+    # so the defaulted field follows the required ones.
+    pivot_turns: list[tuple[str, str, str]] = field(default_factory=list)
 
     # ------------------------------------------------------------------
     # Snapshot / restore (used by the undo/redo stack)
@@ -114,6 +125,7 @@ class FieldModel:
         self.line_segments = copy.deepcopy(snap.line_segments)
         self.blind_edges = copy.deepcopy(snap.blind_edges)
         self.obstacles = copy.deepcopy(snap.obstacles)
+        self.pivot_turns = copy.deepcopy(snap.pivot_turns)
 
     # ------------------------------------------------------------------
     # JSON round-trip
@@ -146,8 +158,13 @@ class FieldModel:
         ``NODE_TYPES``      ``node_types``
         ``LINE_SEGMENTS``   ``line_segments``
         ``BLIND_EDGES``     ``blind_edges``
+        ``pivot_turns``     ``pivot_turns``
         ``OBSTACLES``       ``obstacles``
         =================== ====================
+
+        ``pivot_turns`` is optional (older JSON files predate it): an absent
+        key maps to an empty list, and each present 3-array becomes a
+        ``(u, v, w)`` tuple, mirroring the ``LINE_SEGMENTS`` treatment.
 
         :param data: Dict as returned by
             :func:`~tools.path_planner.editor.loader.load_field_json`.
@@ -170,6 +187,7 @@ class FieldModel:
             line_segments=[tuple(seg) for seg in data["LINE_SEGMENTS"]],
             blind_edges=[tuple(edge) for edge in data["BLIND_EDGES"]],
             obstacles=[tuple(obs) for obs in data["OBSTACLES"]],
+            pivot_turns=[tuple(turn) for turn in data.get("pivot_turns", [])],
         )
 
     # ------------------------------------------------------------------
@@ -193,8 +211,16 @@ class FieldModel:
         validator treats a missing ``EDGES`` as benign (backward-compatible
         with pre-PR4 fixtures).
 
-        :return: A :class:`types.SimpleNamespace` with exactly the 11
-            attributes ``validator._REQUIRED_ATTRS`` lists.
+        ``PIVOT_TURNS`` IS exposed: the model persists it via
+        :meth:`to_json_dict`, so the proxy must carry it too or
+        :func:`validator._validate_pivot_turns` hits its
+        ``getattr(..., 'PIVOT_TURNS', None)`` early-return and the editor's
+        Save silently skips every pivot geometry rule (the docstring's "full
+        PR3/PR4 schema rules" promise would not hold for pivots).
+
+        :return: A :class:`types.SimpleNamespace` with the 11 required
+            attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
+            ``PIVOT_TURNS``.
         """
         return types.SimpleNamespace(
             NODES=self.nodes,
@@ -208,6 +234,7 @@ class FieldModel:
             START_HEADING_DEG=self.start_heading_deg,
             FIELD_MM=self.field_mm,
             MAP_PNG=self.map_png,
+            PIVOT_TURNS=self.pivot_turns,
         )
 
     def validate(self) -> None:
@@ -242,14 +269,19 @@ class FieldModel:
 
         - Top-level keys follow ``_JSON_KEY_ORDER`` exactly.
         - ``NODES`` and ``NODE_TYPES`` dict keys are sorted alphabetically.
-        - ``LINE_SEGMENTS``, ``BLIND_EDGES``, and ``OBSTACLES`` preserve the
-          original list order (spatial order is semantically meaningful for
-          the renderer).
+        - ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``pivot_turns``, and
+          ``OBSTACLES`` preserve the original list order (spatial / authoring
+          order is semantically meaningful for the renderer and the planner).
+        - ``pivot_turns`` is OPTIONAL: it is emitted (in its canonical slot,
+          between ``BLIND_EDGES`` and ``OBSTACLES``) only when non-empty. A
+          pivot-free field omits the key entirely, matching the loader's
+          ``dump_field_json`` "absent stays absent" round-trip so a save
+          through the model produces no spurious ``pivot_turns: []`` diff.
 
         :return: A :class:`dict` whose values are JSON-native types (``str``,
             ``float``, ``int``, ``list``, ``dict``).  No tuples are present.
         """
-        return {
+        result = {
             "FIELD_MM": list(self.field_mm),
             "MAP_PNG": self.map_png,
             "ROBOT_RADIUS_CM": float(self.robot_radius_cm),
@@ -266,5 +298,8 @@ class FieldModel:
             },
             "LINE_SEGMENTS": [list(seg) for seg in self.line_segments],
             "BLIND_EDGES": [list(edge) for edge in self.blind_edges],
-            "OBSTACLES": [list(obs) for obs in self.obstacles],
         }
+        if self.pivot_turns:
+            result["pivot_turns"] = [list(turn) for turn in self.pivot_turns]
+        result["OBSTACLES"] = [list(obs) for obs in self.obstacles]
+        return result

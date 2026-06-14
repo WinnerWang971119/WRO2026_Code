@@ -25,11 +25,6 @@ compiler, and header writer):
 
 * ``primitive_mode`` : opaque string tag selecting the per-edge primitive
   pipeline mode. Not validated here.
-* ``pre_turn_mode``  : opaque string tag selecting the pre-turn alignment
-  pipeline mode. Not validated here.
-* ``pivot``          : integer (the value of a :class:`Pivot` member).
-  Marks the turn entering this edge as a single-wheel pivot. Absent =
-  inherit / no pivot.
 * ``direction_override`` : integer (the value of a
   :class:`pipeline_config.DirectionMode` member, 1 = FORCE_FORWARD,
   2 = FORCE_REVERSE). Forces forward/reverse traversal of this directed
@@ -65,7 +60,6 @@ from __future__ import annotations
 
 import math
 import warnings
-from enum import IntEnum
 from typing import Iterable, List, Sequence, Tuple
 
 import networkx as nx
@@ -86,34 +80,14 @@ EDGE_BLIND = "BLIND"
 EDGE_PROJECTION = "PROJECTION"
 
 
-class Pivot(IntEnum):
-    """Single-wheel pivot selector for the turn entering an edge.
-
-    This is the single source of truth for the pivot vocabulary used
-    across :mod:`tools.path_planner.field_data`,
-    :mod:`tools.path_planner.validator`,
-    :mod:`tools.path_planner.planner`, and
-    :mod:`tools.path_planner.header_writer`. Those modules import
-    :class:`Pivot` from here so the integer encoding cannot drift.
-
-    The values are written to the compiled header verbatim, so the
-    integer assignments are part of the wire contract and must not be
-    renumbered without bumping the header schema.
-    """
-
-    NONE = 0   # default -- counter-rotation turn (PIPELINE_CONFIG.turn applies)
-    LEFT = 1   # single-wheel pivot around the LEFT wheel
-    RIGHT = 2  # single-wheel pivot around the RIGHT wheel
-
-
 __all__ = [
     "EDGE_LINE",
     "EDGE_BLIND",
     "EDGE_PROJECTION",
-    "Pivot",
     "inflate_obstacles",
     "edge_clips_obstacle",
     "build_graph",
+    "directed_edge_heading",
 ]
 
 
@@ -129,6 +103,29 @@ def _reverse_heading(heading_deg: float) -> float:
 
 def _euclid(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     return math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+
+
+def directed_edge_heading(graph: "nx.DiGraph", u: str, v: str) -> float:
+    """Return the heading of the directed edge ``u -> v`` in degrees.
+
+    Reads the ``heading_deg`` attribute stored on the edge by
+    :func:`build_graph`, which respects any ``heading_deg`` override
+    supplied via ``field_data.EDGES``.  The heading follows the module
+    convention: ``[0, 360)``; ``0 deg`` = East (+x); CCW positive.
+
+    This is the single reusable source for all downstream heading
+    arithmetic (planner ``build_pivot_turns``, validator
+    ``_validate_pivot_turns``).  Callers must **not** re-implement the
+    ``atan2`` / ``% 360`` / ``+ 180`` logic -- subtract this helper's
+    return values and pass the difference through a normalizer.
+
+    :param graph: directed graph returned by :func:`build_graph`.
+    :param u:     source node name.
+    :param v:     destination node name.
+    :return:      heading in ``[0, 360)`` degrees.
+    :raises KeyError: if the edge ``u -> v`` does not exist in *graph*.
+    """
+    return float(graph[u][v]["heading_deg"])
 
 
 def inflate_obstacles(
@@ -194,18 +191,14 @@ def edge_clips_obstacle(
 # entry. Safe to copy onto both directions of a bidirectional pair.
 _BIDIRECTIONAL_OPTIONAL_KEYS = ("primitive_mode",)
 
-# Direction-dependent: ``pre_turn_mode`` selects the alignment for the
-# turn that PRECEDES this edge, ``pivot`` selects which wheel the
-# chassis pivots around when ENTERING this edge, and ``direction`` forces
-# forward/reverse traversal of the directed edge. All three depend on
-# which end the chassis is approaching from, so they must NOT be copied
-# to the reverse edge (a one-way override would otherwise silently steer
-# the robot with the wrong wheel pattern -- or, for ``direction``, force
-# the wrong traversal sense -- on backward traversal). This is the
-# Codex P1 invariant: asymmetric overrides stay on the forward (u -> v)
-# edge only; to override the reverse direction too, the author must add
-# a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
-_DIRECTIONAL_OPTIONAL_KEYS = ("pre_turn_mode", "direction")
+# Direction-dependent: ``direction`` forces forward/reverse traversal of
+# the directed edge. It depends on which end the chassis is approaching
+# from, so it must NOT be copied to the reverse edge (a one-way override
+# would otherwise force the wrong traversal sense on backward traversal).
+# This is the Codex P1 invariant: the asymmetric override stays on the
+# forward (u -> v) edge only; to override the reverse direction too, the
+# author must add a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
+_DIRECTIONAL_OPTIONAL_KEYS = ("direction",)
 
 # String-to-integer mapping for the ``direction`` per-edge override.
 # Header_writer (T3) reads the integer via ``edge_attrs.get("direction_override")``
@@ -240,12 +233,11 @@ def _extract_bidirectional_attrs(options: dict) -> dict:
 def _extract_directional_attrs(options: dict) -> dict:
     """Pull direction-dependent metadata out of a source-edge options dict.
 
-    These attributes (``pre_turn_mode``, ``pivot``, ``direction``)
-    describe behavior that depends on which end is the entry, so the
-    caller must apply the returned dict ONLY to the forward (u -> v)
-    directed edge -- never to the reverse. The integer encoding of
-    ``pivot`` and the string-to-integer mapping of ``direction`` are
-    stored so downstream consumers don't have to import the IntEnums.
+    This attribute (``direction``) describes behavior that depends on
+    which end is the entry, so the caller must apply the returned dict
+    ONLY to the forward (u -> v) directed edge -- never to the reverse.
+    The string-to-integer mapping of ``direction`` is stored so
+    downstream consumers don't have to import the IntEnum.
 
     ``direction`` is translated from the field-data string vocabulary
     (``"front"`` / ``"rear"``) into the wire integer (1 / 2) and stored
@@ -257,13 +249,6 @@ def _extract_directional_attrs(options: dict) -> dict:
     :return: dict of attributes to splat onto the forward edge only.
     """
     forwarded: dict = {}
-    for key in _DIRECTIONAL_OPTIONAL_KEYS:
-        if key == "direction":
-            continue  # handled below with string->integer translation
-        if key in options:
-            forwarded[key] = options[key]
-    if "pivot" in options:
-        forwarded["pivot"] = int(options["pivot"])
     if "direction" in options:
         # Validator (T4) has already constrained this to "front" or "rear".
         forwarded["direction_override"] = _DIRECTION_STR_TO_INT[options["direction"]]
@@ -285,24 +270,23 @@ def _emit_directed_pair(
 
     * **Bidirectional** (``primitive_mode``): describes the segment
       itself; copied onto both directions.
-    * **Directional** (``pre_turn_mode``, ``pivot``, ``direction``):
-      describes behavior that depends on which end is the entry. Applied
-      ONLY to the forward (u -> v) edge. Mirroring these to the reverse
-      edge would steer the chassis with the wrong wheel pattern on
-      backward traversal (Codex P1). To override the reverse direction
-      too, add a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
+    * **Directional** (``direction``): describes behavior that depends on
+      which end is the entry. Applied ONLY to the forward (u -> v) edge.
+      Mirroring it to the reverse edge would force the wrong traversal
+      sense on backward traversal (Codex P1). To override the reverse
+      direction too, add a separate ``EDGES`` entry with ``u`` and ``v``
+      swapped.
 
     .. warning::
        **A directional override is SINGLE-DIRECTION and silently skipped
-       on reverse traversal.** ``direction_override`` (and ``pivot`` /
-       ``pre_turn_mode``) lands on the u -> v edge only; the reverse
-       (v -> u) edge here gets just the symmetric ``primitive_mode``.
-       Because every pair is bidirectional and Dijkstra picks whichever
-       direction is shorter, ``NEXT_HOP`` may route v -> u -- in which
-       case the override does NOT apply and the hop falls back to
-       ``PIPELINE_CONFIG.direction`` with no warning. If you need the
-       override in both senses, author a second ``EDGES`` entry with
-       ``u`` and ``v`` swapped (see finding #40).
+       on reverse traversal.** ``direction_override`` lands on the u -> v
+       edge only; the reverse (v -> u) edge here gets just the symmetric
+       ``primitive_mode``. Because every pair is bidirectional and
+       Dijkstra picks whichever direction is shorter, ``NEXT_HOP`` may
+       route v -> u -- in which case the override does NOT apply and the
+       hop falls back to ``PIPELINE_CONFIG.direction`` with no warning.
+       If you need the override in both senses, author a second ``EDGES``
+       entry with ``u`` and ``v`` swapped (see finding #40).
 
     Geometric attributes (``distance_cm``, ``heading_deg``) default to
     the Euclidean / atan2 of ``pu`` and ``pv``. When ``options`` supplies
@@ -361,7 +345,7 @@ def build_graph(field_data) -> nx.DiGraph:
        ``field_data.EDGES`` (if the attribute exists). Each dict supplies
        ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`,
        :data:`EDGE_PROJECTION`), ``u``, and ``v``, plus any of the
-       optional keys ``primitive_mode``, ``pre_turn_mode``, ``pivot``
+       optional keys ``primitive_mode``, ``direction``
        which are forwarded verbatim to the resulting directed edges.
        Same obstacle-clip drop applies; PROJECTION drops warn the same
        way BLIND_EDGES drops do because the routing intent is explicit.
@@ -418,8 +402,8 @@ def build_graph(field_data) -> nx.DiGraph:
         _emit_directed_pair(g, u, v, pu, pv, EDGE_BLIND)
 
     # Optional rich-edge list. Absent on legacy fixtures; present once T4
-    # introduces example PROJECTION / pivot edges. Iteration order is
-    # preserved so deterministic graph output stays diff-friendly.
+    # introduces example PROJECTION / direction-override edges. Iteration
+    # order is preserved so deterministic graph output stays diff-friendly.
     rich_edges = getattr(field_data, "EDGES", None)
     if rich_edges is not None:
         if not isinstance(rich_edges, (list, tuple)):
@@ -472,13 +456,13 @@ def build_graph(field_data) -> nx.DiGraph:
                 )
                 continue
             # AUTHORING WARNING (finding #40): a directional override on this
-            # EDGES entry -- ``direction`` ("front"/"rear"), ``pivot``, or
-            # ``pre_turn_mode`` -- applies ONLY to the u -> v hop. The reverse
-            # (v -> u) edge below inherits just the symmetric ``primitive_mode``.
-            # Edges are bidirectional and Dijkstra picks the shorter sense, so
-            # if NEXT_HOP routes v -> u the override is SILENTLY ignored and the
-            # hop falls back to PIPELINE_CONFIG.direction. To force the override
-            # on the reverse hop too, add a second EDGES entry with u/v swapped.
+            # EDGES entry -- ``direction`` ("front"/"rear") -- applies ONLY to
+            # the u -> v hop. The reverse (v -> u) edge below inherits just the
+            # symmetric ``primitive_mode``. Edges are bidirectional and Dijkstra
+            # picks the shorter sense, so if NEXT_HOP routes v -> u the override
+            # is SILENTLY ignored and the hop falls back to
+            # PIPELINE_CONFIG.direction. To force the override on the reverse hop
+            # too, add a second EDGES entry with u/v swapped.
             _emit_directed_pair(g, u, v, pu, pv, edge_type, options=edge)
 
     for node in g.nodes():

@@ -49,9 +49,12 @@ from tools.path_planner.pipeline_config import (
     DirectionMode,
     LineMode,
     ProjectionMode,
-    TurnMode,
 )
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import (
+    compute_all_pairs_next_hop,
+    compute_pivot_compensation,
+    parse_track_cm_from_config,
+)
 from tools.path_planner.sim import (
     LocalizationSim,
     PathTrackerSim,
@@ -70,15 +73,16 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
+    LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     StopAtLine,
     resolve_blind_mode,
     resolve_direction,
     resolve_line_mode,
-    resolve_pre_turn_mode,
     resolve_projection_mode,
     resolve_stop_at_line,
 )
 from tools.path_planner.tests.fixtures import bidirectional_field_data
+from tools.path_planner.tests.fixtures import pivot_field_data
 
 _POSITION_TOL_CM: float = 0.1
 
@@ -107,13 +111,17 @@ _FIELD_ATTRS = (
 def _clone_field_data() -> SimpleNamespace:
     """Return a SimpleNamespace mirror of the toy field MINUS the EDGES list.
 
-    Stripping EDGES keeps the demo PROJECTION + pivot fixtures out of the
-    baseline test graph so ``apply_pivot_compensations`` does not abort on
-    the C->E pivot landing in a 4-out-degree node. New tests that need to
-    exercise PROJECTION or per-edge overrides build their own minimal
-    fixtures rather than mutating the shared toy field.
+    Stripping EDGES keeps the demo PROJECTION edges out of the baseline test
+    graph. New tests that need to exercise PROJECTION or per-edge overrides
+    build their own minimal fixtures rather than mutating the shared toy field.
+
+    ``PIVOT_TURNS`` is added empty: the toy field declares no pivots, but the sim
+    constructor resolves ``field_data.PIVOT_TURNS`` against its graph on
+    construction (ADR-036), so the attribute must exist. The pivot-bearing
+    fixtures live in :mod:`tools.path_planner.tests.fixtures.pivot_field_data`.
     """
     snapshot = {attr: copy.deepcopy(getattr(toy_field_data, attr)) for attr in _FIELD_ATTRS}
+    snapshot["PIVOT_TURNS"] = []
     return SimpleNamespace(**snapshot)
 
 
@@ -146,7 +154,7 @@ def fresh_sim(toy_field, toy_graph_and_table):
 
 
 def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
-    """Insert ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` after each LINE primitive.
+    """Insert the per-hop ``(ACT_LINE_OVERSHOOT, offset)`` after each LINE primitive.
 
     The runtime sim (post-T9) emits a LINE_OVERSHOOT step after every
     EDGE_LINE traversal so the wheel axle (not the line sensor) lands on
@@ -155,9 +163,20 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     against ``compile_path``'s output we must re-add the LINE_OVERSHOOT
     steps in the same positions the sim emits them.
 
+    The overshoot advance is the axle offset of the BOARD that LED the hop,
+    so the helper picks the offset per primitive (mirroring the sim, which
+    reads ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` for a REAR hop and
+    ``LINE_SENSOR_AXLE_OFFSET_CM`` for a FRONT hop):
+
+    * FRONT LINE hop -> ``ACT_FOLLOW_INT`` -> overshoot ``LINE_SENSOR_AXLE_OFFSET_CM``.
+    * REAR LINE hop  -> ``ACT_LINE_REVERSE`` -> overshoot ``LINE_SENSOR_AXLE_OFFSET_REAR_CM``.
+
     Post-T12, EDGE_LINE traversals on REAR hops emit ``ACT_LINE_REVERSE``
     instead of ``ACT_FOLLOW_INT`` but still trigger the LINE_OVERSHOOT
-    FSM transition; the helper therefore matches either primitive name.
+    FSM transition; the helper therefore matches either primitive name and
+    emits that hop's own board offset (ADR-035 reconciliation: FRONT 12.02
+    cm, REAR 7.68 cm -- previously both stale 5.0, which masked the
+    per-board distinction and only worked while FRONT == REAR).
 
     Parity limitation — pass-through fixtures only:
 
@@ -185,8 +204,12 @@ def _interleave_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     out: List[Primitive] = []
     for prim in primitives:
         out.append(prim)
-        if prim[0] in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
+        if prim[0] == ACT_FOLLOW_INT:
+            # FRONT line hop: front board led, so roll the FRONT axle offset.
             out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM))
+        elif prim[0] == ACT_LINE_REVERSE:
+            # REAR line hop: rear board led, so roll the REAR axle offset.
+            out.append((ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM))
     return out
 
 
@@ -350,14 +373,16 @@ def _minimal_field(nodes: dict, start_node: str, start_heading_deg: float):
     """Return a SimpleNamespace usable in place of field_data for the sim.
 
     The returned object exposes the attribute surface the sim consumes
-    (``NODES`` + ``START_NODE`` + ``START_HEADING_DEG``). We only need
-    this thin shape because :class:`PathTrackerSim` doesn't reach into the
-    other field-data attributes once the graph + next-hop table are built.
+    (``NODES`` + ``START_NODE`` + ``START_HEADING_DEG`` + an empty
+    ``PIVOT_TURNS``). :class:`PathTrackerSim` resolves ``field_data.PIVOT_TURNS``
+    against its graph on construction (ADR-036), so the attribute must exist even
+    on a pivot-free synthetic field; these minimal graphs declare no pivots.
     """
     return SimpleNamespace(
         NODES=nodes,
         START_NODE=start_node,
         START_HEADING_DEG=start_heading_deg,
+        PIVOT_TURNS=[],
     )
 
 
@@ -581,40 +606,14 @@ def test_resolve_projection_mode_default_falls_back_to_pipeline_config():
     assert resolve_projection_mode(edge_fast) == ProjectionMode.FAST
 
 
-def test_resolve_pre_turn_mode_default_falls_back_to_pipeline_config():
-    """resolve_pre_turn_mode: missing/DEFAULT override -> PIPELINE_CONFIG.turn, concrete -> as-is.
-
-    Note that resolve_pre_turn_mode looks up the 'pre_turn_mode' attr (not
-    'primitive_mode'), since pre-turn mode and per-primitive mode are
-    independent overrides on the same edge.
-    """
-    edge_missing: dict = {}
-    assert resolve_pre_turn_mode(edge_missing) == PIPELINE_CONFIG.turn
-
-    edge_default = {"pre_turn_mode": TurnMode.DEFAULT}
-    assert resolve_pre_turn_mode(edge_default) == PIPELINE_CONFIG.turn
-
-    edge_pivot_left = {"pre_turn_mode": TurnMode.PIVOT_LEFT}
-    assert resolve_pre_turn_mode(edge_pivot_left) == TurnMode.PIVOT_LEFT
-
-    edge_pivot_right = {"pre_turn_mode": TurnMode.PIVOT_RIGHT}
-    assert resolve_pre_turn_mode(edge_pivot_right) == TurnMode.PIVOT_RIGHT
-
-
-def test_resolve_line_mode_ignores_pre_turn_mode_attr():
-    """An edge that ONLY sets pre_turn_mode must not influence line-mode resolution."""
-    edge_only_pre_turn = {"pre_turn_mode": TurnMode.PIVOT_LEFT}
-    assert resolve_line_mode(edge_only_pre_turn) == PIPELINE_CONFIG.line
-
-
-def test_resolve_pre_turn_mode_ignores_primitive_mode_attr():
-    """An edge that ONLY sets primitive_mode must not influence pre-turn-mode resolution."""
-    edge_only_primitive = {"primitive_mode": LineMode.FAST}
-    assert resolve_pre_turn_mode(edge_only_primitive) == PIPELINE_CONFIG.turn
-
-
 def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph_and_table):
-    """PathTrackerSim.resolve_*_mode instance methods mirror the module-level helpers."""
+    """PathTrackerSim.resolve_*_mode instance methods mirror the module-level helpers.
+
+    ADR-036 removed the per-edge ``pre_turn_mode`` override (and its
+    ``resolve_pre_turn_mode`` helper): the pivot wheel is now resolved per turn
+    from the ``PivotTurnRecord`` table, not an edge field. Only the surviving
+    per-edge mode passthroughs (line / blind / projection) are checked here.
+    """
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
     sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
@@ -622,12 +621,10 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
     edge_line_fast = {"primitive_mode": LineMode.FAST}
     edge_blind_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
     edge_proj_slow = {"primitive_mode": ProjectionMode.SLOW}
-    edge_turn_pivot = {"pre_turn_mode": TurnMode.PIVOT_RIGHT}
 
     assert sim.resolve_line_mode(edge_line_fast) == LineMode.FAST
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
     assert sim.resolve_projection_mode(edge_proj_slow) == ProjectionMode.SLOW
-    assert sim.resolve_pre_turn_mode(edge_turn_pivot) == TurnMode.PIVOT_RIGHT
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +773,14 @@ def _make_bidir_sim(fd):
 
     The fixture namespace carries build_graph() and build_next_hop()
     factory attributes mirroring the collinear_4node pattern.
+
+    The bidirectional fixtures predate the per-turn pivot model and expose no
+    ``PIVOT_TURNS`` attribute, but :class:`PathTrackerSim` resolves it on
+    construction (ADR-036). These fields declare no pivots, so default it empty
+    here rather than editing the shared bidirectional fixture module.
     """
+    if not hasattr(fd, "PIVOT_TURNS"):
+        fd.PIVOT_TURNS = []
     graph = fd.build_graph()
     next_hop = fd.build_next_hop()
     chassis = VirtualChassis.from_field_data(fd)
@@ -1047,6 +1051,7 @@ def test_bidir_tc10_blind_edge_rear_emits_blind_reverse():
         NODES=nodes,
         START_NODE="A",
         START_HEADING_DEG=0.0,
+        PIVOT_TURNS=[],
     )
     g = nx.DiGraph()
     g.add_node("A")
@@ -1106,6 +1111,7 @@ def test_bidir_tc11_projection_edge_rear_emits_projection_reverse():
         NODES=nodes,
         START_NODE="A",
         START_HEADING_DEG=0.0,
+        PIVOT_TURNS=[],
     )
     g = nx.DiGraph()
     g.add_node("A")
@@ -1192,6 +1198,7 @@ def test_bidir_tc18_compiler_sim_parity_front_only():
         NODES=nodes,
         START_NODE="A",
         START_HEADING_DEG=0.0,
+        PIVOT_TURNS=[],
     )
     g = nx.DiGraph()
     for name, (x, y) in nodes.items():
@@ -1230,7 +1237,9 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
     fixture where compiler and sim must produce the same sequence:
         (ACT_TURN_REL, 180.0)                   -- turn to face 180deg (body heading for REAR)
         (ACT_LINE_REVERSE, 'B', LineMode.NORMAL) -- REAR traverse
-        (ACT_LINE_OVERSHOOT, 5.0)                -- sim-only overshoot step
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM)  -- sim-only overshoot step
+                                                 -- (7.68 cm: a REAR hop rolls the REAR
+                                                 --  board's own axle offset, ADR-035)
 
     Verifies the TC18 contract for the REAR case.
     """
@@ -1239,6 +1248,7 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
         NODES=nodes,
         START_NODE="A",
         START_HEADING_DEG=0.0,
+        PIVOT_TURNS=[],
     )
     g = nx.DiGraph()
     g.add_node("A")
@@ -1323,6 +1333,7 @@ def _make_three_hop_sim(
         NODES=nodes,
         START_NODE="A",
         START_HEADING_DEG=start_heading_deg,
+        PIVOT_TURNS=[],
     )
 
     g = nx.DiGraph()
@@ -1962,3 +1973,439 @@ def test_resolve_line_mode_string_name_end_to_end_via_sim():
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
     ]
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# Per-turn single-wheel pivot compensation (ADR-036, issue #44) -- sim parity
+# (TC16 - TC21)
+#
+# These replace the per-edge ADR-035 pivot tests. A pivot is now a property of a
+# 3-node turn ``(u, v, w)`` declared in ``field_data.PIVOT_TURNS`` -- it fires
+# only when the route takes that turn. The sim resolves each fixture's pivots
+# from ``field_data.PIVOT_TURNS`` against its own graph
+# (``build_pivot_turns(self._graph, pivot_turns=...)``) and applies the
+# departing + approaching trims via the ``_pending_pivot`` latch in
+# ``_walk_hops`` -- a byte-for-byte mirror of ``PathTracker._onPlanNextHop``.
+#
+# Geometry note (load-bearing, carried over from the ADR-035 tests):
+# :class:`VirtualChassis` models a turn as a pure in-place rotation (zero
+# translation), so for a PIVOT hop the trimmed drives leave the point-model
+# chassis ``delta`` short on the incoming leg AND ``delta`` short on the outgoing
+# leg. The firmware closes that residual with the pivot maneuver's OWN physical
+# translation (``delta`` along the inbound heading to reach ``v``, then ``delta``
+# along the outbound heading of over-travel past ``v``), which the point-sim does
+# not replay. So the drift-is-zero acceptance adds that documented physical pivot
+# translation back to the sim's point position -- once per pivot the route took
+# -- and checks the axle lands on the node within ``_POSITION_TOL_CM``. The
+# load-bearing firmware-parity contract -- the adjacent drives trimmed by
+# ``delta`` -- is asserted DIRECTLY on the emitted primitive payloads. We never
+# re-introduce a per-junction offset into the sim and never relax
+# ``_POSITION_TOL_CM``.
+#
+# Every expected ``delta`` is sourced from
+# ``compute_pivot_compensation(theta, track_cm)`` -- the SAME closed form the
+# planner bakes into each ``PivotTurnRecord`` -- never a second hard-coded
+# formula (issue #44, TC2 discipline).
+#
+# Fixtures: tools/path_planner/tests/fixtures/pivot_field_data.py
+# Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim
+#   ._walk_hops (per-turn latch/carry) / ._pivot_trim_distance / .go_to /
+#   .step_through.
+# ===========================================================================
+
+# Competition chassis track (cm): Config::TRACK_MM = 180 mm. The fixtures and the
+# sim both resolve this from the firmware header (parse_track_cm_from_config), so
+# the trims are byte-identical to the emitter's PIVOT_TURNS records.
+_PIVOT_TRACK_CM: float = parse_track_cm_from_config()
+
+# Turn magnitudes baked into the pivot fixtures (see pivot_field_data.py).
+_PIVOT_TURN_90_DEG: float = 90.0     # dead-reckon + chain fixtures (delta = 9.0 cm)
+_PIVOT_TURN_70_DEG: float = 70.0     # LINE-incoming fixture (delta ~= 6.30 cm)
+_PIVOT_TURN_120_DEG: float = 120.0   # auto-REAR fixture (delta ~= 15.59 cm)
+
+
+def _make_pivot_sim(field):
+    """Return a zeroed ``(sim, chassis, graph, next_hop)`` for a pivot fixture.
+
+    Builds the directed graph + all-pairs next-hop table from the fixture field
+    and constructs a :class:`PathTrackerSim` over them. The sim resolves the
+    field's ``PIVOT_TURNS`` against ``graph`` in its constructor, so the trims it
+    applies match the geometry the validator checked. The orphan-node
+    UserWarning a disconnected pivot cluster can raise is suppressed (the
+    fixtures are deliberately small single-route fields).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        graph, next_hop = pivot_field_data.build_graph_and_next_hop(field)
+    chassis = VirtualChassis.from_field_data(field)
+    sim = PathTrackerSim(field, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis, graph, next_hop
+
+
+def _pivot_corrected_position(chassis, delta, pivot_legs):
+    """Return the sim point-position plus each pivot's physical translation.
+
+    The point-model :class:`VirtualChassis` rotates in place, so every pivot hop
+    the route took leaves it ``delta`` short along that pivot's inbound heading
+    and ``delta`` short along its outbound heading. The firmware's pivot maneuver
+    physically translates the axle by exactly that. Add it back -- once per pivot
+    the route traversed -- to recover the axle's true landing for the drift
+    cross-check.
+
+    :param chassis: the sim chassis after the route completed.
+    :param delta: the per-pivot over-travel (all fixtures use one turn magnitude
+        per route, so a single ``delta`` covers every pivot on the route).
+    :param pivot_legs: list of ``(inbound_heading_deg, outbound_heading_deg)``
+        pairs, one per pivot node the route turned through, in route order.
+    :return: the drift-corrected ``(x_cm, y_cm)`` axle position.
+    """
+    px, py = chassis.x_cm, chassis.y_cm
+    for hdg_in_deg, hdg_out_deg in pivot_legs:
+        px += delta * math.cos(math.radians(hdg_in_deg))
+        px += delta * math.cos(math.radians(hdg_out_deg))
+        py += delta * math.sin(math.radians(hdg_in_deg))
+        py += delta * math.sin(math.radians(hdg_out_deg))
+    return px, py
+
+
+def test_pivot_fixtures_are_legal_fields():
+    """Every pivot fixture passes build_graph + validate (the legality gate).
+
+    The validator now enforces the per-turn pivot regime / angle / budget rules
+    (T5), so a fixture that passes ``validate`` is a legal field by
+    construction. The orphan-node UserWarning a small disconnected fixture may
+    raise is suppressed; ``validate`` itself must not raise.
+    """
+    from tools.path_planner.validator import validate
+
+    fields = pivot_field_data.all_fields()
+    assert len(fields) == 4   # guard against an empty sweep vacuously passing
+    for field in fields:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            validate(field)               # must not raise
+            build_graph(field)            # must build cleanly
+
+
+# ---------------------------------------------------------------------------
+# TC16 -- dead-reckon pivot reached and left by dead-reckon: both drives trimmed
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc16_dead_reckon_incoming_and_outgoing_both_trimmed():
+    """TC16: a BLIND->BLIND pivot trims BOTH the approach and the departure; drift ~ 0.
+
+    On the route ``U -> V -> W`` the declared pivot ``(U, V, W)`` (90 deg right
+    turn) is reached by dead-reckon (the BLIND approach ``U -> V``) and left by
+    dead-reckon (the BLIND departure ``V -> W``). The latch in ``_walk_hops``:
+
+    * trims the approach drive to ``L_uv - delta`` (``_approaching_pivot``),
+    * carries ``delta`` one hop, and
+    * trims the departure drive to ``L_vw - delta`` (``_departing_pivot``).
+
+    Both emitted ``ACT_FORWARD`` payloads carry the trimmed distances (the
+    load-bearing per-turn dispatch contract). The point-sim lands ``delta`` short
+    on each leg; adding the pivot maneuver's physical translation recovers node
+    ``W`` with ZERO residual within ``_POSITION_TOL_CM``.
+    """
+    field = pivot_field_data.make_dead_reckon_pivot_field()
+    sim, chassis, _graph, _next_hop = _make_pivot_sim(field)
+    delta = compute_pivot_compensation(_PIVOT_TURN_90_DEG, _PIVOT_TRACK_CM)
+
+    prims = sim.go_to("W")
+
+    # Both adjacent dead-reckon drives are trimmed by delta (the contract).
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(60.0 - delta, abs=1e-9)),    # U->V approach trim
+        (ACT_TURN_REL, pytest.approx(-_PIVOT_TURN_90_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(60.0 - delta, abs=1e-9)),    # V->W departure trim
+    ]
+
+    # Drift ~ 0: the point-sim is delta short on each leg of the single pivot at
+    # V (inbound U->V heading 90 deg, outbound V->W heading 0 deg); the pivot's
+    # own physical translation closes it, landing the axle on W.
+    px, py = _pivot_corrected_position(chassis, delta, [(90.0, 0.0)])
+    wx, wy = field.NODES["W"]
+    assert math.hypot(px - wx, py - wy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "W"
+
+
+# ---------------------------------------------------------------------------
+# TC17 -- a route through the pivot node that does NOT take the declared turn
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc17_non_pivot_route_through_pivot_node_drives_full_distance():
+    """TC17: routing through pivot node V WITHOUT taking ``(U, V, W)`` drives FULL distance.
+
+    The same field declares the pivot ``(U, V, W)``, but node ``V`` has a SECOND
+    continuation ``V -> Y`` that is collinear with ``U -> V`` (turn 0 deg) and is
+    NOT a declared pivot. Routing ``U -> Y`` passes through the pivot node ``V``
+    without taking the ``(U, V, W)`` turn, so the lookahead ``find_pivot_turn(U,
+    V, Y)`` misses on the approach hop and ``find_pivot_turn(V, Y, None)`` misses
+    on the departure: NO trim is applied and both BLIND hops drive their FULL
+    60 cm. This proves the per-turn pivot "fires only when the route takes that
+    turn" guarantee at the sim level.
+    """
+    field = pivot_field_data.make_dead_reckon_pivot_field()
+    sim, chassis, _graph, next_hop = _make_pivot_sim(field)
+
+    # Sanity: the route really does pass through the pivot node V.
+    assert walk_next_hop(next_hop, "U", "Y") == ["U", "V", "Y"]
+
+    prims = sim.go_to("Y")
+
+    # Full distance on BOTH hops -- no delta subtracted on a non-pivot route, and
+    # the collinear V->Y continuation needs no ACT_TURN_REL.
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
+    ]
+    yx, yy = field.NODES["Y"]
+    assert math.hypot(chassis.x_cm - yx, chassis.y_cm - yy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "Y"
+
+
+# ---------------------------------------------------------------------------
+# TC18 -- LINE-incoming pivot: overshoot reduced by delta + outgoing trimmed
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc18_line_incoming_overshoot_reduced_and_outgoing_trimmed():
+    """TC18: a LINE-incoming pivot reduces the overshoot advance by delta and trims the outgoing hop.
+
+    On the route ``L0 -> L1 -> L2`` the pivot ``(L0, L1, L2)`` arrives over a
+    LINE edge (``L0 -> L1`` re-anchors on the junction line, so it cannot stop
+    short on its approach) and leaves over a BLIND edge. With a 70 deg turn at
+    track 18 cm, ``delta ~= 6.30`` cm, within the FRONT overshoot budget
+    (12.02 cm). The latch therefore:
+
+    * reduces the LINE_OVERSHOOT advance to ``LINE_SENSOR_AXLE_OFFSET_CM - delta``
+      (the axle settles delta short of L1 -- the ``_approaching_pivot`` read on
+      the LINE-incoming hop), and
+    * carries the same ``delta`` to the outgoing ``L1 -> L2`` BLIND hop, trimming
+      it to ``L_vw - delta`` (the next hop's ``_departing_pivot``).
+
+    Both adjacent corrections are asserted on the emitted primitive payloads.
+    """
+    field = pivot_field_data.make_line_incoming_pivot_field()
+    sim, chassis, _graph, _next_hop = _make_pivot_sim(field)
+    delta = compute_pivot_compensation(_PIVOT_TURN_70_DEG, _PIVOT_TRACK_CM)
+    # Within the FRONT overshoot budget (single-sourced) -- the validator accepts
+    # this; a 90 deg LINE-incoming pivot (delta = 9 < 12.02) would also fit, but
+    # 70 deg keeps the reduced overshoot comfortably positive.
+    assert delta <= LINE_SENSOR_AXLE_OFFSET_CM
+
+    prims = sim.go_to("L2")
+
+    # LINE incoming: FOLLOW_INT then a reduced LINE_OVERSHOOT (offset - delta),
+    # then the turn, then the outgoing BLIND hop trimmed by delta.
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, pytest.approx(LINE_SENSOR_AXLE_OFFSET_CM - delta, abs=1e-9)),
+        (ACT_TURN_REL, pytest.approx(_PIVOT_TURN_70_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),
+    ]
+    assert sim.localization.current_node() == "L2"
+
+
+def test_pivot_tc18_non_pivot_line_traversal_drives_full_overshoot():
+    """TC18 (control): the reverse LINE traversal of L1 (non-pivot) rolls the FULL overshoot.
+
+    The pivot ``(L0, L1, L2)`` is keyed on the forward turn only. Driving the
+    reverse LINE edge ``L1 -> L0`` -- a non-pivot traversal through the same line
+    node L1 -- rolls the FULL ``LINE_SENSOR_AXLE_OFFSET_CM`` overshoot with no
+    delta reduction, proving a non-pivot route through the same line node is
+    unaffected.
+    """
+    field = pivot_field_data.make_line_incoming_pivot_field()
+    # Re-seed at L1 facing back toward L0 (heading 180 deg) and drive L1 -> L0.
+    field.START_NODE = "L1"
+    field.START_HEADING_DEG = 180.0
+    sim, _chassis, _graph, _next_hop = _make_pivot_sim(field)
+
+    prims = sim.go_to("L0")
+
+    assert prims == [
+        (ACT_FOLLOW_INT, None),
+        (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
+    ]
+    assert sim.localization.current_node() == "L0"
+
+
+# ---------------------------------------------------------------------------
+# TC19 -- chained fitting pivots u->v->w->x land with ~0 residual
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc19_chained_fitting_pivots_land_with_zero_residual():
+    """TC19: the fitting chain ``U -> V -> W -> X`` (pivots at V and W) lands with ~0 residual.
+
+    Two declared pivots ``(U, V, W)`` and ``(V, W, X)`` (each a 90 deg right
+    turn, delta = 9 cm) chain on the shared dead-reckoned edge ``V -> W``: the
+    snapshot-before-overwrite latch makes the departing V-pivot trim and the
+    approaching W-pivot trim two DISTINCT resolved records, so the shared edge
+    nets ``length - delta_V - delta_W`` = ``60 - 9 - 9 = 42`` cm. The outer hops
+    each net ``60 - 9 = 51`` cm. Adding each pivot's physical translation lands
+    the axle on ``X`` with ZERO residual.
+    """
+    field = pivot_field_data.make_chained_pivot_field()
+    sim, chassis, _graph, _next_hop = _make_pivot_sim(field)
+    delta = compute_pivot_compensation(_PIVOT_TURN_90_DEG, _PIVOT_TRACK_CM)
+
+    prims = sim.go_to("X")
+
+    # U->V trimmed by delta; the SHARED V->W trimmed by delta on BOTH sides
+    # (length - 2*delta); W->X trimmed by delta.
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(60.0 - delta, abs=1e-9)),         # U->V (approach @ V)
+        (ACT_TURN_REL, pytest.approx(-_PIVOT_TURN_90_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(60.0 - 2.0 * delta, abs=1e-9)),   # V->W (depart V + approach W)
+        (ACT_TURN_REL, pytest.approx(-_PIVOT_TURN_90_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(60.0 - delta, abs=1e-9)),         # W->X (depart @ W)
+    ]
+
+    # Drift ~ 0: add each pivot's physical translation. Pivot @ V: inbound U->V
+    # 90 deg, outbound V->W 0 deg. Pivot @ W: inbound V->W 0 deg, outbound W->X
+    # 270 deg.
+    px, py = _pivot_corrected_position(chassis, delta, [(90.0, 0.0), (0.0, 270.0)])
+    xx, xy = field.NODES["X"]
+    assert math.hypot(px - xx, py - xy) < _POSITION_TOL_CM
+    assert sim.localization.current_node() == "X"
+
+
+# ---------------------------------------------------------------------------
+# TC20 -- a pivot hop the auto heuristic would resolve REAR is forced FRONT
+# ---------------------------------------------------------------------------
+
+
+def test_pivot_tc20_auto_rear_pivot_hop_is_forced_front_and_fires():
+    """TC20: an obtuse pivot whose departure hop auto-resolves REAR is forced FRONT.
+
+    On the route ``P -> Q -> R`` the pivot ``(P, Q, R)`` is an obtuse 120 deg
+    turn. After the FRONT approach ``P -> Q`` the chassis heading is 0 deg and the
+    departure edge ``Q -> R`` heads 120 deg, so the bidirectional auto heuristic
+    (|delta| = 120 deg > the 90 deg threshold, 2-board chassis) would resolve the
+    departure REAR. The FRONT-only pivot override in ``_walk_hops`` must flip it
+    back to FRONT and STILL fire the pivot trim:
+
+    * the departure ``Q -> R`` emits a FRONT ``ACT_FORWARD`` (trimmed by delta),
+      NEVER ``ACT_BLIND_REVERSE`` -- no silent downgrade to a counter-rotation;
+    * the approach ``P -> Q`` is also trimmed (it drives into the pivot node).
+
+    This is the load-bearing FRONT-only sim case. The skip+trace backstop stays a
+    should-be-impossible path.
+    """
+    field = pivot_field_data.make_auto_rear_pivot_field()
+    sim, chassis, graph, _next_hop = _make_pivot_sim(field)
+    delta = compute_pivot_compensation(_PIVOT_TURN_120_DEG, _PIVOT_TRACK_CM)
+
+    # Control: the SAME departure edge, resolved WITHOUT a pivot, auto-resolves
+    # REAR -- so the force-FRONT below is genuinely load-bearing.
+    qr_heading = float(graph.edges["Q", "R"]["heading_deg"])
+    auto_dir = resolve_direction(
+        edge_dir_override=DirectionMode.DEFAULT,
+        pipeline_default=DirectionMode.DEFAULT,
+        builder_arrival=Direction.AUTO,
+        builder_route=Direction.AUTO,
+        current_heading=0.0,            # chassis heading after the FRONT approach P->Q
+        edge_heading=qr_heading,
+        is_last_hop=True,
+        bidirectional_enabled=True,
+        line_board_count=2,
+    )
+    assert auto_dir == Direction.REAR, (
+        "fixture geometry no longer makes Q->R auto-resolve REAR; the force-FRONT "
+        "assertion below would be vacuous"
+    )
+
+    prims = sim.go_to("R")
+    act_tags = [p[0] for p in prims]
+
+    # Force-FRONT: the departure emits FRONT ACT_FORWARD, never ACT_BLIND_REVERSE.
+    assert ACT_BLIND_REVERSE not in act_tags, (
+        f"pivot departure hop was NOT forced FRONT (silent REAR downgrade); got {act_tags}"
+    )
+
+    # Both legs trimmed by delta; the obtuse pivot turn is emitted as ACT_TURN_REL.
+    assert prims == [
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),    # P->Q approach trim (FRONT)
+        (ACT_TURN_REL, pytest.approx(_PIVOT_TURN_120_DEG, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(40.0 - delta, abs=1e-9)),    # Q->R departure trim (forced FRONT)
+    ]
+    assert sim.localization.current_node() == "R"
+
+
+# ---------------------------------------------------------------------------
+# TC21 -- go_to and step_through emit identical primitives via the shared helper
+# ---------------------------------------------------------------------------
+#
+# Both public entry points walk NEXT_HOP through the single private per-hop
+# producer ``_walk_hops``; ``go_to`` collects the flat primitive list while
+# ``step_through`` pairs each primitive with a chassis snapshot. This pins the
+# equivalence the per-turn pivot dispatch relies on: the latch/carry threading
+# lands in one site, so the two streams must stay byte-identical -- including
+# across the pivot path.
+
+
+def _step_through_primitives(sim, goal, **kwargs):
+    """Return only the primitive halves of ``sim.step_through(goal)``'s output."""
+    return [primitive for primitive, _snapshot in sim.step_through(goal, **kwargs)]
+
+
+def test_tc21_goto_step_through_emit_identical_primitives_multi_hop(
+    toy_field, toy_graph_and_table
+):
+    """TC21: go_to and step_through emit byte-identical primitives on a multi-hop route.
+
+    The toy route ``A -> B -> G`` spans a LINE hop (with its LINE_OVERSHOOT
+    step), a heading turn, and a BLIND hop -- enough edge variety that any
+    divergence between the two entry points' per-hop dispatch would surface.
+    Two independent sims drive the same route so the walks do not share mutable
+    chassis / localization state; the primitive streams must match exactly.
+    """
+    graph, next_hop = toy_graph_and_table
+
+    chassis_a = VirtualChassis.from_field_data(toy_field)
+    sim_a = PathTrackerSim(toy_field, graph, next_hop, chassis_a)
+    sim_a.localization.zero_heading_from_current()
+
+    chassis_b = VirtualChassis.from_field_data(toy_field)
+    sim_b = PathTrackerSim(toy_field, graph, next_hop, chassis_b)
+    sim_b.localization.zero_heading_from_current()
+
+    go_to_prims = sim_a.go_to("G")
+    step_prims = _step_through_primitives(sim_b, "G")
+
+    # The route is genuinely multi-hop (guards against a 0/1-hop fixture
+    # silently passing a trivial equality).
+    assert len(go_to_prims) >= 3
+    assert go_to_prims == step_prims
+    assert sim_a.localization.current_node() == "G"
+    assert sim_b.localization.current_node() == "G"
+
+
+def test_tc21_goto_step_through_identical_on_pivot_chain():
+    """TC21: parity holds across the per-turn pivot latch/carry path.
+
+    The chained fixture ``U -> V -> W -> X`` exercises the exact ``_pending_pivot``
+    snapshot-before-overwrite latch + the departing/approaching trim folding on
+    the shared edge -- the single site the per-turn pivot dispatch lives in. Two
+    independent sims drive the route; the primitive streams must be byte-identical
+    even with two chained pivots active.
+    """
+    field_go = pivot_field_data.make_chained_pivot_field()
+    field_step = pivot_field_data.make_chained_pivot_field()
+    sim_go, _chassis_go, _g_go, _nh_go = _make_pivot_sim(field_go)
+    sim_step, _chassis_step, _g_step, _nh_step = _make_pivot_sim(field_step)
+
+    go_to_prims = sim_go.go_to("X")
+    step_prims = _step_through_primitives(sim_step, "X")
+
+    # Multi-hop with the pivot latch active on the shared edge (guards a trivial
+    # equality).
+    assert len(go_to_prims) >= 5
+    assert go_to_prims == step_prims
+    assert sim_go.localization.current_node() == "X"
+    assert sim_step.localization.current_node() == "X"
