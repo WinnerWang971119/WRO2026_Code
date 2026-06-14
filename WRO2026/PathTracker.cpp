@@ -1006,9 +1006,9 @@ void PathTrackerClass::_onPlanNextHop()
 
         // ADR-036: the pre-turn maneuver wheel comes from the DEPARTING pivot
         // (the turn we are pivoting through at `cur` this hop), else the pipeline
-        // default. A valid pivot's turn (validator floor ≥ 15°) always exceeds
-        // NAV_TURN_TOLERANCE_DEG (0.5°), so this branch fires and the pivot wheel
-        // applies — no firmware min-angle change is needed. The wheel and the δ
+        // default. A valid pivot's turn (validator floor >= Config::PIVOT_MIN_TURN_DEG)
+        // always exceeds NAV_TURN_TOLERANCE_DEG (0.5° by default), so this branch fires and
+        // the pivot wheel applies — no firmware min-angle change is needed. The wheel and the δ
         // come from the SAME resolved record, so they cannot disagree.
         const Routes::TurnMode resolvedTurnMode =
             _departingPivot.active ? _departingPivot.wheel : Routes::PIPELINE_CONFIG.turn;
