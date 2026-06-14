@@ -619,3 +619,20 @@ add_ctps_mock_force_includes(ctps_dump)
 add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
 set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
+
+# =========================================================================================
+# Test executable #9 — PivotTrimPolicy pure-math (ADR-036, #11 promotion).
+#
+# `resolvePivotTrim` is a header-only inline policy (`PivotTrimPolicy.h`) promoted
+# out of PathTracker.cpp so production and this host test link the SAME subtract-
+# and-clamp symbol, mirroring `DirectionPolicy.h` / `StopAtLinePolicy.h` (PR #34).
+# The host harness does NOT compile `PathTracker.cpp`, so before this promotion the
+# trim formula had no host coverage at all. The policy is pure float math with no
+# Arduino surface, so this target needs no mocks / SUT sources — just the sketch
+# include dir for the header.
+# =========================================================================================
+add_executable(test_pivot_trim_policy
+    ${TEST_DIR}/test_pivot_trim_policy.cpp
+)
+target_include_directories(test_pivot_trim_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME pivot_trim_policy COMMAND test_pivot_trim_policy)

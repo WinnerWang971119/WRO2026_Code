@@ -109,6 +109,38 @@ def test_run_verbose_logs_to_stderr(tmp_path, capsys):
     assert "emitting" in err
 
 
+def test_run_emits_populated_pivot_turns_table(tmp_path, monkeypatch):
+    """End-to-end: _run on a one-pivot field emits a populated PIVOT_TURNS table.
+
+    Every shipped golden (routes.cpp + the toy golden) has N_PIVOT_TURNS == 0,
+    and the header-writer pivot tests drive ``emit_routes`` directly. This closes
+    that gap: it runs the real validate -> build_graph -> build_pivot_turns ->
+    emit_routes orchestration on a synthetic one-pivot field and asserts the
+    emitted routes.{h,cpp} carry the single derived record.
+    """
+    from tools.path_planner.tests.fixtures import pivot_field_data
+
+    field = pivot_field_data.make_dead_reckon_pivot_field()
+    # The orchestrator/emitter may getattr EDGES; pivots live in PIVOT_TURNS.
+    field.EDGES = []
+    monkeypatch.setattr("tools.path_planner.build_routes.field_data", field)
+    # _run calls build_pivot_turns(graph, track_cm) WITHOUT pivot_turns=, so it
+    # reads the module-global field_data.PIVOT_TURNS -- point that at the same
+    # triple the fixture graph carries so the record is derived against it.
+    monkeypatch.setattr(real_field_data, "PIVOT_TURNS", field.PIVOT_TURNS, raising=False)
+
+    out_dir = tmp_path / "out"
+    rc = build_routes._run(out_dir=out_dir, no_viz=True)
+    assert rc == 0
+
+    header = (out_dir / "routes.h").read_text(encoding="utf-8")
+    cpp = (out_dir / "routes.cpp").read_text(encoding="utf-8")
+    # One authored pivot (U->V->W, a -90 deg right turn) derived end to end.
+    assert "constexpr uint8_t N_PIVOT_TURNS = 1;" in header
+    assert "extern const PivotTurn PIVOT_TURNS[1];" in header
+    assert "TurnMode::PIVOT_RIGHT" in cpp
+
+
 def test_run_disconnected_node_warns_but_succeeds(tmp_path, monkeypatch, capsys):
     # Use the stable toy fixture, not the live field_data module: in the toy
     # layout node "G" is a blind node whose only edge is the BLIND_EDGES pair

@@ -14,6 +14,7 @@
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
+#include "PivotTrimPolicy.h"
 #include "StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
@@ -23,11 +24,12 @@ PathTrackerClass PathTracker;
 //
 // Each `Routes::EdgeInfo` carries per-category override fields
 // (`line_mode_override`, `blind_mode_override`, `projection_mode_override`,
-// `pre_turn_mode_override`). The value `DEFAULT` means "inherit from
+// `direction_override`). The value `DEFAULT` means "inherit from
 // `Routes::PIPELINE_CONFIG.<category>`"; anything else wins over the
 // pipeline-wide default. These helpers resolve DEFAULT → concrete at
 // edge-dispatch time so the FSM never has to chase the override semantics
-// inline.
+// inline. The pre-edge turn wheel is resolved per turn from the
+// `Routes::PivotTurn` table (ADR-036), not from an `EdgeInfo` field.
 // =========================================================================================
 
 namespace
@@ -54,14 +56,6 @@ namespace
         return (edge.projection_mode_override == Routes::ProjectionMode::DEFAULT)
             ? Routes::PIPELINE_CONFIG.projection
             : edge.projection_mode_override;
-    }
-
-    /// Resolve the pre-edge turn motor-mode for the given edge.
-    Routes::TurnMode _resolveTurnMode(const Routes::EdgeInfo& edge)
-    {
-        return (edge.pre_turn_mode_override == Routes::TurnMode::DEFAULT)
-            ? Routes::PIPELINE_CONFIG.turn
-            : edge.pre_turn_mode_override;
     }
 
     // NOTE: the production direction-resolution helper has been promoted to
@@ -140,8 +134,9 @@ namespace
      *
      * @note Intentionally distinct from the legacy `MiniR4.DriveDC.TurnGyro` byte values —
      *       the lower-MCU TurnGyro is no longer called.
-     * @note `TurnMode::DEFAULT` should not reach this helper (callers resolve it via
-     *       `_resolveTurnMode()` first). It is mapped to counter-rotation defensively.
+     * @note `TurnMode::DEFAULT` should not reach this helper (callers resolve the pre-turn
+     *       wheel — pivot wheel or pipeline default — to a concrete value first). It is
+     *       mapped to counter-rotation defensively.
      */
     uint8_t _turnModeToByte(Routes::TurnMode m)
     {
@@ -240,6 +235,8 @@ bool PathTrackerClass::begin()
     _passThrough             = false;
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
+    // ADR-036: no pivot latched at boot.
+    _resetPivotLatch();
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
     _activeStopAtLine        = StopAtLine::AUTO;
@@ -295,6 +292,9 @@ void PathTrackerClass::abort()
     _passThrough            = false;
     _resolvedDirection      = Direction::AUTO;
     _resolvedBodyHeading    = 0.0f;
+    // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
+    // outgoing trim into the next goal's first dead-reckon drive.
+    _resetPivotLatch();
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
@@ -490,6 +490,12 @@ void PathTrackerClass::update()
             _activeRouteDirection   = e.route_direction;
             _activeArrivalDirection = e.arrival_direction;
             _activeStopAtLine       = e.stop_at_line;
+            // ADR-036: each goal starts with a clean pivot latch. A pivot whose
+            // FINAL hop was the previous goal's last hop left `_pendingPivot`
+            // active with no following hop to consume it — clear all three here
+            // so a pivot never fires across a `goTo(...)` boundary and a stop at
+            // the pivot node degrades to a normal turn.
+            _resetPivotLatch();
             _state                  = State::PLAN_NEXT_HOP;
             return;
         }
@@ -623,13 +629,53 @@ void PathTrackerClass::update()
                 const float overshootAxleOffsetCm =
                     overshootReverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
                                      : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+
+                // ----------------------------------------------------------------
+                // ADR-036 — LINE-incoming pivot trim (per-turn compensation).
+                //
+                // This LINE hop drives INTO `_nextHop`. If `_nextHop` is a pivot
+                // node, the approaching pivot was resolved at THIS hop's plan-time
+                // dispatch (`_onPlanNextHop`'s one-hop lookahead) into
+                // `_approachingPivot`, which survives into this LINE_FOLLOW state.
+                //
+                // A LINE edge re-anchors on the junction line and cannot stop
+                // short, so instead of an approach-distance trim we shorten the
+                // overshoot advance by δ — the axle settles δ short of the node.
+                // The OUTGOING hop's dead-reckon trim is NOT latched here: the
+                // one-hop carry is already owned by `_pendingPivot` → next hop's
+                // `_departingPivot`. This is the LINE row of the regime matrix.
+                //
+                // The validator guarantees δ ≤ the overshoot budget (the FRONT
+                // sensor-to-axle offset; pivots are FRONT-only in v1), so the
+                // reduced target stays positive; a non-positive result means a
+                // config/validator mismatch, so clamp defensively to a tiny
+                // positive advance rather than command a zero/negative distance
+                // into the gate.
+                const float inboundPivotTrim =
+                    _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
+                float overshootTargetCm = overshootAxleOffsetCm;
+                if (inboundPivotTrim > 0.0f)
+                {
+                    overshootTargetCm = overshootAxleOffsetCm - inboundPivotTrim;
+                    if (overshootTargetCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
+                    {
+                        Serial.print(F("[PathTracker] ADR-036: LINE overshoot trim "
+                                       "underflow (offset="));
+                        Serial.print(overshootAxleOffsetCm);
+                        Serial.print(F(" delta="));
+                        Serial.print(inboundPivotTrim);
+                        Serial.println(F("); clamping. Check validator/config."));
+                        overshootTargetCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
+                    }
+                }
+
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
                             .setTShapeRampDown(!_passThrough)
                             .setOvershootMode(true)
                             .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
-                            .setDistanceTarget(overshootAxleOffsetCm);
+                            .setDistanceTarget(overshootTargetCm);
                 _state = State::LINE_OVERSHOOT;
             }
             return;
@@ -749,6 +795,9 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeEdgeType         = Routes::EdgeType::NONE;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
+    // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
+    // cannot bleed into a post-clearFault() goal.
+    _resetPivotLatch();
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -766,6 +815,11 @@ void PathTrackerClass::_onPlanNextHop()
     if (cur == _destinationNode)
     {
         _destinationNode = FieldMap::NODE_NONE;
+        // ADR-036: the goal is complete. If its final hop departed a pivot node
+        // `_pendingPivot` is still active with no following hop to consume it —
+        // drop all three so a later `goTo(...)` (or the next queued goal, on the
+        // DEQUEUE path) does not inherit a stale latch.
+        _resetPivotLatch();
         _state           = (_qCount > 0) ? State::DEQUEUE : State::IDLE;
         return;
     }
@@ -787,6 +841,37 @@ void PathTrackerClass::_onPlanNextHop()
     _nextHop        = nxt;
     _activeEdgeType = edge.type;
 
+    // -----------------------------------------------------------------------
+    // Per-turn pivot latch contract (ADR-036, supersedes ADR-035).
+    //
+    // A pivot is a property of a 3-node turn `(u, v, w)`, not of an edge. Snapshot
+    // the carry into `_departingPivot` BEFORE the one-hop lookahead overwrites
+    // `_pendingPivot` — the single carry member is sufficient ONLY because the
+    // departing pivot is read out first. Both records survive the TURNING state
+    // into the drive dispatch (and `_approachingPivot` into the LINE_FOLLOW
+    // overshoot-arm, a different FSM state).
+    //
+    // Last hop: no pivot can latch onto the FINAL node mid-turn, so skip the
+    // forward lookahead. This never skips CONSUMING an already-pending latch — a
+    // pivot `(u,v,w)` whose goal is `w` still consumes its wheel + trim on the
+    // final `v→w` hop via `_departingPivot`.
+    // -----------------------------------------------------------------------
+    const bool isLastHop = (nxt == _destinationNode);
+
+    _departingPivot = _pendingPivot;    // snapshot the carry FIRST
+    if (isLastHop)
+    {
+        _approachingPivot = PivotRef{};    // no pivot can latch onto the final node
+    }
+    else
+    {
+        const uint8_t nextNext = FieldMap::getNextHop(nxt, _destinationNode);
+        const Routes::PivotTurn* p = FieldMap::findPivotTurn(cur, nxt, nextNext);
+        _approachingPivot =
+            p ? PivotRef{true, p->wheel, p->trim_cm} : PivotRef{};
+    }
+    _pendingPivot = _approachingPivot;    // carry for the NEXT hop
+
     const float currentWorld = Localization.getHeadingDeg();
 
     // -----------------------------------------------------------------------
@@ -804,8 +889,9 @@ void PathTrackerClass::_onPlanNextHop()
     // edge.heading_deg — otherwise a chassis already aligned with the raw
     // forward heading would short-circuit a REAR hop into a forward-going
     // LineFollower dispatch.
+    //
+    // `isLastHop` was hoisted above for the pivot latch contract.
     // -----------------------------------------------------------------------
-    const bool isLastHop = (nxt == _destinationNode);
 
     // Builder overrides cached on DEQUEUE for the in-flight goal (T8).
     // Both default to Direction::AUTO for bare `goTo(...)` calls — the
@@ -823,7 +909,7 @@ void PathTrackerClass::_onPlanNextHop()
     // override authored for u->v must NOT bind v->u (mirroring it would reverse
     // the chassis when forward is correct). Author a swapped EDGES entry to
     // force the reverse sense. See graph_builder `_emit_directed_pair` warning.
-    const Direction resolved = resolveDirection(
+    Direction resolved = resolveDirection(
         edge.direction_override,
         Routes::PIPELINE_CONFIG.direction,
         builderArrival,
@@ -833,6 +919,19 @@ void PathTrackerClass::_onPlanNextHop()
         isLastHop,
         Config::BIDIRECTIONAL_AUTO_ENABLED,
         Config::LINE_BOARD_COUNT);
+
+    // ADR-036: pivots are FRONT-only in v1 (#54). The wheel + δ are derived for
+    // forward traversal, so force FRONT on any pivot-adjacent hop — the approach
+    // `u→v` (`_approachingPivot`) or the departure `v→w` (`_departingPivot`) —
+    // and never silently downgrade to a counter-rotation: the author chose a
+    // single-wheel pivot for a clearance a center turn may not have. Because
+    // FRONT is always available, the `reverseUnavailable(...)` guard below is
+    // inert for pivot hops (that is the intended "FRONT genuinely unavailable
+    // faults via the existing guard" backstop — no separate pivot-skip path).
+    if (_departingPivot.active || _approachingPivot.active)
+    {
+        resolved = Direction::FRONT;
+    }
 
     // ------------------------------------------------------------------------
     // Early reverse-availability guard.
@@ -905,10 +1004,24 @@ void PathTrackerClass::_onPlanNextHop()
 
         const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
 
-        // Resolve the per-edge turn motor-mode override (DEFAULT → pipeline
-        // default) and map to the lower-MCU mode byte the Turn builders accept.
-        const Routes::TurnMode resolvedTurnMode = _resolveTurnMode(edge);
-        const uint8_t          turnModeByte     = _turnModeToByte(resolvedTurnMode);
+        // ADR-036: the pre-turn maneuver wheel comes from the DEPARTING pivot
+        // (the turn we are pivoting through at `cur` this hop), else the pipeline
+        // default. A valid pivot's turn (validator floor >= Config::PIVOT_MIN_TURN_DEG)
+        // always exceeds NAV_TURN_TOLERANCE_DEG (0.5° by default), so this branch fires and
+        // the pivot wheel applies — no firmware min-angle change is needed. The wheel and the δ
+        // come from the SAME resolved record, so they cannot disagree.
+        const Routes::TurnMode resolvedTurnMode =
+            _departingPivot.active ? _departingPivot.wheel : Routes::PIPELINE_CONFIG.turn;
+        const uint8_t turnModeByte = _turnModeToByte(resolvedTurnMode);
+        if (_departingPivot.active)
+        {
+            Serial.print(F("[PathTracker] ADR-036: pivot turn at v="));
+            Serial.print(cur);
+            Serial.print(F(" wheel="));
+            Serial.print(turnModeByte);
+            Serial.print(F(" trim="));
+            Serial.println(_departingPivot.trim_cm);
+        }
         Drive.turnToYaw(imuTarget).setMode(turnModeByte).async();
         _state = State::TURNING;
     }
@@ -916,6 +1029,53 @@ void PathTrackerClass::_onPlanNextHop()
     {
         _dispatchEdgeAfterTurn();
     }
+}
+
+void PathTrackerClass::_resetPivotLatch()
+{
+    // ADR-036: all three latch members move together. Clearing only some would
+    // leak a pivot across a goal boundary — the bleed these resets prevent.
+    _pendingPivot     = PivotRef{};
+    _departingPivot   = PivotRef{};
+    _approachingPivot = PivotRef{};
+}
+
+float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
+{
+    // ADR-036 (issue #44) — per-turn pivot compensation, distance-terminated side.
+    // LOCAL effective distance only; EDGES[*][*].distance_cm is never mutated. The
+    // one-hop carry / latch is owned by the `_pendingPivot` contract resolved in
+    // `_onPlanNextHop()`; this wrapper only gathers the two already-resolved trims
+    // and delegates the subtract-and-clamp to the shared `resolvePivotTrim` policy
+    // (PivotTrimPolicy.h) so the host test links the SAME symbol.
+    //
+    // DEPARTING trim: this hop LEAVES a pivot node (`cur`) — its outgoing
+    // over-travel δ, so the axle lands exactly on the node. APPROACHING trim: this
+    // dead-reckon edge drives INTO a pivot node (`nxt`) — its δ, so the chassis
+    // stops δ short and the pivot starts at the geometric pivot point. On a chain
+    // u→v→w→x the hop v→w nets `length − δ_v(departing) − δ_w(approaching)`.
+    const float departingTrim   = _departingPivot.active ? _departingPivot.trim_cm : 0.0f;
+    const float approachingTrim =
+        _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
+
+    const PivotTrimResolution trim = resolvePivotTrim(
+        edge.distance_cm, departingTrim, approachingTrim, Config::PIVOT_TRIM_MIN_DRIVE_CM);
+
+    // Defensive clamp trace. The validator guarantees δ leaves at least the floor
+    // on every dead-reckon side (and the chained sum-check on a shared edge), so a
+    // correctly-built table never clamps here. A clamp means a future bad table /
+    // validator mismatch — trace it (the policy already degraded to the floor so
+    // Drive.driveDist never sees a non-positive cm, which it rejects and no-ops).
+    if (trim.clamped)
+    {
+        Serial.print(F("[PathTracker] ADR-036: dead-reckon trim underflow (raw="));
+        Serial.print(edge.distance_cm);
+        Serial.print(F(" eff="));
+        Serial.print(trim.effectiveCm);
+        Serial.println(F("); clamping. Check validator/config."));
+    }
+
+    return trim.driveCm;
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()
@@ -949,6 +1109,13 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     {
         case Routes::EdgeType::LINE:
         {
+            // ADR-036: a LINE outgoing edge applies no dead-reckon trim — it is
+            // sensor-terminated and re-anchors on the junction line. The departing
+            // trim is irrelevant on a LINE hop (the line corrects it); the approach
+            // trim for a LINE-incoming pivot is the overshoot-advance reduction in
+            // the LINE_FOLLOW state; the outgoing carry for the next hop is already
+            // owned by the `_pendingPivot` latch. Nothing to do here.
+
             // Drain any stale Intersection edge so the first LINE_FOLLOW tick
             // does not skip the segment.
             (void) Intersection.isAtIntersection();
@@ -1003,13 +1170,21 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // `.setReverse(reverse)` selects forward-vs-rear board + error sign
             // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
             // — the guard above rejects REAR PROJECTION on a 1-board chassis.
+            // ADR-036: PROJECTION is distance-terminated (the gate uses the
+            // edge length, no physical marker), so it takes both the departing
+            // trim (`_departingPivot`, the pivot we just left) and the approach
+            // trim (`_approachingPivot`, the pivot at `_nextHop`) — both folded
+            // into a LOCAL effective distance by `_pivotTrimDistance`.
+            // `distance_cm` itself is untouched.
+            const float effectiveDistCm = _pivotTrimDistance(edge);
+
             const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
             const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
                         .setReverse(reverse)
                         .setOvershootMode(false)
-                        .setDistanceTarget(edge.distance_cm);
+                        .setDistanceTarget(effectiveDistCm);
             _state = State::PROJECTION_FOLLOW;
             _passThrough = false;    // consumed
             break;
@@ -1044,6 +1219,16 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
             if (sal.seek)
             {
+                // ADR-036: a STOP_AT_LINE seek is sensor-terminated — it self-
+                // corrects on the physical line, so it takes NO incoming/outgoing
+                // distance trim. The seek drives the FULL `edge.distance_cm` (max
+                // seek distance — the crossing, not the distance, terminates it).
+                // The outgoing carry for the next hop is already owned by the
+                // `_pendingPivot` latch, so there is nothing to do here — a pivot
+                // reached via a seek still over-travels on its OUTGOING side, and
+                // the next hop's `_departingPivot` (snapshot of `_pendingPivot`)
+                // applies that trim.
+
                 // A pass-through LINE→BLIND handoff leaves the LineFollower
                 // enabled (T5's brake-on-gate=false path). Release it WITHOUT
                 // braking before handing the wheels to the Drive seek so the
@@ -1110,6 +1295,14 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                                               : (int16_t)  Config::SPEED_NORMAL;
             const int16_t signedStartSpeed = reverse ? (int16_t) -startSpeed : startSpeed;
 
+            // ADR-036: a dead-reckon BLIND hop (plain `driveDist`, sal.seek ==
+            // false) is distance-terminated, so it takes both the departing trim
+            // (`_departingPivot`) and the approach trim (`_approachingPivot`) —
+            // both folded into a LOCAL effective distance. The seek path above
+            // returned early and never reaches this; `edge.distance_cm` stays
+            // untouched in the table.
+            const float effectiveDistCm = _pivotTrimDistance(edge);
+
             // Per-edge motion-profile override (DEFAULT → pipeline default).
             // Three concrete BlindMode values map onto the Drive builder chain:
             //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
@@ -1141,7 +1334,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
                     // rotated 180° for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
                     const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
-                    Drive.driveDist(edge.distance_cm)
+                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
                          .setPower(cruisePwm)
@@ -1161,7 +1354,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // introduces a ramp and breaks the FLAT contract for callers that picked
                     // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
                     const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
-                    Drive.driveDist(edge.distance_cm)
+                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
                          .setMode(DriveMode::RAW)
                          .setPower(cruisePwm)
                          .setStartSpeed(rawStart)
@@ -1174,7 +1367,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 case Routes::BlindMode::DEFAULT:    // defensive — see comment above
                 default:
                 {
-                    Drive.driveDist(edge.distance_cm)
+                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
                          .setMode(DriveMode::SYNC)
                          .setPower(cruisePwm)
                          .setStartSpeed(signedStartSpeed)

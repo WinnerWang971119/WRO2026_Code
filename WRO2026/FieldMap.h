@@ -47,7 +47,6 @@ namespace FieldMap
             Routes::LineMode::DEFAULT,     // line_mode_override
             Routes::BlindMode::DEFAULT,    // blind_mode_override
             Routes::ProjectionMode::DEFAULT, // projection_mode_override
-            Routes::TurnMode::DEFAULT,     // pre_turn_mode_override
             Routes::DirectionMode::DEFAULT // direction_override
         };
         return kNoEdge;
@@ -157,6 +156,39 @@ namespace FieldMap
             }
         }
         return NODE_NONE;
+    }
+
+    /**
+     * @brief Resolve the single-wheel pivot record for a turn (arrive-from `u`, pivot-at
+     *        `v`, leave-to `w`).
+     *
+     * @param u Node index the robot arrives from.
+     * @param v Node index the robot pivots at.
+     * @param w Node index the robot leaves to.
+     * @return Pointer to the matching `Routes::PivotTurn`, or `nullptr` if any index is out
+     *         of range or no record exists for the turn.
+     *
+     * @note Bounds-checks every index (ADR-028) and scans only the first `N_PIVOT_TURNS`
+     *       truth records, never the padded array size. When no real pivots exist
+     *       (`N_PIVOT_TURNS == 0`) the loop runs zero times, so the zeroed `{0,0,0,...}`
+     *       placeholder element is never matched and a `(0,0,0)` query returns `nullptr`.
+     *       Bounded iteration count, no dynamic allocation (ARCHITECTURE iron rules).
+     */
+    inline const Routes::PivotTurn* findPivotTurn(uint8_t u, uint8_t v, uint8_t w)
+    {
+        if (u >= N_NODES || v >= N_NODES || w >= N_NODES)
+        {
+            return nullptr;
+        }
+        for (uint8_t i = 0; i < Routes::N_PIVOT_TURNS; ++i)
+        {
+            const Routes::PivotTurn& rec = Routes::PIVOT_TURNS[i];
+            if (rec.u == u && rec.v == v && rec.w == w)
+            {
+                return &Routes::PIVOT_TURNS[i];
+            }
+        }
+        return nullptr;
     }
 }    // namespace FieldMap
 

@@ -20,7 +20,11 @@ the live editor (`edit_field.py`) mutates. This module is a thin loader that
 re-exposes those values under their historical attribute names so callers do
 not need to know about the JSON layout. The rich ``EDGES`` table stays in
 Python because per-edge entries reference enum values (``LineMode``,
-``TurnMode``, ``Pivot``) that JSON cannot represent (see ADR-022).
+``TurnMode``) that JSON cannot represent (see ADR-022).
+
+Single-wheel pivots are authored per turn, not per edge: ``field_data.json``
+carries a ``pivot_turns`` list of ``["<u>", "<v>", "<w>"]`` node-name triples,
+re-exposed here as :data:`PIVOT_TURNS` (a list of ``(u, v, w)`` string tuples).
 
 Tests that need a stable graph shape import
 :mod:`tools.path_planner.tests.fixtures.toy_field_data` instead of this module
@@ -28,7 +32,7 @@ so editor saves do not flip the planner suite red.
 """
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION, Pivot  # noqa: F401
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION  # noqa: F401
 from tools.path_planner.pipeline_config import LineMode, BlindMode, ProjectionMode, TurnMode  # noqa: F401
 
 _data = load_field_json()
@@ -44,16 +48,25 @@ LINE_SEGMENTS         = _data["LINE_SEGMENTS"]
 BLIND_EDGES           = _data["BLIND_EDGES"]
 OBSTACLES             = _data["OBSTACLES"]
 
+# Per-turn single-wheel pivots: a list of (u, v, w) node-name string tuples
+# (the loader has already converted the JSON 3-arrays to tuples). Absent /
+# empty means no pivots; the downstream planner/validator/header consume this.
+PIVOT_TURNS           = _data.get("pivot_turns", [])
+
 # ---------------------------------------------------------------------------
 # Rich edge list — optional per-edge overrides for the live field graph.
 #
 # This list is ADDITIVE alongside the geometry loaded from field_data.json
 # (LINE_SEGMENTS / BLIND_EDGES). Entries here let an author attach enum-typed
-# overrides (primitive_mode / pre_turn_mode / pivot) to a specific edge that
-# JSON cannot represent. Leaving the list empty is fine — every edge then
-# inherits the pipeline-wide PIPELINE_CONFIG defaults at C++ dispatch time.
+# overrides (primitive_mode) to a specific edge that JSON cannot represent.
+# Leaving the list empty is fine — every edge then inherits the pipeline-wide
+# PIPELINE_CONFIG defaults at C++ dispatch time.
 # The example below is commented out and uses placeholder node names; uncomment
 # (and rename ``u`` / ``v`` to nodes that exist in ``NODES``) to attach overrides.
+#
+# Single-wheel pivots are NOT authored here — they live in the ``pivot_turns``
+# list above as (u, v, w) node-name triples (a pivot is a property of a turn,
+# not of one edge).
 #
 # Schema: each dict MUST supply:
 #   type          : EDGE_LINE | EDGE_BLIND | EDGE_PROJECTION
@@ -65,8 +78,6 @@ OBSTACLES             = _data["OBSTACLES"]
 # Optional overrides (absent = inherit the pipeline-wide PIPELINE_CONFIG
 # default for that edge's category at C++ dispatch time):
 #   primitive_mode : LineMode | BlindMode | ProjectionMode value
-#   pre_turn_mode  : TurnMode value — wheel pattern for the approach turn
-#   pivot          : Pivot enum value — single-wheel pivot selector
 #   direction      : "front" | "rear" — asymmetric per-directed-edge
 #                    traversal override; applies only to the forward
 #                    (u → v) edge, never mirrored to the reverse. Use
@@ -75,8 +86,7 @@ OBSTACLES             = _data["OBSTACLES"]
 #
 # graph_builder.build_graph() emits a bidirectional directed pair for each
 # entry. ``primitive_mode`` is forwarded onto both directions; the
-# direction-dependent overrides (``pre_turn_mode``, ``pivot``, ``direction``)
-# land on the forward edge only.
+# direction-dependent override (``direction``) lands on the forward edge only.
 # These entries are ADDITIVE alongside LINE_SEGMENTS / BLIND_EDGES, not a
 # replacement; the planner merges all edge sources into one DiGraph.
 # ---------------------------------------------------------------------------

@@ -54,10 +54,12 @@
  * Per-edge motion-mode resolution:
  *  - Each `Routes::EdgeInfo` carries per-category override fields
  *    (`line_mode_override`, `blind_mode_override`,
- *    `projection_mode_override`, `pre_turn_mode_override`). `DEFAULT` means
+ *    `projection_mode_override`, `direction_override`). `DEFAULT` means
  *    "inherit `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves
  *    DEFAULT → concrete at edge-dispatch time and chains the appropriate
- *    builder setters.
+ *    builder setters. The pre-edge turn wheel is no longer an `EdgeInfo`
+ *    field: it is resolved per turn from the `Routes::PivotTurn` table
+ *    (ADR-036) when the hop departs a pivot node, else the pipeline default.
  *
  * Iron rules (match `Drive`'s discipline):
  *  1. `update()` is non-blocking; every Drive call is `.async()`.
@@ -261,6 +263,47 @@ private:
     void _onPlanNextHop();
     void _dispatchEdgeAfterTurn();
 
+    /**
+     * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
+     *        hop, applying the per-turn pivot trims (ADR-036).
+     *
+     * Called only on distance-terminated dispatches (BLIND dead-reckon
+     * `driveDist`, PROJECTION distance gate). Subtracts the two RESOLVED pivot
+     * trims latched at plan time into a LOCAL effective distance —
+     * `EDGES[*][*].distance_cm` is never mutated:
+     *   1. DEPARTING trim: if this hop LEAVES a pivot node (`_departingPivot`
+     *      active), subtract its δ (the outgoing over-travel of the pivot we
+     *      just turned through).
+     *   2. APPROACHING trim: if this dead-reckon edge drives INTO a pivot node
+     *      (`_approachingPivot` active), subtract its δ so the chassis stops δ
+     *      short and the pivot starts at the geometric pivot point.
+     * On a chain `u→v→w→x` the hop `v→w` nets `length − δ_v(departing) −
+     * δ_w(approaching)`. The result is clamped to `Config::PIVOT_TRIM_MIN_DRIVE_CM`
+     * so a bad table can never command a non-positive drive (which
+     * `Drive.driveDist` would reject). No carry/latch lives here anymore — the
+     * one-hop carry is owned by the `_pendingPivot` latch contract resolved in
+     * `_onPlanNextHop()`. The subtract-and-clamp itself is the shared
+     * `resolvePivotTrim` policy (PivotTrimPolicy.h); this method only gathers the
+     * latched trims and traces an underflow.
+     *
+     * @param edge The directed edge being dispatched (`getEdge(cur, _nextHop)`).
+     * @return The trimmed, clamped distance to feed the distance-terminated builder.
+     */
+    float _pivotTrimDistance(const Routes::EdgeInfo& edge);
+
+    /**
+     * @brief Clear all three pivot-latch members to the inactive sentinel (ADR-036).
+     *
+     * Resets `_pendingPivot`, `_departingPivot`, and `_approachingPivot` to a
+     * default-constructed `PivotRef{}` (`active == false`). Called at every point
+     * the latch must not survive: boot (`begin`), abort, fault (`_enterFault`),
+     * DEQUEUE of a fresh goal, and the goal-complete IDLE/DEQUEUE transition.
+     * Centralising the reset keeps the three members in lock-step — a site that
+     * cleared only some of them would leak a pivot across a `goTo(...)` boundary,
+     * the exact cross-goal bleed these resets guard against.
+     */
+    void _resetPivotLatch();
+
     void _drainBlocking();
 
     void _applyGoToBuilder(
@@ -330,6 +373,49 @@ private:
     /// (T6) also uses it as the inbound-body heading when classifying the
     /// next-next hop's geometry.
     float _resolvedBodyHeading = 0.0f;
+
+    /// @brief A RESOLVED COPY of a `Routes::PivotTurn` record (ADR-036).
+    ///
+    /// Never a pointer into the `PIVOT_TURNS` table kept across hops — the
+    /// firmware resolves the turn once, copies the wheel + δ out, and consumes
+    /// the copy at the maneuver and the drive. `active == false` is the
+    /// "no pivot" sentinel (every field at its default).
+    struct PivotRef
+    {
+        bool             active  = false;
+        Routes::TurnMode wheel   = Routes::TurnMode::DEFAULT;
+        float            trim_cm = 0.0f;
+    };
+
+    /// @brief The per-turn pivot latch contract (ADR-036, supersedes ADR-035).
+    ///
+    /// A pivot is a property of a 3-node turn `(u, v, w)`, not of an edge. At
+    /// plan time `_onPlanNextHop()` resolves the approaching pivot via a one-hop
+    /// lookahead (`findPivotTurn(cur, nxt, getNextHop(nxt, dest))`) and latches
+    /// it. The single `_pendingPivot` carry suffices ONLY because the departing
+    /// pivot is snapshotted BEFORE `_pendingPivot` is overwritten — see the
+    /// "snapshot BEFORE overwrite" sequence in `_onPlanNextHop()`.
+    ///
+    ///  - `_pendingPivot`     — carry: the approaching pivot latched LAST hop,
+    ///                          which becomes THIS hop's departing pivot. The
+    ///                          critical one to clear across goals so a stop at
+    ///                          `v` degrades to a normal turn and a pivot never
+    ///                          fires across a `goTo()` boundary.
+    ///  - `_departingPivot`   — the pivot we LEAVE at `cur` this hop (snapshot of
+    ///                          `_pendingPivot`). Supplies the pre-turn maneuver
+    ///                          wheel and the departing (outgoing) dead-reckon trim.
+    ///  - `_approachingPivot` — the pivot we ENTER at `nxt` this hop (fresh
+    ///                          lookahead). Supplies the approach trim on a
+    ///                          dead-reckon edge or the LINE overshoot reduction.
+    ///
+    /// All three are members (not locals) because they are set at plan time and
+    /// must survive the `TURNING` state into the drive dispatch (and, for the
+    /// approaching pivot, into the `LINE_FOLLOW` overshoot-arm in a different FSM
+    /// state). Reset to inactive on abort, on a fault, on DEQUEUE of a fresh
+    /// goal, and on the IDLE/done transition.
+    PivotRef _pendingPivot;
+    PivotRef _departingPivot;
+    PivotRef _approachingPivot;
 
     FaultInfo _fault;
     void (*_tickCallback)()        = nullptr;

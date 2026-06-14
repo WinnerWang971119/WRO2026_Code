@@ -57,13 +57,13 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import networkx as nx
 import pytest
 
 from tools.path_planner import field_data as real_field_data
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    Pivot,
     build_graph,
 )
 from tools.path_planner.header_writer import (
@@ -76,7 +76,11 @@ from tools.path_planner.header_writer import (
     emit_routes,
 )
 from tools.path_planner.pipeline_config import LineMode, TurnMode
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import (
+    PivotTurnRecord,
+    build_pivot_turns,
+    compute_all_pairs_next_hop,
+)
 
 _FIELD_ATTRS = (
     "NODES",
@@ -170,6 +174,48 @@ def emit_targets(tmp_path: Path) -> tuple[Path, Path]:
 def _emit_with_toy_field(emit_targets: tuple[Path, Path]) -> tuple[Path, Path]:
     header_path, source_path = emit_targets
     return _emit_toy(_build_toy_field_data(), header_path, source_path)
+
+
+def _edge_cell_text(cpp_text: str, from_name: str, to_name: str) -> str:
+    """Return the single ``EdgeInfo`` aggregate-initialiser cell for ``from->to``.
+
+    The emitter writes the EDGES table as one ``{ // from <name> (index N)``
+    block per source node, with one cell line per destination ending in
+    ``// to <name>`` (see :func:`header_writer._emit_edges_table`). This
+    slices to the EDGES table (the NEXT_HOP table reuses the same
+    ``// from <name>`` annotation, so the search must start after the
+    ``const EdgeInfo EDGES`` marker), walks to the ``from_name`` block, then
+    returns the cell text (everything up to the trailing ``}``) of the line
+    annotated ``// to <to_name>`` so a test can assert on a single cell's
+    fields -- the four override-enum slots that close the cell -- without
+    matching the wrong table or source row.
+    """
+    edges_marker = "const EdgeInfo EDGES"
+    edges_start = cpp_text.index(edges_marker)
+    lines = cpp_text[edges_start:].splitlines()
+    # In the EDGES table, a from-block header is ``{ // from <name> (``; the
+    # leading ``{ `` distinguishes it from the NEXT_HOP rows that end in the
+    # same annotation. (Already moot here because we sliced past NEXT_HOP,
+    # but keeping the precise marker makes the intent explicit.)
+    from_marker = "{ // from " + from_name + " ("
+    to_marker = "// to " + to_name
+    in_block = False
+    for line in lines:
+        if from_marker in line:
+            in_block = True
+            continue
+        if in_block:
+            # A new ``{ // from <other> (`` header ends the current block.
+            if "// from " in line:
+                break
+            if line.rstrip().endswith(to_marker):
+                # Strip the trailing ", // to <name>" annotation, leaving the
+                # brace-enclosed cell ending at "}".
+                brace_end = line.rfind("}")
+                return line[: brace_end + 1].strip()
+    raise AssertionError(
+        "no EDGES cell found for " + from_name + "->" + to_name
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -495,23 +541,38 @@ def test_edge_primitive_mode_override_emit(emit_targets):
     assert "LineMode::FAST" in cpp_text
 
 
-def test_edge_pre_turn_mode_override_emit(emit_targets):
-    """TC3: an edge with pre_turn_mode=TurnMode.PIVOT_LEFT emits the override.
+# ---------------------------------------------------------------------------
+# T11: per-turn PIVOT_TURNS table (TC13, TC24) + EdgeInfo shrink (TC14).
+#
+# Single-wheel pivots moved off ``EdgeInfo`` into a sparse, sorted
+# ``PivotTurn PIVOT_TURNS[]`` table (ADR-036). The header writer emits
+# ``struct PivotTurn``, ``constexpr uint8_t N_PIVOT_TURNS = <count>``, and
+# ``extern const PivotTurn PIVOT_TURNS[max(1, count)]`` sorted by the
+# ``(u, v, w)`` node-index tuple. The toy golden has zero pivots, so TC24
+# below is the ONLY coverage of a NON-empty table -- it drives a synthetic
+# 2-pivot record list through ``emit_routes(..., pivot_records=...)``.
+# ---------------------------------------------------------------------------
 
-    Three-node A->B->C fixture: ``A->B`` carries the pivot override, and
-    ``B->C`` is the single forward continuation needed by
-    ``apply_pivot_compensations`` (the back-edge ``B->A`` is excluded
-    from the count so it does not trip the multi-successor guard).
-    Directional overrides (``pre_turn_mode``, ``pivot``) are forward-only
-    after the Codex P1 fix, so the reverse traversal would land at A
-    with no pivot tag -- the compensation iteration finds only the
-    forward (A,B) entry.
+
+def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
+    """Build a 4-node field + graph that yields two derivable pivot turns.
+
+    Nodes A/B/C/D with two chained turns -- ``A->B->C`` (left, +90 deg) and
+    ``B->C->D`` (right, -90 deg) -- so :func:`build_pivot_turns` can derive two
+    records with DISTINCT wheels from authored triples. ``A->B`` heads East,
+    ``B->C`` heads North (turn +90, left), ``C->D`` heads East again (turn
+    normalize(0 - 90) = -90, right). Built via ``build_graph`` so the geometry /
+    headings are real, and the edges are long enough that both pivots validate.
     """
-    header_path, source_path = emit_targets
     fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "C": (100.0, 100.0)},
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
-        LINE_SEGMENTS=[],
+        NODES={
+            "A": (0.0, 0.0),
+            "B": (100.0, 0.0),
+            "C": (100.0, 100.0),
+            "D": (200.0, 100.0),
+        },
+        NODE_TYPES={"A": "line", "B": "line", "C": "line", "D": "line"},
+        LINE_SEGMENTS=[("A", "B"), ("B", "C"), ("C", "D")],
         BLIND_EDGES=[],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
@@ -520,86 +581,172 @@ def test_edge_pre_turn_mode_override_emit(emit_targets):
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
-        EDGES=[
-            {
-                "type":          EDGE_BLIND,
-                "u":             "A",
-                "v":             "B",
-                "distance_cm":   100.0,
-                "heading_deg":   0.0,
-                "pre_turn_mode": TurnMode.PIVOT_LEFT,
-                "pivot":         Pivot.LEFT,
-            },
-            {
-                "type":          EDGE_BLIND,
-                "u":             "B",
-                "v":             "C",
-                "distance_cm":   100.0,
-                "heading_deg":   90.0,
-            },
-        ],
+        EDGES=[],
     )
-    _emit_toy(fd, header_path, source_path)
+    graph = build_graph(fd)
+    return fd, graph
+
+
+def test_pivot_turns_table_empty_field_emits_placeholder(emit_targets):
+    """TC13: a pivot-free field emits N_PIVOT_TURNS == 0 + a 1-element placeholder.
+
+    The toy field declares no pivots, so the header reports the truth count
+    ``N_PIVOT_TURNS == 0`` while the ``.cpp`` still emits a single zeroed
+    placeholder element (a zero-length array bound is ill-formed in standard
+    C++). The placeholder is never read at runtime.
+    """
+    header_path, source_path = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
     cpp_text = source_path.read_text(encoding="utf-8")
+
+    # routes.h: the struct, the zero truth-count, and a 1-element extern bound.
+    assert "struct PivotTurn {" in header_text
+    assert "constexpr uint8_t N_PIVOT_TURNS = 0;" in header_text
+    assert "extern const PivotTurn PIVOT_TURNS[1];" in header_text
+
+    # routes.cpp: a single placeholder element, explicitly annotated.
+    assert "const PivotTurn PIVOT_TURNS[1] = {" in cpp_text
+    assert "placeholder: N_PIVOT_TURNS == 0, never read at runtime" in cpp_text
+
+
+def test_pivot_turns_table_sorted_with_correct_count(emit_targets):
+    """TC13 / TC24: a populated PIVOT_TURNS table is emitted sorted with N == count.
+
+    Drives a synthetic 2-record list through ``emit_routes(pivot_records=...)``.
+    The records are passed in DESCENDING (u, v, w) index order; the emitter must
+    sort them ASCENDING by the ``(u, v, w)`` node-index tuple. With NODES sorted
+    A=0, B=1, C=2, D=3 the two records are ``(B, C, D)`` -> (1, 2, 3) and
+    ``(A, B, C)`` -> (0, 1, 2), so the emitted rows must lead with (0, 1, 2)
+    then (1, 2, 3). Each row carries the wheel literal and the trim float.
+    """
+    header_path, source_path = emit_targets
+    fd, graph = _two_pivot_graph()
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+
+    # Two records, supplied DESC by triple so the sort is observable. Distinct
+    # wheels + trims so each row is individually identifiable in the output.
+    records = [
+        PivotTurnRecord(u="B", v="C", w="D", wheel=TurnMode.PIVOT_RIGHT, trim_cm=9.0),
+        PivotTurnRecord(u="A", v="B", w="C", wheel=TurnMode.PIVOT_LEFT, trim_cm=5.5),
+    ]
+    emit_routes(
+        fd, graph, next_hop,
+        pivot_records=records,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # Truth count and array bound both reflect the two records.
+    assert "constexpr uint8_t N_PIVOT_TURNS = 2;" in header_text
+    assert "extern const PivotTurn PIVOT_TURNS[2];" in header_text
+
+    # The two emitted rows, in ascending (u, v, w) index order. NODES order is
+    # A=0, B=1, C=2, D=3 so (A,B,C) -> (0,1,2) sorts before (B,C,D) -> (1,2,3).
+    row_a_b_c = "{ 0, 1, 2, TurnMode::PIVOT_LEFT, " + "{:.6f}f".format(5.5) + " },"
+    row_b_c_d = "{ 1, 2, 3, TurnMode::PIVOT_RIGHT, " + "{:.6f}f".format(9.0) + " },"
+    assert row_a_b_c in cpp_text
+    assert row_b_c_d in cpp_text
+    # Sorted: (0,1,2) must appear before (1,2,3).
+    assert cpp_text.index(row_a_b_c) < cpp_text.index(row_b_c_d)
+
+
+def test_pivot_turns_table_from_build_pivot_turns(emit_targets, monkeypatch):
+    """TC24: records derived by build_pivot_turns flow end-to-end into the table.
+
+    Closes the loop the synthetic-record test leaves open: rather than
+    hand-construct ``PivotTurnRecord``s, derive them from authored triples via
+    :func:`build_pivot_turns` (the production path) and emit them. The real
+    ``field_data.PIVOT_TURNS`` is empty, so the test points it at two triples on
+    the synthetic graph; the derived records must produce ``N_PIVOT_TURNS == 2``
+    and two sorted rows whose wheels match the turn geometry (A->B->C is a left
+    turn, B->C->D a right turn).
+    """
+    from tools.path_planner import field_data as fd_module
+
+    header_path, source_path = emit_targets
+    fd, graph = _two_pivot_graph()
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+
+    monkeypatch.setattr(
+        fd_module, "PIVOT_TURNS", [("A", "B", "C"), ("B", "C", "D")], raising=False
+    )
+    records = build_pivot_turns(graph, track_cm=18.0)
+    assert len(records) == 2
+
+    emit_routes(
+        fd, graph, next_hop,
+        pivot_records=records,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    assert "constexpr uint8_t N_PIVOT_TURNS = 2;" in header_text
+    # A->B->C is a CCW (left) turn, B->C->D a CW (right) turn -- both wheels
+    # appear, derived from geometry, not hand-typed.
     assert "TurnMode::PIVOT_LEFT" in cpp_text
+    assert "TurnMode::PIVOT_RIGHT" in cpp_text
+    # Sorted by (u, v, w) index: (0,1,2) before (1,2,3).
+    assert cpp_text.index("{ 0, 1, 2,") < cpp_text.index("{ 1, 2, 3,")
 
 
-def test_pivot_compensation_reaches_emitted_distance(emit_targets):
-    """TC9 / finding #42: the shortened pivot distance lands in routes.cpp.
+def test_edge_info_struct_has_no_pivot_fields(emit_targets):
+    """TC14: EdgeInfo no longer declares pivot_trim_cm / pre_turn_mode_override.
 
-    Before Decision B, ``apply_pivot_compensations`` ran only on a
-    discarded weighted copy inside ``compute_all_pairs_next_hop``, so the
-    EDGES table in routes.cpp carried the UN-shortened ``distance_cm`` and
-    the robot overshot every pivot landing. Now the compensation mutates
-    the same ``graph`` object that ``_emit_toy`` hands to ``emit_routes``,
-    so the compensated distance must appear in the emitted source.
-
-    Three-node A->B->C fixture (mirrors
-    :func:`test_edge_pre_turn_mode_override_emit`): ``A->B`` is a 90 deg
-    LEFT pivot, ``B->C`` is the single forward continuation. For
-    TRACK_CM=15 and a 90 deg turn the forward chord component is 7.5 cm,
-    so ``B->C`` is shortened from 30.0 to 22.5 cm. ``22.500000f`` is the
-    compensated literal; ``30.000000f`` is the pre-compensation value that
-    must NOT survive on the forward B->C cell.
+    The per-edge pivot fields and their ``offsetof`` layout guard were removed
+    when single-wheel pivots moved to the sparse ``PIVOT_TURNS`` table
+    (ADR-036). The emitted ``EdgeInfo`` struct must carry neither field, and the
+    old field-order ``static_assert`` / ``<stddef.h>`` (only present for the
+    removed ``offsetof`` guard) must be gone from routes.h.
     """
     header_path, source_path = emit_targets
-    fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 70.0)},
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind"},
-        LINE_SEGMENTS=[],
-        BLIND_EDGES=[],
-        OBSTACLES=[],
-        ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
-        START_NODE="A",
-        START_HEADING_DEG=0.0,
-        FIELD_MM=(3000, 2000),
-        MAP_PNG="maps/map.png",
-        EDGES=[
-            {
-                "type":        EDGE_BLIND,
-                "u":           "A",
-                "v":           "B",
-                "distance_cm": 40.0,
-                "heading_deg": 0.0,
-                "pivot":       Pivot.LEFT,
-            },
-            {
-                "type":        EDGE_BLIND,
-                "u":           "B",
-                "v":           "C",
-                "distance_cm": 30.0,
-                "heading_deg": 90.0,
-            },
-        ],
-    )
-    _emit_toy(fd, header_path, source_path)
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
     cpp_text = source_path.read_text(encoding="utf-8")
-    # The compensated B->C distance (22.5 cm) reached the emitted EDGES
-    # table -- proof the compensation now flows to emission, not just cost.
-    assert "22.500000f" in cpp_text, (
-        "compensated B->C distance (22.5 cm) missing from routes.cpp"
+
+    # The struct still exists, but without the two removed members.
+    assert "struct EdgeInfo {" in header_text
+    assert "pivot_trim_cm" not in header_text
+    assert "pre_turn_mode_override" not in header_text
+    assert "pivot_trim_cm" not in cpp_text
+    assert "pre_turn_mode_override" not in cpp_text
+
+    # The removed offsetof layout guard (its only reason to exist was the now-
+    # deleted trailing float) must be gone, along with the <stddef.h> it needed.
+    assert "offsetof(EdgeInfo" not in header_text
+    assert "static_assert(offsetof" not in header_text
+    assert "#include <stddef.h>" not in header_text
+
+
+def test_edge_info_cell_builders_drop_pivot_fields(emit_targets):
+    """TC14 (cell shape): every EDGES cell ends at its four override-enum slots.
+
+    Both the populated ``_edge_cell`` and the empty ``_none_edge_cell`` builders
+    dropped the trailing ``pivot_trim_cm`` (and the turn-mode override slot), so
+    each emitted cell now closes on the ``direction_override`` enum literal --
+    not a float. A populated A->B cell and a NONE cell both end on a
+    ``DirectionMode::*`` literal.
+    """
+    _, source_path = emit_targets
+    _emit_with_toy_field(emit_targets)
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # A populated edge cell (A->B exists in the toy field) ends on the
+    # direction-override enum literal, with no trailing float.
+    a_to_b_cell = _edge_cell_text(cpp_text, "A", "B")
+    assert a_to_b_cell.rstrip().endswith("DirectionMode::DEFAULT }"), (
+        "populated EdgeInfo cell must end on direction_override; got: " + a_to_b_cell
     )
+    # No EdgeInfo cell carries a trailing pivot_trim_cm float anymore: the
+    # only floats in a cell are distance_cm / heading_deg near the START.
+    assert "EdgeType::NONE" in cpp_text
+    # A NONE cell also closes on the direction default (its 4 override slots).
+    assert "EdgeType::NONE, " in cpp_text
+    assert ("DirectionMode::DEFAULT }" in a_to_b_cell)
 
 
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the

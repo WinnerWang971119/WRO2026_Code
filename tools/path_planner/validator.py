@@ -2,29 +2,43 @@
 
 Inspects the raw module attributes (``NODES``, ``NODE_TYPES``,
 ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``OBSTACLES``, ``FIELD_MM``,
-``MAP_PNG``, optional ``EDGES``, ...) and raises :class:`FieldDataError`
-on the first malformed entry with a precise key path and a one-line
-nudge toward the fix.
+``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, ...) and raises
+:class:`FieldDataError` on the first malformed entry with a precise key
+path and a one-line nudge toward the fix.
 
 PR3 schema (vs PR1/PR2): drops ``PROJECTIONS`` and ``GOAL_APPROACH``,
 adds required ``BLIND_EDGES`` and ``FIELD_MM`` / ``MAP_PNG``.
 
 PR4 (T3/T6) adds an optional ``EDGES`` table for rich per-edge metadata
-(EDGE_PROJECTION, per-edge mode overrides, single-wheel pivot tags).
-Absence of ``EDGES`` is benign for backward compatibility.
+(EDGE_PROJECTION, per-edge mode overrides). Absence of ``EDGES`` is benign
+for backward compatibility.
 
-The validator performs no I/O, no logging, and mutates no global state.
+Single-wheel pivots are authored **per turn**, not per edge: a pivot is a
+3-node triple ``(u, v, w)`` in ``field_data.PIVOT_TURNS`` (arrive from
+``u``, pivot at ``v``, leave to ``w``). The per-turn geometry fail-fasts
+live in :func:`_validate_pivot_turns`; the old per-edge ``pivot`` /
+``pre_turn_mode`` ``EDGES`` keys are gone (the validator no longer reads
+them).
+
+The validator performs no I/O on mutable state and mutates no global
+state. It does read two firmware headers (``WRO2026/Config.h`` for the
+single-sourced over-travel constants and the chassis track) so the
+offline pivot checks stay in lockstep with the values the robot drives
+with -- mirroring :func:`tools.path_planner.planner.parse_track_cm_from_config`.
 
 Imports of :mod:`tools.path_planner.graph_builder` and
-:mod:`tools.path_planner.pipeline_config` are deferred inside the EDGES
-validator to avoid a circular import (``graph_builder`` imports
-:func:`validate` from this module).
+:mod:`tools.path_planner.pipeline_config` are deferred inside the
+EDGES / pivot validators to avoid a circular import (``graph_builder``
+imports :func:`validate` from this module).
 """
 
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any, Iterable
+
+from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH, parse_config_float
 
 _REQUIRED_ATTRS = (
     "NODES",
@@ -41,6 +55,17 @@ _REQUIRED_ATTRS = (
 )
 
 _ALLOWED_NODE_TYPES = ("line", "blind")
+
+# Per-edge pivot authoring keys removed by the per-turn model (issue #44, T5).
+# A field that still carries one of these on an EDGES entry pre-dates the
+# migration: the key is silently ignored by the per-turn validator and -- worse
+# -- the stray ``pivot`` would crash ``graph_builder._extract_directional_attrs``
+# with a raw ``ValueError`` (``int(...)`` on a string) when the authored graph is
+# built. The EDGES shape check rejects these up front with a precise
+# :class:`FieldDataError` (single anti-ambiguity gate, ADR-029) so the raw
+# ValueError is unreachable and the author is pointed at the new ``PIVOT_TURNS``
+# top-level list.
+_OBSOLETE_EDGE_KEYS = ("pivot", "pre_turn_mode")
 
 
 class FieldDataError(Exception):
@@ -72,77 +97,570 @@ def _segment_key(a: str, b: str) -> frozenset:
     return frozenset((a, b))
 
 
-def _authored_out_neighbors(field_data, node: str) -> set:
-    """Return the directed out-neighbors of ``node`` in the AUTHORED graph.
+# -- per-turn pivot validation (issue #44 per-turn model, T5) -----------------
+#
+# A pivot is a 3-node turn ``(u, v, w)`` authored in
+# ``field_data.PIVOT_TURNS`` -- arrive along ``u -> v``, pivot the chassis at
+# ``v``, depart along ``v -> w``. Geometry (turn angle, over-travel ``delta``,
+# wheel) is derived offline; the validator fails fast on any turn the chassis
+# cannot physically realise. This replaces the old per-edge ``EDGES["pivot"]``
+# model (one trim field on one edge, plus a single-forward-out-edge landing
+# rule, finding #36) -- a node ``v`` may now carry several continuations, only
+# some of which are pivots, because a pivot is a property of the *turn*, not
+# the edge.
 
-    Mirrors the directed-edge emission of
-    :func:`tools.path_planner.graph_builder.build_graph` exactly, so the
-    count of forward out-edges this function reports matches what the
-    planner would see -- with one deliberate exception noted below.
 
-    ``build_graph`` emits every undirected pair bidirectionally:
+# The firmware header owns the over-travel budget constants the pivot checks
+# need (the line-sensor-to-axle offset, the trim-underflow floor, the minimum
+# authored pivot angle). Like ``planner.py`` does for ``TRACK_MM``, this
+# module reads them from ``Config.h`` via the shared, anchored
+# ``config_parse.parse_config_float`` -- with a no-stale-fallback policy -- so an
+# edit to ``Config.h`` can never silently desync the offline validator from the
+# firmware and sim (parity test TC26 asserts these parsed values equal the header
+# literals). The alias keeps this module's public parse-function signatures stable.
+_CONFIG_H_PATH = DEFAULT_CONFIG_H_PATH
 
-    * each ``LINE_SEGMENTS`` pair ``(a, b)`` -> ``a->b`` and ``b->a``;
-    * each ``BLIND_EDGES`` pair ``(a, b)`` -> ``a->b`` and ``b->a``;
-    * each ``EDGES`` entry ``{u, v}`` -> ``u->v`` and ``v->u``.
 
-    So ``node`` has an out-edge to every line/blind neighbor, an out-edge
-    to ``w`` for every EDGES entry with ``u == node``, and an out-edge to
-    ``u`` (the reverse leg) for every EDGES entry with ``v == node``.
-    Out-neighbors are collected into a ``set`` because ``networkx``'s
-    ``DiGraph.add_edge`` keeps at most one directed edge per ordered pair:
-    a node named in two source lists still contributes a single out-edge.
+def parse_line_sensor_axle_offset_cm(config_path: Path = _CONFIG_H_PATH) -> float:
+    """Return ``Config::LINE_SENSOR_AXLE_OFFSET_CM`` (the FRONT offset) in cm.
 
-    .. note::
+    A LINE-incoming pivot realises its correction as a REDUCTION of the
+    post-detect ``LINE_OVERSHOOT`` advance, so the over-travel ``delta`` it
+    cancels must fit within that advance -- the line-sensor-to-axle offset.
 
-        This counts the AUTHORED topology, BEFORE obstacle / C-space
-        inflation clipping. The planner's old in-line check (now removed)
-        counted the POST-clip graph instead. The divergence is
-        intentional: a pivot landing should be unambiguous in the graph
-        the author actually wrote, independent of which edges inflation
-        happens to drop. Edges silently lost to obstacle clipping are a
-        separate concern, warned per finding #37; this check must not
-        depend on that clipping to decide a pivot is well-formed.
+    The per-turn model is **FRONT-only** in v1 (reverse pivots are deferred to
+    #54 and rejected by the validator), so the budget is the FRONT offset
+    alone, not the min of front/rear the per-edge model used (which had to
+    hedge against a runtime direction choice). Single-sourced from Config.h
+    so a chassis remeasure cannot desync this check.
 
-    :param field_data: the field-data module (or any object exposing
-        ``LINE_SEGMENTS``, ``BLIND_EDGES``, and optionally ``EDGES``).
-    :param node: the node whose out-neighbors to collect.
-    :return: set of node names ``node`` has a directed out-edge to.
+    :param config_path: path to ``Config.h`` (defaults to the firmware header).
+    :return: the FRONT sensor-to-axle offset in centimetres.
     """
-    neighbors: set = set()
+    return parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", config_path)
 
+
+def parse_pivot_trim_min_drive_cm_from_config(
+    config_path: Path = _CONFIG_H_PATH,
+) -> float:
+    """Return ``Config::PIVOT_TRIM_MIN_DRIVE_CM`` (firmware's trim-underflow floor) in cm.
+
+    The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
+    advance) to this tiny positive floor so a bad table can never command a
+    non-positive distance. The validator gates on the SAME floor: it rejects any
+    pivot whose trim would leave less than this much of the edge it shortens, so
+    a delta that merely satisfies ``delta < length`` yet trips the runtime clamp
+    fails offline instead of overshooting on a table that validated clean. The
+    sim and the parity test (TC26) read the same single-sourced constant.
+
+    :param config_path: path to ``Config.h`` (defaults to the firmware header).
+    :return: the trim-underflow minimum drive distance in centimetres.
+    """
+    return parse_config_float("PIVOT_TRIM_MIN_DRIVE_CM", config_path)
+
+
+def parse_pivot_min_turn_deg_from_config(config_path: Path = _CONFIG_H_PATH) -> float:
+    """Return ``Config::PIVOT_MIN_TURN_DEG`` -- the minimum authored pivot angle.
+
+    The validator rejects any authored pivot turn whose geometric ``|theta|`` is
+    below this floor. It is a TUNABLE Config.h knob (not derived from the
+    firmware tolerance): a pivot fires at runtime only when the pre-turn maneuver
+    dispatches (heading delta ``> NAV_TURN_TOLERANCE_DEG``, PathTracker), so a
+    too-shallow turn would silently no-op the pivot while its ``delta`` trim is
+    still subtracted. Single-sourced here so a retune of the floor cannot desync
+    the offline check from the firmware header (TC26 parity).
+
+    :param config_path: path to ``Config.h`` (defaults to the firmware header).
+    :return: the minimum authored pivot turn angle in degrees.
+    """
+    return parse_config_float("PIVOT_MIN_TURN_DEG", config_path)
+
+
+# Above this absolute turn angle the over-travel formula
+# ``delta = (track/2) * tan(|theta| / 2)`` blows up: ``tan`` diverges toward a
+# full one-wheel reversal at 180 deg. Reject at/above this threshold rather
+# than emit an unboundedly large (garbage) trim. At 179 deg the multiplier is
+# already ~115x the half-track, far beyond any realisable maneuver. A pure
+# literal (no Config.h read), so it is a module constant.
+_PIVOT_MAX_TURN_DEG = 179.0
+
+
+def _build_authored_graph(field_data):
+    """Build the AUTHORED directed graph the per-turn pivot checks read from.
+
+    **Graph-availability approach (the riskiest design call in T5).**
+    ``directed_edge_heading`` -- the single reusable source for directed-edge
+    geometry (T3) -- needs a built graph. But :func:`validate` runs *inside*
+    :func:`tools.path_planner.graph_builder.build_graph`, BEFORE the planner
+    graph exists, so calling ``build_graph`` from here would recurse infinitely
+    (``build_graph -> validate -> build_graph -> ...``). Instead this rebuilds a
+    minimal graph DIRECTLY from the authored field data using ``build_graph``'s
+    OWN emission helper (:func:`graph_builder._emit_directed_pair`), so the
+    edges carry byte-identical ``type`` / ``distance_cm`` / ``heading_deg`` /
+    ``primitive_mode`` and the same LINE -> BLIND -> EDGES last-writer
+    precedence the planner will later see -- without ever re-entering
+    ``validate``. This is the precedence/bidirectional resolver of review fix 2
+    realised through the canonical emitter rather than a bare ``entry.get``.
+
+    Obstacle inflation is deliberately SKIPPED: the validator judges a pivot
+    against the topology the AUTHOR wrote, not against whichever edges C-space
+    clipping happens to drop (the same stance the removed
+    ``_authored_out_neighbors`` documented). Pivot geometry is an authoring
+    property; edges lost to clipping are a separate concern (finding #37).
+
+    :param field_data: the field-data module (or namespace) exposing
+        ``NODES``, ``LINE_SEGMENTS``, ``BLIND_EDGES``, and optionally
+        ``EDGES``.
+    :return: a ``networkx.DiGraph`` of the authored topology (no inflation),
+        with every directed edge carrying the geometry attributes
+        :func:`tools.path_planner.graph_builder.directed_edge_heading` reads.
+    """
+    # Deferred imports to avoid a circular import: graph_builder imports
+    # `validate` from this module.
+    import networkx as nx
+
+    from tools.path_planner.graph_builder import (
+        EDGE_BLIND,
+        EDGE_LINE,
+        EDGE_PROJECTION,
+        _emit_directed_pair,
+    )
+
+    nodes = getattr(field_data, "NODES", {})
+    g = nx.DiGraph()
+    for name, coord in nodes.items():
+        g.add_node(name, x_cm=float(coord[0]), y_cm=float(coord[1]))
+
+    # Match build_graph's source precedence exactly: LINE_SEGMENTS, then
+    # BLIND_EDGES, then EDGES (a later source's directed edge overwrites an
+    # earlier one's attributes -- networkx add_edge updates in place). No
+    # obstacle-clip drop here (authored topology).
     for a, b in getattr(field_data, "LINE_SEGMENTS", ()):
-        if a == node:
-            neighbors.add(b)
-        elif b == node:
-            neighbors.add(a)
+        if a in nodes and b in nodes:
+            _emit_directed_pair(g, a, b, nodes[a], nodes[b], EDGE_LINE)
 
     for a, b in getattr(field_data, "BLIND_EDGES", ()):
-        if a == node:
-            neighbors.add(b)
-        elif b == node:
-            neighbors.add(a)
+        if a in nodes and b in nodes:
+            _emit_directed_pair(g, a, b, nodes[a], nodes[b], EDGE_BLIND)
 
-    known_nodes = getattr(field_data, "NODES", {})
     for entry in getattr(field_data, "EDGES", ()) or ():
         if not isinstance(entry, dict):
             continue  # malformed entry; the per-entry shape check reports it.
-        u = entry.get("u")
-        v = entry.get("v")
-        # Only count a neighbor that is a real, known node name. A later
-        # malformed entry (missing or non-string ``u``/``v``) would otherwise
-        # contribute a ``None`` -- or a bogus value -- that inflates an
-        # EARLIER pivot landing's out-degree and raises a misleading
-        # "exactly one forward out-edge" error, masking the per-entry shape
-        # check that actually pinpoints the malformed entry. ``in`` on the
-        # NODES dict is False for ``None`` and any unknown key, so this gate
-        # keeps the count faithful to the authored topology.
-        if u == node and v in known_nodes:
-            neighbors.add(v)
-        elif v == node and u in known_nodes:
-            neighbors.add(u)
+        eu = entry.get("u")
+        ev = entry.get("v")
+        etype = entry.get("type")
+        if eu not in nodes or ev not in nodes:
+            continue  # unknown node; the per-entry shape check reports it.
+        if etype not in (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION):
+            continue  # bad type; the per-entry shape check reports it.
+        if "distance_cm" not in entry or "heading_deg" not in entry:
+            continue  # malformed entry; the per-entry shape check reports it.
+        # Belt-and-suspenders for W1: forward ONLY the geometry/mode keys the
+        # pivot checks read off the graph, never the whole entry. The shape
+        # check (`_validate_edges_field`) already rejects a stale `pivot` /
+        # `pre_turn_mode` before this runs, but narrowing the payload means a
+        # stray legacy key can never reach `_extract_directional_attrs` and
+        # crash on `int("left")` even if this helper is ever called on
+        # unvalidated data.
+        geometry_options = {
+            key: entry[key]
+            for key in ("distance_cm", "heading_deg", "primitive_mode", "direction")
+            if key in entry
+        }
+        _emit_directed_pair(
+            g, eu, ev, nodes[eu], nodes[ev], etype, options=geometry_options
+        )
 
-    return neighbors
+    return g
+
+
+def _resolve_authored_direction(field_data, a: str, b: str):
+    """Return the authored ``direction`` override on the directed edge ``a -> b``.
+
+    The per-edge ``direction`` override is asymmetric in graph_builder
+    (:func:`graph_builder._emit_directed_pair` applies it to the forward
+    ``u -> v`` edge only). The validator's FRONT-only guard must therefore look
+    at the AUTHORED direction on each pivot-adjacent directed edge: a ``"rear"``
+    authored on the exact ``u -> v`` or ``v -> w`` leg of a pivot is rejected
+    (v1 is FRONT-only; reverse pivots are #54). A ``"rear"`` authored only on
+    some other leg (e.g. the reverse ``b -> a``) does not constrain ``a -> b``.
+
+    :param field_data: the field-data module/namespace.
+    :param a: source node of the directed edge.
+    :param b: destination node of the directed edge.
+    :return: ``"front"``, ``"rear"``, or ``None`` (no authored override on the
+        exact ``a -> b`` leg).
+    """
+    direction = None
+    for entry in getattr(field_data, "EDGES", ()) or ():
+        if not isinstance(entry, dict):
+            continue  # malformed entry; the per-entry shape check reports it.
+        # Asymmetric: the override lands on the forward (u -> v) leg only, so
+        # match the entry's u/v to a/b in that exact sense. Last writer wins,
+        # mirroring graph_builder's emission order.
+        if entry.get("u") == a and entry.get("v") == b and "direction" in entry:
+            direction = entry["direction"]
+    return direction
+
+
+def _validate_pivot_turns(field_data) -> None:
+    """Reject per-turn pivots whose two-sided over-travel geometry is unrealisable.
+
+    Validates every triple ``(u, v, w)`` in ``field_data.PIVOT_TURNS`` -- the
+    per-turn pivot authoring that replaces the old per-edge ``EDGES["pivot"]``
+    model. A pivot fires only when the route takes the turn, so ``v`` may have
+    several continuations; this pass checks each authored turn in isolation.
+
+    For each triple it:
+
+    1. requires both legs ``u -> v`` and ``v -> w`` to be authored edges;
+    2. derives the turn angle ``theta`` at ``v`` from the two directed-edge
+       headings via :func:`tools.path_planner.graph_builder.directed_edge_heading`
+       (T3 -- no reimplemented ``hypot`` / ``atan2`` / ``+180`` here) wrapped
+       by the one canonical :func:`tools.path_planner.compiler.normalize_turn`
+       (the same normalizer the planner's ``build_pivot_turns`` emits with);
+    3. classifies each side's edge into a regime -- ``"line"`` (true LINE,
+       overshoot-budget-bearing), ``"sensor"`` (a BLIND edge whose effective
+       mode is STOP_AT_LINE -- self-corrects, no trim, no budget), or
+       ``"distance"`` (plain BLIND / PROJECTION -- dead-reckoned, where the
+       trim actually bites);
+    4. computes the single-wheel over-travel
+       ``delta = compute_pivot_compensation(theta, track_cm)`` (issue #44
+       closed form -- reused, not re-derived); and
+    5. fails fast with a precise :class:`FieldDataError` on any configuration
+       the geometry cannot realise.
+
+    Fail-fast conditions (each a distinct, precisely-worded error):
+
+    * **Missing leg.** ``u -> v`` or ``v -> w`` is not an authored edge.
+    * **Duplicate triple.** The same ``(u, v, w)`` authored twice.
+    * **Degenerate / sub-gate turn angle.** ``|theta|`` at/above
+      :data:`_PIVOT_MAX_TURN_DEG` (a near-full one-wheel reversal where ``tan``
+      diverges) or below ``Config::PIVOT_MIN_TURN_DEG`` (the tunable floor -- the
+      turn would slip under the firmware's dispatch gate).
+    * **Unsupported regime combo.** Either side's edge type fails to classify.
+    * **Trim exceeds a dead-reckoned drive.** On a ``"distance"`` side ``delta``
+      is subtracted from that side's encoder drive, so it must stay strictly
+      below the edge length. Checked on incoming and outgoing independently.
+    * **Trim exceeds the LINE-incoming overshoot budget.** Only when the
+      incoming side is a true ``"line"`` edge; ``"sensor"`` (STOP_AT_LINE)
+      incoming is EXEMPT (review fix 3).
+    * **Chained pivots over-trim a shared edge.** Two triples sharing the same
+      directed edge ``(v, w)`` (one departing it, one approaching it) must
+      satisfy ``delta_uv + delta_vw < length(v -> w)``.
+    * **Authored REAR on a pivot-adjacent edge.** v1 is FRONT-only; a
+      ``direction: "rear"`` on the exact ``u -> v`` or ``v -> w`` leg is
+      rejected (reverse pivots are #54).
+
+    The supported incoming x outgoing matrix (``line`` / ``sensor`` =
+    sensor-terminated; ``distance`` = dead-reckoned) is::
+
+        incoming \\ outgoing | sensor (line / STOP_AT_LINE) | distance (BLIND / PROJ)
+        --------------------+------------------------------+-------------------------
+        line (re-anchor)    | overshoot-reduce in;          | overshoot-reduce in;
+                            | out no-op (self-corrects @w)  | out drive trimmed
+        sensor / distance   | approach trim in;             | approach trim in;
+                            | out no-op (self-corrects @w)  | out drive trimmed
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes -- including
+        ``PIVOT_TURNS``).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``PIVOT_TURNS[i]`` key path and a
+        one-line fix hint on the first unrealisable pivot.
+    """
+    pivot_turns = getattr(field_data, "PIVOT_TURNS", None)
+    if not pivot_turns:
+        # Early return BEFORE touching Config.h: a pivot-free field (the real
+        # field today) must not pay the per-build header parse, and must not
+        # fail if a constant the pivot checks need is ever absent. This is the
+        # only place the firmware constants get read.
+        return
+
+    # Deferred imports to avoid a circular import with graph_builder (which
+    # imports `validate` from this module). `parse_track_cm_from_config` is the
+    # single source of truth for the chassis track (issue #44);
+    # `compute_pivot_compensation` is the single source of the delta formula.
+    # `compiler.normalize_turn` is the ONE canonical turn normalizer the planner
+    # emits with -- imported here (not at module top) because
+    # `compiler -> graph_builder -> validator` would otherwise close an import
+    # cycle. Using the same normalizer guarantees the validator's gating angle
+    # and the planner's emitted wheel/delta are computed identically (the latent
+    # +-180 drift the consolidation closes).
+    from tools.path_planner.compiler import normalize_turn
+    from tools.path_planner.graph_builder import (
+        EDGE_BLIND,
+        EDGE_LINE,
+        EDGE_PROJECTION,
+        directed_edge_heading,
+    )
+    from tools.path_planner.pipeline_config import PIPELINE_CONFIG, BlindMode
+    from tools.path_planner.planner import (
+        compute_pivot_compensation,
+        parse_track_cm_from_config,
+    )
+
+    track_cm = parse_track_cm_from_config()
+
+    # Single-source the over-travel budget + min-angle floor from the firmware
+    # header, parsed lazily HERE (not at import) so a pivot-free field never pays
+    # the read (the nit: kill the per-build dead read). The LINE budget is the
+    # FRONT sensor-to-axle offset (FRONT-only); the min-angle floor is the tunable
+    # Config::PIVOT_MIN_TURN_DEG knob -- an authored pivot below it would slip
+    # under the firmware's turn-dispatch gate and silently no-op.
+    line_overshoot_budget_cm = parse_line_sensor_axle_offset_cm()
+    pivot_min_turn_deg = parse_pivot_min_turn_deg_from_config()
+    # The firmware/sim clamp a trimmed dead-reckon drive (and the LINE overshoot
+    # advance) to this floor (PathTracker._pivotTrimDistance and the LINE_FOLLOW
+    # overshoot branch; the sim mirrors both). A delta that merely satisfies
+    # delta < length leaves length - delta in (0, floor), which the runtime
+    # clamps -- driving the floor instead of the geometric remainder and printing
+    # "Check validator/config" on a table that validated clean. Gate on the same
+    # floor here so such a pivot is rejected offline.
+    pivot_trim_min_drive_cm = parse_pivot_trim_min_drive_cm_from_config()
+
+    # The authored topology graph -- built without re-entering validate (see
+    # _build_authored_graph). All directed-edge geometry comes from here.
+    graph = _build_authored_graph(field_data)
+
+    def _edge_attrs(a: str, b: str):
+        """Return the directed edge's (type, distance_cm, primitive_mode) or None."""
+        if not graph.has_edge(a, b):
+            return None
+        data = graph[a][b]
+        return data["type"], float(data["distance_cm"]), data.get("primitive_mode")
+
+    def _regime(edge_type, primitive_mode) -> str | None:
+        """Classify a directed edge: 'line', 'sensor', 'distance', or None.
+
+        ``line``     -- a true LINE edge: re-anchors on the junction line; its
+                        incoming trim is bounded by the LINE overshoot budget.
+        ``sensor``   -- a BLIND edge whose EFFECTIVE mode is STOP_AT_LINE
+                        (review fix 1: an absent override inherits
+                        ``PIPELINE_CONFIG.blind``, so a no-override BLIND classifies
+                        sensor when the pipeline default is STOP_AT_LINE). Self-
+                        corrects on the line: takes no trim, and is NOT subject to
+                        the overshoot budget (review fix 3).
+        ``distance`` -- plain BLIND or PROJECTION: dead-reckoned; the trim bites.
+        ``None``     -- an unclassifiable edge type (unsupported combo).
+        """
+        if edge_type == EDGE_LINE:
+            return "line"
+        if edge_type == EDGE_PROJECTION:
+            return "distance"
+        if edge_type == EDGE_BLIND:
+            # Review fix 1: a BLIND edge with no per-edge override inherits
+            # PIPELINE_CONFIG.blind. Classify on the EFFECTIVE mode so a
+            # no-override BLIND under a STOP_AT_LINE pipeline default is sensor.
+            effective = primitive_mode if isinstance(primitive_mode, BlindMode) else PIPELINE_CONFIG.blind
+            if effective == BlindMode.STOP_AT_LINE:
+                return "sensor"
+            return "distance"
+        return None
+
+    # First pass: per-triple geometry + collect each triple's delta keyed by
+    # its outgoing directed edge, so a second pass can sum chained pivots that
+    # share an edge.
+    seen_triples: set = set()
+    # Map directed edge (v, w) -> list of (triple_index, delta) for every
+    # pivot whose OUTGOING leg is that edge (departing it) AND every pivot
+    # whose INCOMING leg is that edge (approaching it). A shared edge that
+    # carries one departing and one approaching trim must fit both.
+    out_edge_deltas: dict = {}
+    in_edge_deltas: dict = {}
+
+    nodes = getattr(field_data, "NODES", {})
+    for i, triple in enumerate(pivot_turns):
+        # Shape: a pivot turn is a 3-element sequence of known node names. The
+        # loader (T1) already produces (u, v, w) string tuples, but the
+        # validator is the anti-ambiguity gate -- fail fast with a precise
+        # message rather than crash on an unpacking error or an unknown node.
+        if not isinstance(triple, (tuple, list)) or len(triple) != 3:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] must be a 3-element (u, v, w) node-name "
+                f"sequence; got: {triple!r}"
+            )
+        u, v, w = triple
+        for role, name in (("u", u), ("v", v), ("w", w)):
+            if name not in nodes:
+                raise FieldDataError(
+                    f"PIVOT_TURNS[{i}] references unknown node {role}='{name}' "
+                    f"(triple {triple!r}) -- add it to NODES or fix the triple."
+                )
+        if u == v or v == w:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has a degenerate leg "
+                f"(u==v or v==w) -- a pivot turn needs three distinct steps; "
+                f"fix the triple."
+            )
+
+        # Normalize to a hashable tuple for duplicate detection and edge keys
+        # (the loader yields tuples, but a hand-built fixture may pass a list).
+        triple = (u, v, w)
+
+        # Duplicate triple --------------------------------------------------
+        if triple in seen_triples:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] is a duplicate pivot turn "
+                f"('{u}','{v}','{w}') -- a turn is authored once; remove the "
+                f"repeat."
+            )
+        seen_triples.add(triple)
+
+        # Both legs must be authored edges ----------------------------------
+        in_attrs = _edge_attrs(u, v)
+        if in_attrs is None:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') names an incoming edge "
+                f"('{u}','{v}') that is not authored -- add it to "
+                f"LINE_SEGMENTS / BLIND_EDGES / EDGES or fix the triple."
+            )
+        out_attrs = _edge_attrs(v, w)
+        if out_attrs is None:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') names an outgoing edge "
+                f"('{v}','{w}') that is not authored -- add it to "
+                f"LINE_SEGMENTS / BLIND_EDGES / EDGES or fix the triple."
+            )
+        in_type, in_distance, in_primitive = in_attrs
+        out_type, out_distance, out_primitive = out_attrs
+
+        # FRONT-only: reject authored REAR on either pivot-adjacent leg ------
+        # (review fix 4 / FRONT-only; reverse pivots are #54). Check the exact
+        # u -> v and v -> w legs -- the override is asymmetric in graph_builder.
+        for leg_a, leg_b, label in ((u, v, "incoming"), (v, w, "outgoing")):
+            if _resolve_authored_direction(field_data, leg_a, leg_b) == "rear":
+                raise FieldDataError(
+                    f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an authored "
+                    f"direction:'rear' on its {label} edge ('{leg_a}','{leg_b}'), "
+                    f"but single-wheel pivots are FRONT-only in v1 (reverse "
+                    f"pivots are tracked by #54). Drop the 'rear' override on "
+                    f"that edge or remove the pivot turn."
+                )
+
+        # 1. Degenerate / sub-gate turn angle -------------------------------
+        in_heading = directed_edge_heading(graph, u, v)
+        out_heading = directed_edge_heading(graph, v, w)
+        # ONE canonical normalizer: the planner's build_pivot_turns derives its
+        # emitted wheel/delta from compiler.normalize_turn (yields (-180, 180]).
+        # Computing theta the same way here keeps the validator's gating angle
+        # and the planner's emitted geometry byte-identical at every angle --
+        # including +-180, where a divergent local wrap would flip the wheel sign.
+        theta = normalize_turn(out_heading - in_heading)
+        abs_theta = abs(theta)
+        if abs_theta >= _PIVOT_MAX_TURN_DEG or abs_theta < pivot_min_turn_deg:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has a degenerate turn "
+                f"angle theta={theta:.2f} deg (must be in "
+                f"[{pivot_min_turn_deg:.2f}, {_PIVOT_MAX_TURN_DEG}) deg). A "
+                f"near-180 deg turn makes the single-wheel over-travel "
+                f"(track/2)*tan(theta/2) diverge, and a sub-{pivot_min_turn_deg:.0f} "
+                f"deg turn would slip under the firmware turn-dispatch gate -- "
+                f"fix the headings of ('{u}','{v}') / ('{v}','{w}') or remove "
+                f"the pivot turn."
+            )
+
+        # 2. Unsupported incoming x outgoing combo --------------------------
+        in_regime = _regime(in_type, in_primitive)
+        out_regime = _regime(out_type, out_primitive)
+        if in_regime is None or out_regime is None:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an unsupported "
+                f"regime combo: incoming type {in_type!r} x outgoing type "
+                f"{out_type!r}. The two-sided pivot compensation only models "
+                f"sensor-terminated (LINE / BLIND STOP_AT_LINE) and "
+                f"distance-terminated (BLIND / PROJECTION) edges -- reclassify "
+                f"the offending edge or remove the pivot turn."
+            )
+
+        # Single-source the delta formula (no inline re-derive).
+        delta = compute_pivot_compensation(theta, track_cm)
+
+        # 3. delta leaves < the trim floor on a DISTANCE-terminated side ----
+        # The trim shortens a dead-reckoned drive; the firmware clamps the
+        # remainder to PIVOT_TRIM_MIN_DRIVE_CM, so a remainder below that floor
+        # would overshoot the node on a table that validated clean. Reject when
+        # length - delta < the floor. Incoming and outgoing are independent.
+        if in_regime == "distance" and in_distance - delta < pivot_trim_min_drive_cm:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
+                f"delta={delta:.3f} cm, leaving {in_distance - delta:.3f} cm of "
+                f"the INCOMING dead-reckoned edge length {in_distance:.3f} cm "
+                f"(type {in_type!r}) -- below the firmware's trim-underflow floor "
+                f"{pivot_trim_min_drive_cm:.3f} cm. The runtime would clamp to "
+                f"that floor and overshoot the node -- lengthen ('{u}','{v}'), "
+                f"soften the turn, or remove the pivot turn."
+            )
+        if out_regime == "distance" and out_distance - delta < pivot_trim_min_drive_cm:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
+                f"delta={delta:.3f} cm, leaving {out_distance - delta:.3f} cm of "
+                f"the OUTGOING dead-reckoned edge length {out_distance:.3f} cm "
+                f"(type {out_type!r}) -- below the firmware's trim-underflow floor "
+                f"{pivot_trim_min_drive_cm:.3f} cm. The runtime would clamp to "
+                f"that floor and overshoot the node -- lengthen ('{v}','{w}'), "
+                f"soften the turn, or remove the pivot turn."
+            )
+
+        # 4. delta leaves < the trim floor of the LINE overshoot budget -----
+        # ONLY a true LINE incoming edge realises its correction as a reduction
+        # of the post-detect LINE_OVERSHOOT advance, bounded by the FRONT
+        # sensor-to-axle offset (review fix 3/4: STOP_AT_LINE-incoming is
+        # 'sensor', not 'line', and is EXEMPT -- it takes no incoming trim). The
+        # firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
+        # reject when budget - delta < the floor.
+        if in_regime == "line" and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm:
+            raise FieldDataError(
+                f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
+                f"delta={delta:.3f} cm, leaving "
+                f"{line_overshoot_budget_cm - delta:.3f} cm of the LINE overshoot "
+                f"budget {line_overshoot_budget_cm:.2f} cm (the FRONT sensor-to-axle "
+                f"offset; v1 pivots are FRONT-only) -- below the firmware's "
+                f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. The runtime "
+                f"would clamp the overshoot advance to that floor -- soften the "
+                f"turn or remove the pivot turn on ('{u}','{v}','{w}')."
+            )
+
+        # Record this triple's delta against the directed edges it trims, for
+        # the chained-pivot sum-check below. Only a DISTANCE-terminated leg
+        # actually subtracts the trim from that edge's drive; a sensor/line leg
+        # absorbs it on the line (no length budget to share). So a chain only
+        # stacks on a shared edge that is dead-reckoned for both pivots.
+        if out_regime == "distance":
+            out_edge_deltas.setdefault((v, w), []).append((i, delta))
+        if in_regime == "distance":
+            in_edge_deltas.setdefault((u, v), []).append((i, delta))
+
+    # 5. Chained pivots sharing a dead-reckoned edge --------------------------
+    # A chain u -> v -> w -> x (pivots at v and w) subtracts TWO trims from the
+    # shared edge (v, w): the v-pivot's OUTGOING (departing) trim and the
+    # w-pivot's INCOMING (approaching) trim. They must leave at least the
+    # firmware's trim floor between them -- length(v -> w) - (delta_uv + delta_vw)
+    # >= the floor -- or the firmware's two independent subtractions clamp (or
+    # command a non-positive drive).
+    for edge, departing in out_edge_deltas.items():
+        approaching = in_edge_deltas.get(edge)
+        if not approaching:
+            continue  # no pivot approaches this edge; the single-side delta >= length gate already covered it.
+        v, w = edge
+        edge_len = float(graph[v][w]["distance_cm"])
+        for dep_i, dep_delta in departing:
+            for app_i, app_delta in approaching:
+                if dep_i == app_i:
+                    continue  # same triple cannot both depart and approach the same edge.
+                if edge_len - (dep_delta + app_delta) < pivot_trim_min_drive_cm:
+                    raise FieldDataError(
+                        f"PIVOT_TURNS[{dep_i}] and PIVOT_TURNS[{app_i}] chain on "
+                        f"the shared dead-reckoned edge ('{v}','{w}'): the "
+                        f"departing trim {dep_delta:.3f} cm + the approaching "
+                        f"trim {app_delta:.3f} cm = {dep_delta + app_delta:.3f} "
+                        f"cm leaves {edge_len - (dep_delta + app_delta):.3f} cm of "
+                        f"the edge length {edge_len:.3f} cm -- below the firmware's "
+                        f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. "
+                        f"The runtime would clamp the shared drive to that floor -- "
+                        f"lengthen ('{v}','{w}'), soften one turn, or remove one of "
+                        f"the chained pivot turns."
+                    )
 
 
 def _validate_edge_list(
@@ -179,12 +697,11 @@ def _validate_edges_field(field_data) -> None:
     Runs only when ``field_data`` exposes an ``EDGES`` attribute. Each
     entry must be a dict carrying required keys (``type``, ``u``, ``v``,
     ``distance_cm``, ``heading_deg``) and may carry optional keys
-    (``primitive_mode``, ``pre_turn_mode``, ``pivot``). Mode overrides
-    are cross-checked against the edge ``type`` -- e.g. a
-    :class:`LineMode` is illegal on an :data:`EDGE_BLIND` edge -- and
-    the :class:`DEFAULT <pipeline_config.LineMode>` sentinel is rejected
-    on any override (DEFAULT == "absent", so being explicit about it is
-    a confusion).
+    (``primitive_mode``, ``direction``). Mode overrides are cross-checked
+    against the edge ``type`` -- e.g. a :class:`LineMode` is illegal on an
+    :data:`EDGE_BLIND` edge -- and the :class:`DEFAULT
+    <pipeline_config.LineMode>` sentinel is rejected on any override
+    (DEFAULT == "absent", so being explicit about it is a confusion).
 
     An anti-ambiguity cross-check rejects an entry whose unordered pair
     ``{u, v}`` already exists in ``LINE_SEGMENTS`` or ``BLIND_EDGES``
@@ -195,24 +712,14 @@ def _validate_edges_field(field_data) -> None:
     entry on an existing pair is a legitimate override layer and is
     accepted.
 
-    The pivot out-degree check (finding #36) lives here: a pivot-tagged
-    entry's destination ``v`` must have exactly one forward out-edge in
-    the AUTHORED adjacency (excluding the back-edge to the pivot's source
-    ``u``), otherwise pivot compensation in
-    :mod:`tools.path_planner.planner` is ambiguous. The check counts the
-    authored topology before obstacle / C-space inflation, so a bad pivot
-    fails as a clean :class:`FieldDataError` at validation time rather
-    than as an uncaught ``ValueError`` from the planner at build time.
+    Single-wheel pivots are no longer authored here. The old per-edge
+    ``pivot`` / ``pre_turn_mode`` keys are gone; pivots are per-turn
+    triples validated by :func:`_validate_pivot_turns`, which runs after
+    this per-entry shape check.
 
-    The cross-edge pivot-geometry refinement (does the upcoming turn
-    delta exceed the minimum useful angle?) is still owned by
-    :mod:`tools.path_planner.planner` (T5); this validator checks the
-    per-entry shape and the pivot landing's out-degree.
-
-    Imports of :class:`Pivot`, :class:`LineMode`, :class:`BlindMode`,
-    :class:`ProjectionMode`, and :class:`TurnMode` are performed inside
-    the function to avoid a circular import with
-    :mod:`tools.path_planner.graph_builder`.
+    Imports of :class:`LineMode`, :class:`BlindMode`, and
+    :class:`ProjectionMode` are performed inside the function to avoid a
+    circular import with :mod:`tools.path_planner.graph_builder`.
 
     :param field_data: the ``tools.path_planner.field_data`` module (or
         any object exposing the same top-level attributes).
@@ -222,7 +729,10 @@ def _validate_edges_field(field_data) -> None:
     """
     edges = getattr(field_data, "EDGES", None)
     if edges is None:
-        return  # backward-compatible: missing EDGES is fine.
+        # backward-compatible: missing EDGES is fine, but a per-turn pivot can
+        # still reference LINE_SEGMENTS / BLIND_EDGES legs, so the pivot pass
+        # runs regardless (see validate()).
+        return
 
     if not isinstance(edges, (list, tuple)):
         raise FieldDataError(
@@ -237,13 +747,11 @@ def _validate_edges_field(field_data) -> None:
         EDGE_BLIND,
         EDGE_LINE,
         EDGE_PROJECTION,
-        Pivot,
     )
     from tools.path_planner.pipeline_config import (
         BlindMode,
         LineMode,
         ProjectionMode,
-        TurnMode,
     )
 
     legal_edge_types = (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION)
@@ -262,8 +770,8 @@ def _validate_edges_field(field_data) -> None:
     # EDGE_BLIND matches BLIND_EDGES; EDGE_PROJECTION matches neither, so a
     # PROJECTION entry on a LINE/BLIND pair is a conflict. A *matching*-type
     # entry (e.g. EDGE_LINE on a LINE_SEGMENTS pair) is a legitimate override
-    # layer (distance/heading/pivot/direction) and is accepted. This mirrors,
-    # via EDGES, the LINE-vs-BLIND guard in :func:`validate`.
+    # layer (distance/heading/direction) and is accepted. This mirrors, via
+    # EDGES, the LINE-vs-BLIND guard in :func:`validate`.
     line_segment_keys = {
         _segment_key(a, b)
         for a, b in getattr(field_data, "LINE_SEGMENTS", ())
@@ -280,6 +788,26 @@ def _validate_edges_field(field_data) -> None:
                 "each entry needs at least 'type', 'u', 'v', "
                 "'distance_cm', 'heading_deg'"
             )
+
+        # Obsolete per-edge pivot keys (issue #44, T5) ---------------------
+        # The per-turn model removed the per-edge ``pivot`` / ``pre_turn_mode``
+        # authoring. A stale key here is no longer read by the per-turn pivot
+        # validator AND, left in place, a ``pivot`` string would later crash
+        # ``graph_builder._extract_directional_attrs`` with a raw ``ValueError``
+        # (``int("left")``) when ``_validate_pivot_turns`` builds the authored
+        # graph. Fail fast here -- BEFORE that graph build -- with a precise
+        # FieldDataError so the raw ValueError is unreachable and the author is
+        # pointed at the new top-level ``PIVOT_TURNS`` list (single
+        # anti-ambiguity gate, ADR-029).
+        for obsolete_key in _OBSOLETE_EDGE_KEYS:
+            if obsolete_key in entry:
+                raise FieldDataError(
+                    f"EDGES[{i}] carries the removed per-edge key "
+                    f"'{obsolete_key}' -- single-wheel pivots are no longer "
+                    "authored on edges. Drop the 'pivot' / 'pre_turn_mode' key "
+                    "and author the turn as a (u, v, w) triple in the top-level "
+                    "PIVOT_TURNS list instead (issue #44 per-turn model)."
+                )
 
         # Required keys ----------------------------------------------------
         for required_key in ("type", "u", "v", "distance_cm", "heading_deg"):
@@ -381,23 +909,6 @@ def _validate_edges_field(field_data) -> None:
                     "pick a concrete mode"
                 )
 
-        # Optional: pre_turn_mode -----------------------------------------
-        if "pre_turn_mode" in entry:
-            pre_turn_mode = entry["pre_turn_mode"]
-            if not isinstance(pre_turn_mode, TurnMode):
-                raise FieldDataError(
-                    f"EDGES[{i}].pre_turn_mode = {pre_turn_mode!r} -- "
-                    "must be a TurnMode instance "
-                    "(COUNTER_ROT, PIVOT_LEFT, or PIVOT_RIGHT)"
-                )
-            if int(pre_turn_mode) == 0:
-                raise FieldDataError(
-                    f"EDGES[{i}].pre_turn_mode = TurnMode.DEFAULT -- "
-                    "DEFAULT means 'inherit PIPELINE_CONFIG.turn', which "
-                    "is what absence already encodes; omit the override "
-                    "or pick a concrete mode"
-                )
-
         # Optional: direction --------------------------------------------
         # Per-directed-edge traversal override (asymmetric -- applies only
         # to the forward u -> v edge, never mirrored to the reverse).
@@ -410,49 +921,6 @@ def _validate_edges_field(field_data) -> None:
                     f"EDGES[{i}].direction must be 'front', 'rear', or "
                     f"absent; got {direction!r}"
                 )
-
-        # Optional: pivot -------------------------------------------------
-        if "pivot" in entry:
-            pivot = entry["pivot"]
-            if not isinstance(pivot, Pivot):
-                raise FieldDataError(
-                    f"EDGES[{i}].pivot = {pivot!r} -- "
-                    "must be a Pivot instance (Pivot.LEFT, Pivot.RIGHT, "
-                    "or Pivot.NONE; though NONE is redundant since "
-                    "absence already encodes it)"
-                )
-            # NONE is allowed but redundant -- do not reject it as
-            # DEFAULT-sentinel, because Pivot.NONE is the meaningful
-            # "counter-rotation" value, not a placeholder.
-            #
-            # Pivot out-degree check (finding #36). A single-wheel pivot
-            # entering 'v' is compensated by shortening 'v's ONE forward
-            # continuation; the planner cannot pick among several before
-            # Dijkstra runs, so it requires 'v' to have exactly one forward
-            # out-edge (excluding the back-edge to the pivot's source 'u',
-            # which the chassis never immediately reverses). This used to be
-            # a raw ValueError raised from planner.apply_pivot_compensations
-            # at build time -- an uncaught traceback rather than a clean
-            # data error. It now lives here so a bad pivot fails as a
-            # FieldDataError at validation time (finding #36 decision B).
-            #
-            # The count is taken over the AUTHORED adjacency, BEFORE
-            # obstacle / C-space inflation clipping (the planner counted the
-            # post-clip graph). This is intentional: a pivot landing must be
-            # unambiguous in the graph the author wrote, not contingent on
-            # which edges inflation drops. Edges lost to clipping are warned
-            # separately (finding #37).
-            if pivot in (Pivot.LEFT, Pivot.RIGHT):
-                forward_out = _authored_out_neighbors(field_data, v) - {u}
-                if len(forward_out) != 1:
-                    raise FieldDataError(
-                        f"EDGES[{i}] pivot compensation requires destination "
-                        f"node '{v}' (entered from '{u}') to have exactly one "
-                        f"forward out-edge, got {len(forward_out)}. "
-                        "Restructure the graph so pivot landings are "
-                        f"unambiguous, or drop the pivot tag on edge "
-                        f"('{u}', '{v}')."
-                    )
 
 
 def validate(field_data) -> None:
@@ -644,3 +1112,9 @@ def validate(field_data) -> None:
 
     # 9. Optional rich-edge table (PR4 / T6). Absent on legacy fixtures.
     _validate_edges_field(field_data)
+
+    # 10. Per-turn single-wheel pivots (issue #44 per-turn model, T5). Runs
+    # after the EDGES shape check so the directed-edge legs it reads are
+    # well-formed, and after node/segment validation so the authored graph it
+    # builds is sound. Inert (early return) on a pivot-free field.
+    _validate_pivot_turns(field_data)
