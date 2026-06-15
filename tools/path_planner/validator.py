@@ -752,6 +752,7 @@ def _validate_edges_field(field_data) -> None:
         BlindMode,
         LineMode,
         ProjectionMode,
+        StopAtLineMode,
     )
 
     legal_edge_types = (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION)
@@ -920,6 +921,28 @@ def _validate_edges_field(field_data) -> None:
                 raise FieldDataError(
                     f"EDGES[{i}].direction must be 'front', 'rear', or "
                     f"absent; got {direction!r}"
+                )
+
+        # Optional: stop_at_line ------------------------------------------
+        # Per-directed-edge stop-on-crossing seek override (asymmetric --
+        # applies only to the forward u -> v edge, never mirrored to the
+        # reverse, exactly like ``direction``). graph_builder
+        # (_extract_directional_attrs, T5) accepts either a StopAtLineMode
+        # member (DEFAULT / ON / OFF) or the case-insensitive string
+        # vocabulary "on" / "off" -- mirror that here. Absence yields
+        # DEFAULT (inherit). "default" as a string is NOT accepted (the
+        # ``direction`` key has no DEFAULT string either); use absence or
+        # the StopAtLineMode.DEFAULT member to inherit.
+        if "stop_at_line" in entry:
+            stop_at_line = entry["stop_at_line"]
+            if not isinstance(stop_at_line, StopAtLineMode) and (
+                not isinstance(stop_at_line, str)
+                or stop_at_line.lower() not in ("on", "off")
+            ):
+                raise FieldDataError(
+                    f"EDGES[{i}].stop_at_line must be a StopAtLineMode member "
+                    "(DEFAULT, ON, OFF), the string 'on' / 'off' "
+                    f"(case-insensitive), or absent; got {stop_at_line!r}"
                 )
 
 
@@ -1109,6 +1132,17 @@ def validate(field_data) -> None:
         raise FieldDataError(
             f"MAP_PNG must be a non-empty path string; got: {map_png!r}"
         )
+
+    # 8b. Optional field-wide stop-at-line toggle (issue #43). When present it
+    # must be a bool; absence defaults to True downstream (field_data.py), so
+    # it is NOT a required attribute -- only its type is constrained.
+    if hasattr(field_data, "BLIND_PROJECTION_AUTO_SEEK"):
+        auto_seek = getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK")
+        if not isinstance(auto_seek, bool):
+            raise FieldDataError(
+                "BLIND_PROJECTION_AUTO_SEEK must be a bool (True or False); "
+                f"got: {auto_seek!r}"
+            )
 
     # 9. Optional rich-edge table (PR4 / T6). Absent on legacy fixtures.
     _validate_edges_field(field_data)
