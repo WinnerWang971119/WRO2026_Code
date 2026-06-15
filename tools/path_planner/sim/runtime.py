@@ -27,7 +27,14 @@ the runtime-only LINE_OVERSHOOT FSM transition):
   :func:`tools.path_planner.compiler.compile_path`). The per-hop decision
   runs through :func:`resolve_stop_at_line` (call flag ``AUTO`` — the
   offline streams have no call-site verb, matching the firmware's per-edge
-  AUTO default), which returns ``(seek, motion_mode)``:
+  AUTO default). The resolver walks a precedence ladder (call-site verb →
+  per-edge ``stop_at_line_override`` → legacy ``STOP_AT_LINE`` tag →
+  auto-rule → never) and returns ``(seek, motion_mode, soft_fallback)``. The
+  auto-rule fires when ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set AND
+  the hop after this blind hop is a projection edge, so a blind→projection
+  pair re-anchors on a line first. ``soft_fallback`` is computed for parity
+  but the sim does not model a missing line, so its emission stream is
+  unchanged — only the DECISION to seek now also fires on the auto-rule:
 
     * ``seek`` + FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)``; re-anchors via
       :meth:`LocalizationSim.on_intersection` (the front board stops on the
@@ -100,6 +107,7 @@ from tools.path_planner.pipeline_config import (
     DirectionMode,
     LineMode,
     ProjectionMode,
+    StopAtLineMode,
 )
 from tools.path_planner.planner import (
     NextHopTable,
@@ -416,43 +424,68 @@ def resolve_blind_mode(edge) -> BlindMode:
 
 def resolve_stop_at_line(
     call_flag: "StopAtLine",
+    edge_override: StopAtLineMode,
     edge_mode: BlindMode,
     pipeline_blind: BlindMode,
     direction: "Direction",
     line_board_count: int,
-) -> tuple[bool, BlindMode]:
+    auto_rule_active: bool,
+) -> tuple[bool, BlindMode, bool]:
     """Resolve whether a BLIND hop seeks a line and which motion bundle it runs.
 
     Function-identical Python mirror of the C++
-    ``StopAtLinePolicy.h::resolveStopAtLine`` helper (T1). Answers one
-    question per BLIND hop: does this edge run a ``Drive.stopAtLine`` seek,
-    and if not, which motion bundle does the dead-reckoned fallback use?
+    ``StopAtLinePolicy.h::resolveStopAtLine`` helper. Answers one question per
+    BLIND hop: does this edge run a ``Drive.stopAtLine`` seek, and if not,
+    which motion bundle does the dead-reckoned fallback use? The seek decision
+    follows a strict precedence ladder.
 
-    Rule (T0 truth table):
+    Precedence (highest wins; first match decides ``requested``):
 
-    1. ``seek_requested``: a call-site :attr:`StopAtLine.ON` always asks for
-       the seek; a call-site :attr:`StopAtLine.AUTO` asks only when the edge
-       itself is :attr:`BlindMode.STOP_AT_LINE`; :attr:`StopAtLine.OFF` never
-       asks.
-    2. ``board_ok``: a line board must face the travel direction — the front
-       board always faces forward, but a rear seek needs a second board
-       (``line_board_count >= 2``).
-    3. ``seek = seek_requested and board_ok``.
-    4. When seeking, the motion bundle is the edge's mode, except a bare
-       :attr:`BlindMode.STOP_AT_LINE` edge has no velocity profile of its own
-       and seeks under :attr:`BlindMode.SYNC_TSHAPE`.
-    5. When not seeking (OFF, or a board-degrade), the hop dead-reckons: a
-       :attr:`BlindMode.STOP_AT_LINE` edge falls back to the pipeline blind
-       mode; any residual ``STOP_AT_LINE`` (e.g. a ``STOP_AT_LINE`` pipeline
-       default) defensively degrades to :attr:`BlindMode.SYNC_TSHAPE`. The
-       returned ``motion_mode`` is therefore never ``STOP_AT_LINE`` and never
-       ``DEFAULT``.
+    1. Call-site :attr:`StopAtLine.ON` / :attr:`StopAtLine.OFF` -- a per-hop
+       verb beats everything below it.
+    2. Per-edge :attr:`StopAtLineMode.ON` / :attr:`StopAtLineMode.OFF` -- the
+       Routes ``stop_at_line_override`` baked by the graph builder (T5).
+    3. Legacy force-on: the resolved edge :class:`BlindMode` is itself
+       :attr:`BlindMode.STOP_AT_LINE` (the historical "STOP_AT_LINE tag means
+       seek" behavior, kept for back-compat).
+    4. Auto-rule: ``auto_rule_active`` (the caller's
+       ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection``) -- a blind
+       hop feeding a projection seeks a line first to re-anchor. This rung sets
+       ``auto_triggered`` so the seek can be flagged as a soft fallback.
+    5. Otherwise ``requested = False`` -- a call-site/edge ``AUTO``/``DEFAULT``
+       with no rule active never seeks. This reproduces the pre-auto behavior
+       across the FULL domain (including the degenerate
+       ``edge_mode != STOP_AT_LINE, pipeline_blind == STOP_AT_LINE`` case,
+       which still does not seek): the resolved ``edge_mode`` already encodes
+       the pipeline default, so there is intentionally NO pipeline-default seek
+       rung here.
 
-    The offline compiler/sim have no call-site stop-at-line verb today, so
-    they always pass ``call_flag=StopAtLine.AUTO`` — matching the firmware's
-    per-edge AUTO default. The full ``ON``/``OFF`` branches are implemented
-    anyway so the signature mirrors the C++ surface and TC13 can drive every
-    truth-table row through both languages.
+    ``board_ok``: a line board must face the travel direction -- the front
+    board always faces forward, but a rear seek needs a second board
+    (``line_board_count >= 2``). ``seek = requested and board_ok``.
+
+    ``soft_fallback = seek and auto_triggered`` -- True ONLY when the seek was
+    raised by the auto rung AND a board could service it. A board-degraded auto
+    case (``seek`` False) carries no soft fallback, and any higher-precedence
+    rung (call / edge / legacy) yields ``soft_fallback`` False. The firmware
+    uses this flag to decide whether a missing line is tolerable (soft) or a
+    hard fault; the sim does not model a missing line, so it computes the flag
+    for parity but its emission stream is unchanged by it.
+
+    ``motion_mode`` (unchanged from the pre-precedence logic): when seeking, the
+    motion bundle is the edge's mode, except a bare :attr:`BlindMode.STOP_AT_LINE`
+    edge has no velocity profile of its own and seeks under
+    :attr:`BlindMode.SYNC_TSHAPE`. When not seeking, the hop dead-reckons: a
+    :attr:`BlindMode.STOP_AT_LINE` edge falls back to the pipeline blind mode;
+    any residual ``STOP_AT_LINE`` defensively degrades to
+    :attr:`BlindMode.SYNC_TSHAPE`, so the returned ``motion_mode`` is never
+    ``STOP_AT_LINE`` and never ``DEFAULT``.
+
+    The offline compiler/sim have no call-site stop-at-line verb today, so they
+    always pass ``call_flag=StopAtLine.AUTO`` -- matching the firmware's per-edge
+    AUTO default. The full ``ON``/``OFF`` branches are implemented anyway so the
+    signature mirrors the C++ surface and TC13 can drive every truth-table row
+    through both languages.
 
     Keep step-for-step identical with
     ``WRO2026/StopAtLinePolicy.h::resolveStopAtLine``;
@@ -460,33 +493,59 @@ def resolve_stop_at_line(
     normative source; TC13 enforces parity.
 
     :param call_flag: PathTracker's ``_activeStopAtLine`` (ON/OFF/AUTO).
-    :param edge_mode: ``resolve_blind_mode(edge)`` — already DEFAULT->pipeline
+    :param edge_override: the per-edge ``stop_at_line_override``
+        (``ON``/``OFF``/``DEFAULT``) baked into Routes by the graph builder.
+    :param edge_mode: ``resolve_blind_mode(edge)`` -- already DEFAULT->pipeline
         resolved, so never :attr:`BlindMode.DEFAULT`.
-    :param pipeline_blind: ``PIPELINE_CONFIG.blind`` — the mission-wide blind
+    :param pipeline_blind: ``PIPELINE_CONFIG.blind`` -- the mission-wide blind
         default, used as the dead-reckon fallback for a ``STOP_AT_LINE`` edge
         that does not seek.
     :param direction: the post-:func:`resolve_direction` travel direction
         (``FRONT``/``REAR``; never ``AUTO`` here).
     :param line_board_count: number of MXColor reflectance boards on the
         chassis (mirrors ``Config::LINE_BOARD_COUNT``); gates a rear seek.
-    :return: a ``(seek, motion_mode)`` tuple. ``seek`` is True iff the
-        ``Drive.stopAtLine`` seek should be dispatched; ``motion_mode`` is the
-        seek's drive mode (when seeking) or the dead-reckon fallback's drive
-        mode (when not) — always a concrete bundle, never ``STOP_AT_LINE`` or
-        ``DEFAULT``.
+    :param auto_rule_active: the caller's
+        ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection`` -- True when
+        the field-wide auto-seek toggle is on AND this blind hop feeds a
+        projection edge.
+    :return: a ``(seek, motion_mode, soft_fallback)`` tuple. ``seek`` is True
+        iff the ``Drive.stopAtLine`` seek should be dispatched; ``motion_mode``
+        is the seek's drive mode (when seeking) or the dead-reckon fallback's
+        drive mode (when not) -- always a concrete bundle, never ``STOP_AT_LINE``
+        or ``DEFAULT``; ``soft_fallback`` is True iff the seek was raised by the
+        auto rung and a board could service it.
     """
-    # Step 1: who asked for the seek? ON always; AUTO only on a STOP_AT_LINE
-    # edge; OFF never.
-    seek_requested = (call_flag == StopAtLine.ON) or (
-        call_flag == StopAtLine.AUTO and edge_mode == BlindMode.STOP_AT_LINE
-    )
+    # Step 1: precedence ladder for who asked. Call-site ON/OFF beats the
+    # per-edge override, which beats the legacy STOP_AT_LINE tag, which beats
+    # the auto-rule. AUTO + DEFAULT + no rule active never seeks.
+    auto_triggered = False
+    if call_flag == StopAtLine.ON:
+        requested = True
+    elif call_flag == StopAtLine.OFF:
+        requested = False
+    elif edge_override == StopAtLineMode.ON:
+        requested = True
+    elif edge_override == StopAtLineMode.OFF:
+        requested = False
+    elif edge_mode == BlindMode.STOP_AT_LINE:    # legacy force-on
+        requested = True
+    elif auto_rule_active:
+        requested = True
+        auto_triggered = True
+    else:    # AUTO call / DEFAULT edge, no rule active: never seek
+        requested = False
 
     # Step 2: a line board must face the travel direction. Front always; rear
     # needs a second board.
     board_ok = (direction == Direction.FRONT) or (line_board_count >= 2)
 
     # Step 3: the seek runs only when requested and physically possible.
-    seek = seek_requested and board_ok
+    seek = requested and board_ok
+
+    # Step 3b: a soft fallback is an auto-raised seek that a board can service.
+    # A board-degraded auto case (seek False) or any higher-precedence rung
+    # (auto_triggered False) never carries it.
+    soft_fallback = seek and auto_triggered
 
     if seek:
         # Step 4: keep the edge's typed mode; a bare STOP_AT_LINE edge seeks
@@ -503,7 +562,7 @@ def resolve_stop_at_line(
         base = pipeline_blind if edge_mode == BlindMode.STOP_AT_LINE else edge_mode
         motion_mode = BlindMode.SYNC_TSHAPE if base == BlindMode.STOP_AT_LINE else base
 
-    return seek, motion_mode
+    return seek, motion_mode, soft_fallback
 
 
 def resolve_projection_mode(edge) -> ProjectionMode:
@@ -617,6 +676,26 @@ def _read_edge_dir_override(edge) -> DirectionMode:
     if isinstance(raw, DirectionMode):
         return raw
     return DirectionMode(raw)
+
+
+def _read_edge_stop_at_line_override(edge) -> StopAtLineMode:
+    """Coerce the graph edge's ``stop_at_line_override`` attribute to
+    :class:`StopAtLineMode`.
+
+    Tolerates absence (returns ``StopAtLineMode.DEFAULT``), raw int values
+    (coerced via the enum constructor), and already-typed
+    :class:`StopAtLineMode` instances (returned as-is). Mirrors the
+    tolerance pattern of :func:`_read_edge_dir_override`. The graph builder
+    (T5) bakes this attribute as a :class:`StopAtLineMode` member; absence
+    means no per-edge override (defer to the resolver's lower-precedence
+    rungs).
+    """
+    raw = edge.get("stop_at_line_override") if hasattr(edge, "get") else None
+    if raw is None:
+        return StopAtLineMode.DEFAULT
+    if isinstance(raw, StopAtLineMode):
+        return raw
+    return StopAtLineMode(raw)
 
 
 def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
@@ -1147,16 +1226,40 @@ class PathTrackerSim:
                 # ``test_property_random_walks`` / TC12). The offline streams
                 # carry no call-site stop-at-line verb, so resolve with
                 # ``StopAtLine.AUTO`` (the firmware's per-edge AUTO default):
-                # an effective ``STOP_AT_LINE`` BlindMode seeks; everything
-                # else dead-reckons. REAR seek requires a 2-board chassis --
+                # the resolver's precedence ladder decides whether to seek.
+                # REAR seek requires a 2-board chassis --
                 # ``resolve_stop_at_line`` returns ``seek=False`` for REAR on
                 # 1-board, degrading to the dead-reckon reverse below.
-                seek, _motion_mode = resolve_stop_at_line(
+                #
+                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
+                # line first to re-anchor before the dead-reckoned projection.
+                # Peek the hop AFTER this one toward the goal (``nxt -> the next
+                # hop``) and check it is a projection edge. Mirrors the
+                # next-next peek pattern in ``_should_pass_through`` /
+                # ``find_pivot_turn``: ``None`` (this blind hop IS the final/goal
+                # hop) or a self-loop means no next-next edge, so no auto rule.
+                next_after_blind = self._next_hop[nxt][goal_name]
+                if next_after_blind is None or next_after_blind == nxt:
+                    next_hop_is_projection = False
+                else:
+                    next_hop_is_projection = (
+                        self._graph.edges[nxt, next_after_blind]["type"]
+                        == EDGE_PROJECTION
+                    )
+                auto_rule_active = (
+                    getattr(
+                        self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True
+                    )
+                    and next_hop_is_projection
+                )
+                seek, _motion_mode, soft_fallback = resolve_stop_at_line(
                     StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
                     PIPELINE_CONFIG.blind,
                     direction,
                     LINE_BOARD_COUNT,
+                    auto_rule_active,
                 )
                 if seek and direction == Direction.FRONT:
                     # Front board stops on the physical crossing line; the
