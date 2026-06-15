@@ -42,5 +42,6 @@ NODE_TYPES = _data["NODE_TYPES"]
 LINE_SEGMENTS = _data["LINE_SEGMENTS"]
 BLIND_EDGES = _data["BLIND_EDGES"]
 OBSTACLES = _data["OBSTACLES"]
+BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
 
 EDGES: list = []
