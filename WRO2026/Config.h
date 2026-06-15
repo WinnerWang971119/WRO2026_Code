@@ -616,6 +616,26 @@ namespace Config
      */
     constexpr float STOP_AT_LINE_PROGRESS_EPS_CM = 0.2f;
 
+    /**
+     * @brief When `true`, an auto-rule-triggered stopAtLine seek that fails to find the line
+     *        degrades gracefully (dead-reckon to the target node) instead of latching a hard
+     *        `DRIVE_FAULT`.
+     *
+     * Two modes:
+     *   - `false` (default — dev-time): a missed line faults loud (`Fault::LINE_NOT_FOUND`
+     *     propagated to `PathTracker` as `DRIVE_FAULT`). The team wants noisy failures during
+     *     development so missed detections surface immediately rather than hiding behind a
+     *     silent position estimate.
+     *   - `true` (competition): a missed line degrades to a dead-reckoned hop so the robot
+     *     keeps moving instead of halting on the floor. Flip this at competition once hardware
+     *     reliability is proven and a silent slip is preferable to a full stop.
+     *
+     * @note This flag ONLY affects auto-rule-triggered seeks (i.e. PathTracker BLIND hops that
+     *       call stopAtLine automatically). Explicit / call-ON / legacy `BlindMode::STOP_AT_LINE`
+     *       seeks always hard-fault regardless of this flag.
+     */
+    constexpr bool STOP_AT_LINE_FAULT_FALL_BACK = false;
+
     // ---------------------------------------------------------------------------------------
     // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
     // ---------------------------------------------------------------------------------------
