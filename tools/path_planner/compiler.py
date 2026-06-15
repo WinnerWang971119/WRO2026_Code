@@ -176,7 +176,7 @@ def compile_path(
     path: List[str],
     start_heading_deg: float,
     graph: nx.DiGraph,
-    field_data,  # noqa: ARG001 -- kept for API stability with PR2 callers
+    field_data,
 ) -> List[Primitive]:
     """Compile a node-name path into a primitive sequence.
 
@@ -257,6 +257,7 @@ def compile_path(
         Direction,
         StopAtLine,
         _read_edge_dir_override,
+        _read_edge_stop_at_line_override,
         resolve_blind_mode,
         resolve_direction,
         resolve_line_mode,
@@ -325,12 +326,32 @@ def compile_path(
                 # to stay byte-identical to the REAR branch of
                 # ``PathTrackerSim.go_to`` in ``sim/runtime.py`` (TC10/TC12 gate
                 # the two emission streams against each other).
-                seek, _motion_mode = resolve_stop_at_line(
+                #
+                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
+                # line first to re-anchor. The blind hop is ``path[i] ->
+                # path[i+1]``; the NEXT hop is ``path[i+1] -> path[i+2]``. The
+                # ``i + 2 < len(path)`` guard is the path-list mirror of the sim's
+                # next-next NEXT_HOP peek (``None``/self-loop short-circuit): it is
+                # False on the last / second-last hop, so a final blind hop yields
+                # ``next_hop_is_projection = False`` and never indexes past the
+                # path. Mirrors ``_walk_hops`` in ``sim/runtime.py`` step-for-step.
+                next_hop_is_projection = (
+                    i + 2 < len(path)
+                    and graph.edges[path[i + 1], path[i + 2]]["type"]
+                    == EDGE_PROJECTION
+                )
+                auto_rule_active = (
+                    getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+                    and next_hop_is_projection
+                )
+                seek, _motion_mode, _soft_fallback = resolve_stop_at_line(
                     StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
                     PIPELINE_CONFIG.blind,
                     direction,
                     LINE_BOARD_COUNT,
+                    auto_rule_active,
                 )
                 if seek:
                     out.append((
@@ -363,12 +384,32 @@ def compile_path(
                 # Mirrors the FRONT branch of ``PathTrackerSim.go_to`` in
                 # ``sim/runtime.py`` (T6); the two emission streams must stay
                 # byte-identical (``test_property_random_walks`` / TC12).
-                seek, _motion_mode = resolve_stop_at_line(
+                #
+                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
+                # line first to re-anchor. The blind hop is ``path[i] ->
+                # path[i+1]``; the NEXT hop is ``path[i+1] -> path[i+2]``. The
+                # ``i + 2 < len(path)`` guard is the path-list mirror of the sim's
+                # next-next NEXT_HOP peek (``None``/self-loop short-circuit): it is
+                # False on the last / second-last hop, so a final blind hop yields
+                # ``next_hop_is_projection = False`` and never indexes past the
+                # path. Mirrors ``_walk_hops`` in ``sim/runtime.py`` step-for-step.
+                next_hop_is_projection = (
+                    i + 2 < len(path)
+                    and graph.edges[path[i + 1], path[i + 2]]["type"]
+                    == EDGE_PROJECTION
+                )
+                auto_rule_active = (
+                    getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+                    and next_hop_is_projection
+                )
+                seek, _motion_mode, _soft_fallback = resolve_stop_at_line(
                     StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
                     PIPELINE_CONFIG.blind,
                     direction,
                     LINE_BOARD_COUNT,
+                    auto_rule_active,
                 )
                 if seek:
                     out.append((ACT_STOP_AT_LINE, float(edge["distance_cm"])))
