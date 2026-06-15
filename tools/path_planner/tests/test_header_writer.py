@@ -797,6 +797,55 @@ def test_no_legacy_edge_type_suffix_anywhere():
     )
 
 
+def test_blind_projection_auto_seek_source_parity():
+    """TC-TOGGLE-PARITY: emitted BLIND_PROJECTION_AUTO_SEEK matches field_data.
+
+    Reads the committed ``WRO2026/routes.h`` (without regenerating) and
+    asserts that the ``constexpr bool BLIND_PROJECTION_AUTO_SEEK`` value
+    inside ``namespace Routes`` equals ``field_data.BLIND_PROJECTION_AUTO_SEEK``.
+
+    This test guards the parity contract between the Python planner/sim and the
+    firmware: if someone flips the toggle in ``field_data.py`` and regenerates
+    ``routes.h``, this test confirms the two surfaces agree; if someone edits one
+    without the other, this test catches the silent divergence at CI time.
+
+    The committed ``routes.h`` is authoritative -- this test does NOT regenerate
+    it, consistent with the CI freshness gate (``git diff --exit-code``).
+    """
+    header_path = _REPO_ROOT / DEFAULT_HEADER_PATH
+    if not header_path.exists():
+        pytest.fail(
+            "routes.h not found at " + str(header_path)
+            + "; regenerate it with: uv run python tools/path_planner/build_routes.py"
+        )
+
+    header_text = header_path.read_text(encoding="utf-8")
+
+    # Match ``constexpr bool BLIND_PROJECTION_AUTO_SEEK = true;`` (or false),
+    # tolerating any surrounding whitespace and the namespace indentation.
+    match = _re.search(
+        r"constexpr\s+bool\s+BLIND_PROJECTION_AUTO_SEEK\s*=\s*(true|false)\s*;",
+        header_text,
+    )
+    assert match is not None, (
+        "constexpr bool BLIND_PROJECTION_AUTO_SEEK not found in "
+        + str(header_path)
+        + "; the header writer may not be emitting this constant"
+    )
+
+    cpp_literal = match.group(1)        # "true" or "false"
+    emitted_value = cpp_literal == "true"
+    expected_value = real_field_data.BLIND_PROJECTION_AUTO_SEEK
+
+    assert emitted_value == expected_value, (
+        "routes.h emits BLIND_PROJECTION_AUTO_SEEK = "
+        + cpp_literal
+        + " but field_data.BLIND_PROJECTION_AUTO_SEEK = "
+        + repr(expected_value)
+        + "; regenerate routes.h or fix field_data.py"
+    )
+
+
 def test_direction_override_emits_force_reverse_one_direction(emit_targets):
     """TC8: an EDGES direction='rear' override emits FORCE_REVERSE for
     the forward (A,B) edge and DEFAULT for the reverse (B,A) edge.
