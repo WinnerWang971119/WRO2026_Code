@@ -7,6 +7,10 @@
  *     `resolveStopAtLine` from `StopAtLinePolicy.h` (the same cases the Python
  *     sim asserts against the T0 CSV fixture; parity enforced by TC13 running
  *     both sides against every fixture row).
+ *   - TC20: the new resolver dimensions added when `resolveStopAtLine` grew the
+ *     `StopAtLineQuery` struct — the per-edge `edgeOverride` (ON/OFF) rung, the
+ *     `autoRuleActive` rung, the precedence between them, and the `softFallback`
+ *     output (true only for an auto-rule-raised seek).
  *   - TC14 (formerly TC7/TC8 in the old numbering): FSM-slice re-anchor on
  *     `Drive.isIdle()` and `DRIVE_FAULT` on `Drive.hasFault()`.
  *   - TC18: drain-ordering mirror-slice — `Intersection.isAtIntersection()` is
@@ -49,6 +53,8 @@
  *     - `StopAtLine`                  (NavTypes.h)
  *     - `Direction`                   (NavTypes.h)
  *     - `Routes::BlindMode`           (routes.h)
+ *     - `Routes::StopAtLineMode`      (routes.h)
+ *     - `StopAtLineQuery`             (StopAtLinePolicy.h)
  *     - `StopAtLineResolution`        (StopAtLinePolicy.h)
  *
  *   Because the replica references the real enum values, a future rename of
@@ -130,8 +136,8 @@ struct StopAtLineTickResult
 /// @return The decision the production tick would take, with the side-effect
 ///         flags it would issue.
 ///
-// MIRROR: PathTracker.cpp:415-419 (shared Drive-fault guard → Fault::DRIVE_FAULT).
-// MIRROR: PathTracker.cpp:659-663 (STOP_AT_LINE success → onIntersection(_nextHop)).
+// MIRROR: PathTracker.cpp:539-543 (shared Drive-fault guard → Fault::DRIVE_FAULT).
+// MIRROR: PathTracker.cpp:838-842 (STOP_AT_LINE success → onIntersection(_nextHop)).
 static StopAtLineTickResult replica_stopAtLineTick(bool driveHasFault, bool driveIsIdle)
 {
     StopAtLineTickResult result{};
@@ -188,7 +194,9 @@ struct DrainOrderResult
 ///                    (drain → seek → enter state); `false` to simulate the
 ///                    erroneous reversed order for negative-case coverage.
 ///
-// MIRROR: PathTracker.cpp (BLIND case STOP_AT_LINE dispatch: drain then async() then _state=STOP_AT_LINE).
+// MIRROR: PathTracker.cpp:1364,1387/1396,1402 (BLIND STOP_AT_LINE dispatch:
+//         Intersection.isAtIntersection() drain → Drive.stopAtLine(..).async() →
+//         _state = State::STOP_AT_LINE).
 static DrainOrderResult replica_dispatchDrainOrdering(bool drainFirst)
 {
     DrainOrderResult r{};
@@ -225,16 +233,21 @@ static void test_TC1_auto_stop_at_line_edge_front_1board_seeks_sync_tshape()
 
     // AUTO defers to edge; edge is STOP_AT_LINE; FRONT board always exists.
     // Seeks under SYNC_TSHAPE (the bare STOP_AT_LINE edge has no velocity
-    // profile of its own — Step 4 of the resolver).
-    const StopAtLineResolution r = resolveStopAtLine(
+    // profile of its own — Step 4 of the resolver). Legacy slice: no per-edge
+    // override, no auto rule — the seek rides the legacy STOP_AT_LINE tag rung.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::FRONT,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_TRUE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // Legacy STOP_AT_LINE-tag seek is not auto-raised → not a soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -246,16 +259,21 @@ static void test_TC2_auto_stop_at_line_edge_rear_2board_seeks_sync_tshape()
     TEST_SCOPE("TC2: AUTO + STOP_AT_LINE edge, REAR, 2-board → seek=true, SYNC_TSHAPE");
 
     // REAR + 2 boards: boardOK = true (lineBoardCount >= 2).
-    // AUTO defers to edge → seekRequested = true. Seeks under SYNC_TSHAPE.
-    const StopAtLineResolution r = resolveStopAtLine(
+    // AUTO defers to edge → seekRequested = true via the legacy STOP_AT_LINE
+    // tag rung. Seeks under SYNC_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::REAR,
-        /*lineBoardCount*/ 2);
+        /*lineBoardCount*/ 2,
+        /*autoRuleActive*/ false});
 
     ASSERT_TRUE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // Legacy STOP_AT_LINE-tag seek is not auto-raised → not a soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -271,15 +289,19 @@ static void test_TC3_auto_stop_at_line_edge_rear_1board_degrades_to_pipeline_bli
     // Dead-reckon fallback: edgeMode == STOP_AT_LINE → motionMode = pipelineBlind.
     // pipelineBlind is SYNC_TSHAPE (not STOP_AT_LINE) so no second defensive
     // degrade fires.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::REAR,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -293,15 +315,19 @@ static void test_TC4_on_gyro_tshape_edge_front_1board_seeks_gyro_tshape()
 
     // ON forces a seek even on a plain GYRO_TSHAPE edge. Step 4: edgeMode is
     // not STOP_AT_LINE, so motionMode keeps the edge's typed mode: GYRO_TSHAPE.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::ON,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::GYRO_TSHAPE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::FRONT,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_TRUE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+    // Call-ON seek is explicit, not auto-raised → not a soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -314,15 +340,19 @@ static void test_TC5_on_raw_flat_edge_rear_2board_seeks_raw_flat()
 
     // ON forces seek; REAR + 2 boards satisfies boardOK. Edge is RAW_FLAT
     // (not STOP_AT_LINE), so Step 4 keeps motionMode = RAW_FLAT.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::ON,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::RAW_FLAT,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::REAR,
-        /*lineBoardCount*/ 2);
+        /*lineBoardCount*/ 2,
+        /*autoRuleActive*/ false});
 
     ASSERT_TRUE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::RAW_FLAT);
+    // Call-ON seek is explicit, not auto-raised → not a soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -335,15 +365,19 @@ static void test_TC6_off_stop_at_line_edge_front_1board_no_seek()
 
     // OFF always suppresses the seek regardless of edge mode or board count.
     // Dead-reckon: edgeMode == STOP_AT_LINE → base = pipelineBlind (SYNC_TSHAPE).
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::OFF,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::FRONT,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 static void test_TC6_off_stop_at_line_edge_front_2board_no_seek()
@@ -351,15 +385,19 @@ static void test_TC6_off_stop_at_line_edge_front_2board_no_seek()
     TEST_SCOPE("TC6: OFF + STOP_AT_LINE edge, FRONT, 2-board → seek=false (OFF wins regardless of board count)");
 
     // Same as above with 2 boards — OFF still suppresses.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::OFF,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::FRONT,
-        /*lineBoardCount*/ 2);
+        /*lineBoardCount*/ 2,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -371,18 +409,22 @@ static void test_TC7_auto_plain_blind_edge_no_seek()
 {
     TEST_SCOPE("TC7: AUTO + SYNC_TSHAPE edge, FRONT → seek=false, SYNC_TSHAPE");
 
-    // AUTO on a non-STOP_AT_LINE edge: seekRequested = false. Dead-reckon:
-    // edgeMode != STOP_AT_LINE → base = edgeMode = SYNC_TSHAPE (no defensive
-    // degrade, base is already a concrete mode).
-    const StopAtLineResolution r = resolveStopAtLine(
+    // AUTO on a non-STOP_AT_LINE edge with no auto rule active: seekRequested =
+    // false. Dead-reckon: edgeMode != STOP_AT_LINE → base = edgeMode =
+    // SYNC_TSHAPE (no defensive degrade, base is already a concrete mode).
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::FRONT,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -399,31 +441,31 @@ static void test_TC13_on_wins_over_every_plain_blind_mode()
     // the edge resolved to. motionMode keeps the edge's type (not STOP_AT_LINE,
     // so Step 4 leaves it unchanged).
     {
-        // DEFAULT is never passed to the resolver after _resolveBlindMode maps it
-        // to pipelineBlind, but the resolver must still handle it defensively.
-        // On a plain DEFAULT edge with ON: seekRequested=true, boardOK=true,
-        // edgeMode != STOP_AT_LINE → motionMode = DEFAULT. This is the one case
-        // where motionMode=DEFAULT could appear; the caller (PathTracker) must
-        // never pass DEFAULT via _resolveBlindMode, but the resolver doesn't assert.
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::ON, Routes::BlindMode::GYRO_TSHAPE,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1);
+        // ON on a plain GYRO_TSHAPE edge: seekRequested=true, boardOK=true,
+        // edgeMode != STOP_AT_LINE → motionMode = GYRO_TSHAPE. Call-ON, not
+        // auto-raised, so softFallback stays false.
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::ON, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::GYRO_TSHAPE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, false});
         ASSERT_TRUE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+        ASSERT_FALSE(r.softFallback);
     }
     {
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::ON, Routes::BlindMode::RAW_FLAT,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1);
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::ON, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::RAW_FLAT,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, false});
         ASSERT_TRUE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::RAW_FLAT);
+        ASSERT_FALSE(r.softFallback);
     }
     {
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::ON, Routes::BlindMode::SYNC_TSHAPE,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1);
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::ON, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::SYNC_TSHAPE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, false});
         ASSERT_TRUE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+        ASSERT_FALSE(r.softFallback);
     }
 }
 
@@ -435,26 +477,29 @@ static void test_TC13_off_suppresses_regardless_of_edge_mode_or_board_count()
     // every direction. Dead-reckon fallback applies (Step 5).
     {
         // STOP_AT_LINE edge → base = pipelineBlind
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::OFF, Routes::BlindMode::STOP_AT_LINE,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 2);
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::OFF, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::STOP_AT_LINE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 2, false});
         ASSERT_FALSE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+        ASSERT_FALSE(r.softFallback);
     }
     {
         // Non-STOP_AT_LINE edge → base = edgeMode
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::OFF, Routes::BlindMode::GYRO_TSHAPE,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::REAR, 2);
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::OFF, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::GYRO_TSHAPE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::REAR, 2, false});
         ASSERT_FALSE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+        ASSERT_FALSE(r.softFallback);
     }
     {
-        const StopAtLineResolution r = resolveStopAtLine(
-            StopAtLine::OFF, Routes::BlindMode::RAW_FLAT,
-            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1);
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::OFF, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::RAW_FLAT,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, false});
         ASSERT_FALSE(r.seek);
         ASSERT_TRUE(r.motionMode == Routes::BlindMode::RAW_FLAT);
+        ASSERT_FALSE(r.softFallback);
     }
 }
 
@@ -464,15 +509,19 @@ static void test_TC13_on_rear_1board_degrades_seek_but_keeps_edge_motionMode()
 
     // ON requests the seek but boardOK = false (REAR, 1 board). seek = false.
     // Dead-reckon: edgeMode = GYRO_TSHAPE (not STOP_AT_LINE) → base = GYRO_TSHAPE.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::ON,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::GYRO_TSHAPE,
         /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
         /*direction*/      Direction::REAR,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
 }
 
 static void test_TC13_pipeline_stop_at_line_defensively_degrades_to_sync_tshape()
@@ -483,15 +532,285 @@ static void test_TC13_pipeline_stop_at_line_defensively_degrades_to_sync_tshape(
     // edge does not seek (e.g. REAR + 1-board), Step 5: base = pipelineBlind =
     // STOP_AT_LINE; the defensive second degrade kicks in → SYNC_TSHAPE so the
     // returned motionMode is never STOP_AT_LINE.
-    const StopAtLineResolution r = resolveStopAtLine(
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
         /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
         /*pipelineBlind*/  Routes::BlindMode::STOP_AT_LINE,    // unusual but must not leak
         /*direction*/      Direction::REAR,
-        /*lineBoardCount*/ 1);
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
 
     ASSERT_FALSE(r.seek);
     ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    // No seek → no soft fallback.
+    ASSERT_FALSE(r.softFallback);
+}
+
+// ===========================================================================
+// TC20 — new resolver dimensions added with the `StopAtLineQuery` struct:
+//         the per-edge `edgeOverride` rung, the `autoRuleActive` rung, the
+//         precedence between every rung, and the `softFallback` output (true
+//         ONLY for an auto-rule-raised seek). These exercise the inputs that
+//         did not exist before the resolver signature grew the struct.
+//
+// Cross-language parity: same rows live in
+// `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv` and are
+// asserted by the Python `resolve_stop_at_line`.
+// ===========================================================================
+
+static void test_TC20_edge_override_on_forces_seek()
+{
+    TEST_SCOPE("TC20: edgeOverride==ON forces seek on a plain (non-STOP_AT_LINE) edge");
+
+    // No call-site verb (AUTO), no legacy tag (edge is SYNC_TSHAPE), no auto
+    // rule — but the per-edge override is ON, so rung 2 forces the seek. The
+    // edge is not STOP_AT_LINE, so motionMode keeps its typed mode (SYNC_TSHAPE).
+    // An edge-override seek is not auto-raised → softFallback stays false.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::ON,
+        /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_TRUE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_edge_override_off_suppresses_seek()
+{
+    TEST_SCOPE("TC20: edgeOverride==OFF suppresses seek even with auto rule active");
+
+    // edgeOverride OFF (rung 2) beats both the auto rule (rung 4) and would beat
+    // the legacy tag (rung 3) — see the dedicated test below. With the seek
+    // suppressed and a non-STOP_AT_LINE edge, the hop dead-reckons under the
+    // edge's own SYNC_TSHAPE. No seek → softFallback false.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::OFF,
+        /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ true});    // auto rule wants to seek, but OFF wins
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_edge_override_off_beats_legacy_stop_at_line_tag()
+{
+    TEST_SCOPE("TC20: edgeOverride==OFF beats the legacy BlindMode::STOP_AT_LINE tag → seek=false");
+
+    // The historical "STOP_AT_LINE tag means seek" behaviour is rung 3, BELOW
+    // the per-edge override at rung 2. A STOP_AT_LINE-tagged edge with an
+    // explicit edgeOverride==OFF must NOT seek — the override wins. Dead-reckon:
+    // edgeMode == STOP_AT_LINE → base = pipelineBlind (SYNC_TSHAPE).
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::OFF,
+        /*edgeMode*/       Routes::BlindMode::STOP_AT_LINE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_call_off_beats_edge_override_on()
+{
+    TEST_SCOPE("TC20: call OFF (rung 1) beats edgeOverride==ON (rung 2) → seek=false");
+
+    // Call-site OFF is the top rung — it suppresses the seek even when the
+    // per-edge override says ON. Non-STOP_AT_LINE edge dead-reckons under its
+    // own SYNC_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::OFF,
+        /*edgeOverride*/   Routes::StopAtLineMode::ON,
+        /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_call_on_beats_edge_override_off()
+{
+    TEST_SCOPE("TC20: call ON (rung 1) beats edgeOverride==OFF (rung 2) → seek=true");
+
+    // The symmetric case: call-site ON forces the seek even when the per-edge
+    // override says OFF. Explicit call-ON is not auto-raised → softFallback
+    // false. Edge keeps its typed RAW_FLAT mode.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::ON,
+        /*edgeOverride*/   Routes::StopAtLineMode::OFF,
+        /*edgeMode*/       Routes::BlindMode::RAW_FLAT,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_TRUE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::RAW_FLAT);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_auto_rule_active_front_seeks_soft_fallback()
+{
+    TEST_SCOPE("TC20: autoRuleActive (no higher rung) → seek=true, softFallback=true (FRONT)");
+
+    // The auto rung (rung 4) fires when nothing above it decided: call AUTO,
+    // edgeOverride DEFAULT, edge is a plain non-STOP_AT_LINE mode. FRONT board
+    // always services the seek → seek=true. Because the auto rung raised it,
+    // softFallback is true. motionMode keeps the edge's GYRO_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
+        /*edgeMode*/       Routes::BlindMode::GYRO_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ true});
+
+    ASSERT_TRUE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+    ASSERT_TRUE(r.softFallback);
+}
+
+static void test_TC20_auto_rule_inactive_no_seek()
+{
+    TEST_SCOPE("TC20: autoRuleActive==false on a plain edge → no auto seek (seek=false)");
+
+    // With the auto rule off and nothing else requesting, the resolver falls to
+    // the terminal "never seek" rung. Plain edge dead-reckons under SYNC_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
+        /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    ASSERT_FALSE(r.softFallback);
+}
+
+static void test_TC20_auto_rule_rear_1board_degrades_no_soft_fallback()
+{
+    TEST_SCOPE("TC20: autoRuleActive + REAR + 1-board → seek=false, softFallback=false (board degrade)");
+
+    // The auto rule wants the seek but a REAR seek needs a second board
+    // (lineBoardCount >= 2). With only 1 board, boardOK = false → seek = false.
+    // A board-degraded auto case carries NO soft fallback (softFallback =
+    // seek && autoTriggered, and seek is false). Dead-reckon under the edge's
+    // SYNC_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
+        /*edgeMode*/       Routes::BlindMode::SYNC_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::REAR,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ true});
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_FALSE(r.softFallback);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+}
+
+static void test_TC20_auto_rule_rear_2board_seeks_soft_fallback()
+{
+    TEST_SCOPE("TC20: autoRuleActive + REAR + 2-board → seek=true, softFallback=true");
+
+    // Same auto-rule request as above, but a 2-board chassis services the REAR
+    // seek (boardOK = true). seek = true and, because the auto rung raised it,
+    // softFallback = true. motionMode keeps the edge's GYRO_TSHAPE.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
+        /*edgeMode*/       Routes::BlindMode::GYRO_TSHAPE,
+        /*pipelineBlind*/  Routes::BlindMode::SYNC_TSHAPE,
+        /*direction*/      Direction::REAR,
+        /*lineBoardCount*/ 2,
+        /*autoRuleActive*/ true});
+
+    ASSERT_TRUE(r.seek);
+    ASSERT_TRUE(r.softFallback);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::GYRO_TSHAPE);
+}
+
+static void test_TC20_soft_fallback_only_for_auto_not_explicit_seeks()
+{
+    TEST_SCOPE("TC20: softFallback is true ONLY for auto seeks — false for call-ON / legacy-tag seeks");
+
+    // Three FRONT seeks that all set seek=true, contrasting the softFallback
+    // output across the rungs that can raise the seek:
+    {
+        // (a) Auto-rule seek → softFallback TRUE.
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::AUTO, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::SYNC_TSHAPE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, true});
+        ASSERT_TRUE(r.seek);
+        ASSERT_TRUE(r.softFallback);
+    }
+    {
+        // (b) Call-ON seek (explicit) → softFallback FALSE even if the auto rule
+        //     would also have fired (rung 1 wins; autoTriggered never set).
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::ON, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::SYNC_TSHAPE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, true});
+        ASSERT_TRUE(r.seek);
+        ASSERT_FALSE(r.softFallback);
+    }
+    {
+        // (c) Legacy STOP_AT_LINE-tag seek → softFallback FALSE (rung 3, not the
+        //     auto rung). Auto rule also active but never reached.
+        const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+            StopAtLine::AUTO, Routes::StopAtLineMode::DEFAULT, Routes::BlindMode::STOP_AT_LINE,
+            Routes::BlindMode::SYNC_TSHAPE, Direction::FRONT, 1, true});
+        ASSERT_TRUE(r.seek);
+        ASSERT_FALSE(r.softFallback);
+        // Bare STOP_AT_LINE edge seeks under SYNC_TSHAPE (Step 4).
+        ASSERT_TRUE(r.motionMode == Routes::BlindMode::SYNC_TSHAPE);
+    }
+}
+
+static void test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek()
+{
+    TEST_SCOPE("TC20: AUTO, no auto rule, edge!=STOP_AT_LINE, pipeline==STOP_AT_LINE → seek=false");
+
+    // Full-domain degenerate row (the case that proves there is NO pipeline-
+    // default seek rung): callFlag AUTO, edgeOverride DEFAULT, the resolved edge
+    // is a concrete non-STOP_AT_LINE mode, the auto rule is off — yet the
+    // PIPELINE default happens to be STOP_AT_LINE. No rung requests a seek, so
+    // seek=false. Dead-reckon: edgeMode != STOP_AT_LINE → base = edgeMode
+    // (RAW_FLAT); the pipeline STOP_AT_LINE never leaks into motionMode.
+    const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
+        /*callFlag*/       StopAtLine::AUTO,
+        /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,
+        /*edgeMode*/       Routes::BlindMode::RAW_FLAT,
+        /*pipelineBlind*/  Routes::BlindMode::STOP_AT_LINE,    // pipeline default is itself STOP_AT_LINE
+        /*direction*/      Direction::FRONT,
+        /*lineBoardCount*/ 1,
+        /*autoRuleActive*/ false});
+
+    ASSERT_FALSE(r.seek);
+    ASSERT_TRUE(r.motionMode == Routes::BlindMode::RAW_FLAT);
+    ASSERT_FALSE(r.softFallback);
 }
 
 // ===========================================================================
@@ -615,7 +934,7 @@ static void test_TC18_reversed_drain_ordering_is_detected()
 
 int main()
 {
-    std::printf("INFO: PathTracker STOP_AT_LINE — resolver truth table (TC1-TC7/TC13) + FSM slice (TC14) + drain (TC18)\n");
+    std::printf("INFO: PathTracker STOP_AT_LINE — resolver truth table (TC1-TC7/TC13/TC20) + FSM slice (TC14) + drain (TC18)\n");
 
     // TC1–TC7: resolver truth-table representative vectors (TC13 C++ side).
     test_TC1_auto_stop_at_line_edge_front_1board_seeks_sync_tshape();
@@ -633,6 +952,20 @@ int main()
     test_TC13_off_suppresses_regardless_of_edge_mode_or_board_count();
     test_TC13_on_rear_1board_degrades_seek_but_keeps_edge_motionMode();
     test_TC13_pipeline_stop_at_line_defensively_degrades_to_sync_tshape();
+
+    // TC20: the new resolver dimensions — per-edge edgeOverride, autoRuleActive,
+    // rung precedence, and the softFallback output.
+    test_TC20_edge_override_on_forces_seek();
+    test_TC20_edge_override_off_suppresses_seek();
+    test_TC20_edge_override_off_beats_legacy_stop_at_line_tag();
+    test_TC20_call_off_beats_edge_override_on();
+    test_TC20_call_on_beats_edge_override_off();
+    test_TC20_auto_rule_active_front_seeks_soft_fallback();
+    test_TC20_auto_rule_inactive_no_seek();
+    test_TC20_auto_rule_rear_1board_degrades_no_soft_fallback();
+    test_TC20_auto_rule_rear_2board_seeks_soft_fallback();
+    test_TC20_soft_fallback_only_for_auto_not_explicit_seeks();
+    test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek();
 
     // TC14: FSM-slice re-anchor on success; DRIVE_FAULT on no-line.
     test_TC14_line_found_reanchors_via_on_intersection();
