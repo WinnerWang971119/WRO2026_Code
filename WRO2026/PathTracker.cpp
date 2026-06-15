@@ -240,6 +240,8 @@ bool PathTrackerClass::begin()
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
     _activeStopAtLine        = StopAtLine::AUTO;
+    // ADR-037: no soft-fallback seek in flight at boot.
+    _activeSoftFallback      = false;
     _fault = FaultInfo{};
     return true;
 }
@@ -298,6 +300,9 @@ void PathTrackerClass::abort()
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
+    // ADR-037: a hard-cancel drops any in-flight soft-fallback seek flag so it
+    // cannot leak into the next goal after the abort.
+    _activeSoftFallback     = false;
     _fault                  = FaultInfo{};
 }
 
@@ -460,6 +465,77 @@ void PathTrackerClass::_drainBlocking()
 
 void PathTrackerClass::update()
 {
+    // -------------------------------------------------------------------------
+    // ADR-037 — soft-fallback recovery (runs BEFORE the hard Drive-fault guard).
+    //
+    // An auto-rule-triggered stop-at-line seek that misses the line latches
+    // `DriveClass::Fault::LINE_NOT_FOUND` and `Drive.hasFault()` goes true. When
+    // (a) the seek in flight is a SOFT fallback (`_activeSoftFallback`, set only
+    // for an auto-rule seek that a board can service), AND (b) the competition
+    // toggle `Config::STOP_AT_LINE_FAULT_FALL_BACK` is on (default false), AND
+    // (c) the fault is exactly `LINE_NOT_FOUND` (not a dispatch/drain fault),
+    // degrade the missed seek to a dead-reckoned advance instead of latching
+    // `DRIVE_FAULT`. The `_activeSoftFallback` guard ensures an explicit /
+    // call-ON / legacy `BlindMode::STOP_AT_LINE` seek (softFallback == false)
+    // ALWAYS hard-faults — it never reaches this branch. With the toggle off
+    // (the default), this condition is false and the hard-fault path below runs
+    // exactly as before.
+    //
+    // This path BYPASSES `_enterFault`, so it must replicate the teardown that
+    // matters here itself: `Drive.clearFault()` is mandatory (Drive latches the
+    // fault; without clearing it the corrective move silently no-ops), and
+    // LineFollower must be disabled (the blind-seek dispatch already disabled it,
+    // but assert it rather than assume). The chassis is already stopped — Drive
+    // active-braked at the `LINE_NOT_FOUND` fault — so no extra `Drive.stop(...)`
+    // is needed before the corrective advance.
+    //
+    // BENCH GATE: `setMaxDistance(edge.distance_cm)` only capped the over-search;
+    // no overshoot rolled on the fault and the sensor leads the axle, so the axle
+    // stops ~`LINE_SENSOR_AXLE_OFFSET_CM` SHORT of the node (the REAR board's own
+    // offset when the seek ran in reverse). Issue an explicit corrective
+    // `driveDist` for that residual so the axle lands on the node before
+    // `onDeadReckonedAdvance`. The exact correction is bench-verified on hardware
+    // (this whole path is default-OFF); the structure — direction-matched offset,
+    // signed cruise — is what is fixed here.
+    if (_state == State::STOP_AT_LINE && _activeSoftFallback
+        && Config::STOP_AT_LINE_FAULT_FALL_BACK && Drive.hasFault()
+        && Drive.getFault().kind == DriveClass::Fault::LINE_NOT_FOUND)
+    {
+        // (a) Clear the latched Drive fault so the corrective move dispatches.
+        Drive.clearFault();
+
+        // (c) Replicate the `_enterFault` teardown that matters on this bypass:
+        //     LineFollower must be disabled so it cannot re-issue Drive.setSpeed()
+        //     under the corrective move. The blind-seek dispatch already disabled
+        //     it (pass-through path) or never enabled it; this is the assert.
+        LineFollower.setEnabled(false);
+
+        // (b) Corrective advance for the residual axle-to-node offset. Match the
+        //     seek's travel direction: a reverse (rear-board) seek under-shoots by
+        //     the REAR offset and corrects backward; a forward seek by the FRONT
+        //     offset and corrects forward. `driveDist` takes positive cm + signed
+        //     PWM (sign-by-power), so negate the cruise for REAR.
+        const bool  recoverReverse = (_resolvedDirection == Direction::REAR);
+        const float residualCm      = recoverReverse
+                                          ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                                          : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+        const int16_t correctivePwm = recoverReverse ? (int16_t) -Config::SPEED_NORMAL
+                                                     : (int16_t)  Config::SPEED_NORMAL;
+        Drive.driveDist(residualCm)
+             .setMode(DriveMode::SYNC)
+             .setPower(correctivePwm)
+             .tShape()
+             .async();
+
+        // (d) Advance the discrete node by dead-reckoning (the line was never
+        //     found, so this is NOT a true re-anchor) and re-plan the next hop.
+        Localization.onDeadReckonedAdvance(_nextHop);
+        _activeSoftFallback = false;    // consumed — recovery handled this seek
+        _state              = State::PLAN_NEXT_HOP;
+        // Do NOT fall through into the hard Drive-fault guard below.
+        return;
+    }
+
     if (_state != State::IDLE && _state != State::FAULT && Drive.hasFault())
     {
         Drive.stop(true);
@@ -496,6 +572,10 @@ void PathTrackerClass::update()
             // so a pivot never fires across a `goTo(...)` boundary and a stop at
             // the pivot node degrades to a normal turn.
             _resetPivotLatch();
+            // ADR-037: a fresh goal starts with no in-flight soft-fallback seek so
+            // a previous goal's auto-seek flag can never bleed into this goal's
+            // Drive-fault recovery (cleared alongside the pivot latch).
+            _activeSoftFallback = false;
             _state                  = State::PLAN_NEXT_HOP;
             return;
         }
@@ -798,6 +878,9 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
     // cannot bleed into a post-clearFault() goal.
     _resetPivotLatch();
+    // ADR-037: likewise drop the in-flight soft-fallback flag so a post-clearFault()
+    // goal cannot inherit a stale auto-seek latch.
+    _activeSoftFallback = false;
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -820,6 +903,9 @@ void PathTrackerClass::_onPlanNextHop()
         // drop all three so a later `goTo(...)` (or the next queued goal, on the
         // DEQUEUE path) does not inherit a stale latch.
         _resetPivotLatch();
+        // ADR-037: the goal is complete — clear the soft-fallback flag alongside
+        // the pivot latch so it cannot survive into the next goal.
+        _activeSoftFallback = false;
         _state           = (_qCount > 0) ? State::DEQUEUE : State::IDLE;
         return;
     }
@@ -1209,13 +1295,45 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // `_resolveBlindMode(edge)` already maps DEFAULT → pipeline blind, so
             // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
             // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
+            //
+            // ADR-037 auto-rule: a blind hop that feeds a PROJECTION edge seeks a
+            // line first to re-anchor before the marker-less projection. Peek the
+            // hop AFTER `_nextHop` toward the goal and classify its edge type —
+            // mirrors the LINE_FOLLOW pass-through peek (same NODE_NONE / self-loop
+            // guard) so the final/goal blind hop (no next-next) never crashes and
+            // never auto-seeks. `nextHopIsProjection` feeds the resolver's
+            // `autoRuleActive` input together with the field-wide toggle.
             // -----------------------------------------------------------------
-            const StopAtLineResolution sal = resolveStopAtLine(
+            bool nextHopIsProjection = false;
+            if (_nextHop != _destinationNode)
+            {
+                const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
+                if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
+                {
+                    nextHopIsProjection =
+                        (FieldMap::getEdge(_nextHop, nextNext).type
+                         == Routes::EdgeType::PROJECTION);
+                }
+            }
+
+            const StopAtLineQuery q{
                 _activeStopAtLine,
+                edge.stop_at_line_override,
                 _resolveBlindMode(edge),
                 Routes::PIPELINE_CONFIG.blind,
                 _resolvedDirection,
-                Config::LINE_BOARD_COUNT);
+                Config::LINE_BOARD_COUNT,
+                (Routes::BLIND_PROJECTION_AUTO_SEEK && nextHopIsProjection)};
+            const StopAtLineResolution sal = resolveStopAtLine(q);
+
+            // ADR-037: latch whether this seek is a SOFT fallback (auto-rule raised
+            // it and a board can service it). The shared Drive-fault guard at the
+            // top of update() reads this to decide LINE_NOT_FOUND -> degrade vs.
+            // hard-fault. An explicit / call-ON / legacy STOP_AT_LINE seek resolves
+            // softFallback == false and therefore always hard-faults. The flag is
+            // set unconditionally (true or false) so a previous hop's value can
+            // never linger when this hop's seek is not a soft fallback.
+            _activeSoftFallback = sal.softFallback;
 
             if (sal.seek)
             {
@@ -1252,11 +1370,35 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // the STOP_AT_LINE state below polls `Drive.isIdle()` /
                 // `Drive.hasFault()` for the outcome.
                 const DriveMode mode = blindModeToDriveMode(sal.motionMode);
-                Drive.stopAtLine(edge.distance_cm)
-                    .setReverse(reverse)
-                    .setMode(mode)
-                    .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
-                    .async();
+
+                // ADR-037: cap a SOFT-fallback seek's max search distance at the
+                // edge length so a missing line trips `LINE_NOT_FOUND` at the node
+                // instead of running the default `+ STOP_AT_LINE_MAX_MARGIN_CM`
+                // over-search past it. This bounds the over-travel only — it does
+                // NOT by itself land the axle on the node (the recovery branch in
+                // update() issues the corrective advance). A normal / explicit seek
+                // keeps today's behaviour (default max = expected + margin), so the
+                // builder must NOT call `.setMaxDistance(...)` on that path — hence
+                // two full single-statement RAII chains rather than a conditional
+                // mid-chain setter (the Drive builder is move-only; the whole chain
+                // must be one discarded temporary).
+                if (sal.softFallback)
+                {
+                    Drive.stopAtLine(edge.distance_cm)
+                        .setReverse(reverse)
+                        .setMode(mode)
+                        .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                        .setMaxDistance(edge.distance_cm)
+                        .async();
+                }
+                else
+                {
+                    Drive.stopAtLine(edge.distance_cm)
+                        .setReverse(reverse)
+                        .setMode(mode)
+                        .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                        .async();
+                }
                 _state       = State::STOP_AT_LINE;
                 _passThrough = false;    // consumed
                 break;

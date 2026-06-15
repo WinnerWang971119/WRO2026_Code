@@ -343,6 +343,20 @@ private:
     /// no modifier keeps it AUTO, so the per-edge BlindMode governs. See ADR-027.
     StopAtLine _activeStopAtLine = StopAtLine::AUTO;
 
+    /// @brief Whether the IN-FLIGHT BLIND stop-at-line seek is a SOFT fallback (ADR-037).
+    ///
+    /// Latched at the BLIND dispatch from `resolveStopAtLine(...)`'s `softFallback`
+    /// output — true ONLY for an auto-rule-triggered seek (a blind hop feeding a
+    /// projection edge, with a board that can service it). Consumed by the shared
+    /// Drive-fault guard at the top of `update()`: a `LINE_NOT_FOUND` fault on a
+    /// soft-fallback seek degrades to a dead-reckoned advance (under the
+    /// `Config::STOP_AT_LINE_FAULT_FALL_BACK` toggle) instead of latching
+    /// `DRIVE_FAULT`. An explicit / call-ON / legacy `BlindMode::STOP_AT_LINE` seek
+    /// has `softFallback == false` and therefore always hard-faults. Reset to
+    /// `false` at every `_resetPivotLatch()` site (DEQUEUE / fault / goal-complete)
+    /// so it cannot bleed across a `goTo(...)` boundary.
+    bool _activeSoftFallback = false;
+
     /// @brief Pass-through eligibility for the in-flight LINE_OVERSHOOT.
     ///
     /// Set in `update()`'s `LINE_FOLLOW` case at intersection-detect when the
