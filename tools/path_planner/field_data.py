@@ -53,6 +53,10 @@ OBSTACLES             = _data["OBSTACLES"]
 # empty means no pivots; the downstream planner/validator/header consume this.
 PIVOT_TURNS           = _data.get("pivot_turns", [])
 
+# Field-wide toggle: when True, blind/projection moves auto-seek the next line
+# before stopping (the default). Set to False to restore exact dead-reckoning.
+BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
+
 # ---------------------------------------------------------------------------
 # Rich edge list — optional per-edge overrides for the live field graph.
 #
