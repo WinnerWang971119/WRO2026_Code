@@ -49,6 +49,7 @@ from tools.path_planner.pipeline_config import (
     DirectionMode,
     LineMode,
     ProjectionMode,
+    StopAtLineMode,
 )
 from tools.path_planner.planner import (
     compute_all_pairs_next_hop,
@@ -1814,12 +1815,23 @@ _FIXTURE_PATH = (
     pathlib.Path(__file__).parent / "fixtures" / "stop_at_line_truth_table.csv"
 )
 
-_EXPECTED_ROW_COUNT = 144
+# 936 rows = base 864 (3 callFlag × 3 edgeOverride × 4 edgeMode
+#            × 3 pipelineBlind × 2 direction × 2 lineBoardCount × 2 autoRuleActive)
+#            + supplemental 72 (pipelineBlind=STOP_AT_LINE, edgeMode pinned).
+# The generator (tools/path_planner/tests/fixtures/gen_stop_at_line_truth_table.py)
+# is the single source of truth; this constant is a guard, not a magic number.
+_EXPECTED_ROW_COUNT = 936
 
 _CALL_FLAG_MAP = {
     "AUTO": StopAtLine.AUTO,
     "ON":   StopAtLine.ON,
     "OFF":  StopAtLine.OFF,
+}
+
+_EDGE_OVERRIDE_MAP = {
+    "DEFAULT": StopAtLineMode.DEFAULT,
+    "ON":      StopAtLineMode.ON,
+    "OFF":     StopAtLineMode.OFF,
 }
 
 _BLIND_MODE_MAP = {
@@ -1838,10 +1850,11 @@ _DIRECTION_MAP = {
 def test_tc13_resolve_stop_at_line_matches_fixture():
     """TC13 (Python): resolve_stop_at_line agrees with the T0 truth table for every row.
 
-    Reads ``stop_at_line_truth_table.csv`` by column name and calls
-    ``resolve_stop_at_line`` for each of the 144 input combinations, asserting
-    the returned ``(seek, motion_mode)`` matches the fixture's
-    ``expect_seek`` / ``expect_motionMode`` columns.
+    Reads ``stop_at_line_truth_table.csv`` by column name (DictReader, so column
+    order is irrelevant) and calls ``resolve_stop_at_line`` for each of the 936
+    input combinations, asserting the returned ``(seek, motion_mode, soft_fallback)``
+    matches the fixture's ``expect_seek`` / ``expect_motionMode`` /
+    ``expect_softFallback`` columns.
 
     Satisfies AC4 (#6): the Python transcription cannot silently drift from
     the canonical single-source truth table.
@@ -1864,29 +1877,41 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
     )
 
     for row in rows:
-        call_flag     = _CALL_FLAG_MAP[row["callFlag"]]
-        edge_mode     = _BLIND_MODE_MAP[row["edgeMode"]]
-        pipeline_blind = _BLIND_MODE_MAP[row["pipelineBlind"]]
-        direction     = _DIRECTION_MAP[row["direction"]]
+        call_flag        = _CALL_FLAG_MAP[row["callFlag"]]
+        edge_override    = _EDGE_OVERRIDE_MAP[row["edgeOverride"]]
+        edge_mode        = _BLIND_MODE_MAP[row["edgeMode"]]
+        pipeline_blind   = _BLIND_MODE_MAP[row["pipelineBlind"]]
+        direction        = _DIRECTION_MAP[row["direction"]]
         line_board_count = int(row["lineBoardCount"])
-        expect_seek   = row["expect_seek"].strip().lower() == "true"
-        expect_motion = _BLIND_MODE_MAP[row["expect_motionMode"]]
+        auto_rule_active = row["autoRuleActive"].strip().lower() == "true"
+        expect_seek          = row["expect_seek"].strip().lower() == "true"
+        expect_motion        = _BLIND_MODE_MAP[row["expect_motionMode"]]
+        expect_soft_fallback = row["expect_softFallback"].strip().lower() == "true"
 
-        actual_seek, actual_motion = resolve_stop_at_line(
+        actual_seek, actual_motion, actual_soft_fallback = resolve_stop_at_line(
             call_flag,
+            edge_override,
             edge_mode,
             pipeline_blind,
             direction,
             line_board_count,
+            auto_rule_active,
         )
 
-        assert (actual_seek, actual_motion) == (expect_seek, expect_motion), (
+        assert (actual_seek, actual_motion, actual_soft_fallback) == (
+            expect_seek,
+            expect_motion,
+            expect_soft_fallback,
+        ), (
             f"resolve_stop_at_line mismatch for row "
-            f"callFlag={row['callFlag']} edgeMode={row['edgeMode']} "
-            f"pipelineBlind={row['pipelineBlind']} direction={row['direction']} "
-            f"lineBoardCount={row['lineBoardCount']}: "
-            f"got (seek={actual_seek}, motionMode={actual_motion!r}) "
-            f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r})"
+            f"callFlag={row['callFlag']} edgeOverride={row['edgeOverride']} "
+            f"edgeMode={row['edgeMode']} pipelineBlind={row['pipelineBlind']} "
+            f"direction={row['direction']} lineBoardCount={row['lineBoardCount']} "
+            f"autoRuleActive={row['autoRuleActive']}: "
+            f"got (seek={actual_seek}, motionMode={actual_motion!r}, "
+            f"softFallback={actual_soft_fallback}) "
+            f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r}, "
+            f"softFallback={expect_soft_fallback})"
         )
 
 
