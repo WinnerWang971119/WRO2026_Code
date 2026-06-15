@@ -94,6 +94,7 @@ _FIELD_ATTRS = (
     "START_HEADING_DEG",
     "FIELD_MM",
     "MAP_PNG",
+    "BLIND_PROJECTION_AUTO_SEEK",
 )
 
 _GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -145,6 +146,7 @@ def _build_toy_field_data() -> SimpleNamespace:
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
 
 
@@ -459,6 +461,7 @@ def test_emit_accepts_255_nodes(emit_targets):
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -582,6 +585,7 @@ def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
     graph = build_graph(fd)
     return fd, graph
@@ -723,30 +727,31 @@ def test_edge_info_struct_has_no_pivot_fields(emit_targets):
 
 
 def test_edge_info_cell_builders_drop_pivot_fields(emit_targets):
-    """TC14 (cell shape): every EDGES cell ends at its four override-enum slots.
+    """TC14 (cell shape): every EDGES cell ends at its five override-enum slots.
 
     Both the populated ``_edge_cell`` and the empty ``_none_edge_cell`` builders
     dropped the trailing ``pivot_trim_cm`` (and the turn-mode override slot), so
-    each emitted cell now closes on the ``direction_override`` enum literal --
+    each emitted cell now closes on the ``stop_at_line_override`` enum literal --
     not a float. A populated A->B cell and a NONE cell both end on a
-    ``DirectionMode::*`` literal.
+    ``StopAtLineMode::*`` literal.
     """
     _, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
     cpp_text = source_path.read_text(encoding="utf-8")
 
     # A populated edge cell (A->B exists in the toy field) ends on the
-    # direction-override enum literal, with no trailing float.
+    # stop_at_line_override enum literal (the last field on EdgeInfo after
+    # direction_override), with no trailing float.
     a_to_b_cell = _edge_cell_text(cpp_text, "A", "B")
-    assert a_to_b_cell.rstrip().endswith("DirectionMode::DEFAULT }"), (
-        "populated EdgeInfo cell must end on direction_override; got: " + a_to_b_cell
+    assert a_to_b_cell.rstrip().endswith("StopAtLineMode::DEFAULT }"), (
+        "populated EdgeInfo cell must end on stop_at_line_override; got: " + a_to_b_cell
     )
     # No EdgeInfo cell carries a trailing pivot_trim_cm float anymore: the
     # only floats in a cell are distance_cm / heading_deg near the START.
     assert "EdgeType::NONE" in cpp_text
-    # A NONE cell also closes on the direction default (its 4 override slots).
+    # A NONE cell also closes on the stop_at_line default (its 5 override slots).
     assert "EdgeType::NONE, " in cpp_text
-    assert ("DirectionMode::DEFAULT }" in a_to_b_cell)
+    assert "StopAtLineMode::DEFAULT }" in a_to_b_cell
 
 
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the

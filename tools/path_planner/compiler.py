@@ -204,9 +204,12 @@ def compile_path(
        * Emit one motion primitive based on ``edge['type']`` and
          direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
          ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
-         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when the
-         edge's effective :class:`BlindMode` is ``STOP_AT_LINE`` (via
-         :func:`resolve_blind_mode`), else ``(ACT_FORWARD, distance_cm)``.
+         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when
+         :func:`resolve_stop_at_line` returns ``seek=True`` (the edge's
+         effective :class:`BlindMode` is ``STOP_AT_LINE``, or the auto-rule
+         fires because ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set and
+         the next hop is a ``PROJECTION`` edge), else
+         ``(ACT_FORWARD, distance_cm)``.
          REAR: ``EDGE_LINE`` ->
          ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
          ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
@@ -227,7 +230,10 @@ def compile_path(
         chassis's current node.
     :param start_heading_deg: heading at ``path[0]`` in ``[0, 360)``.
     :param graph: directed graph from :func:`build_graph`.
-    :param field_data: unused; kept for API stability with PR2 callers.
+    :param field_data: read for ``BLIND_PROJECTION_AUTO_SEEK`` (the auto-rule
+        that fires a ``stop_at_line`` / ``stop_at_line_reverse`` seek on a
+        blind hop whose next hop is a projection edge). ``getattr`` fallback
+        to ``True`` keeps old callers that predate T11 working unchanged.
     :return: list of :data:`Primitive` tuples.
     :raises ValueError: if ``start_heading_deg`` is not in ``[0, 360)``
         or an edge has an unknown type tag.
