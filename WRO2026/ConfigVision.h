@@ -73,6 +73,20 @@ namespace Config
      */
     constexpr uint8_t VISION_FLUSH_DISCARD_FRAMES = 1;   // frames dropped after flush before latch
 
+    /**
+     * @brief Wake / start command string written to the HUE12 over Serial1.
+     *
+     * The HUE12 is from the same device family as the vendor `MiniR4SmartCamReader`, whose
+     * `SmartCamReader()` writes `Serial1.write("start")` whenever it has received no valid data
+     * (`MiniR4SmartCamReader.h`: the `else { if (!hasReceivedValidData) Serial1.write("start"); }`
+     * branch). On a cold boot the camera may sit idle until it is kicked with this command, so the
+     * firmware sends it once from `Vision::begin()` and on demand via `Vision::start()`.
+     *
+     * @note Stored as a named constant so the wire string lives in exactly one place (no magic
+     *       strings); mirrors the vendor contract verbatim.
+     */
+    constexpr char VISION_START_CMD[] = "start";   // HUE12 wake command — vendor SmartCamReader contract
+
     // -----------------------------------------------------------------------------------------
     // Colour classification
     // -----------------------------------------------------------------------------------------

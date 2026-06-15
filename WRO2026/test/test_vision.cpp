@@ -981,6 +981,13 @@ static void test_TC21_classify_bad_code_before_sta_gate()
     ASSERT_TRUE(VisionFrame::classifyHue(248, 1) == Config::Color::UNKNOWN);
     // Same precedence for the device NONE code.
     ASSERT_TRUE(VisionFrame::classifyHue(255, 1) == Config::Color::UNKNOWN);
+
+    // Reserved codes 251..254 are undefined: 240..245 (White), 246..250 (Black) and 255 (None)
+    // are handled by earlier steps, so a code in 251..254 must NOT leak to WHITE through the
+    // step-4 sta gate. It returns UNKNOWN regardless of saturation — both below the white gate
+    // (sta 1) and above it (sta 15).
+    ASSERT_TRUE(VisionFrame::classifyHue(252, 1) == Config::Color::UNKNOWN);
+    ASSERT_TRUE(VisionFrame::classifyHue(252, 15) == Config::Color::UNKNOWN);
 }
 
 // ===========================================================================

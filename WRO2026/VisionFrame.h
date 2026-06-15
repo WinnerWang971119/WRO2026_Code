@@ -212,6 +212,12 @@ namespace VisionFrame
      *   1. `hue == 255`            -> UNKNOWN  (device "NONE" / no detection)
      *   2. `246 <= hue <= 250`     -> UNKNOWN  (device Black)
      *   3. `240 <= hue <= 245`     -> WHITE    (device achromatic White)
+     *   3a. `hue > 239` (i.e. 251..254) -> UNKNOWN  (reserved device codes;
+     *                              255 / 246..250 / 240..245 already returned
+     *                              above, so the only codes left here are the
+     *                              undefined 251..254 — fence them off so they
+     *                              never reach the step-4 sta gate and get
+     *                              mis-classified as WHITE)
      *   4. chromatic (`hue <= 239`) AND `sta < Config::VISION_WHITE_STA_MAX`
      *                              -> WHITE    (desaturated / washed out)
      *   5. chromatic `hue` inside a `Config::HUE_BANDS[]` entry (`lo <= hue <= hi`,
@@ -221,6 +227,7 @@ namespace VisionFrame
      * Steps 1–2 (bad device codes) MUST precede the step-4 saturation gate:
      * a low-saturation Black reading (hue 248, sta 1) returns UNKNOWN, never
      * WHITE. Putting the device-code checks first is what makes that hold (TC21).
+     * Step 3a likewise fences the reserved 251..254 band off the sta gate.
      *
      * @param hue  Cell hue byte (device range: 0..239 chromatic, 240..245 White,
      *             246..250 Black, 255 None).
@@ -251,6 +258,15 @@ namespace VisionFrame
         if (hue >= 240 && hue <= 245)
         {
             return Config::Color::WHITE;
+        }
+
+        // Step 3a: reserved device codes. 240..245 (White), 246..250 (Black), and 255 (None) all
+        // returned above, so the ONLY codes > 239 reaching here are the undefined 251..254. They
+        // are NOT chromatic, so fence them off as UNKNOWN before the step-4 sta gate — otherwise a
+        // low-sta reserved code would leak through as WHITE.
+        if (hue > 239)
+        {
+            return Config::Color::UNKNOWN;
         }
 
         // Step 4: chromatic but desaturated -> White. hue <= 239 is guaranteed

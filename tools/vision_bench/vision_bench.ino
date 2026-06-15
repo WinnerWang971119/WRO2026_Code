@@ -65,7 +65,10 @@
  *     `Serial1` directly. If `fps` stays 0 and no `slot` table ever prints,
  *     check the physical D0/D1 socket and the TX<->RX cross-wiring (camera TX
  *     must reach R4 RX) BEFORE assuming a baud mismatch. A dead socket and a
- *     wrong baud look identical from the serial monitor.
+ *     wrong baud look identical from the serial monitor. If the wiring and baud
+ *     check out but `fps` still stays 0, the camera may need the start command
+ *     to begin emitting — this bench now sends `Config::VISION_START_CMD` once at
+ *     setup(), matching the firmware, so a cold-boot-idle camera is kicked awake.
  *
  * ---------------------------------------------------------------------------
  * HOW TO COMPILE / FLASH
@@ -254,6 +257,10 @@ void setup()
     // HUE12 camera UART. Serial1 IS MiniR4.Uart (MatrixMiniR4.h:114). Use the
     // Config baud so this bench and the firmware agree on one source of truth.
     Serial1.begin(Config::VISION_UART_BAUD);
+
+    // Wake the camera (vendor SmartCamReader contract) — a cold-booted HUE12 may stay idle
+    // until kicked with this command, so the bench sends it once like the firmware does.
+    Serial1.print(Config::VISION_START_CMD);
 
     _rxLen            = 0;
     _framesThisWindow = 0;

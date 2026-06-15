@@ -103,8 +103,25 @@ public:
      *         the platform is ever changed.
      * @note Does NOT flush any pending UART bytes — the camera may already be streaming.
      *       `readMosaic()` performs its own flush-and-discard sequence before latching.
+     * @note Sends the HUE12 wake command via `start()` at the end of `begin()` so a
+     *       cold-booted camera begins emitting frames.
      */
     bool begin();
+
+    /**
+     * @brief Send the wake/start command to the HUE12 over Serial1.
+     *
+     * Writes `Config::VISION_START_CMD` to `Serial1`, kicking a camera that has not yet begun
+     * emitting frames. The HUE12 belongs to the same device family as the vendor
+     * `MiniR4SmartCamReader`, which writes the same command when it has received no valid data.
+     *
+     * Called once by `begin()`; also callable any time the camera needs re-kicking (e.g. before a
+     * `readMosaic()` after a long idle).
+     *
+     * @note Pure TX — does NOT read, flush, or touch the colour / hue latch or the fault record.
+     *       Safe to call repeatedly; an already-streaming camera ignores a redundant wake.
+     */
+    void start();
 
     // -----------------------------------------------------------------------------------------
     // Command
@@ -132,10 +149,12 @@ public:
      *
      * @note **This is a command-time BLOCKING call** (ADR-003 / ADR-037 sanctioned blocking
      *       site). It spins on the registered tick callback (see `setTickCallback()`) while
-     *       waiting for UART bytes. The spin duration is bounded by
-     *       `Config::VISION_READ_TIMEOUT_MS`; if that deadline is exceeded the method returns
-     *       `false` with `Fault::READ_TIMEOUT`. Do NOT call from inside any module's
-     *       `update()` method.
+     *       waiting for UART bytes. Each read attempt is bounded by
+     *       `Config::VISION_READ_TIMEOUT_MS`; if that deadline is exceeded the attempt fails with
+     *       `Fault::READ_TIMEOUT`. Because a transport fault retries ONCE, the worst-case
+     *       blocking time is the FULL retry budget — up to the maximum attempt count multiplied by
+     *       `Config::VISION_READ_TIMEOUT_MS` (2 × 120 ms = 240 ms at today's config), not a single
+     *       timeout. Do NOT call from inside any module's `update()` method.
      */
     bool readMosaic();
 
@@ -232,6 +251,60 @@ public:
     void setTickCallback(void (*cb)());
 
 private:
+    // -----------------------------------------------------------------------------------------
+    // Private read-loop helpers (decomposed out of `readMosaic()` for readability — behaviour is
+    // identical to the original monolithic loop). These are hardware-facing UART glue; the pure,
+    // host-testable parse / unpack / classify logic lives in `VisionFrame.h` (ADR-030).
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * @brief Drain every currently-available byte from `Serial1`'s RX queue (read-and-discard).
+     *
+     * Called at the start of each read attempt to flush the streamed backlog the HUE12 emitted
+     * while the robot was moving, so the latched frame begins strictly after the flush.
+     *
+     * @note Pure RX side effect — does not touch the latch, the fault record, or the deadline.
+     */
+    void _flushRx();
+
+    /**
+     * @brief One iteration of the bounded wait between RX polls.
+     *
+     * Invokes the registered cooperative-tick callback if one is set; otherwise emits the
+     * one-time "no tick callback" warning. In BOTH cases it then sleeps `kWaitGranularityMs`
+     * via `delay()` (LOAD-BEARING: on the host mock `millis()` advances only inside `delay()`,
+     * and on hardware the tick re-entry keeps the OLED / heartbeat alive).
+     *
+     * @note Owns the one-shot `noCallbackWarned` static guard for the no-callback warning.
+     */
+    void _waitTick();
+
+    /**
+     * @brief Map → classify → strict-guard a candidate frame's words into LOCAL cell arrays.
+     *
+     * Unpacks @p words into per-slot hue / sta, then for every cell maps `VISION_CELL_TO_SLOT[c]`
+     * and classifies it into @p outColors / @p outHue. Applies the strict guard: the FIRST cell
+     * that classifies as `Config::Color::UNKNOWN` aborts the scan, records its index in
+     * @p firstBadCell and the raw mapped-slot hue in @p badRaw, and returns `false` WITHOUT a
+     * complete local result. The caller (`readMosaic()`) commits the latch only on `true`, so the
+     * no-overwrite-on-failure invariant stays visible at the call site.
+     *
+     * @param words        The `Config::VISION_FRAME_WORDS` decoded words from `parseFrame()`.
+     * @param outColors    Receives the per-cell classified colours (only fully written on `true`).
+     * @param outHue       Receives the per-cell raw hues (only fully written on `true`).
+     * @param firstBadCell Set to the first offending CELL index on `false`; untouched on `true`.
+     * @param badRaw       Set to the offending mapped-slot raw hue on `false`; untouched on `true`.
+     * @return `true` if every active cell classified to a known colour; `false` on the first
+     *         UNKNOWN cell (the strict-guard / `BAD_CELL` path).
+     * @note Pure with respect to member state — writes only the out-parameters, never the latch.
+     */
+    bool _classifyCandidate(
+        const uint16_t words[Config::VISION_FRAME_WORDS],
+        Config::Color  outColors[Config::VISION_CELL_COUNT],
+        uint8_t        outHue[Config::VISION_CELL_COUNT],
+        uint8_t&       firstBadCell,
+        uint8_t&       badRaw) const;
+
     Config::Color _colors[Config::VISION_CELL_COUNT];   ///< Per-cell colour latch. Zeroed by ctor; updated only on a successful read.
     uint8_t       _rawHue[Config::VISION_CELL_COUNT];   ///< Per-cell raw hue latch. Zeroed by ctor; updated only on a successful read.
     bool          _hasRead      = false;                 ///< True once at least one successful `readMosaic()` has returned. Guards safe-sentinel paths in getters.

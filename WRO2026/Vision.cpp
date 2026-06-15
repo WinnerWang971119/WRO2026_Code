@@ -13,11 +13,16 @@
  * mock `millis()` advances only inside `delay()`, so a tight spin would hang the timeout tests
  * forever and on hardware would starve every cooperative module for up to the read timeout.
  *
+ * The HUE12 begins emitting frames once it is kicked with the wake command; `begin()` sends it
+ * via `start()` at boot, and `start()` is callable on demand if the camera needs re-kicking
+ * after a long idle. Once awake the camera streams continuously, so `readMosaic()` flushes the
+ * streamed backlog at the start of every attempt before latching a fresh frame.
+ *
  * Parsing, unpacking, and classification are NOT reimplemented here — they live in the pure,
  * host-testable free functions in `VisionFrame.h` (ADR-030 host-link test seam). This file is
- * the hardware-facing UART glue only. The whole read algorithm lives inside `readMosaic()`
- * (no private helpers): `Vision.h` (T3) declares the public surface and the latch members, and
- * this task is forbidden from adding to it.
+ * the hardware-facing UART glue only. `readMosaic()` is decomposed into a few private helpers
+ * (`_flushRx`, `_waitTick`, `_classifyCandidate`) for readability; `Vision.h` declares the
+ * public surface, those helpers, and the latch members.
  *
  * The vendor `MiniR4SmartCamReader` / `MiniR4.Vision` are deliberately NOT used (its parser
  * runs off the end of a non-void function on a misaligned start, overruns a fixed stack buffer
@@ -61,6 +66,10 @@ namespace
     ///        READ_TIMEOUT or BAD_CHECKSUM on the first attempt retries once (AC6); a second
     ///        failure surfaces the fault. BAD_CELL never reaches this loop bound — it returns
     ///        immediately (a static scene re-read would only reproduce the same UNKNOWN cell).
+    /// @note  Because of this single retry, the WORST-CASE blocking time of `readMosaic()` is the
+    ///        full retry budget — `kMaxAttempts * Config::VISION_READ_TIMEOUT_MS` (2 × 120 ms =
+    ///        240 ms at today's config), not one `VISION_READ_TIMEOUT_MS`. Each attempt re-arms
+    ///        its own per-attempt deadline, so two consecutive transport timeouts stack.
     constexpr uint8_t kMaxAttempts = 2u;
 
     /// @brief Full HUE12 frame size in bytes: header + length + 2 bytes/word + checksum.
@@ -136,16 +145,114 @@ bool VisionClass::begin()
     // We do NOT flush pending UART bytes here (the device may already be streaming) — readMosaic()
     // owns its own flush-and-discard sequence. See the @note on begin() in Vision.h.
 
+    // Kick the HUE12 so a cold-booted camera begins emitting frames (vendor SmartCamReader
+    // contract). Done LAST so Serial1 is already open before the wake command is written.
+    start();
+
     // Always true on this platform; declared `bool` for parity with Drive/Manipulator begin() so
     // the call site can guard on the return value if the platform ever changes.
     return true;
 }
 
 // -----------------------------------------------------------------------------------------
+// Command — wake the camera
+// -----------------------------------------------------------------------------------------
+
+void VisionClass::start()
+{
+    // Pure TX: write the wake command to the HUE12. `Serial1.print(const char*)` works on the real
+    // HardwareSerial and on the host mock (a no-op there). No read, flush, or latch mutation.
+    Serial1.print(Config::VISION_START_CMD);
+}
+
+// -----------------------------------------------------------------------------------------
+// Read-loop helpers — decomposed out of readMosaic() for readability (behaviour identical).
+// -----------------------------------------------------------------------------------------
+
+void VisionClass::_flushRx()
+{
+    // Step 1 — Flush the streamed backlog (AC7). The HUE12 streams continuously, so at the stop the
+    // RX buffer holds frames captured WHILE MOVING. Draining them here guarantees the latched frame
+    // begins after the flush, so it reflects the robot's current field position. (The caller must
+    // additionally ensure Drive.isIdle() — that contract lives on Vision.h's @note.)
+    while (Serial1.available() > 0)
+    {
+        Serial1.read();
+    }
+}
+
+void VisionClass::_waitTick()
+{
+    // Wait-loop step (LOAD-BEARING). No bytes available yet: tick every other module, then sleep
+    // one granularity. NEVER spin without delay() — on host the mock clock only advances inside
+    // delay() (a tight spin hangs the timeout tests forever), and on hardware the tick re-entry is
+    // what keeps the OLED / heartbeat alive. Mirrors Drive::_drainBlocking.
+    if (_tickCallback != nullptr)
+    {
+        _tickCallback();
+    }
+    else
+    {
+        // No callback registered: still perform a bare bounded wait, but warn ONCE so the operator
+        // knows other modules freeze during the read. Static-bool guard matches the
+        // Drive/Manipulator "no tick registered" convention.
+        static bool noCallbackWarned = false;
+        if (!noCallbackWarned)
+        {
+            Serial.println(F("[Vision] readMosaic: no tick callback set — only the UART "
+                              "poll runs during the read. Call "
+                              "Vision.setTickCallback(...) in setup()."));
+            noCallbackWarned = true;
+        }
+    }
+    delay(kWaitGranularityMs);
+}
+
+bool VisionClass::_classifyCandidate(
+    const uint16_t words[Config::VISION_FRAME_WORDS],
+    Config::Color  outColors[Config::VISION_CELL_COUNT],
+    uint8_t        outHue[Config::VISION_CELL_COUNT],
+    uint8_t&       firstBadCell,
+    uint8_t&       badRaw) const
+{
+    // Unpack into per-SLOT hue / sta arrays (device order S1..S12).
+    uint8_t hue[Config::VISION_CELL_COUNT];
+    uint8_t sta[Config::VISION_CELL_COUNT];
+    VisionFrame::unpackFrame(words, hue, sta);
+
+    // Classify into CELL-indexed local buffers, applying the strict guard, so the caller touches
+    // the latch ONLY after every active cell validates. This is what makes AC4's "no overwrite on
+    // failure" hold (the caller commits the latch only on a true return).
+    for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
+    {
+        // DIRECTION MATTERS (TC19): the unpacked arrays are indexed BY SLOT, the result is stored
+        // BY CELL. `VISION_CELL_TO_SLOT[c]` is the HUE12 slot that observes cell `c`. A transposed
+        // map (indexing by cell) is exactly what TC19 catches.
+        const uint8_t       slot = Config::VISION_CELL_TO_SLOT[c];
+        const Config::Color col  = VisionFrame::classifyHue(hue[slot], sta[slot]);
+
+        if (col == Config::Color::UNKNOWN)
+        {
+            // Strict guard (AC4): any active cell that fails to classify aborts the whole read.
+            // Record the first offending CELL index and the raw hue of its mapped slot. The caller
+            // does NOT write the latch on a false return.
+            firstBadCell = c;
+            badRaw       = hue[slot];
+            return false;
+        }
+
+        outColors[c] = col;
+        outHue[c]    = hue[slot];
+    }
+
+    // Every active cell validated.
+    return true;
+}
+
+// -----------------------------------------------------------------------------------------
 // Command — the core blocking read
 //
-// The entire read algorithm is inlined here (no private helpers — Vision.h's surface is fixed
-// for this task and may not be extended). Structure:
+// Structure:
 //   - Outer retry-once loop over READ_TIMEOUT / BAD_CHECKSUM (AC6).
 //   - Per attempt: flush (AC7) → accumulate into a bounded buffer, ticking + delay()ing while
 //     waiting (AC1) → parse frames, discard VISION_FLUSH_DISCARD_FRAMES, latch the next (AC7) →
@@ -153,6 +260,9 @@ bool VisionClass::begin()
 //   - BAD_CELL returns immediately (no retry, no latch overwrite). A success returns true with
 //     the latch committed. A transport fault retries once, then latches the fault and returns
 //     false without touching the colour/hue latch.
+//
+// The byte-accumulation / parse drain stays inline (it reads as one cohesive loop); the flush,
+// the wait-tick, and the candidate classify+guard are factored into private helpers.
 // -----------------------------------------------------------------------------------------
 
 bool VisionClass::readMosaic()
@@ -160,16 +270,10 @@ bool VisionClass::readMosaic()
     for (uint8_t attempt = 0; attempt < kMaxAttempts; ++attempt)
     {
         // ---------------------------------------------------------------------------------
-        // Step 1 — Flush the streamed backlog (AC7). The HUE12 streams continuously, so at the
-        // stop the RX buffer holds frames captured WHILE MOVING. Draining them here guarantees
-        // the latched frame begins after the flush, so it reflects the robot's current field
-        // position. (The caller must additionally ensure Drive.isIdle() — that contract lives on
-        // Vision.h's @note.)
+        // Step 1 — Flush the streamed backlog (AC7), so the latched frame begins strictly after
+        // the flush and reflects the robot's current field position.
         // ---------------------------------------------------------------------------------
-        while (Serial1.available() > 0)
-        {
-            Serial1.read();
-        }
+        _flushRx();
 
         // ---------------------------------------------------------------------------------
         // Step 2 — Accumulate bytes into a FIXED, overflow-proof local buffer and parse frames
@@ -264,46 +368,17 @@ bool VisionClass::readMosaic()
                         // -------------------------------------------------------------------
                         // Step 3 — Latch-candidate processing. The (DISCARD+1)-th valid frame
                         // began strictly after the flush, so it is the fresh frame to latch
-                        // (AC7).
+                        // (AC7). Map + classify + strict-guard into LOCAL arrays; the latch is
+                        // committed below ONLY on a full pass, so AC4's "no overwrite on failure"
+                        // is visible right here at the call site.
                         // -------------------------------------------------------------------
                         sawCandidate = true;
 
-                        // Unpack into per-SLOT hue / sta arrays (device order S1..S12).
-                        uint8_t hue[Config::VISION_CELL_COUNT];
-                        uint8_t sta[Config::VISION_CELL_COUNT];
-                        VisionFrame::unpackFrame(words, hue, sta);
-
-                        // Classify into CELL-indexed local buffers first, applying the strict
-                        // guard, so the latch is touched ONLY after every active cell validates.
-                        // This is what makes AC4's "no overwrite on failure" hold.
                         Config::Color cellColors[Config::VISION_CELL_COUNT];
                         uint8_t       cellHue[Config::VISION_CELL_COUNT];
 
-                        bool allValid = true;
-                        for (uint8_t c = 0; c < Config::VISION_CELL_COUNT; ++c)
-                        {
-                            // DIRECTION MATTERS (TC19): the unpacked arrays are indexed BY SLOT,
-                            // the result is stored BY CELL. `VISION_CELL_TO_SLOT[c]` is the HUE12
-                            // slot that observes cell `c`. A transposed map (indexing by cell) is
-                            // exactly what TC19 catches.
-                            const uint8_t       slot = Config::VISION_CELL_TO_SLOT[c];
-                            const Config::Color col  = VisionFrame::classifyHue(hue[slot], sta[slot]);
-
-                            if (col == Config::Color::UNKNOWN)
-                            {
-                                // Strict guard (AC4): any active cell that fails to classify aborts
-                                // the whole read. Record the first offending CELL index and the
-                                // raw hue of its mapped slot. Do NOT write the latch.
-                                badCell      = true;
-                                badCellIndex = c;
-                                badCellRaw   = hue[slot];
-                                allValid     = false;
-                                break;
-                            }
-
-                            cellColors[c] = col;
-                            cellHue[c]    = hue[slot];
-                        }
+                        const bool allValid =
+                            _classifyCandidate(words, cellColors, cellHue, badCellIndex, badCellRaw);
 
                         if (allValid)
                         {
@@ -316,6 +391,13 @@ bool VisionClass::readMosaic()
                             }
                             _hasRead = true;
                             latched  = true;
+                        }
+                        else
+                        {
+                            // Strict-guard failure — `_classifyCandidate` recorded the first bad
+                            // CELL index and its raw mapped-slot hue. Flag it for outcome resolution
+                            // below; the latch was NOT touched.
+                            badCell = true;
                         }
                         break;    // candidate handled — leave the parse loop
                     }
@@ -348,31 +430,12 @@ bool VisionClass::readMosaic()
             }
 
             // -----------------------------------------------------------------------------
-            // Wait-loop step (LOAD-BEARING). No bytes available yet: tick every other module,
-            // then sleep one granularity. NEVER spin without delay() — on host the mock clock
-            // only advances inside delay() (a tight spin hangs the timeout tests forever), and on
-            // hardware the tick re-entry is what keeps the OLED / heartbeat alive. Mirrors
-            // Drive::_drainBlocking.
+            // Wait-loop step (LOAD-BEARING). No bytes available yet: tick every other module (or
+            // warn once if no callback is set), then sleep one granularity inside `_waitTick()`.
+            // The `delay()` it performs is what advances `millis()` on host and keeps cooperative
+            // modules alive on hardware.
             // -----------------------------------------------------------------------------
-            if (_tickCallback != nullptr)
-            {
-                _tickCallback();
-            }
-            else
-            {
-                // No callback registered: still perform a bare bounded wait, but warn ONCE so the
-                // operator knows other modules freeze during the read. Static-bool guard matches
-                // the Drive/Manipulator "no tick registered" convention.
-                static bool noCallbackWarned = false;
-                if (!noCallbackWarned)
-                {
-                    Serial.println(F("[Vision] readMosaic: no tick callback set — only the UART "
-                                      "poll runs during the read. Call "
-                                      "Vision.setTickCallback(...) in setup()."));
-                    noCallbackWarned = true;
-                }
-            }
-            delay(kWaitGranularityMs);
+            _waitTick();
         }
 
         // ---------------------------------------------------------------------------------
