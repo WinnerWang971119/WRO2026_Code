@@ -48,6 +48,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-034 — `.flat()` is the named opt-out from the default trapezoidal profile](./docs/decisions/034-flat-opt-out-tshape.md)
 - [ADR-035 — Two-sided pivot compensation: `delta = (T/2)*tan(theta/2)` stored on the pivot edge; no global `EDGES` mutation](./docs/decisions/035-two-sided-pivot-compensation.md) (**Superseded by ADR-036**)
 - [ADR-036 — Per-turn pivot compensation: a pivot is a 3-node turn `(u,v,w)`; sparse `PivotTurn[]` table; one firmware lookup resolves wheel + trim](./docs/decisions/036-per-turn-pivot-compensation.md)
+- [ADR-037 — Blind→projection auto stop-at-line: auto-rule via `auto_rule_active`; per-edge `StopAtLineMode` override; field-sourced `Routes::BLIND_PROJECTION_AUTO_SEEK` toggle; soft-fallback default off](./docs/decisions/037-blind-projection-auto-stop-at-line.md)
 
 ### Perception
 
@@ -66,7 +67,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 29 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036 |
+| Implemented | 30 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
 | Deferred | 0 | — |
