@@ -282,9 +282,11 @@ void loop()
 
     // 2. Extract every complete, checksum-valid frame currently buffered. Each
     //    parseFrame success advances `consumed` past the accepted frame; we
-    //    compact and loop so a burst of buffered frames is fully drained. A
-    //    failure sets `consumed = _rxLen`, so we drop the unparseable prefix and
-    //    wait for more bytes (the real reader behaves the same way).
+    //    compact and loop so a burst of buffered frames is fully drained. On a
+    //    parse failure the `&&` short-circuits and the loop exits WITHOUT
+    //    compacting, leaving the buffered bytes in place for the next pump to
+    //    complete; a stream that never yields a frame is bounded by the
+    //    oldest-byte slide in pumpUartBytes (the real reader resyncs similarly).
     uint16_t words[Config::VISION_FRAME_WORDS];
     size_t   consumed = 0;
     while (_rxLen >= kFrameBytes && VisionFrame::parseFrame(_rx, _rxLen, words, consumed))

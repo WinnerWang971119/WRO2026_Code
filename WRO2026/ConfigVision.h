@@ -37,8 +37,12 @@ namespace Config
     /**
      * @brief Number of active game-mosaic cells the robot must identify.
      *
-     * The WRO 2026 mosaic is a 4×3 grid = 12 cells (confirmed 2026-06-13). Split from
-     * `VISION_SLOT_COUNT` so a layout change is a one-line edit to this constant only.
+     * The WRO 2026 mosaic is a 4×3 grid = 12 cells (confirmed 2026-06-13). Kept as its own
+     * named constant (separate from `VISION_SLOT_COUNT`) so cell-count uses read clearly, but
+     * the two are currently pinned together: `ConfigChecks.h` static_asserts
+     * `VISION_CELL_COUNT == VISION_SLOT_COUNT`, an even count, and `VISION_FRAME_WORDS` derived
+     * from it. A real layout change therefore means reprogramming the camera and updating those
+     * coupled constants in lock-step — not a one-line edit to this value alone.
      */
     constexpr uint8_t VISION_CELL_COUNT = 12;   // 4×3 mosaic
 

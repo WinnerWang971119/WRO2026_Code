@@ -83,7 +83,7 @@ public:
     // -----------------------------------------------------------------------------------------
 
     /**
-     * @brief Construct the facade with the latch uninitialised.
+     * @brief Construct the facade with the latch cleared to safe defaults (no read yet).
      *
      * Zeroes both latch arrays and marks `_hasRead = false` so getters return safe sentinels
      * before the first successful `readMosaic()`. Does NO hardware work.
