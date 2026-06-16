@@ -23,7 +23,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 ### Mission-layer
 
-- [ADR-006 — Read the mosaic with a camera at a line-anchored stop](./docs/decisions/006-mosaic-via-camera.md) (Phase 3)
+- [ADR-006 — Read the 4×3 mosaic with a camera at a line-anchored stop](./docs/decisions/006-mosaic-via-camera.md) (Refined by ADR-037)
 - [ADR-007 — Manipulator exposes control primitives only until the mechanism is built](./docs/decisions/007-manipulator-control-primitives-only.md) (**Superseded by ADR-032**)
 - [ADR-008 — Greedy score-per-second scheduling + 2-minute time guard](./docs/decisions/008-mission-scheduling-and-time-guard.md) (Phase 4)
 - [ADR-009 — Three named failure modes get explicit bounded recovery](./docs/decisions/009-failure-recovery-first-class.md) (Phase 4)
@@ -53,8 +53,9 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 - [ADR-019 — Custom 8-channel `WROLineArray` replaces vendor `MatrixLineTracer`](./docs/decisions/019-8channel-custom-line-sensor.md)
 - [ADR-020 — Freeze LineFollower PID output during any intersection](./docs/decisions/020-junction-pid-freeze.md)
-- [ADR-021 — Camera is the sole color sensor — no dedicated `ColorReader` module](./docs/decisions/021-camera-as-sole-color-sensor.md) (Phase 4)
+- [ADR-021 — Camera is the sole color sensor — no dedicated `ColorReader` module](./docs/decisions/021-camera-as-sole-color-sensor.md) (Refined by ADR-037)
 - [ADR-024 — Bidirectional line following — runtime auto-direction + 3-layer override](./docs/decisions/024-bidirectional-line-following.md)
+- [ADR-037 — HUE12 Vision capture-once latch + on-device hue classification](./docs/decisions/037-hue12-vision-capture-once.md)
 
 ### Tooling & testing
 
@@ -66,9 +67,9 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 29 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036 |
+| Implemented | 32 | 001, 002, 003, 004, 005, 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
-| Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
+| Pending implementation | 0 | — |
 | Deferred | 0 | — |
 | Superseded | 2 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done); 035 (superseded by ADR-036 — per-turn pivot model replaces the per-edge `pivot_trim_cm` field). Sub-decision supersessions (parent ADR stays Implemented): ADR-010 supersedes the Phase 0 "no logging at all" stance; ADR-033 supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision. |
 

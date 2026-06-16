@@ -53,6 +53,7 @@
 #include "MissionScript.h"
 #include "PathTracker.h"
 #include "Tasks.h"
+#include "Vision.h"
 #include "WROLineArray.h"
 
 namespace
@@ -174,16 +175,18 @@ void setup()
     const bool locOk   = Localization.begin();
     const bool pathOk  = PathTracker.begin();
     const bool missOk  = Mission.begin();
-    const bool tasksOk = Tasks.begin();
-    const bool traceOk = EventTrace.begin();
+    const bool tasksOk  = Tasks.begin();
+    const bool visionOk = Vision.begin();
+    const bool traceOk  = EventTrace.begin();
 
     Drive.setTickCallback(cooperativeTick);
     PathTracker.setTickCallback(cooperativeTick);
     LineFollower.setTickCallback(cooperativeTick);
     Manipulator.setTickCallback(cooperativeTick);
     Tasks.setTickCallback(cooperativeTick);
+    Vision.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && traceOk);
+    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
 
     if (_setupFailed)
     {
@@ -197,6 +200,7 @@ void setup()
         if (!pathOk)   { Serial.println(F("  - PathTracker"));  EventTrace.pushEvent("FAIL PATH"); }
         if (!missOk)   { Serial.println(F("  - Mission"));      EventTrace.pushEvent("FAIL MIS"); }
         if (!tasksOk)  { Serial.println(F("  - Tasks"));        EventTrace.pushEvent("FAIL TASKS"); }
+        if (!visionOk) { Serial.println(F("  - Vision"));       EventTrace.pushEvent("FAIL VIS"); }
         if (!traceOk)  { Serial.println(F("  - EventTrace"));   EventTrace.pushEvent("FAIL TRACE"); }
         EventTrace.pushEvent("BOOT FAIL");
 
