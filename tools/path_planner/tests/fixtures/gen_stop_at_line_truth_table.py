@@ -12,13 +12,13 @@ both parity tests fail together (a louder signal than a single-language bug).
 The emitted CSV is the normative single source consumed by:
 
 * TC13 (Python) -- ``test_runtime_sim.py`` drives every row through
-  ``resolve_stop_at_line`` and asserts ``(seek, motion_mode, soft_fallback)``.
+  ``resolve_stop_at_line`` and asserts ``(seek, motion_mode)``.
 * The C++ parity test -- drives every row through ``resolveStopAtLine``.
 
 Column order (named header, consumed by ``csv.DictReader``)::
 
     callFlag,edgeOverride,edgeMode,pipelineBlind,direction,lineBoardCount,
-    autoRuleActive,expect_seek,expect_motionMode,expect_softFallback
+    autoRuleActive,expect_seek,expect_motionMode
 
 Value spellings mirror the enum MEMBER NAMES exactly so the test's
 string->enum maps consume them without translation:
@@ -32,8 +32,8 @@ string->enum maps consume them without translation:
   task's shorthand "GYRO"/"RAW" are these full member names.)
 * ``direction``     -- ``Direction`` names: FRONT / REAR.
 * ``lineBoardCount``-- integer 1 or 2.
-* ``autoRuleActive``, ``expect_seek``, ``expect_softFallback`` -- lowercase
-  ``true`` / ``false`` (matching the legacy CSV's boolean spelling).
+* ``autoRuleActive``, ``expect_seek`` -- lowercase ``true`` / ``false``
+  (matching the legacy CSV's boolean spelling).
 
 The table is written DETERMINISTICALLY: nested loops in a fixed dimension
 order, no date stamp, no randomness. Re-running the generator on an unchanged
@@ -95,7 +95,6 @@ HEADER: Tuple[str, ...] = (
     "autoRuleActive",
     "expect_seek",
     "expect_motionMode",
-    "expect_softFallback",
 )
 
 
@@ -123,7 +122,6 @@ def _compute_row(
     """
     # --- Precedence ladder: first match decides ``requested``. -------------
     requested = False
-    auto_triggered = False
     if call_flag == "ON":
         requested = True
     elif call_flag == "OFF":
@@ -136,7 +134,6 @@ def _compute_row(
         requested = True
     elif auto_rule_active:
         requested = True
-        auto_triggered = True
     else:
         requested = False
 
@@ -146,9 +143,6 @@ def _compute_row(
 
     # --- The seek runs only when requested AND physically possible. --------
     expect_seek = requested and board_ok
-
-    # --- Soft fallback: an auto-raised seek a board can service. -----------
-    expect_soft_fallback = expect_seek and auto_triggered
 
     # --- Motion mode. ------------------------------------------------------
     if expect_seek:
@@ -172,7 +166,6 @@ def _compute_row(
         _bool_str(auto_rule_active),
         _bool_str(expect_seek),
         expect_motion_mode,
-        _bool_str(expect_soft_fallback),
     )
 
 
@@ -308,18 +301,6 @@ def build_rows() -> List[Tuple[str, ...]]:
         f"exactly 144 rows, got {len(legacy_slice)}"
     )
 
-    # --- Self-check: softFallback only with auto rule AND seek. ------------
-    # No row may flag a soft fallback unless its auto rule was active AND the hop
-    # seeks. (auto_triggered implies autoRuleActive; expect_seek must hold too.)
-    _IDX_AUTO_FLAG = HEADER.index("autoRuleActive")
-    _IDX_SEEK = HEADER.index("expect_seek")
-    _IDX_SOFT = HEADER.index("expect_softFallback")
-    for row in all_rows:
-        if row[_IDX_SOFT] == "true":
-            assert row[_IDX_AUTO_FLAG] == "true" and row[_IDX_SEEK] == "true", (
-                f"softFallback=true requires autoRuleActive AND seek; bad row: {row}"
-            )
-
     return all_rows
 
 
@@ -328,8 +309,6 @@ def write_csv(path: pathlib.Path) -> Tuple[int, int, int]:
 
     :return: ``(base_count, supplemental_count, total_count)``.
     """
-    base_rows = _build_base_rows()
-    supplemental_rows = _build_supplemental_rows()
     all_rows = build_rows()
 
     # ``newline=""`` so the csv module owns line endings (no doubled CR on
@@ -339,7 +318,25 @@ def write_csv(path: pathlib.Path) -> Tuple[int, int, int]:
         writer.writerow(HEADER)
         writer.writerows(all_rows)
 
-    return len(base_rows), len(supplemental_rows), len(all_rows)
+    # Derive counts from the same dimension products that build_rows() asserts
+    # use -- no need to call the builders a second time.
+    base_count = (
+        len(CALL_FLAGS)
+        * len(EDGE_OVERRIDES)
+        * len(EDGE_MODES)
+        * len(PIPELINE_BLINDS_BASE)
+        * len(DIRECTIONS)
+        * len(LINE_BOARD_COUNTS)
+        * len(AUTO_RULE_FLAGS)
+    )
+    supplemental_count = (
+        len(CALL_FLAGS)
+        * len(EDGE_OVERRIDES)
+        * len(DIRECTIONS)
+        * len(LINE_BOARD_COUNTS)
+        * len(AUTO_RULE_FLAGS)
+    )
+    return base_count, supplemental_count, len(all_rows)
 
 
 def main() -> None:
