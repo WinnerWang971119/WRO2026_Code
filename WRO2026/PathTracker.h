@@ -264,6 +264,37 @@ private:
     void _dispatchEdgeAfterTurn();
 
     /**
+     * @brief One-hop lookahead: the hop AFTER `_nextHop` toward `_destinationNode`.
+     *
+     * Shared guard for the two FSM sites that peek the next-next hop — the
+     * `LINE_FOLLOW` pass-through decision in `update()` and the BLIND auto-rule
+     * projection classification (`_nextHopIsProjection()`). Centralises the three
+     * guards both need so they cannot drift: the not-final guard (`_nextHop` is the
+     * destination), the `NODE_NONE` guard (no route from `_nextHop` to the goal),
+     * and the self-loop guard (the lookahead returns `_nextHop` itself).
+     *
+     * @return The next-next node id, or `FieldMap::NODE_NONE` when any guard fails
+     *         (there is no valid next-next hop to classify).
+     */
+    uint8_t _peekNextNextHop() const;
+
+    /**
+     * @brief ADR-037 auto-rule predicate: is the hop after `_nextHop` a PROJECTION edge?
+     *
+     * Feeds the `autoRuleActive` input of `resolveStopAtLine(...)` on a BLIND hop —
+     * a blind hop that feeds a projection edge seeks a line first to re-anchor
+     * before the marker-less projection. Reuses the shared `_peekNextNextHop()`
+     * guard and classifies the resulting edge type.
+     *
+     * @return `true` when the next-next edge is `Routes::EdgeType::PROJECTION`.
+     * @note Short-circuits to `false` — with NO `NEXT_HOP` lookup — when the
+     *       feature is compiled out via `Routes::BLIND_PROJECTION_AUTO_SEEK ==
+     *       false`, so the auto-seek peek costs nothing on a build that never
+     *       auto-seeks.
+     */
+    bool _nextHopIsProjection() const;
+
+    /**
      * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
      *        hop, applying the per-turn pivot trims (ADR-036).
      *
@@ -342,20 +373,6 @@ private:
     /// defers to it. Defaults to `StopAtLine::AUTO` — a bare `goTo(...)` with
     /// no modifier keeps it AUTO, so the per-edge BlindMode governs. See ADR-027.
     StopAtLine _activeStopAtLine = StopAtLine::AUTO;
-
-    /// @brief Whether the IN-FLIGHT BLIND stop-at-line seek is a SOFT fallback (ADR-037).
-    ///
-    /// Latched at the BLIND dispatch from `resolveStopAtLine(...)`'s `softFallback`
-    /// output — true ONLY for an auto-rule-triggered seek (a blind hop feeding a
-    /// projection edge, with a board that can service it). Consumed by the shared
-    /// Drive-fault guard at the top of `update()`: a `LINE_NOT_FOUND` fault on a
-    /// soft-fallback seek degrades to a dead-reckoned advance (under the
-    /// `Config::STOP_AT_LINE_FAULT_FALL_BACK` toggle) instead of latching
-    /// `DRIVE_FAULT`. An explicit / call-ON / legacy `BlindMode::STOP_AT_LINE` seek
-    /// has `softFallback == false` and therefore always hard-faults. Reset to
-    /// `false` at every `_resetPivotLatch()` site (DEQUEUE / fault / goal-complete)
-    /// so it cannot bleed across a `goTo(...)` boundary.
-    bool _activeSoftFallback = false;
 
     /// @brief Pass-through eligibility for the in-flight LINE_OVERSHOOT.
     ///

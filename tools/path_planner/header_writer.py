@@ -211,7 +211,15 @@ def _override_enum_value(
         except KeyError:
             return default_sentinel
         return enum_cls.__name__ + "::" + member.name
-    # Integer or other -- best-effort lookup; fall back to DEFAULT.
+    # Integer or other -- best-effort lookup by value; fall back to DEFAULT.
+    # Cross-enum int-coercion hazard: enum_cls(int(mode_tag)) matches on
+    # *value*, not name, so the same integer can resolve to a member of a
+    # different enum class if their value spaces overlap (e.g. LineMode(2)
+    # and BlindMode(2) are distinct members).  This branch is latent-safe
+    # only because field_data builders always bake real enum *members* (never
+    # raw ints), so an out-of-range or wrong-type int reaching here indicates
+    # a validator gap, not a normal code path.  If that assumption ever
+    # breaks, the int would silently mis-map rather than raise.
     try:
         member = enum_cls(int(mode_tag))
     except (ValueError, TypeError):

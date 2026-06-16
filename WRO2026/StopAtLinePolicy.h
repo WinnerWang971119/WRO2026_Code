@@ -26,24 +26,16 @@
  *      seek" behaviour, kept for back-compat).
  *   4. Auto-rule: `q.autoRuleActive` (the caller's
  *      `autoSeekEnabled && nextHopIsProjection`) — a blind hop feeding a
- *      projection seeks a line first to re-anchor. This rung sets
- *      `autoTriggered` so the seek can be flagged a soft fallback.
+ *      projection seeks a line first to re-anchor.
  *   5. Otherwise `requested = false` — a call-site/edge `AUTO`/`DEFAULT` with no
  *      rule active never seeks. There is intentionally NO pipeline-default seek
  *      rung: the resolved `edgeMode` already encodes the pipeline default, so
  *      the degenerate `edgeMode != STOP_AT_LINE, pipelineBlind == STOP_AT_LINE`
- *      case still yields `seek = false` (full-domain parity with the shipping
- *      resolver).
+ *      case still yields `seek = false`.
  *
  * boardOK: a line board must face the travel direction — the front board always
  * faces forward, but a rear seek needs a second board (`lineBoardCount >= 2`).
  * `seek = requested && boardOK`.
- *
- * softFallback: `seek && autoTriggered` — true ONLY when the seek was raised by
- * the auto rung (step 4) AND a board could service it (boardOK). A board-degraded
- * auto case (`seek` false) carries no soft fallback, and any higher-precedence
- * rung (call / edge / legacy) yields `softFallback` false. The firmware uses this
- * flag to decide whether a missing line is tolerable (soft) or a hard fault.
  *
  * motionMode: when seeking, the motion bundle is the edge's mode, except a bare
  * `STOP_AT_LINE` edge has no real velocity profile of its own and seeks under
@@ -64,10 +56,11 @@
  *
  * Cross-language parity: keep this step-for-step identical with
  * `tools/path_planner/sim/runtime.py::resolve_stop_at_line` — same precedence
- * ladder, same `edgeOverride` / `autoRuleActive` inputs, same `softFallback`
+ * ladder, same `edgeOverride` / `autoRuleActive` inputs, same `{seek, motionMode}`
  * output. The fixture
  * `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv` is the
- * normative source both transcribe; TC13 enforces parity across the full domain.
+ * normative source both transcribe; the Python resolver (TC13) is verified
+ * against the full domain, while the C++ tests cover representative rows.
  */
 
 /**
@@ -99,9 +92,8 @@ struct StopAtLineQuery
  */
 struct StopAtLineResolution
 {
-    bool              seek;            ///< true -> dispatch the Drive.stopAtLine seek.
-    Routes::BlindMode motionMode;     ///< Motion bundle; NEVER STOP_AT_LINE or DEFAULT.
-    bool              softFallback;    ///< true ONLY for auto-rule-triggered seeks.
+    bool              seek;          ///< dispatch the Drive.stopAtLine seek
+    Routes::BlindMode motionMode;    ///< concrete bundle; NEVER STOP_AT_LINE or DEFAULT
 };
 
 /**
@@ -124,12 +116,11 @@ struct StopAtLineResolution
  *                             `autoSeekEnabled && nextHopIsProjection` — true when
  *                             the field-wide auto-seek toggle is on AND this blind
  *                             hop feeds a projection edge.
- * @return The `{seek, motionMode, softFallback}` decision per the T0 truth table.
+ * @return The `{seek, motionMode}` decision per the T0 truth table.
  *         `seek` is true iff the `Drive.stopAtLine` seek should be dispatched;
  *         `motionMode` is the seek's drive mode (when seeking) or the dead-reckon
  *         fallback's drive mode (when not) — always a concrete bundle, never
- *         `STOP_AT_LINE` or `DEFAULT`; `softFallback` is true iff the seek was
- *         raised by the auto rung AND a board could service it.
+ *         `STOP_AT_LINE` or `DEFAULT`.
  */
 inline StopAtLineResolution resolveStopAtLine(const StopAtLineQuery& q)
 {
@@ -138,8 +129,7 @@ inline StopAtLineResolution resolveStopAtLine(const StopAtLineQuery& q)
     // Step 1: precedence ladder for who asked. Call-site ON/OFF beats the
     // per-edge override, which beats the legacy STOP_AT_LINE tag, which beats
     // the auto-rule. AUTO call + DEFAULT edge + no rule active never seeks.
-    bool requested     = false;
-    bool autoTriggered = false;
+    bool requested = false;
     if (q.callFlag == StopAtLine::ON)
     {
         requested = true;
@@ -162,8 +152,7 @@ inline StopAtLineResolution resolveStopAtLine(const StopAtLineQuery& q)
     }
     else if (q.autoRuleActive)
     {
-        requested     = true;
-        autoTriggered = true;
+        requested = true;
     }
     else    // AUTO call / DEFAULT edge, no rule active: never seek
     {
@@ -176,11 +165,6 @@ inline StopAtLineResolution resolveStopAtLine(const StopAtLineQuery& q)
 
     // Step 3: the seek runs only when requested and physically possible.
     result.seek = requested && boardOK;
-
-    // Step 3b: a soft fallback is an auto-raised seek that a board can service.
-    // A board-degraded auto case (seek false) or any higher-precedence rung
-    // (autoTriggered false) never carries it.
-    result.softFallback = result.seek && autoTriggered;
 
     if (result.seek)
     {

@@ -3,6 +3,8 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #43, Phase 3)
 
+> **Soft-fallback sub-decision superseded by [ADR-038](./038-stop-at-line-normal-seek-no-soft-fallback.md).** The auto-rule, the per-edge `stop_at_line_override`, and the field-sourced toggle below are still in force; only the soft-fallback (`soft_fallback` output, `_activeSoftFallback` latch, `Config::STOP_AT_LINE_FAULT_FALL_BACK`) is removed — the auto-seek now fires a normal `stopAtLine` and a missed line is a hard fault.
+
 ## Rule
 
 A BLIND hop whose resolved next hop (via `NEXT_HOP`) is a `PROJECTION` edge
@@ -20,7 +22,7 @@ and passes it in — the resolver never learns the word "projection."
 2. Per-edge `stop_at_line_override ON/OFF` (new `EdgeInfo` field, `StopAtLineMode{DEFAULT,ON,OFF}`)
 3. Legacy `BlindMode::STOP_AT_LINE` force-on (kept for backward compat — partial decoupling)
 4. Auto-rule (`auto_rule_active`)
-5. Pipeline blind default (no seek)
+5. Otherwise never seek (`requested = false`) — there is intentionally **no** pipeline-default seek rung; the resolved `edgeMode` already encodes the pipeline default, so a call-`AUTO`/edge-`DEFAULT` hop with no rule active falls straight through to `seek = false`.
 
 `stop_at_line_override` is **directional**: baked on the forward `u→v` edge only, never
 mirrored to `v→u`, matching the `direction_override` convention. Control the reverse

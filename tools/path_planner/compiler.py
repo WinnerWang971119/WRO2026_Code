@@ -280,6 +280,27 @@ def compile_path(
         edge_type = edge["type"]
         is_last_hop = ((i + 1) == last_index)
 
+        # Peek at the NEXT hop's edge type to implement the auto-seek rule: a
+        # blind hop that FEEDS a projection edge seeks a line first to
+        # re-anchor localization before the dead-reckoned slide.
+        #
+        # ``path[i+2]`` is valid only when the path was produced by the
+        # NEXT_HOP Dijkstra table (as it always is here and in
+        # PathTrackerSim/CTPS).  The real robot uses the same NEXT_HOP-table
+        # peek at runtime, so this offline peek must stay consistent with that:
+        # never hand-construct a path that skips NEXT_HOP nodes or this guard
+        # will fire incorrectly.  The ``i + 2 < len(path)`` bound mirrors the
+        # sim's ``None``/self-loop short-circuit: it is False on the last /
+        # second-last hop, so a final blind hop never indexes past the end.
+        next_hop_is_projection = (
+            i + 2 < len(path)
+            and graph.edges[path[i + 1], path[i + 2]]["type"] == EDGE_PROJECTION
+        )
+        auto_rule_active = (
+            getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+            and next_hop_is_projection
+        )
+
         direction = resolve_direction(
             edge_dir_override=_read_edge_dir_override(edge),
             pipeline_default=PIPELINE_CONFIG.direction,
@@ -332,25 +353,7 @@ def compile_path(
                 # to stay byte-identical to the REAR branch of
                 # ``PathTrackerSim.go_to`` in ``sim/runtime.py`` (TC10/TC12 gate
                 # the two emission streams against each other).
-                #
-                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
-                # line first to re-anchor. The blind hop is ``path[i] ->
-                # path[i+1]``; the NEXT hop is ``path[i+1] -> path[i+2]``. The
-                # ``i + 2 < len(path)`` guard is the path-list mirror of the sim's
-                # next-next NEXT_HOP peek (``None``/self-loop short-circuit): it is
-                # False on the last / second-last hop, so a final blind hop yields
-                # ``next_hop_is_projection = False`` and never indexes past the
-                # path. Mirrors ``_walk_hops`` in ``sim/runtime.py`` step-for-step.
-                next_hop_is_projection = (
-                    i + 2 < len(path)
-                    and graph.edges[path[i + 1], path[i + 2]]["type"]
-                    == EDGE_PROJECTION
-                )
-                auto_rule_active = (
-                    getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
-                    and next_hop_is_projection
-                )
-                seek, _motion_mode, _soft_fallback = resolve_stop_at_line(
+                seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
@@ -391,24 +394,7 @@ def compile_path(
                 # ``sim/runtime.py`` (T6); the two emission streams must stay
                 # byte-identical (``test_property_random_walks`` / TC12).
                 #
-                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
-                # line first to re-anchor. The blind hop is ``path[i] ->
-                # path[i+1]``; the NEXT hop is ``path[i+1] -> path[i+2]``. The
-                # ``i + 2 < len(path)`` guard is the path-list mirror of the sim's
-                # next-next NEXT_HOP peek (``None``/self-loop short-circuit): it is
-                # False on the last / second-last hop, so a final blind hop yields
-                # ``next_hop_is_projection = False`` and never indexes past the
-                # path. Mirrors ``_walk_hops`` in ``sim/runtime.py`` step-for-step.
-                next_hop_is_projection = (
-                    i + 2 < len(path)
-                    and graph.edges[path[i + 1], path[i + 2]]["type"]
-                    == EDGE_PROJECTION
-                )
-                auto_rule_active = (
-                    getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
-                    and next_hop_is_projection
-                )
-                seek, _motion_mode, _soft_fallback = resolve_stop_at_line(
+                seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),

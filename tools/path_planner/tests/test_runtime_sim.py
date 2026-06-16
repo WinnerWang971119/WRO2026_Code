@@ -1852,9 +1852,8 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
 
     Reads ``stop_at_line_truth_table.csv`` by column name (DictReader, so column
     order is irrelevant) and calls ``resolve_stop_at_line`` for each of the 936
-    input combinations, asserting the returned ``(seek, motion_mode, soft_fallback)``
-    matches the fixture's ``expect_seek`` / ``expect_motionMode`` /
-    ``expect_softFallback`` columns.
+    input combinations, asserting the returned ``(seek, motion_mode)``
+    matches the fixture's ``expect_seek`` / ``expect_motionMode`` columns.
 
     Satisfies AC4 (#6): the Python transcription cannot silently drift from
     the canonical single-source truth table.
@@ -1884,11 +1883,10 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
         direction        = _DIRECTION_MAP[row["direction"]]
         line_board_count = int(row["lineBoardCount"])
         auto_rule_active = row["autoRuleActive"].strip().lower() == "true"
-        expect_seek          = row["expect_seek"].strip().lower() == "true"
-        expect_motion        = _BLIND_MODE_MAP[row["expect_motionMode"]]
-        expect_soft_fallback = row["expect_softFallback"].strip().lower() == "true"
+        expect_seek   = row["expect_seek"].strip().lower() == "true"
+        expect_motion = _BLIND_MODE_MAP[row["expect_motionMode"]]
 
-        actual_seek, actual_motion, actual_soft_fallback = resolve_stop_at_line(
+        actual_seek, actual_motion = resolve_stop_at_line(
             call_flag,
             edge_override,
             edge_mode,
@@ -1898,20 +1896,17 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
             auto_rule_active,
         )
 
-        assert (actual_seek, actual_motion, actual_soft_fallback) == (
+        assert (actual_seek, actual_motion) == (
             expect_seek,
             expect_motion,
-            expect_soft_fallback,
         ), (
             f"resolve_stop_at_line mismatch for row "
             f"callFlag={row['callFlag']} edgeOverride={row['edgeOverride']} "
             f"edgeMode={row['edgeMode']} pipelineBlind={row['pipelineBlind']} "
             f"direction={row['direction']} lineBoardCount={row['lineBoardCount']} "
             f"autoRuleActive={row['autoRuleActive']}: "
-            f"got (seek={actual_seek}, motionMode={actual_motion!r}, "
-            f"softFallback={actual_soft_fallback}) "
-            f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r}, "
-            f"softFallback={expect_soft_fallback})"
+            f"got (seek={actual_seek}, motionMode={actual_motion!r}) "
+            f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r})"
         )
 
 

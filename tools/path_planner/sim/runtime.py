@@ -29,12 +29,11 @@ the runtime-only LINE_OVERSHOOT FSM transition):
   offline streams have no call-site verb, matching the firmware's per-edge
   AUTO default). The resolver walks a precedence ladder (call-site verb →
   per-edge ``stop_at_line_override`` → legacy ``STOP_AT_LINE`` tag →
-  auto-rule → never) and returns ``(seek, motion_mode, soft_fallback)``. The
+  auto-rule → never) and returns ``(seek, motion_mode)``. The
   auto-rule fires when ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set AND
   the hop after this blind hop is a projection edge, so a blind→projection
-  pair re-anchors on a line first. ``soft_fallback`` is computed for parity
-  but the sim does not model a missing line, so its emission stream is
-  unchanged — only the DECISION to seek now also fires on the auto-rule:
+  pair re-anchors on a line first. The DECISION to seek now also fires on the
+  auto-rule:
 
     * ``seek`` + FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)``; re-anchors via
       :meth:`LocalizationSim.on_intersection` (the front board stops on the
@@ -430,7 +429,7 @@ def resolve_stop_at_line(
     direction: "Direction",
     line_board_count: int,
     auto_rule_active: bool,
-) -> tuple[bool, BlindMode, bool]:
+) -> tuple[bool, BlindMode]:
     """Resolve whether a BLIND hop seeks a line and which motion bundle it runs.
 
     Function-identical Python mirror of the C++
@@ -450,8 +449,7 @@ def resolve_stop_at_line(
        seek" behavior, kept for back-compat).
     4. Auto-rule: ``auto_rule_active`` (the caller's
        ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection``) -- a blind
-       hop feeding a projection seeks a line first to re-anchor. This rung sets
-       ``auto_triggered`` so the seek can be flagged as a soft fallback.
+       hop feeding a projection seeks a line first to re-anchor.
     5. Otherwise ``requested = False`` -- a call-site/edge ``AUTO``/``DEFAULT``
        with no rule active never seeks. This reproduces the pre-auto behavior
        across the FULL domain (including the degenerate
@@ -463,14 +461,6 @@ def resolve_stop_at_line(
     ``board_ok``: a line board must face the travel direction -- the front
     board always faces forward, but a rear seek needs a second board
     (``line_board_count >= 2``). ``seek = requested and board_ok``.
-
-    ``soft_fallback = seek and auto_triggered`` -- True ONLY when the seek was
-    raised by the auto rung AND a board could service it. A board-degraded auto
-    case (``seek`` False) carries no soft fallback, and any higher-precedence
-    rung (call / edge / legacy) yields ``soft_fallback`` False. The firmware
-    uses this flag to decide whether a missing line is tolerable (soft) or a
-    hard fault; the sim does not model a missing line, so it computes the flag
-    for parity but its emission stream is unchanged by it.
 
     ``motion_mode`` (unchanged from the pre-precedence logic): when seeking, the
     motion bundle is the edge's mode, except a bare :attr:`BlindMode.STOP_AT_LINE`
@@ -508,17 +498,15 @@ def resolve_stop_at_line(
         ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection`` -- True when
         the field-wide auto-seek toggle is on AND this blind hop feeds a
         projection edge.
-    :return: a ``(seek, motion_mode, soft_fallback)`` tuple. ``seek`` is True
+    :return: a ``(seek, motion_mode)`` tuple. ``seek`` is True
         iff the ``Drive.stopAtLine`` seek should be dispatched; ``motion_mode``
         is the seek's drive mode (when seeking) or the dead-reckon fallback's
         drive mode (when not) -- always a concrete bundle, never ``STOP_AT_LINE``
-        or ``DEFAULT``; ``soft_fallback`` is True iff the seek was raised by the
-        auto rung and a board could service it.
+        or ``DEFAULT``.
     """
     # Step 1: precedence ladder for who asked. Call-site ON/OFF beats the
     # per-edge override, which beats the legacy STOP_AT_LINE tag, which beats
     # the auto-rule. AUTO + DEFAULT + no rule active never seeks.
-    auto_triggered = False
     if call_flag == StopAtLine.ON:
         requested = True
     elif call_flag == StopAtLine.OFF:
@@ -531,7 +519,6 @@ def resolve_stop_at_line(
         requested = True
     elif auto_rule_active:
         requested = True
-        auto_triggered = True
     else:    # AUTO call / DEFAULT edge, no rule active: never seek
         requested = False
 
@@ -541,11 +528,6 @@ def resolve_stop_at_line(
 
     # Step 3: the seek runs only when requested and physically possible.
     seek = requested and board_ok
-
-    # Step 3b: a soft fallback is an auto-raised seek that a board can service.
-    # A board-degraded auto case (seek False) or any higher-precedence rung
-    # (auto_triggered False) never carries it.
-    soft_fallback = seek and auto_triggered
 
     if seek:
         # Step 4: keep the edge's typed mode; a bare STOP_AT_LINE edge seeks
@@ -562,7 +544,7 @@ def resolve_stop_at_line(
         base = pipeline_blind if edge_mode == BlindMode.STOP_AT_LINE else edge_mode
         motion_mode = BlindMode.SYNC_TSHAPE if base == BlindMode.STOP_AT_LINE else base
 
-    return seek, motion_mode, soft_fallback
+    return seek, motion_mode
 
 
 def resolve_projection_mode(edge) -> ProjectionMode:
@@ -661,21 +643,44 @@ def resolve_direction(
     return Direction.FRONT
 
 
+def _read_edge_override(edge, attr: str, enum_cls):
+    """Coerce a graph edge override attribute to a RAW member of ``enum_cls``.
+
+    Shared coercion for the per-edge override readers. Unlike
+    :func:`_resolve_override`, this does NOT collapse ``DEFAULT`` into a
+    pipeline value -- it returns the literal enum member (a real member or
+    ``enum_cls.DEFAULT``). The caller decides what ``DEFAULT`` means.
+
+    Tolerates absence (returns ``enum_cls.DEFAULT``), already-typed
+    ``enum_cls`` instances (returned as-is), and raw int values (coerced via
+    the enum constructor).
+
+    Cross-enum int-coercion hazard: the int branch maps an int back to an
+    ``enum_cls`` member via ``enum_cls(raw)``. This is latent-safe ONLY
+    because the field_data builder bakes exactly the real enum members of
+    this category (never an arbitrary or cross-enum int) -- an out-of-range
+    int would mis-map (or raise ``ValueError``). Keep the builder the single
+    source of these attribute values.
+    """
+    raw = edge.get(attr) if hasattr(edge, "get") else None
+    if raw is None:
+        return enum_cls.DEFAULT
+    if isinstance(raw, enum_cls):
+        return raw
+    return enum_cls(raw)
+
+
 def _read_edge_dir_override(edge) -> DirectionMode:
     """Coerce the graph edge's ``direction_override`` attribute to
     :class:`DirectionMode`.
 
     Tolerates absence (returns ``DirectionMode.DEFAULT``), raw int values
     (coerced via the enum constructor), and already-typed
-    :class:`DirectionMode` instances (returned as-is). Mirrors the
-    tolerance pattern of :func:`_resolve_override`.
+    :class:`DirectionMode` instances (returned as-is). Thin wrapper over
+    :func:`_read_edge_override` (which preserves ``DEFAULT``, unlike
+    :func:`_resolve_override`).
     """
-    raw = edge.get("direction_override") if hasattr(edge, "get") else None
-    if raw is None:
-        return DirectionMode.DEFAULT
-    if isinstance(raw, DirectionMode):
-        return raw
-    return DirectionMode(raw)
+    return _read_edge_override(edge, "direction_override", DirectionMode)
 
 
 def _read_edge_stop_at_line_override(edge) -> StopAtLineMode:
@@ -684,18 +689,13 @@ def _read_edge_stop_at_line_override(edge) -> StopAtLineMode:
 
     Tolerates absence (returns ``StopAtLineMode.DEFAULT``), raw int values
     (coerced via the enum constructor), and already-typed
-    :class:`StopAtLineMode` instances (returned as-is). Mirrors the
-    tolerance pattern of :func:`_read_edge_dir_override`. The graph builder
-    (T5) bakes this attribute as a :class:`StopAtLineMode` member; absence
-    means no per-edge override (defer to the resolver's lower-precedence
-    rungs).
+    :class:`StopAtLineMode` instances (returned as-is). Thin wrapper over
+    :func:`_read_edge_override` (which preserves ``DEFAULT``). The graph
+    builder (T5) bakes this attribute as a :class:`StopAtLineMode` member;
+    absence means no per-edge override (defer to the resolver's
+    lower-precedence rungs).
     """
-    raw = edge.get("stop_at_line_override") if hasattr(edge, "get") else None
-    if raw is None:
-        return StopAtLineMode.DEFAULT
-    if isinstance(raw, StopAtLineMode):
-        return raw
-    return StopAtLineMode(raw)
+    return _read_edge_override(edge, "stop_at_line_override", StopAtLineMode)
 
 
 def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
@@ -1252,7 +1252,7 @@ class PathTrackerSim:
                     )
                     and next_hop_is_projection
                 )
-                seek, _motion_mode, soft_fallback = resolve_stop_at_line(
+                seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),

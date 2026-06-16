@@ -142,6 +142,7 @@ def make_collinear_field() -> SimpleNamespace:
         NODES=dict(_COLLINEAR_NODES),
         START_NODE=_COLLINEAR_START_NODE,
         START_HEADING_DEG=_COLLINEAR_START_HEADING,
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
     ns.build_graph = lambda: _build_graph_from_edges(_COLLINEAR_NODES, _COLLINEAR_EDGES)
     ns.build_next_hop = lambda: _build_chain_next_hop(
@@ -192,6 +193,7 @@ def make_rear_edge_field() -> SimpleNamespace:
         NODES=dict(_REAR_EDGE_NODES),
         START_NODE=_REAR_EDGE_START_NODE,
         START_HEADING_DEG=_REAR_EDGE_START_HEADING,
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
     ns.build_graph = lambda: _build_graph_from_edges(_REAR_EDGE_NODES, _REAR_EDGE_EDGES)
     ns.build_next_hop = lambda: _build_chain_next_hop(
@@ -271,6 +273,7 @@ def make_mixed_turn_field() -> SimpleNamespace:
         NODES=dict(_MIXED_TURN_NODES),
         START_NODE=_MIXED_TURN_START_NODE,
         START_HEADING_DEG=_MIXED_TURN_START_HEADING,
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )
     ns.build_graph = lambda: _build_graph_from_edges(_MIXED_TURN_NODES, _MIXED_TURN_EDGES)
     ns.build_next_hop = lambda: _build_chain_next_hop(
