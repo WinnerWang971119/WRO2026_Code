@@ -56,7 +56,7 @@ which will change miss-handling from "hard fault" to "recover, then fault" once 
 
 ## Trigger to revisit
 
-- The position-aware come-back recovery is built (the deferred come-back-recovery issue) —
+- The position-aware come-back recovery is built (#62) —
   at that point miss-handling changes from "hard fault" to "recover to the node, then
   fault if still lost", and the `Drive` `LINE_NOT_FOUND` fault kind is read to discriminate
   the overshoot case.
@@ -66,6 +66,6 @@ which will change miss-handling from "hard fault" to "recover, then fault" once 
 - [ADR-037 — Blind→projection auto stop-at-line](./037-blind-projection-auto-stop-at-line.md) — the auto-rule / per-edge override / field-sourced toggle survive; this ADR supersedes only its soft-fallback sub-decision.
 - [ADR-027 — `Drive.stopAtLine()` re-anchors localization; arm-window rule; resolver](./027-drive-stop-at-line.md) — the seek primitive and its hard-fault-on-miss contract this aligns with.
 - `WRO2026/StopAtLinePolicy.h` — the `{seek, motionMode}` resolver this ADR restores.
-- The deferred **position-aware come-back recovery** issue — the wanted overshoot recovery (carries the `LINE_NOT_FOUND` discrimination + fail-loud posture as design inputs); supersedes the recovery-debt tracker, issue #60.
-- The deferred **CSV-driven C++ full-domain parity harness** issue — runs the 936-row truth-table CSV through the real `resolveStopAtLine` (until then the C++ tests cover representative rows, not every row).
+- #62 (**position-aware come-back recovery**) — the wanted overshoot recovery (carries the `LINE_NOT_FOUND` discrimination + fail-loud posture as design inputs); supersedes the recovery-debt tracker, issue #60 (closed).
+- #63 (**CSV-driven C++ full-domain parity harness**) — runs the 936-row truth-table CSV through the real `resolveStopAtLine` (until then the C++ tests cover representative rows, not every row).
 - `docs/plans/2026-06-16-stop-at-line-softfallback-removal.md` — the originating plan.
