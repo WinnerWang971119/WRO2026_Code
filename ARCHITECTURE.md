@@ -77,9 +77,15 @@ WRO2026.ino
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
-`LineArray → Drive → LineFollower → Intersection → Manipulator → Tasks → PathTracker → Mission → EventTrace`.
+`LineArray → Drive → LineFollower → Intersection → Manipulator → Tasks → PathTracker → Localization → Mission → EventTrace`.
 
 The lower-layer modules tick first so that PathTracker / Mission see fresh state in the same loop iteration.
+
+`Localization` sits BELOW `PathTracker` in the layering: PathTracker pushes its hop
+activity DOWN each tick via `Localization.setNavActive(...)`, and `Localization.update()`
+reads `Drive`'s encoders (also a lower layer) to integrate the operator offset. Both are
+one-directional, downward dependencies — Localization never calls up into PathTracker.
+It ticks AFTER PathTracker so the nav-active flag reflects the FSM's final state for the tick.
 
 ## Module responsibilities
 

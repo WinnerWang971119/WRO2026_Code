@@ -460,6 +460,17 @@ void PathTrackerClass::_drainBlocking()
 
 void PathTrackerClass::update()
 {
+    _stepFsm();
+
+    // Push nav activity DOWN to the offset integrator (Localization is below us): it
+    // accumulates operator offset only while we are NOT executing a hop. A latched
+    // FAULT counts as not-driving so an operator can hand-correct and the next goTo
+    // still returns. Idle also counts as not-driving.
+    Localization.setNavActive(_state != State::IDLE && _state != State::FAULT);
+}
+
+void PathTrackerClass::_stepFsm()
+{
     if (_state != State::IDLE && _state != State::FAULT && Drive.hasFault())
     {
         Drive.stop(true);
