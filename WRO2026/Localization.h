@@ -47,6 +47,26 @@
 #include "routes.h"
 
 /**
+ * @brief Read-only telemetry pose offset from the last anchored node.
+ *
+ * A small POD carried by value out of `LocalizationClass::getOffsetFromNode()`. It
+ * accumulates how far the chassis has been hand-driven away from the node it was last
+ * anchored to (`x`/`y` in centimetres along the world frame, `thetaDeg` a signed
+ * heading delta in degrees). All three fields are `0` while the chassis sits on its
+ * anchored node — a node arrival re-anchors and zeroes the offset.
+ *
+ * @note `thetaDeg` is a delta-from-anchor, NOT an authoritative heading. The single
+ *       source of truth for heading stays live-from-IMU via `getHeadingDeg()`; this
+ *       value exists only as recovery telemetry (ADR-005 single-writer rule).
+ */
+struct Offset2D
+{
+    float x        = 0.0f;    ///< World-frame +x displacement from the anchored node (cm).
+    float y        = 0.0f;    ///< World-frame +y displacement from the anchored node (cm).
+    float thetaDeg = 0.0f;    ///< Signed heading delta from the anchored node (degrees).
+};
+
+/**
  * @brief Singleton that holds the discrete current node + IMU-frame yaw offset.
  *
  * Heading is treated as a derived quantity — `getHeadingDeg()` reads the IMU live and
@@ -178,6 +198,67 @@ public:
      */
     void onDeadReckonedAdvance(uint8_t advanceTo);
 
+    /**
+     * @brief Per-tick entry point for the operator-offset integrator (read-only telemetry).
+     *
+     * Reads the `Drive` encoders and the live IMU world heading, computes per-tick deltas, and
+     * accumulates them into the stored offset when the integrate gate is open. The gate is open
+     * ONLY when BOTH hold:
+     *   1. `!_navActive` — PathTracker is NOT executing a hop (the operator may be hand-driving).
+     *   2. `isZeroed()`  — the world frame is bound (heading is meaningless before zeroing).
+     * When the gate is closed the offset is left untouched, but ALL three baselines
+     * (`_lastEncL`, `_lastEncR`, `_lastYawDeg`) are re-snapshotted to the current readings every
+     * tick so the first delta after the gate reopens is ~0.
+     *
+     * Translation and rotation accumulate on two INDEPENDENT deadband gates (see
+     * `Config::OFFSET_TRANSLATION_DEADBAND_CM` / `OFFSET_ROTATION_DEADBAND_DEG`): a pure manual
+     * turn updates `thetaDeg` while contributing ~zero translation, and a pure straight push
+     * updates `x`/`y` without touching `thetaDeg`.
+     *
+     * @note Call site (added by a later task) runs this once per cooperative tick AFTER
+     *       `PathTracker.update()`. PR1a only integrates + exposes — nothing acts on the offset.
+     * @note Reads the lower `Drive` layer (allowed); Localization is never called UP into by Drive.
+     */
+    void update();
+
+    /**
+     * @brief Read the accumulated pose offset from the last anchored node (read-only telemetry).
+     *
+     * Pure accessor — issues no I/O and mutates no state. Returns the value built up by
+     * `update()` since the last `clearOffset()` / node arrival.
+     *
+     * @return A by-value `Offset2D`: `x`/`y` in centimetres along the world frame, `thetaDeg` a
+     *         signed heading delta in degrees. All-zero while the chassis is anchored on a node.
+     */
+    Offset2D getOffsetFromNode() const;
+
+    /**
+     * @brief Zero the accumulated offset AND re-snapshot the integrator baselines.
+     *
+     * Clears `x`/`y`/`thetaDeg` to `0` and re-snapshots `_lastEncL`/`_lastEncR`/`_lastYawDeg` to
+     * the current encoder and heading readings, so the very NEXT `update()` integrates a zero
+     * delta. Re-snapshotting the baselines is what kills the arrival-tick phantom: on the single
+     * tick where Drive finishes the approach and PathTracker re-anchors, the offset reads ~0 even
+     * though the wheels just moved.
+     *
+     * @note Called by the node-arrival hooks (`onIntersection` / `onDeadReckonedAdvance`); kept
+     *       public so a later recovery verb can re-anchor explicitly.
+     */
+    void clearOffset();
+
+    /**
+     * @brief Push PathTracker's hop activity DOWN to the integrator gate.
+     *
+     * PathTracker calls this `true` while executing a hop and `false` on idle / done / FAULT. The
+     * integrator's translation and rotation channels both gate on `!_navActive`, so motion that
+     * PathTracker itself commands never grows the operator offset.
+     *
+     * @param active `true` while PathTracker is driving a hop; `false` otherwise.
+     * @note PathTracker only CALLS this method — it never writes offset state directly
+     *       (ADR-005 single-writer rule keeps all offset mutation inside this class).
+     */
+    void setNavActive(bool active);
+
 private:
     /**
      * @brief Wrap a degree value into `[0, 360)`.
@@ -204,6 +285,41 @@ private:
      */
     static bool _readImuYaw(float& yawOut);
 
+    /**
+     * @brief Signed shortest angular delta from @p fromDeg to @p toDeg, wrapped to `[-180, 180]`.
+     *
+     * Distinct from `_normalize` (which folds to the half-open `[0, 360)` magnitude interval):
+     * this returns a SIGNED difference so the rotation channel can tell CW from CCW and accumulate
+     * `thetaDeg` correctly across the `0/360` wrap. `+` is CCW (matching the world-frame
+     * convention); a `359 -> 1` step yields `+2`, not `-358`.
+     *
+     * @param toDeg    Target heading in degrees (any finite value).
+     * @param fromDeg  Reference heading in degrees (any finite value).
+     * @return The wrapped signed delta `toDeg - fromDeg` in `[-180, 180]`.
+     */
+    static float _shortestAngleDelta(float toDeg, float fromDeg);
+
+    /**
+     * @brief Per-tick accumulation math for the offset integrator (both channels).
+     *
+     * Called by `update()` ONLY when the integrate gate is open. Decomposes the averaged
+     * wheel-encoder delta along the current world heading into `x`/`y`, and the signed IMU-yaw
+     * delta into `thetaDeg`, each behind its own deadband. A channel whose delta is below its
+     * deadband leaves both its offset AND its baseline UNADVANCED, so slow sub-deadband motion can
+     * still accumulate across ticks until it crosses the floor (a stationary chassis never does).
+     */
+    void _integrateOffset();
+
+    /**
+     * @brief Zero the offset and re-snapshot all three integrator baselines to current readings.
+     *
+     * The implementation behind `clearOffset()`. Reads the current `Drive` encoders and live IMU
+     * heading into `_lastEncL`/`_lastEncR`/`_lastYawDeg` and zeroes `_offset`, so the next
+     * `update()` sees a zero delta. (Naming per the plan: `_integrateOffset` accumulates;
+     * `_consumeOffset` re-anchors.)
+     */
+    void _consumeOffset();
+
     uint8_t _currentNode  = 0;        ///< Single source of truth for graph position.
     float   _yawOffsetDeg = 0.0f;     ///< Captured at zeroHeadingFromCurrent(); world = IMU - offset.
     bool    _zeroed       = false;    ///< Latched true on first zeroHeadingFromCurrent() call.
@@ -220,6 +336,21 @@ private:
 
     /// `millis()` of the last OK `getHeadingDeg()` read; `0` = none since `begin()`.
     mutable uint32_t _lastGoodHeadingMs = 0;
+
+    /// Accumulated pose offset from the last anchored node; all-zero while anchored.
+    Offset2D _offset;
+
+    /// Last-tick left-encoder snapshot (degrees) — translation-channel delta baseline.
+    int32_t _lastEncL = 0;
+
+    /// Last-tick right-encoder snapshot (degrees) — translation-channel delta baseline.
+    int32_t _lastEncR = 0;
+
+    /// Last-tick world heading (degrees) — rotation-channel delta baseline.
+    float _lastYawDeg = 0.0f;
+
+    /// Pushed DOWN by PathTracker; `true` while it executes a hop. Closes the integrate gate.
+    bool _navActive = false;
 };
 
 /**

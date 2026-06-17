@@ -9,6 +9,8 @@
 #include <MatrixMiniR4.h>
 #include <math.h>
 
+#include "Drive.h"
+#include "WROMath.h"
 #include "routes.h"
 
 namespace
@@ -140,11 +142,125 @@ int16_t LocalizationClass::toImuYaw(float worldHeadingDeg) const
 void LocalizationClass::onIntersection(uint8_t advanceTo)
 {
     _currentNode = advanceTo;
+    // Arriving on a node re-anchors the operator-offset frame. The baseline re-snapshot inside
+    // clearOffset() is what wins the arrival-tick race: on the single tick where Drive finishes
+    // the approach and PathTracker re-anchors, the very next update() integrates a zero delta, so
+    // getOffsetFromNode() reads ~0 instead of a phantom equal to the final approach motion.
+    clearOffset();
 }
 
 void LocalizationClass::onDeadReckonedAdvance(uint8_t advanceTo)
 {
     _currentNode = advanceTo;
+    // Same re-anchor as onIntersection — a dead-reckoned advance lands on a node too, so the
+    // offset frame resets to zero with the baselines re-snapshotted (kills the arrival phantom).
+    clearOffset();
+}
+
+void LocalizationClass::update()
+{
+    // Two conditions open the integrate gate: PathTracker is not driving a hop (the operator may
+    // be hand-driving) AND the world frame is bound (heading is meaningless before zeroing).
+    const bool gateOpen = (!_navActive) && _zeroed;
+    if (gateOpen)
+    {
+        _integrateOffset();
+        return;
+    }
+
+    // Gate closed: do NOT accumulate, but keep every baseline current so that the moment the gate
+    // reopens the first per-tick delta is ~0 (no jump from motion that happened while PathTracker
+    // was driving, and no jump across the pre-zero window).
+    _lastEncL   = Drive.getEncL();
+    _lastEncR   = Drive.getEncR();
+    _lastYawDeg = getHeadingDeg();
+}
+
+Offset2D LocalizationClass::getOffsetFromNode() const
+{
+    // Read-only telemetry: no I/O, no mutation — just hand back the accumulated offset.
+    return _offset;
+}
+
+void LocalizationClass::clearOffset()
+{
+    // Thin wrapper over the re-anchor helper (naming per the plan: integrate vs consume).
+    _consumeOffset();
+}
+
+void LocalizationClass::setNavActive(bool active)
+{
+    _navActive = active;
+}
+
+void LocalizationClass::_integrateOffset()
+{
+    // Snapshot the live heading once: both channels reference the same world-frame reading so the
+    // translation decomposition and the rotation delta are consistent for this tick. getHeadingDeg()
+    // is const and refreshes its own mutable cache, so calling it from this non-const path is fine.
+    const float heading = getHeadingDeg();
+
+    // ---- Translation channel (gated independently of rotation) -------------------------------
+    const int32_t encL = Drive.getEncL();
+    const int32_t encR = Drive.getEncR();
+    // Average the two wheel deltas (encoder degrees) so a pure on-the-spot turn — where the wheels
+    // move equal-and-opposite — nets ~zero translation. encDegToCm carries the sign through.
+    const int32_t dEnc = ((encL - _lastEncL) + (encR - _lastEncR)) / 2;
+    const float   dCm  = encDegToCm(dEnc);
+    if (fabsf(dCm) >= Config::OFFSET_TRANSLATION_DEADBAND_CM)
+    {
+        // Above the deadband: decompose along the current world heading and advance the baselines.
+        // Use the Arduino `PI` macro (defined by Arduino.h and the host mock) rather than M_PI,
+        // which the host test mock does not provide — matching the existing WROMath.h convention.
+        const float headingRad = heading * ((float) PI / 180.0f);
+        _offset.x += dCm * cosf(headingRad);
+        _offset.y += dCm * sinf(headingRad);
+        _lastEncL = encL;
+        _lastEncR = encR;
+    }
+    // Below the deadband: leave _offset AND the encoder baselines UNADVANCED, so slow sub-deadband
+    // motion still accumulates across ticks until it crosses the floor. A stationary chassis never
+    // crosses it (dCm stays ~0 forever), satisfying the no-phantom-drift requirement.
+
+    // ---- Rotation channel (gated independently of translation) -------------------------------
+    const float dYaw = _shortestAngleDelta(heading, _lastYawDeg);
+    if (fabsf(dYaw) >= Config::OFFSET_ROTATION_DEADBAND_DEG)
+    {
+        // A pure manual turnDeg nets ~zero translation but a real yaw change, so the rotation
+        // channel must update thetaDeg even when the translation channel skipped this tick.
+        _offset.thetaDeg += dYaw;
+        _lastYawDeg = heading;
+    }
+    // Below the deadband: leave thetaDeg and the yaw baseline UNADVANCED (same sub-deadband
+    // carry-across rationale as the translation channel).
+}
+
+void LocalizationClass::_consumeOffset()
+{
+    // Re-anchor: zero the offset and re-snapshot all three baselines to the CURRENT readings, so
+    // the next update() integrates a zero delta. This is the arrival-tick phantom kill — the
+    // baselines jump forward to "now" before the next integrate, discarding the approach motion.
+    _offset     = Offset2D{};
+    _lastEncL   = Drive.getEncL();
+    _lastEncR   = Drive.getEncR();
+    _lastYawDeg = getHeadingDeg();
+}
+
+float LocalizationClass::_shortestAngleDelta(float toDeg, float fromDeg)
+{
+    // Signed difference wrapped into [-180, 180]. fmodf can return a value in (-360, 360); the
+    // two guards fold it into the symmetric half-revolution interval. +180 maps to +180, and the
+    // -180 boundary maps to +180 as well (both name the same antipode) — fine for accumulation.
+    float delta = fmodf(toDeg - fromDeg, 360.0f);
+    if (delta > 180.0f)
+    {
+        delta -= 360.0f;
+    }
+    else if (delta < -180.0f)
+    {
+        delta += 360.0f;
+    }
+    return delta;
 }
 
 float LocalizationClass::_normalize(float deg)
