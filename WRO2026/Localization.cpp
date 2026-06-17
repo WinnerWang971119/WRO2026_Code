@@ -196,6 +196,19 @@ void LocalizationClass::onDeadReckonedAdvance(uint8_t advanceTo)
     clearOffset();
 }
 
+void LocalizationClass::declarePosition(uint8_t nodeId)
+{
+    // Operator-recovery counterpart to onIntersection / onDeadReckonedAdvance: the same
+    // unconditional low-level write (set node + re-anchor offset) but operator-initiated
+    // rather than triggered by a sensed crossing. The heading offset is deliberately left
+    // alone — the operator is only declaring graph position and zeroing the offset.
+    //
+    // Layering: this NEVER calls up into PathTracker (no clearFault here). The idle-OR-faulted
+    // guard and the fault-clear live in the Mission layer above, which can reach both modules.
+    _currentNode = nodeId;
+    clearOffset();
+}
+
 void LocalizationClass::update()
 {
     // Two conditions open the integrate gate: PathTracker is not driving a hop (the operator may

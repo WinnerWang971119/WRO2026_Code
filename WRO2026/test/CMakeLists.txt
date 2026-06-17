@@ -589,6 +589,7 @@ function(add_ctps_mock_force_includes target)
             "/FI${CTPS_MOCKS_DIR}/PathTracker.h"
             "/FI${CTPS_MOCKS_DIR}/EventTrace.h"
             "/FI${CTPS_MOCKS_DIR}/LineFollower.h"
+            "/FI${CTPS_MOCKS_DIR}/Localization.h"
             "/FI${CTPS_MOCKS_DIR}/Manipulator.h"
         )
     else()
@@ -599,6 +600,7 @@ function(add_ctps_mock_force_includes target)
             "SHELL:-include ${CTPS_MOCKS_DIR}/PathTracker.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/EventTrace.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/LineFollower.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/Localization.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/Manipulator.h"
         )
     endif()

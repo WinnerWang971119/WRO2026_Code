@@ -230,6 +230,34 @@ public:
      */
     void abort();
 
+    /**
+     * @brief Operator recovery: declare the chassis to be on node ``name`` with a
+     *        zero offset, clearing any latched PathTracker fault.
+     *
+     * **Immediate action, NOT a queued step.** Like :func:`abort`, this acts NOW —
+     * it is not enqueued and has no ``StepType``. It re-anchors ``Localization`` at
+     * the declared node (``Localization.declarePosition``) and, if a PathTracker
+     * fault is latched, clears it (``PathTracker.clearFault``). This is the recovery
+     * path for an ``OFF_NODE`` fault raised when the operator offset exceeds the
+     * trust cap. The heading offset is left untouched — re-zero heading separately
+     * via ``Localization.zeroHeadingFromCurrent()`` if the chassis was re-oriented.
+     *
+     * Usable only when PathTracker is NOT mid-hop — i.e. ``PathTracker.isIdle() ||
+     * PathTracker.hasFault()``. The OR (not strictly-idle) is deliberate: the whole
+     * point is recovering from a fault, during which ``isIdle()`` returns ``false``.
+     * Position is declared before arming or during a fault, never mid-hop.
+     *
+     * Misuse modes (all no-op + Serial warning, ``false`` returned, state unchanged):
+     *   - PathTracker is actively executing a hop (guard fails).
+     *   - ``name`` does not resolve to a valid node
+     *     (``FieldMap::NODE_NONE`` or ``>= Routes::N_NODES``).
+     *
+     * @param name  Node name resolved via ``FieldMap::findNodeByName``.
+     * @return ``true`` on a successful re-anchor; ``false`` on a guard violation or a
+     *         bad / unknown node name.
+     */
+    bool declarePosition(const char* name);
+
     /** @brief ``true`` when no mission is running and no fault is latched. */
     bool isIdle() const;
 

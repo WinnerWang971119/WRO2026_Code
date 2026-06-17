@@ -206,6 +206,30 @@ public:
     void onDeadReckonedAdvance(uint8_t advanceTo);
 
     /**
+     * @brief Operator-recovery re-anchor: declare the chassis to be on @p nodeId
+     *        with a zero offset.
+     *
+     * Sets `_currentNode = nodeId` and clears the accumulated offset (re-snapshotting
+     * the integrator baselines exactly like `clearOffset()`), making this a true
+     * re-anchor at the declared node with zero offset. It is the operator-initiated
+     * counterpart to the sensed-arrival hooks (`onIntersection` /
+     * `onDeadReckonedAdvance`): those advance the node after a physically sensed
+     * crossing, whereas this is an explicit operator declaration used to recover from
+     * an `OFF_NODE` fault.
+     *
+     * @param nodeId  Node id to anchor to. NOT heavily validated here (mirrors
+     *                `onIntersection`, which trusts its caller) — the Mission layer
+     *                resolves the name and bounds-checks the id before calling.
+     * @note Performs the unconditional low-level write ONLY — it does NOT reach UP into
+     *       `PathTracker` (no `PathTracker.clearFault()`), preserving the module
+     *       layering. The guard and the fault-clear live in the Mission layer above.
+     * @note The heading offset (`_yawOffsetDeg`) is intentionally left UNTOUCHED — the
+     *       operator is declaring graph position and zeroing the offset, not re-zeroing
+     *       heading. Re-zero heading via `zeroHeadingFromCurrent()` if needed.
+     */
+    void declarePosition(uint8_t nodeId);
+
+    /**
      * @brief Per-tick entry point for the operator-offset integrator (read-only telemetry).
      *
      * Reads the `Drive` encoders and the live IMU world heading, computes per-tick deltas, and
