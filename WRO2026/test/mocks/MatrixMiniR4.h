@@ -362,6 +362,101 @@ public:
 /// `extern MatrixMiniR4 MiniR4;`).
 extern MockMatrixMiniR4 MiniR4;
 
+// ---------------------------------------------------------------------------
+// Mock lower-MCU IMU surface — mirrors the slice of `MMLower` that
+// `Localization.cpp` calls directly (the result-surfacing `mmL.GetIMUEuler`).
+//
+// ADDITIVE contract (extends the file-level note above): the Localization host
+// test (`test_localization_offset.cpp`) is the FIRST target to compile the real
+// `Localization.cpp`, which reads the IMU via `mmL.GetIMUEuler(roll,pitch,yaw)`
+// and inspects the returned `MMLower::RESULT` (vendor `MiniR4Motion::getEuler`
+// discards that RESULT, so Localization calls the lower layer directly). None of
+// the other 15 targets reference `MMLower` / `mmL`, so adding them here is purely
+// additive — no existing symbol changes and no `mocks.cpp` edit is needed (the
+// `mmL` global is a C++17 `inline` variable, defined once across all TUs).
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief Result enum mirror of the vendor `MMLower::RESULT`.
+ *
+ * Only the two states `Localization.cpp` compares against are modelled: `OK`
+ * (read succeeded, out-params written) and `ERROR` (any non-OK; the test scripts
+ * a transient timeout with it). The underlying type matches the vendor's `uint8_t`.
+ */
+namespace MMLower
+{
+    enum class RESULT : uint8_t
+    {
+        OK    = 0,
+        ERROR = 1
+    };
+}    // namespace MMLower
+
+/**
+ * @brief Host mock for the lower-MCU IMU read used by `Localization`.
+ *
+ * Backs `mmL.GetIMUEuler(double&,double&,double&)` with a test-settable yaw and a
+ * test-settable result code so a fixture can script the heading the integrator sees
+ * AND a transient read failure. Faithfully reproduces the one behaviour Localization
+ * depends on: on a NON-OK read the out-params are left UNTOUCHED (the real lib returns
+ * before writing yaw on a wait/read timeout — see `Localization::_readImuYaw`).
+ */
+class MockMMLower
+{
+public:
+    MockMMLower() = default;
+
+    /**
+     * @brief Mirrors `mmL.GetIMUEuler(double&,double&,double&)`.
+     *
+     * Writes `yaw` (and zeroes `roll`/`pitch`) ONLY on an `OK` result; on a non-OK
+     * result returns immediately WITHOUT touching the out-params, matching the vendor
+     * contract `Localization::_readImuYaw` relies on.
+     *
+     * @param roll  Out-param set to `0.0` only on OK.
+     * @param pitch Out-param set to `0.0` only on OK.
+     * @param yaw   Out-param set to `mockYawDeg` only on OK; untouched otherwise.
+     * @return `mockResult` (defaults to `OK`).
+     */
+    MMLower::RESULT GetIMUEuler(double& roll, double& pitch, double& yaw)
+    {
+        getImuEulerCallCount++;
+        if (mockResult != MMLower::RESULT::OK)
+        {
+            return mockResult;
+        }
+        roll  = 0.0;
+        pitch = 0.0;
+        yaw   = mockYawDeg;
+        return MMLower::RESULT::OK;
+    }
+
+    /** @brief Restore defaults: yaw 0, result OK, call counter cleared. */
+    void mockReset()
+    {
+        mockYawDeg            = 0.0;
+        mockResult            = MMLower::RESULT::OK;
+        getImuEulerCallCount  = 0;
+    }
+
+    // ---- Test setters / recorded state --------------------------------------
+
+    /// Yaw (degrees) returned by the next OK `GetIMUEuler`.
+    double mockYawDeg = 0.0;
+
+    /// Result returned by `GetIMUEuler` (set to `ERROR` to script a transient timeout).
+    MMLower::RESULT mockResult = MMLower::RESULT::OK;
+
+    /// Number of `GetIMUEuler` calls since the last `mockReset()`.
+    uint32_t getImuEulerCallCount = 0;
+};
+
+/// Single global instance. A C++17 `inline` variable so it has ONE definition across
+/// every TU that includes this header without a `mocks.cpp` edit — keeping this
+/// addition zero-blast-radius for the other targets (mirrors the vendor's `extern
+/// MMLower mmL;`, but inline so no mock source file changes).
+inline MockMMLower mmL;
+
 /**
  * @brief Reset every recorded field on the `MiniR4` mock (facade + all RC/M channels).
  *
