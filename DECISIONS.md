@@ -16,7 +16,8 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-002 — Three-layer mental model (perception → map → planning)](./docs/decisions/002-three-layer-mental-model.md)
 - [ADR-003 — Arduino-style modules — no class hierarchies, no DI, no `delay()` in `update()`](./docs/decisions/003-arduino-style-modules.md)
 - [ADR-004 — Motor-speed/position PID stays on the STM32](./docs/decisions/004-pid-stays-on-stm32.md)
-- [ADR-005 — `Localization` is the single source of truth for current node + heading](./docs/decisions/005-localization-single-source-of-truth.md)
+- [ADR-005 — `Localization` is the single source of truth for current node + heading](./docs/decisions/005-localization-single-source-of-truth.md) (Amended by ADR-038)
+- [ADR-038 — `Localization` tracks a 2D operator-offset delta from the last anchored node](./docs/decisions/038-operator-offset-localization.md)
 - [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md)
 - [ADR-028 — FieldMap accessors bounds-check every index and return a safe sentinel](./docs/decisions/028-fieldmap-accessor-bounds.md)
 - [ADR-029 — The validator is the single anti-ambiguity and input-finiteness gate](./docs/decisions/029-validator-anti-ambiguity.md)
@@ -67,7 +68,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 32 | 001, 002, 003, 004, 005, 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037 |
+| Implemented | 33 | 001, 002, 003, 004, 005 (amended by 038), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037, 038 (amends 005 "never stored" clause — parent stays Implemented) |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 0 | — |
 | Deferred | 0 | — |

@@ -87,6 +87,10 @@ reads `Drive`'s encoders (also a lower layer) to integrate the operator offset. 
 one-directional, downward dependencies — Localization never calls up into PathTracker.
 It ticks AFTER PathTracker so the nav-active flag reflects the FSM's final state for the tick.
 
+`Localization` also stores a 2D operator-offset delta (`Offset2D {x, y, thetaDeg}`)
+accumulated between node arrivals — written only through its own methods, preserving the
+ADR-005 single-writer rule (see ADR-038).
+
 ## Module responsibilities
 
 | Module | Owns | Key surface |
