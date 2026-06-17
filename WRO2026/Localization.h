@@ -30,7 +30,10 @@
  *  - `begin()` once in `setup()` after every `MiniR4.begin()` and the Phase 1 modules'
  *    `begin()`. The order is `Drive` -> `LineFollower` -> `Intersection` -> `Manipulator`
  *    -> `Localization` -> `PathTracker` -> `EventTrace`.
- *  - No `update()` — Localization is a pure state holder + accessor. `getHeadingDeg()`
+ *  - `update()` runs once per cooperative tick (after `PathTracker.update()`, so encoders are
+ *    fresh and the nav-active flag is current). It integrates raw operator motion into a 2D
+ *    offset-from-node while the gate is open (`!navActive && isZeroed()`); while the gate is
+ *    closed it only re-snapshots the integrator baselines (no accumulation). `getHeadingDeg()`
  *    reads the IMU live; on a transient lower-MCU read failure it falls back to the last
  *    good heading instead of a `0.0`-derived garbage value (see `getHeadingDeg`).
  *  - `getLastHeadingDeg()` returns that cached value with NO I/O — use it on telemetry /

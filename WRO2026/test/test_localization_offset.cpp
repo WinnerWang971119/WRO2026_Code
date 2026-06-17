@@ -219,6 +219,34 @@ int main()
         check(approx(off.thetaDeg, 0.0f, 1e-4f), "TC3: thetaDeg reads ~0 on the arrival tick");
     }
 
+    // -------------------------------------------------------------------------------------
+    // TC4 (AC3 nav-gate) — while PathTracker is driving a hop (navActive == true), operator
+    // offset accumulation is SUPPRESSED: encoder motion does not grow the offset. This is the
+    // other half of AC3 ("the offset is NOT grown by PathTracker motion"); TC3 covers the
+    // arrival-tick clear, TC4 covers the gate that keeps a goTo traversal from ever building
+    // an offset. With the gate closed, update() only re-snapshots baselines, so the per-tick
+    // delta stays zero no matter how far the wheels turned.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        mmL.mockYawDeg = 0.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC4: zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(true);    // PathTracker is executing a hop.
+        Localization.update();              // settle baselines under the closed gate.
+
+        // Advance the encoders as if PathTracker drove a 25 cm hop, then tick.
+        const int32_t hopDeg = (int32_t) cmToEncDeg(25.0f);
+        Drive.mockAdvanceEncoders(hopDeg, hopDeg);
+        Localization.update();
+
+        // Gate was closed the whole time, so nothing accumulated.
+        const Offset2D off = Localization.getOffsetFromNode();
+        check(approx(offsetMag(off), 0.0f, 1e-4f),
+              "TC4: navActive suppresses offset accumulation during a hop");
+        check(approx(off.thetaDeg, 0.0f, 1e-4f), "TC4: thetaDeg stays ~0 while navActive");
+    }
+
     if (g_failures == 0)
     {
         std::printf("LOCALIZATION OFFSET OK\n");
