@@ -1115,6 +1115,7 @@ namespace Config
 // from all sub-headers AND the drivetrain symbols (MOTOR_LEFT_ID/RIGHT_ID, above).
 #include "ConfigManipulator.h"
 #include "ConfigVision.h"
+#include "ConfigLocalization.h"
 #include "ConfigChecks.h"
 
 #endif    // CONFIG_H
