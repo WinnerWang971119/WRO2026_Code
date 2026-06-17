@@ -460,6 +460,10 @@ void PathTrackerClass::_drainBlocking()
 
 void PathTrackerClass::update()
 {
+    // ADR-038: a missed stop-at-line seek latches `DriveClass::Fault::LINE_NOT_FOUND`
+    // and `Drive.hasFault()` goes true; the shared Drive-fault guard below catches it
+    // and hard-faults into `Fault::DRIVE_FAULT` (no soft fallback — a missed seek is
+    // always a hard fault).
     if (_state != State::IDLE && _state != State::FAULT && Drive.hasFault())
     {
         Drive.stop(true);
@@ -543,67 +547,70 @@ void PathTrackerClass::update()
                 // in `_onPlanNextHop`, and in `DirectionPolicy.h`).
                 // -----------------------------------------------------------------
                 _passThrough = false;
-                if (Config::PATH_PASS_THROUGH_ENABLED && _nextHop != _destinationNode)
+                // `Config::PATH_PASS_THROUGH_ENABLED` leads so the peek's NEXT_HOP
+                // lookup is skipped entirely when pass-through is compiled out. The
+                // shared `_peekNextNextHop()` applies the not-final / NODE_NONE /
+                // self-loop guards and returns `NODE_NONE` when there is no valid
+                // next-next hop.
+                const uint8_t nextNext =
+                    Config::PATH_PASS_THROUGH_ENABLED ? _peekNextNextHop() : FieldMap::NODE_NONE;
+                if (nextNext != FieldMap::NODE_NONE)
                 {
-                    const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
-                    if (nextNext != FieldMap::NODE_NONE && nextNext != _nextHop)
+                    const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
+                    if (outbound.type != Routes::EdgeType::NONE)
                     {
-                        const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
-                        if (outbound.type != Routes::EdgeType::NONE)
+                        // Body-heading peek: the pass-through
+                        // delta MUST compare BODY-headings, not raw forward edge
+                        // headings. The chassis arrives at the intersection
+                        // facing `_resolvedBodyHeading` (set by `_onPlanNextHop`
+                        // for the inbound hop), which is either the inbound
+                        // edge heading (FRONT) or `+180°` (REAR). The outbound
+                        // body-heading is computed by re-resolving direction for
+                        // the next-next hop with `inboundBody` as currentHeading.
+                        // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
+                        const float inboundBody = _resolvedBodyHeading;
+
+                        // Read the builder overrides cached on DEQUEUE for the
+                        // in-flight goal. The next-next hop is still part of the
+                        // active goTo() call, so the same route_direction /
+                        // arrival_direction values apply (arrival only takes effect
+                        // when this is the final hop into the destination, which
+                        // _resolveDirection handles via the isLastHop flag).
+                        const Direction nextDir = resolveDirection(
+                            outbound.direction_override,
+                            Routes::PIPELINE_CONFIG.direction,
+                            _activeArrivalDirection,
+                            _activeRouteDirection,
+                            inboundBody,
+                            outbound.heading_deg,
+                            (nextNext == _destinationNode),
+                            Config::BIDIRECTIONAL_AUTO_ENABLED,
+                            Config::LINE_BOARD_COUNT);
+
+                        float outboundBody = outbound.heading_deg;
+                        if (nextDir == Direction::REAR)
                         {
-                            // Body-heading peek: the pass-through
-                            // delta MUST compare BODY-headings, not raw forward edge
-                            // headings. The chassis arrives at the intersection
-                            // facing `_resolvedBodyHeading` (set by `_onPlanNextHop`
-                            // for the inbound hop), which is either the inbound
-                            // edge heading (FRONT) or `+180°` (REAR). The outbound
-                            // body-heading is computed by re-resolving direction for
-                            // the next-next hop with `inboundBody` as currentHeading.
-                            // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
-                            const float inboundBody = _resolvedBodyHeading;
+                            outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
+                            if (outboundBody < 0.0f) outboundBody += 360.0f;
+                        }
 
-                            // Read the builder overrides cached on DEQUEUE for the
-                            // in-flight goal. The next-next hop is still part of the
-                            // active goTo() call, so the same route_direction /
-                            // arrival_direction values apply (arrival only takes effect
-                            // when this is the final hop into the destination, which
-                            // _resolveDirection handles via the isLastHop flag).
-                            const Direction nextDir = resolveDirection(
-                                outbound.direction_override,
-                                Routes::PIPELINE_CONFIG.direction,
-                                _activeArrivalDirection,
-                                _activeRouteDirection,
-                                inboundBody,
-                                outbound.heading_deg,
-                                (nextNext == _destinationNode),
-                                Config::BIDIRECTIONAL_AUTO_ENABLED,
-                                Config::LINE_BOARD_COUNT);
+                        const float delta = wrapDeltaDeg(outboundBody - inboundBody);
 
-                            float outboundBody = outbound.heading_deg;
-                            if (nextDir == Direction::REAR)
-                            {
-                                outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
-                                if (outboundBody < 0.0f) outboundBody += 360.0f;
-                            }
-
-                            const float delta = wrapDeltaDeg(outboundBody - inboundBody);
-
-                            // Pass-through requires BOTH (1) collinear body
-                            // headings AND (2) matching direction across the
-                            // intersection. A REAR→FRONT or FRONT→REAR transition
-                            // would force the dispatcher to flip
-                            // LineFollower.setReverse(...) mid-flight — instantly
-                            // swapping the active line board and inverting cruise
-                            // sign in one tick, jolting the chassis without a
-                            // controlled stop. Falling through to LINE_OVERSHOOT
-                            // (with brake, no pass-through) gives the controller
-                            // a clean re-init window before the new edge starts.
-                            // PR #34 review.
-                            if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
-                                nextDir == _resolvedDirection)
-                            {
-                                _passThrough = true;
-                            }
+                        // Pass-through requires BOTH (1) collinear body
+                        // headings AND (2) matching direction across the
+                        // intersection. A REAR→FRONT or FRONT→REAR transition
+                        // would force the dispatcher to flip
+                        // LineFollower.setReverse(...) mid-flight — instantly
+                        // swapping the active line board and inverting cruise
+                        // sign in one tick, jolting the chassis without a
+                        // controlled stop. Falling through to LINE_OVERSHOOT
+                        // (with brake, no pass-through) gives the controller
+                        // a clean re-init window before the new edge starts.
+                        // PR #34 review.
+                        if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
+                            nextDir == _resolvedDirection)
+                        {
+                            _passThrough = true;
                         }
                     }
                 }
@@ -1078,6 +1085,51 @@ float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
     return trim.driveCm;
 }
 
+uint8_t PathTrackerClass::_peekNextNextHop() const
+{
+    // Shared one-hop lookahead guard. Two FSM sites peek the hop AFTER `_nextHop`
+    // toward `_destinationNode`: the LINE_FOLLOW pass-through decision and the
+    // BLIND auto-rule projection classification (`_nextHopIsProjection`). Both need
+    // the SAME three guards, kept in one place here so they cannot drift:
+    //   1. not-final  — `_nextHop` is the destination, so there is no next-next hop
+    //                   (the final/goal hop must never crash or trigger either rule).
+    //   2. NODE_NONE  — `getNextHop` returns no route from `_nextHop` to the goal.
+    //   3. self-loop  — the lookahead returns `_nextHop` itself.
+    // Any failed guard yields `FieldMap::NODE_NONE`; otherwise the valid next-next
+    // node id is returned for the caller to classify.
+    if (_nextHop == _destinationNode)
+    {
+        return FieldMap::NODE_NONE;
+    }
+    const uint8_t nextNext = FieldMap::getNextHop(_nextHop, _destinationNode);
+    if (nextNext == FieldMap::NODE_NONE || nextNext == _nextHop)
+    {
+        return FieldMap::NODE_NONE;
+    }
+    return nextNext;
+}
+
+bool PathTrackerClass::_nextHopIsProjection() const
+{
+    // ADR-038 auto-rule predicate: is the hop AFTER `_nextHop` a PROJECTION edge?
+    //
+    // Short-circuit to `false` (no NEXT_HOP work) when the feature is compiled out
+    // via `Routes::BLIND_PROJECTION_AUTO_SEEK == false`, so the auto-seek peek costs
+    // nothing on a build that never auto-seeks. When enabled, reuse the shared
+    // `_peekNextNextHop()` guard and classify the resulting edge — a `NODE_NONE`
+    // peek (final/goal hop, unreachable, or self-loop) classifies as not-projection.
+    if (!Routes::BLIND_PROJECTION_AUTO_SEEK)
+    {
+        return false;
+    }
+    const uint8_t nextNext = _peekNextNextHop();
+    if (nextNext == FieldMap::NODE_NONE)
+    {
+        return false;
+    }
+    return FieldMap::getEdge(_nextHop, nextNext).type == Routes::EdgeType::PROJECTION;
+}
+
 void PathTrackerClass::_dispatchEdgeAfterTurn()
 {
     const uint8_t cur = Localization.getCurrentNode();
@@ -1209,13 +1261,26 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // `_resolveBlindMode(edge)` already maps DEFAULT → pipeline blind, so
             // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
             // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
+            //
+            // ADR-038 auto-rule: a blind hop that feeds a PROJECTION edge seeks a
+            // line first to re-anchor before the marker-less projection.
+            // `_nextHopIsProjection()` peeks the hop AFTER `_nextHop` toward the goal
+            // and classifies its edge type (folding in the `BLIND_PROJECTION_AUTO_SEEK`
+            // compile-time toggle so it short-circuits to `false` — no NEXT_HOP work —
+            // when the feature is built out). It shares the `_peekNextNextHop()` guard
+            // with the LINE_FOLLOW pass-through peek (same NODE_NONE / self-loop guard)
+            // so the final/goal blind hop (no next-next) never crashes and never
+            // auto-seeks. The result feeds the resolver's `autoRuleActive` input.
             // -----------------------------------------------------------------
-            const StopAtLineResolution sal = resolveStopAtLine(
+            const StopAtLineQuery q{
                 _activeStopAtLine,
+                edge.stop_at_line_override,
                 _resolveBlindMode(edge),
                 Routes::PIPELINE_CONFIG.blind,
                 _resolvedDirection,
-                Config::LINE_BOARD_COUNT);
+                Config::LINE_BOARD_COUNT,
+                _nextHopIsProjection()};
+            const StopAtLineResolution sal = resolveStopAtLine(q);
 
             if (sal.seek)
             {
@@ -1252,6 +1317,13 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // the STOP_AT_LINE state below polls `Drive.isIdle()` /
                 // `Drive.hasFault()` for the outcome.
                 const DriveMode mode = blindModeToDriveMode(sal.motionMode);
+
+                // ADR-038: a missed seek is always a hard fault — the seek uses the
+                // Drive default max search distance (`expected +
+                // Config::STOP_AT_LINE_MAX_MARGIN_CM`); no `.setMaxDistance(...)`
+                // zero-margin override and no soft-fallback recovery. The Drive
+                // builder is move-only (deleted copy ctor + early enqueue), so the
+                // whole chain MUST be one discarded-temporary RAII statement.
                 Drive.stopAtLine(edge.distance_cm)
                     .setReverse(reverse)
                     .setMode(mode)

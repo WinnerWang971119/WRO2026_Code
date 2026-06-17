@@ -59,6 +59,13 @@ class DirectionMode(IntEnum):
     FORCE_REVERSE = 2  # force reverse traversal regardless of heading delta
 
 
+class StopAtLineMode(IntEnum):
+    """Per-edge stop-at-line override, decoupled from BlindMode (the motion bundle)."""
+    DEFAULT = 0   # inherit: defer to legacy BlindMode tag / auto-rule / pipeline
+    ON      = 1   # force the seek on this edge
+    OFF     = 2   # force dead-reckon (no seek) on this edge
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     """Mission-wide motion-mode defaults baked into routes.cpp at build time."""
@@ -102,6 +109,7 @@ __all__ = [
     "ProjectionMode",
     "TurnMode",
     "DirectionMode",
+    "StopAtLineMode",
     "PipelineConfig",
     "PIPELINE_CONFIG",
 ]

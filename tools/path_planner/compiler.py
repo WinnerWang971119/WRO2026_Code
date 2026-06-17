@@ -63,7 +63,12 @@ from typing import Any, List, Optional, Tuple, Union
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import (
+    EDGE_BLIND,
+    EDGE_LINE,
+    EDGE_PROJECTION,
+    next_hop_is_projection,
+)
 
 ACT_TURN_REL = "turn_relative"
 ACT_FOLLOW_INT = "follow_line_to_intersection"
@@ -176,7 +181,7 @@ def compile_path(
     path: List[str],
     start_heading_deg: float,
     graph: nx.DiGraph,
-    field_data,  # noqa: ARG001 -- kept for API stability with PR2 callers
+    field_data,
 ) -> List[Primitive]:
     """Compile a node-name path into a primitive sequence.
 
@@ -204,9 +209,12 @@ def compile_path(
        * Emit one motion primitive based on ``edge['type']`` and
          direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
          ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
-         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when the
-         edge's effective :class:`BlindMode` is ``STOP_AT_LINE`` (via
-         :func:`resolve_blind_mode`), else ``(ACT_FORWARD, distance_cm)``.
+         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when
+         :func:`resolve_stop_at_line` returns ``seek=True`` (the edge's
+         effective :class:`BlindMode` is ``STOP_AT_LINE``, or the auto-rule
+         fires because ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set and
+         the next hop is a ``PROJECTION`` edge), else
+         ``(ACT_FORWARD, distance_cm)``.
          REAR: ``EDGE_LINE`` ->
          ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
          ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
@@ -227,7 +235,10 @@ def compile_path(
         chassis's current node.
     :param start_heading_deg: heading at ``path[0]`` in ``[0, 360)``.
     :param graph: directed graph from :func:`build_graph`.
-    :param field_data: unused; kept for API stability with PR2 callers.
+    :param field_data: read for ``BLIND_PROJECTION_AUTO_SEEK`` (the auto-rule
+        that fires a ``stop_at_line`` / ``stop_at_line_reverse`` seek on a
+        blind hop whose next hop is a projection edge). ``getattr`` fallback
+        to ``True`` keeps old callers that predate T11 working unchanged.
     :return: list of :data:`Primitive` tuples.
     :raises ValueError: if ``start_heading_deg`` is not in ``[0, 360)``
         or an edge has an unknown type tag.
@@ -257,6 +268,7 @@ def compile_path(
         Direction,
         StopAtLine,
         _read_edge_dir_override,
+        _read_edge_stop_at_line_override,
         resolve_blind_mode,
         resolve_direction,
         resolve_line_mode,
@@ -272,6 +284,24 @@ def compile_path(
         edge_heading = float(edge["heading_deg"])
         edge_type = edge["type"]
         is_last_hop = ((i + 1) == last_index)
+
+        # Peek at the NEXT hop's edge type to implement the auto-seek rule: a
+        # blind hop that FEEDS a projection edge seeks a line first to
+        # re-anchor localization before the dead-reckoned slide.
+        #
+        # ``path[i+2]`` is the destination of that next hop -- valid only when
+        # the path was produced by the NEXT_HOP Dijkstra table (as it always is
+        # here and in PathTrackerSim/CTPS); never hand-construct a path that
+        # skips NEXT_HOP nodes or the peek fires incorrectly.  Past the end
+        # (final / second-last hop) there is no next-next, so pass ``None``;
+        # ``next_hop_is_projection`` (the one shared predicate the sim and
+        # firmware also call) absorbs the ``None`` / self-loop / missing-edge
+        # guard, so the three peeks stay byte-identical.
+        next_after = path[i + 2] if i + 2 < len(path) else None
+        auto_rule_active = (
+            getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+            and next_hop_is_projection(graph, path[i + 1], next_after)
+        )
 
         direction = resolve_direction(
             edge_dir_override=_read_edge_dir_override(edge),
@@ -327,10 +357,12 @@ def compile_path(
                 # the two emission streams against each other).
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
                     PIPELINE_CONFIG.blind,
                     direction,
                     LINE_BOARD_COUNT,
+                    auto_rule_active,
                 )
                 if seek:
                     out.append((
@@ -363,12 +395,15 @@ def compile_path(
                 # Mirrors the FRONT branch of ``PathTrackerSim.go_to`` in
                 # ``sim/runtime.py`` (T6); the two emission streams must stay
                 # byte-identical (``test_property_random_walks`` / TC12).
+                #
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
                     resolve_blind_mode(edge),
                     PIPELINE_CONFIG.blind,
                     direction,
                     LINE_BOARD_COUNT,
+                    auto_rule_active,
                 )
                 if seek:
                     out.append((ACT_STOP_AT_LINE, float(edge["distance_cm"])))

@@ -10,6 +10,10 @@
 namespace Routes {
     constexpr uint8_t N_NODES = 6;
 
+    // Field-wide: auto stop-at-line seek on a BLIND hop that precedes
+    // a PROJECTION.
+    constexpr bool BLIND_PROJECTION_AUTO_SEEK = true;
+
     // Node category. LINE nodes are reached by line-following
     // to the next intersection; BLIND nodes are reached by a
     // dead-reckoned turn + forward move from a connected node.
@@ -25,6 +29,9 @@ namespace Routes {
     enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
     enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
     enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };
+
+    // Per-edge stop-at-line seek override, decoupled from BlindMode.
+    enum class StopAtLineMode : uint8_t { DEFAULT = 0, ON = 1, OFF = 2 };
 
     // Mission-wide motion-mode defaults, baked in from
     // tools/path_planner/pipeline_config.py at build time.
@@ -46,6 +53,7 @@ namespace Routes {
         BlindMode      blind_mode_override;
         ProjectionMode projection_mode_override;
         DirectionMode  direction_override;
+        StopAtLineMode stop_at_line_override;
     };
 
     // Single-wheel pivot turn (ADR-036). A pivot is a property

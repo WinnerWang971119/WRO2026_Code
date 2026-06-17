@@ -31,6 +31,11 @@ compiler, and header writer):
   edge regardless of heading delta. Absent = inherit
   PIPELINE_CONFIG.direction. Asymmetric: applied to the forward edge
   only -- the reverse edge needs its own ``EDGES`` entry to opt in.
+* ``stop_at_line_override`` : a :class:`pipeline_config.StopAtLineMode`
+  member (ON = force the stop-on-crossing seek, OFF = force dead-reckon).
+  Absent = inherit (DEFAULT). Asymmetric like ``direction_override``:
+  applied to the forward edge only -- the reverse edge needs its own
+  ``EDGES`` entry to opt in.
 
 Edge-type semantics:
 
@@ -65,6 +70,7 @@ from typing import Iterable, List, Sequence, Tuple
 import networkx as nx
 from shapely.geometry import LineString, Polygon, box
 
+from tools.path_planner.pipeline_config import StopAtLineMode
 from tools.path_planner.validator import validate
 
 EDGE_LINE = "LINE"
@@ -126,6 +132,32 @@ def directed_edge_heading(graph: "nx.DiGraph", u: str, v: str) -> float:
     :raises KeyError: if the edge ``u -> v`` does not exist in *graph*.
     """
     return float(graph[u][v]["heading_deg"])
+
+
+def next_hop_is_projection(graph: "nx.DiGraph", u, v) -> bool:
+    """Return True iff the directed edge ``u -> v`` exists and is a PROJECTION.
+
+    The single shared predicate for the BLIND->PROJECTION auto-seek rule: a
+    blind hop that FEEDS a projection edge seeks a line first to re-anchor
+    before the dead-reckoned slide.  The compiler, the sim, and the validator
+    each need the "is the NEXT hop a projection?" peek; centralizing it here
+    keeps the three from drifting in shape (the firmware mirrors this as
+    ``PathTracker::_nextHopIsProjection``).
+
+    Tolerant of a *degenerate* peek so callers need not special-case it: a
+    ``None`` endpoint (this hop is the final/goal hop, no next-next), a
+    self-loop (``u == v``), or a missing edge all return ``False`` -- the same
+    "no auto rule" answer the firmware's bounds-guarded ``getEdge`` degrades
+    to, never a ``KeyError``.
+
+    :param graph: directed graph returned by :func:`build_graph`.
+    :param u:     source node of the peeked next hop (or ``None``).
+    :param v:     destination of the peeked next hop (or ``None``).
+    :return:      True only for a real ``u -> v`` PROJECTION edge.
+    """
+    if u is None or v is None or u == v or not graph.has_edge(u, v):
+        return False
+    return graph.edges[u, v]["type"] == EDGE_PROJECTION
 
 
 def inflate_obstacles(
@@ -192,13 +224,15 @@ def edge_clips_obstacle(
 _BIDIRECTIONAL_OPTIONAL_KEYS = ("primitive_mode",)
 
 # Direction-dependent: ``direction`` forces forward/reverse traversal of
-# the directed edge. It depends on which end the chassis is approaching
-# from, so it must NOT be copied to the reverse edge (a one-way override
-# would otherwise force the wrong traversal sense on backward traversal).
-# This is the Codex P1 invariant: the asymmetric override stays on the
-# forward (u -> v) edge only; to override the reverse direction too, the
-# author must add a separate ``EDGES`` entry with ``u`` and ``v`` swapped.
-_DIRECTIONAL_OPTIONAL_KEYS = ("direction",)
+# the directed edge, and ``stop_at_line`` forces (or suppresses) the
+# stop-on-crossing seek for the directed edge. Both depend on which end the
+# chassis is approaching from, so they must NOT be copied to the reverse
+# edge (a one-way override would otherwise force the wrong traversal sense /
+# seek behavior on backward traversal). This is the Codex P1 invariant: the
+# asymmetric override stays on the forward (u -> v) edge only; to override
+# the reverse direction too, the author must add a separate ``EDGES`` entry
+# with ``u`` and ``v`` swapped.
+_DIRECTIONAL_OPTIONAL_KEYS = ("direction", "stop_at_line")
 
 # String-to-integer mapping for the ``direction`` per-edge override.
 # Header_writer (T3) reads the integer via ``edge_attrs.get("direction_override")``
@@ -208,6 +242,16 @@ _DIRECTIONAL_OPTIONAL_KEYS = ("direction",)
 _DIRECTION_STR_TO_INT = {
     "front": 1,  # DirectionMode::FORCE_FORWARD
     "rear":  2,  # DirectionMode::FORCE_REVERSE
+}
+
+# String-to-enum mapping for the ``stop_at_line`` per-edge override. Mirrors
+# the case-insensitive string tolerance of ``direction``: the field-data
+# vocabulary ("on" / "off") resolves to the :class:`StopAtLineMode` member
+# stored under ``stop_at_line_override``. Absence yields no attribute, so
+# header_writer falls back to ``StopAtLineMode::DEFAULT`` (0).
+_STOP_AT_LINE_STR_TO_MODE = {
+    "on":  StopAtLineMode.ON,
+    "off": StopAtLineMode.OFF,
 }
 
 
@@ -233,16 +277,23 @@ def _extract_bidirectional_attrs(options: dict) -> dict:
 def _extract_directional_attrs(options: dict) -> dict:
     """Pull direction-dependent metadata out of a source-edge options dict.
 
-    This attribute (``direction``) describes behavior that depends on
-    which end is the entry, so the caller must apply the returned dict
-    ONLY to the forward (u -> v) directed edge -- never to the reverse.
-    The string-to-integer mapping of ``direction`` is stored so
-    downstream consumers don't have to import the IntEnum.
+    These attributes (``direction``, ``stop_at_line``) describe behavior
+    that depends on which end is the entry, so the caller must apply the
+    returned dict ONLY to the forward (u -> v) directed edge -- never to
+    the reverse. The string mapping of each is resolved here so
+    downstream consumers don't have to re-derive it.
 
     ``direction`` is translated from the field-data string vocabulary
     (``"front"`` / ``"rear"``) into the wire integer (1 / 2) and stored
     under the key ``direction_override`` -- the name the header writer
     (T3) reads to emit the ``DirectionMode::*`` literal. Absence yields
+    no attribute, so header_writer falls back to DEFAULT (0).
+
+    ``stop_at_line`` is resolved to a :class:`StopAtLineMode` member --
+    either passed through when already a member, or coerced from the
+    case-insensitive string vocabulary (``"on"`` / ``"off"``) -- and
+    stored under the key ``stop_at_line_override``, the name the header
+    writer reads to emit the ``StopAtLineMode::*`` literal. Absence yields
     no attribute, so header_writer falls back to DEFAULT (0).
 
     :param options: dict-like source-edge attributes (may be empty).
@@ -252,6 +303,15 @@ def _extract_directional_attrs(options: dict) -> dict:
     if "direction" in options:
         # Validator (T4) has already constrained this to "front" or "rear".
         forwarded["direction_override"] = _DIRECTION_STR_TO_INT[options["direction"]]
+    if "stop_at_line" in options:
+        # Validator (T4) has already constrained this to a StopAtLineMode
+        # member or one of the strings "on" / "off". A member passes through;
+        # a string is coerced case-insensitively (mirroring ``direction``).
+        value = options["stop_at_line"]
+        if isinstance(value, StopAtLineMode):
+            forwarded["stop_at_line_override"] = value
+        else:
+            forwarded["stop_at_line_override"] = _STOP_AT_LINE_STR_TO_MODE[value.lower()]
     return forwarded
 
 
@@ -270,12 +330,12 @@ def _emit_directed_pair(
 
     * **Bidirectional** (``primitive_mode``): describes the segment
       itself; copied onto both directions.
-    * **Directional** (``direction``): describes behavior that depends on
-      which end is the entry. Applied ONLY to the forward (u -> v) edge.
-      Mirroring it to the reverse edge would force the wrong traversal
-      sense on backward traversal (Codex P1). To override the reverse
-      direction too, add a separate ``EDGES`` entry with ``u`` and ``v``
-      swapped.
+    * **Directional** (``direction``, ``stop_at_line``): describes behavior
+      that depends on which end is the entry. Applied ONLY to the forward
+      (u -> v) edge. Mirroring it to the reverse edge would force the wrong
+      traversal sense / seek behavior on backward traversal (Codex P1). To
+      override the reverse direction too, add a separate ``EDGES`` entry
+      with ``u`` and ``v`` swapped.
 
     .. warning::
        **A directional override is SINGLE-DIRECTION and silently skipped
@@ -345,7 +405,7 @@ def build_graph(field_data) -> nx.DiGraph:
        ``field_data.EDGES`` (if the attribute exists). Each dict supplies
        ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`,
        :data:`EDGE_PROJECTION`), ``u``, and ``v``, plus any of the
-       optional keys ``primitive_mode``, ``direction``
+       optional keys ``primitive_mode``, ``direction``, ``stop_at_line``
        which are forwarded verbatim to the resulting directed edges.
        Same obstacle-clip drop applies; PROJECTION drops warn the same
        way BLIND_EDGES drops do because the routing intent is explicit.
@@ -456,13 +516,13 @@ def build_graph(field_data) -> nx.DiGraph:
                 )
                 continue
             # AUTHORING WARNING (finding #40): a directional override on this
-            # EDGES entry -- ``direction`` ("front"/"rear") -- applies ONLY to
-            # the u -> v hop. The reverse (v -> u) edge below inherits just the
-            # symmetric ``primitive_mode``. Edges are bidirectional and Dijkstra
-            # picks the shorter sense, so if NEXT_HOP routes v -> u the override
-            # is SILENTLY ignored and the hop falls back to
-            # PIPELINE_CONFIG.direction. To force the override on the reverse hop
-            # too, add a second EDGES entry with u/v swapped.
+            # EDGES entry -- ``direction`` ("front"/"rear") or ``stop_at_line``
+            # ("on"/"off") -- applies ONLY to the u -> v hop. The reverse
+            # (v -> u) edge below inherits just the symmetric ``primitive_mode``.
+            # Edges are bidirectional and Dijkstra picks the shorter sense, so if
+            # NEXT_HOP routes v -> u the override is SILENTLY ignored and the hop
+            # falls back to the pipeline default. To force the override on the
+            # reverse hop too, add a second EDGES entry with u/v swapped.
             _emit_directed_pair(g, u, v, pu, pv, edge_type, options=edge)
 
     for node in g.nodes():

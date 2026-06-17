@@ -25,6 +25,7 @@ _FIELD_ATTRS = (
     "START_HEADING_DEG",
     "FIELD_MM",
     "MAP_PNG",
+    "BLIND_PROJECTION_AUTO_SEEK",
 )
 
 

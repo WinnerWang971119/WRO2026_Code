@@ -264,6 +264,37 @@ private:
     void _dispatchEdgeAfterTurn();
 
     /**
+     * @brief One-hop lookahead: the hop AFTER `_nextHop` toward `_destinationNode`.
+     *
+     * Shared guard for the two FSM sites that peek the next-next hop — the
+     * `LINE_FOLLOW` pass-through decision in `update()` and the BLIND auto-rule
+     * projection classification (`_nextHopIsProjection()`). Centralises the three
+     * guards both need so they cannot drift: the not-final guard (`_nextHop` is the
+     * destination), the `NODE_NONE` guard (no route from `_nextHop` to the goal),
+     * and the self-loop guard (the lookahead returns `_nextHop` itself).
+     *
+     * @return The next-next node id, or `FieldMap::NODE_NONE` when any guard fails
+     *         (there is no valid next-next hop to classify).
+     */
+    uint8_t _peekNextNextHop() const;
+
+    /**
+     * @brief ADR-038 auto-rule predicate: is the hop after `_nextHop` a PROJECTION edge?
+     *
+     * Feeds the `autoRuleActive` input of `resolveStopAtLine(...)` on a BLIND hop —
+     * a blind hop that feeds a projection edge seeks a line first to re-anchor
+     * before the marker-less projection. Reuses the shared `_peekNextNextHop()`
+     * guard and classifies the resulting edge type.
+     *
+     * @return `true` when the next-next edge is `Routes::EdgeType::PROJECTION`.
+     * @note Short-circuits to `false` — with NO `NEXT_HOP` lookup — when the
+     *       feature is compiled out via `Routes::BLIND_PROJECTION_AUTO_SEEK ==
+     *       false`, so the auto-seek peek costs nothing on a build that never
+     *       auto-seeks.
+     */
+    bool _nextHopIsProjection() const;
+
+    /**
      * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
      *        hop, applying the per-turn pivot trims (ADR-036).
      *
