@@ -1,6 +1,6 @@
 # ADR-031: Config split per domain — umbrella Config.h + per-domain sub-headers + ConfigChecks.h last
 
-**Status:** Implemented
+**Status:** Implemented (Refined by ADR-039)
 **Date decided:** 2026-06 (Phase 5 pulled forward)
 
 ## Rule
@@ -50,4 +50,5 @@ This supersedes the earlier informal convention that `Config.h` is a non-negotia
 
 - [ADR-022](./022-dual-motor-profile.md) — dual motor profile; its constants currently live in the
   un-split `Config.h` and are not moved by this ADR.
+- [ADR-039](./039-config-split-finished.md) — finishes the split: remaining constants into `config/`, all asserts centralized in `ConfigChecks.h`.
 - `WRO2026/Config.h`, `WRO2026/ConfigManipulator.h`, `WRO2026/ConfigChecks.h`

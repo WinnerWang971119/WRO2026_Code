@@ -60,14 +60,15 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 ### Tooling & testing
 
 - [ADR-030 — Host-compile harness links the real production symbols; CI-enforced via the `host-tests` ctest job](./docs/decisions/030-harness-links-real-sources-ci-enforced.md)
-- [ADR-031 — Config split per domain: umbrella Config.h + per-domain sub-headers + ConfigChecks.h last](./docs/decisions/031-config-split-per-domain.md)
+- [ADR-031 — Config split per domain: umbrella Config.h + per-domain sub-headers + ConfigChecks.h last](./docs/decisions/031-config-split-per-domain.md) (Refined by ADR-039)
 - [ADR-033 — CTPS ingests a derived mission trace recorded from the real C++; no Python re-implementation of task bodies](./docs/decisions/033-ctps-derived-mission-trace.md) (supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision)
+- [ADR-039 — Finish the per-domain Config split (config/ folder + centralized checks)](./docs/decisions/039-config-split-finished.md)
 
 ## Status summary
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 32 | 001, 002, 003, 004, 005, 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037 |
+| Implemented | 33 | 001, 002, 003, 004, 005, 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 039), 032, 033, 034, 036, 037, 039 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 0 | — |
 | Deferred | 0 | — |
