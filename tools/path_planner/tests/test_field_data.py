@@ -963,6 +963,110 @@ def test_pivot_turn_rejects_authored_rear_on_pivot_adjacent_edge() -> None:
         validate(fd)
 
 
+# -- TC13..TC15: the NEW seek triggers exempt a pivot leg from the trim --------
+#
+# A blind pivot leg is SENSOR-terminated (no over-travel trim) whenever it
+# SEEKS a line at runtime. Besides the legacy ``BlindMode.STOP_AT_LINE`` tag
+# (TC8..TC10 above), two triggers were added: a per-edge ``stop_at_line``
+# override of ON, and the BLIND->PROJECTION auto-rule. The validator must read
+# both off the same shared ``resolve_stop_at_line`` resolver the robot runs, or
+# it falsely rejects a legal field (gates a sensor leg's over-travel as if
+# dead-reckoned). Each accept below uses a leg too SHORT to survive the
+# dead-reckon gate, so it rejects without the trigger and validates with it.
+
+
+def test_pivot_turn_incoming_stop_at_line_override_on_is_sensor_exempt() -> None:
+    """TC13: a per-edge stop_at_line:'on' on the incoming leg makes it sensor.
+
+    A 90 deg pivot (delta = 9.0 cm) whose INCOMING BLIND edge ``A->B`` is only
+    2.0 cm long. Without an override it classifies 'distance' and the incoming
+    dead-reckon gate rejects it (see
+    ``test_pivot_turn_rejects_delta_exceeds_incoming_dead_reckon``). The per-edge
+    ``stop_at_line:'on'`` override makes the edge SEEK at runtime, so it is
+    SENSOR-terminated -- takes no approach trim -- and the short incoming leg
+    must NOT be falsely rejected.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 2.0, "heading_deg": 0.0, "stop_at_line": "on"},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_outgoing_stop_at_line_override_on_is_sensor_exempt() -> None:
+    """TC14: a per-edge stop_at_line:'on' on the outgoing leg makes it sensor.
+
+    The outgoing leg's auto-rule is goal-relative and not resolved per-triple,
+    but an EXPLICIT ``stop_at_line:'on'`` IS honored: a 90 deg pivot onto a SHORT
+    (2.0 cm) outgoing BLIND edge that would otherwise reject as a too-short
+    dead-reckon (see
+    ``test_pivot_turn_rejects_delta_exceeds_outgoing_dead_reckon``) validates,
+    because the seeking edge is SENSOR-terminated and takes no outgoing trim.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 2.0, "heading_deg": 90.0, "stop_at_line": "on"},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_incoming_blind_feeding_projection_auto_seeks_sensor() -> None:
+    """TC15: an incoming BLIND that FEEDS a PROJECTION auto-seeks -> sensor.
+
+    With ``BLIND_PROJECTION_AUTO_SEEK`` on (the default), a blind hop whose
+    continuation toward the pivot is a PROJECTION seeks a line first to
+    re-anchor before the dead-reckoned slide. For the pivot ``(A, B, C)`` the
+    incoming leg ``A->B`` feeds the outgoing PROJECTION ``B->C``, so ``A->B`` is
+    SENSOR-terminated and takes no approach trim -- a 90 deg pivot whose short
+    (2.0 cm) incoming edge would otherwise reject as a too-short dead-reckon
+    must validate.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 2.0, "heading_deg": 0.0},
+            {"type": EDGE_PROJECTION, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off() -> None:
+    """TC15 (control): auto-seek OFF removes the trigger, so the leg dead-reckons.
+
+    Disabling ``BLIND_PROJECTION_AUTO_SEEK`` removes the only seek trigger on the
+    incoming ``A->B`` leg (no override, not STOP_AT_LINE), so it classifies
+    'distance' again and the short 2.0 cm incoming edge is rejected -- proving
+    the accept above is the auto-rule firing, not an unrelated exemption.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 2.0, "heading_deg": 0.0},
+            {"type": EDGE_PROJECTION, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+    )
+    fd.BLIND_PROJECTION_AUTO_SEEK = False
+    with pytest.raises(
+        FieldDataError, match=r"the INCOMING dead-reckoned edge length"
+    ):
+        validate(fd)
+
+
 # -- TC26: validator parse-helper / firmware Config.h parity ------------------
 #
 # The validator single-sources its pivot constants from WRO2026/Config.h

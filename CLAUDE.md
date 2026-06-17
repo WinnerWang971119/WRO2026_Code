@@ -232,6 +232,7 @@ Load-bearing design decisions live as one file per decision under [`docs/decisio
 - For non-trivial work, run the `plan` skill first, then `execute`.
 - Create a feature branch — never commit straight to `main`.
 - When debugging, present 2–3 options with tradeoffs **before** picking a fix.
+- `tools/path_planner/field_data.*` is a **test/placeholder map, not the real WRO field.** Never defer or dismiss a confirmed bug because "the current map doesn't exercise that path" — built code the test map happens not to traverse will run on the real field, so fix it now. (A genuinely *unbuilt feature* may still be deferred to a tracking issue.)
 - Use the `code-writer` agent for implementation once a plan is agreed.
 - When planning something, always read `ARCHITECTURE.md` and `DECISIONS.md` and `Roadmap.md` first to understand the big picture.
 - After fixing PR review feedback (e.g., `pr-review-triage`), commit and `git push` to the PR branch without asking for confirmation. The user has pre-authorized this for any PR-review fix flow on a feature branch.

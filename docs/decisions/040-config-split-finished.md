@@ -1,4 +1,4 @@
-# ADR-039: Finish the per-domain Config split (config/ folder + centralized checks)
+# ADR-040: Finish the per-domain Config split (config/ folder + centralized checks)
 
 **Status:** Implemented
 **Date decided:** 2026-06

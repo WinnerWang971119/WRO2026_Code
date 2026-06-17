@@ -118,6 +118,7 @@ def _make_field(
         MAP_PNG=_MAP_PNG,
         ROBOT_RADIUS_CM=_ROBOT_RADIUS_CM,
         COST_BLIND_MULTIPLIER=_COST_BLIND_MULTIPLIER,
+        BLIND_PROJECTION_AUTO_SEEK=True,
         START_NODE=start_node,
         START_HEADING_DEG=start_heading_deg,
         NODES={name: tuple(coord) for name, coord in nodes.items()},
