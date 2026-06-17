@@ -1,0 +1,571 @@
+#ifndef CONFIG_DRIVE_H
+#define CONFIG_DRIVE_H
+
+#include <stdint.h>
+
+#include "ConfigGlobal.h"
+
+/**
+ * @brief Drivetrain configuration — reopens `namespace Config` per ADR-031 / Issue #39.
+ *
+ * Holds the motor IDs / direction flags, the per-chassis motor profile + PID gains
+ * (dispatched via `ActiveMotor`), chassis geometry, speed presets, the custom TurnGyro
+ * state-machine knobs, the stop-at-line seek defaults, the trapezoidal velocity profile,
+ * the Drive command queue, and the motor-bias calibration scalars.
+ *
+ * Depends on `ConfigGlobal.h` for `PWM_MIN_MAGNITUDE` (`TSHAPE_START_SPEED` forwards it).
+ * The drive-pair / CRAWL bounds static_asserts live in `ConfigChecks.h` (included last).
+ *
+ * @note PID gains and encoder specs are dispatched via `Config::ActiveMotor` — see the two
+ *       structs `MatrixTT` and `LegoEV3` (each with `static constexpr` members) below.
+ *       Values are sourced from MatrixMiniR4's `MiniR4DriveDC.h` PID docstrings
+ *       (`setMoveSyncPID` / `setMoveGyroPID` / `setTurnGyroPID`) and the vendor example
+ *       `MiniR4_DriveDC_Test.ino`. To swap chassis, edit only the `using ActiveMotor = ...;`
+ *       line; the flat constants below forward to the active profile. See ADR-022.
+ */
+namespace Config
+{
+    // ---------------------------------------------------------------------------------------
+    // Motor IDs and direction
+    // ---------------------------------------------------------------------------------------
+    //
+    // ⚠️  DO NOT EDIT `MOTOR_LEFT_ID` / `MOTOR_RIGHT_ID` IN ISOLATION  ⚠️
+    //
+    // These two constants LOOK like config knobs but they are NOT independently tunable.
+    // They are consumed in exactly one place — `MiniR4.DriveDC.begin(left_id, right_id, ...)`
+    // at `Drive.cpp:40-41` — while EVERY OTHER reference to the drive pair in `Drive.cpp`
+    // hardcodes `MiniR4.M2` and `MiniR4.M3` directly. Specifically:
+    //
+    //   - `Drive.cpp:35-38`   setReverse / setPPR_RPM are called on M2 / M3 by name.
+    //   - `Drive.cpp:428-435` getEncL / getEncR read M2.getDegrees() / M3.getDegrees().
+    //   - `Drive.cpp:491-492, 620, 944`  profile-state and bias-calibration encoder sampling
+    //                                    also read M2 / M3 directly.
+    //   - `Drive.h:397-406`   doxygen explicitly calls out the M2/M3 assumption.
+    //
+    // Changing only these two constants therefore puts the system into a contradictory
+    // state: `DriveDC` would steer a different motor pair than the one the R4-side code
+    // configures and reads. The "left encoder" would read a motor `DriveDC` doesn't own,
+    // motor-bias calibration would target the wrong wheel, and reverse flags would be
+    // applied to the wrong motor. The bug is silent — the chassis still moves, just
+    // wrong, and distance gates drift unpredictably.
+    //
+    // If you actually need to re-wire the drive pair to different ports, you MUST also
+    // edit every `MiniR4.M2` / `MiniR4.M3` reference in `Drive.cpp` AND update the M2/M3
+    // doxygen in `Drive.h`. See PR #20 codex P1 review for the full failure analysis.
+    // A cleaner long-term fix is a `motorById<ID>()` constexpr template helper that
+    // dispatches on the ID — but that refactor is intentionally NOT done here; the
+    // assumption that "the drive pair is M2/M3" is baked deep enough that the
+    // safest current state is "this convention is the ground truth, enforced by
+    // static_assert below."
+    //
+    // The static_assert lines (in ConfigChecks.h) are the load-bearing safety net: they
+    // will FAIL THE BUILD if either constant is edited without the Drive.cpp / Drive.h
+    // surgery above. Do not "fix" them by editing the assert — that defeats the entire point.
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Motor controller ID for the left drive wheel (M2 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
+    constexpr uint8_t MOTOR_LEFT_ID = 2;     // M2
+
+    /** @brief Motor controller ID for the right drive wheel (M3 per WRO chassis convention).
+     *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
+    constexpr uint8_t MOTOR_RIGHT_ID = 3;    // M3
+
+    /** @brief Reverse the left motor's positive-power direction at the driver level. */
+    constexpr bool MOTOR_LEFT_REVERSE = false;
+
+    /** @brief Reverse the right motor's positive-power direction at the driver level. */
+    constexpr bool MOTOR_RIGHT_REVERSE = true;
+
+    // ---------------------------------------------------------------------------------------
+    // Motor profile + PID gains (selected via ActiveMotor)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Vendor PID + encoder defaults for the Matrix TT motor.
+     * @note Source: MatrixMiniR4 MiniR4DriveDC.h PID docstrings (setMoveSyncPID, setMoveGyroPID,
+     *       setTurnGyroPID) + examples/4-DriveDC Functions/MiniR4_DriveDC_Test/MiniR4_DriveDC_Test.ino:64-74.
+     */
+    struct MatrixTT
+    {
+        static constexpr uint16_t PPR = 545;
+        static constexpr uint16_t RPM = 200;
+        static constexpr float    MOVESYNC_KP = 0.02f;
+        static constexpr float    MOVESYNC_KI = 0.0f;
+        static constexpr float    MOVESYNC_KD = 0.04f;
+        static constexpr float    MOVEGYRO_KP = 6.01f;
+        static constexpr float    MOVEGYRO_KI = 0.0f;
+        static constexpr float    MOVEGYRO_KD = 2.15f;
+        static constexpr float    TURNGYRO_KP = 22.75f;
+        static constexpr float    TURNGYRO_KI = 0.08f;
+        static constexpr float    TURNGYRO_KD = 0.25f;
+    };
+
+    /**
+     * @brief Vendor PID + encoder defaults for the LEGO EV3 motor (LE-F TurnGyro variant).
+     * @note Source: MiniR4DriveDC.h PID docstrings + MiniR4_DriveDC_Test.ino:52-62.
+     *       LE-F = "LEGO EV3 Fast" Kp (22.75). LE-S variant uses Kp=5.25 — not used here.
+     */
+    struct LegoEV3
+    {
+        static constexpr uint16_t PPR = 360;
+        static constexpr uint16_t RPM = 300;
+        static constexpr float    MOVESYNC_KP = 0.02f;
+        static constexpr float    MOVESYNC_KI = 0.0f;
+        static constexpr float    MOVESYNC_KD = 0.025f;
+        static constexpr float    MOVEGYRO_KP = 0.52f;
+        static constexpr float    MOVEGYRO_KI = 0.0f;
+        static constexpr float    MOVEGYRO_KD = 0.15f;
+        static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
+        static constexpr float    TURNGYRO_KI = 0.02f;
+        static constexpr float    TURNGYRO_KD = 1.54f;
+    };
+
+    /**
+     * @brief Single edit point to swap the chassis motor model.
+     *
+     * Default is LegoEV3 (Lofaix competition robot). Switch to MatrixTT for the
+     * test rover. The flat constants below (MOTOR_PPR, MOVESYNC_K*, …) forward
+     * to ActiveMotor::PPR / ActiveMotor::MOVESYNC_KP / etc. so call sites do
+     * not change.
+     *
+     * @warning Swapping motors does NOT recalibrate MOTOR_BIAS_L/R — those are
+     *          per-physical-chassis measurements and MUST be re-captured via
+     *          Drive.calibrateMotorBias() after a swap. See ADR-011 + ADR-022.
+     */
+    using ActiveMotor = MatrixTT;
+
+    constexpr uint16_t MOTOR_PPR    = ActiveMotor::PPR;
+    constexpr uint16_t MOTOR_RPM    = ActiveMotor::RPM;
+    constexpr float    MOVESYNC_KP  = ActiveMotor::MOVESYNC_KP;
+    constexpr float    MOVESYNC_KI  = ActiveMotor::MOVESYNC_KI;
+    constexpr float    MOVESYNC_KD  = ActiveMotor::MOVESYNC_KD;
+    constexpr float    MOVEGYRO_KP  = ActiveMotor::MOVEGYRO_KP;
+    constexpr float    MOVEGYRO_KI  = ActiveMotor::MOVEGYRO_KI;
+    constexpr float    MOVEGYRO_KD  = ActiveMotor::MOVEGYRO_KD;
+    constexpr float    TURNGYRO_KP  = ActiveMotor::TURNGYRO_KP;
+    constexpr float    TURNGYRO_KI  = ActiveMotor::TURNGYRO_KI;
+    constexpr float    TURNGYRO_KD  = ActiveMotor::TURNGYRO_KD;
+
+    // ---------------------------------------------------------------------------------------
+    // Geometry (TODO: measure on real chassis)
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Drive-wheel diameter in millimetres. @note TODO: measure on real chassis. */
+    constexpr float WHEEL_DIAM_MM = 63.0f;
+
+    /** @brief Wheel-to-wheel track width in millimetres. @note TODO: measure on real chassis. */
+    constexpr float TRACK_MM = 180.0f;
+
+    // ---------------------------------------------------------------------------------------
+    // Speed presets (consumed by the fluent Drive / LineFollower APIs)
+    // ---------------------------------------------------------------------------------------
+    //
+    // The fluent chassis API takes `SpeedPreset preset = SpeedPreset::NORMAL` as its default
+    // power source. Each preset maps to a PWM in the [-100, 100] DriveDC range below. Callers
+    // that need a non-preset value can still override via `.setPower(int16_t)` on the builder.
+    //
+
+    /**
+     * @brief Coarse speed selector for chassis movement primitives.
+     *
+     * Used by every fluent verb that takes a power: Drive.driveDist / driveTime /
+     * forwardGyro / turnDeg / turnToYaw, plus LineFollower.setPreset for cruise. Default is
+     * `NORMAL`; pass `SLOW` for intersection approaches and tight corners, `FAST` for long
+     * straights.
+     */
+    enum class SpeedPreset : uint8_t
+    {
+        SLOW,
+        NORMAL,
+        FAST
+    };
+
+    /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
+    constexpr int16_t SPEED_SLOW = 70;
+
+    /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
+    constexpr int16_t SPEED_NORMAL = 85;
+
+    /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
+    constexpr int16_t SPEED_FAST = 90;
+
+    // ---------------------------------------------------------------------------------------
+    // Turn defaults
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Default wheel-pattern selector for the custom TurnGyro state machine.
+     *
+     * Encoding (NEW — set by the 2026-05-17 PR4 plan; intentionally different from
+     * the legacy `MiniR4.DriveDC.TurnGyro` byte values):
+     *   - `0` = COUNTER_ROT — both wheels spin opposite directions, chassis pivots
+     *                         around its center. Tightest in-place rotation.
+     *   - `1` = PIVOT_LEFT  — left wheel braked, right wheel drives; chassis pivots
+     *                         around the LEFT wheel.
+     *   - `2` = PIVOT_RIGHT — right wheel braked, left wheel drives; chassis pivots
+     *                         around the RIGHT wheel.
+     *
+     * @note `TurnDegBuilder::setMode` / `TurnToYawBuilder::setMode` accept this byte;
+     *       PathTracker maps `Routes::TurnMode::*` to it via `_turnModeToByte`. See
+     *       `Drive.h::TurnDegBuilder::setMode` for the full encoding contract.
+     */
+    constexpr uint8_t TURN_MODE = 0;
+
+    /** @brief Apply active brake at end of turn (vs. coast). */
+    constexpr bool TURN_BRAKE = true;
+
+    // ---------------------------------------------------------------------------------------
+    // Line-sensor → axle geometric offset (intersection overshoot compensation)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Distance from the FRONT line-sensor board's centerline to the wheel-axle
+     *        line, in cm.
+     *
+     * Positive = sensor is in front of (ahead of) the axle.
+     *
+     * Used by the PathTracker LINE_OVERSHOOT state: the intersection-detect event fires
+     * when the SENSOR is over the junction marker, but we want the chassis CENTER (the
+     * axle midpoint) to land on the node. After detecting the intersection, PathTracker
+     * re-arms LineFollower with the axle offset of the board that led the hop (front when
+     * FRONT, `LINE_SENSOR_AXLE_OFFSET_REAR_CM` when REAR) to roll forward by exactly that
+     * amount before stopping.
+     *
+     * @note TODO: measure on real chassis.
+     */
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
+
+    /**
+     * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,
+     *        in cm, used when a hop is followed in REVERSE (rear board leading).
+     *
+     * On a bidirectional chassis the rear board need not sit the same distance from the
+     * axle as the front, so a REAR hop must dead-reckon with its own offset. Reusing the
+     * front offset lands every reverse hop off-node and feeds that error into the next
+     * dead-reckoned hop. PathTracker selects this when the resolved direction is
+     * `Direction::REAR`.
+     *
+     * @note TODO: measure on real chassis. Defaults to the front offset until the rear
+     *       board is wired (T5); override once the two distances are known to differ.
+     */
+    constexpr float LINE_SENSOR_AXLE_OFFSET_REAR_CM = 7.68f;
+
+    /**
+     * @brief Floor (cm) for a pivot-trimmed dead-reckon drive / LINE overshoot advance (ADR-036).
+     *
+     * PathTracker subtracts the resolved pivot over-travel δ from a dead-reckon
+     * drive (and from the LINE overshoot advance) to compensate a single-wheel
+     * pivot. The offline validator already guarantees `δ < edge length` on every
+     * dead-reckon side and `δ ≤ overshoot budget` on every LINE-incoming side, so
+     * a correctly-built routes table never drives the effective distance to (or
+     * below) zero. This is a DEFENSIVE floor only: if a future bad table or a
+     * validator/config mismatch ever produced a non-positive effective distance,
+     * `Drive.driveDist` would reject a negative cm and silently no-op the hop,
+     * stalling the FSM. Clamping to a tiny positive advance keeps motion forward
+     * (with a Serial trace) instead of dropping the drive into UB / a stall.
+     *
+     * @note Single-sourced here so the offline validator / sim
+     *       (`parse_pivot_trim_min_drive_cm_from_config`) read the same value the
+     *       firmware uses (TC26 parity).
+     */
+    constexpr float PIVOT_TRIM_MIN_DRIVE_CM = 0.5f;
+
+    /**
+     * @brief Minimum authored pivot turn angle, in degrees (offline validator guard, ADR-036).
+     *
+     * The offline validator rejects any authored pivot turn `(u, v, w)` whose
+     * geometric angle `|θ|` is below this floor. A pivot only fires at runtime
+     * when the pre-turn maneuver dispatches (heading delta `> NAV_TURN_TOLERANCE_DEG`,
+     * PathTracker), so a turn near that gate would silently no-op the pivot while
+     * its δ trim is still subtracted — under-driving the adjacent hop. Keeping a
+     * real pivot comfortably above the gate makes a too-shallow "pivot" a
+     * build-time authoring error instead of a silent runtime mis-position.
+     *
+     * @note This is a TUNABLE knob, not a derived value: set it to the smallest
+     *       pivot the chassis should be allowed to author. It must stay above
+     *       `NAV_TURN_TOLERANCE_DEG` (the firmware dispatch gate). NOT read by the
+     *       firmware at runtime — the validator/sim single-source it from here
+     *       (`parse_pivot_min_turn_deg_from_config`) so a retune cannot desync the
+     *       offline check (TC26 parity).
+     */
+    constexpr float PIVOT_MIN_TURN_DEG = 5.0f;
+
+    // ---------------------------------------------------------------------------------------
+    // Drive.stopAtLine() — drive-until-line seek defaults (ADR-027)
+    //
+    // `Drive.stopAtLine(expectedCm)` drives straight toward an expected perpendicular crossing
+    // line, arms a T_OR_CROSS detector only once the chassis is near the expected endpoint,
+    // overshoots so the axle lands on the line, then active-brakes. PathTracker uses it on
+    // flagged BLIND hops to re-anchor `Localization` on the physical line instead of dead
+    // reckoning. The post-detect overshoot default reuses `LINE_SENSOR_AXLE_OFFSET_CM` above.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Arm-window half-length (cm): detection arms only once the chassis is within this
+     *        many cm of the expected endpoint.
+     *
+     * The seeker drives blind until `traveled >= expectedCm - STOP_AT_LINE_ARM_WINDOW_CM`, then
+     * arms its `T_OR_CROSS` detector. This prevents stopping on a line crossed earlier en route.
+     *
+     * @note Tuning constraint (load-bearing): the window only fires on the true line if the
+     *       encoder estimate of `traveled` is within this many cm of reality. If dead reckoning
+     *       UNDER-travels by more than this, the chassis crosses the real line while still
+     *       disarmed and misses it (→ runs to max → `LINE_NOT_FOUND`). Size this LARGER than the
+     *       worst-case dead-reckoning under-travel over a hop — generous, not tight. That drift
+     *       is exactly what stop-at-line exists to correct. Verified on hardware (bench B3.7).
+     * @note Overridable per call via `StopAtLineBuilder::setArmWithin(float)`.
+     */
+    constexpr float STOP_AT_LINE_ARM_WINDOW_CM = 10.0f;
+
+    /**
+     * @brief Extra search margin (cm) past the expected endpoint before failing.
+     *
+     * If no `T_OR_CROSS` is detected by `traveled >= expectedCm + STOP_AT_LINE_MAX_MARGIN_CM`,
+     * `Drive` fail-fast faults `LINE_NOT_FOUND` (stop + clear queue) — there is no silent
+     * dead-reckon fallback. Surfaced to PathTracker as `DRIVE_FAULT`.
+     *
+     * @note Overridable per call via `StopAtLineBuilder::setMaxDistance(float)`, which sets the
+     *       absolute max distance (default `expectedCm + STOP_AT_LINE_MAX_MARGIN_CM`).
+     */
+    constexpr float STOP_AT_LINE_MAX_MARGIN_CM = 15.0f;
+
+    /**
+     * @brief Consecutive `T_OR_CROSS` samples required to confirm a line detection.
+     *
+     * The seeker debounces the crossing with its own rising-edge counter — a single noisy
+     * `getJunctionType()` sample no longer triggers the stop. Mirrors the streak-confirm idiom
+     * used by `INTERSECTION_DEBOUNCE_TICKS`. At ~50-100 Hz cooperative tick, 2 ticks is well
+     * within a ~5-10 cm junction marker's dwell time while rejecting single-sample flicker.
+     */
+    constexpr uint8_t STOP_AT_LINE_DETECT_TICKS = 2;
+
+    /**
+     * @brief No-progress watchdog timeout (ms) for the unbounded stopAtLine seek.
+     *
+     * The cooperative tick runs every ~10-30 ms (LineArray I2C refresh + the 2 ms drain delay),
+     * so a moving seek advances every tick; 1500 ms (~50-150 idle ticks) trips only a truly
+     * stalled / zero-power seek, never a slow-but-moving one. On a no-progress timeout the seek
+     * fail-fasts Fault::LINE_NOT_FOUND instead of hanging the async nav FSM (which has no drain
+     * timeout). Bench-tunable.
+     */
+    constexpr uint32_t STOP_AT_LINE_STALL_TIMEOUT_MS = 1500;
+
+    /**
+     * @brief Minimum traveled advance (cm) per check that counts as forward progress for the
+     *        stall watchdog (guards float noise / encoder jitter from masking a real stall).
+     */
+    constexpr float STOP_AT_LINE_PROGRESS_EPS_CM = 0.2f;
+
+    // ---------------------------------------------------------------------------------------
+    // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Cruise PWM for `Drive.turnDeg` / `Drive.turnToYaw`, in [-100, 100].
+     *
+     * Two roles:
+     *   1. Default value of `TurnDegBuilder::_power` / `TurnToYawBuilder::_power`;
+     *      callers can override per-call via `.setPower(...)` on the builder.
+     *   2. Fast-phase PWM magnitude for the custom TurnGyro state machine. Applied
+     *      until the heading error falls within ±TURN_SLOW_ZONE_DEG of the target,
+     *      after which the turn ramps down to `TURN_SLOW_SPEED_PWM` (not overridable).
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr int16_t TURN_CRUISE_PWM = 50;
+
+    /**
+     * @brief Slow-zone half-width in degrees.
+     *
+     * When |heading error| ≤ this value, the turn ramps down from TURN_CRUISE_PWM to
+     * TURN_SLOW_SPEED_PWM. Sized to give enough time to bleed rotational momentum
+     * before the tolerance gate fires.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr float TURN_SLOW_ZONE_DEG = 30.0f;
+
+    /**
+     * @brief PWM applied in the slow zone, in [-100, 100].
+     *
+     * Held constant while |heading error| > TURN_TOLERANCE_DEG. Set equal to
+     * Config::PWM_MIN_MAGNITUDE so the motor reliably breaks static friction even
+     * at minimum command.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr int16_t TURN_SLOW_SPEED_PWM = 20;
+
+    /**
+     * @brief Final heading tolerance in degrees.
+     *
+     * When |heading error| ≤ this value, the TurnGyro state machine brakes and
+     * declares the turn complete.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr float TURN_TOLERANCE_DEG = 1.0f;
+
+    // =========================================================================================
+    // Motor-bias calibration (Strategy B from Phase 1.5 chassis-API research).
+    //
+    // DC drive motors of the same model can vary 10-20% in RPM at the same PWM (this is true for
+    // both `MatrixTT` and `LegoEV3`). Our
+    // raw-PWM Drive paths (setSpeed, driveDist, driveTime — all routed through
+    // MatrixMiniR4 Move/MoveDegs/MoveTime, which are open-loop) are the ones
+    // affected; Sync/Gyro variants close the loop on the STM32 and don't need it.
+    //
+    // Workflow: at first hardware bring-up, call Drive.calibrateMotorBias()
+    // once with the wheels free of the ground. The routine prints two scalars
+    // to Serial; copy them into MOTOR_BIAS_L / MOTOR_BIAS_R below. From then on,
+    // Drive.begin() applies them automatically via setMotorBias().
+    //
+    // 1.0f = no correction (default; safe before calibration).
+    //
+    // See DECISIONS.md "Motor-bias calibration (Strategy B)" for full rationale,
+    // including the on-shelf Strategy C (R4-side encoder-rate PID) we'd add if
+    // B alone is not enough on the actual track.
+    // =========================================================================================
+
+    /** @brief Static manufacturer-bias scalar applied to the LEFT motor in raw-PWM paths. */
+    static constexpr float MOTOR_BIAS_L = 1.0f;
+
+    /** @brief Static manufacturer-bias scalar applied to the RIGHT motor in raw-PWM paths. */
+    static constexpr float MOTOR_BIAS_R = 1.0f;
+
+    // Calibration-routine defaults. The routine spins both motors at this power
+    // for this duration, then computes scalars from the resulting encoder deltas.
+    // 50% power for 2 s gives a few thousand encoder counts on either profile (PPR 360 for
+    // LegoEV3, 545 for MatrixTT) — plenty of signal, not enough to spin the chassis off a
+    // bench in wheels-up mode.
+
+    /** @brief PWM power used by `Drive.calibrateMotorBias()` during the wheels-free spin. */
+    static constexpr int16_t MOTOR_BIAS_CALIB_POWER = 50;
+
+    /** @brief Spin duration in milliseconds used by `Drive.calibrateMotorBias()`. */
+    static constexpr uint32_t MOTOR_BIAS_CALIB_DURATION_MS = 2000;
+
+    // =============================================================================
+    // Trapezoidal velocity profile (`.tShape()` modifier on Drive / LineFollower).
+    //
+    // Acceleration-based: speed ramps at TSHAPE_ACCEL_PWM_PER_CM (PWM units gained
+    // per cm of encoder travel) until the cruise target is reached, then plateaus,
+    // then ramps back down at the same rate. Per-side ramp distance per move is
+    // implicit: (cruise - endpointSpeed) / accel, clamped to [MIN_CM, MAX_CM] and
+    // to half of the total move length. If accel- and decel-distances together
+    // exceed total, the cruise plateau collapses (triangle fallback) and the peak
+    // speed is reduced so the integral still matches the requested distance.
+    //
+    // Endpoint-default convention: when a move is configured `.setBrake(false)`,
+    // the default `endSpeed` resolves to `cruise` (not 0) — the assumption is that
+    // a no-brake move is chaining into a follow-up. Caller can override with an
+    // explicit `.setEndSpeed(0)` if they really want a coast-to-stop.
+    //
+    // See DECISIONS.md "Trapezoidal velocity profile" for full rationale.
+    // =============================================================================
+
+    /** @brief PWM units gained per cm of travel during the ramp phase. */
+    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 5.0f;
+
+    /** @brief Floor on the per-side ramp distance — never shorter than this (cm). */
+    constexpr float TSHAPE_RAMP_MIN_CM = 2.0f;
+
+    /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
+    constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
+
+    /**
+     * @brief Default starting speed for a profiled move (raw PWM).
+     *
+     * Set to `PWM_MIN_MAGNITUDE` (the motor deadband floor) rather than 0 so the
+     * very first ramp tick emits a PWM the motor can actually act on. Starting at
+     * 0 would waste the first ~20% of the ramp distance with the chassis sitting
+     * still while the speed setpoint climbs through the dead zone.
+     *
+     * Override per-call with `.setStartSpeed(0)` if a true rest-start is desired
+     * (e.g. for very long ramps where the lost first centimetres don't matter).
+     */
+    constexpr int16_t TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE;
+
+    /**
+     * @brief Default ending speed for a profiled move (raw PWM). 0 = end at rest.
+     *
+     * Stays at 0 (no symmetric deadband floor) by design: the motor naturally
+     * stalls in the last bit when the ramp passes through the dead zone, then
+     * `stop()` engages the brake immediately — the chassis comes to rest cleanly
+     * without needing a ramp-down floor.
+     */
+    constexpr int16_t TSHAPE_END_SPEED = 0;
+
+    /**
+     * @brief Hysteresis: if `|cruise - endpointSpeed| < TSHAPE_NO_RAMP_EPSILON_PWM`,
+     *        skip the ramp on that side entirely.
+     *
+     * Prevents the MIN_CM floor from forcing a tiny pointless ramp on chained moves
+     * where startSpeed or endSpeed is already at (or very near) cruise.
+     */
+    constexpr int16_t TSHAPE_NO_RAMP_EPSILON_PWM = 2;
+
+    /** @brief Tick-rate target for the profile state machine — only used as a comment marker. */
+    // Profile is driven from Drive.update() at whatever rate the main loop ticks (~50-200 Hz typical).
+
+    /**
+     * @brief Minimum move length below which `.tShape()` silently no-ops.
+     *
+     * Below this threshold, the half-of-total clamp on per-side ramp distances would force
+     * the effective acceleration steeper than `TSHAPE_ACCEL_PWM_PER_CM`, breaking the
+     * constant-acceleration contract. Cleaner to fall back to a non-profiled constant-cruise
+     * move below the threshold than to deliver an inconsistent ramp.
+     *
+     * @note When tShape no-ops, the move still runs — just without the ramp. Caller does not
+     *       need to special-case short moves.
+     */
+    constexpr float TSHAPE_MIN_MOVE_CM = 5.0f;
+
+    /** @brief Same threshold as TSHAPE_MIN_MOVE_CM but for time-bounded moves (seconds). */
+    constexpr float TSHAPE_MIN_MOVE_SEC = 0.2f;
+
+    // =============================================================================
+    // Drive command queue (sequential dispatch).
+    //
+    // Drive's fluent builder destructors enqueue commands instead of dispatching
+    // immediately. `Drive.update()` pops the next command when the current bounded
+    // move + profile state machine are both idle. This makes source-order sequencing
+    // of multiple moves work without caller-side polling — the future auto-path
+    // planner can issue dozens of moves and they execute in order:
+    //
+    //   Drive.driveDist(30).tShape();
+    //   Drive.driveDist(20).tShape();
+    //   Drive.turnDeg(90);
+    //
+    // Blocking variants (`.setBlocking(true)`) bypass the queue: they drain existing
+    // entries first, then dispatch synchronously.
+    //
+    // `Drive.stop()` clears the queue (abort semantics).
+    //
+    // See DECISIONS.md "Drive command queue" for full rationale.
+    // =============================================================================
+
+    /**
+     * @brief Maximum number of pending commands the Drive queue can hold.
+     *
+     * 8 is comfortably more than a typical multi-segment maneuver and keeps the
+     * struct array under 1 KB even with the largest command POD. Overflow drops
+     * the new command and prints a Serial warning — that's a caller bug.
+     */
+    constexpr uint8_t DRIVE_QUEUE_CAPACITY = 8;
+
+    /**
+     * @brief Per-command worst-case ceiling used by `_drainBlocking` to bound its
+     *        synchronous spin (code review F3).
+     *
+     * A typical 30 cm @ 50 PWM move completes in ~1 s; 10 s is a 10× safety factor
+     * that still fits the 2-minute WRO run clock even if a full queue (8 cmds plus
+     * the in-flight one) all hit the ceiling. The drain budget is computed as
+     * `(qCount + 1) * DRIVE_DRAIN_TIMEOUT_MS_PER_CMD`. On expiry the drain stops the
+     * chassis, clears the queue, and surfaces a Serial warning.
+     */
+    constexpr uint32_t DRIVE_DRAIN_TIMEOUT_MS_PER_CMD = 10000;
+}    // namespace Config
+
+#endif    // CONFIG_DRIVE_H
