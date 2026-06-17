@@ -141,7 +141,8 @@ The user requires **strict OOP** and clean, debuggable code. Match the MatrixMin
 WRO2026_Code/
 ├── WRO2026/                  # Arduino sketch — flashes to the R4
 │   ├── WRO2026.ino           # setup() + cooperativeTick() + mission DSL
-│   ├── Config.h              # all constants, pin maps, PID gains, calibration tables
+│   ├── Config.h              # umbrella include — per-domain tunables live in config/
+│   ├── config/               # ConfigGlobal/Drive/Line/Nav/Mission/Manipulator/Vision/Checks.h
 │   ├── Drive.h / .cpp        # drivebase facade + fluent builders + queue + T-shape
 │   ├── LineFollower.h / .cpp # P+D over WROLineArray + distance gate + sync helpers
 │   ├── Intersection.h / .cpp # rising-edge detector + JunctionType + edge counter

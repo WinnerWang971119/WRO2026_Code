@@ -15,7 +15,8 @@
 WRO2026_Code/
 ├── WRO2026/                  # Arduino sketch (flashed to the R4)
 │   ├── WRO2026.ino           # setup() + cooperativeTick() + inline mission DSL
-│   ├── Config.h              # all constants — pins, PID gains, calibration tables
+│   ├── Config.h              # umbrella include — tunables live in config/ sub-headers
+│   ├── config/               # per-domain sub-headers: ConfigGlobal/Drive/Line/Nav/Mission/Manipulator/Vision/Checks.h
 │   │
 │   ├── Drive.h / .cpp        # fluent builders, FIFO queue, T-shape profile, bias calib
 │   ├── LineFollower.h / .cpp # P+D over WROLineArray, distance gate, sync helpers
@@ -85,7 +86,7 @@ The lower-layer modules tick first so that PathTracker / Mission see fresh state
 
 | Module | Owns | Key surface |
 |---|---|---|
-| `Config` | constants, pin maps, PID gains, calibration tables | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
+| `Config` | umbrella over `config/` per-domain sub-headers (Global/Drive/Line/Nav/Mission/Manipulator/Vision/Checks) | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
 | `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; shared resolver via `StopAtLinePolicy.h` | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |

@@ -1,11 +1,11 @@
-"""Single-source parser for ``constexpr float`` constants in WRO2026/Config.h.
+"""Single-source parser for ``constexpr float`` constants in WRO2026/config/ConfigDrive.h.
 
-The firmware header ``WRO2026/Config.h`` owns the chassis constants the offline
-path planner and validator reuse (the chassis track, the line-sensor-to-axle
-offset, the pivot-trim floor, the turn-dispatch tolerance). Both modules parse
-those values out of the header at build time rather than mirroring literals, so
-an edit to ``Config.h`` cannot silently desync the offline tools from the value
-the robot drives with (issue #44).
+The firmware header ``WRO2026/config/ConfigDrive.h`` owns the chassis constants
+the offline path planner and validator reuse (the chassis track, the
+line-sensor-to-axle offset, the pivot-trim floor, the turn-dispatch tolerance).
+Both modules parse those values out of the header at build time rather than
+mirroring literals, so an edit to ``ConfigDrive.h`` cannot silently desync the
+offline tools from the value the robot drives with (issue #44).
 
 This module is the ONE place that parsing lives, so ``planner`` and ``validator``
 cannot drift in HOW they read the header. Previously each carried its own
@@ -25,9 +25,11 @@ from pathlib import Path
 
 # ``planner.py`` / ``validator.py`` / this module all live at
 # ``<repo>/tools/path_planner/<mod>.py`` and the firmware header at
-# ``<repo>/WRO2026/Config.h``. Resolve relative to THIS file (two parents up to
-# the repo root) so the lookup ignores the caller's working directory.
-DEFAULT_CONFIG_H_PATH = Path(__file__).resolve().parents[2] / "WRO2026" / "Config.h"
+# ``<repo>/WRO2026/config/ConfigDrive.h``. Resolve relative to THIS file (two
+# parents up to the repo root) so the lookup ignores the caller's working directory.
+DEFAULT_CONFIG_H_PATH = (
+    Path(__file__).resolve().parents[2] / "WRO2026" / "config" / "ConfigDrive.h"
+)
 
 
 def config_float_pattern(name: str) -> re.Pattern:
@@ -51,7 +53,7 @@ def config_float_pattern(name: str) -> re.Pattern:
 
 
 def parse_config_float(name: str, config_path: Path = DEFAULT_CONFIG_H_PATH) -> float:
-    """Parse a ``constexpr float <name>`` literal out of ``WRO2026/Config.h``.
+    """Parse a ``constexpr float <name>`` literal out of ``WRO2026/config/ConfigDrive.h``.
 
     The firmware header is the single source of truth for the chassis constants
     the offline tools reuse. This reads the named ``constexpr float``
@@ -63,8 +65,8 @@ def parse_config_float(name: str, config_path: Path = DEFAULT_CONFIG_H_PATH) -> 
     a wrong constant silently mis-compensates every pivot in the field.
 
     :param name: the ``constexpr float`` identifier to read.
-    :param config_path: path to ``Config.h``; defaults to the firmware header
-        resolved relative to this module (independent of the cwd).
+    :param config_path: path to ``ConfigDrive.h``; defaults to the firmware
+        header resolved relative to this module (independent of the cwd).
     :return: the parsed float value, in the header's own units.
     :raises OSError: when ``config_path`` cannot be read.
     :raises ValueError: when no matching declaration is found.
@@ -74,8 +76,8 @@ def parse_config_float(name: str, config_path: Path = DEFAULT_CONFIG_H_PATH) -> 
     except OSError as exc:
         raise OSError(
             f"Cannot parse '{name}': firmware header at {config_path} is "
-            f"unreadable ({exc}). Config.h is the single source of truth for the "
-            f"offline tools' chassis constants (issue #44); there is no fallback "
+            f"unreadable ({exc}). ConfigDrive.h is the single source of truth for "
+            f"the offline tools' chassis constants (issue #44); there is no fallback "
             f"literal."
         ) from exc
 
