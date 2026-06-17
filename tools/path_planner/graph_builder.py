@@ -134,6 +134,32 @@ def directed_edge_heading(graph: "nx.DiGraph", u: str, v: str) -> float:
     return float(graph[u][v]["heading_deg"])
 
 
+def next_hop_is_projection(graph: "nx.DiGraph", u, v) -> bool:
+    """Return True iff the directed edge ``u -> v`` exists and is a PROJECTION.
+
+    The single shared predicate for the BLIND->PROJECTION auto-seek rule: a
+    blind hop that FEEDS a projection edge seeks a line first to re-anchor
+    before the dead-reckoned slide.  The compiler, the sim, and the validator
+    each need the "is the NEXT hop a projection?" peek; centralizing it here
+    keeps the three from drifting in shape (the firmware mirrors this as
+    ``PathTracker::_nextHopIsProjection``).
+
+    Tolerant of a *degenerate* peek so callers need not special-case it: a
+    ``None`` endpoint (this hop is the final/goal hop, no next-next), a
+    self-loop (``u == v``), or a missing edge all return ``False`` -- the same
+    "no auto rule" answer the firmware's bounds-guarded ``getEdge`` degrades
+    to, never a ``KeyError``.
+
+    :param graph: directed graph returned by :func:`build_graph`.
+    :param u:     source node of the peeked next hop (or ``None``).
+    :param v:     destination of the peeked next hop (or ``None``).
+    :return:      True only for a real ``u -> v`` PROJECTION edge.
+    """
+    if u is None or v is None or u == v or not graph.has_edge(u, v):
+        return False
+    return graph.edges[u, v]["type"] == EDGE_PROJECTION
+
+
 def inflate_obstacles(
     obstacles: Iterable[Tuple[float, float, float, float, str]],
     robot_radius_cm: float,

@@ -99,7 +99,12 @@ from tools.path_planner.compiler import (
     normalize_turn,
 )
 from tools.path_planner import pipeline_config as _pipeline_config
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import (
+    EDGE_BLIND,
+    EDGE_LINE,
+    EDGE_PROJECTION,
+    next_hop_is_projection,
+)
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
@@ -1239,18 +1244,11 @@ class PathTrackerSim:
                 # ``find_pivot_turn``: ``None`` (this blind hop IS the final/goal
                 # hop) or a self-loop means no next-next edge, so no auto rule.
                 next_after_blind = self._next_hop[nxt][goal_name]
-                if next_after_blind is None or next_after_blind == nxt:
-                    next_hop_is_projection = False
-                else:
-                    next_hop_is_projection = (
-                        self._graph.edges[nxt, next_after_blind]["type"]
-                        == EDGE_PROJECTION
-                    )
                 auto_rule_active = (
                     getattr(
                         self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True
                     )
-                    and next_hop_is_projection
+                    and next_hop_is_projection(self._graph, nxt, next_after_blind)
                 )
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,

@@ -261,10 +261,19 @@ def _build_authored_graph(field_data):
         # `pre_turn_mode` before this runs, but narrowing the payload means a
         # stray legacy key can never reach `_extract_directional_attrs` and
         # crash on `int("left")` even if this helper is ever called on
-        # unvalidated data.
+        # unvalidated data. ``stop_at_line`` is forwarded too: it is a per-edge
+        # seek trigger the pivot regime classification reads (a seeking blind
+        # leg is sensor-terminated, exempt from the over-travel trim), and lands
+        # on the edge as ``stop_at_line_override``.
         geometry_options = {
             key: entry[key]
-            for key in ("distance_cm", "heading_deg", "primitive_mode", "direction")
+            for key in (
+                "distance_cm",
+                "heading_deg",
+                "primitive_mode",
+                "direction",
+                "stop_at_line",
+            )
             if key in entry
         }
         _emit_directed_pair(
@@ -320,10 +329,16 @@ def _validate_pivot_turns(field_data) -> None:
        by the one canonical :func:`tools.path_planner.compiler.normalize_turn`
        (the same normalizer the planner's ``build_pivot_turns`` emits with);
     3. classifies each side's edge into a regime -- ``"line"`` (true LINE,
-       overshoot-budget-bearing), ``"sensor"`` (a BLIND edge whose effective
-       mode is STOP_AT_LINE -- self-corrects, no trim, no budget), or
-       ``"distance"`` (plain BLIND / PROJECTION -- dead-reckoned, where the
-       trim actually bites);
+       overshoot-budget-bearing), ``"sensor"`` (a BLIND edge that SEEKS a line
+       at runtime -- via the legacy STOP_AT_LINE tag, a per-edge ``stop_at_line``
+       override of ON, or the BLIND->PROJECTION auto-rule on the incoming leg --
+       self-corrects, no trim, no budget), or ``"distance"`` (a non-seeking
+       BLIND / any PROJECTION -- dead-reckoned, where the trim actually bites).
+       The seek is decided by the one shared
+       :func:`tools.path_planner.sim.runtime.resolve_stop_at_line` resolver, not
+       re-derived. The outgoing leg's auto-rule is goal-relative (the hop after
+       ``w``) and not visible per-triple, so it is treated conservatively as
+       non-seeking;
     4. computes the single-wheel over-travel
        ``delta = compute_pivot_compensation(theta, track_cm)`` (issue #44
        closed form -- reused, not re-derived); and
@@ -393,11 +408,28 @@ def _validate_pivot_turns(field_data) -> None:
         EDGE_LINE,
         EDGE_PROJECTION,
         directed_edge_heading,
+        next_hop_is_projection,
     )
-    from tools.path_planner.pipeline_config import PIPELINE_CONFIG, BlindMode
+    from tools.path_planner.pipeline_config import (
+        PIPELINE_CONFIG,
+        BlindMode,
+        StopAtLineMode,
+    )
     from tools.path_planner.planner import (
         compute_pivot_compensation,
         parse_track_cm_from_config,
+    )
+    # The ONE seek resolver (+ its enums and the chassis board count) the
+    # compiler, the sim, and the firmware all share -- so a BLIND pivot leg is
+    # classified seek-vs-deadreckon identically to runtime rather than by a
+    # re-derived ladder that could drift. Deferred like the compiler's own use:
+    # ``sim.runtime`` imports from ``compiler`` at module load, so a top-level
+    # import here would close a cycle.
+    from tools.path_planner.sim.runtime import (
+        LINE_BOARD_COUNT,
+        Direction,
+        StopAtLine,
+        resolve_stop_at_line,
     )
 
     track_cm = parse_track_cm_from_config()
@@ -423,39 +455,73 @@ def _validate_pivot_turns(field_data) -> None:
     # _build_authored_graph). All directed-edge geometry comes from here.
     graph = _build_authored_graph(field_data)
 
+    # Field-wide auto-seek toggle (default ON): a blind hop that feeds a
+    # PROJECTION seeks a line first. Read once; the per-leg auto-rule below ANDs
+    # it with the "feeds a projection?" peek.
+    auto_seek_enabled = getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+
     def _edge_attrs(a: str, b: str):
-        """Return the directed edge's (type, distance_cm, primitive_mode) or None."""
+        """Return (type, distance_cm, primitive_mode, stop_at_line_override) or None."""
         if not graph.has_edge(a, b):
             return None
         data = graph[a][b]
-        return data["type"], float(data["distance_cm"]), data.get("primitive_mode")
+        return (
+            data["type"],
+            float(data["distance_cm"]),
+            data.get("primitive_mode"),
+            data.get("stop_at_line_override"),
+        )
 
-    def _regime(edge_type, primitive_mode) -> str | None:
+    def _regime(edge_type, primitive_mode, stop_override, auto_rule_active) -> str | None:
         """Classify a directed edge: 'line', 'sensor', 'distance', or None.
 
         ``line``     -- a true LINE edge: re-anchors on the junction line; its
                         incoming trim is bounded by the LINE overshoot budget.
-        ``sensor``   -- a BLIND edge whose EFFECTIVE mode is STOP_AT_LINE
-                        (review fix 1: an absent override inherits
-                        ``PIPELINE_CONFIG.blind``, so a no-override BLIND classifies
-                        sensor when the pipeline default is STOP_AT_LINE). Self-
-                        corrects on the line: takes no trim, and is NOT subject to
-                        the overshoot budget (review fix 3).
-        ``distance`` -- plain BLIND or PROJECTION: dead-reckoned; the trim bites.
+        ``sensor``   -- a BLIND edge that SEEKS a line at runtime, so it self-
+                        corrects: takes no trim, and is NOT subject to the
+                        overshoot budget. A blind hop seeks when ANY trigger
+                        fires -- a per-edge ``stop_at_line`` override of ON, the
+                        legacy ``BlindMode.STOP_AT_LINE`` tag (incl. a
+                        no-override edge inheriting a STOP_AT_LINE pipeline
+                        default), or the BLIND->PROJECTION auto-rule
+                        (``auto_rule_active``). The decision is the ONE shared
+                        :func:`resolve_stop_at_line` resolver -- the same
+                        precedence ladder the compiler / sim / firmware run --
+                        never re-derived here, so the validator can never drift
+                        from what the robot actually does.
+        ``distance`` -- a non-seeking BLIND edge, or any PROJECTION edge:
+                        dead-reckoned; the trim bites.
         ``None``     -- an unclassifiable edge type (unsupported combo).
+
+        Pivots are FRONT-only in v1 (reverse pivots are #54), so the seek is
+        resolved with ``Direction.FRONT`` -- a front board always faces travel,
+        so ``LINE_BOARD_COUNT`` never suppresses it.
         """
         if edge_type == EDGE_LINE:
             return "line"
         if edge_type == EDGE_PROJECTION:
             return "distance"
         if edge_type == EDGE_BLIND:
-            # Review fix 1: a BLIND edge with no per-edge override inherits
-            # PIPELINE_CONFIG.blind. Classify on the EFFECTIVE mode so a
-            # no-override BLIND under a STOP_AT_LINE pipeline default is sensor.
-            effective = primitive_mode if isinstance(primitive_mode, BlindMode) else PIPELINE_CONFIG.blind
-            if effective == BlindMode.STOP_AT_LINE:
-                return "sensor"
-            return "distance"
+            edge_mode = (
+                primitive_mode
+                if isinstance(primitive_mode, BlindMode)
+                else PIPELINE_CONFIG.blind
+            )
+            edge_override = (
+                stop_override
+                if isinstance(stop_override, StopAtLineMode)
+                else StopAtLineMode.DEFAULT
+            )
+            seek, _motion_mode = resolve_stop_at_line(
+                StopAtLine.AUTO,
+                edge_override,
+                edge_mode,
+                PIPELINE_CONFIG.blind,
+                Direction.FRONT,
+                LINE_BOARD_COUNT,
+                auto_rule_active,
+            )
+            return "sensor" if seek else "distance"
         return None
 
     # First pass: per-triple geometry + collect each triple's delta keyed by
@@ -522,8 +588,8 @@ def _validate_pivot_turns(field_data) -> None:
                 f"('{v}','{w}') that is not authored -- add it to "
                 f"LINE_SEGMENTS / BLIND_EDGES / EDGES or fix the triple."
             )
-        in_type, in_distance, in_primitive = in_attrs
-        out_type, out_distance, out_primitive = out_attrs
+        in_type, in_distance, in_primitive, in_stop_override = in_attrs
+        out_type, out_distance, out_primitive, out_stop_override = out_attrs
 
         # FRONT-only: reject authored REAR on either pivot-adjacent leg ------
         # (review fix 4 / FRONT-only; reverse pivots are #54). Check the exact
@@ -561,8 +627,17 @@ def _validate_pivot_turns(field_data) -> None:
             )
 
         # 2. Unsupported incoming x outgoing combo --------------------------
-        in_regime = _regime(in_type, in_primitive)
-        out_regime = _regime(out_type, out_primitive)
+        # The INCOMING blind leg's auto-seek rule is knowable here: its
+        # continuation toward the pivot IS the outgoing leg ``v -> w``, so it
+        # seeks (re-anchors) when that outgoing leg is a PROJECTION. The
+        # OUTGOING leg's auto-rule depends on the hop AFTER ``w`` -- chosen by
+        # the route per goal, not visible in this per-triple check -- so it is
+        # left False: conservative, since assuming dead-reckon never validates a
+        # real over-travel away (a v->w blind the author KNOWS will seek should
+        # carry an explicit ``stop_at_line: "on"``, which IS honored below).
+        in_auto_rule = auto_seek_enabled and next_hop_is_projection(graph, v, w)
+        in_regime = _regime(in_type, in_primitive, in_stop_override, in_auto_rule)
+        out_regime = _regime(out_type, out_primitive, out_stop_override, False)
         if in_regime is None or out_regime is None:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an unsupported "

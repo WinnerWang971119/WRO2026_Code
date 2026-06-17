@@ -63,7 +63,12 @@ from typing import Any, List, Optional, Tuple, Union
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import (
+    EDGE_BLIND,
+    EDGE_LINE,
+    EDGE_PROJECTION,
+    next_hop_is_projection,
+)
 
 ACT_TURN_REL = "turn_relative"
 ACT_FOLLOW_INT = "follow_line_to_intersection"
@@ -284,21 +289,18 @@ def compile_path(
         # blind hop that FEEDS a projection edge seeks a line first to
         # re-anchor localization before the dead-reckoned slide.
         #
-        # ``path[i+2]`` is valid only when the path was produced by the
-        # NEXT_HOP Dijkstra table (as it always is here and in
-        # PathTrackerSim/CTPS).  The real robot uses the same NEXT_HOP-table
-        # peek at runtime, so this offline peek must stay consistent with that:
-        # never hand-construct a path that skips NEXT_HOP nodes or this guard
-        # will fire incorrectly.  The ``i + 2 < len(path)`` bound mirrors the
-        # sim's ``None``/self-loop short-circuit: it is False on the last /
-        # second-last hop, so a final blind hop never indexes past the end.
-        next_hop_is_projection = (
-            i + 2 < len(path)
-            and graph.edges[path[i + 1], path[i + 2]]["type"] == EDGE_PROJECTION
-        )
+        # ``path[i+2]`` is the destination of that next hop -- valid only when
+        # the path was produced by the NEXT_HOP Dijkstra table (as it always is
+        # here and in PathTrackerSim/CTPS); never hand-construct a path that
+        # skips NEXT_HOP nodes or the peek fires incorrectly.  Past the end
+        # (final / second-last hop) there is no next-next, so pass ``None``;
+        # ``next_hop_is_projection`` (the one shared predicate the sim and
+        # firmware also call) absorbs the ``None`` / self-loop / missing-edge
+        # guard, so the three peeks stay byte-identical.
+        next_after = path[i + 2] if i + 2 < len(path) else None
         auto_rule_active = (
             getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
-            and next_hop_is_projection
+            and next_hop_is_projection(graph, path[i + 1], next_after)
         )
 
         direction = resolve_direction(
