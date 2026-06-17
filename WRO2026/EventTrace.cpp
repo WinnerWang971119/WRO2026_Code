@@ -7,6 +7,8 @@
 #include "EventTrace.h"
 
 #include <MatrixMiniR4.h>    // MiniR4.OLED + WHITE color macro
+#include <math.h>            // sqrtf
+#include <stdio.h>           // snprintf
 #include <string.h>          // strncpy, memset
 
 #include "Drive.h"
@@ -101,6 +103,31 @@ void EventTraceClass::update()
     _prevTurnDone = doneNow;
 
     // -----------------------------------------------------------------------------------------
+    // Offset magnitude — change-throttled OLED event (does NOT push on every tick).
+    //
+    // Rounds the 2-D Euclidean magnitude to whole centimetres and compares against the last
+    // value shown. An event is pushed ONLY when the rounded value differs, so a stationary
+    // chassis never floods the 4-slot ring. The `sqrtf` + cast to `int16_t` is the only
+    // math; `getOffsetFromNode()` is a pure accessor with no I/O.
+    //
+    // Display granularity: 1 cm. Fine-grained enough to show a hand-push on the bench;
+    // coarse enough that vibration / sensor noise does not spam the ring. Intentionally NOT
+    // a Config knob — this is a presentation detail, not a tunable control parameter.
+    // -----------------------------------------------------------------------------------------
+    {
+        const Offset2D  o      = Localization.getOffsetFromNode();
+        const float     mag    = sqrtf(o.x * o.x + o.y * o.y);
+        const int16_t   magCm  = static_cast<int16_t>(mag);    // truncate to whole cm
+        if (magCm != _lastShownOffsetCm)
+        {
+            char label[MAX_LINE_LEN];
+            snprintf(label, sizeof(label), "OFF %d", static_cast<int>(magCm));
+            pushEvent(label);
+            _lastShownOffsetCm = magCm;
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
     // Heartbeat: periodic status line on Serial so the operator always sees liveness.
     // -----------------------------------------------------------------------------------------
     _emitHeartbeat();
@@ -140,6 +167,12 @@ void EventTraceClass::_emitHeartbeat()
     {
         Serial.print(F("?"));
     }
+    // Pure accessor — no I/O. Offset magnitude in cm (one decimal place) surfaces how far
+    // the chassis has been hand-driven from its last anchored node.
+    const Offset2D off    = Localization.getOffsetFromNode();
+    const float    offMag = sqrtf(off.x * off.x + off.y * off.y);
+    Serial.print(F(" off="));
+    Serial.print(offMag, 1);
     Serial.print(F(" node="));
     Serial.println(name);
 }
