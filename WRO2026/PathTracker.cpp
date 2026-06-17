@@ -312,6 +312,7 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
         case Fault::BAD_NODE:            return "BAD";
         case Fault::DRAIN_TIMEOUT:       return "DRN";
         case Fault::REVERSE_UNAVAILABLE: return "REV";
+        case Fault::OFF_NODE:            return "OFN";
     }
     return "??";
 }
