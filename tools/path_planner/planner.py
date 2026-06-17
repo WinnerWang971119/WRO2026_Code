@@ -89,22 +89,25 @@ NextHopTable = Dict[str, Dict[str, Optional[str]]]
 # -- chassis track (single-sourced from the firmware header) ------------------
 
 # The firmware owns the one true chassis track width as
-# ``constexpr float TRACK_MM`` in ``WRO2026/Config.h``. We parse it out of that
-# header at build time rather than mirroring a literal here, so the planner can
-# never drift from the value the robot actually drives with (issue #44: the old
-# hard-coded 15.0 cm literal was stale -- the header says 180 mm = 18 cm). The
-# parse is delegated to the shared, anchored ``config_parse.parse_config_float``
-# so the planner and validator read the header the same way.
+# ``constexpr float TRACK_MM`` in ``WRO2026/config/ConfigDrive.h``. We parse it
+# out of that header at build time rather than mirroring a literal here, so the
+# planner can never drift from the value the robot actually drives with (issue
+# #44: the old hard-coded 15.0 cm literal was stale -- the header says 180 mm =
+# 18 cm). The parse is delegated to the shared, anchored
+# ``config_parse.parse_config_float`` so the planner and validator read the
+# header the same way.
 
 # ``planner.py`` lives at ``<repo>/tools/path_planner/planner.py``; the
-# firmware header lives at ``<repo>/WRO2026/Config.h``. Resolve it relative
-# to this file (three parents up to the repo root) so the lookup is
+# firmware header lives at ``<repo>/WRO2026/config/ConfigDrive.h``. Resolve it
+# relative to this file (three parents up to the repo root) so the lookup is
 # independent of the caller's current working directory.
-_CONFIG_H_PATH = Path(__file__).resolve().parents[2] / "WRO2026" / "Config.h"
+_CONFIG_H_PATH = (
+    Path(__file__).resolve().parents[2] / "WRO2026" / "config" / "ConfigDrive.h"
+)
 
 
 def parse_track_cm_from_config(config_path: Path = _CONFIG_H_PATH) -> float:
-    """Parse ``Config::TRACK_MM`` from ``WRO2026/Config.h`` and return cm.
+    """Parse ``Config::TRACK_MM`` from ``WRO2026/config/ConfigDrive.h`` and return cm.
 
     The firmware header is the single source of truth for the chassis
     track width. This reads ``constexpr float TRACK_MM = <value>f;`` out
@@ -115,9 +118,9 @@ def parse_track_cm_from_config(config_path: Path = _CONFIG_H_PATH) -> float:
     fallback, because a wrong track width silently mis-compensates every
     pivot (issue #44).
 
-    :param config_path: path to ``Config.h``. Defaults to the firmware
-        header resolved relative to this module's location (independent of
-        the caller's working directory).
+    :param config_path: path to ``config/ConfigDrive.h``. Defaults to the
+        firmware header resolved relative to this module's location (independent
+        of the caller's working directory).
     :return: chassis track width in centimetres (``TRACK_MM / 10``).
     :raises OSError: when ``config_path`` cannot be read (missing,
         permission denied, or a directory).
@@ -254,10 +257,10 @@ def build_pivot_turns(
         :func:`tools.path_planner.graph_builder.build_graph`. Read-only.
     :param track_cm: chassis track width in centimetres, forwarded to
         :func:`compute_pivot_compensation`. ``None`` (the default) parses
-        ``Config::TRACK_MM`` from ``WRO2026/Config.h`` via
+        ``Config::TRACK_MM`` from ``WRO2026/config/ConfigDrive.h`` via
         :func:`parse_track_cm_from_config` -- the single source of truth
         (issue #44). Bypass callers (e.g. CTPS) pass it explicitly so no
-        new hard Config.h dependency is baked in.
+        new hard ConfigDrive.h dependency is baked in.
     :param pivot_turns: the ``(u, v, w)`` triples to resolve. ``None`` (the
         default) reads the module-global
         :data:`tools.path_planner.field_data.PIVOT_TURNS` -- the existing
@@ -270,7 +273,7 @@ def build_pivot_turns(
         default, or ``pivot_turns`` order when supplied). Empty when no
         pivots are declared (the real field today).
     :raises FileNotFoundError: when ``track_cm`` is ``None`` and
-        ``WRO2026/Config.h`` cannot be found (no stale-literal fallback).
+        ``WRO2026/config/ConfigDrive.h`` cannot be found (no stale-literal fallback).
     """
     # Choose the triples source. ``None`` reads the module-global
     # field_data.PIVOT_TURNS (the existing behavior); a caller built against a
