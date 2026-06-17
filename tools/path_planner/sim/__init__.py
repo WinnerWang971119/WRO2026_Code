@@ -36,15 +36,25 @@ in two ways:
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
     LocalizationSim,
+    Offset2D,
+    OffMapFaultError,
+    OffMapGate,
     PathTrackerSim,
+    ReturnAction,
     UnreachableGoalError,
+    resolve_return_action,
     walk_next_hop,
 )
 
 __all__ = [
     "VirtualChassis",
     "LocalizationSim",
+    "Offset2D",
+    "OffMapFaultError",
+    "OffMapGate",
     "PathTrackerSim",
+    "ReturnAction",
     "UnreachableGoalError",
+    "resolve_return_action",
     "walk_next_hop",
 ]
