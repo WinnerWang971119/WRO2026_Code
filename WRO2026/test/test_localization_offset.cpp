@@ -18,6 +18,11 @@
 //   TC6  (#5)   — a failed IMU read mid-drive deposits nothing (no stale-heading
 //                  corruption); the motion carries to the next good-read tick.
 //   TC7  (#3)   — no live IMU read while the nav gate is closed (mission hot path).
+//   TC8  (P2)   — an idle re-zero while the gate is already open resets the integrator
+//                  and resumes accumulation in the fresh frame.
+//   TC9  (AC7)  — declarePosition(node) sets the current node AND clears the offset
+//                  (re-snapshotting baselines); the Localization-level core of the
+//                  operator-recovery re-anchor (PR1b, T9/T10).
 //
 // HOW THE SUT IS LINKED (see CMakeLists.txt `test_localization_offset`):
 //   - `Localization.cpp` is compiled UNCHANGED. Its `#include "Drive.h"` is a quote
@@ -396,6 +401,74 @@ int main()
         Localization.update();
         check(approx(offsetMag(Localization.getOffsetFromNode()), 10.0f, 1.0f),
               "TC8: the integrator resumes in the fresh frame after a re-zero");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC9 (AC7) — declarePosition(node) is the operator-recovery re-anchor: it sets the
+    // current node to the declared id AND clears the accumulated offset, re-snapshotting the
+    // integrator baselines exactly like a sensed arrival. This is the Localization-level core
+    // of AC7 ("the operator declares the chassis back on a node to recover from an OFF_NODE
+    // fault"). Asserted here:
+    //   (a) after accumulating a real offset, declarePosition(node) leaves getCurrentNode()
+    //       == the declared node (NOT the prior node);
+    //   (b) getOffsetFromNode() reads ~0 immediately (offset cleared, like clearOffset());
+    //   (c) a subsequent idle tick under the OPEN gate stays ~0 — the baselines were
+    //       re-snapshotted, so the very next update() integrates a zero delta. This is the
+    //       arrival-tick-phantom-kill property (same as TC3 for onIntersection), proving
+    //       declarePosition re-anchored the integrator and not just the node id.
+    //
+    // The Mission-layer half of AC7 — the idle-OR-faulted guard and the
+    // PathTracker.clearFault() that Mission issues alongside declarePosition — is NOT
+    // covered here: declarePosition deliberately performs the low-level write ONLY (it never
+    // reaches UP into PathTracker, preserving module layering), and exercising the Mission
+    // layer would drag in Mission.cpp's heavy deps (EventTrace / the MiniR4 global / the task
+    // queue). That half is covered by integration / the firmware compile.
+    //
+    // Tolerance: post-declare the integrator delta is exactly zero (baselines == current
+    // readings), so the offset is bit-exact zero; a tiny epsilon guards float noise — same
+    // rationale as TC3.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        mmL.mockYawDeg = 0.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC9: zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(false);    // open the integrate gate (hand-drive recovery).
+        Localization.update();               // settle baselines at the post-zero pose.
+
+        // Hand-drive 30 cm forward and integrate -> a real, non-zero offset builds up.
+        const int32_t driveDeg = (int32_t) cmToEncDeg(30.0f);
+        Drive.mockAdvanceEncoders(driveDeg, driveDeg);
+        Localization.update();
+        check(offsetMag(Localization.getOffsetFromNode()) > 1.0f,
+              "TC9: offset is non-zero after a hand-drive (pre-declare)");
+
+        // Operator declares the chassis on a DIFFERENT node than the current one, recovering
+        // from the off-node excursion. Pick a node id distinct from the current node so the
+        // (a) node-set assertion is meaningful (not a no-op coincidence).
+        const uint8_t currentBefore = Localization.getCurrentNode();
+        const uint8_t declaredNode  = (uint8_t) (currentBefore == 1 ? 2 : 1);
+        Localization.declarePosition(declaredNode);
+
+        // (a) the declared node id is now the current node.
+        check(Localization.getCurrentNode() == declaredNode,
+              "TC9: declarePosition sets the current node to the declared id");
+
+        // (b) the offset is cleared immediately by the re-anchor.
+        const Offset2D afterDeclare = Localization.getOffsetFromNode();
+        check(approx(offsetMag(afterDeclare), 0.0f, 1e-4f),
+              "TC9: declarePosition clears the accumulated offset (reads ~0)");
+        check(approx(afterDeclare.thetaDeg, 0.0f, 1e-4f),
+              "TC9: declarePosition clears the heading-delta offset too");
+
+        // (c) the next idle tick (encoders/yaw unchanged) stays ~0 — baselines were
+        //     re-snapshotted, so no arrival-tick phantom equal to the pre-declare motion.
+        Localization.update();
+        const Offset2D afterTick = Localization.getOffsetFromNode();
+        check(approx(offsetMag(afterTick), 0.0f, 1e-4f),
+              "TC9: offset stays ~0 on the tick after declarePosition (baselines re-snapshotted)");
+        check(approx(afterTick.thetaDeg, 0.0f, 1e-4f),
+              "TC9: thetaDeg stays ~0 on the tick after declarePosition");
     }
 
     if (g_failures == 0)
