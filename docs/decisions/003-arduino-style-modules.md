@@ -19,7 +19,7 @@ The Matrix R4 runs C++ on a microcontroller with limited RAM, no operating syste
 - New module = `Foo.h` + `Foo.cpp` + `extern FooClass Foo` + `FooClass Foo;` in the .cpp.
 - All state lives in the singleton instance or in module-private static.
 - Long operations decompose into state machines driven by `update()`.
-- Only `delay()` sites permitted: command-time orchestration (`Drive::_drainBlocking`, `Drive::calibrateMotorBias`, `WROLineArray::calibrate`) — never inside a cooperative tick.
+- Only `delay()` / blocking sites permitted: command-time orchestration (`Drive::_drainBlocking`, `Drive::calibrateMotorBias`, `WROLineArray::calibrate`, `Vision::readMosaic`) — never inside a cooperative tick. Each blocking site must spin the registered `cooperativeTick` callback so OLED/heartbeat/sensors keep running during the wait.
 
 ## Trigger to revisit
 

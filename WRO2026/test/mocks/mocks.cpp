@@ -19,6 +19,12 @@
 uint32_t g_mockMillis = 0;
 MockSerial Serial;
 
+// Streaming `Serial1` (UART RX) mock consumed by `Vision.cpp`, plus the per-`delay()`
+// tick counter (TC18). Both are declared `extern` in the mock `Arduino.h`; this TU is
+// their single definition, alongside `Serial` / `g_mockMillis`.
+MockHardwareSerial Serial1;
+uint32_t           mockTickCount = 0;
+
 // ---------------------------------------------------------------------------
 // Module singletons — match the `extern` declarations in each mock header.
 // ---------------------------------------------------------------------------

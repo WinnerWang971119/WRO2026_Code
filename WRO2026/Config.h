@@ -1110,10 +1110,11 @@ namespace Config
     constexpr uint16_t BOOT_FAIL_BEEP_MS = 2000;
 }    // namespace Config
 
-// Manipulator config + its validation checks (split out per ADR-031 / Issue #39).
-// ConfigChecks.h MUST be included LAST — it references both the manipulator symbols
-// (from ConfigManipulator.h) and the drivetrain symbols (MOTOR_LEFT_ID/RIGHT_ID, above).
+// Per-domain config splits (ADR-031 / Issue #39): each sub-header reopens namespace Config
+// and adds its own symbols. ConfigChecks.h MUST be included LAST — it references symbols
+// from all sub-headers AND the drivetrain symbols (MOTOR_LEFT_ID/RIGHT_ID, above).
 #include "ConfigManipulator.h"
+#include "ConfigVision.h"
 #include "ConfigChecks.h"
 
 #endif    // CONFIG_H

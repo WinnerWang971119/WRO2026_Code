@@ -23,7 +23,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 ### Mission-layer
 
-- [ADR-006 — Read the mosaic with a camera at a line-anchored stop](./docs/decisions/006-mosaic-via-camera.md) (Phase 3)
+- [ADR-006 — Read the 4×3 mosaic with a camera at a line-anchored stop](./docs/decisions/006-mosaic-via-camera.md) (Refined by ADR-037)
 - [ADR-007 — Manipulator exposes control primitives only until the mechanism is built](./docs/decisions/007-manipulator-control-primitives-only.md) (**Superseded by ADR-032**)
 - [ADR-008 — Greedy score-per-second scheduling + 2-minute time guard](./docs/decisions/008-mission-scheduling-and-time-guard.md) (Phase 4)
 - [ADR-009 — Three named failure modes get explicit bounded recovery](./docs/decisions/009-failure-recovery-first-class.md) (Phase 4)
@@ -48,15 +48,16 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-034 — `.flat()` is the named opt-out from the default trapezoidal profile](./docs/decisions/034-flat-opt-out-tshape.md)
 - [ADR-035 — Two-sided pivot compensation: `delta = (T/2)*tan(theta/2)` stored on the pivot edge; no global `EDGES` mutation](./docs/decisions/035-two-sided-pivot-compensation.md) (**Superseded by ADR-036**)
 - [ADR-036 — Per-turn pivot compensation: a pivot is a 3-node turn `(u,v,w)`; sparse `PivotTurn[]` table; one firmware lookup resolves wheel + trim](./docs/decisions/036-per-turn-pivot-compensation.md)
-- [ADR-037 — Blind→projection auto stop-at-line: auto-rule via `auto_rule_active`; per-edge `StopAtLineMode` override; field-sourced `Routes::BLIND_PROJECTION_AUTO_SEEK` toggle; soft-fallback default off](./docs/decisions/037-blind-projection-auto-stop-at-line.md) (soft-fallback sub-decision superseded by ADR-038)
-- [ADR-038 — Blind→projection auto stop-at-line fires a normal seek (default margin); a missed line is a hard `DRIVE_FAULT`; the soft-fallback (`soft_fallback`, `_activeSoftFallback`, `STOP_AT_LINE_FAULT_FALL_BACK`) is removed; come-back recovery deferred](./docs/decisions/038-stop-at-line-normal-seek-no-soft-fallback.md)
+- [ADR-038 — Blind→projection auto stop-at-line: auto-rule via `auto_rule_active`; per-edge `StopAtLineMode` override; field-sourced `Routes::BLIND_PROJECTION_AUTO_SEEK` toggle; soft-fallback default off](./docs/decisions/038-blind-projection-auto-stop-at-line.md) (soft-fallback sub-decision superseded by ADR-039)
+- [ADR-039 — Blind→projection auto stop-at-line fires a normal seek (default margin); a missed line is a hard `DRIVE_FAULT`; the soft-fallback (`soft_fallback`, `_activeSoftFallback`, `STOP_AT_LINE_FAULT_FALL_BACK`) is removed; come-back recovery deferred](./docs/decisions/039-stop-at-line-normal-seek-no-soft-fallback.md)
 
 ### Perception
 
 - [ADR-019 — Custom 8-channel `WROLineArray` replaces vendor `MatrixLineTracer`](./docs/decisions/019-8channel-custom-line-sensor.md)
 - [ADR-020 — Freeze LineFollower PID output during any intersection](./docs/decisions/020-junction-pid-freeze.md)
-- [ADR-021 — Camera is the sole color sensor — no dedicated `ColorReader` module](./docs/decisions/021-camera-as-sole-color-sensor.md) (Phase 4)
+- [ADR-021 — Camera is the sole color sensor — no dedicated `ColorReader` module](./docs/decisions/021-camera-as-sole-color-sensor.md) (Refined by ADR-037)
 - [ADR-024 — Bidirectional line following — runtime auto-direction + 3-layer override](./docs/decisions/024-bidirectional-line-following.md)
+- [ADR-037 — HUE12 Vision capture-once latch + on-device hue classification](./docs/decisions/037-hue12-vision-capture-once.md)
 
 ### Tooling & testing
 
@@ -68,11 +69,11 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 31 | 001, 002, 003, 004, 005, 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037 (soft-fallback sub-decision superseded by 038), 038 |
+| Implemented | 34 | 001, 002, 003, 004, 005, 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031, 032, 033, 034, 036, 037, 038 (soft-fallback sub-decision superseded by 039), 039 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
-| Pending implementation | 2 | 006 (Phase 4 camera selection), 021 (Phase 4 camera-as-sole-color-sensor) |
+| Pending implementation | 0 | — |
 | Deferred | 0 | — |
-| Superseded | 2 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done); 035 (superseded by ADR-036 — per-turn pivot model replaces the per-edge `pivot_trim_cm` field). Sub-decision supersessions (parent ADR stays Implemented): ADR-010 supersedes the Phase 0 "no logging at all" stance; ADR-033 supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision; ADR-038 supersedes the ADR-037 soft-fallback sub-decision (the auto-rule / per-edge override / toggle survive). |
+| Superseded | 2 | 007 (superseded by ADR-032 — manipulator verb-level API now that CAD is done); 035 (superseded by ADR-036 — per-turn pivot model replaces the per-edge `pivot_trim_cm` field). Sub-decision supersessions (parent ADR stays Implemented): ADR-010 supersedes the Phase 0 "no logging at all" stance; ADR-033 supersedes the ADR-025 "Python mirror of each task body" sim-parity sub-decision; ADR-039 supersedes the ADR-038 soft-fallback sub-decision (the auto-rule / per-edge override / toggle survive). |
 
 ## Conventions
 

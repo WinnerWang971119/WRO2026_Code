@@ -1,11 +1,11 @@
-# ADR-038: Blind→projection auto stop-at-line fires a normal seek — no soft-fallback
+# ADR-039: Blind→projection auto stop-at-line fires a normal seek — no soft-fallback
 
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 3)
 
 ## Rule
 
-The blind→projection auto-seek (ADR-037) fires a **normal** `Drive.stopAtLine`: it
+The blind→projection auto-seek (ADR-038) fires a **normal** `Drive.stopAtLine`: it
 runs to the default margin (`expected + Config::STOP_AT_LINE_MAX_MARGIN_CM`), with no
 zero-margin `setMaxDistance(distance_cm)` override. A missed line is a **hard fault** —
 `Drive` latches the no-line fault and the shared guard at the top of
@@ -63,7 +63,7 @@ which will change miss-handling from "hard fault" to "recover, then fault" once 
 
 ## See also
 
-- [ADR-037 — Blind→projection auto stop-at-line](./037-blind-projection-auto-stop-at-line.md) — the auto-rule / per-edge override / field-sourced toggle survive; this ADR supersedes only its soft-fallback sub-decision.
+- [ADR-038 — Blind→projection auto stop-at-line](./038-blind-projection-auto-stop-at-line.md) — the auto-rule / per-edge override / field-sourced toggle survive; this ADR supersedes only its soft-fallback sub-decision.
 - [ADR-027 — `Drive.stopAtLine()` re-anchors localization; arm-window rule; resolver](./027-drive-stop-at-line.md) — the seek primitive and its hard-fault-on-miss contract this aligns with.
 - `WRO2026/StopAtLinePolicy.h` — the `{seek, motionMode}` resolver this ADR restores.
 - #62 (**position-aware come-back recovery**) — the wanted overshoot recovery (carries the `LINE_NOT_FOUND` discrimination + fail-loud posture as design inputs); supersedes the recovery-debt tracker, issue #60 (closed).

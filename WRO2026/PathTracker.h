@@ -279,7 +279,7 @@ private:
     uint8_t _peekNextNextHop() const;
 
     /**
-     * @brief ADR-037 auto-rule predicate: is the hop after `_nextHop` a PROJECTION edge?
+     * @brief ADR-038 auto-rule predicate: is the hop after `_nextHop` a PROJECTION edge?
      *
      * Feeds the `autoRuleActive` input of `resolveStopAtLine(...)` on a BLIND hop —
      * a blind hop that feeds a projection edge seeks a line first to re-anchor

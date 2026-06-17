@@ -460,7 +460,7 @@ void PathTrackerClass::_drainBlocking()
 
 void PathTrackerClass::update()
 {
-    // ADR-037: a missed stop-at-line seek latches `DriveClass::Fault::LINE_NOT_FOUND`
+    // ADR-038: a missed stop-at-line seek latches `DriveClass::Fault::LINE_NOT_FOUND`
     // and `Drive.hasFault()` goes true; the shared Drive-fault guard below catches it
     // and hard-faults into `Fault::DRIVE_FAULT` (no soft fallback — a missed seek is
     // always a hard fault).
@@ -1111,7 +1111,7 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
 
 bool PathTrackerClass::_nextHopIsProjection() const
 {
-    // ADR-037 auto-rule predicate: is the hop AFTER `_nextHop` a PROJECTION edge?
+    // ADR-038 auto-rule predicate: is the hop AFTER `_nextHop` a PROJECTION edge?
     //
     // Short-circuit to `false` (no NEXT_HOP work) when the feature is compiled out
     // via `Routes::BLIND_PROJECTION_AUTO_SEEK == false`, so the auto-seek peek costs
@@ -1262,7 +1262,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
             // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
             //
-            // ADR-037 auto-rule: a blind hop that feeds a PROJECTION edge seeks a
+            // ADR-038 auto-rule: a blind hop that feeds a PROJECTION edge seeks a
             // line first to re-anchor before the marker-less projection.
             // `_nextHopIsProjection()` peeks the hop AFTER `_nextHop` toward the goal
             // and classifies its edge type (folding in the `BLIND_PROJECTION_AUTO_SEEK`
@@ -1318,7 +1318,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // `Drive.hasFault()` for the outcome.
                 const DriveMode mode = blindModeToDriveMode(sal.motionMode);
 
-                // ADR-037: a missed seek is always a hard fault — the seek uses the
+                // ADR-038: a missed seek is always a hard fault — the seek uses the
                 // Drive default max search distance (`expected +
                 // Config::STOP_AT_LINE_MAX_MARGIN_CM`); no `.setMaxDistance(...)`
                 // zero-margin override and no soft-fallback recovery. The Drive

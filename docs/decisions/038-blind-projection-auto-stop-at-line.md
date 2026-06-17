@@ -1,9 +1,9 @@
-# ADR-037: Blind→projection auto stop-at-line — auto-rule, per-edge override, field-sourced toggle, soft-fallback
+# ADR-038: Blind→projection auto stop-at-line — auto-rule, per-edge override, field-sourced toggle, soft-fallback
 
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #43, Phase 3)
 
-> **Soft-fallback sub-decision superseded by [ADR-038](./038-stop-at-line-normal-seek-no-soft-fallback.md).** The auto-rule, the per-edge `stop_at_line_override`, and the field-sourced toggle below are still in force; only the soft-fallback (`soft_fallback` output, `_activeSoftFallback` latch, `Config::STOP_AT_LINE_FAULT_FALL_BACK`) is removed — the auto-seek now fires a normal `stopAtLine` and a missed line is a hard fault.
+> **Soft-fallback sub-decision superseded by [ADR-039](./039-stop-at-line-normal-seek-no-soft-fallback.md).** The auto-rule, the per-edge `stop_at_line_override`, and the field-sourced toggle below are still in force; only the soft-fallback (`soft_fallback` output, `_activeSoftFallback` latch, `Config::STOP_AT_LINE_FAULT_FALL_BACK`) is removed — the auto-seek now fires a normal `stopAtLine` and a missed line is a hard fault.
 
 ## Rule
 

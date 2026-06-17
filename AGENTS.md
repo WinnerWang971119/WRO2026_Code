@@ -19,6 +19,7 @@ R4-side modules in `WRO2026/`:
 - `Mission` — operator DSL (`goTo`/`wait`/`print`/`beep`/`led`) with fault beep-and-flash.
 - `EventTrace` — OLED ring buffer (4 events) + edge-triggered event push + 500 ms Serial heartbeat.
 - `WROLineArray` — custom 8-channel reflectance line array over 1–2 MXColor I2C boards (drop-in for vendor `MatrixLineTracer`).
+- `Vision` — one-shot HUE12 mosaic read over Serial1, bounded-resync parser, on-R4 hue classification via `Config::HUE_BANDS`, capture-once 12-cell latch + pure getters.
 - `WROMath` / `StateMachine` — header-only helpers (StateMachine defined but not yet instantiated).
 
 Stubs awaiting Phase 3+ hardware decisions: `Manipulator.h/.cpp` (every method no-op).
