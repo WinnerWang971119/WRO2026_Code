@@ -28,4 +28,5 @@ If a perception module (camera, color sensor) ever needs to *correct* localizati
 
 - [ADR-002](./002-three-layer-mental-model.md)
 - [ADR-042](./042-operator-offset-localization.md) — amends the "never stored" clause above; adds the 2D operator-offset delta
+- [ADR-043](./043-wall-zero-reset-nodes.md) — amends the "yaw offset written only by `zeroHeadingFromCurrent`" clause above; adds `reanchorAtWall` as a new yaw/position writer
 - [ARCHITECTURE.md](../../ARCHITECTURE.md) — coding criteria checklist
