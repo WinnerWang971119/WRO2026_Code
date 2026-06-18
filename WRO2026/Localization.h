@@ -33,9 +33,9 @@
  *  - `update()` runs once per cooperative tick (after `PathTracker.update()`, so encoders are
  *    fresh and the nav-active flag is current). It integrates raw operator motion into a 2D
  *    offset-from-node while the gate is open (`!navActive && isZeroed()`); while the gate is
- *    closed it only re-snapshots the integrator baselines (no accumulation). `getHeadingDeg()`
- *    reads the IMU live; on a transient lower-MCU read failure it falls back to the last
- *    good heading instead of a `0.0`-derived garbage value (see `getHeadingDeg`).
+ *    closed it neither accumulates nor reads the IMU, re-baselining only on the closed->open edge.
+ *    `getHeadingDeg()` reads the IMU live; on a transient lower-MCU read failure it falls back to
+ *    the last good heading instead of a `0.0`-derived garbage value (see `getHeadingDeg`).
  *  - `getLastHeadingDeg()` returns that cached value with NO I/O — use it on telemetry /
  *    non-blocking paths that must not issue a bus transaction.
  */
@@ -213,9 +213,11 @@ public:
      * ONLY when BOTH hold:
      *   1. `!_navActive` — PathTracker is NOT executing a hop (the operator may be hand-driving).
      *   2. `isZeroed()`  — the world frame is bound (heading is meaningless before zeroing).
-     * When the gate is closed the offset is left untouched, but ALL three baselines
-     * (`_lastEncL`, `_lastEncR`, `_lastYawDeg`) are re-snapshotted to the current readings every
-     * tick so the first delta after the gate reopens is ~0.
+     * When the gate is closed the offset is left untouched and NO IMU read is issued; the three
+     * baselines (`_lastEncL`, `_lastEncR`, `_lastYawDeg`) are instead re-snapshotted ONCE on the
+     * closed->open EDGE (from a single live read) so the first delta after the gate reopens is ~0.
+     * This keeps a multi-second mission from issuing a blocking lower-MCU read on every cooperative
+     * tick of the hot path.
      *
      * Translation and rotation accumulate on two INDEPENDENT deadband gates (see
      * `Config::OFFSET_TRANSLATION_DEADBAND_CM` / `OFFSET_ROTATION_DEADBAND_DEG`): a pure manual
@@ -224,6 +226,9 @@ public:
      *
      * @note Call site (added by a later task) runs this once per cooperative tick AFTER
      *       `PathTracker.update()`. PR1a only integrates + exposes — nothing acts on the offset.
+     * @note On a transient lower-MCU read failure while accumulating, the tick is SKIPPED (no
+     *       deposit, baselines unadvanced) so motion is never decomposed onto a stale heading; the
+     *       deltas carry across to the next good-read tick.
      * @note Reads the lower `Drive` layer (allowed); Localization is never called UP into by Drive.
      */
     void update();
@@ -314,13 +319,34 @@ private:
     void _consumeOffset();
 
     /**
-     * @brief Re-snapshot all three integrator baselines (`_lastEncL`/`_lastEncR`/`_lastYawDeg`)
-     *        to the current `Drive` encoder + live IMU-heading readings.
+     * @brief Re-snapshot the integrator baselines: current `Drive` encoders + a caller-supplied
+     *        world heading.
      *
-     * Shared by the gate-closed branch of `update()` and by `_consumeOffset()` — the single seam
-     * that moves the per-tick delta reference to "now", so the next `update()` integrates ~0.
+     * The heading is passed in rather than read here so each caller picks its source: the
+     * gate-reopen edge in `update()` passes a LIVE read (a fresh, accurate baseline), while the
+     * arrival hook `_consumeOffset()` passes the CACHED heading (`getLastHeadingDeg()`) to avoid a
+     * blocking IMU read on the PathTracker FSM hot path. Either way the next `update()` integrates
+     * a ~0 delta.
+     *
+     * @param headingDeg World heading (degrees) to anchor `_lastYawDeg` to.
      */
-    void _snapshotBaselines();
+    void _snapshotBaselines(float headingDeg);
+
+    /**
+     * @brief Live IMU read -> world heading with explicit success reporting.
+     *
+     * Shared core of `getHeadingDeg()` and the offset integrator. Reads the raw IMU yaw via
+     * `_readImuYaw`, converts to the world frame (`normalize(imu - offset)`), and refreshes the
+     * last-good cache + stamp — but ONLY on a successful read. Returns `false` on a transient
+     * lower-MCU failure WITHOUT touching @p headingOut or the cache, so callers can choose between
+     * serving the last-good value (`getHeadingDeg`) and skipping the tick (`_integrateOffset`,
+     * whose offset has no correction path so a stale-heading deposit would be permanent).
+     *
+     * @param headingOut Set to the world heading in `[0, 360)` ONLY on a successful read.
+     * @return `true` if the live read succeeded; `false` on a transient lower-MCU failure.
+     * @note Caller must hold `_zeroed` (the world frame must be bound).
+     */
+    bool _readWorldHeading(float& headingOut) const;
 
     uint8_t _currentNode  = 0;        ///< Single source of truth for graph position.
     float   _yawOffsetDeg = 0.0f;     ///< Captured at zeroHeadingFromCurrent(); world = IMU - offset.
@@ -353,6 +379,15 @@ private:
 
     /// Pushed DOWN by PathTracker; `true` while it executes a hop. Closes the integrate gate.
     bool _navActive = false;
+
+    /**
+     * @brief Previous-tick state of the integrate gate (`!_navActive && _zeroed`).
+     *
+     * Lets `update()` re-baseline only on the closed->open EDGE instead of every closed tick, so a
+     * running mission no longer issues a blocking IMU read per cooperative tick. Reset to `false`
+     * by `begin()` so the first open tick after zeroing always re-baselines.
+     */
+    bool _gateWasOpen = false;
 };
 
 /**

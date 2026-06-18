@@ -41,11 +41,12 @@ bool LocalizationClass::begin()
     // begin() takes NO IMU/encoder read (the contract forbids touching the IMU before zeroing) —
     // the baselines reset to their defaults here, and the first update() under the closed gate
     // (!_zeroed) re-snapshots them to live readings before any accumulation can occur.
-    _offset     = Offset2D{};
-    _lastEncL   = 0;
-    _lastEncR   = 0;
-    _lastYawDeg = 0.0f;
-    _navActive  = false;
+    _offset      = Offset2D{};
+    _lastEncL    = 0;
+    _lastEncR    = 0;
+    _lastYawDeg  = 0.0f;
+    _navActive   = false;
+    _gateWasOpen = false;
     return true;
 }
 
@@ -113,18 +114,33 @@ float LocalizationClass::getHeadingDeg() const
         // do, return the start heading rather than a garbage offset-relative value.
         return Routes::START_HEADING_DEG;
     }
-    float imuYaw = 0.0f;
-    if (!_readImuYaw(imuYaw))
+    float heading = 0.0f;
+    if (!_readWorldHeading(heading))
     {
         // Transient lower-MCU timeout: a 0.0-derived heading would be wrong by up to a
         // full revolution and can flip a turn decision. Serve the last good heading
-        // instead. The cache is not refreshed, so it stays at its last valid value.
+        // instead (the cache is not refreshed on a failed read, so it stays valid).
         return _lastGoodHeadingDeg;
     }
-    const float heading = _normalize(imuYaw - _yawOffsetDeg);
-    _lastGoodHeadingDeg = heading;
-    _lastGoodHeadingMs  = millis();
     return heading;
+}
+
+bool LocalizationClass::_readWorldHeading(float& headingOut) const
+{
+    // Live IMU read -> world heading, refreshing the last-good cache + stamp ONLY on success.
+    // Returns false on a transient lower-MCU failure WITHOUT touching headingOut or the cache, so a
+    // caller can choose: serve the last-good value (getHeadingDeg) or skip the tick entirely
+    // (_integrateOffset — the offset has no correction path, so a deposit at a stale heading is a
+    // permanent error). Caller holds _zeroed; the world frame must be bound.
+    float imuYaw = 0.0f;
+    if (!_readImuYaw(imuYaw))
+    {
+        return false;
+    }
+    headingOut          = _normalize(imuYaw - _yawOffsetDeg);
+    _lastGoodHeadingDeg = headingOut;
+    _lastGoodHeadingMs  = millis();
+    return true;
 }
 
 float LocalizationClass::getLastHeadingDeg() const
@@ -176,14 +192,31 @@ void LocalizationClass::update()
     const bool gateOpen = (!_navActive) && _zeroed;
     if (gateOpen)
     {
+        if (!_gateWasOpen)
+        {
+            // Gate-reopen EDGE: re-baseline from a SINGLE live read so the first integrated delta
+            // is ~0 (discards any motion that happened while the gate was closed). This is the only
+            // heading read on the closed->open boundary — the closed branch no longer reads the IMU
+            // every tick, so a multi-second mission no longer issues a blocking lower-MCU read per
+            // cooperative tick on the hot path (and the EventTrace staleness flag works again). If
+            // the read fails, leave the gate "not yet reopened" and retry next tick rather than
+            // baselining off a stale heading, which would deposit the whole closed-period rotation
+            // as a phantom on the first integrate.
+            float heading = 0.0f;
+            if (_readWorldHeading(heading))
+            {
+                _snapshotBaselines(heading);
+                _gateWasOpen = true;
+            }
+            return;
+        }
         _integrateOffset();
         return;
     }
 
-    // Gate closed: do NOT accumulate, but keep every baseline current so that the moment the gate
-    // reopens the first per-tick delta is ~0 (no jump from motion that happened while PathTracker
-    // was driving, and no jump across the pre-zero window).
-    _snapshotBaselines();
+    // Gate closed (PathTracker driving a hop, or pre-zero): do NOT accumulate and do NOT read the
+    // IMU. Baselines are re-established at the reopen edge above, so there is no per-tick read here.
+    _gateWasOpen = false;
 }
 
 Offset2D LocalizationClass::getOffsetFromNode() const
@@ -205,10 +238,17 @@ void LocalizationClass::setNavActive(bool active)
 
 void LocalizationClass::_integrateOffset()
 {
-    // Snapshot the live heading once: both channels reference the same world-frame reading so the
-    // translation decomposition and the rotation delta are consistent for this tick. getHeadingDeg()
-    // is const and refreshes its own mutable cache, so calling it from this non-const path is fine.
-    const float heading = getHeadingDeg();
+    // Read the live world heading ONCE; both channels reference the same reading so the translation
+    // decomposition and the rotation delta are consistent for this tick. On a transient lower-MCU
+    // failure SKIP the whole tick rather than decomposing motion onto a stale heading: x/y has no
+    // correction path, so a single deposit at the wrong angle is a permanent error. Leaving the
+    // baselines unadvanced carries both channels' deltas across to the next good-read tick (the same
+    // carry-across the sub-deadband branches use), so the motion is deferred, not lost.
+    float heading = 0.0f;
+    if (!_readWorldHeading(heading))
+    {
+        return;
+    }
 
     // ---- Translation channel (gated independently of rotation) -------------------------------
     const int32_t encL = Drive.getEncL();
@@ -252,21 +292,25 @@ void LocalizationClass::_integrateOffset()
 
 void LocalizationClass::_consumeOffset()
 {
-    // Re-anchor: zero the offset and re-snapshot all three baselines to the CURRENT readings, so
-    // the next update() integrates a zero delta. This is the arrival-tick phantom kill — the
-    // baselines jump forward to "now" before the next integrate, discarding the approach motion.
+    // Re-anchor: zero the offset and re-snapshot all three baselines so the next update() integrates
+    // a zero delta. This is the arrival-tick phantom kill. The node-arrival hooks run on the hot FSM
+    // path (PathTracker::_stepFsm, right after Drive active-brakes), so anchor the yaw baseline to
+    // the CACHED heading (getLastHeadingDeg) — no blocking IMU read here. Correctness holds because
+    // arrival always happens with the gate closed (navActive while a hop runs); the gate-reopen edge
+    // re-baselines from a live read before any integrate consumes this baseline.
     _offset = Offset2D{};
-    _snapshotBaselines();
+    _snapshotBaselines(getLastHeadingDeg());
 }
 
-void LocalizationClass::_snapshotBaselines()
+void LocalizationClass::_snapshotBaselines(float headingDeg)
 {
-    // Re-anchor all three integrator baselines to the CURRENT readings. Shared by the gate-closed
-    // branch of update() and by _consumeOffset() — the single place that moves the per-tick delta
-    // reference to "now", so the next update() integrates ~0.
+    // Re-anchor all three integrator baselines to "now": current encoders + the caller-supplied
+    // world heading. The heading is passed in (not read here) so each caller picks its source — the
+    // gate-reopen edge passes a LIVE read (a fresh baseline), the arrival hook passes the CACHED
+    // heading (no blocking read on the FSM hot path). The next update() then integrates a ~0 delta.
     _lastEncL   = Drive.getEncL();
     _lastEncR   = Drive.getEncR();
-    _lastYawDeg = getHeadingDeg();
+    _lastYawDeg = headingDeg;
 }
 
 float LocalizationClass::_normalize(float deg)

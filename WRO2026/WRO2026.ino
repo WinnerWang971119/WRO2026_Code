@@ -151,9 +151,9 @@ void cooperativeTick()
     // Operator-offset integrator. MUST run unconditionally every tick (not behind
     // the cal-menu guard below): Drive ticked above so its encoder reads are fresh,
     // and PathTracker just pushed its nav-active flag (setNavActive) so the gate
-    // resolves on this same tick. When the gate is closed it re-snapshots its
-    // baselines every tick — that is what keeps the pre-zero baselines fresh so the
-    // operator's first zero does not register a cold-start phantom yaw.
+    // resolves on this same tick. While the gate is closed it issues no IMU read; it
+    // re-baselines once on the closed->open edge, so the operator's first hand-drive
+    // after a hop (or after zeroing) does not register a cold-start phantom.
     Localization.update();
 
     Mission.update();

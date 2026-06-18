@@ -15,6 +15,9 @@
 //   TC4  (AC3)  — navActive (PathTracker driving a hop) suppresses accumulation.
 //   TC5  (AC1)  — a drive at a NON-ZERO world heading decomposes onto BOTH world
 //                  axes with the correct signs (cosf/sinf split, not just magnitude).
+//   TC6  (#5)   — a failed IMU read mid-drive deposits nothing (no stale-heading
+//                  corruption); the motion carries to the next good-read tick.
+//   TC7  (#3)   — no live IMU read while the nav gate is closed (mission hot path).
 //
 // HOW THE SUT IS LINKED (see CMakeLists.txt `test_localization_offset`):
 //   - `Localization.cpp` is compiled UNCHANGED. Its `#include "Drive.h"` is a quote
@@ -235,8 +238,8 @@ int main()
 
         mmL.mockYawDeg = 0.0;
         check(Localization.zeroHeadingFromCurrent(), "TC4: zeroHeadingFromCurrent succeeds");
-        Localization.setNavActive(true);    // PathTracker is executing a hop.
-        Localization.update();              // settle baselines under the closed gate.
+        Localization.setNavActive(true);    // PathTracker is executing a hop (gate closed).
+        Localization.update();              // closed gate: no read, no accumulation.
 
         // Advance the encoders as if PathTracker drove a 25 cm hop, then tick.
         const int32_t hopDeg = (int32_t) cmToEncDeg(25.0f);
@@ -283,6 +286,65 @@ int main()
         check(approx(off.x, -25.98f, 1.0f), "TC5: +x component ~= 30*cos(150) (negative)");
         check(approx(off.y, 15.0f, 1.0f), "TC5: +y component ~= 30*sin(150) (positive)");
         check(approx(offsetMag(off), 30.0f, 1.0f), "TC5: magnitude preserved off the 0-deg axis");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC6 (#5 stale-read) — a failed IMU read mid-drive does NOT deposit translation onto a
+    // stale heading; the motion carries to the next good-read tick instead of corrupting x/y.
+    //
+    // Setup: zero + open the gate + a reopen-edge settle. Drive 30 cm, then force the IMU to
+    // fail (mockResult = ERROR) and integrate: the tick is skipped, so the offset stays ~0 and
+    // the baselines are left unadvanced. Recover the IMU at the SAME heading and integrate again:
+    // the carried-across 30 cm is deposited once, at the correct heading.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        mmL.mockYawDeg = 0.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC6: zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(false);
+        Localization.update();    // reopen-edge settle (live read OK).
+
+        // Drive 30 cm, then fail the IMU on the integrate tick.
+        const int32_t driveDeg = (int32_t) cmToEncDeg(30.0f);
+        Drive.mockAdvanceEncoders(driveDeg, driveDeg);
+        mmL.mockResult = MMLower::RESULT::ERROR;
+        Localization.update();    // read fails -> tick skipped, baselines unadvanced.
+        check(approx(offsetMag(Localization.getOffsetFromNode()), 0.0f, 1e-4f),
+              "TC6: a failed IMU read deposits nothing (no stale-heading corruption)");
+
+        // Recover at the same heading: the carried 30 cm is deposited now, at the right angle.
+        mmL.mockResult = MMLower::RESULT::OK;
+        mmL.mockYawDeg = 0.0;
+        Localization.update();
+        check(approx(offsetMag(Localization.getOffsetFromNode()), 30.0f, 1.0f),
+              "TC6: the carried-across motion is deposited on the next good read");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC7 (#3 hot-path) — while PathTracker is driving a hop (gate closed), update() issues NO
+    // live IMU read. This is the per-tick blocking read removed from the mission hot path; the
+    // baseline is re-established once at the gate-reopen edge instead.
+    //
+    // Setup: zero (one read), then close the gate (navActive) and tick several times while the
+    // wheels turn. The mock IMU's call counter must not advance across those closed ticks.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        mmL.mockYawDeg = 0.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC7: zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(true);    // PathTracker driving -> gate closed.
+
+        const uint32_t readsBefore = mmL.getImuEulerCallCount;
+        const int32_t  hopDeg      = (int32_t) cmToEncDeg(25.0f);
+        for (int i = 0; i < 5; ++i)
+        {
+            Drive.mockAdvanceEncoders(hopDeg, hopDeg);
+            Localization.update();    // closed gate: must not read the IMU.
+        }
+        check(mmL.getImuEulerCallCount == readsBefore,
+              "TC7: no IMU read while the nav gate is closed (mission hot path)");
     }
 
     if (g_failures == 0)
