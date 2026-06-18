@@ -11,6 +11,7 @@
 
 #include "DirectionPolicy.h"
 #include "Drive.h"
+#include "EventTrace.h"
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
@@ -252,6 +253,8 @@ bool PathTrackerClass::begin()
     _returnUsesLineSeek      = false;
     _returnActive            = false;
     _returnDistCm            = 0.0f;
+    // PR2: no wall-zero reset interlude in flight at boot.
+    _resetNode               = FieldMap::NODE_NONE;
     // ADR-036: no pivot latched at boot.
     _resetPivotLatch();
     _activeRouteDirection    = Direction::AUTO;
@@ -312,6 +315,9 @@ void PathTrackerClass::abort()
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // PR2: drop any in-flight wall-zero reset interlude so a re-arm on a later goal
+    // re-fires the wall push.
+    _resetNode              = FieldMap::NODE_NONE;
     // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
     // outgoing trim into the next goal's first dead-reckon drive.
     _resetPivotLatch();
@@ -333,6 +339,7 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
         case Fault::DRAIN_TIMEOUT:       return "DRN";
         case Fault::REVERSE_UNAVAILABLE: return "REV";
         case Fault::OFF_NODE:            return "OFN";
+        case Fault::WALL_NOT_SQUARE:     return "WSQ";
     }
     return "??";
 }
@@ -534,6 +541,9 @@ void PathTrackerClass::_stepFsm()
             _activeRouteDirection   = e.route_direction;
             _activeArrivalDirection = e.arrival_direction;
             _activeStopAtLine       = e.stop_at_line;
+            // PR2: re-arm the wall-zero reset latch for the fresh goal so a reset node
+            // re-visited by a later goTo(...) fires its wall push again.
+            _resetNode              = FieldMap::NODE_NONE;
             // ADR-036: each goal starts with a clean pivot latch. A pivot whose
             // FINAL hop was the previous goal's last hop left `_pendingPivot`
             // active with no following hop to consume it — clear all three here
@@ -935,6 +945,86 @@ void PathTrackerClass::_stepFsm()
             return;
         }
 
+        case State::WALL_STOP:
+        {
+            // Wall-zero reset interlude, phase 1 (PR2, AC9). The `Drive.wallStop(...)`
+            // push was dispatched `.async()` by `_dispatchWallStop` when this state was
+            // entered (latched on `_resetNode`, so it fires exactly once per arrival).
+            // The push is stall/timeout-terminated (T14): it ends idle on EITHER a
+            // confirmed wall stall (back-off + brake) OR the non-latching advisory
+            // timeout. A wall-stop timeout does NOT set `Drive.hasFault()`, so the
+            // generic Drive-fault guard at the top of `_stepFsm()` does NOT fire here —
+            // the advisory is inspected in `REANCHOR` (AC10: assume-at-wall, continue).
+            // Just wait for the push to settle, then re-square.
+            if (Drive.isIdle())
+            {
+                _state = State::REANCHOR;
+            }
+            return;
+        }
+
+        case State::REANCHOR:
+        {
+            // Wall-zero reset interlude, phase 2 (PR2, AC9–AC11). The chassis is now
+            // pressed against (and backed a hair off) the wall. Re-anchor the world
+            // pose against the wall's ground truth.
+            const uint8_t cur = Localization.getCurrentNode();
+
+            // AC10 — surface the wall-stop advisory but DO NOT halt. A timeout means the
+            // push never stalled (never reached the wall); we still re-anchor and
+            // continue ("assume at wall"). The advisory goes to EventTrace + Serial so
+            // the operator can see it on the OLED ring; it is NOT a fault.
+            if (Drive.wallStopTimedOut())
+            {
+                EventTrace.pushEvent("WALL no-stall, assume@wall");
+                Serial.print(F("[PathTracker] WALL_STOP advisory: no stall at node "));
+                Serial.print(cur);
+                Serial.println(F("; assuming at wall and re-anchoring"));
+            }
+
+            // Re-read the reset record (axis / wall_coord / facing). A null here means
+            // the node lost its reset record between arrival and now — defensively skip
+            // the re-anchor and resume planning rather than dereference null.
+            const Routes::ResetNode* info = FieldMap::getResetInfo(cur);
+            if (info == nullptr)
+            {
+                Serial.print(F("[PathTracker] REANCHOR: node "));
+                Serial.print(cur);
+                Serial.println(F(" has no reset record; skipping re-anchor"));
+                _state = State::PLAN_NEXT_HOP;
+                return;
+            }
+
+            // AC9 — axis set + heading squared atomically inside reanchorAtWall (T15).
+            const bool ok =
+                Localization.reanchorAtWall(info->axis, info->wall_coord, (float) info->facing);
+
+            // AC11 — the strict wall-normal check (only active under
+            // Config::WALL_NORMAL_STRICT_ENABLED) rejected the squaring: the chassis is
+            // too far off the expected wall normal to trust a re-zero. Fault instead of
+            // re-anchoring against a bad pose.
+            if (!ok)
+            {
+                EventTrace.pushEvent("WALL not square; WSQ");
+                Serial.print(F("[PathTracker] REANCHOR: wall-normal check REJECTED at node "));
+                Serial.print(cur);
+                Serial.println(F("; raising WALL_NOT_SQUARE"));
+                // `_enterFault` clears `_resetNode` (re-arm) along with the rest of the
+                // in-flight goal state.
+                _enterFault(Fault::WALL_NOT_SQUARE, cur, _destinationNode);
+                return;
+            }
+
+            // Success: re-anchored. Leave `_resetNode == cur` set so the immediate
+            // return to PLAN_NEXT_HOP does not re-enter the interlude for this same
+            // node; it re-arms naturally once the FSM advances off this node (or on the
+            // next goal's DEQUEUE). Continue the FSM exactly as a normal post-arrival:
+            // PLAN_NEXT_HOP plans the next hop, or declares the goal reached if this
+            // reset node WAS the destination.
+            _state = State::PLAN_NEXT_HOP;
+            return;
+        }
+
         case State::FAULT:
         {
             return;
@@ -970,6 +1060,9 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // PR2: a fault aborts the in-flight goal — drop any in-flight wall-zero reset
+    // interlude so it cannot bleed into a post-clearFault() goal.
+    _resetNode              = FieldMap::NODE_NONE;
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
     // cannot bleed into a post-clearFault() goal.
     _resetPivotLatch();
@@ -1147,9 +1240,102 @@ void PathTrackerClass::_dispatchReturnMoveAfterTurn()
     _state = State::RETURN_TO_NODE;
 }
 
+bool PathTrackerClass::_maybeEnterReset(uint8_t cur)
+{
+    // Wall-zero reset hook (PR2, AC9). `_onPlanNextHop` is the single arrival
+    // chokepoint: every hop's success path advances `Localization` and routes here, so
+    // `cur` is the just-arrived node. If it carries a reset record and its interlude has
+    // not already run for THIS arrival (latch guard), run the wall-stop interlude before
+    // planning the next hop / declaring the goal reached — the arrival analogue of the
+    // RETURN_TO_NODE prologue inserted at DEQUEUE.
+    //
+    // No change for non-reset nodes (AC5-style "no behavior change when not applicable"):
+    // getNodeType returns LINE/BLIND, the first clause is false, and the caller proceeds
+    // exactly as before. The `_resetNode == cur` guard makes the entry one-shot — after a
+    // successful REANCHOR returns control here with `_resetNode` still set to `cur`, this
+    // re-check is false, so the interlude is NOT re-entered (the wallStop push fired
+    // once). It re-arms once the FSM advances off this node (or on the next DEQUEUE).
+    if (FieldMap::getNodeType(cur) == Routes::NodeType::RESET && _resetNode != cur)
+    {
+        _dispatchWallStop(cur);
+        return true;
+    }
+    return false;
+}
+
+void PathTrackerClass::_dispatchWallStop(uint8_t node)
+{
+    // Resolve the reset record for this node (axis / wall_coord / facing). The caller
+    // confirmed `NodeType::RESET`, but a node can be tagged RESET yet (defensively) lack
+    // a sparse `RESET_NODES` entry — if so, skip the push and re-anchor will likewise
+    // no-op, so just plan on. This keeps the dispatch total even on a malformed table.
+    const Routes::ResetNode* info = FieldMap::getResetInfo(node);
+    if (info == nullptr)
+    {
+        Serial.print(F("[PathTracker] WALL_STOP: node "));
+        Serial.print(node);
+        Serial.println(F(" tagged RESET but has no reset record; skipping wall push"));
+        // Latch it so `_maybeEnterReset` does not loop back in, then fall through to
+        // planning via the caller's normal path.
+        _resetNode = node;
+        _state     = State::PLAN_NEXT_HOP;
+        return;
+    }
+
+    // Advisory push distance: the absolute gap from the node's coordinate on `axis` to
+    // the wall (`axis` is 0 = x, 1 = y — the cross-task ResetNode contract). This is
+    // ADVISORY only — `Drive.wallStop` terminates on a wheel stall or the advisory
+    // timeout (T14), never on distance — but we pass a sensible value rather than 0.
+    const Routes::NodeInfo& n = FieldMap::getNode(node);
+    const float nodeCoord     = (info->axis == 0) ? n.x_cm : n.y_cm;
+    const float distToWall    = fabsf(info->wall_coord - nodeCoord);
+
+    // GYRO push holding `facing` (the wall normal), forward. Assumption: the field
+    // author places the reset node so the approach heading ≈ `facing`, i.e. the robot
+    // arrives roughly facing the wall normal — the GYRO hold corrects minor heading
+    // error during the push, and gross misalignment is caught by the strict wall-normal
+    // check in REANCHOR (under Config::WALL_NORMAL_STRICT_ENABLED). Forward by default;
+    // the node is authored so the wall is ahead along `facing`.
+    const int16_t imuTarget = Localization.toImuYaw((float) info->facing);
+
+    Serial.print(F("[PathTracker] WALL_STOP: node="));
+    Serial.print(node);
+    Serial.print(F(" axis="));
+    Serial.print(info->axis);
+    Serial.print(F(" wallCoord="));
+    Serial.print(info->wall_coord);
+    Serial.print(F(" facing="));
+    Serial.print(info->facing);
+    Serial.print(F(" distToWall="));
+    Serial.println(distToWall);
+
+    // Latch BEFORE dispatch so a second `_onPlanNextHop` tick cannot re-fire the push.
+    _resetNode = node;
+
+    // RAII builder rule: the whole chain is ONE discarded-temporary statement ending in
+    // `.async()` — never split across statements or held in a local. `.async()` keeps
+    // the FSM non-blocking; the WALL_STOP state polls `Drive.isIdle()`.
+    Drive.wallStop(distToWall)
+        .setReverse(false)
+        .setMode(DriveMode::GYRO)
+        .setHeading(imuTarget)
+        .async();
+    _state = State::WALL_STOP;
+}
+
 void PathTrackerClass::_onPlanNextHop()
 {
     const uint8_t cur = Localization.getCurrentNode();
+
+    // Wall-zero reset hook (PR2, AC9): if the just-arrived node is a RESET node and its
+    // interlude has not yet run, divert into the wall-stop / re-anchor interlude BEFORE
+    // any planning or goal-reached decision. Returns control to this method (via
+    // REANCHOR → PLAN_NEXT_HOP) once the re-anchor completes. A non-reset node is a true
+    // no-op here — the FSM continues exactly as before (AC5-style).
+    if (_maybeEnterReset(cur))
+    {
+        return;    // _state is now WALL_STOP; the interlude will route back here
+    }
 
     // Already at the destination — done.
     if (cur == _destinationNode)
