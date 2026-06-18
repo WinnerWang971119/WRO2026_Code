@@ -6,6 +6,7 @@
   "MAP_PNG": "maps/map.png",
   "ROBOT_RADIUS_CM": 15.0,
   "COST_BLIND_MULTIPLIER": 5.0,
+  "blind_projection_auto_seek": true,
   "START_NODE": "Start",
   "START_HEADING_DEG": 0.0,
   "NODES": {

@@ -11,11 +11,50 @@
  * Carved out of `Config.h` per ADR-031 / Issue #39 ("datacheck in another file").
  * Included LAST by `Config.h` so it sees the drivetrain symbols (MOTOR_LEFT_ID /
  * MOTOR_RIGHT_ID), the manipulator symbols (from ConfigManipulator.h), and the
- * vision symbols (from ConfigVision.h). The drive-pair asserts stay in `Config.h`;
- * do not move or duplicate them here.
+ * vision symbols (from ConfigVision.h). The drive-pair + line asserts now live
+ * here too (the `Config.h` umbrella body is empty after the per-domain split).
  */
 namespace Config
 {
+    // -----------------------------------------------------------------------------------------
+    // Drivetrain / line checks (ConfigDrive.h / ConfigLine.h)
+    //
+    // Relocated here from the old monolithic Config.h body. Their explanatory block comments /
+    // @warning lines stay beside the constants they guard (in ConfigDrive.h / ConfigLine.h);
+    // only the static_assert statements live here, since this header is included LAST and so
+    // sees every per-domain symbol.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(MOTOR_LEFT_ID == 2,
+                  "MOTOR_LEFT_ID is hardcoded as M2 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
+    static_assert(MOTOR_RIGHT_ID == 3,
+                  "MOTOR_RIGHT_ID is hardcoded as M3 throughout Drive.cpp/Drive.h. "
+                  "Changing this constant alone produces a silently-broken chassis. "
+                  "See the block comment above this assert and PR #20 codex P1 review.");
+
+    static_assert(LINE_BOARD_COUNT == 1 || LINE_BOARD_COUNT == 2,
+                  "Config::LINE_BOARD_COUNT must be 1 or 2 — WROLineArrayClass has fixed [2][8] "
+                  "storage and front/rear semantics. Update both this assertion AND the array "
+                  "dimensions if a third board is ever added.");
+
+    static_assert(LINE_FRONT_I2C_PORT >= 1 && LINE_FRONT_I2C_PORT <= 4,
+                  "Config::LINE_FRONT_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
+
+    static_assert(LINE_REAR_I2C_PORT >= 1 && LINE_REAR_I2C_PORT <= 4,
+                  "Config::LINE_REAR_I2C_PORT must be in [1, 4] — matches the "
+                  "physical I2C1..I2C4 port labels on the MiniR4 board. The "
+                  "WROLineArrayClass converts to the 0-based PCA9548A mux channel "
+                  "internally; do NOT pre-convert in Config.");
+
+    static_assert(CRAWL_PWM >= PWM_MIN_MAGNITUDE && CRAWL_PWM <= PWM_MAX,
+                  "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
+                  "recovery branch never hits the deadband floor or saturation cap silently.");
+
     // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)
     // -----------------------------------------------------------------------------------------

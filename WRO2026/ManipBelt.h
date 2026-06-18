@@ -60,7 +60,7 @@
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
 
-#include "ConfigManipulator.h"
+#include "config/ConfigManipulator.h"
 
 /**
  * @brief Encoder-DC-motor conveyor-belt actuator with POSITION + TIMED move modes.

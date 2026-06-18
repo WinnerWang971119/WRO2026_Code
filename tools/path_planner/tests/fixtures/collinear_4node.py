@@ -136,4 +136,5 @@ def make_field_data() -> SimpleNamespace:
         NODES=dict(NODES),
         START_NODE=START_NODE,
         START_HEADING_DEG=START_HEADING_DEG,
+        BLIND_PROJECTION_AUTO_SEEK=True,
     )

@@ -47,7 +47,8 @@ namespace FieldMap
             Routes::LineMode::DEFAULT,     // line_mode_override
             Routes::BlindMode::DEFAULT,    // blind_mode_override
             Routes::ProjectionMode::DEFAULT, // projection_mode_override
-            Routes::DirectionMode::DEFAULT // direction_override
+            Routes::DirectionMode::DEFAULT,  // direction_override
+            Routes::StopAtLineMode::DEFAULT  // stop_at_line_override
         };
         return kNoEdge;
     }

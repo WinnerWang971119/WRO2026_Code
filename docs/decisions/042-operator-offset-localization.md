@@ -1,4 +1,4 @@
-# ADR-038: `Localization` tracks a 2D operator-offset delta from the last anchored node
+# ADR-042: `Localization` tracks a 2D operator-offset delta from the last anchored node
 
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 3)
@@ -45,7 +45,7 @@ mission — so the accumulated error stays within the bounds of a single inter-n
 - `getOffsetFromNode()` is a pure, no-I/O accessor. Telemetry and recovery callers may call
   it freely without worrying about bus latency.
 - Independent deadbands (`Config::OFFSET_TRANSLATION_DEADBAND_CM` /
-  `Config::OFFSET_ROTATION_DEADBAND_DEG` in `ConfigLocalization.h`) prevent vibration jitter
+  `Config::OFFSET_ROTATION_DEADBAND_DEG` in `config/ConfigNav.h`) prevent vibration jitter
   from growing the offset while the robot is stationary.
 
 ## Trigger to revisit
@@ -62,5 +62,5 @@ mission — so the accumulated error stays within the bounds of a single inter-n
   offset is bounded dead-reckoning, not continuous odometry
 - [ADR-005](./005-localization-single-source-of-truth.md) — single-writer rule; this ADR
   amends its "never stored" heading clause
-- [ADR-031](./031-config-split-per-domain.md) — `ConfigLocalization.h` follows the
-  per-domain config split
+- [ADR-031](./031-config-split-per-domain.md) — the operator-offset constants live in
+  `config/ConfigNav.h` per the per-domain config split

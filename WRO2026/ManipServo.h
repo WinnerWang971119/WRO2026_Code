@@ -34,7 +34,7 @@
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
 
-#include "ConfigManipulator.h"
+#include "config/ConfigManipulator.h"
 
 /**
  * @brief One RC-servo joint with fire-and-forget, timer-based move completion.
