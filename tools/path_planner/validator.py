@@ -2,9 +2,10 @@
 
 Inspects the raw module attributes (``NODES``, ``NODE_TYPES``,
 ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``OBSTACLES``, ``FIELD_MM``,
-``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, optional
-``RESET_NODES``, ...) and raises :class:`FieldDataError` on the first
-malformed entry with a precise key path and a one-line nudge toward the fix.
+``MAP_PNG``, the ``BLIND_DECAY_*`` decay knobs, optional ``EDGES``,
+optional ``PIVOT_TURNS``, optional ``RESET_NODES``, ...) and raises
+:class:`FieldDataError` on the first malformed entry with a precise key
+path and a one-line nudge toward the fix.
 
 Wall-zero reset nodes are authored in a sparse top-level ``RESET_NODES``
 table keyed by node name (``{"axis", "wall_coord", "facing"}`` per node),
@@ -53,7 +54,10 @@ _REQUIRED_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",
@@ -1212,6 +1216,60 @@ def _validate_reset_nodes(field_data) -> None:
             )
 
 
+def _validate_blind_decay(field_data) -> None:
+    """Reject a malformed blind-distance decay configuration.
+
+    The four ``BLIND_DECAY_*`` top-level scalars parameterise the blind-edge
+    cost penalty the planner applies at table-build time (T22):
+    ``weight = length * (1 + k * (d / d_ref) ** exponent)``. They live in
+    ``field_data.json`` as plain JSON scalars (ADR-022) and replace the old
+    ``COST_BLIND_MULTIPLIER`` knob. This pass enforces the domain of each:
+
+    * ``BLIND_DECAY_ENABLED`` -- a ``bool`` (``True`` / ``False``).
+    * ``BLIND_DECAY_K`` -- a finite number ``>= 0`` (``k == 0`` disables the
+      penalty so blind weights reduce to plain length).
+    * ``BLIND_DECAY_EXPONENT`` -- a finite number ``>= 1`` (a sub-linear
+      exponent would make far-from-anchor blind hops cheaper, inverting the
+      penalty's intent).
+    * ``BLIND_DECAY_D_REF`` -- a finite number ``> 0`` (the normalizer; a
+      non-positive ``d_ref`` divides by zero / flips the sign).
+
+    Presence is guaranteed by the ``_REQUIRED_ATTRS`` structural check in
+    :func:`validate`, so this pass only judges the values.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``BLIND_DECAY_*`` key path and a
+        one-line fix hint on the first malformed value.
+    """
+    enabled = getattr(field_data, "BLIND_DECAY_ENABLED")
+    k = getattr(field_data, "BLIND_DECAY_K")
+    exponent = getattr(field_data, "BLIND_DECAY_EXPONENT")
+    d_ref = getattr(field_data, "BLIND_DECAY_D_REF")
+
+    if not isinstance(enabled, bool):
+        raise FieldDataError(
+            "BLIND_DECAY_ENABLED must be a bool (true / false); "
+            f"got: {enabled!r}"
+        )
+    if not _is_number(k) or k < 0:
+        raise FieldDataError(
+            "BLIND_DECAY_K must be a finite number >= 0 "
+            f"(0 disables the penalty); got: {k!r}"
+        )
+    if not _is_number(exponent) or exponent < 1:
+        raise FieldDataError(
+            "BLIND_DECAY_EXPONENT must be a finite number >= 1; "
+            f"got: {exponent!r}"
+        )
+    if not _is_number(d_ref) or d_ref <= 0:
+        raise FieldDataError(
+            "BLIND_DECAY_D_REF must be a finite number > 0 (cm); "
+            f"got: {d_ref!r}"
+        )
+
+
 def validate(field_data) -> None:
     """Raise :class:`FieldDataError` on the first problem; return ``None`` on success.
 
@@ -1233,7 +1291,6 @@ def validate(field_data) -> None:
     blind_edges = getattr(field_data, "BLIND_EDGES")
     obstacles = getattr(field_data, "OBSTACLES")
     robot_radius = getattr(field_data, "ROBOT_RADIUS_CM")
-    cost_blind_mul = getattr(field_data, "COST_BLIND_MULTIPLIER")
     start_node = getattr(field_data, "START_NODE")
     start_heading = getattr(field_data, "START_HEADING_DEG")
     field_mm = getattr(field_data, "FIELD_MM")
@@ -1361,11 +1418,6 @@ def validate(field_data) -> None:
         raise FieldDataError(
             f"ROBOT_RADIUS_CM must be a positive number; got: {robot_radius!r}"
         )
-    if not _is_number(cost_blind_mul) or cost_blind_mul <= 0:
-        raise FieldDataError(
-            "COST_BLIND_MULTIPLIER must be a positive number; "
-            f"got: {cost_blind_mul!r}"
-        )
     if not isinstance(start_node, str):
         raise FieldDataError(
             f"START_NODE must be a node-name string; got: {start_node!r}"
@@ -1423,3 +1475,8 @@ def validate(field_data) -> None:
     # the "reset" typing it cross-checks is well-formed. Inert (early return)
     # on a reset-free field.
     _validate_reset_nodes(field_data)
+
+    # 12. Blind-distance decay knobs (PR3 T21). Presence is guaranteed by the
+    # _REQUIRED_ATTRS structural check above; this pass enforces each value's
+    # domain (k >= 0, exponent >= 1, d_ref > 0, enabled is a bool).
+    _validate_blind_decay(field_data)

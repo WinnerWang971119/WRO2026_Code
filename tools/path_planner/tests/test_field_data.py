@@ -36,7 +36,10 @@ _FIELD_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",
@@ -92,7 +95,7 @@ def test_obstacle_invalid_bounds() -> None:
 # -- TC4: non-finite numbers (NaN / Inf) rejected at every numeric gate -----
 #
 # `_is_number` is the single root gate for NODES coords, OBSTACLES bounds,
-# ROBOT_RADIUS_CM, COST_BLIND_MULTIPLIER, FIELD_MM and EDGES scalars. A NaN
+# ROBOT_RADIUS_CM, the BLIND_DECAY_* knobs, FIELD_MM and EDGES scalars. A NaN
 # is a float and not a bool, so it used to pass; worse, the obstacle bounds
 # check `x_min >= x_max` is always False when an operand is NaN, so a NaN
 # rectangle slipped through and reached the Euclidean planner math as a
@@ -521,7 +524,10 @@ def _pivot_field(edges, pivot_turns) -> SimpleNamespace:
         BLIND_EDGES=[],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE="A",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
@@ -1109,7 +1115,10 @@ def _reset_field(
         BLIND_EDGES=[],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE=start_node,
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
@@ -1357,6 +1366,102 @@ def test_reset_node_type_accepted_in_node_types() -> None:
     fd_bad = _reset_field(node_types_overrides={"A": "weird", "B": "line"})
     with pytest.raises(FieldDataError, match=r"NODE_TYPES\['A'\]"):
         validate(fd_bad)
+
+
+# -- T21: blind-distance decay knobs (_validate_blind_decay) ------------------
+#
+# The four BLIND_DECAY_* top-level scalars parameterise the planner's blind-edge
+# cost penalty (T22): weight = length * (1 + k * (d / d_ref) ** exponent). They
+# replace the old COST_BLIND_MULTIPLIER knob and are authored in field_data.json
+# as plain JSON scalars (ADR-022). The validator enforces each value's domain:
+# enabled is a bool, k >= 0, exponent >= 1, d_ref > 0. The base clone
+# (_clone_field_data) carries the valid authored defaults, so each test mutates
+# one knob to the offending value.
+
+
+def test_decay_default_knobs_pass() -> None:
+    """The toy fixture's authored decay knobs validate as-is."""
+    fd = _clone_field_data()
+    assert validate(fd) is None
+
+
+def test_decay_enabled_non_bool_rejected() -> None:
+    """BLIND_DECAY_ENABLED must be a bool, not a truthy int."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_ENABLED = 1
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_ENABLED"):
+        validate(fd)
+
+
+def test_decay_enabled_false_accepted() -> None:
+    """BLIND_DECAY_ENABLED=False is a valid bool and validates."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_ENABLED = False
+    assert validate(fd) is None
+
+
+def test_decay_k_negative_rejected() -> None:
+    """BLIND_DECAY_K must be >= 0; a negative weight is rejected."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_K = -0.1
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_K"):
+        validate(fd)
+
+
+def test_decay_k_zero_accepted() -> None:
+    """BLIND_DECAY_K == 0 disables the penalty and is a valid value."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_K = 0.0
+    assert validate(fd) is None
+
+
+def test_decay_k_non_finite_rejected() -> None:
+    """A non-finite BLIND_DECAY_K (NaN / Inf) is rejected at the numeric gate."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_K = float("inf")
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_K"):
+        validate(fd)
+
+
+def test_decay_exponent_below_one_rejected() -> None:
+    """BLIND_DECAY_EXPONENT must be >= 1; a sub-linear exponent is rejected."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_EXPONENT = 0.5
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_EXPONENT"):
+        validate(fd)
+
+
+def test_decay_exponent_at_one_accepted() -> None:
+    """BLIND_DECAY_EXPONENT == 1 sits exactly at the inclusive floor."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_EXPONENT = 1.0
+    assert validate(fd) is None
+
+
+def test_decay_d_ref_zero_rejected() -> None:
+    """BLIND_DECAY_D_REF must be > 0; zero would divide by zero downstream."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_D_REF = 0.0
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_D_REF"):
+        validate(fd)
+
+
+def test_decay_d_ref_negative_rejected() -> None:
+    """A negative BLIND_DECAY_D_REF is rejected."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_D_REF = -50.0
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_D_REF"):
+        validate(fd)
+
+
+def test_decay_missing_required_attr_rejected() -> None:
+    """A field missing a BLIND_DECAY_* attribute fails the structural check."""
+    fd = _clone_field_data()
+    delattr(fd, "BLIND_DECAY_K")
+    with pytest.raises(
+        FieldDataError, match=r"missing required attribute: BLIND_DECAY_K"
+    ):
+        validate(fd)
 
 
 # -- TC26: validator parse-helper / firmware Config.h parity ------------------

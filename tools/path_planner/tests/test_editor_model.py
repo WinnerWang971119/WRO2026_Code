@@ -25,7 +25,10 @@ def make_model() -> FieldModel:
         field_mm=(3000, 2000),
         map_png="maps/map.png",
         robot_radius_cm=8.0,
-        cost_blind_multiplier=5.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
         start_node="A",
         start_heading_deg=0.0,
         nodes={"A": (10.0, 10.0), "B": (200.0, 10.0)},
@@ -98,7 +101,7 @@ def test_round_trip_to_from_json_dict_equality() -> None:
 
 
 def test_to_json_dict_top_level_key_order() -> None:
-    """to_json_dict() must emit the 12 keys in the canonical order when a pivot is set.
+    """to_json_dict() must emit the 15 keys in the canonical order when a pivot is set.
 
     ``pivot_turns`` is optional and emitted only when non-empty (see
     ``test_to_json_dict_omits_empty_pivot_turns``), so this canonical-slot check
@@ -111,7 +114,10 @@ def test_to_json_dict_top_level_key_order() -> None:
         "FIELD_MM",
         "MAP_PNG",
         "ROBOT_RADIUS_CM",
-        "COST_BLIND_MULTIPLIER",
+        "BLIND_DECAY_ENABLED",
+        "BLIND_DECAY_K",
+        "BLIND_DECAY_EXPONENT",
+        "BLIND_DECAY_D_REF",
         "START_NODE",
         "START_HEADING_DEG",
         "NODES",
@@ -135,9 +141,9 @@ def test_to_json_dict_omits_empty_pivot_turns() -> None:
     assert model.pivot_turns == []
     json_dict = model.to_json_dict()
     assert "pivot_turns" not in json_dict
-    # The remaining 11 keys keep their canonical order; OBSTACLES stays last.
+    # The remaining 14 keys keep their canonical order; OBSTACLES stays last.
     assert tuple(json_dict.keys())[-1] == "OBSTACLES"
-    assert len(json_dict) == 11
+    assert len(json_dict) == 14
 
 
 def test_to_json_dict_nodes_sorted_alphabetically() -> None:
@@ -226,7 +232,10 @@ def test_validate_enforces_pivot_geometry_via_proxy() -> None:
         field_mm=(3000, 2000),
         map_png="maps/map.png",
         robot_radius_cm=8.0,
-        cost_blind_multiplier=5.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
         start_node="A",
         start_heading_deg=0.0,
         nodes={
@@ -354,7 +363,10 @@ def test_to_json_dict_reset_nodes_in_canonical_slot() -> None:
         "FIELD_MM",
         "MAP_PNG",
         "ROBOT_RADIUS_CM",
-        "COST_BLIND_MULTIPLIER",
+        "BLIND_DECAY_ENABLED",
+        "BLIND_DECAY_K",
+        "BLIND_DECAY_EXPONENT",
+        "BLIND_DECAY_D_REF",
         "START_NODE",
         "START_HEADING_DEG",
         "NODES",
@@ -525,3 +537,126 @@ def test_validate_rejects_unknown_node_in_line_segments() -> None:
         model.validate()
 
     assert "ZZZ" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# blind-distance decay knobs (T21): the four BLIND_DECAY_* scalars replace the
+# old cost_blind_multiplier. They are required dataclass fields, so they must
+# survive snapshot/restore (undo/redo) and the JSON round-trip, reach the
+# validator via the proxy, and live in their canonical JSON slot.
+# ---------------------------------------------------------------------------
+
+
+def test_decay_knobs_survive_to_from_json_round_trip() -> None:
+    """from_json_dict(to_json_dict()) preserves the four decay knobs."""
+    model = make_model()
+    restored = FieldModel.from_json_dict(model.to_json_dict())
+
+    assert restored.blind_decay_enabled is True
+    assert restored.blind_decay_k == 0.05
+    assert restored.blind_decay_exponent == 2.0
+    assert restored.blind_decay_d_ref == 50.0
+    assert restored == model
+
+
+def test_decay_knobs_emitted_in_json_dict() -> None:
+    """to_json_dict() renders the decay knobs as JSON-native scalars in slot."""
+    json_dict = make_model().to_json_dict()
+
+    assert json_dict["BLIND_DECAY_ENABLED"] is True
+    assert json_dict["BLIND_DECAY_K"] == 0.05
+    assert json_dict["BLIND_DECAY_EXPONENT"] == 2.0
+    assert json_dict["BLIND_DECAY_D_REF"] == 50.0
+    # Canonical slot: the four knobs sit between ROBOT_RADIUS_CM and START_NODE.
+    keys = list(json_dict.keys())
+    assert (
+        keys.index("ROBOT_RADIUS_CM")
+        < keys.index("BLIND_DECAY_ENABLED")
+        < keys.index("BLIND_DECAY_K")
+        < keys.index("BLIND_DECAY_EXPONENT")
+        < keys.index("BLIND_DECAY_D_REF")
+        < keys.index("START_NODE")
+    )
+
+
+def test_to_module_proxy_exposes_decay_knobs() -> None:
+    """to_module_proxy() carries the decay knobs so validate() actually sees them.
+
+    The dual-serialization trap: a field added to to_json_dict() but not to the
+    proxy is persisted-but-unvalidated (the validator early-returns / never reads
+    the missing attribute). The proxy must expose all four knobs.
+    """
+    proxy = make_model().to_module_proxy()
+
+    assert proxy.BLIND_DECAY_ENABLED is True
+    assert proxy.BLIND_DECAY_K == 0.05
+    assert proxy.BLIND_DECAY_EXPONENT == 2.0
+    assert proxy.BLIND_DECAY_D_REF == 50.0
+
+
+def test_validate_reaches_decay_rules_via_proxy() -> None:
+    """model.validate() rejects a bad decay knob because the proxy exposes it.
+
+    A negative k is malformed. If the proxy did not carry the decay knobs, the
+    validator would never see the value (persisted-but-unvalidated). This proves
+    the proxy plumbs the knobs through to _validate_blind_decay.
+    """
+    model = make_model()
+    model.blind_decay_k = -1.0
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_K"):
+        model.validate()
+
+
+def test_snapshot_restore_preserves_decay_knobs() -> None:
+    """snapshot()/restore() round-trips the decay knobs so undo unwinding keeps them."""
+    model = make_model()
+    snap = model.snapshot()
+
+    # Mutate the live model, then restore: the knobs must come back exactly.
+    model.blind_decay_enabled = False
+    model.blind_decay_k = 99.0
+    model.blind_decay_exponent = 5.0
+    model.blind_decay_d_ref = 1.0
+    model.restore(snap)
+
+    assert model.blind_decay_enabled is True
+    assert model.blind_decay_k == 0.05
+    assert model.blind_decay_exponent == 2.0
+    assert model.blind_decay_d_ref == 50.0
+
+
+def test_history_undo_redo_preserves_decay_knobs() -> None:
+    """A History do -> undo -> redo cycle leaves the decay knobs intact.
+
+    The editor has no command that touches the decay knobs, so an unrelated edit
+    (AddNode) driven through the real History must not disturb them across an
+    undo/redo round-trip. Guards the snapshot/restore path from a regression
+    where a History cycle drops or corrupts a required scalar field.
+    """
+    model = make_model()
+    before = (
+        model.blind_decay_enabled,
+        model.blind_decay_k,
+        model.blind_decay_exponent,
+        model.blind_decay_d_ref,
+    )
+
+    def _current() -> tuple:
+        return (
+            model.blind_decay_enabled,
+            model.blind_decay_k,
+            model.blind_decay_exponent,
+            model.blind_decay_d_ref,
+        )
+
+    history = History()
+    history.do(AddNode(name="Z", xy=(5.0, 5.0), node_type="line"), model)
+    assert _current() == before
+
+    assert history.undo(model) is True
+    assert _current() == before
+    assert "Z" not in model.nodes
+
+    assert history.redo(model) is True
+    assert _current() == before
+    assert "Z" in model.nodes
