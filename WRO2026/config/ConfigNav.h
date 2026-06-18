@@ -183,8 +183,8 @@ namespace Config
      *
      * Above this cap the robot is too far off-node for dead reckoning to reliably drive
      * back — the accumulated position error makes the return vector untrustworthy. When
-     * the offset exceeds this cap, the off-map gate policy (`OFF_MAP_GATE`) decides
-     * whether to fault or to attempt the return anyway.
+     * the offset exceeds this cap, the PR1b off-map policy decides whether to fault or to
+     * attempt the return anyway.
      *
      * @note TODO: bench-tune. Suggested: 50.0f cm (roughly one node-spacing on a typical
      *       WRO field). Raise if the robot is allowed to wander further before needing to
@@ -195,35 +195,9 @@ namespace Config
      */
     constexpr float RETURN_DISTANCE_CAP_CM = 50.0f;
 
-    /**
-     * @brief Policy applied when the accumulated offset exceeds `RETURN_DISTANCE_CAP_CM`.
-     *
-     * - `FAULT`       — refuse to plan; latch a localization fault and surface it to the
-     *                   caller. Safer default: avoids driving the chassis further off-map
-     *                   on a vector the firmware can no longer trust.
-     * - `BEST_EFFORT` — log a Serial warning and attempt the return anyway, using the
-     *                   capped vector as a best-effort dead-reckoned target. Useful for
-     *                   bench/debug sessions where losing the robot to a fault is worse
-     *                   than a possibly imprecise recovery.
-     *
-     * @note Default is `FAULT` (safer). Switch to `BEST_EFFORT` for bench sessions or
-     *       when empirical testing shows dead reckoning is still reliable beyond the cap.
-     * @note Forward-looking: no consumer in PR1a. Used by the PR1b return-to-node prologue.
-     */
-    enum class OffMapGate : uint8_t
-    {
-        FAULT,
-        BEST_EFFORT
-    };
-
-    /**
-     * @brief Active off-map gate policy.
-     *
-     * @note TODO: bench-tune. Default `FAULT` (refuse-and-fault when offset > cap).
-     *       Override to `OffMapGate::BEST_EFFORT` for bench use once tested.
-     * @note Forward-looking: no consumer in PR1a.
-     */
-    constexpr OffMapGate OFF_MAP_GATE = OffMapGate::FAULT;
+    // NOTE: the off-map gate policy (`enum OffMapGate` + `OFF_MAP_GATE`) is intentionally NOT
+    // declared here yet — it has no PR1a consumer. It lands in PR1b alongside the return-to-node
+    // prologue that reads it, so the config surface stays consumer-driven (no speculative symbols).
 
     // Sanity static_asserts (intra-Localization; keep them here next to the constants,
     // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).
@@ -247,12 +221,6 @@ namespace Config
                   "Config::RETURN_DISTANCE_CAP_CM must be positive — a zero or negative cap "
                   "would fire the off-map gate on every offset, making the return-to-node "
                   "prologue unreachable.");
-
-    static_assert(OFFSET_TRANSLATION_DEADBAND_CM < RETURN_TRIGGER_THRESHOLD_CM,
-                  "Config::OFFSET_TRANSLATION_DEADBAND_CM must be strictly less than "
-                  "RETURN_TRIGGER_THRESHOLD_CM — if the deadband sits at or above the trigger, "
-                  "wheel motion is filtered out before it can accumulate to the trigger value, "
-                  "making the return-to-node prologue permanently unreachable.");
 
     static_assert(RETURN_TRIGGER_THRESHOLD_CM <= RETURN_DISTANCE_CAP_CM,
                   "Config::RETURN_TRIGGER_THRESHOLD_CM must be <= RETURN_DISTANCE_CAP_CM - "
