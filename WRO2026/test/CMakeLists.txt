@@ -44,6 +44,11 @@ set(MOCKS_DIR      ${TEST_DIR}/mocks)
 # `LineFollower.cpp` / `Manipulator.cpp`. Keeping these out of `mocks/` and
 # force-including them only into `test_tasks_dispatch` avoids that collision.
 set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
+# Scoped shadow of `ConfigLocalization.h` with the strict wall-normal flag FORCED ON, used by
+# ONLY `test_reanchor_at_wall_strict`. Lives in its OWN dir (NOT `mocks/`) so it cannot flip the
+# strict flag for any other target — `mocks/` is on every target's include path and a copy there
+# would shadow `ConfigLocalization.h` for ALL targets. Force-included into the one strict target.
+set(WALL_STRICT_MOCKS_DIR ${TEST_DIR}/wall_strict_mocks)
 
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
@@ -723,3 +728,117 @@ add_executable(test_return_to_node_dispatch
 )
 target_include_directories(test_return_to_node_dispatch PRIVATE ${COMMON_INCLUDES})
 add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)
+
+# =========================================================================================
+# Test executable #13 — wall-zero re-anchor (Localization::reanchorAtWall), strict OFF (PR2, T18).
+#
+# TC11 (AC9) + TC12-OFF (AC11): links the REAL production `Localization.cpp` (same surface as
+# `test_localization_offset`) and drives `reanchorAtWall(axis, wallCoord, headingDeg)` through the
+# mock IMU (`mmL`) + mock `Drive` encoders, asserting the atomic success post-conditions, the
+# no-mutation reject path (failed IMU read), and that with the strict flag OFF the re-anchor always
+# proceeds. Compiles against the SHIPPED Config default (strict OFF).
+#
+# Same link recipe as `test_localization_offset`: mock `Drive.h` force-included (guard `DRIVE_H`)
+# to shadow the real one; `<MatrixMiniR4.h>` / `<Arduino.h>` resolved by the `mocks/`-first path;
+# `routes.cpp` linked for the `Routes::START_NODE / NODES / N_NODES` symbols Localization odr-uses
+# (FieldMap::getNode reads NODES for the believed-coordinate post-condition).
+# =========================================================================================
+add_executable(test_reanchor_at_wall
+    ${TEST_DIR}/test_reanchor_at_wall.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_reanchor_at_wall PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_reanchor_at_wall)   # shadows the real Drive.h with the mock
+add_test(NAME reanchor_at_wall COMMAND test_reanchor_at_wall)
+
+# =========================================================================================
+# Test executable #14 — wall-normal STRICT boundary, strict ON (PR2, T18). TC12-ON (AC11).
+#
+# `Config::WALL_NORMAL_STRICT_ENABLED` is a hard `constexpr bool ... = false;` with NO `#ifndef
+# <NAME>_DEFAULT` override hook (unlike PATH_PASS_THROUGH_ENABLED / BIDIRECTIONAL_AUTO_ENABLED), so
+# `target_compile_definitions(... <NAME>_DEFAULT=true)` CANNOT flip it, and an in-file `#define` in
+# the test .cpp would not reach the separately-compiled `Localization.cpp` TU (the cross-TU Config
+# trap). Editing the production header is out of scope for T18. The target-scoped lever used here:
+# force-include a SCOPED shadow `wall_strict_mocks/ConfigLocalization.h` (strict flag = true) FIRST
+# into ONLY this target, so BOTH `Localization.cpp` and the test main see the flag ON. The shadow
+# uses the production guard `CONFIG_LOCALIZATION_H`, so when `Config.h` later includes the real
+# sub-header it no-ops. The shadow lives in `wall_strict_mocks/` (NOT `mocks/`) so it does not flip
+# the flag for any other target.
+#
+# `${WALL_STRICT_MOCKS_DIR}` leads the include path so the shadow wins the `"ConfigLocalization.h"`
+# quote-include resolution too; the mock Drive.h is still force-included (guard `DRIVE_H`).
+# =========================================================================================
+add_executable(test_reanchor_at_wall_strict
+    ${TEST_DIR}/test_reanchor_at_wall_strict.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_reanchor_at_wall_strict
+    PRIVATE ${WALL_STRICT_MOCKS_DIR} ${COMMON_INCLUDES})
+# Force-include the scoped strict-ON shadow FIRST — BEFORE `add_mock_force_includes` — so it defines
+# `CONFIG_LOCALIZATION_H` (= strict ON) before ANYTHING else pulls `Config.h`. Ordering matters: the
+# mock `Drive.h` itself `#include "Config.h"`, so if the Drive force-include ran first it would pull
+# the REAL `ConfigLocalization.h` (guard then defined, strict = false) before this shadow could win.
+# `target_compile_options` appends, so emitting this call first puts the shadow's `/FI` ahead of the
+# Drive/WROLineArray/Intersection ones. `SHELL:` keeps the `-include <path>` pair atomic on GNU/Clang
+# (CMake de-dup trap); MSVC uses `/FI`.
+if(MSVC)
+    target_compile_options(test_reanchor_at_wall_strict PRIVATE
+        "/FI${WALL_STRICT_MOCKS_DIR}/ConfigLocalization.h")
+else()
+    target_compile_options(test_reanchor_at_wall_strict PRIVATE
+        "SHELL:-include ${WALL_STRICT_MOCKS_DIR}/ConfigLocalization.h")
+endif()
+add_mock_force_includes(test_reanchor_at_wall_strict)   # shadows the real Drive.h with the mock
+add_test(NAME reanchor_at_wall_strict COMMAND test_reanchor_at_wall_strict)
+
+# =========================================================================================
+# Test executable #15 — Drive.wallStop watchdog state machine (PR2, T14). TC9 + TC10 (AC8).
+#
+# `Drive.cpp` is NOT host-compiled (heavy MatrixMiniR4 deps), so this target INLINE-MIRRORS the
+# WALL_STOP PUSH -> stall? -> BACK_OFF / outer-timeout -> advisory slice (annotated `// MIRROR:
+# Drive.cpp:<line>`), the same precedent as `test_path_tracker_stop_at_line`. The mirror calls the
+# SAME `stopAtLineProgressed` / `stopAtLineStalled` primitives from `WROMath.h` (host-compilable)
+# with the SAME `Config` constants the production `_updateWallStop` uses, so the watchdog DECISION
+# is exercised, not re-derived.
+#
+# Minimal TU set: the mirror touches no Drive/LineArray/Intersection surface, so this target does
+# NOT force-include those mocks (mirrors `test_stop_at_line_armmath`). It links `MOCK_SOURCES` only
+# for the `Serial` / `g_mockMillis` globals the mock `<Arduino.h>` declares `extern` (pulled in via
+# `WROMath.h`'s `<Arduino.h>`).
+# =========================================================================================
+add_executable(test_wall_stop_watchdog
+    ${TEST_DIR}/test_wall_stop_watchdog.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_wall_stop_watchdog PRIVATE ${COMMON_INCLUDES})
+add_test(NAME wall_stop_watchdog COMMAND test_wall_stop_watchdog)
+
+# =========================================================================================
+# Test executable #16 — PathTracker reset-node arrival interlude WALL_STOP -> REANCHOR (PR2, T16).
+# TC10b (AC10 + AC11).
+#
+# `PathTracker.cpp` is NOT host-compiled, so this target INLINE-MIRRORS the reset-arrival decision
+# slice (annotated `// MIRROR: PathTracker.cpp:<line>`), the same precedent as
+# `test_return_to_node_dispatch`. The mirror routes to the REAL `PathTrackerClass::Fault` enum AND
+# links the REAL `Localization.cpp` so the REANCHOR step calls the genuine `reanchorAtWall(...)`
+# over the real `routes.cpp` reset record (node 5). Compiles against the shipped default (strict
+# OFF) so the success/advisory cases re-anchor for real; the strict-reject ROUTING is modelled on
+# the boolean outcome (its provenance is covered by `test_reanchor_at_wall_strict`).
+#
+# Links `routes.cpp` (FieldMap::getNodeType / getResetInfo / getNode over real data + Localization's
+# odr-uses) + `MOCK_SOURCES` (Serial / MiniR4 / mmL). Mock `Drive.h` force-included (guard
+# `DRIVE_H`) to shadow the real one, as Localization.cpp `#include "Drive.h"`.
+# =========================================================================================
+add_executable(test_path_tracker_reset_arrival
+    ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_path_tracker_reset_arrival PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_path_tracker_reset_arrival)   # shadows the real Drive.h with the mock
+add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
