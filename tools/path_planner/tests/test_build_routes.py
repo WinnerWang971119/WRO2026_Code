@@ -26,6 +26,9 @@ _FIELD_ATTRS = (
     "FIELD_MM",
     "MAP_PNG",
     "BLIND_PROJECTION_AUTO_SEEK",
+    # Optional sparse table (empty on every fixture here) -- carried so the
+    # strict header_writer read of field_data.RESET_NODES never AttributeErrors.
+    "RESET_NODES",
 )
 
 

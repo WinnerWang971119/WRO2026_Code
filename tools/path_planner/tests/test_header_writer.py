@@ -95,6 +95,9 @@ _FIELD_ATTRS = (
     "FIELD_MM",
     "MAP_PNG",
     "BLIND_PROJECTION_AUTO_SEEK",
+    # Optional sparse table (empty on every fixture here) -- carried so the
+    # strict header_writer read of field_data.RESET_NODES never AttributeErrors.
+    "RESET_NODES",
 )
 
 _GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -147,6 +150,7 @@ def _build_toy_field_data() -> SimpleNamespace:
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
 
 
@@ -462,6 +466,7 @@ def test_emit_accepts_255_nodes(emit_targets):
         MAP_PNG="maps/map.png",
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -586,6 +591,7 @@ def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
         MAP_PNG="maps/map.png",
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
     graph = build_graph(fd)
     return fd, graph
