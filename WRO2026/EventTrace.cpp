@@ -47,6 +47,10 @@ bool EventTraceClass::begin()
     _prevTurnDone     = true;
     _lastHeartbeat_ms = millis();
 
+    // Reset the change-throttle sentinel so a re-begin does not carry the prior run's last-shown
+    // offset magnitude — which would defeat the documented boot-suppression of the `OFF 0` event.
+    _lastShownOffsetCm = 0;
+
     return true;
 }
 
