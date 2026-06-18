@@ -209,6 +209,77 @@ void LocalizationClass::declarePosition(uint8_t nodeId)
     clearOffset();
 }
 
+bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float headingDeg)
+{
+    // --- Read the IMU ONCE up front (pre-mutation) --------------------------------------------
+    // One raw-yaw sample backs BOTH the strict check (live heading vs. expected normal) and the
+    // heading re-bind, so the two can never disagree across a second read. A failed read aborts
+    // with NO mutation: re-binding _yawOffsetDeg against a stale yaw would skew every later
+    // getHeadingDeg() by the staleness, which is worse than declining the re-anchor and letting
+    // the caller fault.
+    float imuYaw = 0.0f;
+    if (!_readImuYaw(imuYaw))
+    {
+        return false;
+    }
+
+    // --- Strict wall-normal sanity check (default OFF) ----------------------------------------
+    // When enabled, refuse to re-anchor if the chassis is not actually squared to the wall: the
+    // current world heading must be within tolerance of the expected wall normal. Computed and
+    // decided BEFORE any state write so a rejection leaves the pose byte-for-byte unchanged
+    // (atomicity). Reuse _shortestAngleDelta for the wrap-around-correct signed difference rather
+    // than a naive abs(a - b), which breaks across the 0/360 seam.
+    if (Config::WALL_NORMAL_STRICT_ENABLED)
+    {
+        const float currentHeading = _normalize(imuYaw - _yawOffsetDeg);
+        const float diff           = fabsf(_shortestAngleDelta(currentHeading, headingDeg));
+        // Boundary: `> tolerance` REJECTS, so a difference exactly equal to the tolerance still
+        // re-anchors ("just inside" is inclusive). Matches the Config docstring + AC11 boundary.
+        if (diff > Config::WALL_NORMAL_TOLERANCE_DEG)
+        {
+            return false;
+        }
+    }
+
+    // === Atomic re-anchor: no observation point from here to the end ==========================
+
+    // (1) Square heading: bind the offset so getHeadingDeg() == headingDeg. Same definition as
+    //     zeroHeadingFromCurrent (world = normalize(imu - offset)), but targeting the wall normal
+    //     instead of the start heading. Also seed the heading cache so a no-I/O getLastHeadingDeg()
+    //     immediately reflects the squared heading instead of the pre-square value.
+    _yawOffsetDeg       = imuYaw - headingDeg;
+    _lastGoodHeadingDeg = _normalize(imuYaw - _yawOffsetDeg);
+    _lastGoodHeadingMs  = millis();
+
+    // (2) Re-anchor the operator-offset frame to zero AND re-snapshot all three integrator
+    //     baselines to the CURRENT readings (kills the arrival-tick phantom — same discipline as
+    //     clearOffset / onIntersection). Done BEFORE writing the axis offset below: _consumeOffset
+    //     zeroes the whole _offset, so the axis write must follow it, not precede it.
+    _consumeOffset();
+
+    // (3) Set the on-axis belief to the wall coordinate. Position is _currentNode + _offset (no
+    //     stored absolute pose), so express "coordinate-on-axis == wallCoord" as an offset from
+    //     the anchored node: _offset[axis] = wallCoord - nodeCoord[axis]. The reset node's stored
+    //     coordinate generally differs from its wall coordinate, so this is non-zero by design and
+    //     the net belief nodeCoord[axis] + _offset[axis] == wallCoord. The off-axis component and
+    //     thetaDeg stay 0 from step (2) — the wall gives no off-axis info and heading was just
+    //     re-bound, so the delta channel resets.
+    const Routes::NodeInfo& node = FieldMap::getNode(_currentNode);
+    if (axis == 0)
+    {
+        _offset.x = wallCoord - node.x_cm;
+    }
+    else if (axis == 1)
+    {
+        _offset.y = wallCoord - node.y_cm;
+    }
+    // Any other axis value: leave _offset at the zeroed state from step (2). The heading is still
+    // squared (the wall normal is axis-independent). The caller passes a validated info->axis, so
+    // this branch is defence-in-depth, not an expected path.
+
+    return true;
+}
+
 void LocalizationClass::update()
 {
     // Two conditions open the integrate gate: PathTracker is not driving a hop (the operator may
