@@ -127,6 +127,9 @@ def _make_field(
         BLIND_EDGES=[tuple(seg) for seg in blind_edges],
         OBSTACLES=[],
         PIVOT_TURNS=[tuple(turn) for turn in pivot_turns],
+        # No reset nodes in any pivot fixture; carried so the strict
+        # header_writer read (`field_data.RESET_NODES`) never AttributeErrors.
+        RESET_NODES={},
     )
 
 

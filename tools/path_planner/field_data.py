@@ -57,6 +57,13 @@ PIVOT_TURNS           = _data.get("pivot_turns", [])
 # before stopping (the default). Set to False to restore exact dead-reckoning.
 BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
 
+# Wall-zero reset nodes: a sparse table keyed by node name, mapping each
+# "reset"-typed node to its {axis, wall_coord, facing} re-localization spec.
+# Mirrors the PIVOT_TURNS precedent (a top-level sparse table, not a key buried
+# inside a node). Absent / empty means no reset nodes; the downstream
+# validator/header consume this.
+RESET_NODES           = _data.get("RESET_NODES", {})
+
 # ---------------------------------------------------------------------------
 # Rich edge list — optional per-edge overrides for the live field graph.
 #

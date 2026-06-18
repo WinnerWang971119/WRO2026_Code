@@ -2,9 +2,15 @@
 
 Inspects the raw module attributes (``NODES``, ``NODE_TYPES``,
 ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``OBSTACLES``, ``FIELD_MM``,
-``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, ...) and raises
-:class:`FieldDataError` on the first malformed entry with a precise key
-path and a one-line nudge toward the fix.
+``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, optional
+``RESET_NODES``, ...) and raises :class:`FieldDataError` on the first
+malformed entry with a precise key path and a one-line nudge toward the fix.
+
+Wall-zero reset nodes are authored in a sparse top-level ``RESET_NODES``
+table keyed by node name (``{"axis", "wall_coord", "facing"}`` per node),
+mirroring the ``PIVOT_TURNS`` precedent. A ``"reset"``-typed node and its
+``RESET_NODES`` entry must agree both directions; the geometry fail-fasts
+live in :func:`_validate_reset_nodes`.
 
 PR3 schema (vs PR1/PR2): drops ``PROJECTIONS`` and ``GOAL_APPROACH``,
 adds required ``BLIND_EDGES`` and ``FIELD_MM`` / ``MAP_PNG``.
@@ -54,7 +60,10 @@ _REQUIRED_ATTRS = (
     "MAP_PNG",
 )
 
-_ALLOWED_NODE_TYPES = ("line", "blind")
+_ALLOWED_NODE_TYPES = ("line", "blind", "reset")
+
+# Axis labels a reset node may re-zero against (a wall parallel to one axis).
+_ALLOWED_RESET_AXES = ("x", "y")
 
 # Per-edge pivot authoring keys removed by the per-turn model (issue #44, T5).
 # A field that still carries one of these on an EDGES entry pre-dates the
@@ -1021,6 +1030,117 @@ def _validate_edges_field(field_data) -> None:
                 )
 
 
+def _validate_reset_nodes(field_data) -> None:
+    """Reject malformed wall-zero reset nodes.
+
+    A reset node re-localizes the chassis against a known wall: it carries a
+    ``{"axis", "wall_coord", "facing"}`` spec in the sparse top-level
+    ``field_data.RESET_NODES`` table (keyed by node name), and is typed
+    ``"reset"`` in ``NODE_TYPES``. This mirrors the per-turn ``PIVOT_TURNS``
+    precedent -- a top-level sparse table, not a key buried inside a node.
+
+    Validates that:
+
+    1. ``RESET_NODES`` (when present) is a dict keyed by node name;
+    2. every key is a node in ``NODES``;
+    3. the ``"reset"`` typing is consistent both directions -- every node typed
+       ``"reset"`` in ``NODE_TYPES`` has a ``RESET_NODES`` entry, and every
+       ``RESET_NODES`` key is typed ``"reset"``;
+    4. each spec is a dict with ``axis`` in ``{"x","y"}``, a finite
+       ``wall_coord`` (cm), and a finite ``facing`` in ``[0, 360)`` degrees.
+
+    Like :func:`_validate_pivot_turns`, this early-returns on a reset-free
+    field (absent / empty table) so the common case pays nothing.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes -- including the optional
+        ``RESET_NODES``).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``RESET_NODES['<name>']`` key path
+        and a one-line fix hint on the first malformed entry.
+    """
+    reset_nodes = getattr(field_data, "RESET_NODES", {})
+    node_types = getattr(field_data, "NODE_TYPES", {})
+
+    # Even on an empty RESET_NODES we must still catch a node typed "reset"
+    # that has NO entry, so only short-circuit when BOTH sides are empty.
+    reset_typed = {
+        name for name, value in node_types.items() if value == "reset"
+    }
+    if not reset_nodes and not reset_typed:
+        return
+
+    if not isinstance(reset_nodes, dict):
+        raise FieldDataError(
+            "RESET_NODES must be a dict mapping node-name -> "
+            "{axis, wall_coord, facing}; "
+            f"got: {type(reset_nodes).__name__}"
+        )
+
+    nodes = getattr(field_data, "NODES", {})
+
+    # Consistency: every reset-typed node needs a RESET_NODES entry.
+    for name in reset_typed:
+        if name not in reset_nodes:
+            raise FieldDataError(
+                f"node '{name}' is typed 'reset' in NODE_TYPES but has no "
+                f"RESET_NODES entry -- add RESET_NODES['{name}'] = "
+                "{'axis': 'x'|'y', 'wall_coord': <cm>, 'facing': <deg>} "
+                "or change its node type"
+            )
+
+    for name, spec in reset_nodes.items():
+        # The key must be a real node ...
+        if name not in nodes:
+            raise FieldDataError(
+                f"RESET_NODES references unknown node: '{name}' -- "
+                "add it to NODES or remove the entry from RESET_NODES"
+            )
+        # ... and that node must be typed 'reset' (consistency, other way).
+        if node_types.get(name) != "reset":
+            raise FieldDataError(
+                f"RESET_NODES['{name}'] is set but NODE_TYPES['{name}'] = "
+                f"'{node_types.get(name)}' -- a reset node must be typed "
+                "'reset'; fix NODE_TYPES or remove the RESET_NODES entry"
+            )
+
+        if not isinstance(spec, dict):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'] must be a dict with keys "
+                f"'axis', 'wall_coord', 'facing'; got: {spec!r}"
+            )
+
+        for required_key in ("axis", "wall_coord", "facing"):
+            if required_key not in spec:
+                raise FieldDataError(
+                    f"RESET_NODES['{name}'] missing required key "
+                    f"'{required_key}' -- each entry needs 'axis', "
+                    "'wall_coord', and 'facing'"
+                )
+
+        axis = spec["axis"]
+        wall_coord = spec["wall_coord"]
+        facing = spec["facing"]
+
+        if axis not in _ALLOWED_RESET_AXES:
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].axis = {axis!r}; expected one of "
+                "{'x','y'} -- the wall is parallel to one field axis"
+            )
+
+        if not _is_number(wall_coord):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].wall_coord must be a finite number "
+                f"in centimetres; got: {wall_coord!r}"
+            )
+
+        if not _is_number(facing) or not (0.0 <= float(facing) < 360.0):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].facing must be a number in [0, 360); "
+                f"got: {facing!r} -- normalize via `facing % 360.0`"
+            )
+
+
 def validate(field_data) -> None:
     """Raise :class:`FieldDataError` on the first problem; return ``None`` on success.
 
@@ -1099,13 +1219,13 @@ def validate(field_data) -> None:
         if name not in node_types:
             raise FieldDataError(
                 f"node '{name}' missing from NODE_TYPES -- "
-                "every NODES key needs a type ('line' or 'blind')"
+                "every NODES key needs a type ('line', 'blind', or 'reset')"
             )
     for name, value in node_types.items():
         if value not in _ALLOWED_NODE_TYPES:
             raise FieldDataError(
                 f"NODE_TYPES['{name}'] = '{value}'; expected one of "
-                "{'line','blind'}"
+                "{'line','blind','reset'}"
             )
 
     # 4. LINE_SEGMENTS coverage.
@@ -1227,3 +1347,8 @@ def validate(field_data) -> None:
     # well-formed, and after node/segment validation so the authored graph it
     # builds is sound. Inert (early return) on a pivot-free field.
     _validate_pivot_turns(field_data)
+
+    # 11. Wall-zero reset nodes (PR2 T12). Runs after NODE_TYPES validation so
+    # the "reset" typing it cross-checks is well-formed. Inert (early return)
+    # on a reset-free field.
+    _validate_reset_nodes(field_data)

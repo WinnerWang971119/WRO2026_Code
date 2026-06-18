@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pytest
 
+from tools.path_planner.editor.commands import AddNode
+from tools.path_planner.editor.history import History
 from tools.path_planner.editor.model import FieldModel
 from tools.path_planner.validator import FieldDataError
 
@@ -274,6 +276,215 @@ def test_pivot_turns_open_save_open_preservation(tmp_path) -> None:
     reopened = FieldModel.from_json_dict(load_field_json(saved_path))
     assert reopened.pivot_turns == [("A", "B", "C")]
     assert reopened == opened
+
+
+# ---------------------------------------------------------------------------
+# reset_nodes preservation (PR2 T12): like pivot_turns, the editor has no GUI
+# control for wall-zero reset nodes, so the model must carry the sparse
+# RESET_NODES table verbatim across open (from_json_dict) -> save
+# (to_json_dict), expose it on the validator proxy, and deep-copy it through
+# snapshot/restore so undo/redo preserves it.
+# ---------------------------------------------------------------------------
+
+
+def _reset_spec() -> dict:
+    """Return one valid reset-node spec ``{axis, wall_coord, facing}``."""
+    return {"axis": "y", "wall_coord": 205.0, "facing": 90.0}
+
+
+def test_reset_nodes_defaults_to_empty_dict() -> None:
+    """A model constructed without reset_nodes has an empty dict, not an error.
+
+    The dataclass field is defaulted so existing call sites that build a
+    FieldModel without reset nodes stay valid.
+    """
+    model = make_model()
+    assert model.reset_nodes == {}
+
+
+def test_reset_nodes_survives_to_from_json_round_trip() -> None:
+    """from_json_dict(to_json_dict()) preserves an authored reset_nodes table.
+
+    Open -> save must not drop the field. The spec dict is carried verbatim.
+    """
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": _reset_spec()}
+
+    restored = FieldModel.from_json_dict(model.to_json_dict())
+
+    assert restored.reset_nodes == {"A": _reset_spec()}
+    assert restored == model
+
+
+def test_reset_nodes_emitted_as_dict_in_json_dict() -> None:
+    """to_json_dict() renders RESET_NODES as a JSON-native dict of specs."""
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": _reset_spec()}
+
+    json_dict = model.to_json_dict()
+
+    assert json_dict["RESET_NODES"] == {"A": _reset_spec()}
+
+
+def test_to_json_dict_omits_empty_reset_nodes() -> None:
+    """A reset-free model omits the optional ``RESET_NODES`` key entirely.
+
+    Matches the loader's ``dump_field_json`` "absent stays absent" round-trip so
+    opening + saving a reset-free field through the model produces no spurious
+    ``RESET_NODES: {}`` diff.
+    """
+    model = make_model()
+    assert model.reset_nodes == {}
+    json_dict = model.to_json_dict()
+    assert "RESET_NODES" not in json_dict
+    # OBSTACLES still closes the canonical order even with both optional keys
+    # (pivot_turns + RESET_NODES) absent.
+    assert tuple(json_dict.keys())[-1] == "OBSTACLES"
+
+
+def test_to_json_dict_reset_nodes_in_canonical_slot() -> None:
+    """RESET_NODES is emitted between pivot_turns and OBSTACLES when both are set."""
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.pivot_turns = [("A", "B", "A")]  # shape only; not validated here
+    model.reset_nodes = {"A": _reset_spec()}
+    expected_keys = (
+        "FIELD_MM",
+        "MAP_PNG",
+        "ROBOT_RADIUS_CM",
+        "COST_BLIND_MULTIPLIER",
+        "START_NODE",
+        "START_HEADING_DEG",
+        "NODES",
+        "NODE_TYPES",
+        "LINE_SEGMENTS",
+        "BLIND_EDGES",
+        "pivot_turns",
+        "RESET_NODES",
+        "OBSTACLES",
+    )
+    assert tuple(model.to_json_dict().keys()) == expected_keys
+
+
+def test_reset_nodes_sorted_alphabetically_in_json_dict() -> None:
+    """RESET_NODES keys are emitted alphabetically for a deterministic dump."""
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.node_types["B"] = "reset"
+    # Insert in reverse-alphabetical order to stress the sort.
+    model.reset_nodes = {
+        "B": {"axis": "x", "wall_coord": 10.0, "facing": 0.0},
+        "A": _reset_spec(),
+    }
+    json_keys = list(model.to_json_dict()["RESET_NODES"].keys())
+    assert json_keys == sorted(json_keys) == ["A", "B"]
+
+
+def test_from_json_dict_tolerates_absent_reset_nodes() -> None:
+    """A JSON dict predating RESET_NODES loads with an empty dict.
+
+    Older field_data.json files omit the optional key; from_json_dict must
+    default it rather than raise KeyError. A reset-free model's to_json_dict
+    already omits the key, so this dict has no ``RESET_NODES`` to begin with.
+    """
+    data = make_model().to_json_dict()
+    assert "RESET_NODES" not in data
+
+    model = FieldModel.from_json_dict(data)
+
+    assert model.reset_nodes == {}
+
+
+def test_to_module_proxy_exposes_reset_nodes() -> None:
+    """to_module_proxy() carries RESET_NODES so validate() actually sees it.
+
+    The dual-serialization trap: a field added to to_json_dict() but not to the
+    proxy is persisted-but-unvalidated (the validator early-returns on the
+    missing attribute). The proxy must expose RESET_NODES with the exact dict
+    the model holds.
+    """
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": _reset_spec()}
+
+    proxy = model.to_module_proxy()
+
+    assert hasattr(proxy, "RESET_NODES")
+    assert proxy.RESET_NODES == {"A": _reset_spec()}
+    # Same object the model holds (the validator reads it by reference).
+    assert proxy.RESET_NODES is model.reset_nodes
+
+
+def test_validate_reaches_reset_rules_via_proxy() -> None:
+    """model.validate() rejects a bad reset node because the proxy exposes it.
+
+    A reset node typed "reset" with NO RESET_NODES entry is malformed. If the
+    proxy did not carry RESET_NODES, _validate_reset_nodes would still catch the
+    "reset"-typed node via NODE_TYPES, but a bad SPEC (here, an unknown axis)
+    only surfaces when the table itself reaches the validator. This proves the
+    proxy plumbs the spec through, not just the node type.
+    """
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": {"axis": "z", "wall_coord": 10.0, "facing": 0.0}}
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.axis"):
+        model.validate()
+
+
+def test_snapshot_restore_preserves_reset_nodes() -> None:
+    """snapshot()/restore() deep-copies reset_nodes so undo unwinding preserves it.
+
+    restore() is the path the undo stack uses to unwind to a prior state. A
+    shallow copy would alias the spec dicts, so a later live mutation would leak
+    into the snapshot (or vice versa). Assert deep independence both ways.
+    """
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": _reset_spec()}
+    snap = model.snapshot()
+
+    # Mutating the snapshot's nested spec must not touch the live model.
+    snap.reset_nodes["A"]["facing"] = 270.0
+    assert model.reset_nodes["A"]["facing"] == 90.0
+
+    # Mutate the live model, then restore: the table must come back exactly.
+    model.reset_nodes["A"]["wall_coord"] = 999.0
+    model.reset_nodes["B"] = {"axis": "x", "wall_coord": 1.0, "facing": 0.0}
+    model.restore(snap)
+    assert model.reset_nodes == {
+        "A": {"axis": "y", "wall_coord": 205.0, "facing": 270.0}
+    }
+    # The restored table is independent of the snapshot (deep copy on restore).
+    model.reset_nodes["A"]["facing"] = 0.0
+    assert snap.reset_nodes["A"]["facing"] == 270.0
+
+
+def test_history_undo_redo_preserves_reset_nodes() -> None:
+    """A History do -> undo -> redo cycle leaves reset_nodes intact.
+
+    The editor has no command that touches reset_nodes, so an unrelated edit
+    (AddNode) driven through the real History must not disturb the sparse table
+    across an undo/redo round-trip. Guards the snapshot/restore deep-copy from a
+    regression where a History cycle drops or aliases the preserved-only field.
+    """
+    model = make_model()
+    model.node_types["A"] = "reset"
+    model.reset_nodes = {"A": _reset_spec()}
+    before = {k: dict(v) for k, v in model.reset_nodes.items()}
+
+    history = History()
+    history.do(AddNode(name="Z", xy=(5.0, 5.0), node_type="line"), model)
+    assert model.reset_nodes == before
+
+    assert history.undo(model) is True
+    assert model.reset_nodes == before
+    assert "Z" not in model.nodes
+
+    assert history.redo(model) is True
+    assert model.reset_nodes == before
+    assert "Z" in model.nodes
 
 
 # ---------------------------------------------------------------------------

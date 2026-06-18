@@ -44,4 +44,9 @@ BLIND_EDGES = _data["BLIND_EDGES"]
 OBSTACLES = _data["OBSTACLES"]
 BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
 
+# Optional sparse tables (this toy field authors neither). Mirror field_data.py
+# so the strict header_writer read (`field_data.RESET_NODES`) never AttributeErrors.
+PIVOT_TURNS = _data.get("pivot_turns", [])
+RESET_NODES = _data.get("RESET_NODES", {})
+
 EDGES: list = []

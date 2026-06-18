@@ -1067,6 +1067,185 @@ def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off
         validate(fd)
 
 
+# -- TC13: wall-zero reset nodes (_validate_reset_nodes) ----------------------
+#
+# A reset node re-localizes the chassis against a known wall. It is a normal
+# node (entry in NODES + NODE_TYPES with the value "reset") PLUS a separate
+# top-level sparse table RESET_NODES, keyed by node name, mapping each
+# "reset"-typed node to {"axis", "wall_coord", "facing"}. RESET_NODES is
+# OPTIONAL (absent => empty dict). The validator cross-checks the "reset"
+# typing both directions and fail-fasts on a malformed spec. Every fixture
+# here is an inline SimpleNamespace -- field_data.json is never touched.
+
+
+def _reset_field(node_types_overrides=None, reset_nodes=None) -> SimpleNamespace:
+    """Build a minimal A/B field carrying the given NODE_TYPES + RESET_NODES.
+
+    Two real nodes A/B joined by a LINE segment. ``A`` is the candidate reset
+    node: by default it is typed ``"reset"`` and carries a valid RESET_NODES
+    entry, so the base field validates. Tests pass ``node_types_overrides`` /
+    ``reset_nodes`` to author the specific malformed (or absent) case.
+    """
+    node_types = {"A": "reset", "B": "line"}
+    if node_types_overrides is not None:
+        node_types = dict(node_types_overrides)
+    if reset_nodes is None:
+        reset_nodes = {"A": {"axis": "y", "wall_coord": 205.0, "facing": 90.0}}
+    return SimpleNamespace(
+        NODES={"A": (12.0, 200.0), "B": (12.0, 50.0)},
+        NODE_TYPES=node_types,
+        LINE_SEGMENTS=[("A", "B")],
+        BLIND_EDGES=[],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="A",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        RESET_NODES=reset_nodes,
+    )
+
+
+def test_reset_node_valid_field_passes() -> None:
+    """TC13: a well-formed reset node + RESET_NODES entry validates."""
+    assert validate(_reset_field()) is None
+
+
+def test_reset_node_absent_table_passes() -> None:
+    """A reset-free field (no "reset" type, empty RESET_NODES) validates.
+
+    The validator early-returns when both the RESET_NODES table and the set of
+    "reset"-typed nodes are empty, so a plain LINE/BLIND field is unaffected.
+    """
+    fd = _reset_field(
+        node_types_overrides={"A": "line", "B": "line"},
+        reset_nodes={},
+    )
+    assert validate(fd) is None
+
+
+def test_reset_node_missing_attr_treated_as_empty() -> None:
+    """A field with no RESET_NODES attribute at all is reset-free and valid.
+
+    ``getattr(field_data, "RESET_NODES", {})`` defaults the optional table, so
+    a field that never authored one (and types no node "reset") passes.
+    """
+    fd = _reset_field(node_types_overrides={"A": "line", "B": "line"})
+    delattr(fd, "RESET_NODES")
+    assert validate(fd) is None
+
+
+def test_reset_node_axis_not_x_or_y_rejected() -> None:
+    """TC13: axis outside {x, y} is rejected with a precise key path."""
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "z", "wall_coord": 205.0, "facing": 90.0}}
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.axis"):
+        validate(fd)
+
+
+def test_reset_node_facing_360_rejected() -> None:
+    """TC13: facing == 360 is out of the [0, 360) range and rejected."""
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 205.0, "facing": 360.0}}
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
+        validate(fd)
+
+
+def test_reset_node_facing_negative_rejected() -> None:
+    """TC13: a negative facing is out of [0, 360) and rejected."""
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 205.0, "facing": -1.0}}
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
+        validate(fd)
+
+
+def test_reset_node_wall_coord_non_finite_rejected() -> None:
+    """TC13: a non-finite wall_coord (NaN / Inf) is rejected.
+
+    Mirrors the finiteness gate used everywhere else in the validator: a NaN
+    is a float but slips through downstream numeric math, so it must fail with
+    a clean FieldDataError at the field-data layer.
+    """
+    fd = _reset_field(
+        reset_nodes={
+            "A": {"axis": "y", "wall_coord": float("inf"), "facing": 90.0}
+        }
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.wall_coord"):
+        validate(fd)
+
+
+def test_reset_node_key_not_in_nodes_rejected() -> None:
+    """TC13: a RESET_NODES key that is not a NODES entry is rejected.
+
+    No node is typed "reset" here, so the consistency check passes and the
+    unknown-key gate is the one that trips on the bogus ``ZZZ`` key.
+    """
+    fd = _reset_field(
+        node_types_overrides={"A": "line", "B": "line"},
+        reset_nodes={
+            "ZZZ": {"axis": "y", "wall_coord": 205.0, "facing": 90.0}
+        },
+    )
+    with pytest.raises(
+        FieldDataError, match=r"RESET_NODES references unknown node: 'ZZZ'"
+    ):
+        validate(fd)
+
+
+def test_reset_node_typed_reset_without_entry_rejected() -> None:
+    """TC13: a node typed "reset" with NO RESET_NODES entry is rejected.
+
+    Consistency, one direction: typing a node "reset" without authoring its
+    {axis, wall_coord, facing} spec leaves the re-localization undefined.
+    """
+    fd = _reset_field(reset_nodes={})  # A is still typed "reset"
+    with pytest.raises(
+        FieldDataError, match=r"node 'A' is typed 'reset' .* has no\s+RESET_NODES entry"
+    ):
+        validate(fd)
+
+
+def test_reset_node_entry_without_reset_type_rejected() -> None:
+    """TC13: a RESET_NODES entry whose node is NOT typed "reset" is rejected.
+
+    Consistency, the other direction: authoring a RESET_NODES spec for a node
+    typed "line" (or anything but "reset") is contradictory and must fail.
+    """
+    fd = _reset_field(
+        node_types_overrides={"A": "line", "B": "line"},
+        reset_nodes={"A": {"axis": "y", "wall_coord": 205.0, "facing": 90.0}},
+    )
+    with pytest.raises(
+        FieldDataError, match=r"RESET_NODES\['A'\] is set but NODE_TYPES\['A'\]"
+    ):
+        validate(fd)
+
+
+def test_reset_node_missing_spec_key_rejected() -> None:
+    """TC13: a RESET_NODES spec missing a required key is rejected."""
+    fd = _reset_field(reset_nodes={"A": {"axis": "y", "facing": 90.0}})
+    with pytest.raises(
+        FieldDataError, match=r"RESET_NODES\['A'\] missing required key 'wall_coord'"
+    ):
+        validate(fd)
+
+
+def test_reset_node_type_accepted_in_node_types() -> None:
+    """TC13: "reset" is now an allowed NODE_TYPES value (alongside line/blind)."""
+    fd = _reset_field()
+    # Sanity: the "reset" typing on A did not trip the NODE_TYPES value gate.
+    assert validate(fd) is None
+    # A bogus type still fails, proving the gate is not a blanket pass.
+    fd_bad = _reset_field(node_types_overrides={"A": "weird", "B": "line"})
+    with pytest.raises(FieldDataError, match=r"NODE_TYPES\['A'\]"):
+        validate(fd_bad)
+
+
 # -- TC26: validator parse-helper / firmware Config.h parity ------------------
 #
 # The validator single-sources its pivot constants from WRO2026/Config.h
