@@ -98,10 +98,15 @@ void DriveClass::update()
     // duration of the continuous, event-terminated seek. The seek commands MoveSync/MoveGyro/Move
     // continuously (which do NOT raise the lower-MCU task-done bit), but a *prior* bounded task's
     // stale done bit could still flip `_moveDone` mid-seek — skip the drain while seeking (W1).
+    //
+    // Same guard for an in-flight wallStop push: `_updateWallStop` owns `_moveDone` for the
+    // duration of the continuous, stall-terminated push (which also commands MoveSync/MoveGyro/Move
+    // continuously) — skip the drain while pushing (W1).
     // -------------------------------------------------------------------------------------
     if (_profileState == ProfileState::IDLE
         && _turnProfileState == TurnProfileState::IDLE
         && _stopState == StopAtLineState::IDLE
+        && _wallState == WallStopState::IDLE
         && (!_moveDone || !_turnDone))
     {
         // The lower MCU reports a single task-done bit, so move-done and turn-done collapse
@@ -126,6 +131,10 @@ void DriveClass::update()
     _updateStopAtLine();     // ADR-027 — cooperative tick parallel to the two profiles, owns
                               // the continuous, event-terminated SEEK → ARMED → OVERSHOOT → DONE
                               // drive-until-line seek. Reads LineArray.getJunctionType() directly.
+    _updateWallStop();       // AC8 — cooperative tick parallel to the seek, owns the continuous,
+                              // stall-terminated PUSH → BACK_OFF → DONE wall re-zero push. REUSES
+                              // the stop-at-line no-progress watchdog with the stall meaning
+                              // inverted to success.
 
     // -------------------------------------------------------------------------------------
     // Stage 3 — if the chassis is fully idle and a queued command is waiting, dispatch it.
@@ -179,6 +188,13 @@ uint8_t DriveClass::stop(bool brake)
     if (_stopState != StopAtLineState::IDLE)
     {
         _endStopAtLine(brake);
+    }
+
+    // Abort any in-flight wallStop push too (AC8). The shared teardown re-issues the same
+    // `Move(0, 0)` + `brake(brake)` already done above with this `brake`, which is harmless.
+    if (_wallState != WallStopState::IDLE)
+    {
+        _endWallStop(brake);
     }
 
     // Abort semantics — pending queued work is dropped. Without this, a `Drive.stop()` call
@@ -458,6 +474,11 @@ bool DriveClass::isIdle() const
 bool DriveClass::isLineFound() const
 {
     return _isLineFound;
+}
+
+bool DriveClass::wallStopTimedOut() const
+{
+    return _wallStopTimedOut;
 }
 
 void DriveClass::waitUntilIdle()
@@ -1344,6 +1365,151 @@ void DriveClass::_endStopAtLine(bool brake)
 }
 
 // -----------------------------------------------------------------------------------------
+// Wall-stop push state machine (`wallStop()` cooperative driver) — wall-zero reset nodes (AC8)
+//
+// CONTINUOUS, STALL-terminated push. Unlike `_updateProfile()` there is no known total distance to
+// plan a ramp-down against — the stop point is unknown until the wheels stall against the wall. Each
+// tick this commands a continuous primitive (Move / MoveSync / MoveGyro) per `_wallMode` in the push
+// direction (`_wallReverse`) and walks PUSH → BACK_OFF → DONE:
+//   - PUSH      drive flat at the low push PWM; REUSE the stop-at-line no-progress watchdog
+//               (`stopAtLineProgressed` / `stopAtLineStalled` over STOP_AT_LINE_STALL_TIMEOUT_MS).
+//               A stall here is SUCCESS (wall reached) — the INVERSE of the seek, where a stall is
+//               the `LINE_NOT_FOUND` fault. On stall, capture the back-off encoder + enter BACK_OFF.
+//               If the outer advisory timeout elapses first WITHOUT a stall, record the
+//               NON-LATCHING `_wallStopTimedOut` advisory (NOT a hard fault) + enter DONE.
+//   - BACK_OFF  roll the configured back-off distance in the reverse-of-push direction, then DONE.
+//   - DONE      issue the final stop (active-brake per `_wallBrake`), restore the front board, set
+//               `_moveDone`, return to IDLE.
+//
+// The stall watchdog is the SAME mechanism `_updateStopAtLine` uses — the only inversion is the
+// meaning (success vs fault), so the predicates and Config constants are shared, not duplicated.
+// -----------------------------------------------------------------------------------------
+
+void DriveClass::_updateWallStop()
+{
+    if (_wallState == WallStopState::IDLE)
+    {
+        return;
+    }
+
+    // DONE neither reads the encoder nor commands continuous motion — it only finalises. Handle it
+    // first so the per-tick STM32 encoder round-trip below is skipped entirely in that state.
+    if (_wallState == WallStopState::DONE)
+    {
+        // Final stop. Active-brake (or coast) per `_wallBrake`, restore the front board, mark the
+        // push complete so `_dispatchNext` can hand off to the next queued command on this tick.
+        _endWallStop(_wallBrake);
+        return;
+    }
+
+    // Travel measured as an unsigned magnitude from the per-side baseline (M2, the canonical
+    // encoder), matching `_updateProfile` / `_updateStopAtLine`. Forward and reverse both accumulate
+    // positive `traveled`, so the back-off comparison needs no sign juggling.
+    const int32_t nowEnc   = MiniR4.M2.getDegrees();
+    const float   traveled = encDegToCm((int32_t) abs(nowEnc - _wallStartEnc));
+
+    // Emit a continuous PWM at the given positive magnitude through the shared `_emitContinuous`,
+    // applying the push direction (backward when `_wallReverse`). Every magnitude passed here is
+    // positive — the builder carries direction in `_wallReverse`, never in the power sign.
+    auto driveContinuous = [&](int16_t mag)
+    {
+        const int16_t pwm = (int16_t) (_wallReverse ? -mag : mag);
+        _emitContinuous(_wallMode, pwm, _wallHeading);
+    };
+
+    switch (_wallState)
+    {
+    case WallStopState::PUSH:
+    {
+        // Reused no-progress watchdog (AC8): whenever `traveled` advances by at least
+        // `Config::STOP_AT_LINE_PROGRESS_EPS_CM` since the last mark, reset the watchdog (record the
+        // new baseline + timestamp). A push that stops advancing (wheels stalled against the wall)
+        // never resets it, so `stopAtLineStalled(...)` fires once the timeout elapses — and HERE that
+        // is SUCCESS, the inverse of the stop-at-line seek. The progress decision lives in
+        // `stopAtLineProgressed` (host-tested via TC17) and is shared verbatim.
+        if (stopAtLineProgressed(traveled, _wallLastProgressCm, Config::STOP_AT_LINE_PROGRESS_EPS_CM))
+        {
+            _wallLastProgressCm = traveled;
+            _wallLastProgressMs = millis();
+        }
+        const uint32_t now     = millis();
+        const bool     stalled =
+            stopAtLineStalled(now, _wallLastProgressMs, Config::STOP_AT_LINE_STALL_TIMEOUT_MS);
+
+        if (stalled)
+        {
+            // Wall reached — SUCCESS. Anchor the back-off roll on the current encoder and hand off to
+            // BACK_OFF. `_wallStopTimedOut` stays false (it was cleared at dispatch).
+            _wallBackOffEnc = nowEnc;
+            _wallState      = WallStopState::BACK_OFF;
+            break;
+        }
+
+        // Outer advisory timeout — never stalled (e.g. never reached a wall, wheels kept turning
+        // freely). Record the NON-LATCHING advisory flag (NOT a hard `_fault` — `hasFault()` stays
+        // false and the queue is NOT frozen) and finalise via DONE. The caller assumes-at-wall and
+        // continues. Checked AFTER the stall gate so a press that stalls on the very tick the outer
+        // timeout would also fire still reports success, never a spurious advisory timeout.
+        if ((uint32_t) (now - _wallStartMs) >= _wallTimeoutMs)
+        {
+            Serial.println(F("[Drive] wallStop: no stall within timeout — advisory (assume at wall)"));
+            _wallStopTimedOut = true;
+            _wallState        = WallStopState::DONE;
+            break;
+        }
+
+        // Still pushing — hold the flat low push PWM toward the wall.
+        driveContinuous(_wallPushPwm);
+        break;
+    }
+
+    case WallStopState::BACK_OFF:
+    {
+        // Roll the known back-off distance in the reverse-of-push direction so the chassis is no
+        // longer pressing the wall. The distance IS known, so this phase could ramp — but the roll
+        // is short (a few cm) and the watchdog is disarmed here, so a flat low-PWM roll is simplest
+        // and reliable. `rolled` is the magnitude travelled since the stall was confirmed.
+        const float rolled = encDegToCm((int32_t) abs(nowEnc - _wallBackOffEnc));
+
+        if (_wallBackOffCm <= 0.0f || rolled >= _wallBackOffCm)
+        {
+            // Back-off consumed (or none requested) — finalise on the next state.
+            _wallState = WallStopState::DONE;
+            break;
+        }
+
+        // Drive at the deadband floor in the REVERSE-of-push direction. `_wallReverse` already
+        // selected the push direction; negate it here so back-off opposes the push regardless of
+        // whether the push itself was forward or rearward.
+        const int16_t floorPwm   = Config::PWM_MIN_MAGNITUDE;
+        const int16_t backOffMag = (int16_t) (_wallReverse ? floorPwm : -floorPwm);
+        _emitContinuous(_wallMode, backOffMag, _wallHeading);
+        break;
+    }
+
+    default:
+        // IDLE and DONE are handled above the encoder read; no other state values exist.
+        break;
+    }
+}
+
+void DriveClass::_endWallStop(bool brake)
+{
+    // Shared push teardown (AC8). Used by the DONE state (brake = `_wallBrake`) and `stop()` /
+    // `_drainBlocking()` when an in-flight push is aborted. Restores the front board for symmetry
+    // with `_endStopAtLine` (wall-stop never selects the rear board, so this is a harmless no-op,
+    // but it keeps the active-board invariant explicit). Does NOT clear the queue (the normal DONE
+    // hand-off keeps it) and does NOT touch `_wallStopTimedOut` (owned by the PUSH-phase outcome)
+    // or `_fault` (the wall-stop timeout is non-latching by design).
+    MiniR4.DriveDC.Move(0, 0);
+    MiniR4.DriveDC.brake(brake);
+    LineArray.setReverseActive(false);
+    _wallState = WallStopState::IDLE;
+    _moveDone  = true;
+    _turnDone  = true;
+}
+
+// -----------------------------------------------------------------------------------------
 // Fault state accessors (code review F5).
 // -----------------------------------------------------------------------------------------
 
@@ -1551,6 +1717,38 @@ void DriveClass::_dispatchNext()
                                      // seeding cannot fail at dispatch (no lower-MCU round trip).
         break;
     }
+
+    case DriveCommand::Kind::WALL_STOP:
+    {
+        // Seed the continuous, stall-terminated wall push (AC8). Like STOP_AT_LINE this does NOT go
+        // through `_execProfileMove` — the stop point is unknown until the wheels stall against the
+        // wall, so there is no known-distance trapezoid. `_updateWallStop()` owns the wheels from
+        // here until DONE. LineFollower was already auto-disabled above.
+        _wallMode     = cmd.mode;
+        _wallPushPwm  = cmd.power;
+        _wallHeading  = cmd.heading;
+        _wallBackOffCm = cmd.backOffCm;
+        _wallTimeoutMs = cmd.timeoutMs;
+        _wallReverse  = cmd.reverse;
+        _wallBrake    = cmd.brake;
+        _wallStartEnc = MiniR4.M2.getDegrees();    // canonical encoder, matches `_updateProfile`
+        _wallBackOffEnc = _wallStartEnc;
+        _wallStopTimedOut = false;    // cleared on dispatch; set true only on the no-stall timeout.
+
+        // Seed BOTH watchdogs (AC8): the reused stop-at-line no-progress watchdog (baseline at zero
+        // travel, clock from now) AND the outer advisory timeout (clock from now). The inner stall
+        // watchdog REUSES `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM`
+        // via `stopAtLineProgressed` / `stopAtLineStalled` — a stall here means SUCCESS (wall
+        // reached), the inverse of the seek's `LINE_NOT_FOUND`.
+        _wallLastProgressCm = 0.0f;
+        _wallLastProgressMs = millis();
+        _wallStartMs        = millis();
+
+        _wallState = WallStopState::PUSH;
+        _moveDone  = false;          // the push owns _moveDone until DONE. `rc` stays 0x00 — seeding
+                                     // cannot fail at dispatch (no lower-MCU round trip).
+        break;
+    }
     }
 
     if (rc != 0x00)
@@ -1577,7 +1775,8 @@ bool DriveClass::_isIdle() const
 {
     return _moveDone && _turnDone && _profileState == ProfileState::IDLE
            && _turnProfileState == TurnProfileState::IDLE
-           && _stopState == StopAtLineState::IDLE;
+           && _stopState == StopAtLineState::IDLE
+           && _wallState == WallStopState::IDLE;
 }
 
 void DriveClass::_drainBlocking()
@@ -1627,6 +1826,12 @@ void DriveClass::_drainBlocking()
             if (_stopState != StopAtLineState::IDLE)
             {
                 _endStopAtLine(true);
+            }
+            // Abort an in-flight wallStop push too (AC8) — active-brake to match the hard-stop. The
+            // shared teardown re-issues `Move(0, 0)` + `brake(true)`, harmless after the hard-stop.
+            if (_wallState != WallStopState::IDLE)
+            {
+                _endWallStop(true);
             }
             _clearQueue();
             return;
