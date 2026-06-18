@@ -17,7 +17,7 @@ namespace Routes {
     // Node category. LINE nodes are reached by line-following
     // to the next intersection; BLIND nodes are reached by a
     // dead-reckoned turn + forward move from a connected node.
-    enum class NodeType : uint8_t { LINE = 0, BLIND = 1 };
+    enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2 };
 
     // Edge motion class, dispatched by the runtime.
     enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, PROJECTION = 3 };
@@ -68,6 +68,18 @@ namespace Routes {
         float    trim_cm;    // delta over-travel, cm
     };
 
+    // Wall-zero reset node (PR2). A reset node re-anchors the
+    // chassis against a known wall: drive to the wall on `axis`,
+    // re-zero that coordinate to `wall_coord`, and adopt `facing`
+    // as the heading. Reached like any node; the reset payload
+    // lives ONLY here, not on NODES[] (sparse, like PivotTurn).
+    struct ResetNode {
+        uint8_t  node;        // node index
+        uint8_t  axis;        // 0 = x, 1 = y (wall parallel to axis)
+        float    wall_coord;  // cm; the re-zeroed coordinate
+        int16_t  facing;      // degrees [0, 360)
+    };
+
     extern const NodeInfo NODES[N_NODES];
     extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];
     extern const EdgeInfo EDGES   [N_NODES][N_NODES];
@@ -77,6 +89,12 @@ namespace Routes {
     // short bounded linear scan in FieldMap::findPivotTurn.
     constexpr uint8_t N_PIVOT_TURNS = 0;
     extern const PivotTurn PIVOT_TURNS[1];
+
+    // Sparse, sorted wall-zero reset table (PR2). Sorted by node
+    // index for a deterministic golden and a short bounded linear
+    // scan in FieldMap::getResetInfo.
+    constexpr uint8_t N_RESET_NODES = 0;
+    extern const ResetNode RESET_NODES[1];
 
     // Sentinel for unreachable next-hop entries; PathTracker
     // treats this as 'no path; halt and report'.

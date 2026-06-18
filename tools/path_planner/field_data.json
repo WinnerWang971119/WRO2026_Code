@@ -37,6 +37,10 @@
     "position1": [
       165.11723948056715,
       119.22713715413207
+    ],
+    "Wall1": [
+      165.0,
+      139.0
     ]
   },
   "NODE_TYPES": {
@@ -46,7 +50,8 @@
     "Inter4": "line",
     "Start": "blind",
     "final": "blind",
-    "position1": "blind"
+    "position1": "blind",
+    "Wall1": "reset"
   },
   "LINE_SEGMENTS": [
     [
@@ -94,8 +99,19 @@
     [
       "final",
       "position1"
+    ],
+    [
+      "position1",
+      "Wall1"
     ]
   ],
   "pivot_turns": [],
+  "RESET_NODES": {
+    "Wall1": {
+      "axis": "y",
+      "wall_coord": 154.0,
+      "facing": 90.0
+    }
+  },
   "OBSTACLES": []
 }
