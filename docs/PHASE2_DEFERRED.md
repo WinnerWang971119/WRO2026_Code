@@ -34,7 +34,7 @@ in the "Graduates" subsection.
 
 | Feature | Spec § | Status | When likely |
 |---|---|---|---|
-| Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | Deferred to Phase 2.5 | After real-field nav exposes accumulated blind-walk drift |
+| Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | **Partially graduated** — static multiplicative decay shipped via ADR-041; path-dependent augmented-state `(node, blind_bucket)` + runtime counter still deferred | After real-field runs show the static tail-approximation mis-routing in practice |
 | Per-scenario NEXT_HOP tables (transparent self-target) | §7.4 | Deferred to Phase 2.5 | After the real 2026 field encodes multiple goals |
 | `wall_zero` primitive on the R4 | §5.3 | **Graduated** — shipped via encoder-stall (ADR-043); hardware-switch variant still future | Bumper / limit-switch variant: after mechanical hard-bumper or limit-switch work is done |
 | Hardware verification of PathTracker on the toy printout | PR2 scope | Deferred to bench session | Once mechanical chassis geometry is finalised |
@@ -43,17 +43,38 @@ in the "Graduates" subsection.
 
 ---
 
-## Calibration nodes + blind-cost tiers + constrained Dijkstra
+## Calibration nodes + blind-cost tiers + constrained Dijkstra — PARTIALLY GRADUATED (static approximation shipped; path-dependent form still deferred)
 
-### What it is
+> **Partially graduated.** The **static approximation** shipped via the blind-decay routing
+> feature (PR3) — see [ADR-041](./decisions/041-blind-decay-routing.md). The offline planner
+> weights blind edges by a convex multiplicative factor
+> `weight = distance_cm * (1 + k * (d(u) / d_ref) ** exponent)` where `d(u)` is the
+> blind-subgraph distance from tail node `u` to its nearest anchor (any line or reset node),
+> computed once at table-build time. One flat `NEXT_HOP[from][to]` table is emitted; no runtime
+> counter; no firmware change. This replaces the old flat `COST_BLIND_MULTIPLIER`.
+>
+> The **path-dependent augmented-state form** — `(node, blind_bucket)` state, 3-D
+> `NEXT_HOP[from][blind_bucket][to]`, runtime `blind_accumulated_cm` counter — remains deferred.
+> Its upgrade trigger: real-field runs show the static tail-approximation actually mis-routing
+> (the directional naivety biting in practice). The design narrative below is preserved for that
+> future upgrade path.
 
-Section 8.5 of the spec defines a mechanism for actively correcting accumulated odometry error.
-Certain nodes are flagged as calibration points; when the robot traverses one it executes a
-`wall_zero` primitive to re-anchor its position and heading. The spec states:
+### What the static model does not capture
+
+The static decay is keyed on the edge **tail** (a fixed potential field), so it is directionally
+naive — per-edge, travelling toward an anchor can cost more than travelling away — and it gives
+the first blind hop off an anchor zero penalty. The model discourages deep blind **chains**, not
+single bounded hops, which is its stated goal. The section below describes the full path-dependent
+form that fixes the directionality.
+
+### What the path-dependent form adds (still deferred)
+
+Section 8.5 of the spec calls for a cost that reflects how much blind distance has accumulated
+**since the last calibration node**, not a static node potential. The spec states:
 > 「盲走的不確定性與累積距離成正比。剛校正完誤差小，盲走風險低，cost 應低；久沒校正誤差大，
 > 盲走風險高，cost 應高。」
 
-The cost mechanism uses five 5 cm tiers:
+The spec's tier representation:
 
 ```
 Cumulative blind distance  0– 5 cm  →  cost × 1.0
@@ -63,45 +84,26 @@ Cumulative blind distance  0– 5 cm  →  cost × 1.0
                           20+  cm   →  cost × 5.0  (baseline)
 ```
 
-Represented in `field_data.py` as:
-
-```python
-BLIND_COST_TIERS = [
-    (0,  5,  1.0),
-    (5,  10, 2.0),
-    (10, 15, 3.0),
-    (15, 20, 4.0),
-    (20, float("inf"), 5.0),
-]
-```
-
-Because the cost of a blind edge depends on how much blind distance has accumulated since the last
-calibration, standard Dijkstra (which assumes path-independent edge costs) does not apply. The spec
-calls for an augmented state `(node, blind_bucket)`, expanding the state space from N to N × 5.
+Because the cost of a blind edge depends on path history, standard Dijkstra does not apply. The
+spec calls for augmented state `(node, blind_bucket)`, expanding the state space from N to N × 5.
 The R4's `NEXT_HOP` table becomes three-dimensional: `[from][blind_bucket][to]`, and the R4 must
-maintain a `blind_accumulated_cm` counter at runtime.
+maintain a `blind_accumulated_cm` counter at runtime. Traversing a calibration (reset) node resets
+the bucket to 0.
 
-### Why deferred
+### What unlocks the path-dependent upgrade
 
-The toy graph in PR 1 has a single short blind segment. The tier mechanism would be inert on it,
-and the augmented-state Dijkstra adds non-trivial search complexity (N × 5 states, custom priority
-queue, bucket discretisation logic) for zero observable benefit on a toy fixture. The 3-D
-`NEXT_HOP` table also complicates `routes.h` before PR 2's PathTracker even exists.
+Real-field runs show the static tail-approximation mis-routing — the planner choosing a
+deep-blind path over a line-threading route of comparable total length because the directional
+naivety of the potential-field model fails to capture the path-history cost. At that point the
+augmented-state form is the upgrade.
 
-### What unlocks it
+### Estimated effort (path-dependent form)
 
-Real 2026 field is encoded in `field_data.py` (PR 3); multiple blind segments exist in the
-competition route; drift is observed on hardware to accumulate enough to cause mis-localisation on
-a multi-blind task; and the chassis reliably supports `wall_zero` (see that entry below).
-
-### Estimated effort
-
-Medium. `graph_builder.py` must attach calibration metadata to nodes. `planner.py` must implement
-a custom priority-queue Dijkstra over `(node, blind_bucket)` state, replacing the `networkx`
-single-source call for affected runs. `header_writer.py` must emit a 3-D NEXT_HOP array.
-`tests/test_planner.py` needs augmented-state test cases. The R4 side (PR 2 / PR 3 scope) needs a
+Medium. `planner.py` must implement a custom priority-queue Dijkstra over `(node, blind_bucket)`
+state, replacing the `networkx` single-source call. `header_writer.py` must emit a 3-D NEXT_HOP
+array. `tests/test_planner.py` needs augmented-state test cases. The R4 side needs a
 `blind_accumulated_cm` counter and updated lookup logic. Total: ~200–300 lines of Python + C++
-changes, spread across four modules.
+changes across four modules.
 
 ---
 
