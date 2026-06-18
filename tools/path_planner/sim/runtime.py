@@ -135,6 +135,38 @@ behaviors (``WRO2026/Localization.cpp`` + ``WRO2026/PathTracker.cpp``):
   dead-reckon return drive. 3-tuple
   ``(ACT_RETURN_FORWARD, node, dist_cm)``, preceded by the heading-align
   ``(ACT_TURN_REL, delta)``.
+
+Wall-zero reset nodes (PR2, AC17 pillar 2):
+
+On arrival at a node typed ``"reset"`` (carrying a sparse ``RESET_NODES``
+entry ``{axis, wall_coord, facing}``), the firmware runs a two-phase interlude
+BEFORE planning the next hop or declaring the goal reached
+(``PathTracker::_maybeEnterReset`` -> WALL_STOP -> REANCHOR). The sim mirrors
+it inline in :meth:`PathTrackerSim._walk_hops`, the moment a hop re-anchors
+localization onto a reset node (:meth:`PathTrackerSim._dispatch_wall_reset`):
+
+1. **wallStop.** Mirror of ``Drive.wallStop(...).setMode(GYRO).setHeading(facing)``.
+   The deterministic sim has no real stall, so it models the successful press:
+   square to ``facing`` (the wall normal), advance to ``wall_coord`` on ``axis``,
+   then back off :data:`WALL_STOP_BACK_OFF_CM` in the reverse-of-push direction.
+2. **reanchor.** Mirror of ``Localization.reanchorAtWall(axis, wall_coord,
+   facing)``. Snaps the chassis pose to the wall's ground truth: the BELIEVED
+   on-axis coordinate becomes exactly ``wall_coord`` (the re-zero -- any
+   pre-existing drift on ``axis`` is corrected) and heading becomes ``facing``.
+   The firmware belief after re-anchor is ``wall_coord`` REGARDLESS of the
+   physical back-off, so the sim's chassis (which IS the believed pose driving
+   downstream NEXT_HOP geometry + parity) is snapped to ``wall_coord``, NOT
+   ``wall_coord - back_off``.
+
+The interlude fires whether the reset node is an intermediate hop (planning
+continues) or the final destination. A clean run through a reset node leaves
+the chassis pose EXACTLY at the wall truth (drift on ``axis`` = 0 by
+construction).
+
+* :data:`ACT_WALL_STOP` -- sim-only primitive tag for the wall push. 4-tuple
+  ``(ACT_WALL_STOP, node, axis_idx, wall_coord)`` (``axis_idx`` 0 = x, 1 = y).
+* :data:`ACT_REANCHOR` -- sim-only primitive tag for the wall re-anchor.
+  4-tuple ``(ACT_REANCHOR, node, axis_idx, wall_coord)``.
 """
 
 from __future__ import annotations
@@ -392,6 +424,44 @@ ACT_RETURN_STOP_AT_LINE: str = "return_stop_at_line"
 ACT_RETURN_FORWARD: str = "return_forward"
 
 
+# ---------------------------------------------------------------------------
+# Wall-zero reset nodes (PR2, AC17 pillar 2)
+# ---------------------------------------------------------------------------
+#
+# On arrival at a node typed ``"reset"`` (carrying a sparse ``RESET_NODES``
+# entry ``{axis, wall_coord, facing}``), the firmware runs a two-phase
+# interlude BEFORE planning the next hop or declaring the goal reached
+# (``PathTracker::_onPlanNextHop`` -> ``_maybeEnterReset`` -> WALL_STOP ->
+# REANCHOR). The sim mirrors that interlude inline in :meth:`PathTrackerSim._walk_hops`
+# the moment a hop re-anchors localization onto a reset node.
+
+# MUST mirror ``Config::WALL_STOP_BACK_OFF_CM`` in WRO2026/Config.h. Distance
+# (cm) the chassis rolls back off the wall after a confirmed stall, in the
+# reverse-of-push direction, so it is no longer pressing the wall when control
+# returns to the caller. Hand-mirrored (Python cannot import the C++ header);
+# keep in lockstep with the firmware constant.
+WALL_STOP_BACK_OFF_CM: float = 2.0
+
+# Sim-only primitive tag for the wall-stop push (phase 1 of the reset
+# interlude). Mirrors the firmware's ``Drive.wallStop(distToWall).setMode(GYRO)
+# .setHeading(facing).async()`` dispatch in ``PathTracker::_dispatchWallStop``.
+# The C++ runtime owns this as the WALL_STOP FSM state (not a compiled
+# primitive), so -- like ACT_LINE_OVERSHOOT / ACT_RETURN_* -- it is
+# intentionally kept out of :mod:`tools.path_planner.compiler`. 4-tuple shape:
+# ``(ACT_WALL_STOP, node, axis, wall_coord)`` -- ``axis`` is ``0`` (x) or ``1``
+# (y), matching the cross-task ResetNode encoding the firmware decodes.
+ACT_WALL_STOP: str = "wall_stop"
+
+# Sim-only primitive tag for the wall re-anchor (phase 2 of the reset
+# interlude). Mirrors the firmware's ``Localization.reanchorAtWall(axis,
+# wall_coord, facing)`` call in the REANCHOR FSM state: it squares heading to
+# ``facing`` and sets the BELIEVED on-axis coordinate to ``wall_coord`` (a
+# re-zero -- any pre-existing drift on ``axis`` is corrected to exactly
+# ``wall_coord``). 4-tuple shape:
+# ``(ACT_REANCHOR, node, axis, wall_coord)``.
+ACT_REANCHOR: str = "reanchor"
+
+
 class Direction(IntEnum):
     """Travel direction the chassis takes through an edge.
 
@@ -438,9 +508,11 @@ __all__ = [
     "ACT_LINE_PASS",
     "ACT_LINE_REVERSE",
     "ACT_PROJECTION_REVERSE",
+    "ACT_REANCHOR",
     "ACT_RETURN_FORWARD",
     "ACT_RETURN_STOP_AT_LINE",
     "ACT_STOP_AT_LINE_REVERSE",
+    "ACT_WALL_STOP",
     "BIDIRECTIONAL_AUTO_ENABLED",
     "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_BOARD_COUNT",
@@ -455,6 +527,7 @@ __all__ = [
     "RETURN_DISTANCE_CAP_CM",
     "RETURN_TRIGGER_THRESHOLD_CM",
     "TURN_EPSILON_DEG",
+    "WALL_STOP_BACK_OFF_CM",
     "Direction",
     "LocalizationSim",
     "Offset2D",
@@ -1171,6 +1244,15 @@ class LocalizationSim:
                     "return-to-node dispatch silently defaults them to LINE "
                     "(bench-fidelity gap vs FieldMap::getNodeType)."
                 )
+        # Sparse wall-zero reset table keyed by node name (mirror of the
+        # firmware's ``Routes::RESET_NODES`` / ``FieldMap::getResetInfo``). Each
+        # value is a ``{axis, wall_coord, facing}`` spec. Absent on a reset-free
+        # field -- default to an empty map; the consumer (`reset_info`) then
+        # reports ``None`` and the interlude no-ops (PR2 AC5 "no behavior change
+        # when not applicable").
+        self._reset_nodes: Dict[str, Dict] = dict(
+            getattr(field_data, "RESET_NODES", {}) or {}
+        )
 
     def zero_heading_from_current(self) -> bool:
         self._zeroed = True
@@ -1204,6 +1286,58 @@ class LocalizationSim:
         via ``Drive.stopAtLine``; anything else dead-reckons back.
         """
         return self.node_type(node) == "line"
+
+    def is_reset_node(self, node: str) -> bool:
+        """Return ``True`` iff @p node is a wall-zero reset node.
+
+        Mirrors ``FieldMap::getNodeType(cur) == Routes::NodeType::RESET`` in
+        ``PathTracker::_maybeEnterReset``. A node is a reset node iff it is typed
+        ``"reset"`` AND carries a sparse ``RESET_NODES`` entry -- both must agree
+        (the validator enforces this both directions). A node typed ``"reset"``
+        with no spec is treated as a non-reset node here (the interlude no-ops),
+        mirroring the firmware's defensive ``getResetInfo == nullptr`` skip.
+
+        :param node: node name to look up.
+        :return: ``True`` iff the interlude should fire on arrival at @p node.
+        """
+        return self.node_type(node) == "reset" and node in self._reset_nodes
+
+    def reset_info(self, node: str) -> Optional[Dict]:
+        """Return the ``{axis, wall_coord, facing}`` reset spec for @p node, or None.
+
+        Mirror of ``FieldMap::getResetInfo``: a node with no sparse
+        ``RESET_NODES`` entry reports ``None`` (the interlude no-ops). The
+        returned dict is the live spec; callers read it but never mutate it.
+
+        :param node: node name to look up.
+        :return: the reset spec dict if @p node carries one, else ``None``.
+        """
+        return self._reset_nodes.get(node)
+
+    def reanchor_at_wall(self, axis: str, wall_coord: float, facing: float) -> None:
+        """Re-zero the believed on-axis coordinate to @p wall_coord; square heading.
+
+        Sim mirror of ``LocalizationClass::reanchorAtWall``. The firmware tracks
+        position as ``node + offset`` and sets ``_offset[axis] = wall_coord -
+        nodeCoord[axis]`` so the net BELIEF on ``axis`` becomes exactly
+        @p wall_coord, then re-binds heading to @p facing. The sim tracks the
+        chassis pose directly (no node + offset split), so the LocalizationSim
+        analogue clears the operator-offset frame (the re-anchor zeroes it, just
+        like ``on_intersection``) -- the chassis-pose snap to @p wall_coord +
+        @p facing is applied by :meth:`PathTrackerSim._dispatch_wall_reset`,
+        which owns the chassis. This method keeps the LocalizationSim offset
+        state consistent (cleared) with a node arrival.
+
+        :param axis: ``"x"`` or ``"y"`` -- the wall is parallel to this field
+            axis; the orthogonal coordinate is re-zeroed.
+        :param wall_coord: the re-zeroed coordinate on @p axis (cm).
+        :param facing: the squared heading (deg, world frame, ``[0, 360)``).
+        """
+        # The wall re-anchor lands on (and re-zeroes against) the current node,
+        # exactly like a sensed intersection: clear the operator-offset frame.
+        # The believed on-axis coordinate + heading live on the chassis pose,
+        # snapped by the PathTrackerSim dispatch that calls this.
+        self.clear_offset()
 
     def set_nav_active(self, active: bool) -> None:
         """Push PathTracker's hop activity DOWN to the integrator gate.
@@ -1586,6 +1720,90 @@ class PathTrackerSim:
         self._chassis.forward(return_dist_cm)
         self._localization.clear_offset()
         yield (ACT_RETURN_FORWARD, node, return_dist_cm)
+
+    def _dispatch_wall_reset(self, node: str) -> List[Primitive]:
+        """Run the wall-zero reset interlude on arrival at a reset node.
+
+        Sim mirror of the firmware's two-phase reset interlude
+        (``PathTracker::_dispatchWallStop`` -> WALL_STOP -> REANCHOR). Called the
+        moment a hop re-anchors localization onto a node that
+        :meth:`LocalizationSim.is_reset_node` reports as a reset node -- BEFORE
+        any further planning -- so it fires whether the reset node is an
+        intermediate hop or the final destination, matching
+        ``_maybeEnterReset`` running at the top of ``_onPlanNextHop``.
+
+        Two phases:
+
+        1. **wallStop** (mirror of ``Drive.wallStop(distToWall).setMode(GYRO)
+           .setHeading(facing)``). The deterministic sim has no real stall, so it
+           models the SUCCESSFUL press: turn to face ``facing`` (the wall normal),
+           advance to the wall coordinate on ``axis``, then back off
+           :data:`WALL_STOP_BACK_OFF_CM` in the reverse-of-push direction so the
+           chassis is no longer pressing the wall. Emits
+           ``(ACT_WALL_STOP, node, axis_idx, wall_coord)``.
+        2. **reanchor** (mirror of ``Localization.reanchorAtWall(axis, wall_coord,
+           facing)``). Snaps the chassis pose to the wall's ground truth: sets the
+           BELIEVED coordinate on ``axis`` to exactly ``wall_coord`` (a re-zero --
+           any pre-existing drift on ``axis`` is corrected) and heading to
+           ``facing``. The firmware's belief after re-anchor is ``wall_coord`` on
+           ``axis`` REGARDLESS of the physical back-off (``reanchorAtWall`` sets
+           ``nodeCoord[axis] + offset[axis] == wall_coord``), so the sim's chassis
+           -- which IS the believed pose that drives downstream NEXT_HOP geometry
+           and parity -- is snapped to ``wall_coord``, NOT ``wall_coord -
+           back_off``. Emits ``(ACT_REANCHOR, node, axis_idx, wall_coord)``.
+
+        :param node: the just-arrived reset node (localization is already
+            anchored here). The caller guarantees
+            :meth:`LocalizationSim.is_reset_node` is ``True``.
+        :return: ``[(ACT_WALL_STOP, ...), (ACT_REANCHOR, ...)]`` in emission
+            order. Empty only if the node lost its reset spec between the
+            ``is_reset_node`` check and now (defensive; mirrors the firmware's
+            ``getResetInfo == nullptr`` skip).
+        """
+        info = self._localization.reset_info(node)
+        if info is None:    # pragma: no cover -- defensive only
+            return []
+
+        axis = info["axis"]                       # "x" or "y"
+        wall_coord = float(info["wall_coord"])
+        facing = _normalize(float(info["facing"]))
+        axis_idx = 0 if axis == "x" else 1        # cross-task ResetNode encoding
+
+        # -- Phase 1: wallStop (successful press) -----------------------------
+        # Square to the wall normal, push to the wall on `axis`, then back off so
+        # the chassis is no longer pressing. The push distance is the signed gap
+        # from the chassis's current on-axis coordinate to the wall; the back-off
+        # rolls `WALL_STOP_BACK_OFF_CM` in the reverse-of-push direction. Modeled
+        # explicitly so the chassis trajectory is realistic, but the believed
+        # on-axis coordinate is overwritten to `wall_coord` by the re-anchor
+        # below -- so the residual back-off bias never leaks into the next hop.
+        self._chassis.turn_to_heading(facing)
+        current_coord = self._chassis.x_cm if axis_idx == 0 else self._chassis.y_cm
+        push_cm = wall_coord - current_coord                 # signed: toward the wall
+        push_sign = 1.0 if push_cm >= 0.0 else -1.0
+        if axis_idx == 0:
+            self._chassis.x_cm = wall_coord                  # press flush to the wall
+            self._chassis.x_cm -= push_sign * WALL_STOP_BACK_OFF_CM    # back off
+        else:
+            self._chassis.y_cm = wall_coord
+            self._chassis.y_cm -= push_sign * WALL_STOP_BACK_OFF_CM
+
+        # -- Phase 2: reanchor (re-zero to wall truth) ------------------------
+        # Snap the BELIEVED pose to ground truth: on-axis coordinate := wall_coord
+        # (the firmware belief, back-off NOT subtracted) and heading := facing.
+        # This is the re-zero -- it corrects any pre-existing drift on `axis`.
+        if axis_idx == 0:
+            self._chassis.x_cm = wall_coord
+        else:
+            self._chassis.y_cm = wall_coord
+        self._chassis.turn_to_heading(facing)
+        # Keep LocalizationSim's offset frame consistent with a node arrival.
+        self._localization.reanchor_at_wall(axis, wall_coord, facing)
+
+        return [
+            (ACT_WALL_STOP, node, axis_idx, wall_coord),
+            (ACT_REANCHOR, node, axis_idx, wall_coord),
+        ]
 
     def _evaluate_return_gate(self, goal_name: str) -> Iterator[Primitive]:
         """Resolve the return gate and emit the return primitive(s), if any.
@@ -2024,6 +2242,17 @@ class PathTrackerSim:
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
                 )
+
+            # Wall-zero reset interlude (PR2, AC17 pillar 2). The hop above just
+            # re-anchored localization onto `nxt`. If `nxt` is a reset node, run
+            # the WALL_STOP -> REANCHOR interlude NOW -- before the loop advances
+            # to plan the next hop -- mirroring the firmware's `_maybeEnterReset`
+            # at the top of `_onPlanNextHop`. This fires whether `nxt` is an
+            # intermediate hop (the loop continues afterward) OR the final
+            # destination (the loop then exits because `current == goal_name`).
+            if self._localization.is_reset_node(nxt):
+                for primitive in self._dispatch_wall_reset(nxt):
+                    yield primitive
 
             current = nxt
 
