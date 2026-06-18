@@ -224,6 +224,48 @@ namespace Config
      */
     constexpr OffMapGate OFF_MAP_GATE = OffMapGate::FAULT;
 
+    // ---------------------------------------------------------------------------------------
+    // Wall-normal strict sanity check (Pillar 2 — consumed by Localization::reanchorAtWall)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master switch for the wall-normal sanity check in `reanchorAtWall`.
+     *
+     * When `false` (default), `Localization::reanchorAtWall(...)` ALWAYS re-anchors against
+     * the wall's ground truth — it trusts that a preceding `Drive.wallStop` left the chassis
+     * square to the wall. When `true`, `reanchorAtWall` first compares the live IMU heading
+     * against the expected wall normal (`facing`) and REFUSES to re-anchor (no mutation,
+     * returns `false`) when the absolute angular difference EXCEEDS
+     * `WALL_NORMAL_TOLERANCE_DEG` — the squaring is then untrustworthy and re-zeroing the
+     * pose against it would inject a worse error than the drift it tried to correct.
+     *
+     * @note Default `false`: the check is a guard against a botched wall-square, not part of
+     *       the nominal flow. Enable it once bench testing characterises how square
+     *       `wallStop` actually leaves the chassis and what tolerance flags a real failure
+     *       (vs. normal squaring slop) without false-rejecting good re-anchors.
+     * @note TODO: bench-tune (the enable decision, paired with `WALL_NORMAL_TOLERANCE_DEG`).
+     * @note Consumer: `Localization::reanchorAtWall` (Pillar 2).
+     */
+    constexpr bool WALL_NORMAL_STRICT_ENABLED = false;
+
+    /**
+     * @brief Tolerance (degrees) for the wall-normal sanity check, when enabled.
+     *
+     * The maximum absolute angular difference, computed wrap-around-correct over `[0, 360)`,
+     * between the live IMU heading and the expected wall normal that still lets
+     * `reanchorAtWall` proceed. The comparison is `> tolerance` REJECTS: a difference exactly
+     * EQUAL to the tolerance still re-anchors (the tolerance value is inclusive / "just
+     * inside"), and only a strictly greater difference rejects. Inert while
+     * `WALL_NORMAL_STRICT_ENABLED == false`.
+     *
+     * @note TODO: bench-tune. Suggested: 10.0f deg — wide enough to absorb the squaring slop
+     *       a real `wallStop` leaves, tight enough to catch a chassis that stopped against a
+     *       corner / obstacle instead of the intended wall. Tighten once the squaring
+     *       repeatability is measured.
+     * @note Consumer: `Localization::reanchorAtWall` (Pillar 2).
+     */
+    constexpr float WALL_NORMAL_TOLERANCE_DEG = 10.0f;
+
     // Sanity static_asserts (intra-Localization; keep them here next to the constants,
     // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).
 
@@ -252,6 +294,18 @@ namespace Config
                   "the return-to-node prologue should only fire for offsets that the firmware "
                   "can still trust to dead-reckon back from. A trigger above the cap would "
                   "immediately invoke the off-map gate on every return attempt.");
+
+    static_assert(WALL_NORMAL_TOLERANCE_DEG > 0.0f,
+                  "Config::WALL_NORMAL_TOLERANCE_DEG must be positive — a zero or negative "
+                  "tolerance would reject EVERY re-anchor when the strict check is enabled "
+                  "(no real wall-square lands bit-exact on the normal), making "
+                  "reanchorAtWall permanently fail under WALL_NORMAL_STRICT_ENABLED.");
+
+    static_assert(WALL_NORMAL_TOLERANCE_DEG < 180.0f,
+                  "Config::WALL_NORMAL_TOLERANCE_DEG must be < 180 — the wrap-around angular "
+                  "difference is bounded by 180 deg, so a tolerance >= 180 can never be "
+                  "exceeded and the strict check would accept any heading, defeating it.");
+
 }    // namespace Config
 
 #endif    // CONFIG_NAV_H
