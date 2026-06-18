@@ -32,7 +32,7 @@ from tools.path_planner.ctps.config import DRIFT_THRESHOLD_CM
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import load
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import PathTrackerSim
 from tools.path_planner.tests.fixtures import toy_field_data
@@ -72,7 +72,7 @@ def _reference_snapshots(field_data, goto_targets):
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(field_data)
         next_hop = compute_all_pairs_next_hop(
-            graph, field_data.COST_BLIND_MULTIPLIER
+            graph, BlindDecayParams.from_field_data(field_data)
         )
     chassis = VirtualChassis.from_field_data(field_data)
     sim = PathTrackerSim(field_data, graph, next_hop, chassis)

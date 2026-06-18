@@ -78,6 +78,7 @@ from tools.path_planner.header_writer import (
 )
 from tools.path_planner.pipeline_config import LineMode, TurnMode
 from tools.path_planner.planner import (
+    BlindDecayParams,
     PivotTurnRecord,
     build_pivot_turns,
     compute_all_pairs_next_hop,
@@ -90,7 +91,11 @@ _FIELD_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",
@@ -145,7 +150,10 @@ def _build_toy_field_data() -> SimpleNamespace:
         BLIND_EDGES=[("B", "G")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE="A",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
@@ -162,7 +170,9 @@ def _emit_toy(
 ):
     """Build graph + next-hop from the toy field_data and emit routes."""
     graph = build_graph(field_data)
-    next_hop = compute_all_pairs_next_hop(graph, field_data.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(
+        graph, BlindDecayParams.from_field_data(field_data)
+    )
     return emit_routes(
         field_data,
         graph,
@@ -303,7 +313,7 @@ def test_unreachable_pair_emits_0xff(emit_targets):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         graph = build_graph(fd)
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
     header_path, source_path = emit_targets
     emit_routes(
         fd, graph, next_hop,
@@ -460,7 +470,10 @@ def test_emit_accepts_255_nodes(emit_targets):
         BLIND_EDGES=[],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE="N0",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
@@ -472,7 +485,7 @@ def test_emit_accepts_255_nodes(emit_targets):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         graph = build_graph(fd)
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
     emit_routes(
         fd, graph, next_hop,
         header_path=header_path, source_path=source_path,
@@ -585,7 +598,10 @@ def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
         BLIND_EDGES=[],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE="A",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
@@ -633,7 +649,7 @@ def test_pivot_turns_table_sorted_with_correct_count(emit_targets):
     """
     header_path, source_path = emit_targets
     fd, graph = _two_pivot_graph()
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
 
     # Two records, supplied DESC by triple so the sort is observable. Distinct
     # wheels + trims so each row is individually identifiable in the output.
@@ -679,7 +695,7 @@ def test_pivot_turns_table_from_build_pivot_turns(emit_targets, monkeypatch):
 
     header_path, source_path = emit_targets
     fd, graph = _two_pivot_graph()
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
 
     monkeypatch.setattr(
         fd_module, "PIVOT_TURNS", [("A", "B", "C"), ("B", "C", "D")], raising=False
@@ -884,7 +900,7 @@ def test_direction_override_emits_force_reverse_one_direction(emit_targets):
     ]
     header_path, source_path = emit_targets
     graph = build_graph(fd)
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
     emit_routes(
         fd, graph, next_hop,
         header_path=header_path, source_path=source_path,
@@ -937,7 +953,10 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
         BLIND_EDGES=[("Inter", "Wall1")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
-        COST_BLIND_MULTIPLIER=5.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
         START_NODE="Inter",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3200, 1540),
@@ -950,7 +969,7 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
     )
     header_path, source_path = emit_targets
     graph = build_graph(fd)
-    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(fd))
     emit_routes(
         fd, graph, next_hop,
         header_path=header_path, source_path=source_path,

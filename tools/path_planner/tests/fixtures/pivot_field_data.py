@@ -74,7 +74,7 @@ from typing import Dict, List, Tuple
 import networkx as nx
 
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
 
 
 # Shared field scalars. The values are arbitrary but legal -- the pivot tests
@@ -149,7 +149,9 @@ def build_graph_and_next_hop(field) -> Tuple[nx.DiGraph, dict]:
     :return: the ``(DiGraph, NextHopTable)`` pair.
     """
     graph = build_graph(field)
-    next_hop = compute_all_pairs_next_hop(graph, field.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(
+        graph, BlindDecayParams.from_field_data(field)
+    )
     return graph, next_hop
 
 

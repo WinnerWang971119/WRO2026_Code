@@ -52,6 +52,7 @@ from tools.path_planner.pipeline_config import (
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
+    BlindDecayParams,
     compute_all_pairs_next_hop,
     compute_pivot_compensation,
     parse_track_cm_from_config,
@@ -117,7 +118,11 @@ _FIELD_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",
@@ -157,7 +162,9 @@ def toy_graph_and_table(toy_field):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(toy_field)
-        next_hop = compute_all_pairs_next_hop(graph, toy_field.COST_BLIND_MULTIPLIER)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(toy_field)
+        )
     return graph, next_hop
 
 
@@ -287,7 +294,9 @@ def test_unreachable_goal_raises():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(fd)
-        next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(fd)
+        )
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()

@@ -67,6 +67,7 @@ from tools.path_planner.header_writer import (  # noqa: E402
 )
 from tools.path_planner.pipeline_config import PIPELINE_CONFIG  # noqa: F401 -- baked into routes.cpp by header_writer
 from tools.path_planner.planner import (  # noqa: E402
+    BlindDecayParams,
     build_pivot_turns,
     compute_all_pairs_next_hop,
     parse_track_cm_from_config,
@@ -207,7 +208,7 @@ def _run(
     #    decoupled pivot derivation into build_pivot_turns below).
     log("computing all-pairs next-hop table ...")
     next_hop = compute_all_pairs_next_hop(
-        graph, field_data.COST_BLIND_MULTIPLIER
+        graph, BlindDecayParams.from_field_data(field_data)
     )
 
     # 3b. Derive per-turn pivot records from the authored (u,v,w) triples.
