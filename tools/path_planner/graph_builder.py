@@ -47,12 +47,15 @@ Edge-type semantics:
   Cost multiplier 1.0 (same as LINE -- the chassis is still tracking
   the line, just with a distance gate).
 * :data:`EDGE_BLIND`      -- dead-reckoning move with no line under the
-  sensor. Cost multiplied by ``cost_blind_multiplier``.
+  sensor. Penalised by the planner's blind-decay factor
+  ``1 + k*(d/d_ref)**exponent``, where ``d`` is the blind-subgraph
+  distance from the edge's tail to the nearest line/reset anchor (see
+  :mod:`tools.path_planner.planner`).
 
 Node attributes:
 
 * ``x_cm``, ``y_cm`` : float coordinates.
-* ``type``           : ``"line" | "blind"`` (from ``field_data.NODE_TYPES``).
+* ``type``           : ``"line" | "blind" | "reset"`` (from ``field_data.NODE_TYPES``).
 
 PR3 schema vs PR2: off-line goals are first-class ``blind`` nodes joined
 to the line graph by explicit :data:`field_data.BLIND_EDGES`
