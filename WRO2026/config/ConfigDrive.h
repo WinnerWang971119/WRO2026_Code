@@ -358,6 +358,84 @@ namespace Config
     constexpr float STOP_AT_LINE_PROGRESS_EPS_CM = 0.2f;
 
     // ---------------------------------------------------------------------------------------
+    // Wall-stop re-zero primitive (`Drive.wallStop(cm)`) — wall-zero reset nodes (AC8)
+    //
+    // `Drive.wallStop(cm)` pushes the chassis toward a physical wall at low PWM and re-zeros
+    // against it via encoder-STALL — the SAME no-progress watchdog `stopAtLine` already uses
+    // (`stopAtLineProgressed` / `stopAtLineStalled` over `STOP_AT_LINE_STALL_TIMEOUT_MS` and
+    // `STOP_AT_LINE_PROGRESS_EPS_CM` above). The ONLY inversion is the meaning of a stall: in
+    // `stopAtLine` a stall is a `LINE_NOT_FOUND` fault; here a stall is SUCCESS (wall reached),
+    // and the chassis then backs off `WALL_STOP_BACK_OFF_CM` and goes idle. The wall-stop verb
+    // deliberately reuses those two stall constants rather than adding parallel ones, so a single
+    // tune of the stall window governs both primitives — only the three knobs unique to wall-stop
+    // are added here.
+    //
+    // COUPLED CALL SITES for the wall-stop stall window (NOT redefined here — listed so a future
+    // editor who retunes them knows wall-stop rides on the same values):
+    //   - `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`   — no-progress timeout that signals "at wall".
+    //   - `Config::STOP_AT_LINE_PROGRESS_EPS_CM`    — minimum advance that resets the watchdog.
+    //   - `Drive::_updateWallStop()` (Drive.cpp)    — sole consumer of the three constants below.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Low push PWM the wall-stop primitive drives at toward the wall, in [-100, 100].
+     *
+     * Sized AT the motor deadband floor (`PWM_MIN_MAGNITUDE`) on purpose: `deadbandSnap()` floors
+     * any non-zero command up to `PWM_MIN_MAGNITUDE`, so a softer crawl is not physically
+     * achievable on this chassis — the effective push is always `max(pwm, PWM_MIN_MAGNITUDE)`. A
+     * floor-level push is the gentlest reliable wall press while still carrying enough torque to
+     * stall cleanly against the wall (which is exactly the success condition).
+     *
+     * @warning Load-bearing: pushing below `PWM_MIN_MAGNITUDE` is silently floored UP to it by
+     *          `deadbandSnap`, so a "20-PWM crawl" is fiction — the wheels would still press at 50.
+     *          Pushing far ABOVE the floor risks a hard impact that bounces the chassis off the
+     *          wall before the watchdog confirms the stall. Keep this at or just above the floor.
+     *          The static_assert below pins the value in the snap-safe band.
+     */
+    constexpr int16_t WALL_STOP_PUSH_PWM = PWM_MIN_MAGNITUDE;
+    static_assert(WALL_STOP_PUSH_PWM >= PWM_MIN_MAGNITUDE && WALL_STOP_PUSH_PWM <= PWM_MAX,
+                  "Config::WALL_STOP_PUSH_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the wall "
+                  "push is neither silently floored by the motor deadband nor capped by the "
+                  "saturation limit — a low-but-real push is the whole point of the primitive.");
+
+    /**
+     * @brief Distance (cm) the chassis backs off the wall after a confirmed stall, before idling.
+     *
+     * On stall (= wall reached) the wall-stop primitive rolls this far in the reverse-of-push
+     * direction so the chassis is no longer pressing the wall when control returns to the caller —
+     * leaving it free to turn / drive away without scrubbing against the wall. Tuned small: just
+     * enough to break contact, not a full retreat. Bench-tunable.
+     *
+     * @note Overridable per call via `WallStopBuilder::setBackOff(float)`.
+     */
+    constexpr float WALL_STOP_BACK_OFF_CM = 2.0f;
+
+    /**
+     * @brief Outer advisory timeout (ms) before the wall-stop primitive gives up waiting to stall.
+     *
+     * If the chassis pushes for this long and NEVER stalls (e.g. it never reached a wall and the
+     * wheels kept turning freely), the primitive records a NON-LATCHING advisory "stall not
+     * detected" outcome (queryable via `Drive.wallStopTimedOut()`), stops the motors, and goes
+     * idle — it does NOT set the hard `Drive::Fault` that `hasFault()` latches on, and does NOT
+     * halt the FSM. The caller (PathTracker) then assumes-at-wall and continues. Sized generously
+     * above `STOP_AT_LINE_STALL_TIMEOUT_MS`: the inner stall watchdog should normally fire first on
+     * a real wall press, so this outer cap is the never-reached-a-wall safety net, not the primary
+     * success path. Bench-tunable.
+     *
+     * @note Overridable per call via `WallStopBuilder::setTimeout(uint32_t)`.
+     * @warning Load-bearing ordering: keep this STRICTLY GREATER than
+     *          `STOP_AT_LINE_STALL_TIMEOUT_MS` so a genuine wall press trips the inner
+     *          stall-success path BEFORE this outer advisory cap fires. If this were smaller, every
+     *          wall press would report the advisory timeout instead of success. The static_assert
+     *          below enforces the ordering.
+     */
+    constexpr uint32_t WALL_STOP_TIMEOUT_MS = 3000;
+    static_assert(WALL_STOP_TIMEOUT_MS > STOP_AT_LINE_STALL_TIMEOUT_MS,
+                  "Config::WALL_STOP_TIMEOUT_MS must exceed STOP_AT_LINE_STALL_TIMEOUT_MS so a real "
+                  "wall press trips the inner stall-success watchdog before the outer advisory "
+                  "timeout — otherwise every successful press would mis-report as a timeout.");
+
+    // ---------------------------------------------------------------------------------------
     // Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
     // ---------------------------------------------------------------------------------------
 
