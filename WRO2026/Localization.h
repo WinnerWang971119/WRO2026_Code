@@ -82,10 +82,14 @@ class LocalizationClass
 {
 public:
     /**
-     * @brief Seed `_currentNode = Routes::START_NODE`; clear `_zeroed` and offset.
+     * @brief Seed `_currentNode = Routes::START_NODE`; clear `_zeroed`, the offset, and the
+     *        integrator baselines.
      *
      * Must be called from `setup()` after every Phase 1 module's `begin()`. Does NOT
      * touch the IMU — `_yawOffsetDeg` stays `0.0f` until `zeroHeadingFromCurrent()` runs.
+     * Also resets the operator-offset integrator (`_offset`, the encoder/yaw baselines, and the
+     * `_navActive` gate) so a re-begin between bench runs starts from a clean frame rather than
+     * serving the prior run's displacement or inheriting a stuck nav gate.
      *
      * @return `true` always (defensive — kept for symmetry with the other modules' bool
      *         return convention so `.ino` can collect a single `_setupFailed` flag).
@@ -289,20 +293,6 @@ private:
     static bool _readImuYaw(float& yawOut);
 
     /**
-     * @brief Signed shortest angular delta from @p fromDeg to @p toDeg, wrapped to `[-180, 180]`.
-     *
-     * Distinct from `_normalize` (which folds to the half-open `[0, 360)` magnitude interval):
-     * this returns a SIGNED difference so the rotation channel can tell CW from CCW and accumulate
-     * `thetaDeg` correctly across the `0/360` wrap. `+` is CCW (matching the world-frame
-     * convention); a `359 -> 1` step yields `+2`, not `-358`.
-     *
-     * @param toDeg    Target heading in degrees (any finite value).
-     * @param fromDeg  Reference heading in degrees (any finite value).
-     * @return The wrapped signed delta `toDeg - fromDeg` in `[-180, 180]`.
-     */
-    static float _shortestAngleDelta(float toDeg, float fromDeg);
-
-    /**
      * @brief Per-tick accumulation math for the offset integrator (both channels).
      *
      * Called by `update()` ONLY when the integrate gate is open. Decomposes the averaged
@@ -322,6 +312,15 @@ private:
      * `_consumeOffset` re-anchors.)
      */
     void _consumeOffset();
+
+    /**
+     * @brief Re-snapshot all three integrator baselines (`_lastEncL`/`_lastEncR`/`_lastYawDeg`)
+     *        to the current `Drive` encoder + live IMU-heading readings.
+     *
+     * Shared by the gate-closed branch of `update()` and by `_consumeOffset()` — the single seam
+     * that moves the per-tick delta reference to "now", so the next `update()` integrates ~0.
+     */
+    void _snapshotBaselines();
 
     uint8_t _currentNode  = 0;        ///< Single source of truth for graph position.
     float   _yawOffsetDeg = 0.0f;     ///< Captured at zeroHeadingFromCurrent(); world = IMU - offset.

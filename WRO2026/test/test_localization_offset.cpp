@@ -3,7 +3,7 @@
 //
 // FIRST host target to compile the REAL production `Localization.cpp`. It drives the
 // per-tick offset integrator (`Localization::update()`) through the mock `Drive`
-// encoders and the mock lower-MCU IMU (`mmL.GetIMUEuler`), asserting the four
+// encoders and the mock lower-MCU IMU (`mmL.GetIMUEuler`), asserting the
 // acceptance cases:
 //
 //   TC1  (AC1)  — a forward drive of 30 cm grows the offset magnitude to ~30 cm.
@@ -12,6 +12,9 @@
 //                  ~0 translation (sign + channel-independence proof).
 //   TC3  (AC3)  — a node arrival (`onIntersection`) re-anchors: the very next tick
 //                  reads ~0 offset (no one-tick arrival phantom).
+//   TC4  (AC3)  — navActive (PathTracker driving a hop) suppresses accumulation.
+//   TC5  (AC1)  — a drive at a NON-ZERO world heading decomposes onto BOTH world
+//                  axes with the correct signs (cosf/sinf split, not just magnitude).
 //
 // HOW THE SUT IS LINKED (see CMakeLists.txt `test_localization_offset`):
 //   - `Localization.cpp` is compiled UNCHANGED. Its `#include "Drive.h"` is a quote
@@ -245,6 +248,41 @@ int main()
         check(approx(offsetMag(off), 0.0f, 1e-4f),
               "TC4: navActive suppresses offset accumulation during a hop");
         check(approx(off.thetaDeg, 0.0f, 1e-4f), "TC4: thetaDeg stays ~0 while navActive");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC5 (AC1 off-axis) — a forward drive at a NON-ZERO world heading decomposes onto BOTH
+    // world axes with the correct signs (proves the cosf/sinf split, not just the magnitude).
+    //
+    // Setup: zero at world heading 0, open the gate, then rotate the world heading to 150 deg
+    // (a pure IMU-yaw change; encoders untouched) and settle so the yaw baseline tracks it.
+    // Then drive 30 cm forward. At heading 150: x = 30*cos(150) = -25.98, y = 30*sin(150) =
+    // +15.0. The magnitude-only check (TC1) would still pass on an axis-swapped or sign-flipped
+    // decomposition; pinning the individual components is what catches that.
+    //
+    // Tolerance: encDegToCm truncation loses < 1 cm on the 30 cm drive, which scales onto each
+    // component, so +/-1.0 cm per axis covers it.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        mmL.mockYawDeg = 0.0;    // zero at world heading 0.
+        check(Localization.zeroHeadingFromCurrent(), "TC5: zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(false);
+
+        // Rotate the world heading to 150 deg and settle the baselines there (no translation yet).
+        mmL.mockYawDeg = 150.0;
+        Localization.update();
+
+        // Drive 30 cm forward along the 150-deg heading.
+        const int32_t driveDeg = (int32_t) cmToEncDeg(30.0f);
+        Drive.mockAdvanceEncoders(driveDeg, driveDeg);
+        Localization.update();
+
+        const Offset2D off = Localization.getOffsetFromNode();
+        check(approx(off.x, -25.98f, 1.0f), "TC5: +x component ~= 30*cos(150) (negative)");
+        check(approx(off.y, 15.0f, 1.0f), "TC5: +y component ~= 30*sin(150) (positive)");
+        check(approx(offsetMag(off), 30.0f, 1.0f), "TC5: magnitude preserved off the 0-deg axis");
     }
 
     if (g_failures == 0)

@@ -10,6 +10,7 @@
 #include <math.h>
 
 #include "Drive.h"
+#include "NavTypes.h"
 #include "WROMath.h"
 #include "routes.h"
 
@@ -34,6 +35,17 @@ bool LocalizationClass::begin()
     // staleness check treats the seed value as not-yet-refreshed.
     _lastGoodHeadingDeg = (float) Routes::START_HEADING_DEG;
     _lastGoodHeadingMs  = 0;
+    // Reset the operator-offset integrator so a re-begin between bench runs starts from a clean
+    // frame. Without this, getOffsetFromNode() would serve the prior run's displacement until the
+    // next arrival, and a leaked _navActive == true would silently suppress all integration.
+    // begin() takes NO IMU/encoder read (the contract forbids touching the IMU before zeroing) —
+    // the baselines reset to their defaults here, and the first update() under the closed gate
+    // (!_zeroed) re-snapshots them to live readings before any accumulation can occur.
+    _offset     = Offset2D{};
+    _lastEncL   = 0;
+    _lastEncR   = 0;
+    _lastYawDeg = 0.0f;
+    _navActive  = false;
     return true;
 }
 
@@ -171,9 +183,7 @@ void LocalizationClass::update()
     // Gate closed: do NOT accumulate, but keep every baseline current so that the moment the gate
     // reopens the first per-tick delta is ~0 (no jump from motion that happened while PathTracker
     // was driving, and no jump across the pre-zero window).
-    _lastEncL   = Drive.getEncL();
-    _lastEncR   = Drive.getEncR();
-    _lastYawDeg = getHeadingDeg();
+    _snapshotBaselines();
 }
 
 Offset2D LocalizationClass::getOffsetFromNode() const
@@ -203,10 +213,11 @@ void LocalizationClass::_integrateOffset()
     // ---- Translation channel (gated independently of rotation) -------------------------------
     const int32_t encL = Drive.getEncL();
     const int32_t encR = Drive.getEncR();
-    // Average the two wheel deltas (encoder degrees) so a pure on-the-spot turn — where the wheels
-    // move equal-and-opposite — nets ~zero translation. encDegToCm carries the sign through.
-    const int32_t dEnc = ((encL - _lastEncL) + (encR - _lastEncR)) / 2;
-    const float   dCm  = encDegToCm(dEnc);
+    // Average the two wheel deltas in CENTIMETRES (not raw encoder degrees) so a veer with an odd
+    // encoder-degree sum does not lose ~0.5 enc-deg to integer truncation on every crossing. A
+    // pure on-the-spot turn — wheels equal-and-opposite — still nets ~zero. encDegToCm carries
+    // the sign through.
+    const float dCm = (encDegToCm(encL - _lastEncL) + encDegToCm(encR - _lastEncR)) * 0.5f;
     if (fabsf(dCm) >= Config::OFFSET_TRANSLATION_DEADBAND_CM)
     {
         // Above the deadband: decompose along the current world heading and advance the baselines.
@@ -223,7 +234,11 @@ void LocalizationClass::_integrateOffset()
     // crosses it (dCm stays ~0 forever), satisfying the no-phantom-drift requirement.
 
     // ---- Rotation channel (gated independently of translation) -------------------------------
-    const float dYaw = _shortestAngleDelta(heading, _lastYawDeg);
+    // wrapDeltaDeg (NavTypes.h) is the single source of truth for folding a heading difference
+    // into (-180, 180]; reuse it instead of a private fmodf copy so the rotation channel matches
+    // the convention used by PathTracker / DirectionPolicy. `+` is CCW, so a 359 -> 1 step yields
+    // +2, not -358.
+    const float dYaw = wrapDeltaDeg(heading - _lastYawDeg);
     if (fabsf(dYaw) >= Config::OFFSET_ROTATION_DEADBAND_DEG)
     {
         // A pure manual turnDeg nets ~zero translation but a real yaw change, so the rotation
@@ -240,27 +255,18 @@ void LocalizationClass::_consumeOffset()
     // Re-anchor: zero the offset and re-snapshot all three baselines to the CURRENT readings, so
     // the next update() integrates a zero delta. This is the arrival-tick phantom kill — the
     // baselines jump forward to "now" before the next integrate, discarding the approach motion.
-    _offset     = Offset2D{};
+    _offset = Offset2D{};
+    _snapshotBaselines();
+}
+
+void LocalizationClass::_snapshotBaselines()
+{
+    // Re-anchor all three integrator baselines to the CURRENT readings. Shared by the gate-closed
+    // branch of update() and by _consumeOffset() — the single place that moves the per-tick delta
+    // reference to "now", so the next update() integrates ~0.
     _lastEncL   = Drive.getEncL();
     _lastEncR   = Drive.getEncR();
     _lastYawDeg = getHeadingDeg();
-}
-
-float LocalizationClass::_shortestAngleDelta(float toDeg, float fromDeg)
-{
-    // Signed difference wrapped into [-180, 180]. fmodf can return a value in (-360, 360); the
-    // two guards fold it into the symmetric half-revolution interval. +180 maps to +180, and the
-    // -180 boundary maps to +180 as well (both name the same antipode) — fine for accumulation.
-    float delta = fmodf(toDeg - fromDeg, 360.0f);
-    if (delta > 180.0f)
-    {
-        delta -= 360.0f;
-    }
-    else if (delta < -180.0f)
-    {
-        delta += 360.0f;
-    }
-    return delta;
 }
 
 float LocalizationClass::_normalize(float deg)
