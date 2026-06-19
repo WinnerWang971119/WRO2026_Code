@@ -357,9 +357,10 @@ def _validate_pivot_turns(field_data) -> None:
     * **Trim exceeds a dead-reckoned drive.** On a ``"distance"`` side ``delta``
       is subtracted from that side's encoder drive, so it must stay strictly
       below the edge length. Checked on incoming and outgoing independently.
-    * **Trim exceeds the LINE-incoming overshoot budget.** Only when the
-      incoming side is a true ``"line"`` edge; ``"sensor"`` (STOP_AT_LINE)
-      incoming is EXEMPT (review fix 3).
+    * **Trim exceeds the sensor/LINE-incoming overshoot budget.** Applies to
+      BOTH a true ``"line"`` edge AND a ``"sensor"`` (STOP_AT_LINE seek)
+      incoming side: each reduces the post-detect overshoot by ``delta``,
+      bounded by the FRONT sensor-to-axle offset (ADR-043).
     * **Chained pivots over-trim a shared edge.** Two triples sharing the same
       directed edge ``(v, w)`` (one departing it, one approaching it) must
       satisfy ``delta_uv + delta_vw < length(v -> w)``.
@@ -372,9 +373,9 @@ def _validate_pivot_turns(field_data) -> None:
 
         incoming \\ outgoing | sensor (line / STOP_AT_LINE) | distance (BLIND / PROJ)
         --------------------+------------------------------+-------------------------
-        line (re-anchor)    | overshoot-reduce in;          | overshoot-reduce in;
-                            | out no-op (self-corrects @w)  | out drive trimmed
-        sensor / distance   | approach trim in;             | approach trim in;
+        line / sensor       | overshoot-reduce in;          | overshoot-reduce in;
+        (re-anchor / seek)  | out no-op (self-corrects @w)  | out drive trimmed
+        distance            | approach trim in;             | approach trim in;
                             | out no-op (self-corrects @w)  | out drive trimmed
 
     :param field_data: the ``tools.path_planner.field_data`` module (or any
@@ -677,23 +678,29 @@ def _validate_pivot_turns(field_data) -> None:
                 f"soften the turn, or remove the pivot turn."
             )
 
-        # 4. delta leaves < the trim floor of the LINE overshoot budget -----
-        # ONLY a true LINE incoming edge realises its correction as a reduction
-        # of the post-detect LINE_OVERSHOOT advance, bounded by the FRONT
-        # sensor-to-axle offset (review fix 3/4: STOP_AT_LINE-incoming is
-        # 'sensor', not 'line', and is EXEMPT -- it takes no incoming trim). The
-        # firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
+        # 4. delta leaves < the trim floor of the sensor/LINE overshoot budget
+        # BOTH a true LINE incoming edge AND a 'sensor' (STOP_AT_LINE seek)
+        # incoming edge realise their correction as a reduction of the
+        # post-detect overshoot advance, bounded by the same FRONT sensor-to-axle
+        # offset (pivots are FRONT-only). The classifier already folds authored
+        # STOP_AT_LINE edges, per-edge overrides, AND auto-rule BLIND->PROJECTION
+        # seeks into 'sensor', so both regimes share this one budget (ADR-043).
+        # The firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
         # reject when budget - delta < the floor.
-        if in_regime == "line" and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm:
+        if (
+            in_regime in ("line", "sensor")
+            and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm
+        ):
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') over-travels "
                 f"delta={delta:.3f} cm, leaving "
-                f"{line_overshoot_budget_cm - delta:.3f} cm of the LINE overshoot "
-                f"budget {line_overshoot_budget_cm:.2f} cm (the FRONT sensor-to-axle "
-                f"offset; v1 pivots are FRONT-only) -- below the firmware's "
-                f"trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. The runtime "
-                f"would clamp the overshoot advance to that floor -- soften the "
-                f"turn or remove the pivot turn on ('{u}','{v}','{w}')."
+                f"{line_overshoot_budget_cm - delta:.3f} cm of the sensor/LINE "
+                f"overshoot budget {line_overshoot_budget_cm:.2f} cm (the FRONT "
+                f"sensor-to-axle offset; v1 pivots are FRONT-only) -- below the "
+                f"firmware's trim-underflow floor {pivot_trim_min_drive_cm:.3f} cm. "
+                f"The runtime would clamp the overshoot advance to that floor -- "
+                f"approach via a dead-reckon BLIND leg, use a center turn, soften "
+                f"the turn, or see issue #75 for ('{u}','{v}','{w}')."
             )
 
         # Record this triple's delta against the directed edges it trims, for
