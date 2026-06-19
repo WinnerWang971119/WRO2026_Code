@@ -347,6 +347,57 @@ int main()
               "TC7: no IMU read while the nav gate is closed (mission hot path)");
     }
 
+    // -------------------------------------------------------------------------------------
+    // TC8 (review P2 re-zero) — an idle re-zero while the integrate gate is ALREADY open must
+    // reset the integrator: the offset reads ~0 afterward, and accumulation resumes in the NEW
+    // frame. This is the bench re-run / MISSION_ALLOW_REARM path the review flagged.
+    //
+    // The state machine only re-baselines on the closed->open EDGE (gateOpen && !_gateWasOpen).
+    // The normal start zeroes while the gate is CLOSED (!_zeroed), so the first open tick takes
+    // the reopen edge. But a re-zero while idle leaves the gate OPEN and _gateWasOpen == true, so
+    // without the fix the reopen edge is skipped: the next update() integrates against the stale
+    // _offset / baselines under a freshly rebound _yawOffsetDeg, reporting the prior run's
+    // displacement instead of zero. zeroHeadingFromCurrent() must clear the offset AND force the
+    // reopen path so the fresh frame starts clean.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorld();
+
+        // First run: zero at world heading 0, open the gate, settle, then hand-drive 25 cm so the
+        // integrator holds a real, non-zero offset (the "prior bench run" displacement).
+        mmL.mockYawDeg = 0.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC8: first zeroHeadingFromCurrent succeeds");
+        Localization.setNavActive(false);    // gate open
+        Localization.update();               // reopen-edge settle (live read OK)
+
+        const int32_t driveDeg = (int32_t) cmToEncDeg(25.0f);
+        Drive.mockAdvanceEncoders(driveDeg, driveDeg);
+        Localization.update();
+        check(offsetMag(Localization.getOffsetFromNode()) > 1.0f,
+              "TC8: offset is non-zero after the first run's hand-drive (precondition)");
+
+        // Bench re-zero: the operator re-orients the chassis (IMU now reads 30 deg) and re-zeroes
+        // WITHOUT any begin() / node arrival. The gate stays open and _gateWasOpen stays true.
+        mmL.mockYawDeg = 30.0;
+        check(Localization.zeroHeadingFromCurrent(), "TC8: idle re-zero succeeds");
+
+        // The very next tick must NOT report the prior run's offset. The reopen path re-baselines
+        // from the fresh frame and the cleared offset reads ~0.
+        Localization.update();
+        const Offset2D afterRezero = Localization.getOffsetFromNode();
+        check(approx(offsetMag(afterRezero), 0.0f, 1e-4f),
+              "TC8: an idle re-zero clears the stale offset (starts from zero)");
+        check(approx(afterRezero.thetaDeg, 0.0f, 1e-4f),
+              "TC8: an idle re-zero clears the stale thetaDeg (no frame-discontinuity phantom)");
+
+        // Accumulation resumes correctly in the NEW frame: a 10 cm push grows the offset to ~10 cm.
+        const int32_t resumeDeg = (int32_t) cmToEncDeg(10.0f);
+        Drive.mockAdvanceEncoders(resumeDeg, resumeDeg);
+        Localization.update();
+        check(approx(offsetMag(Localization.getOffsetFromNode()), 10.0f, 1.0f),
+              "TC8: the integrator resumes in the fresh frame after a re-zero");
+    }
+
     if (g_failures == 0)
     {
         std::printf("LOCALIZATION OFFSET OK\n");

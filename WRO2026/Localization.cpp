@@ -93,6 +93,17 @@ bool LocalizationClass::zeroHeadingFromCurrent()
     // want world == Routes::START_HEADING_DEG, so offset = imu - START_HEADING_DEG.
     _yawOffsetDeg = imuYaw - (float) Routes::START_HEADING_DEG;
     _zeroed       = true;
+
+    // Re-zeroing rebinds the world frame, so any offset accumulated under the OLD frame is stale and
+    // its rotation baseline (_lastYawDeg) now references a different yaw origin. Drop the offset and
+    // force the gate-reopen edge — same reset begin() performs — so the next update() re-baselines
+    // from a fresh live read in the NEW frame before it integrates. Without this, an idle re-zero or a
+    // MISSION_ALLOW_REARM re-zero (gate already open, _gateWasOpen still true) would skip the reopen
+    // edge and integrate the frame discontinuity against the stale baselines, reporting the prior
+    // run's displacement instead of starting from zero. Only reached on a successful read — a failed
+    // read returned above WITHOUT mutating any state, so the offset is never cleared on a no-op zero.
+    _offset      = Offset2D{};
+    _gateWasOpen = false;
     return true;
 }
 
