@@ -22,9 +22,11 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..')
 
-if (-not (Test-Path $CliPath)) {
-    throw "arduino-cli was not found at '$CliPath'. Update the wro2026.arduino.cliPath setting."
+$resolved = Get-Command $CliPath -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $resolved) {
+    throw "arduino-cli not found ('$CliPath'). Install it (winget install ArduinoSA.CLI) or set wro2026.arduino.cliPath to the binary path."
 }
+$CliPath = $resolved.Source
 
 function Resolve-SketchDir {
     return Resolve-Path (Join-Path $repoRoot $SketchPath)
