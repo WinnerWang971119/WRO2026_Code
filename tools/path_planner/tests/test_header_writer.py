@@ -942,6 +942,7 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
         FIELD_MM=(3200, 1540),
         MAP_PNG="maps/map.png",
         EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
         RESET_NODES={
             "Wall1": {"axis": "y", "wall_coord": 154.0, "facing": 90.0},
         },

@@ -227,12 +227,12 @@ bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float head
     // When enabled, refuse to re-anchor if the chassis is not actually squared to the wall: the
     // current world heading must be within tolerance of the expected wall normal. Computed and
     // decided BEFORE any state write so a rejection leaves the pose byte-for-byte unchanged
-    // (atomicity). Reuse _shortestAngleDelta for the wrap-around-correct signed difference rather
+    // (atomicity). Reuse wrapDeltaDeg for the wrap-around-correct signed difference rather
     // than a naive abs(a - b), which breaks across the 0/360 seam.
     if (Config::WALL_NORMAL_STRICT_ENABLED)
     {
         const float currentHeading = _normalize(imuYaw - _yawOffsetDeg);
-        const float diff           = fabsf(_shortestAngleDelta(currentHeading, headingDeg));
+        const float diff           = fabsf(wrapDeltaDeg(headingDeg - currentHeading));
         // Boundary: `> tolerance` REJECTS, so a difference exactly equal to the tolerance still
         // re-anchors ("just inside" is inclusive). Matches the Config docstring + AC11 boundary.
         if (diff > Config::WALL_NORMAL_TOLERANCE_DEG)

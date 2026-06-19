@@ -2,11 +2,11 @@
 // Host unit test for the STRICT wall-normal sanity check in Localization::reanchorAtWall
 // (PR2 / T15, AC11) — the ON half of TC12.
 //
-// Links the REAL production `Localization.cpp`, but compiles it against a SCOPED shadow
-// `wall_strict_mocks/ConfigLocalization.h` that forces `Config::WALL_NORMAL_STRICT_ENABLED = true`
-// (the production header hard-codes it `false` with no override hook — see the shadow's docblock
-// and the CMakeLists.txt `test_reanchor_at_wall_strict` registration). The shadow is force-included
-// FIRST into THIS target only, so both `Localization.cpp` and this test main see the strict flag ON.
+// Links the REAL production `Localization.cpp`, compiled with `Config::WALL_NORMAL_STRICT_ENABLED`
+// forced ON for THIS target only. The production default in `config/ConfigNav.h` is guarded by
+// `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT` (shipped value `false`); the CMakeLists.txt
+// `test_reanchor_at_wall_strict` target sets `-DWALL_NORMAL_STRICT_ENABLED_DEFAULT=true`, which
+// reaches every TU in the target, so both `Localization.cpp` and this test main see the flag ON.
 //
 // What the strict check does (Localization.cpp:193-203): it reads the live IMU heading once,
 // computes the wrap-around-correct absolute angular difference against the expected wall normal,

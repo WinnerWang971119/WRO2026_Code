@@ -44,11 +44,6 @@ set(MOCKS_DIR      ${TEST_DIR}/mocks)
 # `LineFollower.cpp` / `Manipulator.cpp`. Keeping these out of `mocks/` and
 # force-including them only into `test_tasks_dispatch` avoids that collision.
 set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
-# Scoped shadow of `ConfigLocalization.h` with the strict wall-normal flag FORCED ON, used by
-# ONLY `test_reanchor_at_wall_strict`. Lives in its OWN dir (NOT `mocks/`) so it cannot flip the
-# strict flag for any other target — `mocks/` is on every target's include path and a copy there
-# would shadow `ConfigLocalization.h` for ALL targets. Force-included into the one strict target.
-set(WALL_STRICT_MOCKS_DIR ${TEST_DIR}/wall_strict_mocks)
 
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
@@ -756,19 +751,15 @@ add_test(NAME reanchor_at_wall COMMAND test_reanchor_at_wall)
 # =========================================================================================
 # Test executable #14 — wall-normal STRICT boundary, strict ON (PR2, T18). TC12-ON (AC11).
 #
-# `Config::WALL_NORMAL_STRICT_ENABLED` is a hard `constexpr bool ... = false;` with NO `#ifndef
-# <NAME>_DEFAULT` override hook (unlike PATH_PASS_THROUGH_ENABLED / BIDIRECTIONAL_AUTO_ENABLED), so
-# `target_compile_definitions(... <NAME>_DEFAULT=true)` CANNOT flip it, and an in-file `#define` in
-# the test .cpp would not reach the separately-compiled `Localization.cpp` TU (the cross-TU Config
-# trap). Editing the production header is out of scope for T18. The target-scoped lever used here:
-# force-include a SCOPED shadow `wall_strict_mocks/ConfigLocalization.h` (strict flag = true) FIRST
-# into ONLY this target, so BOTH `Localization.cpp` and the test main see the flag ON. The shadow
-# uses the production guard `CONFIG_LOCALIZATION_H`, so when `Config.h` later includes the real
-# sub-header it no-ops. The shadow lives in `wall_strict_mocks/` (NOT `mocks/`) so it does not flip
-# the flag for any other target.
-#
-# `${WALL_STRICT_MOCKS_DIR}` leads the include path so the shadow wins the `"ConfigLocalization.h"`
-# quote-include resolution too; the mock Drive.h is still force-included (guard `DRIVE_H`).
+# `Config::WALL_NORMAL_STRICT_ENABLED` (in `config/ConfigNav.h`) is guarded by an
+# `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT` override hook — the SHIPPED default is `false`, so a
+# merge can never silently flip it. This target flips it ON target-wide with
+# `target_compile_definitions(... WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)`, so BOTH the
+# separately-compiled `Localization.cpp` TU and the test main see the flag ON (the `-D` reaches every
+# TU in the target, sidestepping the cross-TU `constexpr` override trap). Mirrors the
+# `MISSION_ALLOW_REARM_DEFAULT` / `PATH_PASS_THROUGH_ENABLED_DEFAULT` idiom — no Config shadow header
+# needed. Otherwise identical to `test_reanchor_at_wall` (strict OFF); the mock Drive.h is still
+# force-included (guard `DRIVE_H`).
 # =========================================================================================
 add_executable(test_reanchor_at_wall_strict
     ${TEST_DIR}/test_reanchor_at_wall_strict.cpp
@@ -776,22 +767,13 @@ add_executable(test_reanchor_at_wall_strict
     ${SKETCH_DIR}/routes.cpp
     ${MOCK_SOURCES}
 )
-target_include_directories(test_reanchor_at_wall_strict
-    PRIVATE ${WALL_STRICT_MOCKS_DIR} ${COMMON_INCLUDES})
-# Force-include the scoped strict-ON shadow FIRST — BEFORE `add_mock_force_includes` — so it defines
-# `CONFIG_LOCALIZATION_H` (= strict ON) before ANYTHING else pulls `Config.h`. Ordering matters: the
-# mock `Drive.h` itself `#include "Config.h"`, so if the Drive force-include ran first it would pull
-# the REAL `ConfigLocalization.h` (guard then defined, strict = false) before this shadow could win.
-# `target_compile_options` appends, so emitting this call first puts the shadow's `/FI` ahead of the
-# Drive/WROLineArray/Intersection ones. `SHELL:` keeps the `-include <path>` pair atomic on GNU/Clang
-# (CMake de-dup trap); MSVC uses `/FI`.
-if(MSVC)
-    target_compile_options(test_reanchor_at_wall_strict PRIVATE
-        "/FI${WALL_STRICT_MOCKS_DIR}/ConfigLocalization.h")
-else()
-    target_compile_options(test_reanchor_at_wall_strict PRIVATE
-        "SHELL:-include ${WALL_STRICT_MOCKS_DIR}/ConfigLocalization.h")
-endif()
+target_include_directories(test_reanchor_at_wall_strict PRIVATE ${COMMON_INCLUDES})
+# Force the strict wall-normal flag ON for THIS target only. The production default in
+# `config/ConfigNav.h` is guarded by `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT`, so this `-D`
+# flips it target-wide (both `Localization.cpp` and the test main see strict = true) without a
+# per-target Config shadow header or the cross-TU `constexpr` override trap. Mirrors the
+# `MISSION_ALLOW_REARM_DEFAULT` / `PATH_PASS_THROUGH_ENABLED_DEFAULT` idiom.
+target_compile_definitions(test_reanchor_at_wall_strict PRIVATE WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)
 add_mock_force_includes(test_reanchor_at_wall_strict)   # shadows the real Drive.h with the mock
 add_test(NAME reanchor_at_wall_strict COMMAND test_reanchor_at_wall_strict)
 
