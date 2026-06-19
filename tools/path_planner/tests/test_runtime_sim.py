@@ -2893,6 +2893,119 @@ def test_blind_return_lands_back_on_node_within_tolerance():
     assert math.hypot(snap.x_cm - bx, snap.y_cm - by) < _POSITION_TOL_CM
 
 
+def test_line_return_off_axis_emits_turn_before_seek():
+    """An off-axis LINE return turns to the inverse heading FIRST, then seeks the line.
+
+    Regression for issue #36 #1: the firmware LINE return now dispatches the pre-edge
+    ``turnToYaw`` through the SHARED turn machinery before the ``stopAtLine`` seek (it
+    previously seeked without turning, arcing forward away from the node on a body-axis
+    push). The sim mirrors that -- a FORWARD push off the body axis makes the inverse-return
+    heading ~180deg from the facing, so the return emits ``ACT_TURN_REL`` (the turnToYaw)
+    BEFORE ``ACT_RETURN_STOP_AT_LINE``. The straight-back regression tests never exercised
+    this (return heading == facing -> delta 0 -> no turn).
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    # Forward push 10 cm along +x (chassis faces 0deg): offset (10, 0), inverse-return
+    # heading 180deg -> a real pre-edge turn is required before the seek.
+    sim.operator_move(10.0)
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        10.0, abs=1e-9
+    )
+
+    prims = sim.go_to("B")
+
+    # The return's pre-edge turn fires FIRST (prims[0]), then the line re-acquire seek.
+    assert prims[0][0] == ACT_TURN_REL
+    assert prims[0][1] == pytest.approx(180.0, abs=1e-9)
+    seek = next(p for p in prims if p[0] == ACT_RETURN_STOP_AT_LINE)
+    assert prims.index(seek) == 1
+    _tag, node, dist, heading = seek
+    assert node == "A"
+    assert dist == pytest.approx(10.0, abs=1e-9)
+    assert heading == pytest.approx(180.0, abs=1e-9)
+    # The return re-anchored on A and cleared the offset before the planned hop.
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+
+def test_blind_return_turn_snapshot_is_post_turn_not_post_forward():
+    """step_through pairs the BLIND return's ACT_TURN_REL with the POST-TURN pose (#7).
+
+    The return dispatch is a generator that yields each primitive AFTER its own mutation, so
+    the ``ACT_TURN_REL`` snapshot is the chassis after the in-place turn but BEFORE the
+    forward drive -- not the final post-forward pose. A consumer animating step_through must
+    not see the chassis jump to the return destination on the turn step.
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+    # Anchor on blind node B, then push it off-node so a blind return fires on go_to("A").
+    sim.go_to("B")
+    bx, by = fd.NODES["B"]
+    sim.operator_move(12.0)    # offset (12, 0); return heading 180deg; chassis at (bx+12, by)
+
+    steps = list(sim.step_through("A"))
+    turn_idx = next(i for i, (p, _s) in enumerate(steps) if p[0] == ACT_TURN_REL)
+    fwd_idx = next(i for i, (p, _s) in enumerate(steps) if p[0] == ACT_RETURN_FORWARD)
+    assert turn_idx < fwd_idx
+    _tp, turn_snap = steps[turn_idx]
+    _fp, fwd_snap = steps[fwd_idx]
+    # Post-turn snapshot: the chassis has only ROTATED (still at the pushed-off pose); it has
+    # NOT yet driven back. The forward snapshot IS back on the node.
+    assert math.hypot(turn_snap.x_cm - (bx + 12.0), turn_snap.y_cm - by) < 1e-6
+    assert math.hypot(fwd_snap.x_cm - bx, fwd_snap.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_operator_move_subdeadband_carries_across_calls():
+    """Sub-deadband moves accumulate across calls until they cross the floor, then flush (#5).
+
+    Mirror of the firmware leaving the encoder baseline UNADVANCED below the deadband: a slow
+    hand-drive delivered as many sub-deadband ``operator_move`` calls must NOT be dropped per
+    call -- the residual carries and flushes (in full) once it crosses
+    OFFSET_TRANSLATION_DEADBAND_CM, so the sim's offset tracks the firmware's instead of
+    staying at ~0. The single-call drop test (a sub-deadband move read once) still holds.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    step = OFFSET_TRANSLATION_DEADBAND_CM * 0.4    # 0.08 cm: each call is sub-deadband
+    # Two sub-deadband calls stay below the 0.2 cm floor -> offset still ~0 (residual carried).
+    sim.operator_move(step)
+    sim.operator_move(step)
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+    # The third call crosses the floor (0.24 >= 0.2) -> flush the WHOLE accumulated residual.
+    sim.operator_move(step)
+    off = sim.localization.get_offset_from_node()
+    assert off.x == pytest.approx(3 * step, abs=1e-9)    # along START_HEADING 0deg
+    assert off.magnitude_cm() == pytest.approx(3 * step, abs=1e-9)
+
+    # Residual reset after the flush: a further sub-deadband move is again carried (no growth).
+    sim.operator_move(step)
+    assert sim.localization.get_offset_from_node().x == pytest.approx(3 * step, abs=1e-9)
+
+
+def test_partial_node_types_fixture_raises():
+    """A fixture authoring NODE_TYPES but omitting a graph node raises (bench-fidelity, #9).
+
+    ``node_type()`` defaults an absent node to ``"line"``, diverging from
+    ``FieldMap::getNodeType`` (which returns the authored type for every valid node). A
+    fixture missing an entry would silently route that node through the LINE re-acquire while
+    the firmware dead-reckons -- a false-green parity. The sim now refuses to construct such a
+    fixture. A fixture with NO NODE_TYPES at all stays exempt (the minimal synthetic graphs).
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    # Drop B's authored type, leaving NODE_TYPES non-empty but incomplete.
+    fd.NODE_TYPES = {"A": "line"}
+    chassis = VirtualChassis.from_field_data(fd)
+    with pytest.raises(ValueError, match="NODE_TYPES is missing"):
+        PathTrackerSim(fd, graph, next_hop, chassis)
+
+
 def test_goto_over_cap_fault_gate_raises_and_moves_nothing():
     """An over-cap offset under the FAULT gate raises OffMapFaultError; no chassis motion.
 

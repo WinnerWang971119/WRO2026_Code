@@ -1139,6 +1139,14 @@ class LocalizationSim:
         # PR1b operator-offset state (mirror of LocalizationClass members).
         self._offset = Offset2D()
         self._nav_active = False
+        # Sub-deadband carry residuals (mirror of the firmware's UNADVANCED encoder /
+        # yaw baselines). `_integrateOffset` leaves the baseline un-advanced when a tick's
+        # delta is below the deadband, so slow sub-deadband motion accumulates across ticks
+        # until it crosses the floor, then flushes in full. The sim integrates explicit
+        # operator moves rather than per-tick encoder deltas, so it carries the un-applied
+        # amount here instead of an un-advanced baseline (#5). Both reset on re-anchor.
+        self._pending_translation_cm = 0.0
+        self._pending_rotation_deg = 0.0
         # Node-type lookup so the return-to-node dispatch can pick the LINE vs
         # BLIND re-anchor path (mirrors FieldMap::getNodeType). Absent on the
         # minimal synthetic fixtures -- default to an empty map; the consumer
@@ -1147,6 +1155,22 @@ class LocalizationSim:
         self._node_types: Dict[str, str] = dict(
             getattr(field_data, "NODE_TYPES", {}) or {}
         )
+        # Bench-fidelity guard (#9): when a fixture DOES author NODE_TYPES, every graph node
+        # must have an entry. The firmware's getNodeType returns the authored type for every
+        # valid node (only out-of-range ids fall back to LINE), so a node present in the graph
+        # but missing from NODE_TYPES would silently default to "line" here while the firmware
+        # used its real (possibly BLIND) type -- a false-green parity for that node. A fixture
+        # with NO NODE_TYPES at all is exempt (the minimal synthetic graphs that never exercise
+        # the return dispatch). The real validated field data always has full coverage.
+        if self._node_types:
+            missing = [n for n in field_data.NODES if n not in self._node_types]
+            if missing:
+                raise ValueError(
+                    "NODE_TYPES is missing entries for graph node(s) "
+                    f"{sorted(missing)}; every node must have a type or the "
+                    "return-to-node dispatch silently defaults them to LINE "
+                    "(bench-fidelity gap vs FieldMap::getNodeType)."
+                )
 
     def zero_heading_from_current(self) -> bool:
         self._zeroed = True
@@ -1211,10 +1235,13 @@ class LocalizationSim:
         Mirror of ``LocalizationClass::clearOffset`` / ``_consumeOffset``. The
         firmware also re-snapshots the encoder/yaw baselines to kill the
         arrival-tick phantom; the sim integrates explicit operator moves rather
-        than per-tick encoder deltas, so zeroing the offset is sufficient (the
-        next :meth:`accumulate_operator_move` starts from a clean offset).
+        than per-tick encoder deltas, so zeroing the offset AND the sub-deadband
+        carry residuals is the equivalent re-anchor (the firmware's baseline
+        re-snapshot discards any un-flushed sub-deadband motion too).
         """
         self._offset = Offset2D()
+        self._pending_translation_cm = 0.0
+        self._pending_rotation_deg = 0.0
 
     def accumulate_operator_move(
         self,
@@ -1230,15 +1257,18 @@ class LocalizationSim:
         @p heading_deg, optionally with a raw ``Drive.turnDeg`` of
         @p theta_delta_deg. The two channels gate INDEPENDENTLY:
 
-        * **Translation channel** -- decompose @p distance_cm along
-          @p heading_deg into ``x`` / ``y`` and accumulate, BUT only when
-          ``abs(distance_cm) >= OFFSET_TRANSLATION_DEADBAND_CM`` (sub-deadband
-          translation is dropped as encoder noise).
-        * **Rotation channel** -- accumulate @p theta_delta_deg into
-          ``theta_deg``, BUT only when
-          ``abs(theta_delta_deg) >= OFFSET_ROTATION_DEADBAND_DEG`` (sub-deadband
-          yaw is dropped as IMU noise). A pure manual turn nets ~zero
-          translation but a real yaw change, so the channels are independent.
+        * **Translation channel** -- add @p distance_cm to the pending carry; once
+          ``abs(pending) >= OFFSET_TRANSLATION_DEADBAND_CM`` flush the WHOLE pending
+          amount, decomposed along @p heading_deg into ``x`` / ``y``, and reset the
+          carry. A sub-deadband move is NOT dropped -- it accumulates across calls
+          until the carry crosses the floor, mirroring the firmware leaving the
+          encoder baseline UNADVANCED below the deadband (#5). The flush decomposes
+          along the heading of the call that crosses the floor, exactly as the
+          firmware decomposes the accumulated encoder delta along the current heading.
+        * **Rotation channel** -- add @p theta_delta_deg to the pending rotation
+          carry; flush the whole carry into ``theta_deg`` once
+          ``abs(pending) >= OFFSET_ROTATION_DEADBAND_DEG``. A pure manual turn nets
+          ~zero translation but a real yaw change, so the channels are independent.
 
         The whole integration is gated on ``!nav_active and is_zeroed()``
         (mirror of the firmware's ``(!_navActive) && _zeroed``): a move
@@ -1257,15 +1287,22 @@ class LocalizationSim:
         if self._nav_active or not self._zeroed:
             return
 
-        # Translation channel (independent deadband).
-        if abs(distance_cm) >= OFFSET_TRANSLATION_DEADBAND_CM:
+        # Translation channel (independent deadband, with sub-deadband carry). Accumulate
+        # into the pending residual; flush the WHOLE residual once it crosses the floor,
+        # then reset it -- mirroring the firmware advancing the encoder baseline to "now"
+        # only when the accumulated delta crosses OFFSET_TRANSLATION_DEADBAND_CM.
+        self._pending_translation_cm += distance_cm
+        if abs(self._pending_translation_cm) >= OFFSET_TRANSLATION_DEADBAND_CM:
             rad = math.radians(heading_deg)
-            self._offset.x += distance_cm * math.cos(rad)
-            self._offset.y += distance_cm * math.sin(rad)
+            self._offset.x += self._pending_translation_cm * math.cos(rad)
+            self._offset.y += self._pending_translation_cm * math.sin(rad)
+            self._pending_translation_cm = 0.0
 
-        # Rotation channel (independent deadband).
-        if abs(theta_delta_deg) >= OFFSET_ROTATION_DEADBAND_DEG:
-            self._offset.theta_deg += theta_delta_deg
+        # Rotation channel (independent deadband, with sub-deadband carry — same rationale).
+        self._pending_rotation_deg += theta_delta_deg
+        if abs(self._pending_rotation_deg) >= OFFSET_ROTATION_DEADBAND_DEG:
+            self._offset.theta_deg += self._pending_rotation_deg
+            self._pending_rotation_deg = 0.0
 
     def on_intersection(self, advance_to: str) -> None:
         self._current_node = advance_to
@@ -1424,37 +1461,65 @@ class PathTrackerSim:
             distance_cm, heading_deg, turn_deg
         )
 
-    def _dispatch_return_move(self, off: Offset2D, mag: float) -> List[Primitive]:
+    def _emit_turn_to(self, target_heading_deg: float) -> Optional[Primitive]:
+        """Rotate the chassis to face @p target_heading_deg -- the SHARED pre-edge turn.
+
+        Sim mirror of the firmware's ``PathTracker::_dispatchTurnIfNeeded``: the SAME
+        turn decision every planned hop AND the return-to-node prologue go through, so a
+        return can never skip the pre-edge turn (issue #36, #6). No turn is emitted when
+        the chassis is already within :data:`TURN_EPSILON_DEG` of the target; otherwise the
+        chassis rotates in place and an ``ACT_TURN_REL`` primitive is returned.
+        ``VirtualChassis.turn_relative`` already lands the heading exactly on the normalized
+        target (``heading = _normalize(heading + delta)`` with ``delta = wrap_pm180(target -
+        heading)``), so no redundant explicit ``heading_deg`` set is needed -- removing it
+        also drops the dead assignment the old return / hop code carried (#8).
+
+        :param target_heading_deg: world-frame heading the chassis must face (deg).
+        :return: the ``(ACT_TURN_REL, delta)`` primitive if a turn fired, else ``None``.
+        """
+        delta = wrap_pm180(target_heading_deg - self._chassis.heading_deg)
+        if abs(delta) <= TURN_EPSILON_DEG:
+            return None
+        self._chassis.turn_relative(delta)
+        return (ACT_TURN_REL, delta)
+
+    def _dispatch_return_move(
+        self, off: Offset2D, mag: float
+    ) -> Iterator[Primitive]:
         """Drive the inverse of the operator offset back onto the anchored node.
 
-        Sim mirror of ``PathTracker::_dispatchReturnMove``. The chassis sits at
-        ``node + offset``; the return drives the inverse offset vector so the
-        wheel AXLE lands back ON the node, then re-anchors localization (which
-        clears the offset). Emitted BEFORE the first planned hop departs, so a
-        clean ``go_to`` after a return nets the original path's geometry with
-        drift~0.
+        Sim mirror of ``PathTracker::_dispatchReturnMove`` + ``_dispatchReturnMoveAfterTurn``.
+        The chassis sits at ``node + offset``; the return drives the inverse offset vector so
+        the wheel AXLE lands back ON the node, then re-anchors localization (which clears the
+        offset). Emitted BEFORE the first planned hop departs, so a clean ``go_to`` after a
+        return nets the original path's geometry with drift~0.
 
-        Return-travel world heading is ``atan2(-off.y, -off.x)`` (the heading
-        of the inverse offset vector) normalized into ``[0, 360)`` -- the world
-        frame is CCW-positive with ``0 = +x``, exactly atan2's convention. The
-        drive distance is ``mag`` clamped to :data:`RETURN_DISTANCE_CAP_CM` (so
-        a BEST_EFFORT over-cap return cannot command an unbounded drive). The
-        caller guarantees ``mag > RETURN_TRIGGER_THRESHOLD_CM`` (>= a few cm),
-        so the inverse vector is well-defined and atan2 never sees ``(0, 0)``.
+        A **generator**: each primitive is ``yield``ed AFTER its own chassis mutation, exactly
+        like :meth:`_walk_hops`, so a :meth:`step_through` consumer snapshots the pose at THAT
+        primitive (the pre-edge turn snapshots the post-turn pose, not the post-move pose) --
+        the snapshot-invariant fix of #7.
 
-        Dispatch by anchor node kind (mirror of the firmware branch on
+        Return-travel world heading is ``atan2(-off.y, -off.x)`` (the heading of the inverse
+        offset vector) normalized into ``[0, 360)`` -- the world frame is CCW-positive with
+        ``0 = +x``, exactly atan2's convention. The drive distance is ``mag`` clamped to
+        :data:`RETURN_DISTANCE_CAP_CM` (so a BEST_EFFORT over-cap return cannot command an
+        unbounded drive). The caller guarantees ``mag > RETURN_TRIGGER_THRESHOLD_CM`` (>= a few
+        cm), so the inverse vector is well-defined and atan2 never sees ``(0, 0)``.
+
+        Both node kinds first dispatch the SHARED pre-edge turn (:meth:`_emit_turn_to`) -- the
+        mirror of the firmware routing the return through ``_dispatchTurnIfNeeded`` -- so the
+        ``ACT_TURN_REL`` is emitted conditionally for LINE re-acquires too, not only blind
+        returns (#4). Then by anchor node kind (mirror of the firmware branch on
         ``FieldMap::getNodeType``):
 
-        * **Line-backed** (:meth:`LocalizationSim.is_line_backed`): emit
-          ``(ACT_RETURN_STOP_AT_LINE, node, dist, heading_world)``. The sim
-          models the SAME ``stopAtLine`` overshoot/axle-roll the LINE hops use
-          -- a follow phase advances ``dist - LINE_SENSOR_AXLE_OFFSET_CM`` then
-          a roll advances the remaining ``LINE_SENSOR_AXLE_OFFSET_CM`` so the
-          AXLE (not the sensor) lands on the node. Re-anchors via
+        * **Line-backed** (:meth:`LocalizationSim.is_line_backed`): the SAME ``stopAtLine``
+          overshoot/axle-roll the LINE hops use -- a follow phase advances ``dist -
+          LINE_SENSOR_AXLE_OFFSET_CM`` then a roll advances the remaining
+          ``LINE_SENSOR_AXLE_OFFSET_CM`` so the AXLE (not the sensor) lands on the node.
+          Yields ``(ACT_RETURN_STOP_AT_LINE, node, dist, heading_world)``; re-anchors via
           :meth:`LocalizationSim.on_intersection` (the same node).
-        * **Blind-only**: emit ``(ACT_TURN_REL, delta)`` to face the return
-          heading then ``(ACT_RETURN_FORWARD, node, dist)`` -- the dead-reckon
-          ``turnToYaw`` + ``driveDist``. Re-anchors via
+        * **Blind-only**: a dead-reckon forward ``driveDist``. Yields
+          ``(ACT_RETURN_FORWARD, node, dist)``; re-anchors via
           :meth:`LocalizationSim.clear_offset` (no node change).
 
         :param off: the accumulated :class:`Offset2D` to invert.
@@ -1475,23 +1540,25 @@ class PathTrackerSim:
         # drive; an in-trust return (mag <= cap) is unaffected.
         return_dist_cm = min(mag, RETURN_DISTANCE_CAP_CM)
 
-        out: List[Primitive] = []
+        # Shared pre-edge turn (mirror of _dispatchTurnIfNeeded): face the return heading
+        # first, conditionally -- skipped when already aligned (e.g. a straight-back push
+        # where the return heading equals the facing). Yielded as its own step so the turn
+        # snapshot is the post-turn pose (#4 / #7 / #8).
+        turn = self._emit_turn_to(return_heading_deg)
+        if turn is not None:
+            yield turn
 
         if self._localization.is_line_backed(node):
-            # LINE-backed anchor: re-acquire the line. The stopAtLine seek
-            # lands the wheel AXLE on the node (ADR-027), so the sim must model
-            # the SAME overshoot/axle-roll the LINE hops model (follow phase
-            # short of the node, then roll the sensor-to-axle offset onto it) --
-            # snapping the chassis straight to the node would make the return
-            # parity fake. Net advance == return_dist_cm along the return
-            # heading, which is exactly the inverse offset, so the axle lands
-            # back on the node.
+            # LINE-backed anchor: re-acquire the line. The stopAtLine seek lands the wheel
+            # AXLE on the node (ADR-027), so the sim models the SAME overshoot/axle-roll the
+            # LINE hops model (follow phase short of the node, then roll the sensor-to-axle
+            # offset onto it) -- snapping the chassis straight to the node would make the
+            # return parity fake. Net advance == return_dist_cm along the (now-faced) return
+            # heading, which is exactly the inverse offset, so the axle lands back on the node.
             #
-            # GUARD: a return shorter than the axle offset would push the follow
-            # phase negative; clamp the follow phase to 0 (the whole return is
-            # then the overshoot roll) so the net advance stays return_dist_cm
-            # and the sim never emits a negative follow displacement.
-            self._chassis.turn_to_heading(return_heading_deg)
+            # GUARD: a return shorter than the axle offset would push the follow phase
+            # negative; clamp the follow phase to 0 (the whole return is then the overshoot
+            # roll) so the net advance stays return_dist_cm and never emits a negative follow.
             follow_cm = max(0.0, return_dist_cm - LINE_SENSOR_AXLE_OFFSET_CM)
             overshoot_cm = return_dist_cm - follow_cm
             self._chassis.follow_line_to_intersection(follow_cm)
@@ -1499,26 +1566,18 @@ class PathTrackerSim:
             # Re-anchor the SAME node (we returned TO it, not advanced) via the
             # verified physical re-localisation, which also clears the offset.
             self._localization.on_intersection(node)
-            out.append(
-                (ACT_RETURN_STOP_AT_LINE, node, return_dist_cm, return_heading_deg)
-            )
-            return out
+            yield (ACT_RETURN_STOP_AT_LINE, node, return_dist_cm, return_heading_deg)
+            return
 
-        # Blind-only anchor: dead-reckon the inverse drive. Turn to face the
-        # return heading (turnToYaw), then drive forward (driveDist). The
-        # dead-reckoned drive IS the re-anchor -- clear_offset zeroes the
-        # offset without changing the node id (we returned to the same node).
-        delta = wrap_pm180(return_heading_deg - self._chassis.heading_deg)
-        if abs(delta) > TURN_EPSILON_DEG:
-            self._chassis.turn_relative(delta)
-            self._chassis.heading_deg = _normalize(return_heading_deg)
-            out.append((ACT_TURN_REL, delta))
+        # Blind-only anchor: dead-reckon the inverse drive forward (the shared pre-turn above
+        # already faced the return heading -- the firmware's turnToYaw + driveDist split into a
+        # TURNING step then the drive). The dead-reckoned drive IS the re-anchor -- clear_offset
+        # zeroes the offset without changing the node id (we returned to the same node).
         self._chassis.forward(return_dist_cm)
         self._localization.clear_offset()
-        out.append((ACT_RETURN_FORWARD, node, return_dist_cm))
-        return out
+        yield (ACT_RETURN_FORWARD, node, return_dist_cm)
 
-    def _evaluate_return_gate(self, goal_name: str) -> List[Primitive]:
+    def _evaluate_return_gate(self, goal_name: str) -> Iterator[Primitive]:
         """Resolve the return gate and emit the return primitive(s), if any.
 
         Sim mirror of ``PathTracker::_evaluateReturnGate``. Reads the current
@@ -1526,14 +1585,19 @@ class PathTrackerSim:
         (:func:`resolve_return_action`) on its translation magnitude, then:
 
         * :attr:`ReturnAction.NONE` -- offset within trigger; no return move,
-          no chassis motion. Returns an empty list so the planned-path stream
-          stays byte-identical to today's (AC5).
+          no chassis motion. Yields nothing so the planned-path stream stays
+          byte-identical to today's (AC5).
         * :attr:`ReturnAction.RETURN` / :attr:`ReturnAction.OFF_MAP_PROCEED` --
           dispatch the inverse return (the over-cap BEST_EFFORT case clamps the
           distance to the cap inside :meth:`_dispatch_return_move`).
         * :attr:`ReturnAction.OFF_MAP_FAULT` -- offset over cap, FAULT gate;
           raise :class:`OffMapFaultError` and move nothing (mirror of the
           firmware's ``_enterFault(Fault::OFF_NODE, ...)`` refusal).
+
+        A **generator** (like :meth:`_dispatch_return_move` it delegates to): ``go_to``
+        forces it eagerly with ``list(...)`` so the chassis mutation + re-anchor (and the
+        FAULT-gate raise) happen before the planned walk, exactly as before; ``step_through``
+        iterates it lazily so each return primitive pairs with its own post-mutation snapshot.
 
         :param goal_name: the requested goal (carried only for the fault
             diagnostic, matching the firmware's ``_destinationNode``).
@@ -1551,14 +1615,14 @@ class PathTrackerSim:
         )
 
         if action == ReturnAction.NONE:
-            return []
+            return
         if action == ReturnAction.OFF_MAP_FAULT:
             raise OffMapFaultError(
                 self._localization.current_node(), goal_name, mag
             )
         # RETURN or OFF_MAP_PROCEED: drive the inverse return (BEST_EFFORT
         # over-cap is clamped to the cap inside _dispatch_return_move).
-        return self._dispatch_return_move(off, mag)
+        yield from self._dispatch_return_move(off, mag)
 
     # -- mode resolution (instance-method passthroughs) ----------------------
 
@@ -1734,11 +1798,11 @@ class PathTrackerSim:
 
             body_heading = _body_heading_for(direction, edge_heading)
 
-            delta = wrap_pm180(body_heading - self._chassis.heading_deg)
-            if abs(delta) > TURN_EPSILON_DEG:
-                self._chassis.turn_relative(delta)
-                self._chassis.heading_deg = _normalize(body_heading)
-                yield (ACT_TURN_REL, delta)
+            # Shared pre-edge turn (the SAME helper the return prologue uses) — emits a
+            # conditional ACT_TURN_REL and rotates the chassis onto body_heading (#6 / #8).
+            turn = self._emit_turn_to(body_heading)
+            if turn is not None:
+                yield turn
 
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
@@ -2040,9 +2104,11 @@ class PathTrackerSim:
         # Return-to-node prologue (PR1b). Evaluate the operator offset BEFORE
         # planning: an over-cap FAULT raises (no chassis motion); otherwise the
         # return primitive(s) (possibly empty) are prepended to the planned
-        # stream. _dispatch_return_move re-anchors localization (clears the
-        # offset), so the subsequent walk starts from a clean on-node state.
-        return_prims = self._evaluate_return_gate(goal_name)
+        # stream. `_evaluate_return_gate` is a generator (so step_through can
+        # snapshot each return primitive); force it EAGERLY here with list(...)
+        # so the chassis mutation + re-anchor (and any FAULT-gate raise) happen
+        # before the walk, exactly as the non-generator version did.
+        return_prims = list(self._evaluate_return_gate(goal_name))
 
         # The planned walk's own motion must NOT grow the operator offset
         # (mirror of the firmware's setNavActive(true) while a hop executes).
@@ -2098,10 +2164,12 @@ class PathTrackerSim:
         # ADR-036: clean pivot latch per goal (see go_to for the rationale).
         self._reset_pivot_latch()
 
-        # Return-to-node prologue (PR1b). Yield the return primitive(s) first,
-        # each paired with the post-mutation chassis snapshot (the dispatch
-        # already mutated the chassis + re-anchored localization). An over-cap
-        # FAULT raises before any yield, matching go_to.
+        # Return-to-node prologue (PR1b). Yield the return primitive(s) first. The gate is a
+        # generator that yields each primitive AFTER its own chassis mutation (the pre-edge
+        # turn, then the seek/drive), so the snapshot taken here is the pose AT that primitive
+        # -- the pre-edge turn pairs with the post-turn pose, the move with the post-move pose,
+        # honouring the same "snapshot == state at this primitive" invariant the planned walk
+        # holds (#7). An over-cap FAULT raises before any yield, matching go_to.
         for primitive in self._evaluate_return_gate(goal_name):
             yield primitive, self._snapshot_chassis()
 

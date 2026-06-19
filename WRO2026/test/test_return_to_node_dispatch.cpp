@@ -98,11 +98,13 @@ struct ReturnTickResult
 /// @param driveHasFault The value `Drive.hasFault()` would return this tick.
 /// @param gateIsFault   `Config::OFF_MAP_GATE == FAULT` (LINE no-line routing only).
 ///
-// MIRROR: PathTracker.cpp:543-546 (not-idle -> WAIT, both node kinds).
-// MIRROR: PathTracker.cpp:548-588 (LINE-backed: LINE_NOT_FOUND -> off-map gate; else onIntersection).
-// MIRROR: PathTracker.cpp:591-613 (BLIND-only: hasFault -> DRIVE_FAULT; else clearOffset).
+// MIRROR: PathTracker.cpp:560-569 (not-idle -> WAIT, both node kinds; then clear _returnActive).
+// MIRROR: PathTracker.cpp:571-627 (LINE-backed: non-LINE_NOT_FOUND fault -> DRIVE_FAULT;
+//         LINE_NOT_FOUND -> off-map gate; else onIntersection).
+// MIRROR: PathTracker.cpp:629-650 (BLIND-only: hasFault -> DRIVE_FAULT; else clearOffset).
 static ReturnTickResult replica_returnTick(bool isLineBacked, bool driveIsIdle,
-                                           bool driveHasFault, bool gateIsFault)
+                                           bool driveHasFault, bool gateIsFault,
+                                           bool faultIsLineNotFound = true)
 {
     ReturnTickResult r{};
 
@@ -115,10 +117,18 @@ static ReturnTickResult replica_returnTick(bool isLineBacked, bool driveIsIdle,
 
     if (isLineBacked)
     {
-        // LINE-backed anchor: a Drive fault here is exactly LINE_NOT_FOUND (the seek is the
-        // only fault source), which routes to the OFF-MAP GATE, not DRIVE_FAULT.
         if (driveHasFault)
         {
+            // #3 discriminator (MIRROR: PathTracker.cpp:593): the stopAtLine seek's EXPECTED
+            // fault is LINE_NOT_FOUND, which routes to the OFF-MAP GATE. Any OTHER Drive fault
+            // (e.g. a future DISPATCH_FAILED) is a genuine hardware/dispatch failure and
+            // surfaces as DRIVE_FAULT, NOT the off-map gate.
+            if (!faultIsLineNotFound)
+            {
+                r.outcome = ReturnTickOutcome::FAULT_DRIVE;
+                r.fault   = PathTrackerClass::Fault::DRIVE_FAULT;
+                return r;
+            }
             if (gateIsFault)
             {
                 r.outcome = ReturnTickOutcome::FAULT_OFF_NODE;
@@ -166,9 +176,9 @@ int main()
     // TC4 — node-kind CLASSIFICATION against the REAL FieldMap::getNodeType over the REAL
     // routes.cpp graph. The toy fixture has LINE nodes 0..3 and BLIND nodes 4..6, so the
     // _returnIsLineBacked predicate (getNodeType(cur) == NodeType::LINE) discriminates the
-    // two kinds for real. This is the exact predicate at PathTracker.cpp:1016.
+    // two kinds for real. This is the exact predicate at PathTracker.cpp:1066.
     // -------------------------------------------------------------------------------------
-    // MIRROR: PathTracker.cpp:1016 (_returnIsLineBacked = getNodeType(cur) == NodeType::LINE).
+    // MIRROR: PathTracker.cpp:1066 (_returnIsLineBacked = getNodeType(cur) == NodeType::LINE).
     {
         // The fixture must actually contain both kinds for the discrimination to be real —
         // assert that precondition so a future field_data change that drops one kind fails
@@ -234,6 +244,25 @@ int main()
               "TC4b: LINE no-line under BEST_EFFORT accepts the dead-reckoned pose (clearOffset)");
         check(r.reAnchored && r.planNext && r.fault == PathTrackerClass::Fault::NONE,
               "TC4b: LINE no-line BEST_EFFORT re-anchors + plans without faulting");
+    }
+
+    // LINE-backed NON-LINE_NOT_FOUND fault (#3 discriminator): idle + faulted but the fault is
+    // NOT LINE_NOT_FOUND (e.g. a future DISPATCH_FAILED). It must surface DRIVE_FAULT, NOT the
+    // off-map gate — under BOTH gate policies (the gate only governs LINE_NOT_FOUND).
+    {
+        const ReturnTickResult rFaultGate = replica_returnTick(
+            /*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ true,
+            /*faultIsLineNotFound*/ false);
+        check(rFaultGate.outcome == ReturnTickOutcome::FAULT_DRIVE,
+              "TC4b: LINE non-LINE_NOT_FOUND fault surfaces Fault::DRIVE_FAULT (not OFF_NODE)");
+        check(rFaultGate.fault == PathTrackerClass::Fault::DRIVE_FAULT
+                  && !rFaultGate.reAnchored && !rFaultGate.planNext,
+              "TC4b: LINE non-LINE_NOT_FOUND fault does not re-anchor or plan");
+        const ReturnTickResult rBestGate = replica_returnTick(
+            /*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ false,
+            /*faultIsLineNotFound*/ false);
+        check(rBestGate.outcome == ReturnTickOutcome::FAULT_DRIVE,
+              "TC4b: LINE non-LINE_NOT_FOUND fault is DRIVE_FAULT regardless of off-map gate");
     }
 
     // BLIND-only success: idle, no fault -> re-anchor via clearOffset (node id unchanged).

@@ -255,13 +255,23 @@ bool MissionClass::declarePosition(const char* name)
         PathTracker.clearFault();
     }
 
+    // Also clear Drive's OWN latched fault (#2). A return seek that ran to its max distance
+    // latched `Fault::LINE_NOT_FOUND` on Drive and surfaced PathTracker `OFF_NODE`;
+    // `PathTracker.clearFault()` does NOT touch Drive and `Drive.stop()` does not clear it
+    // either, so without this the very next `goTo()` trips the generic Drive-fault guard
+    // (-> `Fault::DRIVE_FAULT`) and the robot is unrecoverable without a reboot. Harmless (a
+    // no-op) when Drive has no fault latched.
+    Drive.clearFault();
+
     // Surface the recovery so the operator sees it happened (OLED + Serial). Buffer width
-    // tracks EventTrace's ring slot so the truncation rule stays single-sourced.
+    // tracks EventTrace's ring slot so the truncation rule stays single-sourced. `name` is
+    // non-null here: a null name resolves to NODE_NONE above and returns at the unknown-node
+    // branch, so the defensive `name == nullptr` ternary on this success path was dead (#11).
     char buf[EventTraceClass::MAX_LINE_LEN];
-    snprintf(buf, sizeof(buf), "DECL %s", name == nullptr ? "?" : name);
+    snprintf(buf, sizeof(buf), "DECL %s", name);
     EventTrace.pushEvent(buf);
     Serial.print(F("[Mission] declarePosition "));
-    Serial.println(name == nullptr ? "?" : name);
+    Serial.println(name);
     return true;
 }
 
