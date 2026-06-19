@@ -825,21 +825,21 @@ void PathTrackerClass::_stepFsm()
                 // into the gate.
                 const float inboundPivotTrim =
                     _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
-                float overshootTargetCm = overshootAxleOffsetCm;
-                if (inboundPivotTrim > 0.0f)
+                const SensorOvershootResolution lineOvershoot =
+                    resolveSensorOvershootTrim(
+                        overshootAxleOffsetCm,
+                        inboundPivotTrim,
+                        Config::PIVOT_TRIM_MIN_DRIVE_CM);
+                if (lineOvershoot.clamped)
                 {
-                    overshootTargetCm = overshootAxleOffsetCm - inboundPivotTrim;
-                    if (overshootTargetCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
-                    {
-                        Serial.print(F("[PathTracker] ADR-036: LINE overshoot trim "
-                                       "underflow (offset="));
-                        Serial.print(overshootAxleOffsetCm);
-                        Serial.print(F(" delta="));
-                        Serial.print(inboundPivotTrim);
-                        Serial.println(F("); clamping. Check validator/config."));
-                        overshootTargetCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
-                    }
+                    Serial.print(F("[PathTracker] ADR-036: LINE overshoot trim "
+                                   "underflow (offset="));
+                    Serial.print(overshootAxleOffsetCm);
+                    Serial.print(F(" delta="));
+                    Serial.print(inboundPivotTrim);
+                    Serial.println(F("); clamping. Check validator/config."));
                 }
+                const float overshootTargetCm = lineOvershoot.overshootCm;
 
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
@@ -1662,10 +1662,36 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // zero-margin override and no soft-fallback recovery. The Drive
                 // builder is move-only (deleted copy ctor + early enqueue), so the
                 // whole chain MUST be one discarded-temporary RAII statement.
+                // ADR-043: a seek into an approaching pivot must land the axle δ
+                // short of the node (like every other approach mechanism), so
+                // reduce the post-detect overshoot by the approaching trim. A
+                // seek is sensor-terminated, so the DEPARTING trim is auto-
+                // absorbed and never subtracted here (D1). With no approaching
+                // pivot the trim is 0 ⇒ overshoot stays the full default
+                // LINE_SENSOR_AXLE_OFFSET_CM, so a departing-into-seek hop is
+                // unchanged (AC2). Pivots are FRONT-only, so the FRONT offset.
+                const float seekApproachTrim =
+                    _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
+                const SensorOvershootResolution seekOvershoot =
+                    resolveSensorOvershootTrim(
+                        Config::LINE_SENSOR_AXLE_OFFSET_CM,
+                        seekApproachTrim,
+                        Config::PIVOT_TRIM_MIN_DRIVE_CM);
+                if (seekOvershoot.clamped)
+                {
+                    Serial.print(F("[PathTracker] ADR-043: seek overshoot trim "
+                                   "underflow (offset="));
+                    Serial.print(Config::LINE_SENSOR_AXLE_OFFSET_CM);
+                    Serial.print(F(" delta="));
+                    Serial.print(seekApproachTrim);
+                    Serial.println(F("); clamping. Check validator/config."));
+                }
+
                 Drive.stopAtLine(edge.distance_cm)
                     .setReverse(reverse)
                     .setMode(mode)
                     .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                    .setOvershoot(seekOvershoot.overshootCm)
                     .async();
                 _state       = State::STOP_AT_LINE;
                 _passThrough = false;    // consumed
