@@ -4,7 +4,8 @@
     "wro2026.editor.scriptPath": "${workspaceFolder}/tools/path_planner/edit_field.py",
     "wro2026.sim.scriptPath": "${workspaceFolder}/tools/path_planner/sim/demo.py",
     "wro2026.sim.goals": "Start, finial",
-    "wro2026.arduino.cliPath": "C:/Users/wangd/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe",
+    // arduino-cli resolved from PATH (standalone ArduinoSA.CLI). Without the standalone CLI, set this to the IDE-bundled binary instead: C:/Users/<you>/AppData/Local/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe
+    "wro2026.arduino.cliPath": "arduino-cli",
     "wro2026.arduino.fqbn": "arduino:renesas_uno:unor4wifi",
     "wro2026.arduino.sketchPath": "WRO2026",
     "wro2026.arduino.port": "auto",
