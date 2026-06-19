@@ -259,6 +259,18 @@ private:
     bool _pop(NavEntry& out);
     void _clearQueue();
 
+    /**
+     * @brief Run one tick of the per-edge FSM (the guard + state switch).
+     *
+     * The body of `update()` minus the trailing nav-active push. Split out so the
+     * public `update()` stays a thin wrapper: it runs the full FSM step (which may
+     * resolve a state transition via any of the per-state `return` paths) and THEN
+     * pushes the final `_state` down to `Localization.setNavActive(...)`. Keeping the
+     * push in `update()` rather than inside this helper guarantees it fires exactly
+     * once per tick, after every FSM path has settled.
+     */
+    void _stepFsm();
+
     void _enterFault(Fault kind, uint8_t from, uint8_t to);
     void _onPlanNextHop();
     void _dispatchEdgeAfterTurn();

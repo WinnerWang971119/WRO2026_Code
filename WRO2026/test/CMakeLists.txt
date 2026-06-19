@@ -621,6 +621,36 @@ set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
 
 # =========================================================================================
+# Test executable #10 — Localization operator-offset integrator (PR1a, TC1/TC2/TC2b/TC3).
+#
+# FIRST host target to compile the real production `Localization.cpp`. It drives the
+# per-tick offset integrator (`Localization::update()`) via the mock `Drive` encoders
+# and the mock lower-MCU IMU (`mmL.GetIMUEuler`, added additively to mocks/MatrixMiniR4.h).
+#
+# `Localization.cpp` includes `"Drive.h"` (quote, source-relative to the sketch dir), so
+# `add_mock_force_includes` force-includes the mock `Drive.h` (guard `DRIVE_H`) to shadow
+# the real one — same mechanism as the PathTracker mirror targets. `<MatrixMiniR4.h>` /
+# `<Arduino.h>` are angle-bracket includes resolved by the `mocks/`-first include path,
+# so the mock IMU surface (`mmL`, `MMLower::RESULT`) is picked without a force-include.
+#
+# `routes.cpp` IS linked: `Localization.cpp` odr-uses `Routes::START_NODE`,
+# `START_HEADING_DEG`, `NODES`, and `N_NODES` (pulled in via routes.h / FieldMap.h), so
+# the const POD graph data needs a definer — routes.cpp is the sole definer and compiles
+# cleanly against the mock surface (no hardware deps). `MOCK_SOURCES` supplies the
+# `Drive` / `MiniR4` / `Serial` / `g_mockMillis` globals (the `mmL` global is an inline
+# variable in the mock header, so no extra source is linked for it).
+# =========================================================================================
+add_executable(test_localization_offset
+    ${TEST_DIR}/test_localization_offset.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_localization_offset PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_localization_offset)   # shadows the real Drive.h with the mock
+add_test(NAME localization_offset COMMAND test_localization_offset)
+
+# =========================================================================================
 # Test executable #9 — PivotTrimPolicy pure-math (ADR-036, #11 promotion).
 #
 # `resolvePivotTrim` is a header-only inline policy (`PivotTrimPolicy.h`) promoted

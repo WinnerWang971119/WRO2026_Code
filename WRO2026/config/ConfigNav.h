@@ -7,9 +7,9 @@
  * @brief PathTracker navigation configuration — reopens `namespace Config` per ADR-031.
  *
  * Holds the PathTracker goal queue + drain timeout + heading tolerance, the pass-through
- * collinear-intersection toggle, and the bidirectional auto-selection kill-switch.
- * Self-contained (only `<stdint.h>`): every value here is a literal with no cross-file
- * constexpr dependency.
+ * collinear-intersection toggle, the bidirectional auto-selection kill-switch, and the
+ * Localization operator-offset integrator constants (ADR-042). Self-contained (only
+ * `<stdint.h>`): every value here is a literal with no cross-file constexpr dependency.
  */
 namespace Config
 {
@@ -109,6 +109,124 @@ namespace Config
     /// Angular threshold (degrees) above which PathTracker selects REAR
     /// line-following instead of performing a wide on-the-spot turn.
     constexpr float BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90.0f;
+
+    // =========================================================================================
+    // Localization operator-offset integrator (ADR-042).
+    //
+    // The `Localization` 2D operator-offset delta (Pillar 1) accumulates how far the chassis
+    // is hand-driven away from its last anchored node, gated by per-channel deadbands and
+    // bounded by a return trigger / distance cap + off-map policy. Folded here from the former
+    // standalone `ConfigLocalization.h` so the per-domain split stays one file per concern.
+    //
+    // @note **Pillar 1 only.** Do NOT add wall-reset / wall-normal constants here — those
+    //       belong to Pillar 2.
+    // @note Some constants below have no consumer in PR1a (operator-offset integrator); they
+    //       are authored for PR1b (return-to-node prologue) so that PR needs no Config change.
+    //       Each such constant is marked `Forward-looking: no consumer in PR1a`.
+    // @note **Every numeric value here is bench-tunable** — treat the defaults as starting
+    //       points until measured on the physical chassis.
+    // =========================================================================================
+
+    /**
+     * @brief Per-tick net translation (cm) below which wheel motion is treated as encoder noise.
+     *
+     * The offset integrator accumulates wheel-encoder deltas each cooperative tick.
+     * When the per-tick net translation magnitude (|(ΔL + ΔR) / 2|) falls below this
+     * floor, the tick is silently dropped from the translation channel — it is too
+     * small to distinguish real motion from encoder quantisation noise. The rotation
+     * channel is gated INDEPENDENTLY via `OFFSET_ROTATION_DEADBAND_DEG`.
+     *
+     * @note TODO: bench-tune. Suggested: 0.2f cm (~half a wheel-encoder count at
+     *       typical cruise). Tighten toward 0 to capture slower drift; loosen to
+     *       reduce noise accumulation.
+     * @note Consumer: the offset integrator's translation channel (PR1a).
+     */
+    constexpr float OFFSET_TRANSLATION_DEADBAND_CM = 0.2f;
+
+    /**
+     * @brief Per-tick IMU-yaw delta (deg) below which rotation is treated as IMU noise.
+     *
+     * When the per-tick absolute IMU-yaw change falls below this floor, the tick is
+     * silently dropped from the rotation channel. Gated INDEPENDENTLY of the
+     * translation deadband — a tick can contribute to translation without contributing
+     * to rotation, and vice versa.
+     *
+     * @note TODO: bench-tune. Suggested: 0.5f deg (~one IMU LSB at typical noise floor).
+     *       Tighten toward 0 to capture slow yaw creep; loosen to suppress sensor drift
+     *       during straight-line driving.
+     * @note Consumer: the offset integrator's rotation channel (PR1a).
+     */
+    constexpr float OFFSET_ROTATION_DEADBAND_DEG = 0.5f;
+
+    /**
+     * @brief Offset magnitude (cm) above which a `goTo()` call first returns to the
+     *        anchored node before planning the requested path.
+     *
+     * When the accumulated operator offset vector's magnitude exceeds this threshold,
+     * PathTracker inserts a dead-reckoned return move back onto the anchored node before
+     * dispatching the caller's goal. Below this threshold `goTo()` behaves exactly as
+     * today — no return move is inserted.
+     *
+     * @note TODO: bench-tune. Suggested: 3.0f cm (roughly half the axle-offset measurement
+     *       uncertainty). Raise to tolerate larger pushes before triggering a return;
+     *       lower to recover from smaller deviations.
+     * @note Must be greater than `OFFSET_TRANSLATION_DEADBAND_CM` — if the trigger sits
+     *       below or at the deadband, accumulated offset can never reach the trigger and
+     *       the return-to-node branch is permanently unreachable. Enforced by static_assert
+     *       below.
+     * @note Forward-looking: no consumer in PR1a. Used by the PR1b return-to-node prologue.
+     */
+    constexpr float RETURN_TRIGGER_THRESHOLD_CM = 3.0f;
+
+    /**
+     * @brief Maximum offset magnitude (cm) that can be trusted for a dead-reckoned return.
+     *
+     * Above this cap the robot is too far off-node for dead reckoning to reliably drive
+     * back — the accumulated position error makes the return vector untrustworthy. When
+     * the offset exceeds this cap, the PR1b off-map policy decides whether to fault or to
+     * attempt the return anyway.
+     *
+     * @note TODO: bench-tune. Suggested: 50.0f cm (roughly one node-spacing on a typical
+     *       WRO field). Raise if the robot is allowed to wander further before needing to
+     *       recover; lower to be more conservative about trusting dead reckoning.
+     * @note Must be ≥ `RETURN_TRIGGER_THRESHOLD_CM` — you can only trigger a return for
+     *       offsets you still trust to drive back. Enforced by static_assert below.
+     * @note Forward-looking: no consumer in PR1a. Used by the PR1b return-to-node prologue.
+     */
+    constexpr float RETURN_DISTANCE_CAP_CM = 50.0f;
+
+    // NOTE: the off-map gate policy (`enum OffMapGate` + `OFF_MAP_GATE`) is intentionally NOT
+    // declared here yet — it has no PR1a consumer. It lands in PR1b alongside the return-to-node
+    // prologue that reads it, so the config surface stays consumer-driven (no speculative symbols).
+
+    // Sanity static_asserts (intra-Localization; keep them here next to the constants,
+    // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).
+
+    static_assert(OFFSET_TRANSLATION_DEADBAND_CM > 0.0f,
+                  "Config::OFFSET_TRANSLATION_DEADBAND_CM must be positive — a zero or negative "
+                  "deadband disables the encoder-noise gate and causes every idle tick to accumulate "
+                  "phantom offset.");
+
+    static_assert(OFFSET_ROTATION_DEADBAND_DEG > 0.0f,
+                  "Config::OFFSET_ROTATION_DEADBAND_DEG must be positive — a zero or negative "
+                  "deadband disables the IMU-noise gate and causes every idle tick to accumulate "
+                  "phantom yaw offset.");
+
+    static_assert(RETURN_TRIGGER_THRESHOLD_CM > 0.0f,
+                  "Config::RETURN_TRIGGER_THRESHOLD_CM must be positive — a zero or negative "
+                  "threshold would fire the return-to-node prologue on every goTo() call, even "
+                  "when the robot is already on-node.");
+
+    static_assert(RETURN_DISTANCE_CAP_CM > 0.0f,
+                  "Config::RETURN_DISTANCE_CAP_CM must be positive — a zero or negative cap "
+                  "would fire the off-map gate on every offset, making the return-to-node "
+                  "prologue unreachable.");
+
+    static_assert(RETURN_TRIGGER_THRESHOLD_CM <= RETURN_DISTANCE_CAP_CM,
+                  "Config::RETURN_TRIGGER_THRESHOLD_CM must be <= RETURN_DISTANCE_CAP_CM - "
+                  "the return-to-node prologue should only fire for offsets that the firmware "
+                  "can still trust to dead-reckon back from. A trigger above the cap would "
+                  "immediately invoke the off-map gate on every return attempt.");
 }    // namespace Config
 
 #endif    // CONFIG_NAV_H

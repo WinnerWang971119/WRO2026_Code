@@ -131,7 +131,7 @@ void renderCalMenu()
  * is flipped on, instead of freezing to whatever was cached on entry.
  *
  * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
- *     -> PathTracker -> Mission -> EventTrace.
+ *     -> PathTracker -> Localization -> Mission -> EventTrace.
  */
 void cooperativeTick()
 {
@@ -147,6 +147,15 @@ void cooperativeTick()
     Manipulator.update();
     Tasks.update();          // T8: housekeeping; no FSM in this plan
     PathTracker.update();
+
+    // Operator-offset integrator. MUST run unconditionally every tick (not behind
+    // the cal-menu guard below): Drive ticked above so its encoder reads are fresh,
+    // and PathTracker just pushed its nav-active flag (setNavActive) so the gate
+    // resolves on this same tick. While the gate is closed it issues no IMU read; it
+    // re-baselines once on the closed->open edge, so the operator's first hand-drive
+    // after a hop (or after zeroing) does not register a cold-start phantom.
+    Localization.update();
+
     Mission.update();
 
     // The calibration menu owns the OLED while open (FINDING #4): EventTrace's

@@ -145,6 +145,19 @@ private:
      */
     uint32_t _lastHeartbeat_ms = 0;
 
+    /**
+     * @brief Last offset magnitude (whole cm) pushed to the OLED ring, used for change-throttled
+     *        OLED events.
+     *
+     * Initialised to `0` — matching the zero offset the chassis has at boot while it sits on its
+     * anchored start node. This means `OFF 0` is never pushed at boot (the rounded magnitude
+     * equals the sentinel, so no event fires). The first OLED event fires only when the chassis
+     * is hand-driven at least 1 cm away from its anchored node, which is the desired behaviour
+     * for bench telemetry. `int16_t` accommodates the full field diagonal (~400 cm) while still
+     * fitting in a negative sentinel if the design ever needs one.
+     */
+    int16_t _lastShownOffsetCm = 0;
+
     /** @brief Emit the heartbeat line to Serial if the period has elapsed. */
     void _emitHeartbeat();
 
