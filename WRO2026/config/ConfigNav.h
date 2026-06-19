@@ -245,8 +245,17 @@ namespace Config
      *       (vs. normal squaring slop) without false-rejecting good re-anchors.
      * @note TODO: bench-tune (the enable decision, paired with `WALL_NORMAL_TOLERANCE_DEG`).
      * @note Consumer: `Localization::reanchorAtWall` (Pillar 2).
+     * @note Override-hook: guarded by `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT` so the
+     *       SHIPPED source default stays `false` while the strict-ON host test
+     *       (`test_reanchor_at_wall_strict`) flips it target-wide via
+     *       `-DWALL_NORMAL_STRICT_ENABLED_DEFAULT=true` (same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above) — avoids the cross-TU `constexpr`
+     *       override trap without a per-target Config shadow header.
      */
-    constexpr bool WALL_NORMAL_STRICT_ENABLED = false;
+#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT
+#define WALL_NORMAL_STRICT_ENABLED_DEFAULT false
+#endif
+    constexpr bool WALL_NORMAL_STRICT_ENABLED = WALL_NORMAL_STRICT_ENABLED_DEFAULT;
 
     /**
      * @brief Tolerance (degrees) for the wall-normal sanity check, when enabled.
