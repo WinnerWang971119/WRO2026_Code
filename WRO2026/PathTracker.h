@@ -350,17 +350,20 @@ private:
      * mag, clamped to `Config::RETURN_DISTANCE_CAP_CM` so a best-effort over-cap
      * return cannot run unbounded.
      *
-     * Latches the in-flight return state (`_returnIsLineBacked`, `_returnDistCm`,
+     * Latches the in-flight return state (`_returnUsesLineSeek`, `_returnDistCm`,
      * `_resolvedBodyHeading = returnHeading`, `_resolvedDirection = FRONT`, `_returnActive`),
      * then dispatches the pre-edge turn through the SAME `_dispatchTurnIfNeeded(...)` every hop
      * uses. When a turn fires the FSM enters `TURNING` and `_dispatchReturnMoveAfterTurn()`
      * runs once it completes; when the chassis is already aligned the move dispatches
-     * immediately. The actual node-kind move lives in `_dispatchReturnMoveAfterTurn()`:
-     *  - LINE  : a forward `Drive.stopAtLine(_returnDistCm)` GYRO seek that lands the wheel
-     *            AXLE on the node (ADR-027); `RETURN_TO_NODE` re-anchors the SAME node via
-     *            `Localization.onIntersection(...)` on success.
-     *  - BLIND : a forward dead-reckon `Drive.driveDist(_returnDistCm)`; `RETURN_TO_NODE`
-     *            re-anchors via `Localization.clearOffset()` (the node id does not change).
+     * immediately. The actual move lives in `_dispatchReturnMoveAfterTurn()` and is chosen by
+     * `_returnUsesLineSeek` (a LINE anchor whose return distance is at least the front sensor's
+     * axle lead `Config::LINE_SENSOR_AXLE_OFFSET_CM`):
+     *  - line seek : a forward `Drive.stopAtLine(_returnDistCm)` GYRO seek that lands the wheel
+     *                AXLE on the node (ADR-027); `RETURN_TO_NODE` re-anchors the SAME node via
+     *                `Localization.onIntersection(...)` on success.
+     *  - dead-reckon : a forward `Drive.driveDist(_returnDistCm)` (a blind anchor, OR a short
+     *                LINE return whose front sensor already sits past the node line, #14);
+     *                `RETURN_TO_NODE` re-anchors via `Localization.clearOffset()` (node unchanged).
      *
      * Routing the return through the shared pre-turn is the structural fix for the
      * LINE-return-without-turn bug: the pre-edge turn is no longer inlined per node kind, so
@@ -379,11 +382,11 @@ private:
      *
      * Called either directly by `_dispatchReturnMove(...)` when no pre-turn was needed, or
      * from the `TURNING` state once the return's pre-edge `Drive.turnToYaw` completes (the
-     * `_returnActive` branch). LINE-backed anchors re-acquire the line with a forward
-     * `Drive.stopAtLine(_returnDistCm)` GYRO seek; blind-only anchors dead-reckon a forward
-     * `Drive.driveDist(_returnDistCm)`. Both enter `RETURN_TO_NODE`, which polls the outcome.
-     * Reads `_returnIsLineBacked`, `_returnDistCm`, and `_resolvedBodyHeading` (all latched by
-     * `_dispatchReturnMove`). Every Drive call is one discarded-temporary `.async()` statement.
+     * `_returnActive` branch). A line-seek return (`_returnUsesLineSeek`) re-acquires the line
+     * with a forward `Drive.stopAtLine(_returnDistCm)` GYRO seek; a dead-reckon return drives a
+     * forward `Drive.driveDist(_returnDistCm)`. Both enter `RETURN_TO_NODE`, which polls the
+     * outcome. Reads `_returnUsesLineSeek`, `_returnDistCm`, and `_resolvedBodyHeading` (all
+     * latched by `_dispatchReturnMove`). Every Drive call is one discarded-temporary `.async()`.
      */
     void _dispatchReturnMoveAfterTurn();
 
@@ -503,14 +506,16 @@ private:
     uint8_t          _nextHop         = FieldMap::NODE_NONE;
     Routes::EdgeType _activeEdgeType  = Routes::EdgeType::NONE;
 
-    /// @brief Node kind of the anchor for the IN-FLIGHT return-to-node prologue (PR1b).
+    /// @brief Whether the IN-FLIGHT return re-acquires via the forward line seek (PR1b).
     ///
-    /// Set by `_dispatchReturnMove(...)` when entering `RETURN_TO_NODE`: `true` for a
-    /// LINE-backed anchor (a `Drive.stopAtLine` seek re-anchors via `onIntersection`),
-    /// `false` for a blind-only anchor (a dead-reckoned `Drive.driveDist` re-anchors via
-    /// `clearOffset`). Read only by the `RETURN_TO_NODE` state body to pick the success
-    /// path. Meaningless outside `RETURN_TO_NODE`; defaults to `false`.
-    bool _returnIsLineBacked = false;
+    /// Set by `_dispatchReturnMove(...)` when entering `RETURN_TO_NODE`: `true` only when the
+    /// anchor is a LINE node AND the return distance is at least the front sensor's axle lead
+    /// (`Config::LINE_SENSOR_AXLE_OFFSET_CM`) — a `Drive.stopAtLine` seek re-acquires the line and
+    /// re-anchors via `onIntersection`. It is `false` for a blind-only anchor AND for a SHORT LINE
+    /// return whose front sensor already sits past the node line (#14): both dead-reckon a forward
+    /// `Drive.driveDist` and re-anchor via `clearOffset`. Read only by `_dispatchReturnMoveAfterTurn`
+    /// and the `RETURN_TO_NODE` state body. Meaningless outside `RETURN_TO_NODE`; defaults to `false`.
+    bool _returnUsesLineSeek = false;
 
     /// @brief True while a return-to-node prologue is in flight (PR1b, issue #36, #6 refactor).
     ///

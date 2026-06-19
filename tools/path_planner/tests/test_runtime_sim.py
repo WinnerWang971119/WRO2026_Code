@@ -2752,17 +2752,20 @@ def test_goto_line_backed_return_emits_stop_at_line_and_lands_on_node():
     the chassis ends back ON the anchored node (drift~0) with the offset
     cleared.
 
-    Setup: the chassis is pushed 10 cm BACKWARD along +x (offset (-10, 0)), so
-    the inverse-return heading is 0deg -- the return drives forward 10 cm and
-    lands the axle back on node A at the origin.
+    Setup: the chassis is pushed 20 cm BACKWARD along +x (offset (-20, 0)), so
+    the inverse-return heading is 0deg -- the return drives forward 20 cm and
+    lands the axle back on node A at the origin. The push is kept above the
+    sensor-to-axle lead (LINE_SENSOR_AXLE_OFFSET_CM) so the front sensor can
+    actually re-cross the node line -- a shorter LINE return dead-reckons (#14,
+    see test_goto_short_line_backed_return_dead_reckons).
     """
     # Node A is line-backed (start). Push backward so the return heading is 0.
     fd, graph, next_hop = _typed_two_node_field("line")
     sim, chassis = _make_typed_sim(fd, graph, next_hop)
 
-    sim.operator_move(-10.0)    # offset (-10, 0); chassis now at x = -10
+    sim.operator_move(-20.0)    # offset (-20, 0); chassis now at x = -20
     assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
-        10.0, abs=1e-9
+        20.0, abs=1e-9
     )
 
     prims = sim.go_to("B")
@@ -2771,7 +2774,7 @@ def test_goto_line_backed_return_emits_stop_at_line_and_lands_on_node():
     assert prims[0][0] == ACT_RETURN_STOP_AT_LINE
     tag, node, dist, heading = prims[0]
     assert node == "A"
-    assert dist == pytest.approx(10.0, abs=1e-9)
+    assert dist == pytest.approx(20.0, abs=1e-9)
     assert heading == pytest.approx(0.0, abs=1e-9)
 
     # Exactly one return primitive (the prologue fires once).
@@ -2907,11 +2910,13 @@ def test_line_return_off_axis_emits_turn_before_seek():
     fd, graph, next_hop = _typed_two_node_field("line")
     sim, _chassis = _make_typed_sim(fd, graph, next_hop)
 
-    # Forward push 10 cm along +x (chassis faces 0deg): offset (10, 0), inverse-return
-    # heading 180deg -> a real pre-edge turn is required before the seek.
-    sim.operator_move(10.0)
+    # Forward push 20 cm along +x (chassis faces 0deg): offset (20, 0), inverse-return
+    # heading 180deg -> a real pre-edge turn is required before the seek. The push stays
+    # above the sensor-to-axle lead so this exercises the line seek (a shorter LINE return
+    # dead-reckons, #14) while still requiring the off-axis pre-turn.
+    sim.operator_move(20.0)
     assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
-        10.0, abs=1e-9
+        20.0, abs=1e-9
     )
 
     prims = sim.go_to("B")
@@ -2923,12 +2928,83 @@ def test_line_return_off_axis_emits_turn_before_seek():
     assert prims.index(seek) == 1
     _tag, node, dist, heading = seek
     assert node == "A"
-    assert dist == pytest.approx(10.0, abs=1e-9)
+    assert dist == pytest.approx(20.0, abs=1e-9)
     assert heading == pytest.approx(180.0, abs=1e-9)
     # The return re-anchored on A and cleared the offset before the planned hop.
     assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
         0.0, abs=1e-9
     )
+
+
+def test_goto_short_line_backed_return_dead_reckons():
+    """A LINE return shorter than the sensor-to-axle lead dead-reckons, not stopAtLine (#14).
+
+    The front line sensor leads the wheel axle by LINE_SENSOR_AXLE_OFFSET_CM, so a return whose
+    distance is below that lead starts the sensor already PAST the node line -- a forward
+    stopAtLine seek could never re-cross it and would fault LINE_NOT_FOUND on hardware. The fix
+    routes such short LINE returns through the dead-reckon path (ACT_RETURN_FORWARD +
+    clear_offset), exactly like a blind anchor. This is the COMMON small hand-correction case
+    (offset between RETURN_TRIGGER_THRESHOLD_CM and the axle lead).
+
+    Setup: node A is line-backed; push 8 cm BACKWARD along +x (offset (-8, 0), 3 < 8 < 12.02), so
+    the return heading is 0deg (== facing -> no pre-turn) and the return dead-reckons forward 8 cm
+    back onto A.
+    """
+    push_cm = 8.0
+    assert RETURN_TRIGGER_THRESHOLD_CM < push_cm < LINE_SENSOR_AXLE_OFFSET_CM
+
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(-push_cm)    # offset (-8, 0); return heading 0deg == facing
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        push_cm, abs=1e-9
+    )
+
+    prims = sim.go_to("B")
+
+    # Straight-back return (heading == facing) -> no pre-turn; the head primitive is the
+    # dead-reckon forward, NOT a line seek.
+    assert prims[0][0] == ACT_RETURN_FORWARD
+    _tag, node, dist = prims[0]
+    assert node == "A"
+    assert dist == pytest.approx(push_cm, abs=1e-9)
+    # A short LINE return never emits the (would-fault) line seek.
+    assert not any(p[0] == ACT_RETURN_STOP_AT_LINE for p in prims)
+    # It re-anchored on A (clear_offset, node unchanged), cleared the offset, then walked to B.
+    assert sim.localization.current_node() == "B"
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+    bx, by = fd.NODES["B"]
+    assert math.hypot(chassis.x_cm - bx, chassis.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_line_return_seek_threshold_is_the_axle_offset():
+    """The line-seek vs dead-reckon boundary for a LINE return is exactly the axle lead (#14).
+
+    A LINE return at exactly LINE_SENSOR_AXLE_OFFSET_CM re-acquires via the seek (the sensor
+    reaches the node line); a hair below it dead-reckons (the sensor cannot re-cross). Locks the
+    ``>=`` threshold so a future off-by-one (e.g. ``>``) is caught. Both pushes are straight back
+    (return heading == facing) so the head primitive is the dispatch itself, not a pre-turn.
+    """
+    eps = 1e-3
+
+    # Just BELOW the lead -> dead-reckon (ACT_RETURN_FORWARD), no line seek.
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+    sim.operator_move(-(LINE_SENSOR_AXLE_OFFSET_CM - eps))
+    prims_below = sim.go_to("B")
+    assert prims_below[0][0] == ACT_RETURN_FORWARD
+    assert not any(p[0] == ACT_RETURN_STOP_AT_LINE for p in prims_below)
+
+    # Exactly AT the lead -> line seek (ACT_RETURN_STOP_AT_LINE).
+    fd2, graph2, next_hop2 = _typed_two_node_field("line")
+    sim2, _chassis2 = _make_typed_sim(fd2, graph2, next_hop2)
+    sim2.operator_move(-LINE_SENSOR_AXLE_OFFSET_CM)
+    prims_at = sim2.go_to("B")
+    assert prims_at[0][0] == ACT_RETURN_STOP_AT_LINE
+    assert not any(p[0] == ACT_RETURN_FORWARD for p in prims_at)
 
 
 def test_blind_return_turn_snapshot_is_post_turn_not_post_forward():
@@ -3119,12 +3195,13 @@ def test_tc18a_post_return_tail_matches_clean_goto():
     clean_prims = sim_clean.go_to("C")
 
     # Post-return run: push BACKWARD along +x (offset (-d, 0); return heading
-    # 0deg == start heading), then go_to C.
+    # 0deg == start heading), then go_to C. The push stays above the sensor-to-axle
+    # lead so the LINE return re-acquires via the seek (a shorter return dead-reckons, #14).
     fd_ret, g_ret, nh_ret = _build()
     chassis_ret = VirtualChassis.from_field_data(fd_ret)
     sim_ret = PathTrackerSim(fd_ret, g_ret, nh_ret, chassis_ret)
     sim_ret.localization.zero_heading_from_current()
-    sim_ret.operator_move(-9.0)
+    sim_ret.operator_move(-20.0)
     ret_prims = sim_ret.go_to("C")
 
     # The head primitive is the return seek; the tail is the planned path.
@@ -3153,7 +3230,7 @@ def test_tc18a_clean_goto_after_return_nets_zero_drift_on_toy_fixture(toy_field,
     sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()
 
-    sim.operator_move(-7.0)    # above trigger, within cap; return heading 0deg
+    sim.operator_move(-20.0)    # above the axle lead (line seek), within cap; heading 0deg
     prims = sim.go_to("C")
 
     assert prims[0][0] == ACT_RETURN_STOP_AT_LINE

@@ -4,12 +4,14 @@
 //
 // Two things are under test here, at two layers:
 //
-//   1. The node-kind CLASSIFICATION (`_returnIsLineBacked = (FieldMap::getNodeType(cur) ==
-//      Routes::NodeType::LINE)`, PathTracker.cpp:1016) is tested DIRECTLY against the REAL
-//      `FieldMap::getNodeType` over the REAL `routes.cpp` graph data — the same symbol and
-//      the same node table production reads. The toy fixture carries BOTH LINE nodes
-//      (indices 0..3, "Inter1..4") and BLIND nodes (indices 4..6, "Start"/"final"/
-//      "position1"), so this is a genuine LINE-vs-BLIND discrimination, NOT a tautology.
+//   1. The line-seek CLASSIFICATION (`_returnUsesLineSeek = nodeIsLine && _returnDistCm >=
+//      Config::LINE_SENSOR_AXLE_OFFSET_CM` in `_dispatchReturnMove`). The node-kind half is
+//      tested DIRECTLY against the REAL `FieldMap::getNodeType` over the REAL `routes.cpp` graph
+//      data — the same symbol and the same node table production reads (TC4); the distance-gate
+//      half is tested against the REAL `Config::LINE_SENSOR_AXLE_OFFSET_CM` (TC4c, #14). The toy
+//      fixture carries BOTH LINE nodes (indices 0..3, "Inter1..4") and BLIND nodes (indices 4..6,
+//      "Start"/"final"/"position1"), so this is a genuine LINE-vs-BLIND discrimination, NOT a
+//      tautology.
 //
 //   2. The per-kind RETURN_TO_NODE state-body ROUTING (which Drive observations lead to a
 //      successful re-anchor vs which lead to which fault) is inline-MIRRORED, following the
@@ -40,6 +42,7 @@
 #include <cstdio>
 #include <stdint.h>
 
+#include "Config.h"          // Config::LINE_SENSOR_AXLE_OFFSET_CM (the line-seek distance gate).
 #include "FieldMap.h"        // real FieldMap::getNodeType + getNode (header-only inline).
 #include "routes.h"          // Routes::NodeType, Routes::N_NODES, Routes::NODES (data in routes.cpp).
 #include "PathTracker.h"     // PathTrackerClass::Fault (the real enum the mirror routes to).
@@ -60,8 +63,9 @@ static void check(bool cond, const char* what)
 //
 // Mirrors the slice of `PathTracker::_stepFsm()` case `State::RETURN_TO_NODE`
 // that decides, once `Drive.isIdle()` is true, what re-anchor / fault action to
-// take — branching on `_returnIsLineBacked` (set by `_dispatchReturnMove` from
-// the node kind) and the live Drive fault + the compile-time off-map gate.
+// take — branching on `_returnUsesLineSeek` (set by `_dispatchReturnMove` from
+// the node kind AND the return distance vs the axle lead) and the live Drive
+// fault + the compile-time off-map gate.
 //
 // The production code reads `Drive.isIdle()` / `Drive.hasFault()`; here those two
 // observations are plain `bool` inputs (the mock Drive has no fault-injection
@@ -92,17 +96,19 @@ struct ReturnTickResult
 
 /// Replica of one `PathTrackerClass::_stepFsm()` tick while in `State::RETURN_TO_NODE`.
 ///
-/// @param isLineBacked  The `_returnIsLineBacked` flag — `true` if the anchor node is
-///                      a LINE node (set by `_dispatchReturnMove` from `getNodeType`).
+/// @param usesLineSeek  The `_returnUsesLineSeek` flag — `true` only when the anchor is a LINE
+///                      node AND the return distance reaches the front sensor's axle lead
+///                      (set by `_dispatchReturnMove`). A short LINE return is `false` and drives
+///                      the blind (dead-reckon) routing, exactly like a blind anchor (#14).
 /// @param driveIsIdle   The value `Drive.isIdle()` would return this tick.
 /// @param driveHasFault The value `Drive.hasFault()` would return this tick.
-/// @param gateIsFault   `Config::OFF_MAP_GATE == FAULT` (LINE no-line routing only).
+/// @param gateIsFault   `Config::OFF_MAP_GATE == FAULT` (line-seek no-line routing only).
 ///
-// MIRROR: PathTracker.cpp:560-569 (not-idle -> WAIT, both node kinds; then clear _returnActive).
-// MIRROR: PathTracker.cpp:571-627 (LINE-backed: non-LINE_NOT_FOUND fault -> DRIVE_FAULT;
+// MIRROR: PathTracker.cpp (not-idle -> WAIT, both paths; then clear _returnActive).
+// MIRROR: PathTracker.cpp (line seek: non-LINE_NOT_FOUND fault -> DRIVE_FAULT;
 //         LINE_NOT_FOUND -> off-map gate; else onIntersection).
-// MIRROR: PathTracker.cpp:629-650 (BLIND-only: hasFault -> DRIVE_FAULT; else clearOffset).
-static ReturnTickResult replica_returnTick(bool isLineBacked, bool driveIsIdle,
+// MIRROR: PathTracker.cpp (dead-reckon: hasFault -> DRIVE_FAULT; else clearOffset).
+static ReturnTickResult replica_returnTick(bool usesLineSeek, bool driveIsIdle,
                                            bool driveHasFault, bool gateIsFault,
                                            bool faultIsLineNotFound = true)
 {
@@ -115,7 +121,7 @@ static ReturnTickResult replica_returnTick(bool isLineBacked, bool driveIsIdle,
         return r;    // outcome stays WAIT
     }
 
-    if (isLineBacked)
+    if (usesLineSeek)
     {
         if (driveHasFault)
         {
@@ -175,10 +181,12 @@ int main()
     // -------------------------------------------------------------------------------------
     // TC4 — node-kind CLASSIFICATION against the REAL FieldMap::getNodeType over the REAL
     // routes.cpp graph. The toy fixture has LINE nodes 0..3 and BLIND nodes 4..6, so the
-    // _returnIsLineBacked predicate (getNodeType(cur) == NodeType::LINE) discriminates the
-    // two kinds for real. This is the exact predicate at PathTracker.cpp:1066.
+    // node-kind HALF of the `_returnUsesLineSeek` predicate (getNodeType(cur) == NodeType::LINE)
+    // discriminates the two kinds for real. The distance HALF (dist >= the axle lead) is covered
+    // by TC4c below.
     // -------------------------------------------------------------------------------------
-    // MIRROR: PathTracker.cpp:1066 (_returnIsLineBacked = getNodeType(cur) == NodeType::LINE).
+    // MIRROR: PathTracker.cpp _dispatchReturnMove
+    //         (nodeIsLine = getNodeType(cur) == NodeType::LINE).
     {
         // The fixture must actually contain both kinds for the discrimination to be real —
         // assert that precondition so a future field_data change that drops one kind fails
@@ -195,11 +203,55 @@ int main()
         check(sawBlind, "TC4 precondition: routes.cpp toy fixture has at least one BLIND node");
 
         // Spot-check known node ids against the fixture's authored types (routes.cpp:16-22):
-        // a LINE-backed anchor -> _returnIsLineBacked true; a BLIND-only anchor -> false.
+        // node 0 is LINE-backed (a long-enough return uses the seek), node 4 is BLIND-only.
         const bool lineBacked0 = (FieldMap::getNodeType(0) == Routes::NodeType::LINE);
         const bool lineBacked4 = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
         check(lineBacked0, "TC4: node 0 (Inter1) is LINE-backed -> stopAtLine-seek return");
         check(!lineBacked4, "TC4: node 4 (Start) is BLIND-only -> dead-reckon return");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC4c — line-seek DISTANCE GATE (#14). `_returnUsesLineSeek` is true ONLY for a LINE
+    // anchor whose return distance reaches the front sensor's axle lead
+    // (Config::LINE_SENSOR_AXLE_OFFSET_CM). A shorter LINE return leaves the sensor already
+    // past the node line, so a forward seek can never re-cross it — it dead-reckons back like a
+    // blind anchor. Mirror the full decision and confirm a short LINE return routes through the
+    // dead-reckon (blind) branch of replica_returnTick (clearOffset success / DRIVE_FAULT), NOT
+    // the line-seek branch (onIntersection / off-map gate).
+    // -------------------------------------------------------------------------------------
+    // MIRROR: PathTracker.cpp _dispatchReturnMove
+    //         (_returnUsesLineSeek = nodeIsLine && _returnDistCm >= LINE_SENSOR_AXLE_OFFSET_CM).
+    {
+        const float axle = Config::LINE_SENSOR_AXLE_OFFSET_CM;
+        // Node 0 is LINE (asserted in TC4). The decision mirror:
+        const bool node0IsLine = (FieldMap::getNodeType(0) == Routes::NodeType::LINE);
+
+        const bool shortUsesSeek = node0IsLine && ((axle - 1.0f) >= axle);     // short return
+        const bool atUsesSeek    = node0IsLine && (axle >= axle);              // exactly the lead
+        const bool longUsesSeek  = node0IsLine && ((axle + 10.0f) >= axle);    // comfortably long
+        check(!shortUsesSeek, "TC4c: a LINE return below the axle lead does NOT use the line seek");
+        check(atUsesSeek, "TC4c: a LINE return exactly at the axle lead uses the line seek (>=)");
+        check(longUsesSeek, "TC4c: a LINE return above the axle lead uses the line seek");
+
+        // A BLIND node never uses the seek regardless of distance.
+        const bool node4IsLine = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
+        const bool blindLongUsesSeek = node4IsLine && ((axle + 10.0f) >= axle);
+        check(!blindLongUsesSeek, "TC4c: a BLIND anchor never uses the line seek (any distance)");
+
+        // A short LINE return (usesLineSeek == false) drives the BLIND routing: an idle, no-fault
+        // arrival re-anchors via clearOffset; a faulted arrival is a genuine DRIVE_FAULT.
+        const ReturnTickResult ok = replica_returnTick(/*usesLineSeek*/ shortUsesSeek,
+                                                       /*idle*/ true, /*fault*/ false,
+                                                       /*gateFault*/ true);
+        check(ok.outcome == ReturnTickOutcome::REANCHOR_CLEAR && ok.planNext
+                  && ok.fault == PathTrackerClass::Fault::NONE,
+              "TC4c: short LINE return success re-anchors via clearOffset (dead-reckon path)");
+        const ReturnTickResult bad = replica_returnTick(/*usesLineSeek*/ shortUsesSeek,
+                                                        /*idle*/ true, /*fault*/ true,
+                                                        /*gateFault*/ true);
+        check(bad.outcome == ReturnTickOutcome::FAULT_DRIVE
+                  && bad.fault == PathTrackerClass::Fault::DRIVE_FAULT,
+              "TC4c: short LINE return drive failure surfaces DRIVE_FAULT (not the off-map gate)");
     }
 
     // -------------------------------------------------------------------------------------
@@ -208,8 +260,8 @@ int main()
 
     // Both kinds: drive still in flight (not idle) -> WAIT, no action.
     {
-        const ReturnTickResult line  = replica_returnTick(/*lineBacked*/ true,  /*idle*/ false, /*fault*/ false, /*gateFault*/ true);
-        const ReturnTickResult blind = replica_returnTick(/*lineBacked*/ false, /*idle*/ false, /*fault*/ false, /*gateFault*/ true);
+        const ReturnTickResult line  = replica_returnTick(/*usesLineSeek*/ true,  /*idle*/ false, /*fault*/ false, /*gateFault*/ true);
+        const ReturnTickResult blind = replica_returnTick(/*usesLineSeek*/ false, /*idle*/ false, /*fault*/ false, /*gateFault*/ true);
         check(line.outcome == ReturnTickOutcome::WAIT && !line.reAnchored && !line.planNext,
               "TC4b: LINE return waits while the seek is in flight");
         check(blind.outcome == ReturnTickOutcome::WAIT && !blind.reAnchored && !blind.planNext,
@@ -218,7 +270,7 @@ int main()
 
     // LINE-backed success: idle, no fault -> re-anchor SAME node via onIntersection.
     {
-        const ReturnTickResult r = replica_returnTick(/*lineBacked*/ true, /*idle*/ true, /*fault*/ false, /*gateFault*/ true);
+        const ReturnTickResult r = replica_returnTick(/*usesLineSeek*/ true, /*idle*/ true, /*fault*/ false, /*gateFault*/ true);
         check(r.outcome == ReturnTickOutcome::REANCHOR_ONINTER,
               "TC4b: LINE return success re-anchors via onIntersection (physical re-localisation)");
         check(r.reAnchored && r.planNext && r.fault == PathTrackerClass::Fault::NONE,
@@ -229,7 +281,7 @@ int main()
     // (NOT DRIVE_FAULT — the state is exempt from the generic guard precisely so this
     // routes to the off-map gate).
     {
-        const ReturnTickResult r = replica_returnTick(/*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ true);
+        const ReturnTickResult r = replica_returnTick(/*usesLineSeek*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ true);
         check(r.outcome == ReturnTickOutcome::FAULT_OFF_NODE,
               "TC4b: LINE no-line under FAULT gate surfaces Fault::OFF_NODE (not DRIVE_FAULT)");
         check(r.fault == PathTrackerClass::Fault::OFF_NODE && !r.reAnchored && !r.planNext,
@@ -239,7 +291,7 @@ int main()
     // LINE-backed LINE_NOT_FOUND under BEST_EFFORT gate: idle + faulted -> accept the
     // dead-reckoned pose (clearOffset re-anchor) and plan; no fault latched.
     {
-        const ReturnTickResult r = replica_returnTick(/*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ false);
+        const ReturnTickResult r = replica_returnTick(/*usesLineSeek*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ false);
         check(r.outcome == ReturnTickOutcome::REANCHOR_CLEAR,
               "TC4b: LINE no-line under BEST_EFFORT accepts the dead-reckoned pose (clearOffset)");
         check(r.reAnchored && r.planNext && r.fault == PathTrackerClass::Fault::NONE,
@@ -251,7 +303,7 @@ int main()
     // off-map gate — under BOTH gate policies (the gate only governs LINE_NOT_FOUND).
     {
         const ReturnTickResult rFaultGate = replica_returnTick(
-            /*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ true,
+            /*usesLineSeek*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ true,
             /*faultIsLineNotFound*/ false);
         check(rFaultGate.outcome == ReturnTickOutcome::FAULT_DRIVE,
               "TC4b: LINE non-LINE_NOT_FOUND fault surfaces Fault::DRIVE_FAULT (not OFF_NODE)");
@@ -259,7 +311,7 @@ int main()
                   && !rFaultGate.reAnchored && !rFaultGate.planNext,
               "TC4b: LINE non-LINE_NOT_FOUND fault does not re-anchor or plan");
         const ReturnTickResult rBestGate = replica_returnTick(
-            /*lineBacked*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ false,
+            /*usesLineSeek*/ true, /*idle*/ true, /*fault*/ true, /*gateFault*/ false,
             /*faultIsLineNotFound*/ false);
         check(rBestGate.outcome == ReturnTickOutcome::FAULT_DRIVE,
               "TC4b: LINE non-LINE_NOT_FOUND fault is DRIVE_FAULT regardless of off-map gate");
@@ -267,7 +319,7 @@ int main()
 
     // BLIND-only success: idle, no fault -> re-anchor via clearOffset (node id unchanged).
     {
-        const ReturnTickResult r = replica_returnTick(/*lineBacked*/ false, /*idle*/ true, /*fault*/ false, /*gateFault*/ true);
+        const ReturnTickResult r = replica_returnTick(/*usesLineSeek*/ false, /*idle*/ true, /*fault*/ false, /*gateFault*/ true);
         check(r.outcome == ReturnTickOutcome::REANCHOR_CLEAR,
               "TC4b: BLIND return success re-anchors via clearOffset (dead-reckon arrival)");
         check(r.reAnchored && r.planNext && r.fault == PathTrackerClass::Fault::NONE,
@@ -277,14 +329,14 @@ int main()
     // BLIND-only drive failure: idle + faulted -> Fault::DRIVE_FAULT (a genuine drive
     // failure, NOT routed to the off-map gate — no line seek was involved).
     {
-        const ReturnTickResult r = replica_returnTick(/*lineBacked*/ false, /*idle*/ true, /*fault*/ true, /*gateFault*/ true);
+        const ReturnTickResult r = replica_returnTick(/*usesLineSeek*/ false, /*idle*/ true, /*fault*/ true, /*gateFault*/ true);
         check(r.outcome == ReturnTickOutcome::FAULT_DRIVE,
               "TC4b: BLIND return drive failure surfaces Fault::DRIVE_FAULT (not the off-map gate)");
         check(r.fault == PathTrackerClass::Fault::DRIVE_FAULT && !r.reAnchored && !r.planNext,
               "TC4b: BLIND drive failure does not re-anchor or plan");
         // The gate policy must NOT change the BLIND drive-failure routing (the gate only
         // applies to LINE LINE_NOT_FOUND) — confirm BEST_EFFORT yields the same DRIVE_FAULT.
-        const ReturnTickResult rBest = replica_returnTick(/*lineBacked*/ false, /*idle*/ true, /*fault*/ true, /*gateFault*/ false);
+        const ReturnTickResult rBest = replica_returnTick(/*usesLineSeek*/ false, /*idle*/ true, /*fault*/ true, /*gateFault*/ false);
         check(rBest.outcome == ReturnTickOutcome::FAULT_DRIVE,
               "TC4b: BLIND drive failure is DRIVE_FAULT regardless of off-map gate policy");
     }

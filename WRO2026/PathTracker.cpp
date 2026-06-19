@@ -249,7 +249,7 @@ bool PathTrackerClass::begin()
     _passThrough             = false;
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
-    _returnIsLineBacked      = false;
+    _returnUsesLineSeek      = false;
     _returnActive            = false;
     _returnDistCm            = 0.0f;
     // ADR-036: no pivot latched at boot.
@@ -309,7 +309,7 @@ void PathTrackerClass::abort()
     _passThrough            = false;
     _resolvedDirection      = Direction::AUTO;
     _resolvedBodyHeading    = 0.0f;
-    _returnIsLineBacked     = false;
+    _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
     // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
@@ -573,9 +573,9 @@ void PathTrackerClass::_stepFsm()
             // return dispatch.
             _returnActive = false;
 
-            if (_returnIsLineBacked)
+            if (_returnUsesLineSeek)
             {
-                // LINE-backed anchor: the `Drive.stopAtLine` seek either re-acquired
+                // Line-seek return: the `Drive.stopAtLine` seek either re-acquired
                 // the line (axle now on the node — a true re-localisation) or ran the
                 // full max distance without a crossing and latched
                 // `Fault::LINE_NOT_FOUND` (stop + clear queue, so `isIdle()` is now
@@ -631,9 +631,9 @@ void PathTrackerClass::_stepFsm()
                 return;
             }
 
-            // BLIND-only anchor: the return was a dead-reckoned turn + drive (no line
-            // seek). A `Drive.hasFault()` here is a genuine drive failure (not a
-            // LINE_NOT_FOUND — neither `turnToYaw` nor `driveDist` seeks a line), so it
+            // Dead-reckon return (a blind-only anchor OR a short LINE return, #14): the return was
+            // a dead-reckoned turn + drive (no line seek). A `Drive.hasFault()` here is a genuine
+            // drive failure (not a LINE_NOT_FOUND — neither `turnToYaw` nor `driveDist` seeks a line), so it
             // is a real DRIVE_FAULT, NOT the off-map gate. Routing it through
             // `_enterFault(DRIVE_FAULT, ...)` here is necessary because the generic
             // guard at the top is suppressed for this state; without it the blind
@@ -967,7 +967,7 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeEdgeType         = Routes::EdgeType::NONE;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
-    _returnIsLineBacked     = false;
+    _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
@@ -1071,7 +1071,16 @@ void PathTrackerClass::_dispatchReturnMove(const Offset2D& off, float mag)
     // return always drives FORWARD toward the anchor facing the return heading, so the resolved
     // direction is FRONT (the REVERSE_UNAVAILABLE guard is irrelevant) and the resolved body
     // heading IS the return heading.
-    _returnIsLineBacked  = (FieldMap::getNodeType(cur) == Routes::NodeType::LINE);
+    // A LINE anchor is re-acquired by driving FORWARD until the FRONT line sensor re-crosses the
+    // node line. That sensor leads the wheel axle by `LINE_SENSOR_AXLE_OFFSET_CM`, so once the
+    // return distance (the axle's distance back to the node) is shorter than that lead, the sensor
+    // already sits PAST the node line at the start of the seek and a forward drive can never
+    // re-cross it — the seek would just run to its max and fault `LINE_NOT_FOUND` (#14). Returns
+    // shorter than the sensor lead therefore dead-reckon back exactly like a blind anchor (the
+    // `RETURN_TO_NODE` blind success path re-anchors the SAME node via `clearOffset`).
+    // `_returnDistCm` is the cap-clamped magnitude set just above.
+    const bool nodeIsLine = (FieldMap::getNodeType(cur) == Routes::NodeType::LINE);
+    _returnUsesLineSeek  = nodeIsLine && (_returnDistCm >= Config::LINE_SENSOR_AXLE_OFFSET_CM);
     _resolvedDirection   = Direction::FRONT;
     _resolvedBodyHeading = returnHeadingDeg;
     _returnActive        = true;
@@ -1093,10 +1102,11 @@ void PathTrackerClass::_dispatchReturnMove(const Offset2D& off, float mag)
 
 void PathTrackerClass::_dispatchReturnMoveAfterTurn()
 {
-    if (_returnIsLineBacked)
+    if (_returnUsesLineSeek)
     {
-        // LINE-backed anchor: re-acquire the line. Drive FORWARD toward the expected node
-        // crossing facing the (already-aligned) return heading; the seek arms the T_OR_CROSS
+        // Line-seek return (LINE anchor, return distance >= the sensor lead). Re-acquire the
+        // line: drive FORWARD toward the expected node crossing facing the (already-aligned)
+        // return heading; the seek arms the T_OR_CROSS
         // detector near the endpoint, snaps on the line, and overshoots so the wheel AXLE lands
         // on the node (ADR-027) — the same primitive the STOP_AT_LINE hop uses. GYRO holds the
         // return heading so the chassis tracks straight back. `expectedCm` is the capped
@@ -1121,9 +1131,10 @@ void PathTrackerClass::_dispatchReturnMoveAfterTurn()
         return;
     }
 
-    // BLIND-only anchor: no line to snap onto — dead-reckon the inverse drive back. The chassis
-    // already faces the return heading (the shared pre-turn ran in TURNING), so this is a plain
-    // forward driveDist. deadbandSnap floors any non-zero PWM to PWM_MIN_MAGNITUDE, so seed the
+    // Dead-reckon return: a blind-only anchor (no line to snap onto) OR a short LINE return whose
+    // front sensor already sits past the node line (#14) — both drive the inverse vector blind.
+    // The chassis already faces the return heading (the shared pre-turn ran in TURNING), so this
+    // is a plain forward driveDist. deadbandSnap floors any non-zero PWM to PWM_MIN_MAGNITUDE, so seed the
     // start speed (TSHAPE_START_SPEED) like the BLIND_FORWARD dispatch — do not ramp from 0.
     // SYNC + tShape + setPower + setStartSpeed mirrors the existing SYNC_TSHAPE BLIND dispatch
     // shape. RAII rule: one discarded-temporary .async() statement.

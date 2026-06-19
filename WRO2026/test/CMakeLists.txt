@@ -698,10 +698,10 @@ add_test(NAME return_to_node_policy COMMAND test_return_to_node_policy)
 # Test executable #12 — return-to-node NODE-KIND dispatch slice (issue #36, PR1b, T8/T10).
 #
 # Two layers (see the test file docblock):
-#   - TC4: the LINE-vs-BLIND classification is tested DIRECTLY against the REAL
-#     `FieldMap::getNodeType` over the REAL `routes.cpp` graph data (the toy fixture carries
-#     both kinds), so the `_returnIsLineBacked` predicate links the same symbol + node table
-#     production reads — not a tautology.
+#   - TC4 / TC4c: the `_returnUsesLineSeek` decision (LINE-vs-BLIND node kind AND the
+#     return-distance vs axle-lead gate, #14) is tested DIRECTLY against the REAL
+#     `FieldMap::getNodeType` over the REAL `routes.cpp` graph data and the REAL
+#     `Config::LINE_SENSOR_AXLE_OFFSET_CM` (the toy fixture carries both kinds) — not a tautology.
 #   - TC4b: the per-kind RETURN_TO_NODE state-body routing is inline-MIRRORED (annotated
 #     `// MIRROR: PathTracker.cpp:<line>`), following the precedent of
 #     `test_path_tracker_stop_at_line` — the full `PathTracker.cpp` is NOT linked by ANY host

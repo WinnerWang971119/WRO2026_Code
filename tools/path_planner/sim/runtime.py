@@ -1506,20 +1506,22 @@ class PathTrackerSim:
         unbounded drive). The caller guarantees ``mag > RETURN_TRIGGER_THRESHOLD_CM`` (>= a few
         cm), so the inverse vector is well-defined and atan2 never sees ``(0, 0)``.
 
-        Both node kinds first dispatch the SHARED pre-edge turn (:meth:`_emit_turn_to`) -- the
+        Both paths first dispatch the SHARED pre-edge turn (:meth:`_emit_turn_to`) -- the
         mirror of the firmware routing the return through ``_dispatchTurnIfNeeded`` -- so the
-        ``ACT_TURN_REL`` is emitted conditionally for LINE re-acquires too, not only blind
-        returns (#4). Then by anchor node kind (mirror of the firmware branch on
-        ``FieldMap::getNodeType``):
+        ``ACT_TURN_REL`` is emitted conditionally for line re-acquires too, not only dead-reckon
+        returns (#4). Then by whether the return re-acquires via the forward line seek (mirror of
+        the firmware's ``_returnUsesLineSeek``: a LINE node AND ``dist >=
+        LINE_SENSOR_AXLE_OFFSET_CM`` -- a shorter LINE return leaves the front sensor already past
+        the node and would fault ``LINE_NOT_FOUND``, so it dead-reckons back instead, #14):
 
-        * **Line-backed** (:meth:`LocalizationSim.is_line_backed`): the SAME ``stopAtLine``
-          overshoot/axle-roll the LINE hops use -- a follow phase advances ``dist -
-          LINE_SENSOR_AXLE_OFFSET_CM`` then a roll advances the remaining
+        * **Line seek** (:meth:`LocalizationSim.is_line_backed` and ``dist`` >= the axle lead):
+          the SAME ``stopAtLine`` overshoot/axle-roll the LINE hops use -- a follow phase advances
+          ``dist - LINE_SENSOR_AXLE_OFFSET_CM`` then a roll advances the remaining
           ``LINE_SENSOR_AXLE_OFFSET_CM`` so the AXLE (not the sensor) lands on the node.
           Yields ``(ACT_RETURN_STOP_AT_LINE, node, dist, heading_world)``; re-anchors via
           :meth:`LocalizationSim.on_intersection` (the same node).
-        * **Blind-only**: a dead-reckon forward ``driveDist``. Yields
-          ``(ACT_RETURN_FORWARD, node, dist)``; re-anchors via
+        * **Dead-reckon** (blind anchor, OR a short LINE return): a dead-reckon forward
+          ``driveDist``. Yields ``(ACT_RETURN_FORWARD, node, dist)``; re-anchors via
           :meth:`LocalizationSim.clear_offset` (no node change).
 
         :param off: the accumulated :class:`Offset2D` to invert.
@@ -1540,6 +1542,17 @@ class PathTrackerSim:
         # drive; an in-trust return (mag <= cap) is unaffected.
         return_dist_cm = min(mag, RETURN_DISTANCE_CAP_CM)
 
+        # Decide whether this return re-acquires via the forward line seek (mirror of
+        # PathTracker::_dispatchReturnMove's `_returnUsesLineSeek`). A LINE anchor is re-acquired
+        # by driving FORWARD until the FRONT sensor re-crosses the node line; that sensor leads the
+        # axle by LINE_SENSOR_AXLE_OFFSET_CM, so a return shorter than that lead leaves the sensor
+        # already PAST the node and would fault LINE_NOT_FOUND on hardware. Such short LINE returns
+        # dead-reckon back exactly like a blind anchor (#14) -- never via the (faking) line seek.
+        uses_line_seek = (
+            self._localization.is_line_backed(node)
+            and return_dist_cm >= LINE_SENSOR_AXLE_OFFSET_CM
+        )
+
         # Shared pre-edge turn (mirror of _dispatchTurnIfNeeded): face the return heading
         # first, conditionally -- skipped when already aligned (e.g. a straight-back push
         # where the return heading equals the facing). Yielded as its own step so the turn
@@ -1548,30 +1561,27 @@ class PathTrackerSim:
         if turn is not None:
             yield turn
 
-        if self._localization.is_line_backed(node):
-            # LINE-backed anchor: re-acquire the line. The stopAtLine seek lands the wheel
-            # AXLE on the node (ADR-027), so the sim models the SAME overshoot/axle-roll the
-            # LINE hops model (follow phase short of the node, then roll the sensor-to-axle
-            # offset onto it) -- snapping the chassis straight to the node would make the
-            # return parity fake. Net advance == return_dist_cm along the (now-faced) return
-            # heading, which is exactly the inverse offset, so the axle lands back on the node.
-            #
-            # GUARD: a return shorter than the axle offset would push the follow phase
-            # negative; clamp the follow phase to 0 (the whole return is then the overshoot
-            # roll) so the net advance stays return_dist_cm and never emits a negative follow.
-            follow_cm = max(0.0, return_dist_cm - LINE_SENSOR_AXLE_OFFSET_CM)
-            overshoot_cm = return_dist_cm - follow_cm
+        if uses_line_seek:
+            # Line-seek return: re-acquire the line. The stopAtLine seek lands the wheel AXLE on
+            # the node (ADR-027), so the sim models the SAME overshoot/axle-roll the LINE hops
+            # model (follow phase short of the node, then roll the sensor-to-axle offset onto it)
+            # -- snapping the chassis straight to the node would make the return parity fake. Net
+            # advance == return_dist_cm along the (now-faced) heading, which is exactly the inverse
+            # offset, so the axle lands back on the node. The follow phase is non-negative here
+            # because uses_line_seek guarantees return_dist_cm >= LINE_SENSOR_AXLE_OFFSET_CM.
+            follow_cm = return_dist_cm - LINE_SENSOR_AXLE_OFFSET_CM
             self._chassis.follow_line_to_intersection(follow_cm)
-            self._chassis.forward(overshoot_cm)
+            self._chassis.forward(LINE_SENSOR_AXLE_OFFSET_CM)
             # Re-anchor the SAME node (we returned TO it, not advanced) via the
             # verified physical re-localisation, which also clears the offset.
             self._localization.on_intersection(node)
             yield (ACT_RETURN_STOP_AT_LINE, node, return_dist_cm, return_heading_deg)
             return
 
-        # Blind-only anchor: dead-reckon the inverse drive forward (the shared pre-turn above
-        # already faced the return heading -- the firmware's turnToYaw + driveDist split into a
-        # TURNING step then the drive). The dead-reckoned drive IS the re-anchor -- clear_offset
+        # Dead-reckon return: a blind-only anchor OR a short LINE return whose front sensor already
+        # sits past the node line (#14). Dead-reckon the inverse drive forward (the shared pre-turn
+        # above already faced the return heading -- the firmware's turnToYaw + driveDist split into
+        # a TURNING step then the drive). The dead-reckoned drive IS the re-anchor -- clear_offset
         # zeroes the offset without changing the node id (we returned to the same node).
         self._chassis.forward(return_dist_cm)
         self._localization.clear_offset()
