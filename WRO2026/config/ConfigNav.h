@@ -195,9 +195,34 @@ namespace Config
      */
     constexpr float RETURN_DISTANCE_CAP_CM = 50.0f;
 
-    // NOTE: the off-map gate policy (`enum OffMapGate` + `OFF_MAP_GATE`) is intentionally NOT
-    // declared here yet — it has no PR1a consumer. It lands in PR1b alongside the return-to-node
-    // prologue that reads it, so the config surface stays consumer-driven (no speculative symbols).
+    // ---------------------------------------------------------------------------------------
+    // Off-map gate policy (PR1b — read by the return-to-node prologue)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Policy applied when the accumulated offset exceeds `RETURN_DISTANCE_CAP_CM`.
+     *
+     * - `FAULT`       — refuse to plan; latch a localization fault and surface it to the
+     *                   caller. Safer default: avoids driving the chassis further off-map
+     *                   on a vector the firmware can no longer trust.
+     * - `BEST_EFFORT` — log a Serial warning and attempt the return anyway, using the
+     *                   capped vector as a best-effort dead-reckoned target. Useful for
+     *                   bench/debug sessions where losing the robot to a fault is worse
+     *                   than a possibly imprecise recovery.
+     */
+    enum class OffMapGate : uint8_t
+    {
+        FAULT,
+        BEST_EFFORT
+    };
+
+    /**
+     * @brief Active off-map gate policy.
+     *
+     * @note TODO: bench-tune. Default `FAULT` (refuse-and-fault when offset > cap).
+     *       Override to `OffMapGate::BEST_EFFORT` for bench use once tested.
+     */
+    constexpr OffMapGate OFF_MAP_GATE = OffMapGate::FAULT;
 
     // Sanity static_asserts (intra-Localization; keep them here next to the constants,
     // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).

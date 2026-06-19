@@ -24,6 +24,7 @@
 #include "Drive.h"          // DriveClass mock
 #include "EventTrace.h"     // EventTraceClass mock
 #include "LineFollower.h"   // LineFollowerClass mock
+#include "Localization.h"   // LocalizationClass mock
 #include "Manipulator.h"    // ManipulatorClass mock
 #include "MatrixMiniR4.h"   // MatrixMiniR4 facade (MiniR4 global)
 #include "PathTracker.h"    // PathTrackerClass mock
@@ -158,6 +159,9 @@ EventTraceClass EventTrace;
 
 /// @brief Recording Manipulator mock singleton.
 ManipulatorClass Manipulator;
+
+/// @brief No-op Localization mock singleton (Mission.declarePosition target).
+LocalizationClass Localization;
 
 // =============================================================================
 // ctps:: recording sink.

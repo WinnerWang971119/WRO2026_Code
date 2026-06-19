@@ -15,6 +15,7 @@
 #include "LineFollower.h"
 #include "Localization.h"
 #include "PivotTrimPolicy.h"
+#include "ReturnToNodePolicy.h"
 #include "StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
@@ -172,6 +173,19 @@ namespace
             default:                             return DriveMode::SYNC;    // defensive — see doc above
         }
     }
+
+    /// Print the shared over-cap diagnostic prefix for the two off-map gate branches (#12):
+    /// "[PathTracker] return-to-node: offset <mag> cm exceeds cap <cap> cm; OFF_MAP_GATE=".
+    /// Each branch appends only its gate-specific tail, so a later format change touches one
+    /// place instead of drifting between the FAULT and BEST_EFFORT messages.
+    void _printReturnOverCapPrefix(float mag)
+    {
+        Serial.print(F("[PathTracker] return-to-node: offset "));
+        Serial.print(mag);
+        Serial.print(F(" cm exceeds cap "));
+        Serial.print(Config::RETURN_DISTANCE_CAP_CM);
+        Serial.print(F(" cm; OFF_MAP_GATE="));
+    }
 }    // namespace
 
 // =========================================================================================
@@ -235,6 +249,9 @@ bool PathTrackerClass::begin()
     _passThrough             = false;
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
+    _returnUsesLineSeek      = false;
+    _returnActive            = false;
+    _returnDistCm            = 0.0f;
     // ADR-036: no pivot latched at boot.
     _resetPivotLatch();
     _activeRouteDirection    = Direction::AUTO;
@@ -292,6 +309,9 @@ void PathTrackerClass::abort()
     _passThrough            = false;
     _resolvedDirection      = Direction::AUTO;
     _resolvedBodyHeading    = 0.0f;
+    _returnUsesLineSeek     = false;
+    _returnActive           = false;
+    _returnDistCm           = 0.0f;
     // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
     // outgoing trim into the next goal's first dead-reckon drive.
     _resetPivotLatch();
@@ -312,6 +332,7 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
         case Fault::BAD_NODE:            return "BAD";
         case Fault::DRAIN_TIMEOUT:       return "DRN";
         case Fault::REVERSE_UNAVAILABLE: return "REV";
+        case Fault::OFF_NODE:            return "OFN";
     }
     return "??";
 }
@@ -472,10 +493,18 @@ void PathTrackerClass::update()
 void PathTrackerClass::_stepFsm()
 {
     // ADR-038: a missed stop-at-line seek latches `DriveClass::Fault::LINE_NOT_FOUND`
-    // and `Drive.hasFault()` goes true; the shared Drive-fault guard below catches it
-    // and hard-faults into `Fault::DRIVE_FAULT` (no soft fallback — a missed seek is
-    // always a hard fault).
-    if (_state != State::IDLE && _state != State::FAULT && Drive.hasFault())
+    // and `Drive.hasFault()` goes true; for a normal (projection) hop the shared
+    // Drive-fault guard below catches it and hard-faults into `Fault::DRIVE_FAULT`
+    // (no soft fallback — a missed seek is always a hard fault).
+    //
+    // RETURN_TO_NODE is EXEMPT (alongside IDLE / FAULT): a `LINE_NOT_FOUND` on the
+    // line re-acquire seek must instead route to the off-map gate (Fault::OFF_NODE
+    // under FAULT, accept-dead-reckon under BEST_EFFORT) — see the plan's
+    // "Line-return success check". If this guard fired for RETURN_TO_NODE it would
+    // mislabel that as DRIVE_FAULT, so the RETURN_TO_NODE state body inspects
+    // `Drive.hasFault()` / `Drive.isLineFound()` itself (issue #36, PR1b).
+    if (_state != State::IDLE && _state != State::FAULT && _state != State::RETURN_TO_NODE
+        && Drive.hasFault())
     {
         Drive.stop(true);
         _enterFault(Fault::DRIVE_FAULT, Localization.getCurrentNode(), _destinationNode);
@@ -511,7 +540,119 @@ void PathTrackerClass::_stepFsm()
             // so a pivot never fires across a `goTo(...)` boundary and a stop at
             // the pivot node degrades to a normal turn.
             _resetPivotLatch();
-            _state                  = State::PLAN_NEXT_HOP;
+
+            // Return-to-node prologue (issue #36, PR1b). Evaluate the accumulated
+            // operator offset BEFORE planning: a non-trivial offset drives the
+            // chassis back onto the anchored node first (RETURN_TO_NODE), an
+            // over-cap offset honors the off-map gate, and an offset≈0 falls
+            // through to PLAN_NEXT_HOP unchanged (AC5 — a true no-op). The helper
+            // sets `_state` to one of {RETURN_TO_NODE, PLAN_NEXT_HOP, FAULT}.
+            const Offset2D off = Localization.getOffsetFromNode();
+            const float    mag = sqrtf(off.x * off.x + off.y * off.y);
+            _evaluateReturnGate(off, mag);
+            return;
+        }
+
+        case State::RETURN_TO_NODE:
+        {
+            // The return move was dispatched `.async()` in `_dispatchReturnMove`.
+            // This state is EXEMPT from the generic Drive-fault guard at the top of
+            // `_stepFsm()` so a LINE re-acquire's `LINE_NOT_FOUND` can route to the
+            // off-map gate (Fault::OFF_NODE) instead of being mislabeled DRIVE_FAULT.
+            // The trade-off: this state body must inspect the Drive fault itself for
+            // BOTH node kinds — a blind dead-reckon drive that faults for any reason
+            // must NOT be silently accepted as a successful return.
+            if (!Drive.isIdle())
+            {
+                return;    // seek / dead-reckon drive still in flight
+            }
+
+            // The return move (and its shared pre-turn) has settled — the prologue is no
+            // longer in flight regardless of the outcome below. Clear the routing flag so a
+            // later TURNING tick (the next goal's normal hop) is never mis-routed to the
+            // return dispatch.
+            _returnActive = false;
+
+            if (_returnUsesLineSeek)
+            {
+                // Line-seek return: the `Drive.stopAtLine` seek either re-acquired
+                // the line (axle now on the node — a true re-localisation) or ran the
+                // full max distance without a crossing and latched
+                // `Fault::LINE_NOT_FOUND` (stop + clear queue, so `isIdle()` is now
+                // true). A LINE_NOT_FOUND routes to the off-map gate (NOT DRIVE_FAULT)
+                // per the plan: under FAULT raise `Fault::OFF_NODE`; under BEST_EFFORT
+                // log and accept the dead-reckoned position (the chassis drove back to
+                // ~the node — re-anchor anyway via `clearOffset()` so the goal can
+                // still plan).
+                if (Drive.hasFault())
+                {
+                    // The `stopAtLine` seek's EXPECTED fault is `LINE_NOT_FOUND` (no crossing
+                    // within the max distance), which routes to the off-map gate. Discriminate
+                    // it explicitly (#3): any OTHER Drive fault here (e.g. a future
+                    // `DISPATCH_FAILED`) is a genuine hardware/dispatch failure, NOT an off-map
+                    // condition — surface it as `DRIVE_FAULT` instead of mislabeling it
+                    // `OFF_NODE` (FAULT gate) or silently accepting a never-completed return
+                    // (BEST_EFFORT). `Drive.getFault().kind` (not `isLineFound()`) is the right
+                    // probe: `isLineFound()` is false for ANY fault and cannot tell the two
+                    // apart. (Drive's no-line outcome agrees: `isLineFound() == false`.)
+                    if (Drive.getFault().kind != DriveClass::Fault::LINE_NOT_FOUND)
+                    {
+                        Drive.stop(true);
+                        _enterFault(Fault::DRIVE_FAULT, Localization.getCurrentNode(),
+                                    _destinationNode);
+                        return;
+                    }
+
+                    if (Config::OFF_MAP_GATE == Config::OffMapGate::FAULT)
+                    {
+                        Drive.stop(true);
+                        _enterFault(Fault::OFF_NODE, Localization.getCurrentNode(),
+                                    _destinationNode);
+                        return;
+                    }
+                    // BEST_EFFORT: clear the latched Drive fault so the next hop's
+                    // dispatch is not immediately tripped by the generic guard, accept
+                    // the dead-reckoned pose (re-anchor on the SAME node), and plan.
+                    Serial.println(
+                        F("[PathTracker] return-to-node: LINE_NOT_FOUND, BEST_EFFORT "
+                          "accepting dead-reckoned position"));
+                    Drive.clearFault();
+                    Localization.clearOffset();
+                    _state = State::PLAN_NEXT_HOP;
+                    return;
+                }
+
+                // Success: the seek detected the crossing line and rolled the axle
+                // onto it. Re-anchor the SAME node (we returned TO it, not advanced)
+                // via `onIntersection(...)` — a verified physical re-localisation,
+                // which also clears the operator offset (Localization side).
+                Localization.onIntersection(Localization.getCurrentNode());
+                _state = State::PLAN_NEXT_HOP;
+                return;
+            }
+
+            // Dead-reckon return (a blind-only anchor OR a short LINE return, #14): the return was
+            // a dead-reckoned turn + drive (no line seek). A `Drive.hasFault()` here is a genuine
+            // drive failure (not a LINE_NOT_FOUND — neither `turnToYaw` nor `driveDist` seeks a line), so it
+            // is a real DRIVE_FAULT, NOT the off-map gate. Routing it through
+            // `_enterFault(DRIVE_FAULT, ...)` here is necessary because the generic
+            // guard at the top is suppressed for this state; without it the blind
+            // success path below would silently accept a faulted (incomplete) return.
+            if (Drive.hasFault())
+            {
+                Drive.stop(true);
+                _enterFault(Fault::DRIVE_FAULT, Localization.getCurrentNode(),
+                            _destinationNode);
+                return;
+            }
+
+            // Success: the dead-reckoned inverse drive IS the re-anchor. `clearOffset()`
+            // zeroes the offset and re-snapshots the integrator baselines without
+            // changing the node id (we returned to the same node). ADR-001: a blind
+            // node's own position is only dead-reckoned, so a dead-reckoned return is no
+            // worse than how the robot reached it; the distance cap bounds the error.
+            Localization.clearOffset();
+            _state = State::PLAN_NEXT_HOP;
             return;
         }
 
@@ -525,7 +666,20 @@ void PathTrackerClass::_stepFsm()
         {
             if (Drive.isIdle())
             {
-                _dispatchEdgeAfterTurn();
+                // The shared pre-edge turn just finished. Route the post-turn dispatch by
+                // context: a return prologue (`_returnActive`) dispatches the return
+                // seek/drive; a normal hop dispatches its edge. The return reuses this SAME
+                // state and the SAME pre-turn, so a return's pre-edge turn can never be
+                // skipped (issue #36, #6 refactor — the structural fix for the
+                // LINE-return-without-turn bug).
+                if (_returnActive)
+                {
+                    _dispatchReturnMoveAfterTurn();
+                }
+                else
+                {
+                    _dispatchEdgeAfterTurn();
+                }
             }
             return;
         }
@@ -813,6 +967,9 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeEdgeType         = Routes::EdgeType::NONE;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
+    _returnUsesLineSeek     = false;
+    _returnActive           = false;
+    _returnDistCm           = 0.0f;
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
     // cannot bleed into a post-clearFault() goal.
     _resetPivotLatch();
@@ -823,6 +980,171 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     Serial.print(from);
     Serial.print(F(" to="));
     Serial.println(to);
+}
+
+void PathTrackerClass::_evaluateReturnGate(const Offset2D& off, float mag)
+{
+    // Pure gate decision shared with the host test (ReturnToNodePolicy.h). The
+    // position offset governs the trigger/cap (the translation magnitude, NOT the
+    // heading delta — see the Config docstrings), so `mag` is the only metric fed in.
+    const ReturnAction action = resolveReturnAction(
+        mag,
+        Config::RETURN_TRIGGER_THRESHOLD_CM,
+        Config::RETURN_DISTANCE_CAP_CM,
+        Config::OFF_MAP_GATE);
+
+    switch (action)
+    {
+        case ReturnAction::NONE:
+        {
+            // AC5: offset within trigger — behave exactly as today. No Drive
+            // dispatch, no return move; plan the goal directly.
+            _state = State::PLAN_NEXT_HOP;
+            return;
+        }
+
+        case ReturnAction::OFF_MAP_FAULT:
+        {
+            // AC6: offset over cap, FAULT gate — refuse to plan. `_enterFault`
+            // stops the chassis, clears the queue, and latches the diagnostic.
+            _printReturnOverCapPrefix(mag);
+            Serial.println(F("FAULT, refusing to plan"));
+            _enterFault(Fault::OFF_NODE, Localization.getCurrentNode(), _destinationNode);
+            return;
+        }
+
+        case ReturnAction::OFF_MAP_PROCEED:
+        {
+            // AC6: offset over cap, BEST_EFFORT gate — log and proceed with the
+            // return anyway, treating it as a capped best-effort drive
+            // (`_dispatchReturnMove` clamps the distance to the cap).
+            _printReturnOverCapPrefix(mag);
+            Serial.println(F("BEST_EFFORT, returning anyway (capped)"));
+            _dispatchReturnMove(off, mag);
+            return;
+        }
+
+        case ReturnAction::RETURN:
+        {
+            // AC4: trigger < offset ≤ cap — drive the inverse return onto the node.
+            _dispatchReturnMove(off, mag);
+            return;
+        }
+    }
+}
+
+void PathTrackerClass::_dispatchReturnMove(const Offset2D& off, float mag)
+{
+    const uint8_t cur = Localization.getCurrentNode();
+
+    // Return-travel world heading: the direction from the current (hand-pushed) pose back to
+    // the anchor, i.e. the heading of the inverse offset vector (-off.x, -off.y). World frame
+    // is CCW-positive with 0° = +x (East), exactly atan2's convention, so atan2(-off.y, -off.x)
+    // (degrees) gives the heading. The magnitude is > trigger (>= a few cm by Config), so the
+    // vector is well-defined and atan2 never sees (0, 0). Use the Arduino `PI` macro (defined by
+    // Arduino.h and the host mock), NOT M_PI which the host test mock does not provide —
+    // matching the WROMath.h / Localization.cpp convention. The raw atan2 result is fed straight
+    // to the shared turn / `toImuYaw`, which normalizes its own argument (Localization.cpp), so
+    // no pre-normalization is needed here (#10) — only the log line below wants a positive value.
+    const float returnHeadingDeg = atan2f(-off.y, -off.x) * (180.0f / (float) PI);
+
+    // Clamp the drive distance to the trust cap so a BEST_EFFORT over-cap return (mag > cap)
+    // cannot command an unbounded seek/drive; an in-trust return (mag ≤ cap) is unaffected.
+    _returnDistCm =
+        (mag > Config::RETURN_DISTANCE_CAP_CM) ? Config::RETURN_DISTANCE_CAP_CM : mag;
+
+    // Normalize into [0, 360) for the LOG ONLY — the functional consumers (`_dispatchTurnIfNeeded`
+    // and `_dispatchReturnMoveAfterTurn`) call `toImuYaw`, which normalizes internally.
+    float returnHeadingLog = fmodf(returnHeadingDeg, 360.0f);
+    if (returnHeadingLog < 0.0f)
+    {
+        returnHeadingLog += 360.0f;
+    }
+    Serial.print(F("[PathTracker] return-to-node: node="));
+    Serial.print(cur);
+    Serial.print(F(" dist="));
+    Serial.print(_returnDistCm);
+    Serial.print(F(" cm headingWorld="));
+    Serial.println(returnHeadingLog);
+
+    // Latch the in-flight return context for the shared TURNING / RETURN_TO_NODE path. The
+    // return always drives FORWARD toward the anchor facing the return heading, so the resolved
+    // direction is FRONT (the REVERSE_UNAVAILABLE guard is irrelevant) and the resolved body
+    // heading IS the return heading.
+    // A LINE anchor is re-acquired by driving FORWARD until the FRONT line sensor re-crosses the
+    // node line. That sensor leads the wheel axle by `LINE_SENSOR_AXLE_OFFSET_CM`, so once the
+    // return distance (the axle's distance back to the node) is shorter than that lead, the sensor
+    // already sits PAST the node line at the start of the seek and a forward drive can never
+    // re-cross it — the seek would just run to its max and fault `LINE_NOT_FOUND` (#14). Returns
+    // shorter than the sensor lead therefore dead-reckon back exactly like a blind anchor (the
+    // `RETURN_TO_NODE` blind success path re-anchors the SAME node via `clearOffset`).
+    // `_returnDistCm` is the cap-clamped magnitude set just above.
+    const bool nodeIsLine = (FieldMap::getNodeType(cur) == Routes::NodeType::LINE);
+    _returnUsesLineSeek  = nodeIsLine && (_returnDistCm >= Config::LINE_SENSOR_AXLE_OFFSET_CM);
+    _resolvedDirection   = Direction::FRONT;
+    _resolvedBodyHeading = returnHeadingDeg;
+    _returnActive        = true;
+
+    // Dispatch the pre-edge turn through the SAME helper every hop uses — the structural fix
+    // for the LINE-return-without-turn bug (the turn is no longer inlined per node kind, so it
+    // cannot be omitted on one branch). A return is never pivot-adjacent, so the wheel is the
+    // pipeline default. If a turn fires the FSM waits in TURNING and dispatches the move when it
+    // completes; if the chassis is already aligned the move dispatches immediately.
+    if (_dispatchTurnIfNeeded(returnHeadingDeg, _turnModeToByte(Routes::PIPELINE_CONFIG.turn)))
+    {
+        _state = State::TURNING;
+    }
+    else
+    {
+        _dispatchReturnMoveAfterTurn();
+    }
+}
+
+void PathTrackerClass::_dispatchReturnMoveAfterTurn()
+{
+    if (_returnUsesLineSeek)
+    {
+        // Line-seek return (LINE anchor, return distance >= the sensor lead). Re-acquire the
+        // line: drive FORWARD toward the expected node crossing facing the (already-aligned)
+        // return heading; the seek arms the T_OR_CROSS
+        // detector near the endpoint, snaps on the line, and overshoots so the wheel AXLE lands
+        // on the node (ADR-027) — the same primitive the STOP_AT_LINE hop uses. GYRO holds the
+        // return heading so the chassis tracks straight back. `expectedCm` is the capped
+        // magnitude; the seek's own STOP_AT_LINE_MAX_MARGIN_CM provides the search slack past
+        // it, so the seek faults LINE_NOT_FOUND at the max distance rather than running forever.
+        // RETURN_TO_NODE re-anchors the SAME node via onIntersection on success, or routes
+        // LINE_NOT_FOUND to the off-map gate.
+        //
+        // Drain any stale Intersection edge so the return seek's own physical crossing cannot
+        // leak a phantom nav edge into the next LINE hop (the forward seek drives over the
+        // anchor node's line marking to re-acquire it while Intersection.update() independently
+        // counts that crossing). RAII rule: one discarded-temporary .async() statement.
+        (void) Intersection.isAtIntersection();
+
+        const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
+        Drive.stopAtLine(_returnDistCm)
+            .setReverse(false)
+            .setMode(DriveMode::GYRO)
+            .setHeading(imuTarget)
+            .async();
+        _state = State::RETURN_TO_NODE;
+        return;
+    }
+
+    // Dead-reckon return: a blind-only anchor (no line to snap onto) OR a short LINE return whose
+    // front sensor already sits past the node line (#14) — both drive the inverse vector blind.
+    // The chassis already faces the return heading (the shared pre-turn ran in TURNING), so this
+    // is a plain forward driveDist. deadbandSnap floors any non-zero PWM to PWM_MIN_MAGNITUDE, so seed the
+    // start speed (TSHAPE_START_SPEED) like the BLIND_FORWARD dispatch — do not ramp from 0.
+    // SYNC + tShape + setPower + setStartSpeed mirrors the existing SYNC_TSHAPE BLIND dispatch
+    // shape. RAII rule: one discarded-temporary .async() statement.
+    Drive.driveDist(_returnDistCm)
+        .setMode(DriveMode::SYNC)
+        .setPower(Config::SPEED_NORMAL)
+        .setStartSpeed(Config::TSHAPE_START_SPEED)
+        .tShape()
+        .async();
+    _state = State::RETURN_TO_NODE;
 }
 
 void PathTrackerClass::_onPlanNextHop()
@@ -987,50 +1309,22 @@ void PathTrackerClass::_onPlanNextHop()
     _resolvedDirection   = resolved;
     _resolvedBodyHeading = bodyTarget;
 
-    const float delta = wrapDeltaDeg(bodyTarget - currentWorld);
+    // ADR-036: the pre-turn maneuver wheel comes from the DEPARTING pivot (the turn we are
+    // pivoting through at `cur` this hop), else the pipeline default. A valid pivot's turn
+    // (validator floor >= Config::PIVOT_MIN_TURN_DEG) always exceeds NAV_TURN_TOLERANCE_DEG
+    // (0.5° by default), so the shared turn fires and the pivot wheel applies — no firmware
+    // min-angle change is needed. The wheel and the δ come from the SAME resolved record, so
+    // they cannot disagree.
+    const Routes::TurnMode resolvedTurnMode =
+        _departingPivot.active ? _departingPivot.wheel : Routes::PIPELINE_CONFIG.turn;
+    const uint8_t turnModeByte = _turnModeToByte(resolvedTurnMode);
 
-    if (fabsf(delta) > Config::NAV_TURN_TOLERANCE_DEG)
+    // Dispatch the pre-edge turn through the SHARED helper — the same path the return prologue
+    // uses (issue #36, #6). It owns the skip-when-aligned decision (NAV_TURN_TOLERANCE_DEG), the
+    // LineFollower-vs-Drive writer guard (the yaw-vs-peek divergence case), and the pass-through
+    // reset, so the pre-edge turn is structurally identical for every hop and for the return.
+    if (_dispatchTurnIfNeeded(bodyTarget, turnModeByte))
     {
-        // Yaw-vs-peek divergence guard (ADR-023 follow-up): the LINE_OVERSHOOT
-        // pass-through decision (T4) uses EDGE headings from FieldMap, while
-        // this turn dispatch decision uses live IMU heading (Localization).
-        // If the IMU has drifted slightly, the peek may have classified the
-        // hop as pass-through (controller left enabled) while this branch now
-        // decides a turn is required. Without a guard, LineFollower.update()
-        // would keep issuing Drive.setSpeed each tick while Drive.turnToYaw
-        // owns the wheels — two writers fighting for motors. Disable the
-        // follower cleanly (no brake) so Drive's turn command runs alone.
-        //
-        // The same guard fires for REAR hops where the peek (now also
-        // body-heading aware) and this branch agree on FRONT semantics
-        // but disagree on whether a turn is needed: the bodyTarget vs.
-        // currentWorld delta is the authoritative trigger.
-        if (LineFollower.isEnabled())
-        {
-            LineFollower.setEnabled(false).setBrake(false);
-        }
-
-        // Clear any pass-through eligibility the LINE_FOLLOW peek latched. That
-        // peek used FieldMap edge headings; this branch fired because the live
-        // IMU heading disagrees, so a real pre-edge turn IS required. Leaving
-        // `_passThrough` set would make the post-turn `_dispatchEdgeAfterTurn`
-        // run its blind pass-through branch (cruise start-speed) from a dead
-        // stop with no soft-start ramp, jolting the chassis. The chassis is
-        // stopped after the turn, so the blind move must soft-start from
-        // TSHAPE_START_SPEED. (PR#35 findings #32 / #90.)
-        _passThrough = false;
-
-        const int16_t imuTarget = Localization.toImuYaw(bodyTarget);
-
-        // ADR-036: the pre-turn maneuver wheel comes from the DEPARTING pivot
-        // (the turn we are pivoting through at `cur` this hop), else the pipeline
-        // default. A valid pivot's turn (validator floor >= Config::PIVOT_MIN_TURN_DEG)
-        // always exceeds NAV_TURN_TOLERANCE_DEG (0.5° by default), so this branch fires and
-        // the pivot wheel applies — no firmware min-angle change is needed. The wheel and the δ
-        // come from the SAME resolved record, so they cannot disagree.
-        const Routes::TurnMode resolvedTurnMode =
-            _departingPivot.active ? _departingPivot.wheel : Routes::PIPELINE_CONFIG.turn;
-        const uint8_t turnModeByte = _turnModeToByte(resolvedTurnMode);
         if (_departingPivot.active)
         {
             Serial.print(F("[PathTracker] ADR-036: pivot turn at v="));
@@ -1040,13 +1334,46 @@ void PathTrackerClass::_onPlanNextHop()
             Serial.print(F(" trim="));
             Serial.println(_departingPivot.trim_cm);
         }
-        Drive.turnToYaw(imuTarget).setMode(turnModeByte).async();
         _state = State::TURNING;
     }
     else
     {
         _dispatchEdgeAfterTurn();
     }
+}
+
+bool PathTrackerClass::_dispatchTurnIfNeeded(float bodyHeadingWorld, uint8_t turnModeByte)
+{
+    const float currentWorld = Localization.getHeadingDeg();
+    const float delta        = wrapDeltaDeg(bodyHeadingWorld - currentWorld);
+    if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG)
+    {
+        return false;    // already aligned — caller dispatches the move directly
+    }
+
+    // A real pre-edge turn is required: the wheels go to Drive.turnToYaw alone.
+    //
+    // Disable a live LineFollower (no brake) so the two writers never fight over the motors —
+    // without this, LineFollower.update() would keep issuing Drive.setSpeed each tick while
+    // Drive.turnToYaw owns the wheels. This also covers the yaw-vs-peek divergence guard
+    // (ADR-023 follow-up): the LINE_OVERSHOOT pass-through peek classifies on EDGE headings
+    // (FieldMap) while this decision uses the live IMU heading (Localization); if the IMU has
+    // drifted, the peek may have left the controller enabled while the live delta now demands a
+    // turn. The bodyTarget-vs-currentWorld delta is the authoritative trigger.
+    if (LineFollower.isEnabled())
+    {
+        LineFollower.setEnabled(false).setBrake(false);
+    }
+
+    // Clear any pass-through eligibility the LINE_FOLLOW peek latched: a real turn means the
+    // chassis stops, so the post-turn dispatch must soft-start from TSHAPE_START_SPEED rather
+    // than assume cruise. Leaving `_passThrough` set would make a post-turn blind move run its
+    // pass-through branch (cruise start-speed) from a dead stop with no soft-start ramp, jolting
+    // the chassis. (PR#35 findings #32 / #90.)
+    _passThrough = false;
+
+    Drive.turnToYaw(Localization.toImuYaw(bodyHeadingWorld)).setMode(turnModeByte).async();
+    return true;
 }
 
 void PathTrackerClass::_resetPivotLatch()

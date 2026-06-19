@@ -70,16 +70,28 @@ from tools.path_planner.sim.runtime import (
     ACT_LINE_PASS,
     ACT_LINE_REVERSE,
     ACT_PROJECTION_REVERSE,
+    ACT_RETURN_FORWARD,
+    ACT_RETURN_STOP_AT_LINE,
     ACT_STOP_AT_LINE,
     ACT_STOP_AT_LINE_REVERSE,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
+    OFF_MAP_GATE,
+    OFFSET_ROTATION_DEADBAND_DEG,
+    OFFSET_TRANSLATION_DEADBAND_CM,
+    Offset2D,
+    OffMapFaultError,
+    OffMapGate,
+    RETURN_DISTANCE_CAP_CM,
+    RETURN_TRIGGER_THRESHOLD_CM,
+    ReturnAction,
     StopAtLine,
     resolve_blind_mode,
     resolve_direction,
     resolve_line_mode,
     resolve_projection_mode,
+    resolve_return_action,
     resolve_stop_at_line,
 )
 from tools.path_planner.tests.fixtures import bidirectional_field_data
@@ -2429,3 +2441,802 @@ def test_tc21_goto_step_through_identical_on_pivot_chain():
     assert go_to_prims == step_prims
     assert sim_go.localization.current_node() == "X"
     assert sim_step.localization.current_node() == "X"
+
+
+# ===========================================================================
+# Operator offset + return-to-node sim mirror (issue #36, PR1b -- T11)
+#
+# Covers: AC17 pillar 1, TC18a parity. Mirrors the two PR1b firmware
+# behaviors -- (1) operator-offset accumulation while not navigating
+# (WRO2026/Localization.cpp _integrateOffset), and (2) the return-to-node
+# prologue that drives the chassis back onto its anchored node before a go_to
+# plans (WRO2026/PathTracker.cpp _evaluateReturnGate / _dispatchReturnMove,
+# WRO2026/ReturnToNodePolicy.h resolveReturnAction).
+#
+# Code under test: tools/path_planner/sim/runtime.py --
+#   LocalizationSim (offset state + accumulate_operator_move + clear_offset +
+#   set_nav_active + node_type), PathTrackerSim.operator_move /
+#   _dispatch_return_move / go_to prologue, resolve_return_action,
+#   Offset2D, ReturnAction, OffMapGate, OffMapFaultError, and the
+#   ACT_RETURN_STOP_AT_LINE / ACT_RETURN_FORWARD primitive tags.
+# ===========================================================================
+
+
+def _typed_two_node_field(
+    node_type_b: str,
+    *,
+    distance_cm: float = 50.0,
+    start_heading_deg: float = 0.0,
+):
+    """Return a (field, graph, next_hop) triple for a 2-node A->B LINE edge.
+
+    Node ``A`` is always LINE (the start); ``B`` carries @p node_type_b so a
+    return-to-node test can anchor the chassis on either a LINE-backed or a
+    BLIND-only node and exercise the matching re-anchor path. The edge is
+    EDGE_LINE in both cases -- the node *kind* (not the edge kind) selects the
+    return dispatch, mirroring ``FieldMap::getNodeType`` in
+    ``PathTracker::_dispatchReturnMove``.
+    """
+    nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
+    fd = SimpleNamespace(
+        NODES=nodes,
+        NODE_TYPES={"A": "line", "B": node_type_b},
+        START_NODE="A",
+        START_HEADING_DEG=start_heading_deg,
+        PIVOT_TURNS=[],
+    )
+    graph = _single_edge_graph("A", "B", EDGE_LINE, distance_cm, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    return fd, graph, next_hop
+
+
+def _make_typed_sim(fd, graph, next_hop):
+    """Construct and zero a PathTrackerSim over the given fixture triple."""
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis
+
+
+# ---------------------------------------------------------------------------
+# resolve_return_action parity -- NONE / RETURN / OFF_MAP_* boundaries
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "mag_cm, gate, expected",
+    [
+        # Case 1: mag <= trigger -> NONE (trigger boundary CLOSED at 3.0).
+        (0.0, OffMapGate.FAULT, ReturnAction.NONE),
+        (RETURN_TRIGGER_THRESHOLD_CM, OffMapGate.FAULT, ReturnAction.NONE),
+        # Case 2: trigger < mag <= cap -> RETURN (cap boundary CLOSED at 50.0).
+        (RETURN_TRIGGER_THRESHOLD_CM + 1e-6, OffMapGate.FAULT, ReturnAction.RETURN),
+        (10.0, OffMapGate.FAULT, ReturnAction.RETURN),
+        (RETURN_DISTANCE_CAP_CM, OffMapGate.FAULT, ReturnAction.RETURN),
+        # Case 3/4: mag > cap -> off-map gate (cap boundary OPEN above 50.0).
+        (RETURN_DISTANCE_CAP_CM + 1e-6, OffMapGate.FAULT, ReturnAction.OFF_MAP_FAULT),
+        (100.0, OffMapGate.FAULT, ReturnAction.OFF_MAP_FAULT),
+        (100.0, OffMapGate.BEST_EFFORT, ReturnAction.OFF_MAP_PROCEED),
+    ],
+    ids=[
+        "zero_NONE",
+        "at_trigger_NONE",
+        "just_over_trigger_RETURN",
+        "mid_RETURN",
+        "at_cap_RETURN",
+        "just_over_cap_FAULT",
+        "over_cap_FAULT",
+        "over_cap_BEST_EFFORT_PROCEED",
+    ],
+)
+def test_resolve_return_action_boundaries(mag_cm, gate, expected):
+    """resolve_return_action matches the C++ resolveReturnAction four-case rule.
+
+    Boundary semantics (mirror of ``WRO2026/ReturnToNodePolicy.h``): the
+    trigger test is ``<=`` (CLOSED -- mag == trigger is NONE) and the cap test
+    is ``>`` (OPEN -- mag == cap is still RETURN, only mag strictly above the
+    cap fires the off-map gate). The cap test runs BEFORE deciding RETURN so an
+    over-cap offset can never fall into a plain return.
+    """
+    action = resolve_return_action(
+        mag_cm,
+        RETURN_TRIGGER_THRESHOLD_CM,
+        RETURN_DISTANCE_CAP_CM,
+        gate,
+    )
+    assert action == expected
+
+
+def test_resolve_return_action_constants_mirror_config():
+    """The hand-mirrored Config constants carry the firmware's ConfigLocalization.h values.
+
+    Guards the "MUST mirror Config::X" contract: a divergence here means the
+    sim's gate would fire at a different offset than the robot's, breaking
+    sim/firmware parity. Values per WRO2026/ConfigLocalization.h.
+    """
+    assert RETURN_TRIGGER_THRESHOLD_CM == pytest.approx(3.0)
+    assert RETURN_DISTANCE_CAP_CM == pytest.approx(50.0)
+    assert OFFSET_TRANSLATION_DEADBAND_CM == pytest.approx(0.2)
+    assert OFFSET_ROTATION_DEADBAND_DEG == pytest.approx(0.5)
+    # Off-map gate default is FAULT (the safer firmware default).
+    assert OFF_MAP_GATE == OffMapGate.FAULT
+
+
+# ---------------------------------------------------------------------------
+# Offset accumulation (AC1 / AC2 / AC2b / AC3 mirror) -- pillar 1
+# ---------------------------------------------------------------------------
+
+
+def test_operator_move_while_idle_grows_offset_by_magnitude():
+    """A raw operator move while nav-inactive grows the offset ~by the magnitude.
+
+    Mirror of AC1: after a raw ``Drive.driveDist(d)`` while PathTracker is idle,
+    ``getOffsetFromNode()`` reports a 2D offset whose magnitude ~= d and the
+    current node is unchanged. Here a forward push of 15 cm along +x leaves an
+    offset of (15, 0, 0) and the node still 'A'.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(15.0)
+
+    off = sim.localization.get_offset_from_node()
+    assert off.x == pytest.approx(15.0, abs=1e-9)
+    assert off.y == pytest.approx(0.0, abs=1e-9)
+    assert off.magnitude_cm() == pytest.approx(15.0, abs=1e-9)
+    # Node id is unchanged -- the operator move does not advance graph position.
+    assert sim.localization.current_node() == "A"
+    # The chassis actually moved (the sim models the hand-drive, not just the
+    # bookkeeping).
+    assert chassis.x_cm == pytest.approx(15.0, abs=1e-9)
+
+
+def test_operator_move_offset_accumulates_across_moves():
+    """Successive raw operator moves accumulate into one offset vector.
+
+    Two forward pushes (10 cm then 8 cm along +x) sum to an 18 cm offset --
+    the integrator carries state across moves (mirror of the firmware
+    accumulating per-tick deltas into the same ``_offset``).
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(10.0)
+    sim.operator_move(8.0)
+
+    off = sim.localization.get_offset_from_node()
+    assert off.magnitude_cm() == pytest.approx(18.0, abs=1e-9)
+
+
+def test_operator_turn_updates_theta_not_translation():
+    """A raw operator turn updates theta_deg via the rotation channel; translation ~0.
+
+    Mirror of AC2b: a raw ``Drive.turnDeg(theta)`` while idle updates the
+    offset's ``theta_deg`` (gated on the IMU-yaw deadband) even though net
+    translation is ~0. A pure 45deg turn leaves x/y at 0 and theta_deg at 45.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(0.0, turn_deg=45.0)
+
+    off = sim.localization.get_offset_from_node()
+    assert off.x == pytest.approx(0.0, abs=1e-9)
+    assert off.y == pytest.approx(0.0, abs=1e-9)
+    assert off.theta_deg == pytest.approx(45.0, abs=1e-9)
+
+
+def test_operator_move_below_deadband_drops_translation():
+    """A sub-deadband translation is dropped (encoder-noise gate); theta still drops too.
+
+    Mirror of AC2 (no phantom drift): a move shorter than
+    OFFSET_TRANSLATION_DEADBAND_CM (0.2 cm) does not grow the translation
+    channel, and a turn smaller than OFFSET_ROTATION_DEADBAND_DEG (0.5 deg)
+    does not grow the rotation channel. Both channels gate INDEPENDENTLY.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(
+        OFFSET_TRANSLATION_DEADBAND_CM / 2.0,
+        turn_deg=OFFSET_ROTATION_DEADBAND_DEG / 2.0,
+    )
+
+    off = sim.localization.get_offset_from_node()
+    assert off.magnitude_cm() == pytest.approx(0.0, abs=1e-9)
+    assert off.theta_deg == pytest.approx(0.0, abs=1e-9)
+
+
+def test_operator_move_while_nav_active_accumulates_nothing():
+    """A move issued while nav-active accumulates nothing (the gate is closed).
+
+    Mirror of AC3 / the firmware gate ``(!_navActive) && _zeroed``: motion that
+    PathTracker itself commands (nav-active True) never grows the operator
+    offset. With the gate forced closed, even a 30 cm push leaves the offset at
+    zero (the chassis still moves -- only the bookkeeping is gated).
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.set_nav_active(True)
+    sim.operator_move(30.0)
+
+    off = sim.localization.get_offset_from_node()
+    assert off.magnitude_cm() == pytest.approx(0.0, abs=1e-9)
+    # The chassis moved even though the offset was gated.
+    assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
+
+
+def test_operator_move_before_zero_accumulates_nothing():
+    """The offset integrator is gated on is_zeroed() (world frame must be bound).
+
+    Mirror of the firmware gate's ``_zeroed`` clause: before
+    ``zero_heading_from_current()`` the world frame is not bound, so a raw move
+    accumulates no offset.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    # NOTE: deliberately NOT zeroed.
+
+    sim.operator_move(20.0)
+
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+
+def test_node_arrival_clears_offset():
+    """A node arrival re-anchors the offset to zero (AC3 arrival re-anchor).
+
+    Mirror of ``LocalizationClass::onIntersection`` /
+    ``onDeadReckonedAdvance`` -> ``clearOffset()``: arriving on a node zeroes
+    the accumulated offset. Drive the chassis off-node (offset grows), then a
+    clean go_to to B re-anchors at the destination with a zero offset.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    # A sub-trigger push so the subsequent go_to does NOT fire a return -- we
+    # are isolating the node-arrival clear, not the return prologue.
+    sim.operator_move(RETURN_TRIGGER_THRESHOLD_CM / 2.0)
+    assert sim.localization.get_offset_from_node().magnitude_cm() > 0.0
+
+    sim.go_to("B")
+
+    assert sim.localization.current_node() == "B"
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+
+# ---------------------------------------------------------------------------
+# Return-to-node prologue -- NONE / RETURN (line + blind) / off-map gate
+# ---------------------------------------------------------------------------
+
+
+def test_goto_offset_below_trigger_is_byte_identical_noop(fresh_sim, toy_field):
+    """With offset ~0 (below trigger), go_to emits NO return -- stream unchanged (AC5).
+
+    A clean go_to from the anchored node and a go_to after a sub-trigger
+    operator push must emit the byte-identical primitive stream: the
+    sub-trigger offset resolves NONE, so the prologue inserts nothing.
+    """
+    graph, next_hop = (fresh_sim._graph, fresh_sim._next_hop)
+
+    # Baseline: clean go_to from A to C.
+    chassis_clean = VirtualChassis.from_field_data(toy_field)
+    sim_clean = PathTrackerSim(toy_field, graph, next_hop, chassis_clean)
+    sim_clean.localization.zero_heading_from_current()
+    clean_prims = sim_clean.go_to("C")
+
+    # Sub-trigger push, then the same go_to: must be identical (no return).
+    chassis_push = VirtualChassis.from_field_data(toy_field)
+    sim_push = PathTrackerSim(toy_field, graph, next_hop, chassis_push)
+    sim_push.localization.zero_heading_from_current()
+    sim_push.operator_move(RETURN_TRIGGER_THRESHOLD_CM - 0.5)
+    pushed_prims = sim_push.go_to("C")
+
+    assert not any(
+        p[0] in (ACT_RETURN_STOP_AT_LINE, ACT_RETURN_FORWARD) for p in pushed_prims
+    )
+    assert pushed_prims == clean_prims
+
+
+def test_goto_line_backed_return_emits_stop_at_line_and_lands_on_node():
+    """A LINE-backed anchor returns via ACT_RETURN_STOP_AT_LINE, axle landing ON the node.
+
+    Mirror of AC4 (line-backed): with the offset above the trigger, go_to first
+    re-acquires the line (ACT_RETURN_STOP_AT_LINE) before any planned hop. The
+    sim models the SAME stopAtLine overshoot/axle-roll the LINE hops use, so
+    the chassis ends back ON the anchored node (drift~0) with the offset
+    cleared.
+
+    Setup: the chassis is pushed 20 cm BACKWARD along +x (offset (-20, 0)), so
+    the inverse-return heading is 0deg -- the return drives forward 20 cm and
+    lands the axle back on node A at the origin. The push is kept above the
+    sensor-to-axle lead (LINE_SENSOR_AXLE_OFFSET_CM) so the front sensor can
+    actually re-cross the node line -- a shorter LINE return dead-reckons (#14,
+    see test_goto_short_line_backed_return_dead_reckons).
+    """
+    # Node A is line-backed (start). Push backward so the return heading is 0.
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(-20.0)    # offset (-20, 0); chassis now at x = -20
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        20.0, abs=1e-9
+    )
+
+    prims = sim.go_to("B")
+
+    # The FIRST emitted primitive is the line-backed return seek.
+    assert prims[0][0] == ACT_RETURN_STOP_AT_LINE
+    tag, node, dist, heading = prims[0]
+    assert node == "A"
+    assert dist == pytest.approx(20.0, abs=1e-9)
+    assert heading == pytest.approx(0.0, abs=1e-9)
+
+    # Exactly one return primitive (the prologue fires once).
+    assert sum(1 for p in prims if p[0] == ACT_RETURN_STOP_AT_LINE) == 1
+    assert not any(p[0] == ACT_RETURN_FORWARD for p in prims)
+
+    # The return cleared the offset and re-anchored on A before the walk.
+    assert sim.localization.current_node() == "B"    # after the planned hop
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+    # Final pose: the planned hop A->B (50 cm along +x) lands the axle on B.
+    bx, by = fd.NODES["B"]
+    assert math.hypot(chassis.x_cm - bx, chassis.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_line_return_models_stopatline_axle_roll():
+    """The line return models the stopAtLine follow + axle-roll, not a snap-to-node.
+
+    The gotcha: the return seek must model the SAME overshoot/axle-roll the LINE
+    hops use (drive back toward the node, roll the axle ONTO it), or the parity
+    is fake. Verify the chassis lands EXACTLY on the node after the return seek
+    -- not at the line-sensor position (which would be
+    LINE_SENSOR_AXLE_OFFSET_CM short of the node).
+
+    Step through to capture the chassis snapshot at the return primitive (before
+    any planned hop), so the assertion is on the return move alone.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    push_cm = 20.0    # well above the axle offset so the follow phase is positive
+    sim.operator_move(-push_cm)    # offset (-20, 0); return heading 0deg
+
+    steps = list(sim.step_through("B"))
+    # The first step is the return seek; its snapshot is post-return-move.
+    first_prim, first_snap = steps[0]
+    assert first_prim[0] == ACT_RETURN_STOP_AT_LINE
+    # Axle lands ON node A (origin), NOT LINE_SENSOR_AXLE_OFFSET_CM short of it.
+    assert first_snap.x_cm == pytest.approx(0.0, abs=1e-9)
+    assert first_snap.y_cm == pytest.approx(0.0, abs=1e-9)
+    # The net return advance equals the full offset (follow short + roll the
+    # axle offset): had the sim snapped to the sensor position the axle would
+    # sit at x == -LINE_SENSOR_AXLE_OFFSET_CM.
+    assert first_snap.x_cm != pytest.approx(-LINE_SENSOR_AXLE_OFFSET_CM)
+
+
+def test_goto_blind_only_return_emits_turn_and_return_forward():
+    """A BLIND-only anchor dead-reckons back via ACT_TURN_REL + ACT_RETURN_FORWARD.
+
+    Mirror of AC4 (blind-only): the return turns to face the inverse-offset
+    heading (ACT_TURN_REL, the turnToYaw) then dead-reckons forward
+    (ACT_RETURN_FORWARD, the driveDist). It re-anchors via clear_offset (no
+    node change -- the dead-reckon return IS the re-anchor) and lands the
+    chassis back on the node within tolerance, then plans the path.
+
+    Setup: anchor the chassis ON the blind node 'B' (a chained go_to to B),
+    push it off-node, then go_to back to A so the blind-anchor return fires.
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    # First reach the blind node B so it becomes the anchor.
+    sim.go_to("B")
+    assert sim.localization.current_node() == "B"
+    bx, by = fd.NODES["B"]
+
+    # Push the chassis 12 cm off-node along +x (offset (12, 0); return heading
+    # 180deg -- the dead-reckon return turns to face -x then drives back).
+    sim.operator_move(12.0)
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        12.0, abs=1e-9
+    )
+
+    prims = sim.go_to("A")
+
+    # The return is a turn-to-face + dead-reckon forward, emitted before any
+    # planned hop. Find them at the head of the stream.
+    return_tags = [p[0] for p in prims if p[0] in (ACT_TURN_REL, ACT_RETURN_FORWARD)]
+    assert ACT_RETURN_FORWARD in [p[0] for p in prims]
+    rf = next(p for p in prims if p[0] == ACT_RETURN_FORWARD)
+    _tag, rf_node, rf_dist = rf
+    assert rf_node == "B"
+    assert rf_dist == pytest.approx(12.0, abs=1e-9)
+    # The ACT_TURN_REL aligning to the return heading precedes the forward.
+    assert prims.index(rf) >= 1
+    assert prims[prims.index(rf) - 1][0] == ACT_TURN_REL
+
+    # Blind return uses clear_offset (no node change), so the anchor stays B
+    # until the planned hop advances it; the offset is cleared.
+    assert sim.localization.current_node() == "A"   # after the planned hop B->A
+
+    # No line-backed return primitive on a blind anchor.
+    assert not any(p[0] == ACT_RETURN_STOP_AT_LINE for p in prims)
+
+
+def test_blind_return_lands_back_on_node_within_tolerance():
+    """The blind dead-reckon return lands the chassis back on the anchored node.
+
+    Capture the chassis at the ACT_RETURN_FORWARD step (before the planned hop)
+    and assert it is back on the blind node within tolerance -- the dead-reckon
+    return drives the exact inverse offset.
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+    sim.go_to("B")
+    bx, by = fd.NODES["B"]
+
+    # Push diagonally off-node so x AND y are both non-trivial.
+    sim.operator_move(0.0, turn_deg=30.0)    # face 30deg
+    sim.operator_move(15.0)                  # 15 cm along 30deg
+
+    steps = list(sim.step_through("A"))
+    # Find the return-forward step and its snapshot.
+    rf_step = next(
+        (prim, snap) for prim, snap in steps if prim[0] == ACT_RETURN_FORWARD
+    )
+    _prim, snap = rf_step
+    assert math.hypot(snap.x_cm - bx, snap.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_line_return_off_axis_emits_turn_before_seek():
+    """An off-axis LINE return turns to the inverse heading FIRST, then seeks the line.
+
+    Regression for issue #36 #1: the firmware LINE return now dispatches the pre-edge
+    ``turnToYaw`` through the SHARED turn machinery before the ``stopAtLine`` seek (it
+    previously seeked without turning, arcing forward away from the node on a body-axis
+    push). The sim mirrors that -- a FORWARD push off the body axis makes the inverse-return
+    heading ~180deg from the facing, so the return emits ``ACT_TURN_REL`` (the turnToYaw)
+    BEFORE ``ACT_RETURN_STOP_AT_LINE``. The straight-back regression tests never exercised
+    this (return heading == facing -> delta 0 -> no turn).
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    # Forward push 20 cm along +x (chassis faces 0deg): offset (20, 0), inverse-return
+    # heading 180deg -> a real pre-edge turn is required before the seek. The push stays
+    # above the sensor-to-axle lead so this exercises the line seek (a shorter LINE return
+    # dead-reckons, #14) while still requiring the off-axis pre-turn.
+    sim.operator_move(20.0)
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        20.0, abs=1e-9
+    )
+
+    prims = sim.go_to("B")
+
+    # The return's pre-edge turn fires FIRST (prims[0]), then the line re-acquire seek.
+    assert prims[0][0] == ACT_TURN_REL
+    assert prims[0][1] == pytest.approx(180.0, abs=1e-9)
+    seek = next(p for p in prims if p[0] == ACT_RETURN_STOP_AT_LINE)
+    assert prims.index(seek) == 1
+    _tag, node, dist, heading = seek
+    assert node == "A"
+    assert dist == pytest.approx(20.0, abs=1e-9)
+    assert heading == pytest.approx(180.0, abs=1e-9)
+    # The return re-anchored on A and cleared the offset before the planned hop.
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+
+def test_goto_short_line_backed_return_dead_reckons():
+    """A LINE return shorter than the sensor-to-axle lead dead-reckons, not stopAtLine (#14).
+
+    The front line sensor leads the wheel axle by LINE_SENSOR_AXLE_OFFSET_CM, so a return whose
+    distance is below that lead starts the sensor already PAST the node line -- a forward
+    stopAtLine seek could never re-cross it and would fault LINE_NOT_FOUND on hardware. The fix
+    routes such short LINE returns through the dead-reckon path (ACT_RETURN_FORWARD +
+    clear_offset), exactly like a blind anchor. This is the COMMON small hand-correction case
+    (offset between RETURN_TRIGGER_THRESHOLD_CM and the axle lead).
+
+    Setup: node A is line-backed; push 8 cm BACKWARD along +x (offset (-8, 0), 3 < 8 < 12.02), so
+    the return heading is 0deg (== facing -> no pre-turn) and the return dead-reckons forward 8 cm
+    back onto A.
+    """
+    push_cm = 8.0
+    assert RETURN_TRIGGER_THRESHOLD_CM < push_cm < LINE_SENSOR_AXLE_OFFSET_CM
+
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    sim.operator_move(-push_cm)    # offset (-8, 0); return heading 0deg == facing
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        push_cm, abs=1e-9
+    )
+
+    prims = sim.go_to("B")
+
+    # Straight-back return (heading == facing) -> no pre-turn; the head primitive is the
+    # dead-reckon forward, NOT a line seek.
+    assert prims[0][0] == ACT_RETURN_FORWARD
+    _tag, node, dist = prims[0]
+    assert node == "A"
+    assert dist == pytest.approx(push_cm, abs=1e-9)
+    # A short LINE return never emits the (would-fault) line seek.
+    assert not any(p[0] == ACT_RETURN_STOP_AT_LINE for p in prims)
+    # It re-anchored on A (clear_offset, node unchanged), cleared the offset, then walked to B.
+    assert sim.localization.current_node() == "B"
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+    bx, by = fd.NODES["B"]
+    assert math.hypot(chassis.x_cm - bx, chassis.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_line_return_seek_threshold_is_the_axle_offset():
+    """The line-seek vs dead-reckon boundary for a LINE return is exactly the axle lead (#14).
+
+    A LINE return at exactly LINE_SENSOR_AXLE_OFFSET_CM re-acquires via the seek (the sensor
+    reaches the node line); a hair below it dead-reckons (the sensor cannot re-cross). Locks the
+    ``>=`` threshold so a future off-by-one (e.g. ``>``) is caught. Both pushes are straight back
+    (return heading == facing) so the head primitive is the dispatch itself, not a pre-turn.
+    """
+    eps = 1e-3
+
+    # Just BELOW the lead -> dead-reckon (ACT_RETURN_FORWARD), no line seek.
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+    sim.operator_move(-(LINE_SENSOR_AXLE_OFFSET_CM - eps))
+    prims_below = sim.go_to("B")
+    assert prims_below[0][0] == ACT_RETURN_FORWARD
+    assert not any(p[0] == ACT_RETURN_STOP_AT_LINE for p in prims_below)
+
+    # Exactly AT the lead -> line seek (ACT_RETURN_STOP_AT_LINE).
+    fd2, graph2, next_hop2 = _typed_two_node_field("line")
+    sim2, _chassis2 = _make_typed_sim(fd2, graph2, next_hop2)
+    sim2.operator_move(-LINE_SENSOR_AXLE_OFFSET_CM)
+    prims_at = sim2.go_to("B")
+    assert prims_at[0][0] == ACT_RETURN_STOP_AT_LINE
+    assert not any(p[0] == ACT_RETURN_FORWARD for p in prims_at)
+
+
+def test_blind_return_turn_snapshot_is_post_turn_not_post_forward():
+    """step_through pairs the BLIND return's ACT_TURN_REL with the POST-TURN pose (#7).
+
+    The return dispatch is a generator that yields each primitive AFTER its own mutation, so
+    the ``ACT_TURN_REL`` snapshot is the chassis after the in-place turn but BEFORE the
+    forward drive -- not the final post-forward pose. A consumer animating step_through must
+    not see the chassis jump to the return destination on the turn step.
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+    # Anchor on blind node B, then push it off-node so a blind return fires on go_to("A").
+    sim.go_to("B")
+    bx, by = fd.NODES["B"]
+    sim.operator_move(12.0)    # offset (12, 0); return heading 180deg; chassis at (bx+12, by)
+
+    steps = list(sim.step_through("A"))
+    turn_idx = next(i for i, (p, _s) in enumerate(steps) if p[0] == ACT_TURN_REL)
+    fwd_idx = next(i for i, (p, _s) in enumerate(steps) if p[0] == ACT_RETURN_FORWARD)
+    assert turn_idx < fwd_idx
+    _tp, turn_snap = steps[turn_idx]
+    _fp, fwd_snap = steps[fwd_idx]
+    # Post-turn snapshot: the chassis has only ROTATED (still at the pushed-off pose); it has
+    # NOT yet driven back. The forward snapshot IS back on the node.
+    assert math.hypot(turn_snap.x_cm - (bx + 12.0), turn_snap.y_cm - by) < 1e-6
+    assert math.hypot(fwd_snap.x_cm - bx, fwd_snap.y_cm - by) < _POSITION_TOL_CM
+
+
+def test_operator_move_subdeadband_carries_across_calls():
+    """Sub-deadband moves accumulate across calls until they cross the floor, then flush (#5).
+
+    Mirror of the firmware leaving the encoder baseline UNADVANCED below the deadband: a slow
+    hand-drive delivered as many sub-deadband ``operator_move`` calls must NOT be dropped per
+    call -- the residual carries and flushes (in full) once it crosses
+    OFFSET_TRANSLATION_DEADBAND_CM, so the sim's offset tracks the firmware's instead of
+    staying at ~0. The single-call drop test (a sub-deadband move read once) still holds.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    step = OFFSET_TRANSLATION_DEADBAND_CM * 0.4    # 0.08 cm: each call is sub-deadband
+    # Two sub-deadband calls stay below the 0.2 cm floor -> offset still ~0 (residual carried).
+    sim.operator_move(step)
+    sim.operator_move(step)
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )
+
+    # The third call crosses the floor (0.24 >= 0.2) -> flush the WHOLE accumulated residual.
+    sim.operator_move(step)
+    off = sim.localization.get_offset_from_node()
+    assert off.x == pytest.approx(3 * step, abs=1e-9)    # along START_HEADING 0deg
+    assert off.magnitude_cm() == pytest.approx(3 * step, abs=1e-9)
+
+    # Residual reset after the flush: a further sub-deadband move is again carried (no growth).
+    sim.operator_move(step)
+    assert sim.localization.get_offset_from_node().x == pytest.approx(3 * step, abs=1e-9)
+
+
+def test_partial_node_types_fixture_raises():
+    """A fixture authoring NODE_TYPES but omitting a graph node raises (bench-fidelity, #9).
+
+    ``node_type()`` defaults an absent node to ``"line"``, diverging from
+    ``FieldMap::getNodeType`` (which returns the authored type for every valid node). A
+    fixture missing an entry would silently route that node through the LINE re-acquire while
+    the firmware dead-reckons -- a false-green parity. The sim now refuses to construct such a
+    fixture. A fixture with NO NODE_TYPES at all stays exempt (the minimal synthetic graphs).
+    """
+    fd, graph, next_hop = _typed_two_node_field("blind")
+    # Drop B's authored type, leaving NODE_TYPES non-empty but incomplete.
+    fd.NODE_TYPES = {"A": "line"}
+    chassis = VirtualChassis.from_field_data(fd)
+    with pytest.raises(ValueError, match="NODE_TYPES is missing"):
+        PathTrackerSim(fd, graph, next_hop, chassis)
+
+
+def test_goto_over_cap_fault_gate_raises_and_moves_nothing():
+    """An over-cap offset under the FAULT gate raises OffMapFaultError; no chassis motion.
+
+    Mirror of AC6 (FAULT): when the offset exceeds RETURN_DISTANCE_CAP_CM and
+    OFF_MAP_GATE is FAULT, go_to refuses to plan -- it raises OffMapFaultError
+    and the chassis is not moved (the offset is left intact). Default gate is
+    FAULT, so no patch is needed.
+    """
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, chassis = _make_typed_sim(fd, graph, next_hop)
+
+    over_cap = RETURN_DISTANCE_CAP_CM + 5.0
+    sim.operator_move(-over_cap)    # push backward beyond the cap
+    chassis_x_before = chassis.x_cm
+    node_before = sim.localization.current_node()
+
+    with pytest.raises(OffMapFaultError) as excinfo:
+        sim.go_to("B")
+
+    err = excinfo.value
+    assert err.node == "A"
+    assert err.goal_node == "B"
+    assert err.offset_mag_cm == pytest.approx(over_cap, abs=1e-9)
+    # No motion, no node advance, offset untouched.
+    assert chassis.x_cm == pytest.approx(chassis_x_before, abs=1e-9)
+    assert sim.localization.current_node() == node_before
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        over_cap, abs=1e-9
+    )
+
+
+def test_goto_over_cap_best_effort_gate_proceeds_capped(monkeypatch):
+    """An over-cap offset under BEST_EFFORT returns anyway, clamped to the cap (AC6).
+
+    Mirror of AC6 (BEST_EFFORT): with OFF_MAP_GATE patched to BEST_EFFORT, an
+    over-cap offset does NOT fault -- it dispatches the return with the drive
+    distance CLAMPED to RETURN_DISTANCE_CAP_CM (the over-cap vector is
+    untrustworthy, so the firmware bounds the seek), then plans the goal.
+    """
+    monkeypatch.setattr(_runtime, "OFF_MAP_GATE", OffMapGate.BEST_EFFORT)
+
+    fd, graph, next_hop = _typed_two_node_field("line")
+    sim, _chassis = _make_typed_sim(fd, graph, next_hop)
+
+    over_cap = RETURN_DISTANCE_CAP_CM + 12.0
+    sim.operator_move(-over_cap)    # backward beyond cap; return heading 0deg
+
+    prims = sim.go_to("B")
+
+    # A return seek fired (no fault) and its distance is clamped to the cap.
+    return_prims = [p for p in prims if p[0] == ACT_RETURN_STOP_AT_LINE]
+    assert len(return_prims) == 1
+    _tag, node, dist, _heading = return_prims[0]
+    assert node == "A"
+    assert dist == pytest.approx(RETURN_DISTANCE_CAP_CM, abs=1e-9)
+    # The goal still planned after the capped return.
+    assert sim.localization.current_node() == "B"
+
+
+# ---------------------------------------------------------------------------
+# TC18a parity -- post-return planned tail matches a clean go_to (AC17 pillar 1)
+# ---------------------------------------------------------------------------
+
+
+def test_tc18a_post_return_tail_matches_clean_goto():
+    """TC18a: the planned tail after a return is byte-identical to a clean go_to.
+
+    The return erases the operator excursion, so the planned-path primitive
+    stream (everything after the return primitive) and the final arrival pose
+    must match a clean go_to from the anchored node with drift~0.
+
+    Heading parity: the line return faces the inverse-offset heading. A pure
+    BACKWARD push along the start heading gives an inverse-return heading equal
+    to the start heading, so the post-return chassis faces exactly as a clean
+    start does -- making the first planned ACT_TURN_REL identical between the
+    two runs.
+    """
+    # A->B->C with a 90deg turn at B (so the sim emits ACT_LINE_OVERSHOOT, not
+    # ACT_LINE_PASS, at the intermediate node -- matching the clean baseline).
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (50.0, 50.0)}
+    node_types = {"A": "line", "B": "line", "C": "line"}
+
+    def _build():
+        fd = SimpleNamespace(
+            NODES=nodes,
+            NODE_TYPES=node_types,
+            START_NODE="A",
+            START_HEADING_DEG=0.0,
+            PIVOT_TURNS=[],
+        )
+        g = nx.DiGraph()
+        for name, (x, y) in nodes.items():
+            g.add_node(name, x_cm=float(x), y_cm=float(y))
+        for u, v, hdg in (("A", "B", 0.0), ("B", "C", 90.0)):
+            g.add_edge(u, v, type=EDGE_LINE, distance_cm=50.0, heading_deg=hdg)
+            g.add_edge(
+                v, u, type=EDGE_LINE, distance_cm=50.0, heading_deg=(hdg + 180.0) % 360.0
+            )
+        next_hop = {
+            "A": {"A": "A", "B": "B", "C": "B"},
+            "B": {"A": "A", "B": "B", "C": "C"},
+            "C": {"A": "B", "B": "B", "C": "C"},
+        }
+        return fd, g, next_hop
+
+    # Clean baseline.
+    fd_clean, g_clean, nh_clean = _build()
+    chassis_clean = VirtualChassis.from_field_data(fd_clean)
+    sim_clean = PathTrackerSim(fd_clean, g_clean, nh_clean, chassis_clean)
+    sim_clean.localization.zero_heading_from_current()
+    clean_prims = sim_clean.go_to("C")
+
+    # Post-return run: push BACKWARD along +x (offset (-d, 0); return heading
+    # 0deg == start heading), then go_to C. The push stays above the sensor-to-axle
+    # lead so the LINE return re-acquires via the seek (a shorter return dead-reckons, #14).
+    fd_ret, g_ret, nh_ret = _build()
+    chassis_ret = VirtualChassis.from_field_data(fd_ret)
+    sim_ret = PathTrackerSim(fd_ret, g_ret, nh_ret, chassis_ret)
+    sim_ret.localization.zero_heading_from_current()
+    sim_ret.operator_move(-20.0)
+    ret_prims = sim_ret.go_to("C")
+
+    # The head primitive is the return seek; the tail is the planned path.
+    assert ret_prims[0][0] == ACT_RETURN_STOP_AT_LINE
+    planned_tail = ret_prims[1:]
+    assert planned_tail == clean_prims
+
+    # Final arrival pose parity: both end on C with drift~0 (do NOT loosen the
+    # existing position tolerance).
+    cx, cy = nodes["C"]
+    assert math.hypot(chassis_ret.x_cm - cx, chassis_ret.y_cm - cy) < _POSITION_TOL_CM
+    assert math.hypot(chassis_clean.x_cm - cx, chassis_clean.y_cm - cy) < _POSITION_TOL_CM
+    assert sim_ret.localization.current_node() == "C"
+
+
+def test_tc18a_clean_goto_after_return_nets_zero_drift_on_toy_fixture(toy_field, toy_graph_and_table):
+    """TC18a (toy fixture): a return then a clean go_to lands on the goal, drift~0.
+
+    On the shared toy fixture, push the chassis off node A, issue go_to(C): the
+    prologue returns to A (line-backed) then walks A->...->C. The chassis lands
+    on C within _POSITION_TOL_CM and the node advances to C -- proving the
+    return erased the excursion end-to-end on a multi-hop route.
+    """
+    graph, next_hop = toy_graph_and_table
+    chassis = VirtualChassis.from_field_data(toy_field)
+    sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    sim.operator_move(-20.0)    # above the axle lead (line seek), within cap; heading 0deg
+    prims = sim.go_to("C")
+
+    assert prims[0][0] == ACT_RETURN_STOP_AT_LINE
+    assert sim.localization.current_node() == "C"
+    cx, cy = toy_field.NODES["C"]
+    assert math.hypot(chassis.x_cm - cx, chassis.y_cm - cy) < _POSITION_TOL_CM
+    assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
+        0.0, abs=1e-9
+    )

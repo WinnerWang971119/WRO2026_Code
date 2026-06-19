@@ -15,17 +15,46 @@
  *  - A fluent `goTo(node)` builder. Default is sync-blocking; chain
  *    `.async()` to enqueue + return immediately.
  *  - A latched fault state (`Fault::NOT_ZEROED`, `UNREACHABLE`,
- *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`)
- *    surfaced via `hasFault()` / `getFault()`. `clearFault()` re-arms
+ *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`,
+ *    `OFF_NODE`) surfaced via `hasFault()` / `getFault()`. `clearFault()` re-arms
  *    the queue but does not restart motion. `faultMnemonic()` returns
  *    a short tag (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
  *
  * FSM states (`State`):
  *  - `IDLE`              — nothing pending; waits for a goal to be enqueued.
- *  - `DEQUEUE`           — pops the next nav entry off the FIFO.
+ *  - `DEQUEUE`           — pops the next nav entry off the FIFO, then evaluates
+ *                          the accumulated operator offset (issue #36, PR1b):
+ *                          on a non-trivial offset it drives a return-to-node
+ *                          prologue (`RETURN_TO_NODE`) BEFORE planning; on an
+ *                          over-cap offset it honors the off-map gate
+ *                          (`Fault::OFF_NODE` under `Config::OffMapGate::FAULT`,
+ *                          log-and-proceed under `BEST_EFFORT`); otherwise it
+ *                          transitions straight to `PLAN_NEXT_HOP` (no behavior
+ *                          change for the offset≈0 case).
+ *  - `RETURN_TO_NODE`    — drives the approximate inverse of the tracked operator
+ *                          offset back onto the anchored node before planning the
+ *                          requested goal (issue #36, PR1b). LINE-backed anchors
+ *                          re-acquire the line with `Drive.stopAtLine(...)` (the
+ *                          same axle-on-node seek the `STOP_AT_LINE` hop uses,
+ *                          ADR-027) and re-anchor via `Localization.onIntersection`
+ *                          on the SAME node; blind-only anchors dead-reckon the
+ *                          inverse drive back and re-anchor via
+ *                          `Localization.clearOffset()`. On a `LINE_NOT_FOUND`
+ *                          (line never re-acquired) this state routes to the
+ *                          off-map gate — `Fault::OFF_NODE` under FAULT, or a
+ *                          best-effort accept-dead-reckon under BEST_EFFORT — so
+ *                          it is EXEMPT from the generic Drive-fault guard (which
+ *                          would otherwise mislabel it `DRIVE_FAULT`). On success
+ *                          it transitions to `PLAN_NEXT_HOP`.
  *  - `PLAN_NEXT_HOP`     — resolves the next edge via `FieldMap::getNextHop`,
- *                          dispatches the pre-edge yaw turn (if non-trivial).
- *  - `TURNING`           — waits for `Drive.isIdle()` after a turn dispatch.
+ *                          dispatches the pre-edge yaw turn (if non-trivial) via the shared
+ *                          `_dispatchTurnIfNeeded(...)`.
+ *  - `TURNING`           — waits for `Drive.isIdle()` after a pre-edge turn dispatch, then
+ *                          dispatches the move: a normal hop's edge
+ *                          (`_dispatchEdgeAfterTurn`) or, when a return prologue is in flight
+ *                          (`_returnActive`), the return seek/drive
+ *                          (`_dispatchReturnMoveAfterTurn`). The return reuses this SAME
+ *                          pre-turn path, so a return can never skip the turn.
  *  - `LINE_FOLLOW`       — waits for `Intersection.isAtIntersection()` while
  *                          the LineFollower drives the chassis along a line
  *                          segment.
@@ -80,6 +109,13 @@
 #include "FieldMap.h"
 #include "NavTypes.h"
 #include "routes.h"
+
+/// @brief Operator-offset POD defined in `Localization.h`. Forward-declared here
+///        because the return-to-node helpers (`_evaluateReturnGate` /
+///        `_dispatchReturnMove`) take it by const-reference — the full definition
+///        is only needed in `PathTracker.cpp`, which includes `Localization.h`.
+///        Keeps the header from pulling the lower Localization layer in.
+struct Offset2D;
 
 class PathTrackerClass;
 
@@ -159,7 +195,8 @@ public:
         DRIVE_FAULT         = 3,
         BAD_NODE            = 4,
         DRAIN_TIMEOUT       = 5,
-        REVERSE_UNAVAILABLE = 6
+        REVERSE_UNAVAILABLE = 6,
+        OFF_NODE            = 7  ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
     };
 
     /**
@@ -214,6 +251,7 @@ private:
     {
         IDLE,
         DEQUEUE,
+        RETURN_TO_NODE,
         PLAN_NEXT_HOP,
         TURNING,
         LINE_FOLLOW,
@@ -272,7 +310,109 @@ private:
     void _stepFsm();
 
     void _enterFault(Fault kind, uint8_t from, uint8_t to);
+
+    /**
+     * @brief Evaluate the accumulated operator offset at `goTo()` start and decide
+     *        whether to drive a return-to-node prologue (issue #36, PR1b, AC4–AC6).
+     *
+     * Called from the `DEQUEUE` state right after `_pop(...)` sets `_destinationNode`,
+     * BEFORE the transition to `PLAN_NEXT_HOP`. Reads `Localization.getOffsetFromNode()`,
+     * computes the translation magnitude `sqrt(off.x^2 + off.y^2)`, and runs the pure
+     * `resolveReturnAction(...)` gate (ReturnToNodePolicy.h) over
+     * `Config::RETURN_TRIGGER_THRESHOLD_CM`, `RETURN_DISTANCE_CAP_CM`, and
+     * `OFF_MAP_GATE`:
+     *
+     *   - `NONE`            — offset ≈0 (≤ trigger): transition straight to
+     *                         `PLAN_NEXT_HOP`. A true no-op — no Drive dispatch, no
+     *                         behavior change versus the pre-PR1b code path (AC5).
+     *   - `OFF_MAP_FAULT`   — offset over cap, `OFF_MAP_GATE == FAULT`: latch
+     *                         `Fault::OFF_NODE` and refuse to plan (AC6).
+     *   - `OFF_MAP_PROCEED` — offset over cap, `OFF_MAP_GATE == BEST_EFFORT`: log a
+     *                         Serial warning and dispatch the (capped) return anyway
+     *                         (AC6).
+     *   - `RETURN`          — trigger < offset ≤ cap: dispatch the return via
+     *                         `_dispatchReturnMove(...)` (AC4).
+     *
+     * @param off The accumulated operator offset (world-frame cm + heading delta).
+     * @param mag The pre-computed translation magnitude `sqrt(off.x^2 + off.y^2)`.
+     */
+    void _evaluateReturnGate(const Offset2D& off, float mag);
+
+    /**
+     * @brief Dispatch the inverse-of-offset return move onto the anchored node and
+     *        enter the `RETURN_TO_NODE` state (issue #36, PR1b, AC4).
+     *
+     * Drives the chassis from its current (hand-pushed) pose back toward the
+     * anchored node. The return-travel world heading is the direction from the
+     * current pose back to the anchor — i.e. the heading of the inverse offset
+     * vector `(-off.x, -off.y)`, computed as `atan2(-off.y, -off.x)` and normalized
+     * to `[0, 360)`. The drive distance is the offset translation magnitude @p
+     * mag, clamped to `Config::RETURN_DISTANCE_CAP_CM` so a best-effort over-cap
+     * return cannot run unbounded.
+     *
+     * Latches the in-flight return state (`_returnUsesLineSeek`, `_returnDistCm`,
+     * `_resolvedBodyHeading = returnHeading`, `_resolvedDirection = FRONT`, `_returnActive`),
+     * then dispatches the pre-edge turn through the SAME `_dispatchTurnIfNeeded(...)` every hop
+     * uses. When a turn fires the FSM enters `TURNING` and `_dispatchReturnMoveAfterTurn()`
+     * runs once it completes; when the chassis is already aligned the move dispatches
+     * immediately. The actual move lives in `_dispatchReturnMoveAfterTurn()` and is chosen by
+     * `_returnUsesLineSeek` (a LINE anchor whose return distance is at least the front sensor's
+     * axle lead `Config::LINE_SENSOR_AXLE_OFFSET_CM`):
+     *  - line seek : a forward `Drive.stopAtLine(_returnDistCm)` GYRO seek that lands the wheel
+     *                AXLE on the node (ADR-027); `RETURN_TO_NODE` re-anchors the SAME node via
+     *                `Localization.onIntersection(...)` on success.
+     *  - dead-reckon : a forward `Drive.driveDist(_returnDistCm)` (a blind anchor, OR a short
+     *                LINE return whose front sensor already sits past the node line, #14);
+     *                `RETURN_TO_NODE` re-anchors via `Localization.clearOffset()` (node unchanged).
+     *
+     * Routing the return through the shared pre-turn is the structural fix for the
+     * LINE-return-without-turn bug: the pre-edge turn is no longer inlined per node kind, so
+     * it cannot be omitted on one branch. Every Drive call is emitted as a single
+     * discarded-temporary `.async()` statement (RAII builder rule — never split a
+     * builder chain across statements / a local variable).
+     *
+     * @param off The accumulated operator offset (world-frame cm + heading delta).
+     * @param mag The offset translation magnitude `sqrt(off.x^2 + off.y^2)`.
+     */
+    void _dispatchReturnMove(const Offset2D& off, float mag);
+
+    /**
+     * @brief Dispatch the return seek/drive AFTER the shared pre-turn has aligned the chassis
+     *        (PR1b, issue #36, #6 refactor).
+     *
+     * Called either directly by `_dispatchReturnMove(...)` when no pre-turn was needed, or
+     * from the `TURNING` state once the return's pre-edge `Drive.turnToYaw` completes (the
+     * `_returnActive` branch). A line-seek return (`_returnUsesLineSeek`) re-acquires the line
+     * with a forward `Drive.stopAtLine(_returnDistCm)` GYRO seek; a dead-reckon return drives a
+     * forward `Drive.driveDist(_returnDistCm)`. Both enter `RETURN_TO_NODE`, which polls the
+     * outcome. Reads `_returnUsesLineSeek`, `_returnDistCm`, and `_resolvedBodyHeading` (all
+     * latched by `_dispatchReturnMove`). Every Drive call is one discarded-temporary `.async()`.
+     */
+    void _dispatchReturnMoveAfterTurn();
+
     void _onPlanNextHop();
+
+    /**
+     * @brief Dispatch a pre-edge yaw turn toward @p bodyHeadingWorld, shared by normal hops
+     *        and the return-to-node prologue (issue #36 #6 refactor).
+     *
+     * Computes the wrap-normalized delta between the live heading and @p bodyHeadingWorld; if
+     * it is within `Config::NAV_TURN_TOLERANCE_DEG` NO turn is dispatched (the caller proceeds
+     * straight to the move). Otherwise it disables a live LineFollower (the wheels go to
+     * `Drive.turnToYaw` alone — two writers would fight) and clears any pass-through
+     * eligibility the LINE_FOLLOW peek latched (a real turn means the chassis stops and the
+     * next move must soft-start), then dispatches `Drive.turnToYaw(...).setMode(turnModeByte)`
+     * `.async()`. Centralising the turn here makes the pre-edge turn structurally
+     * unskippable — the return prologue and every hop go through the SAME decision.
+     *
+     * @param bodyHeadingWorld The world-frame body-target heading (deg) the chassis must face.
+     * @param turnModeByte     The wheel-pattern byte for `TurnToYawBuilder::setMode`
+     *                         (pivot wheel for a pivot hop, else the pipeline default).
+     * @return `true` if a turn was dispatched (caller enters `TURNING`); `false` if the
+     *         chassis is already aligned (caller dispatches the move immediately).
+     */
+    bool _dispatchTurnIfNeeded(float bodyHeadingWorld, uint8_t turnModeByte);
+
     void _dispatchEdgeAfterTurn();
 
     /**
@@ -365,6 +505,36 @@ private:
     uint8_t          _destinationNode = FieldMap::NODE_NONE;
     uint8_t          _nextHop         = FieldMap::NODE_NONE;
     Routes::EdgeType _activeEdgeType  = Routes::EdgeType::NONE;
+
+    /// @brief Whether the IN-FLIGHT return re-acquires via the forward line seek (PR1b).
+    ///
+    /// Set by `_dispatchReturnMove(...)` when entering `RETURN_TO_NODE`: `true` only when the
+    /// anchor is a LINE node AND the return distance is at least the front sensor's axle lead
+    /// (`Config::LINE_SENSOR_AXLE_OFFSET_CM`) — a `Drive.stopAtLine` seek re-acquires the line and
+    /// re-anchors via `onIntersection`. It is `false` for a blind-only anchor AND for a SHORT LINE
+    /// return whose front sensor already sits past the node line (#14): both dead-reckon a forward
+    /// `Drive.driveDist` and re-anchor via `clearOffset`. Read only by `_dispatchReturnMoveAfterTurn`
+    /// and the `RETURN_TO_NODE` state body. Meaningless outside `RETURN_TO_NODE`; defaults to `false`.
+    bool _returnUsesLineSeek = false;
+
+    /// @brief True while a return-to-node prologue is in flight (PR1b, issue #36, #6 refactor).
+    ///
+    /// Set by `_dispatchReturnMove(...)` when a return is dispatched; cleared by the
+    /// `RETURN_TO_NODE` arrive state once the return move settles (and on begin/abort/fault).
+    /// Read by the SHARED `TURNING` state to route the post-turn dispatch to
+    /// `_dispatchReturnMoveAfterTurn()` (the return seek/drive) instead of
+    /// `_dispatchEdgeAfterTurn()` (a normal hop). Because the return reuses the same pre-turn
+    /// machinery as every hop (`_dispatchTurnIfNeeded`), the pre-edge turn can never be
+    /// skipped on a return — the structural fix for the LINE-return-without-turn bug.
+    bool _returnActive = false;
+
+    /// @brief Clamped return-travel distance (cm) latched for the in-flight return prologue.
+    ///
+    /// Set by `_dispatchReturnMove(...)` (the offset magnitude clamped to
+    /// `Config::RETURN_DISTANCE_CAP_CM`) and consumed by `_dispatchReturnMoveAfterTurn()` once
+    /// the shared pre-turn has faced the chassis at the return heading. Meaningless outside a
+    /// return; defaults to 0.
+    float _returnDistCm = 0.0f;
 
     /// @brief Bidirectional builder overrides cached for the IN-FLIGHT goal.
     ///

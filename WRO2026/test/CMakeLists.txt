@@ -589,6 +589,7 @@ function(add_ctps_mock_force_includes target)
             "/FI${CTPS_MOCKS_DIR}/PathTracker.h"
             "/FI${CTPS_MOCKS_DIR}/EventTrace.h"
             "/FI${CTPS_MOCKS_DIR}/LineFollower.h"
+            "/FI${CTPS_MOCKS_DIR}/Localization.h"
             "/FI${CTPS_MOCKS_DIR}/Manipulator.h"
         )
     else()
@@ -599,6 +600,7 @@ function(add_ctps_mock_force_includes target)
             "SHELL:-include ${CTPS_MOCKS_DIR}/PathTracker.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/EventTrace.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/LineFollower.h"
+            "SHELL:-include ${CTPS_MOCKS_DIR}/Localization.h"
             "SHELL:-include ${CTPS_MOCKS_DIR}/Manipulator.h"
         )
     endif()
@@ -666,3 +668,58 @@ add_executable(test_pivot_trim_policy
 )
 target_include_directories(test_pivot_trim_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME pivot_trim_policy COMMAND test_pivot_trim_policy)
+
+# =========================================================================================
+# Test executable #11 — ReturnToNodePolicy pure-math (issue #36, PR1b, T8/T10).
+#
+# `resolveReturnAction` is a header-only inline policy (`ReturnToNodePolicy.h`) — the
+# return-to-node GATE decision (trigger / cap / off-map), promoted out of PathTracker.cpp
+# so production (`PathTracker::_evaluateReturnGate`) and this host test link the SAME symbol,
+# mirroring `PivotTrimPolicy.h` / `DirectionPolicy.h` / `StopAtLinePolicy.h`. It is the TC4 /
+# TC5 / TC6 / TC7 coverage layer (RETURN trigger, below-trigger NONE, over-cap FAULT, over-cap
+# BEST_EFFORT) plus the exact trigger-closed / cap-open boundaries.
+#
+# Pure enum/float logic with no Drive / Localization runtime surface and no SUT `.cpp`.
+# Unlike `test_pivot_trim_policy` (whose `PivotTrimPolicy.h` is self-contained),
+# `ReturnToNodePolicy.h` includes `Config.h` for the `Config::OffMapGate` enum, and
+# `Config.h` pulls in `<Arduino.h>` — so this target needs the `mocks/`-first
+# `COMMON_INCLUDES` to resolve that angle-bracket header to `mocks/Arduino.h`. It still
+# links NO `MOCK_SOURCES`: the policy + Config are header-only and the test never odr-uses
+# a mock global (no `Serial` / `millis()` call), so there is nothing to link. No
+# force-include needed (the policy never includes the production `Drive.h`).
+# =========================================================================================
+add_executable(test_return_to_node_policy
+    ${TEST_DIR}/test_return_to_node_policy.cpp
+)
+target_include_directories(test_return_to_node_policy PRIVATE ${COMMON_INCLUDES})
+add_test(NAME return_to_node_policy COMMAND test_return_to_node_policy)
+
+# =========================================================================================
+# Test executable #12 — return-to-node NODE-KIND dispatch slice (issue #36, PR1b, T8/T10).
+#
+# Two layers (see the test file docblock):
+#   - TC4 / TC4c: the `_returnUsesLineSeek` decision (LINE-vs-BLIND node kind AND the
+#     return-distance vs axle-lead gate, #14) is tested DIRECTLY against the REAL
+#     `FieldMap::getNodeType` over the REAL `routes.cpp` graph data and the REAL
+#     `Config::LINE_SENSOR_AXLE_OFFSET_CM` (the toy fixture carries both kinds) — not a tautology.
+#   - TC4b: the per-kind RETURN_TO_NODE state-body routing is inline-MIRRORED (annotated
+#     `// MIRROR: PathTracker.cpp:<line>`), following the precedent of
+#     `test_path_tracker_stop_at_line` — the full `PathTracker.cpp` is NOT linked by ANY host
+#     target. The full FSM transition + the Drive builder chain + axle-on-node geometry are
+#     delegated to the Python sim parity test (T11) and the firmware compile.
+#
+# Links `routes.cpp` (the sole definer of the `Routes::NODES` / `N_NODES` data that
+# `FieldMap::getNodeType` odr-uses) + `MOCK_SOURCES` (for the `Serial` / `MiniR4` globals the
+# mock `<Arduino.h>` / `<MatrixMiniR4.h>` — pulled in transitively by `PathTracker.h` /
+# `FieldMap.h` — declare `extern`). The `mocks/`-first `COMMON_INCLUDES` resolves those two
+# angle-bracket headers. NO Drive force-include: none of the headers this TU includes
+# (FieldMap.h / routes.h / PathTracker.h) include the production `Drive.h`, so there is
+# nothing to shadow (the `PathTracker.cpp` that would is never linked).
+# =========================================================================================
+add_executable(test_return_to_node_dispatch
+    ${TEST_DIR}/test_return_to_node_dispatch.cpp
+    ${SKETCH_DIR}/routes.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_return_to_node_dispatch PRIVATE ${COMMON_INCLUDES})
+add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)

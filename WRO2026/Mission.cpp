@@ -14,6 +14,7 @@
 #include "EventTrace.h"
 #include "FieldMap.h"
 #include "LineFollower.h"
+#include "Localization.h"
 #include "PathTracker.h"
 #include "Tasks.h"
 #include "routes.h"
@@ -219,6 +220,59 @@ void MissionClass::abort()
     _buildError  = false;
     _lastPushOk  = false;
     Serial.println(F("[Mission] abort"));
+}
+
+bool MissionClass::declarePosition(const char* name)
+{
+    // Immediate recovery action (like abort()) — NOT a queued step. Usable only when
+    // PathTracker is NOT mid-hop. The guard is idle-OR-faulted, not strictly-idle:
+    // recovering from an OFF_NODE fault is the whole point, and isIdle() returns false
+    // while faulted, so a strictly-idle guard would make recovery impossible.
+    if (!PathTracker.isIdle() && !PathTracker.hasFault())
+    {
+        Serial.println(F("[Mission] declarePosition: PathTracker busy (ignored)"));
+        return false;
+    }
+
+    // Resolve + bounds-check the name the same way the GOTO step validates s.goal.
+    const uint8_t id = FieldMap::findNodeByName(name);
+    if (id == FieldMap::NODE_NONE || id >= Routes::N_NODES)
+    {
+        Serial.print(F("[Mission] declarePosition: unknown node '"));
+        Serial.print(name == nullptr ? "?" : name);
+        Serial.println(F("'"));
+        return false;
+    }
+
+    // Low-level re-anchor: set node + zero offset (heading offset untouched).
+    Localization.declarePosition(id);
+
+    // Clear the latched PathTracker fault if any — this is the "clears the fault" half
+    // of the recovery, and it lives HERE (Mission layer) because Localization can't
+    // reach up into PathTracker. clearFault() resets the fault and returns the FSM to IDLE.
+    if (PathTracker.hasFault())
+    {
+        PathTracker.clearFault();
+    }
+
+    // Also clear Drive's OWN latched fault (#2). A return seek that ran to its max distance
+    // latched `Fault::LINE_NOT_FOUND` on Drive and surfaced PathTracker `OFF_NODE`;
+    // `PathTracker.clearFault()` does NOT touch Drive and `Drive.stop()` does not clear it
+    // either, so without this the very next `goTo()` trips the generic Drive-fault guard
+    // (-> `Fault::DRIVE_FAULT`) and the robot is unrecoverable without a reboot. Harmless (a
+    // no-op) when Drive has no fault latched.
+    Drive.clearFault();
+
+    // Surface the recovery so the operator sees it happened (OLED + Serial). Buffer width
+    // tracks EventTrace's ring slot so the truncation rule stays single-sourced. `name` is
+    // non-null here: a null name resolves to NODE_NONE above and returns at the unknown-node
+    // branch, so the defensive `name == nullptr` ternary on this success path was dead (#11).
+    char buf[EventTraceClass::MAX_LINE_LEN];
+    snprintf(buf, sizeof(buf), "DECL %s", name);
+    EventTrace.pushEvent(buf);
+    Serial.print(F("[Mission] declarePosition "));
+    Serial.println(name);
+    return true;
 }
 
 bool MissionClass::isIdle() const
