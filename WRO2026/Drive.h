@@ -270,7 +270,7 @@ public:
     /**
      * @brief Continuously drive forward holding the most recent yaw target.
      *
-     * Routes to `MiniR4.DriveDC.MoveGyro(power, YawSource::toHwHeading(_heldYaw))` — `_heldYaw`
+     * Routes to `MiniR4.DriveDC.MoveGyro(power, YawSource.toHwHeading(_heldYaw))` — `_heldYaw`
      * is an app-frame (CCW-positive) heading, converted to the STM32 raw frame at the call
      * boundary (ADR-044). Update the held yaw with `holdYaw()` (snapshot the IMU now) or by
      * issuing a turn (turns update `_heldYaw` to the post-turn target).

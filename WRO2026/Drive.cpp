@@ -174,7 +174,7 @@ uint8_t DriveClass::forwardGyro(int16_t power)
     // shared PWM cap/deadband floor for uniform clamping (finding #14).
     // GYRO precondition (ADR-044): _heldYaw is an app-frame (CCW-positive) heading; toHwHeading
     // converts it to the STM32 raw frame. NEVER pass a raw heading here — it would double-correct.
-    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), YawSource::toHwHeading(_heldYaw));
+    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), YawSource.toHwHeading(_heldYaw));
 }
 
 uint8_t DriveClass::stop(bool brake)
@@ -263,7 +263,7 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
     const uint16_t encDeg = cmToEncDeg(cm);
     // GYRO precondition (ADR-044): `yaw` is an app-frame heading; toHwHeading converts to raw.
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), YawSource::toHwHeading(yaw), encDeg, brake, !blocking);
+        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), YawSource.toHwHeading(yaw), encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -315,7 +315,7 @@ uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
     // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
     // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
     // GYRO precondition (ADR-044): `yaw` is an app-frame heading; toHwHeading converts to raw.
-    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), YawSource::toHwHeading(yaw), sec, brake, !blocking);
+    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), YawSource.toHwHeading(yaw), sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -684,7 +684,7 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
         // converts to raw. All three GYRO channels feeding this (_profileHeading / _stopHeading
         // / _wallHeading) carry app-frame values, so this single wrap covers straight-line,
         // stop-at-line, and wall-stop alike.
-        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), YawSource::toHwHeading(heading));
+        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), YawSource.toHwHeading(heading));
         break;
     }
 }
