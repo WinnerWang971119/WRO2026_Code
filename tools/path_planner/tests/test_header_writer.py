@@ -945,7 +945,7 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
         RESET_NODES={
-            "Wall1": {"axis": "y", "wall_coord": 154.0, "facing": 90.0},
+            "Wall1": {"axis": "y", "wall_coord": 154.0, "facing": 270.0},
         },
     )
     header_path, source_path = emit_targets
@@ -971,7 +971,7 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
     # The single emitted ResetNode row: axis "y" -> 1 (x=0/y=1 contract),
     # wall_coord as a float, facing rounded to int16_t.
     expected_row = (
-        "{ " + str(wall1_idx) + ", 1, " + "{:.6f}f".format(154.0) + ", 90 },"
+        "{ " + str(wall1_idx) + ", 1, " + "{:.6f}f".format(154.0) + ", 270 },"
     )
     assert expected_row in cpp_text, (
         "expected ResetNode row " + expected_row + " not found in:\n" + cpp_text
