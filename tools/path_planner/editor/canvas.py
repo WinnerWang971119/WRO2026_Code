@@ -55,6 +55,14 @@ from tools.path_planner.graph_builder import inflate_obstacles  # noqa: E402
 _BACKGROUND_ALPHA: float = 0.6
 _BACKGROUND_ZORDER: int = 0
 
+# Sentinel stored in the per-instance background cache when a map PNG is
+# missing or fails to decode. Caching the *failure* (rather than leaving the
+# key absent) is what stops :meth:`FieldCanvas._draw_background` from
+# re-attempting a doomed ``imread`` -- and re-warning -- on every render tick
+# during a drag. A cache value of ``_BACKGROUND_NONE`` means "this path has
+# no usable background; do not try again".
+_BACKGROUND_NONE: object = object()
+
 # Raw obstacle outline (axis-aligned rectangle from ``field_data.OBSTACLES``).
 _OBSTACLE_RAW_LINEWIDTH: float = 0.8
 _OBSTACLE_RAW_EDGECOLOR: str = "black"
@@ -192,6 +200,15 @@ class FieldCanvas:
         # find-node helper) can ask "what's at (x, y)?" without
         # re-passing the model on every query.
         self._last_model: Optional[FieldModel] = None
+
+        # Per-instance background cache keyed by the *resolved* absolute map
+        # path string. A hit reuses the already-decoded image array; a miss
+        # calls ``mpimg.imread`` exactly once. Failed/missing loads store the
+        # ``_BACKGROUND_NONE`` sentinel so a doomed decode -- and its warning
+        # -- is not re-attempted on every render tick during a drag. The
+        # decoded array's type is backend-specific (a NumPy ``ndarray``), so
+        # the value is typed loosely as ``object``.
+        self._bg_cache: dict[str, object] = {}
 
         # Wire matplotlib's event system into our three Python callbacks.
         # Connection IDs are stashed so a future ``destroy`` method (out of
@@ -520,23 +537,32 @@ class FieldCanvas:
         absolute paths are used as-is; relative paths are resolved
         against ``tools/path_planner/``. A missing file is non-fatal —
         the axes are simply left with their default white facecolor.
+
+        The decoded PNG is cached per-instance in :attr:`_bg_cache`, keyed by
+        the resolved absolute path string, so it is read from disk only once
+        and reused on every subsequent render. This matters because
+        :meth:`render` runs on every mouse-motion tick during a drag; without
+        the cache the PNG would be re-decoded dozens of times per second. A
+        missing or unreadable PNG caches a "no background" sentinel so the
+        doomed decode (and its warning) is not re-attempted every frame.
+
+        :param model: Source of the ``map_png`` path and field extent.
+        :param width_cm: Field width in centimetres (image extent x-max).
+        :param height_cm: Field height in centimetres (image extent y-max).
+        :return: ``None``.
         """
         map_path = self._resolve_map_png(model)
-        if map_path is None or not map_path.exists():
-            # No background image; the default white axes facecolor is
-            # fine. Render nothing.
+        if map_path is None:
+            # No ``map_png`` configured at all; the default white axes
+            # facecolor is fine. Nothing to cache or draw.
             return
-        try:
-            img = mpimg.imread(str(map_path))
-        except (FileNotFoundError, PermissionError, OSError, ValueError) as exc:
-            warnings.warn(
-                f"FieldCanvas: failed to load map.png at {map_path} "
-                f"({type(exc).__name__}: {exc}); rendering without "
-                "background.",
-                UserWarning,
-                stacklevel=2,
-            )
+
+        image = self._cached_background(map_path)
+        if image is _BACKGROUND_NONE:
+            # Missing/unreadable PNG (already warned + cached as the
+            # sentinel). Render on the default white facecolor.
             return
+
         # ``origin="upper"`` (vs. the visualizer's ``"lower"``) flips the
         # PNG vertically so the editor view matches the operator's
         # physical orientation of the field mat. Nodes, edges, obstacles,
@@ -546,12 +572,59 @@ class FieldCanvas:
         # set in :meth:`render`. Passing ``aspect="auto"`` would override
         # that and re-stretch the field rectangle on every window resize.
         self._ax.imshow(
-            img,
+            image,
             extent=(0.0, width_cm, 0.0, height_cm),
             origin="upper",
             alpha=_BACKGROUND_ALPHA,
             zorder=_BACKGROUND_ZORDER,
         )
+
+    def _cached_background(self, map_path: Path) -> object:
+        """Return the decoded background array for *map_path*, caching it.
+
+        On a cache miss the PNG is decoded from disk exactly once via
+        ``mpimg.imread`` and the resulting array is stored under the resolved
+        absolute path string. If the file is missing or ``imread`` raises, the
+        :data:`_BACKGROUND_NONE` sentinel is cached instead (warning once, the
+        first time the failure is recorded for that path) so the doomed decode
+        is never retried on subsequent renders. On a cache hit the stored
+        value — a decoded array or the sentinel — is returned untouched
+        without touching the disk.
+
+        :param map_path: Resolved absolute path to the candidate map PNG (from
+            :meth:`_resolve_map_png`).
+        :return: The decoded image array on success, or :data:`_BACKGROUND_NONE`
+            when the PNG is missing or could not be decoded.
+        """
+        key = str(map_path)
+        cached = self._bg_cache.get(key, None)
+        if cached is not None:
+            return cached
+
+        if not map_path.exists():
+            # Cache the failure so we don't re-stat / re-warn every frame.
+            # A missing file is non-fatal: the visualizer parity behaviour is
+            # to render on the default white facecolor, so we stay silent here
+            # to match the pre-cache contract (which only warned on a decode
+            # error, not on a plain absent file).
+            self._bg_cache[key] = _BACKGROUND_NONE
+            return _BACKGROUND_NONE
+
+        try:
+            image = mpimg.imread(key)
+        except (FileNotFoundError, PermissionError, OSError, ValueError) as exc:
+            warnings.warn(
+                f"FieldCanvas: failed to load map.png at {map_path} "
+                f"({type(exc).__name__}: {exc}); rendering without "
+                "background.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._bg_cache[key] = _BACKGROUND_NONE
+            return _BACKGROUND_NONE
+
+        self._bg_cache[key] = image
+        return image
 
     def _draw_obstacles(self, model: FieldModel) -> None:
         """Draw raw rectangles + C-space inflated polygons for obstacles."""
