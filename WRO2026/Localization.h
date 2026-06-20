@@ -103,8 +103,9 @@ public:
     /**
      * @brief Capture the IMU yaw NOW and bind the world-frame offset.
      *
-     * Reads the IMU yaw through the result-surfacing lower-MCU call (`mmL.GetIMUEuler`). On
-     * an OK read computes `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG` and sets
+     * Reads the corrected (app CCW-positive) IMU yaw through `YawSource` — the single owner of
+     * the lower-MCU read, which applies `Config::IMU_YAW_SIGN` (ADR-044). On an OK read computes
+     * `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG` and sets
      * `_zeroed = true`. Must be called once on the start-button press AFTER the operator has
      * physically placed the chassis on `Routes::START_NODE` facing the start heading.
      *
@@ -154,7 +155,8 @@ public:
     /**
      * @brief Read the current world-frame heading in degrees (live IMU read).
      *
-     * Issues a single lower-MCU IMU read (`mmL.GetIMUEuler`). On an OK read computes
+     * Issues a single corrected IMU read through `YawSource` (applies `Config::IMU_YAW_SIGN`,
+     * ADR-044). On an OK read computes
      * `normalize(imu_yaw - _yawOffsetDeg)` to `[0, 360)` and refreshes the last-good cache.
      * On a NON-OK read (transient STM32 comms timeout) the underlying out-param is left
      * untouched by the library, so this method returns the LAST GOOD heading instead of a
@@ -193,16 +195,19 @@ public:
     uint32_t getLastHeadingUpdateMs() const;
 
     /**
-     * @brief Convert a world-frame heading to the IMU-frame yaw value `Drive.turnToYaw`
-     *        expects.
+     * @brief Convert a world-frame heading to the corrected app-frame yaw value
+     *        `Drive.turnToYaw` expects.
      *
-     * Result = `normalize(worldHeadingDeg + _yawOffsetDeg)` rounded to `int16_t`. The
-     * `Drive` layer further normalises to `(-360, +360)` via `_normalizeYaw` before
-     * dispatching to the lower MCU.
+     * Result = `normalize(worldHeadingDeg + _yawOffsetDeg)` rounded to `int16_t`. This is in
+     * the corrected app (CCW-positive) frame — the SAME frame `YawSource` reads return, NOT the
+     * raw STM32 frame. The custom turn loop compares it directly against corrected reads; a GYRO
+     * straight-line write converts it to the raw frame via `YawSource::toHwHeading` at the call
+     * site (ADR-044). The `Drive` layer further normalises to `(-360, +360)` via `_normalizeYaw`.
      *
      * @param worldHeadingDeg  World-frame heading in `[0, 360)`. Out-of-range values are
      *                         normalised before the offset is applied.
-     * @return IMU-frame yaw target as an `int16_t`.
+     * @return Corrected app-frame yaw target as an `int16_t` (a gyro-PID write applies
+     *         `toHwHeading` first; never pass this raw to the STM32).
      */
     int16_t toImuYaw(float worldHeadingDeg) const;
 
