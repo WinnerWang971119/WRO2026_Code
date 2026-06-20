@@ -159,7 +159,7 @@ int main()
     // ACCEPT cases: on-normal, exactly-at-tolerance (both sides), and just-inside.
     // -------------------------------------------------------------------------------------
     {
-        const bool onNormal = attemptReanchorAtYaw(90.0);
+        const bool onNormal = attemptReanchorAtYaw(-90.0);
         check(onNormal, "TC12 (ON): on-normal (diff 0) re-anchors");
         check(approx(Localization.getHeadingDeg(), kFacingDeg, 0.5f),
               "TC12 (ON): on-normal accept binds heading to the wall normal");
@@ -168,13 +168,13 @@ int main()
               "TC12 (ON): on-normal accept re-zeros the on-axis coordinate to the axle (wall_coord - offset)");
 
         // Exactly at the tolerance, high side: diff == 10 -> ACCEPT (inclusive `>` boundary).
-        check(attemptReanchorAtYaw(100.0),
+        check(attemptReanchorAtYaw(-100.0),
               "TC12 (ON): diff exactly == tolerance (high side) re-anchors (inclusive boundary)");
         // Exactly at the tolerance, low side: diff == 10 -> ACCEPT.
-        check(attemptReanchorAtYaw(80.0),
+        check(attemptReanchorAtYaw(-80.0),
               "TC12 (ON): diff exactly == tolerance (low side) re-anchors (inclusive boundary)");
         // Just inside: diff 9.5 -> ACCEPT.
-        check(attemptReanchorAtYaw(99.5),
+        check(attemptReanchorAtYaw(-99.5),
               "TC12 (ON): diff just inside the tolerance (9.5 < 10) re-anchors");
     }
 
@@ -184,12 +184,12 @@ int main()
     // -------------------------------------------------------------------------------------
     {
         // Just outside, high side: diff 10.5 > 10 -> REJECT.
-        expectRejectNoMutation(100.5, "TC12 (ON): diff just outside (10.5 > 10) REJECTS the reanchor");
+        expectRejectNoMutation(-100.5, "TC12 (ON): diff just outside (10.5 > 10) REJECTS the reanchor");
         // Just outside, low side: diff 10.5 -> REJECT.
-        expectRejectNoMutation(79.5, "TC12 (ON): diff just outside (low side) REJECTS the reanchor");
+        expectRejectNoMutation(-79.5, "TC12 (ON): diff just outside (low side) REJECTS the reanchor");
         // Far off-normal (AC11 core): chassis stopped against a corner/obstacle, not the wall.
-        expectRejectNoMutation(70.0, "TC12 (ON): far off-normal (diff 20) REJECTS the reanchor");
-        expectRejectNoMutation(130.0, "TC12 (ON): far off-normal (diff 40) REJECTS the reanchor");
+        expectRejectNoMutation(-70.0, "TC12 (ON): far off-normal (diff 20) REJECTS the reanchor");
+        expectRejectNoMutation(-130.0, "TC12 (ON): far off-normal (diff 40) REJECTS the reanchor");
     }
 
     // -------------------------------------------------------------------------------------
@@ -203,12 +203,12 @@ int main()
         Localization.update();
 
         // Reject once (far off-normal)...
-        mmL.mockYawDeg = 60.0;
+        mmL.mockYawDeg = -60.0;
         check(!Localization.reanchorAtWall(kAxisY, kWallCoordY, kFacingDeg),
               "TC12 (ON): off-normal reanchor rejects");
 
         // ...then succeed once the chassis is squared (yaw back on-normal).
-        mmL.mockYawDeg = 92.0;    // diff 2 -> well inside tolerance.
+        mmL.mockYawDeg = -92.0;    // diff 2 -> well inside tolerance.
         check(Localization.reanchorAtWall(kAxisY, kWallCoordY, kFacingDeg),
               "TC12 (ON): a later in-tolerance reanchor succeeds after an earlier reject");
         check(approx(believedCoordOnAxis(kResetNode, kAxisY),

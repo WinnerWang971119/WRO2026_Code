@@ -250,7 +250,7 @@ int main()
         // REANCHOR with the wallStop ADVISORY set: call the REAL reanchor (assume-at-wall) and feed
         // its genuine outcome into the slice. Live IMU yaw is off-normal (60), but strict is OFF so
         // the real reanchor accepts.
-        mmL.mockYawDeg = 60.0;
+        mmL.mockYawDeg = -60.0;
         const bool reanchorOk =
             Localization.reanchorAtWall(info->axis, info->wall_coord, (float) info->facing);
         check(reanchorOk, "TC10b: real reanchorAtWall accepts under the advisory (strict OFF)");
@@ -293,7 +293,7 @@ int main()
         fsm.maybeEnterReset(kResetNode);
         fsm.tickWallStop(/*driveIsIdle*/ true);
 
-        mmL.mockYawDeg = 90.0;    // squared to the normal.
+        mmL.mockYawDeg = -90.0;    // squared to the normal.
         const bool reanchorOk =
             Localization.reanchorAtWall(info->axis, info->wall_coord, (float) info->facing);
 
