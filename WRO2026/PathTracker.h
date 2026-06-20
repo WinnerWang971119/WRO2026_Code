@@ -218,15 +218,16 @@ class PathTrackerClass
 public:
     enum class Fault : uint8_t
     {
-        NONE                = 0,
-        NOT_ZEROED          = 1,
-        UNREACHABLE         = 2,
-        DRIVE_FAULT         = 3,
-        BAD_NODE            = 4,
-        DRAIN_TIMEOUT       = 5,
-        REVERSE_UNAVAILABLE = 6,
-        OFF_NODE            = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
-        WALL_NOT_SQUARE     = 8  ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
+        NONE                 = 0,
+        NOT_ZEROED           = 1,
+        UNREACHABLE          = 2,
+        DRIVE_FAULT          = 3,
+        BAD_NODE             = 4,
+        DRAIN_TIMEOUT        = 5,
+        REVERSE_UNAVAILABLE  = 6,
+        OFF_NODE             = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
+        WALL_NOT_SQUARE      = 8, ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
+        PIVOT_TRIM_UNDERFLOW = 9  ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
     };
 
     /**

@@ -20,7 +20,13 @@ _FIELD_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
+    # _run builds BlindDecayParams.from_field_data, so a cloned/monkeypatched
+    # field-data namespace must carry all four or the planner call AttributeErrors.
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",

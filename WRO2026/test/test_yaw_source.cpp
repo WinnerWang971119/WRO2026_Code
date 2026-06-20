@@ -1,5 +1,5 @@
 // =========================================================================================
-// Host unit test for the YawSource CW->CCW adapter (YawSource.cpp, ADR-044, TC3/TC4).
+// Host unit test for the YawSource CW->CCW adapter (YawSource.cpp, ADR-045, TC3/TC4).
 //
 // FIRST host target to compile the REAL production `YawSource.cpp` standalone. YawSource is
 // the SOLE owner of lower-MCU IMU yaw I/O and the SOLE applier of `Config::IMU_YAW_SIGN`:

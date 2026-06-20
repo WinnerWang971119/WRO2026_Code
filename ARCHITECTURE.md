@@ -81,7 +81,7 @@ WRO2026.ino
                     reads its raw yaw through YawSource)
   YawSource ────── (sole owner of raw IMU yaw I/O; applies Config::IMU_YAW_SIGN to bridge
                     the hardware CW-positive raw yaw and the app CCW-positive frame; read by
-                    Drive — turn loop + gyro-straight writes — and Localization — heading; ADR-044)
+                    Drive — turn loop + gyro-straight writes — and Localization — heading; ADR-045)
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
@@ -110,12 +110,12 @@ writer module does not.
 | Module | Owns | Key surface |
 |---|---|---|
 | `Config` | umbrella over `config/` per-domain sub-headers (Global/Drive/Line/Nav/Mission/Manipulator/Vision/Checks) | `MOTOR_LEFT_ID`, `LINE_KP`, `TSHAPE_ACCEL_PWM_PER_CM`, ... |
-| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; wall-zero push via `wallStop` (reuses the stall watchdog inverted, ADR-043); shared resolvers via header-only policies `StopAtLinePolicy.h` / `DirectionPolicy.h` / `PivotTrimPolicy.h` / `TurnSignPolicy.h`; reads raw yaw + writes gyro headings via `YawSource` (ADR-044) | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `wallStop(cm).setReverse(...).setBackOff(...).setTimeout(...)`, `wallStopTimedOut()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
+| `Drive` | motion primitives + fluent builders + queue + T-shape; reads `WROLineArray` (read-only) for stop-on-line (forward and reverse, ADR-027); seek drive mode + stall watchdog; wall-zero push via `wallStop` (reuses the stall watchdog inverted, ADR-043); shared resolvers via header-only policies `StopAtLinePolicy.h` / `DirectionPolicy.h` / `PivotTrimPolicy.h` / `TurnSignPolicy.h`; reads raw yaw + writes gyro headings via `YawSource` (ADR-045) | `setSpeed(L,R)`, `driveDist(cm).setMode(...).tShape()`, `turnDeg(deg)`, `turnToYaw(yaw)`, `stopAtLine(cm).setMode(...).setArmWithin(...).setReverse(...)`, `isLineFound()`, `wallStop(cm).setReverse(...).setBackOff(...).setTimeout(...)`, `wallStopTimedOut()`, `stop()`, `isIdle()`, `waitUntilIdle()`, `calibrateMotorBias()`, `setTickCallback(...)` |
 | `TurnSignPolicy` | header-only turn-direction math extracted from `Drive.cpp` (host-testable, zero Arduino surface) | `normalizeTurnDelta(delta) → int32_t`, `turnSign(foldedDelta) → int8_t`, `turnWheelPattern(sign,pwm,mode) → TurnWheels` |
 | `LineFollower` | outer P+D, lost-line, distance gate | `setEnabled(bool).setBrake(...).setDistanceTarget(...).tShape()`, `followDistance(cm)`, `followUntilIntersection()`, `isLineLost()`, `isDistanceReached()` |
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |
-| `YawSource` | sole owner of raw lower-MCU IMU yaw I/O; applies `Config::IMU_YAW_SIGN` to convert the hardware CW-positive raw yaw to the app CCW-positive frame on read, and app headings back to raw for STM32 gyro-PID writes (ADR-044); read by `Drive` + `Localization` | `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
+| `YawSource` | sole owner of raw lower-MCU IMU yaw I/O; applies `Config::IMU_YAW_SIGN` to convert the hardware CW-positive raw yaw to the app CCW-positive frame on read, and app headings back to raw for STM32 gyro-PID writes (ADR-045); read by `Drive` + `Localization` | `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
 | `Localization` | current node + IMU-yaw offset (single writer); reads its raw yaw through `YawSource` | `zeroHeadingFromCurrent()`, `getCurrentNode()`, `getHeadingDeg()`, `toImuYaw(world)`, `onIntersection(advanceTo)`, `onDeadReckonedAdvance(advanceTo)`, `reanchorAtWall(axis,coord,heading)` (wall-zero re-anchor, ADR-043) |
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |
 | `routes` | **auto-generated** graph data | `Routes::NODES[N]`, `Routes::NEXT_HOP[N][N]`, `Routes::EDGES[N][N]`, `Routes::PIPELINE_CONFIG` |

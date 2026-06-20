@@ -111,7 +111,7 @@ namespace Config
     constexpr float BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90.0f;
 
     // =========================================================================================
-    // IMU yaw sign — hardware CW-positive → app CCW-positive conversion (ADR-044).
+    // IMU yaw sign — hardware CW-positive → app CCW-positive conversion (ADR-045).
     //
     // The STM32 coprocessor reports yaw in a CW-positive frame; the app world frame is
     // CCW-positive (standard mathematical convention).  A single multiplicative sign

@@ -1,5 +1,5 @@
 // =========================================================================================
-// Host unit test for the turn-sign + wheel-pattern math (TurnSignPolicy.h, ADR-044, TC5/TC6).
+// Host unit test for the turn-sign + wheel-pattern math (TurnSignPolicy.h, ADR-045, TC5/TC6).
 //
 // `normalizeTurnDelta` / `turnSign` / `turnWheelPattern` were promoted out of Drive.cpp into
 // header-only inline policies so production AND this host test link the SAME symbols — the

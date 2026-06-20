@@ -272,7 +272,7 @@ public:
      *
      * Routes to `MiniR4.DriveDC.MoveGyro(power, YawSource.toHwHeading(_heldYaw))` — `_heldYaw`
      * is an app-frame (CCW-positive) heading, converted to the STM32 raw frame at the call
-     * boundary (ADR-044). Update the held yaw with `holdYaw()` (snapshot the IMU now) or by
+    * boundary (ADR-045). Update the held yaw with `holdYaw()` (snapshot the IMU now) or by
      * issuing a turn (turns update `_heldYaw` to the post-turn target).
      *
      * @param power Drive power in `[-100, 100]`. Negative drives backwards while still
@@ -554,7 +554,7 @@ public:
     /**
      * @brief Current IMU yaw in degrees, in the corrected app (CCW-positive) frame.
      * @return Corrected app-frame yaw via `YawSource::readYawDegOr` (which applies
-     *         `Config::IMU_YAW_SIGN`); best-effort `0.0` on a transient read failure (ADR-044).
+    *         `Config::IMU_YAW_SIGN`); best-effort `0.0` on a transient read failure (ADR-045).
      *         NOT the raw `MiniR4.Motion.getEuler` value — do not re-apply the sign.
      */
     double getYaw() const;

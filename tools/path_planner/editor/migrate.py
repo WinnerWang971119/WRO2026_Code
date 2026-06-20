@@ -56,14 +56,17 @@ from tools.path_planner.editor.loader import dump_field_json
 _FIELD_DATA_PY: Path = Path(__file__).resolve().parent.parent / "field_data.py"
 _FIELD_DATA_JSON: Path = Path(__file__).resolve().parent.parent / "field_data.json"
 
-# The eleven module attributes the legacy ``field_data.py`` exposes that the
+# The fourteen module attributes the legacy ``field_data.py`` exposes that the
 # JSON sidecar must capture.  Order matches the schema's documented top-level
 # key order; ``loader.dump_field_json`` re-orders these as needed.
 _ATTRS_TO_CAPTURE: tuple[str, ...] = (
     "FIELD_MM",
     "MAP_PNG",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "NODES",
@@ -345,7 +348,7 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
 
     The header is a fixed template: the captured docstring, the loader and
     enum imports the rich-``EDGES`` table needs, the ``_data = load_field_json()``
-    call, and the eleven aliases that re-expose the JSON values under the
+    call, and the fourteen aliases that re-expose the JSON values under the
     original module-attribute names.
 
     The tail is then appended, *normalised* so exactly one blank line
@@ -373,7 +376,10 @@ def _build_rewritten_source(docstring: str, tail: str) -> str:
         'FIELD_MM              = _data["FIELD_MM"]',
         'MAP_PNG               = _data["MAP_PNG"]',
         'ROBOT_RADIUS_CM       = _data["ROBOT_RADIUS_CM"]',
-        'COST_BLIND_MULTIPLIER = _data["COST_BLIND_MULTIPLIER"]',
+        'BLIND_DECAY_ENABLED   = _data["BLIND_DECAY_ENABLED"]',
+        'BLIND_DECAY_K         = _data["BLIND_DECAY_K"]',
+        'BLIND_DECAY_EXPONENT  = _data["BLIND_DECAY_EXPONENT"]',
+        'BLIND_DECAY_D_REF     = _data["BLIND_DECAY_D_REF"]',
         'START_NODE            = _data["START_NODE"]',
         'START_HEADING_DEG     = _data["START_HEADING_DEG"]',
         'NODES                 = _data["NODES"]',

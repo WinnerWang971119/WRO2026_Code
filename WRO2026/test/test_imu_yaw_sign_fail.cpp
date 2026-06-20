@@ -3,7 +3,7 @@
  * @brief TC7 / AC4 — Compile-fail target proving the IMU_YAW_SIGN tripwire in
  *        ``ConfigChecks.h`` fires for a non-(+/-1) sign.
  *
- * ADR-044 negative branch. T7's CMake declares ONE ``EXCLUDE_FROM_ALL`` +
+ * ADR-045 negative branch. T7's CMake declares ONE ``EXCLUDE_FROM_ALL`` +
  * ``EXCLUDE_FROM_DEFAULT_BUILD`` target (``test_imu_yaw_sign_zero``) that compiles
  * this TU with the override:
  *

@@ -44,12 +44,15 @@ from tools.path_planner.editor import loader as loader_mod
 # Module-level constants
 # ---------------------------------------------------------------------------
 
-# The 11 public attributes the migration promises to preserve by repr().
+# The 14 public attributes the migration promises to preserve by repr().
 _PUBLIC_ATTRS = (
     "FIELD_MM",
     "MAP_PNG",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "NODES",
@@ -68,7 +71,10 @@ _PRE_MIGRATION_SOURCE = textwrap.dedent('''\
     FIELD_MM = (3000, 2000)
     MAP_PNG = "maps/map.png"
     ROBOT_RADIUS_CM = 8.0
-    COST_BLIND_MULTIPLIER = 5.0
+    BLIND_DECAY_ENABLED = True
+    BLIND_DECAY_K = 0.05
+    BLIND_DECAY_EXPONENT = 2.0
+    BLIND_DECAY_D_REF = 50.0
     START_NODE = "A"
     START_HEADING_DEG = 0.0
     NODES = {
@@ -293,9 +299,9 @@ def test_migrate_emits_pivot_turns_when_source_exposes_it(
 ) -> None:
     """A source module with PIVOT_TURNS migrates the key into the JSON sidecar.
 
-    The pivot key is optional, so it is captured separately from the eleven
+    The pivot key is optional, so it is captured separately from the fourteen
     required attrs. This test feeds a synthetic module exposing PIVOT_TURNS
-    and a capture fn mirroring migrate._capture_module_attributes (the eleven
+    and a capture fn mirroring migrate._capture_module_attributes (the fourteen
     required attrs plus the optional lowercase pivot_turns key), then asserts
     the written JSON carries pivot_turns and the rewritten file re-exports it.
     """

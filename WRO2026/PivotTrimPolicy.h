@@ -28,8 +28,11 @@
  * pattern (PR #34), which killed the per-test replicas those decisions used to
  * need.
  *
- * Cross-language parity: keep step-for-step identical with
- * `tools/path_planner/sim/runtime.py::PathTrackerSim._pivot_trim_distance`.
+ * Cross-language parity: keep step-for-step identical with the Python core
+ * `tools/path_planner/sim/runtime.py::resolve_pivot_trim`, which both
+ * `PathTrackerSim._pivot_trim_distance` and `resolve_sensor_overshoot_trim`
+ * delegate to (mirroring this header's `resolvePivotTrim` /
+ * `resolveSensorOvershootTrim` split) so neither language can drift.
  */
 
 /**
@@ -73,6 +76,53 @@ inline PivotTrimResolution resolvePivotTrim(
         result.driveCm = result.effectiveCm;
         result.clamped = false;
     }
+    return result;
+}
+
+/**
+ * @brief Outcome of the overshoot decision for one SENSOR-anchored hop.
+ *
+ * @note `overshootCm` is the post-detect axle roll the caller commands so the
+ *       chassis settles `delta` short of the pivot node (`>= floor`). `clamped`
+ *       reports whether the floor fired, mirroring `PivotTrimResolution`.
+ */
+struct SensorOvershootResolution
+{
+    float overshootCm;    ///< post-detect axle roll: max(offset - approachingTrim, floor).
+    bool  clamped;        ///< true if the floor clamp fired (caller traces it).
+};
+
+/**
+ * @brief Reduce a sensor-anchored hop's post-detect overshoot by the approaching
+ *        pivot trim so the axle settles `delta` short of the pivot node.
+ *
+ * Thin wrapper over `resolvePivotTrim(axleOffsetCm, 0.0f, approachingTrimCm,
+ * minDriveCm)`, mapping `driveCm -> overshootCm`. The two helpers share one
+ * subtract-and-clamp so the SENSOR path and the DISTANCE path can never drift.
+ *
+ * @param axleOffsetCm      Nominal post-detect roll: line edge to the axle.
+ * @param approachingTrimCm Approach trim of the pivot being ENTERED, or 0 if none.
+ * @param minDriveCm        `Config::PIVOT_TRIM_MIN_DRIVE_CM` underflow floor.
+ * @return `{overshootCm, clamped}` -- `overshootCm = max(axleOffsetCm -
+ *         approachingTrimCm, minDriveCm)`, `clamped` true iff the floor fired.
+ *
+ * @note Departing trim is intentionally NOT a parameter: a sensor-terminated hop
+ *       self-corrects on the line, so the over-travel of the pivot just left does
+ *       not accumulate into this roll (ADR-044 D1). Passing the departing slot as
+ *       a hard-coded `0.0f` keeps the shared formula honest.
+ * @note Cross-language parity: keep step-for-step identical with
+ *       `tools/path_planner/sim/runtime.py::resolve_sensor_overshoot_trim`.
+ */
+inline SensorOvershootResolution resolveSensorOvershootTrim(
+    float axleOffsetCm,
+    float approachingTrimCm,
+    float minDriveCm)
+{
+    PivotTrimResolution       pivot = resolvePivotTrim(
+        axleOffsetCm, /*departingTrimCm=*/0.0f, approachingTrimCm, minDriveCm);
+    SensorOvershootResolution result;
+    result.overshootCm = pivot.driveCm;
+    result.clamped     = pivot.clamped;
     return result;
 }
 

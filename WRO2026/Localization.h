@@ -104,7 +104,7 @@ public:
      * @brief Capture the IMU yaw NOW and bind the world-frame offset.
      *
      * Reads the corrected (app CCW-positive) IMU yaw through `YawSource` — the single owner of
-     * the lower-MCU read, which applies `Config::IMU_YAW_SIGN` (ADR-044). On an OK read computes
+    * the lower-MCU read, which applies `Config::IMU_YAW_SIGN` (ADR-045). On an OK read computes
      * `_yawOffsetDeg = imu_yaw - Routes::START_HEADING_DEG` and sets
      * `_zeroed = true`. Must be called once on the start-button press AFTER the operator has
      * physically placed the chassis on `Routes::START_NODE` facing the start heading.
@@ -156,7 +156,7 @@ public:
      * @brief Read the current world-frame heading in degrees (live IMU read).
      *
      * Issues a single corrected IMU read through `YawSource` (applies `Config::IMU_YAW_SIGN`,
-     * ADR-044). On an OK read computes
+    * ADR-045). On an OK read computes
      * `normalize(imu_yaw - _yawOffsetDeg)` to `[0, 360)` and refreshes the last-good cache.
      * On a NON-OK read (transient STM32 comms timeout) the underlying out-param is left
      * untouched by the library, so this method returns the LAST GOOD heading instead of a
@@ -202,7 +202,7 @@ public:
      * the corrected app (CCW-positive) frame — the SAME frame `YawSource` reads return, NOT the
      * raw STM32 frame. The custom turn loop compares it directly against corrected reads; a GYRO
      * straight-line write converts it to the raw frame via `YawSource::toHwHeading` at the call
-     * site (ADR-044). The `Drive` layer further normalises to `(-360, +360)` via `_normalizeYaw`.
+    * site (ADR-045). The `Drive` layer further normalises to `(-360, +360)` via `_normalizeYaw`.
      *
      * @param worldHeadingDeg  World-frame heading in `[0, 360)`. Out-of-range values are
      *                         normalised before the offset is applied.
@@ -398,7 +398,7 @@ private:
     /**
      * @brief Read the corrected (app CCW-positive) IMU yaw via the single-owner `YawSource`.
      *
-     * Thin adapter over `YawSource::readYawDeg` (ADR-044), which performs the result-surfacing
+    * Thin adapter over `YawSource::readYawDeg` (ADR-045), which performs the result-surfacing
      * lower-MCU read (`mmL.GetIMUEuler`, retry-once) and applies `Config::IMU_YAW_SIGN` to
      * convert the hardware CW-positive raw yaw into the app frame. On a non-OK read `yawOut` is
      * left untouched, so callers can distinguish a real read from a silent comms timeout.

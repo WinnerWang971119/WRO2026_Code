@@ -6,7 +6,7 @@
 /**
  * @file TurnSignPolicy.h
  * @brief Single source of truth for the turn-direction sign + wheel-pattern math
- *        (ADR-044, IMU yaw sign normalization).
+ *        (ADR-045, IMU yaw sign normalization).
  *
  * Three pure free functions answer the "which way, how hard, on which wheels"
  * question for an in-place turn:

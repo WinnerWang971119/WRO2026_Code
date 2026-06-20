@@ -83,6 +83,7 @@
 #include "routes.h"            // For Routes::BlindMode.
 #include "FieldMap.h"          // For FieldMap::NODE_NONE.
 #include "StopAtLinePolicy.h"  // resolveStopAtLine + StopAtLineResolution (real resolver).
+#include "PivotTrimPolicy.h"   // resolveSensorOvershootTrim + SensorOvershootResolution (real helper).
 
 #include <stdint.h>
 #include <cstdio>
@@ -733,6 +734,161 @@ static void test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek()
 }
 
 // ===========================================================================
+// TC4 — seek-overshoot dispatch mirror (issue #65, ADR-044 D1).
+//
+// The BLIND→STOP_AT_LINE dispatch reduces the seek's post-detect axle roll by
+// the APPROACHING pivot trim so a seek into a pivot lands the axle δ short of
+// the node, exactly like every other approach mechanism. The firmware selects
+// the trim with `_approachingPivot.active ? _approachingPivot.trim_cm : 0` and
+// feeds it through the REAL `resolveSensorOvershootTrim(...)` helper, whose
+// result becomes `Drive.stopAtLine(...).setOvershoot(seekOvershoot.overshootCm)`.
+//
+// This replica mirrors ONLY the active-selector + helper call (the production
+// `_approachingPivot` state is modelled as two plain inputs, exactly as the
+// Drive fault/idle observations are in the TC14 replica). It calls the SAME
+// header-only `resolveSensorOvershootTrim` symbol production links — the math
+// is NOT re-derived here.
+//
+// MIRROR: PathTracker.cpp:1673 (seekApproachTrim = active ? trim : 0 → the seek
+//         resolveSensorOvershootTrim call → Drive.stopAtLine(..).setOvershoot(..)).
+// ===========================================================================
+
+/// Approx-equality for the float overshoot (no float ASSERT macro exists).
+/// Matches the 1e-4f tolerance the sibling `test_sensor_overshoot_policy` uses.
+static bool seekOvershootApprox(float a, float b)
+{
+    const float d = a - b;
+    return (d < 0.0f ? -d : d) < 1e-4f;
+}
+
+/// Replica of the BLIND→STOP_AT_LINE seek-overshoot computation. Mirrors the
+/// firmware's direction-resolved offset + approaching-pivot selector then
+/// delegates to the REAL policy helper, returning the overshoot value the
+/// dispatch would pass to `Drive.stopAtLine(...).setOvershoot(...)`.
+///
+/// @param reverse           Value of `reverse` (`_resolvedDirection == REAR`).
+///                          Selects the REAR vs FRONT axle offset, mirroring the
+///                          LINE overshoot path (#2). Force-FRONT guarantees a
+///                          pivot seek is always FRONT.
+/// @param approachingActive Value of `_approachingPivot.active` this dispatch.
+/// @param approachingTrimCm Value of `_approachingPivot.trim_cm` (read only when
+///                          `approachingActive` is true, per the firmware).
+/// @return The `SensorOvershootResolution` the production dispatch would obtain.
+static SensorOvershootResolution replica_seekOvershoot(
+    bool reverse, bool approachingActive, float approachingTrimCm)
+{
+    // MIRROR: PathTracker.cpp — seekAxleOffsetCm = reverse ? REAR : FRONT (the
+    // offset is direction-resolved exactly like the LINE overshoot path, #2).
+    const float seekAxleOffsetCm =
+        reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+
+    // MIRROR: PathTracker.cpp — seekApproachTrim = active ? trim : 0.
+    const float seekApproachTrim = approachingActive ? approachingTrimCm : 0.0f;
+
+    // MIRROR: PathTracker.cpp — the REAL header-only policy helper (NOT
+    // re-implemented here): production and this test link the same symbol.
+    return resolveSensorOvershootTrim(
+        seekAxleOffsetCm,
+        seekApproachTrim,
+        Config::PIVOT_TRIM_MIN_DRIVE_CM);
+}
+
+/// MIRROR: PathTracker.cpp seek dispatch control flow — the seek HARD-FAULTS
+/// (`Fault::PIVOT_TRIM_UNDERFLOW`) instead of arming `Drive.stopAtLine` iff the
+/// overshoot resolution clamped (δ > offset, ADR-044 D4 / finding #1). Returns
+/// true when the dispatch would fault rather than dispatch.
+static bool replica_seekWouldFault(bool reverse, bool approachingActive,
+                                   float approachingTrimCm)
+{
+    return replica_seekOvershoot(reverse, approachingActive, approachingTrimCm).clamped;
+}
+
+static void test_TC4_seek_into_approaching_pivot_trims_overshoot()
+{
+    TEST_SCOPE("TC4: seek into an approaching pivot reduces overshoot by the trim (offset - trim)");
+
+    // Approaching pivot active with trim=9.0: the seek overshoot becomes
+    // offset - trim = 12.02 - 9.0 = 3.02 cm (well above the 0.5 floor, so not
+    // clamped). This is the δ-short-of-node landing ADR-044 D1 requires.
+    const SensorOvershootResolution r = replica_seekOvershoot(
+        /*reverse*/ false,
+        /*approachingActive*/ true,
+        /*approachingTrimCm*/ 9.0f);
+
+    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, 3.02f));
+    ASSERT_FALSE(r.clamped);
+}
+
+static void test_TC4_seek_without_approaching_pivot_keeps_full_offset()
+{
+    TEST_SCOPE("TC4: seek with NO approaching pivot keeps the full default overshoot (AC2)");
+
+    // No approaching pivot → selector yields trim 0 → overshoot stays the full
+    // default LINE_SENSOR_AXLE_OFFSET_CM = 12.02 cm, unchanged from the legacy
+    // behaviour (AC2: a departing-into-seek or plain seek hop is untouched).
+    const SensorOvershootResolution r = replica_seekOvershoot(
+        /*reverse*/ false,
+        /*approachingActive*/ false,
+        /*approachingTrimCm*/ 9.0f);    // trim present but IGNORED when inactive.
+
+    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, Config::LINE_SENSOR_AXLE_OFFSET_CM));
+    ASSERT_FALSE(r.clamped);
+}
+
+static void test_TC4_seek_rear_uses_rear_offset()
+{
+    TEST_SCOPE("TC4: a REAR seek rolls the REAR axle offset, not FRONT (#2 direction-resolve)");
+
+    // A REAR 2-board seek resolves its overshoot from the REAR sensor-to-axle
+    // offset (7.68 cm), mirroring the LINE overshoot path — not the FRONT 12.02.
+    // Force-FRONT guarantees a REAR seek never carries a pivot, so the trim is 0
+    // and the overshoot is the full REAR offset (no reduction, no clamp).
+    const SensorOvershootResolution r = replica_seekOvershoot(
+        /*reverse*/ true,
+        /*approachingActive*/ false,
+        /*approachingTrimCm*/ 0.0f);
+
+    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM));
+    ASSERT_FALSE(r.clamped);
+}
+
+static void test_TC4_seek_overbudget_trim_clamps_to_floor()
+{
+    TEST_SCOPE("TC4: over-budget approaching trim clamps the seek overshoot to the floor");
+
+    // Pathological trim larger than the axle offset (15.588 > 12.02): the shared
+    // subtract-and-clamp floors the overshoot at PIVOT_TRIM_MIN_DRIVE_CM = 0.5
+    // and reports clamped=true so the dispatch can hard-fault (ADR-044 D4) — the
+    // helper itself still returns the floored value; see the fault-decision test.
+    const SensorOvershootResolution r = replica_seekOvershoot(
+        /*reverse*/ false,
+        /*approachingActive*/ true,
+        /*approachingTrimCm*/ 15.588f);
+
+    ASSERT_TRUE(seekOvershootApprox(r.overshootCm, Config::PIVOT_TRIM_MIN_DRIVE_CM));
+    ASSERT_TRUE(r.clamped);
+}
+
+static void test_TC4_seek_overbudget_faults_not_dispatches()
+{
+    TEST_SCOPE("TC4: δ>offset seek hard-faults (PIVOT_TRIM_UNDERFLOW), not a silent clamp (#1/D4)");
+
+    // δ > offset: a forward-only seek has no positive overshoot left to shorten,
+    // so the dispatch enters Fault::PIVOT_TRIM_UNDERFLOW instead of arming the
+    // seek with the clamped floor (which would land the axle off-target and fire
+    // the pivot from the wrong origin, succeeding silently — the original bug).
+    ASSERT_TRUE(replica_seekWouldFault(
+        /*reverse*/ false, /*approachingActive*/ true, /*approachingTrimCm*/ 15.588f));
+
+    // Within budget (δ ≤ offset) and the no-pivot seek both dispatch normally.
+    ASSERT_FALSE(replica_seekWouldFault(
+        /*reverse*/ false, /*approachingActive*/ true, /*approachingTrimCm*/ 9.0f));
+    ASSERT_FALSE(replica_seekWouldFault(
+        /*reverse*/ false, /*approachingActive*/ false, /*approachingTrimCm*/ 9.0f));
+}
+
+// ===========================================================================
 // TC14 — FSM-slice: re-anchor on success; DRIVE_FAULT on no-line.
 //         (Formerly TC7/TC8 in the old numbering; kept intact per the task.)
 // ===========================================================================
@@ -853,7 +1009,7 @@ static void test_TC18_reversed_drain_ordering_is_detected()
 
 int main()
 {
-    std::printf("INFO: PathTracker STOP_AT_LINE — resolver truth table (TC1-TC7/TC13/TC20) + FSM slice (TC14) + drain (TC18)\n");
+    std::printf("INFO: PathTracker STOP_AT_LINE — resolver truth table (TC1-TC7/TC13/TC20) + seek-overshoot (TC4) + FSM slice (TC14) + drain (TC18)\n");
 
     // TC1–TC7: resolver truth-table representative vectors (TC13 C++ side).
     test_TC1_auto_stop_at_line_edge_front_1board_seeks_sync_tshape();
@@ -884,6 +1040,16 @@ int main()
     test_TC20_auto_rule_rear_1board_degrades();
     test_TC20_auto_rule_rear_2board_seeks();
     test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek();
+
+    // TC4: seek-overshoot dispatch mirror — approaching-pivot trim reduces the
+    // post-detect overshoot (ADR-044 D1); no pivot keeps the full default (AC2);
+    // a REAR seek rolls the REAR offset (#2); over-budget trim clamps the helper
+    // and hard-faults the dispatch (ADR-044 D4 / #1).
+    test_TC4_seek_into_approaching_pivot_trims_overshoot();
+    test_TC4_seek_without_approaching_pivot_keeps_full_offset();
+    test_TC4_seek_rear_uses_rear_offset();
+    test_TC4_seek_overbudget_trim_clamps_to_floor();
+    test_TC4_seek_overbudget_faults_not_dispatches();
 
     // TC14: FSM-slice re-anchor on success; DRIVE_FAULT on no-line.
     test_TC14_line_found_reanchors_via_on_intersection();

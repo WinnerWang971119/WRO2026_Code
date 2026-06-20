@@ -52,6 +52,7 @@ from tools.path_planner.pipeline_config import (
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
+    BlindDecayParams,
     compute_all_pairs_next_hop,
     compute_pivot_compensation,
     parse_track_cm_from_config,
@@ -117,7 +118,11 @@ _FIELD_ATTRS = (
     "BLIND_EDGES",
     "OBSTACLES",
     "ROBOT_RADIUS_CM",
-    "COST_BLIND_MULTIPLIER",
+    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
+    "BLIND_DECAY_ENABLED",
+    "BLIND_DECAY_K",
+    "BLIND_DECAY_EXPONENT",
+    "BLIND_DECAY_D_REF",
     "START_NODE",
     "START_HEADING_DEG",
     "FIELD_MM",
@@ -157,7 +162,9 @@ def toy_graph_and_table(toy_field):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(toy_field)
-        next_hop = compute_all_pairs_next_hop(graph, toy_field.COST_BLIND_MULTIPLIER)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(toy_field)
+        )
     return graph, next_hop
 
 
@@ -287,7 +294,9 @@ def test_unreachable_goal_raises():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(fd)
-        next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(fd)
+        )
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()
@@ -2116,7 +2125,7 @@ def test_pivot_fixtures_are_legal_fields():
     from tools.path_planner.validator import validate
 
     fields = pivot_field_data.all_fields()
-    assert len(fields) == 4   # guard against an empty sweep vacuously passing
+    assert len(fields) == 6   # guard against an empty sweep vacuously passing
     for field in fields:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -3530,3 +3539,357 @@ def test_tc18b_non_reset_node_emits_no_interlude():
     )
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# TC18c — decay-weighted routing parity (PR3, AC17 pillar 3)
+#
+# Covers: the sim walks the SAME decay-weighted NEXT_HOP the firmware does.
+# The sim builds its NEXT_HOP via the planner's
+# ``compute_all_pairs_next_hop(graph, BlindDecayParams.from_field_data(...))``
+# (the SAME call demo.py and every other sim test uses, migrated by T22) --
+# never a stale flat-multiplier path or a sim-only hardcoded table. So the
+# routing the sim follows IS decay-weighted by construction; this row proves
+# that end-to-end: the sim's NEXT_HOP-walked node sequence matches the
+# planner's, the decay penalty actually FLIPS the chosen route at the field's
+# default k vs k=0 / lowered k, and the chassis lands ON the decay-chosen goal
+# with drift~0 (the VirtualChassis tracks the wheel axle and lands on each
+# node -- the position tolerance is NOT loosened to absorb drift).
+#
+# Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim
+# walking a decay-weighted NextHopTable; tools/path_planner/planner.py --
+# BlindDecayParams / compute_all_pairs_next_hop.
+#
+# Fixture: a deep-blind-shortcut-vs-reset-detour diamond (the same idea the
+# planner-level TC16 / AC15 tests use), but with edge headings + distances
+# derived from the node coordinates so the chassis geometry is self-consistent
+# and a clean go_to lands axle-on-node. All seven edges are exactly 50 cm:
+#
+#     SHORTCUT (raw 150):  S --50-- A1 --50-- A2 --50-- Gl
+#     DETOUR   (raw 200):  S --50-- B1 --50-- R --50-- B2 --50-- Gl
+#
+# When R is a "reset" anchor (d(R)=0) the detour's blind hops have low-d tails
+# and are barely penalised, while the shortcut's interior node A2 sits two
+# blind hops (d=100) from the only other anchor S, so the shortcut is penalised
+# hard. Hand-computed weighted costs (exponent 2, d_ref 50) match the planner
+# fixture: shortcut = 150 + 250*k, detour = 200 + 100*k, so the detour wins iff
+# k > 1/3. Default k=0.5 -> detour (threads R); lowered k=0.05 -> shortcut.
+# ===========================================================================
+
+
+# Decay knobs for the TC18c diamond. Mirror the planner-level AC15 fixture
+# (tools/path_planner/tests/test_planner.py): exponent / d_ref match the toy
+# field, only k is varied to flip the route. k=0.5 is decisively "default"
+# (> 1/3 crossover) and k=0.05 decisively "lowered".
+_TC18C_D_REF: float = 50.0
+_TC18C_EXPONENT: float = 2.0
+_TC18C_K_DEFAULT: float = 0.5
+_TC18C_K_LOWERED: float = 0.05
+
+# Flat-bottomed trapezoid detour: every detour segment is exactly 50 cm
+# (S->B1->R->B2->Gl), the same length the planner fixture assigns by hand, and
+# the shortcut S->A1->A2->Gl is collinear on +x at 3 x 50 = 150 cm. B1/R/B2 sit
+# at y = -50*sin(60deg) so each consecutive pair is exactly 50 cm apart -- the
+# geometry is self-consistent, so a sim go_to lands the chassis ON Gl (drift~0)
+# regardless of which branch decay selects.
+_TC18C_DETOUR_Y: float = -50.0 * math.sin(math.radians(60.0))  # = -43.30127...
+_TC18C_NODES = {
+    "S":  (0.0, 0.0),
+    "A1": (50.0, 0.0),
+    "A2": (100.0, 0.0),
+    "Gl": (150.0, 0.0),
+    "B1": (25.0, _TC18C_DETOUR_Y),
+    "R":  (75.0, _TC18C_DETOUR_Y),
+    "B2": (125.0, _TC18C_DETOUR_Y),
+}
+_TC18C_EDGES = (
+    ("S", "A1"), ("A1", "A2"), ("A2", "Gl"),          # shortcut: raw 150
+    ("S", "B1"), ("B1", "R"), ("R", "B2"), ("B2", "Gl"),  # detour: raw 200
+)
+
+
+def _tc18c_decay_params(k: float) -> BlindDecayParams:
+    """Return the TC18c diamond's decay params at gain ``k``."""
+    return BlindDecayParams(
+        enabled=True, k=k, exponent=_TC18C_EXPONENT, d_ref=_TC18C_D_REF
+    )
+
+
+def _tc18c_diamond(*, reset_node: bool):
+    """Build the shortcut-vs-detour diamond with geometry-consistent edges.
+
+    Every edge's ``heading_deg`` and ``distance_cm`` are derived from the node
+    coordinates (mirroring ``graph_builder.build_graph``'s geometry), so the
+    :class:`VirtualChassis` tracks real geometry and a clean ``go_to`` lands the
+    wheel axle ON each visited node -- the arrival-parity contract is not
+    achievable with the planner fixture's hand-stamped ``heading_deg=0`` edges,
+    which is why this fixture is rebuilt here rather than imported.
+
+    All seven edges are exactly 50 cm (verified by the geometry sanity assert in
+    the tests). The shortcut S->A1->A2->Gl is raw 150; the detour
+    S->B1->R->B2->Gl is raw 200.
+
+    :param reset_node: classify the mid-detour node ``R`` as ``"reset"`` (an
+        anchor with ``d(R)=0``, so the detour's blind hops are barely penalised)
+        when True, or a plain ``"blind"`` node (the negative control) when
+        False. ``S`` is always a ``"line"`` anchor; every other node is blind.
+    :return: a ``(field_data, graph)`` pair. The NEXT_HOP table is built per-k
+        by the caller via :func:`compute_all_pairs_next_hop` so one graph can be
+        routed at several gains.
+    """
+    node_types = {name: "blind" for name in _TC18C_NODES}
+    node_types["S"] = "line"
+    node_types["R"] = "reset" if reset_node else "blind"
+
+    def _heading(u: str, v: str) -> float:
+        (x0, y0), (x1, y1) = _TC18C_NODES[u], _TC18C_NODES[v]
+        return math.degrees(math.atan2(y1 - y0, x1 - x0)) % 360.0
+
+    def _distance(u: str, v: str) -> float:
+        (x0, y0), (x1, y1) = _TC18C_NODES[u], _TC18C_NODES[v]
+        return math.hypot(x1 - x0, y1 - y0)
+
+    g = nx.DiGraph()
+    for name, (x, y) in _TC18C_NODES.items():
+        g.add_node(name, x_cm=float(x), y_cm=float(y), type=node_types[name])
+    for u, v in _TC18C_EDGES:
+        g.add_edge(u, v, type=EDGE_BLIND, distance_cm=_distance(u, v), heading_deg=_heading(u, v))
+        g.add_edge(v, u, type=EDGE_BLIND, distance_cm=_distance(u, v), heading_deg=_heading(v, u))
+
+    # The reset metadata re-zeroes R's y-axis to its own true coordinate (the
+    # wall IS at the node), so a clean inbound hop is corrected by a no-op and
+    # the chassis stays on the node geometry -- exactly the TC18b convention.
+    reset_nodes = {}
+    if reset_node:
+        reset_nodes["R"] = {
+            "axis": "y",
+            "wall_coord": _TC18C_DETOUR_Y,
+            "facing": _heading("B1", "R"),
+        }
+
+    fd = SimpleNamespace(
+        NODES=dict(_TC18C_NODES),
+        NODE_TYPES=node_types,
+        RESET_NODES=reset_nodes,
+        # The decay knobs live ON the field_data so the sim builds its NEXT_HOP
+        # the same way demo.py does: BlindDecayParams.from_field_data(fd). The
+        # per-test routing uses explicit params to flip k, but exposing the
+        # knobs here proves from_field_data wires through unchanged.
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=_TC18C_K_DEFAULT,
+        BLIND_DECAY_EXPONENT=_TC18C_EXPONENT,
+        BLIND_DECAY_D_REF=_TC18C_D_REF,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        PIVOT_TURNS=[],
+    )
+    return fd, g
+
+
+def _tc18c_sim(fd, g, next_hop):
+    """Return a zeroed PathTrackerSim + chassis over the diamond fixture."""
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis
+
+
+def _path_has_reset(path, fd) -> bool:
+    """True iff any node on ``path`` is typed ``"reset"`` in ``fd.NODE_TYPES``."""
+    return any(fd.NODE_TYPES[n] == "reset" for n in path)
+
+
+def test_tc18c_diamond_all_edges_are_50cm():
+    """Geometry sanity: every diamond edge is exactly 50 cm (cost-math anchor).
+
+    The hand-computed crossover (shortcut = 150 + 250k, detour = 200 + 100k,
+    flip at k = 1/3) only holds if every edge is 50 cm. This guards the fixture
+    geometry so a future coordinate edit that breaks the 50 cm invariant fails
+    HERE with a clear message rather than silently shifting the crossover and
+    making the routing-flip tests below pass/fail for the wrong reason.
+    """
+    _fd, g = _tc18c_diamond(reset_node=True)
+    for u, v in _TC18C_EDGES:
+        assert g.edges[u, v]["distance_cm"] == pytest.approx(50.0, abs=1e-9), (
+            f"edge {u}->{v} is not 50 cm; the TC18c cost crossover assumes it is"
+        )
+    # Shortcut raw total 150, detour raw total 200 (the lengths the planner
+    # fixture stamps by hand).
+    shortcut = sum(g.edges[u, v]["distance_cm"] for u, v in (("S", "A1"), ("A1", "A2"), ("A2", "Gl")))
+    detour = sum(
+        g.edges[u, v]["distance_cm"]
+        for u, v in (("S", "B1"), ("B1", "R"), ("R", "B2"), ("B2", "Gl"))
+    )
+    assert shortcut == pytest.approx(150.0, abs=1e-9)
+    assert detour == pytest.approx(200.0, abs=1e-9)
+
+
+def test_tc18c_sim_next_hop_built_from_field_decay_params():
+    """The sim's NEXT_HOP is the planner's decay-weighted table, byte-for-byte.
+
+    Builds the sim's NEXT_HOP exactly as demo.py does --
+    ``compute_all_pairs_next_hop(g, BlindDecayParams.from_field_data(fd))`` --
+    and confirms it is the same object the sim routes on AND that it equals an
+    independently-computed decay-weighted table at the field's default k. This
+    is the "sim mirrors the robot, not a parallel sim-only config" contract:
+    the routing the sim follows IS the decay model, sourced from the field's own
+    knobs, never a stale flat multiplier or a hardcoded sim table.
+    """
+    fd, g = _tc18c_diamond(reset_node=True)
+    # The from_field_data path (what demo.py / every sim test uses).
+    field_params = BlindDecayParams.from_field_data(fd)
+    assert field_params == _tc18c_decay_params(_TC18C_K_DEFAULT)
+    next_hop = compute_all_pairs_next_hop(g, field_params)
+
+    sim, _chassis = _tc18c_sim(fd, g, next_hop)
+    # The sim routes on exactly this table (no internal rebuild / no flat path).
+    assert sim._next_hop is next_hop    # pylint: disable=protected-access
+    # And the table genuinely carries the decay route at the default k.
+    assert walk_next_hop(next_hop, "S", "Gl") == ["S", "B1", "R", "B2", "Gl"]
+
+
+def test_tc18c_default_k_sim_walks_planner_decay_route_through_reset():
+    """At default k the sim follows the planner's decay route through the reset.
+
+    The decay penalty makes the longer reset-threading detour cheaper than the
+    deep-blind shortcut (k=0.5 > 1/3 crossover). The sim, routing on the
+    decay-weighted NEXT_HOP, must walk the SAME node sequence the planner's
+    compute_all_pairs_next_hop produces -- and that sequence must thread R.
+    """
+    fd, g = _tc18c_diamond(reset_node=True)
+    next_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(_TC18C_K_DEFAULT))
+
+    # Planner's decay-walked path == the sim's NEXT_HOP-walked path (parity).
+    planner_path = walk_next_hop(next_hop, "S", "Gl")
+    sim, chassis = _tc18c_sim(fd, g, next_hop)
+    sim_path = walk_next_hop(sim._next_hop, "S", "Gl")    # pylint: disable=protected-access
+    assert sim_path == planner_path
+
+    # Decay actually chose the detour through the reset node.
+    assert _path_has_reset(planner_path, fd), (
+        f"expected the decay detour through R; got {planner_path}"
+    )
+    assert "R" in planner_path
+    assert "A2" not in planner_path    # specifically NOT the shortcut
+
+    # The sim drives that route and lands the wheel axle ON Gl (drift~0). The
+    # reset node fires its WALL_STOP -> REANCHOR interlude mid-route. Do NOT
+    # loosen _POSITION_TOL_CM to absorb drift -- the geometry is exact.
+    prims = sim.go_to("Gl")
+    assert sim.localization.current_node() == "Gl"
+    gx, gy = fd.NODES["Gl"]
+    assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM
+
+    # The interlude fired exactly once, at R (pillar-2 behavior still holds
+    # through a decay-chosen route).
+    assert sum(1 for p in prims if p[0] == ACT_WALL_STOP) == 1
+    assert sum(1 for p in prims if p[0] == ACT_REANCHOR) == 1
+
+
+def test_tc18c_lowered_k_sim_walks_planner_shortcut_without_reset():
+    """At lowered k the route flips to the shortcut and the sim mirrors it.
+
+    The same fixture at k=0.05 (< 1/3 crossover): the tiny penalty no longer
+    overcomes the 50 cm raw advantage, so both planner and sim take the
+    reset-free shortcut S->A1->A2->Gl. Pairing this with the default-k test
+    proves the decay knob actually INFLUENCED the route (the chosen path differs
+    between the two k values) AND that the sim matches the planner in both.
+    """
+    fd, g = _tc18c_diamond(reset_node=True)
+    next_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(_TC18C_K_LOWERED))
+
+    planner_path = walk_next_hop(next_hop, "S", "Gl")
+    sim, chassis = _tc18c_sim(fd, g, next_hop)
+    sim_path = walk_next_hop(sim._next_hop, "S", "Gl")    # pylint: disable=protected-access
+    assert sim_path == planner_path
+
+    # Decay chose the shortcut; no reset is threaded.
+    assert not _path_has_reset(planner_path, fd), (
+        f"expected the reset-free shortcut; got {planner_path}"
+    )
+    assert "R" not in planner_path
+    assert "A1" in planner_path and "A2" in planner_path
+
+    # The sim drives the shortcut and lands axle-on-Gl with no interlude.
+    prims = sim.go_to("Gl")
+    assert sim.localization.current_node() == "Gl"
+    gx, gy = fd.NODES["Gl"]
+    assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM
+    assert not any(p[0] in (ACT_WALL_STOP, ACT_REANCHOR) for p in prims)
+
+
+def test_tc18c_decay_flips_the_route_between_default_and_lowered_k():
+    """The default-k and lowered-k routes DIFFER -- decay is load-bearing.
+
+    A single assertion that the chosen route is k-dependent: at the field's
+    default k the sim threads the reset, at lowered k it does not. Without the
+    decay model both would be the plain-length shortcut, so this difference is
+    the proof that the sim's routing is genuinely decay-weighted (not a flat
+    multiplier or a hardcoded table). Both routes are independently checked
+    against the planner in the two tests above.
+    """
+    fd, g = _tc18c_diamond(reset_node=True)
+    default_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(_TC18C_K_DEFAULT))
+    lowered_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(_TC18C_K_LOWERED))
+
+    default_path = walk_next_hop(default_hop, "S", "Gl")
+    lowered_path = walk_next_hop(lowered_hop, "S", "Gl")
+
+    assert default_path != lowered_path
+    assert _path_has_reset(default_path, fd)
+    assert not _path_has_reset(lowered_path, fd)
+
+
+def test_tc18c_negative_control_no_reset_anchor_sim_takes_shortcut():
+    """Negative control: with R relabeled blind, default k routes the shortcut.
+
+    The same diamond geometry but the mid-detour node is a plain ``"blind"``
+    node (not an anchor). The detour is then penalised even harder, so at the
+    default k both planner and sim pick the shortcut and the chosen path threads
+    no reset (there is none). This prevents the positive test from
+    false-positiving on "it routed through R" -- the reset-threading there is
+    driven by R's anchor status, not by the topology / raw lengths.
+    """
+    fd, g = _tc18c_diamond(reset_node=False)
+    next_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(_TC18C_K_DEFAULT))
+
+    planner_path = walk_next_hop(next_hop, "S", "Gl")
+    sim, chassis = _tc18c_sim(fd, g, next_hop)
+    sim_path = walk_next_hop(sim._next_hop, "S", "Gl")    # pylint: disable=protected-access
+    assert sim_path == planner_path
+
+    # No node is reset-typed, and the shortcut wins on weight alone.
+    assert not _path_has_reset(planner_path, fd), f"no node is reset-typed; got {planner_path}"
+    assert "A1" in planner_path and "A2" in planner_path
+
+    prims = sim.go_to("Gl")
+    assert sim.localization.current_node() == "Gl"
+    gx, gy = fd.NODES["Gl"]
+    assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM
+    assert not any(p[0] in (ACT_WALL_STOP, ACT_REANCHOR) for p in prims)
+
+
+def test_tc18c_k_zero_sim_matches_planner_plain_length_route():
+    """At k=0 the decay model collapses to plain length and the sim mirrors it.
+
+    The AC14b regression anchor at the sim level: with k=0 every blind edge
+    costs its raw length, so the planner picks the shorter shortcut and the sim
+    follows the same plain-length route -- proving the decay model is a strict
+    generalisation of plain length and the sim agrees at the degenerate gain.
+    """
+    fd, g = _tc18c_diamond(reset_node=True)
+    next_hop = compute_all_pairs_next_hop(g, _tc18c_decay_params(0.0))
+
+    planner_path = walk_next_hop(next_hop, "S", "Gl")
+    sim, chassis = _tc18c_sim(fd, g, next_hop)
+    sim_path = walk_next_hop(sim._next_hop, "S", "Gl")    # pylint: disable=protected-access
+    assert sim_path == planner_path
+
+    # k=0 -> plain length -> the shorter shortcut (raw 150 < 200), no reset.
+    assert planner_path == ["S", "A1", "A2", "Gl"]
+    assert not _path_has_reset(planner_path, fd)
+
+    sim.go_to("Gl")
+    assert sim.localization.current_node() == "Gl"
+    gx, gy = fd.NODES["Gl"]
+    assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM

@@ -15,7 +15,7 @@
  *    convert an app-frame target into the raw-frame heading a `MoveGyro*` gyro-PID
  *    command expects.
  *
- * Single-owner rule (per ADR-044): no other module reads `mmL.GetIMUEuler` or applies
+ * Single-owner rule (per ADR-045): no other module reads `mmL.GetIMUEuler` or applies
  * `Config::IMU_YAW_SIGN`. Every consumer works exclusively in the app CCW-positive frame
  * and routes its raw yaw I/O through this class. A second application of the sign anywhere
  * would double-negate the conversion and reverse all heading math.
@@ -37,7 +37,7 @@
  * @note Single global instance `YawSource` (declared `extern` below, defined in the .cpp).
  *       Construct nothing else; all consumers share this instance.
  * @note No other module performs raw IMU yaw I/O or applies the yaw sign — see the file
- *       header and ADR-044.
+ *       header and ADR-045.
  */
 class YawSourceClass
 {

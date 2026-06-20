@@ -1,4 +1,4 @@
-# ADR-044: IMU yaw sign normalization — all raw IMU yaw I/O flows through YawSource
+# ADR-045: IMU yaw sign normalization — all raw IMU yaw I/O flows through YawSource
 
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 2)

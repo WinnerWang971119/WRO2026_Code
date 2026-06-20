@@ -13,8 +13,8 @@
 
 #include "Drive.h"
 
-#include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-044).
-#include "YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-044).
+#include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
+#include "YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
 
 #include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
                               // its tick loop does not write setSpeed concurrently with a
@@ -172,7 +172,7 @@ uint8_t DriveClass::forwardGyro(int16_t power)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the power through the
     // shared PWM cap/deadband floor for uniform clamping (finding #14).
-    // GYRO precondition (ADR-044): _heldYaw is an app-frame (CCW-positive) heading; toHwHeading
+    // GYRO precondition (ADR-045): _heldYaw is an app-frame (CCW-positive) heading; toHwHeading
     // converts it to the STM32 raw frame. NEVER pass a raw heading here — it would double-correct.
     return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), YawSource.toHwHeading(_heldYaw));
 }
@@ -261,7 +261,7 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
     // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
     // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
     const uint16_t encDeg = cmToEncDeg(cm);
-    // GYRO precondition (ADR-044): `yaw` is an app-frame heading; toHwHeading converts to raw.
+    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
     const uint8_t  rc =
         MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), YawSource.toHwHeading(yaw), encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
@@ -314,7 +314,7 @@ uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
     // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
     // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
-    // GYRO precondition (ADR-044): `yaw` is an app-frame heading; toHwHeading converts to raw.
+    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
     const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), YawSource.toHwHeading(yaw), sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
@@ -346,7 +346,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-044). Best-effort
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). Best-effort
     // fallback 0.0 preserves the prior dispatch-time behavior of acting on the vendor's 0.0.
     const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
@@ -407,7 +407,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-044); best-effort 0.0.
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045); best-effort 0.0.
     const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
@@ -501,13 +501,13 @@ void DriveClass::resetEnc()
 
 double DriveClass::getYaw() const
 {
-    // Corrected app-frame yaw via the single owner (ADR-044); best-effort 0.0 on read failure.
+    // Corrected app-frame yaw via the single owner (ADR-045); best-effort 0.0 on read failure.
     return YawSource.readYawDegOr(0.0);
 }
 
 void DriveClass::holdYaw()
 {
-    // Latch the corrected app-frame yaw (ADR-044); best-effort 0.0 on read failure.
+    // Latch the corrected app-frame yaw (ADR-045); best-effort 0.0 on read failure.
     _heldYaw = (int16_t) YawSource.readYawDegOr(0.0);
 }
 
@@ -682,7 +682,7 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
         break;
     case DriveMode::GYRO:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        // GYRO precondition (ADR-044): `heading` is app-frame (CCW-positive); toHwHeading
+        // GYRO precondition (ADR-045): `heading` is app-frame (CCW-positive); toHwHeading
         // converts to raw. All three GYRO channels feeding this (_profileHeading / _stopHeading
         // / _wallHeading) carry app-frame values, so this single wrap covers straight-line,
         // stop-at-line, and wall-stop alike.
@@ -1079,7 +1079,7 @@ void DriveClass::_updateTurnProfile()
         return;
     }
 
-    // Read current IMU yaw through YawSource (corrected app CCW-positive frame, ADR-044). On a
+    // Read current IMU yaw through YawSource (corrected app CCW-positive frame, ADR-045). On a
     // transient lower-MCU read failure SKIP this tick: holding the previous Move(L,R) one more
     // cycle is safer than acting on a fabricated 0.0 yaw, which mid-turn could flip the spin
     // direction. This is a deliberate behavior change vs the old "act on the vendor's 0.0".
@@ -1153,7 +1153,7 @@ void DriveClass::_updateTurnProfile()
         return;
     }
 
-    // Apply rotation direction + wheel pattern via TurnSignPolicy (host-tested; ADR-044).
+    // Apply rotation direction + wheel pattern via TurnSignPolicy (host-tested; ADR-045).
     // `_turnDeltaSign` was captured at dispatch from the CORRECTED (app CCW-positive) yaw:
     //   +1 → yaw must increase (CCW / left turn), -1 → yaw must decrease (CW / right turn).
     // The CCW counter-rotation pattern is L = -sign*pwm, R = +sign*pwm. The app frame is made

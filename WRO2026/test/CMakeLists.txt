@@ -671,6 +671,26 @@ target_include_directories(test_pivot_trim_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME pivot_trim_policy COMMAND test_pivot_trim_policy)
 
 # =========================================================================================
+# Test executable #9b — SensorOvershootPolicy pure-math (issue #65, ADR-044 D1).
+#
+# `resolveSensorOvershootTrim` is a header-only inline policy (`PivotTrimPolicy.h`) —
+# the SENSOR-anchored twin of `resolvePivotTrim`. It feeds the post-detect axle roll
+# through the shared subtract-and-clamp with departing trim hard-coded to 0 (ADR-044 D1:
+# sensor-terminated hops self-correct on the line, so outgoing over-travel does not
+# accumulate). TC1-TC4 from the issue #65 plan cover the normal, over-trim, no-trim, and
+# strict-boundary cases; together with `test_pivot_trim_policy` they ensure the DISTANCE
+# and SENSOR paths cannot drift from each other on host.
+#
+# Pure float math with no Arduino surface: no mocks, no SUT sources — just the sketch
+# include dir for the header. Mirrors the `test_pivot_trim_policy` block exactly.
+# =========================================================================================
+add_executable(test_sensor_overshoot_policy
+    ${TEST_DIR}/test_sensor_overshoot_policy.cpp
+)
+target_include_directories(test_sensor_overshoot_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME sensor_overshoot_policy COMMAND test_sensor_overshoot_policy)
+
+# =========================================================================================
 # Test executable #11 — ReturnToNodePolicy pure-math (issue #36, PR1b, T8/T10).
 #
 # `resolveReturnAction` is a header-only inline policy (`ReturnToNodePolicy.h`) — the
@@ -848,7 +868,7 @@ add_mock_force_includes(test_path_tracker_reset_arrival)   # shadows the real Dr
 add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
 
 # =========================================================================================
-# Test executable #17 — YawSource CW->CCW adapter, real-linked (ADR-044, TC3/TC4).
+# Test executable #17 — YawSource CW->CCW adapter, real-linked (ADR-045, TC3/TC4).
 #
 # Links the REAL production `YawSource.cpp` against the mock lower-MCU IMU surface
 # (`mmL.GetIMUEuler` + `mmL.mockYawDeg` / `mmL.mockResult` / `mmL.getImuEulerCallCount`
@@ -877,7 +897,7 @@ target_include_directories(test_yaw_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME yaw_source COMMAND test_yaw_source)
 
 # =========================================================================================
-# Test executable #18 — TurnSignPolicy pure-math (ADR-044, TC5/TC6).
+# Test executable #18 — TurnSignPolicy pure-math (ADR-045, TC5/TC6).
 #
 # `normalizeTurnDelta` / `turnSign` / `turnWheelPattern` are header-only inline policies
 # (`TurnSignPolicy.h`) promoted out of Drive.cpp so production AND this host test link the
@@ -896,7 +916,7 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
-# Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-044, TC7 / AC4, compile-fail).
+# Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-045, TC7 / AC4, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::IMU_YAW_SIGN` is not
 # exactly +/-1. Built with `-DIMU_YAW_SIGN_DEFAULT=0.0f` (the `#ifndef`-guarded override

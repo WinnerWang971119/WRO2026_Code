@@ -16,16 +16,46 @@ The plan explicitly chose this over Floyd-Warshall because networkx
 ships an optimised heap-based Dijkstra and the toy / real graphs both
 have <50 nodes - the constant factor matters far less than readability.
 
-Cost model
-----------
+Cost model (blind-distance decay)
+---------------------------------
 
-Edge cost = ``edge['distance_cm'] * cost_multiplier`` where
-``cost_multiplier`` is :data:`tools.path_planner.field_data.COST_BLIND_MULTIPLIER`
-(passed in as an argument here for testability) when the edge type is
-:data:`tools.path_planner.graph_builder.EDGE_BLIND`, and ``1.0`` otherwise.
-Penalising blind edges keeps the planner on the line whenever a line
-detour is reasonable - the line follower is far more reliable than
-open-loop encoder moves.
+The cost of a :data:`tools.path_planner.graph_builder.EDGE_LINE` or
+:data:`tools.path_planner.graph_builder.EDGE_PROJECTION` edge equals its
+``distance_cm`` (factor ``1`` -- the chassis is tracking the line, the
+most reliable mode). A :data:`tools.path_planner.graph_builder.EDGE_BLIND`
+edge is penalised by a *convex, multiplicative* decay factor keyed on how
+deep its tail sits in line-free, anchor-far blind territory::
+
+    weight(blind u -> v) = distance_cm(u -> v)
+                           * (1 + k * (d(u) / d_ref) ** exponent)
+
+where (see :class:`BlindDecayParams`):
+
+* ``k`` is a unitless penalty gain (``k == 0`` reduces the model to plain
+  ``distance_cm`` -- a strict generalisation of the old flat multiplier);
+* ``exponent`` (``>= 1``) makes the penalty convex in ``d``;
+* ``d_ref`` is a length normaliser (cm) so ``k`` is map-portable;
+* ``d(u)`` is the **blind-subgraph distance from the edge's TAIL node ``u``
+  to the nearest ANCHOR**, an anchor being any node whose ``type`` is
+  ``"line"`` OR ``"reset"``. It is computed once per table build by a
+  multi-source search over the blind subgraph (only ``EDGE_BLIND`` edges,
+  weighted by ``distance_cm``) seeded with ``d = 0`` at every line + reset
+  node -- see :func:`compute_blind_distance_to_anchor`.
+
+Rationale: a line intersection re-anchors localization (ADR-001/005), so a
+route on the line backbone clears accumulated blind drift exactly like a
+reset node does. Seeding the search from all line + reset nodes makes the
+planner prefer that self-correcting backbone; reset nodes then matter
+specifically in line-free blind pockets the line graph cannot reach. The
+penalty is keyed on the edge *tail* (a static potential field), so it is
+directionally naive by design -- the goal is to discourage deep blind
+*chains*, not single bounded hops (ADR-041).
+
+Unreachable fallback: a blind node with no anchor reachable in the blind
+subgraph (``d == inf``) falls back to factor ``1`` (no decay signal -> no
+penalty), keeping every Dijkstra weight finite. With dense line anchors
+this is degenerate; an anchor-less blind island is already the
+disconnected-node case the builder warns about.
 
 The weighted copy used by Dijkstra carries an extra ``cost`` attribute;
 the underlying geometry (``distance_cm`` / ``heading_deg``) is taken
@@ -80,10 +110,151 @@ from tools.path_planner.compiler import normalize_turn
 from tools.path_planner.config_parse import parse_config_float
 from tools.path_planner.graph_builder import EDGE_BLIND, directed_edge_heading
 from tools.path_planner.pipeline_config import TurnMode
+from tools.path_planner.validator import validate_blind_decay_domain
 
 # Public type alias: outer key = source node, inner key = target node,
 # value = next node on the shortest path (or None if unreachable).
 NextHopTable = Dict[str, Dict[str, Optional[str]]]
+
+# Node ``type`` values that re-anchor localization and therefore seed the
+# blind-distance decay search (see :func:`compute_blind_distance_to_anchor`).
+# A line intersection re-anchors via ``onIntersection`` (ADR-001/005) exactly
+# as a wall-zero reset node does, so both clear accumulated blind drift; the
+# decay model treats them identically as anchors. ``"blind"`` nodes are NOT
+# anchors -- they are the deep-blind territory the penalty discourages.
+NODE_TYPE_LINE = "line"
+NODE_TYPE_RESET = "reset"
+_ANCHOR_NODE_TYPES = frozenset((NODE_TYPE_LINE, NODE_TYPE_RESET))
+
+
+# -- blind-distance decay parameters ------------------------------------------
+
+
+@dataclass(frozen=True)
+class BlindDecayParams:
+    """Immutable knobs for the blind-edge decay cost (replaces the old multiplier).
+
+    A blind edge is penalised by ``1 + k * (d(u) / d_ref) ** exponent`` where
+    ``d(u)`` is the blind-subgraph distance from the edge tail to its nearest
+    line / reset anchor (see the module docstring's "Cost model" section).
+    Frozen so a params object can be shared across calls and compared in tests
+    without risk of mutation.
+
+    The four fields mirror ``field_data.BLIND_DECAY_*`` (authored in
+    ``field_data.json`` per ADR-022); :func:`from_field_data` adapts a
+    field-data namespace into one of these so callers never spell the four
+    attribute names out by hand.
+
+    :ivar enabled: master switch. ``False`` short-circuits every blind edge to
+        factor ``1`` (plain ``distance_cm``) and skips the d-map computation.
+    :ivar k: unitless penalty gain ``>= 0``. ``k == 0`` also reduces every
+        blind edge to factor ``1`` (the AC14b regression anchor) -- a strict
+        generalisation of the old flat ``COST_BLIND_MULTIPLIER`` model.
+    :ivar exponent: convexity exponent in ``[1, BLIND_DECAY_EXPONENT_MAX]`` in
+        ``(d / d_ref) ** exponent``. A sub-linear exponent would invert the
+        penalty's intent (cheaper far from an anchor) and an extreme one would
+        overflow the weight, so the planner rejects both ends of the range.
+    :ivar d_ref: length normaliser in centimetres, ``> 0``, so ``k`` is
+        portable across maps. A non-positive ``d_ref`` divides by zero / flips
+        the sign, so the planner rejects it.
+    """
+
+    enabled: bool
+    k: float
+    exponent: float
+    d_ref: float
+
+    @classmethod
+    def from_field_data(cls, field_data) -> "BlindDecayParams":
+        """Build a :class:`BlindDecayParams` from a field-data namespace.
+
+        Reads the four ``BLIND_DECAY_*`` top-level scalars off ``field_data``
+        (the JSON-bridge module or any object exposing the same attributes).
+        The reads are strict (no ``getattr`` default): a fixture missing any
+        of the four knobs fails loudly here rather than silently defaulting.
+
+        ``enabled`` is passed through verbatim -- NOT coerced with ``bool(...)``,
+        because ``bool("false")`` is ``True``, so a bypass caller whose
+        ``BLIND_DECAY_ENABLED`` is a truthy non-bool would silently *enable*
+        decay. A non-bool is instead caught by :func:`_validate_blind_decay_params`
+        (the shared :func:`validator.validate_blind_decay_domain` predicate)
+        before any weight is computed.
+
+        When ``enabled is False`` the three numeric knobs are NOT cast: every
+        blind edge short-circuits to factor ``1`` and never reads
+        ``k`` / ``exponent`` / ``d_ref``, and
+        :func:`validator.validate_blind_decay_domain` exempts them from its
+        domain check too. A disabled config can therefore carry unset /
+        non-numeric knobs that :func:`validator.validate` accepts (it skips them
+        when disabled); casting them here with ``float(...)`` would raise on such
+        a *validated* field, so the disabled branch substitutes benign in-domain
+        defaults instead. The knobs are still *read* (no ``getattr`` default) so
+        a missing attribute fails loudly regardless of ``enabled``.
+
+        :param field_data: object exposing ``BLIND_DECAY_ENABLED`` /
+            ``BLIND_DECAY_K`` / ``BLIND_DECAY_EXPONENT`` / ``BLIND_DECAY_D_REF``.
+        :return: the populated, frozen params object.
+        :raises AttributeError: if any ``BLIND_DECAY_*`` attribute is absent.
+        """
+        enabled = field_data.BLIND_DECAY_ENABLED
+        # Strict reads (no getattr default): a missing knob fails loudly even
+        # when disabled, matching the validator which reads all four before its
+        # domain check.
+        k = field_data.BLIND_DECAY_K
+        exponent = field_data.BLIND_DECAY_EXPONENT
+        d_ref = field_data.BLIND_DECAY_D_REF
+        if enabled is False:
+            # Decay off: the knobs are never read downstream and the validator
+            # exempts them, so substitute benign defaults rather than casting
+            # values a disabled config is allowed to leave unset / non-numeric.
+            return cls(enabled=False, k=0.0, exponent=1.0, d_ref=1.0)
+        return cls(
+            enabled=enabled,
+            k=float(k),
+            exponent=float(exponent),
+            d_ref=float(d_ref),
+        )
+
+
+def _validate_blind_decay_params(params: BlindDecayParams) -> None:
+    """Reject a malformed :class:`BlindDecayParams` (mirrors the validator).
+
+    The field-data validator (``validator._validate_blind_decay``) already
+    enforces these domains on the authored ``field_data.json``, but a direct or
+    bypass caller (sim, CTPS, a hand-built params object) can construct a
+    :class:`BlindDecayParams` by hand and skip it. This guard re-runs the exact
+    same rules so such a caller fails loudly rather than emitting a negative /
+    NaN / overflowing Dijkstra weight (which would corrupt the routing table or
+    crash the heap). The domain logic is the single shared
+    :func:`tools.path_planner.validator.validate_blind_decay_domain` predicate --
+    this wrapper only adapts its ``(field, reason)`` result into a ``ValueError``
+    naming the ``BlindDecayParams`` attribute, so the planner guard and the
+    field-data validator can never drift:
+
+    * ``enabled`` is a real ``bool`` (a truthy non-bool would silently enable
+      decay);
+    * ``d_ref > 0`` and finite (the normaliser; a non-positive value divides by
+      zero);
+    * ``k >= 0`` and finite (a negative gain would make blind edges *cheaper*);
+    * ``exponent`` finite in ``[1, BLIND_DECAY_EXPONENT_MAX]`` (a sub-linear
+      exponent inverts the penalty's intent; an extreme exponent overflows the
+      weight).
+
+    A disabled params object (``enabled is False``) short-circuits to factor
+    ``1`` upstream and never reaches the weight formula, so only its ``enabled``
+    type is checked.
+
+    :param params: the decay params to validate.
+    :return: ``None`` on success.
+    :raises ValueError: on the first out-of-domain field, with the offending
+        value in the message.
+    """
+    result = validate_blind_decay_domain(
+        params.enabled, params.k, params.exponent, params.d_ref
+    )
+    if result is not None:
+        field, reason = result
+        raise ValueError(f"BlindDecayParams.{field} {reason}")
 
 
 # -- chassis track (single-sourced from the firmware header) ------------------
@@ -340,26 +511,125 @@ def build_pivot_turns(
     return records
 
 
+# -- public helper: blind-distance-to-anchor ---------------------------------
+
+
+def compute_blind_distance_to_anchor(graph: nx.DiGraph) -> Dict[str, float]:
+    """Return each node's blind-subgraph distance to its nearest anchor.
+
+    An **anchor** is any node whose ``type`` is ``"line"`` OR ``"reset"`` (see
+    :data:`_ANCHOR_NODE_TYPES`). The distance ``d(u)`` is measured over the
+    **blind subgraph** -- the directed graph restricted to
+    :data:`tools.path_planner.graph_builder.EDGE_BLIND` edges, weighted by each
+    edge's ``distance_cm``. A single multi-source Dijkstra
+    (:func:`networkx.multi_source_dijkstra_path_length`) seeded with ``d == 0``
+    at every anchor node yields, for each node, the length of the shortest
+    all-blind chain back to *some* anchor.
+
+    Semantics:
+
+    * an anchor node maps to ``0.0`` (it is its own nearest anchor, even when
+      it has no blind edges -- isolated anchors are still seeds);
+    * a blind-only node maps to the shortest blind-chain length to an anchor;
+    * a blind-only node with **no** anchor reachable over blind edges maps to
+      :data:`math.inf` (the unreachable fallback, which the weight formula
+      treats as factor ``1`` -- no decay signal, no penalty).
+
+    Every node in ``graph`` appears in the returned dict (``inf`` if not
+    reached and not itself an anchor), so a caller can index any tail node
+    without a ``KeyError``.
+
+    :param graph: directed graph as produced by
+        :func:`tools.path_planner.graph_builder.build_graph`. Nodes must carry
+        a ``type`` attribute; blind edges must carry ``distance_cm``.
+        Read-only.
+    :return: ``{node_name: d}`` with ``d`` a finite float or ``math.inf``.
+    """
+    # 1. The anchors: every line / reset node seeds the search at d == 0.
+    anchors = {
+        node
+        for node, attrs in graph.nodes(data=True)
+        if attrs.get("type") in _ANCHOR_NODE_TYPES
+    }
+
+    # 2. The blind subgraph: only EDGE_BLIND edges, weighted by distance_cm.
+    #    Every node is copied first so isolated anchors (no blind edges) and
+    #    blind-only nodes alike are present as keys, mirroring the input graph.
+    blind = nx.DiGraph()
+    blind.add_nodes_from(graph.nodes())
+    for u, v, data in graph.edges(data=True):
+        if data["type"] == EDGE_BLIND:
+            blind.add_edge(u, v, distance_cm=float(data["distance_cm"]))
+
+    # 3. Default every node to inf (no anchor reachable), then overwrite the
+    #    reachable ones. With no anchors at all every node stays inf and the
+    #    weight formula falls back to factor 1 everywhere -- a degenerate but
+    #    finite, never-disconnecting result.
+    distances: Dict[str, float] = {node: math.inf for node in graph.nodes()}
+    if not anchors:
+        return distances
+
+    reachable = nx.multi_source_dijkstra_path_length(
+        blind, anchors, weight="distance_cm"
+    )
+    for node, dist in reachable.items():
+        distances[node] = float(dist)
+
+    return distances
+
+
 # -- internal helpers ---------------------------------------------------------
 
 
-def _weighted_copy(graph: nx.DiGraph, cost_blind_multiplier: float) -> nx.DiGraph:
-    """Return a copy of ``graph`` with a ``cost`` attribute on every edge.
+def _blind_decay_factor(d: float, params: BlindDecayParams) -> float:
+    """Return the multiplicative weight factor for a blind edge with tail-d ``d``.
+
+    Implements ``1 + k * (d / d_ref) ** exponent`` with the disabled / zero-gain
+    / unreachable short-circuits to factor ``1``:
+
+    * ``params.enabled is False`` or ``params.k == 0`` -> ``1.0`` (plain length);
+    * ``d`` is :data:`math.inf` (no anchor reachable) -> ``1.0`` (no decay signal);
+    * otherwise the convex formula above.
+
+    :param d: blind-subgraph distance from the edge tail to the nearest anchor.
+    :param params: the validated decay params.
+    :return: the weight factor (``>= 1.0`` for legal params).
+    """
+    if not params.enabled or params.k == 0.0:
+        return 1.0
+    if math.isinf(d):
+        # No anchor reachable over blind edges: no decay signal, so no penalty.
+        return 1.0
+    return 1.0 + params.k * (d / params.d_ref) ** params.exponent
+
+
+def _weighted_copy(graph: nx.DiGraph, params: BlindDecayParams) -> nx.DiGraph:
+    """Return a copy of ``graph`` with a decay-weighted ``cost`` on every edge.
+
+    Line / projection edges get ``cost == distance_cm`` (factor ``1``). Blind
+    edges get ``cost == distance_cm * (1 + k * (d(u) / d_ref) ** exponent)``
+    where ``d(u)`` is the tail node's blind-distance-to-anchor. The d-map is
+    computed once via :func:`compute_blind_distance_to_anchor` and skipped
+    entirely when the penalty is disabled / zero-gain (factor ``1`` for every
+    blind edge, so no d-map is needed).
 
     The copy preserves all original edge attributes (``type``,
-    ``distance_cm``, ``heading_deg``) so downstream code that consumes
-    the weighted graph still has the geometric information available.
+    ``distance_cm``, ``heading_deg``) so downstream code that consumes the
+    weighted graph still has the geometric information available.
 
     :param graph: directed graph as produced by
-        :func:`tools.path_planner.graph_builder.build_graph`. Every edge
-        must carry ``type`` and ``distance_cm``.
-    :param cost_blind_multiplier: multiplier applied to the
-        ``distance_cm`` of edges whose ``type`` equals
-        :data:`tools.path_planner.graph_builder.EDGE_BLIND`. Must be
-        positive; a multiplier of ``1.0`` disables the penalty.
-    :return: new :class:`networkx.DiGraph` carrying the same nodes and
-        edges as ``graph``, plus a ``cost`` attribute per edge.
+        :func:`tools.path_planner.graph_builder.build_graph`. Every edge must
+        carry ``type`` and ``distance_cm``; nodes must carry ``type``.
+    :param params: the validated :class:`BlindDecayParams`.
+    :return: new :class:`networkx.DiGraph` carrying the same nodes and edges as
+        ``graph``, plus a ``cost`` attribute per edge.
     """
+    # The d-map is only needed when the penalty actually applies. A disabled /
+    # zero-gain params object collapses every blind factor to 1, so the (one)
+    # multi-source Dijkstra over the blind subgraph is skipped.
+    penalty_active = params.enabled and params.k != 0.0
+    d_map = compute_blind_distance_to_anchor(graph) if penalty_active else {}
+
     weighted = nx.DiGraph()
     # Copy nodes with their attributes so node-only graphs (e.g. the
     # fully-isolated-G fixture in the unreachable test) still iterate.
@@ -368,11 +638,19 @@ def _weighted_copy(graph: nx.DiGraph, cost_blind_multiplier: float) -> nx.DiGrap
 
     for u, v, data in graph.edges(data=True):
         distance_cm = float(data["distance_cm"])
-        edge_type = data["type"]
-        multiplier = cost_blind_multiplier if edge_type == EDGE_BLIND else 1.0
-        cost = distance_cm * multiplier
-        # Re-emit every original attribute alongside the new cost field.
-        weighted.add_edge(u, v, cost=cost, **data)
+        if data["type"] == EDGE_BLIND:
+            # Penalty keyed on the edge TAIL u (a static potential field). An
+            # unreachable / inactive tail yields factor 1 (no penalty).
+            factor = _blind_decay_factor(d_map.get(u, math.inf), params)
+        else:
+            factor = 1.0
+        cost = distance_cm * factor
+        # Re-emit every original attribute alongside the new cost field. Merge
+        # via a dict (not ``cost=cost, **data``) so that if an input edge ever
+        # carries its own ``cost`` attribute -- a future per-edge override, or a
+        # graph re-fed through this function -- the explicit cost wins instead of
+        # raising "multiple values for keyword argument 'cost'".
+        weighted.add_edge(u, v, **{**data, "cost": cost})
 
     return weighted
 
@@ -382,7 +660,7 @@ def _weighted_copy(graph: nx.DiGraph, cost_blind_multiplier: float) -> nx.DiGrap
 
 def compute_all_pairs_next_hop(
     graph: nx.DiGraph,
-    cost_blind_multiplier: float,
+    params: BlindDecayParams,
 ) -> NextHopTable:
     """Return the all-pairs next-hop routing table for ``graph``.
 
@@ -397,37 +675,34 @@ def compute_all_pairs_next_hop(
       the table from ``source`` by repeatedly indexing on the running
       next-hop reconstructs the optimal path.
 
-    Edge cost = ``distance_cm * (cost_blind_multiplier if type == EDGE_BLIND
-    else 1.0)``. This function is **pivot-agnostic**: single-wheel-pivot
-    derivation is decoupled into :func:`build_pivot_turns`, which the
-    orchestrator calls separately. Nothing here mutates ``graph``, so the
-    Dijkstra cost computed here and the ``routes.cpp`` emitter driven by
-    the caller both read the same original, un-shortened distances.
+    Edge cost follows the blind-distance decay model (see the module
+    docstring): line / projection edges cost ``distance_cm``; blind edges
+    cost ``distance_cm * (1 + k * (d(u) / d_ref) ** exponent)`` keyed on the
+    tail node's blind-distance-to-anchor. This function is **pivot-agnostic**:
+    single-wheel-pivot derivation is decoupled into :func:`build_pivot_turns`,
+    which the orchestrator calls separately. Nothing here mutates ``graph``,
+    so the Dijkstra cost computed here and the ``routes.cpp`` emitter driven
+    by the caller both read the same original, un-shortened distances.
 
     :param graph: directed graph as produced by
-        :func:`tools.path_planner.graph_builder.build_graph`. Every edge
-        must carry ``type`` and ``distance_cm``. Read-only.
-    :param cost_blind_multiplier: positive multiplier applied to
-        :data:`tools.path_planner.graph_builder.EDGE_BLIND` edges.
+        :func:`tools.path_planner.graph_builder.build_graph`. Every edge must
+        carry ``type`` and ``distance_cm``; nodes must carry ``type``.
+        Read-only.
+    :param params: the :class:`BlindDecayParams` for the blind-edge penalty.
+        ``enabled=False`` or ``k == 0`` reduces the model to plain length.
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
-    :raises ValueError: when ``cost_blind_multiplier`` is not positive.
+    :raises ValueError: when ``params`` is out of domain (non-bool ``enabled``,
+        ``d_ref <= 0``, ``k < 0``, or ``exponent`` outside
+        ``[1, BLIND_DECAY_EXPONENT_MAX]``) while enabled.
     """
-    if cost_blind_multiplier <= 0:
-        raise ValueError(
-            "cost_blind_multiplier must be positive, got "
-            f"{cost_blind_multiplier}. Zero would make BLIND edges cost "
-            "nothing, so the planner would over-prefer them; a negative "
-            "multiplier would give them negative weight, which Dijkstra "
-            "cannot handle. A positive multiplier keeps BLIND edges more "
-            "expensive than equal-length LINE edges."
-        )
+    _validate_blind_decay_params(params)
 
     # Build the weighted copy from the (unmutated) graph. Every ``cost`` is
     # derived from the original ``distance_cm``; no pivot geometry rides
     # along, so the cost model and the emitter see identical distances.
-    weighted = _weighted_copy(graph, cost_blind_multiplier)
+    weighted = _weighted_copy(graph, params)
 
     nodes = list(graph.nodes())
 
@@ -460,14 +735,19 @@ def compute_all_pairs_next_hop(
 def compute_path_cost(
     graph: nx.DiGraph,
     path: List[str],
-    cost_blind_multiplier: float,
+    params: BlindDecayParams,
 ) -> float:
     """Return the total cost of walking ``path`` through ``graph``.
 
-    Uses the same edge-cost formula as
+    Uses the same blind-distance decay edge-cost formula as
     :func:`compute_all_pairs_next_hop`, so tests can confirm a Dijkstra
     decision matches a hand-computed cost. A single-node path (or empty
     path) has cost ``0.0`` because no edges are traversed.
+
+    Internally it prices the path through the same decay-weighted graph copy
+    (:func:`_weighted_copy`) the all-pairs table is built from, so each blind
+    edge is charged the identical ``cost`` Dijkstra saw -- the decay formula is
+    never re-implemented here, only summed.
 
     .. note::
 
@@ -480,25 +760,34 @@ def compute_path_cost(
         by tests to cross-check Dijkstra against a hand-computed cost.
 
     :param graph: directed graph carrying ``type`` and ``distance_cm``
-        on every edge.
+        on every edge and ``type`` on every node.
     :param path: ordered list of node names. Consecutive pairs must be
         connected by a directed edge in ``graph``.
-    :param cost_blind_multiplier: positive multiplier applied to
-        :data:`tools.path_planner.graph_builder.EDGE_BLIND` edges.
+    :param params: the :class:`BlindDecayParams` for the blind-edge penalty.
     :return: summed edge cost as a float.
+    :raises ValueError: when ``params`` is out of domain (non-bool ``enabled``,
+        ``d_ref <= 0``, ``k < 0``, or ``exponent`` outside
+        ``[1, BLIND_DECAY_EXPONENT_MAX]``) while enabled.
     :raises KeyError: if any consecutive ``(path[i], path[i+1])`` pair
         is not an edge in ``graph``.
     """
+    _validate_blind_decay_params(params)
+
     if len(path) < 2:
         return 0.0
 
+    # Price the path through the SAME decay-weighted graph copy Dijkstra
+    # optimises rather than re-deriving the per-edge factor here, so the cost
+    # formula lives in exactly one place (_weighted_copy / _blind_decay_factor)
+    # and this cross-check can never silently validate against a stale copy of
+    # the rule.
+    weighted = _weighted_copy(graph, params)
+
     total = 0.0
     for u, v in zip(path[:-1], path[1:]):
-        # graph.edges[u, v] raises KeyError on a missing edge, which is
-        # exactly the contract we promise.
-        data = graph.edges[u, v]
-        distance_cm = float(data["distance_cm"])
-        multiplier = cost_blind_multiplier if data["type"] == EDGE_BLIND else 1.0
-        total += distance_cm * multiplier
+        # ``weighted`` carries the same nodes and edges as the input graph, so
+        # weighted.edges[u, v] raises KeyError on a missing edge -- exactly the
+        # contract we promise.
+        total += weighted.edges[u, v]["cost"]
 
     return total

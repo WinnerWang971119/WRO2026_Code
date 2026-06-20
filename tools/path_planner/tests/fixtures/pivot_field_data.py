@@ -63,18 +63,65 @@ Fields
     REAR (the body would turn 120 deg > the 90 deg threshold to face the edge
     forward), so the FRONT-only force-override is load-bearing and observable:
     the hop must emit FRONT primitives + the trim, never ``ACT_BLIND_REVERSE``.
+
+``make_sensor_autorule_pivot_field()`` -- TC10 / TC11 / TC12 (validator), TC6-TC9 (sim)
+
+    ::
+
+        A(0,0) --BLIND,heading 0--> B(60,0) --PROJECTION,heading 90--> C(60,100)
+
+    The sim "user's scenario": incoming ``A -> B`` is a plain BLIND hop, the
+    outgoing ``B -> C`` is a PROJECTION authored via ``EDGES``.  With
+    ``BLIND_PROJECTION_AUTO_SEEK=True`` the incoming BLIND FEEDS a projection,
+    so the auto-rule (``next_hop_is_projection(graph, B, C)``) makes it seek a
+    line and classify ``"sensor"``.  The declared pivot ``(A, B, C)`` is a
+    90 deg turn (``delta = 9.0`` cm), within the 12.02 cm FRONT overshoot
+    budget, so the sensor-incoming correction reduces the overshoot advance and
+    trims the outgoing PROJECTION hop.  The 100 cm PROJECTION edge clears the
+    distance-side trim floor.  PASSES ``validate`` -- joins ``all_fields()``.
+
+``make_sensor_authored_pivot_field()`` -- TC10 / TC11 / TC12 (validator), TC6-TC9 (sim)
+
+    ::
+
+        A(0,0) --BLIND,stop_at_line "on",heading 0--> B(60,0)
+                                              --BLIND,heading 70--> C(94.2,93.97)
+
+    Incoming ``A -> B`` is a BLIND hop authored via ``EDGES`` carrying
+    ``stop_at_line: "on"``, so the per-edge override forces the seek and the
+    incoming leg classifies ``"sensor"`` regardless of the auto-rule.  The
+    outgoing ``B -> C`` is a plain (non-seeking) BLIND edge, so it is
+    ``"distance"`` and carries the departure trim.  The declared pivot
+    ``(A, B, C)`` is a 70 deg turn (``delta ~= 6.30`` cm), within the 12.02 cm
+    FRONT budget; the 100 cm outgoing edge clears the distance-side floor.
+    PASSES ``validate`` -- joins ``all_fields()``.
+
+``over_budget_sensor_fields()`` -- TC10 / TC11 / TC12 (validator REJECT cases)
+
+    ::
+
+        A(0,0) --BLIND[auto-rule | stop_at_line "on"],heading 0--> B(60,0)
+                                          --[PROJECTION | BLIND],heading 120--> C(10,86.6)
+
+    Two over-budget variants (an auto-rule BLIND->PROJECTION one and an authored
+    ``stop_at_line: "on"`` one), each an obtuse 120 deg pivot
+    (``delta ~= 15.59`` cm > the 12.02 cm FRONT budget).  Both edges are long
+    (60 cm incoming, 100 cm outgoing) so ONLY the sensor/LINE overshoot-budget
+    gate trips -- never the distance-side trim floor (100 - 15.59 = 84.4 cm
+    remains).  These are designed to be REJECTED by ``validate`` and are
+    therefore EXCLUDED from ``all_fields()``.
 """
 
 from __future__ import annotations
 
 import math
 from types import SimpleNamespace
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import networkx as nx
 
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
 
 
 # Shared field scalars. The values are arbitrary but legal -- the pivot tests
@@ -82,7 +129,10 @@ from tools.path_planner.planner import compute_all_pairs_next_hop
 _FIELD_MM: Tuple[float, float] = (3000.0, 2000.0)
 _MAP_PNG: str = "maps/map.png"
 _ROBOT_RADIUS_CM: float = 8.0
-_COST_BLIND_MULTIPLIER: float = 5.0
+_BLIND_DECAY_ENABLED: bool = True
+_BLIND_DECAY_K: float = 0.05
+_BLIND_DECAY_EXPONENT: float = 2.0
+_BLIND_DECAY_D_REF: float = 50.0
 
 
 def _make_field(
@@ -93,6 +143,7 @@ def _make_field(
     pivot_turns: List[Tuple[str, str, str]],
     start_node: str,
     start_heading_deg: float,
+    edges: Optional[List[dict]] = None,
 ) -> SimpleNamespace:
     """Return a full field-data ``SimpleNamespace`` for one pivot scenario.
 
@@ -110,14 +161,23 @@ def _make_field(
     :param pivot_turns: declared single-wheel pivots as ``(u, v, w)`` triples.
     :param start_node: ``START_NODE`` for the chassis spawn.
     :param start_heading_deg: ``START_HEADING_DEG`` in ``[0, 360)``.
+    :param edges: optional rich-edge list -- each entry a dict
+        ``{"type": ..., "u": ..., "v": ...}`` plus any of ``primitive_mode`` /
+        ``direction`` / ``stop_at_line``.  When supplied it is set verbatim as
+        the ``EDGES`` attribute (``build_graph`` reads it OPTIONALLY via
+        ``getattr``); when ``None`` the attribute is OMITTED entirely so legacy
+        fixtures keep their exact attribute surface.
     :return: a field-data namespace ready for ``build_graph`` / ``validate`` /
         ``PathTrackerSim``.
     """
-    return SimpleNamespace(
+    field = SimpleNamespace(
         FIELD_MM=_FIELD_MM,
         MAP_PNG=_MAP_PNG,
         ROBOT_RADIUS_CM=_ROBOT_RADIUS_CM,
-        COST_BLIND_MULTIPLIER=_COST_BLIND_MULTIPLIER,
+        BLIND_DECAY_ENABLED=_BLIND_DECAY_ENABLED,
+        BLIND_DECAY_K=_BLIND_DECAY_K,
+        BLIND_DECAY_EXPONENT=_BLIND_DECAY_EXPONENT,
+        BLIND_DECAY_D_REF=_BLIND_DECAY_D_REF,
         BLIND_PROJECTION_AUTO_SEEK=True,
         START_NODE=start_node,
         START_HEADING_DEG=start_heading_deg,
@@ -131,6 +191,13 @@ def _make_field(
         # header_writer read (`field_data.RESET_NODES`) never AttributeErrors.
         RESET_NODES={},
     )
+    # Only attach EDGES when authored -- build_graph reads it via getattr, so an
+    # absent attribute (the legacy fixtures) is the "no rich edges" signal. A
+    # dict-EDGES fixture must NOT also list the same pair in BLIND_EDGES /
+    # LINE_SEGMENTS, or the edge would be emitted twice.
+    if edges is not None:
+        field.EDGES = [dict(edge) for edge in edges]
+    return field
 
 
 def build_graph_and_next_hop(field) -> Tuple[nx.DiGraph, dict]:
@@ -143,7 +210,9 @@ def build_graph_and_next_hop(field) -> Tuple[nx.DiGraph, dict]:
     :return: the ``(DiGraph, NextHopTable)`` pair.
     """
     graph = build_graph(field)
-    next_hop = compute_all_pairs_next_hop(graph, field.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(
+        graph, BlindDecayParams.from_field_data(field)
+    )
     return graph, next_hop
 
 
@@ -318,11 +387,161 @@ def make_auto_rear_pivot_field() -> SimpleNamespace:
     )
 
 
+# ---------------------------------------------------------------------------
+# Sensor-incoming pivot geometry (shared by the in-budget + over-budget fields)
+# ---------------------------------------------------------------------------
+#
+#   A(0,0) --BLIND,heading 0--> B(_SI_IN_CM,0) --[PROJECTION|BLIND],theta--> C
+#
+# A and B sit on the +x axis so the incoming heading is 0 deg; C is placed at
+# the requested turn angle so theta == the authored angle.  Node C is derived
+# from the angle (single-sourced) -- never a hard-coded second coordinate -- so
+# the delta the validator computes always matches the geometry below.
+_SI_A: Tuple[float, float] = (0.0, 0.0)
+_SI_IN_CM: float = 60.0
+_SI_B: Tuple[float, float] = (_SI_IN_CM, 0.0)
+# Outgoing edge long enough that the distance-side trim floor never bites; only
+# the sensor/LINE overshoot budget can gate these fixtures.
+_SI_OUT_CM: float = 100.0
+
+
+def _sensor_incoming_node_c(turn_deg: float) -> Tuple[float, float]:
+    """Return node ``C`` placed ``_SI_OUT_CM`` from ``B`` at ``turn_deg``.
+
+    Single source of the outgoing geometry: ``B`` is on the +x axis (incoming
+    heading 0 deg), so the pivot angle ``theta`` equals ``turn_deg`` exactly and
+    the validator's ``delta = (track/2)*tan(|theta|/2)`` follows from this one
+    placement -- no second delta formula is hard-coded.
+    """
+    return (
+        _SI_B[0] + _SI_OUT_CM * math.cos(math.radians(turn_deg)),
+        _SI_B[1] + _SI_OUT_CM * math.sin(math.radians(turn_deg)),
+    )
+
+
+def _sensor_autorule_field(turn_deg: float) -> SimpleNamespace:
+    """Return a BLIND->PROJECTION auto-rule sensor-incoming pivot field.
+
+    ``A -> B`` is a plain BLIND hop (no override); ``B -> C`` is a PROJECTION
+    authored via ``EDGES``.  With ``BLIND_PROJECTION_AUTO_SEEK=True`` the
+    incoming BLIND FEEDS a projection, so the auto-rule classifies it
+    ``"sensor"``; the outgoing PROJECTION is ``"distance"``.  ``turn_deg`` sets
+    the pivot angle -> ``delta``: <=106 deg fits the FRONT budget (accepted),
+    120 deg overflows it (rejected).
+    """
+    c = _sensor_incoming_node_c(turn_deg)
+    return _make_field(
+        nodes={"A": _SI_A, "B": _SI_B, "C": c},
+        line_segments=[],
+        blind_edges=[("A", "B")],
+        pivot_turns=[("A", "B", "C")],
+        start_node="A",
+        start_heading_deg=0.0,    # facing along A->B
+        edges=[
+            {
+                "type": "PROJECTION",
+                "u": "B",
+                "v": "C",
+                "distance_cm": _SI_OUT_CM,
+                "heading_deg": turn_deg,    # B->C bears at the turn angle (B on +x)
+            }
+        ],
+    )
+
+
+def _sensor_authored_field(turn_deg: float) -> SimpleNamespace:
+    """Return an authored-STOP_AT_LINE sensor-incoming pivot field.
+
+    ``A -> B`` is a BLIND hop authored via ``EDGES`` carrying
+    ``stop_at_line: "on"``, so the per-edge override forces the seek and the
+    incoming leg classifies ``"sensor"`` independent of the auto-rule.
+    ``B -> C`` is a plain (non-seeking) BLIND edge -> ``"distance"``, carrying
+    the departure trim.  ``turn_deg`` sets the pivot angle -> ``delta``.
+    """
+    c = _sensor_incoming_node_c(turn_deg)
+    return _make_field(
+        nodes={"A": _SI_A, "B": _SI_B, "C": c},
+        line_segments=[],
+        blind_edges=[("B", "C")],
+        pivot_turns=[("A", "B", "C")],
+        start_node="A",
+        start_heading_deg=0.0,    # facing along A->B
+        edges=[
+            {
+                "type": "BLIND",
+                "u": "A",
+                "v": "B",
+                "distance_cm": _SI_IN_CM,
+                "heading_deg": 0.0,    # A->B runs along +x
+                "stop_at_line": "on",
+            }
+        ],
+    )
+
+
+# Turn magnitudes for the sensor-incoming fixtures (single-sourced; the tests
+# recompute delta from these via compute_pivot_compensation).
+_SI_AUTORULE_TURN_DEG: float = 90.0     # delta = 9.0 cm  (<= 12.02 FRONT budget)
+_SI_AUTHORED_TURN_DEG: float = 70.0     # delta ~= 6.30 cm (<= 12.02 FRONT budget)
+_SI_OVER_BUDGET_TURN_DEG: float = 120.0  # delta ~= 15.59 cm (> 12.02 -> REJECT)
+
+
+def make_sensor_autorule_pivot_field() -> SimpleNamespace:
+    """Return the delta<=budget BLIND->PROJECTION auto-rule pivot (sim user's scenario).
+
+    Incoming ``A -> B`` BLIND, outgoing ``B -> C`` PROJECTION (authored via
+    ``EDGES``), declared pivot ``(A, B, C)`` a 90 deg turn (``delta = 9.0`` cm,
+    within the 12.02 cm FRONT overshoot budget).  The auto-rule resolves the
+    incoming BLIND to ``"sensor"`` (it feeds a projection), so the
+    sensor-incoming correction trims the overshoot advance and the 100 cm
+    outgoing PROJECTION hop.  PASSES ``validate``; joins ``all_fields()``.
+    """
+    return _sensor_autorule_field(_SI_AUTORULE_TURN_DEG)
+
+
+def make_sensor_authored_pivot_field() -> SimpleNamespace:
+    """Return the delta<=budget authored-STOP_AT_LINE sensor-incoming pivot.
+
+    Incoming ``A -> B`` BLIND with an ``EDGES`` ``stop_at_line: "on"`` override
+    (forces ``"sensor"``), outgoing ``B -> C`` plain BLIND (``"distance"``),
+    declared pivot ``(A, B, C)`` a 70 deg turn (``delta ~= 6.30`` cm, within the
+    12.02 cm FRONT budget).  PASSES ``validate``; joins ``all_fields()``.
+    """
+    return _sensor_authored_field(_SI_AUTHORED_TURN_DEG)
+
+
+def over_budget_sensor_fields() -> List[SimpleNamespace]:
+    """Return the delta>budget sensor-incoming pivot fields (validate REJECT cases).
+
+    Both variants are an obtuse 120 deg pivot (``delta ~= 15.59`` cm), which
+    exceeds the 12.02 cm FRONT overshoot budget, so ``validate`` must REJECT
+    them.  Both edges are long (60 cm incoming, 100 cm outgoing) so ONLY the
+    sensor/LINE overshoot-budget gate trips -- the distance-side trim floor
+    leaves ``100 - 15.59 = 84.4`` cm and never fires.
+
+    EXCLUDED from ``all_fields()`` on purpose: the legality sweep asserts every
+    ``all_fields()`` entry PASSES ``validate``, and these are built to fail.
+
+    :return: ``[auto_rule_variant, authored_stop_at_line_variant]``.
+    """
+    return [
+        _sensor_autorule_field(_SI_OVER_BUDGET_TURN_DEG),
+        _sensor_authored_field(_SI_OVER_BUDGET_TURN_DEG),
+    ]
+
+
 def all_fields() -> List[SimpleNamespace]:
-    """Return every pivot fixture field (for the legality / validate sweep)."""
+    """Return every pivot fixture field (for the legality / validate sweep).
+
+    Only the PASSING fixtures belong here -- the over-budget rejection fixtures
+    in :func:`over_budget_sensor_fields` are deliberately excluded so the
+    ``validate`` sweep stays green.
+    """
     return [
         make_dead_reckon_pivot_field(),
         make_line_incoming_pivot_field(),
         make_chained_pivot_field(),
         make_auto_rear_pivot_field(),
+        make_sensor_autorule_pivot_field(),
+        make_sensor_authored_pivot_field(),
     ]
