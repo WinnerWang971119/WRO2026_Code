@@ -427,9 +427,12 @@ def test_validate_reaches_reset_rules_via_proxy() -> None:
     proxy plumbs the spec through, not just the node type.
     """
     model = make_model()
-    model.node_types["A"] = "reset"
-    model.reset_nodes = {"A": {"axis": "z", "wall_coord": 10.0, "facing": 0.0}}
-    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.axis"):
+    # Use B as the reset node (A is the START node, and the validator rejects a
+    # reset-typed START node before any spec check).
+    model.start_node = "A"
+    model.node_types["B"] = "reset"
+    model.reset_nodes = {"B": {"axis": "z", "wall_coord": 10.0, "facing": 0.0}}
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['B'\]\.axis"):
         model.validate()
 
 

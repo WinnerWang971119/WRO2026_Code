@@ -118,8 +118,9 @@ namespace Config
     // bounded by a return trigger / distance cap + off-map policy. Folded here from the former
     // standalone `ConfigLocalization.h` so the per-domain split stays one file per concern.
     //
-    // @note **Pillar 1 only.** Do NOT add wall-reset / wall-normal constants here — those
-    //       belong to Pillar 2.
+    // @note **This sub-section is Pillar 1 (operator-offset) only.** The Pillar 2 wall-reset /
+    //       wall-normal constants live in their own "Wall-normal strict sanity check" section
+    //       further down this file — keep the two groups separate; do not interleave them here.
     // @note Some constants below have no consumer in PR1a (operator-offset integrator); they
     //       are authored for PR1b (return-to-node prologue) so that PR needs no Config change.
     //       Each such constant is marked `Forward-looking: no consumer in PR1a`.

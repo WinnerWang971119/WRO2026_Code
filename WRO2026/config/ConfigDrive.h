@@ -350,6 +350,18 @@ namespace Config
      * timeout). Bench-tunable.
      */
     constexpr uint32_t STOP_AT_LINE_STALL_TIMEOUT_MS = 1500;
+    // SHARED-WINDOW FLOOR (load-bearing): this no-progress window is reused VERBATIM as the
+    // wall-stop SUCCESS window in `Drive::_updateWallStop` (AC8) — but with the meaning INVERTED.
+    // There a no-progress span means "stalled against the wall = AT WALL" (success), not "seek
+    // failed". A retune that shortens this to fail line seeks faster ALSO shrinks the wall-success
+    // window in the opposite direction: too SHORT and a low-PWM GYRO wall press reads as "stalled"
+    // before the wheels overcome static friction — a false at-wall on thin air, then BACK_OFF +
+    // re-anchor against nothing. Keep it well above motor spin-up; the floor below guards the press.
+    static_assert(STOP_AT_LINE_STALL_TIMEOUT_MS >= 500,
+                  "Config::STOP_AT_LINE_STALL_TIMEOUT_MS doubles as the wall-stop press SUCCESS "
+                  "window (Drive::_updateWallStop, inverted meaning). Below ~500 ms a low-PWM wall "
+                  "push can false-stall before the wheels move (re-anchoring against thin air). "
+                  "Keep it above motor spin-up — retune both primitives' needs together.");
 
     /**
      * @brief Minimum traveled advance (cm) per check that counts as forward progress for the
@@ -372,7 +384,9 @@ namespace Config
     //
     // COUPLED CALL SITES for the wall-stop stall window (NOT redefined here — listed so a future
     // editor who retunes them knows wall-stop rides on the same values):
-    //   - `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`   — no-progress timeout that signals "at wall".
+    //   - `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`   — no-progress timeout that signals "at wall"
+    //                                                  (INVERTED meaning vs the line seek; a
+    //                                                  spin-up floor static_assert above guards it).
     //   - `Config::STOP_AT_LINE_PROGRESS_EPS_CM`    — minimum advance that resets the watchdog.
     //   - `Drive::_updateWallStop()` (Drive.cpp)    — sole consumer of the three constants below.
     // ---------------------------------------------------------------------------------------

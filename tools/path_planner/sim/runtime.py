@@ -461,6 +461,13 @@ ACT_WALL_STOP: str = "wall_stop"
 # ``(ACT_REANCHOR, node, axis, wall_coord)``.
 ACT_REANCHOR: str = "reanchor"
 
+# The load-bearing ResetNode axis encoding (``"x" -> 0``, ``"y" -> 1``) -- the
+# cross-task contract the emitter (``header_writer._RESET_AXIS_TO_UINT8``) and
+# the firmware (``Localization::coordOnAxis``) also hold. Named once here so the
+# sim does not open-code ``0 if axis == "x" else 1`` inline (a drift hazard if
+# the encoding ever changes). Do NOT reorder.
+_RESET_AXIS_TO_IDX: dict = {"x": 0, "y": 1}
+
 
 class Direction(IntEnum):
     """Travel direction the chassis takes through an edge.
@@ -1736,11 +1743,13 @@ class PathTrackerSim:
 
         1. **wallStop** (mirror of ``Drive.wallStop(distToWall).setMode(GYRO)
            .setHeading(facing)``). The deterministic sim has no real stall, so it
-           models the SUCCESSFUL press: turn to face ``facing`` (the wall normal),
-           advance to the wall coordinate on ``axis``, then back off
-           :data:`WALL_STOP_BACK_OFF_CM` in the reverse-of-push direction so the
-           chassis is no longer pressing the wall. Emits
-           ``(ACT_WALL_STOP, node, axis_idx, wall_coord)``.
+           models the SUCCESSFUL press: turn to face ``facing`` (the wall normal)
+           and advance to the wall coordinate on ``axis``. The firmware then backs
+           off :data:`WALL_STOP_BACK_OFF_CM`, but the re-anchor in phase 2
+           overwrites the believed on-axis coordinate to exactly ``wall_coord``
+           regardless of that back-off, so the sim does NOT model the back-off (it
+           would be discarded immediately and never reaches any observable
+           output). Emits ``(ACT_WALL_STOP, node, axis_idx, wall_coord)``.
         2. **reanchor** (mirror of ``Localization.reanchorAtWall(axis, wall_coord,
            facing)``). Snaps the chassis pose to the wall's ground truth: sets the
            BELIEVED coordinate on ``axis`` to exactly ``wall_coord`` (a re-zero --
@@ -1767,36 +1776,24 @@ class PathTrackerSim:
         axis = info["axis"]                       # "x" or "y"
         wall_coord = float(info["wall_coord"])
         facing = _normalize(float(info["facing"]))
-        axis_idx = 0 if axis == "x" else 1        # cross-task ResetNode encoding
+        axis_idx = _RESET_AXIS_TO_IDX[axis]       # cross-task ResetNode encoding (x=0/y=1)
 
-        # -- Phase 1: wallStop (successful press) -----------------------------
-        # Square to the wall normal, push to the wall on `axis`, then back off so
-        # the chassis is no longer pressing. The push distance is the signed gap
-        # from the chassis's current on-axis coordinate to the wall; the back-off
-        # rolls `WALL_STOP_BACK_OFF_CM` in the reverse-of-push direction. Modeled
-        # explicitly so the chassis trajectory is realistic, but the believed
-        # on-axis coordinate is overwritten to `wall_coord` by the re-anchor
-        # below -- so the residual back-off bias never leaks into the next hop.
+        # -- Square, press to the wall, re-anchor (re-zero to wall truth) -----
+        # The firmware squares to `facing`, presses to the wall, backs off
+        # `WALL_STOP_BACK_OFF_CM`, then re-anchors. But `reanchorAtWall` sets the
+        # BELIEVED on-axis coordinate to exactly `wall_coord` REGARDLESS of the
+        # physical back-off, and the sim's chassis IS the believed pose (it drives
+        # downstream NEXT_HOP geometry + parity). So modelling the press distance
+        # and the back-off here would be dead work -- the re-zero below discards
+        # both. Snap the believed pose straight to ground truth: square to
+        # `facing` (the wall normal) and set the on-axis coordinate to
+        # `wall_coord` (correcting any pre-existing drift on `axis`); the off-axis
+        # component is left untouched.
         self._chassis.turn_to_heading(facing)
-        current_coord = self._chassis.x_cm if axis_idx == 0 else self._chassis.y_cm
-        push_cm = wall_coord - current_coord                 # signed: toward the wall
-        push_sign = 1.0 if push_cm >= 0.0 else -1.0
-        if axis_idx == 0:
-            self._chassis.x_cm = wall_coord                  # press flush to the wall
-            self._chassis.x_cm -= push_sign * WALL_STOP_BACK_OFF_CM    # back off
-        else:
-            self._chassis.y_cm = wall_coord
-            self._chassis.y_cm -= push_sign * WALL_STOP_BACK_OFF_CM
-
-        # -- Phase 2: reanchor (re-zero to wall truth) ------------------------
-        # Snap the BELIEVED pose to ground truth: on-axis coordinate := wall_coord
-        # (the firmware belief, back-off NOT subtracted) and heading := facing.
-        # This is the re-zero -- it corrects any pre-existing drift on `axis`.
         if axis_idx == 0:
             self._chassis.x_cm = wall_coord
         else:
             self._chassis.y_cm = wall_coord
-        self._chassis.turn_to_heading(facing)
         # Keep LocalizationSim's offset frame consistent with a node arrival.
         self._localization.reanchor_at_wall(axis, wall_coord, facing)
 

@@ -1078,13 +1078,17 @@ def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off
 # here is an inline SimpleNamespace -- field_data.json is never touched.
 
 
-def _reset_field(node_types_overrides=None, reset_nodes=None) -> SimpleNamespace:
+def _reset_field(
+    node_types_overrides=None, reset_nodes=None, start_node="B"
+) -> SimpleNamespace:
     """Build a minimal A/B field carrying the given NODE_TYPES + RESET_NODES.
 
     Two real nodes A/B joined by a LINE segment. ``A`` is the candidate reset
     node: by default it is typed ``"reset"`` and carries a valid RESET_NODES
-    entry, so the base field validates. Tests pass ``node_types_overrides`` /
-    ``reset_nodes`` to author the specific malformed (or absent) case.
+    entry, so the base field validates. The START_NODE defaults to ``B`` (not the
+    reset node) because the validator rejects a reset-typed START node; pass
+    ``start_node="A"`` to exercise that guard. Tests pass ``node_types_overrides``
+    / ``reset_nodes`` to author the specific malformed (or absent) case.
     """
     node_types = {"A": "reset", "B": "line"}
     if node_types_overrides is not None:
@@ -1099,7 +1103,7 @@ def _reset_field(node_types_overrides=None, reset_nodes=None) -> SimpleNamespace
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         COST_BLIND_MULTIPLIER=5.0,
-        START_NODE="A",
+        START_NODE=start_node,
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
@@ -1161,6 +1165,53 @@ def test_reset_node_facing_negative_rejected() -> None:
     )
     with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
         validate(fd)
+
+
+def test_reset_node_start_node_typed_reset_rejected() -> None:
+    """#3: a START node typed 'reset' is rejected (the interlude never runs at start).
+
+    The default fixture types A 'reset'; pointing START_NODE at A trips the guard
+    before any spec-level check. A is at y=200 with a valid wall (so only the
+    START guard, not a spec error, is the cause).
+    """
+    fd = _reset_field(start_node="A")
+    with pytest.raises(FieldDataError, match=r"START_NODE 'A' is typed 'reset'"):
+        validate(fd)
+
+
+def test_reset_node_facing_away_from_wall_rejected() -> None:
+    """TC13: facing must point TOWARD the wall, not away from it.
+
+    A is at y=200 and the wall is at y=205 (toward +y), but facing 270 deg
+    points -y -- the forward push would drive away from the wall. The geometry
+    gate rejects it (the firmware presses forward along facing).
+    """
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 205.0, "facing": 270.0}}
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
+        validate(fd)
+
+
+def test_reset_node_facing_toward_wall_negative_axis_passes() -> None:
+    """A wall on the -y side with facing 270 deg (-y) points toward it: valid."""
+    # A is at y=200; wall at y=50 (toward -y); facing 270 deg drives -y.
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 50.0, "facing": 270.0}}
+    )
+    assert validate(fd) is None
+
+
+def test_reset_node_on_wall_skips_geometry_gate() -> None:
+    """A node authored exactly on the wall (zero gap) accepts any facing.
+
+    With wall_coord == the node coordinate there is no push to misdirect, so
+    the toward-the-wall gate is skipped (a degenerate but legal authoring).
+    """
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 200.0, "facing": 270.0}}
+    )
+    assert validate(fd) is None
 
 
 def test_reset_node_wall_coord_non_finite_rejected() -> None:

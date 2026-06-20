@@ -72,6 +72,7 @@ from tools.path_planner.header_writer import (
     FIELD_DATA_JSON_PATH,
     FIELD_DATA_PATH,
     NEXT_HOP_NONE_HEX,
+    _resolve_reset_rows,
     compute_source_hash,
     emit_routes,
 )
@@ -977,6 +978,30 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
     )
     # No placeholder line when the table is populated.
     assert "N_RESET_NODES == 0, never read at runtime" not in cpp_text
+
+
+def test_resolve_reset_rows_facing_rounds_up_wraps_mod_360() -> None:
+    """A facing that rounds up to 360 wraps to 0 to honor the [0, 360) contract.
+
+    The validator admits facing < 360.0, so 359.7 is legal input but
+    ``round(359.7) == 360`` would breach the emitted ``int16_t facing; //
+    degrees [0, 360)`` contract. The emitter reduces mod 360 so the row carries
+    0, not 360.
+    """
+    rows = _resolve_reset_rows(
+        {"R": {"axis": "y", "wall_coord": 154.0, "facing": 359.7}},
+        {"R": 0},
+    )
+    assert rows == [(0, 1, 154.0, 0)]
+
+
+def test_resolve_reset_rows_facing_below_half_does_not_wrap() -> None:
+    """A facing that rounds DOWN below 360 is unaffected by the mod."""
+    rows = _resolve_reset_rows(
+        {"R": {"axis": "x", "wall_coord": 10.0, "facing": 359.4}},
+        {"R": 0},
+    )
+    assert rows == [(0, 0, 10.0, 359)]
 
 
 def test_reset_nodes_table_empty_field_emits_placeholder(emit_targets):

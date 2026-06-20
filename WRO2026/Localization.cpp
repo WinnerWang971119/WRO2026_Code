@@ -117,6 +117,15 @@ uint8_t LocalizationClass::getCurrentNode() const
     return _currentNode;
 }
 
+float LocalizationClass::coordOnAxis(uint8_t nodeId, uint8_t axis) const
+{
+    // The single firmware-side home for the ResetNode axis encoding (0 = x, 1 = y — the T13
+    // cross-task contract the emitter and sim mirror). Any non-1 axis falls back to x; the
+    // caller passes a validated `info->axis`, so the fallback is defence-in-depth.
+    const Routes::NodeInfo& node = FieldMap::getNode(nodeId);
+    return (axis == 1) ? node.y_cm : node.x_cm;
+}
+
 float LocalizationClass::getHeadingDeg() const
 {
     if (!_zeroed)
@@ -264,14 +273,14 @@ bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float head
     //     the net belief nodeCoord[axis] + _offset[axis] == wallCoord. The off-axis component and
     //     thetaDeg stay 0 from step (2) — the wall gives no off-axis info and heading was just
     //     re-bound, so the delta channel resets.
-    const Routes::NodeInfo& node = FieldMap::getNode(_currentNode);
+    const float nodeCoord = coordOnAxis(_currentNode, axis);    // x=0 / y=1 decode (one home)
     if (axis == 0)
     {
-        _offset.x = wallCoord - node.x_cm;
+        _offset.x = wallCoord - nodeCoord;
     }
     else if (axis == 1)
     {
-        _offset.y = wallCoord - node.y_cm;
+        _offset.y = wallCoord - nodeCoord;
     }
     // Any other axis value: leave _offset at the zeroed state from step (2). The heading is still
     // squared (the wall normal is axis-independent). The caller passes a validated info->axis, so
