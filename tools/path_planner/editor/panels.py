@@ -34,6 +34,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
+from tools.path_planner.editor import theme
+
 if TYPE_CHECKING:
     from tools.path_planner.editor.model import FieldModel
 
@@ -169,6 +171,47 @@ _BADGE_UNKNOWN_TEXT: str = "VALIDATION: --"
 
 
 # ---------------------------------------------------------------------------
+# Theme constants (T11).  Named ttk styles + font sizes + accent-bar geometry.
+# Colours and font families come from the shared ``theme`` module; only the
+# sizing literals live here so the code body stays free of magic numbers.
+# ---------------------------------------------------------------------------
+
+# Named ttk styles defined by :meth:`SidePanels._apply_theme` and assigned to
+# the ttk widgets at build time so SidePanels reads as themed even before the
+# app applies a root-level base theme (T13).
+_STYLE_LABELFRAME: str = "Editor.TLabelframe"
+_STYLE_LABELFRAME_LABEL: str = "Editor.TLabelframe.Label"
+_STYLE_BUTTON: str = "Editor.TButton"
+_STYLE_COMBOBOX: str = "Editor.TCombobox"
+_STYLE_SPINBOX: str = "Editor.TSpinbox"
+_STYLE_MONO_SPINBOX: str = "Editor.Mono.TSpinbox"
+
+# Base font sizes (points) for the panel's text roles.
+_FONT_SIZE_UI: int = 10
+_FONT_SIZE_MONO: int = 10
+# The status surface reads a touch larger so it stays legible as the floor of
+# the column; the badge is the largest, boldest line of the four.
+_FONT_SIZE_STATUS: int = 10
+_FONT_SIZE_BADGE: int = 11
+
+# Mode-toolbar accent bar: a thin vertical terracotta strip on the left edge of
+# the active mode's row.  Width in pixels; the inactive rows show a same-width
+# strip painted in the panel surface tone so the rows stay aligned.
+_ACCENT_BAR_WIDTH_PX: int = 4
+# Horizontal gap (pixels) between the accent strip and its mode label.
+_MODE_ROW_GAP_PX: int = 6
+# Vertical padding (pixels) around each mode row so the toolbar breathes.
+_MODE_ROW_PAD_Y: int = 2
+
+# Highlight thickness (pixels) used to flatten the chrome on plain tk widgets
+# (Listbox / Canvas / buttons) so they sit cleanly on the warm surface.
+_FLAT_BORDER_PX: int = 0
+# Sunken border (pixels) kept on the status surface so it still reads as a
+# distinct sunk plane at the floor of the column.
+_STATUS_BORDER_PX: int = 1
+
+
+# ---------------------------------------------------------------------------
 # SidePanels frame
 # ---------------------------------------------------------------------------
 
@@ -250,6 +293,40 @@ class SidePanels(tk.Frame):
         # width stays fixed regardless of which sub-section is tallest.
         self.pack_propagate(False)
 
+        # ---- Resolved fonts (T11) --------------------------------------
+        # Resolve the theme's fallback chains once, now that a Tk root almost
+        # certainly exists (this frame has a master).  ``resolve_font`` degrades
+        # to the chain's generic tail when no families are queryable, so this is
+        # headless-safe.  Stored as ``(family, size)`` tuples ready to hand to
+        # any widget's ``font=`` option.
+        self._font_ui: tuple[str, int] = (
+            theme.resolve_font(theme.FONT_SANS),
+            _FONT_SIZE_UI,
+        )
+        self._font_mono: tuple[str, int] = (
+            theme.resolve_font(theme.FONT_MONO),
+            _FONT_SIZE_MONO,
+        )
+        self._font_status: tuple[str, int] = (
+            theme.resolve_font(theme.FONT_SANS),
+            _FONT_SIZE_STATUS,
+        )
+        self._font_badge: tuple[str, int, str] = (
+            theme.resolve_font(theme.FONT_DISPLAY),
+            _FONT_SIZE_BADGE,
+            "bold",
+        )
+
+        # Paint the panel column itself with the warm surface tone so it no
+        # longer reads as default grey, even before the app applies a base
+        # theme to the root (T13).
+        self.configure(background=theme.SURFACE)
+
+        # Per-mode accent strips, populated by :meth:`_build_mode_selector`
+        # and recoloured by :meth:`_update_mode_accent` on every ``mode_var``
+        # write.  Keyed by the mode's ``value`` string.
+        self._mode_accent_bars: dict[str, tk.Frame] = {}
+
         # ---- Public callback attributes (assigned by T12 after init) ----
         self.on_node_select: Optional[Callable[[Optional[str]], None]] = None
         self.on_node_type_change: Optional[Callable[[str, str], None]] = None
@@ -321,6 +398,11 @@ class SidePanels(tk.Frame):
         # the handlers to swallow events caused by programmatic updates.
         self._suppress_callbacks = False
 
+        # ---- Define the named ttk styles before any widget is built ----
+        # so the ttk Labelframes / Comboboxes / Spinboxes below can opt into
+        # them by name.  Guarded internally; a no-op if no live root exists.
+        self._apply_theme()
+
         # ---- Build every sub-frame + status surface --------------------
         # The enlarged status surface is built first and packed to the bottom
         # so it always anchors the column floor regardless of how tall the
@@ -334,13 +416,221 @@ class SidePanels(tk.Frame):
         self._build_start_pose_panel()
         self._build_action_buttons()
 
+        # ---- Drive the mode-toolbar accent bar from ``mode_var`` --------
+        # A pure-visual trace: it only recolours the accent strips, never fires
+        # a user callback, so it is safe to leave installed for the panel's
+        # lifetime and needs no ``_suppress_callbacks`` gate.  Paint the initial
+        # accent for the default mode now that the strips exist.
+        self.mode_var.trace_add("write", self._on_mode_var_write)
+        self._update_mode_accent()
+
+    # ------------------------------------------------------------------
+    # Theme application (T11) -- named ttk styles + the accent-bar driver.
+    # ------------------------------------------------------------------
+
+    def _apply_theme(self) -> None:
+        """Define the panel's named ``ttk.Style`` entries from the palette.
+
+        This configures *named* styles (``Editor.TLabelframe`` etc.) rather
+        than touching the base theme or calling ``theme_use`` -- that root-level
+        work belongs to the app (T13).  Configuring named styles here means the
+        ttk widgets in this panel look themed even when :class:`SidePanels` is
+        built standalone under the default theme (the headless smoke test).
+
+        Every step is guarded: a :class:`ttk.Style` needs a live Tk root, so if
+        one cannot be obtained the method degrades to a no-op rather than
+        raising, keeping the headless build green.
+        """
+        try:
+            style = ttk.Style(self)
+        except tk.TclError:
+            return
+
+        ui_font = self._font_ui
+        mono_font = self._font_mono
+
+        # Labelframe: warm surface plane with an ink heading in the UI font.
+        self._safe_configure(
+            style, _STYLE_LABELFRAME, background=theme.SURFACE
+        )
+        self._safe_configure(
+            style,
+            _STYLE_LABELFRAME_LABEL,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            font=ui_font,
+        )
+
+        # Buttons rest on the surface and flash terracotta on press / hover.
+        self._safe_configure(
+            style,
+            _STYLE_BUTTON,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            font=ui_font,
+        )
+        self._safe_map(
+            style,
+            _STYLE_BUTTON,
+            background=[("pressed", theme.TERRACOTTA), ("active", theme.TERRACOTTA)],
+            foreground=[("pressed", theme.PAPER), ("active", theme.PAPER)],
+        )
+
+        # Combobox: light paper field, ink text, UI font.
+        self._safe_configure(
+            style,
+            _STYLE_COMBOBOX,
+            fieldbackground=theme.PAPER_LIGHT,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            font=ui_font,
+        )
+
+        # Spinboxes: a UI-font variant (start heading) and a mono variant for
+        # the numeric reset-facing field.  Both read on the light paper tone.
+        self._safe_configure(
+            style,
+            _STYLE_SPINBOX,
+            fieldbackground=theme.PAPER_LIGHT,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            font=ui_font,
+        )
+        self._safe_configure(
+            style,
+            _STYLE_MONO_SPINBOX,
+            fieldbackground=theme.PAPER_LIGHT,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            font=mono_font,
+        )
+
+    @staticmethod
+    def _safe_configure(style: ttk.Style, name: str, **kwargs) -> None:
+        """Call ``style.configure`` swallowing backend-specific rejections.
+
+        Some option names (``fieldbackground``) are rejected by some platform
+        themes; attempting the configure and ignoring a rejection keeps the
+        rest of the theming applied rather than aborting on the first miss.
+
+        :param style: A live :class:`ttk.Style`.
+        :param name: The named style to configure.
+        :param kwargs: Style options forwarded to ``configure``.
+        """
+        try:
+            style.configure(name, **kwargs)
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _safe_map(style: ttk.Style, name: str, **kwargs) -> None:
+        """Call ``style.map`` swallowing backend-specific rejections.
+
+        :param style: A live :class:`ttk.Style`.
+        :param name: The named style to map.
+        :param kwargs: State-keyed option lists forwarded to ``map``.
+        """
+        try:
+            style.map(name, **kwargs)
+        except tk.TclError:
+            pass
+
+    def _on_mode_var_write(self, *_args: object) -> None:
+        """``mode_var`` write trace: repaint the active-mode accent strip.
+
+        Purely visual -- it never invokes a user ``on_*`` callback, so it is
+        unaffected by (and does not need to consult) :attr:`_suppress_callbacks`.
+
+        :param _args: Tk trace positional args (var name, index, op); unused.
+        """
+        self._update_mode_accent()
+
+    def _update_mode_accent(self) -> None:
+        """Colour the accent strip of the active mode and clear the others.
+
+        The active mode's left-edge strip is painted :data:`theme.TERRACOTTA`;
+        every other strip is painted the panel surface tone so the rows stay
+        aligned but only the active one shows the accent.  Safe to call before
+        all strips exist (it iterates whatever is registered).
+        """
+        active = self.mode_var.get()
+        for value, bar in self._mode_accent_bars.items():
+            color = theme.TERRACOTTA if value == active else theme.SURFACE
+            try:
+                bar.configure(background=color)
+            except tk.TclError:
+                pass
+
+    # ------------------------------------------------------------------
+    # Themed plain-tk widget factories (T11)
+    # ------------------------------------------------------------------
+    # ttk styling cannot reach plain ``tk`` widgets, so these helpers stamp the
+    # warm palette + fonts onto the Frames / Labels / Buttons / Entries the tree
+    # still uses.  Keeping them in one place stops the per-widget bg/fg/font
+    # triples from scattering naked palette references through every builder.
+
+    def _themed_frame(self, master: tk.Misc, **kwargs) -> tk.Frame:
+        """Return a :class:`tk.Frame` painted with the panel surface tone."""
+        kwargs.setdefault("background", theme.SURFACE)
+        return tk.Frame(master, **kwargs)
+
+    def _themed_label(self, master: tk.Misc, **kwargs) -> tk.Label:
+        """Return a surface-toned, ink, UI-font :class:`tk.Label`."""
+        kwargs.setdefault("background", theme.SURFACE)
+        kwargs.setdefault("foreground", theme.INK)
+        kwargs.setdefault("font", self._font_ui)
+        return tk.Label(master, **kwargs)
+
+    def _themed_button(self, master: tk.Misc, **kwargs) -> tk.Button:
+        """Return a :class:`tk.Button` styled like the warm ttk buttons.
+
+        Resting state sits on the panel surface; the active (hover / press)
+        state flips to the terracotta accent on paper, mirroring the
+        ``Editor.TButton`` ttk map so the plain buttons match the styled ones.
+        """
+        kwargs.setdefault("background", theme.SURFACE)
+        kwargs.setdefault("foreground", theme.INK)
+        kwargs.setdefault("activebackground", theme.TERRACOTTA)
+        kwargs.setdefault("activeforeground", theme.PAPER)
+        kwargs.setdefault("highlightthickness", _FLAT_BORDER_PX)
+        kwargs.setdefault("font", self._font_ui)
+        return tk.Button(master, **kwargs)
+
+    def _themed_entry(
+        self, master: tk.Misc, *, mono: bool, **kwargs
+    ) -> tk.Entry:
+        """Return a paper-field :class:`tk.Entry`.
+
+        :param mono: ``True`` for numeric fields (coordinates, knobs) so they
+            use :data:`theme.FONT_MONO`; ``False`` for text fields, which use
+            the UI sans font.
+        """
+        kwargs.setdefault("background", theme.PAPER_LIGHT)
+        kwargs.setdefault("foreground", theme.INK)
+        kwargs.setdefault("insertbackground", theme.INK)
+        kwargs.setdefault("disabledbackground", theme.SURFACE)
+        kwargs.setdefault("disabledforeground", theme.INK_MUTED)
+        kwargs.setdefault("readonlybackground", theme.SURFACE)
+        kwargs.setdefault("highlightthickness", _FLAT_BORDER_PX)
+        kwargs.setdefault("font", self._font_mono if mono else self._font_ui)
+        return tk.Entry(master, **kwargs)
+
     # ------------------------------------------------------------------
     # Sub-frame builders
     # ------------------------------------------------------------------
 
     def _build_mode_selector(self) -> None:
-        """Create the top **Mode** labelframe with one radio button per mode."""
-        group = ttk.Labelframe(self, text="Mode", padding=_GROUP_INNER_PAD)
+        """Create the top **Mode** toolbar: one accented radio row per mode.
+
+        Each mode is rendered as a row holding a thin left-edge accent strip
+        (:data:`theme.TERRACOTTA` for the active mode, surface-toned otherwise)
+        followed by a radio button bound to the unchanged :attr:`mode_var`.  The
+        accent is driven by the ``mode_var`` write trace installed in
+        ``__init__`` so it tracks the active mode regardless of who set it.
+        """
+        group = ttk.Labelframe(
+            self, text="Mode", padding=_GROUP_INNER_PAD, style=_STYLE_LABELFRAME
+        )
         group.pack(
             side="top",
             fill="x",
@@ -349,18 +639,44 @@ class SidePanels(tk.Frame):
         )
 
         for mode, label in _MODE_LABELS:
+            row = tk.Frame(group, background=theme.SURFACE)
+            row.pack(side="top", fill="x", pady=_MODE_ROW_PAD_Y)
+
+            # Thin left-edge accent strip; initial colour is set by the trace's
+            # first run after the toolbar finishes building.
+            accent = tk.Frame(
+                row,
+                width=_ACCENT_BAR_WIDTH_PX,
+                background=theme.SURFACE,
+            )
+            accent.pack(side="left", fill="y")
+            # Keep the strip at its fixed width regardless of row height.
+            accent.pack_propagate(False)
+            self._mode_accent_bars[mode.value] = accent
+
             btn = tk.Radiobutton(
-                group,
+                row,
                 text=label,
                 variable=self.mode_var,
                 value=mode.value,
                 anchor="w",
+                background=theme.SURFACE,
+                foreground=theme.INK,
+                activebackground=theme.SURFACE,
+                activeforeground=theme.TERRACOTTA,
+                selectcolor=theme.PAPER_LIGHT,
+                highlightthickness=_FLAT_BORDER_PX,
+                font=self._font_ui,
             )
-            btn.pack(side="top", fill="x", anchor="w")
+            btn.pack(
+                side="left", fill="x", expand=True, padx=(_MODE_ROW_GAP_PX, 0)
+            )
 
     def _build_node_list_and_inspector(self) -> None:
         """Create the **Nodes** labelframe: list + name/type/coords inspector."""
-        group = ttk.Labelframe(self, text="Nodes", padding=_GROUP_INNER_PAD)
+        group = ttk.Labelframe(
+            self, text="Nodes", padding=_GROUP_INNER_PAD, style=_STYLE_LABELFRAME
+        )
         group.pack(
             side="top",
             fill="x",
@@ -369,10 +685,16 @@ class SidePanels(tk.Frame):
         )
 
         # --- Node listbox (with vertical scrollbar) ---
-        list_frame = tk.Frame(group)
+        list_frame = self._themed_frame(group)
         list_frame.pack(side="top", fill="x")
 
-        scrollbar = tk.Scrollbar(list_frame, orient="vertical")
+        scrollbar = tk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            background=theme.SURFACE,
+            troughcolor=theme.PAPER,
+            highlightthickness=_FLAT_BORDER_PX,
+        )
         scrollbar.pack(side="right", fill="y")
 
         self._node_listbox = tk.Listbox(
@@ -382,6 +704,12 @@ class SidePanels(tk.Frame):
             selectmode=tk.SINGLE,
             exportselection=False,
             yscrollcommand=scrollbar.set,
+            background=theme.PAPER_LIGHT,
+            foreground=theme.INK,
+            selectbackground=theme.TERRACOTTA,
+            selectforeground=theme.PAPER,
+            highlightthickness=_FLAT_BORDER_PX,
+            font=self._font_ui,
         )
         self._node_listbox.pack(side="left", fill="x", expand=True)
         scrollbar.config(command=self._node_listbox.yview)
@@ -389,37 +717,40 @@ class SidePanels(tk.Frame):
         self._node_listbox.bind("<<ListboxSelect>>", self._handle_listbox_select)
 
         # --- Inspector: read-only name entry ---
-        name_row = tk.Frame(group)
+        name_row = self._themed_frame(group)
         name_row.pack(side="top", fill="x", pady=(_SECTION_SPACING, 0))
-        tk.Label(name_row, text="Name:").pack(side="left")
-        self._name_entry = tk.Entry(
+        self._themed_label(name_row, text="Name:").pack(side="left")
+        self._name_entry = self._themed_entry(
             name_row,
+            mono=False,
             textvariable=self._selected_node_var,
             state="readonly",
         )
         self._name_entry.pack(side="left", fill="x", expand=True)
 
         # --- Inspector: node type combobox ---
-        type_row = tk.Frame(group)
+        type_row = self._themed_frame(group)
         type_row.pack(side="top", fill="x")
-        tk.Label(type_row, text="Type:").pack(side="left")
+        self._themed_label(type_row, text="Type:").pack(side="left")
         self._type_combo = ttk.Combobox(
             type_row,
             textvariable=self._selected_type_var,
             values=list(_NODE_TYPE_VALUES),
             state="disabled",
+            style=_STYLE_COMBOBOX,
         )
         self._type_combo.pack(side="left", fill="x", expand=True)
         self._type_combo.bind(
             "<<ComboboxSelected>>", self._handle_type_change
         )
 
-        # --- Inspector: x / y editable entries ---
-        coords_row = tk.Frame(group)
+        # --- Inspector: x / y editable entries (numeric -> mono font) ---
+        coords_row = self._themed_frame(group)
         coords_row.pack(side="top", fill="x")
-        tk.Label(coords_row, text="x:").pack(side="left")
-        self._x_entry = tk.Entry(
+        self._themed_label(coords_row, text="x:").pack(side="left")
+        self._x_entry = self._themed_entry(
             coords_row,
+            mono=True,
             textvariable=self._selected_x_var,
             width=_COORD_ENTRY_WIDTH,
             state="disabled",
@@ -428,9 +759,10 @@ class SidePanels(tk.Frame):
         self._x_entry.bind("<Return>", self._handle_coords_commit)
         self._x_entry.bind("<FocusOut>", self._handle_coords_commit)
 
-        tk.Label(coords_row, text="y:").pack(side="left")
-        self._y_entry = tk.Entry(
+        self._themed_label(coords_row, text="y:").pack(side="left")
+        self._y_entry = self._themed_entry(
             coords_row,
+            mono=True,
             textvariable=self._selected_y_var,
             width=_COORD_ENTRY_WIDTH,
             state="disabled",
@@ -440,12 +772,14 @@ class SidePanels(tk.Frame):
         self._y_entry.bind("<FocusOut>", self._handle_coords_commit)
 
         # --- Auto-create edges row (T7) ---
-        autocreate_row = tk.Frame(group)
+        autocreate_row = self._themed_frame(group)
         autocreate_row.pack(side="top", fill="x", pady=(_SECTION_SPACING, 0))
 
-        length_label_row = tk.Frame(autocreate_row)
+        length_label_row = self._themed_frame(autocreate_row)
         length_label_row.pack(side="top", fill="x")
-        tk.Label(length_label_row, text="Max edge length (cm):").pack(side="left")
+        self._themed_label(length_label_row, text="Max edge length (cm):").pack(
+            side="left"
+        )
         self._max_edge_length_spinbox = ttk.Spinbox(
             length_label_row,
             from_=_MAX_EDGE_LENGTH_MIN,
@@ -454,26 +788,27 @@ class SidePanels(tk.Frame):
             textvariable=self._max_edge_length_var,
             format=_MAX_EDGE_LENGTH_FORMAT,
             width=6,
+            style=_STYLE_MONO_SPINBOX,
         )
         self._max_edge_length_spinbox.pack(side="right")
 
         # Button sub-row: hosts the Auto-create button in idle mode and
         # the Accept / Reject pair in preview mode.  The state is toggled
         # via :meth:`set_auto_create_state`.
-        self._autocreate_button_frame = tk.Frame(autocreate_row)
+        self._autocreate_button_frame = self._themed_frame(autocreate_row)
         self._autocreate_button_frame.pack(side="top", fill="x", pady=(4, 0))
 
-        self._auto_create_button = tk.Button(
+        self._auto_create_button = self._themed_button(
             self._autocreate_button_frame,
             text="Auto-create edges",
             command=self._handle_auto_create_edges,
         )
-        self._accept_button = tk.Button(
+        self._accept_button = self._themed_button(
             self._autocreate_button_frame,
             text="Accept",
             command=self._handle_accept_proposed,
         )
-        self._reject_button = tk.Button(
+        self._reject_button = self._themed_button(
             self._autocreate_button_frame,
             text="Reject",
             command=self._handle_reject_proposed,
@@ -493,7 +828,10 @@ class SidePanels(tk.Frame):
         coordinate-entry commit pattern.
         """
         group = ttk.Labelframe(
-            self, text="Reset spec", padding=_GROUP_INNER_PAD
+            self,
+            text="Reset spec",
+            padding=_GROUP_INNER_PAD,
+            style=_STYLE_LABELFRAME,
         )
         group.pack(
             side="top",
@@ -502,25 +840,27 @@ class SidePanels(tk.Frame):
             pady=(0, _SECTION_SPACING),
         )
 
-        axis_row = tk.Frame(group)
+        axis_row = self._themed_frame(group)
         axis_row.pack(side="top", fill="x")
-        tk.Label(axis_row, text="Axis:").pack(side="left")
+        self._themed_label(axis_row, text="Axis:").pack(side="left")
         self._reset_axis_combo = ttk.Combobox(
             axis_row,
             textvariable=self._reset_axis_var,
             values=list(_RESET_AXIS_VALUES),
             state="disabled",
+            style=_STYLE_COMBOBOX,
         )
         self._reset_axis_combo.pack(side="left", fill="x", expand=True)
         self._reset_axis_combo.bind(
             "<<ComboboxSelected>>", self._handle_reset_spec_commit
         )
 
-        wall_row = tk.Frame(group)
+        wall_row = self._themed_frame(group)
         wall_row.pack(side="top", fill="x")
-        tk.Label(wall_row, text="Wall coord (cm):").pack(side="left")
-        self._reset_wall_entry = tk.Entry(
+        self._themed_label(wall_row, text="Wall coord (cm):").pack(side="left")
+        self._reset_wall_entry = self._themed_entry(
             wall_row,
+            mono=True,
             textvariable=self._reset_wall_coord_var,
             width=_RESET_COORD_ENTRY_WIDTH,
             state="disabled",
@@ -531,9 +871,9 @@ class SidePanels(tk.Frame):
             "<FocusOut>", self._handle_reset_spec_commit
         )
 
-        facing_row = tk.Frame(group)
+        facing_row = self._themed_frame(group)
         facing_row.pack(side="top", fill="x")
-        tk.Label(facing_row, text="Facing (deg):").pack(side="left")
+        self._themed_label(facing_row, text="Facing (deg):").pack(side="left")
         self._reset_facing_spinbox = ttk.Spinbox(
             facing_row,
             from_=_HEADING_MIN_DEG,
@@ -544,6 +884,7 @@ class SidePanels(tk.Frame):
             width=_RESET_FACING_SPINBOX_WIDTH,
             command=self._handle_reset_spec_commit,
             state="disabled",
+            style=_STYLE_MONO_SPINBOX,
         )
         self._reset_facing_spinbox.pack(side="right")
         # The Spinbox ``command`` only fires on arrow clicks; bind keyboard /
@@ -564,7 +905,9 @@ class SidePanels(tk.Frame):
         :attr:`on_add_pivot` once all three pickers hold a value.  The list is
         rebuilt and the picker dropdowns repopulated on every :meth:`refresh`.
         """
-        group = ttk.Labelframe(self, text="Pivots", padding=_GROUP_INNER_PAD)
+        group = ttk.Labelframe(
+            self, text="Pivots", padding=_GROUP_INNER_PAD, style=_STYLE_LABELFRAME
+        )
         group.pack(
             side="top",
             fill="x",
@@ -573,23 +916,31 @@ class SidePanels(tk.Frame):
         )
 
         # --- Scrollable list of existing pivot triples ---
-        list_frame = tk.Frame(group, height=_PIVOT_LIST_HEIGHT_PX)
+        list_frame = self._themed_frame(group, height=_PIVOT_LIST_HEIGHT_PX)
         list_frame.pack(side="top", fill="x")
         # Keep the canvas at the requested height even when it has no rows.
         list_frame.pack_propagate(False)
 
         self._pivot_canvas = tk.Canvas(
-            list_frame, height=_PIVOT_LIST_HEIGHT_PX, highlightthickness=0
+            list_frame,
+            height=_PIVOT_LIST_HEIGHT_PX,
+            highlightthickness=_FLAT_BORDER_PX,
+            background=theme.SURFACE,
         )
         pivot_scroll = tk.Scrollbar(
-            list_frame, orient="vertical", command=self._pivot_canvas.yview
+            list_frame,
+            orient="vertical",
+            command=self._pivot_canvas.yview,
+            background=theme.SURFACE,
+            troughcolor=theme.PAPER,
+            highlightthickness=_FLAT_BORDER_PX,
         )
         pivot_scroll.pack(side="right", fill="y")
         self._pivot_canvas.pack(side="left", fill="both", expand=True)
         self._pivot_canvas.configure(yscrollcommand=pivot_scroll.set)
 
         # Inner frame that actually holds the rows; rebuilt by ``refresh``.
-        self._pivot_rows_frame = tk.Frame(self._pivot_canvas)
+        self._pivot_rows_frame = self._themed_frame(self._pivot_canvas)
         self._pivot_canvas.create_window(
             (0, 0), window=self._pivot_rows_frame, anchor="nw"
         )
@@ -602,7 +953,7 @@ class SidePanels(tk.Frame):
         )
 
         # --- Add-row: three node pickers + Add button ---
-        add_row = tk.Frame(group)
+        add_row = self._themed_frame(group)
         add_row.pack(side="top", fill="x", pady=(_SECTION_SPACING, 0))
 
         self._pivot_u_combo = ttk.Combobox(
@@ -611,28 +962,31 @@ class SidePanels(tk.Frame):
             values=[],
             state="readonly",
             width=_PIVOT_COMBO_WIDTH,
+            style=_STYLE_COMBOBOX,
         )
         self._pivot_u_combo.pack(side="left")
-        tk.Label(add_row, text=_PIVOT_ARROW).pack(side="left")
+        self._themed_label(add_row, text=_PIVOT_ARROW).pack(side="left")
         self._pivot_v_combo = ttk.Combobox(
             add_row,
             textvariable=self._pivot_v_var,
             values=[],
             state="readonly",
             width=_PIVOT_COMBO_WIDTH,
+            style=_STYLE_COMBOBOX,
         )
         self._pivot_v_combo.pack(side="left")
-        tk.Label(add_row, text=_PIVOT_ARROW).pack(side="left")
+        self._themed_label(add_row, text=_PIVOT_ARROW).pack(side="left")
         self._pivot_w_combo = ttk.Combobox(
             add_row,
             textvariable=self._pivot_w_var,
             values=[],
             state="readonly",
             width=_PIVOT_COMBO_WIDTH,
+            style=_STYLE_COMBOBOX,
         )
         self._pivot_w_combo.pack(side="left")
 
-        self._pivot_add_button = tk.Button(
+        self._pivot_add_button = self._themed_button(
             add_row, text="Add", command=self._handle_add_pivot
         )
         self._pivot_add_button.pack(side="right")
@@ -648,7 +1002,10 @@ class SidePanels(tk.Frame):
         fire.
         """
         group = ttk.Labelframe(
-            self, text="Global knobs", padding=_GROUP_INNER_PAD
+            self,
+            text="Global knobs",
+            padding=_GROUP_INNER_PAD,
+            style=_STYLE_LABELFRAME,
         )
         group.pack(
             side="top",
@@ -657,7 +1014,7 @@ class SidePanels(tk.Frame):
             pady=(0, _SECTION_SPACING),
         )
 
-        toggle_row = tk.Frame(group)
+        toggle_row = self._themed_frame(group)
         toggle_row.pack(side="top", fill="x")
         self._blind_decay_check = tk.Checkbutton(
             toggle_row,
@@ -665,18 +1022,27 @@ class SidePanels(tk.Frame):
             variable=self._blind_decay_enabled_var,
             anchor="w",
             command=self._handle_blind_decay_toggle,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            activebackground=theme.SURFACE,
+            activeforeground=theme.TERRACOTTA,
+            selectcolor=theme.PAPER_LIGHT,
+            highlightthickness=_FLAT_BORDER_PX,
+            font=self._font_ui,
         )
         self._blind_decay_check.pack(side="left", fill="x")
 
-        # One labelled entry per float knob.  Bind both commit triggers and
-        # capture the knob name in the lambda's default arg (late-binding trap).
+        # One labelled entry per float knob (numeric -> mono font).  Bind both
+        # commit triggers and capture the knob name in the lambda's default arg
+        # (late-binding trap).
         self._float_knob_entries: dict[str, tk.Entry] = {}
         for knob_name, label_text in _FLOAT_KNOB_LABELS:
-            row = tk.Frame(group)
+            row = self._themed_frame(group)
             row.pack(side="top", fill="x")
-            tk.Label(row, text=label_text).pack(side="left")
-            entry = tk.Entry(
+            self._themed_label(row, text=label_text).pack(side="left")
+            entry = self._themed_entry(
                 row,
+                mono=True,
                 textvariable=self._float_knob_vars[knob_name],
                 width=_KNOB_ENTRY_WIDTH,
             )
@@ -697,7 +1063,9 @@ class SidePanels(tk.Frame):
 
     def _build_start_pose_panel(self) -> None:
         """Create the **Start** labelframe: node combobox + heading spinbox."""
-        group = ttk.Labelframe(self, text="Start", padding=_GROUP_INNER_PAD)
+        group = ttk.Labelframe(
+            self, text="Start", padding=_GROUP_INNER_PAD, style=_STYLE_LABELFRAME
+        )
         group.pack(
             side="top",
             fill="x",
@@ -705,23 +1073,24 @@ class SidePanels(tk.Frame):
             pady=(0, _SECTION_SPACING),
         )
 
-        node_row = tk.Frame(group)
+        node_row = self._themed_frame(group)
         node_row.pack(side="top", fill="x")
-        tk.Label(node_row, text="Node:").pack(side="left")
+        self._themed_label(node_row, text="Node:").pack(side="left")
         self._start_node_combo = ttk.Combobox(
             node_row,
             textvariable=self._start_node_var,
             values=[],
             state="readonly",
+            style=_STYLE_COMBOBOX,
         )
         self._start_node_combo.pack(side="left", fill="x", expand=True)
         self._start_node_combo.bind(
             "<<ComboboxSelected>>", self._handle_start_node_change
         )
 
-        heading_row = tk.Frame(group)
+        heading_row = self._themed_frame(group)
         heading_row.pack(side="top", fill="x")
-        tk.Label(heading_row, text="Heading:").pack(side="left")
+        self._themed_label(heading_row, text="Heading:").pack(side="left")
         self._heading_spinbox = ttk.Spinbox(
             heading_row,
             from_=_HEADING_MIN_DEG,
@@ -730,6 +1099,7 @@ class SidePanels(tk.Frame):
             textvariable=self._start_heading_var,
             format=_HEADING_FORMAT,
             command=self._handle_heading_change,
+            style=_STYLE_MONO_SPINBOX,
         )
         self._heading_spinbox.pack(side="left", fill="x", expand=True)
         # The Spinbox's ``command`` only fires on arrow clicks; bind
@@ -739,7 +1109,7 @@ class SidePanels(tk.Frame):
 
     def _build_action_buttons(self) -> None:
         """Create the bottom 2x2 grid of action buttons."""
-        group = tk.Frame(self)
+        group = self._themed_frame(self)
         group.pack(
             side="top",
             fill="x",
@@ -751,22 +1121,22 @@ class SidePanels(tk.Frame):
         group.grid_columnconfigure(0, weight=1, uniform="actions")
         group.grid_columnconfigure(1, weight=1, uniform="actions")
 
-        self._undo_button = tk.Button(
+        self._undo_button = self._themed_button(
             group, text="Undo", command=self._handle_undo
         )
         self._undo_button.grid(row=0, column=0, sticky="ew", padx=2, pady=2)
 
-        self._redo_button = tk.Button(
+        self._redo_button = self._themed_button(
             group, text="Redo", command=self._handle_redo
         )
         self._redo_button.grid(row=0, column=1, sticky="ew", padx=2, pady=2)
 
-        self._save_button = tk.Button(
+        self._save_button = self._themed_button(
             group, text="Save", command=self._handle_save
         )
         self._save_button.grid(row=1, column=0, sticky="ew", padx=2, pady=2)
 
-        self._save_build_button = tk.Button(
+        self._save_build_button = self._themed_button(
             group, text="Save & Build", command=self._handle_save_and_build
         )
         self._save_build_button.grid(
@@ -788,7 +1158,9 @@ class SidePanels(tk.Frame):
         :meth:`set_validation_badge`, :meth:`set_mode_display`,
         :meth:`set_selection_display`, and :meth:`set_status`.
         """
-        group = tk.Frame(self, relief="sunken", bd=1)
+        group = self._themed_frame(
+            self, relief="sunken", bd=_STATUS_BORDER_PX
+        )
         group.pack(
             side="bottom",
             fill="x",
@@ -796,30 +1168,45 @@ class SidePanels(tk.Frame):
             pady=(0, _PANEL_OUTER_PAD),
         )
 
-        # Validation badge -- kept on its own label so T11 can recolour it.
-        self._badge_label = tk.Label(
-            group, textvariable=self._badge_var, anchor="w"
+        # Validation badge -- kept on its own label so it can be recoloured by
+        # :meth:`set_validation_badge`.  It uses the largest, boldest font of
+        # the four status lines and starts in the muted "unknown" tone until the
+        # app reports a validation result.
+        self._badge_label = self._themed_label(
+            group,
+            textvariable=self._badge_var,
+            anchor="w",
+            foreground=theme.INK_MUTED,
+            font=self._font_badge,
         )
         self._badge_label.pack(side="top", fill="x")
 
-        self._mode_label = tk.Label(
-            group, textvariable=self._mode_display_var, anchor="w"
+        self._mode_label = self._themed_label(
+            group,
+            textvariable=self._mode_display_var,
+            anchor="w",
+            font=self._font_status,
         )
         self._mode_label.pack(side="top", fill="x")
 
-        self._selection_label = tk.Label(
-            group, textvariable=self._selection_display_var, anchor="w"
+        self._selection_label = self._themed_label(
+            group,
+            textvariable=self._selection_display_var,
+            anchor="w",
+            font=self._font_status,
         )
         self._selection_label.pack(side="top", fill="x")
 
         # Free-form status line: wraps so a long message stays readable across
         # the enlarged surface instead of being clipped to one row.
-        self._status_label = tk.Label(
+        self._status_label = self._themed_label(
             group,
             textvariable=self._status_var,
             anchor="w",
             justify="left",
             wraplength=_PANEL_WIDTH_PX - 2 * _PANEL_OUTER_PAD,
+            foreground=theme.INK_MUTED,
+            font=self._font_status,
         )
         self._status_label.pack(side="top", fill="x")
 
@@ -936,13 +1323,17 @@ class SidePanels(tk.Frame):
     def set_validation_badge(self, ok: bool) -> None:
         """Set the validation badge to a valid / invalid state.
 
-        Only the badge **text** is changed here; colouring is deferred to the
-        warm restyle (T11), which is why the badge owns its own dedicated
-        :class:`tk.Label`.
+        Updates both the badge **text** and its **colour**: a valid result is
+        shown in :data:`theme.VALID`, an invalid one in :data:`theme.INVALID`.
+        The badge owns its own dedicated :class:`tk.Label` so recolouring it
+        does not disturb the other status lines.
 
         :param ok: ``True`` to show the valid badge, ``False`` for invalid.
         """
         self._badge_var.set(_BADGE_VALID_TEXT if ok else _BADGE_INVALID_TEXT)
+        self._badge_label.configure(
+            foreground=theme.VALID if ok else theme.INVALID
+        )
 
     def set_undo_enabled(self, enabled: bool) -> None:
         """Enable or disable the **Undo** button.
@@ -1092,15 +1483,15 @@ class SidePanels(tk.Frame):
 
         for turn in model.pivot_turns:
             triple = tuple(turn)
-            row = tk.Frame(self._pivot_rows_frame)
+            row = self._themed_frame(self._pivot_rows_frame)
             row.pack(side="top", fill="x")
             label_text = f" {_PIVOT_ARROW} ".join(str(part) for part in triple)
-            tk.Label(row, text=label_text, anchor="w").pack(
+            self._themed_label(row, text=label_text, anchor="w").pack(
                 side="left", fill="x", expand=True
             )
             # Capture the triple in the default arg to dodge the late-binding
             # closure trap (every button would otherwise see the last triple).
-            tk.Button(
+            self._themed_button(
                 row,
                 text="Remove",
                 command=lambda t=triple: self._handle_delete_pivot(t),
