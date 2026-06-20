@@ -44,14 +44,28 @@ create a low-`d` basin — not a semantic "reset the accumulator on arrival."
 **Knobs** (`field_data.json` top-level scalars, per ADR-022; never `Config.h`; the firmware
 does not compute decay):
 
-| Attribute             | Default | Constraint       |
-|-----------------------|---------|------------------|
-| `BLIND_DECAY_ENABLED` | `true`  | boolean          |
-| `BLIND_DECAY_K`       | `0.05`  | `k >= 0`         |
-| `BLIND_DECAY_EXPONENT`| `2.0`   | `exponent >= 1`  |
-| `BLIND_DECAY_D_REF`   | `50.0`  | `d_ref > 0` (cm) |
+| Attribute             | Default | Constraint                   |
+|-----------------------|---------|------------------------------|
+| `BLIND_DECAY_ENABLED` | `true`  | boolean                      |
+| `BLIND_DECAY_K`       | `0.05`  | finite, `k >= 0`             |
+| `BLIND_DECAY_EXPONENT`| `2.0`   | finite, `1 <= exponent <= 8` |
+| `BLIND_DECAY_D_REF`   | `50.0`  | finite, `d_ref > 0` (cm)     |
 
-Default `k`, `exponent`, and `d_ref` are placeholder values to be bench-tuned on hardware.
+Default `k`, `exponent`, and `d_ref` are placeholder values to be bench-tuned on hardware. The
+four domains live in one shared predicate (`validator.validate_blind_decay_domain`) that both the
+field-data validator and the planner guard call, so a direct / sim / CTPS caller that hand-builds
+`BlindDecayParams` is held to the exact same rules. Every knob must be **finite** (NaN / inf slip
+past a comparison-only guard and silently corrupt the table); `exponent` is **capped at 8** because
+without a ceiling a fat-fingered value overflows `(d / d_ref) ** exponent` into an uncaught
+`OverflowError` deep in Dijkstra.
+
+**Anchor-reachability invariant (validator-enforced).** A `LINE` / `PROJECTION` (line-follow) edge
+may not be incident to a `"blind"` node: line-following needs a line under the sensor, so a blind
+pocket must be entered by a `BLIND` edge. This makes the unreachable fallback below
+correct-by-construction — a blind tail with no anchor reachable over blind edges (`d == inf`) falls
+back to factor `1`, and with the invariant in force `d == inf` means a genuinely disconnected
+island (the only case the fallback is meant for), never a pocket the backbone reaches through a
+line-follow seam whose interior hops would otherwise be priced the cheapest.
 
 **Honest tail-approximation caveat.** The penalty is keyed on the edge **tail** (a static
 potential field). This means it is directionally naive: traversing toward an anchor can cost more

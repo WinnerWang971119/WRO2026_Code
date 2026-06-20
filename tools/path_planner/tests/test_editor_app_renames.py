@@ -124,8 +124,11 @@ def test_undo_saved_rename_then_unrelated_edit_then_save(app):
     assert app._pending_renames == {"AA": "A"}
 
     # An unrelated edit clears the redo stack (History.do discards the redo
-    # branch), so the RenameNode is now on neither stack.
-    assert app._dispatch(SetNodeType("A", "blind"))
+    # branch), so the RenameNode is now on neither stack. Retype the blind node
+    # G to "line" -- a benign edit that keeps the field valid. (Typing the
+    # line-incident node A to "blind" would now fail the line-into-blind save
+    # check, ADR-041, aborting the save this test asserts succeeds.)
+    assert app._dispatch(SetNodeType("G", "line"))
     assert not app._history.can_redo
     assert app._pending_renames == {"AA": "A"}  # delta is not stack-derived
 

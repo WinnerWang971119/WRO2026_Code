@@ -555,19 +555,60 @@ def test_disabled_params_skip_penalty_entirely() -> None:
         (BlindDecayParams(enabled=True, k=0.05, exponent=2.0, d_ref=0.0), "d_ref"),
         (BlindDecayParams(enabled=True, k=-0.1, exponent=2.0, d_ref=50.0), "k"),
         (BlindDecayParams(enabled=True, k=0.05, exponent=0.5, d_ref=50.0), "exponent"),
+        # Non-finite values slip through a comparison-only guard (nan < 0 is
+        # False), so the shared predicate rejects them at the finiteness gate.
+        (BlindDecayParams(enabled=True, k=float("nan"), exponent=2.0, d_ref=50.0), "k"),
+        (BlindDecayParams(enabled=True, k=0.05, exponent=float("nan"), d_ref=50.0), "exponent"),
+        (BlindDecayParams(enabled=True, k=0.05, exponent=float("inf"), d_ref=50.0), "exponent"),
+        (BlindDecayParams(enabled=True, k=0.05, exponent=2.0, d_ref=float("nan")), "d_ref"),
+        # A finite-but-extreme exponent would overflow the weight; the cap stops
+        # it at authoring time with a ValueError, never an OverflowError.
+        (BlindDecayParams(enabled=True, k=0.05, exponent=400.0, d_ref=50.0), "exponent"),
+        # bool("false") is True, so a truthy non-bool enabled would silently
+        # enable decay; the type check rejects it.
+        (BlindDecayParams(enabled="false", k=0.05, exponent=2.0, d_ref=50.0), "enabled"),
     ],
-    ids=["d_ref<=0", "k<0", "exponent<1"],
+    ids=[
+        "d_ref<=0", "k<0", "exponent<1",
+        "k=nan", "exponent=nan", "exponent=inf", "d_ref=nan",
+        "exponent>max", "enabled non-bool",
+    ],
 )
 def test_out_of_domain_params_raise(bad_params, needle) -> None:
     """A bypass caller passing out-of-domain params fails loudly (mirrors validator).
 
-    ``d_ref <= 0`` / ``k < 0`` / ``exponent < 1`` each raise ValueError naming
-    the offending field, so a direct caller that skips the field-data validator
-    cannot emit a negative / NaN Dijkstra weight.
+    Each malformed field raises ValueError naming it, so a direct caller that
+    skips the field-data validator cannot emit a negative / NaN / overflowing
+    Dijkstra weight or silently enable decay through a truthy non-bool. The
+    domain rules are the single shared ``validator.validate_blind_decay_domain``
+    predicate, so this guard can never drift from the field-data validator.
     """
     g = _make_shortcut_vs_reset_graph(reset_node=True)
     with pytest.raises(ValueError, match=needle):
         compute_all_pairs_next_hop(g, bad_params)
+
+
+def test_extreme_exponent_raises_valueerror_not_overflow() -> None:
+    """The exponent cap converts a would-be OverflowError into a clean ValueError.
+
+    Regression for the unbounded-exponent crash: a fat-fingered exponent of 400
+    on a graph with deep blind tails used to raise OverflowError deep inside
+    networkx Dijkstra. The shared guard now rejects it up front with a ValueError
+    naming the exponent -- and never an OverflowError.
+    """
+    g = _make_shortcut_vs_reset_graph(reset_node=True)
+    bad = BlindDecayParams(enabled=True, k=0.05, exponent=400.0, d_ref=50.0)
+    with pytest.raises(ValueError, match="exponent"):
+        compute_all_pairs_next_hop(g, bad)
+
+
+def test_exponent_at_cap_is_accepted() -> None:
+    """An exponent exactly at the cap is in-domain and prices a real table."""
+    g = _make_shortcut_vs_reset_graph(reset_node=True)
+    ok = BlindDecayParams(enabled=True, k=0.05, exponent=8.0, d_ref=50.0)
+    next_hop = compute_all_pairs_next_hop(g, ok)
+    # A populated table, not an exception, is the assertion.
+    assert next_hop and all(src in next_hop[src] for src in next_hop)
 
 
 # -- pivot compensation tests (T13) ------------------------------------------

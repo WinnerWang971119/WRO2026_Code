@@ -110,6 +110,7 @@ from tools.path_planner.compiler import normalize_turn
 from tools.path_planner.config_parse import parse_config_float
 from tools.path_planner.graph_builder import EDGE_BLIND, directed_edge_heading
 from tools.path_planner.pipeline_config import TurnMode
+from tools.path_planner.validator import validate_blind_decay_domain
 
 # Public type alias: outer key = source node, inner key = target node,
 # value = next node on the shortest path (or None if unreachable).
@@ -149,9 +150,10 @@ class BlindDecayParams:
     :ivar k: unitless penalty gain ``>= 0``. ``k == 0`` also reduces every
         blind edge to factor ``1`` (the AC14b regression anchor) -- a strict
         generalisation of the old flat ``COST_BLIND_MULTIPLIER`` model.
-    :ivar exponent: convexity exponent ``>= 1`` in ``(d / d_ref) ** exponent``.
-        A sub-linear exponent would invert the penalty's intent (cheaper far
-        from an anchor), so the planner rejects ``exponent < 1``.
+    :ivar exponent: convexity exponent in ``[1, BLIND_DECAY_EXPONENT_MAX]`` in
+        ``(d / d_ref) ** exponent``. A sub-linear exponent would invert the
+        penalty's intent (cheaper far from an anchor) and an extreme one would
+        overflow the weight, so the planner rejects both ends of the range.
     :ivar d_ref: length normaliser in centimetres, ``> 0``, so ``k`` is
         portable across maps. A non-positive ``d_ref`` divides by zero / flips
         the sign, so the planner rejects it.
@@ -171,13 +173,20 @@ class BlindDecayParams:
         The reads are strict (no ``getattr`` default): a fixture missing any
         of the four knobs fails loudly here rather than silently defaulting.
 
+        ``enabled`` is passed through verbatim -- NOT coerced with ``bool(...)``,
+        because ``bool("false")`` is ``True``, so a bypass caller whose
+        ``BLIND_DECAY_ENABLED`` is a truthy non-bool would silently *enable*
+        decay. A non-bool is instead caught by :func:`_validate_blind_decay_params`
+        (the shared :func:`validator.validate_blind_decay_domain` predicate)
+        before any weight is computed.
+
         :param field_data: object exposing ``BLIND_DECAY_ENABLED`` /
             ``BLIND_DECAY_K`` / ``BLIND_DECAY_EXPONENT`` / ``BLIND_DECAY_D_REF``.
         :return: the populated, frozen params object.
         :raises AttributeError: if any ``BLIND_DECAY_*`` attribute is absent.
         """
         return cls(
-            enabled=bool(field_data.BLIND_DECAY_ENABLED),
+            enabled=field_data.BLIND_DECAY_ENABLED,
             k=float(field_data.BLIND_DECAY_K),
             exponent=float(field_data.BLIND_DECAY_EXPONENT),
             d_ref=float(field_data.BLIND_DECAY_D_REF),
@@ -188,44 +197,41 @@ def _validate_blind_decay_params(params: BlindDecayParams) -> None:
     """Reject a malformed :class:`BlindDecayParams` (mirrors the validator).
 
     The field-data validator (``validator._validate_blind_decay``) already
-    enforces these domains on the authored ``field_data.json``, but a direct
-    or bypass caller can construct a :class:`BlindDecayParams` by hand. This
-    guards the planner so such a caller fails loudly rather than emitting a
-    negative / NaN Dijkstra weight (which would corrupt the routing table or
-    crash the heap). The rules match the validator one-for-one:
+    enforces these domains on the authored ``field_data.json``, but a direct or
+    bypass caller (sim, CTPS, a hand-built params object) can construct a
+    :class:`BlindDecayParams` by hand and skip it. This guard re-runs the exact
+    same rules so such a caller fails loudly rather than emitting a negative /
+    NaN / overflowing Dijkstra weight (which would corrupt the routing table or
+    crash the heap). The domain logic is the single shared
+    :func:`tools.path_planner.validator.validate_blind_decay_domain` predicate --
+    this wrapper only adapts its ``(field, reason)`` result into a ``ValueError``
+    naming the ``BlindDecayParams`` attribute, so the planner guard and the
+    field-data validator can never drift:
 
-    * ``d_ref > 0`` (the normaliser; a non-positive value divides by zero);
-    * ``k >= 0`` (a negative gain would make blind edges *cheaper*);
-    * ``exponent >= 1`` (a sub-linear exponent inverts the penalty's intent).
+    * ``enabled`` is a real ``bool`` (a truthy non-bool would silently enable
+      decay);
+    * ``d_ref > 0`` and finite (the normaliser; a non-positive value divides by
+      zero);
+    * ``k >= 0`` and finite (a negative gain would make blind edges *cheaper*);
+    * ``exponent`` finite in ``[1, BLIND_DECAY_EXPONENT_MAX]`` (a sub-linear
+      exponent inverts the penalty's intent; an extreme exponent overflows the
+      weight).
 
     A disabled params object (``enabled is False``) short-circuits to factor
-    ``1`` upstream and never reaches the weight formula, so it is exempt.
+    ``1`` upstream and never reaches the weight formula, so only its ``enabled``
+    type is checked.
 
     :param params: the decay params to validate.
     :return: ``None`` on success.
     :raises ValueError: on the first out-of-domain field, with the offending
         value in the message.
     """
-    if not params.enabled:
-        return
-    if params.d_ref <= 0:
-        raise ValueError(
-            "BlindDecayParams.d_ref must be positive (it normalises d so k is "
-            f"map-portable; a non-positive d_ref divides by zero), got "
-            f"{params.d_ref}."
-        )
-    if params.k < 0:
-        raise ValueError(
-            "BlindDecayParams.k must be non-negative (a negative gain would "
-            f"make BLIND edges cheaper than equal-length LINE edges), got "
-            f"{params.k}."
-        )
-    if params.exponent < 1:
-        raise ValueError(
-            "BlindDecayParams.exponent must be >= 1 (a sub-linear exponent "
-            "would make far-from-anchor blind hops cheaper, inverting the "
-            f"penalty), got {params.exponent}."
-        )
+    result = validate_blind_decay_domain(
+        params.enabled, params.k, params.exponent, params.d_ref
+    )
+    if result is not None:
+        field, reason = result
+        raise ValueError(f"BlindDecayParams.{field} {reason}")
 
 
 # -- chassis track (single-sourced from the firmware header) ------------------
@@ -616,8 +622,12 @@ def _weighted_copy(graph: nx.DiGraph, params: BlindDecayParams) -> nx.DiGraph:
         else:
             factor = 1.0
         cost = distance_cm * factor
-        # Re-emit every original attribute alongside the new cost field.
-        weighted.add_edge(u, v, cost=cost, **data)
+        # Re-emit every original attribute alongside the new cost field. Merge
+        # via a dict (not ``cost=cost, **data``) so that if an input edge ever
+        # carries its own ``cost`` attribute -- a future per-edge override, or a
+        # graph re-fed through this function -- the explicit cost wins instead of
+        # raising "multiple values for keyword argument 'cost'".
+        weighted.add_edge(u, v, **{**data, "cost": cost})
 
     return weighted
 
@@ -660,8 +670,9 @@ def compute_all_pairs_next_hop(
     :return: nested dict ``{source: {target: next_hop | None}}``.
         Outer dict has every node as a key; each inner dict has every
         node as a key (no missing entries).
-    :raises ValueError: when ``params`` is out of domain (``d_ref <= 0``,
-        ``k < 0``, or ``exponent < 1``) while enabled.
+    :raises ValueError: when ``params`` is out of domain (non-bool ``enabled``,
+        ``d_ref <= 0``, ``k < 0``, or ``exponent`` outside
+        ``[1, BLIND_DECAY_EXPONENT_MAX]``) while enabled.
     """
     _validate_blind_decay_params(params)
 
@@ -710,10 +721,10 @@ def compute_path_cost(
     decision matches a hand-computed cost. A single-node path (or empty
     path) has cost ``0.0`` because no edges are traversed.
 
-    The blind-distance-to-anchor map is computed once over the whole graph
-    (not just the path) so each blind edge on the path is priced by the same
-    tail-``d`` the all-pairs table used. It is skipped when the penalty is
-    disabled / zero-gain (every blind edge then costs plain ``distance_cm``).
+    Internally it prices the path through the same decay-weighted graph copy
+    (:func:`_weighted_copy`) the all-pairs table is built from, so each blind
+    edge is charged the identical ``cost`` Dijkstra saw -- the decay formula is
+    never re-implemented here, only summed.
 
     .. note::
 
@@ -731,8 +742,9 @@ def compute_path_cost(
         connected by a directed edge in ``graph``.
     :param params: the :class:`BlindDecayParams` for the blind-edge penalty.
     :return: summed edge cost as a float.
-    :raises ValueError: when ``params`` is out of domain (``d_ref <= 0``,
-        ``k < 0``, or ``exponent < 1``) while enabled.
+    :raises ValueError: when ``params`` is out of domain (non-bool ``enabled``,
+        ``d_ref <= 0``, ``k < 0``, or ``exponent`` outside
+        ``[1, BLIND_DECAY_EXPONENT_MAX]``) while enabled.
     :raises KeyError: if any consecutive ``(path[i], path[i+1])`` pair
         is not an edge in ``graph``.
     """
@@ -741,19 +753,18 @@ def compute_path_cost(
     if len(path) < 2:
         return 0.0
 
-    penalty_active = params.enabled and params.k != 0.0
-    d_map = compute_blind_distance_to_anchor(graph) if penalty_active else {}
+    # Price the path through the SAME decay-weighted graph copy Dijkstra
+    # optimises rather than re-deriving the per-edge factor here, so the cost
+    # formula lives in exactly one place (_weighted_copy / _blind_decay_factor)
+    # and this cross-check can never silently validate against a stale copy of
+    # the rule.
+    weighted = _weighted_copy(graph, params)
 
     total = 0.0
     for u, v in zip(path[:-1], path[1:]):
-        # graph.edges[u, v] raises KeyError on a missing edge, which is
-        # exactly the contract we promise.
-        data = graph.edges[u, v]
-        distance_cm = float(data["distance_cm"])
-        if data["type"] == EDGE_BLIND:
-            factor = _blind_decay_factor(d_map.get(u, math.inf), params)
-        else:
-            factor = 1.0
-        total += distance_cm * factor
+        # ``weighted`` carries the same nodes and edges as the input graph, so
+        # weighted.edges[u, v] raises KeyError on a missing edge -- exactly the
+        # contract we promise.
+        total += weighted.edges[u, v]["cost"]
 
     return total

@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Optional, Tuple
 
 from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH, parse_config_float
 
@@ -65,6 +65,22 @@ _REQUIRED_ATTRS = (
 )
 
 _ALLOWED_NODE_TYPES = ("line", "blind", "reset")
+
+# The off-line node kind: a node with no line under the sensor, reachable only
+# by dead reckoning. A LINE / PROJECTION (line-follow) edge can never be
+# incident to one -- you cannot line-follow to a node that has no line -- so the
+# validator rejects such an edge (see :func:`_reject_line_follow_into_blind`).
+_BLIND_NODE_TYPE = "blind"
+
+# Inclusive upper bound on BLIND_DECAY_EXPONENT. The decay weight is
+# ``length * (1 + k * (d / d_ref) ** exponent)``; with no ceiling a fat-fingered
+# exponent (e.g. 400) makes ``(d / d_ref) ** exponent`` overflow to an uncaught
+# OverflowError deep inside the planner. A ceiling of 8 covers linear through
+# strongly-convex penalties with large headroom while keeping the weight finite
+# for any sane ``d / d_ref`` ratio, so the failure surfaces here as a precise
+# FieldDataError instead of a crash. Shared with the planner guard via
+# :func:`validate_blind_decay_domain`.
+BLIND_DECAY_EXPONENT_MAX = 8.0
 
 # Axis labels a reset node may re-zero against (a wall parallel to one axis).
 _ALLOWED_RESET_AXES = ("x", "y")
@@ -856,6 +872,7 @@ def _validate_edges_field(field_data) -> None:
         EDGE_PROJECTION: (ProjectionMode, "ProjectionMode"),
     }
     nodes = getattr(field_data, "NODES", {})
+    node_types = getattr(field_data, "NODE_TYPES", {})
 
     # Anti-ambiguity cross-check (findings #38/#47): an EDGES entry whose
     # unordered pair {u, v} already exists in LINE_SEGMENTS or BLIND_EDGES
@@ -942,6 +959,15 @@ def _validate_edges_field(field_data) -> None:
             raise FieldDataError(
                 f"EDGES[{i}] references unknown node v='{v}' -- "
                 "add it to NODES or fix the entry"
+            )
+
+        # A LINE / PROJECTION override is a line-follow edge; like a
+        # LINE_SEGMENTS pair it cannot be incident to a blind node (no line under
+        # the sensor), which also keeps the planner's blind-decay fallback
+        # correct-by-construction (ADR-041).
+        if edge_type in (EDGE_LINE, EDGE_PROJECTION):
+            _reject_line_follow_into_blind(
+                u, v, edge_type, node_types, f"EDGES[{i}]"
             )
 
         # Conflicting-type cross-check (findings #38/#47). A matching-type
@@ -1216,6 +1242,107 @@ def _validate_reset_nodes(field_data) -> None:
             )
 
 
+def validate_blind_decay_domain(
+    enabled: Any, k: Any, exponent: Any, d_ref: Any
+) -> Optional[Tuple[str, str]]:
+    """Return ``None`` if the four decay knobs are in-domain, else ``(field, reason)``.
+
+    Single source of truth for the blind-distance decay parameter domain, shared
+    by the field-data validator (:func:`_validate_blind_decay`) and the planner
+    guard (``planner._validate_blind_decay_params``) so the two can never drift.
+    A direct / bypass caller (sim, CTPS, a hand-built ``BlindDecayParams``) skips
+    the field-data validator, so the planner re-runs exactly these rules before
+    it can emit a negative / NaN / overflowing Dijkstra weight.
+
+    The rules:
+
+    * ``enabled`` is a real ``bool`` -- not a truthy int / string. ``bool("false")``
+      is ``True``, so a non-bool would silently *enable* decay.
+    * a disabled config (``enabled is False``) is exempt from the rest -- every
+      blind edge short-circuits to factor ``1`` upstream and never reaches the
+      weight formula.
+    * ``k`` is finite and ``>= 0`` (a negative gain makes blind edges cheaper;
+      ``k == 0`` disables the penalty).
+    * ``exponent`` is finite and in ``[1, BLIND_DECAY_EXPONENT_MAX]`` -- a
+      sub-linear exponent inverts the penalty, an extreme one overflows the
+      weight.
+    * ``d_ref`` is finite and ``> 0`` (the normalizer; a non-positive value
+      divides by zero / flips the sign).
+
+    NaN / infinities are rejected by :func:`_is_number` at every numeric gate; a
+    comparison-only guard lets them through (``nan < 0`` is ``False``) and
+    corrupts the routing table with no diagnostic.
+
+    :param enabled: the master switch (must be a ``bool``).
+    :param k: the penalty gain.
+    :param exponent: the convexity exponent.
+    :param d_ref: the length normalizer in centimetres.
+    :return: ``None`` when every value is in-domain, else a ``(field, reason)``
+        pair where ``field`` is the lowercase knob name
+        (``"enabled"`` / ``"k"`` / ``"exponent"`` / ``"d_ref"``) and ``reason`` is
+        a one-line explanation with no field-name prefix, so each caller prepends
+        its own naming (``BLIND_DECAY_*`` for field data, ``BlindDecayParams.*``
+        for the planner).
+    """
+    if not isinstance(enabled, bool):
+        return ("enabled", f"must be a bool (true / false); got: {enabled!r}")
+    if not enabled:
+        return None
+    if not _is_number(k) or k < 0:
+        return (
+            "k",
+            f"must be a finite number >= 0 (0 disables the penalty); got: {k!r}",
+        )
+    if not _is_number(exponent) or not (1.0 <= exponent <= BLIND_DECAY_EXPONENT_MAX):
+        return (
+            "exponent",
+            "must be a finite number in "
+            f"[1, {BLIND_DECAY_EXPONENT_MAX:g}] (a sub-linear exponent inverts the "
+            "penalty; an extreme exponent overflows the weight); "
+            f"got: {exponent!r}",
+        )
+    if not _is_number(d_ref) or d_ref <= 0:
+        return ("d_ref", f"must be a finite number > 0 (cm); got: {d_ref!r}")
+    return None
+
+
+def _reject_line_follow_into_blind(
+    u: str, v: str, edge_kind: str, node_types: dict, where: str
+) -> None:
+    """Reject a line-follow (LINE / PROJECTION) edge incident to a ``blind`` node.
+
+    Line-following requires a line under the sensor, so a LINE or PROJECTION edge
+    cannot terminate on a node typed ``"blind"`` (a node with no line). Beyond
+    being physically impossible, such a seam breaks the planner's blind-decay
+    model (ADR-041): a blind pocket reachable from the line backbone only through
+    a line-follow edge never seeds the blind-distance search, so its interior
+    blind hops get ``d == inf`` and the ``inf -> factor 1`` fallback prices the
+    deepest-drift hops the *cheapest* -- silently, because the disconnected-node
+    warning never fires (the node is reachable in the full graph). Forcing blind
+    pockets to be entered by a ``BLIND`` edge keeps that fallback
+    correct-by-construction: ``d == inf`` then means a genuinely disconnected
+    island, the only case the factor-1 fallback is meant for.
+
+    :param u: the edge tail node name.
+    :param v: the edge head node name.
+    :param edge_kind: the edge type label for the message (``"LINE"`` /
+        ``"PROJECTION"``).
+    :param node_types: the validated ``NODE_TYPES`` map.
+    :param where: a key-path label for the message (e.g. ``"LINE_SEGMENTS"`` or
+        ``"EDGES[3]"``).
+    :raises FieldDataError: when either endpoint is typed ``"blind"``.
+    """
+    for endpoint in (u, v):
+        if node_types.get(endpoint) == _BLIND_NODE_TYPE:
+            raise FieldDataError(
+                f"{where} ('{u}','{v}') is a {edge_kind} (line-follow) edge "
+                f"incident to blind node '{endpoint}' -- line-following needs a "
+                "line under the sensor, so a blind node must be reached by a "
+                "BLIND edge (in BLIND_EDGES), not a LINE/PROJECTION edge. Re-type "
+                "the node in NODE_TYPES or move the pair to BLIND_EDGES."
+            )
+
+
 def _validate_blind_decay(field_data) -> None:
     """Reject a malformed blind-distance decay configuration.
 
@@ -1223,14 +1350,17 @@ def _validate_blind_decay(field_data) -> None:
     cost penalty the planner applies at table-build time (T22):
     ``weight = length * (1 + k * (d / d_ref) ** exponent)``. They live in
     ``field_data.json`` as plain JSON scalars (ADR-022) and replace the old
-    ``COST_BLIND_MULTIPLIER`` knob. This pass enforces the domain of each:
+    ``COST_BLIND_MULTIPLIER`` knob. The domain rules live in the shared
+    :func:`validate_blind_decay_domain` predicate (so the planner guard cannot
+    drift from this pass); this pass adapts a ``(field, reason)`` result into a
+    ``FieldDataError`` naming the ``BLIND_DECAY_*`` key:
 
     * ``BLIND_DECAY_ENABLED`` -- a ``bool`` (``True`` / ``False``).
     * ``BLIND_DECAY_K`` -- a finite number ``>= 0`` (``k == 0`` disables the
       penalty so blind weights reduce to plain length).
-    * ``BLIND_DECAY_EXPONENT`` -- a finite number ``>= 1`` (a sub-linear
-      exponent would make far-from-anchor blind hops cheaper, inverting the
-      penalty's intent).
+    * ``BLIND_DECAY_EXPONENT`` -- a finite number in ``[1, BLIND_DECAY_EXPONENT_MAX]``
+      (a sub-linear exponent inverts the penalty's intent; an extreme exponent
+      overflows the weight).
     * ``BLIND_DECAY_D_REF`` -- a finite number ``> 0`` (the normalizer; a
       non-positive ``d_ref`` divides by zero / flips the sign).
 
@@ -1248,26 +1378,10 @@ def _validate_blind_decay(field_data) -> None:
     exponent = getattr(field_data, "BLIND_DECAY_EXPONENT")
     d_ref = getattr(field_data, "BLIND_DECAY_D_REF")
 
-    if not isinstance(enabled, bool):
-        raise FieldDataError(
-            "BLIND_DECAY_ENABLED must be a bool (true / false); "
-            f"got: {enabled!r}"
-        )
-    if not _is_number(k) or k < 0:
-        raise FieldDataError(
-            "BLIND_DECAY_K must be a finite number >= 0 "
-            f"(0 disables the penalty); got: {k!r}"
-        )
-    if not _is_number(exponent) or exponent < 1:
-        raise FieldDataError(
-            "BLIND_DECAY_EXPONENT must be a finite number >= 1; "
-            f"got: {exponent!r}"
-        )
-    if not _is_number(d_ref) or d_ref <= 0:
-        raise FieldDataError(
-            "BLIND_DECAY_D_REF must be a finite number > 0 (cm); "
-            f"got: {d_ref!r}"
-        )
+    result = validate_blind_decay_domain(enabled, k, exponent, d_ref)
+    if result is not None:
+        field, reason = result
+        raise FieldDataError(f"BLIND_DECAY_{field.upper()} {reason}")
 
 
 def validate(field_data) -> None:
@@ -1363,6 +1477,15 @@ def validate(field_data) -> None:
             f"got: {type(line_segments).__name__}"
         )
     _validate_edge_list(line_segments, nodes, "LINE_SEGMENTS")
+
+    # 4b. A LINE_SEGMENTS edge is a line-follow segment, so neither endpoint may
+    # be a blind node (you cannot line-follow to a node with no line). This also
+    # keeps the planner's blind-decay inf->factor-1 fallback correct-by-
+    # construction -- a blind pocket must be entered by a BLIND edge, never a
+    # line-follow seam (ADR-041). Runs after NODE_TYPES (pass 3) so the typing is
+    # validated.
+    for a, b in line_segments:
+        _reject_line_follow_into_blind(a, b, "LINE", node_types, "LINE_SEGMENTS")
 
     # 5. BLIND_EDGES coverage.
     if not isinstance(blind_edges, (list, tuple)):
