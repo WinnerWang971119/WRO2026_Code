@@ -8,7 +8,8 @@
 //
 //   TC11 (AC9)  — reanchorAtWall atomicity. On the success path the post-conditions hold all
 //                 at once: getHeadingDeg() == headingDeg, the believed on-axis coordinate
-//                 (nodeCoord[axis] + offset[axis]) == wallCoord, the off-axis offset + thetaDeg
+//                 (nodeCoord[axis] + offset[axis]) == wallCoord - sign(gap)*WALL_CONTACT_OFFSET_CM
+//                 (the wheel axle, not the wall surface), the off-axis offset + thetaDeg
 //                 are 0, the node is unchanged, and the next update() tick integrates a zero
 //                 delta. The strict-REJECT path (IMU read failure here, since the strict flag is
 //                 OFF by default) mutates NOTHING — snapshot heading + offset + node, force a
@@ -28,9 +29,10 @@
 // `Routes::START_NODE / NODES / N_NODES` symbols Localization odr-uses.
 //
 // Node fixture (routes.cpp): node 5 ("Wall1") is the toy field's sole RESET node at
-// (x=165, y=139); its reset record is { axis=1 (y), wall_coord=154, facing=90 }. The test
+// (x=165, y=139); its reset record is { axis=1 (y), wall_coord=154, facing=270 }. The test
 // anchors the believed node to 5 via declarePosition(5) before each reanchor so the on-axis
-// post-condition (nodeCoord.y + offset.y == 154) is checked against the real node coordinate.
+// post-condition (nodeCoord.y + offset.y == wall_coord - WALL_CONTACT_OFFSET_CM, the wheel
+// axle) is checked against the real node coordinate.
 //
 // Float-tolerance checks use a local `approx`/`check` pair (the shared `TestAssert.h` ASSERT_EQ
 // casts to `long long`, truncating the sub-cm / sub-degree quantities). Conventions mirror
@@ -77,7 +79,7 @@ static float offsetMag(const Offset2D& o)
 static constexpr uint8_t kResetNode   = 5;       // "Wall1"
 static constexpr uint8_t kAxisY       = 1;       // axis 1 = y
 static constexpr float   kWallCoordY  = 154.0f;  // wall_coord on y
-static constexpr float   kFacingDeg   = 90.0f;   // wall normal heading
+static constexpr float   kFacingDeg   = 270.0f;  // parked heading away from the wall (routes facing)
 
 // -----------------------------------------------------------------------------------------
 // Per-case world reset: clear both mock surfaces, re-seed Localization, then declare the
@@ -122,9 +124,10 @@ int main()
     // TC11 (AC9) — success-path post-conditions all hold at once (atomic re-anchor).
     //
     // Setup: anchor on node 5, hand-drive a real offset so there is non-zero state to clear,
-    // then reanchorAtWall(y, 154, 90). The believed y becomes 154, heading becomes 90, the
-    // off-axis (x) offset and thetaDeg reset to 0, the node stays 5, and the next idle tick
-    // integrates a zero delta (baselines re-snapshotted).
+    // then reanchorAtWall(y, 154, 270). The believed y becomes the axle (wall_coord -
+    // WALL_CONTACT_OFFSET_CM), heading becomes 270, the off-axis (x) offset and thetaDeg reset
+    // to 0, the node stays 5, and the next idle tick integrates a zero delta (baselines
+    // re-snapshotted).
     // -------------------------------------------------------------------------------------
     {
         resetWorldOnResetNode();
@@ -149,9 +152,12 @@ int main()
         check(approx(Localization.getHeadingDeg(), kFacingDeg, 0.5f),
               "TC11: getHeadingDeg() == facing (heading squared to the wall normal)");
 
-        // (2) believed on-axis coordinate == wall coordinate (nodeCoord.y 139 + offset.y 15 == 154).
-        check(approx(believedCoordOnAxis(kResetNode, kAxisY), kWallCoordY, 0.01f),
-              "TC11: nodeCoord[y] + offset[y] == wall_coord (154)");
+        // (2) believed on-axis coordinate == the wheel axle: wall_coord - sign(gap)*offset. For
+        //     Wall1, gap = wall_coord(154) - node.y(139) = +15, so sign(gap) = +1 and the axle sits
+        //     at 154 - WALL_CONTACT_OFFSET_CM IN FRONT of the wall (nodeCoord.y 139 + offset.y 7).
+        check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                     kWallCoordY - Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+              "TC11: nodeCoord[y] + offset[y] == wall_coord - WALL_CONTACT_OFFSET_CM (the axle)");
 
         // (3) off-axis offset (x) and thetaDeg are zeroed — the wall gives no off-axis info and
         //     the heading delta channel resets after the re-bind.
@@ -167,10 +173,34 @@ int main()
         //     were re-snapshotted, so no arrival-tick phantom equal to the pre-reanchor motion.
         Localization.update();
         const Offset2D afterTick = Localization.getOffsetFromNode();
-        check(approx(believedCoordOnAxis(kResetNode, kAxisY), kWallCoordY, 0.01f),
-              "TC11: believed y stays 154 on the tick after reanchor (baselines re-snapshotted)");
+        check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                     kWallCoordY - Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+              "TC11: believed y stays at the axle on the tick after reanchor (baselines re-snapshotted)");
         check(approx(afterTick.x, 0.0f, 1e-4f) && approx(afterTick.thetaDeg, 0.0f, 1e-4f),
               "TC11: off-axis + thetaDeg stay 0 on the tick after reanchor");
+    }
+
+    // -------------------------------------------------------------------------------------
+    // TC1b — negative-axis (sign) branch. reanchorAtWall takes wallCoord as a parameter, so the
+    // same Wall1 node can exercise the OTHER sign of `gap`: pass a wallCoord BELOW the node y
+    // (139), e.g. 120. Then gap = 120 - 139 = -19 -> sign(gap) = -1, and the axle lands on the
+    // node side of the wall: believed y == wallCoord + WALL_CONTACT_OFFSET_CM (the axle sits IN
+    // FRONT of a wall that is now below the node). This proves the sign(gap) = -1 path.
+    // -------------------------------------------------------------------------------------
+    {
+        resetWorldOnResetNode();
+        Localization.update();    // settle baselines.
+
+        const float kWallBelowNodeY = 120.0f;    // below node y (139) -> gap < 0 -> sign(gap) = -1.
+        const bool  ok = Localization.reanchorAtWall(kAxisY, kWallBelowNodeY, kFacingDeg);
+        check(ok, "TC1b: reanchorAtWall returns true on the negative-axis success path (strict OFF)");
+
+        // believed y == wall_coord + WALL_CONTACT_OFFSET_CM (axle on the node side of the wall).
+        check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                     kWallBelowNodeY + Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+              "TC1b: nodeCoord[y] + offset[y] == wall_coord + WALL_CONTACT_OFFSET_CM (sign(gap) = -1)");
+        check(approx(Localization.getHeadingDeg(), kFacingDeg, 0.5f),
+              "TC1b: heading is still bound to the parked facing on the negative-axis branch");
     }
 
     // -------------------------------------------------------------------------------------
@@ -241,8 +271,9 @@ int main()
             check(ok, "TC12 (OFF): reanchorAtWall accepts any heading when the strict flag is OFF");
             check(approx(Localization.getHeadingDeg(), kFacingDeg, 0.5f),
                   "TC12 (OFF): heading is bound to the wall normal regardless of the live yaw");
-            check(approx(believedCoordOnAxis(kResetNode, kAxisY), kWallCoordY, 0.01f),
-                  "TC12 (OFF): believed on-axis coordinate is re-zeroed to wall_coord");
+            check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                         kWallCoordY - Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+                  "TC12 (OFF): believed on-axis coordinate is re-zeroed to the axle (wall_coord - offset)");
         }
     }
 

@@ -14,10 +14,17 @@
 //
 // REAL Localization IS LINKED (the "even better" path in the T18 brief)
 //   The REANCHOR step calls the REAL `Localization.reanchorAtWall(...)` over the REAL `routes.cpp`
-//   reset record (node 5 "Wall1", { axis=1, wall_coord=154, facing=90 }), so the success-path
+//   reset record (node 5 "Wall1", { axis=1, wall_coord=154, facing=270 }), so the success-path
 //   re-anchor and its post-conditions are genuine, not mocked. This target compiles against the
 //   SHIPPED default (strict wall-normal OFF), so the live IMU heading does not gate the re-anchor —
 //   that lets TC10b drive the advisory-timeout + success cases through real Localization.
+//
+//   The interlude now runs WALL_STOP -> REANCHOR -> WALL_DEPART -> PLAN_NEXT_HOP: on a successful
+//   reanchor the FSM drives `standoff - WALL_CONTACT_OFFSET_CM` forward off the wall (WALL_DEPART),
+//   then on `Drive.isIdle()` calls `Localization.clearOffset()` so the FINAL believed pose lands on
+//   the NODE coordinate (y=139), not the axle (146) and not the wall (154). The mirror models this
+//   final clearOffset directly (the mock Drive carries no real motion); the believed-on-node
+//   post-condition is therefore genuine against real Localization.
 //
 //   For the strict-REJECT routing (AC11: reanchorAtWall returns false -> WALL_NOT_SQUARE) the
 //   replica is driven with `reanchorOk = false` — the exact value real Localization returns when
@@ -31,8 +38,11 @@
 //   - WALL_STOP waits for `Drive.isIdle()`, then enters REANCHOR.
 //   - In REANCHOR, a wallStop ADVISORY TIMEOUT (`Drive.wallStopTimedOut()` true) does NOT halt:
 //     the slice STILL calls reanchor (assume-at-wall), surfaces the advisory (EventTrace/Serial),
-//     and CONTINUES (-> PLAN_NEXT_HOP). It is NOT a fault.
-//   - A strict-REJECT (reanchorAtWall returns false) routes to `Fault::WALL_NOT_SQUARE`.
+//     and CONTINUES (-> WALL_DEPART). It is NOT a fault.
+//   - On a successful reanchor the slice dispatches the depart drive and enters WALL_DEPART; on
+//     `Drive.isIdle()` it clears the offset (believed pose == NODE coordinate) and continues to
+//     PLAN_NEXT_HOP. A strict-REJECT (reanchorAtWall returns false) routes to `Fault::WALL_NOT_SQUARE`
+//     BEFORE any depart.
 //   - A non-reset node is a true no-op (the interlude is not entered).
 //
 // Links the real `Localization.cpp` + `routes.cpp` + the mock surface (same shape as
@@ -77,15 +87,18 @@ static constexpr uint8_t kNonResetNode = 0;   // "Inter1" (NodeType::LINE).
 //   _maybeEnterReset(cur)  -> if RESET && not-yet-run: dispatch wallStop, enter WALL_STOP.
 //   State::WALL_STOP       -> wait for Drive.isIdle(); then enter REANCHOR.
 //   State::REANCHOR        -> surface the advisory (if any), call reanchorAtWall; on reject route
-//                             Fault::WALL_NOT_SQUARE, else continue to PLAN_NEXT_HOP.
+//                             Fault::WALL_NOT_SQUARE, else dispatch the depart drive + enter
+//                             WALL_DEPART.
+//   State::WALL_DEPART     -> wait for Drive.isIdle(); then clearOffset (believed pose == NODE
+//                             coordinate) and continue to PLAN_NEXT_HOP.
 //
 // The production code reads `Drive.isIdle()` / `Drive.wallStopTimedOut()`; here those two
 // observations are plain `bool` inputs to the replicated tick (same modelling choice as
 // test_return_to_node_dispatch.cpp / test_path_tracker_stop_at_line.cpp — the mock Drive has no
-// wallStop surface). The reanchor itself calls REAL Localization.
+// wallStop surface). The reanchor + clearOffset themselves call REAL Localization.
 // ===========================================================================
 
-enum class RState : uint8_t { ARRIVAL, WALL_STOP, REANCHOR, PLAN_NEXT_HOP, FAULT };
+enum class RState : uint8_t { ARRIVAL, WALL_STOP, REANCHOR, WALL_DEPART, PLAN_NEXT_HOP, FAULT };
 
 struct ResetArrivalMirror
 {
@@ -94,6 +107,8 @@ struct ResetArrivalMirror
     bool                    interludeEntered = false;
     bool                    advisorySurfaced = false;
     bool                    reanchorCalled   = false;
+    bool                    departDispatched = false;
+    bool                    offsetCleared    = false;
     PathTrackerClass::Fault fault            = PathTrackerClass::Fault::NONE;
 
     /// MIRROR: PathTracker.cpp:1163-1184 (_maybeEnterReset) + 1232-1243 (_dispatchWallStop tail).
@@ -150,11 +165,30 @@ struct ResetArrivalMirror
             return;
         }
 
-        // Success: re-anchored. Continue exactly as a normal post-arrival (PLAN_NEXT_HOP). The
+        // Success: re-anchored at the AXLE. Dispatch the depart drive (`standoff -
+        // WALL_CONTACT_OFFSET_CM` forward, back onto the node) and enter WALL_DEPART. The
         // `_resetNode == cur` latch is left set so the immediate return does not re-enter the
-        // interlude for this same node. MIRROR: PathTracker.cpp:959-965.
+        // interlude for this same node. MIRROR: PathTracker.cpp (REANCHOR success tail ->
+        // WALL_DEPART dispatch).
         (void) cur;
-        state = RState::PLAN_NEXT_HOP;
+        departDispatched = true;
+        state            = RState::WALL_DEPART;
+    }
+
+    /// One WALL_DEPART tick: wait for the depart drive to finish, then clear the offset so the
+    /// FINAL believed pose lands on the NODE coordinate (not the axle), and continue to
+    /// PLAN_NEXT_HOP. The mock Drive carries no real motion, so the production `driveDist` is
+    /// modelled by `departDispatched` above and the post-idle `clearOffset` is invoked here
+    /// against REAL Localization. MIRROR: PathTracker.cpp (case State::WALL_DEPART).
+    void tickWallDepart(bool driveIsIdle)
+    {
+        if (driveIsIdle)
+        {
+            Localization.clearOffset();    // believed pose -> node coordinate (offset zeroed).
+            offsetCleared = true;
+            state         = RState::PLAN_NEXT_HOP;
+        }
+        // else: stay in WALL_DEPART (the depart drive is still in flight).
     }
 };
 
@@ -220,16 +254,24 @@ int main()
 
         check(fsm.advisorySurfaced, "TC10b: the wallStop advisory is surfaced (AC10)");
         check(fsm.reanchorCalled, "TC10b: the interlude STILL calls reanchor on an advisory timeout");
-        check(fsm.state == RState::PLAN_NEXT_HOP,
-              "TC10b: an advisory timeout CONTINUES to PLAN_NEXT_HOP (does NOT halt)");
+        check(fsm.departDispatched && fsm.state == RState::WALL_DEPART,
+              "TC10b: an advisory timeout STILL dispatches the depart drive (enters WALL_DEPART)");
         check(fsm.fault == PathTrackerClass::Fault::NONE,
               "TC10b: an advisory timeout is NOT a fault");
 
-        // Genuine post-condition from real Localization: believed y re-zeroed to the wall coord.
+        // WALL_DEPART waits while the depart drive is in flight, then clears the offset on idle.
+        fsm.tickWallDepart(/*driveIsIdle*/ false);
+        check(fsm.state == RState::WALL_DEPART, "TC10b: WALL_DEPART waits while the depart drive runs");
+        fsm.tickWallDepart(/*driveIsIdle*/ true);
+        check(fsm.offsetCleared && fsm.state == RState::PLAN_NEXT_HOP,
+              "TC10b: WALL_DEPART clears the offset and continues to PLAN_NEXT_HOP once Drive is idle");
+
+        // Genuine post-condition from real Localization: after the depart + clearOffset the FINAL
+        // believed pose lands on the NODE coordinate (139), NOT the wall (154) and NOT the axle (146).
         const Routes::NodeInfo& n = FieldMap::getNode(kResetNode);
         const Offset2D off        = Localization.getOffsetFromNode();
-        check(approx(n.y_cm + off.y, info->wall_coord, 0.01f),
-              "TC10b: after the assume-at-wall reanchor, believed y == wall_coord (real Localization)");
+        check(approx(n.y_cm + off.y, n.y_cm, 0.01f),
+              "TC10b: after depart + clearOffset, believed y == node coordinate (real Localization)");
         check(approx(Localization.getHeadingDeg(), (float) info->facing, 0.5f),
               "TC10b: after the assume-at-wall reanchor, heading == facing");
     }
@@ -253,9 +295,20 @@ int main()
         fsm.tickReanchor(kResetNode, /*wallStopTimedOut*/ false, reanchorOk);
 
         check(!fsm.advisorySurfaced, "TC10b: a clean stall-success arrival surfaces NO advisory");
-        check(fsm.reanchorCalled && fsm.state == RState::PLAN_NEXT_HOP,
-              "TC10b: a clean success re-anchors and continues to PLAN_NEXT_HOP");
+        check(fsm.reanchorCalled && fsm.departDispatched && fsm.state == RState::WALL_DEPART,
+              "TC10b: a clean success re-anchors and dispatches the depart drive (WALL_DEPART)");
+
+        // Drive the depart to completion -> clearOffset -> PLAN_NEXT_HOP.
+        fsm.tickWallDepart(/*driveIsIdle*/ true);
+        check(fsm.offsetCleared && fsm.state == RState::PLAN_NEXT_HOP,
+              "TC10b: a clean success departs the wall and continues to PLAN_NEXT_HOP");
         check(fsm.fault == PathTrackerClass::Fault::NONE, "TC10b: a clean success is not a fault");
+
+        // FINAL believed pose lands on the node coordinate (139), not the axle (146).
+        const Routes::NodeInfo& n = FieldMap::getNode(kResetNode);
+        const Offset2D off        = Localization.getOffsetFromNode();
+        check(approx(n.y_cm + off.y, n.y_cm, 0.01f),
+              "TC10b: a clean success lands the believed pose on the node coordinate");
     }
 
     // -------------------------------------------------------------------------------------
@@ -278,6 +331,8 @@ int main()
         check(fsm.state == RState::FAULT, "TC10b: a strict reject halts the interlude (enters FAULT)");
         check(fsm.fault == PathTrackerClass::Fault::WALL_NOT_SQUARE,
               "TC10b: a strict reject routes Fault::WALL_NOT_SQUARE (AC11)");
+        check(!fsm.departDispatched && !fsm.offsetCleared,
+              "TC10b: a strict reject faults BEFORE any depart (no depart drive, no clearOffset)");
         check(fsm.resetNode == 0xFF, "TC10b: a WALL_NOT_SQUARE fault re-arms the reset latch");
     }
 
@@ -306,6 +361,21 @@ int main()
         check(fsm.maybeEnterReset(kResetNode), "TC10b latch: first arrival enters the interlude");
         check(!fsm.maybeEnterReset(kResetNode),
               "TC10b latch: a second tick for the SAME reset node does NOT re-enter (one-shot)");
+
+        // Drive the interlude all the way through WALL_DEPART; the `_resetNode == cur` latch must
+        // stay held across the extra depart step so the immediate post-depart return does not
+        // re-fire the wallStop for this same node.
+        resetWorldOnResetNode();
+        const Routes::ResetNode* info = FieldMap::getResetInfo(kResetNode);
+        fsm.tickWallStop(/*driveIsIdle*/ true);
+        const bool reanchorOk =
+            Localization.reanchorAtWall(info->axis, info->wall_coord, (float) info->facing);
+        fsm.tickReanchor(kResetNode, /*wallStopTimedOut*/ false, reanchorOk);
+        fsm.tickWallDepart(/*driveIsIdle*/ true);
+        check(fsm.state == RState::PLAN_NEXT_HOP,
+              "TC10b latch: a full success (through WALL_DEPART) reaches PLAN_NEXT_HOP");
+        check(!fsm.maybeEnterReset(kResetNode),
+              "TC10b latch: the latch holds through WALL_DEPART — no re-entry for the same node");
     }
 
     if (g_failures == 0)
