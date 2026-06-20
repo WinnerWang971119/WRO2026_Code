@@ -775,7 +775,7 @@ def test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget() -> None:
         node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
     )
     with pytest.raises(
-        FieldDataError, match=r"the LINE overshoot budget"
+        FieldDataError, match=r"the sensor/LINE overshoot budget"
     ):
         validate(fd)
 
@@ -887,16 +887,16 @@ def test_pivot_turn_incoming_mode_read_via_bidirectional_resolver() -> None:
     assert validate(fd) is None
 
 
-def test_pivot_turn_stop_at_line_incoming_exempt_from_overshoot_budget() -> None:
-    """TC10: a STOP_AT_LINE-incoming pivot is exempt from the LINE overshoot budget.
+def test_pivot_turn_rejects_stop_at_line_incoming_over_overshoot_budget() -> None:
+    """ADR-044: a STOP_AT_LINE (sensor)-incoming pivot is now budgeted too.
 
-    Only a true LINE incoming edge is bound by the FRONT overshoot budget
-    (12.02 cm); a BLIND incoming edge whose effective mode is STOP_AT_LINE is
-    'sensor', not 'line', and takes NO incoming trim -- so a 120 deg pivot
-    (delta = 15.588 cm, well over the budget) onto a long outgoing edge must
-    NOT trip the overshoot-budget gate. Contrast with
-    ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget`` (LINE
-    incoming, same 120 deg, rejected).
+    A BLIND incoming edge whose effective mode is STOP_AT_LINE classifies as
+    'sensor' and re-anchors via the seek, reducing the post-detect overshoot by
+    delta exactly like a LINE incoming -- so it shares the same FRONT overshoot
+    budget (12.02 cm). A 120 deg pivot (delta = 15.588 cm, well over the budget)
+    is therefore REJECTED, not exempt: the pre-ADR-044 exemption is removed.
+    Mirrors ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget``
+    (LINE incoming, same 120 deg, rejected).
     """
     fd = _pivot_field(
         edges=[
@@ -909,7 +909,10 @@ def test_pivot_turn_stop_at_line_incoming_exempt_from_overshoot_budget() -> None
         ],
         pivot_turns=[("A", "B", "C")],
     )
-    assert validate(fd) is None
+    with pytest.raises(
+        FieldDataError, match=r"the sensor/LINE overshoot budget"
+    ):
+        validate(fd)
 
 
 def test_pivot_turn_accepts_chained_pivots_within_shared_edge() -> None:

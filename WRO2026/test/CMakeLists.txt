@@ -670,6 +670,26 @@ target_include_directories(test_pivot_trim_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME pivot_trim_policy COMMAND test_pivot_trim_policy)
 
 # =========================================================================================
+# Test executable #9b — SensorOvershootPolicy pure-math (issue #65, ADR-044 D1).
+#
+# `resolveSensorOvershootTrim` is a header-only inline policy (`PivotTrimPolicy.h`) —
+# the SENSOR-anchored twin of `resolvePivotTrim`. It feeds the post-detect axle roll
+# through the shared subtract-and-clamp with departing trim hard-coded to 0 (ADR-044 D1:
+# sensor-terminated hops self-correct on the line, so outgoing over-travel does not
+# accumulate). TC1-TC4 from the issue #65 plan cover the normal, over-trim, no-trim, and
+# strict-boundary cases; together with `test_pivot_trim_policy` they ensure the DISTANCE
+# and SENSOR paths cannot drift from each other on host.
+#
+# Pure float math with no Arduino surface: no mocks, no SUT sources — just the sketch
+# include dir for the header. Mirrors the `test_pivot_trim_policy` block exactly.
+# =========================================================================================
+add_executable(test_sensor_overshoot_policy
+    ${TEST_DIR}/test_sensor_overshoot_policy.cpp
+)
+target_include_directories(test_sensor_overshoot_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME sensor_overshoot_policy COMMAND test_sensor_overshoot_policy)
+
+# =========================================================================================
 # Test executable #11 — ReturnToNodePolicy pure-math (issue #36, PR1b, T8/T10).
 #
 # `resolveReturnAction` is a header-only inline policy (`ReturnToNodePolicy.h`) — the

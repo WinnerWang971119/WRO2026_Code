@@ -2125,7 +2125,7 @@ def test_pivot_fixtures_are_legal_fields():
     from tools.path_planner.validator import validate
 
     fields = pivot_field_data.all_fields()
-    assert len(fields) == 4   # guard against an empty sweep vacuously passing
+    assert len(fields) == 6   # guard against an empty sweep vacuously passing
     for field in fields:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)

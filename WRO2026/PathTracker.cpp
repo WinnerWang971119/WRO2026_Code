@@ -187,6 +187,24 @@ namespace
         Serial.print(Config::RETURN_DISTANCE_CAP_CM);
         Serial.print(F(" cm; OFF_MAP_GATE="));
     }
+
+    /// Print the shared overshoot-trim underflow trace prefix for the two sensor-anchored
+    /// pivot paths (#6): the LINE overshoot reduction and the STOP_AT_LINE seek. Each caller
+    /// appends its own tail (the LINE path clamps and continues; the seek path faults — they
+    /// diverge only there), so a later format change touches one place. @p adrTag names the
+    /// ADR governing that path (ADR-036 LINE / ADR-044 seek). Mirrors the
+    /// `_printReturnOverCapPrefix` prefix-helper pattern.
+    void _printOvershootTrimUnderflow(const __FlashStringHelper* adrTag, float offset,
+                                      float delta)
+    {
+        Serial.print(F("[PathTracker] "));
+        Serial.print(adrTag);
+        Serial.print(F(": overshoot trim underflow (offset="));
+        Serial.print(offset);
+        Serial.print(F(" delta="));
+        Serial.print(delta);
+        Serial.print(F("); "));
+    }
 }    // namespace
 
 // =========================================================================================
@@ -331,15 +349,16 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
 {
     switch (kind)
     {
-        case Fault::NONE:                return "OK";
-        case Fault::NOT_ZEROED:          return "NZ";
-        case Fault::UNREACHABLE:         return "UNR";
-        case Fault::DRIVE_FAULT:         return "DRV";
-        case Fault::BAD_NODE:            return "BAD";
-        case Fault::DRAIN_TIMEOUT:       return "DRN";
-        case Fault::REVERSE_UNAVAILABLE: return "REV";
-        case Fault::OFF_NODE:            return "OFN";
-        case Fault::WALL_NOT_SQUARE:     return "WSQ";
+        case Fault::NONE:                 return "OK";
+        case Fault::NOT_ZEROED:           return "NZ";
+        case Fault::UNREACHABLE:          return "UNR";
+        case Fault::DRIVE_FAULT:          return "DRV";
+        case Fault::BAD_NODE:             return "BAD";
+        case Fault::DRAIN_TIMEOUT:        return "DRN";
+        case Fault::REVERSE_UNAVAILABLE:  return "REV";
+        case Fault::OFF_NODE:             return "OFN";
+        case Fault::WALL_NOT_SQUARE:      return "WSQ";
+        case Fault::PIVOT_TRIM_UNDERFLOW: return "PTU";
     }
     return "??";
 }
@@ -840,21 +859,23 @@ void PathTrackerClass::_stepFsm()
                 // into the gate.
                 const float inboundPivotTrim =
                     _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
-                float overshootTargetCm = overshootAxleOffsetCm;
-                if (inboundPivotTrim > 0.0f)
+                const SensorOvershootResolution lineOvershoot =
+                    resolveSensorOvershootTrim(
+                        overshootAxleOffsetCm,
+                        inboundPivotTrim,
+                        Config::PIVOT_TRIM_MIN_DRIVE_CM);
+                if (lineOvershoot.clamped)
                 {
-                    overshootTargetCm = overshootAxleOffsetCm - inboundPivotTrim;
-                    if (overshootTargetCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
-                    {
-                        Serial.print(F("[PathTracker] ADR-036: LINE overshoot trim "
-                                       "underflow (offset="));
-                        Serial.print(overshootAxleOffsetCm);
-                        Serial.print(F(" delta="));
-                        Serial.print(inboundPivotTrim);
-                        Serial.println(F("); clamping. Check validator/config."));
-                        overshootTargetCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
-                    }
+                    // A LINE-incoming pivot's δ is ALWAYS validator-visible (no
+                    // call-site escape, unlike the seek), so the budget check
+                    // (validator.py "sensor/LINE" regime) already rejects δ>offset
+                    // here — this clamp is defensive only (a table built without
+                    // the validator). Clamp + warn rather than fault.
+                    _printOvershootTrimUnderflow(F("ADR-036"), overshootAxleOffsetCm,
+                                                 inboundPivotTrim);
+                    Serial.println(F("clamping. Check validator/config."));
                 }
+                const float overshootTargetCm = lineOvershoot.overshootCm;
 
                 LineFollower.setEnabled(true)
                             .setTShapeRampUp(false)
@@ -1510,6 +1531,12 @@ void PathTrackerClass::_onPlanNextHop()
     // FRONT is always available, the `reverseUnavailable(...)` guard below is
     // inert for pivot hops (that is the intended "FRONT genuinely unavailable
     // faults via the existing guard" backstop — no separate pivot-skip path).
+    //
+    // This force-FRONT is the single invariant the seek/LINE overshoot trims rely
+    // on: a pivot-adjacent hop is always FRONT, so the seek dispatch's δ-budget
+    // (`_dispatchEdgeAfterTurn`) and the validator's δ-budget both use the FRONT
+    // offset. #54 (REAR pivots) must add a REAR δ-budget on the seek + LINE
+    // overshoot paths BEFORE relaxing this — see the ADR-044 trigger.
     if (_departingPivot.active || _approachingPivot.active)
     {
         resolved = Direction::FRONT;
@@ -1904,10 +1931,55 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // zero-margin override and no soft-fallback recovery. The Drive
                 // builder is move-only (deleted copy ctor + early enqueue), so the
                 // whole chain MUST be one discarded-temporary RAII statement.
+                // ADR-044: a seek into an approaching pivot must land the axle δ
+                // short of the node (like every other approach mechanism), so
+                // reduce the post-detect overshoot by the approaching trim. A
+                // seek is sensor-terminated, so the DEPARTING trim is auto-
+                // absorbed and never subtracted here (D1). With no approaching
+                // pivot the trim is 0 ⇒ overshoot stays the full direction-
+                // resolved offset, so a departing-into-seek / plain seek hop is
+                // unchanged (AC2).
+                //
+                // The offset is direction-resolved (FRONT/REAR) exactly like the
+                // LINE overshoot above, so a REAR 2-board seek rolls the rear
+                // board's own offset. Pivots are FRONT-only in v1 (#54):
+                // `_onPlanNextHop` force-FRONTs every pivot-adjacent hop, so for a
+                // pivot seek `reverse` is always false and this resolves to the
+                // FRONT offset the validator's δ-budget assumes. When #54 lifts
+                // force-FRONT, a REAR pivot seek will need a REAR δ-budget here
+                // (ADR-044 trigger).
+                const float seekAxleOffsetCm =
+                    reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                            : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+                const float seekApproachTrim =
+                    _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
+                const SensorOvershootResolution seekOvershoot =
+                    resolveSensorOvershootTrim(
+                        seekAxleOffsetCm,
+                        seekApproachTrim,
+                        Config::PIVOT_TRIM_MIN_DRIVE_CM);
+                if (seekOvershoot.clamped)
+                {
+                    // δ > offset: a forward-only seek has no positive overshoot
+                    // left to shorten, so it cannot land the axle δ-short. The
+                    // validator rejects this for every seek rung EXCEPT a pure
+                    // call-site setStopAtLine(ON) it cannot see (ADR-044 D4).
+                    // Rather than clamp to the floor and silently fire the pivot
+                    // from an off-target origin, hard-fault — consistent with
+                    // ADR-039's "no silent degradation on a seek". Issue #75
+                    // tracks the reverse re-seat that would compensate δ>offset.
+                    _printOvershootTrimUnderflow(F("ADR-044"), seekAxleOffsetCm,
+                                                 seekApproachTrim);
+                    Serial.println(F("delta exceeds offset; faulting (see #75)."));
+                    _enterFault(Fault::PIVOT_TRIM_UNDERFLOW, cur, _nextHop);
+                    return;
+                }
+
                 Drive.stopAtLine(edge.distance_cm)
                     .setReverse(reverse)
                     .setMode(mode)
                     .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                    .setOvershoot(seekOvershoot.overshootCm)
                     .async();
                 _state       = State::STOP_AT_LINE;
                 _passThrough = false;    // consumed
