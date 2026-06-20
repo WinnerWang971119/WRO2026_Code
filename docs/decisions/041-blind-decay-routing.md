@@ -59,13 +59,16 @@ past a comparison-only guard and silently corrupt the table); `exponent` is **ca
 without a ceiling a fat-fingered value overflows `(d / d_ref) ** exponent` into an uncaught
 `OverflowError` deep in Dijkstra.
 
-**Anchor-reachability invariant (validator-enforced).** A `LINE` / `PROJECTION` (line-follow) edge
-may not be incident to a `"blind"` node: line-following needs a line under the sensor, so a blind
-pocket must be entered by a `BLIND` edge. This makes the unreachable fallback below
+**Anchor-reachability invariant (validator-enforced).** A `LINE` edge may not be incident to a
+`"blind"` node at *either* end, and a `PROJECTION` edge may not *terminate* on one — its head must be
+a line node it can seek, though its tail may be blind (the hop projects out of dead-reckoned
+territory and re-acquires the line at the head). Line-following needs a line under the sensor, so a
+blind pocket must be *entered* by a `BLIND` edge. This makes the unreachable fallback below
 correct-by-construction — a blind tail with no anchor reachable over blind edges (`d == inf`) falls
 back to factor `1`, and with the invariant in force `d == inf` means a genuinely disconnected
 island (the only case the fallback is meant for), never a pocket the backbone reaches through a
-line-follow seam whose interior hops would otherwise be priced the cheapest.
+line-follow seam whose interior hops would otherwise be priced the cheapest. A projection's blind
+tail does not breach this: it leaves a pocket toward a line rather than entering one.
 
 **Honest tail-approximation caveat.** The penalty is keyed on the edge **tail** (a static
 potential field). This means it is directionally naive: traversing toward an anchor can cost more

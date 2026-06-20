@@ -1309,19 +1309,25 @@ def validate_blind_decay_domain(
 def _reject_line_follow_into_blind(
     u: str, v: str, edge_kind: str, node_types: dict, where: str
 ) -> None:
-    """Reject a line-follow (LINE / PROJECTION) edge incident to a ``blind`` node.
+    """Reject a line-follow edge that needs a line where a node has none.
 
-    Line-following requires a line under the sensor, so a LINE or PROJECTION edge
-    cannot terminate on a node typed ``"blind"`` (a node with no line). Beyond
-    being physically impossible, such a seam breaks the planner's blind-decay
-    model (ADR-041): a blind pocket reachable from the line backbone only through
-    a line-follow edge never seeds the blind-distance search, so its interior
-    blind hops get ``d == inf`` and the ``inf -> factor 1`` fallback prices the
-    deepest-drift hops the *cheapest* -- silently, because the disconnected-node
-    warning never fires (the node is reachable in the full graph). Forcing blind
-    pockets to be entered by a ``BLIND`` edge keeps that fallback
-    correct-by-construction: ``d == inf`` then means a genuinely disconnected
-    island, the only case the factor-1 fallback is meant for.
+    A ``LINE`` edge follows a line for its whole length, so *neither* endpoint
+    may be typed ``"blind"``. A ``PROJECTION`` edge may *start* off the line -- a
+    blind tail is allowed, the chassis projects out of dead-reckoned territory --
+    but it SEEKS and re-acquires the line at its head, so its **head** ``v`` may
+    not be ``"blind"`` (there is no line there to seek). Per ADR-041 a projection
+    is "wired to a line node" at its destination; only its head is checked.
+
+    Beyond being physically impossible, a line-follow edge that *terminates on* a
+    blind node breaks the planner's blind-decay model (ADR-041): a blind pocket
+    reachable from the line backbone only through such a seam never seeds the
+    blind-distance search, so its interior blind hops get ``d == inf`` and the
+    ``inf -> factor 1`` fallback prices the deepest-drift hops the *cheapest* --
+    silently, because the disconnected-node warning never fires (the node is
+    reachable in the full graph). A projection's blind *tail* is exempt: it
+    leaves a pocket toward a line rather than entering one, so the seeding stays
+    correct-by-construction (``d == inf`` still means a genuinely disconnected
+    island, the only case the factor-1 fallback is meant for).
 
     :param u: the edge tail node name.
     :param v: the edge head node name.
@@ -1330,9 +1336,13 @@ def _reject_line_follow_into_blind(
     :param node_types: the validated ``NODE_TYPES`` map.
     :param where: a key-path label for the message (e.g. ``"LINE_SEGMENTS"`` or
         ``"EDGES[3]"``).
-    :raises FieldDataError: when either endpoint is typed ``"blind"``.
+    :raises FieldDataError: when a checked endpoint is typed ``"blind"`` -- both
+        endpoints for ``LINE``, the head ``v`` only for ``PROJECTION``.
     """
-    for endpoint in (u, v):
+    from tools.path_planner.graph_builder import EDGE_PROJECTION
+
+    endpoints = (v,) if edge_kind == EDGE_PROJECTION else (u, v)
+    for endpoint in endpoints:
         if node_types.get(endpoint) == _BLIND_NODE_TYPE:
             raise FieldDataError(
                 f"{where} ('{u}','{v}') is a {edge_kind} (line-follow) edge "

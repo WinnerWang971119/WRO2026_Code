@@ -1057,6 +1057,9 @@ def test_pivot_turn_incoming_blind_feeding_projection_auto_seeks_sensor() -> Non
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
+        # The PROJECTION seeks the line at its head C, so C must be a line node;
+        # the blind tail B is allowed (the hop projects out of blind territory).
+        node_types={"A": "line", "B": "blind", "C": "line", "D": "blind"},
     )
     assert validate(fd) is None
 
@@ -1077,6 +1080,9 @@ def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
+        # The PROJECTION seeks the line at its head C, so C must be a line node;
+        # the blind tail B is allowed (the hop projects out of blind territory).
+        node_types={"A": "line", "B": "blind", "C": "line", "D": "blind"},
     )
     fd.BLIND_PROJECTION_AUTO_SEEK = False
     with pytest.raises(
