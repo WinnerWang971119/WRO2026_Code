@@ -21,6 +21,12 @@ in the "Graduates" subsection.
 - **NAV FAULT mnemonics** (NZ / UNR / DRV / BAD / DRN). Shipped in `PathTracker::faultMnemonic()`
   and emitted to Serial on every fault transition. EventTrace also pushes a `FAIL PATH` line
   on the OLED.
+- **`wall_zero` primitive (§5.3)** — shipped via the **encoder-stall** path (no bumper / limit
+  switch). A `"reset"` node kind carries a sparse `RESET_NODES{axis, wall_coord, facing}` table;
+  on arrival PathTracker runs `Drive.wallStop` (push until the stop-at-line stall watchdog fires,
+  back off) then one atomic `Localization.reanchorAtWall(axis, coord, heading)`. Recorded in
+  [ADR-043](./decisions/043-wall-zero-reset-nodes.md). The **hardware-switch variant** (bumper /
+  limit switch on the leading face) remains a future option — see §5.3 below for that trigger.
 
 ---
 
@@ -30,7 +36,7 @@ in the "Graduates" subsection.
 |---|---|---|---|
 | Calibration nodes + blind-cost tiers + constrained Dijkstra | §8.5 | Deferred to Phase 2.5 | After real-field nav exposes accumulated blind-walk drift |
 | Per-scenario NEXT_HOP tables (transparent self-target) | §7.4 | Deferred to Phase 2.5 | After the real 2026 field encodes multiple goals |
-| `wall_zero` primitive on the R4 | §5.3 | Deferred to Phase 2.5 | After mechanical hard-bumper or limit-switch work is done |
+| `wall_zero` primitive on the R4 | §5.3 | **Graduated** — shipped via encoder-stall (ADR-043); hardware-switch variant still future | Bumper / limit-switch variant: after mechanical hard-bumper or limit-switch work is done |
 | Hardware verification of PathTracker on the toy printout | PR2 scope | Deferred to bench session | Once mechanical chassis geometry is finalised |
 | IMU drift compensation across long runs | PR2-new | Deferred | Once the real 2026 field's longer paths expose drift accumulation |
 | Replace `field_data.py` with the real 2026 layout | PR3 followup | Deferred | After field is measured via `pick_xy.py` (issue #10 scope 1 shipped the tool) |
@@ -139,7 +145,15 @@ when calling `go_to`. Net new code: approximately 50–80 lines of Python + 20 l
 
 ---
 
-## `wall_zero` primitive on the R4
+## `wall_zero` primitive on the R4 — GRADUATED (shipped via encoder-stall; hardware-switch variant remains future)
+
+> **Graduated.** The software primitive shipped via the **encoder-stall** path (no bumper / limit
+> switch) — see [ADR-043](./decisions/043-wall-zero-reset-nodes.md). A `"reset"` node kind carries
+> a sparse `RESET_NODES{axis, wall_coord, facing}` table; on arrival PathTracker runs `Drive.wallStop`
+> (push until the stop-at-line stall watchdog fires — stall = success — then back off) then one
+> atomic `Localization.reanchorAtWall(axis, coord, heading)`. The **hardware bumper / limit-switch
+> variant** below remains the future upgrade trigger; the section is kept for that path's design
+> narrative.
 
 ### What it is
 
@@ -152,26 +166,29 @@ or a limit switch triggers), then backs off a fixed distance. The result is an a
 reset of position and heading on the contacted axis. Section 8.5.7 notes that the plan compiler
 auto-inserts `wall_zero` after every calibration node arrival — no user-authored step is needed.
 
-### Why deferred
+### What shipped
 
-At the time of PR 1 the robot has no front bumper and no limit switch. Reliable contact detection
-requires a mechanical decision (hard bumper vs. limit switch vs. encoder-stall threshold), and the
-back-off distance must be tuned to the specific surface and motor characteristics. Writing the C++
-primitive before the mechanical design is finalised would produce dead code that is likely wrong.
+The encoder-stall variant landed as the wall-zero reset node feature (ADR-043): `Drive.wallStop`
+(a continuous, stall-terminated push that reuses the stop-at-line no-progress watchdog with the
+stall meaning inverted — a stall is success) plus `Localization.reanchorAtWall(axis, wall_coord,
+heading)`, dispatched by PathTracker's `WALL_STOP` → `REANCHOR` arrival interlude. No new hardware
+was required.
 
-### What unlocks it
+### What still unlocks the hardware variant
 
-A physical hard bumper or limit switch is installed on the robot's leading face. Once mechanical
-geometry is settled, `wall_zero` is a small Drive primitive on the R4 (push at low speed until
-stall or switch fires, then reverse a fixed `back_off_cm`) plus a `Localization::resetAxis` hook.
-The calibration-node feature (above) depends on this primitive, so both features likely land in the
-same PR.
+A physical hard bumper or limit switch installed on the robot's leading face. The encoder-stall
+detector is the only mechanism shipped; if it proves unreliable on the real field (false stalls,
+or no stall against a compliant wall), the bumper / limit-switch contact detector is the upgrade —
+it would route through the same `Drive.wallStop` → `reanchorAtWall` interlude, swapping only the
+contact-detection source. The optional strict wall-normal check
+(`Config::WALL_NORMAL_STRICT_ENABLED`, off by default) is the in-software escalation that flags a
+bad post-stop heading in the meantime.
 
-### Estimated effort
+### Estimated effort (hardware variant only)
 
-Small on the code side: one new primitive function in `primitives.cpp` (~40 lines of C++) and a
-`Localization::resetAxis` method (~20 lines). The hard part is the mechanical work and the
-per-surface back-off calibration, which is outside the software scope.
+Small on the code side: a new contact-detection source feeding the existing `wallStop` state
+machine (the `Localization.reanchorAtWall` hook already exists). The hard part is the mechanical
+work and the per-surface back-off calibration, which is outside the software scope.
 
 ---
 

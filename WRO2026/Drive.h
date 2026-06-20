@@ -58,6 +58,7 @@ class DriveTimeBuilder;
 class TurnDegBuilder;
 class TurnToYawBuilder;
 class StopAtLineBuilder;
+class WallStopBuilder;
 
 /**
  * @brief Mode selector for distance/time-bounded straight-line moves.
@@ -98,7 +99,8 @@ struct DriveCommand
         TURN_TO_YAW,       ///< Absolute-yaw turn.
         PROFILE_DIST,      ///< Profiled (tShape) distance move.
         PROFILE_TIME,      ///< Profiled (tShape) time move.
-        STOP_AT_LINE       ///< Drive-until-line move; stops on T_OR_CROSS near the endpoint.
+        STOP_AT_LINE,      ///< Drive-until-line move; stops on T_OR_CROSS near the endpoint.
+        WALL_STOP          ///< Push-until-encoder-stall move; backs off and re-zeros against a wall.
     };
 
     Kind        kind;
@@ -131,6 +133,16 @@ struct DriveCommand
     float       maxCm      = 0.0f;     ///< Fault `LINE_NOT_FOUND` if no line detected by here.
     float       overshoot  = 0.0f;     ///< Post-detect roll so the wheel axle lands on the line.
     bool        reverse    = false;    ///< Back into the line via the rear board (needs 2 boards).
+                                       ///< For WALL_STOP, `true` = push rearward instead of forward.
+
+    // WALL_STOP-only. Dispatched into `_updateWallStop()` (a continuous, stall-terminated machine
+    // that REUSES the stop-at-line no-progress watchdog with the stall meaning INVERTED to
+    // success). `mode`, `power`, `heading`, `brake`, and `reverse` above are reused; these add the
+    // wall-push-specific bounds. The stall window itself is NOT carried here — it reads
+    // `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM` directly, shared
+    // with the stop-at-line seek.
+    float       backOffCm  = 0.0f;     ///< Distance to back off the wall after a confirmed stall.
+    uint32_t    timeoutMs  = 0;        ///< Outer advisory timeout; on no-stall, soft-fault (no halt).
 };
 
 /**
@@ -152,6 +164,7 @@ class DriveClass
     friend class TurnDegBuilder;
     friend class TurnToYawBuilder;
     friend class StopAtLineBuilder;
+    friend class WallStopBuilder;
 
 public:
     /**
@@ -389,6 +402,48 @@ public:
      */
     [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm);
 
+    /**
+     * @brief Build a push-until-wall move that re-zeros the chassis against a physical wall (AC8).
+     *
+     * Returns a `WallStopBuilder` that executes when the temporary destructs at end-of-statement.
+     * The move drives at a low PWM toward a wall (forward by default; `.setReverse(true)` to push
+     * rearward) and watches the SAME no-progress watchdog `stopAtLine` uses — but with the meaning
+     * INVERTED: an encoder STALL here is SUCCESS, not a fault. On stall (wall reached) the chassis
+     * backs off @p `WALL_STOP_BACK_OFF_CM` (a short reverse-of-push roll) and goes idle.
+     *
+     * If the chassis pushes for `Config::WALL_STOP_TIMEOUT_MS` and never stalls (e.g. it never
+     * reached a wall), the move records a NON-LATCHING advisory "stall not detected" outcome
+     * (query `Drive.wallStopTimedOut()`), stops, and goes idle — it does NOT set the hard
+     * `Fault` that `hasFault()` latches on, and does NOT halt the FSM. The caller (PathTracker)
+     * then assumes-at-wall and continues.
+     *
+     * Defaults are: sync-blocking, `DriveMode::GYRO` (heading-locked so the push stays square to
+     * the wall), power `Config::WALL_STOP_PUSH_PWM`, brake `true`, heading = current `_heldYaw`,
+     * `backOff = Config::WALL_STOP_BACK_OFF_CM`, `timeout = Config::WALL_STOP_TIMEOUT_MS`, forward.
+     * Chain `.async()` for the auto-path-planner / PathTracker opt-out (tick `loop()`, poll
+     * `Drive.isIdle()` / `Drive.wallStopTimedOut()`).
+     *
+     * Unlike `driveDist`, this is a CONTINUOUS stall-terminated move: it runs the bespoke
+     * `_updateWallStop()` machine, NOT the bounded `_updateProfile()` trapezoid — the stop point
+     * is unknown until the wheels stall against the wall.
+     *
+     * Example:
+     * @code
+     * Drive.wallStop(20);                                  // GYRO push, stall→back off→idle, sync-block
+     * Drive.wallStop(20).setReverse(true).async();         // push rearward, pollable
+     * Drive.wallStop(20).setBackOff(3.0f).setTimeout(4000);// override back-off + advisory timeout
+     * @endcode
+     *
+     * @param cm Nominal expected push distance to the wall, in centimetres (advisory only — the
+     *           move terminates on stall, not on distance; carried for symmetry / future use and
+     *           rejected if negative). Reverse direction is selected via `.setReverse()`, never a
+     *           negative distance.
+     * @return A fluent builder that auto-executes on destruction.
+     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means you
+     *       forgot the chain.
+     */
+    [[nodiscard]] WallStopBuilder wallStop(float cm);
+
     // -------------------------------------------------------------------------------------
     // State accessors
     // -------------------------------------------------------------------------------------
@@ -420,7 +475,7 @@ public:
      * mission step?" tick — it's queue-aware unlike `isMoveDone()` / `isTurnDone()`.
      *
      * @return `true` iff `_moveDone && _turnDone && _profileState == IDLE &&
-     *         _stopState == IDLE && _qCount == 0`.
+     *         _stopState == IDLE && _wallState == IDLE && _qCount == 0`.
      */
     bool isIdle() const;
 
@@ -438,6 +493,24 @@ public:
      *       Fault::LINE_NOT_FOUND` — this query and the fault state agree.
      */
     bool isLineFound() const;
+
+    /**
+     * @brief Advisory result of the most recent `wallStop` move (AC8): did it time out without
+     *        ever stalling against a wall?
+     *
+     * Set `false` the tick a `wallStop` is dispatched. Left `false` on the success path (the
+     * chassis stalled against the wall, backed off, and went idle). Set `true` only if the push ran
+     * the full `Config::WALL_STOP_TIMEOUT_MS` without the no-progress watchdog ever firing — i.e.
+     * the wheels kept turning freely and the chassis never reached a wall. Other move/turn verbs do
+     * not touch this flag.
+     *
+     * @return `true` if the last `wallStop` timed out without stalling; `false` if it succeeded
+     *         (or none has run yet).
+     * @note This is a NON-LATCHING advisory signal, NOT a hard fault: on a wall-stop timeout
+     *       `hasFault()` stays `false` and the queue is NOT frozen. The caller is expected to treat
+     *       a timeout as "assume at wall and continue" rather than a halt-and-recover condition.
+     */
+    bool wallStopTimedOut() const;
 
     /**
      * @brief Block (spin) until the chassis is fully idle and the queue is empty.
@@ -854,6 +927,100 @@ private:
     ///<        confirmed crossing, `false` while seeking or after a `LINE_NOT_FOUND` fault.
 
     // -------------------------------------------------------------------------------------
+    // Wall-stop push state machine (`wallStop()`-driven moves) — wall-zero reset nodes (AC8)
+    //
+    // Parallel to the trapezoidal move profile, the custom TurnGyro profile, and the stopAtLine
+    // seek above, but for a CONTINUOUS STALL-terminated wall push. `_updateWallStop()` commands
+    // continuous motion each tick per `.setMode` (it does NOT run `_updateProfile` — the stop point
+    // is unknown until the wheels stall against the wall) and REUSES the stop-at-line no-progress
+    // watchdog (`stopAtLineProgressed` / `stopAtLineStalled` over
+    // `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM`) — with the stall
+    // meaning INVERTED: a stall here is SUCCESS (wall reached), not the `LINE_NOT_FOUND` fault it is
+    // in the seek. On stall it backs off `_wallBackOffCm` and idles; on the outer advisory timeout
+    // it records the NON-LATCHING `_wallStopTimedOut` flag (NOT a hard fault) and idles. Hooked into
+    // `Drive.update()` parallel to `_updateStopAtLine()` and included in `_isIdle()`.
+    // -------------------------------------------------------------------------------------
+    /**
+     * @brief State of the in-flight `wallStop` push (parallel to StopAtLineState).
+     *
+     * `IDLE` means no push is in flight; `_updateWallStop()` short-circuits in that state. `SQUARE`
+     * = turning in place to `_wallHeading` (the wall normal) BEFORE pushing, so the press is square
+     * regardless of the arrival heading — it reuses the `_updateTurnProfile` turn machine and waits
+     * for it to idle. `PUSH` = driving STRAIGHT at the low push PWM toward the wall (open-loop RAW
+     * with motor bias once squared, so the PID cannot steer or wind up as one wheel contacts first),
+     * running the (inverted) no-progress watchdog; stall → BACK_OFF, outer timeout → record advisory
+     * + DONE. `BACK_OFF` = rolling the configured back-off distance in the reverse-of-push direction.
+     * `DONE` is the brief tick during which `update()` issues the final stop, restores the front
+     * board, and clears `_moveDone`.
+     */
+    enum class WallStopState : uint8_t
+    {
+        IDLE,
+        SQUARE,
+        PUSH,
+        BACK_OFF,
+        DONE
+    };
+
+    WallStopState _wallState = WallStopState::IDLE;
+    ///< @brief Current push phase. `IDLE` = no push in flight; non-IDLE values are driven by
+    ///<        `_updateWallStop()`.
+
+    DriveMode _wallMode = DriveMode::GYRO;
+    ///< @brief Mode of the active PUSH (RAW / SYNC / GYRO). Selects which continuous primitive
+    ///<        `_updateWallStop()` commands each PUSH/BACK_OFF tick. The reset interlude passes RAW
+    ///<        (open-loop + motor bias) because the `SQUARE` phase already faced the wall normal, so
+    ///<        the push goes straight without the GYRO PID fighting the wall contact. Mirrors
+    ///<        `DriveMode`. Captured from `cmd.mode`.
+
+    int16_t _wallPushPwm = Config::WALL_STOP_PUSH_PWM;
+    ///< @brief Resolved (positive) push PWM magnitude held during PUSH. Captured from `cmd.power`.
+
+    int16_t _wallHeading = 0;
+    ///< @brief Wall-normal yaw target. The `SQUARE` phase turns in place to this BEFORE the push
+    ///<        (and a `DriveMode::GYRO` push, if ever selected, would hold it). Captured from
+    ///<        `cmd.heading`.
+
+    float _wallBackOffCm = Config::WALL_STOP_BACK_OFF_CM;
+    ///< @brief Back-off distance (cm) rolled in the reverse-of-push direction after a confirmed
+    ///<        stall. Captured from `cmd.backOffCm`.
+
+    uint32_t _wallTimeoutMs = Config::WALL_STOP_TIMEOUT_MS;
+    ///< @brief Outer advisory timeout (ms) — the no-stall safety net. Captured from `cmd.timeoutMs`.
+
+    bool _wallReverse = false;
+    ///< @brief Whether this push drives rearward instead of forward. Captured from `cmd.reverse`.
+
+    bool _wallBrake = true;
+    ///< @brief Whether to engage the active brake at the end of the back-off roll / on completion.
+    ///<        Mirrors `DriveCommand::brake` captured at dispatch time.
+
+    int32_t _wallStartEnc = 0;
+    ///< @brief Per-side encoder reading (degrees) at push dispatch; `traveled` is measured relative
+    ///<        to this each tick (M2, the canonical encoder — matches `_updateProfile`).
+
+    int32_t _wallBackOffEnc = 0;
+    ///< @brief Per-side encoder reading (degrees) captured the tick the stall is confirmed; the
+    ///<        BACK_OFF phase rolls `_wallBackOffCm` cm relative to this.
+
+    uint32_t _wallStartMs = 0;
+    ///< @brief `millis()` at push dispatch — the outer advisory-timeout baseline.
+
+    uint32_t _wallLastProgressMs = 0;
+    ///< @brief `millis()` at the last detected progress — the stall watchdog's reset point. Seeded
+    ///<        at dispatch and advanced each tick `stopAtLineProgressed(...)` is true; a stall is
+    ///<        confirmed (= success) once `stopAtLineStalled(now, this, STALL_TIMEOUT_MS)` is true.
+
+    float _wallLastProgressCm = 0.0f;
+    ///< @brief `traveled` (cm) at the last detected progress — the progress-detector baseline.
+    ///<        Seeded at dispatch and advanced (with `_wallLastProgressMs`) whenever `traveled`
+    ///<        gains at least `Config::STOP_AT_LINE_PROGRESS_EPS_CM` since this value.
+
+    bool _wallStopTimedOut = false;
+    ///< @brief Advisory result of the last `wallStop` (see `wallStopTimedOut()`): `true` only if the
+    ///<        push ran the full timeout without ever stalling. NON-LATCHING — does NOT set `_fault`.
+
+    // -------------------------------------------------------------------------------------
     // Builder dispatch targets — each fluent builder destructor calls into one of these.
     // -------------------------------------------------------------------------------------
 
@@ -1082,6 +1249,60 @@ private:
     void _endStopAtLine(bool brake);
 
     /**
+     * @brief Cooperative tick for the `wallStop` push state machine (AC8).
+     *
+     * Drives a CONTINUOUS STALL-terminated push that does NOT use `_updateProfile()` (the stop
+     * point is unknown until the wheels stall against the wall). Each tick it measures `traveled`
+     * from `_wallStartEnc`, commands the continuous primitive selected by `_wallMode` (applying the
+     * push direction from `_wallReverse`), and steps the state machine:
+     *   - `SQUARE` — wait for the in-place turn to `_wallHeading` (the wall normal) to finish (#1).
+     *     The turn is driven by `_updateTurnProfile()` (kicked off at dispatch via `_execTurnToYaw`);
+     *     this state only polls `_turnProfileState`, then seeds the push watchdogs at the true start
+     *     of the push and enters `PUSH`. Squaring first means a misaligned arrival presses square
+     *     instead of arcing into the wall.
+     *   - `PUSH` — drive flat at `_wallPushPwm` toward the wall. REUSES the stop-at-line no-progress
+     *     watchdog (`stopAtLineProgressed` advances `_wallLastProgressCm` / `_wallLastProgressMs`;
+     *     `stopAtLineStalled` over `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`) — but a stall here is
+     *     SUCCESS: capture `_wallBackOffEnc` and transition to `BACK_OFF`. If the outer advisory
+     *     timeout (`_wallTimeoutMs` from `_wallStartMs`) elapses first WITHOUT a stall, set
+     *     `_wallStopTimedOut = true` (NON-LATCHING advisory — NOT a hard fault) and transition to
+     *     `DONE`.
+     *   - `BACK_OFF` — roll `_wallBackOffCm` in the reverse-of-push direction (so the chassis is no
+     *     longer pressing the wall), then transition to `DONE`.
+     *   - `DONE` — issue the final stop (active-brake per `_wallBrake`), restore the front board,
+     *     set `_moveDone`, and return to `IDLE`.
+     *
+     * @note Idempotent / no-op when `_wallState == IDLE` — short-circuits immediately.
+     * @note Hook ordering inside `Drive.update()`: drain-task-done bit → `_updateProfile()` →
+     *       `_updateTurnProfile()` → `_updateStopAtLine()` → `_updateWallStop()` → `_dispatchNext`.
+     *       The drain-task-done bit must NOT flip `_moveDone` while a push is in flight (same W1
+     *       guard as the move / turn / seek profiles).
+     * @note REUSES the stop-at-line stall watchdog deliberately — the ONLY semantic difference is
+     *       that a stall maps to success here instead of `LINE_NOT_FOUND`. See AC8 / the wall-zero
+     *       reset-nodes plan.
+     */
+    void _updateWallStop();
+
+    /**
+     * @brief Tear down an in-flight `wallStop` push: stop, brake, restore the front board, and
+     *        return the wall-stop state machine to IDLE.
+     *
+     * The single shared push-teardown path. Issues `Move(0, 0)` + `brake(brake)`, restores the
+     * front board (`LineArray.setReverseActive(false)` — harmless no-op here since wall-stop never
+     * selects the rear board, kept for symmetry with `_endStopAtLine` and any future rear-push),
+     * sets `_wallState = IDLE`, and marks `_moveDone` / `_turnDone` so `_dispatchNext` can hand off
+     * on the same tick. Does NOT clear the queue and does NOT touch `_wallStopTimedOut` (that
+     * advisory flag is owned by the PUSH-phase outcome) or `_fault` — the wall-stop timeout is
+     * non-latching by design.
+     *
+     * @param brake `true` = engage the active brake; `false` = coast.
+     *
+     * @note Called from the DONE state (brake = `_wallBrake`) and from `stop()` / `_drainBlocking()`
+     *       when an in-flight push is aborted.
+     */
+    void _endWallStop(bool brake);
+
+    /**
      * @brief Compute the current speed setpoint based on traveled fraction (0.0 → 1.0).
      *
      * Implements the trapezoidal velocity profile:
@@ -1171,7 +1392,7 @@ private:
      * is complete.
      *
      * @return `true` iff `_moveDone && _turnDone && _profileState == ProfileState::IDLE &&
-     *         _stopState == StopAtLineState::IDLE`.
+     *         _stopState == StopAtLineState::IDLE && _wallState == WallStopState::IDLE`.
      */
     bool _isIdle() const;
 
@@ -2708,6 +2929,254 @@ private:
     bool                _executed       = false;
 };
 
+/**
+ * @brief Fluent builder for `Drive.wallStop(cm)` — push-until-wall re-zero (AC8).
+ *
+ * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction. Drives
+ * at a low push PWM toward a wall (forward by default; `.setReverse(true)` to push rearward) and
+ * watches the SAME no-progress watchdog as `stopAtLine`, but INVERTED: an encoder STALL is SUCCESS
+ * (wall reached), not a fault. On stall the chassis backs off `setBackOff(...)` cm and idles. If it
+ * pushes for `setTimeout(...)` ms without ever stalling, it records a NON-LATCHING advisory outcome
+ * (`Drive.wallStopTimedOut()`), stops, and idles WITHOUT halting the FSM — the caller assumes
+ * at-wall and continues. Defaults: `DriveMode::GYRO` (heading-locked), power
+ * `Config::WALL_STOP_PUSH_PWM`, brake `true`, blocking `true`, forward, heading = `Drive`'s current
+ * `_heldYaw` (only consulted in `DriveMode::GYRO`), `backOff = Config::WALL_STOP_BACK_OFF_CM`,
+ * `timeout = Config::WALL_STOP_TIMEOUT_MS`. Unlike `driveDist` there is NO `tShape` knob — the push
+ * is a continuous stall-terminated move whose stop point is unknown until the wheels stall.
+ */
+class [[nodiscard]] WallStopBuilder
+{
+public:
+    /**
+     * @brief Construct a builder bound to the singleton `Drive` for expected push distance @p cm.
+     * @param drive Reference to the singleton `Drive` (only `Drive.wallStop` should call this).
+     * @param cm    Nominal expected push distance to the wall, in centimetres (advisory only — the
+     *              move terminates on stall, not distance).
+     */
+    WallStopBuilder(DriveClass& drive, float cm) : _drive(drive), _cm(cm)
+    {
+    }
+
+    WallStopBuilder(const WallStopBuilder&)            = delete;
+    WallStopBuilder& operator=(const WallStopBuilder&) = delete;
+    WallStopBuilder& operator=(WallStopBuilder&&)      = delete;
+
+    /**
+     * @brief Move constructor — transfers execution responsibility to the new instance.
+     *
+     * Required so the verb method (`Drive.wallStop(cm)`) can return a builder by value on compilers
+     * without mandatory copy elision. The moved-from instance is marked `_executed` so its
+     * destructor is a no-op. Touches NO `DriveClass` member, so it stays safely inline (gotcha #2
+     * only bars the RAII destructor — which dereferences the facade — from being inline).
+     */
+    WallStopBuilder(WallStopBuilder&& other) noexcept
+        : _drive(other._drive),
+          _cm(other._cm),
+          _power(other._power),
+          _powerExplicit(other._powerExplicit),
+          _preset(other._preset),
+          _presetSet(other._presetSet),
+          _mode(other._mode),
+          _brake(other._brake),
+          _blocking(other._blocking),
+          _heading(other._heading),
+          _headingSet(other._headingSet),
+          _backOff(other._backOff),
+          _timeout(other._timeout),
+          _reverse(other._reverse),
+          _executed(other._executed)
+    {
+        other._executed = true;
+    }
+
+    /**
+     * @brief Override the push PWM explicitly. Wins over any preset.
+     * @param p PWM target in `[-100, 100]`.
+     * @return `*this` for chaining.
+     * @note The push carries direction via `.setReverse()`, not the power sign — pass a positive
+     *       magnitude; the state machine applies the travel direction. Below
+     *       `Config::PWM_MIN_MAGNITUDE` is silently floored UP by `deadbandSnap`.
+     */
+    WallStopBuilder& setPower(int16_t p)
+    {
+        _power         = p;
+        _powerExplicit = true;
+        return *this;
+    }
+
+    /**
+     * @brief Use a `Config::SpeedPreset` for the push PWM.
+     * @param p Preset selector — resolved via `presetToPwm` (WROMath.h) at execute-time.
+     * @return `*this` for chaining.
+     * @note Ignored if `setPower` was also called on the same builder.
+     */
+    WallStopBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset    = p;
+        _presetSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Choose which underlying continuous primitive drives the push each tick.
+     * @param m `RAW` (open-loop), `SYNC` (encoder-rate sync PID), or `GYRO` (yaw-lock).
+     * @return `*this` for chaining.
+     * @note Default `GYRO` so the push holds heading and presses square to the wall. `GYRO` holds
+     *       `setHeading(...)` (or the current `_heldYaw`).
+     */
+    WallStopBuilder& setMode(DriveMode m)
+    {
+        _mode = m;
+        return *this;
+    }
+
+    /**
+     * @brief Override the heading held during a `DriveMode::GYRO` push.
+     * @param yaw Absolute yaw target in degrees.
+     * @return `*this` for chaining.
+     * @note Only consulted when the resolved mode is `GYRO`. If never set, the push uses the
+     *       current `Drive` `_heldYaw`.
+     */
+    WallStopBuilder& setHeading(int16_t yaw)
+    {
+        _heading    = yaw;
+        _headingSet = true;
+        return *this;
+    }
+
+    /**
+     * @brief Push rearward (via the rear of the chassis) instead of driving forward.
+     * @param r `true` = push rearward; `false` (default) = push forward.
+     * @return `*this` for chaining.
+     * @note Wall-stop reads no line sensor, so reverse here only flips the push direction — it does
+     *       NOT require a rear line board (unlike `stopAtLine`'s reverse).
+     */
+    WallStopBuilder& setReverse(bool r)
+    {
+        _reverse = r;
+        return *this;
+    }
+
+    /**
+     * @brief Override the back-off distance rolled after a confirmed stall.
+     * @param cm Back-off distance in centimetres. Default `Config::WALL_STOP_BACK_OFF_CM`.
+     * @return `*this` for chaining.
+     * @note Measured along the reverse-of-push direction. A non-positive value skips the back-off
+     *       roll entirely (the chassis stops pressed against the wall).
+     */
+    WallStopBuilder& setBackOff(float cm)
+    {
+        _backOff = cm;
+        return *this;
+    }
+
+    /**
+     * @brief Override the outer advisory timeout before giving up waiting to stall.
+     * @param ms Timeout in milliseconds. Default `Config::WALL_STOP_TIMEOUT_MS`.
+     * @return `*this` for chaining.
+     * @note On expiry the push records the NON-LATCHING `Drive.wallStopTimedOut()` advisory and
+     *       idles WITHOUT a hard fault. Keep this above `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` so a
+     *       real wall press trips the inner stall-success path first.
+     */
+    WallStopBuilder& setTimeout(uint32_t ms)
+    {
+        _timeout = ms;
+        return *this;
+    }
+
+    /**
+     * @brief Apply (or release) the active brake at the end of the back-off roll / on completion.
+     * @param b `true` = brake; `false` = coast.
+     * @return `*this` for chaining.
+     */
+    WallStopBuilder& setBrake(bool b)
+    {
+        _brake = b;
+        return *this;
+    }
+
+    /**
+     * @brief Block the caller until the push completes (stall + back-off, or advisory timeout).
+     * @param b `true` = sync (default — spins on the registered tick callback); `false` = async.
+     * @return `*this` for chaining.
+     * @warning Blocking variants MUST NOT be called from inside any module's `update()`.
+     * @note Prefer `.async()` for the auto-path-planner / PathTracker opt-out — it documents intent
+     *       more clearly than `.setBlocking(false)`.
+     */
+    WallStopBuilder& setBlocking(bool b)
+    {
+        _blocking = b;
+        return *this;
+    }
+
+    /**
+     * @brief Opt this push out of the default sync-blocking behaviour.
+     *
+     * Equivalent to `.setBlocking(false)`. The builder's destructor enqueues the command and
+     * returns immediately. Use for the auto-path planner / PathTracker case where the caller ticks
+     * `loop()` and polls `Drive.isIdle()` / `Drive.wallStopTimedOut()` to know the outcome.
+     *
+     * @return Reference to this builder for chaining.
+     * @note The default is sync (`_blocking = true`).
+     */
+    WallStopBuilder& async()
+    {
+        _blocking = false;
+        return *this;
+    }
+
+    /**
+     * @brief Destructor — RAII auto-enqueue. Resolves the final knobs and pushes a
+     *        `Kind::WALL_STOP` command onto the Drive queue.
+     *
+     * DECLARED here, DEFINED out-of-line below (after `DriveClass` is complete) — the body
+     * dereferences `DriveClass` private members (`_enqueue`, `_drainBlocking`, `_heldYaw`), which
+     * MSVC rejects as an incomplete-type access if the body is inline before the facade is fully
+     * seen (gotcha #2 — CI g++ is lenient and would NOT catch this). All other members above stay
+     * inline because they touch no facade member.
+     */
+    ~WallStopBuilder();
+
+private:
+    /**
+     * @brief Resolve the final push PWM: explicit `setPower` wins, then `setPreset`, then
+     *        `Config::WALL_STOP_PUSH_PWM` as the documented default.
+     */
+    int16_t _resolvePower() const
+    {
+        if (_powerExplicit)
+        {
+            return _power;
+        }
+        if (_presetSet)
+        {
+            return presetToPwm(_preset);
+        }
+        return Config::WALL_STOP_PUSH_PWM;
+    }
+
+    DriveClass&         _drive;
+    float               _cm;
+    int16_t             _power         = Config::WALL_STOP_PUSH_PWM;
+    bool                _powerExplicit = false;
+    Config::SpeedPreset _preset        = Config::SpeedPreset::NORMAL;
+    bool                _presetSet     = false;
+    DriveMode           _mode          = DriveMode::GYRO;    ///< default GYRO — push square to wall.
+    bool                _brake         = true;
+    bool                _blocking      = true;    ///< default sync — destructor blocks until done.
+                                                  ///< Auto-planner / PathTracker opt out via `.async()`.
+    int16_t             _heading       = 0;
+    bool                _headingSet    = false;
+    // No `*Set` flag for back-off / timeout: each field already DEFAULTS to its Config value, and a
+    // setter just overwrites it, so the resolved value is `_backOff` / `_timeout` unconditionally
+    // (unlike `_heading`, which a flag selects against the runtime `_heldYaw`). Read the fields
+    // directly in the dtor.
+    float               _backOff       = Config::WALL_STOP_BACK_OFF_CM;
+    uint32_t            _timeout       = Config::WALL_STOP_TIMEOUT_MS;
+    bool                _reverse       = false;
+    bool                _executed      = false;
+};
+
 // =========================================================================================
 // Inline definitions of the verb entry points — these MUST come after the builder classes
 // are fully defined, since they construct and return them by value.
@@ -2736,6 +3205,62 @@ inline TurnToYawBuilder DriveClass::turnToYaw(int16_t yaw)
 inline StopAtLineBuilder DriveClass::stopAtLine(float expectedCm)
 {
     return StopAtLineBuilder(*this, expectedCm);
+}
+
+inline WallStopBuilder DriveClass::wallStop(float cm)
+{
+    return WallStopBuilder(*this, cm);
+}
+
+// -----------------------------------------------------------------------------------------
+// Out-of-line `WallStopBuilder` destructor (gotcha #2).
+//
+// DEFINED here, AFTER `DriveClass` is complete, because the RAII body dereferences `DriveClass`
+// private members (`_enqueue`, `_drainBlocking`, `_heldYaw`). MSVC rejects an inline body that
+// touches an incomplete type; CI g++ is lenient and would NOT catch the regression, so the local
+// MSVC build is the real gate. The existing builders happen to sit after the facade too, but this
+// one declares-then-defines to make the ordering constraint explicit and MSVC-proof.
+// -----------------------------------------------------------------------------------------
+inline WallStopBuilder::~WallStopBuilder()
+{
+    if (_executed)
+    {
+        return;
+    }
+    _executed = true;
+
+    // Reject negative distance at the public-API boundary — reverse direction is expressed via
+    // `.setReverse()`, never a negative distance. Mirrors DriveDistBuilder / StopAtLineBuilder (F4).
+    if (_cm < 0.0f)
+    {
+        Serial.println(F("[Drive] wallStop: negative cm rejected"));
+        return;
+    }
+
+    // Resolve push PWM — explicit setPower wins, then setPreset, then WALL_STOP_PUSH_PWM.
+    const int16_t pushPwm = _resolvePower();
+
+    DriveCommand cmd;
+    cmd.kind      = DriveCommand::Kind::WALL_STOP;
+    cmd.mode      = _mode;
+    cmd.power     = pushPwm;
+    cmd.brake     = _brake;
+    cmd.heading   = _headingSet ? _heading : _drive._heldYaw;
+    cmd.cm        = _cm;
+    cmd.reverse   = _reverse;
+    cmd.backOffCm = _backOff;     // defaults to Config::WALL_STOP_BACK_OFF_CM; setBackOff overrides
+    cmd.timeoutMs = _timeout;     // defaults to Config::WALL_STOP_TIMEOUT_MS; setTimeout overrides
+
+    if (_blocking)
+    {
+        _drive._drainBlocking();
+        _drive._enqueue(cmd);
+        _drive._drainBlocking();
+    }
+    else
+    {
+        _drive._enqueue(cmd);
+    }
 }
 
 #endif    // DRIVE_H

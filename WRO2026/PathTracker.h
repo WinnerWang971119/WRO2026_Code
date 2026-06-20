@@ -16,9 +16,10 @@
  *    `.async()` to enqueue + return immediately.
  *  - A latched fault state (`Fault::NOT_ZEROED`, `UNREACHABLE`,
  *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`,
- *    `OFF_NODE`) surfaced via `hasFault()` / `getFault()`. `clearFault()` re-arms
- *    the queue but does not restart motion. `faultMnemonic()` returns
- *    a short tag (`UNR`, `DRV`, ...) for the EventTrace / Mission output.
+ *    `OFF_NODE`, `WALL_NOT_SQUARE`) surfaced via `hasFault()` / `getFault()`.
+ *    `clearFault()` re-arms the queue but does not restart motion.
+ *    `faultMnemonic()` returns a short tag (`UNR`, `DRV`, ...) for the
+ *    EventTrace / Mission output.
  *
  * FSM states (`State`):
  *  - `IDLE`              — nothing pending; waits for a goal to be enqueued.
@@ -77,6 +78,34 @@
  *                          `Localization` via `onIntersection(...)` (a true
  *                          re-anchor, not a dead-reckon advance); on
  *                          `Drive.hasFault()` enters `Fault::DRIVE_FAULT`.
+ *  - `WALL_STOP`         — wall-zero reset interlude, phase 1 (PR2, AC9). Entered
+ *                          from `PLAN_NEXT_HOP` when the just-arrived node is a
+ *                          `Routes::NodeType::RESET` node (the reset hook, the
+ *                          arrival analogue of the `RETURN_TO_NODE` prologue).
+ *                          Dispatches one latched `Drive.wallStop(...)` REVERSE
+ *                          push (rear into the wall — only the rear may take wall
+ *                          load): the primitive's SQUARE phase first turns to the
+ *                          reset record's `facing` (the PARKED heading, front AWAY
+ *                          from the wall), then presses the rear straight in RAW mode
+ *                          with back-off 0. Waits for `Drive.isIdle()` before
+ *                          transitioning to `REANCHOR`.
+ *  - `REANCHOR`          — wall-zero reset interlude, phase 2 (PR2, AC9–AC11).
+ *                          Surfaces a `Drive.wallStopTimedOut()` advisory (AC10 —
+ *                          assume-at-wall and continue, NOT a halt), then calls
+ *                          `Localization.reanchorAtWall(axis, wall_coord, facing)`.
+ *                          On `false` (strict wall-normal check rejected the
+ *                          squaring, only possible under
+ *                          `Config::WALL_NORMAL_STRICT_ENABLED`) it raises
+ *                          `Fault::WALL_NOT_SQUARE` (AC11). On `true` it transitions
+ *                          to `WALL_DEPART` to pull off the wall before any planning.
+ *  - `WALL_DEPART`       — wall-zero reset interlude, phase 3. The chassis is pressed
+ *                          against the wall (belief is the axle, a contact-offset
+ *                          short of it), so before `PLAN_NEXT_HOP` can dispatch a
+ *                          pivot it drives FORWARD off the wall back onto the node
+ *                          (`standoff - WALL_CONTACT_OFFSET_CM`, GYRO holding the
+ *                          squared heading), then `clearOffset()` (belief == node)
+ *                          and continues to `PLAN_NEXT_HOP`. The reset latch stays
+ *                          set, so the interlude is not re-entered.
  *  - `FAULT`             — latched fault; cleared via `clearFault()` or
  *                          `abort()`.
  *
@@ -189,15 +218,16 @@ class PathTrackerClass
 public:
     enum class Fault : uint8_t
     {
-        NONE                = 0,
-        NOT_ZEROED          = 1,
-        UNREACHABLE         = 2,
-        DRIVE_FAULT         = 3,
-        BAD_NODE            = 4,
-        DRAIN_TIMEOUT       = 5,
-        REVERSE_UNAVAILABLE = 6,
-        OFF_NODE            = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
-        PIVOT_TRIM_UNDERFLOW = 8 ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
+        NONE                 = 0,
+        NOT_ZEROED           = 1,
+        UNREACHABLE          = 2,
+        DRIVE_FAULT          = 3,
+        BAD_NODE             = 4,
+        DRAIN_TIMEOUT        = 5,
+        REVERSE_UNAVAILABLE  = 6,
+        OFF_NODE             = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
+        WALL_NOT_SQUARE      = 8, ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
+        PIVOT_TRIM_UNDERFLOW = 9  ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
     };
 
     /**
@@ -260,6 +290,9 @@ private:
         PROJECTION_FOLLOW,
         BLIND_FORWARD,
         STOP_AT_LINE,
+        WALL_STOP,
+        REANCHOR,
+        WALL_DEPART,
         FAULT
     };
 
@@ -390,6 +423,56 @@ private:
      * latched by `_dispatchReturnMove`). Every Drive call is one discarded-temporary `.async()`.
      */
     void _dispatchReturnMoveAfterTurn();
+
+    /**
+     * @brief Wall-zero reset hook: if the just-arrived node carries a reset record,
+     *        enter the wall-stop interlude before planning the next hop (PR2, AC9).
+     *
+     * Called at the TOP of `_onPlanNextHop()` (the single arrival chokepoint — every
+     * hop's success path advances `Localization` and routes to `PLAN_NEXT_HOP`). When
+     * `FieldMap::getNodeType(cur) == Routes::NodeType::RESET` AND the per-arrival latch
+     * `_resetNode` does not already name `cur`, this dispatches the wall-push via
+     * `_dispatchWallStop(...)` and transitions to `WALL_STOP`. It is the arrival-side
+     * analogue of the `RETURN_TO_NODE` prologue that `DEQUEUE` inserts before the first
+     * hop: the reset interlude inserts before the next hop / before the goal-reached
+     * decision, then hands control back to the unchanged hop loop.
+     *
+     * @param cur The just-arrived node id (`Localization.getCurrentNode()`).
+     * @return `true` if the reset interlude was entered (caller must `return`
+     *         immediately — `_state` is now `WALL_STOP`); `false` to continue normal
+     *         planning (non-reset node, or the latch shows this reset already ran). The
+     *         `false` path is a true no-op for non-reset nodes (AC5-style "no change
+     *         when not applicable").
+     */
+    bool _maybeEnterReset(uint8_t cur);
+
+    /**
+     * @brief Dispatch the latched `Drive.wallStop(...)` push and enter `WALL_STOP` (PR2, AC9).
+     *
+     * Reads the reset record via `FieldMap::getResetInfo(node)` for `(axis, wall_coord,
+     * facing)`. Computes the advisory push distance as the absolute gap between the
+     * node's coordinate on `axis` and `wall_coord`
+     * (`fabs(wall_coord - node_coord[axis])`) — advisory only, since `wallStop` is
+     * stall/timeout-terminated (T14), not distance-terminated. `wallStop` first SQUARES
+     * (turns in place to `facing`, the PARKED heading — front away from the wall, so the
+     * rear faces it) then presses the REAR straight into the wall in `DriveMode::RAW`
+     * (open-loop + motor bias) with back-off 0, latching `_resetNode = node` so the push
+     * fires exactly once. Only the rear may take wall load — a front press would break the
+     * mechanism.
+     *
+     * The square-up corrects the arrival-heading error up front, so a misaligned arrival
+     * presses square instead of arcing into the wall (#1). RAW — not GYRO — for the push:
+     * once squared, a heading-hold PID would only fight the wall contact as one wheel
+     * stalls first; an open-loop straight press with motor bias stalls cleanly. A residual
+     * gross misalignment is still caught by the strict wall-normal check in `REANCHOR`
+     * (under `Config::WALL_NORMAL_STRICT_ENABLED`).
+     *
+     * RAII builder rule: the whole `Drive.wallStop(...)....async()` chain is ONE
+     * discarded-temporary statement — never split across statements / a local variable.
+     *
+     * @param node The reset node id (already confirmed `NodeType::RESET` by the caller).
+     */
+    void _dispatchWallStop(uint8_t node);
 
     void _onPlanNextHop();
 
@@ -536,6 +619,37 @@ private:
     /// the shared pre-turn has faced the chassis at the return heading. Meaningless outside a
     /// return; defaults to 0.
     float _returnDistCm = 0.0f;
+
+    /// @brief Per-arrival latch guarding the wall-zero reset interlude (PR2, AC9).
+    ///
+    /// Holds the node id whose reset interlude is currently in flight (the one that
+    /// dispatched `Drive.wallStop` in `WALL_STOP`), or `FieldMap::NODE_NONE` when no
+    /// reset is active. The `PLAN_NEXT_HOP` reset hook only enters the interlude when
+    /// the just-arrived node is a `Routes::NodeType::RESET` node AND `_resetNode` does
+    /// NOT already equal it — so the one-shot `Drive.wallStop` fires exactly ONCE per
+    /// arrival (mirrors the pivot-latch discipline: a re-entry or a second tick of
+    /// `PLAN_NEXT_HOP` after `REANCHOR` success does not re-fire the push, because
+    /// `_resetNode` is still set to that node). Set in `WALL_STOP` (on dispatch) and
+    /// re-armed (cleared to `NODE_NONE`) on a fresh `DEQUEUE`, on `abort()`, and on
+    /// `_enterFault(...)`. A successful `REANCHOR` deliberately LEAVES it set to the
+    /// reset node so the immediate return to `PLAN_NEXT_HOP` does not re-trigger; it
+    /// naturally re-arms once the FSM advances off that node (a later goal that
+    /// re-visits the same reset node clears it at DEQUEUE first).
+    uint8_t _resetNode = FieldMap::NODE_NONE;
+
+    /// @brief True only on the FIRST `_onPlanNextHop()` of a goal — before any hop has run.
+    ///
+    /// The wall-zero reset interlude fires on ARRIVAL at a reset node, i.e. only AFTER a real
+    /// hop has driven the chassis onto it. But `_onPlanNextHop()` also runs once at the very
+    /// start of a goal (the first plan after `DEQUEUE`, possibly after the return-to-node
+    /// prologue), when `cur` is still the start/current node and no hop has moved the chassis.
+    /// Firing the interlude there would (a) wall-push at mission start if the START node is typed
+    /// `reset`, and (b) wall-push on a zero-hop `goTo(R)` while already on `R` — both with zero
+    /// prior motion, and NEITHER modelled by the sim (which only checks for a reset node AFTER a
+    /// hop). This flag is set at `DEQUEUE` and cleared on the first `_onPlanNextHop()`, so the
+    /// interlude is gated to genuine post-hop arrivals and firmware/sim stay in lockstep. The
+    /// matching authoring guard (a START node may not be typed `reset`) lives in the validator.
+    bool _planIsFirstAfterDequeue = false;
 
     /// @brief Bidirectional builder overrides cached for the IN-FLIGHT goal.
     ///

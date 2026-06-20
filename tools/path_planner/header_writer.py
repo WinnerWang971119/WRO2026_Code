@@ -101,6 +101,16 @@ _EDGE_TYPE_TO_ENUM: Dict[str, str] = {
 _NODE_TYPE_TO_ENUM: Dict[str, str] = {
     "line":  "NodeType::LINE",
     "blind": "NodeType::BLIND",
+    "reset": "NodeType::RESET",
+}
+
+# Wall-zero reset axis encoding -- the load-bearing cross-task contract
+# (T15 ``reanchorAtWall(uint8_t axis, ...)`` decodes it). The authored
+# ``RESET_NODES[name].axis`` string maps to the ``uint8_t`` emitted into
+# the ``ResetNode.axis`` cell: ``"x" -> 0``, ``"y" -> 1``. Do NOT reorder.
+_RESET_AXIS_TO_UINT8: Dict[str, int] = {
+    "x": 0,
+    "y": 1,
 }
 
 # Which override slot on EdgeInfo a ``primitive_mode`` value should land
@@ -403,6 +413,7 @@ def _build_routes_h_lines(
     source_hash: str,
     start_node_index: int,
     pivot_count: int,
+    reset_count: int,
 ) -> List[str]:
     n_nodes = len(node_names)
     start_heading = _format_float(field_data.START_HEADING_DEG)
@@ -410,6 +421,10 @@ def _build_routes_h_lines(
     # in standard C++, so a pivot-free field still emits a single zeroed
     # placeholder element while ``N_PIVOT_TURNS`` reports the truth count (0).
     pivot_array_len = max(1, pivot_count)
+    # Same min-size-1 placeholder discipline for the reset table: a reset-free
+    # field still emits a single zeroed placeholder while ``N_RESET_NODES``
+    # reports the truth count (0).
+    reset_array_len = max(1, reset_count)
 
     lines: List[str] = []
     lines.extend(_routes_h_banner(source_hash))
@@ -437,7 +452,10 @@ def _build_routes_h_lines(
     lines.append(_INDENT + "// Node category. LINE nodes are reached by line-following")
     lines.append(_INDENT + "// to the next intersection; BLIND nodes are reached by a")
     lines.append(_INDENT + "// dead-reckoned turn + forward move from a connected node.")
-    lines.append(_INDENT + "enum class NodeType : uint8_t { LINE = 0, BLIND = 1 };")
+    lines.append(
+        _INDENT
+        + "enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2 };"
+    )
     lines.append("")
     lines.append(_INDENT + "// Edge motion class, dispatched by the runtime.")
     lines.append(
@@ -519,6 +537,32 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "float    trim_cm;    // delta over-travel, cm")
     lines.append(_INDENT + "};")
     lines.append("")
+    lines.append(
+        _INDENT + "// Wall-zero reset node (PR2). A reset node re-anchors the"
+    )
+    lines.append(
+        _INDENT + "// chassis against a known wall: drive to the wall on `axis`,"
+    )
+    lines.append(
+        _INDENT + "// re-zero that coordinate to `wall_coord`, and adopt `facing`"
+    )
+    lines.append(
+        _INDENT + "// as the heading. Reached like any node; the reset payload"
+    )
+    lines.append(
+        _INDENT + "// lives ONLY here, not on NODES[] (sparse, like PivotTurn)."
+    )
+    lines.append(_INDENT + "struct ResetNode {")
+    lines.append(_INDENT * 2 + "uint8_t  node;        // node index")
+    # AXIS ENCODING CONTRACT (load-bearing): "x" -> 0, "y" -> 1. T15's
+    # reanchorAtWall(uint8_t axis, ...) decodes this exact mapping.
+    lines.append(
+        _INDENT * 2 + "uint8_t  axis;        // 0 = x, 1 = y (wall parallel to axis)"
+    )
+    lines.append(_INDENT * 2 + "float    wall_coord;  // cm; the re-zeroed coordinate")
+    lines.append(_INDENT * 2 + "int16_t  facing;      // degrees [0, 360)")
+    lines.append(_INDENT + "};")
+    lines.append("")
     lines.append(_INDENT + "extern const NodeInfo NODES[N_NODES];")
     lines.append(_INDENT + "extern const uint8_t  NEXT_HOP[N_NODES][N_NODES];")
     lines.append(_INDENT + "extern const EdgeInfo EDGES   [N_NODES][N_NODES];")
@@ -542,6 +586,28 @@ def _build_routes_h_lines(
         _INDENT
         + "extern const PivotTurn PIVOT_TURNS["
         + str(pivot_array_len)
+        + "];"
+    )
+    lines.append("")
+    lines.append(
+        _INDENT + "// Sparse, sorted wall-zero reset table (PR2). Sorted by node"
+    )
+    lines.append(
+        _INDENT + "// index for a deterministic golden and a short bounded linear"
+    )
+    lines.append(
+        _INDENT + "// scan in FieldMap::getResetInfo."
+    )
+    lines.append(
+        _INDENT
+        + "constexpr uint8_t N_RESET_NODES = "
+        + str(reset_count)
+        + ";"
+    )
+    lines.append(
+        _INDENT
+        + "extern const ResetNode RESET_NODES["
+        + str(reset_array_len)
         + "];"
     )
     lines.append("")
@@ -750,6 +816,114 @@ def _emit_pivot_turns(
     return out
 
 
+def _resolve_reset_rows(
+    reset_nodes: Mapping[str, Mapping],
+    index_of: Mapping[str, int],
+) -> List[Tuple[int, int, float, int]]:
+    """Resolve ``RESET_NODES`` to sorted ``(node, axis, wall_coord, facing)`` rows.
+
+    Each entry in the sparse ``field_data.RESET_NODES`` table is keyed by a node
+    NAME mapped to its integer index via ``index_of`` (the same NODES-order
+    lookup the rest of the emitter uses, mirroring :func:`_resolve_pivot_rows`).
+    The ``axis`` string is encoded to a ``uint8_t`` via
+    :data:`_RESET_AXIS_TO_UINT8` (``"x" -> 0``, ``"y" -> 1`` -- the load-bearing
+    cross-task contract T15 decodes). ``facing`` is rounded to the nearest
+    integer and reduced mod 360 for the emitted ``int16_t`` field, so a value
+    that rounds up to 360 wraps to 0 and stays inside the ``[0, 360)`` contract.
+
+    Rows are sorted by node index so the emitted ``RESET_NODES`` table is
+    deterministic for golden byte-compares and supports the firmware's ordered
+    linear scan.
+
+    An entry naming a node absent from ``index_of`` -- or an unknown ``axis``
+    string -- is skipped defensively (the validator guarantees both, so this
+    only fires for a hand-built caller that bypasses validation, and skipping
+    keeps the emitter from raising :class:`KeyError`). The truth count
+    ``N_RESET_NODES`` is derived from the returned rows, so a skipped entry
+    drops out of the count too.
+
+    :param reset_nodes: ``field_data.RESET_NODES`` -- a dict mapping node name
+        to a ``{"axis", "wall_coord", "facing"}`` spec.
+    :param index_of: node-name -> NODES-order index lookup.
+    :return: rows ``(node_index, axis_uint8, wall_coord, facing_int)`` sorted
+        ascending by ``node_index``.
+    """
+    rows: List[Tuple[int, int, float, int]] = []
+    for name, spec in reset_nodes.items():
+        if name not in index_of:
+            continue
+        axis = _RESET_AXIS_TO_UINT8.get(spec["axis"])
+        if axis is None:
+            continue
+        rows.append(
+            (
+                index_of[name],
+                axis,
+                float(spec["wall_coord"]),
+                # Round to the nearest integer for the emitted int16_t, then
+                # reduce mod 360 so a value rounding UP to 360 (e.g. 359.7 ->
+                # 360) wraps to 0 and stays inside the `facing; // degrees
+                # [0, 360)` contract on Routes::ResetNode.
+                int(round(float(spec["facing"]))) % 360,
+            )
+        )
+    rows.sort(key=lambda row: row[0])
+    return rows
+
+
+def _emit_reset_nodes(
+    reset_rows: Sequence[Tuple[int, int, float, int]],
+) -> List[str]:
+    """Emit the ``const ResetNode RESET_NODES[...]`` definition.
+
+    ``reset_rows`` are the already-resolved, already-sorted rows from
+    :func:`_resolve_reset_rows`. When empty, a single zeroed placeholder element
+    is emitted (the array bound is ``max(1, count)``; a zero-length array bound
+    is ill-formed in standard C++) while ``N_RESET_NODES`` in routes.h reports
+    the truth count of ``0`` -- exactly the empty-``PIVOT_TURNS`` discipline.
+
+    Field order MUST match the ``ResetNode`` struct declared in routes.h
+    (``node, axis, wall_coord, facing``) and the ``FieldMap::getResetInfo``
+    accessor that reads it: the brace-enclosed aggregate initialiser is
+    positional.
+    """
+    array_len = max(1, len(reset_rows))
+    out: List[str] = []
+    out.append(
+        _INDENT
+        + "const ResetNode RESET_NODES["
+        + str(array_len)
+        + "] = {"
+    )
+    if reset_rows:
+        out.append(_INDENT * 2 + "// sorted by node index; axis 0 = x, 1 = y")
+        for node, axis, wall_coord, facing in reset_rows:
+            out.append(
+                _INDENT * 2
+                + "{ "
+                + str(node) + ", " + str(axis) + ", "
+                + _format_float(wall_coord) + ", "
+                + str(facing)
+                + " },"
+            )
+    else:
+        # Reset-free field: one zeroed placeholder so the array bound is >= 1.
+        # N_RESET_NODES == 0 tells FieldMap::getResetInfo to scan nothing, so
+        # this element is never read at runtime.
+        out.append(
+            _INDENT * 2
+            + "// placeholder: N_RESET_NODES == 0, never read at runtime"
+        )
+        out.append(
+            _INDENT * 2
+            + "{ 0, 0, "
+            + _format_float(0.0) + ", 0"
+            + " },"
+        )
+    out.append(_INDENT + "};")
+    return out
+
+
 def _build_routes_cpp_lines(
     field_data,
     graph: nx.DiGraph,
@@ -758,6 +932,7 @@ def _build_routes_cpp_lines(
     index_of: Mapping[str, int],
     source_hash: str,
     pivot_rows: Sequence[Tuple[int, int, int, str, float]],
+    reset_rows: Sequence[Tuple[int, int, float, int]],
 ) -> List[str]:
     lines: List[str] = []
     lines.extend(_routes_cpp_banner(source_hash))
@@ -775,6 +950,8 @@ def _build_routes_cpp_lines(
     lines.extend(_emit_edges_table(graph, node_names))
     lines.append("")
     lines.extend(_emit_pivot_turns(pivot_rows))
+    lines.append("")
+    lines.extend(_emit_reset_nodes(reset_rows))
     lines.append("}  // namespace Routes")
     return lines
 
@@ -836,8 +1013,19 @@ def emit_routes(
     # same list (a record skipped for an unknown node drops out of both).
     pivot_rows = _resolve_pivot_rows(pivot_records or (), index_of)
 
+    # Resolve the sparse RESET_NODES table the same way: read it strictly off
+    # field_data (every fixture carries RESET_NODES = {}), resolve node-name
+    # keys to NODES-order indices, and derive the count in routes.h and the
+    # table in routes.cpp from the SAME sorted list.
+    reset_rows = _resolve_reset_rows(field_data.RESET_NODES, index_of)
+
     header_lines = _build_routes_h_lines(
-        field_data, node_names, source_hash, start_node_index, len(pivot_rows)
+        field_data,
+        node_names,
+        source_hash,
+        start_node_index,
+        len(pivot_rows),
+        len(reset_rows),
     )
     cpp_lines = _build_routes_cpp_lines(
         field_data,
@@ -847,6 +1035,7 @@ def emit_routes(
         index_of,
         source_hash,
         pivot_rows,
+        reset_rows,
     )
 
     header_path.parent.mkdir(parents=True, exist_ok=True)

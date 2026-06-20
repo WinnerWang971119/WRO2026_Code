@@ -87,4 +87,9 @@ namespace Routes {
         // placeholder: N_PIVOT_TURNS == 0, never read at runtime
         { 0, 0, 0, TurnMode::DEFAULT, 0.000000f },
     };
+
+    const ResetNode RESET_NODES[1] = {
+        // placeholder: N_RESET_NODES == 0, never read at runtime
+        { 0, 0, 0.000000f, 0 },
+    };
 }  // namespace Routes

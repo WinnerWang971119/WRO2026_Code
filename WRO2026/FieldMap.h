@@ -191,6 +191,36 @@ namespace FieldMap
         }
         return nullptr;
     }
+
+    /**
+     * @brief Resolve the wall-zero reset record for a node, if any.
+     *
+     * @param node Node index to look up.
+     * @return Pointer to the matching `Routes::ResetNode`, or `nullptr` if `node` is out of
+     *         range or carries no reset record.
+     *
+     * @note Bounds-checks the index (ADR-028) and scans only the first `N_RESET_NODES` truth
+     *       records, never the padded array size. When no real reset nodes exist
+     *       (`N_RESET_NODES == 0`) the loop runs zero times, so the zeroed `{0,0,...}`
+     *       placeholder element is never matched. The `axis` field is encoded `0 = x`,
+     *       `1 = y` (the cross-task contract `reanchorAtWall` decodes). Bounded iteration
+     *       count, no dynamic allocation (ARCHITECTURE iron rules).
+     */
+    inline const Routes::ResetNode* getResetInfo(uint8_t node)
+    {
+        if (node >= N_NODES)
+        {
+            return nullptr;
+        }
+        for (uint8_t i = 0; i < Routes::N_RESET_NODES; ++i)
+        {
+            if (Routes::RESET_NODES[i].node == node)
+            {
+                return &Routes::RESET_NODES[i];
+            }
+        }
+        return nullptr;
+    }
 }    // namespace FieldMap
 
 #endif    // FIELDMAP_H

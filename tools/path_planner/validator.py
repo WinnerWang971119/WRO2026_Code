@@ -2,9 +2,15 @@
 
 Inspects the raw module attributes (``NODES``, ``NODE_TYPES``,
 ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``OBSTACLES``, ``FIELD_MM``,
-``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, ...) and raises
-:class:`FieldDataError` on the first malformed entry with a precise key
-path and a one-line nudge toward the fix.
+``MAP_PNG``, optional ``EDGES``, optional ``PIVOT_TURNS``, optional
+``RESET_NODES``, ...) and raises :class:`FieldDataError` on the first
+malformed entry with a precise key path and a one-line nudge toward the fix.
+
+Wall-zero reset nodes are authored in a sparse top-level ``RESET_NODES``
+table keyed by node name (``{"axis", "wall_coord", "facing"}`` per node),
+mirroring the ``PIVOT_TURNS`` precedent. A ``"reset"``-typed node and its
+``RESET_NODES`` entry must agree both directions; the geometry fail-fasts
+live in :func:`_validate_reset_nodes`.
 
 PR3 schema (vs PR1/PR2): drops ``PROJECTIONS`` and ``GOAL_APPROACH``,
 adds required ``BLIND_EDGES`` and ``FIELD_MM`` / ``MAP_PNG``.
@@ -54,7 +60,16 @@ _REQUIRED_ATTRS = (
     "MAP_PNG",
 )
 
-_ALLOWED_NODE_TYPES = ("line", "blind")
+_ALLOWED_NODE_TYPES = ("line", "blind", "reset")
+
+# Axis labels a reset node may re-zero against (a wall parallel to one axis).
+_ALLOWED_RESET_AXES = ("x", "y")
+
+# MUST mirror Config::WALL_PIVOT_CLEARANCE_CM in WRO2026/config/ConfigNav.h (the
+# pivot sweep radius + safety margin). The firmware cannot include this header, so
+# the value is hand-mirrored here for the offline authoring guardrail; keep the two
+# in lockstep.
+WALL_PIVOT_CLEARANCE_CM = 14.0
 
 # Per-edge pivot authoring keys removed by the per-turn model (issue #44, T5).
 # A field that still carries one of these on an EDGES entry pre-dates the
@@ -1028,6 +1043,182 @@ def _validate_edges_field(field_data) -> None:
                 )
 
 
+def _validate_reset_nodes(field_data) -> None:
+    """Reject malformed wall-zero reset nodes.
+
+    A reset node re-localizes the chassis against a known wall: it carries a
+    ``{"axis", "wall_coord", "facing"}`` spec in the sparse top-level
+    ``field_data.RESET_NODES`` table (keyed by node name), and is typed
+    ``"reset"`` in ``NODE_TYPES``. This mirrors the per-turn ``PIVOT_TURNS``
+    precedent -- a top-level sparse table, not a key buried inside a node.
+
+    Validates that:
+
+    1. ``RESET_NODES`` (when present) is a dict keyed by node name;
+    2. every key is a node in ``NODES``;
+    3. the ``"reset"`` typing is consistent both directions -- every node typed
+       ``"reset"`` in ``NODE_TYPES`` has a ``RESET_NODES`` entry, and every
+       ``RESET_NODES`` key is typed ``"reset"``;
+    4. each spec is a dict with ``axis`` in ``{"x","y"}``, a finite
+       ``wall_coord`` (cm), and a finite ``facing`` in ``[0, 360)`` degrees;
+    5. ``facing`` points from the node AWAY from the wall (its component along the
+       reset axis is OPPOSITE the sign of ``wall_coord - node_coord``) -- the
+       firmware presses REARWARD, so the rear (at ``facing + 180``) faces the wall;
+    6. the node-to-wall standoff ``abs(wall_coord - node_coord)`` is at least
+       ``WALL_PIVOT_CLEARANCE_CM`` -- the chassis pivots in place around the
+       wall-zero and needs room to clear the wall (a zero-gap on-wall node is rejected);
+    7. the ``START_NODE`` is not typed ``"reset"`` -- the interlude runs only on a
+       post-hop arrival, so a reset START node would never re-zero at mission start.
+
+    Like :func:`_validate_pivot_turns`, this early-returns on a reset-free
+    field (absent / empty table) so the common case pays nothing.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes -- including the optional
+        ``RESET_NODES``).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``RESET_NODES['<name>']`` key path
+        and a one-line fix hint on the first malformed entry.
+    """
+    reset_nodes = getattr(field_data, "RESET_NODES", {})
+    node_types = getattr(field_data, "NODE_TYPES", {})
+
+    # Even on an empty RESET_NODES we must still catch a node typed "reset"
+    # that has NO entry, so only short-circuit when BOTH sides are empty.
+    reset_typed = {
+        name for name, value in node_types.items() if value == "reset"
+    }
+    if not reset_nodes and not reset_typed:
+        return
+
+    if not isinstance(reset_nodes, dict):
+        raise FieldDataError(
+            "RESET_NODES must be a dict mapping node-name -> "
+            "{axis, wall_coord, facing}; "
+            f"got: {type(reset_nodes).__name__}"
+        )
+
+    nodes = getattr(field_data, "NODES", {})
+
+    # (#3) The START node may not be a reset node. The wall-zero interlude fires only on a
+    # post-hop ARRIVAL (the firmware gates it off the first plan of a goal, and the sim only
+    # checks for a reset node after a hop), so a START reset node would never run its interlude
+    # at mission start anyway -- typing it "reset" is therefore a no-op trap that suggests a
+    # wall re-zero will happen at the start when it will not. Reject it so the author re-homes
+    # the wall re-zero onto a mid-route node (or uses the calibration start routine instead).
+    start_node = getattr(field_data, "START_NODE", None)
+    if start_node in reset_typed:
+        raise FieldDataError(
+            f"START_NODE '{start_node}' is typed 'reset' -- the wall-zero reset interlude "
+            "runs only on a post-hop arrival, never at mission start, so a reset START node "
+            "never re-zeroes. Move the reset typing to a mid-route node, or change "
+            f"NODE_TYPES['{start_node}']."
+        )
+
+    # Consistency: every reset-typed node needs a RESET_NODES entry.
+    for name in reset_typed:
+        if name not in reset_nodes:
+            raise FieldDataError(
+                f"node '{name}' is typed 'reset' in NODE_TYPES but has no "
+                f"RESET_NODES entry -- add RESET_NODES['{name}'] = "
+                "{'axis': 'x'|'y', 'wall_coord': <cm>, 'facing': <deg>} "
+                "or change its node type"
+            )
+
+    for name, spec in reset_nodes.items():
+        # The key must be a real node ...
+        if name not in nodes:
+            raise FieldDataError(
+                f"RESET_NODES references unknown node: '{name}' -- "
+                "add it to NODES or remove the entry from RESET_NODES"
+            )
+        # ... and that node must be typed 'reset' (consistency, other way).
+        if node_types.get(name) != "reset":
+            raise FieldDataError(
+                f"RESET_NODES['{name}'] is set but NODE_TYPES['{name}'] = "
+                f"'{node_types.get(name)}' -- a reset node must be typed "
+                "'reset'; fix NODE_TYPES or remove the RESET_NODES entry"
+            )
+
+        if not isinstance(spec, dict):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'] must be a dict with keys "
+                f"'axis', 'wall_coord', 'facing'; got: {spec!r}"
+            )
+
+        for required_key in ("axis", "wall_coord", "facing"):
+            if required_key not in spec:
+                raise FieldDataError(
+                    f"RESET_NODES['{name}'] missing required key "
+                    f"'{required_key}' -- each entry needs 'axis', "
+                    "'wall_coord', and 'facing'"
+                )
+
+        axis = spec["axis"]
+        wall_coord = spec["wall_coord"]
+        facing = spec["facing"]
+
+        if axis not in _ALLOWED_RESET_AXES:
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].axis = {axis!r}; expected one of "
+                "{'x','y'} -- the wall is parallel to one field axis"
+            )
+
+        if not _is_number(wall_coord):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].wall_coord must be a finite number "
+                f"in centimetres; got: {wall_coord!r}"
+            )
+
+        if not _is_number(facing) or not (0.0 <= float(facing) < 360.0):
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].facing must be a number in [0, 360); "
+                f"got: {facing!r} -- normalize via `facing % 360.0`"
+            )
+
+        node_x, node_y = nodes[name]
+        node_coord = node_x if axis == "x" else node_y
+        toward = float(wall_coord) - float(node_coord)
+
+        # Clearance floor: the robot SQUARE-turns to `facing` in place and then
+        # presses the wall rear-first, so it needs room to pivot without the rear
+        # clipping the wall during the sweep (and after the wall-zero). Reject any
+        # standoff below the pivot sweep radius (plus safety). A node authored
+        # exactly ON the wall (zero gap) also fails here -- no room to pivot at all.
+        if abs(toward) < WALL_PIVOT_CLEARANCE_CM:
+            raise FieldDataError(
+                f"RESET_NODES['{name}'] stands {abs(toward)} cm from the wall "
+                f"(node at {axis}={node_coord}, wall at {axis}={wall_coord}), below "
+                f"the {WALL_PIVOT_CLEARANCE_CM} cm pivot clearance floor: the robot "
+                "pivots in place around the wall-zero and would clip the wall. Author "
+                f"the node at least {WALL_PIVOT_CLEARANCE_CM} cm from the wall."
+            )
+
+        # Geometry: `facing` must point from the node AWAY from the wall. The
+        # firmware presses REARWARD (a reverse RAW push after an in-place SQUARE
+        # turn to `facing`); `facing` is the PARKED heading with the robot's FRONT
+        # pointing away from the wall, so the REAR (at facing+180) presses it. If
+        # `facing` pointed toward the wall the chassis would reverse off the field,
+        # never stall, and the advisory timeout would still re-anchor against thin
+        # air -- a large silent position error with no fault. The wall normal is
+        # axis-aligned and the world frame is CCW with 0 deg = +x, so the facing's
+        # component along the reset axis is cos(facing) on x / sin(facing) on y;
+        # that component must be OPPOSITE the sign of (wall_coord - node_coord) so
+        # the rear faces the wall. (toward != 0 is guaranteed by the floor above.)
+        rad = math.radians(float(facing))
+        comp = math.cos(rad) if axis == "x" else math.sin(rad)
+        if comp * toward >= 0.0:
+            away = "decreasing" if toward > 0.0 else "increasing"
+            raise FieldDataError(
+                f"RESET_NODES['{name}'].facing = {facing!r} deg does not point away "
+                f"from the wall: the node is at {axis}={node_coord} and the wall is "
+                f"at {axis}={wall_coord}, so the robot's FRONT (`facing`) must point "
+                f"toward {away} {axis} (away from the wall) so the rear presses it "
+                "(the firmware presses REARWARD, along facing+180). Re-author "
+                "`facing` to point away from the wall."
+            )
+
+
 def validate(field_data) -> None:
     """Raise :class:`FieldDataError` on the first problem; return ``None`` on success.
 
@@ -1106,13 +1297,13 @@ def validate(field_data) -> None:
         if name not in node_types:
             raise FieldDataError(
                 f"node '{name}' missing from NODE_TYPES -- "
-                "every NODES key needs a type ('line' or 'blind')"
+                "every NODES key needs a type ('line', 'blind', or 'reset')"
             )
     for name, value in node_types.items():
         if value not in _ALLOWED_NODE_TYPES:
             raise FieldDataError(
                 f"NODE_TYPES['{name}'] = '{value}'; expected one of "
-                "{'line','blind'}"
+                "{'line','blind','reset'}"
             )
 
     # 4. LINE_SEGMENTS coverage.
@@ -1234,3 +1425,8 @@ def validate(field_data) -> None:
     # well-formed, and after node/segment validation so the authored graph it
     # builds is sound. Inert (early return) on a pivot-free field.
     _validate_pivot_turns(field_data)
+
+    # 11. Wall-zero reset nodes (PR2 T12). Runs after NODE_TYPES validation so
+    # the "reset" typing it cross-checks is well-formed. Inert (early return)
+    # on a reset-free field.
+    _validate_reset_nodes(field_data)

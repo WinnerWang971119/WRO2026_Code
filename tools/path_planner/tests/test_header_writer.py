@@ -72,6 +72,7 @@ from tools.path_planner.header_writer import (
     FIELD_DATA_JSON_PATH,
     FIELD_DATA_PATH,
     NEXT_HOP_NONE_HEX,
+    _resolve_reset_rows,
     compute_source_hash,
     emit_routes,
 )
@@ -95,6 +96,9 @@ _FIELD_ATTRS = (
     "FIELD_MM",
     "MAP_PNG",
     "BLIND_PROJECTION_AUTO_SEEK",
+    # Optional sparse table (empty on every fixture here) -- carried so the
+    # strict header_writer read of field_data.RESET_NODES never AttributeErrors.
+    "RESET_NODES",
 )
 
 _GOLDEN_DIR = Path(__file__).parent / "golden"
@@ -147,6 +151,7 @@ def _build_toy_field_data() -> SimpleNamespace:
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
 
 
@@ -462,6 +467,7 @@ def test_emit_accepts_255_nodes(emit_targets):
         MAP_PNG="maps/map.png",
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -586,6 +592,7 @@ def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
         MAP_PNG="maps/map.png",
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
     )
     graph = build_graph(fd)
     return fd, graph
@@ -891,6 +898,134 @@ def test_direction_override_emits_force_reverse_one_direction(emit_targets):
         f"Expected exactly 1 FORCE_REVERSE cell (A->B), got "
         f"{cpp_text.count('FORCE_REVERSE')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T13: sparse RESET_NODES table (wall-zero reset nodes, PR2).
+#
+# Mirrors the PIVOT_TURNS emit coverage. The toy golden has zero reset nodes,
+# so this is the ONLY coverage of a NON-empty RESET_NODES table -- it drives a
+# field_data with one "reset"-typed node + a RESET_NODES entry through
+# emit_routes and pins the emitted ResetNode row, the axis encoding (x=0/y=1),
+# N_RESET_NODES, and the NodeType::RESET usage.
+# ---------------------------------------------------------------------------
+
+
+def test_reset_nodes_table_emits_row_and_count(emit_targets):
+    """T13 (AC12 emit): a reset node emits a ResetNode row + N_RESET_NODES = 1.
+
+    A small inline field with one ``"reset"``-typed node (``Wall1``, against the
+    top wall) and its sparse ``RESET_NODES`` entry must emit:
+
+    * ``NodeType::RESET`` on the Wall1 NODES row (the enum value, not LINE/BLIND);
+    * ``N_RESET_NODES = 1`` in routes.h with a ``ResetNode RESET_NODES[1]``;
+    * one ``ResetNode`` row ``{ <idx>, 1, 154.000000f, 90 }`` -- axis ``"y"``
+      encodes to ``1`` (the load-bearing x=0/y=1 contract), wall_coord as a
+      float, facing rounded to an ``int16_t``.
+
+    The node order is alphabetical (``Inter`` < ``Wall1``), so Wall1 lands at
+    index 1; the assertion derives the index from the sorted NODES rather than
+    hard-coding it so a future node addition would not silently pass.
+    """
+    fd = SimpleNamespace(
+        NODES={
+            "Inter": (165.0, 119.0),
+            "Wall1": (165.0, 139.0),
+        },
+        NODE_TYPES={"Inter": "line", "Wall1": "reset"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[("Inter", "Wall1")],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        COST_BLIND_MULTIPLIER=5.0,
+        START_NODE="Inter",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3200, 1540),
+        MAP_PNG="maps/map.png",
+        EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={
+            "Wall1": {"axis": "y", "wall_coord": 154.0, "facing": 270.0},
+        },
+    )
+    header_path, source_path = emit_targets
+    graph = build_graph(fd)
+    next_hop = compute_all_pairs_next_hop(graph, fd.COST_BLIND_MULTIPLIER)
+    emit_routes(
+        fd, graph, next_hop,
+        header_path=header_path, source_path=source_path,
+        field_data_source_path=_TOY_FIELD_SOURCE,
+    )
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # routes.h: the truth count, the [1] extern bound, and the enum value.
+    assert "constexpr uint8_t N_RESET_NODES = 1;" in header_text
+    assert "extern const ResetNode RESET_NODES[1];" in header_text
+    assert "RESET = 2" in header_text
+
+    # Wall1's NODES row carries NodeType::RESET (not LINE / BLIND).
+    wall1_idx = sorted(fd.NODES).index("Wall1")
+    assert "NodeType::RESET, \"Wall1\"" in cpp_text
+
+    # The single emitted ResetNode row: axis "y" -> 1 (x=0/y=1 contract),
+    # wall_coord as a float, facing rounded to int16_t.
+    expected_row = (
+        "{ " + str(wall1_idx) + ", 1, " + "{:.6f}f".format(154.0) + ", 270 },"
+    )
+    assert expected_row in cpp_text, (
+        "expected ResetNode row " + expected_row + " not found in:\n" + cpp_text
+    )
+    # No placeholder line when the table is populated.
+    assert "N_RESET_NODES == 0, never read at runtime" not in cpp_text
+
+
+def test_resolve_reset_rows_facing_rounds_up_wraps_mod_360() -> None:
+    """A facing that rounds up to 360 wraps to 0 to honor the [0, 360) contract.
+
+    The validator admits facing < 360.0, so 359.7 is legal input but
+    ``round(359.7) == 360`` would breach the emitted ``int16_t facing; //
+    degrees [0, 360)`` contract. The emitter reduces mod 360 so the row carries
+    0, not 360.
+    """
+    rows = _resolve_reset_rows(
+        {"R": {"axis": "y", "wall_coord": 154.0, "facing": 359.7}},
+        {"R": 0},
+    )
+    assert rows == [(0, 1, 154.0, 0)]
+
+
+def test_resolve_reset_rows_facing_below_half_does_not_wrap() -> None:
+    """A facing that rounds DOWN below 360 is unaffected by the mod."""
+    rows = _resolve_reset_rows(
+        {"R": {"axis": "x", "wall_coord": 10.0, "facing": 359.4}},
+        {"R": 0},
+    )
+    assert rows == [(0, 0, 10.0, 359)]
+
+
+def test_reset_nodes_table_empty_field_emits_placeholder(emit_targets):
+    """T13: a reset-free field emits N_RESET_NODES == 0 + a 1-element placeholder.
+
+    The toy field declares no reset nodes, so the header reports the truth count
+    ``N_RESET_NODES == 0`` while the ``.cpp`` still emits a single zeroed
+    placeholder element (a zero-length array bound is ill-formed in standard
+    C++), mirroring the empty-``PIVOT_TURNS`` discipline. The placeholder is
+    never read at runtime.
+    """
+    header_path, source_path = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # routes.h: the struct, the zero truth-count, and a 1-element extern bound.
+    assert "struct ResetNode {" in header_text
+    assert "constexpr uint8_t N_RESET_NODES = 0;" in header_text
+    assert "extern const ResetNode RESET_NODES[1];" in header_text
+
+    # routes.cpp: a single placeholder element, explicitly annotated.
+    assert "const ResetNode RESET_NODES[1] = {" in cpp_text
+    assert "placeholder: N_RESET_NODES == 0, never read at runtime" in cpp_text
 
 
 # ---------------------------------------------------------------------------

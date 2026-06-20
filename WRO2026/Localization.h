@@ -12,9 +12,13 @@
  * Single-writer rule (per ARCHITECTURE.md):
  *  - `_currentNode` is written ONLY by this class. PathTracker calls `onIntersection(...)`
  *    or `onDeadReckonedAdvance(...)` to advance the node id after a successful edge.
- *  - `_yawOffsetDeg` is written ONLY by `zeroHeadingFromCurrent()`. PathTracker NEVER
- *    writes heading state — every turn dispatches `Drive.turnToYaw(...)` against the
- *    IMU as the source of truth, so cumulative-relative drift is never accumulated.
+ *  - `_yawOffsetDeg` is written ONLY by `LocalizationClass` methods —
+ *    `zeroHeadingFromCurrent()` (start-button frame bind) and `reanchorAtWall()` (wall-zero
+ *    re-square). PathTracker / Drive NEVER poke heading state directly: every turn dispatches
+ *    `Drive.turnToYaw(...)` against the IMU as the source of truth, so cumulative-relative
+ *    drift is never accumulated. The write SET grew for the wall-reset feature (PR2), but the
+ *    writes stay inside this class so the single-writer discipline holds (PR2 ADR T20
+ *    supersedes ADR-005's narrower "only zeroHeadingFromCurrent" wording).
  *
  * Operator-relative reference frame (key convention):
  *  - The yaw offset is captured at the **start-button press**, not at `begin()`. The
@@ -132,6 +136,22 @@ public:
     uint8_t getCurrentNode() const;
 
     /**
+     * @brief Read a node's stored coordinate on one field axis (the x=0 / y=1 decode).
+     *
+     * Single home for the load-bearing `ResetNode::axis` encoding (`0 = x`, `1 = y` — the T13
+     * cross-task contract the emitter and sim mirror). Callers that need "the coordinate of a
+     * node on the reset axis" (PathTracker's wall-push distance, `reanchorAtWall`'s offset write)
+     * route through here instead of open-coding `(axis == 0) ? x_cm : y_cm`, so the decode lives
+     * in exactly one place on the firmware side.
+     *
+     * @param nodeId Node id in `[0, FieldMap::N_NODES)`.
+     * @param axis   `0 = x`, `1 = y`. Any other value returns the x coordinate (defensive — the
+     *               caller passes a validated `info->axis`).
+     * @return The node's `x_cm` (axis 0) or `y_cm` (axis 1), in centimetres.
+     */
+    float coordOnAxis(uint8_t nodeId, uint8_t axis) const;
+
+    /**
      * @brief Read the current world-frame heading in degrees (live IMU read).
      *
      * Issues a single lower-MCU IMU read (`mmL.GetIMUEuler`). On an OK read computes
@@ -228,6 +248,68 @@ public:
      *       heading. Re-zero heading via `zeroHeadingFromCurrent()` if needed.
      */
     void declarePosition(uint8_t nodeId);
+
+    /**
+     * @brief Wall-zero re-anchor: adopt the ground truth a `Drive.wallStop` just established.
+     *
+     * After the chassis presses its REAR against a known wall, the tracked wheel axle sits
+     * `Config::WALL_CONTACT_OFFSET_CM` short of the wall on @p axis (the rear contact face is at
+     * the wall; the axle is that margin in front of it, on the node side), and the chassis should
+     * be squared to the wall normal. This re-binds Localization's belief to that truth in ONE
+     * atomic update (the wall-reset half of PR2, called by PathTracker from a
+     * `FieldMap::getResetInfo(node)` record). It corrects both the accumulated heading drift
+     * (against the wall normal) and the on-axis position drift (against the axle's wall-relative
+     * coordinate) at once.
+     *
+     * Pose-model choice: position is `_currentNode` + `_offset` (there is NO stored absolute
+     * pose in this class), so the on-axis belief is expressed as an offset from the anchored node:
+     * `_offset[axis] = (wallCoord - sign(gap)*WALL_CONTACT_OFFSET_CM) - nodeCoord[axis]`, where
+     * `gap = wallCoord - nodeCoord` carries which side the wall is on (so the axle always lands on
+     * the node side), read via `FieldMap::getNode(_currentNode)`. The reset node's stored
+     * coordinate generally differs from its wall coordinate (e.g. node Wall1 sits at y=139 but its
+     * wall is at y=154), so this offset is non-zero by design and the net belief
+     * `nodeCoord[axis] + _offset[axis]` equals `wallCoord - sign(gap)*WALL_CONTACT_OFFSET_CM` (the
+     * axle, NOT the wall surface). The off-axis offset component and `thetaDeg` are zeroed
+     * (the wall gives no off-axis information; heading is re-bound below, so the delta-channel
+     * resets), and the integrator baselines are re-snapshotted so the next `update()` tick
+     * integrates a zero delta (no arrival-tick phantom). `_currentNode` is left as-is — the
+     * caller already anchored it to the reset node on arrival.
+     *
+     * Atomicity: the strict check (when enabled) and the single IMU read happen BEFORE any
+     * state write, and a failed IMU read or a rejected strict check returns `false` having
+     * mutated NOTHING. On the success path all of `_yawOffsetDeg`, `_offset`, and the three
+     * integrator baselines are written in one straight-line sequence with no intervening
+     * observation point, so no consumer can witness a half-anchored pose.
+     *
+     * Post-condition on a `true` return: `getHeadingDeg() == @p headingDeg` (modulo the live
+     * IMU read it re-derives), `nodeCoord[axis] + getOffsetFromNode()[axis] == @p wallCoord -
+     * sign(gap)*Config::WALL_CONTACT_OFFSET_CM` (the axle, on the node side of the wall), the
+     * off-axis offset and `thetaDeg` are `0`, and the next `update()` tick integrates a
+     * zero delta. On a `false` return the pose is byte-for-byte unchanged.
+     *
+     * Strict wall-normal sanity check (`Config::WALL_NORMAL_STRICT_ENABLED`, default OFF):
+     * when enabled, the live IMU heading is compared against @p headingDeg BEFORE any
+     * mutation. If the wrap-around-correct absolute angular difference EXCEEDS
+     * `Config::WALL_NORMAL_TOLERANCE_DEG` the squaring is untrustworthy and the method rejects
+     * (returns `false`, no mutation). A difference exactly equal to the tolerance still
+     * re-anchors (boundary is inclusive; `> tolerance` rejects). When the flag is OFF the
+     * method always re-anchors (subject only to a successful IMU read).
+     *
+     * @param axis       Reset axis: `0 = x`, `1 = y` (the T13 `Routes::ResetNode::axis`
+     *                   contract). Any other value is treated as a no-op axis write (the
+     *                   heading is still re-bound) — the caller passes a validated `info->axis`.
+     * @param wallCoord  Ground-truth wall-surface coordinate on @p axis (cm). The believed axle
+     *                   coordinate is pulled back from it by `Config::WALL_CONTACT_OFFSET_CM`.
+     * @param headingDeg Expected world-frame wall normal (degrees, `[0, 360)`) — the heading
+     *                   to re-bind to.
+     * @return `true` if the pose was re-anchored; `false` if the strict check rejected the
+     *         re-anchor OR the IMU read failed (in both cases NO state was mutated). PathTracker
+     *         (T16) maps a `false` to a localization fault; `Localization` does NOT raise the
+     *         fault itself (it sits below PathTracker — layering).
+     * @note Performs I/O (one live IMU read). One-shot synchronous update — no loops, no
+     *       blocking beyond the IMU read's own bounded retry.
+     */
+    bool reanchorAtWall(uint8_t axis, float wallCoord, float headingDeg);
 
     /**
      * @brief Per-tick entry point for the operator-offset integrator (read-only telemetry).

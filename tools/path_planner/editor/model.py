@@ -49,6 +49,13 @@ class FieldModel:
         is carried verbatim so an open -> save round-trip preserves any
         pivots authored directly in ``field_data.json``. Defaults to an empty
         list when the JSON omits the optional ``pivot_turns`` key.
+    :param reset_nodes: Wall-zero reset nodes, a sparse table keyed by node
+        name mapping each ``"reset"``-typed node to its
+        ``{"axis", "wall_coord", "facing"}`` re-localization spec. Like
+        ``pivot_turns``, the editor has no GUI control for these; the table is
+        carried verbatim so an open -> save round-trip preserves any reset
+        nodes authored directly in ``field_data.json``. Defaults to an empty
+        dict when the JSON omits the optional ``RESET_NODES`` key.
     """
 
     # Ordered list of top-level JSON keys.  ``to_json_dict`` produces keys in
@@ -66,6 +73,7 @@ class FieldModel:
         "LINE_SEGMENTS",
         "BLIND_EDGES",
         "pivot_turns",
+        "RESET_NODES",
         "OBSTACLES",
     )
 
@@ -84,6 +92,10 @@ class FieldModel:
     # sites that construct a FieldModel without pivots stay valid; placed last
     # so the defaulted field follows the required ones.
     pivot_turns: list[tuple[str, str, str]] = field(default_factory=list)
+    # Optional, preserved-only (no GUI control). Sparse table keyed by node
+    # name -> {axis, wall_coord, facing}. Defaulted so existing call sites that
+    # build a FieldModel without reset nodes stay valid.
+    reset_nodes: dict[str, dict] = field(default_factory=dict)
 
     # ------------------------------------------------------------------
     # Snapshot / restore (used by the undo/redo stack)
@@ -126,6 +138,7 @@ class FieldModel:
         self.blind_edges = copy.deepcopy(snap.blind_edges)
         self.obstacles = copy.deepcopy(snap.obstacles)
         self.pivot_turns = copy.deepcopy(snap.pivot_turns)
+        self.reset_nodes = copy.deepcopy(snap.reset_nodes)
 
     # ------------------------------------------------------------------
     # JSON round-trip
@@ -159,12 +172,18 @@ class FieldModel:
         ``LINE_SEGMENTS``   ``line_segments``
         ``BLIND_EDGES``     ``blind_edges``
         ``pivot_turns``     ``pivot_turns``
+        ``RESET_NODES``     ``reset_nodes``
         ``OBSTACLES``       ``obstacles``
         =================== ====================
 
         ``pivot_turns`` is optional (older JSON files predate it): an absent
         key maps to an empty list, and each present 3-array becomes a
         ``(u, v, w)`` tuple, mirroring the ``LINE_SEGMENTS`` treatment.
+
+        ``RESET_NODES`` is optional too (older JSON files predate it): an
+        absent key maps to an empty dict, and each present per-node spec is
+        deep-copied so the model owns an independent table (its values are
+        plain JSON objects, so no tuple conversion applies).
 
         :param data: Dict as returned by
             :func:`~tools.path_planner.editor.loader.load_field_json`.
@@ -188,6 +207,10 @@ class FieldModel:
             blind_edges=[tuple(edge) for edge in data["BLIND_EDGES"]],
             obstacles=[tuple(obs) for obs in data["OBSTACLES"]],
             pivot_turns=[tuple(turn) for turn in data.get("pivot_turns", [])],
+            reset_nodes={
+                name: dict(spec)
+                for name, spec in data.get("RESET_NODES", {}).items()
+            },
         )
 
     # ------------------------------------------------------------------
@@ -218,9 +241,16 @@ class FieldModel:
         Save silently skips every pivot geometry rule (the docstring's "full
         PR3/PR4 schema rules" promise would not hold for pivots).
 
+        ``RESET_NODES`` IS exposed for the same reason: the model persists it
+        via :meth:`to_json_dict`, so the proxy must carry it too or
+        :func:`validator._validate_reset_nodes` hits its
+        ``getattr(..., 'RESET_NODES', {})`` early-return and the editor's Save
+        silently skips every reset-node rule (the dual-serialization trap --
+        a field added to JSON but not the proxy is persisted-but-unvalidated).
+
         :return: A :class:`types.SimpleNamespace` with the 11 required
             attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
-            ``PIVOT_TURNS``.
+            ``PIVOT_TURNS`` and ``RESET_NODES``.
         """
         return types.SimpleNamespace(
             NODES=self.nodes,
@@ -235,6 +265,7 @@ class FieldModel:
             FIELD_MM=self.field_mm,
             MAP_PNG=self.map_png,
             PIVOT_TURNS=self.pivot_turns,
+            RESET_NODES=self.reset_nodes,
         )
 
     def validate(self) -> None:
@@ -272,11 +303,18 @@ class FieldModel:
         - ``LINE_SEGMENTS``, ``BLIND_EDGES``, ``pivot_turns``, and
           ``OBSTACLES`` preserve the original list order (spatial / authoring
           order is semantically meaningful for the renderer and the planner).
+        - ``RESET_NODES`` dict keys are sorted alphabetically (like ``NODES``
+          / ``NODE_TYPES``) so the dump is byte-deterministic.
         - ``pivot_turns`` is OPTIONAL: it is emitted (in its canonical slot,
-          between ``BLIND_EDGES`` and ``OBSTACLES``) only when non-empty. A
+          between ``BLIND_EDGES`` and ``RESET_NODES``) only when non-empty. A
           pivot-free field omits the key entirely, matching the loader's
           ``dump_field_json`` "absent stays absent" round-trip so a save
           through the model produces no spurious ``pivot_turns: []`` diff.
+        - ``RESET_NODES`` is OPTIONAL too: it is emitted (in its canonical
+          slot, between ``pivot_turns`` and ``OBSTACLES``) only when non-empty.
+          A reset-free field omits the key entirely, matching the same
+          "absent stays absent" round-trip so a save produces no spurious
+          ``RESET_NODES: {}`` diff.
 
         :return: A :class:`dict` whose values are JSON-native types (``str``,
             ``float``, ``int``, ``list``, ``dict``).  No tuples are present.
@@ -301,5 +339,10 @@ class FieldModel:
         }
         if self.pivot_turns:
             result["pivot_turns"] = [list(turn) for turn in self.pivot_turns]
+        if self.reset_nodes:
+            result["RESET_NODES"] = {
+                name: dict(self.reset_nodes[name])
+                for name in sorted(self.reset_nodes)
+            }
         result["OBSTACLES"] = [list(obs) for obs in self.obstacles]
         return result

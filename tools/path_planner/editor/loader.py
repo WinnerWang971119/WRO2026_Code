@@ -24,6 +24,7 @@ the module-level attributes the existing
       "LINE_SEGMENTS":         [["<a>", "<b>"], ...],
       "BLIND_EDGES":           [["<a>", "<b>"], ...],
       "pivot_turns":           [["<u>", "<v>", "<w>"], ...],
+      "RESET_NODES":           {"<name>": {"axis": "x"|"y", "wall_coord": <float>, "facing": <float in [0, 360)>}, ...},
       "OBSTACLES":             [[x_min, y_min, x_max, y_max, "<kind>"], ...]
     }
 
@@ -32,6 +33,13 @@ entry is a 3-element node-name array ``["<u>", "<v>", "<w>"]`` declaring a
 single-wheel pivot on the turn that arrives at ``v`` from ``u`` and leaves
 to ``w``. Same array-of-arrays shape as ``LINE_SEGMENTS`` / ``BLIND_EDGES``,
 so the loader's tuple discipline (below) applies to it identically.
+
+``RESET_NODES`` is **optional** (absent or ``{}`` means no reset nodes). It
+is a sparse table keyed by node name -- each ``"reset"``-typed node maps to a
+``{"axis", "wall_coord", "facing"}`` object describing its wall-zero
+re-localization. Unlike the array-of-arrays fields above, its values are
+plain JSON objects (no tuple conversion applies); they round-trip through the
+loader unchanged.
 
 The rich ``EDGES`` table that lives in ``field_data.py`` is deliberately
 **not** part of the JSON schema -- it carries enum references
@@ -95,6 +103,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "LINE_SEGMENTS",
     "BLIND_EDGES",
     "pivot_turns",
+    "RESET_NODES",
     "OBSTACLES",
 )
 
@@ -102,8 +111,9 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
 # valid field. The dump writer emits them only when present so a field that
 # never authored one round-trips byte-identically (absent stays absent),
 # while a field that did keeps it in the canonical slot above. ``pivot_turns``
-# (per-turn single-wheel pivots) is the sole such key today.
-_OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"pivot_turns"})
+# (per-turn single-wheel pivots) and ``RESET_NODES`` (wall-zero reset nodes)
+# are the such keys today.
+_OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"pivot_turns", "RESET_NODES"})
 
 
 def load_field_json(path: Path | None = None) -> dict:
@@ -175,7 +185,8 @@ def dump_field_json(data: dict, path: Path) -> None:
     * Uses 2-space indentation (``indent=2``).
     * Emits top-level keys in the fixed order documented in this
       module's schema section (``FIELD_MM`` first, ``OBSTACLES`` last).
-    * Sorts the keys inside ``NODES`` and ``NODE_TYPES`` alphabetically.
+    * Sorts the keys inside ``NODES``, ``NODE_TYPES``, and ``RESET_NODES``
+      alphabetically.
     * Preserves list order for ``LINE_SEGMENTS``, ``BLIND_EDGES``,
       ``OBSTACLES``.
     * Retains numeric type: ``float`` values render as ``10.0``,
@@ -270,14 +281,15 @@ def _build_ordered_payload(data: dict) -> dict:
     Python's ``json.dumps`` honours dict insertion order when
     ``sort_keys`` is left at its default ``False``. This helper assembles
     a fresh dict in :data:`_TOP_LEVEL_KEY_ORDER` and, for ``NODES`` /
-    ``NODE_TYPES``, in alphabetical key order. List members are passed
-    through verbatim so caller-controlled ordering (``LINE_SEGMENTS``,
-    ``BLIND_EDGES``, ``pivot_turns``, ``OBSTACLES``) is preserved.
+    ``NODE_TYPES`` / ``RESET_NODES``, in alphabetical key order. List members
+    are passed through verbatim so caller-controlled ordering
+    (``LINE_SEGMENTS``, ``BLIND_EDGES``, ``pivot_turns``, ``OBSTACLES``) is
+    preserved.
 
-    Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (currently ``pivot_turns``)
-    are emitted only when present in ``data``: a field that never authored
-    one is omitted entirely so ``dump(load(x)) == dump(x)`` holds for a
-    pivot-free input that lacked the key on disk (absent stays absent).
+    Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (``pivot_turns`` and
+    ``RESET_NODES``) are emitted only when present in ``data``: a field that
+    never authored one is omitted entirely so ``dump(load(x)) == dump(x)``
+    holds for an input that lacked the key on disk (absent stays absent).
 
     :param data: Source dict. Must contain every required key in
         :data:`_TOP_LEVEL_KEY_ORDER` (i.e. every key not in
@@ -290,7 +302,7 @@ def _build_ordered_payload(data: dict) -> dict:
         if key in _OPTIONAL_TOP_LEVEL_KEYS and key not in data:
             continue
         value = data[key]
-        if key in ("NODES", "NODE_TYPES") and isinstance(value, dict):
+        if key in ("NODES", "NODE_TYPES", "RESET_NODES") and isinstance(value, dict):
             ordered[key] = {name: value[name] for name in sorted(value)}
         else:
             ordered[key] = value

@@ -118,8 +118,9 @@ namespace Config
     // bounded by a return trigger / distance cap + off-map policy. Folded here from the former
     // standalone `ConfigLocalization.h` so the per-domain split stays one file per concern.
     //
-    // @note **Pillar 1 only.** Do NOT add wall-reset / wall-normal constants here — those
-    //       belong to Pillar 2.
+    // @note **This sub-section is Pillar 1 (operator-offset) only.** The Pillar 2 wall-reset /
+    //       wall-normal constants live in their own "Wall-normal strict sanity check" section
+    //       further down this file — keep the two groups separate; do not interleave them here.
     // @note Some constants below have no consumer in PR1a (operator-offset integrator); they
     //       are authored for PR1b (return-to-node prologue) so that PR needs no Config change.
     //       Each such constant is marked `Forward-looking: no consumer in PR1a`.
@@ -224,6 +225,91 @@ namespace Config
      */
     constexpr OffMapGate OFF_MAP_GATE = OffMapGate::FAULT;
 
+    // ---------------------------------------------------------------------------------------
+    // Wall-normal strict sanity check (Pillar 2 — consumed by Localization::reanchorAtWall)
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master switch for the wall-normal sanity check in `reanchorAtWall`.
+     *
+     * When `false` (default), `Localization::reanchorAtWall(...)` ALWAYS re-anchors against
+     * the wall's ground truth — it trusts that a preceding `Drive.wallStop` left the chassis
+     * square to the wall. When `true`, `reanchorAtWall` first compares the live IMU heading
+     * against the expected wall normal (`facing`) and REFUSES to re-anchor (no mutation,
+     * returns `false`) when the absolute angular difference EXCEEDS
+     * `WALL_NORMAL_TOLERANCE_DEG` — the squaring is then untrustworthy and re-zeroing the
+     * pose against it would inject a worse error than the drift it tried to correct.
+     *
+     * @note Default `false`: the check is a guard against a botched wall-square, not part of
+     *       the nominal flow. Enable it once bench testing characterises how square
+     *       `wallStop` actually leaves the chassis and what tolerance flags a real failure
+     *       (vs. normal squaring slop) without false-rejecting good re-anchors.
+     * @note TODO: bench-tune (the enable decision, paired with `WALL_NORMAL_TOLERANCE_DEG`).
+     * @note Consumer: `Localization::reanchorAtWall` (Pillar 2).
+     * @note Override-hook: guarded by `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT` so the
+     *       SHIPPED source default stays `false` while the strict-ON host test
+     *       (`test_reanchor_at_wall_strict`) flips it target-wide via
+     *       `-DWALL_NORMAL_STRICT_ENABLED_DEFAULT=true` (same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above) — avoids the cross-TU `constexpr`
+     *       override trap without a per-target Config shadow header.
+     */
+#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT
+#define WALL_NORMAL_STRICT_ENABLED_DEFAULT false
+#endif
+    constexpr bool WALL_NORMAL_STRICT_ENABLED = WALL_NORMAL_STRICT_ENABLED_DEFAULT;
+
+    /**
+     * @brief Tolerance (degrees) for the wall-normal sanity check, when enabled.
+     *
+     * The maximum absolute angular difference, computed wrap-around-correct over `[0, 360)`,
+     * between the live IMU heading and the expected wall normal that still lets
+     * `reanchorAtWall` proceed. The comparison is `> tolerance` REJECTS: a difference exactly
+     * EQUAL to the tolerance still re-anchors (the tolerance value is inclusive / "just
+     * inside"), and only a strictly greater difference rejects. Inert while
+     * `WALL_NORMAL_STRICT_ENABLED == false`.
+     *
+     * @note TODO: bench-tune. Suggested: 10.0f deg — wide enough to absorb the squaring slop
+     *       a real `wallStop` leaves, tight enough to catch a chassis that stopped against a
+     *       corner / obstacle instead of the intended wall. Tighten once the squaring
+     *       repeatability is measured.
+     * @note Consumer: `Localization::reanchorAtWall` (Pillar 2).
+     */
+    constexpr float WALL_NORMAL_TOLERANCE_DEG = 10.0f;
+
+    /**
+     * @brief Distance (cm) from the rear wall-contact face to the wheel axle (the tracked
+     *        reference point).
+     *
+     * A wall-zero presses the chassis REAR against a known wall; the believed position must
+     * therefore land on the AXLE, which sits this far IN FRONT of the contact face — not on the
+     * wall surface. `Localization::reanchorAtWall` subtracts this from the wall coordinate so the
+     * re-zeroed axis reads the axle, and the PathTracker reset interlude then drives
+     * `standoff - WALL_CONTACT_OFFSET_CM` forward back onto the node.
+     *
+     * @note TODO: measure at bring-up — the empty-box rest geometry sets it (the variable / loaded
+     *       box case is deferred to issue #77). Hand-mirrored in
+     *       `tools/path_planner/sim/runtime.py` (added together in this change); keep in lockstep.
+     * @note Consumed by `Localization::reanchorAtWall` (margin subtraction) and the PathTracker
+     *       wall-depart move, both landing in this same change (Pillar 2).
+     */
+    constexpr float WALL_CONTACT_OFFSET_CM = 8.0f;   // TODO measure at bring-up
+
+    /**
+     * @brief Minimum node-to-wall standoff (cm) a reset node may be authored at.
+     *
+     * The pivot sweep radius (axle -> farthest corner, ~12.5 cm) plus a safety margin. A reset
+     * node must sit at least this far from its wall so BOTH the in-place SQUARE turn that
+     * reorients the chassis rear-to-wall AND any post-re-anchor pivot clear the wall. Together
+     * with the static_assert below it also guarantees the return distance
+     * `standoff - WALL_CONTACT_OFFSET_CM >= 0`.
+     *
+     * @note Enforced OFFLINE by `tools/path_planner/validator.py`, which hand-mirrors this value
+     *       (Python cannot include this header) — keep the two in lockstep. The firmware does not
+     *       read it at runtime; it is an authoring guardrail (and the static_assert anchor).
+     * @note TODO: bench-tune once the pivot sweep radius is measured.
+     */
+    constexpr float WALL_PIVOT_CLEARANCE_CM = 14.0f;   // TODO bench-tune (12.5 pivot radius + safety)
+
     // Sanity static_asserts (intra-Localization; keep them here next to the constants,
     // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).
 
@@ -252,6 +338,29 @@ namespace Config
                   "the return-to-node prologue should only fire for offsets that the firmware "
                   "can still trust to dead-reckon back from. A trigger above the cap would "
                   "immediately invoke the off-map gate on every return attempt.");
+
+    static_assert(WALL_NORMAL_TOLERANCE_DEG > 0.0f,
+                  "Config::WALL_NORMAL_TOLERANCE_DEG must be positive — a zero or negative "
+                  "tolerance would reject EVERY re-anchor when the strict check is enabled "
+                  "(no real wall-square lands bit-exact on the normal), making "
+                  "reanchorAtWall permanently fail under WALL_NORMAL_STRICT_ENABLED.");
+
+    static_assert(WALL_NORMAL_TOLERANCE_DEG < 180.0f,
+                  "Config::WALL_NORMAL_TOLERANCE_DEG must be < 180 — the wrap-around angular "
+                  "difference is bounded by 180 deg, so a tolerance >= 180 can never be "
+                  "exceeded and the strict check would accept any heading, defeating it.");
+
+    static_assert(WALL_PIVOT_CLEARANCE_CM >= WALL_CONTACT_OFFSET_CM,
+                  "Config::WALL_PIVOT_CLEARANCE_CM must be >= WALL_CONTACT_OFFSET_CM, else an "
+                  "authored reset node can pass the clearance floor yet command a negative return "
+                  "distance (Drive.driveDist REJECTS a negative distance with no command — the "
+                  "robot never leaves the wall, then pivots into it).");
+
+    static_assert(WALL_CONTACT_OFFSET_CM > 0.0f,
+                  "Config::WALL_CONTACT_OFFSET_CM must be positive — the wheel axle sits in front "
+                  "of the rear contact face, so the margin subtracted in reanchorAtWall is "
+                  "strictly positive; zero or negative would place belief on or past the wall.");
+
 }    // namespace Config
 
 #endif    // CONFIG_NAV_H
