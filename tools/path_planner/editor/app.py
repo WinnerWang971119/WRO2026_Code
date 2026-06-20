@@ -790,13 +790,13 @@ class EditorApp:
         """
         mode = self._current_mode()
         if mode is Mode.MOVE and self._drag_target is not None:
-            # Live LIVE-update the model so the canvas can re-render the
-            # node + its incident edges following the cursor. The
-            # eventual MoveNode command (issued on release) will undo
-            # this temporary mutation and re-apply the final delta as a
-            # single undo entry.
-            self._model.nodes[self._drag_target] = (x, y)
-            self._refresh_view()
+            # Route the live drag through the canvas blit fast-path armed by
+            # _handle_move_click's begin_node_drag: it animates ONLY the
+            # dragged node's dot, label, and incident edges (no model write,
+            # no listbox rebuild, no per-frame full render). The model is left
+            # untouched until the MoveNode command on release; until then the
+            # canvas merely slides the animated artists to follow the cursor.
+            self._canvas.update_node_drag(self._drag_target, x, y)
         elif mode is Mode.OBSTACLE and self._obstacle_anchor is not None:
             self._obstacle_cursor = (x, y)
             self._refresh_view()
@@ -869,6 +869,12 @@ class EditorApp:
             return
         self._drag_target = hit
         self._drag_origin_xy = self._model.nodes[hit]
+        # Arm the canvas blit fast-path before the first drag motion so each
+        # _on_canvas_drag tick only re-composites the dragged node's animated
+        # artists against a baked static background (see FieldCanvas.
+        # begin_node_drag / update_node_drag). _finish_move issues the matching
+        # end_node_drag on release.
+        self._canvas.begin_node_drag(hit)
         self._set_status(f"Dragging {hit!r}.")
 
     def _handle_edge_click(self, x: float, y: float) -> None:
@@ -930,12 +936,18 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _finish_move(self, x: float, y: float) -> None:
-        """Commit the live-dragged position via :class:`MoveNode`.
+        """Commit the dragged position via :class:`MoveNode`.
 
-        The model was mutated LIVE during the drag (so the canvas could
-        follow the cursor) -- restore the pre-drag value first so the
-        MoveNode command captures the correct ``_original_xy`` and
-        produces a single, fully-reversible undo entry.
+        With the T3 blit fast-path the model is NOT mutated during the drag:
+        :meth:`FieldCanvas.update_node_drag` animates the dragged node's
+        on-canvas artists while the model keeps holding the pre-drag value.
+        First tear down the canvas drag state via
+        :meth:`FieldCanvas.end_node_drag` (clears the animated flags, drops the
+        blit background, and re-bakes the static scene -- safe even if
+        ``begin_node_drag`` never armed anything), then dispatch a single
+        :class:`MoveNode` so the move lands as one fully-reversible undo entry.
+        ``_dispatch`` runs the one full :meth:`_refresh_view` that re-syncs the
+        inspector / listbox to the final position.
 
         :param x: World x coordinate at release (the final position).
         :param y: World y coordinate at release.
@@ -947,15 +959,23 @@ class EditorApp:
         self._drag_target = None
         self._drag_origin_xy = None
 
+        # Always tear down the canvas drag fast-path on a MOVE release. It
+        # no-ops when no drag was armed and re-bakes the static scene either
+        # way, so it is safe to call before the early returns below.
+        self._canvas.end_node_drag()
+
         if target is None or origin is None:
             return
 
-        # Restore the original coordinates so MoveNode.apply captures them
-        # correctly as _original_xy.
+        # The model was never live-mutated (the canvas animated artists
+        # instead), so it still holds ``origin``; this assignment is a
+        # defensive no-op kept only to guarantee the pre-drag value before
+        # MoveNode.apply captures it as ``_original_xy``.
         self._model.nodes[target] = origin
 
         # No-op shortcut: if the drag ended where it started, there's no
-        # mutation to record.
+        # mutation to record. end_node_drag already re-rendered the canvas;
+        # refresh once more so the panels / inspector stay consistent.
         if (x, y) == origin:
             self._refresh_view()
             self._set_status(f"{target!r} unchanged.")
