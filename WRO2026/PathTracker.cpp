@@ -1020,12 +1020,50 @@ void PathTrackerClass::_stepFsm()
                 return;
             }
 
-            // Success: re-anchored. Leave `_resetNode == cur` set so the immediate
-            // return to PLAN_NEXT_HOP does not re-enter the interlude for this same
-            // node; it re-arms naturally once the FSM advances off this node (or on the
-            // next goal's DEQUEUE). Continue the FSM exactly as a normal post-arrival:
-            // PLAN_NEXT_HOP plans the next hop, or declares the goal reached if this
-            // reset node WAS the destination.
+            // Success: re-anchored. The chassis is still pressed against the wall (belief is the
+            // axle, WALL_CONTACT_OFFSET_CM short of the wall surface), so BEFORE any planning —
+            // which could dispatch a pivot that would clip the wall — drive FORWARD off the wall
+            // back onto the node, giving the next hop clearance. `_resetNode == cur` stays latched
+            // through WALL_DEPART so the interlude is not re-entered; it re-arms once the FSM
+            // advances off this node (or on the next goal's DEQUEUE). The depart distance is the
+            // node-to-wall standoff minus the contact offset (the axle is already that offset off
+            // the wall). GYRO holds `_heldYaw` (the squared heading the wallStop SQUARE left set),
+            // so the short forward move tracks straight away from the wall.
+            const float nodeCoord = Localization.coordOnAxis(cur, info->axis);
+            const float standoff  = fabsf(info->wall_coord - nodeCoord);
+            const float departCm  = standoff - Config::WALL_CONTACT_OFFSET_CM;
+            if (departCm > 0.0f)
+            {
+                Drive.driveDist(departCm).setMode(DriveMode::GYRO).async();
+                _state = State::WALL_DEPART;
+                return;
+            }
+            // Degenerate: standoff <= contact offset. The validator's clearance floor
+            // (standoff >= WALL_PIVOT_CLEARANCE_CM >= WALL_CONTACT_OFFSET_CM, static_asserted) makes
+            // this unreachable on a valid field; guard it anyway so a malformed table never
+            // dispatches a non-positive driveDist. Nothing to drive: declare belief == node, plan.
+            Localization.clearOffset();
+            _state = State::PLAN_NEXT_HOP;
+            return;
+        }
+
+        case State::WALL_DEPART:
+        {
+            // Wall-zero reset interlude, phase 3 (return-to-node). The `Drive.driveDist(...)`
+            // dispatched on REANCHOR success drives the chassis FORWARD off the wall, back onto the
+            // node (the `standoff - WALL_CONTACT_OFFSET_CM` the axle was short of it). It is a plain
+            // bounded move, so a real Drive fault during it correctly trips the generic DRIVE_FAULT
+            // guard at the top of `_stepFsm()` — this state is intentionally NOT exempt (unlike
+            // RETURN_TO_NODE / the wallStop advisory). On a clean settle the axle is on the node:
+            // clear the operator offset to declare belief == node, then resume the normal
+            // post-arrival path. `_resetNode == cur` stays latched, so PLAN_NEXT_HOP does not
+            // re-enter the interlude. A blind-only reset node has no line to re-acquire — this is a
+            // pure dead-reckon return onto a known-distance target.
+            if (!Drive.isIdle())
+            {
+                return;    // depart drive still in flight
+            }
+            Localization.clearOffset();
             _state = State::PLAN_NEXT_HOP;
             return;
         }
@@ -1295,13 +1333,16 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     const float nodeCoord  = Localization.coordOnAxis(node, info->axis);
     const float distToWall = fabsf(info->wall_coord - nodeCoord);
 
-    // (#1) Square-then-push, forward. `wallStop` first turns in place to `facing` (the wall
-    // normal) — its internal SQUARE phase — then pushes STRAIGHT in RAW mode (open-loop +
-    // motor bias). RAW (not GYRO) because once the chassis is squared a heading-hold PID would
-    // only fight the wall contact as one wheel stalls first; an open-loop straight press with
-    // motor bias presses square and stalls cleanly. The squaring corrects any arrival-heading
-    // error up front, so a misaligned arrival no longer arcs into the wall. `facing` is passed
-    // as the squaring target; the node is authored so the wall is ahead along `facing`.
+    // (#1) Square-then-push, REVERSE. `wallStop` first turns in place to `facing` — its internal
+    // SQUARE phase — which points the robot's FRONT away from the wall (so the REAR faces it),
+    // then presses the rear STRAIGHT into the wall in RAW mode (open-loop + motor bias). Only the
+    // rear of this chassis may take wall load; a front press would break the mechanism. RAW (not
+    // GYRO) because once the chassis is squared a heading-hold PID would only fight the wall
+    // contact as one wheel stalls first; an open-loop straight press with motor bias presses square
+    // and stalls cleanly. The squaring corrects any arrival-heading error up front. `facing` is the
+    // PARKED heading (front away from the wall); the node is authored so the wall is BEHIND along
+    // `facing + 180`. Back-off is 0 — the post-re-anchor WALL_DEPART move provides all turn
+    // clearance, so the chassis stays pressed (belief == axle) until WALL_DEPART pulls it off.
     const int16_t imuTarget = Localization.toImuYaw((float) info->facing);
 
     Serial.print(F("[PathTracker] WALL_STOP: node="));
@@ -1322,9 +1363,10 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     // `.async()` — never split across statements or held in a local. `.async()` keeps
     // the FSM non-blocking; the WALL_STOP state polls `Drive.isIdle()`.
     Drive.wallStop(distToWall)
-        .setReverse(false)
+        .setReverse(true)
         .setMode(DriveMode::RAW)
         .setHeading(imuTarget)
+        .setBackOff(0.0f)
         .async();
     _state = State::WALL_STOP;
 }
