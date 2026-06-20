@@ -82,9 +82,12 @@
  *                          from `PLAN_NEXT_HOP` when the just-arrived node is a
  *                          `Routes::NodeType::RESET` node (the reset hook, the
  *                          arrival analogue of the `RETURN_TO_NODE` prologue).
- *                          Dispatches one latched `Drive.wallStop(...)` push in
- *                          GYRO mode holding the reset record's `facing` (the wall
- *                          normal), then waits for `Drive.isIdle()` before
+ *                          Dispatches one latched `Drive.wallStop(...)` REVERSE
+ *                          push (rear into the wall — only the rear may take wall
+ *                          load): the primitive's SQUARE phase first turns to the
+ *                          reset record's `facing` (the PARKED heading, front AWAY
+ *                          from the wall), then presses the rear straight in RAW mode
+ *                          with back-off 0. Waits for `Drive.isIdle()` before
  *                          transitioning to `REANCHOR`.
  *  - `REANCHOR`          — wall-zero reset interlude, phase 2 (PR2, AC9–AC11).
  *                          Surfaces a `Drive.wallStopTimedOut()` advisory (AC10 —
@@ -93,11 +96,16 @@
  *                          On `false` (strict wall-normal check rejected the
  *                          squaring, only possible under
  *                          `Config::WALL_NORMAL_STRICT_ENABLED`) it raises
- *                          `Fault::WALL_NOT_SQUARE` (AC11). On `true` it clears the
- *                          reset latch and continues exactly as a normal
- *                          post-arrival would — back to `PLAN_NEXT_HOP` (which then
- *                          plans the next hop, or declares the goal reached if the
- *                          reset node WAS the destination).
+ *                          `Fault::WALL_NOT_SQUARE` (AC11). On `true` it transitions
+ *                          to `WALL_DEPART` to pull off the wall before any planning.
+ *  - `WALL_DEPART`       — wall-zero reset interlude, phase 3. The chassis is pressed
+ *                          against the wall (belief is the axle, a contact-offset
+ *                          short of it), so before `PLAN_NEXT_HOP` can dispatch a
+ *                          pivot it drives FORWARD off the wall back onto the node
+ *                          (`standoff - WALL_CONTACT_OFFSET_CM`, GYRO holding the
+ *                          squared heading), then `clearOffset()` (belief == node)
+ *                          and continues to `PLAN_NEXT_HOP`. The reset latch stays
+ *                          set, so the interlude is not re-entered.
  *  - `FAULT`             — latched fault; cleared via `clearFault()` or
  *                          `abort()`.
  *
@@ -283,6 +291,7 @@ private:
         STOP_AT_LINE,
         WALL_STOP,
         REANCHOR,
+        WALL_DEPART,
         FAULT
     };
 
@@ -444,9 +453,11 @@ private:
      * node's coordinate on `axis` and `wall_coord`
      * (`fabs(wall_coord - node_coord[axis])`) — advisory only, since `wallStop` is
      * stall/timeout-terminated (T14), not distance-terminated. `wallStop` first SQUARES
-     * (turns in place to `facing`, the wall normal) then pushes FORWARD in
-     * `DriveMode::RAW` (open-loop + motor bias), latching `_resetNode = node` so the push
-     * fires exactly once.
+     * (turns in place to `facing`, the PARKED heading — front away from the wall, so the
+     * rear faces it) then presses the REAR straight into the wall in `DriveMode::RAW`
+     * (open-loop + motor bias) with back-off 0, latching `_resetNode = node` so the push
+     * fires exactly once. Only the rear may take wall load — a front press would break the
+     * mechanism.
      *
      * The square-up corrects the arrival-heading error up front, so a misaligned arrival
      * presses square instead of arcing into the wall (#1). RAW — not GYRO — for the push:
