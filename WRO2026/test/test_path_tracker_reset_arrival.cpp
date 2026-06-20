@@ -43,6 +43,11 @@
 //     `Drive.isIdle()` it clears the offset (believed pose == NODE coordinate) and continues to
 //     PLAN_NEXT_HOP. A strict-REJECT (reanchorAtWall returns false) routes to `Fault::WALL_NOT_SQUARE`
 //     BEFORE any depart.
+//   - The degenerate `departCm <= 0` skip is intentionally NOT a host case: the validator's
+//     clearance floor (standoff >= WALL_PIVOT_CLEARANCE_CM) plus the
+//     `WALL_PIVOT_CLEARANCE_CM >= WALL_CONTACT_OFFSET_CM` static_assert make
+//     `standoff - WALL_CONTACT_OFFSET_CM > 0` on any valid field, so the guard is unreachable
+//     here — it is covered by those compile-time / authoring guarantees, not a runtime test.
 //   - A non-reset node is a true no-op (the interlude is not entered).
 //
 // Links the real `Localization.cpp` + `routes.cpp` + the mock surface (same shape as
