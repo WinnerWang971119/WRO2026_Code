@@ -17,6 +17,7 @@ from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECT
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
+    BLIND_DECAY_EXPONENT_MAX,
     FieldDataError,
     parse_line_sensor_axle_offset_cm,
     parse_pivot_min_turn_deg_from_config,
@@ -504,14 +505,21 @@ def test_validator_rejects_obsolete_pre_turn_mode_edge_key() -> None:
 # determined by the authored edges, not by the (inert) node coordinates.
 
 
-def _pivot_field(edges, pivot_turns) -> SimpleNamespace:
+def _pivot_field(edges, pivot_turns, node_types=None) -> SimpleNamespace:
     """Build a minimal A/B/C/D field carrying the given EDGES + PIVOT_TURNS.
 
     Three real nodes plus a spare ``D`` (so a fixture can author a fourth leg
     for a chained-pivot test). No LINE_SEGMENTS / BLIND_EDGES, so all adjacency
     and geometry come from the explicit EDGES entries; the ``PIVOT_TURNS``
     triples are the authored per-turn pivots the validator checks.
+
+    ``node_types`` defaults to ``B/C/D`` all blind (the BLIND-incoming pivot
+    cases). A LINE-incoming pivot must override it to type the pivot node ``B``
+    as ``"line"`` -- a LINE/PROJECTION (line-follow) edge cannot terminate on a
+    blind node, since the validator now rejects that (ADR-041).
     """
+    if node_types is None:
+        node_types = {"A": "line", "B": "blind", "C": "blind", "D": "blind"}
     return SimpleNamespace(
         NODES={
             "A": (0.0, 0.0),
@@ -519,7 +527,7 @@ def _pivot_field(edges, pivot_turns) -> SimpleNamespace:
             "C": (100.0, 100.0),
             "D": (200.0, 100.0),
         },
-        NODE_TYPES={"A": "line", "B": "blind", "C": "blind", "D": "blind"},
+        NODE_TYPES=node_types,
         LINE_SEGMENTS=[],
         BLIND_EDGES=[],
         OBSTACLES=[],
@@ -764,6 +772,7 @@ def test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget() -> None:
              "distance_cm": 100.0, "heading_deg": 120.0},
         ],
         pivot_turns=[("A", "B", "C")],
+        node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
     )
     with pytest.raises(
         FieldDataError, match=r"the LINE overshoot budget"
@@ -787,6 +796,7 @@ def test_pivot_turn_accepts_line_incoming_within_overshoot_budget() -> None:
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
+        node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
     )
     assert validate(fd) is None
 
@@ -808,6 +818,7 @@ def test_pivot_turn_rejects_line_delta_within_trim_floor_of_budget() -> None:
              "distance_cm": 100.0, "heading_deg": 105.0},
         ],
         pivot_turns=[("A", "B", "C")],
+        node_types={"A": "line", "B": "line", "C": "blind", "D": "blind"},
     )
     with pytest.raises(
         FieldDataError, match=r"below the firmware's trim-underflow floor"
@@ -1462,6 +1473,87 @@ def test_decay_missing_required_attr_rejected() -> None:
         FieldDataError, match=r"missing required attribute: BLIND_DECAY_K"
     ):
         validate(fd)
+
+
+def test_decay_exponent_above_max_rejected() -> None:
+    """BLIND_DECAY_EXPONENT above the cap is rejected before it can overflow.
+
+    Without a ceiling a fat-fingered exponent (e.g. 400) makes
+    ``(d / d_ref) ** exponent`` overflow to an uncaught OverflowError deep in the
+    planner; the validator caps it at ``BLIND_DECAY_EXPONENT_MAX`` so the value
+    fails here with a precise message instead.
+    """
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_EXPONENT = 400.0
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_EXPONENT"):
+        validate(fd)
+
+
+def test_decay_exponent_at_max_accepted() -> None:
+    """BLIND_DECAY_EXPONENT == BLIND_DECAY_EXPONENT_MAX sits at the inclusive ceiling."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_EXPONENT = BLIND_DECAY_EXPONENT_MAX
+    assert validate(fd) is None
+
+
+def test_decay_exponent_non_finite_rejected() -> None:
+    """A non-finite BLIND_DECAY_EXPONENT (inf / NaN) is rejected at the numeric gate."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_EXPONENT = float("inf")
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_EXPONENT"):
+        validate(fd)
+
+
+def test_decay_d_ref_non_finite_rejected() -> None:
+    """A non-finite BLIND_DECAY_D_REF (NaN) is rejected at the numeric gate."""
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_D_REF = float("nan")
+    with pytest.raises(FieldDataError, match=r"BLIND_DECAY_D_REF"):
+        validate(fd)
+
+
+# -- Fix A (ADR-041): a line-follow edge cannot be incident to a blind node ----
+#
+# A LINE / PROJECTION edge is a line-follow segment; it needs a line under the
+# sensor, so it cannot terminate on a node typed "blind". Beyond being
+# physically impossible, such a seam would let the planner's blind-decay
+# inf->factor-1 fallback silently under-price the pocket behind it. A blind node
+# must be reached by a BLIND edge instead.
+
+
+def test_line_segment_into_blind_node_rejected() -> None:
+    """A LINE_SEGMENTS edge terminating on a blind node is rejected.
+
+    'G' is the toy field's blind node; a line-follow segment to it is invalid.
+    """
+    fd = _clone_field_data()
+    fd.LINE_SEGMENTS = list(fd.LINE_SEGMENTS) + [("A", "G")]
+    with pytest.raises(
+        FieldDataError, match=r"LINE_SEGMENTS.*incident to blind node 'G'"
+    ):
+        validate(fd)
+
+
+def test_projection_edge_into_blind_node_rejected() -> None:
+    """A PROJECTION EDGES override into a blind node is rejected too."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {"type": EDGE_PROJECTION, "u": "A", "v": "G",
+         "distance_cm": 50.0, "heading_deg": 0.0},
+    ]
+    with pytest.raises(
+        FieldDataError, match=r"EDGES\[0\].*incident to blind node 'G'"
+    ):
+        validate(fd)
+
+
+def test_blind_edge_into_blind_node_still_accepted() -> None:
+    """A BLIND edge into a blind node stays valid -- only line-follow seams are barred."""
+    fd = _clone_field_data()
+    # 'G' is blind and ('B','G') is already the toy's blind edge; a second blind
+    # hop A->G into G must NOT trip the line-follow rule.
+    fd.BLIND_EDGES = list(fd.BLIND_EDGES) + [("A", "G")]
+    assert validate(fd) is None
 
 
 # -- TC26: validator parse-helper / firmware Config.h parity ------------------
