@@ -22,6 +22,7 @@ from tools.path_planner.validator import (
     parse_pivot_min_turn_deg_from_config,
     parse_pivot_trim_min_drive_cm_from_config,
     validate,
+    WALL_PIVOT_CLEARANCE_CM,
 )
 
 _STOP_AT_LINE_FIXTURE = (
@@ -1089,12 +1090,18 @@ def _reset_field(
     reset node) because the validator rejects a reset-typed START node; pass
     ``start_node="A"`` to exercise that guard. Tests pass ``node_types_overrides``
     / ``reset_nodes`` to author the specific malformed (or absent) case.
+
+    The default spec re-zeroes against a +y wall at ``wall_coord=220`` (A is at
+    y=200, so the standoff is 20 cm -- clear of the ``WALL_PIVOT_CLEARANCE_CM``
+    floor) with ``facing=270`` (sin(270)=-1, pointing -y AWAY from the +y wall so
+    the rear presses it). Both the clearance floor and the away-facing geometry
+    gate pass, so callers that expect ``validate(...) is None`` keep passing.
     """
     node_types = {"A": "reset", "B": "line"}
     if node_types_overrides is not None:
         node_types = dict(node_types_overrides)
     if reset_nodes is None:
-        reset_nodes = {"A": {"axis": "y", "wall_coord": 205.0, "facing": 90.0}}
+        reset_nodes = {"A": {"axis": "y", "wall_coord": 220.0, "facing": 270.0}}
     return SimpleNamespace(
         NODES={"A": (12.0, 200.0), "B": (12.0, 50.0)},
         NODE_TYPES=node_types,
@@ -1179,39 +1186,94 @@ def test_reset_node_start_node_typed_reset_rejected() -> None:
         validate(fd)
 
 
-def test_reset_node_facing_away_from_wall_rejected() -> None:
-    """TC13: facing must point TOWARD the wall, not away from it.
+def test_reset_node_facing_toward_wall_rejected() -> None:
+    """TC13: facing must point AWAY from the wall, not toward it.
 
-    A is at y=200 and the wall is at y=205 (toward +y), but facing 270 deg
-    points -y -- the forward push would drive away from the wall. The geometry
-    gate rejects it (the firmware presses forward along facing).
+    A is at y=200 and the wall is at y=220 (toward +y, standoff 20 cm clears the
+    pivot floor), but facing 90 deg points +y -- the FRONT would press into the
+    wall instead of the rear. With the floor satisfied, the away-facing geometry
+    gate is the one that rejects (the firmware presses REARWARD, along facing+180).
     """
     fd = _reset_field(
-        reset_nodes={"A": {"axis": "y", "wall_coord": 205.0, "facing": 270.0}}
+        reset_nodes={"A": {"axis": "y", "wall_coord": 220.0, "facing": 90.0}}
     )
     with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
         validate(fd)
 
 
-def test_reset_node_facing_toward_wall_negative_axis_passes() -> None:
-    """A wall on the -y side with facing 270 deg (-y) points toward it: valid."""
-    # A is at y=200; wall at y=50 (toward -y); facing 270 deg drives -y.
+def test_reset_node_facing_away_from_wall_negative_axis_passes() -> None:
+    """A wall on the -y side with facing 90 deg (+y) points AWAY from it: valid."""
+    # A is at y=200; wall at y=50 (toward -y, standoff 150 cm); facing 90 deg
+    # points +y so the FRONT faces away and the rear presses the -y wall:
+    # sin(90)=+1, +1 * (50 - 200) = -150 < 0 -> away/valid.
     fd = _reset_field(
-        reset_nodes={"A": {"axis": "y", "wall_coord": 50.0, "facing": 270.0}}
+        reset_nodes={"A": {"axis": "y", "wall_coord": 50.0, "facing": 90.0}}
     )
     assert validate(fd) is None
 
 
-def test_reset_node_on_wall_skips_geometry_gate() -> None:
-    """A node authored exactly on the wall (zero gap) accepts any facing.
+def test_reset_node_on_wall_rejected_by_clearance_floor() -> None:
+    """A node authored exactly on the wall (zero gap) is rejected by the floor.
 
-    With wall_coord == the node coordinate there is no push to misdirect, so
-    the toward-the-wall gate is skipped (a degenerate but legal authoring).
+    With wall_coord == the node coordinate the standoff is 0 cm, below the
+    WALL_PIVOT_CLEARANCE_CM pivot floor -- the chassis pivots in place around the
+    wall-zero and would clip the wall. The floor gate fires before the facing
+    geometry check, so the error names the pivot clearance, not ``.facing``.
     """
     fd = _reset_field(
         reset_nodes={"A": {"axis": "y", "wall_coord": 200.0, "facing": 270.0}}
     )
+    with pytest.raises(FieldDataError, match=r"pivot clearance floor"):
+        validate(fd)
+
+
+def test_reset_node_standoff_at_clearance_floor_passes() -> None:
+    """The standoff boundary is INCLUSIVE: exactly WALL_PIVOT_CLEARANCE_CM passes.
+
+    A is at y=200; wall at y=214 gives a 14.0 cm standoff == the floor. The floor
+    test is a strict ``<``, so the boundary is accepted. facing 270 (sin=-1) points
+    -y away from the +y wall, so the geometry gate passes too.
+    """
+    fd = _reset_field(
+        reset_nodes={
+            "A": {
+                "axis": "y",
+                "wall_coord": 200.0 + WALL_PIVOT_CLEARANCE_CM,
+                "facing": 270.0,
+            }
+        }
+    )
     assert validate(fd) is None
+
+
+def test_reset_node_standoff_below_clearance_floor_rejected() -> None:
+    """A standoff just under WALL_PIVOT_CLEARANCE_CM is rejected by the floor."""
+    fd = _reset_field(
+        reset_nodes={
+            "A": {
+                "axis": "y",
+                "wall_coord": 200.0 + WALL_PIVOT_CLEARANCE_CM - 0.01,
+                "facing": 270.0,
+            }
+        }
+    )
+    with pytest.raises(FieldDataError, match=r"pivot clearance floor"):
+        validate(fd)
+
+
+def test_reset_node_orthogonal_facing_rejected() -> None:
+    """A facing orthogonal to the reset axis (zero on-axis component) is rejected.
+
+    A is at y=200; wall at y=220 (standoff 20 cm clears the floor). facing 0 deg
+    is parallel to the wall (sin(0)=0), so its on-axis component is 0 -- neither
+    toward nor away. ``comp * toward = 0 >= 0`` trips the facing gate: the rear
+    never squarely faces the wall, so the press has no defined direction.
+    """
+    fd = _reset_field(
+        reset_nodes={"A": {"axis": "y", "wall_coord": 220.0, "facing": 0.0}}
+    )
+    with pytest.raises(FieldDataError, match=r"RESET_NODES\['A'\]\.facing"):
+        validate(fd)
 
 
 def test_reset_node_wall_coord_non_finite_rejected() -> None:

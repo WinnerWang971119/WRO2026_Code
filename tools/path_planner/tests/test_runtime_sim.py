@@ -75,6 +75,7 @@ from tools.path_planner.sim.runtime import (
     ACT_RETURN_STOP_AT_LINE,
     ACT_STOP_AT_LINE,
     ACT_STOP_AT_LINE_REVERSE,
+    ACT_WALL_DEPART,
     ACT_WALL_STOP,
     Direction,
     LINE_SENSOR_AXLE_OFFSET_CM,
@@ -3263,10 +3264,11 @@ def test_tc18a_clean_goto_after_return_nets_zero_drift_on_toy_fixture(toy_field,
 #
 # Fixtures are hand-rolled deterministic graphs (no field_data.json /
 # validator / builder), mirroring the TC9 / TC10 / TC10-bidir pattern so the
-# pose + primitive assertions are exact. wall_coord is set EQUAL to the reset
-# node's stored coordinate (the wall IS at the node's true position on that
-# axis), so a clean inbound hop lands axle-on-node and the re-zero corrects
-# ONLY an injected drift -- never re-introducing a per-junction offset.
+# pose + primitive assertions are exact. wall_coord stands a fixed clearance
+# off the reset node (>= WALL_PIVOT_CLEARANCE_CM, the validator floor); the
+# WALL_DEPART phase returns the believed on-axis coordinate TO the node, so a
+# clean inbound hop nets the node and the re-zero corrects ONLY an injected
+# drift -- never re-introducing a per-junction offset.
 # ===========================================================================
 
 
@@ -3274,7 +3276,7 @@ def _reset_chain_field(
     *,
     inbound_distance_cm: float = 30.0,
     reset_axis: str = "x",
-    reset_wall_coord: float = 30.0,
+    reset_wall_coord: float = 10.0,
     reset_facing: float = 0.0,
 ):
     """Build an A -> R -> C blind chain with R typed 'reset'.
@@ -3284,11 +3286,21 @@ def _reset_chain_field(
     ``distance_cm`` exactly -- the test controls the inbound A->R distance to
     inject (or not) an arrival drift relative to R's stored coordinate.
 
+    The wall sits on the -x side at ``wall_coord=10`` (R is at x=30, so the
+    node-to-wall standoff is 20 cm -- above the validator's
+    ``WALL_PIVOT_CLEARANCE_CM`` floor, and consistent with the WALL_DEPART return
+    math). With the wall on the -x side, ``facing=0`` (front +x) points AWAY from
+    it, collinear with the inbound and the R->C hop headings, so the interlude
+    introduces no extra pre-edge turn. After the interlude the believed on-axis
+    coordinate returns to R's stored x (30), correcting any injected inbound
+    drift TO the node -- never re-introducing a per-junction offset.
+
     :param inbound_distance_cm: the A->R edge length. Set ABOVE 30 to land the
         chassis past R's stored x (an injected dead-reckon overshoot the wall
         re-zero must correct); leave at 30 for a clean (drift-free) arrival.
     :param reset_axis: ``"x"`` or ``"y"`` -- the axis R re-zeroes against.
-    :param reset_wall_coord: the wall coordinate R snaps to on ``reset_axis``.
+    :param reset_wall_coord: the wall coordinate R presses against on
+        ``reset_axis`` (default -x side of R, 20 cm standoff).
     :param reset_facing: the squared heading R adopts (deg).
     :return: ``(field_data, graph, next_hop)`` ready for ``PathTrackerSim``.
     """
@@ -3333,29 +3345,30 @@ def _make_reset_sim(fd, g, next_hop):
 
 
 def test_tc18b_reset_node_final_destination_emits_interlude_and_rezeroes():
-    """A go_to ENDING on a reset node emits FORWARD then WALL_STOP + REANCHOR.
+    """A go_to ENDING on a reset node emits FORWARD then the 3-phase interlude.
 
     Clean inbound (A->R = 30 cm, no drift): the chassis lands on R's stored x,
-    then the interlude pushes to the wall (x=30) and re-anchors. With
-    wall_coord == R's stored x, the re-zero is a true no-op on the believed
-    pose -- the chassis ends EXACTLY on the wall truth (x=30, drift 0) facing
-    the wall normal.
+    then the interlude presses the -x wall (x=10), re-anchors to the axle, and
+    departs forward back onto the node. The believed x ends EXACTLY on R's NODE
+    coordinate (x=30, drift 0) facing the wall normal.
     """
     fd, g, next_hop = _reset_chain_field()
     sim, chassis = _make_reset_sim(fd, g, next_hop)
 
     prims = sim.go_to("R")
 
-    # Primitive-sequence parity: the inbound blind hop, then the two-phase
+    # Primitive-sequence parity: the inbound blind hop, then the three-phase
     # interlude in order, and nothing after (R is the destination).
     assert prims == [
         (ACT_FORWARD, 30.0),
-        (ACT_WALL_STOP, "R", 0, 30.0),
-        (ACT_REANCHOR, "R", 0, 30.0),
+        (ACT_WALL_STOP, "R", 0, 10.0),
+        (ACT_REANCHOR, "R", 0, 10.0),
+        (ACT_WALL_DEPART, "R", 0, 30.0),
     ]
 
-    # Pose parity / re-zero: believed x snapped to wall_coord, heading squared
-    # to facing, off-axis untouched. Do NOT loosen _POSITION_TOL_CM.
+    # Pose parity / re-zero: the WALL_DEPART phase returns the believed x to R's
+    # NODE coordinate (30), heading squared to facing, off-axis untouched. Do
+    # NOT loosen _POSITION_TOL_CM.
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
     assert chassis.heading_deg == pytest.approx(0.0, abs=1e-9)
@@ -3370,9 +3383,10 @@ def test_tc18b_reset_node_final_destination_emits_interlude_and_rezeroes():
 def test_tc18b_reset_node_corrects_injected_arrival_drift():
     """An over-long inbound hop drifts the chassis past R; the re-zero CORRECTS it.
 
-    A->R is 31 cm but R's true x is 30 (== wall_coord), so the dead-reckon lands
-    the chassis at x=31 -- 1 cm of injected arrival drift. The wall re-anchor
-    snaps the believed x back to wall_coord=30, ERASING the drift (the whole
+    A->R is 31 cm but R's true x is 30, so the dead-reckon lands the chassis at
+    x=31 -- 1 cm of injected arrival drift. The interlude presses the -x wall,
+    re-anchors to the axle, then departs forward onto the node, snapping the
+    believed x back to R's NODE coordinate 30 and ERASING the drift (the whole
     point of wall-zero). Without the interlude the chassis would sit at x=31.
     """
     fd, g, next_hop = _reset_chain_field(inbound_distance_cm=31.0)
@@ -3386,16 +3400,17 @@ def test_tc18b_reset_node_corrects_injected_arrival_drift():
 
     assert prims == [
         (ACT_FORWARD, 31.0),
-        (ACT_WALL_STOP, "R", 0, 30.0),
-        (ACT_REANCHOR, "R", 0, 30.0),
+        (ACT_WALL_STOP, "R", 0, 10.0),
+        (ACT_REANCHOR, "R", 0, 10.0),
+        (ACT_WALL_DEPART, "R", 0, 30.0),
     ]
-    # The +1 cm drift is corrected to exactly wall_coord=30 (NOT 31, NOT 29 from
-    # back-off): the believed pose is wall truth, drift on the axis == 0.
+    # The +1 cm drift is corrected to exactly R's NODE coordinate 30 (NOT 31):
+    # WALL_DEPART returns the believed pose to the node, drift on the axis == 0.
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
     assert chassis.heading_deg == pytest.approx(0.0, abs=1e-9)
-    # Back-off is NOT visible in the believed pose: wall_coord, not
-    # wall_coord - WALL_STOP_BACK_OFF_CM.
+    # Back-off is NOT visible in the believed pose: the node coordinate, not
+    # the axle/back-off intermediate.
     assert chassis.x_cm != pytest.approx(30.0 - WALL_STOP_BACK_OFF_CM, abs=1e-9)
     assert sim.localization.current_node() == "R"
 
@@ -3413,11 +3428,12 @@ def test_tc18b_reset_node_intermediate_hop_runs_interlude_then_continues():
 
     prims = sim.go_to("C")
 
-    # Interlude is wedged between the two blind hops, in order.
+    # Interlude (all three phases) is wedged between the two blind hops, in order.
     assert prims == [
         (ACT_FORWARD, 31.0),
-        (ACT_WALL_STOP, "R", 0, 30.0),
-        (ACT_REANCHOR, "R", 0, 30.0),
+        (ACT_WALL_STOP, "R", 0, 10.0),
+        (ACT_REANCHOR, "R", 0, 10.0),
+        (ACT_WALL_DEPART, "R", 0, 30.0),
         (ACT_FORWARD, 30.0),
     ]
 
@@ -3434,11 +3450,12 @@ def test_tc18b_reset_node_y_axis_squares_heading_and_rezeroes_y():
 
     Exercises the axis == "y" branch (axis_idx 1) and a non-zero facing. The
     chassis arrives at R via a +x blind hop, then the interlude squares to
-    facing=90deg (the +y wall normal), re-zeroes y to wall_coord, and leaves x
-    untouched.
+    facing=90deg (front +y, away from the -y wall), presses the wall, and departs
+    back onto the node -- the believed y returns to R's NODE coordinate while x is
+    left untouched.
     """
     fd, g, next_hop = _reset_chain_field(
-        reset_axis="y", reset_wall_coord=5.0, reset_facing=90.0
+        reset_axis="y", reset_wall_coord=-20.0, reset_facing=90.0
     )
     sim, chassis = _make_reset_sim(fd, g, next_hop)
 
@@ -3446,12 +3463,13 @@ def test_tc18b_reset_node_y_axis_squares_heading_and_rezeroes_y():
 
     assert prims == [
         (ACT_FORWARD, 30.0),
-        (ACT_WALL_STOP, "R", 1, 5.0),
-        (ACT_REANCHOR, "R", 1, 5.0),
+        (ACT_WALL_STOP, "R", 1, -20.0),
+        (ACT_REANCHOR, "R", 1, -20.0),
+        (ACT_WALL_DEPART, "R", 1, 0.0),
     ]
-    # y re-zeroed to wall_coord; x (off-axis) untouched at R's arrival x;
-    # heading squared to the wall normal.
-    assert chassis.y_cm == pytest.approx(5.0, abs=1e-9)
+    # y returned to R's NODE coordinate (0) after WALL_DEPART; x (off-axis)
+    # untouched at R's arrival x; heading squared to the wall normal.
+    assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert chassis.heading_deg == pytest.approx(90.0, abs=1e-9)
     assert sim.localization.current_node() == "R"
@@ -3471,13 +3489,15 @@ def test_tc18b_step_through_yields_interlude_primitives():
 
     assert emitted == [
         (ACT_FORWARD, 30.0),
-        (ACT_WALL_STOP, "R", 0, 30.0),
-        (ACT_REANCHOR, "R", 0, 30.0),
+        (ACT_WALL_STOP, "R", 0, 10.0),
+        (ACT_REANCHOR, "R", 0, 10.0),
+        (ACT_WALL_DEPART, "R", 0, 30.0),
     ]
-    # The snapshot paired with the REANCHOR step reflects the re-zeroed pose.
-    _reanchor_prim, reanchor_snap = steps[-1]
-    assert reanchor_snap.x_cm == pytest.approx(30.0, abs=1e-9)
-    assert reanchor_snap.heading_deg == pytest.approx(0.0, abs=1e-9)
+    # The snapshot paired with the final WALL_DEPART step reflects the pose
+    # returned to R's NODE coordinate.
+    _depart_prim, depart_snap = steps[-1]
+    assert depart_snap.x_cm == pytest.approx(30.0, abs=1e-9)
+    assert depart_snap.heading_deg == pytest.approx(0.0, abs=1e-9)
 
 
 def test_tc18b_non_reset_node_emits_no_interlude():
@@ -3505,6 +3525,8 @@ def test_tc18b_non_reset_node_emits_no_interlude():
     prims = sim.go_to("B")
 
     assert prims == [(ACT_FORWARD, 30.0)]
-    assert not any(p[0] in (ACT_WALL_STOP, ACT_REANCHOR) for p in prims)
+    assert not any(
+        p[0] in (ACT_WALL_STOP, ACT_REANCHOR, ACT_WALL_DEPART) for p in prims
+    )
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert sim.localization.current_node() == "B"
