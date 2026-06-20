@@ -40,9 +40,10 @@ header-only policy that the host harness can reach directly.
   `Drive.cpp` at the `forwardGyro` emit, `MoveGyroDegs`, `MoveGyroTime`, and the unified
   `_emitContinuous` GYRO path. Add a precondition guard comment at each site: passing a raw heading
   here double-corrects.
-- **Turn direction and wheel pattern:** call `TurnSignPolicy::normalizeTurnDelta`,
-  `TurnSignPolicy::turnSign`, and `TurnSignPolicy::turnWheelPattern` from `Drive.cpp`; the logic is
-  extracted verbatim — no value change to the pattern.
+- **Turn direction and wheel pattern:** call the free functions `normalizeTurnDelta`, `turnSign`,
+  and `turnWheelPattern` (declared in `TurnSignPolicy.h` — un-namespaced inline free functions, the
+  `PivotTrimPolicy.h` convention, not a `TurnSignPolicy::` class/namespace) from `Drive.cpp`; the
+  logic is extracted verbatim — no value change to the pattern.
 - **Config:** `Config::IMU_YAW_SIGN` lives in `config/ConfigNav.h`, guarded by
   `#ifndef IMU_YAW_SIGN_DEFAULT` (default `-1.0f` for the current CW-positive chassis); the
   two-chassis override is `-DIMU_YAW_SIGN_DEFAULT=1.0f` at `target_compile_definitions` scope
