@@ -2426,7 +2426,20 @@ class PathTrackerSim:
                     seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
                     self._chassis.forward(seek_advance_cm)
                     self._localization.on_intersection(nxt)
-                    yield (ACT_STOP_AT_LINE, seek_advance_cm)
+                    # The emitted primitive carries the COMMAND distance
+                    # (``distance_cm``), NOT the trimmed physical advance. The
+                    # firmware dispatches ``Drive.stopAtLine(edge.distance_cm)``
+                    # (the seek's max search bound -- the crossing, not the
+                    # distance, terminates it) and folds the approaching-pivot
+                    # trim into the separate ``.setOvershoot(...)`` channel, so
+                    # the commanded distance stays full. ``compile_path`` emits
+                    # the same ``(ACT_STOP_AT_LINE, distance_cm)``; surfacing
+                    # ``seek_advance_cm`` here would diverge the sim's primitive
+                    # stream from the compiler/CTPS consumers (T7 byte-identical).
+                    # ``seek_advance_cm`` is the chassis-model displacement only
+                    # (applied above) -- it lands the axle delta-short without
+                    # changing what the robot is commanded to do.
+                    yield (ACT_STOP_AT_LINE, distance_cm)
                 elif seek and direction == Direction.REAR:
                     # Pivots are FRONT-only in v1 (ADR-036 / #54): the force-FRONT
                     # above sets ``direction = FRONT`` whenever a pivot is active,

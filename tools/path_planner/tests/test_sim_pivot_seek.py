@@ -164,12 +164,13 @@ def test_tc7_autorule_seek_lands_delta_short_of_pivot_node():
     post-detect axle roll by ``delta`` so the chassis center settles ``delta``
     short of B along the incoming heading ``h_in`` (the A->B unit heading, +x).
 
-    The seek hop emits ``(ACT_STOP_AT_LINE, distance - delta)`` and leaves the
-    chassis center at ``B - delta * h_in`` (captured via the step_through
-    snapshot at the seek hop). WITHOUT the trim the seek would have advanced the
-    full ``distance`` and landed ON B, so the numeric gap between the two is
-    exactly ``delta`` -- asserted directly. The expected advance is derived
-    through :func:`resolve_sensor_overshoot_trim` so the test tracks the
+    The seek hop emits the full command distance ``(ACT_STOP_AT_LINE, distance)``
+    -- matching ``Drive.stopAtLine(edge.distance_cm)`` -- while the chassis center
+    lands at ``B - delta * h_in`` (captured via the step_through snapshot at the
+    seek hop). WITHOUT the trim the chassis would have advanced the full
+    ``distance`` and landed ON B, so the numeric gap in the snapshot pose is
+    exactly ``delta`` -- asserted directly. The expected delta-short landing is
+    derived through ``compute_pivot_compensation`` so the test tracks the
     implementation.
     """
     field = pivot_field_data.make_sensor_autorule_pivot_field()
@@ -192,11 +193,15 @@ def test_tc7_autorule_seek_lands_delta_short_of_pivot_node():
 
     seek_prim, snap = _seek_snapshot(sim, "C")
 
-    # The seek hop is a FRONT ACT_STOP_AT_LINE whose payload is the delta-short
-    # advance (distance - delta in the clean regime).
+    # The seek hop is a FRONT ACT_STOP_AT_LINE whose payload is the full COMMAND
+    # distance (firmware ``Drive.stopAtLine(edge.distance_cm)`` / compile_path),
+    # NOT the delta-short physical advance -- the trim shows up in the snapshot
+    # pose below, never in the primitive payload.
+    assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(incoming_dist, abs=1e-9))
+    # The delta-short physical advance, recomputed through the production overshoot
+    # helper, equals the snapshot displacement asserted below (A is the origin).
     expected_seek_advance = _seek_advance_into_pivot(incoming_dist, delta)
-    assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(expected_seek_advance, abs=1e-9))
-    assert seek_prim[1] == pytest.approx(incoming_dist - delta, abs=1e-9)
+    assert expected_seek_advance == pytest.approx(incoming_dist - delta, abs=1e-9)
 
     # Position contract: the axle lands delta short of B along h_in, i.e. at
     # B - delta * h_in. With h_in = +x that is (B.x - delta, B.y).
@@ -243,9 +248,11 @@ def test_tc7_authored_seek_lands_delta_short_of_pivot_node():
     bx, by = field.NODES["B"]
     seek_prim, snap = _seek_snapshot(sim, "C")
 
+    # Primitive carries the full COMMAND distance (firmware stopAtLine arg /
+    # compile_path); the delta-short trim lives in the snapshot pose below.
+    assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(_SI_IN_CM, abs=1e-9))
     expected_seek_advance = _seek_advance_into_pivot(_SI_IN_CM, delta)
-    assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(expected_seek_advance, abs=1e-9))
-    assert seek_prim[1] == pytest.approx(_SI_IN_CM - delta, abs=1e-9)
+    assert expected_seek_advance == pytest.approx(_SI_IN_CM - delta, abs=1e-9)
 
     # A/B sit on +x, so the axle lands at (B.x - delta, B.y).
     assert snap.x_cm == pytest.approx(bx - delta, abs=1e-9)
@@ -372,11 +379,13 @@ def test_tc8_chained_seek_no_double_trim_and_lands_on_goal():
 
     * The dead-reckon approach ``A -> B`` is trimmed to ``length - delta``
       (the ``_approaching_pivot`` of B).
-    * The seek ``B -> C`` nets ``length - delta`` -- ONLY the approaching trim of
-      C. The departing trim of B is self-corrected on the seek's crossing line
-      and is NOT subtracted (no double-trim): a plain dead-reckon middle hop
-      would net ``length - 2*delta``, so the seek payload being ``length - delta``
-      is the load-bearing distinction.
+    * The seek ``B -> C`` PHYSICALLY advances ``length - delta`` -- ONLY the
+      approaching trim of C. The departing trim of B is self-corrected on the
+      seek's crossing line and is NOT subtracted (no double-trim): a plain
+      dead-reckon middle hop would net ``length - 2*delta``, so the seek advancing
+      ``length - delta`` is the load-bearing distinction. (The seek's PRIMITIVE
+      payload stays the full command distance -- the trim is in the pose, not the
+      payload -- so only the dead-reckon hops carry a trimmed payload.)
     * The projection departure ``C -> D`` is trimmed to ``length - delta`` (the
       ``_departing_pivot`` of C).
 
@@ -393,21 +402,28 @@ def test_tc8_chained_seek_no_double_trim_and_lands_on_goal():
 
     prims = sim.go_to("D")
 
-    # The seek advance into pivot C (delta-short of the full 60 cm).
+    # The seek's PHYSICAL advance into pivot C (delta-short of the full 60 cm) --
+    # the chassis-model displacement, NOT the emitted primitive payload.
     seek_advance = _seek_advance_into_pivot(60.0, delta)
 
-    # Per-turn dispatch contract: approach trimmed, seek single-trimmed, departure
-    # trimmed -- never the double-trim a plain dead-reckon middle hop would take.
+    # Per-hop dispatch contract. The dead-reckon hops are DISTANCE-terminated, so
+    # the firmware commands the trimmed distance (driveDist / projection) and the
+    # payload carries the trim. The seek is SENSOR-terminated: the firmware
+    # commands the FULL ``Drive.stopAtLine(60)`` and folds the trim into the
+    # overshoot, so its payload is the full 60 cm -- the trim shows up only in the
+    # delta-short pose verified below.
     assert prims == [
         (ACT_FORWARD, pytest.approx(60.0 - delta, abs=1e-9)),       # A->B approach @ B
         (ACT_TURN_REL, pytest.approx(_AUTORULE_TURN_DEG, abs=1e-9)),
-        (ACT_STOP_AT_LINE, pytest.approx(seek_advance, abs=1e-9)),  # B->C seek: ONLY approach @ C
+        (ACT_STOP_AT_LINE, pytest.approx(60.0, abs=1e-9)),          # B->C seek: full command distance
         (ACT_TURN_REL, pytest.approx(_AUTORULE_TURN_DEG, abs=1e-9)),
         (ACT_FOLLOW_DIST, pytest.approx(_TC8_OUT_CM - delta, abs=1e-9)),  # C->D depart @ C
     ]
 
-    # No-double-trim, stated as a direct numeric guard: the seek nets length-delta,
-    # strictly MORE than the length-2*delta a dead-reckon middle hop would net.
+    # No-double-trim, as a numeric guard on the seek's PHYSICAL advance: it nets
+    # length-delta (ONLY pivot C's approach), strictly MORE than the length-2*delta
+    # a dead-reckon middle hop would net. The pose reconstruction below confirms
+    # both pivots land clean from this single-trimmed advance.
     assert seek_advance == pytest.approx(60.0 - delta, abs=1e-9)
     assert seek_advance > (60.0 - 2.0 * delta) + _POSITION_TOL_CM
 
@@ -770,8 +786,14 @@ def test_short_sensor_edge_seek_never_drives_backward():
 
     assert walk_next_hop(next_hop, "A", "C") == ["A", "B", "C"]
 
-    seek_prim, _snap = _seek_snapshot(sim, "C")
-    # Clamped to 0 -- the unclamped model would be negative (5 - 9 = -4).
-    assert seek_prim[1] == pytest.approx(_seek_advance_into_pivot(5.0, delta), abs=1e-9)
-    assert seek_prim[1] == pytest.approx(0.0, abs=1e-9)
-    assert seek_prim[1] >= 0.0
+    seek_prim, snap = _seek_snapshot(sim, "C")
+    # The primitive carries the full COMMAND distance (5 cm): the firmware still
+    # dispatches ``Drive.stopAtLine(5)`` -- the degenerate geometry only affects
+    # the physical advance, never the commanded distance.
+    assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(5.0, abs=1e-9))
+    # The PHYSICAL advance clamps to 0 -- the unclamped model would be negative
+    # (5 - (12.02 - 3.02) = -4), a backward drive the sensor-terminated seek never
+    # makes. The chassis starts at A=(0,0) and must not roll backward past it.
+    assert _seek_advance_into_pivot(5.0, delta) == pytest.approx(0.0, abs=1e-9)
+    assert snap.x_cm == pytest.approx(0.0, abs=1e-9)
+    assert snap.x_cm >= 0.0
