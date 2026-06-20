@@ -30,15 +30,51 @@ from tools.path_planner.editor.model import FieldModel
 # Constants
 # ---------------------------------------------------------------------------
 
-#: Allowed values for ``FieldModel.node_types`` entries.
-_VALID_NODE_TYPES: frozenset[str] = frozenset({"line", "blind"})
+#: All model-recognized values for ``FieldModel.node_types`` entries.  Note
+#: that ``"reset"`` is special: a reset-typed node is invalid at Save unless it
+#: also has a matching ``reset_nodes`` spec, so the plain type-setters
+#: (:class:`AddNode`, :class:`SetNodeType`) refuse it and route reset creation
+#: through :class:`SetResetSpec` / :class:`ClearResetSpec` instead.
+_VALID_NODE_TYPES: frozenset[str] = frozenset({"line", "blind", "reset"})
+
+#: Plain (non-reset) node types the type-setters and :class:`ClearResetSpec`
+#: are allowed to assign directly.
+_PLAIN_NODE_TYPES: frozenset[str] = frozenset({"line", "blind"})
 
 #: Allowed ``kind`` values for edge-batch entries.
 _VALID_EDGE_KINDS: frozenset[str] = frozenset({"line", "blind"})
 
+#: Allowed ``axis`` values for a reset-node spec (the wall is parallel to one
+#: field axis); mirrors ``validator._ALLOWED_RESET_AXES``.
+_VALID_RESET_AXES: frozenset[str] = frozenset({"x", "y"})
+
 #: Heading bounds, in degrees, CCW from +x (matches ``field_data`` convention).
 _HEADING_MIN_DEG: float = 0.0
 _HEADING_MAX_DEG_EXCLUSIVE: float = 360.0
+
+#: Recognized global-knob attribute names :class:`SetGlobalKnob` may set, in
+#: canonical display order.  Each maps to a same-named ``FieldModel`` field.
+_VALID_GLOBAL_KNOBS: frozenset[str] = frozenset(
+    {
+        "blind_decay_enabled",
+        "blind_decay_k",
+        "blind_decay_exponent",
+        "blind_decay_d_ref",
+        "robot_radius_cm",
+    }
+)
+
+#: Lower bound (inclusive) for ``blind_decay_k`` -- ``k == 0`` disables the
+#: penalty, negative ``k`` is nonsensical.
+_BLIND_DECAY_K_MIN: float = 0.0
+
+#: Lower bound (inclusive) for ``blind_decay_exponent`` -- a sub-linear
+#: exponent would invert the intended monotonic penalty shaping.
+_BLIND_DECAY_EXPONENT_MIN: float = 1.0
+
+#: Lower bound (exclusive) for the strictly-positive knobs ``blind_decay_d_ref``
+#: (the decay normalizer in cm) and ``robot_radius_cm`` (the inflation radius).
+_POSITIVE_KNOB_MIN_EXCLUSIVE: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +171,9 @@ class AddNode:
     :ivar name: Name of the new node.  Must not already exist in
         ``model.nodes``.
     :ivar xy: ``(x_cm, y_cm)`` coordinates of the new node.
-    :ivar node_type: Either ``"line"`` or ``"blind"``.
+    :ivar node_type: Either ``"line"`` or ``"blind"``.  A ``"reset"`` node may
+        NOT be created here -- it requires a matching ``reset_nodes`` spec, so
+        use :class:`SetResetSpec` instead.
     """
 
     name: str
@@ -146,14 +184,20 @@ class AddNode:
         """Insert ``self.name`` into ``model.nodes`` and ``model.node_types``.
 
         :param model: Target model.
-        :raises ValueError: If *name* already exists in ``model.nodes`` or
-            ``model.node_types``, or if *node_type* is not one of
-            ``"line"`` / ``"blind"``.
+        :raises ValueError: If *node_type* is not a recognized type, if
+            *node_type* is ``"reset"`` (a reset node must be created via
+            :class:`SetResetSpec` so its spec is set atomically), or if *name*
+            already exists in ``model.nodes`` or ``model.node_types``.
         """
         if self.node_type not in _VALID_NODE_TYPES:
             raise ValueError(
                 f"AddNode: node_type must be one of "
                 f"{sorted(_VALID_NODE_TYPES)!r}, got {self.node_type!r}"
+            )
+        if self.node_type == "reset":
+            raise ValueError(
+                "AddNode: cannot create a 'reset' node directly; a reset node "
+                "needs a matching reset_nodes spec -- use SetResetSpec instead"
             )
         if self.name in model.nodes or self.name in model.node_types:
             raise ValueError(
@@ -417,7 +461,15 @@ class DeleteNode:
 
 @dataclass
 class SetNodeType:
-    """Change a node's type between ``"line"`` and ``"blind"``.
+    """Change a node's type between the plain types ``"line"`` and ``"blind"``.
+
+    This command deliberately cannot touch the ``"reset"`` type, in either
+    direction: converting a node TO reset needs a paired ``reset_nodes`` spec
+    (use :class:`SetResetSpec`), and converting a reset node back to a plain
+    type needs the spec removed (use :class:`ClearResetSpec`).  Routing the
+    reset type exclusively through those two commands makes the
+    type-and-spec invariant the validator enforces impossible to break through
+    the plain path.
 
     :ivar name: Name of the node whose type is being changed.
     :ivar new_type: New type; must be ``"line"`` or ``"blind"``.
@@ -433,8 +485,10 @@ class SetNodeType:
 
         :param model: Target model.
         :raises KeyError: If ``self.name`` is not in ``model.node_types``.
-        :raises ValueError: If ``self.new_type`` is not ``"line"`` or
-            ``"blind"``.
+        :raises ValueError: If ``self.new_type`` is not a recognized type, if
+            ``self.new_type`` is ``"reset"`` (convert to reset via
+            :class:`SetResetSpec`), or if the node is CURRENTLY a reset node
+            (change a reset node's type via :class:`ClearResetSpec`).
         """
         if self.new_type not in _VALID_NODE_TYPES:
             raise ValueError(
@@ -444,6 +498,16 @@ class SetNodeType:
         if self.name not in model.node_types:
             raise KeyError(
                 f"SetNodeType: no node named {self.name!r} in model.node_types"
+            )
+        if self.new_type == "reset":
+            raise ValueError(
+                "SetNodeType: cannot set a node to 'reset' here; a reset node "
+                "needs a matching reset_nodes spec -- use SetResetSpec instead"
+            )
+        if model.node_types[self.name] == "reset":
+            raise ValueError(
+                f"SetNodeType: node {self.name!r} is currently a reset node; "
+                "change a reset node's type via ClearResetSpec instead"
             )
         self._original_type = model.node_types[self.name]
         model.node_types[self.name] = self.new_type
@@ -457,6 +521,371 @@ class SetNodeType:
             "SetNodeType.revert before apply"
         )
         model.node_types[self.name] = self._original_type
+
+
+# ---------------------------------------------------------------------------
+# Property-inspector commands
+#
+# These commands back the property panel (T9): pivot turns, reset-node specs,
+# and the global decay / robot-radius knobs.  They follow the same apply /
+# revert + captured-inverse contract as the node and edge commands above, and
+# raise their documented exception BEFORE mutating so a rejected apply is a
+# clean no-op for ``History``.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AddPivotTurn:
+    """Append a single-wheel pivot turn ``(u, v, w)`` to ``model.pivot_turns``.
+
+    A pivot turn directs the robot to arrive at ``v`` from ``u``, pivot in
+    place at ``v``, and leave toward ``w``.  All three endpoints must be
+    existing nodes, and the exact triple must not already be present.
+
+    :ivar u: Arrive-from node name.
+    :ivar v: Pivot node name.
+    :ivar w: Leave-to node name.
+    """
+
+    u: str
+    v: str
+    w: str
+
+    def apply(self, model: FieldModel) -> None:
+        """Append ``(self.u, self.v, self.w)`` to ``model.pivot_turns``.
+
+        :param model: Target model.
+        :raises ValueError: If any of ``u`` / ``v`` / ``w`` is not in
+            ``model.nodes``, or if the exact triple already exists in
+            ``model.pivot_turns``.
+        """
+        for role, name in (("u", self.u), ("v", self.v), ("w", self.w)):
+            if name not in model.nodes:
+                raise ValueError(
+                    f"AddPivotTurn: unknown node {name!r} ({role}) -- all of "
+                    "u, v, w must exist in model.nodes"
+                )
+        turn = (self.u, self.v, self.w)
+        if turn in model.pivot_turns:
+            raise ValueError(
+                f"AddPivotTurn: pivot turn {turn!r} already exists"
+            )
+        model.pivot_turns.append(turn)
+
+    def revert(self, model: FieldModel) -> None:
+        """Remove the pivot turn that :meth:`apply` appended.
+
+        :param model: Target model.
+        """
+        # ``apply`` appends at the end; search by value so an external mutation
+        # that shuffled the list between apply and revert is still handled.
+        turn = (self.u, self.v, self.w)
+        for index in range(len(model.pivot_turns) - 1, -1, -1):
+            if model.pivot_turns[index] == turn:
+                del model.pivot_turns[index]
+                return
+
+
+@dataclass
+class DeletePivotTurn:
+    """Remove a pivot turn ``(u, v, w)`` from ``model.pivot_turns``.
+
+    :ivar turn: The ``(u, v, w)`` triple to remove.  Must be present in
+        ``model.pivot_turns``.
+    """
+
+    turn: tuple[str, str, str]
+
+    _removed_index: int | None = field(default=None, init=False, repr=False)
+    _removed_value: tuple[str, str, str] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Locate and remove ``self.turn`` from ``model.pivot_turns``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.turn`` is not present in
+            ``model.pivot_turns``.
+        """
+        for index, existing in enumerate(model.pivot_turns):
+            if existing == self.turn:
+                self._removed_index = index
+                self._removed_value = existing
+                del model.pivot_turns[index]
+                return
+        raise ValueError(
+            f"DeletePivotTurn: pivot turn {self.turn!r} not found in "
+            "model.pivot_turns"
+        )
+
+    def revert(self, model: FieldModel) -> None:
+        """Re-insert the removed pivot turn at its original index.
+
+        :param model: Target model.
+        """
+        assert self._removed_index is not None, (
+            "DeletePivotTurn.revert before apply"
+        )
+        assert self._removed_value is not None
+        model.pivot_turns.insert(self._removed_index, self._removed_value)
+
+
+@dataclass
+class SetResetSpec:
+    """Convert a node to a wall-zero reset node, or edit its existing spec.
+
+    This command OWNS the atomic type-and-spec change: it sets
+    ``model.node_types[name] = "reset"`` and writes the paired
+    ``model.reset_nodes[name]`` entry together, so the type-and-spec invariant
+    the validator enforces (every reset-typed node has a spec and vice-versa)
+    is never transiently violated.  It is used both to first-convert a plain
+    node to a reset node and to re-author an existing reset node's spec.
+
+    :ivar name: Name of the node to make (or keep) a reset node.  Must exist in
+        ``model.nodes``.
+    :ivar axis: Wall axis, either ``"x"`` or ``"y"`` (the wall is parallel to
+        one field axis).
+    :ivar wall_coord: Wall coordinate in centimetres along ``axis``.
+    :ivar facing: Parked heading in degrees, CCW from +x.
+    """
+
+    name: str
+    axis: str
+    wall_coord: float
+    facing: float
+
+    # Captured at apply time so revert can restore both halves of the change.
+    # ``_had_type`` distinguishes "node_types had no entry" (revert via pop)
+    # from "node_types entry was None"; ``_had_spec`` does the same for
+    # reset_nodes (revert via key removal vs restore).
+    _original_type: str | None = field(default=None, init=False, repr=False)
+    _had_type: bool = field(default=False, init=False, repr=False)
+    _original_spec: dict | None = field(default=None, init=False, repr=False)
+    _had_spec: bool = field(default=False, init=False, repr=False)
+
+    def apply(self, model: FieldModel) -> None:
+        """Set the node's type to ``"reset"`` and write its reset spec.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.name`` is not in ``model.nodes`` or if
+            ``self.axis`` is not ``"x"`` / ``"y"``.
+        """
+        if self.name not in model.nodes:
+            raise ValueError(
+                f"SetResetSpec: node {self.name!r} is not in model.nodes"
+            )
+        if self.axis not in _VALID_RESET_AXES:
+            raise ValueError(
+                f"SetResetSpec: axis must be one of "
+                f"{sorted(_VALID_RESET_AXES)!r}, got {self.axis!r}"
+            )
+        self._had_type = self.name in model.node_types
+        self._original_type = model.node_types.get(self.name)
+        self._had_spec = self.name in model.reset_nodes
+        # Deep-copy the original spec so a later in-place edit of the live dict
+        # cannot mutate the captured inverse.
+        original_spec = model.reset_nodes.get(self.name)
+        self._original_spec = (
+            dict(original_spec) if original_spec is not None else None
+        )
+        model.node_types[self.name] = "reset"
+        model.reset_nodes[self.name] = {
+            "axis": self.axis,
+            "wall_coord": float(self.wall_coord),
+            "facing": float(self.facing),
+        }
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the node's prior type and reset-spec state.
+
+        :param model: Target model.
+        """
+        if self._had_type:
+            # ``_original_type`` may legitimately be None if node_types stored
+            # an explicit None; restore it verbatim.
+            model.node_types[self.name] = self._original_type  # type: ignore[assignment]
+        else:
+            model.node_types.pop(self.name, None)
+
+        if self._had_spec:
+            assert self._original_spec is not None
+            model.reset_nodes[self.name] = dict(self._original_spec)
+        else:
+            model.reset_nodes.pop(self.name, None)
+
+
+@dataclass
+class ClearResetSpec:
+    """Revert a reset node back to a plain ``"line"`` / ``"blind"`` node.
+
+    Removes the ``model.reset_nodes`` entry and re-types the node, the inverse
+    of :class:`SetResetSpec`.  Refuses any node that is not currently a fully
+    formed reset node (reset type AND a spec entry), so the type-and-spec
+    invariant cannot be broken from this side either.
+
+    :ivar name: Name of the reset node to clear.  Must currently be a reset
+        node.
+    :ivar new_type: Plain type to assign after clearing; ``"line"`` (default)
+        or ``"blind"``.
+    """
+
+    name: str
+    new_type: str = "line"
+
+    _original_type: str | None = field(default=None, init=False, repr=False)
+    _removed_spec: dict | None = field(default=None, init=False, repr=False)
+
+    def apply(self, model: FieldModel) -> None:
+        """Remove the reset spec and set the node to a plain type.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.name`` is not in ``model.nodes``, if
+            ``self.new_type`` is not ``"line"`` / ``"blind"``, or if the node
+            is not currently a fully formed reset node (reset type and a
+            matching ``reset_nodes`` entry).
+        """
+        if self.name not in model.nodes:
+            raise ValueError(
+                f"ClearResetSpec: node {self.name!r} is not in model.nodes"
+            )
+        if self.new_type not in _PLAIN_NODE_TYPES:
+            raise ValueError(
+                f"ClearResetSpec: new_type must be one of "
+                f"{sorted(_PLAIN_NODE_TYPES)!r}, got {self.new_type!r}"
+            )
+        if (
+            model.node_types.get(self.name) != "reset"
+            or self.name not in model.reset_nodes
+        ):
+            raise ValueError(
+                f"ClearResetSpec: node {self.name!r} is not a reset node "
+                "(needs node_types[name] == 'reset' and a reset_nodes entry)"
+            )
+        self._original_type = model.node_types[self.name]
+        # Deep-copy so the captured inverse is immune to later live mutation.
+        self._removed_spec = dict(model.reset_nodes[self.name])
+        del model.reset_nodes[self.name]
+        model.node_types[self.name] = self.new_type
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the original reset type and re-insert the removed spec.
+
+        :param model: Target model.
+        """
+        assert self._original_type is not None, (
+            "ClearResetSpec.revert before apply"
+        )
+        assert self._removed_spec is not None
+        model.node_types[self.name] = self._original_type
+        model.reset_nodes[self.name] = dict(self._removed_spec)
+
+
+@dataclass
+class SetGlobalKnob:
+    """Set one global model knob to a validated value (a keyed setter).
+
+    Backs the property inspector's global-knob controls (decay enable / ``k`` /
+    exponent / ``d_ref`` and the robot inflation radius).  Each knob name maps
+    to a same-named ``FieldModel`` attribute; the value is coerced and
+    range-checked per-knob BEFORE the attribute is touched, so a rejected value
+    leaves the model untouched.
+
+    :ivar knob: Attribute name to set; one of ``_VALID_GLOBAL_KNOBS``.
+    :ivar value: New value.  Type and bounds are enforced per-knob (see
+        :meth:`apply`).
+    """
+
+    knob: str
+    value: object
+
+    _original_value: object = field(default=None, init=False, repr=False)
+    _had_value: bool = field(default=False, init=False, repr=False)
+
+    def apply(self, model: FieldModel) -> None:
+        """Validate ``self.value`` for ``self.knob`` and set the attribute.
+
+        Bounds enforced per-knob, all checked before any mutation:
+
+        * ``blind_decay_enabled`` -> coerced to ``bool``.
+        * ``blind_decay_k`` -> ``float``, ``>= 0``.
+        * ``blind_decay_exponent`` -> ``float``, ``>= 1``.
+        * ``blind_decay_d_ref`` -> ``float``, ``> 0``.
+        * ``robot_radius_cm`` -> ``float``, ``> 0``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.knob`` is not a recognized knob name, or
+            if ``self.value`` is out of range / not coercible for that knob.
+            The model is untouched in either case.
+        """
+        if self.knob not in _VALID_GLOBAL_KNOBS:
+            raise ValueError(
+                f"SetGlobalKnob: knob must be one of "
+                f"{sorted(_VALID_GLOBAL_KNOBS)!r}, got {self.knob!r}"
+            )
+
+        coerced = self._coerce_and_validate()
+
+        # Capture the inverse only after validation has fully passed, so a
+        # rejected value never records phantom inverse state.
+        self._had_value = hasattr(model, self.knob)
+        self._original_value = getattr(model, self.knob, None)
+        setattr(model, self.knob, coerced)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the knob's prior value.
+
+        :param model: Target model.
+        """
+        assert self._had_value, "SetGlobalKnob.revert before apply"
+        setattr(model, self.knob, self._original_value)
+
+    # -- internal helpers ------------------------------------------------
+
+    def _coerce_and_validate(self) -> object:
+        """Coerce and range-check ``self.value`` for ``self.knob``.
+
+        :return: The coerced value to store on the model.
+        :raises ValueError: If the value is not coercible or out of range.
+        """
+        if self.knob == "blind_decay_enabled":
+            return bool(self.value)
+
+        # Remaining knobs are all floats; coerce once, then bound per-knob.
+        try:
+            number = float(self.value)  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"SetGlobalKnob: {self.knob} requires a number, "
+                f"got {self.value!r}"
+            ) from exc
+
+        if self.knob == "blind_decay_k":
+            if number < _BLIND_DECAY_K_MIN:
+                raise ValueError(
+                    f"SetGlobalKnob: blind_decay_k must be "
+                    f">= {_BLIND_DECAY_K_MIN}, got {number}"
+                )
+        elif self.knob == "blind_decay_exponent":
+            if number < _BLIND_DECAY_EXPONENT_MIN:
+                raise ValueError(
+                    f"SetGlobalKnob: blind_decay_exponent must be "
+                    f">= {_BLIND_DECAY_EXPONENT_MIN}, got {number}"
+                )
+        elif self.knob == "blind_decay_d_ref":
+            if number <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+                raise ValueError(
+                    f"SetGlobalKnob: blind_decay_d_ref must be "
+                    f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} cm, got {number}"
+                )
+        elif self.knob == "robot_radius_cm":
+            if number <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+                raise ValueError(
+                    f"SetGlobalKnob: robot_radius_cm must be "
+                    f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} cm, got {number}"
+                )
+
+        return number
 
 
 # ---------------------------------------------------------------------------
