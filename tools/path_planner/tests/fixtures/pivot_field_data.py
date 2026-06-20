@@ -121,7 +121,7 @@ from typing import Dict, List, Optional, Tuple
 import networkx as nx
 
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
 
 
 # Shared field scalars. The values are arbitrary but legal -- the pivot tests
@@ -129,7 +129,10 @@ from tools.path_planner.planner import compute_all_pairs_next_hop
 _FIELD_MM: Tuple[float, float] = (3000.0, 2000.0)
 _MAP_PNG: str = "maps/map.png"
 _ROBOT_RADIUS_CM: float = 8.0
-_COST_BLIND_MULTIPLIER: float = 5.0
+_BLIND_DECAY_ENABLED: bool = True
+_BLIND_DECAY_K: float = 0.05
+_BLIND_DECAY_EXPONENT: float = 2.0
+_BLIND_DECAY_D_REF: float = 50.0
 
 
 def _make_field(
@@ -171,7 +174,10 @@ def _make_field(
         FIELD_MM=_FIELD_MM,
         MAP_PNG=_MAP_PNG,
         ROBOT_RADIUS_CM=_ROBOT_RADIUS_CM,
-        COST_BLIND_MULTIPLIER=_COST_BLIND_MULTIPLIER,
+        BLIND_DECAY_ENABLED=_BLIND_DECAY_ENABLED,
+        BLIND_DECAY_K=_BLIND_DECAY_K,
+        BLIND_DECAY_EXPONENT=_BLIND_DECAY_EXPONENT,
+        BLIND_DECAY_D_REF=_BLIND_DECAY_D_REF,
         BLIND_PROJECTION_AUTO_SEEK=True,
         START_NODE=start_node,
         START_HEADING_DEG=start_heading_deg,
@@ -204,7 +210,9 @@ def build_graph_and_next_hop(field) -> Tuple[nx.DiGraph, dict]:
     :return: the ``(DiGraph, NextHopTable)`` pair.
     """
     graph = build_graph(field)
-    next_hop = compute_all_pairs_next_hop(graph, field.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(
+        graph, BlindDecayParams.from_field_data(field)
+    )
     return graph, next_hop
 
 

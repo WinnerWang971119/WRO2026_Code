@@ -31,8 +31,15 @@ class FieldModel:
         background PNG used by the visualizer.
     :param robot_radius_cm: Inflation radius in centimetres applied to each
         obstacle before edge-intersection checks.
-    :param cost_blind_multiplier: Dijkstra cost multiplier applied to blind
-        edges so the planner prefers line-following paths.
+    :param blind_decay_enabled: Whether the blind-distance decay penalty is
+        applied to blind-edge weights at table-build time.
+    :param blind_decay_k: Decay weight ``k`` (unitless, ``>= 0``) in
+        ``weight = length * (1 + k * (d / d_ref) ** exponent)``. At ``k == 0``
+        the penalty vanishes and blind weights reduce to plain length.
+    :param blind_decay_exponent: Decay exponent (``>= 1``) shaping
+        ``g(d) = (d / d_ref) ** exponent``.
+    :param blind_decay_d_ref: Decay normalizer ``d_ref`` in centimetres
+        (``> 0``) so ``k`` is map-portable.
     :param start_node: Name of the node where the robot begins.
     :param start_heading_deg: Initial robot heading in degrees, CCW from +x.
     :param nodes: Mapping of node name to ``(x_cm, y_cm)`` position.
@@ -65,7 +72,10 @@ class FieldModel:
         "FIELD_MM",
         "MAP_PNG",
         "ROBOT_RADIUS_CM",
-        "COST_BLIND_MULTIPLIER",
+        "BLIND_DECAY_ENABLED",
+        "BLIND_DECAY_K",
+        "BLIND_DECAY_EXPONENT",
+        "BLIND_DECAY_D_REF",
         "START_NODE",
         "START_HEADING_DEG",
         "NODES",
@@ -80,7 +90,10 @@ class FieldModel:
     field_mm: tuple[float, float]
     map_png: str
     robot_radius_cm: float
-    cost_blind_multiplier: float
+    blind_decay_enabled: bool
+    blind_decay_k: float
+    blind_decay_exponent: float
+    blind_decay_d_ref: float
     start_node: str
     start_heading_deg: float
     nodes: dict[str, tuple[float, float]]
@@ -129,7 +142,10 @@ class FieldModel:
         self.field_mm = snap.field_mm
         self.map_png = snap.map_png
         self.robot_radius_cm = snap.robot_radius_cm
-        self.cost_blind_multiplier = snap.cost_blind_multiplier
+        self.blind_decay_enabled = snap.blind_decay_enabled
+        self.blind_decay_k = snap.blind_decay_k
+        self.blind_decay_exponent = snap.blind_decay_exponent
+        self.blind_decay_d_ref = snap.blind_decay_d_ref
         self.start_node = snap.start_node
         self.start_heading_deg = snap.start_heading_deg
         self.nodes = copy.deepcopy(snap.nodes)
@@ -164,7 +180,10 @@ class FieldModel:
         ``FIELD_MM``        ``field_mm``
         ``MAP_PNG``         ``map_png``
         ``ROBOT_RADIUS_CM`` ``robot_radius_cm``
-        ``COST_BLIND_MULTIPLIER`` ``cost_blind_multiplier``
+        ``BLIND_DECAY_ENABLED`` ``blind_decay_enabled``
+        ``BLIND_DECAY_K``   ``blind_decay_k``
+        ``BLIND_DECAY_EXPONENT`` ``blind_decay_exponent``
+        ``BLIND_DECAY_D_REF`` ``blind_decay_d_ref``
         ``START_NODE``      ``start_node``
         ``START_HEADING_DEG`` ``start_heading_deg``
         ``NODES``           ``nodes``
@@ -198,7 +217,10 @@ class FieldModel:
             field_mm=tuple(data["FIELD_MM"]),
             map_png=data["MAP_PNG"],
             robot_radius_cm=data["ROBOT_RADIUS_CM"],
-            cost_blind_multiplier=data["COST_BLIND_MULTIPLIER"],
+            blind_decay_enabled=data["BLIND_DECAY_ENABLED"],
+            blind_decay_k=data["BLIND_DECAY_K"],
+            blind_decay_exponent=data["BLIND_DECAY_EXPONENT"],
+            blind_decay_d_ref=data["BLIND_DECAY_D_REF"],
             start_node=data["START_NODE"],
             start_heading_deg=data["START_HEADING_DEG"],
             nodes={name: tuple(coords) for name, coords in data["NODES"].items()},
@@ -221,7 +243,7 @@ class FieldModel:
         """Return a :class:`types.SimpleNamespace` whose attributes satisfy
         :func:`tools.path_planner.validator.validate`.
 
-        The validator reads the 11 required attributes listed in
+        The validator reads the 14 required attributes listed in
         ``validator._REQUIRED_ATTRS`` via ``getattr``.  This method maps
         every snake_case field of :class:`FieldModel` back to the
         corresponding ``SCREAMING_SNAKE_CASE`` name, preserving the exact
@@ -248,7 +270,7 @@ class FieldModel:
         silently skips every reset-node rule (the dual-serialization trap --
         a field added to JSON but not the proxy is persisted-but-unvalidated).
 
-        :return: A :class:`types.SimpleNamespace` with the 11 required
+        :return: A :class:`types.SimpleNamespace` with the 14 required
             attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
             ``PIVOT_TURNS`` and ``RESET_NODES``.
         """
@@ -259,7 +281,10 @@ class FieldModel:
             BLIND_EDGES=self.blind_edges,
             OBSTACLES=self.obstacles,
             ROBOT_RADIUS_CM=self.robot_radius_cm,
-            COST_BLIND_MULTIPLIER=self.cost_blind_multiplier,
+            BLIND_DECAY_ENABLED=self.blind_decay_enabled,
+            BLIND_DECAY_K=self.blind_decay_k,
+            BLIND_DECAY_EXPONENT=self.blind_decay_exponent,
+            BLIND_DECAY_D_REF=self.blind_decay_d_ref,
             START_NODE=self.start_node,
             START_HEADING_DEG=self.start_heading_deg,
             FIELD_MM=self.field_mm,
@@ -323,7 +348,10 @@ class FieldModel:
             "FIELD_MM": list(self.field_mm),
             "MAP_PNG": self.map_png,
             "ROBOT_RADIUS_CM": float(self.robot_radius_cm),
-            "COST_BLIND_MULTIPLIER": float(self.cost_blind_multiplier),
+            "BLIND_DECAY_ENABLED": bool(self.blind_decay_enabled),
+            "BLIND_DECAY_K": float(self.blind_decay_k),
+            "BLIND_DECAY_EXPONENT": float(self.blind_decay_exponent),
+            "BLIND_DECAY_D_REF": float(self.blind_decay_d_ref),
             "START_NODE": self.start_node,
             "START_HEADING_DEG": float(self.start_heading_deg),
             "NODES": {

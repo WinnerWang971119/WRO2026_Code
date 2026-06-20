@@ -14,7 +14,8 @@ Coordinate system: origin (0, 0) at field SW corner. X is East, Y is North.
 Distances in centimetres. Headings in degrees, [0, 360), CCW from +x.
 
 Source of truth: the geometry (NODES / NODE_TYPES / LINE_SEGMENTS / BLIND_EDGES /
-OBSTACLES plus FIELD_MM, MAP_PNG, ROBOT_RADIUS_CM, COST_BLIND_MULTIPLIER,
+OBSTACLES plus FIELD_MM, MAP_PNG, ROBOT_RADIUS_CM, the BLIND_DECAY_* knobs
+(BLIND_DECAY_ENABLED / BLIND_DECAY_K / BLIND_DECAY_EXPONENT / BLIND_DECAY_D_REF),
 START_NODE, START_HEADING_DEG) lives in :file:`field_data.json` and is the file
 the live editor (`edit_field.py`) mutates. This module is a thin loader that
 re-exposes those values under their historical attribute names so callers do
@@ -39,7 +40,10 @@ _data = load_field_json()
 FIELD_MM              = _data["FIELD_MM"]
 MAP_PNG               = _data["MAP_PNG"]
 ROBOT_RADIUS_CM       = _data["ROBOT_RADIUS_CM"]
-COST_BLIND_MULTIPLIER = _data["COST_BLIND_MULTIPLIER"]
+BLIND_DECAY_ENABLED   = _data["BLIND_DECAY_ENABLED"]
+BLIND_DECAY_K         = _data["BLIND_DECAY_K"]
+BLIND_DECAY_EXPONENT  = _data["BLIND_DECAY_EXPONENT"]
+BLIND_DECAY_D_REF     = _data["BLIND_DECAY_D_REF"]
 START_NODE            = _data["START_NODE"]
 START_HEADING_DEG     = _data["START_HEADING_DEG"]
 NODES                 = _data["NODES"]

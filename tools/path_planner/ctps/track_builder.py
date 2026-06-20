@@ -48,7 +48,7 @@ from math import hypot
 from typing import Any, Dict, List
 
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import compute_all_pairs_next_hop
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
     PathTrackerSim,
@@ -256,13 +256,15 @@ def build(trace: Trace, field_data) -> Track:
         :func:`tools.path_planner.ctps.trace_loader.load`).
     :param field_data: validated field-data namespace exposing ``NODES``,
         ``OBSTACLES``, ``FIELD_MM``, ``START_NODE``, ``START_HEADING_DEG``,
-        ``COST_BLIND_MULTIPLIER``.
+        and the ``BLIND_DECAY_*`` decay knobs.
     :return: a fully-expanded :class:`Track` whose ``duration_s`` is the final
         running clock value.
     """
     # 1. Planner inputs: build the graph and the all-pairs next-hop table once.
     graph = build_graph(field_data)
-    next_hop = compute_all_pairs_next_hop(graph, field_data.COST_BLIND_MULTIPLIER)
+    next_hop = compute_all_pairs_next_hop(
+        graph, BlindDecayParams.from_field_data(field_data)
+    )
 
     # 2. Exactly ONE chassis + ONE sim for the whole track (drift accumulates
     #    correctly only on a single long-lived pair). Zero the heading once,
