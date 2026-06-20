@@ -391,15 +391,15 @@ private:
     static float _normalize(float deg);
 
     /**
-     * @brief Read the raw IMU yaw through the result-surfacing lower-MCU call.
+     * @brief Read the corrected (app CCW-positive) IMU yaw via the single-owner `YawSource`.
      *
-     * Wraps `mmL.GetIMUEuler(roll, pitch, yaw)` (which `MiniR4Motion::getEuler` calls but
-     * whose `MMLower::RESULT` it discards) so callers can distinguish a real read from a
-     * silent comms timeout. On a non-OK read `yawOut` is left untouched — the library does
-     * not write the out-params on the timeout / read-error paths.
+     * Thin adapter over `YawSource::readYawDeg` (ADR-044), which performs the result-surfacing
+     * lower-MCU read (`mmL.GetIMUEuler`, retry-once) and applies `Config::IMU_YAW_SIGN` to
+     * convert the hardware CW-positive raw yaw into the app frame. On a non-OK read `yawOut` is
+     * left untouched, so callers can distinguish a real read from a silent comms timeout.
      *
-     * @param yawOut  Set to the raw IMU yaw in degrees ONLY when the read returns OK.
-     * @return `true` if the lower-MCU read returned `MMLower::RESULT::OK`; `false` otherwise.
+     * @param yawOut  Set to the corrected app-frame yaw in degrees ONLY when the read returns OK.
+     * @return `true` if the underlying lower-MCU read returned `MMLower::RESULT::OK`; `false` otherwise.
      */
     static bool _readImuYaw(float& yawOut);
 
