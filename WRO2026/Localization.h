@@ -252,20 +252,24 @@ public:
     /**
      * @brief Wall-zero re-anchor: adopt the ground truth a `Drive.wallStop` just established.
      *
-     * After the chassis squares against a known wall, its coordinate on @p axis is the
-     * physical wall coordinate and it should be facing the wall normal. This re-binds
-     * Localization's belief to that truth in ONE atomic update (the wall-reset half of PR2,
-     * called by PathTracker from a `FieldMap::getResetInfo(node)` record). It corrects both
-     * the accumulated heading drift (against the wall normal) and the on-axis position drift
-     * (against the wall coordinate) at once.
+     * After the chassis presses its REAR against a known wall, the tracked wheel axle sits
+     * `Config::WALL_CONTACT_OFFSET_CM` short of the wall on @p axis (the rear contact face is at
+     * the wall; the axle is that margin in front of it, on the node side), and the chassis should
+     * be squared to the wall normal. This re-binds Localization's belief to that truth in ONE
+     * atomic update (the wall-reset half of PR2, called by PathTracker from a
+     * `FieldMap::getResetInfo(node)` record). It corrects both the accumulated heading drift
+     * (against the wall normal) and the on-axis position drift (against the axle's wall-relative
+     * coordinate) at once.
      *
      * Pose-model choice: position is `_currentNode` + `_offset` (there is NO stored absolute
-     * pose in this class), so "set the on-axis coordinate to @p wallCoord" is expressed as an
-     * offset from the anchored node: `_offset[axis] = wallCoord - nodeCoord[axis]`, read via
-     * `FieldMap::getNode(_currentNode)`. The reset node's stored coordinate generally differs
-     * from its wall coordinate (e.g. node Wall1 sits at y=139 but its wall is at y=154), so
-     * this offset is non-zero by design and the net belief `nodeCoord[axis] + _offset[axis]`
-     * equals @p wallCoord exactly. The off-axis offset component and `thetaDeg` are zeroed
+     * pose in this class), so the on-axis belief is expressed as an offset from the anchored node:
+     * `_offset[axis] = (wallCoord - sign(gap)*WALL_CONTACT_OFFSET_CM) - nodeCoord[axis]`, where
+     * `gap = wallCoord - nodeCoord` carries which side the wall is on (so the axle always lands on
+     * the node side), read via `FieldMap::getNode(_currentNode)`. The reset node's stored
+     * coordinate generally differs from its wall coordinate (e.g. node Wall1 sits at y=139 but its
+     * wall is at y=154), so this offset is non-zero by design and the net belief
+     * `nodeCoord[axis] + _offset[axis]` equals `wallCoord - sign(gap)*WALL_CONTACT_OFFSET_CM` (the
+     * axle, NOT the wall surface). The off-axis offset component and `thetaDeg` are zeroed
      * (the wall gives no off-axis information; heading is re-bound below, so the delta-channel
      * resets), and the integrator baselines are re-snapshotted so the next `update()` tick
      * integrates a zero delta (no arrival-tick phantom). `_currentNode` is left as-is — the
@@ -278,8 +282,9 @@ public:
      * observation point, so no consumer can witness a half-anchored pose.
      *
      * Post-condition on a `true` return: `getHeadingDeg() == @p headingDeg` (modulo the live
-     * IMU read it re-derives), `nodeCoord[axis] + getOffsetFromNode()[axis] == @p wallCoord`,
-     * the off-axis offset and `thetaDeg` are `0`, and the next `update()` tick integrates a
+     * IMU read it re-derives), `nodeCoord[axis] + getOffsetFromNode()[axis] == @p wallCoord -
+     * sign(gap)*Config::WALL_CONTACT_OFFSET_CM` (the axle, on the node side of the wall), the
+     * off-axis offset and `thetaDeg` are `0`, and the next `update()` tick integrates a
      * zero delta. On a `false` return the pose is byte-for-byte unchanged.
      *
      * Strict wall-normal sanity check (`Config::WALL_NORMAL_STRICT_ENABLED`, default OFF):
@@ -293,7 +298,8 @@ public:
      * @param axis       Reset axis: `0 = x`, `1 = y` (the T13 `Routes::ResetNode::axis`
      *                   contract). Any other value is treated as a no-op axis write (the
      *                   heading is still re-bound) — the caller passes a validated `info->axis`.
-     * @param wallCoord  Ground-truth coordinate on @p axis (cm) the chassis now sits at.
+     * @param wallCoord  Ground-truth wall-surface coordinate on @p axis (cm). The believed axle
+     *                   coordinate is pulled back from it by `Config::WALL_CONTACT_OFFSET_CM`.
      * @param headingDeg Expected world-frame wall normal (degrees, `[0, 360)`) — the heading
      *                   to re-bind to.
      * @return `true` if the pose was re-anchored; `false` if the strict check rejected the

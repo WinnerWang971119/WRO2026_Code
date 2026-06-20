@@ -266,21 +266,29 @@ bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float head
     //     zeroes the whole _offset, so the axis write must follow it, not precede it.
     _consumeOffset();
 
-    // (3) Set the on-axis belief to the wall coordinate. Position is _currentNode + _offset (no
-    //     stored absolute pose), so express "coordinate-on-axis == wallCoord" as an offset from
-    //     the anchored node: _offset[axis] = wallCoord - nodeCoord[axis]. The reset node's stored
-    //     coordinate generally differs from its wall coordinate, so this is non-zero by design and
-    //     the net belief nodeCoord[axis] + _offset[axis] == wallCoord. The off-axis component and
-    //     thetaDeg stay 0 from step (2) — the wall gives no off-axis info and heading was just
-    //     re-bound, so the delta channel resets.
-    const float nodeCoord = coordOnAxis(_currentNode, axis);    // x=0 / y=1 decode (one home)
+    // (3) Set the on-axis belief to the wall coordinate PULLED BACK by the rear-contact margin.
+    //     The chassis presses its REAR face flat against the wall, but the tracked reference is the
+    //     wheel AXLE, which sits Config::WALL_CONTACT_OFFSET_CM short of that contact face — on the
+    //     NODE side of the wall. So the believed on-axis coordinate is the wall coordinate moved
+    //     back toward the node by that margin, not the wall surface itself (the old belief ==
+    //     wallCoord was optimistic by exactly this offset). Position is _currentNode + _offset (no
+    //     stored absolute pose), so express it as an offset from the anchored node:
+    //     _offset[axis] = (wallCoord - sign(gap)*offset) - nodeCoord, where gap = wallCoord -
+    //     nodeCoord carries which side of the node the wall is on (so the axle lands on the node
+    //     side regardless). The off-axis component and thetaDeg stay 0 from step (2) — the wall
+    //     gives no off-axis info and heading was just re-bound, so the delta channel resets.
+    const float nodeCoord  = coordOnAxis(_currentNode, axis);    // x=0 / y=1 decode (one home)
+    const float gap        = wallCoord - nodeCoord;              // signed: which side the wall is on
+    const float signGap    = (gap >= 0.0f) ? 1.0f : -1.0f;
+    // Net belief on-axis == wallCoord - signGap*WALL_CONTACT_OFFSET_CM (axle on the node side).
+    const float axleOffset = gap - signGap * Config::WALL_CONTACT_OFFSET_CM;
     if (axis == 0)
     {
-        _offset.x = wallCoord - nodeCoord;
+        _offset.x = axleOffset;
     }
     else if (axis == 1)
     {
-        _offset.y = wallCoord - nodeCoord;
+        _offset.y = axleOffset;
     }
     // Any other axis value: leave _offset at the zeroed state from step (2). The heading is still
     // squared (the wall normal is axis-independent). The caller passes a validated info->axis, so
