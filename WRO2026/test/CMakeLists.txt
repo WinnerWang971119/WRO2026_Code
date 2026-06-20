@@ -803,6 +803,24 @@ target_include_directories(test_wall_stop_watchdog PRIVATE ${COMMON_INCLUDES})
 add_test(NAME wall_stop_watchdog COMMAND test_wall_stop_watchdog)
 
 # =========================================================================================
+# Test executable #15b — turn-profile persistent-IMU-fault watchdog (PR #82 review fix).
+#
+# `Drive.cpp` is NOT host-compiled, so the read-failure escalation in `_updateTurnProfile()`
+# (hard-stop + `Fault::IMU_READ_FAILED` once no good IMU yaw read has landed for
+# `Config::TURN_IMU_STALL_TIMEOUT_MS`) is verified at the DECISION layer: the `turnImuReadStalled`
+# predicate in `WROMath.h`, bound to the shipped Config timeout. Same minimal recipe as
+# `test_wall_stop_watchdog` / `test_stop_at_line_armmath` — the predicate touches no
+# Drive/LineArray/Intersection surface, so no force-includes; `MOCK_SOURCES` only supplies the
+# `Serial` / `g_mockMillis` globals the mock `<Arduino.h>` (pulled in via `WROMath.h`) declares.
+# =========================================================================================
+add_executable(test_turn_imu_watchdog
+    ${TEST_DIR}/test_turn_imu_watchdog.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_turn_imu_watchdog PRIVATE ${COMMON_INCLUDES})
+add_test(NAME turn_imu_watchdog COMMAND test_turn_imu_watchdog)
+
+# =========================================================================================
 # Test executable #16 — PathTracker reset-node arrival interlude WALL_STOP -> REANCHOR (PR2, T16).
 # TC10b (AC10 + AC11).
 #

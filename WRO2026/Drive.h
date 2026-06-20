@@ -649,7 +649,9 @@ public:
         NONE             = 0,   ///< No fault — normal operation.
         DRAIN_TIMEOUT    = 1,   ///< `_drainBlocking` deadline exceeded (F3).
         DISPATCH_FAILED  = 2,   ///< `_dispatchNext` saw a non-zero rc from the lower MCU (F5).
-        LINE_NOT_FOUND   = 3    ///< `stopAtLine` ran the full max distance with no crossing found.
+        LINE_NOT_FOUND   = 3,   ///< `stopAtLine` ran the full max distance with no crossing found.
+        IMU_READ_FAILED  = 4    ///< Custom TurnGyro profile lost the IMU yaw read past the
+                                ///< `Config::TURN_IMU_STALL_TIMEOUT_MS` watchdog — hard-stopped.
     };
 
     /**
@@ -831,6 +833,14 @@ private:
     ///< @brief Whether to engage the active brake at completion of the turn profile.
     ///<        Mirrors `DriveCommand::brake` captured at dispatch time. Read by
     ///<        `_updateTurnProfile()` in the `BRAKE` transition.
+
+    uint32_t _turnLastGoodReadMs = 0;
+    ///< @brief `millis()` at the last good IMU yaw read during the in-flight turn — the
+    ///<        persistent-IMU-fault watchdog reset point. Seeded at dispatch
+    ///<        (`_execTurnDeg`/`_execTurnToYaw`) and refreshed on every successful read in
+    ///<        `_updateTurnProfile()`. When `turnImuReadStalled(millis(), this,
+    ///<        Config::TURN_IMU_STALL_TIMEOUT_MS)` trips, the turn hard-stops and latches
+    ///<        `Fault::IMU_READ_FAILED` so a sustained read failure cannot spin unbounded.
 
     // -------------------------------------------------------------------------------------
     // Drive-until-line state machine (`stopAtLine()`-driven moves) — ADR-027

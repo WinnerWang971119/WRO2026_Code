@@ -384,6 +384,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
     _heldYaw                = target;
+    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
 
     // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing
     // extra here. We always return 0x00 — the new state machine cannot fail at dispatch
@@ -441,6 +442,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
     _heldYaw                = target;
+    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
 
     (void) blocking;
     return 0x00;
@@ -1081,11 +1083,37 @@ void DriveClass::_updateTurnProfile()
     // transient lower-MCU read failure SKIP this tick: holding the previous Move(L,R) one more
     // cycle is safer than acting on a fabricated 0.0 yaw, which mid-turn could flip the spin
     // direction. This is a deliberate behavior change vs the old "act on the vendor's 0.0".
+    //
+    // A SUSTAINED read failure is different. An async turn (`.async()`) has no `_drainBlocking`
+    // deadline behind it, so skipping every tick would hold the counter-rotation Move(L,R) latched
+    // forever — an unbounded spin with no fault path. The persistent-fault watchdog (mirrors the
+    // stopAtLine / wallStop stall watchdog) escalates once no good read has landed for
+    // `Config::TURN_IMU_STALL_TIMEOUT_MS` since dispatch / the last good read: hard-stop, drop the
+    // queue, and latch `Fault::IMU_READ_FAILED`. The decision predicate `turnImuReadStalled` is
+    // host-tested and rollover-safe.
     double curYaw = 0.0;
     if (!YawSource.readYawDeg(curYaw))
     {
+        if (turnImuReadStalled(millis(), _turnLastGoodReadMs, Config::TURN_IMU_STALL_TIMEOUT_MS))
+        {
+            Serial.println(F("[Drive] turn: IMU yaw read failed past watchdog — IMU_READ_FAILED"));
+            MiniR4.DriveDC.Move(0, 0);
+            MiniR4.DriveDC.brake(true);    // emergency active-brake, like the _drainBlocking abort.
+            _fault.kind       = Fault::IMU_READ_FAILED;
+            _fault.rc         = 0x00;
+            _fault.cmdKind    = DriveCommand::Kind::TURN_DEG;    // representative — the profile is
+                                                                 // shared by TURN_DEG / TURN_TO_YAW.
+            _turnProfileState = TurnProfileState::IDLE;
+            _turnDone         = true;
+            _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+            _clearQueue();
+        }
         return;
     }
+
+    // A good read landed — reset the persistent-fault watchdog window.
+    _turnLastGoodReadMs    = millis();
+
     const int16_t cur      = (int16_t) curYaw;
     const int32_t rawDelta = normalizeTurnDelta((int32_t) _turnTargetYaw - (int32_t) cur);
     // rawDelta is in (-180, +180] so a plain abs() is sufficient — no risk of int overflow.

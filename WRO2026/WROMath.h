@@ -24,6 +24,8 @@
  *   - `stopAtLineSeekMaxedOut` — max-distance fault predicate for the seek (Drive seek + host test).
  *   - `stopAtLineProgressed`   — progress-detector for the seek watchdog (Drive seek + host test).
  *   - `stopAtLineStalled`      — no-progress watchdog timeout for the seek (Drive seek + host test).
+ *   - `turnImuReadStalled`     — persistent-IMU-fault watchdog timeout for the turn profile
+ *                                (Drive `_updateTurnProfile` + host test).
  *
  * @note The stopAtLine predicates are extracted from `Drive::_updateStopAtLine()` purely so the
  *       arm-window, detection-debounce, max-distance, and stall-watchdog DECISIONS are
@@ -306,6 +308,33 @@ inline bool stopAtLineProgressed(float traveledCm, float lastProgressCm, float e
 inline bool stopAtLineStalled(uint32_t nowMs, uint32_t lastProgressMs, uint32_t stallTimeoutMs)
 {
     return (uint32_t) (nowMs - lastProgressMs) >= stallTimeoutMs;
+}
+
+/**
+ * @brief Whether the custom TurnGyro profile has gone too long without a good IMU yaw read
+ *        (persistent-IMU-fault watchdog).
+ *
+ * The turn profile reads the IMU every tick; a single transient miss is held (the previous
+ * `Move(L,R)` rides one more cycle). This predicate decides when those misses have lasted long
+ * enough to be a SUSTAINED fault that must hard-stop the spin — closing the unbounded-async hole
+ * where an `.async()` turn (no `_drainBlocking` deadline) would otherwise spin forever. The
+ * subtraction is unsigned so it stays correct across a `millis()` rollover, identical to
+ * `stopAtLineStalled` and the `_drainBlocking` deadline idiom in Drive.cpp.
+ *
+ * @param nowMs           Current `millis()` value.
+ * @param lastGoodReadMs  `millis()` at the last good IMU yaw read (the watchdog reset point —
+ *                        seeded at turn dispatch, refreshed on every successful read).
+ * @param stallTimeoutMs  Timeout (ms) without a good read before the turn is considered stalled.
+ * @return `true` when `(nowMs - lastGoodReadMs) >= stallTimeoutMs` (rollover-safe); `false`
+ *         otherwise.
+ *
+ * @note Source of truth for the turn-watchdog DECISION — `Drive::_updateTurnProfile()` calls this
+ *       on the read-failure path, and the host test drives it directly so the trip / no-trip /
+ *       rollover cases are all CI-verified. Mirrors the `stopAtLineStalled` (TC17) precedent.
+ */
+inline bool turnImuReadStalled(uint32_t nowMs, uint32_t lastGoodReadMs, uint32_t stallTimeoutMs)
+{
+    return (uint32_t) (nowMs - lastGoodReadMs) >= stallTimeoutMs;
 }
 
 #endif    // WRO_MATH_H

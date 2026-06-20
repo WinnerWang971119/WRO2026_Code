@@ -499,6 +499,26 @@ namespace Config
      */
     constexpr float TURN_TOLERANCE_DEG = 1.0f;
 
+    /**
+     * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
+     *
+     * `Drive::_updateTurnProfile()` reads the IMU yaw every tick. A single transient read miss
+     * skips the tick (holds the previous `Move(L,R)`) rather than act on a fabricated yaw. But a
+     * SUSTAINED failure must not spin forever — an async turn has no `_drainBlocking` deadline
+     * behind it. Once no good yaw read has landed for this long since the turn started (or since
+     * the last good read), the profile hard-stops and latches `DriveClass::Fault::IMU_READ_FAILED`.
+     *
+     * Sized well above a couple of ticks (`readYawDeg` already retries once internally) so a brief
+     * I2C hiccup never false-trips, yet short enough that a real fault stops the in-place spin
+     * promptly.
+     *
+     * @note TODO: tune on real chassis.
+     */
+    constexpr uint32_t TURN_IMU_STALL_TIMEOUT_MS = 500;
+    static_assert(TURN_IMU_STALL_TIMEOUT_MS >= 100,
+                  "Config::TURN_IMU_STALL_TIMEOUT_MS must leave room for transient retries — a near-"
+                  "zero timeout would fault the turn on the first IMU read miss.");
+
     // =========================================================================================
     // Motor-bias calibration (Strategy B from Phase 1.5 chassis-API research).
     //
