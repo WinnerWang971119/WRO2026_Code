@@ -163,8 +163,9 @@ int main()
         check(onNormal, "TC12 (ON): on-normal (diff 0) re-anchors");
         check(approx(Localization.getHeadingDeg(), kFacingDeg, 0.5f),
               "TC12 (ON): on-normal accept binds heading to the wall normal");
-        check(approx(believedCoordOnAxis(kResetNode, kAxisY), kWallCoordY, 0.01f),
-              "TC12 (ON): on-normal accept re-zeros the on-axis coordinate to wall_coord");
+        check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                     kWallCoordY - Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+              "TC12 (ON): on-normal accept re-zeros the on-axis coordinate to the axle (wall_coord - offset)");
 
         // Exactly at the tolerance, high side: diff == 10 -> ACCEPT (inclusive `>` boundary).
         check(attemptReanchorAtYaw(100.0),
@@ -210,12 +211,14 @@ int main()
         mmL.mockYawDeg = 92.0;    // diff 2 -> well inside tolerance.
         check(Localization.reanchorAtWall(kAxisY, kWallCoordY, kFacingDeg),
               "TC12 (ON): a later in-tolerance reanchor succeeds after an earlier reject");
-        check(approx(believedCoordOnAxis(kResetNode, kAxisY), kWallCoordY, 0.01f),
-              "TC12 (ON): the recovering accept re-zeros the on-axis coordinate");
+        check(approx(believedCoordOnAxis(kResetNode, kAxisY),
+                     kWallCoordY - Config::WALL_CONTACT_OFFSET_CM, 0.01f),
+              "TC12 (ON): the recovering accept re-zeros the on-axis coordinate to the axle");
         check(approx(offsetMag(Localization.getOffsetFromNode())
-                         - std::fabs(kWallCoordY - FieldMap::getNode(kResetNode).y_cm),
+                         - (std::fabs(kWallCoordY - FieldMap::getNode(kResetNode).y_cm)
+                            - Config::WALL_CONTACT_OFFSET_CM),
                      0.0f, 0.01f),
-              "TC12 (ON): post-accept offset magnitude equals the node->wall y gap (15 cm)");
+              "TC12 (ON): post-accept offset magnitude == node->wall y gap minus contact offset (15 - 8 = 7 cm)");
     }
 
     if (g_failures == 0)
