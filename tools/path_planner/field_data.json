@@ -110,7 +110,7 @@
     "Wall1": {
       "axis": "y",
       "wall_coord": 154.0,
-      "facing": 90.0
+      "facing": 270.0
     }
   },
   "OBSTACLES": []
