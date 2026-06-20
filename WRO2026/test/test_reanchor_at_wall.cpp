@@ -136,7 +136,7 @@ int main()
         Localization.update();    // settle baselines at the post-declare pose.
         const int32_t driveDeg = (int32_t) cmToEncDeg(25.0f);
         Drive.mockAdvanceEncoders(driveDeg, driveDeg);
-        mmL.mockYawDeg = 30.0;    // a manual turn so thetaDeg accumulates too.
+        mmL.mockYawDeg = -30.0;    // a manual turn so thetaDeg accumulates too.
         Localization.update();
         check(offsetMag(Localization.getOffsetFromNode()) > 1.0f,
               "TC11: offset is non-zero after a hand-drive (pre-reanchor)");
@@ -219,7 +219,7 @@ int main()
         Localization.update();    // settle baselines.
         const int32_t driveDeg = (int32_t) cmToEncDeg(12.0f);
         Drive.mockAdvanceEncoders(driveDeg, driveDeg);
-        mmL.mockYawDeg = 20.0;
+        mmL.mockYawDeg = -20.0;
         Localization.update();
 
         // Snapshot the full observable pose BEFORE the rejected call.
@@ -260,7 +260,7 @@ int main()
     {
         // Headings spanning from on-normal to fully anti-normal (180 deg off). All must accept
         // because the flag is OFF — the method trusts the wallStop squared the chassis.
-        const double sweepYaw[] = {90.0, 100.0, 70.0, 130.0, 0.0, 270.0};
+        const double sweepYaw[] = {-90.0, -100.0, -70.0, -130.0, 0.0, -270.0};
         for (double yaw : sweepYaw)
         {
             resetWorldOnResetNode();

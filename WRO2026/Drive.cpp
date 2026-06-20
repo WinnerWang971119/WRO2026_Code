@@ -13,6 +13,9 @@
 
 #include "Drive.h"
 
+#include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
+#include "YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
+
 #include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
                               // its tick loop does not write setSpeed concurrently with a
                               // queued bounded/profiled move. LineFollower.h does NOT pull
@@ -169,7 +172,9 @@ uint8_t DriveClass::forwardGyro(int16_t power)
 {
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the power through the
     // shared PWM cap/deadband floor for uniform clamping (finding #14).
-    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), _heldYaw);
+    // GYRO precondition (ADR-045): _heldYaw is an app-frame (CCW-positive) heading; toHwHeading
+    // converts it to the STM32 raw frame. NEVER pass a raw heading here — it would double-correct.
+    return MiniR4.DriveDC.MoveGyro(deadbandSnap(power), YawSource.toHwHeading(_heldYaw));
 }
 
 uint8_t DriveClass::stop(bool brake)
@@ -256,8 +261,9 @@ uint8_t DriveClass::_execDriveDistGyro(int16_t power,
     // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
     // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
     const uint16_t encDeg = cmToEncDeg(cm);
+    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
     const uint8_t  rc =
-        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), yaw, encDeg, brake, !blocking);
+        MiniR4.DriveDC.MoveGyroDegs(deadbandSnap(power), YawSource.toHwHeading(yaw), encDeg, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -308,7 +314,8 @@ uint8_t DriveClass::_execDriveTimeGyro(int16_t power,
     // No _applyBias here — STM32 closes the loop. See DECISIONS.md. Snap the caller's power through
     // the shared PWM cap/deadband floor for uniform clamping with the RAW/profile paths (finding
     // #14). The yaw target is a heading, NOT a PWM — leave it unsnapped.
-    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), yaw, sec, brake, !blocking);
+    // GYRO precondition (ADR-045): `yaw` is an app-frame heading; toHwHeading converts to raw.
+    const uint8_t rc = MiniR4.DriveDC.MoveGyroTime(deadbandSnap(power), YawSource.toHwHeading(yaw), sec, brake, !blocking);
     if (!blocking && rc == 0x00)    // W3 guard
     {
         _moveDone = false;
@@ -339,20 +346,14 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). Best-effort
+    // fallback 0.0 preserves the prior dispatch-time behavior of acting on the vendor's 0.0.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
     // Capture the initial signed delta normalized into (-180, +180] so the BRAKE-edge
     // tick cannot oscillate the spin direction when the IMU briefly straddles target.
-    int32_t deltaNorm = (int32_t) target - (int32_t) cur;
-    while (deltaNorm > 180)
-    {
-        deltaNorm -= 360;
-    }
-    while (deltaNorm <= -180)
-    {
-        deltaNorm += 360;
-    }
+    const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
 
     // Short-circuit on no-op turns. When the normalized delta is already within
     // the heading tolerance, arming the profile would issue one spurious CRUISE
@@ -373,7 +374,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
         return 0x00;
     }
 
-    const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
+    const int8_t sign = turnSign(deltaNorm);
 
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
@@ -383,6 +384,7 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
     _heldYaw                = target;
+    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
 
     // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing
     // extra here. We always return 0x00 — the new state machine cannot fail at dispatch
@@ -405,18 +407,11 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    const int16_t cur    = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045); best-effort 0.0.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
-    int32_t deltaNorm = (int32_t) target - (int32_t) cur;
-    while (deltaNorm > 180)
-    {
-        deltaNorm -= 360;
-    }
-    while (deltaNorm <= -180)
-    {
-        deltaNorm += 360;
-    }
+    const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
 
     // Short-circuit on no-op turns. When the normalized delta is already within
     // the heading tolerance, arming the profile would issue one spurious CRUISE
@@ -437,7 +432,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
         return 0x00;
     }
 
-    const int8_t sign = (deltaNorm > 0) ? (int8_t) +1 : (int8_t) -1;
+    const int8_t sign = turnSign(deltaNorm);
 
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
@@ -447,6 +442,7 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     _turnProfileState       = TurnProfileState::CRUISE;
     _turnDone               = false;
     _heldYaw                = target;
+    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
 
     (void) blocking;
     return 0x00;
@@ -505,12 +501,14 @@ void DriveClass::resetEnc()
 
 double DriveClass::getYaw() const
 {
-    return MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    // Corrected app-frame yaw via the single owner (ADR-045); best-effort 0.0 on read failure.
+    return YawSource.readYawDegOr(0.0);
 }
 
 void DriveClass::holdYaw()
 {
-    _heldYaw = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
+    // Latch the corrected app-frame yaw (ADR-045); best-effort 0.0 on read failure.
+    _heldYaw = (int16_t) YawSource.readYawDegOr(0.0);
 }
 
 // -----------------------------------------------------------------------------------------
@@ -684,7 +682,11 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
         break;
     case DriveMode::GYRO:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), heading);
+        // GYRO precondition (ADR-045): `heading` is app-frame (CCW-positive); toHwHeading
+        // converts to raw. All three GYRO channels feeding this (_profileHeading / _stopHeading
+        // / _wallHeading) carry app-frame values, so this single wrap covers straight-line,
+        // stop-at-line, and wall-stop alike.
+        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), YawSource.toHwHeading(heading));
         break;
     }
 }
@@ -1077,17 +1079,43 @@ void DriveClass::_updateTurnProfile()
         return;
     }
 
-    // Read current IMU yaw + compute signed normalized delta into (-180, +180].
-    const int16_t cur      = (int16_t) MiniR4.Motion.getEuler(MiniR4Motion::AxisType::Yaw);
-    int32_t       rawDelta = (int32_t) _turnTargetYaw - (int32_t) cur;
-    while (rawDelta > 180)
+    // Read current IMU yaw through YawSource (corrected app CCW-positive frame, ADR-045). On a
+    // transient lower-MCU read failure SKIP this tick: holding the previous Move(L,R) one more
+    // cycle is safer than acting on a fabricated 0.0 yaw, which mid-turn could flip the spin
+    // direction. This is a deliberate behavior change vs the old "act on the vendor's 0.0".
+    //
+    // A SUSTAINED read failure is different. An async turn (`.async()`) has no `_drainBlocking`
+    // deadline behind it, so skipping every tick would hold the counter-rotation Move(L,R) latched
+    // forever — an unbounded spin with no fault path. The persistent-fault watchdog (mirrors the
+    // stopAtLine / wallStop stall watchdog) escalates once no good read has landed for
+    // `Config::TURN_IMU_STALL_TIMEOUT_MS` since dispatch / the last good read: hard-stop, drop the
+    // queue, and latch `Fault::IMU_READ_FAILED`. The decision predicate `turnImuReadStalled` is
+    // host-tested and rollover-safe.
+    double curYaw = 0.0;
+    if (!YawSource.readYawDeg(curYaw))
     {
-        rawDelta -= 360;
+        if (turnImuReadStalled(millis(), _turnLastGoodReadMs, Config::TURN_IMU_STALL_TIMEOUT_MS))
+        {
+            Serial.println(F("[Drive] turn: IMU yaw read failed past watchdog — IMU_READ_FAILED"));
+            MiniR4.DriveDC.Move(0, 0);
+            MiniR4.DriveDC.brake(true);    // emergency active-brake, like the _drainBlocking abort.
+            _fault.kind       = Fault::IMU_READ_FAILED;
+            _fault.rc         = 0x00;
+            _fault.cmdKind    = DriveCommand::Kind::TURN_DEG;    // representative — the profile is
+                                                                 // shared by TURN_DEG / TURN_TO_YAW.
+            _turnProfileState = TurnProfileState::IDLE;
+            _turnDone         = true;
+            _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+            _clearQueue();
+        }
+        return;
     }
-    while (rawDelta <= -180)
-    {
-        rawDelta += 360;
-    }
+
+    // A good read landed — reset the persistent-fault watchdog window.
+    _turnLastGoodReadMs    = millis();
+
+    const int16_t cur      = (int16_t) curYaw;
+    const int32_t rawDelta = normalizeTurnDelta((int32_t) _turnTargetYaw - (int32_t) cur);
     // rawDelta is in (-180, +180] so a plain abs() is sufficient — no risk of int overflow.
     // Consistent with the `abs(delta)` / `abs(encL)` pattern used elsewhere in this file.
     const float absDelta = (float) abs(rawDelta);
@@ -1125,45 +1153,20 @@ void DriveClass::_updateTurnProfile()
         return;
     }
 
-    // Apply rotation direction. The captured `_turnDeltaSign` tells us which way to spin:
-    //   +1 → yaw must increase (CCW / left turn).
-    //   -1 → yaw must decrease (CW / right turn).
-    //
-    // Sign convention for the wheel pattern (per Drive's existing setSpeed semantics):
-    // positive PWM on the left wheel drives the left side forward, which rotates the nose
-    // RIGHT (clockwise body). To rotate the body CCW (yaw increases on this IMU) the left
-    // wheel must spin BACKWARD and the right wheel FORWARD — hence the L = -sign*pwm,
-    // R = +sign*pwm pattern for counter-rotation. If hardware testing reveals the IMU yaw
-    // axis is inverted relative to this assumption, flip the signs below and update this
-    // comment.
-    int16_t L = 0;
-    int16_t R = 0;
-    switch (_turnMotorMode)
-    {
-    case 0:    // COUNTER_ROT — both wheels spin opposite directions.
-        L = (int16_t) (-_turnDeltaSign * pwmMag);
-        R = (int16_t) (+_turnDeltaSign * pwmMag);
-        break;
-    case 1:    // PIVOT_LEFT — left wheel stationary, right wheel drives the rotation.
-        L = 0;
-        R = (int16_t) (+_turnDeltaSign * pwmMag);
-        break;
-    case 2:    // PIVOT_RIGHT — right wheel stationary, left wheel drives the rotation.
-        L = (int16_t) (-_turnDeltaSign * pwmMag);
-        R = 0;
-        break;
-    default:
-        // Unknown mode — fall back to counter-rotation rather than refusing to turn.
-        L = (int16_t) (-_turnDeltaSign * pwmMag);
-        R = (int16_t) (+_turnDeltaSign * pwmMag);
-        break;
-    }
+    // Apply rotation direction + wheel pattern via TurnSignPolicy (host-tested; ADR-045).
+    // `_turnDeltaSign` was captured at dispatch from the CORRECTED (app CCW-positive) yaw:
+    //   +1 → yaw must increase (CCW / left turn), -1 → yaw must decrease (CW / right turn).
+    // The CCW counter-rotation pattern is L = -sign*pwm, R = +sign*pwm. The app frame is made
+    // CCW-positive by Config::IMU_YAW_SIGN inside YawSource (the raw IMU is CW-positive), so this
+    // pattern is correct WITHOUT flipping signs here. If a chassis turns the wrong way, change
+    // Config::IMU_YAW_SIGN, not this block.
+    const TurnWheels wheels = turnWheelPattern(_turnDeltaSign, pwmMag, _turnMotorMode);
 
     // Apply the same deadband snap / PWM saturation used by other drive outputs so
     // profiled turns neither stall below the minimum effective magnitude nor exceed
     // the configured PWM range at the actuator boundary.
-    L = (int16_t) deadbandSnap(L);
-    R = (int16_t) deadbandSnap(R);
+    const int16_t L = (int16_t) deadbandSnap(wheels.left);
+    const int16_t R = (int16_t) deadbandSnap(wheels.right);
 
     MiniR4.DriveDC.Move(L, R);
 }

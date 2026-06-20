@@ -105,7 +105,7 @@ int main()
 
         const uint8_t nodeBefore = Localization.getCurrentNode();
 
-        mmL.mockYawDeg = 37.0;    // arbitrary boot heading H; world heading post-zero is 0.
+        mmL.mockYawDeg = -37.0;    // arbitrary boot heading H; world heading post-zero is 0.
         check(Localization.zeroHeadingFromCurrent(), "TC1: zeroHeadingFromCurrent succeeds");
         Localization.setNavActive(false);    // open the integrate gate (does NOT itself re-snapshot).
 
@@ -180,7 +180,7 @@ int main()
         Localization.update();
 
         // Pure manual turn: +45 deg world heading, encoders untouched (no translation).
-        mmL.mockYawDeg = 45.0;
+        mmL.mockYawDeg = -45.0;
         Localization.update();
 
         const Offset2D off = Localization.getOffsetFromNode();
@@ -279,7 +279,7 @@ int main()
         Localization.setNavActive(false);
 
         // Rotate the world heading to 150 deg and settle the baselines there (no translation yet).
-        mmL.mockYawDeg = 150.0;
+        mmL.mockYawDeg = -150.0;
         Localization.update();
 
         // Drive 30 cm forward along the 150-deg heading.
@@ -383,7 +383,7 @@ int main()
 
         // Bench re-zero: the operator re-orients the chassis (IMU now reads 30 deg) and re-zeroes
         // WITHOUT any begin() / node arrival. The gate stays open and _gateWasOpen stays true.
-        mmL.mockYawDeg = 30.0;
+        mmL.mockYawDeg = -30.0;
         check(Localization.zeroHeadingFromCurrent(), "TC8: idle re-zero succeeds");
 
         // The very next tick must NOT report the prior run's offset. The reopen path re-baselines

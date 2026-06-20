@@ -180,6 +180,20 @@ namespace Config
     static_assert(_visionSlotsUnique(),
                   "Config::VISION_CELL_TO_SLOT entries must be unique (no two cells share a slot).");
 
+    // -----------------------------------------------------------------------------------------
+    // Localization / IMU checks (ConfigNav.h)
+    //
+    // COUPLED SITES: Config::IMU_YAW_SIGN is the per-chassis CW->CCW yaw sign applied by
+    // YawSource::readYawDeg (raw STM32 read -> app frame) and YawSource::toHwHeading (app
+    // heading -> STM32 gyro-PID target). It is a PURE SIGN, never a scale factor: every read
+    // and every gyro-heading write multiplies by it exactly once, so any magnitude other than
+    // +/-1 would silently scale all heading math. Pin it here next to the coupled call sites.
+    // -----------------------------------------------------------------------------------------
+    static_assert(IMU_YAW_SIGN == 1.0f || IMU_YAW_SIGN == -1.0f,
+                  "Config::IMU_YAW_SIGN must be exactly 1.0f or -1.0f -- it is the pure "
+                  "CW-to-CCW sign applied by YawSource::readYawDeg and YawSource::toHwHeading, "
+                  "not a scale factor. See config/ConfigNav.h.");
+
 }    // namespace Config
 
 #endif    // CONFIG_CHECKS_H

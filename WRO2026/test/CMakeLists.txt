@@ -645,6 +645,7 @@ set_tests_properties(ctps_dump_selftest PROPERTIES
 add_executable(test_localization_offset
     ${TEST_DIR}/test_localization_offset.cpp
     ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
     ${SKETCH_DIR}/routes.cpp
     ${MOCK_SOURCES}
 )
@@ -761,6 +762,7 @@ add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)
 add_executable(test_reanchor_at_wall
     ${TEST_DIR}/test_reanchor_at_wall.cpp
     ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
     ${SKETCH_DIR}/routes.cpp
     ${MOCK_SOURCES}
 )
@@ -784,6 +786,7 @@ add_test(NAME reanchor_at_wall COMMAND test_reanchor_at_wall)
 add_executable(test_reanchor_at_wall_strict
     ${TEST_DIR}/test_reanchor_at_wall_strict.cpp
     ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
     ${SKETCH_DIR}/routes.cpp
     ${MOCK_SOURCES}
 )
@@ -820,6 +823,24 @@ target_include_directories(test_wall_stop_watchdog PRIVATE ${COMMON_INCLUDES})
 add_test(NAME wall_stop_watchdog COMMAND test_wall_stop_watchdog)
 
 # =========================================================================================
+# Test executable #15b — turn-profile persistent-IMU-fault watchdog (PR #82 review fix).
+#
+# `Drive.cpp` is NOT host-compiled, so the read-failure escalation in `_updateTurnProfile()`
+# (hard-stop + `Fault::IMU_READ_FAILED` once no good IMU yaw read has landed for
+# `Config::TURN_IMU_STALL_TIMEOUT_MS`) is verified at the DECISION layer: the `turnImuReadStalled`
+# predicate in `WROMath.h`, bound to the shipped Config timeout. Same minimal recipe as
+# `test_wall_stop_watchdog` / `test_stop_at_line_armmath` — the predicate touches no
+# Drive/LineArray/Intersection surface, so no force-includes; `MOCK_SOURCES` only supplies the
+# `Serial` / `g_mockMillis` globals the mock `<Arduino.h>` (pulled in via `WROMath.h`) declares.
+# =========================================================================================
+add_executable(test_turn_imu_watchdog
+    ${TEST_DIR}/test_turn_imu_watchdog.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_turn_imu_watchdog PRIVATE ${COMMON_INCLUDES})
+add_test(NAME turn_imu_watchdog COMMAND test_turn_imu_watchdog)
+
+# =========================================================================================
 # Test executable #16 — PathTracker reset-node arrival interlude WALL_STOP -> REANCHOR (PR2, T16).
 # TC10b (AC10 + AC11).
 #
@@ -838,9 +859,94 @@ add_test(NAME wall_stop_watchdog COMMAND test_wall_stop_watchdog)
 add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
     ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
     ${SKETCH_DIR}/routes.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_path_tracker_reset_arrival PRIVATE ${COMMON_INCLUDES})
 add_mock_force_includes(test_path_tracker_reset_arrival)   # shadows the real Drive.h with the mock
 add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
+
+# =========================================================================================
+# Test executable #17 — YawSource CW->CCW adapter, real-linked (ADR-045, TC3/TC4).
+#
+# Links the REAL production `YawSource.cpp` against the mock lower-MCU IMU surface
+# (`mmL.GetIMUEuler` + `mmL.mockYawDeg` / `mmL.mockResult` / `mmL.getImuEulerCallCount`
+# in `mocks/MatrixMiniR4.h`), exercising the sole `Config::IMU_YAW_SIGN` conversion
+# boundary: `readYawDeg` / `readYawDegOr` (STM32 raw -> app frame, with the retry-once
+# transient-failure path) and the static `toHwHeading` (app heading -> STM32 gyro-PID
+# target). With the shipped default `IMU_YAW_SIGN == -1.0f`, every corrected value is the
+# raw value negated, so the test pins both the sign and the untouched-out-param-on-failure
+# contract.
+#
+# `YawSource.cpp` pulls `<MatrixMiniR4.h>` + quoted `"Config.h"` via the `mocks/`-first
+# `COMMON_INCLUDES`, so the mock IMU + the host `Arduino.h` resolve without the real SDK.
+# It does NOT include the production `Drive.h` / `WROLineArray.h` / `Intersection.h`, so
+# this target DELIBERATELY does NOT call `add_mock_force_includes(...)` — there is no
+# production header to shadow. `MOCK_SOURCES` supplies the `Serial` / `g_mockMillis`
+# globals the mock `<Arduino.h>` declares `extern` (pulled in via YawSource.cpp's
+# `delay()` on the retry path); the `mmL` global is an `inline` variable in the mock
+# header, so no extra source defines it.
+# =========================================================================================
+add_executable(test_yaw_source
+    ${TEST_DIR}/test_yaw_source.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_yaw_source PRIVATE ${COMMON_INCLUDES})
+add_test(NAME yaw_source COMMAND test_yaw_source)
+
+# =========================================================================================
+# Test executable #18 — TurnSignPolicy pure-math (ADR-045, TC5/TC6).
+#
+# `normalizeTurnDelta` / `turnSign` / `turnWheelPattern` are header-only inline policies
+# (`TurnSignPolicy.h`) promoted out of Drive.cpp so production AND this host test link the
+# SAME symbols — the `PivotTrimPolicy.h` / `DirectionPolicy.h` precedent. Drive.cpp is NOT
+# host-compiled (heavy MatrixMiniR4 deps), so before this promotion the turn-fold, the
+# sign capture, and the wheel-pattern switch had no automated coverage at all.
+#
+# Pure integer math with zero Arduino / Config.h surface, so this target needs no mocks /
+# SUT sources — just the sketch include dir for the self-contained header (mirrors
+# `test_pivot_trim_policy`, which is `${SKETCH_DIR}`-only for the same reason).
+# =========================================================================================
+add_executable(test_turn_sign_policy
+    ${TEST_DIR}/test_turn_sign_policy.cpp
+)
+target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
+
+# =========================================================================================
+# Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-045, TC7 / AC4, compile-fail).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when `Config::IMU_YAW_SIGN` is not
+# exactly +/-1. Built with `-DIMU_YAW_SIGN_DEFAULT=0.0f` (the `#ifndef`-guarded override
+# hook in `config/ConfigNav.h`), so `IMU_YAW_SIGN == 0.0f` — a value that would silently
+# zero all heading math. The build is expected to FAIL; ctest uses PASS_REGULAR_EXPRESSION
+# on the metacharacter-free substring `IMU_YAW_SIGN must be exactly`. When
+# PASS_REGULAR_EXPRESSION is set, ctest decides pass/fail purely on whether the regex
+# matches the captured build output and IGNORES the process exit code — so the test PASSES
+# only when the intended assert fires, and FAILS if the build broke for any unrelated
+# reason.
+#
+# Mirrors `test_manipulator_belt_collision` EXACTLY: `EXCLUDE_FROM_ALL` +
+# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, and NO
+# `add_mock_force_includes(...)` so a typo in a mock header cannot mask the intended
+# diagnostic. Include dirs = sketch + mocks (via `COMMON_INCLUDES`) so the quoted
+# `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# =========================================================================================
+add_executable(test_imu_yaw_sign_zero
+    ${TEST_DIR}/test_imu_yaw_sign_fail.cpp
+)
+set_target_properties(test_imu_yaw_sign_zero PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_imu_yaw_sign_zero PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_imu_yaw_sign_zero PRIVATE IMU_YAW_SIGN_DEFAULT=0.0f)
+
+add_test(NAME imu_yaw_sign_zero_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_imu_yaw_sign_zero --config $<CONFIG>
+)
+set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "IMU_YAW_SIGN must be exactly")

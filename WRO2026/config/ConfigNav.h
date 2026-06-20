@@ -111,6 +111,64 @@ namespace Config
     constexpr float BIDIRECTIONAL_TURN_THRESHOLD_DEG = 90.0f;
 
     // =========================================================================================
+    // IMU yaw sign — hardware CW-positive → app CCW-positive conversion (ADR-045).
+    //
+    // The STM32 coprocessor reports yaw in a CW-positive frame; the app world frame is
+    // CCW-positive (standard mathematical convention).  A single multiplicative sign
+    // applied at the two adapter points in `YawSource` bridges the two frames:
+    //
+    //   • STM32 → app  : `YawSource::readYawDeg()`  returns  raw * IMU_YAW_SIGN
+    //   • app  → STM32 : `YawSource::toHwHeading()`  converts appHeading * IMU_YAW_SIGN
+    //
+    // ALL other modules (PathTracker, Drive.turnToYaw, Localization, this Config file)
+    // work EXCLUSIVELY in the app CCW-positive frame and must NEVER apply this sign
+    // themselves — doing so would double-negate the conversion.
+    //
+    // Default `-1.0f` matches the current competition chassis (CW-positive raw IMU).
+    // The bench / test rover may differ — override at compile time via
+    //   `-DIMU_YAW_SIGN_DEFAULT=1.0f`
+    // without editing this file.  A static_assert in ConfigChecks.h enforces the value
+    // is exactly ±1.0f (that tripwire lives in ConfigChecks.h — just referenced here).
+    // =========================================================================================
+
+    /**
+     * @brief Per-chassis sign that converts raw STM32 IMU yaw (CW-positive) into the
+     *        app/world frame (CCW-positive).
+     *
+     * The STM32 coprocessor emits yaw values in a clockwise-positive convention.
+     * The application convention — used throughout PathTracker, Drive.turnToYaw,
+     * Localization, and all authored field headings — is counter-clockwise-positive
+     * (standard mathematical).  Multiplying by `IMU_YAW_SIGN` at exactly two points
+     * inside `YawSource` bridges the frames:
+     *
+     *   - **STM32 → app** (`YawSource::readYawDeg`):
+     *       `appYaw = rawYaw * IMU_YAW_SIGN`
+     *   - **app → STM32** (`YawSource::toHwHeading`):
+     *       `hwHeading = appHeading * IMU_YAW_SIGN`
+     *
+     * **No other module applies this sign.** `YawSource` is the sole conversion
+     * boundary; any secondary application would double-negate the sign and reverse
+     * all heading math.
+     *
+     * @note Default `-1.0f` is correct for the current competition chassis where the
+     *       raw IMU yaw increases clockwise.  If a second chassis has a CCW-positive
+     *       raw IMU, override to `1.0f` via `-DIMU_YAW_SIGN_DEFAULT=1.0f` at the
+     *       compiler command line — this leaves the shipped source unchanged.
+     * @note A `static_assert` in `ConfigChecks.h` enforces the value is exactly
+     *       `+1.0f` or `-1.0f` at compile time.  Any other value (e.g. a scale
+     *       factor accidentally placed here) is rejected immediately.
+     * @note **Compile-time override:** guarded by `#ifndef IMU_YAW_SIGN_DEFAULT` so
+     *       a build or host test can pass `-DIMU_YAW_SIGN_DEFAULT=1.0f` to exercise
+     *       the opposite-sign chassis without editing this file — same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above.
+     * @note Consumer: `YawSource` only — see note above.
+     */
+#ifndef IMU_YAW_SIGN_DEFAULT
+#define IMU_YAW_SIGN_DEFAULT (-1.0f)
+#endif
+    constexpr float IMU_YAW_SIGN = IMU_YAW_SIGN_DEFAULT;
+
+    // =========================================================================================
     // Localization operator-offset integrator (ADR-042).
     //
     // The `Localization` 2D operator-offset delta (Pillar 1) accumulates how far the chassis

@@ -12,16 +12,8 @@
 #include "Drive.h"
 #include "NavTypes.h"
 #include "WROMath.h"
+#include "YawSource.h"
 #include "routes.h"
-
-namespace
-{
-/// Backoff before the single retry of a transient lower-MCU IMU read. The
-/// MMLower-caller convention is to retry once after a short delay on a non-OK
-/// result; `GetIMUEuler` already carries its own 100 ms wait timeout, so this
-/// is just bus settle time before re-issuing the command.
-constexpr uint8_t IMU_READ_RETRY_DELAY_MS = 2;
-}    // namespace
 
 LocalizationClass Localization;    // single global instance
 
@@ -52,27 +44,17 @@ bool LocalizationClass::begin()
 
 bool LocalizationClass::_readImuYaw(float& yawOut)
 {
-    // `MiniR4Motion::getEuler` reads via `mmL.GetIMUEuler` but DISCARDS the RESULT, so a
-    // comms timeout there surfaces as a silent 0.0 yaw. Call the lower-MCU API directly so
-    // the RESULT is visible. On a non-OK read the library leaves the out-params untouched
-    // (MMLower.cpp GetIMUEuler returns before writing yaw on a wait/read timeout), so we
-    // must NOT copy `yaw` into `yawOut` unless the read returned OK.
-    double          roll = 0.0, pitch = 0.0, yaw = 0.0;
-    MMLower::RESULT result = mmL.GetIMUEuler(roll, pitch, yaw);
-    if (result != MMLower::RESULT::OK)
-    {
-        // Transient lower-MCU timeout: retry once after a short backoff (the
-        // MMLower-caller convention) before giving up, so a single missed frame
-        // does not fail zeroHeadingFromCurrent() or strand getHeadingDeg() on a
-        // stale heading when the retry would have recovered.
-        delay(IMU_READ_RETRY_DELAY_MS);
-        result = mmL.GetIMUEuler(roll, pitch, yaw);
-    }
-    if (result != MMLower::RESULT::OK)
+    // Single-owner IMU read (ADR-045): YawSource performs the retry-once lower-MCU read
+    // AND applies Config::IMU_YAW_SIGN, returning the corrected app-frame (CCW-positive) yaw.
+    // On a hard failure it leaves its out-param untouched and returns false; mirror that here by
+    // NOT writing yawOut unless the read succeeded. The world-frame math below this layer is
+    // unchanged — it now just operates on the corrected yaw.
+    double corrected = 0.0;
+    if (!YawSource.readYawDeg(corrected))
     {
         return false;
     }
-    yawOut = (float) yaw;
+    yawOut = (float) corrected;
     return true;
 }
 

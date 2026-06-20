@@ -54,6 +54,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-038 — Blind→projection auto stop-at-line: auto-rule via `auto_rule_active`; per-edge `StopAtLineMode` override; field-sourced `Routes::BLIND_PROJECTION_AUTO_SEEK` toggle; soft-fallback default off](./docs/decisions/038-blind-projection-auto-stop-at-line.md) (soft-fallback sub-decision superseded by ADR-039)
 - [ADR-039 — Blind→projection auto stop-at-line fires a normal seek (default margin); a missed line is a hard `DRIVE_FAULT`; the soft-fallback (`soft_fallback`, `_activeSoftFallback`, `STOP_AT_LINE_FAULT_FALL_BACK`) is removed; come-back recovery deferred](./docs/decisions/039-stop-at-line-normal-seek-no-soft-fallback.md)
 - [ADR-044 — STOP_AT_LINE-incoming pivot trim: a seek into a pivot reduces its overshoot by δ so the axle lands δ-short; shared `resolveSensorOvershootTrim` (C++/sim); validator budgets the `"sensor"`-incoming side; δ>offset hard-rejected (reverse re-seat → #75)](./docs/decisions/044-stop-at-line-incoming-pivot-trim.md) (extends ADR-035/036 regime matrix)
+- [ADR-045 — IMU yaw sign normalization: all raw IMU yaw I/O flows through `YawSource`; `Config::IMU_YAW_SIGN` applied once on read + once on STM32 gyro-heading write; turn-sign math in host-tested `TurnSignPolicy.h`](./docs/decisions/045-imu-yaw-sign-normalization.md)
 
 ### Perception
 
@@ -74,7 +75,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 39 | 001, 002, 003, 004, 005 (amended by 042, 043), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 044), 037, 038 (soft-fallback sub-decision superseded by 039), 039, 040, 041, 042 (amends 005 "never stored" clause — parent stays Implemented), 043 (amends 005 "yaw written only by zeroHeadingFromCurrent" clause — parent stays Implemented), 044 (extends the 035/036 pivot regime matrix) |
+| Implemented | 40 | 001, 002, 003, 004, 005 (amended by 042, 043), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 044), 037, 038 (soft-fallback sub-decision superseded by 039), 039, 040, 041, 042 (amends 005 "never stored" clause — parent stays Implemented), 043 (amends 005 "yaw written only by zeroHeadingFromCurrent" clause — parent stays Implemented), 044 (extends the 035/036 pivot regime matrix), 045 |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 0 | — |
 | Deferred | 0 | — |
