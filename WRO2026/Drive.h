@@ -270,9 +270,10 @@ public:
     /**
      * @brief Continuously drive forward holding the most recent yaw target.
      *
-     * Routes to `MiniR4.DriveDC.MoveGyro(power, _heldYaw)`. Update the held yaw with
-     * `holdYaw()` (snapshot the IMU now) or by issuing a turn (turns update `_heldYaw` to the
-     * post-turn target).
+     * Routes to `MiniR4.DriveDC.MoveGyro(power, YawSource::toHwHeading(_heldYaw))` — `_heldYaw`
+     * is an app-frame (CCW-positive) heading, converted to the STM32 raw frame at the call
+     * boundary (ADR-044). Update the held yaw with `holdYaw()` (snapshot the IMU now) or by
+     * issuing a turn (turns update `_heldYaw` to the post-turn target).
      *
      * @param power Drive power in `[-100, 100]`. Negative drives backwards while still
      *              locking heading.
@@ -342,7 +343,7 @@ public:
      * @brief Build a relative-yaw-delta turn.
      *
      * Returns a `TurnDegBuilder` that executes the turn when the temporary destructs.
-     * Defaults are: non-blocking, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
+     * Defaults are: blocking (sync), mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
      * power `Config::TURN_CRUISE_PWM`.
      *
      * @param deg Relative yaw delta in degrees. Positive = whichever direction the lower MCU
@@ -551,8 +552,10 @@ public:
     void resetEnc();
 
     /**
-     * @brief Current IMU yaw in degrees.
-     * @return Yaw value sampled from `MiniR4.Motion.getEuler(AxisType::Yaw)`.
+     * @brief Current IMU yaw in degrees, in the corrected app (CCW-positive) frame.
+     * @return Corrected app-frame yaw via `YawSource::readYawDegOr` (which applies
+     *         `Config::IMU_YAW_SIGN`); best-effort `0.0` on a transient read failure (ADR-044).
+     *         NOT the raw `MiniR4.Motion.getEuler` value — do not re-apply the sign.
      */
     double getYaw() const;
 
