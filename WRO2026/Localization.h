@@ -136,6 +136,22 @@ public:
     uint8_t getCurrentNode() const;
 
     /**
+     * @brief Read a node's stored coordinate on one field axis (the x=0 / y=1 decode).
+     *
+     * Single home for the load-bearing `ResetNode::axis` encoding (`0 = x`, `1 = y` — the T13
+     * cross-task contract the emitter and sim mirror). Callers that need "the coordinate of a
+     * node on the reset axis" (PathTracker's wall-push distance, `reanchorAtWall`'s offset write)
+     * route through here instead of open-coding `(axis == 0) ? x_cm : y_cm`, so the decode lives
+     * in exactly one place on the firmware side.
+     *
+     * @param nodeId Node id in `[0, FieldMap::N_NODES)`.
+     * @param axis   `0 = x`, `1 = y`. Any other value returns the x coordinate (defensive — the
+     *               caller passes a validated `info->axis`).
+     * @return The node's `x_cm` (axis 0) or `y_cm` (axis 1), in centimetres.
+     */
+    float coordOnAxis(uint8_t nodeId, uint8_t axis) const;
+
+    /**
      * @brief Read the current world-frame heading in degrees (live IMU read).
      *
      * Issues a single lower-MCU IMU read (`mmL.GetIMUEuler`). On an OK read computes

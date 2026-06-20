@@ -1047,7 +1047,12 @@ def _validate_reset_nodes(field_data) -> None:
        ``"reset"`` in ``NODE_TYPES`` has a ``RESET_NODES`` entry, and every
        ``RESET_NODES`` key is typed ``"reset"``;
     4. each spec is a dict with ``axis`` in ``{"x","y"}``, a finite
-       ``wall_coord`` (cm), and a finite ``facing`` in ``[0, 360)`` degrees.
+       ``wall_coord`` (cm), and a finite ``facing`` in ``[0, 360)`` degrees;
+    5. ``facing`` points from the node TOWARD the wall (its component along the
+       reset axis shares the sign of ``wall_coord - node_coord``) -- otherwise
+       the forward firmware push would drive away from the wall;
+    6. the ``START_NODE`` is not typed ``"reset"`` -- the interlude runs only on a
+       post-hop arrival, so a reset START node would never re-zero at mission start.
 
     Like :func:`_validate_pivot_turns`, this early-returns on a reset-free
     field (absent / empty table) so the common case pays nothing.
@@ -1078,6 +1083,21 @@ def _validate_reset_nodes(field_data) -> None:
         )
 
     nodes = getattr(field_data, "NODES", {})
+
+    # (#3) The START node may not be a reset node. The wall-zero interlude fires only on a
+    # post-hop ARRIVAL (the firmware gates it off the first plan of a goal, and the sim only
+    # checks for a reset node after a hop), so a START reset node would never run its interlude
+    # at mission start anyway -- typing it "reset" is therefore a no-op trap that suggests a
+    # wall re-zero will happen at the start when it will not. Reject it so the author re-homes
+    # the wall re-zero onto a mid-route node (or uses the calibration start routine instead).
+    start_node = getattr(field_data, "START_NODE", None)
+    if start_node in reset_typed:
+        raise FieldDataError(
+            f"START_NODE '{start_node}' is typed 'reset' -- the wall-zero reset interlude "
+            "runs only on a post-hop arrival, never at mission start, so a reset START node "
+            "never re-zeroes. Move the reset typing to a mid-route node, or change "
+            f"NODE_TYPES['{start_node}']."
+        )
 
     # Consistency: every reset-typed node needs a RESET_NODES entry.
     for name in reset_typed:
@@ -1139,6 +1159,32 @@ def _validate_reset_nodes(field_data) -> None:
                 f"RESET_NODES['{name}'].facing must be a number in [0, 360); "
                 f"got: {facing!r} -- normalize via `facing % 360.0`"
             )
+
+        # Geometry: `facing` must point from the node TOWARD the wall. The
+        # firmware presses FORWARD along `facing` (a hard-coded forward GYRO push
+        # in PathTracker::_dispatchWallStop); if `facing` pointed away from the
+        # wall the chassis would drive off the field, never stall, and the
+        # advisory timeout would still re-anchor against thin air -- a large
+        # silent position error with no fault. The wall normal is axis-aligned
+        # and the world frame is CCW with 0 deg = +x, so the facing's component
+        # along the reset axis is cos(facing) on x / sin(facing) on y; that
+        # component must share the sign of (wall_coord - node_coord). A node
+        # authored exactly ON the wall (zero gap) needs no push and is allowed.
+        node_x, node_y = nodes[name]
+        node_coord = node_x if axis == "x" else node_y
+        toward = float(wall_coord) - float(node_coord)
+        if toward != 0.0:
+            rad = math.radians(float(facing))
+            comp = math.cos(rad) if axis == "x" else math.sin(rad)
+            if comp * toward <= 0.0:
+                sense = "increasing" if toward > 0.0 else "decreasing"
+                raise FieldDataError(
+                    f"RESET_NODES['{name}'].facing = {facing!r} deg points away "
+                    f"from the wall: the node is at {axis}={node_coord} and the "
+                    f"wall is at {axis}={wall_coord}, so `facing` must drive the "
+                    f"chassis toward {sense} {axis} (the firmware presses FORWARD "
+                    "along `facing`). Re-author `facing` to point at the wall."
+                )
 
 
 def validate(field_data) -> None:

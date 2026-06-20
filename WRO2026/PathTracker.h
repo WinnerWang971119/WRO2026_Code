@@ -443,15 +443,17 @@ private:
      * facing)`. Computes the advisory push distance as the absolute gap between the
      * node's coordinate on `axis` and `wall_coord`
      * (`fabs(wall_coord - node_coord[axis])`) — advisory only, since `wallStop` is
-     * stall/timeout-terminated (T14), not distance-terminated. Pushes FORWARD in
-     * `DriveMode::GYRO` holding `facing` (the wall normal) so the chassis presses square
-     * to the wall, latching `_resetNode = node` so the push fires exactly once.
+     * stall/timeout-terminated (T14), not distance-terminated. `wallStop` first SQUARES
+     * (turns in place to `facing`, the wall normal) then pushes FORWARD in
+     * `DriveMode::RAW` (open-loop + motor bias), latching `_resetNode = node` so the push
+     * fires exactly once.
      *
-     * Assumption: the field author places the reset node so the approach heading ≈
-     * `facing`, i.e. the robot arrives roughly facing the wall normal. The GYRO hold
-     * corrects minor heading error during the push; gross misalignment is caught later
-     * by the strict wall-normal check in `REANCHOR` (under
-     * `Config::WALL_NORMAL_STRICT_ENABLED`).
+     * The square-up corrects the arrival-heading error up front, so a misaligned arrival
+     * presses square instead of arcing into the wall (#1). RAW — not GYRO — for the push:
+     * once squared, a heading-hold PID would only fight the wall contact as one wheel
+     * stalls first; an open-loop straight press with motor bias stalls cleanly. A residual
+     * gross misalignment is still caught by the strict wall-normal check in `REANCHOR`
+     * (under `Config::WALL_NORMAL_STRICT_ENABLED`).
      *
      * RAII builder rule: the whole `Drive.wallStop(...)....async()` chain is ONE
      * discarded-temporary statement — never split across statements / a local variable.
@@ -622,6 +624,20 @@ private:
     /// naturally re-arms once the FSM advances off that node (a later goal that
     /// re-visits the same reset node clears it at DEQUEUE first).
     uint8_t _resetNode = FieldMap::NODE_NONE;
+
+    /// @brief True only on the FIRST `_onPlanNextHop()` of a goal — before any hop has run.
+    ///
+    /// The wall-zero reset interlude fires on ARRIVAL at a reset node, i.e. only AFTER a real
+    /// hop has driven the chassis onto it. But `_onPlanNextHop()` also runs once at the very
+    /// start of a goal (the first plan after `DEQUEUE`, possibly after the return-to-node
+    /// prologue), when `cur` is still the start/current node and no hop has moved the chassis.
+    /// Firing the interlude there would (a) wall-push at mission start if the START node is typed
+    /// `reset`, and (b) wall-push on a zero-hop `goTo(R)` while already on `R` — both with zero
+    /// prior motion, and NEITHER modelled by the sim (which only checks for a reset node AFTER a
+    /// hop). This flag is set at `DEQUEUE` and cleared on the first `_onPlanNextHop()`, so the
+    /// interlude is gated to genuine post-hop arrivals and firmware/sim stay in lockstep. The
+    /// matching authoring guard (a START node may not be typed `reset`) lives in the validator.
+    bool _planIsFirstAfterDequeue = false;
 
     /// @brief Bidirectional builder overrides cached for the IN-FLIGHT goal.
     ///

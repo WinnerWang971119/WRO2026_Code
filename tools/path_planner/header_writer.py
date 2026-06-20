@@ -828,7 +828,8 @@ def _resolve_reset_rows(
     The ``axis`` string is encoded to a ``uint8_t`` via
     :data:`_RESET_AXIS_TO_UINT8` (``"x" -> 0``, ``"y" -> 1`` -- the load-bearing
     cross-task contract T15 decodes). ``facing`` is rounded to the nearest
-    integer for the emitted ``int16_t`` field.
+    integer and reduced mod 360 for the emitted ``int16_t`` field, so a value
+    that rounds up to 360 wraps to 0 and stays inside the ``[0, 360)`` contract.
 
     Rows are sorted by node index so the emitted ``RESET_NODES`` table is
     deterministic for golden byte-compares and supports the firmware's ordered
@@ -859,7 +860,11 @@ def _resolve_reset_rows(
                 index_of[name],
                 axis,
                 float(spec["wall_coord"]),
-                int(round(float(spec["facing"]))),
+                # Round to the nearest integer for the emitted int16_t, then
+                # reduce mod 360 so a value rounding UP to 360 (e.g. 359.7 ->
+                # 360) wraps to 0 and stays inside the `facing; // degrees
+                # [0, 360)` contract on Routes::ResetNode.
+                int(round(float(spec["facing"]))) % 360,
             )
         )
     rows.sort(key=lambda row: row[0])

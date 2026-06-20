@@ -1402,6 +1402,32 @@ void DriveClass::_updateWallStop()
         return;
     }
 
+    // SQUARE precedes the push (#1): the in-place turn to the wall normal is driven by
+    // `_updateTurnProfile()` (it ran earlier this tick); here we only wait for it to idle, then seed
+    // the push watchdogs at the TRUE start of the push and enter PUSH. Seeding here (not at dispatch)
+    // ensures a long square-up never eats into the push's stall window. The turn does not command the
+    // push primitive, so SQUARE issues no continuous motion of its own.
+    if (_wallState == WallStopState::SQUARE)
+    {
+        if (_turnProfileState != TurnProfileState::IDLE)
+        {
+            return;    // still squaring — let `_updateTurnProfile` drive the in-place turn.
+        }
+        // Squared. Seed BOTH watchdogs (AC8) now: the reused stop-at-line no-progress watchdog
+        // (baseline at zero travel, clock from now) AND the outer advisory timeout (clock from now).
+        // The inner stall watchdog REUSES `STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM`
+        // via `stopAtLineProgressed` / `stopAtLineStalled` — a stall here means SUCCESS (wall reached),
+        // the inverse of the seek's `LINE_NOT_FOUND`.
+        _wallStartEnc       = MiniR4.M2.getDegrees();    // canonical encoder, matches `_updateProfile`
+        _wallBackOffEnc     = _wallStartEnc;
+        _wallLastProgressCm = 0.0f;
+        _wallLastProgressMs = millis();
+        _wallStartMs        = millis();
+        _moveDone           = false;    // the turn's BRAKE set this true; the push re-owns it now.
+        _wallState          = WallStopState::PUSH;
+        return;            // begin pushing on the next tick.
+    }
+
     // Travel measured as an unsigned magnitude from the per-side baseline (M2, the canonical
     // encoder), matching `_updateProfile` / `_updateStopAtLine`. Forward and reverse both accumulate
     // positive `traveled`, so the back-off comparison needs no sign juggling.
@@ -1731,22 +1757,22 @@ void DriveClass::_dispatchNext()
         _wallTimeoutMs = cmd.timeoutMs;
         _wallReverse  = cmd.reverse;
         _wallBrake    = cmd.brake;
-        _wallStartEnc = MiniR4.M2.getDegrees();    // canonical encoder, matches `_updateProfile`
-        _wallBackOffEnc = _wallStartEnc;
         _wallStopTimedOut = false;    // cleared on dispatch; set true only on the no-stall timeout.
 
-        // Seed BOTH watchdogs (AC8): the reused stop-at-line no-progress watchdog (baseline at zero
-        // travel, clock from now) AND the outer advisory timeout (clock from now). The inner stall
-        // watchdog REUSES `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM`
-        // via `stopAtLineProgressed` / `stopAtLineStalled` — a stall here means SUCCESS (wall
-        // reached), the inverse of the seek's `LINE_NOT_FOUND`.
-        _wallLastProgressCm = 0.0f;
-        _wallLastProgressMs = millis();
-        _wallStartMs        = millis();
+        // (#1) SQUARE FIRST. Turn in place to the wall normal (`_wallHeading`) BEFORE pushing, so the
+        // press is square regardless of the arrival heading — a misaligned arrival no longer arcs into
+        // the wall (the old GYRO push steered while driving). Reuse the existing `_updateTurnProfile`
+        // turn machine via `_execTurnToYaw`; COUNTER_ROT (mode 0) rotates about the chassis center so
+        // the axle stays on the node. The push watchdogs are seeded later, at the SQUARE→PUSH
+        // transition in `_updateWallStop`, NOT here — a long square-up must not eat the push's stall
+        // window. A no-op turn (already squared) short-circuits inside `_execTurnToYaw`, so the very
+        // next `_updateWallStop` tick advances straight to PUSH.
+        (void) _execTurnToYaw(_wallHeading, /*power*/ 0, /*mode COUNTER_ROT*/ 0,
+                              /*brake*/ true, /*blocking*/ false);
 
-        _wallState = WallStopState::PUSH;
-        _moveDone  = false;          // the push owns _moveDone until DONE. `rc` stays 0x00 — seeding
-                                     // cannot fail at dispatch (no lower-MCU round trip).
+        _wallState = WallStopState::SQUARE;
+        _moveDone  = false;          // the interlude owns _moveDone until DONE. `rc` stays 0x00 —
+                                     // seeding cannot fail at dispatch (no lower-MCU round trip).
         break;
     }
     }

@@ -544,6 +544,11 @@ void PathTrackerClass::_stepFsm()
             // PR2: re-arm the wall-zero reset latch for the fresh goal so a reset node
             // re-visited by a later goTo(...) fires its wall push again.
             _resetNode              = FieldMap::NODE_NONE;
+            // PR2 (#3): the wall-zero interlude fires only on a post-hop arrival. Mark this
+            // goal's FIRST plan so `_onPlanNextHop` skips the interlude when no hop has run yet
+            // (a START reset node, or a zero-hop goTo(R) while already on R). Cleared on the
+            // first plan below. Matches the sim, which only checks for a reset node after a hop.
+            _planIsFirstAfterDequeue = true;
             // ADR-036: each goal starts with a clean pivot latch. A pivot whose
             // FINAL hop was the previous goal's last hop left `_pendingPivot`
             // active with no following hop to consume it — clear all three here
@@ -1283,19 +1288,20 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     }
 
     // Advisory push distance: the absolute gap from the node's coordinate on `axis` to
-    // the wall (`axis` is 0 = x, 1 = y — the cross-task ResetNode contract). This is
-    // ADVISORY only — `Drive.wallStop` terminates on a wheel stall or the advisory
-    // timeout (T14), never on distance — but we pass a sensible value rather than 0.
-    const Routes::NodeInfo& n = FieldMap::getNode(node);
-    const float nodeCoord     = (info->axis == 0) ? n.x_cm : n.y_cm;
-    const float distToWall    = fabsf(info->wall_coord - nodeCoord);
+    // the wall. The axis decode (0 = x, 1 = y — the cross-task ResetNode contract) lives in
+    // `Localization::coordOnAxis`, not open-coded here. This distance is ADVISORY only —
+    // `Drive.wallStop` terminates on a wheel stall or the advisory timeout (T14), never on
+    // distance — but we pass a sensible value rather than 0.
+    const float nodeCoord  = Localization.coordOnAxis(node, info->axis);
+    const float distToWall = fabsf(info->wall_coord - nodeCoord);
 
-    // GYRO push holding `facing` (the wall normal), forward. Assumption: the field
-    // author places the reset node so the approach heading ≈ `facing`, i.e. the robot
-    // arrives roughly facing the wall normal — the GYRO hold corrects minor heading
-    // error during the push, and gross misalignment is caught by the strict wall-normal
-    // check in REANCHOR (under Config::WALL_NORMAL_STRICT_ENABLED). Forward by default;
-    // the node is authored so the wall is ahead along `facing`.
+    // (#1) Square-then-push, forward. `wallStop` first turns in place to `facing` (the wall
+    // normal) — its internal SQUARE phase — then pushes STRAIGHT in RAW mode (open-loop +
+    // motor bias). RAW (not GYRO) because once the chassis is squared a heading-hold PID would
+    // only fight the wall contact as one wheel stalls first; an open-loop straight press with
+    // motor bias presses square and stalls cleanly. The squaring corrects any arrival-heading
+    // error up front, so a misaligned arrival no longer arcs into the wall. `facing` is passed
+    // as the squaring target; the node is authored so the wall is ahead along `facing`.
     const int16_t imuTarget = Localization.toImuYaw((float) info->facing);
 
     Serial.print(F("[PathTracker] WALL_STOP: node="));
@@ -1317,7 +1323,7 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     // the FSM non-blocking; the WALL_STOP state polls `Drive.isIdle()`.
     Drive.wallStop(distToWall)
         .setReverse(false)
-        .setMode(DriveMode::GYRO)
+        .setMode(DriveMode::RAW)
         .setHeading(imuTarget)
         .async();
     _state = State::WALL_STOP;
@@ -1327,12 +1333,20 @@ void PathTrackerClass::_onPlanNextHop()
 {
     const uint8_t cur = Localization.getCurrentNode();
 
+    // (#3) Capture-and-clear the "first plan of this goal" flag. The interlude below fires only
+    // on a genuine post-hop arrival, never on the first plan (when `cur` is still the start node
+    // and no hop has moved the chassis) — see `_planIsFirstAfterDequeue`.
+    const bool firstPlan     = _planIsFirstAfterDequeue;
+    _planIsFirstAfterDequeue = false;
+
     // Wall-zero reset hook (PR2, AC9): if the just-arrived node is a RESET node and its
     // interlude has not yet run, divert into the wall-stop / re-anchor interlude BEFORE
     // any planning or goal-reached decision. Returns control to this method (via
     // REANCHOR → PLAN_NEXT_HOP) once the re-anchor completes. A non-reset node is a true
-    // no-op here — the FSM continues exactly as before (AC5-style).
-    if (_maybeEnterReset(cur))
+    // no-op here — the FSM continues exactly as before (AC5-style). The `!firstPlan` gate
+    // (#3) keeps the interlude off the zero-hop cases (START reset node / goTo(R) while on R)
+    // so the firmware fires it only after a real hop, exactly as the sim does.
+    if (!firstPlan && _maybeEnterReset(cur))
     {
         return;    // _state is now WALL_STOP; the interlude will route back here
     }

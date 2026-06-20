@@ -943,15 +943,20 @@ private:
     /**
      * @brief State of the in-flight `wallStop` push (parallel to StopAtLineState).
      *
-     * `IDLE` means no push is in flight; `_updateWallStop()` short-circuits in that state. `PUSH` =
-     * driving at the low push PWM toward the wall, running the (inverted) no-progress watchdog;
-     * stall → BACK_OFF, outer timeout → record advisory + DONE. `BACK_OFF` = rolling the configured
-     * back-off distance in the reverse-of-push direction. `DONE` is the brief tick during which
-     * `update()` issues the final stop, restores the front board, and clears `_moveDone`.
+     * `IDLE` means no push is in flight; `_updateWallStop()` short-circuits in that state. `SQUARE`
+     * = turning in place to `_wallHeading` (the wall normal) BEFORE pushing, so the press is square
+     * regardless of the arrival heading — it reuses the `_updateTurnProfile` turn machine and waits
+     * for it to idle. `PUSH` = driving STRAIGHT at the low push PWM toward the wall (open-loop RAW
+     * with motor bias once squared, so the PID cannot steer or wind up as one wheel contacts first),
+     * running the (inverted) no-progress watchdog; stall → BACK_OFF, outer timeout → record advisory
+     * + DONE. `BACK_OFF` = rolling the configured back-off distance in the reverse-of-push direction.
+     * `DONE` is the brief tick during which `update()` issues the final stop, restores the front
+     * board, and clears `_moveDone`.
      */
     enum class WallStopState : uint8_t
     {
         IDLE,
+        SQUARE,
         PUSH,
         BACK_OFF,
         DONE
@@ -962,15 +967,18 @@ private:
     ///<        `_updateWallStop()`.
 
     DriveMode _wallMode = DriveMode::GYRO;
-    ///< @brief Mode of the active push (RAW / SYNC / GYRO). Selects which continuous primitive
-    ///<        `_updateWallStop()` commands each tick. Default GYRO so the push holds heading and
-    ///<        stays square to the wall. Mirrors `DriveMode`. Captured from `cmd.mode`.
+    ///< @brief Mode of the active PUSH (RAW / SYNC / GYRO). Selects which continuous primitive
+    ///<        `_updateWallStop()` commands each PUSH/BACK_OFF tick. The reset interlude passes RAW
+    ///<        (open-loop + motor bias) because the `SQUARE` phase already faced the wall normal, so
+    ///<        the push goes straight without the GYRO PID fighting the wall contact. Mirrors
+    ///<        `DriveMode`. Captured from `cmd.mode`.
 
     int16_t _wallPushPwm = Config::WALL_STOP_PUSH_PWM;
     ///< @brief Resolved (positive) push PWM magnitude held during PUSH. Captured from `cmd.power`.
 
     int16_t _wallHeading = 0;
-    ///< @brief Yaw target held during a `DriveMode::GYRO` push (ignored otherwise). Captured from
+    ///< @brief Wall-normal yaw target. The `SQUARE` phase turns in place to this BEFORE the push
+    ///<        (and a `DriveMode::GYRO` push, if ever selected, would hold it). Captured from
     ///<        `cmd.heading`.
 
     float _wallBackOffCm = Config::WALL_STOP_BACK_OFF_CM;
@@ -1247,6 +1255,11 @@ private:
      * point is unknown until the wheels stall against the wall). Each tick it measures `traveled`
      * from `_wallStartEnc`, commands the continuous primitive selected by `_wallMode` (applying the
      * push direction from `_wallReverse`), and steps the state machine:
+     *   - `SQUARE` — wait for the in-place turn to `_wallHeading` (the wall normal) to finish (#1).
+     *     The turn is driven by `_updateTurnProfile()` (kicked off at dispatch via `_execTurnToYaw`);
+     *     this state only polls `_turnProfileState`, then seeds the push watchdogs at the true start
+     *     of the push and enters `PUSH`. Squaring first means a misaligned arrival presses square
+     *     instead of arcing into the wall.
      *   - `PUSH` — drive flat at `_wallPushPwm` toward the wall. REUSES the stop-at-line no-progress
      *     watchdog (`stopAtLineProgressed` advances `_wallLastProgressCm` / `_wallLastProgressMs`;
      *     `stopAtLineStalled` over `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`) — but a stall here is
@@ -3053,8 +3066,7 @@ public:
      */
     WallStopBuilder& setBackOff(float cm)
     {
-        _backOff    = cm;
-        _backOffSet = true;
+        _backOff = cm;
         return *this;
     }
 
@@ -3068,8 +3080,7 @@ public:
      */
     WallStopBuilder& setTimeout(uint32_t ms)
     {
-        _timeout    = ms;
-        _timeoutSet = true;
+        _timeout = ms;
         return *this;
     }
 
@@ -3156,10 +3167,12 @@ private:
                                                   ///< Auto-planner / PathTracker opt out via `.async()`.
     int16_t             _heading       = 0;
     bool                _headingSet    = false;
+    // No `*Set` flag for back-off / timeout: each field already DEFAULTS to its Config value, and a
+    // setter just overwrites it, so the resolved value is `_backOff` / `_timeout` unconditionally
+    // (unlike `_heading`, which a flag selects against the runtime `_heldYaw`). Read the fields
+    // directly in the dtor.
     float               _backOff       = Config::WALL_STOP_BACK_OFF_CM;
-    bool                _backOffSet    = false;
     uint32_t            _timeout       = Config::WALL_STOP_TIMEOUT_MS;
-    bool                _timeoutSet    = false;
     bool                _reverse       = false;
     bool                _executed      = false;
 };
@@ -3235,8 +3248,8 @@ inline WallStopBuilder::~WallStopBuilder()
     cmd.heading   = _headingSet ? _heading : _drive._heldYaw;
     cmd.cm        = _cm;
     cmd.reverse   = _reverse;
-    cmd.backOffCm = _backOffSet ? _backOff : Config::WALL_STOP_BACK_OFF_CM;
-    cmd.timeoutMs = _timeoutSet ? _timeout : Config::WALL_STOP_TIMEOUT_MS;
+    cmd.backOffCm = _backOff;     // defaults to Config::WALL_STOP_BACK_OFF_CM; setBackOff overrides
+    cmd.timeoutMs = _timeout;     // defaults to Config::WALL_STOP_TIMEOUT_MS; setTimeout overrides
 
     if (_blocking)
     {

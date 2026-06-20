@@ -66,7 +66,10 @@ enum class WallState : uint8_t { PUSH, BACK_OFF, DONE };
 
 struct WallStopMirror
 {
-    // --- per-PUSH seed (Drive.cpp:1727-1747, WALL_STOP dispatch case) ---
+    // --- per-PUSH seed (Drive.cpp _updateWallStop SQUARE->PUSH transition) ---
+    // NOTE (#1): production seeds the push watchdog when the SQUARE (turn-to-wall-normal) phase
+    // completes and PUSH begins, NOT at the WALL_STOP dispatch — a long square-up must not eat into
+    // the push's stall window. This mirror starts at PUSH, modelling exactly that post-square seed.
     int32_t  startEnc        = 0;
     uint32_t startMs         = 0;
     float    lastProgressCm  = 0.0f;
@@ -78,8 +81,8 @@ struct WallStopMirror
     WallState state          = WallState::PUSH;
     bool      motorsStopped  = false;     ///< set true on the DONE finalise (mirror of _endWallStop).
 
-    /// Seed the push (mirror of the WALL_STOP dispatch case). `seedEnc` = M2 at dispatch.
-    /// MIRROR: Drive.cpp:1734-1747.
+    /// Seed the push (mirror of the SQUARE->PUSH transition). `seedEnc` = M2 when the push begins.
+    /// MIRROR: Drive::_updateWallStop SQUARE case (seeds `_wallStartEnc`/clocks, enters PUSH).
     void dispatch(int32_t seedEnc, uint32_t seedMs)
     {
         startEnc       = seedEnc;
