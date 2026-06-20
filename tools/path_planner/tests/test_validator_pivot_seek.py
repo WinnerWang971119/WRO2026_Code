@@ -1,4 +1,4 @@
-"""TC10..TC12: validator gates for sensor-incoming single-wheel pivots (ADR-043).
+"""TC10..TC12: validator gates for sensor-incoming single-wheel pivots (ADR-044).
 
 Issue #65 tightened the per-turn pivot validator so a SENSOR-terminated
 incoming leg -- a BLIND edge that SEEKS a line at runtime (via the legacy
@@ -7,7 +7,7 @@ the BLIND->PROJECTION auto-rule) -- is treated like a true LINE incoming for the
 over-travel correction: it re-anchors on the line and reduces the post-detect
 overshoot advance by ``delta``, so it now shares the same FRONT sensor-to-axle
 overshoot budget (``Config::LINE_SENSOR_AXLE_OFFSET_CM = 12.02`` cm). The
-pre-ADR-043 blanket exemption for sensor legs is gone.
+pre-ADR-044 blanket exemption for sensor legs is gone.
 
 Two complementary properties are pinned here:
 
@@ -80,7 +80,7 @@ def test_sensor_authored_pivot_within_budget_validates() -> None:
 
 # -- TC10: an over-budget sensor-incoming pivot is rejected from BOTH sources --
 #
-# ADR-043: a sensor-incoming pivot reduces the post-detect overshoot advance by
+# ADR-044: a sensor-incoming pivot reduces the post-detect overshoot advance by
 # delta exactly like a LINE incoming, so it is bound by the same FRONT
 # sensor-to-axle budget (12.02 cm) -- it is no longer exempt. Both over-budget
 # variants are an obtuse 120 deg pivot (delta ~= 15.588 cm > 12.02 cm). Running
@@ -105,7 +105,7 @@ def test_over_budget_sensor_pivot_rejected(field) -> None:
     and each is an obtuse 120 deg pivot whose delta ~= 15.588 cm overflows the
     12.02 cm FRONT overshoot budget. The error names the ``PIVOT_TURNS[0]`` key
     path, the ``sensor/LINE overshoot budget`` it overflows, and the ``issue
-    #75`` escape hint. Asserting BOTH variants reject proves the ADR-043
+    #75`` escape hint. Asserting BOTH variants reject proves the ADR-044
     tightening covers the auto-rule and the authored-override sources alike.
     """
     with pytest.raises(FieldDataError, match=_OVER_BUDGET_REJECT_PATTERN):
@@ -118,7 +118,7 @@ def test_over_budget_sensor_pivot_rejected(field) -> None:
 # triple delta against a shared directed edge ONLY when that leg is
 # DISTANCE-terminated -- a ``"sensor"`` / ``"line"`` leg absorbs its correction
 # on the line and has no edge-length budget to share, so it is never entered
-# into ``out_edge_deltas`` / ``in_edge_deltas``. ADR-043 added a budget to the
+# into ``out_edge_deltas`` / ``in_edge_deltas``. ADR-044 added a budget to the
 # sensor-incoming SINGLE-side correction but must NOT have leaked into this
 # chained sum: the sum stays distance-only.
 #
@@ -197,7 +197,7 @@ def test_chained_pivot_shared_dead_reckon_edge_double_budgets() -> None:
     distance-only chained sum-check rejects with the ``chain on the shared
     dead-reckoned edge`` diagnostic. This is the existing double-budget behavior
     the sensor variant above deliberately escapes -- together they pin that the
-    ADR-043 single-side budget did not leak into the chained sum.
+    ADR-044 single-side budget did not leak into the chained sum.
     """
     field = _make_field(
         nodes=_TC12_NODES,

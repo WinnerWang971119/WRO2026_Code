@@ -657,7 +657,7 @@ def resolve_sensor_overshoot_trim(
     """Reduce a SENSOR-anchored hop's post-detect overshoot by the pivot trim.
 
     Function-identical Python twin of the C++
-    ``PivotTrimPolicy.h::resolveSensorOvershootTrim`` (ADR-043 D1). Both
+    ``PivotTrimPolicy.h::resolveSensorOvershootTrim`` (ADR-044 D1). Both
     implementations MUST stay step-for-step identical so the offline sim and
     the robot agree on the post-detect axle roll for every sensor-terminated
     hop that drives INTO a pivot node; TC13 (T9) drives a value grid through
@@ -691,7 +691,7 @@ def resolve_sensor_overshoot_trim(
         fired.
     :note: The departing trim is intentionally NOT a parameter: a sensor-
         terminated hop self-corrects on the line, so the over-travel of the
-        pivot just left does not accumulate into this roll (ADR-043 D1). The
+        pivot just left does not accumulate into this roll (ADR-044 D1). The
         C++ twin passes the departing slot as a hard-coded ``0.0f`` for the
         same reason.
     """
@@ -1903,7 +1903,7 @@ class PathTrackerSim:
             # A REAR seek therefore CANNOT carry an approaching pivot today --
             # that is why the REAR-seek branch needs no overshoot trim. #54 (REAR
             # pivots) must add a REAR delta-budget on the seek + LINE overshoot
-            # paths BEFORE relaxing this (ADR-043 trigger).
+            # paths BEFORE relaxing this (ADR-044 trigger).
             if self._departing_pivot is not None or self._approaching_pivot is not None:
                 direction = Direction.FRONT
 
@@ -1971,7 +1971,7 @@ class PathTrackerSim:
                 )
                 # Subtract-and-clamp the approaching trim via the shared twin
                 # (mirror of PivotTrimPolicy.h::resolveSensorOvershootTrim,
-                # ADR-043 D1). Pass the SAME ``overshoot_offset_cm`` already
+                # ADR-044 D1). Pass the SAME ``overshoot_offset_cm`` already
                 # resolved above so REAR keeps the rear board's own offset.
                 # Byte-identical to the old inline branch: trim == 0 ->
                 # overshoot_offset_cm; trim > 0 within budget -> offset - trim;
@@ -2086,7 +2086,7 @@ class PathTrackerSim:
                     # reached via a seek still over-travels on its OUTGOING side;
                     # the next hop's ``_departing_pivot`` applies that trim).
                     #
-                    # ADR-043 D1: a seek INTO an approaching pivot must land the
+                    # ADR-044 D1: a seek INTO an approaching pivot must land the
                     # axle ``delta`` short of the node (like every other approach
                     # mechanism), so the firmware reduces the post-detect axle
                     # roll from the full ``offset`` to ``offset - delta`` (the
@@ -2140,7 +2140,7 @@ class PathTrackerSim:
                     # (and enforced) at the force-FRONT site -- not re-asserted
                     # here, where it would be unreachable dead code. #54 (REAR
                     # pivots) must add a REAR overshoot trim on this branch when it
-                    # relaxes the force-FRONT (see the ADR-043 trigger).
+                    # relaxes the force-FRONT (see the ADR-044 trigger).
                     #
                     # 2-board REAR stop-at-line: the rear board detects the
                     # crossing, so the chassis re-anchors via

@@ -160,7 +160,7 @@ def test_tc7_autorule_seek_lands_delta_short_of_pivot_node():
     ``BLIND_PROJECTION_AUTO_SEEK=True`` the blind hop FEEDS a projection, so the
     auto-rule makes ``A -> B`` a ``Drive.stopAtLine`` seek; the declared pivot
     ``(A, B, C)`` is a 90 deg turn (``delta = 9.0`` cm, within the 12.02 cm FRONT
-    overshoot budget). ADR-043 D1: a seek INTO an approaching pivot reduces its
+    overshoot budget). ADR-044 D1: a seek INTO an approaching pivot reduces its
     post-detect axle roll by ``delta`` so the chassis center settles ``delta``
     short of B along the incoming heading ``h_in`` (the A->B unit heading, +x).
 

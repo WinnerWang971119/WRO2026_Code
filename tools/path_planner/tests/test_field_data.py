@@ -870,13 +870,13 @@ def test_pivot_turn_incoming_mode_read_via_bidirectional_resolver() -> None:
 
 
 def test_pivot_turn_rejects_stop_at_line_incoming_over_overshoot_budget() -> None:
-    """ADR-043: a STOP_AT_LINE (sensor)-incoming pivot is now budgeted too.
+    """ADR-044: a STOP_AT_LINE (sensor)-incoming pivot is now budgeted too.
 
     A BLIND incoming edge whose effective mode is STOP_AT_LINE classifies as
     'sensor' and re-anchors via the seek, reducing the post-detect overshoot by
     delta exactly like a LINE incoming -- so it shares the same FRONT overshoot
     budget (12.02 cm). A 120 deg pivot (delta = 15.588 cm, well over the budget)
-    is therefore REJECTED, not exempt: the pre-ADR-043 exemption is removed.
+    is therefore REJECTED, not exempt: the pre-ADR-044 exemption is removed.
     Mirrors ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget``
     (LINE incoming, same 120 deg, rejected).
     """

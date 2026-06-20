@@ -191,7 +191,7 @@ namespace
     /// pivot paths (#6): the LINE overshoot reduction and the STOP_AT_LINE seek. Each caller
     /// appends its own tail (the LINE path clamps and continues; the seek path faults — they
     /// diverge only there), so a later format change touches one place. @p adrTag names the
-    /// ADR governing that path (ADR-036 LINE / ADR-043 seek). Mirrors the
+    /// ADR governing that path (ADR-036 LINE / ADR-044 seek). Mirrors the
     /// `_printReturnOverCapPrefix` prefix-helper pattern.
     void _printOvershootTrimUnderflow(const __FlashStringHelper* adrTag, float offset,
                                       float delta)
@@ -1294,7 +1294,7 @@ void PathTrackerClass::_onPlanNextHop()
     // on: a pivot-adjacent hop is always FRONT, so the seek dispatch's δ-budget
     // (`_dispatchEdgeAfterTurn`) and the validator's δ-budget both use the FRONT
     // offset. #54 (REAR pivots) must add a REAR δ-budget on the seek + LINE
-    // overshoot paths BEFORE relaxing this — see the ADR-043 trigger.
+    // overshoot paths BEFORE relaxing this — see the ADR-044 trigger.
     if (_departingPivot.active || _approachingPivot.active)
     {
         resolved = Direction::FRONT;
@@ -1689,7 +1689,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // zero-margin override and no soft-fallback recovery. The Drive
                 // builder is move-only (deleted copy ctor + early enqueue), so the
                 // whole chain MUST be one discarded-temporary RAII statement.
-                // ADR-043: a seek into an approaching pivot must land the axle δ
+                // ADR-044: a seek into an approaching pivot must land the axle δ
                 // short of the node (like every other approach mechanism), so
                 // reduce the post-detect overshoot by the approaching trim. A
                 // seek is sensor-terminated, so the DEPARTING trim is auto-
@@ -1705,7 +1705,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // pivot seek `reverse` is always false and this resolves to the
                 // FRONT offset the validator's δ-budget assumes. When #54 lifts
                 // force-FRONT, a REAR pivot seek will need a REAR δ-budget here
-                // (ADR-043 trigger).
+                // (ADR-044 trigger).
                 const float seekAxleOffsetCm =
                     reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
                             : Config::LINE_SENSOR_AXLE_OFFSET_CM;
@@ -1721,12 +1721,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     // δ > offset: a forward-only seek has no positive overshoot
                     // left to shorten, so it cannot land the axle δ-short. The
                     // validator rejects this for every seek rung EXCEPT a pure
-                    // call-site setStopAtLine(ON) it cannot see (ADR-043 D4).
+                    // call-site setStopAtLine(ON) it cannot see (ADR-044 D4).
                     // Rather than clamp to the floor and silently fire the pivot
                     // from an off-target origin, hard-fault — consistent with
                     // ADR-039's "no silent degradation on a seek". Issue #75
                     // tracks the reverse re-seat that would compensate δ>offset.
-                    _printOvershootTrimUnderflow(F("ADR-043"), seekAxleOffsetCm,
+                    _printOvershootTrimUnderflow(F("ADR-044"), seekAxleOffsetCm,
                                                  seekApproachTrim);
                     Serial.println(F("delta exceeds offset; faulting (see #75)."));
                     _enterFault(Fault::PIVOT_TRIM_UNDERFLOW, cur, _nextHop);

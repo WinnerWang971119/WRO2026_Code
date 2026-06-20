@@ -360,7 +360,7 @@ def _validate_pivot_turns(field_data) -> None:
     * **Trim exceeds the sensor/LINE-incoming overshoot budget.** Applies to
       BOTH a true ``"line"`` edge AND a ``"sensor"`` (STOP_AT_LINE seek)
       incoming side: each reduces the post-detect overshoot by ``delta``,
-      bounded by the FRONT sensor-to-axle offset (ADR-043).
+      bounded by the FRONT sensor-to-axle offset (ADR-044).
     * **Chained pivots over-trim a shared edge.** Two triples sharing the same
       directed edge ``(v, w)`` (one departing it, one approaching it) must
       satisfy ``delta_uv + delta_vw < length(v -> w)``.
@@ -684,7 +684,7 @@ def _validate_pivot_turns(field_data) -> None:
         # post-detect overshoot advance, bounded by the same FRONT sensor-to-axle
         # offset (pivots are FRONT-only). The classifier already folds authored
         # STOP_AT_LINE edges, per-edge overrides, AND auto-rule BLIND->PROJECTION
-        # seeks into 'sensor', so both regimes share this one budget (ADR-043).
+        # seeks into 'sensor', so both regimes share this one budget (ADR-044).
         # The firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
         # reject when budget - delta < the floor.
         if (

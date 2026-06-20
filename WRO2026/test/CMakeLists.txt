@@ -670,11 +670,11 @@ target_include_directories(test_pivot_trim_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME pivot_trim_policy COMMAND test_pivot_trim_policy)
 
 # =========================================================================================
-# Test executable #9b — SensorOvershootPolicy pure-math (issue #65, ADR-043 D1).
+# Test executable #9b — SensorOvershootPolicy pure-math (issue #65, ADR-044 D1).
 #
 # `resolveSensorOvershootTrim` is a header-only inline policy (`PivotTrimPolicy.h`) —
 # the SENSOR-anchored twin of `resolvePivotTrim`. It feeds the post-detect axle roll
-# through the shared subtract-and-clamp with departing trim hard-coded to 0 (ADR-043 D1:
+# through the shared subtract-and-clamp with departing trim hard-coded to 0 (ADR-044 D1:
 # sensor-terminated hops self-correct on the line, so outgoing over-travel does not
 # accumulate). TC1-TC4 from the issue #65 plan cover the normal, over-trim, no-trim, and
 # strict-boundary cases; together with `test_pivot_trim_policy` they ensure the DISTANCE

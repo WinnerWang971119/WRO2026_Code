@@ -108,7 +108,7 @@ struct SensorOvershootResolution
  *
  * @note Departing trim is intentionally NOT a parameter: a sensor-terminated hop
  *       self-corrects on the line, so the over-travel of the pivot just left does
- *       not accumulate into this roll (ADR-043 D1). Passing the departing slot as
+ *       not accumulate into this roll (ADR-044 D1). Passing the departing slot as
  *       a hard-coded `0.0f` keeps the shared formula honest.
  * @note Cross-language parity: keep step-for-step identical with
  *       `tools/path_planner/sim/runtime.py::resolve_sensor_overshoot_trim`.

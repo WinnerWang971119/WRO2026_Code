@@ -1,4 +1,4 @@
-# ADR-043: STOP_AT_LINE-incoming pivot trim — a seek into a pivot lands the axle δ-short
+# ADR-044: STOP_AT_LINE-incoming pivot trim — a seek into a pivot lands the axle δ-short
 
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #65, Phase 3)

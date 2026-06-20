@@ -734,7 +734,7 @@ static void test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek()
 }
 
 // ===========================================================================
-// TC4 — seek-overshoot dispatch mirror (issue #65, ADR-043 D1).
+// TC4 — seek-overshoot dispatch mirror (issue #65, ADR-044 D1).
 //
 // The BLIND→STOP_AT_LINE dispatch reduces the seek's post-detect axle roll by
 // the APPROACHING pivot trim so a seek into a pivot lands the axle δ short of
@@ -796,7 +796,7 @@ static SensorOvershootResolution replica_seekOvershoot(
 
 /// MIRROR: PathTracker.cpp seek dispatch control flow — the seek HARD-FAULTS
 /// (`Fault::PIVOT_TRIM_UNDERFLOW`) instead of arming `Drive.stopAtLine` iff the
-/// overshoot resolution clamped (δ > offset, ADR-043 D4 / finding #1). Returns
+/// overshoot resolution clamped (δ > offset, ADR-044 D4 / finding #1). Returns
 /// true when the dispatch would fault rather than dispatch.
 static bool replica_seekWouldFault(bool reverse, bool approachingActive,
                                    float approachingTrimCm)
@@ -810,7 +810,7 @@ static void test_TC4_seek_into_approaching_pivot_trims_overshoot()
 
     // Approaching pivot active with trim=9.0: the seek overshoot becomes
     // offset - trim = 12.02 - 9.0 = 3.02 cm (well above the 0.5 floor, so not
-    // clamped). This is the δ-short-of-node landing ADR-043 D1 requires.
+    // clamped). This is the δ-short-of-node landing ADR-044 D1 requires.
     const SensorOvershootResolution r = replica_seekOvershoot(
         /*reverse*/ false,
         /*approachingActive*/ true,
@@ -859,7 +859,7 @@ static void test_TC4_seek_overbudget_trim_clamps_to_floor()
 
     // Pathological trim larger than the axle offset (15.588 > 12.02): the shared
     // subtract-and-clamp floors the overshoot at PIVOT_TRIM_MIN_DRIVE_CM = 0.5
-    // and reports clamped=true so the dispatch can hard-fault (ADR-043 D4) — the
+    // and reports clamped=true so the dispatch can hard-fault (ADR-044 D4) — the
     // helper itself still returns the floored value; see the fault-decision test.
     const SensorOvershootResolution r = replica_seekOvershoot(
         /*reverse*/ false,
@@ -1042,9 +1042,9 @@ int main()
     test_TC20_degenerate_full_domain_pipeline_stop_at_line_no_seek();
 
     // TC4: seek-overshoot dispatch mirror — approaching-pivot trim reduces the
-    // post-detect overshoot (ADR-043 D1); no pivot keeps the full default (AC2);
+    // post-detect overshoot (ADR-044 D1); no pivot keeps the full default (AC2);
     // a REAR seek rolls the REAR offset (#2); over-budget trim clamps the helper
-    // and hard-faults the dispatch (ADR-043 D4 / #1).
+    // and hard-faults the dispatch (ADR-044 D4 / #1).
     test_TC4_seek_into_approaching_pivot_trims_overshoot();
     test_TC4_seek_without_approaching_pivot_keeps_full_offset();
     test_TC4_seek_rear_uses_rear_offset();

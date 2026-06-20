@@ -197,7 +197,7 @@ public:
         DRAIN_TIMEOUT       = 5,
         REVERSE_UNAVAILABLE = 6,
         OFF_NODE            = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
-        PIVOT_TRIM_UNDERFLOW = 8 ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-043 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
+        PIVOT_TRIM_UNDERFLOW = 8 ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
     };
 
     /**

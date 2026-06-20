@@ -4,7 +4,7 @@
 // This is the SENSOR-anchored twin of test_pivot_trim_policy (the DISTANCE path).
 // `resolveSensorOvershootTrim` is the thin wrapper that feeds the sensor-hop post-detect
 // axle roll through the shared subtract-and-clamp formula, fixing the approaching pivot
-// trim only (departing trim is hard-coded 0 — ADR-043 D1: a sensor-terminated hop
+// trim only (departing trim is hard-coded 0 — ADR-044 D1: a sensor-terminated hop
 // self-corrects on the line). Promoting the formula to PivotTrimPolicy.h guarantees
 // production and this host test link the SAME symbol.
 //

@@ -48,10 +48,10 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-027 — `Drive.stopAtLine()` reads the line-sensor leaf; re-anchors localization; arm-window rule; reverse supported (2-board) via `StopAtLinePolicy` unified resolver](./docs/decisions/027-drive-stop-at-line.md)
 - [ADR-034 — `.flat()` is the named opt-out from the default trapezoidal profile](./docs/decisions/034-flat-opt-out-tshape.md)
 - [ADR-035 — Two-sided pivot compensation: `delta = (T/2)*tan(theta/2)` stored on the pivot edge; no global `EDGES` mutation](./docs/decisions/035-two-sided-pivot-compensation.md) (**Superseded by ADR-036**)
-- [ADR-036 — Per-turn pivot compensation: a pivot is a 3-node turn `(u,v,w)`; sparse `PivotTurn[]` table; one firmware lookup resolves wheel + trim](./docs/decisions/036-per-turn-pivot-compensation.md) (extended by ADR-043)
+- [ADR-036 — Per-turn pivot compensation: a pivot is a 3-node turn `(u,v,w)`; sparse `PivotTurn[]` table; one firmware lookup resolves wheel + trim](./docs/decisions/036-per-turn-pivot-compensation.md) (extended by ADR-044)
 - [ADR-038 — Blind→projection auto stop-at-line: auto-rule via `auto_rule_active`; per-edge `StopAtLineMode` override; field-sourced `Routes::BLIND_PROJECTION_AUTO_SEEK` toggle; soft-fallback default off](./docs/decisions/038-blind-projection-auto-stop-at-line.md) (soft-fallback sub-decision superseded by ADR-039)
 - [ADR-039 — Blind→projection auto stop-at-line fires a normal seek (default margin); a missed line is a hard `DRIVE_FAULT`; the soft-fallback (`soft_fallback`, `_activeSoftFallback`, `STOP_AT_LINE_FAULT_FALL_BACK`) is removed; come-back recovery deferred](./docs/decisions/039-stop-at-line-normal-seek-no-soft-fallback.md)
-- [ADR-043 — STOP_AT_LINE-incoming pivot trim: a seek into a pivot reduces its overshoot by δ so the axle lands δ-short; shared `resolveSensorOvershootTrim` (C++/sim); validator budgets the `"sensor"`-incoming side; δ>offset hard-rejected (reverse re-seat → #75)](./docs/decisions/043-stop-at-line-incoming-pivot-trim.md) (extends ADR-035/036 regime matrix)
+- [ADR-044 — STOP_AT_LINE-incoming pivot trim: a seek into a pivot reduces its overshoot by δ so the axle lands δ-short; shared `resolveSensorOvershootTrim` (C++/sim); validator budgets the `"sensor"`-incoming side; δ>offset hard-rejected (reverse re-seat → #75)](./docs/decisions/044-stop-at-line-incoming-pivot-trim.md) (extends ADR-035/036 regime matrix)
 
 ### Perception
 
@@ -72,7 +72,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 37 | 001, 002, 003, 004, 005 (amended by 042), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 043), 037, 038 (soft-fallback sub-decision superseded by 039), 039, 040, 042 (amends 005 "never stored" clause — parent stays Implemented), 043 (extends the 035/036 pivot regime matrix) |
+| Implemented | 37 | 001, 002, 003, 004, 005 (amended by 042), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023, 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 044), 037, 038 (soft-fallback sub-decision superseded by 039), 039, 040, 042 (amends 005 "never stored" clause — parent stays Implemented), 044 (extends the 035/036 pivot regime matrix) |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 0 | — |
 | Deferred | 0 | — |
