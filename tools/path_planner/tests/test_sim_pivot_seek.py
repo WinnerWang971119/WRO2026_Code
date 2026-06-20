@@ -30,8 +30,9 @@ chassis after the full route.
 
 Fixtures: ``tools/path_planner/tests/fixtures/pivot_field_data.py``.
 Code under test: ``tools/path_planner/sim/runtime.py`` --
-``resolve_sensor_overshoot_trim``, the FRONT-seek branch + the REAR-seek guard
-in ``PathTrackerSim._walk_hops``, ``resolve_stop_at_line``.
+``resolve_pivot_trim`` (the shared subtract-and-clamp core),
+``resolve_sensor_overshoot_trim``, the FRONT-seek branch of
+``PathTrackerSim._walk_hops``, ``resolve_stop_at_line``.
 C++ parity twin: ``WRO2026/PivotTrimPolicy.h::resolveSensorOvershootTrim`` +
 its host test ``WRO2026/test/test_sensor_overshoot_policy.cpp`` (TC1-TC4).
 """
@@ -62,6 +63,7 @@ from tools.path_planner.sim.runtime import (
     PIVOT_TRIM_MIN_DRIVE_CM,
     Direction,
     StopAtLine,
+    resolve_pivot_trim,
     resolve_sensor_overshoot_trim,
     resolve_stop_at_line,
 )
@@ -116,12 +118,14 @@ def _seek_advance_into_pivot(distance_cm: float, delta_cm: float) -> float:
     :func:`resolve_sensor_overshoot_trim`. In the clean ``delta <= offset`` case
     this equals ``distance_cm - delta``; it tracks the floor clamp otherwise.
     Recomputed through the production helper so the expectation can never drift
-    from the seek branch it checks.
+    from the seek branch it checks. The ``max(0.0, ...)`` clamp mirrors the seek
+    branch (and the LINE follow guard): a degenerate short edge never yields a
+    backward advance.
     """
     overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
         LINE_SENSOR_AXLE_OFFSET_CM, delta_cm, PIVOT_TRIM_MIN_DRIVE_CM
     )
-    return distance_cm - (LINE_SENSOR_AXLE_OFFSET_CM - overshoot_cm)
+    return max(0.0, distance_cm - (LINE_SENSOR_AXLE_OFFSET_CM - overshoot_cm))
 
 
 def _seek_snapshot(sim, goal):
@@ -266,9 +270,10 @@ def test_tc6_pivot_adjacent_seek_is_forced_front():
     every pivot-adjacent hop. The auto-rule seek ``A -> B`` drives into the pivot
     node B, so it must dispatch FRONT and emit the forward ``ACT_STOP_AT_LINE``
     (front board seek) -- NEVER the reverse ``ACT_STOP_AT_LINE_REVERSE`` (rear
-    board seek). A REAR seek into a pivot is a hard contract violation guarded by
-    an ``AssertionError`` in the sim, so reaching ``go_to`` cleanly already
-    proves the force-FRONT held; the primitive shape pins it explicitly.
+    board seek). The force-FRONT invariant (a pivot-adjacent hop is always FRONT)
+    is enforced at the force-FRONT site in ``_walk_hops``; this test pins its
+    observable consequence -- the pivot-adjacent seek emits the FRONT primitive,
+    so a REAR pivot seek can never reach the (trim-less) REAR-seek branch.
     """
     field = pivot_field_data.make_sensor_autorule_pivot_field()
     sim, _chassis, _graph, _next_hop = _make_pivot_sim(field)
@@ -648,3 +653,125 @@ def test_tc13_sensor_overshoot_trim_no_trim_is_full_offset():
         )
         assert overshoot_cm == pytest.approx(offset, abs=1e-9)
         assert clamped is False
+
+
+# ===========================================================================
+# Shared resolve_pivot_trim core (finding #5) -- parity with the C++ twin
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "raw, departing, approaching, floor",
+    [
+        (60.0, 0.0, 0.0, 0.5),              # no trim -> raw, not clamped
+        (60.0, 9.0, 9.0, 0.5),              # chained: 60 - 9 - 9 = 42, not clamped
+        (12.02, 0.0, 9.0, 0.5),             # sensor-wrapper case: 12.02 - 9 = 3.02
+        (12.02, 0.0, 12.02 - 0.5, 0.5),     # strict-< boundary -> floor, NOT clamped
+        (12.02, 0.0, 12.0, 0.5),            # over-trim -> floor, clamped
+        (10.0, 6.0, 6.0, 0.5),              # 10 - 12 = -2 -> floor, clamped
+        (10.0, 4.0, 5.0, 1.0),              # 10 - 9 = 1.0 == floor -> NOT clamped (strict <)
+    ],
+)
+def test_resolve_pivot_trim_matches_cpp_closed_form(raw, departing, approaching, floor):
+    """The shared core matches the C++ ``resolvePivotTrim`` closed form (finding #5).
+
+    ``resolve_pivot_trim`` is the Python twin of
+    ``PivotTrimPolicy.h::resolvePivotTrim`` that BOTH
+    :meth:`PathTrackerSim._pivot_trim_distance` and
+    :func:`resolve_sensor_overshoot_trim` route through. Assert it reproduces the
+    C++ closed form across ``(raw, departing, approaching, floor)``:
+    ``effective = raw - departing - approaching``,
+    ``drive = max(effective, floor)``, ``clamped = effective < floor`` (strict
+    ``<`` -- the floor-equal boundary is NOT clamped).
+    """
+    drive_cm, effective_cm, clamped = resolve_pivot_trim(
+        raw, departing, approaching, floor
+    )
+    expected_effective = raw - departing - approaching
+    assert effective_cm == pytest.approx(expected_effective, abs=1e-9)
+    assert drive_cm == pytest.approx(max(expected_effective, floor), abs=1e-9)
+    assert clamped is (expected_effective < floor)
+
+
+def test_resolve_sensor_overshoot_trim_delegates_to_core():
+    """The sensor wrapper is ``resolve_pivot_trim`` with departing fixed at 0 (finding #5).
+
+    Proves the SENSOR path and the DISTANCE path physically share one core (the
+    C++ ``resolveSensorOvershootTrim`` / ``resolvePivotTrim`` split), so they can
+    never drift: for every input the wrapper returns exactly the core's
+    ``(drive_cm, clamped)`` with the departing slot hard-zeroed.
+    """
+    for offset, trim, floor in [
+        (12.02, 0.0, 0.5),
+        (12.02, 9.0, 0.5),
+        (12.02, 15.588, 0.5),
+        (7.68, 3.0, 0.5),
+    ]:
+        overshoot_cm, clamped = resolve_sensor_overshoot_trim(offset, trim, floor)
+        drive_cm, _effective_cm, core_clamped = resolve_pivot_trim(
+            offset, 0.0, trim, floor
+        )
+        assert overshoot_cm == pytest.approx(drive_cm, abs=1e-12)
+        assert clamped is core_clamped
+
+
+# ===========================================================================
+# Degenerate short sensor edge (finding #3) -- the seek never drives backward
+# ===========================================================================
+
+
+def _make_short_seek_into_pivot_field():
+    """Return a field whose A->B seek edge is SHORTER than the approaching delta.
+
+    ``A(0,0) --BLIND,stop_at_line "on",5 cm--> B(5,0) --BLIND,90 deg--> C(5,100)``.
+    The pivot ``(A, B, C)`` is a 90 deg turn (``delta = 9`` cm), and ``delta`` is
+    within the 12.02 cm FRONT overshoot budget the validator gates on -- yet the
+    incoming seek edge is only 5 cm. The validator bounds ``delta`` against the
+    overshoot budget, NOT the edge length (the edge-length floor is gated on the
+    "distance" regime), so this degenerate geometry validates clean and reaches
+    the sim. Real edges are never this short; this exists only to drive the seek
+    branch's ``max(0.0, ...)`` clamp.
+    """
+    return _make_field(
+        nodes={"A": (0.0, 0.0), "B": (5.0, 0.0), "C": (5.0, 100.0)},
+        line_segments=[],
+        blind_edges=[("B", "C")],
+        pivot_turns=[("A", "B", "C")],
+        start_node="A",
+        start_heading_deg=0.0,    # facing along A->B (+x)
+        edges=[
+            {
+                "type": "BLIND",
+                "u": "A",
+                "v": "B",
+                "distance_cm": 5.0,
+                "heading_deg": 0.0,
+                "stop_at_line": "on",    # force the short hop to seek
+            }
+        ],
+    )
+
+
+def test_short_sensor_edge_seek_never_drives_backward():
+    """Finding #3: a seek edge shorter than delta clamps the advance to 0, never backward.
+
+    The seek branch's net-displacement model ``distance - (offset - overshoot)``
+    would go negative here (5 - (12.02 - 3.02) = -4), modeling a backward drive the
+    firmware -- sensor-terminated, it physically finds the line -- never makes. The
+    ``max(0.0, ...)`` clamp (mirroring the LINE follow's ``follow_cm = max(0.0,
+    ...)`` guard) pins the advance at 0 instead.
+    """
+    field = _make_short_seek_into_pivot_field()
+    sim, _chassis, _graph, next_hop = _make_pivot_sim(field)
+    delta = compute_pivot_compensation(_AUTORULE_TURN_DEG, _PIVOT_TRACK_CM)
+    # delta is within the FRONT budget (so it validates), but the edge is shorter.
+    assert delta <= LINE_SENSOR_AXLE_OFFSET_CM
+    assert 5.0 < delta
+
+    assert walk_next_hop(next_hop, "A", "C") == ["A", "B", "C"]
+
+    seek_prim, _snap = _seek_snapshot(sim, "C")
+    # Clamped to 0 -- the unclamped model would be negative (5 - 9 = -4).
+    assert seek_prim[1] == pytest.approx(_seek_advance_into_pivot(5.0, delta), abs=1e-9)
+    assert seek_prim[1] == pytest.approx(0.0, abs=1e-9)
+    assert seek_prim[1] >= 0.0

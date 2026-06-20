@@ -44,11 +44,15 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 
 - **Firmware (`PathTracker.cpp`):** in the BLIND seek dispatch, when
   `_approachingPivot.active`, set the seek overshoot to
-  `resolveSensorOvershootTrim(LINE_SENSOR_AXLE_OFFSET_CM, _approachingPivot.trim_cm,
-  PIVOT_TRIM_MIN_DRIVE_CM).overshootCm`, tracing the existing underflow Serial warning
-  when the floor clamp fires. The inline LINE overshoot reduction is refactored to call
-  the same helper, **passing its existing direction-resolved offset** (FRONT or REAR) so
-  the REAR LINE-into-pivot path stays byte-identical.
+  `resolveSensorOvershootTrim(seekAxleOffsetCm, _approachingPivot.trim_cm,
+  PIVOT_TRIM_MIN_DRIVE_CM).overshootCm`, where `seekAxleOffsetCm` is direction-resolved
+  (FRONT/REAR) like the LINE path — force-FRONT keeps it FRONT for every pivot seek. When
+  the floor clamp fires (δ > offset) the dispatch **hard-faults**
+  (`Fault::PIVOT_TRIM_UNDERFLOW`) instead of dispatching the seek off-target (D4). The
+  inline LINE overshoot reduction calls the same helper, **passing its direction-resolved
+  offset** (FRONT or REAR) so the REAR LINE-into-pivot path stays byte-identical; the LINE
+  clamp stays a defensive warn-and-clamp (always validator-covered — no call-site escape —
+  so it cannot land off-target the way the seek can).
 - **Shared helper:** `resolveSensorOvershootTrim` lives in `PivotTrimPolicy.h` (a thin
   wrapper over `resolvePivotTrim(axleOffsetCm, 0.0f, approachingTrimCm, minDriveCm)`,
   departing fixed at 0). Its **Python twin** in `sim/runtime.py` routes both the LINE and
@@ -63,9 +67,13 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 - **D4 — boundary.** The validator computes `next_hop_is_projection` offline, so it sees
   authored `STOP_AT_LINE`, per-edge override, and the auto-rule. The ONE case it cannot
   see is a pure call-site `setStopAtLine(ON)` on an otherwise non-sensor edge (no
-  projection continuation, no override). There the firmware fix still lands the axle
-  δ-short (it keys on `_approachingPivot.active`, not the rung); a δ>offset such hop falls
-  to the runtime overshoot clamp + the "Check validator/config" Serial warning backstop.
+  projection continuation, no override). For `δ ≤ offset` the firmware fix lands the axle
+  δ-short there too (it keys on `_approachingPivot.active`, not the rung). For `δ > offset`
+  — where a forward-only seek has no positive overshoot left to shorten — the dispatch
+  **hard-faults** (`Fault::PIVOT_TRIM_UNDERFLOW`) rather than clamp to the floor and fire
+  the pivot from an off-target origin. That matches ADR-039's "no silent degradation on a
+  seek": a missed line hard-faults, and so does a seek that cannot land where the pivot
+  needs it. The reverse re-seat that would actually compensate `δ > offset` is issue #75.
 
 ## The audit — pivot × stop-mechanism matrix (issue #65 deliverable)
 
@@ -84,7 +92,7 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 |---|---|---|
 | Departing-pivot-into-seek (arm-window) | OK | δ_departing auto-absorbed by sensor termination; the line still appears inside the seek's arm window and under the max margin. Revisit only if the arm window is tightened below the max authored departing δ. |
 | Chained pivots across a seek (latch carry) | OK | `_pendingPivot → _departingPivot` is latched at plan-time in `_onPlanNextHop`; no STOP_AT_LINE / seek path clears it. |
-| Pure call-site `setStopAtLine(ON)` into pivot | Covered + bounded | Reachable; firmware fix lands it δ-short. Validator can't see the call-site-only override → runtime clamp + warning backstop (D4). |
+| Pure call-site `setStopAtLine(ON)` into pivot | Covered (δ≤offset) / hard fault (δ>offset) | Reachable; the validator can't see the call-site-only override. For δ≤offset the firmware fix lands it δ-short; for δ>offset the dispatch hard-faults `Fault::PIVOT_TRIM_UNDERFLOW` instead of landing off-target (D4). |
 | RETURN_TO_NODE (#36) seek onto a pivot node | OK | The return seek precedes pivot resolution and re-acquires the same node; no δ owed. |
 | Pivot node that is also a wall-zero reset node (ADR-040) | OK | The WALL_STOP→REANCHOR interlude re-anchors `v` on arrival, erasing any approach error before the pivot fires; the incoming trim is belt-and-braces. |
 | REAR / 2-board seek into a pivot | Unreachable | FRONT forced on any pivot-adjacent hop before the seek dispatches; the validator also rejects authored REAR on a pivot leg. |

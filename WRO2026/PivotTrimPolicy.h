@@ -28,8 +28,11 @@
  * pattern (PR #34), which killed the per-test replicas those decisions used to
  * need.
  *
- * Cross-language parity: keep step-for-step identical with
- * `tools/path_planner/sim/runtime.py::PathTrackerSim._pivot_trim_distance`.
+ * Cross-language parity: keep step-for-step identical with the Python core
+ * `tools/path_planner/sim/runtime.py::resolve_pivot_trim`, which both
+ * `PathTrackerSim._pivot_trim_distance` and `resolve_sensor_overshoot_trim`
+ * delegate to (mirroring this header's `resolvePivotTrim` /
+ * `resolveSensorOvershootTrim` split) so neither language can drift.
  */
 
 /**

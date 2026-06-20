@@ -613,6 +613,42 @@ def resolve_return_action(
     return ReturnAction.RETURN
 
 
+def resolve_pivot_trim(
+    raw_distance_cm: float,
+    departing_trim_cm: float,
+    approaching_trim_cm: float,
+    min_drive_cm: float,
+) -> Tuple[float, float, bool]:
+    """Resolve the effective distance after the two pivot trims (shared core).
+
+    Function-identical Python twin of the C++
+    ``PivotTrimPolicy.h::resolvePivotTrim``. The single subtract-and-clamp core
+    that BOTH the DISTANCE path (:meth:`PathTrackerSim._pivot_trim_distance`) and
+    the SENSOR path (:func:`resolve_sensor_overshoot_trim`, departing fixed at
+    ``0.0``) route through -- mirroring the C++ ``resolvePivotTrim`` /
+    ``resolveSensorOvershootTrim`` split so the two paths physically cannot
+    drift::
+
+        effective = raw_distance_cm - departing_trim_cm - approaching_trim_cm
+        drive     = max(effective, min_drive_cm)
+        clamped   = effective < min_drive_cm   # strict < : floor-equal is NOT clamped
+
+    :param raw_distance_cm: the directed edge length (DISTANCE path) or the
+        sensor-to-axle offset (SENSOR path).
+    :param departing_trim_cm: outgoing trim of the pivot being LEFT, or ``0.0``.
+    :param approaching_trim_cm: approach trim of the pivot being ENTERED, or
+        ``0.0``.
+    :param min_drive_cm: :data:`PIVOT_TRIM_MIN_DRIVE_CM` underflow floor.
+    :return: ``(drive_cm, effective_cm, clamped)`` -- ``effective_cm`` is the
+        pre-clamp value (kept for the underflow trace), ``drive_cm`` is
+        ``max(effective, floor)``, ``clamped`` is true iff the floor fired.
+    """
+    effective_cm = raw_distance_cm - departing_trim_cm - approaching_trim_cm
+    drive_cm = max(effective_cm, min_drive_cm)
+    clamped = effective_cm < min_drive_cm
+    return drive_cm, effective_cm, clamped
+
+
 def resolve_sensor_overshoot_trim(
     axle_offset_cm: float,
     approaching_trim_cm: float,
@@ -633,9 +669,10 @@ def resolve_sensor_overshoot_trim(
     sensor -- settles relative to the node. When the hop drives into a pivot
     node, the roll is shortened by the approaching trim so the axle settles
     ``delta`` short of the node (the pivot starts at the geometric pivot
-    point). The subtract-and-clamp is byte-identical to the DISTANCE-path
-    :meth:`PathTrackerSim._pivot_trim_distance` so the SENSOR path and the
-    DISTANCE path can never drift:
+    point). The subtract-and-clamp is delegated to the shared core
+    :func:`resolve_pivot_trim` (departing fixed at ``0.0``) -- the SAME core the
+    DISTANCE-path :meth:`PathTrackerSim._pivot_trim_distance` routes through, so
+    the SENSOR path and the DISTANCE path can never drift:
 
         effective   = axle_offset_cm - approaching_trim_cm
         overshoot_cm = max(effective, min_drive_cm)
@@ -658,9 +695,9 @@ def resolve_sensor_overshoot_trim(
         C++ twin passes the departing slot as a hard-coded ``0.0f`` for the
         same reason.
     """
-    effective = axle_offset_cm - approaching_trim_cm
-    overshoot_cm = max(effective, min_drive_cm)
-    clamped = effective < min_drive_cm
+    overshoot_cm, _effective_cm, clamped = resolve_pivot_trim(
+        axle_offset_cm, 0.0, approaching_trim_cm, min_drive_cm
+    )
     return overshoot_cm, clamped
 
 
@@ -1748,26 +1785,29 @@ class PathTrackerSim:
         positive if a future bad table ever over-trims, mirroring the firmware
         clamp; the validator otherwise guarantees the trims fit.
 
+        The subtract-and-clamp itself is delegated to the shared core
+        :func:`resolve_pivot_trim` -- the SAME core the SENSOR path
+        (:func:`resolve_sensor_overshoot_trim`) routes through, mirroring the C++
+        ``resolvePivotTrim`` both firmware paths share so the two cannot drift.
+
         :param edge: directed graph edge attribute mapping for the hop.
         :return: the effective (possibly trimmed) advance distance in cm.
         """
-        effective = float(edge["distance_cm"])
-
-        # Departing (outgoing) compensation: this hop leaves a pivot node.
-        if self._departing_pivot is not None:
-            effective -= self._departing_pivot.trim_cm
-
-        # Approaching (approach) compensation: this hop drives into a pivot node.
-        if self._approaching_pivot is not None:
-            effective -= self._approaching_pivot.trim_cm
-
-        # Defensive clamp (mirrors PathTracker.cpp). A correctly built table
-        # keeps this well positive; degrade to a tiny positive advance rather
-        # than emit a negative displacement on a bad table / config mismatch.
-        if effective < PIVOT_TRIM_MIN_DRIVE_CM:
-            effective = PIVOT_TRIM_MIN_DRIVE_CM
-
-        return effective
+        departing_trim_cm = (
+            self._departing_pivot.trim_cm if self._departing_pivot is not None else 0.0
+        )
+        approaching_trim_cm = (
+            self._approaching_pivot.trim_cm
+            if self._approaching_pivot is not None
+            else 0.0
+        )
+        drive_cm, _effective_cm, _clamped = resolve_pivot_trim(
+            float(edge["distance_cm"]),
+            departing_trim_cm,
+            approaching_trim_cm,
+            PIVOT_TRIM_MIN_DRIVE_CM,
+        )
+        return drive_cm
 
     # -- shared per-hop dispatch (single source for go_to + step_through) ------
 
@@ -1855,6 +1895,15 @@ class PathTrackerSim:
             # to a counter-rotation: the author chose a single-wheel pivot for a
             # clearance a center turn may not have. Mirrors the force-FRONT
             # override in ``PathTracker._onPlanNextHop``.
+            #
+            # This force-FRONT is the single invariant the seek/LINE overshoot
+            # trims rely on: a pivot-adjacent hop is always FRONT, so the FRONT
+            # seek branch below (and the FRONT delta-budget the validator + the
+            # firmware use) is the only one that ever sees an approaching pivot.
+            # A REAR seek therefore CANNOT carry an approaching pivot today --
+            # that is why the REAR-seek branch needs no overshoot trim. #54 (REAR
+            # pivots) must add a REAR delta-budget on the seek + LINE overshoot
+            # paths BEFORE relaxing this (ADR-043 trigger).
             if self._departing_pivot is not None or self._approaching_pivot is not None:
                 direction = Direction.FRONT
 
@@ -2055,37 +2104,44 @@ class PathTrackerSim:
                     # still re-anchors at the node (the seek stops ON the line);
                     # only the physical displacement shrinks, leaving the chassis
                     # center at ``node - delta * h_in`` (T4 parity).
-                    if self._approaching_pivot is not None:
-                        offset = LINE_SENSOR_AXLE_OFFSET_CM
-                        overshoot_cm, _ = resolve_sensor_overshoot_trim(
-                            offset,
-                            self._approaching_pivot.trim_cm,
-                            PIVOT_TRIM_MIN_DRIVE_CM,
-                        )
-                        seek_advance_cm = distance_cm - (offset - overshoot_cm)
-                    else:
-                        seek_advance_cm = distance_cm
+                    #
+                    # Unconditional, helper-driven form mirroring the LINE
+                    # overshoot path above: trim defaults to 0 when there is no
+                    # approaching pivot, so ``offset - overshoot_cm == 0`` and the
+                    # advance is the full ``distance_cm`` (AC2) -- no separate
+                    # branch. This is the FRONT seek branch, so the offset is the
+                    # FRONT sensor-to-axle offset (force-FRONT guarantees every
+                    # pivot seek lands here).
+                    approach_trim_cm = (
+                        self._approaching_pivot.trim_cm
+                        if self._approaching_pivot is not None
+                        else 0.0
+                    )
+                    offset = LINE_SENSOR_AXLE_OFFSET_CM
+                    overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
+                        offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
+                    )
+                    # Clamp to 0 so a degenerate short sensor edge
+                    # (``distance_cm`` < delta) never models a backward drive --
+                    # the same guard the LINE follow uses
+                    # (``follow_cm = max(0.0, distance_cm - offset)``). The
+                    # firmware seek is sensor-terminated (it physically finds the
+                    # line), so it never drives backward; this clamp keeps the
+                    # net-displacement model honest on degenerate geometry.
+                    seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
                     self._chassis.forward(seek_advance_cm)
                     self._localization.on_intersection(nxt)
                     yield (ACT_STOP_AT_LINE, seek_advance_cm)
                 elif seek and direction == Direction.REAR:
-                    # ADR-043 D6 / AC6 contract guard: pivots are FRONT-only in
-                    # v1 (ADR-036 / #54). PathTracker ``_onPlanNextHop`` force-
-                    # FRONTs every pivot-adjacent hop, so a REAR seek can NEVER
-                    # carry an approaching pivot. Assert it here so a future
-                    # REAR-pivot change (#54) cannot silently route an untrimmed
-                    # rear seek into a pivot node and diverge from the firmware.
-                    if self._approaching_pivot is not None:
-                        raise AssertionError(
-                            "REAR seek into a pivot node "
-                            f"(approaching={self._approaching_pivot!r} at "
-                            f"{nxt!r}): pivots are FRONT-only per ADR-036/043; "
-                            "PathTracker._onPlanNextHop force-FRONTs every "
-                            "pivot-adjacent hop, so a REAR pivot seek is a "
-                            "contract violation (untrimmed rear seek). A future "
-                            "REAR-pivot change (#54) must add a rear overshoot "
-                            "trim here before lifting this guard."
-                        )
+                    # Pivots are FRONT-only in v1 (ADR-036 / #54): the force-FRONT
+                    # above sets ``direction = FRONT`` whenever a pivot is active,
+                    # so a REAR seek can NEVER carry an approaching pivot and this
+                    # branch needs no overshoot trim. That invariant is documented
+                    # (and enforced) at the force-FRONT site -- not re-asserted
+                    # here, where it would be unreachable dead code. #54 (REAR
+                    # pivots) must add a REAR overshoot trim on this branch when it
+                    # relaxes the force-FRONT (see the ADR-043 trigger).
+                    #
                     # 2-board REAR stop-at-line: the rear board detects the
                     # crossing, so the chassis re-anchors via
                     # ``on_intersection`` (mirrors the firmware reverse seek +
