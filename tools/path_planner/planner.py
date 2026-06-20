@@ -180,16 +180,39 @@ class BlindDecayParams:
         (the shared :func:`validator.validate_blind_decay_domain` predicate)
         before any weight is computed.
 
+        When ``enabled is False`` the three numeric knobs are NOT cast: every
+        blind edge short-circuits to factor ``1`` and never reads
+        ``k`` / ``exponent`` / ``d_ref``, and
+        :func:`validator.validate_blind_decay_domain` exempts them from its
+        domain check too. A disabled config can therefore carry unset /
+        non-numeric knobs that :func:`validator.validate` accepts (it skips them
+        when disabled); casting them here with ``float(...)`` would raise on such
+        a *validated* field, so the disabled branch substitutes benign in-domain
+        defaults instead. The knobs are still *read* (no ``getattr`` default) so
+        a missing attribute fails loudly regardless of ``enabled``.
+
         :param field_data: object exposing ``BLIND_DECAY_ENABLED`` /
             ``BLIND_DECAY_K`` / ``BLIND_DECAY_EXPONENT`` / ``BLIND_DECAY_D_REF``.
         :return: the populated, frozen params object.
         :raises AttributeError: if any ``BLIND_DECAY_*`` attribute is absent.
         """
+        enabled = field_data.BLIND_DECAY_ENABLED
+        # Strict reads (no getattr default): a missing knob fails loudly even
+        # when disabled, matching the validator which reads all four before its
+        # domain check.
+        k = field_data.BLIND_DECAY_K
+        exponent = field_data.BLIND_DECAY_EXPONENT
+        d_ref = field_data.BLIND_DECAY_D_REF
+        if enabled is False:
+            # Decay off: the knobs are never read downstream and the validator
+            # exempts them, so substitute benign defaults rather than casting
+            # values a disabled config is allowed to leave unset / non-numeric.
+            return cls(enabled=False, k=0.0, exponent=1.0, d_ref=1.0)
         return cls(
-            enabled=field_data.BLIND_DECAY_ENABLED,
-            k=float(field_data.BLIND_DECAY_K),
-            exponent=float(field_data.BLIND_DECAY_EXPONENT),
-            d_ref=float(field_data.BLIND_DECAY_D_REF),
+            enabled=enabled,
+            k=float(k),
+            exponent=float(exponent),
+            d_ref=float(d_ref),
         )
 
 

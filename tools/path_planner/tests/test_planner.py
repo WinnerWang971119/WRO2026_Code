@@ -549,6 +549,30 @@ def test_disabled_params_skip_penalty_entirely() -> None:
     assert weighted.edges["A2", "Gl"]["cost"] == pytest.approx(50.0, abs=1e-9)
 
 
+def test_disabled_decay_accepts_non_numeric_knobs() -> None:
+    """Regression (PR#72 P3): a disabled config that validates must also build.
+
+    ``validate_blind_decay_domain`` exempts ``k`` / ``exponent`` / ``d_ref`` when
+    ``BLIND_DECAY_ENABLED is False`` (it returns early), so ``validate()`` accepts
+    a disabled field that leaves them unset / non-numeric. ``from_field_data``
+    used to cast all three with ``float()`` regardless and crashed the build with
+    ``ValueError: could not convert string to float`` one step after a passing
+    ``validate()``. It now short-circuits the disabled branch to benign in-domain
+    defaults the penalty never reads, so validate-ok implies build-ok.
+    """
+    from tools.path_planner.validator import validate
+
+    fd = _clone_field_data()
+    fd.BLIND_DECAY_ENABLED = False
+    fd.BLIND_DECAY_K = "not-a-number"  # garbage, but decay is OFF
+
+    # The pipeline gate (build_routes.py) green-lights the disabled config...
+    assert validate(fd) is None
+    # ...so the very next step must not raise on the float() cast.
+    params = BlindDecayParams.from_field_data(fd)
+    assert params == BlindDecayParams(enabled=False, k=0.0, exponent=1.0, d_ref=1.0)
+
+
 @pytest.mark.parametrize(
     "bad_params, needle",
     [
