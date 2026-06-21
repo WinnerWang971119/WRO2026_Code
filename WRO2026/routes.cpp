@@ -14,32 +14,29 @@ namespace Routes {
 
     const NodeInfo NODES[N_NODES] = {
         { 67.900000f, 36.900000f, NodeType::LINE, "Inter1"    },     // index 0
-        { 240.300000f, 36.900000f, NodeType::LINE, "Inter2"    },     // index 1
-        { 69.380076f, 93.677649f, NodeType::LINE, "Inter3"    },     // index 2
-        { 251.456890f, 94.264993f, NodeType::LINE, "Inter4"    },     // index 3
-        { 24.154545f, 23.511482f, NodeType::BLIND, "Start"     },     // index 4
-        { 165.000000f, 139.000000f, NodeType::RESET, "Wall1"     },     // index 5
-        { 91.405497f, 59.905337f, NodeType::BLIND, "final"     },     // index 6
-        { 165.117239f, 119.227137f, NodeType::BLIND, "position1" },     // index 7
+        { 69.380076f, 93.677649f, NodeType::LINE, "Inter3"    },     // index 1
+        { 251.456890f, 94.264993f, NodeType::LINE, "Inter4"    },     // index 2
+        { 24.154545f, 23.511482f, NodeType::BLIND, "Start"     },     // index 3
+        { 165.000000f, 139.000000f, NodeType::RESET, "Wall1"     },     // index 4
+        { 91.405497f, 59.905337f, NodeType::BLIND, "final"     },     // index 5
+        { 165.117239f, 119.227137f, NodeType::BLIND, "position1" },     // index 6
     };
 
     const uint8_t NEXT_HOP[N_NODES][N_NODES] = {
         // [from][to] = next-hop node index; 0xFF = unreachable
-        { 0, 1, 2, 6, 4, 6, 6, 6 }, // from Inter1 (index 0)
-        { 0, 1, 6, 3, 0, 3, 6, 3 }, // from Inter2 (index 1)
-        { 0, 6, 2, 7, 4, 7, 6, 7 }, // from Inter3 (index 2)
-        { 7, 1, 7, 3, 7, 7, 7, 7 }, // from Inter4 (index 3)
-        { 0, 0, 2, 0, 4, 0, 0, 0 }, // from Start (index 4)
-        { 7, 7, 7, 7, 7, 5, 7, 7 }, // from Wall1 (index 5)
-        { 0, 1, 2, 7, 0, 7, 6, 7 }, // from final (index 6)
-        { 6, 3, 2, 3, 6, 5, 6, 7 }, // from position1 (index 7)
+        { 0, 1, 5, 3, 5, 5, 5 }, // from Inter1 (index 0)
+        { 0, 1, 6, 3, 6, 5, 6 }, // from Inter3 (index 1)
+        { 6, 6, 2, 6, 6, 6, 6 }, // from Inter4 (index 2)
+        { 0, 1, 0, 3, 0, 0, 0 }, // from Start (index 3)
+        { 6, 6, 6, 6, 4, 6, 6 }, // from Wall1 (index 4)
+        { 0, 1, 6, 0, 6, 5, 6 }, // from final (index 5)
+        { 5, 1, 2, 5, 4, 5, 6 }, // from position1 (index 6)
     };
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         // [from][to]; type=NONE if no direct edge
         { // from Inter1 (index 0)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::LINE, 172.400000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::LINE, 56.796937f, 88.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::BLIND, 45.748412f, 197.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -47,19 +44,8 @@ namespace Routes {
             { EdgeType::BLIND, 32.890027f, 44.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from Inter2 (index 1)
-            { EdgeType::LINE, 172.400000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
-            { EdgeType::LINE, 58.439872f, 78.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Wall1
-            { EdgeType::BLIND, 150.661271f, 171.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
-        },
-        { // from Inter3 (index 2)
+        { // from Inter3 (index 1)
             { EdgeType::LINE, 56.796937f, 268.506755f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::BLIND, 83.478378f, 237.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -67,9 +53,8 @@ namespace Routes {
             { EdgeType::BLIND, 40.319824f, 303.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::BLIND, 99.087743f, 14.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from Inter4 (index 3)
+        { // from Inter4 (index 2)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::LINE, 58.439872f, 258.993971f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -77,9 +62,8 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::BLIND, 89.875713f, 163.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from Start (index 4)
+        { // from Start (index 3)
             { EdgeType::BLIND, 45.748412f, 17.016995f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::BLIND, 83.478378f, 57.196237f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -87,9 +71,8 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from Wall1 (index 5)
+        { // from Wall1 (index 4)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -97,9 +80,8 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::BLIND, 19.773210f, 270.339721f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from final (index 6)
+        { // from final (index 5)
             { EdgeType::BLIND, 32.890027f, 224.383886f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::BLIND, 150.661271f, 351.216818f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::BLIND, 40.319824f, 123.111342f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -107,9 +89,8 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to final
             { EdgeType::BLIND, 94.617636f, 38.826446f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to position1
         },
-        { // from position1 (index 7)
+        { // from position1 (index 6)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter2
             { EdgeType::BLIND, 99.087743f, 194.942356f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter3
             { EdgeType::BLIND, 89.875713f, 343.874591f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Inter4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, ProjectionMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -126,6 +107,6 @@ namespace Routes {
 
     const ResetNode RESET_NODES[1] = {
         // sorted by node index; axis 0 = x, 1 = y
-        { 5, 1, 154.000000f, 270 },
+        { 4, 1, 154.000000f, 270 },
     };
 }  // namespace Routes

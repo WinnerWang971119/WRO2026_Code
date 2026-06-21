@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 namespace Routes {
-    constexpr uint8_t N_NODES = 8;
+    constexpr uint8_t N_NODES = 7;
 
     // Field-wide: auto stop-at-line seek on a BLIND hop that precedes
     // a PROJECTION.
@@ -99,7 +99,7 @@ namespace Routes {
     // Sentinel for unreachable next-hop entries; PathTracker
     // treats this as 'no path; halt and report'.
     constexpr uint8_t NEXT_HOP_NONE = 0xFF;
-    constexpr uint8_t START_NODE = 4;
+    constexpr uint8_t START_NODE = 3;
     constexpr float   START_HEADING_DEG = 0.000000f;
 }  // namespace Routes
 #endif  // ROUTES_H
