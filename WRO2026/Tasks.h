@@ -256,6 +256,7 @@ private:
      * @return Always `true`.
      */
     bool testOne(const TaskArgs& args);
+    bool test0621(const TaskArgs& args);
 
     bool _inTask  = false;
     bool _aborted = false;
