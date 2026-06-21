@@ -52,12 +52,17 @@ from tools.path_planner.editor.commands import (
     AddLineEdge,
     AddNode,
     AddObstacle,
+    AddPivotTurn,
+    ClearResetSpec,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
+    DeletePivotTurn,
     MoveNode,
     RenameNode,
+    SetGlobalKnob,
     SetNodeType,
+    SetResetSpec,
     SetStart,
     SetStartHeading,
 )
@@ -100,9 +105,90 @@ _MIN_WINDOW_WIDTH_PX: int = 800
 _MIN_WINDOW_HEIGHT_PX: int = 400
 
 #: Valid node-type strings as displayed in dialogs and combobox submenus.
+#: ``"reset"`` joins the inspector combobox's whitelist (a reset node IS a
+#: selectable type), but it is never assigned through the plain ``SetNodeType``
+#: path -- :meth:`EditorApp._on_panel_node_type_change` routes a transition into
+#: or out of ``"reset"`` through :class:`SetResetSpec` / :class:`ClearResetSpec`
+#: instead. The right-click "Set type" submenu still offers only line / blind.
 _NODE_TYPE_LINE: str = "line"
 _NODE_TYPE_BLIND: str = "blind"
-_VALID_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
+_NODE_TYPE_RESET: str = "reset"
+_VALID_NODE_TYPES: tuple[str, ...] = (
+    _NODE_TYPE_LINE,
+    _NODE_TYPE_BLIND,
+    _NODE_TYPE_RESET,
+)
+
+#: Plain (non-reset) node types a node may be retyped TO without touching a
+#: reset spec.  Used by the type-change router to decide whether a transition
+#: out of ``"reset"`` is a clear-spec (line / blind target) operation.
+_PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
+
+#: Default reset spec planted when the operator first flips a plain node to the
+#: ``"reset"`` type from the inspector combobox.  These values are deliberately
+#: a placeholder that the geometry validator at Save will reject: flipping the
+#: type opens the reset-spec sub-panel, and the validation badge stays INVALID
+#: (Save blocked) until the operator fills in real wall geometry.  We do NOT
+#: fabricate a passing spec -- a default that happened to validate would let a
+#: half-authored reset node slip through Save.
+_RESET_SPEC_DEFAULT_AXIS: str = "x"
+_RESET_SPEC_DEFAULT_WALL_COORD: float = 0.0
+_RESET_SPEC_DEFAULT_FACING: float = 0.0
+
+#: Allowed wall-zero axis values for an inline reset-spec edit (mirrors
+#: ``commands._VALID_RESET_AXES`` and ``validator._ALLOWED_RESET_AXES``).  The
+#: inline guard rejects anything else before the command is dispatched.
+_RESET_AXES: tuple[str, ...] = ("x", "y")
+
+#: Inclusive lower / exclusive upper bound (degrees, CCW from +x) for a reset
+#: node's parked facing and any other heading the inline guards check.  An
+#: out-of-range facing is an AC7 inline-reject case.
+_FACING_MIN_DEG: float = 0.0
+_FACING_MAX_DEG_EXCLUSIVE: float = 360.0
+
+#: Boolean global knob (the blind-decay enable toggle) -- its value arrives as a
+#: ``bool`` and needs no numeric range check.  Mirrors
+#: ``panels._BOOL_KNOB_NAME`` and the matching ``commands`` knob name.
+_KNOB_BLIND_DECAY_ENABLED: str = "blind_decay_enabled"
+
+#: Float global-knob names + their inline lower bounds.  Each maps a knob name to
+#: ``(minimum, inclusive)`` where ``inclusive`` selects ``>=`` vs ``>``.  These
+#: mirror the authoritative per-knob bounds in
+#: :meth:`commands.SetGlobalKnob._coerce_and_validate`; the inline guard is the
+#: cheap tier-1 copy that reverts a bad widget value without a dispatch round
+#: trip, while the command remains the authority on apply.
+_KNOB_BLIND_DECAY_K: str = "blind_decay_k"
+_KNOB_BLIND_DECAY_EXPONENT: str = "blind_decay_exponent"
+_KNOB_BLIND_DECAY_D_REF: str = "blind_decay_d_ref"
+_KNOB_ROBOT_RADIUS_CM: str = "robot_radius_cm"
+#: Per-knob ``(minimum, inclusive)`` bound. ``inclusive`` True -> value must be
+#: ``>= minimum``; False -> strictly ``> minimum``.
+_FLOAT_KNOB_BOUNDS: dict[str, tuple[float, bool]] = {
+    _KNOB_BLIND_DECAY_K: (0.0, True),
+    _KNOB_BLIND_DECAY_EXPONENT: (1.0, True),
+    _KNOB_BLIND_DECAY_D_REF: (0.0, False),
+    _KNOB_ROBOT_RADIUS_CM: (0.0, False),
+}
+
+#: Human-readable labels for the status-surface mode line, keyed by the
+#: :class:`Mode` enum's ``value`` string. Mirrors the radio-button labels in
+#: ``panels._MODE_LABELS`` so the surface names the mode the way the toolbar
+#: does.
+_MODE_DISPLAY_LABELS: dict[str, str] = {
+    "add_node": "Add node",
+    "move": "Move / select",
+    "edge": "Edge (L / B)",
+    "obstacle": "Obstacle",
+    "start": "Set start",
+}
+#: Fallback shown on the mode line when ``mode_var`` holds an unknown string.
+_MODE_DISPLAY_UNKNOWN: str = "--"
+
+#: Prefix + placeholder for the status-surface selection line.
+_SELECTION_DISPLAY_PREFIX: str = "Selection: "
+_SELECTION_DISPLAY_NONE: str = "none"
+#: Prefix for the status-surface mode line.
+_MODE_DISPLAY_PREFIX: str = "Mode: "
 
 #: Mouse button numbers per the matplotlib MouseEvent contract.
 _MOUSE_BUTTON_LEFT: int = 1
@@ -255,6 +341,11 @@ class EditorApp:
         self._wire_window_close()
 
         # ---- 10. Initial render + panel population ----
+        # Seed the status surface's mode + selection lines so they read the
+        # current truth from the first frame (nothing is selected yet, so the
+        # selection line shows the "none" placeholder).
+        self._update_mode_display()
+        self._update_selection_display(None)
         self._refresh_view()
 
     # ------------------------------------------------------------------
@@ -335,6 +426,15 @@ class EditorApp:
         self._panels.on_auto_create_edges = self._on_panel_auto_create_edges
         self._panels.on_accept_proposed = self._on_panel_accept_proposed
         self._panels.on_reject_proposed = self._on_panel_reject_proposed
+
+        # Property-inspector callbacks (T7): reset-spec edits, pivot add /
+        # delete, and the global decay / robot-radius knobs. Each handler does
+        # cheap tier-1 well-formedness checks before dispatching; the
+        # authoritative geometry validation stays in model.validate() at Save.
+        self._panels.on_reset_spec_change = self._on_panel_reset_spec_change
+        self._panels.on_add_pivot = self._on_panel_add_pivot
+        self._panels.on_delete_pivot = self._on_panel_delete_pivot
+        self._panels.on_global_knob_change = self._on_panel_global_knob_change
 
         # Clear transient drag / preview / selection state whenever the
         # user switches modes — otherwise a half-finished obstacle drag
@@ -563,14 +663,28 @@ class EditorApp:
             self._set_status("Selection cleared.")
         else:
             self._set_status(f"Selected node {node_name!r}.")
+        self._update_selection_display(node_name)
         self._refresh_view()
 
     def _on_panel_node_type_change(self, node_name: str, new_type: str) -> None:
-        """Dispatch a :class:`SetNodeType` command when the combobox changes.
+        """Route an inspector type-combobox change to the correct command.
+
+        The plain :class:`SetNodeType` command refuses any transition that
+        touches the ``"reset"`` type in either direction, so this handler
+        dispatches by case:
+
+        * ``new_type == "reset"`` and the node is NOT already reset -> plant a
+          DEFAULT reset spec via :class:`SetResetSpec`. The default geometry is
+          intentionally a placeholder the Save-time validator rejects: it opens
+          the reset-spec sub-panel so the operator can fill in real wall values,
+          and the validation badge stays INVALID (Save blocked) until they do.
+        * ``new_type`` in {line, blind} and the node IS currently reset ->
+          :class:`ClearResetSpec`, which removes the spec and re-types the node.
+        * Otherwise (a plain line <-> blind change) -> :class:`SetNodeType`.
 
         :param node_name: Name of the node whose type was edited.
-        :param new_type: New type string (already constrained to
-            ``"line"``/``"blind"`` by the panel).
+        :param new_type: New type string (already constrained to one of
+            :data:`_VALID_NODE_TYPES` by the panel combobox).
         """
         if new_type not in _VALID_NODE_TYPES:
             self._set_status(f"Invalid node type {new_type!r}.")
@@ -578,8 +692,31 @@ class EditorApp:
         # Skip the round-trip if the type is unchanged -- the panel's
         # spurious-event protection mostly handles this, but a belt-and-
         # braces check costs nothing and avoids a useless undo entry.
-        if self._model.node_types.get(node_name) == new_type:
+        current_type = self._model.node_types.get(node_name)
+        if current_type == new_type:
             return
+
+        if new_type == _NODE_TYPE_RESET:
+            # Plain -> reset: SetResetSpec atomically sets type=reset AND writes
+            # the (placeholder) reset_nodes spec, keeping the validator's
+            # type-and-spec invariant intact at every step.
+            self._dispatch(
+                SetResetSpec(
+                    node_name,
+                    _RESET_SPEC_DEFAULT_AXIS,
+                    _RESET_SPEC_DEFAULT_WALL_COORD,
+                    _RESET_SPEC_DEFAULT_FACING,
+                )
+            )
+            return
+
+        if current_type == _NODE_TYPE_RESET:
+            # Reset -> line/blind: ClearResetSpec removes the spec and re-types.
+            # SetNodeType would refuse a currently-reset node.
+            self._dispatch(ClearResetSpec(node_name, new_type))
+            return
+
+        # Plain line <-> blind: no reset spec involved.
         self._dispatch(SetNodeType(node_name, new_type))
 
     def _on_panel_node_coords_change(
@@ -626,6 +763,191 @@ class EditorApp:
             return
         if self._dispatch(SetStartHeading(heading_deg)):
             self._last_committed_heading = heading_deg
+
+    # ------------------------------------------------------------------
+    # Property-inspector handlers (T7): reset specs, pivots, global knobs.
+    #
+    # Two-tier validation. These handlers run cheap, hand-written tier-1
+    # well-formedness guards (membership / range / incidence) BEFORE dispatch.
+    # On a failed guard they write a specific status message, re-sync the panel
+    # from the model via _refresh_view() so the bad widget value reverts, and do
+    # NOT dispatch. They deliberately do NOT call any heavy whole-field
+    # validator (no validator._validate_* helpers): those parse Config.h and
+    # build a networkx graph, far too expensive per keystroke. The authoritative
+    # geometry validation stays in model.validate() at Save (tier-2, unchanged).
+    # ------------------------------------------------------------------
+
+    def _reject_inline_edit(self, message: str) -> None:
+        """Report a rejected tier-1 inline edit and revert the offending widget.
+
+        Centralises the reject-and-revert path the inspector handlers share:
+        writes *message* to the status bar, drops the validation badge to its
+        INVALID state (the edit did not pass), and re-syncs every panel widget
+        from the model via :meth:`_refresh_view` so the rejected value is
+        overwritten with the model's current truth (mirrors the panel layer's
+        own reject-and-revert pattern in ``_handle_coords_commit``).
+
+        :param message: Specific reason the edit was rejected.
+        """
+        self._set_status(message)
+        self._panels.set_validation_badge(False)
+        self._refresh_view()
+
+    def _on_panel_reset_spec_change(
+        self, name: str, axis: str, wall_coord: float, facing: float
+    ) -> None:
+        """Dispatch a :class:`SetResetSpec` from the reset-spec sub-panel.
+
+        Tier-1 guards (cheap, before dispatch): the node must exist, the axis
+        must be ``"x"`` / ``"y"``, and the facing must lie in ``[0, 360)`` (an
+        out-of-range facing is an AC7 inline-reject case). The wall coordinate
+        is unconstrained here -- whether it actually lies on the field wall is a
+        geometry question for the Save-time validator. On any failed guard the
+        edit is rejected and the panel reverts; otherwise the spec is dispatched.
+
+        :param name: Node whose reset spec is being authored.
+        :param axis: Wall-zero axis, expected to be ``"x"`` or ``"y"``.
+        :param wall_coord: Wall coordinate in centimetres along *axis*.
+        :param facing: Parked heading in degrees, expected in ``[0, 360)``.
+        """
+        if name not in self._model.nodes:
+            self._reject_inline_edit(
+                f"Reset spec: unknown node {name!r}."
+            )
+            return
+        if axis not in _RESET_AXES:
+            self._reject_inline_edit(
+                f"Reset spec: axis must be one of {_RESET_AXES!r}, "
+                f"got {axis!r}."
+            )
+            return
+        if not (_FACING_MIN_DEG <= facing < _FACING_MAX_DEG_EXCLUSIVE):
+            self._reject_inline_edit(
+                f"Reset spec: facing must be in "
+                f"[{_FACING_MIN_DEG}, {_FACING_MAX_DEG_EXCLUSIVE}), "
+                f"got {facing}."
+            )
+            return
+        self._dispatch(SetResetSpec(name, axis, wall_coord, facing))
+
+    def _on_panel_add_pivot(self, u: str, v: str, w: str) -> None:
+        """Dispatch an :class:`AddPivotTurn` from the pivots add-row.
+
+        Tier-1 guards (cheap, before dispatch): all three endpoints must be
+        known nodes, and both legs must be REAL incident edges -- the
+        undirected pairs ``{u, v}`` and ``{v, w}`` must each exist in
+        ``line_segments`` or ``blind_edges``. Without an incident leg the turn
+        could never be executed, so it is rejected inline. On any failed guard
+        the edit is rejected (no panel revert is needed -- the readonly add-row
+        pickers keep their chosen names so the operator can fix the third one).
+
+        :param u: Arrive-from node name.
+        :param v: Pivot node name.
+        :param w: Leave-to node name.
+        """
+        for role, node in (("u", u), ("v", v), ("w", w)):
+            if node not in self._model.nodes:
+                self._set_status(
+                    f"Pivot: unknown node {node!r} ({role})."
+                )
+                self._panels.set_validation_badge(False)
+                return
+        if not self._edge_exists(u, v):
+            self._set_status(
+                f"Pivot: no edge between {u!r} and {v!r}; "
+                "the arrive leg must be a real incident edge."
+            )
+            self._panels.set_validation_badge(False)
+            return
+        if not self._edge_exists(v, w):
+            self._set_status(
+                f"Pivot: no edge between {v!r} and {w!r}; "
+                "the leave leg must be a real incident edge."
+            )
+            self._panels.set_validation_badge(False)
+            return
+        self._dispatch(AddPivotTurn(u, v, w))
+
+    def _on_panel_delete_pivot(self, turn) -> None:
+        """Dispatch a :class:`DeletePivotTurn` for a pivot row's Remove button.
+
+        Coerces *turn* to a ``tuple`` before constructing the command:
+        :class:`DeletePivotTurn` matches the stored turn by ``==``, and a list
+        would never equal a stored tuple, so a list payload would silently fail
+        to match (the command would raise "not found"). No model read is needed
+        -- the row only exists because the model holds the turn; the command's
+        own apply raises if it has since vanished, and ``_dispatch`` surfaces
+        that to the status bar.
+
+        :param turn: The ``(u, v, w)`` pivot to delete (any sequence; coerced).
+        """
+        self._dispatch(DeletePivotTurn(tuple(turn)))
+
+    def _on_panel_global_knob_change(self, knob: str, value) -> None:
+        """Dispatch a :class:`SetGlobalKnob` from a global-knob widget.
+
+        Tier-1 guards (cheap, before dispatch): the boolean
+        ``blind_decay_enabled`` knob needs no range check; every float knob is
+        bounded per :data:`_FLOAT_KNOB_BOUNDS` (``blind_decay_k >= 0``,
+        ``blind_decay_exponent >= 1``, ``blind_decay_d_ref > 0``,
+        ``robot_radius_cm > 0``). An unknown knob name or an out-of-range float
+        is rejected inline and the panel reverts; otherwise the value is
+        dispatched.
+
+        :param knob: Canonical knob name (one of the keys the panel feeds).
+        :param value: New value -- ``bool`` for ``blind_decay_enabled``,
+            otherwise a ``float``.
+        """
+        if knob == _KNOB_BLIND_DECAY_ENABLED:
+            # Boolean toggle: no range to enforce.
+            self._dispatch(SetGlobalKnob(knob, bool(value)))
+            return
+
+        bound = _FLOAT_KNOB_BOUNDS.get(knob)
+        if bound is None:
+            self._reject_inline_edit(f"Unknown global knob {knob!r}.")
+            return
+
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            self._reject_inline_edit(
+                f"Global knob {knob!r}: {value!r} is not a number."
+            )
+            return
+
+        minimum, inclusive = bound
+        in_range = number >= minimum if inclusive else number > minimum
+        if not in_range:
+            comparator = ">=" if inclusive else ">"
+            self._reject_inline_edit(
+                f"Global knob {knob!r} must be {comparator} {minimum}, "
+                f"got {number}."
+            )
+            return
+
+        self._dispatch(SetGlobalKnob(knob, number))
+
+    def _edge_exists(self, a: str, b: str) -> bool:
+        """Return ``True`` if an undirected edge ``{a, b}`` exists in the model.
+
+        Scans both ``line_segments`` and ``blind_edges``, treating each stored
+        2-tuple as undirected (either ordering matches). Used by the pivot
+        inline guard to confirm both legs of a proposed turn are real incident
+        edges.
+
+        :param a: First endpoint node name.
+        :param b: Second endpoint node name.
+        :return: ``True`` iff the pair is connected by a line or blind edge.
+        """
+        pair = {a, b}
+        for edge in self._model.line_segments:
+            if set(edge) == pair:
+                return True
+        for edge in self._model.blind_edges:
+            if set(edge) == pair:
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Auto-create-edges (T8)
@@ -748,10 +1070,35 @@ class EditorApp:
 
         The re-render is what makes the change visible: it wipes any
         highlight ring around the previously-selected edge endpoints and
-        any in-progress obstacle preview rectangle.
+        any in-progress obstacle preview rectangle.  Also pushes the new mode
+        name onto the status surface's mode line so it always names the active
+        editing mode (AC8).
         """
         self._clear_transient_state()
+        self._update_mode_display()
         self._refresh_view()
+
+    def _update_mode_display(self) -> None:
+        """Push a readable name for the active mode onto the status surface.
+
+        Reads ``mode_var`` directly (rather than via :meth:`_current_mode`) so
+        an unrecognised value still renders a clear ``"--"`` placeholder rather
+        than vanishing.
+        """
+        raw = self._panels.mode_var.get()
+        label = _MODE_DISPLAY_LABELS.get(raw, _MODE_DISPLAY_UNKNOWN)
+        self._panels.set_mode_display(f"{_MODE_DISPLAY_PREFIX}{label}")
+
+    def _update_selection_display(self, node_name: Optional[str]) -> None:
+        """Push the current selection onto the status surface's selection line.
+
+        :param node_name: Selected node name, or ``None`` when the selection is
+            cleared (rendered as the ``"none"`` placeholder).
+        """
+        shown = node_name if node_name else _SELECTION_DISPLAY_NONE
+        self._panels.set_selection_display(
+            f"{_SELECTION_DISPLAY_PREFIX}{shown}"
+        )
 
     def _on_canvas_click(self, x: float, y: float, button: int) -> None:
         """Route a press event to the per-mode handler.
@@ -1259,13 +1606,25 @@ class EditorApp:
             self._record_pending_rename(target, new_name)
 
     def _context_set_type(self, target: str, new_type: str) -> None:
-        """Dispatch :class:`SetNodeType` from the right-click submenu.
+        """Dispatch a node-type change from the right-click submenu.
+
+        The submenu only ever offers the plain ``"line"`` / ``"blind"`` types
+        (reset is created / edited via the inspector). But the target may
+        CURRENTLY be a reset node, and :class:`SetNodeType` refuses to retype a
+        reset node, so this routes a reset -> line/blind change through
+        :class:`ClearResetSpec` (which removes the spec and retypes) instead.
 
         :param target: Node whose type is being changed.
-        :param new_type: ``"line"`` or ``"blind"``.
+        :param new_type: ``"line"`` or ``"blind"`` (the only submenu options).
         """
-        if self._model.node_types.get(target) == new_type:
+        current_type = self._model.node_types.get(target)
+        if current_type == new_type:
             self._set_status(f"{target!r} is already {new_type!r}.")
+            return
+        if current_type == _NODE_TYPE_RESET:
+            # SetNodeType would refuse a currently-reset node; clear the spec
+            # and retype atomically instead.
+            self._dispatch(ClearResetSpec(target, new_type))
             return
         self._dispatch(SetNodeType(target, new_type))
 
@@ -1401,10 +1760,14 @@ class EditorApp:
         :return: ``True`` on success, ``False`` on validation or I/O failure
             (the user is informed via a modal dialog in that case).
         """
-        # 1. Validate first so we never write a half-broken JSON file.
+        # 1. Validate first so we never write a half-broken JSON file. This is
+        # the authoritative tier-2 gate -- the full geometry validator -- and
+        # the only place the validation badge is driven from a real validate()
+        # call (the per-edit inline guards only ever drop it to INVALID).
         try:
             self._model.validate()
         except Exception as exc:  # noqa: BLE001 -- show any validator error
+            self._panels.set_validation_badge(False)
             messagebox.showerror(
                 "Validation failed",
                 f"Cannot save: {exc}",
@@ -1471,6 +1834,10 @@ class EditorApp:
         # tracks only renames made AFTER this Save -- no history-derived anchor
         # is needed, which is what makes undo-after-save robust.
 
+        # The model passed the full validator and reached disk: flip the badge
+        # to VALID. This is the only success path that runs the real validator,
+        # so it is the only place the badge is set TRUE.
+        self._panels.set_validation_badge(True)
         self._clear_dirty()
         self._set_status(_STATUS_SAVED)
         return True

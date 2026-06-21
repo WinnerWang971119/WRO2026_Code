@@ -21,6 +21,7 @@ helpers. EDGES rewrites are captured rather than written to the real
 from __future__ import annotations
 
 import shutil
+import types
 from pathlib import Path
 
 import matplotlib
@@ -82,6 +83,11 @@ def app(tmp_path, monkeypatch):
     instance._set_status = lambda *a, **k: None
     instance._mark_dirty = lambda: None
     instance._clear_dirty = lambda: None
+    # _save drives the validation badge on the SidePanels surface (T7 / AC8);
+    # this bare instance has no Tk panel, so stub just the one setter it calls.
+    instance._panels = types.SimpleNamespace(
+        set_validation_badge=lambda *a, **k: None
+    )
     instance.captured_rewrites = captured
     return instance
 
