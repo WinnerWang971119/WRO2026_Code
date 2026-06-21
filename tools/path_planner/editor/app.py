@@ -41,10 +41,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tkinter import messagebox, simpledialog
 
-from tools.path_planner.editor.dialogs import AddNodeDialog
+from tools.path_planner.editor.dialogs import AddNodeDialog, ShortcutsDialog
 from typing import Optional
 
-from tools.path_planner.editor import auto_edges, loader
+from tools.path_planner.editor import auto_edges, loader, projection_edges
 from tools.path_planner.editor.canvas import FieldCanvas
 from tools.path_planner.editor.commands import (
     AddBlindEdge,
@@ -53,12 +53,14 @@ from tools.path_planner.editor.commands import (
     AddNode,
     AddObstacle,
     AddPivotTurn,
+    AddProjectionEdge,
     ClearResetSpec,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
     DeletePivotTurn,
     MoveNode,
+    ProjectionDelta,
     RenameNode,
     SetGlobalKnob,
     SetNodeType,
@@ -215,6 +217,14 @@ _OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
 #: the oldest entry so the most recent two clicks always win.
 _EDGE_SELECTION_MAX: int = 2
 
+#: Status hint shown when the operator opens the projection-edge authoring flow
+#: from the "+ add projection" ghost button. It reuses the EDGE-mode two-node
+#: picker; the order of the two picks is load-bearing (FIRST = source ``u``,
+#: SECOND = head ``v``) because a projection edge is DIRECTED.
+_STATUS_PROJECTION_HINT: str = (
+    "Projection: pick source then head, press P."
+)
+
 #: Single-key mode shortcuts (AC5). Each entry maps a Tk key *keysym* to the
 #: :class:`Mode` it activates; the handler sets ``mode_var`` to the mode's
 #: ``value`` (firing the existing ``_on_mode_change`` trace). Both the lower-
@@ -264,6 +274,50 @@ _STATUS_BUILD_FAILED: str = "Build failed; see dialog for details."
 _PLANNER_ROOT: Path = Path(__file__).resolve().parent.parent
 _FIELD_DATA_PY_PATH: Path = _PLANNER_ROOT / "field_data.py"
 _FIELD_DATA_JSON_PATH: Path = _PLANNER_ROOT / "field_data.json"
+
+#: Canonical keyboard-shortcut reference, the SINGLE source of truth for the
+#: shortcuts dialog (AC9). Each group is ``(category_title, [(key, desc), ...])``
+#: and mirrors the bindings installed in :meth:`EditorApp._wire_keyboard_shortcuts`.
+#: When a binding is added or changed there, this table must change with it so
+#: the operator-facing help stays accurate. The shape matches
+#: :class:`dialogs.ShortcutsDialog`'s ``shortcut_groups`` parameter exactly.
+_SHORTCUT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Modes",
+        (
+            ("A", "Add node"),
+            ("M", "Move / select"),
+            ("E", "Edge"),
+            ("O", "Obstacle"),
+            ("S", "Set start"),
+        ),
+    ),
+    (
+        "Edit",
+        (
+            ("Ctrl+Z", "Undo"),
+            ("Ctrl+Y", "Redo"),
+            ("Delete", "Delete selected edge (EDGE mode)"),
+            ("Arrows", "Nudge selected node 0.2 cm"),
+            ("Shift+Arrows", "Nudge selected node 1 cm"),
+        ),
+    ),
+    (
+        "Edges",
+        (
+            ("L", "Add line edge (EDGE mode)"),
+            ("B", "Add blind edge (EDGE mode)"),
+            ("P", "Add projection edge (EDGE mode)"),
+        ),
+    ),
+    (
+        "File",
+        (
+            ("Ctrl+S", "Save"),
+            ("? / F1", "Show this help"),
+        ),
+    ),
+)
 
 
 class EditorApp:
@@ -333,6 +387,21 @@ class EditorApp:
         # history stacks -- doing so was the source of the undo-saved-rename
         # divergence, because History mutates (redo is cleared by any new edit).
         self._pending_renames: dict[str, str] = {}
+
+        # ---- 3b. Projection-edge working set ----
+        # The app owns exactly ONE ProjectionDelta. Its baseline (``loaded``)
+        # is seeded from the field_data module's EDGES below; the
+        # AddProjectionEdge / DeleteProjectionEdge commands push the pending
+        # adds / removes through the same History as every other edit, and the
+        # Save flow flushes them to field_data.py before re-seeding the
+        # baseline. The reconciled render() set is what the canvas paints.
+        self._proj_delta: ProjectionDelta = ProjectionDelta()
+        if self._field_data_module is not None:
+            self._proj_delta.set_loaded(
+                projection_edges.read_projection_edges(
+                    self._field_data_module
+                )
+            )
 
         # ---- 4. Tk root window ----
         self._owns_root: bool = root is None
@@ -407,6 +476,14 @@ class EditorApp:
         self._wire_window_close()
 
         # ---- 11. Initial render + panel population ----
+        # Seed the title-bar filename from the JSON sidecar's basename so the
+        # chrome names the file being edited; the dirty dot starts hidden
+        # (a freshly loaded model is clean).
+        self._panels.set_filename(self._json_path.name)
+        self._panels.set_dirty(False)
+        # Push the existing projection edges to the canvas so they render on
+        # load (the baseline was seeded into ``_proj_delta`` in step 3b).
+        self._sync_projection_render()
         # Seed the status surface's mode + selection lines so they read the
         # current truth from the first frame (nothing is selected yet, so the
         # selection line shows the "none" placeholder).
@@ -502,6 +579,12 @@ class EditorApp:
         self._panels.on_delete_pivot = self._on_panel_delete_pivot
         self._panels.on_global_knob_change = self._on_panel_global_knob_change
 
+        # Ghost "+ add projection" button and the status-strip shortcuts hint
+        # (T8 chrome). The projection handler enters the EDGE-mode picker; the
+        # shortcuts handler opens the read-only reference dialog.
+        self._panels.on_add_projection = self._on_panel_add_projection
+        self._panels.on_show_shortcuts = self._show_shortcuts_dialog
+
         # Clear transient drag / preview / selection state whenever the
         # user switches modes — otherwise a half-finished obstacle drag
         # or edge pick would latch across a mode change and surprise the
@@ -527,6 +610,8 @@ class EditorApp:
         * ``Delete``                    -> :meth:`_handle_delete_key`
         * ``L``                         -> :meth:`_handle_edge_line_key`
         * ``B``                         -> :meth:`_handle_edge_blind_key`
+        * ``P``                         -> :meth:`_handle_edge_projection_key`
+        * ``?`` / ``F1``                -> :meth:`_show_shortcuts_dialog`
         * ``A`` / ``M`` / ``E`` / ``O`` / ``S`` -> switch mode (AC5), per
           :data:`_MODE_SHORTCUT_KEYS` (Add node / Move / Edge / Obstacle /
           Set start).
@@ -560,6 +645,20 @@ class EditorApp:
         self._root.bind_all("<KeyPress-L>", guard(self._handle_edge_line_key))
         self._root.bind_all("<KeyPress-b>", guard(self._handle_edge_blind_key))
         self._root.bind_all("<KeyPress-B>", guard(self._handle_edge_blind_key))
+        self._root.bind_all(
+            "<KeyPress-p>", guard(self._handle_edge_projection_key)
+        )
+        self._root.bind_all(
+            "<KeyPress-P>", guard(self._handle_edge_projection_key)
+        )
+
+        # Shortcuts-help dialog (AC9): ``?`` and ``F1`` both open it. ``?`` is
+        # Shift+/ -- bind the keysym ``question`` (its plain glyph) so the
+        # focus-guard still gates it while typing into a field.
+        self._root.bind_all(
+            "<KeyPress-question>", guard(self._show_shortcuts_dialog)
+        )
+        self._root.bind_all("<F1>", guard(self._show_shortcuts_dialog))
 
         # Mode-switch shortcuts (AC5). Bind both the lower- and upper-case form
         # of each letter (mirroring L / B) so the key works regardless of Caps
@@ -768,6 +867,10 @@ class EditorApp:
 
     def _refresh_view(self) -> None:
         """Re-render canvas + side panels + button enable states + title."""
+        # Keep the canvas's projection overlay in lockstep with the delta's
+        # reconciled render set before the repaint (a node move / undo / redo
+        # can change the geometry the arrows are drawn against).
+        self._sync_projection_render()
         highlighted = list(self._edge_selection)
         self._canvas.render(
             self._model,
@@ -779,20 +882,41 @@ class EditorApp:
         self._panels.set_redo_enabled(self._history.can_redo)
         self._update_title()
 
+    def _sync_projection_render(self) -> None:
+        """Push the delta's reconciled projection edges onto the canvas.
+
+        Called after every projection mutation and from :meth:`_refresh_view`
+        so the canvas overlay always mirrors ``_proj_delta.render()``. The
+        canvas stores the set as-is and replays it on its next paint; this
+        method does NOT itself trigger a repaint (the caller's refresh does).
+
+        Defensive against a bare instance (the rename unit tests build one via
+        ``__new__`` without a ``_proj_delta`` / ``_canvas``): a missing
+        collaborator makes this a silent no-op rather than an
+        :class:`AttributeError`.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        canvas = getattr(self, "_canvas", None)
+        if delta is None or canvas is None:
+            return
+        canvas.set_projection_edges(delta.render())
+
     def _update_title(self) -> None:
         """Reflect :attr:`_dirty` in the window title bar."""
         suffix = _DIRTY_TITLE_SUFFIX if self._dirty else ""
         self._root.title(f"{_WINDOW_TITLE}{suffix}")
 
     def _mark_dirty(self) -> None:
-        """Set the dirty flag and update the title."""
+        """Set the dirty flag, update the title, and show the dirty dot."""
         self._dirty = True
         self._update_title()
+        self._panels.set_dirty(True)
 
     def _clear_dirty(self) -> None:
-        """Clear the dirty flag and update the title."""
+        """Clear the dirty flag, update the title, and hide the dirty dot."""
         self._dirty = False
         self._update_title()
+        self._panels.set_dirty(False)
 
     def _set_status(self, text: str) -> None:
         """Push *text* into the status bar."""
@@ -1019,17 +1143,32 @@ class EditorApp:
     ) -> None:
         """Dispatch a :class:`SetResetSpec` from the reset-spec sub-panel.
 
-        Tier-1 guards (cheap, before dispatch): the node must exist, the axis
-        must be ``"x"`` / ``"y"``, and the facing must lie in ``[0, 360)`` (an
-        out-of-range facing is an AC7 inline-reject case). The wall coordinate
-        is unconstrained here -- whether it actually lies on the field wall is a
-        geometry question for the Save-time validator. On any failed guard the
-        edit is rejected and the panel reverts; otherwise the spec is dispatched.
+        Tier-1 guards (cheap, before dispatch): the node must exist and the axis
+        must be ``"x"`` / ``"y"``. Then the handler branches on whether the axis
+        changed:
+
+        * **Axis changed** (new axis != the node's stored axis): the typed wall
+          / facing belong to the old axis, so both are RE-DERIVED from the node
+          position + field size against the new axis via
+          :func:`projection_edges.reset_autofill` and that auto-filled pair is
+          dispatched. This is the "can it auto-fill?" win -- flipping the axis
+          re-suggests a sensible wall + facing rather than carrying a stale one.
+        * **Axis unchanged** (the operator hand-edited wall or facing): the
+          facing is range-checked (``[0, 360)``; an out-of-range value is an AC7
+          inline-reject) and the operator's values are dispatched verbatim --
+          no recompute, so a manual edit is never clobbered.
+
+        The wall coordinate is unconstrained at this tier -- whether it actually
+        lies on the field wall is a geometry question for the Save-time
+        validator. On any failed guard the edit is rejected and the panel
+        reverts; otherwise the spec is dispatched.
 
         :param name: Node whose reset spec is being authored.
         :param axis: Wall-zero axis, expected to be ``"x"`` or ``"y"``.
-        :param wall_coord: Wall coordinate in centimetres along *axis*.
-        :param facing: Parked heading in degrees, expected in ``[0, 360)``.
+        :param wall_coord: Wall coordinate in centimetres along *axis* (used
+            only on an unchanged-axis edit).
+        :param facing: Parked heading in degrees, expected in ``[0, 360)``
+            (used only on an unchanged-axis edit).
         """
         if name not in self._model.nodes:
             self._reject_inline_edit(
@@ -1042,6 +1181,32 @@ class EditorApp:
                 f"got {axis!r}."
             )
             return
+
+        # Axis-change auto-fill (the "can it auto-fill?" win): when the operator
+        # picks a DIFFERENT axis than the node currently stores, the hand-typed
+        # wall / facing belong to the old axis and would be wrong for the new
+        # one. Re-derive both from the node position + field size against the
+        # new axis and dispatch THAT, so the panel shows a sensible wall +
+        # facing immediately. When the axis is UNCHANGED the operator is editing
+        # the wall or facing by hand -- dispatch their values verbatim (no
+        # recompute) so a manual edit is never clobbered.
+        current_axis = self._model.reset_nodes.get(name, {}).get("axis")
+        if axis != current_axis:
+            try:
+                new_wall, new_facing = projection_edges.reset_autofill(
+                    self._model.nodes[name], axis, self._model.field_mm
+                )
+            except ValueError as exc:
+                # axis was already membership-checked above; this is defensive.
+                self._reject_inline_edit(f"Reset spec: {exc}")
+                return
+            self._dispatch(SetResetSpec(name, axis, new_wall, new_facing))
+            return
+
+        # Axis unchanged: the operator edited wall / facing by hand. Range-check
+        # the facing (an out-of-range facing is an AC7 inline-reject case); the
+        # wall coordinate is unconstrained here -- whether it lies on the field
+        # wall is a geometry question for the Save-time validator.
         if not (_FACING_MIN_DEG <= facing < _FACING_MAX_DEG_EXCLUSIVE):
             self._reject_inline_edit(
                 f"Reset spec: facing must be in "
@@ -1244,6 +1409,42 @@ class EditorApp:
         self._refresh_view()
 
     # ------------------------------------------------------------------
+    # Projection-edge authoring (T8) + shortcuts dialog
+    # ------------------------------------------------------------------
+
+    def _on_panel_add_projection(self) -> None:
+        """Enter the projection-edge picker from the "+ add projection" button.
+
+        Projection edges are authored with the SAME EDGE-mode two-node picker as
+        line / blind edges -- no parallel picker. This handler switches to EDGE
+        mode (which clears any stale transient selection) and writes a status
+        hint telling the operator the directed convention: pick the source, then
+        the head, then press ``P``. The actual add happens in
+        :meth:`_handle_edge_projection_key`.
+        """
+        self._switch_mode(Mode.EDGE)
+        self._set_status(_STATUS_PROJECTION_HINT)
+
+    def _show_shortcuts_dialog(self) -> None:
+        """Open the read-only keyboard-shortcuts reference dialog (AC9).
+
+        Wired to the status-strip key-hint click (``on_show_shortcuts``) and to
+        the ``?`` / ``F1`` shortcuts. The dialog renders the canonical
+        :data:`_SHORTCUT_GROUPS` table -- the single source of truth that mirrors
+        the bindings installed in :meth:`_wire_keyboard_shortcuts` -- and is
+        modal until dismissed. Construction is wrapped so a transient Tk failure
+        (e.g. a torn-down root in a test) surfaces on the status bar rather than
+        raising out of an event callback.
+        """
+        groups = [
+            (title, list(rows)) for title, rows in _SHORTCUT_GROUPS
+        ]
+        try:
+            ShortcutsDialog(self._root, groups)
+        except tk.TclError as exc:  # pragma: no cover -- defensive
+            self._set_status(f"Could not open shortcuts: {exc}")
+
+    # ------------------------------------------------------------------
     # Canvas mouse handlers (mode-routed)
     # ------------------------------------------------------------------
 
@@ -1391,13 +1592,20 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _handle_add_node_click(self, x: float, y: float) -> None:
-        """Prompt for name + type then dispatch :class:`AddNode`.
+        """Prompt for name + type then dispatch the right command(s).
 
-        Opens the combined :class:`AddNodeDialog` (T3). OK dispatches
-        :class:`AddNode` at the clicked coordinates; Cancel is a no-op.
-        Validation of duplicate / illegal names happens downstream in
-        ``AddNode.apply`` -- any ``ValueError`` is surfaced by ``_dispatch``
-        in the status bar.
+        Opens the combined :class:`AddNodeDialog` (T3). OK creates the node at
+        the clicked coordinates; Cancel is a no-op. The dialog now also offers
+        ``"reset"`` -- but :class:`AddNode` refuses a reset type (a reset node
+        needs a paired spec), so a reset selection is created in two steps
+        instead: an :class:`AddNode` as a plain ``"line"`` node, then a
+        :meth:`SetResetSpec.autofilled` that flips it to ``"reset"`` with an
+        auto-suggested wall + facing. The new node is then selected and the
+        Reset-spec inspector section opened so the operator can confirm /
+        tweak the auto-filled geometry. (Two undo steps for a reset node is
+        acceptable.) Validation of duplicate / illegal names happens downstream
+        in the commands' ``apply`` -- any ``ValueError`` is surfaced by
+        ``_dispatch`` in the status bar.
 
         :param x: World x coordinate of the click.
         :param y: World y coordinate of the click.
@@ -1421,7 +1629,79 @@ class EditorApp:
                 parent=self._root,
             )
             return
+
+        if node_type == _NODE_TYPE_RESET:
+            self._add_reset_node(name, (x, y))
+            return
+
+        # Plain line / blind node: one AddNode dispatch.
         self._dispatch(AddNode(name, (x, y), node_type))
+
+    def _add_reset_node(
+        self, name: str, xy: tuple[float, float]
+    ) -> None:
+        """Create a reset node in two undoable steps and open its spec panel.
+
+        :class:`AddNode` rejects the ``"reset"`` type, so a reset node is built
+        as a plain ``"line"`` node first, then :meth:`SetResetSpec.autofilled`
+        flips it to ``"reset"`` with an auto-suggested wall coordinate / facing
+        (the nearer qualifying field wall on the default ``"x"`` axis). If the
+        first :class:`AddNode` is rejected (duplicate name etc.) the second
+        dispatch is skipped so a half-formed reset node is never planted. On
+        success the new node is selected and the Reset-spec inspector section
+        is opened so the operator sees and confirms the auto-fill.
+
+        :param name: Name of the new reset node.
+        :param xy: ``(x_cm, y_cm)`` coordinates of the click.
+        """
+        if not self._dispatch(AddNode(name, xy, _NODE_TYPE_LINE)):
+            return
+        spec = SetResetSpec.autofilled(
+            name,
+            node_xy=xy,
+            axis=_RESET_SPEC_DEFAULT_AXIS,
+            field_mm=self._model.field_mm,
+        )
+        if not self._dispatch(spec):
+            # The autofill flip failed; the plain node is still in the model.
+            # Leave it selected so the operator can fix the type by hand.
+            self._select_node(name)
+            return
+        # Select the new reset node and reveal its spec section so the
+        # auto-filled wall / facing are visible for confirmation.
+        self._select_node(name)
+        self._panels.refresh(self._model)
+        self._reveal_reset_spec_section()
+
+    def _select_node(self, name: str) -> None:
+        """Latch *name* as the selected node and sync the selection surfaces.
+
+        Mirrors what :meth:`_on_panel_node_select` does for a user click, but
+        is driven programmatically (e.g. right after a node is created): it
+        updates the arrow-nudge latch and the status-strip selection line.
+        :meth:`SidePanels.refresh` (run by the caller's :meth:`_refresh_view`
+        or directly) reselects the listbox row and populates the inspector.
+
+        :param name: Name of the node to select.
+        """
+        self._selected_node = name
+        # The panel keys its listbox-restore + inspector-populate off this var.
+        self._panels._selected_node_var.set(name)
+        self._update_selection_display(name)
+
+    def _reveal_reset_spec_section(self) -> None:
+        """Open the inspector's collapsible Reset-spec section if it is closed.
+
+        Lets the operator immediately see the auto-filled wall / facing after a
+        reset node is created. Guarded against panel internals being absent
+        (the section starts open by default, so this is usually a no-op).
+        """
+        collapsibles = getattr(self._panels, "_collapsibles", None)
+        if not collapsibles:
+            return
+        record = collapsibles.get("reset_spec")
+        if record is not None and not record.is_open:
+            self._panels._toggle_collapsible("reset_spec")
 
     def _handle_move_click(self, x: float, y: float) -> None:
         """Pick a node under the cursor and latch it for dragging.
@@ -1673,6 +1953,58 @@ class EditorApp:
         if self._dispatch(AddBlindEdge(a, b)):
             self._edge_selection.clear()
             self._set_status(f"Added blind edge ({a!r}, {b!r}).")
+            self._refresh_view()
+
+    def _handle_edge_projection_key(self) -> None:
+        """``P`` -- add a DIRECTED projection edge from the two picked nodes.
+
+        Reuses the EDGE-mode two-node picker, but unlike the undirected L / B
+        edges the order is load-bearing: the FIRST-selected node is the source
+        ``u`` and the SECOND is the head ``v`` (a projection edge is directed
+        ``u -> v``). The geometry ``(distance_cm, heading_deg)`` is derived from
+        the two node positions, then an :class:`AddProjectionEdge` is dispatched
+        against the app's single :class:`ProjectionDelta`. On success the canvas
+        overlay is re-synced, the buffer is marked dirty (via ``_dispatch``),
+        and the selection is cleared. A duplicate / unknown / same-node edge
+        raises ``ValueError`` inside the command, which ``_dispatch`` surfaces on
+        the status bar.
+        """
+        if self._current_mode() is not Mode.EDGE:
+            return
+        if len(self._edge_selection) != _EDGE_SELECTION_MAX:
+            self._set_status("EDGE mode: pick two nodes first.")
+            return
+        u, v = self._edge_selection
+        # Both names came from a canvas hit-test, but a node could have been
+        # deleted between the pick and this keypress; guard before geometry.
+        if u not in self._model.nodes or v not in self._model.nodes:
+            self._set_status(
+                "Projection: a selected node no longer exists; re-pick."
+            )
+            self._edge_selection.clear()
+            self._refresh_view()
+            return
+        try:
+            distance_cm, heading_deg = (
+                projection_edges.compute_projection_geometry(
+                    self._model.nodes[u], self._model.nodes[v]
+                )
+            )
+        except ValueError as exc:
+            # Identical endpoints have no defined heading.
+            self._set_status(f"Projection: {exc}")
+            return
+        if self._dispatch(
+            AddProjectionEdge(self._proj_delta, u, v, distance_cm, heading_deg)
+        ):
+            # ``_dispatch`` already marked dirty and refreshed (which re-syncs
+            # the overlay); re-sync explicitly too so the contract is met even
+            # if the refresh path changes, then clear the picker.
+            self._sync_projection_render()
+            self._edge_selection.clear()
+            self._set_status(
+                f"Added projection edge {u!r} -> {v!r}."
+            )
             self._refresh_view()
 
     # ------------------------------------------------------------------
@@ -2058,6 +2390,59 @@ class EditorApp:
                     # delete-guard staying as accurate as it was pre-save.
                     pass
             self._pending_renames.clear()
+
+        # 4. Flush pending projection-edge edits into field_data.py's EDGES
+        # list (T3 LibCST appends / removes). Projection edges are NOT part of
+        # the JSON schema or model.validate(); a malformed one surfaces in Save
+        # & Build's existing planner error dialog, not here. The bare-instance
+        # rename unit tests build the app via __new__ without a _proj_delta, so
+        # guard on getattr -- a missing delta makes this a clean no-op.
+        proj_delta = getattr(self, "_proj_delta", None)
+        if proj_delta is not None and (proj_delta.adds or proj_delta.removes):
+            try:
+                from tools.path_planner.editor import ast_rewrite  # noqa: PLC0415
+                for u, v, distance_cm, heading_deg in proj_delta.adds:
+                    ast_rewrite.append_projection_edge(
+                        _FIELD_DATA_PY_PATH, u, v, distance_cm, heading_deg
+                    )
+                for u, v in proj_delta.removes:
+                    ast_rewrite.remove_projection_edge(
+                        _FIELD_DATA_PY_PATH, u, v
+                    )
+            except Exception as exc:  # noqa: BLE001 -- LibCST errors etc.
+                messagebox.showerror(
+                    "Projection-edge write failed",
+                    f"field_data.json was written, but rewriting projection "
+                    f"edges in {_FIELD_DATA_PY_PATH} failed: {exc}",
+                    parent=self._root,
+                )
+                self._set_status(
+                    "Save partial: JSON saved, projection-edge write failed."
+                )
+                # Keep the pending delta so the user can retry. JSON (and any
+                # rename flush above) already reached disk, but these
+                # projection edits did not.
+                return False
+            # The flush reached disk: reload the cached field_data module so
+            # the re-seeded baseline reflects the just-written projection
+            # edges, then collapse the pending adds / removes into that
+            # baseline so the next session starts from a clean delta.
+            if self._field_data_module is not None:
+                import importlib  # noqa: PLC0415
+                try:
+                    self._field_data_module = importlib.reload(
+                        self._field_data_module
+                    )
+                except Exception:  # noqa: BLE001 -- best-effort refresh
+                    pass
+            if self._field_data_module is not None:
+                proj_delta.set_loaded(
+                    projection_edges.read_projection_edges(
+                        self._field_data_module
+                    )
+                )
+            proj_delta.clear_pending()
+            self._sync_projection_render()
 
         # After a successful Save, field_data.json, field_data.py EDGES, and
         # the model are all consistent, so the pending-rename delta is empty

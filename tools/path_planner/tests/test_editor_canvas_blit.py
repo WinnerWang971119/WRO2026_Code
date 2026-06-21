@@ -284,8 +284,10 @@ class _PanelsSpy:
     Provides exactly the surface ``_refresh_view`` and the MOVE-drag path touch:
     ``refresh`` (the listbox / inspector rebuild we are counting),
     ``set_undo_enabled`` / ``set_redo_enabled`` (button enable state),
-    ``set_status`` (status bar text), and a ``mode_var`` whose ``.get()`` returns
-    the MOVE mode value (read by ``EditorApp._current_mode``).
+    ``set_status`` (status bar text), ``set_dirty`` (the title-bar dirty dot,
+    flipped by ``_mark_dirty`` on the MoveNode dispatch), and a ``mode_var``
+    whose ``.get()`` returns the MOVE mode value (read by
+    ``EditorApp._current_mode``).
     """
 
     def __init__(self) -> None:
@@ -294,6 +296,7 @@ class _PanelsSpy:
         self.undo_enabled = None
         self.redo_enabled = None
         self.last_status = None
+        self.dirty = None
         self.mode_var = SimpleNamespace(get=lambda: Mode.MOVE.value)
 
     def refresh(self, model) -> None:
@@ -308,6 +311,9 @@ class _PanelsSpy:
 
     def set_status(self, text: str) -> None:
         self.last_status = text
+
+    def set_dirty(self, dirty: bool) -> None:
+        self.dirty = dirty
 
 
 def test_move_drag_does_not_rebuild_listbox_until_release(field_canvas):
