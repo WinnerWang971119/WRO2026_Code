@@ -69,6 +69,7 @@ from tools.path_planner.editor.commands import (
 from tools.path_planner.editor.history import History
 from tools.path_planner.editor.model import FieldModel
 from tools.path_planner.editor.panels import Mode, SidePanels
+from tools.path_planner.editor import theme
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +274,11 @@ class EditorApp:
     * Loads ``field_data.json`` via the loader; raises if missing.
     * Constructs the in-memory :class:`FieldModel`.
     * Creates (or adopts) a :class:`tkinter.Tk` root window.
+    * Applies the warm "drafting-table" theme to that root via
+      :mod:`tools.path_planner.editor.theme` -- fonts then ttk palette then
+      root chrome -- *before* the panels/canvas build so they pick up the
+      base styling. Every theme call fails soft (no-op) when sv_ttk, a
+      bundled font, or a display is unavailable.
     * Builds the :class:`FieldCanvas` and :class:`SidePanels`, packs them
       into a horizontal layout (canvas on the left, panels on the right).
     * Wires every panel callback, every canvas mouse hook, and the
@@ -334,18 +340,35 @@ class EditorApp:
         self._root.title(_WINDOW_TITLE)
         self._root.geometry(self._initial_window_geometry())
 
-        # ---- 5. Side panels (right column, fixed width) ----
+        # ---- 5. Warm theme (must precede panels/canvas) ----
+        # Apply the drafting-table theme to the freshly-created root BEFORE the
+        # side panels and canvas are constructed so they pick up the base ttk
+        # styling and any bundled fonts as they build. Every call here fails
+        # soft (no-op) when sv_ttk / a bundled font / a display is unavailable,
+        # so this adds no new failure mode -- the __new__-bypassing headless
+        # tests never reach it. Order is deliberate:
+        #   1. Register bundled fonts first so panels resolve real families.
+        #   2. Apply the base ttk theme + palette. T11's panels then define
+        #      their OWN named styles on top, so this MUST run first or those
+        #      named styles would be overwritten by the base recolor.
+        #   3. Paint the root chrome the panel SURFACE tone so the window edge
+        #      has no cold-grey seam against the side panels.
+        theme.load_bundled_fonts()
+        theme.apply_ttk_theme(self._root)
+        self._root.configure(background=theme.SURFACE)
+
+        # ---- 6. Side panels (right column, fixed width) ----
         self._panels: SidePanels = SidePanels(self._root)
         self._panels.pack(side="right", fill="y")
 
-        # ---- 6. Canvas (left, expands) ----
+        # ---- 7. Canvas (left, expands) ----
         # The canvas resolves ``model.map_png`` against the planner root
         # itself; it does not need a field_data module reference.
         self._canvas: FieldCanvas = FieldCanvas(self._root)
         self._size_canvas_to_field()
         self._canvas.tk_widget.pack(side="left", fill="both", expand=True)
 
-        # ---- 7. Mouse / mode state ----
+        # ---- 8. Mouse / mode state ----
         # Move mode: latched node currently being dragged.
         self._drag_target: Optional[str] = None
         # Move mode: original coords captured at press, so on release we
@@ -369,7 +392,7 @@ class EditorApp:
         # nudge knows which node to move without re-reading the panel widget.
         self._selected_node: Optional[str] = None
 
-        # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
+        # ---- 9. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
         # same value already committed. Compare against this latch and
         # short-circuit if equal.
@@ -377,13 +400,13 @@ class EditorApp:
             self._model.start_heading_deg
         )
 
-        # ---- 9. Wire callbacks ----
+        # ---- 10. Wire callbacks ----
         self._wire_panel_callbacks()
         self._wire_canvas_callbacks()
         self._wire_keyboard_shortcuts()
         self._wire_window_close()
 
-        # ---- 10. Initial render + panel population ----
+        # ---- 11. Initial render + panel population ----
         # Seed the status surface's mode + selection lines so they read the
         # current truth from the first frame (nothing is selected yet, so the
         # selection line shows the "none" placeholder).
