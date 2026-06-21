@@ -618,6 +618,15 @@ add_executable(ctps_dump
 target_include_directories(ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
 target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
 add_ctps_mock_force_includes(ctps_dump)
+# Pin the dump binary to the build-tree root so the Python orchestrator
+# (tools/path_planner/ctps) locates it under any generator. Single-config
+# generators (Make/Ninja) already place it there; the _DEBUG/_RELEASE variants
+# cover multi-config generators (Xcode/MSBuild) that would otherwise nest it in
+# a per-config subdir.
+set_target_properties(ctps_dump PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY         ${CMAKE_BINARY_DIR}
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG   ${CMAKE_BINARY_DIR}
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_BINARY_DIR})
 add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
 set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
