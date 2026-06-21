@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Cross-platform driver for the VS Code arduino-cli tasks.
 
-This is the Python port of ``tools/arduino_cli_task.ps1``. It is invoked
-from the workspace's VS Code tasks via::
+This is the cross-platform Python port of the former PowerShell task
+wrapper. It is invoked from the workspace's VS Code tasks via::
 
     uv run python tools/arduino_cli_task.py <action> \
         --cli <cliPath> --fqbn <fqbn> --sketch <sketchPath> \
