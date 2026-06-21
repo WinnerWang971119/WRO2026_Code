@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import platform
 import shutil
 import subprocess
 import sys
@@ -55,6 +56,7 @@ from typing import Optional
 # the part after the prefix (e.g. "usbmodem1101") is identical for a pair.
 _MACOS_CU_PREFIX = "/dev/cu."
 _MACOS_TTY_PREFIX = "/dev/tty."
+_BAD_CPU_TYPE_TOKEN = "bad cpu type in executable"
 
 
 class ResolveError(Exception):
@@ -257,6 +259,41 @@ def _list_detected_ports(cli: str, fqbn: str) -> list[dict]:
     return detected
 
 
+def _apple_silicon_renesas_hint(
+    fqbn: str, stdout: Optional[str], stderr: Optional[str]
+) -> Optional[str]:
+    """Return a targeted Apple Silicon hint for the Renesas Uno toolchain.
+
+    The Arduino ``renesas_uno`` core currently resolves to an Intel-only
+    ``arm-none-eabi-gcc`` package on macOS. On Apple Silicon without Rosetta,
+    ``arduino-cli compile`` surfaces the failure as ``bad CPU type in
+    executable`` from ``arm-none-eabi-g++``. Detect that shape and emit a
+    concrete fix instead of leaving the raw toolchain error unexplained.
+
+    :param fqbn: fully-qualified board name for the current action.
+    :param stdout: the buffered child stdout, if any.
+    :param stderr: the buffered child stderr, if any.
+    :return: a user-facing fix hint, or ``None`` when the failure does not
+        match this Apple Silicon + Renesas Uno case.
+    """
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return None
+    if not fqbn.startswith("arduino:renesas_uno:"):
+        return None
+
+    combined = "\n".join(part for part in (stdout, stderr) if part).lower()
+    if _BAD_CPU_TYPE_TOKEN not in combined:
+        return None
+
+    return (
+        "Detected an Apple Silicon / Arduino Renesas Uno toolchain mismatch. "
+        "The installed GNU Arm compiler is Intel-only, so macOS needs Rosetta 2 "
+        "to launch it. Install Rosetta once with "
+        "`softwareupdate --install-rosetta --agree-to-license`, then rerun "
+        "the Arduino verify/upload task."
+    )
+
+
 def _run_cli(cli: str, args: list[str]) -> int:
     """Run an arduino-cli subcommand, streaming its I/O to this process.
 
@@ -265,6 +302,37 @@ def _run_cli(cli: str, args: list[str]) -> int:
     :return: the child process exit code.
     """
     completed = subprocess.run([cli, *args])
+    return completed.returncode
+
+
+def _run_cli_buffered(cli: str, args: list[str], fqbn: str) -> int:
+    """Run an arduino-cli subcommand, then emit any targeted diagnostics.
+
+    ``verify`` and ``upload`` are short-lived commands, so buffering their
+    output lets us append a clearer host-toolchain hint after an otherwise
+    cryptic failure. ``monitor`` stays on the streaming path.
+
+    :param cli: the resolved arduino-cli executable path.
+    :param args: subcommand arguments (e.g. ``["compile", ...]``).
+    :param fqbn: fully-qualified board name for diagnostics.
+    :return: the child process exit code.
+    """
+    completed = subprocess.run(
+        [cli, *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.stdout:
+        print(completed.stdout, end="")
+    if completed.stderr:
+        print(completed.stderr, end="", file=sys.stderr)
+
+    if completed.returncode != 0:
+        hint = _apple_silicon_renesas_hint(fqbn, completed.stdout, completed.stderr)
+        if hint:
+            print(f"ERROR: {hint}", file=sys.stderr)
+
     return completed.returncode
 
 
@@ -314,9 +382,10 @@ def dispatch(
 
     if action == "verify":
         sketch_dir = _resolve_sketch_dir(sketch)
-        return _run_cli(
+        return _run_cli_buffered(
             resolved_cli,
             ["compile", "--fqbn", fqbn, str(sketch_dir)],
+            fqbn,
         )
 
     if action == "list-boards":
@@ -331,9 +400,10 @@ def dispatch(
         )
         upload_port = resolve_serial_port(detected, port)
         print(f"Uploading to {upload_port}")
-        return _run_cli(
+        return _run_cli_buffered(
             resolved_cli,
             ["upload", "--fqbn", fqbn, "--port", upload_port, str(sketch_dir)],
+            fqbn,
         )
 
     if action == "monitor":

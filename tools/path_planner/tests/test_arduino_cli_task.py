@@ -117,6 +117,39 @@ def test_needs_autodetect_false_for_explicit_port() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Apple Silicon / Renesas Uno diagnostic hint.
+# ---------------------------------------------------------------------------
+
+
+def test_apple_silicon_renesas_hint_matches_bad_cpu(monkeypatch) -> None:
+    """Apple Silicon + Renesas Uno + bad CPU type gets a Rosetta hint."""
+    monkeypatch.setattr(act.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(act.platform, "machine", lambda: "arm64")
+
+    hint = act._apple_silicon_renesas_hint(
+        "arduino:renesas_uno:unor4wifi",
+        "",
+        "fork/exec ... arm-none-eabi-g++: bad CPU type in executable",
+    )
+
+    assert hint is not None
+    assert "Rosetta" in hint
+    assert "Renesas Uno" in hint
+
+
+def test_apple_silicon_renesas_hint_ignores_other_platforms(monkeypatch) -> None:
+    """Non-macOS hosts should not get the Rosetta-specific hint."""
+    monkeypatch.setattr(act.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(act.platform, "machine", lambda: "x86_64")
+
+    assert act._apple_silicon_renesas_hint(
+        "arduino:renesas_uno:unor4wifi",
+        "",
+        "bad CPU type in executable",
+    ) is None
+
+
+# ---------------------------------------------------------------------------
 # dispatch -- the only function that spawns subprocesses; mock them.
 # ---------------------------------------------------------------------------
 
@@ -153,6 +186,39 @@ def test_dispatch_verify_runs_compile_argv(monkeypatch) -> None:
 
     assert rc == 0
     assert calls == [[fake_cli, "compile", "--fqbn", fqbn, expected_sketch_dir]]
+
+
+def test_dispatch_verify_bad_cpu_prints_rosetta_hint(monkeypatch, capsys) -> None:
+    """A bad-CPU compile failure on Apple Silicon prints the targeted hint."""
+    _fake_cli(monkeypatch)
+    fqbn = "arduino:renesas_uno:unor4wifi"
+
+    monkeypatch.setattr(act.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(act.platform, "machine", lambda: "arm64")
+
+    def fake_run(args, *_args, **_kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            returncode=1,
+            stdout="Used platform ...\n",
+            stderr="fork/exec arm-none-eabi-g++: bad CPU type in executable\n",
+        )
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    rc = act.dispatch(
+        action="verify",
+        cli="arduino-cli",
+        fqbn=fqbn,
+        sketch="WRO2026",
+        port=None,
+        baud=None,
+    )
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "bad CPU type in executable" in captured.err
+    assert "Rosetta" in captured.err
 
 
 def test_dispatch_upload_auto_filters_by_fqbn_and_resolves(monkeypatch) -> None:

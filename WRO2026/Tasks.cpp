@@ -36,6 +36,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "home", &TasksClass::home },
     { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
+    { "test1", &TasksClass::test1 },
     //Add new tasks here
 };
 
@@ -293,5 +294,21 @@ bool TasksClass::testOne(const TaskArgs& /*args*/)
     PathTracker.goTo("Inter2");
     PathTracker.goTo("Inter3");
     PathTracker.goTo("position1");
+    return true;
+}
+
+bool TasksClass::test1(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("Inter1");
+    (void)Manipulator.grab();
+    Manipulator.belt.toStation(Config::BeltStation::ABC);
+    Drive.setSpeed(30, 60);
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
+    Drive.wallStop(20.0f);
+    Drive.driveDist(20).setPower(80).setMode(DriveMode::GYRO);
+    LineFollower.setEnabled(true).setDistanceTarget(90);
+    LineFollower.waitUntilDistanceReached();
     return true;
 }

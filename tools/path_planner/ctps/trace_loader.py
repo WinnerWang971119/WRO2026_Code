@@ -58,10 +58,11 @@ _KNOWN_OPS: frozenset[str] = frozenset(
 #: is NOT in this set is skipped with a :class:`UserWarning`.
 #:
 #: ``driveDist`` / ``turnDeg`` / ``turnToYaw`` move the chassis; ``stopAtLine``
-#: also moves it — its ``cm`` is the nominal ``expectedCm`` to the line crossing,
-#: which :mod:`track_builder` replays as a forward advance. ``stop`` carries no
-#: geometry — the recorder emits it (``recordDriveStop``) to preserve execution
-#: order, and :mod:`track_builder` renders it as a non-geometry timeline event.
+#: and ``wallStop`` also move it — their ``cm`` is the nominal expected advance,
+#: which :mod:`track_builder` replays as a forward push estimate. ``stop``
+#: carries no geometry — the recorder emits it (``recordDriveStop``) to
+#: preserve execution order, and :mod:`track_builder` renders it as a
+#: non-geometry timeline event.
 _KNOWN_DRIVE_METHODS: frozenset[str] = frozenset(
     {
         "driveDist",
@@ -69,6 +70,7 @@ _KNOWN_DRIVE_METHODS: frozenset[str] = frozenset(
         "turnToYaw",
         "stop",
         "stopAtLine",
+        "wallStop",
     }
 )
 
@@ -94,8 +96,8 @@ class Command:
     :param method: Method name string; set for ``manip`` and ``drive``
         commands.
     :param arg: Uint8 argument; set for ``manip`` commands.
-    :param cm: Distance in centimetres; set for ``drive`` ``driveDist`` and
-        ``stopAtLine`` commands.
+    :param cm: Distance in centimetres; set for ``drive`` ``driveDist``,
+        ``stopAtLine``, and ``wallStop`` commands.
     :param deg: Angle in degrees; set for ``drive`` ``turnDeg`` /
         ``turnToYaw`` commands.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.

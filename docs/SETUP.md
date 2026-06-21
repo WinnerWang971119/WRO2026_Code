@@ -75,6 +75,22 @@ arduino-cli core install arduino:renesas_uno
 arduino-cli lib install MatrixMiniR4 ArduinoBLE PubSubClient
 ```
 
+### Apple Silicon note for UNO R4 / `renesas_uno`
+
+On Apple Silicon Macs, the Arduino Renesas UNO core currently pulls an
+Intel-only GNU Arm toolchain (`arm-none-eabi-gcc 7-2017q4`). If Rosetta 2 is
+not installed, `arduino-cli compile` fails with:
+
+```text
+bad CPU type in executable
+```
+
+Install Rosetta once, then rerun the core/tool build:
+
+```bash
+softwareupdate --install-rosetta --agree-to-license
+```
+
 ## 2. Get the code and the Python environment
 
 ```bash
