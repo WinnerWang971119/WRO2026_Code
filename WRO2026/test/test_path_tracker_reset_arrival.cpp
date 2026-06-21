@@ -82,9 +82,14 @@ static bool approx(float a, float b, float tol)
     return std::fabs(a - b) <= tol;
 }
 
-// The toy field's sole RESET node + a non-reset control node (routes.cpp).
-static constexpr uint8_t kResetNode    = 5;   // "Wall1" (NodeType::RESET) at (165, 139).
-static constexpr uint8_t kNonResetNode = 0;   // "Inter1" (NodeType::LINE).
+// The field's sole RESET node + a non-reset control node. Resolve "Wall1" by
+// NAME, not a hardcoded index: the real routes.cpp node order shifts whenever
+// field_data.json gains or drops a node (removing Inter2 moved Wall1 from index
+// 5 to 4), so a literal index silently points at the wrong node -- here that
+// dereferenced a null reset record and segfaulted. findNodeByName is the API
+// built for exactly this lookup; "Inter1" stays the first node by construction.
+static const uint8_t kResetNode    = FieldMap::findNodeByName("Wall1");
+static const uint8_t kNonResetNode = FieldMap::findNodeByName("Inter1");
 
 // ===========================================================================
 // Replica of the reset-node arrival interlude (PathTracker FSM slice).
