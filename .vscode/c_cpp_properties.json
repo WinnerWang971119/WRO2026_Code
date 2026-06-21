@@ -27,6 +27,33 @@
                 ],
                 "limitSymbolsToIncludedHeaders": true
             }
+        },
+        {
+            "name": "Arduino UNO R4 WiFi (macOS)",
+            "compilerPath": "${env:HOME}/Library/Arduino15/packages/arduino/tools/arm-none-eabi-gcc/7-2017q4/bin/arm-none-eabi-g++",
+            "intelliSenseMode": "macos-gcc-arm",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "defines": [
+                "ARDUINO=10819",
+                "ARDUINO_UNOR4_WIFI",
+                "ARDUINO_ARCH_RENESAS_UNO"
+            ],
+            "includePath": [
+                "${workspaceFolder}/WRO2026",
+                "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/**",
+                "${env:HOME}/Library/Arduino15/packages/arduino/tools/**",
+                "${env:HOME}/Documents/Arduino/libraries/**"
+            ],
+            "browse": {
+                "path": [
+                    "${workspaceFolder}/WRO2026",
+                    "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/**",
+                    "${env:HOME}/Library/Arduino15/packages/arduino/tools/**",
+                    "${env:HOME}/Documents/Arduino/libraries/**"
+                ],
+                "limitSymbolsToIncludedHeaders": true
+            }
         }
     ]
 }
