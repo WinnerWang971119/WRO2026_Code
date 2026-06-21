@@ -166,6 +166,19 @@ _DEFAULT_HIT_TOLERANCE_CM: float = 4.0
 # extent via :meth:`Axes.set_aspect` so this is just an initial hint.
 _DEFAULT_FIGSIZE_IN: tuple[float, float] = (8.0, 6.0)
 
+# Subplot margins (figure fractions) applied on every render so the map fills
+# the figure instead of floating in matplotlib's default ~12% borders.  The
+# left / bottom insets reserve just enough room for the y / x tick labels and
+# the "x (cm)" / "y (cm)" axis labels; the right / top sit near the edge.  This
+# lifts the drawn map from ~59% of the figure to ~78% -- the "too much blank"
+# fix -- while ``set_aspect("equal")`` keeps the field undistorted.
+_SUBPLOT_MARGINS: dict[str, float] = {
+    "left": 0.075,
+    "right": 0.985,
+    "bottom": 0.095,
+    "top": 0.985,
+}
+
 # Mouse button numbers per the matplotlib MouseEvent contract.
 _MOUSE_BUTTON_LEFT: int = 1
 _MOUSE_BUTTON_RIGHT: int = 3
@@ -448,6 +461,12 @@ class FieldCanvas:
         self._projection_edge_artists = []
 
         width_cm, height_cm = self._field_extent_cm(model)
+
+        # Pull the axes out to near the figure edges so the map uses the space
+        # instead of floating in the default wide borders (the "too much blank"
+        # fix). ``ax.clear()`` does not reset subplot params, but re-applying is
+        # cheap and keeps the layout correct after a figure resize.
+        self._figure.subplots_adjust(**_SUBPLOT_MARGINS)
 
         ax.set_aspect("equal")
         ax.set_xlabel("x (cm)")
