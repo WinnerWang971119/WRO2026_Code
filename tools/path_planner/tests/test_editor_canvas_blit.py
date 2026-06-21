@@ -36,8 +36,6 @@ try:
 finally:
     matplotlib.use = _real_mpl_use
 
-import tkinter as tk  # noqa: E402
-
 import pytest  # noqa: E402
 
 from tools.path_planner.editor import loader  # noqa: E402
@@ -77,41 +75,14 @@ def _load_model() -> FieldModel:
     return FieldModel.from_json_dict(loader.load_field_json(_FIXTURE))
 
 
-@pytest.fixture(scope="session")
-def tk_root():
-    """One shared (withdrawn) Tk root for the whole test session.
-
-    The canvas tests build a real ``FieldCanvas``, which embeds a
-    ``FigureCanvasTkAgg`` and therefore needs a Tk root. Repeatedly creating and
-    destroying ``tk.Tk()`` within a single pytest process is unstable -- it
-    intermittently raises ``TclError``, making the canvas tests skip
-    nondeterministically. So create exactly ONE root for the session, withdraw
-    it, hand it to every ``FieldCanvas`` as the master, and tear it down once at
-    session end. Each test still gets a fresh canvas (function-scoped fixture)
-    on this shared root.
-
-    ``pytest.skip`` here is a genuine last resort: it fires only when this single
-    ``tk.Tk()`` truly cannot be created (no display even under xvfb), never
-    merely because a root already exists.
-    """
-    try:
-        root = tk.Tk()
-    except tk.TclError as exc:
-        pytest.skip(f"Tk unavailable (no display, even under xvfb): {exc}")
-    root.withdraw()
-    yield root
-    try:
-        root.destroy()
-    except tk.TclError:
-        pass
-
-
 @pytest.fixture
 def field_canvas(tk_root):
     """A fresh :class:`FieldCanvas` (Agg backend) built on the shared Tk root.
 
     Function-scoped so every test gets a clean canvas / artist state, while the
-    underlying Tk root is the single session-scoped one above.
+    underlying Tk root is the single session-scoped ``tk_root`` from
+    ``conftest.py`` (one root per session -- see that fixture's docstring for why
+    it is shared across the GUI test modules rather than redefined here).
     """
     return FieldCanvas(tk_root)
 

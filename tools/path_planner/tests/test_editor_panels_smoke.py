@@ -1,0 +1,200 @@
+"""Restyle smoke test for the live field editor's side panels (Issue #78, T14).
+
+The restyle wave (T11 themed panels, T13 app theme startup) repainted the
+right-hand control column with the warm "drafting-table" palette, swapped in
+themed ttk styles + plain-tk factories, added a mode-toolbar accent strip, and
+enlarged the status surface.  None of that should have touched the panel's
+*contract* -- the ``on_*`` callback slots the app wires after construction and
+the public methods/properties the app drives.  TC11 is the automated guard for
+that: it builds the REAL :class:`SidePanels` headless and asserts the exact set
+of callbacks and methods survived the restyle, so a future rename fails the
+suite instead of silently breaking the app wiring (AC9, AC10).
+
+Headless pattern (mirrors ``test_editor_canvas_blit.py``): pin the ``Agg``
+backend and no-op ``matplotlib.use`` for the duration of the editor import so
+``editor.canvas``'s import-time ``use("TkAgg")`` is swallowed.  The single
+SESSION-SCOPED ``tk_root`` (withdrawn, reused, destroyed once at teardown) lives
+in ``conftest.py`` and backs every panel build -- one root per session, shared
+with the blit tests, because repeatedly creating ``tk.Tk()`` within one process
+is unstable; ``pytest.skip`` fires only when that single root genuinely cannot
+be created (no display, even under xvfb).
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import matplotlib
+
+# Pin the headless-safe Agg backend before importing the editor, then no-op the
+# one ``matplotlib.use("TkAgg")`` switch that ``editor.canvas`` performs at
+# import time (it would raise on headless CI and clobber the Agg backend the
+# other tests rely on).  Restore the real ``use`` immediately afterwards.
+matplotlib.use("Agg")
+_real_mpl_use = matplotlib.use
+matplotlib.use = lambda *args, **kwargs: None
+try:
+    from tools.path_planner.editor import canvas as _canvas_mod  # noqa: F401, E402
+finally:
+    matplotlib.use = _real_mpl_use
+
+import pytest  # noqa: E402
+
+from tools.path_planner.editor import loader  # noqa: E402
+from tools.path_planner.editor.model import FieldModel  # noqa: E402
+from tools.path_planner.editor.panels import SidePanels  # noqa: E402
+
+_FIXTURE = Path(__file__).parent / "fixtures" / "field_data_small.json"
+
+# Every public ``on_*`` callback slot the app (T12) assigns AFTER construction.
+# All start at ``None``; SidePanels invokes whichever are set when the user
+# touches a widget.  Enumerated explicitly (not introspected) so a rename in
+# panels.py that drops or renames a slot fails this test loudly.
+_EXPECTED_CALLBACKS: tuple[str, ...] = (
+    "on_node_select",
+    "on_node_type_change",
+    "on_node_coords_change",
+    "on_auto_create_edges",
+    "on_accept_proposed",
+    "on_reject_proposed",
+    "on_start_node_change",
+    "on_start_heading_change",
+    "on_undo",
+    "on_redo",
+    "on_save",
+    "on_save_and_build",
+    "on_reset_spec_change",
+    "on_reset_spec_clear",
+    "on_add_pivot",
+    "on_delete_pivot",
+    "on_global_knob_change",
+)
+
+# Every public method / property the app drives.  ``max_edge_length_cm`` is a
+# read property; the rest are setters / the refresh entry point.  Enumerated so
+# a restyle that drops one is caught here rather than at runtime in the app.
+_EXPECTED_PUBLIC_MEMBERS: tuple[str, ...] = (
+    "refresh",
+    "set_status",
+    "set_mode_display",
+    "set_selection_display",
+    "set_validation_badge",
+    "set_undo_enabled",
+    "set_redo_enabled",
+    "set_auto_create_state",
+    "max_edge_length_cm",
+)
+
+# Mode-display / selection-display strings passed to the status-surface setters
+# in the second smoke check.  Named so the assertion reads as a deliberate themed
+# update rather than a bare literal.
+_SAMPLE_MODE_TEXT: str = "Mode: Move / select"
+_SAMPLE_SELECTION_TEXT: str = "Selection: A"
+
+
+def _load_model() -> FieldModel:
+    """Load the small fixture into a fresh :class:`FieldModel`."""
+    return FieldModel.from_json_dict(loader.load_field_json(_FIXTURE))
+
+
+@pytest.fixture
+def side_panels(tk_root):
+    """A fresh :class:`SidePanels` built on the shared Tk root.
+
+    Function-scoped so every test gets a clean widget tree / callback state,
+    while the underlying Tk root is the single session-scoped ``tk_root`` from
+    ``conftest.py`` (one root per session -- see that fixture's docstring for why
+    it is shared across the GUI test modules rather than redefined here).  The
+    build itself is the first half of the TC11 assertion: it must not raise
+    after the T11 restyle.
+    """
+    return SidePanels(tk_root)
+
+
+# ---------------------------------------------------------------------------
+# TC11 -- the restyled SidePanels still exposes its full callback + method API.
+# ---------------------------------------------------------------------------
+
+
+def test_side_panels_builds_headless_after_restyle(side_panels):
+    """Constructing :class:`SidePanels` must not raise after the T11 restyle.
+
+    The ``side_panels`` fixture already performed the build; reaching this body
+    means the themed widget tree (ttk styles, accent strip, enlarged status
+    surface, mono numeric fields) constructed cleanly under the headless Agg /
+    withdrawn-root context.  The explicit type check documents that intent.
+    """
+    assert isinstance(side_panels, SidePanels)
+
+
+def test_side_panels_exposes_every_callback_slot(side_panels):
+    """Every ``on_*`` callback attribute exists and defaults to ``None``.
+
+    The app wires these AFTER construction, so each must be present and unset at
+    build time.  Enumerating the exact set means a rename or a dropped slot in
+    the restyled panels fails here instead of silently breaking app wiring.
+    """
+    for name in _EXPECTED_CALLBACKS:
+        assert hasattr(side_panels, name), f"missing callback slot: {name}"
+        assert getattr(side_panels, name) is None, (
+            f"callback slot {name} must default to None at construction"
+        )
+
+
+def test_side_panels_exposes_every_public_member(side_panels):
+    """Every public method / property survived the restyle.
+
+    Each setter / the ``refresh`` entry point must be a callable, and
+    ``max_edge_length_cm`` must be a readable property returning a float.  The
+    app drives all of these, so a dropped member would surface as a runtime
+    ``AttributeError`` -- catch it here instead.
+    """
+    for name in _EXPECTED_PUBLIC_MEMBERS:
+        assert hasattr(side_panels, name), f"missing public member: {name}"
+
+    # Everything except the read-only property must be callable.
+    for name in _EXPECTED_PUBLIC_MEMBERS:
+        if name == "max_edge_length_cm":
+            continue
+        assert callable(getattr(side_panels, name)), (
+            f"public member {name} must be callable"
+        )
+
+    # The property must read back as a float (its parse-or-default contract).
+    assert isinstance(side_panels.max_edge_length_cm, float)
+
+
+# ---------------------------------------------------------------------------
+# TC11 (cont.) -- the restyled widgets accept the themed runtime updates the
+# app drives: refresh from a model, both validation-badge states, and the
+# mode / selection display lines.  None may raise.
+# ---------------------------------------------------------------------------
+
+
+def test_side_panels_accepts_themed_runtime_updates(side_panels):
+    """``refresh`` + the status-surface setters run cleanly on themed widgets.
+
+    Drives the same surfaces the app touches after every model mutation:
+    :meth:`refresh` rebuilds the listbox / inspector / pivots / knobs from a
+    real model, :meth:`set_validation_badge` recolours the badge in BOTH the
+    valid and invalid states, and the mode / selection lines update.  The test
+    asserts none of these raise -- i.e. the restyled widgets still accept the
+    themed updates -- which is the runtime half of the contract TC11 guards.
+    """
+    model = _load_model()
+
+    # A full refresh against a real model: rebuilds every dynamic widget.
+    side_panels.refresh(model)
+
+    # Both badge states must recolour without raising on the dedicated label.
+    side_panels.set_validation_badge(True)
+    side_panels.set_validation_badge(False)
+
+    # Mode / selection / status lines accept arbitrary themed text.
+    side_panels.set_mode_display(_SAMPLE_MODE_TEXT)
+    side_panels.set_selection_display(_SAMPLE_SELECTION_TEXT)
+    side_panels.set_status("Ready.")
+
+    # Re-refreshing after the updates must also stay clean (the suppress-callback
+    # replay path runs over the themed widgets a second time).
+    side_panels.refresh(model)
