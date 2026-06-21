@@ -1,0 +1,290 @@
+"""Hermetic unit tests for the CTPS orchestrator's cross-platform branching.
+
+Exercises the platform-specific seams in
+:mod:`tools.path_planner.ctps.__main__`:
+
+* :func:`_dump_exe_name` — the ``.exe`` vs bare-name choice keyed on
+  ``sys.platform``.
+* :func:`_find_dump_exe` — generator-agnostic discovery of the built binary
+  across the build root, ``Debug/``, and ``Release/``.
+* :func:`_produce_trace_json` — the Windows (vcvars + ninja) vs non-Windows
+  (plain cmake) build branch, including the "cmake not found"
+  (:class:`FileNotFoundError`) and non-zero-exit (build-failed) error paths.
+* :func:`main` — the ``--trace`` flow never touches the compiler.
+
+No real compiler, cmake, or subprocess is invoked: ``sys.platform`` is faked
+via ``monkeypatch.setattr(sys, "platform", ...)`` and every build / dump helper
+is replaced with an in-test stub. All monkeypatches auto-undo, so the tests are
+deterministic and isolated regardless of the host OS.
+
+Covered cases (T8): TC1-TC9 and TC21.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from tools.path_planner.ctps import __main__ as ctps_main
+
+
+# ---------------------------------------------------------------------------
+# TC1 / TC2 — _dump_exe_name() is keyed on sys.platform
+# ---------------------------------------------------------------------------
+
+
+def test_tc1_dump_exe_name_windows(monkeypatch):
+    """TC1: ``_dump_exe_name()`` -> ``"ctps_dump.exe"`` on Windows.
+
+    The SUT keys on ``sys.platform.startswith("win")``; the canonical Windows
+    value is ``"win32"`` (which satisfies that prefix check).
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+    assert ctps_main._dump_exe_name() == "ctps_dump.exe"
+
+
+def test_tc2_dump_exe_name_non_windows(monkeypatch):
+    """TC2: ``_dump_exe_name()`` -> ``"ctps_dump"`` on macOS and Linux."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert ctps_main._dump_exe_name() == "ctps_dump"
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert ctps_main._dump_exe_name() == "ctps_dump"
+
+
+# ---------------------------------------------------------------------------
+# TC3 / TC4 / TC5 — _find_dump_exe() is generator-agnostic
+# ---------------------------------------------------------------------------
+
+
+def test_tc3_find_dump_exe_build_root(monkeypatch, tmp_path):
+    """TC3: a binary at the build root is found.
+
+    Single-config generators (Ninja, Unix Makefiles) drop the exe directly in
+    the build dir; ``_find_dump_exe`` must return that path.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")  # name -> "ctps_dump"
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", tmp_path)
+
+    exe = tmp_path / "ctps_dump"
+    exe.write_text("binary", encoding="utf-8")
+
+    assert ctps_main._find_dump_exe() == exe
+
+
+def test_tc4_find_dump_exe_debug_subdir(monkeypatch, tmp_path):
+    """TC4: a binary that exists ONLY under ``Debug/`` is found.
+
+    Multi-config generators (Visual Studio) nest the exe under ``Debug/`` or
+    ``Release/``; with nothing at the build root, the nested binary must win.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")  # name -> "ctps_dump"
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", tmp_path)
+
+    debug_dir = tmp_path / "Debug"
+    debug_dir.mkdir()
+    exe = debug_dir / "ctps_dump"
+    exe.write_text("binary", encoding="utf-8")
+
+    assert ctps_main._find_dump_exe() == exe
+
+
+def test_tc5_find_dump_exe_none_when_missing(monkeypatch, tmp_path):
+    """TC5: ``_find_dump_exe()`` returns ``None`` when no binary exists.
+
+    The empty (freshly created) build dir holds no candidate in any of the
+    three searched locations.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", tmp_path)
+
+    assert ctps_main._find_dump_exe() is None
+
+
+# ---------------------------------------------------------------------------
+# TC6 — non-Windows build branch: vcvars is NEVER consulted
+# ---------------------------------------------------------------------------
+
+
+def test_tc6_non_windows_branch_skips_vcvars(monkeypatch):
+    """TC6: on Linux, the POSIX build branch runs and ``_find_vcvars`` is unused.
+
+    ``_produce_trace_json`` must take the non-Windows path: build via
+    ``_build_dump_posix`` (stubbed to succeed), run the dump (stubbed to return
+    JSON), and never touch the Windows-only ``_find_vcvars`` discovery.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+
+    vcvars_called = {"hit": False}
+
+    def _fail_find_vcvars():
+        vcvars_called["hit"] = True
+        raise AssertionError("_find_vcvars must not be called on non-Windows")
+
+    monkeypatch.setattr(ctps_main, "_find_vcvars", _fail_find_vcvars)
+    monkeypatch.setattr(ctps_main, "_build_dump_posix", lambda: 0)
+    # Guard: the Windows builder must not run on this branch either.
+    monkeypatch.setattr(
+        ctps_main,
+        "_build_dump_windows",
+        lambda vcvars: (_ for _ in ()).throw(
+            AssertionError("_build_dump_windows must not run on non-Windows")
+        ),
+    )
+    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture: "JSON")
+
+    result = ctps_main._produce_trace_json(fixture=True)
+
+    assert result == "JSON"
+    assert vcvars_called["hit"] is False
+
+
+# ---------------------------------------------------------------------------
+# TC7 — non-Windows: missing cmake (FileNotFoundError) is handled, not raised
+# ---------------------------------------------------------------------------
+
+
+def test_tc7_non_windows_cmake_not_found(monkeypatch, capsys):
+    """TC7: a ``FileNotFoundError`` from the POSIX build -> ``None`` + message.
+
+    Models cmake being absent from ``PATH``. ``_produce_trace_json`` must catch
+    the error, print a "cmake not found" guidance line to stderr, and return
+    ``None`` WITHOUT propagating the exception.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        ctps_main, "_find_vcvars", _never_called("_find_vcvars")
+    )
+
+    def _raise_fnf():
+        raise FileNotFoundError("cmake")
+
+    monkeypatch.setattr(ctps_main, "_build_dump_posix", _raise_fnf)
+    # If the dump somehow ran, the test would wrongly pass — guard it.
+    monkeypatch.setattr(
+        ctps_main, "_run_dump", _never_called("_run_dump")
+    )
+
+    result = ctps_main._produce_trace_json(fixture=False)
+
+    assert result is None
+    err = capsys.readouterr().err
+    assert "cmake not found" in err
+
+
+# ---------------------------------------------------------------------------
+# TC8 — Windows build branch: vcvars located, _build_dump_windows is the builder
+# ---------------------------------------------------------------------------
+
+
+def test_tc8_windows_branch_uses_windows_builder(monkeypatch):
+    """TC8: on Windows, ``_build_dump_windows`` builds (not the POSIX builder).
+
+    ``_find_vcvars`` returns a fake path; ``_build_dump_windows`` is stubbed to
+    succeed and asserts it received that path; ``_build_dump_posix`` must never
+    run; the dump returns JSON which ``_produce_trace_json`` passes through.
+    """
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    fake_vcvars = Path("C:/fake/VC/Auxiliary/Build/vcvars64.bat")
+    monkeypatch.setattr(ctps_main, "_find_vcvars", lambda: fake_vcvars)
+
+    windows_called = {"hit": False, "vcvars": None}
+
+    def _stub_build_windows(vcvars):
+        windows_called["hit"] = True
+        windows_called["vcvars"] = vcvars
+        return 0
+
+    monkeypatch.setattr(ctps_main, "_build_dump_windows", _stub_build_windows)
+    monkeypatch.setattr(
+        ctps_main, "_build_dump_posix", _never_called("_build_dump_posix")
+    )
+    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture: "JSON")
+
+    result = ctps_main._produce_trace_json(fixture=False)
+
+    assert result == "JSON"
+    assert windows_called["hit"] is True
+    assert windows_called["vcvars"] == fake_vcvars
+
+
+# ---------------------------------------------------------------------------
+# TC9 — --trace flow needs no compiler
+# ---------------------------------------------------------------------------
+
+
+def test_tc9_trace_flow_skips_compiler(monkeypatch, tmp_path):
+    """TC9: ``main(["--trace", FILE, "--no-open"])`` never builds.
+
+    The ``--trace`` path loads an existing dump and renders it. It must skip
+    ``_produce_trace_json`` entirely (stubbed to fail if called) and delegate to
+    ``_render_and_open`` (stubbed to return ``0``).
+    """
+    monkeypatch.setattr(
+        ctps_main,
+        "_produce_trace_json",
+        _never_called("_produce_trace_json"),
+    )
+    monkeypatch.setattr(
+        ctps_main,
+        "_render_and_open",
+        lambda trace_json, out_path, open_browser: 0,
+    )
+
+    trace_file = tmp_path / "run.json"
+    trace_file.write_text('{"commands": []}', encoding="utf-8")
+
+    rc = ctps_main.main(["--trace", str(trace_file), "--no-open"])
+
+    assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# TC21 — non-Windows: build present but FAILS (non-zero exit)
+# ---------------------------------------------------------------------------
+
+
+def test_tc21_non_windows_build_failure_nonzero_exit(monkeypatch, capsys):
+    """TC21: a non-zero POSIX build exit -> ``None`` + "failed" message.
+
+    Distinct from TC7's ``FileNotFoundError`` (cmake absent): here cmake is
+    present and runs, but the configure/build returns a non-zero code.
+    ``_produce_trace_json`` must report the failure to stderr, NOT run the dump,
+    and return ``None`` without raising.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(
+        ctps_main, "_find_vcvars", _never_called("_find_vcvars")
+    )
+    monkeypatch.setattr(ctps_main, "_build_dump_posix", lambda: 2)
+    monkeypatch.setattr(
+        ctps_main, "_run_dump", _never_called("_run_dump")
+    )
+
+    result = ctps_main._produce_trace_json(fixture=True)
+
+    assert result is None
+    err = capsys.readouterr().err
+    assert "failed" in err
+
+
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+
+
+def _never_called(name: str):
+    """Return a stub that fails the test if invoked.
+
+    Used to assert a code path is NOT taken: substitute the helper that should
+    stay dormant, and any call raises :class:`AssertionError` naming it.
+
+    :param name: the helper name, surfaced in the failure message.
+    :return: a function accepting any args that always raises.
+    """
+
+    def _stub(*_args, **_kwargs):
+        raise AssertionError(f"{name} must not be called on this path")
+
+    return _stub
