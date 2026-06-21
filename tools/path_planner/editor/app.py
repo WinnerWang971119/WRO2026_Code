@@ -214,6 +214,44 @@ _OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
 #: the oldest entry so the most recent two clicks always win.
 _EDGE_SELECTION_MAX: int = 2
 
+#: Single-key mode shortcuts (AC5). Each entry maps a Tk key *keysym* to the
+#: :class:`Mode` it activates; the handler sets ``mode_var`` to the mode's
+#: ``value`` (firing the existing ``_on_mode_change`` trace). Both the lower-
+#: and upper-case form of every letter is bound in
+#: :meth:`EditorApp._wire_keyboard_shortcuts`, mirroring the existing ``L`` /
+#: ``B`` edge-action keys.
+#:
+#: The keys are deliberately disjoint from the existing shortcuts -- the Ctrl
+#: chords (``Ctrl-Z`` / ``Ctrl-Y`` / ``Ctrl-S``), ``Delete``, and the EDGE-mode
+#: edge-action keys ``L`` / ``B`` -- and from the arrow-key nudge below. Plain
+#: ``s`` (Set start) does NOT shadow ``Ctrl-S`` (Save): Tk dispatches the most
+#: specific binding for a modified keypress, so a ``Ctrl-S`` event fires only
+#: ``<Control-s>`` and never the plain ``<KeyPress-s>`` binding.
+_MODE_SHORTCUT_KEYS: dict[str, Mode] = {
+    "a": Mode.ADD_NODE,
+    "m": Mode.MOVE,
+    "e": Mode.EDGE,
+    "o": Mode.OBSTACLE,
+    "s": Mode.START,
+}
+
+#: Arrow-key nudge step (centimetres) for the currently-selected node (AC4).
+#: A plain arrow key nudges by the fine step; holding Shift uses the coarse
+#: step. The new position is clamped to the field bounds before dispatch.
+_NUDGE_FINE_CM: float = 0.2
+_NUDGE_COARSE_CM: float = 1.0
+
+#: Field-coordinate floor used when clamping a nudged node. The field's lower
+#: corner is the origin; the upper bound is derived from ``model.field_mm``.
+_FIELD_ORIGIN_CM: float = 0.0
+
+#: Millimetres-per-centimetre conversion for deriving the field's width/height
+#: in centimetres from ``model.field_mm`` (which is stored in millimetres).
+_MM_PER_CM: float = 10.0
+
+#: Status message shown when an arrow-key nudge fires with no node selected.
+_STATUS_NUDGE_NO_SELECTION: str = "Select a node to nudge."
+
 #: Status messages — collected here so the test suite (future work) and the
 #: developer can grep for the exact text the GUI surfaces.
 _STATUS_READY: str = "Ready."
@@ -325,6 +363,11 @@ class EditorApp:
         # When non-None, the canvas renders the list as a dashed cyan overlay
         # and the SidePanels show Accept / Reject instead of Auto-create.
         self._proposed_edges: Optional[list[tuple[str, str, str]]] = None
+        # Name of the node currently selected in the inspector listbox, or
+        # ``None`` when nothing is selected. Maintained by
+        # _on_panel_node_select and consumed by the arrow-key nudge (AC4) so a
+        # nudge knows which node to move without re-reading the panel widget.
+        self._selected_node: Optional[str] = None
 
         # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
@@ -461,13 +504,24 @@ class EditorApp:
         * ``Delete``                    -> :meth:`_handle_delete_key`
         * ``L``                         -> :meth:`_handle_edge_line_key`
         * ``B``                         -> :meth:`_handle_edge_blind_key`
+        * ``A`` / ``M`` / ``E`` / ``O`` / ``S`` -> switch mode (AC5), per
+          :data:`_MODE_SHORTCUT_KEYS` (Add node / Move / Edge / Obstacle /
+          Set start).
+        * ``Up`` / ``Down`` / ``Left`` / ``Right`` -> nudge the selected node
+          by :data:`_NUDGE_FINE_CM`; with ``Shift`` by :data:`_NUDGE_COARSE_CM`
+          (AC4).
 
         Every binding is routed through :meth:`_shortcut_guard`, which drops
         the event when keyboard focus is on a text-entry or dialog widget so
-        typing an ``l`` / ``b`` / ``Delete`` (or a Ctrl chord) into the rename
-        dialog or a coordinate Entry does not fire an editor action behind it
-        (#67). ``bind_all`` is kept (the canvas is a matplotlib widget that is
-        awkward to focus reliably); the focus check does the gating.
+        typing an ``l`` / ``b`` / ``a`` / ``Delete`` / an arrow (or a Ctrl
+        chord) into the rename dialog or a coordinate Entry does not fire an
+        editor action behind it (#67). ``bind_all`` is kept (the canvas is a
+        matplotlib widget that is awkward to focus reliably); the focus check
+        does the gating.
+
+        Plain ``s`` (Set start) and ``Ctrl-S`` (Save) coexist: Tk dispatches
+        the most specific binding for a modified keypress, so a ``Ctrl-S``
+        event fires ``<Control-s>`` only and never the plain ``<KeyPress-s>``.
         """
         guard = self._shortcut_guard
         self._root.bind_all("<Control-z>", guard(self._undo))
@@ -483,6 +537,35 @@ class EditorApp:
         self._root.bind_all("<KeyPress-L>", guard(self._handle_edge_line_key))
         self._root.bind_all("<KeyPress-b>", guard(self._handle_edge_blind_key))
         self._root.bind_all("<KeyPress-B>", guard(self._handle_edge_blind_key))
+
+        # Mode-switch shortcuts (AC5). Bind both the lower- and upper-case form
+        # of each letter (mirroring L / B) so the key works regardless of Caps
+        # Lock / Shift state. Each closure captures its own ``mode`` -- a bare
+        # ``mode`` reference would late-bind to the loop's final value.
+        for key, mode in _MODE_SHORTCUT_KEYS.items():
+            handler = self._make_mode_switch_handler(mode)
+            self._root.bind_all(f"<KeyPress-{key}>", guard(handler))
+            self._root.bind_all(
+                f"<KeyPress-{key.upper()}>", guard(handler)
+            )
+
+        # Arrow-key nudge of the selected node (AC4). Plain arrows use the fine
+        # step; Shift-arrows use the coarse step. Up = +y, Down = -y, Left =
+        # -x, Right = +x (y is North/up in this model). Each closure captures
+        # its own (dx, dy) so the guard can fire it as a zero-arg handler.
+        nudge_bindings: tuple[tuple[str, float, float], ...] = (
+            ("<Up>", 0.0, _NUDGE_FINE_CM),
+            ("<Down>", 0.0, -_NUDGE_FINE_CM),
+            ("<Left>", -_NUDGE_FINE_CM, 0.0),
+            ("<Right>", _NUDGE_FINE_CM, 0.0),
+            ("<Shift-Up>", 0.0, _NUDGE_COARSE_CM),
+            ("<Shift-Down>", 0.0, -_NUDGE_COARSE_CM),
+            ("<Shift-Left>", -_NUDGE_COARSE_CM, 0.0),
+            ("<Shift-Right>", _NUDGE_COARSE_CM, 0.0),
+        )
+        for sequence, dx_cm, dy_cm in nudge_bindings:
+            handler = self._make_nudge_handler(dx_cm, dy_cm)
+            self._root.bind_all(sequence, guard(handler))
 
     def _shortcut_guard(self, handler):
         """Wrap a shortcut *handler* so it only fires when focus is not text.
@@ -539,6 +622,118 @@ class EditorApp:
             "Text",
         }
         return widget_class not in text_input_classes
+
+    def _make_mode_switch_handler(self, mode: Mode):
+        """Return a zero-arg handler that switches the active mode to *mode*.
+
+        The returned callable is what :meth:`_shortcut_guard` wraps: the guard
+        does the text-focus check, then invokes this handler with no arguments.
+        Each call binds *mode* per-closure so a loop over
+        :data:`_MODE_SHORTCUT_KEYS` does not late-bind to the final value.
+
+        :param mode: The :class:`Mode` this shortcut activates.
+        :return: A zero-argument callable suitable for :meth:`_shortcut_guard`.
+        """
+
+        def _handler() -> None:
+            self._switch_mode(mode)
+
+        return _handler
+
+    def _make_nudge_handler(self, dx_cm: float, dy_cm: float):
+        """Return a zero-arg handler that nudges the selected node by a delta.
+
+        The returned callable is what :meth:`_shortcut_guard` wraps: the guard
+        does the text-focus check, then invokes this handler with no arguments.
+        Each call binds *(dx_cm, dy_cm)* per-closure so the arrow-binding loop
+        does not late-bind every arrow key to the final delta.
+
+        :param dx_cm: Signed x displacement in centimetres.
+        :param dy_cm: Signed y displacement in centimetres.
+        :return: A zero-argument callable suitable for :meth:`_shortcut_guard`.
+        """
+
+        def _handler() -> None:
+            self._nudge_selected(dx_cm, dy_cm)
+
+        return _handler
+
+    def _switch_mode(self, mode: Mode) -> None:
+        """Set the active editing mode (AC5) by writing ``mode_var``.
+
+        Writing ``mode_var`` fires the existing ``_on_mode_change`` write trace,
+        which clears any in-progress drag / edge pick / obstacle preview and
+        re-renders -- the same path the toolbar radio buttons take -- so a
+        keyboard mode switch behaves identically to a click on the toolbar.
+        Writing the value it already holds is a Tk no-op (Tk only fires the
+        write trace when ``set`` is called, but the cleared transient state is
+        idempotent, so re-pressing the active mode's key is harmless).
+
+        :param mode: The :class:`Mode` to activate.
+        """
+        self._panels.mode_var.set(mode.value)
+
+    def _nudge_selected(self, dx_cm: float, dy_cm: float) -> None:
+        """Move the selected node by *(dx_cm, dy_cm)*, clamped to the field (AC4).
+
+        Acts only when a node is selected (tracked in :attr:`_selected_node`).
+        The new position is the current coordinates plus the delta, clamped to
+        the field bounds ``[0, width_cm] x [0, height_cm]`` derived from
+        ``model.field_mm``. A nudge that leaves the node unmoved -- already
+        sitting on the clamped bound -- is a no-op (no dispatch, no empty undo
+        entry), mirroring the inspector's "skip if unchanged" coords guard.
+
+        :param dx_cm: Signed x displacement in centimetres (Left -, Right +).
+        :param dy_cm: Signed y displacement in centimetres (Down -, Up +).
+        """
+        node = self._selected_node
+        if node is None:
+            self._set_status(_STATUS_NUDGE_NO_SELECTION)
+            return
+        # Defensive: the selection latch may name a node that was deleted or
+        # renamed since it was last set. Drop the stale latch and bail rather
+        # than dispatch a MoveNode against a missing node.
+        current = self._model.nodes.get(node)
+        if current is None:
+            self._selected_node = None
+            self._set_status(_STATUS_NUDGE_NO_SELECTION)
+            return
+
+        width_mm, height_mm = self._model.field_mm
+        width_cm = float(width_mm) / _MM_PER_CM
+        height_cm = float(height_mm) / _MM_PER_CM
+
+        cx, cy = float(current[0]), float(current[1])
+        new_x = self._clamp(cx + dx_cm, _FIELD_ORIGIN_CM, width_cm)
+        new_y = self._clamp(cy + dy_cm, _FIELD_ORIGIN_CM, height_cm)
+
+        # No-op shortcut: a nudge that would not move the node (already on the
+        # clamped bound) should not burn an undo entry.
+        if new_x == cx and new_y == cy:
+            return
+
+        self._dispatch(MoveNode(node, (new_x, new_y)))
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        """Clamp *value* to the inclusive range ``[low, high]``.
+
+        Degenerate ranges (``high < low``, possible only for a field with a
+        non-positive dimension) collapse to *low* so the result still lies on a
+        defined bound rather than producing an inverted clamp.
+
+        :param value: The value to clamp.
+        :param low: Inclusive lower bound.
+        :param high: Inclusive upper bound.
+        :return: *value* clamped into ``[low, high]``.
+        """
+        if high < low:
+            return low
+        if value < low:
+            return low
+        if value > high:
+            return high
+        return value
 
     def _wire_window_close(self) -> None:
         """Intercept the window-manager close ("X") so we can warn on dirty."""
@@ -659,6 +854,9 @@ class EditorApp:
 
         :param node_name: Selected node name, or ``None`` if cleared.
         """
+        # Track the selection so the arrow-key nudge (AC4) knows which node to
+        # move; ``None`` clears it.
+        self._selected_node = node_name
         if node_name is None:
             self._set_status("Selection cleared.")
         else:
@@ -1604,6 +1802,12 @@ class EditorApp:
             return
         if self._dispatch(RenameNode(target, new_name)):
             self._record_pending_rename(target, new_name)
+            # Keep the selection latch (AC4) pointing at the renamed node so a
+            # follow-up arrow nudge targets the right node and the selection
+            # line shows the new name.
+            if self._selected_node == target:
+                self._selected_node = new_name
+                self._update_selection_display(new_name)
 
     def _context_set_type(self, target: str, new_type: str) -> None:
         """Dispatch a node-type change from the right-click submenu.
@@ -1670,7 +1874,11 @@ class EditorApp:
         if not confirm:
             return
 
-        self._dispatch(DeleteNode(target))
+        if self._dispatch(DeleteNode(target)) and self._selected_node == target:
+            # The selected node is gone; drop the stale latch (AC4) so an arrow
+            # nudge no longer targets it, and clear the selection line.
+            self._selected_node = None
+            self._update_selection_display(None)
 
     def _find_edges_reference(self, node_name: str) -> Optional[int]:
         """Return the index of the first ``EDGES`` entry referencing *node_name*.
