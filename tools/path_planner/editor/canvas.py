@@ -42,13 +42,16 @@ from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
+from tools.path_planner.editor import theme  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.graph_builder import inflate_obstacles  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Rendering constants. Mirrors the static visualizer's look-and-feel but is
-# intentionally duplicated here -- importing the visualizer would race the
+# Rendering constants. Sizes / z-orders / alphas are local; every COLOR is
+# sourced from ``tools.path_planner.editor.theme`` (the warm "drafting-table"
+# palette) so the canvas, panels, and app share one palette. The static
+# visualizer is intentionally NOT imported here -- doing so would race the
 # matplotlib backend selector (Agg vs TkAgg) and break headless PNG dumps.
 # ---------------------------------------------------------------------------
 
@@ -76,12 +79,13 @@ _OBSTACLE_INFLATED_EDGECOLOR: str = "gray"
 _OBSTACLE_INFLATED_ALPHA: float = 0.5
 _OBSTACLE_INFLATED_ZORDER: int = 2
 
-# Edge styling.
-_EDGE_LINE_COLOR: str = "black"
+# Edge styling. Colors come from the theme's edge palette (line = ink,
+# blind = brick); linestyle / linewidth stay local.
+_EDGE_LINE_COLOR: str = theme.EDGE_COLORS["line"]
 _EDGE_LINE_LINESTYLE: str = "solid"
 _EDGE_LINE_LINEWIDTH: float = 1.5
 
-_EDGE_BLIND_COLOR: str = "red"
+_EDGE_BLIND_COLOR: str = theme.EDGE_COLORS["blind"]
 _EDGE_BLIND_LINESTYLE: str = "dashed"
 _EDGE_BLIND_LINEWIDTH: float = 1.5
 
@@ -89,8 +93,9 @@ _EDGE_ZORDER: int = 3
 
 # Proposed-edge preview styling (used by FieldCanvas.render's proposed_edges
 # kwarg -- drawn ABOVE committed edges, BELOW the highlight ring, so the
-# operator can see the proposal sitting on top of the existing graph.
-_PROPOSED_EDGE_COLOR: str = "cyan"
+# operator can see the proposal sitting on top of the existing graph. The
+# color is the theme's proposed-edge accent (teal).
+_PROPOSED_EDGE_COLOR: str = theme.PROPOSED_EDGE
 _PROPOSED_EDGE_LINESTYLE: tuple = (0, (3, 3))  # dashed
 _PROPOSED_EDGE_LINEWIDTH: float = 1.8
 _PROPOSED_EDGE_ZORDER: int = 4  # between _EDGE_ZORDER (3) and _NODE_ZORDER (6)
@@ -110,16 +115,18 @@ _NODE_LABEL_FONTSIZE: int = 8
 _NODE_LABEL_OFFSET_CM: float = 1.5
 _NODE_LABEL_ZORDER: int = 7
 
-_NODE_COLOR: dict[str, str] = {
-    "line": "black",
-    "blind": "red",
-}
-_NODE_COLOR_FALLBACK: str = "gray"
+# Node fill palette keyed by the model's node type. Sourced from the theme
+# (line = ink, blind = brick, reset = teal); an unknown type falls back to the
+# theme's muted-ink fallback.
+_NODE_COLOR: dict[str, str] = theme.NODE_COLORS
+_NODE_COLOR_FALLBACK: str = theme.NODE_COLOR_FALLBACK
 
-# Highlight ring drawn on top of the selected node(s).
-_HIGHLIGHT_COLOR: str = "yellow"
+# Highlight ring drawn on top of the selected node(s). The ring color is the
+# theme's selection accent (terracotta); linewidth / dot size / z-order stay
+# local.
+_HIGHLIGHT_COLOR: str = theme.SELECTION_RING
 _HIGHLIGHT_LINEWIDTH: float = 2.5
-_HIGHLIGHT_EDGECOLOR: str = "yellow"
+_HIGHLIGHT_EDGECOLOR: str = theme.SELECTION_RING
 _HIGHLIGHT_DOT_SIZE: float = 140.0
 _HIGHLIGHT_ZORDER: int = 8
 
@@ -336,10 +343,10 @@ class FieldCanvas:
         :param model: The :class:`FieldModel` to render. Stored on the
             canvas for use by :meth:`find_node_at`.
         :param highlighted_nodes: Optional list of node names to draw a
-            thick yellow ring around (on top of the regular node dots).
+            thick terracotta ring around (on top of the regular node dots).
             Unknown names are silently skipped.
         :param proposed_edges: Optional list of ``(a, b, kind)`` triples
-            drawn as a dashed cyan overlay above the committed edges.
+            drawn as a dashed teal overlay above the committed edges.
             ``kind`` is informational (caller may use it for status
             reporting); the canvas styles all proposed edges identically.
             Unknown node names are silently skipped (consistent with
@@ -369,6 +376,14 @@ class FieldCanvas:
         ax.set_xlim(0.0, width_cm)
         ax.set_ylim(0.0, height_cm)
         ax.grid(True)
+
+        # Recolor the figure / axes / grid / spines / ticks from the warm
+        # "drafting-table" theme so the map area is the cream PAPER tone rather
+        # than the default matplotlib grey/white. This runs AFTER ``grid(True)``
+        # because ``apply_to_axes`` re-issues ``grid(True, color=...)`` to set
+        # the grid color. The background PNG still draws on top via ``imshow``
+        # at ``_BACKGROUND_ALPHA``, so the paper tone shows through.
+        theme.apply_to_axes(ax, self._figure)
 
         self._draw_background(model, width_cm, height_cm)
         self._draw_obstacles(model)
@@ -821,12 +836,13 @@ class FieldCanvas:
         width_cm: float,
         height_cm: float,
     ) -> None:
-        """Overlay the field PNG (or a plain white background if missing).
+        """Overlay the field PNG (or the bare themed background if missing).
 
         Resolution order matches :mod:`tools.path_planner.visualizer`:
         absolute paths are used as-is; relative paths are resolved
         against ``tools/path_planner/``. A missing file is non-fatal —
-        the axes are simply left with their default white facecolor.
+        the axes are simply left with the warm PAPER facecolor that
+        :meth:`render` applied from the theme before this helper ran.
 
         The decoded PNG is cached per-instance in :attr:`_bg_cache`, keyed by
         the resolved absolute path string, so it is read from disk only once
@@ -843,14 +859,14 @@ class FieldCanvas:
         """
         map_path = self._resolve_map_png(model)
         if map_path is None:
-            # No ``map_png`` configured at all; the default white axes
-            # facecolor is fine. Nothing to cache or draw.
+            # No ``map_png`` configured at all; the warm themed axes facecolor
+            # (applied in ``render``) is fine. Nothing to cache or draw.
             return
 
         image = self._cached_background(map_path)
         if image is _BACKGROUND_NONE:
             # Missing/unreadable PNG (already warned + cached as the
-            # sentinel). Render on the default white facecolor.
+            # sentinel). Render on the warm themed axes facecolor.
             return
 
         # ``origin="upper"`` (vs. the visualizer's ``"lower"``) flips the
@@ -999,7 +1015,7 @@ class FieldCanvas:
         model: FieldModel,
         proposed_edges: list[tuple[str, str, str]],
     ) -> None:
-        """Overlay the given (a, b, kind) edges in dashed cyan above committed edges.
+        """Overlay the given (a, b, kind) edges in dashed teal above committed edges.
 
         The third tuple element (``kind``) is currently informational only — every
         proposed edge is styled identically. Unknown node names are silently
@@ -1075,7 +1091,7 @@ class FieldCanvas:
         model: FieldModel,
         highlighted_nodes: list[str],
     ) -> None:
-        """Outline the given nodes with a thick yellow ring above all else.
+        """Outline the given nodes with a thick terracotta ring above all else.
 
         Unknown node names are silently skipped — the editor may pass a
         stale selection during a multi-step mutation and we don't want to
