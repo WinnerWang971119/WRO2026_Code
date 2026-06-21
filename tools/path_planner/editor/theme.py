@@ -96,6 +96,74 @@ INVALID: str = "#B0413E"
 
 
 # ===========================================================================
+# UI chrome tokens -- consumed by the panel (T6) and canvas (T7) modules.
+# Every chrome constant below maps to a named UI role in the mockup; callers
+# reference the role name, never a naked hex literal.
+# ===========================================================================
+
+# --- Title bar & section headers ------------------------------------------
+
+# Point size for the title-bar display text. Paired with FONT_DISPLAY (Fraunces
+# fallback chain) so the caller writes e.g. ``(resolve_font(FONT_DISPLAY), FONT_SIZE_TITLE)``.
+FONT_SIZE_TITLE: int = 16
+
+# Point size for section-header labels. The "small-caps" look is approximated
+# by rendering the label text in UPPERCASE; no special font variant is needed.
+FONT_SIZE_SECTION: int = 9
+
+# Section-header text color. INK_MUTED gives a quieter hierarchy without
+# introducing a new hue.
+SECTION_HEADER_FG: str = INK_MUTED  # alias — intent is explicit for callers
+
+# Hairline rule color drawn under each section header. SPINE is the right
+# weight: darker than the grid, but still subordinate to body text.
+HAIRLINE: str = SPINE
+
+# --- Ghost button ---------------------------------------------------------
+
+# A "ghost" button is flat/borderless at rest: text in INK_MUTED on SURFACE,
+# with a thin border that matches the button edge for a barely-visible outline.
+GHOST_BUTTON_FG: str = INK_MUTED        # resting foreground (text/icon)
+GHOST_BUTTON_BG: str = SURFACE          # resting background (transparent feel)
+GHOST_BUTTON_BORDER: str = SPINE        # thin 1-px border; SPINE is subtle
+
+# Foreground override when the ghost button uses the primary (terracotta) accent
+# instead of the muted default -- e.g., a "delete" or "arm" action.
+GHOST_BUTTON_FG_ACCENT: str = TERRACOTTA
+
+# --- Collapsible-section chevrons ----------------------------------------
+
+# Glyph shown when the section is expanded (open / pointing down-right).
+CHEVRON_OPEN: str = "◢"
+# Glyph shown when the section is collapsed (closed / pointing right).
+CHEVRON_COLLAPSED: str = "▸"
+
+# --- Dirty-state indicator ------------------------------------------------
+
+# Color for the unsaved-changes dot (⬤) in the title bar. TERRACOTTA is the
+# primary attention accent and reads clearly against PAPER/SURFACE.
+DIRTY_DOT: str = TERRACOTTA  # alias -- intent is explicit for callers
+
+# --- Active-mode accent ---------------------------------------------------
+
+# Soft terracotta wash drawn behind the active tool-mode row in the toolbar.
+# Pale enough to not overpower the panel but clearly warmer than SURFACE.
+ACCENT_SOFT: str = "#E7C9B8"
+
+# Solid accent bar color for the active-mode left-edge stripe. TERRACOTTA is
+# the right token; this alias makes the intent unambiguous for panels.py.
+ACCENT_BAR: str = TERRACOTTA  # alias
+
+# --- Status-badge colors (intent aliases for panels) ---------------------
+
+# These alias the existing VALID / INVALID palette entries so the panels can
+# reference them by their UI role (badge ⬤ indicator) rather than by the
+# generic name, which also doubles as a matplotlib annotation color.
+STATUS_VALID: str = VALID    # green ⬤ in the status-strip badge
+STATUS_INVALID: str = INVALID  # brick ⬤ in the status-strip badge
+
+
+# ===========================================================================
 # Node / edge palette mapping -- consumed by the canvas (T12). Keeping the
 # semantic-to-color mapping here lets the canvas replace its hardcoded
 # black/red literals with a single lookup table that tracks the palette.
