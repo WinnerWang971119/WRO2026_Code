@@ -44,9 +44,21 @@ import pytest  # noqa: E402
 
 from tools.path_planner.editor import loader  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
-from tools.path_planner.editor.panels import SidePanels  # noqa: E402
+from tools.path_planner.editor.panels import (  # noqa: E402
+    _INSPECTOR_WIDTH_PX,
+    _MODE_RAIL_WIDTH_PX,
+    SidePanels,
+)
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "field_data_small.json"
+
+# Generous parent geometry for the three-pane layout test.  The window must be
+# wider than (mode rail + inspector) so the centre canvas column gets a real
+# positive width and the two fixed bands render at their declared pixel widths
+# rather than being squeezed.  Tall enough that the title / status bands also
+# take their natural height with the canvas row absorbing the slack.
+_LAYOUT_PARENT_WIDTH_PX: int = 900
+_LAYOUT_PARENT_HEIGHT_PX: int = 600
 
 # Every public ``on_*`` callback slot the app (T12) assigns AFTER construction.
 # All start at ``None``; SidePanels invokes whichever are set when the user
@@ -255,3 +267,122 @@ def test_side_panels_save_buttons_exist_and_invoke_callbacks(side_panels):
 
     assert save_calls["n"] == 1, "Save button must fire on_save"
     assert build_calls["n"] == 1, "Save & Build button must fire on_save_and_build"
+
+
+# ---------------------------------------------------------------------------
+# F1 -- the true three-pane layout: ``layout_three_pane`` grids four chrome
+# bands + the canvas into one shared parent, the mode rail / inspector hold
+# their declared fixed pixel widths, and the title / status bands span all
+# three columns.  The exact band-width regression the F1 review caught (the
+# rail and inspector must render at 90 / 312 px, not collapse to content) is
+# locked in here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def laid_out_panels(tk_root):
+    """A :class:`SidePanels` whose bands + a stand-in canvas are gridded live.
+
+    Builds a sized parent :class:`tk.Frame` under the shared session root, a
+    :class:`SidePanels` parented to it (so its four bands are siblings of the
+    parent grid), and a plain :class:`tk.Frame` standing in for the app's
+    canvas widget.  Calls the single placement entry point
+    :meth:`SidePanels.layout_three_pane` and forces a geometry pass with
+    ``update_idletasks`` so every ``winfo_*`` query below reads a realised
+    layout rather than the pre-map ``1`` placeholder.
+
+    The parent frame is given an explicit width/height and ``pack_propagate``
+    is disabled so it cannot shrink to its children -- the fixed bands then
+    render at their declared widths instead of being squeezed by a zero-size
+    parent.  Yields ``(panels, parent, canvas)`` and tears the parent down
+    after the test (the shared root survives for the session).
+    """
+    parent = tk.Frame(
+        tk_root,
+        width=_LAYOUT_PARENT_WIDTH_PX,
+        height=_LAYOUT_PARENT_HEIGHT_PX,
+    )
+    parent.pack_propagate(False)
+    parent.pack()
+
+    panels = SidePanels(parent)
+    canvas = tk.Frame(parent)
+    panels.layout_three_pane(canvas)
+
+    # Force a geometry pass so winfo_width/winfo_manager report the realised
+    # grid rather than the pre-map placeholders.
+    parent.update_idletasks()
+    parent.update()
+
+    try:
+        yield panels, parent, canvas
+    finally:
+        parent.destroy()
+
+
+def test_layout_three_pane_grids_every_band_and_canvas(laid_out_panels):
+    """All four chrome bands AND the canvas are placed by the GRID manager.
+
+    ``layout_three_pane`` is the single placement entry point; every band plus
+    the canvas must report ``winfo_manager() == "grid"`` (a withdrawn root never
+    reports ``winfo_ismapped``, so the geometry manager is the robust
+    "it's in the layout" check used elsewhere in this file).
+    """
+    panels, _parent, canvas = laid_out_panels
+
+    for band_name, band in (
+        ("title", panels._title_frame),
+        ("mode rail", panels._mode_frame),
+        ("inspector", panels._inspector_frame),
+        ("status", panels._status_frame),
+    ):
+        assert band.winfo_manager() == "grid", (
+            f"{band_name} band must be gridded by layout_three_pane"
+        )
+    assert canvas.winfo_manager() == "grid", "canvas must be gridded"
+
+
+def test_layout_three_pane_band_widths_are_fixed(laid_out_panels):
+    """The mode rail and inspector render at their declared fixed pixel widths.
+
+    This is the exact regression the F1 review caught: the fixed bands must hold
+    :data:`_MODE_RAIL_WIDTH_PX` (90) and :data:`_INSPECTOR_WIDTH_PX` (312), not
+    collapse to their content width.  ``grid_propagate``/``pack_propagate`` are
+    disabled on each band so a sized parent renders them at exactly these
+    widths.
+    """
+    panels, _parent, _canvas = laid_out_panels
+
+    assert panels._mode_frame.winfo_width() == _MODE_RAIL_WIDTH_PX
+    assert panels._inspector_frame.winfo_width() == _INSPECTOR_WIDTH_PX
+    # Document the literals the constants currently carry so a silent retune of
+    # either band width also trips this guard.
+    assert _MODE_RAIL_WIDTH_PX == 90
+    assert _INSPECTOR_WIDTH_PX == 312
+
+
+def test_layout_three_pane_title_and_status_span_three_columns(laid_out_panels):
+    """The title and status bands span all three columns; the centre bands sit
+    in their own single columns.
+
+    ``grid_info`` reports each band's placement: the full-width title / status
+    strips carry ``columnspan == 3`` (so they stretch across rail + canvas +
+    inspector), while the mode rail and inspector occupy columns 0 and 2 of the
+    middle row with the canvas between them in column 1.
+    """
+    panels, _parent, canvas = laid_out_panels
+
+    title_info = panels._title_frame.grid_info()
+    status_info = panels._status_frame.grid_info()
+    assert int(title_info["columnspan"]) == 3, "title band must span 3 columns"
+    assert int(status_info["columnspan"]) == 3, "status band must span 3 columns"
+    assert int(title_info["row"]) == 0
+    assert int(status_info["row"]) == 2
+
+    # The middle row: rail (col 0) | canvas (col 1) | inspector (col 2).
+    assert int(panels._mode_frame.grid_info()["column"]) == 0
+    assert int(canvas.grid_info()["column"]) == 1
+    assert int(panels._inspector_frame.grid_info()["column"]) == 2
+    assert int(panels._mode_frame.grid_info()["row"]) == 1
+    assert int(canvas.grid_info()["row"]) == 1
+    assert int(panels._inspector_frame.grid_info()["row"]) == 1
