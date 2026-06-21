@@ -59,6 +59,7 @@ from tools.path_planner.editor.commands import (
     DeleteNode,
     DeleteObstacle,
     DeletePivotTurn,
+    DeleteProjectionEdge,
     MoveNode,
     ProjectionDelta,
     RenameNode,
@@ -86,25 +87,45 @@ _DIRTY_TITLE_SUFFIX: str = " *"
 
 #: Initial canvas area width in pixels. The canvas height is derived from the
 #: loaded field's aspect ratio so the map renders without huge empty bars
-#: above and below it. The right-hand side panel (``_PANEL_WIDTH_PX``) and a
-#: small chrome margin are added on top of these to get the window geometry.
+#: above and below it. The two fixed chrome columns (the mode rail +
+#: inspector, ``_CHROME_TOTAL_WIDTH_PX``) and a small chrome margin are added
+#: on top of these to get the window geometry.
 _DEFAULT_CANVAS_WIDTH_PX: int = 900
 
-#: Width of the right-hand side panel column. Mirrors
-#: ``tools.path_planner.editor.panels._PANEL_WIDTH_PX``. Duplicated here
-#: rather than imported because the panels module pins its own column width
-#: with ``pack_propagate(0)`` -- this constant only feeds the initial window
+#: Width of the far-left MODES rail band, in pixels. Mirrors
+#: ``tools.path_planner.editor.panels._MODE_RAIL_WIDTH_PX``. Duplicated here
+#: rather than imported because the panels module pins its own band widths with
+#: ``pack_propagate(False)`` -- these constants only feed the initial window
 #: sizing math.
-_SIDE_PANEL_WIDTH_PX: int = 240
+_MODE_RAIL_WIDTH_PX: int = 90
 
-#: Extra vertical pixels reserved for the matplotlib figure's axis labels,
-#: title bar, and status row so the field rectangle itself fits inside the
-#: canvas area without being clipped.
-_CANVAS_CHROME_PX: int = 80
+#: Width of the right PROPERTIES inspector band, in pixels. Mirrors
+#: ``tools.path_planner.editor.panels._INSPECTOR_WIDTH_PX``. Duplicated for the
+#: same reason as :data:`_MODE_RAIL_WIDTH_PX`.
+_INSPECTOR_WIDTH_PX: int = 312
+
+#: Total fixed-chrome width the two side bands consume now that the layout is a
+#: true three-pane window (rail + inspector). The canvas is the only band that
+#: expands, so this is what the initial geometry reserves around the canvas.
+#: Replaces the old single 240-px right-column figure (F1 flagged it stale).
+_CHROME_TOTAL_WIDTH_PX: int = _MODE_RAIL_WIDTH_PX + _INSPECTOR_WIDTH_PX
+
+#: Extra vertical pixels reserved for the matplotlib figure's axis labels plus
+#: the full-width title band and status band that now bracket the canvas in the
+#: three-pane layout, so the field rectangle itself fits inside the canvas area
+#: without being clipped.
+_CANVAS_CHROME_PX: int = 120
+
+#: Minimum starting width for the expanding canvas band, in pixels. The window
+#: floor (:data:`_MIN_WINDOW_WIDTH_PX`) is derived from this plus the two fixed
+#: chrome columns so a degenerately tall / thin field still opens with a usable
+#: canvas rather than a window only as wide as the chrome.
+_MIN_CANVAS_WIDTH_PX: int = 480
 
 #: Hard floor on the initial window dimensions so a degenerately tall or thin
-#: field still produces a usable starting window.
-_MIN_WINDOW_WIDTH_PX: int = 800
+#: field still produces a usable starting window. The width floor reserves the
+#: two fixed chrome columns (rail + inspector) on top of a minimum canvas band.
+_MIN_WINDOW_WIDTH_PX: int = _CHROME_TOTAL_WIDTH_PX + _MIN_CANVAS_WIDTH_PX
 _MIN_WINDOW_HEIGHT_PX: int = 400
 
 #: Valid node-type strings as displayed in dialogs and combobox submenus.
@@ -333,8 +354,10 @@ class EditorApp:
       root chrome -- *before* the panels/canvas build so they pick up the
       base styling. Every theme call fails soft (no-op) when sv_ttk, a
       bundled font, or a display is unavailable.
-    * Builds the :class:`FieldCanvas` and :class:`SidePanels`, packs them
-      into a horizontal layout (canvas on the left, panels on the right).
+    * Builds the :class:`FieldCanvas` and :class:`SidePanels`, then grids
+      them into the true three-pane window via the panels' single placement
+      entry point :meth:`SidePanels.layout_three_pane` (title + status bands
+      full-width, mode rail + inspector fixed-width, canvas expanding).
     * Wires every panel callback, every canvas mouse hook, and the
       keyboard shortcuts (``Ctrl-Z`` / ``Ctrl-Y`` / ``Ctrl-S`` /
       ``Delete``).
@@ -426,16 +449,25 @@ class EditorApp:
         theme.apply_ttk_theme(self._root)
         self._root.configure(background=theme.SURFACE)
 
-        # ---- 6. Side panels (right column, fixed width) ----
+        # ---- 6. Side panels (chrome bands, not yet placed) ----
+        # SidePanels builds the four chrome bands (title / mode rail /
+        # inspector / status) as siblings of the canvas under the shared root,
+        # but does NOT place them -- the single ``layout_three_pane`` call below
+        # grids every band plus the canvas into the true three-pane window.
         self._panels: SidePanels = SidePanels(self._root)
-        self._panels.pack(side="right", fill="y")
 
-        # ---- 7. Canvas (left, expands) ----
+        # ---- 7. Canvas (centre band, expands) ----
         # The canvas resolves ``model.map_png`` against the planner root
         # itself; it does not need a field_data module reference.
         self._canvas: FieldCanvas = FieldCanvas(self._root)
         self._size_canvas_to_field()
-        self._canvas.tk_widget.pack(side="left", fill="both", expand=True)
+
+        # ---- 7b. Three-pane placement (single entry point) ----
+        # Now that BOTH the chrome bands and the canvas widget exist, hand the
+        # canvas to the panels' one placement method: it grids the title +
+        # status bands full-width, the mode rail + inspector at their fixed
+        # widths, and the canvas in the expanding centre cell.
+        self._panels.layout_three_pane(self._canvas.tk_widget)
 
         # ---- 8. Mouse / mode state ----
         # Move mode: latched node currently being dragged.
@@ -514,14 +546,16 @@ class EditorApp:
         """Compute a ``"WxH"`` geometry string sized to the field aspect.
 
         The canvas area is ``_DEFAULT_CANVAS_WIDTH_PX`` wide; its height is
-        derived from the field aspect so the map fills the canvas without
-        large empty bars. The window adds the side panel width and a small
-        vertical chrome margin for matplotlib's axis labels.
+        derived from the field aspect so the map fills the canvas without large
+        empty bars. The window adds the two fixed chrome columns (the mode rail
+        + inspector, :data:`_CHROME_TOTAL_WIDTH_PX`) on top of the canvas width
+        and a small vertical chrome margin for matplotlib's axis labels plus the
+        title / status bands.
         """
         aspect = self._field_aspect_ratio()
         canvas_w = _DEFAULT_CANVAS_WIDTH_PX
         canvas_h = max(int(round(canvas_w / aspect)), _MIN_WINDOW_HEIGHT_PX)
-        window_w = max(canvas_w + _SIDE_PANEL_WIDTH_PX, _MIN_WINDOW_WIDTH_PX)
+        window_w = max(canvas_w + _CHROME_TOTAL_WIDTH_PX, _MIN_WINDOW_WIDTH_PX)
         window_h = max(canvas_h + _CANVAS_CHROME_PX, _MIN_WINDOW_HEIGHT_PX)
         return f"{window_w}x{window_h}"
 
@@ -1335,6 +1369,49 @@ class EditorApp:
                 return True
         return False
 
+    def _find_projection_on_pair(
+        self, a: str, b: str
+    ) -> Optional[tuple[str, str]]:
+        """Return the directed ``(u, v)`` of any projection edge on ``{a, b}``.
+
+        Scans the app's single :class:`ProjectionDelta`'s reconciled
+        ``render()`` set for an entry whose endpoints are ``(a, b)`` OR
+        ``(b, a)`` -- a projection edge is DIRECTED, so it may be stored in
+        either orientation relative to the (orientation-free) two-node pick.
+        The stored directed pair is returned verbatim so a follow-up
+        :class:`DeleteProjectionEdge` targets the edge exactly as it renders.
+
+        Defensive against a bare ``__new__`` instance (the rename unit tests
+        build one without a ``_proj_delta``): a missing delta makes this a
+        silent ``None`` rather than an :class:`AttributeError`.
+
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :return: The stored ``(u, v)`` directed pair, or ``None`` when no
+            projection edge connects ``a`` and ``b`` in either direction.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return None
+        for edge in delta.render():
+            u, v = edge[0], edge[1]
+            if (u == a and v == b) or (u == b and v == a):
+                return (u, v)
+        return None
+
+    def _find_plain_edge_on_pair(self, a: str, b: str) -> bool:
+        """Return ``True`` if a line OR blind edge connects ``{a, b}``.
+
+        A thin alias over :meth:`_edge_exists` so the EDGE-mode override logic
+        reads symmetrically against :meth:`_find_projection_on_pair`: line /
+        blind edges are UNDIRECTED, so either pick ordering matches.
+
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :return: Whether an undirected line or blind edge exists on ``{a, b}``.
+        """
+        return self._edge_exists(a, b)
+
     # ------------------------------------------------------------------
     # Auto-create-edges (T8)
     # ------------------------------------------------------------------
@@ -1911,6 +1988,14 @@ class EditorApp:
     def _handle_delete_key(self) -> None:
         """``Delete`` -- if EDGE mode + two endpoints selected, drop the edge.
 
+        Deletes whatever edge connects the two picked nodes, in priority order:
+
+        * A DIRECTED projection edge on the pair (either orientation) ->
+          :class:`DeleteProjectionEdge` against the stored ``(u, v)``.
+        * Otherwise an UNDIRECTED line / blind edge on ``{a, b}`` ->
+          :class:`DeleteEdge`.
+        * Otherwise the pair has no edge -- a status message, no dispatch.
+
         In other modes the key is a no-op (deleting nodes is intentionally
         constrained to the right-click context menu so a stray Delete does
         not silently destroy hand-authored data).
@@ -1924,35 +2009,98 @@ class EditorApp:
             )
             return
         a, b = self._edge_selection
-        if self._dispatch(DeleteEdge(a, b)):
-            self._edge_selection.clear()
-            self._set_status(f"Deleted edge ({a!r}, {b!r}).")
-            self._refresh_view()
+        # Projection edges take priority: a pair never carries both a projection
+        # edge and a plain edge at once (the L/B/P overrides enforce that), but
+        # the directed projection delete must target the stored orientation.
+        projection_pair = self._find_projection_on_pair(a, b)
+        if projection_pair is not None:
+            u, v = projection_pair
+            if self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
+                self._sync_projection_render()
+                self._edge_selection.clear()
+                self._set_status(f"Deleted projection edge {u!r} -> {v!r}.")
+                self._refresh_view()
+            return
+        if self._find_plain_edge_on_pair(a, b):
+            if self._dispatch(DeleteEdge(a, b)):
+                self._edge_selection.clear()
+                self._set_status(f"Deleted edge ({a!r}, {b!r}).")
+                self._refresh_view()
+            return
+        self._set_status(f"No edge between ({a!r}, {b!r}) to delete.")
 
     def _handle_edge_line_key(self) -> None:
-        """``L`` -- dispatch :class:`AddLineEdge` if two endpoints picked."""
+        """``L`` -- add a line edge, overriding any projection edge on the pair.
+
+        If a DIRECTED projection edge currently connects the two picked nodes
+        (in either orientation), it is deleted first via
+        :class:`DeleteProjectionEdge` so the undirected line edge replaces it --
+        the override is two undo entries (delete projection, then add line),
+        which is acceptable. Otherwise a plain :class:`AddLineEdge` is
+        dispatched. On the successful add the picker is cleared and the canvas
+        re-synced.
+        """
         if self._current_mode() is not Mode.EDGE:
             return
         if len(self._edge_selection) != _EDGE_SELECTION_MAX:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        if self._dispatch(AddLineEdge(a, b)):
-            self._edge_selection.clear()
-            self._set_status(f"Added line edge ({a!r}, {b!r}).")
-            self._refresh_view()
+        self._add_plain_edge_with_override(AddLineEdge(a, b), a, b, "line")
 
     def _handle_edge_blind_key(self) -> None:
-        """``B`` -- dispatch :class:`AddBlindEdge` if two endpoints picked."""
+        """``B`` -- add a blind edge, overriding any projection edge on the pair.
+
+        Symmetric to :meth:`_handle_edge_line_key`: a projection edge on the
+        picked pair (either orientation) is deleted first, then a plain
+        :class:`AddBlindEdge` is dispatched.
+        """
         if self._current_mode() is not Mode.EDGE:
             return
         if len(self._edge_selection) != _EDGE_SELECTION_MAX:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        if self._dispatch(AddBlindEdge(a, b)):
+        self._add_plain_edge_with_override(AddBlindEdge(a, b), a, b, "blind")
+
+    def _add_plain_edge_with_override(
+        self, add_command, a: str, b: str, kind: str
+    ) -> None:
+        """Add a line / blind edge, first overriding any projection edge there.
+
+        Shared body for the ``L`` and ``B`` handlers. When a projection edge
+        connects ``{a, b}`` (in either orientation), it is deleted FIRST via
+        :class:`DeleteProjectionEdge` against the stored directed pair, so the
+        new undirected line / blind edge replaces it (override projection ->
+        line/blind). If that delete is rejected -- ``_dispatch`` surfaced the
+        ``ValueError`` -- the add is NOT attempted, leaving the model coherent.
+        With no projection edge present the add runs directly. Both steps route
+        through :meth:`_dispatch`, so each is its own undo entry (a two-step
+        override is two entries -- acceptable).
+
+        :param add_command: The :class:`AddLineEdge` / :class:`AddBlindEdge` to
+            dispatch once any projection override is cleared.
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :param kind: ``"line"`` or ``"blind"`` -- only shapes the status text.
+        """
+        overridden = self._find_projection_on_pair(a, b)
+        if overridden is not None:
+            u, v = overridden
+            # Delete the projection edge first; bail if that step is rejected so
+            # we never leave a half-applied override.
+            if not self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
+                return
+            self._sync_projection_render()
+        if self._dispatch(add_command):
             self._edge_selection.clear()
-            self._set_status(f"Added blind edge ({a!r}, {b!r}).")
+            if overridden is not None:
+                u, v = overridden
+                self._set_status(
+                    f"Replaced projection {u!r} -> {v!r} with a {kind} edge."
+                )
+            else:
+                self._set_status(f"Added {kind} edge ({a!r}, {b!r}).")
             self._refresh_view()
 
     def _handle_edge_projection_key(self) -> None:
@@ -1994,6 +2142,14 @@ class EditorApp:
             # Identical endpoints have no defined heading.
             self._set_status(f"Projection: {exc}")
             return
+        # Override line/blind -> projection: a projection edge cannot coexist
+        # with an undirected line / blind edge on the same pair, so delete the
+        # plain edge FIRST. If that step is rejected (``_dispatch`` surfaced the
+        # ValueError) we bail rather than leave a half-applied override.
+        overrode_plain = self._find_plain_edge_on_pair(u, v)
+        if overrode_plain:
+            if not self._dispatch(DeleteEdge(u, v)):
+                return
         if self._dispatch(
             AddProjectionEdge(self._proj_delta, u, v, distance_cm, heading_deg)
         ):
@@ -2002,9 +2158,15 @@ class EditorApp:
             # if the refresh path changes, then clear the picker.
             self._sync_projection_render()
             self._edge_selection.clear()
-            self._set_status(
-                f"Added projection edge {u!r} -> {v!r}."
-            )
+            if overrode_plain:
+                self._set_status(
+                    f"Replaced edge ({u!r}, {v!r}) with a projection "
+                    f"{u!r} -> {v!r}."
+                )
+            else:
+                self._set_status(
+                    f"Added projection edge {u!r} -> {v!r}."
+                )
             self._refresh_view()
 
     # ------------------------------------------------------------------
