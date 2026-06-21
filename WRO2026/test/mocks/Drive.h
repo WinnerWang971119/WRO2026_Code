@@ -135,6 +135,22 @@ public:
     StopAtLineBuilder& async() { return *this; }
 };
 
+class [[nodiscard]] WallStopBuilder
+{
+public:
+    WRO_MOCK_BUILDER_BOILERPLATE(WallStopBuilder)
+    WallStopBuilder& setPower(int16_t) { return *this; }
+    WallStopBuilder& setPreset(Config::SpeedPreset) { return *this; }
+    WallStopBuilder& setMode(DriveMode) { return *this; }
+    WallStopBuilder& setHeading(int16_t) { return *this; }
+    WallStopBuilder& setReverse(bool) { return *this; }
+    WallStopBuilder& setBackOff(float) { return *this; }
+    WallStopBuilder& setTimeout(uint32_t) { return *this; }
+    WallStopBuilder& setBrake(bool) { return *this; }
+    WallStopBuilder& setBlocking(bool) { return *this; }
+    WallStopBuilder& async() { return *this; }
+};
+
 #undef WRO_MOCK_BUILDER_BOILERPLATE
 
 /**
@@ -239,6 +255,7 @@ public:
     [[nodiscard]] TurnDegBuilder    turnDeg(int16_t /*deg*/) { return TurnDegBuilder{}; }
     [[nodiscard]] TurnToYawBuilder  turnToYaw(int16_t /*yaw*/) { return TurnToYawBuilder{}; }
     [[nodiscard]] StopAtLineBuilder stopAtLine(float /*expectedCm*/) { return StopAtLineBuilder{}; }
+    [[nodiscard]] WallStopBuilder   wallStop(float /*cm*/) { return WallStopBuilder{}; }
 
     // state accessors
     bool isMoveDone() const { return true; }

@@ -294,6 +294,15 @@ namespace ctps
         push(std::move(rec));
     }
 
+    void recordWallStop(float cm)
+    {
+        Record rec;
+        rec.op     = Op::DRIVE;
+        rec.method = "wallStop";
+        rec.cm     = cm;
+        push(std::move(rec));
+    }
+
     void recordBuildError()
     {
         g_ctpsBuildError = true;

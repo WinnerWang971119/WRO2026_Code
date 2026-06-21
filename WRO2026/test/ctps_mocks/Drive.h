@@ -171,6 +171,36 @@ public:
 };
 
 /**
+ * @brief Recording mock of `WallStopBuilder`.
+ *
+ * CTPS replays a wall-stop as a nominal forward push by the advisory `cm`
+ * argument; the real firmware terminates on stall and may stop slightly short
+ * or long, but the nominal push is the least-surprising host approximation.
+ */
+class [[nodiscard]] WallStopBuilder
+{
+public:
+    WallStopBuilder(DriveClass& /*drive*/, float expectedCm)
+    {
+        ctps::recordWallStop(expectedCm);
+    }
+
+    WallStopBuilder(const WallStopBuilder&)            = delete;
+    WallStopBuilder& operator=(const WallStopBuilder&) = delete;
+    WallStopBuilder& operator=(WallStopBuilder&&)      = delete;
+
+    WallStopBuilder& setPower(int16_t) { return *this; }
+    WallStopBuilder& setMode(DriveMode) { return *this; }
+    WallStopBuilder& setHeading(int16_t) { return *this; }
+    WallStopBuilder& setBackOff(float) { return *this; }
+    WallStopBuilder& setTimeout(uint32_t) { return *this; }
+    WallStopBuilder& setReverse(bool) { return *this; }
+    WallStopBuilder& setBrake(bool) { return *this; }
+    WallStopBuilder& setBlocking(bool) { return *this; }
+    WallStopBuilder& async() { return *this; }
+};
+
+/**
  * @brief Recording mock of the Drive facade.
  *
  * The fluent verbs return the recording builders by value; the builders record
@@ -197,6 +227,10 @@ public:
     [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm)
     {
         return StopAtLineBuilder(*this, expectedCm);
+    }
+    [[nodiscard]] WallStopBuilder wallStop(float expectedCm)
+    {
+        return WallStopBuilder(*this, expectedCm);
     }
 
     // --- Continuous primitives — no-op. ---

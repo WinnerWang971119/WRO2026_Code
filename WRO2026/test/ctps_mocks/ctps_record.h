@@ -220,6 +220,12 @@ namespace ctps
     void recordStopAtLine(float cm);
 
     /**
+     * @brief Record a `Drive.wallStop(cm)` push (recorded by the Drive mock).
+     * @param cm Nominal expected push distance to the wall, in centimetres.
+     */
+    void recordWallStop(float cm);
+
+    /**
      * @brief Set the sticky build-error flag (Mission.cpp hook, `start()` branch).
      */
     void recordBuildError();

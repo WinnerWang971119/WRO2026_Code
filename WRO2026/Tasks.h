@@ -234,6 +234,8 @@ private:
      */
     bool home(const TaskArgs& args);
 
+    bool test1(const TaskArgs& args);
+
     /**
      * @brief Line-follow a short fixed distance — a smoke test for the line + drive path.
      *
@@ -254,6 +256,7 @@ private:
      * @return Always `true`.
      */
     bool testOne(const TaskArgs& args);
+    bool test0621(const TaskArgs& args);
 
     bool _inTask  = false;
     bool _aborted = false;

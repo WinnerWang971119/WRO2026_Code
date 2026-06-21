@@ -47,7 +47,7 @@ namespace Config
      *       ``--build-property build.extra_flags=-DMISSION_ALLOW_REARM_DEFAULT=true``).
      */
 #ifndef MISSION_ALLOW_REARM_DEFAULT
-#define MISSION_ALLOW_REARM_DEFAULT false
+#define MISSION_ALLOW_REARM_DEFAULT true
 #endif
     constexpr bool MISSION_ALLOW_REARM = MISSION_ALLOW_REARM_DEFAULT;
 

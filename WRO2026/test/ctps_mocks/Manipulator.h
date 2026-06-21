@@ -75,6 +75,8 @@ public:
     ManipBelt() = default;
 
     bool begin() { return true; }
+    template<typename T>
+    void toStation(T) {}
     void home() {}
     void update() {}
     bool isDone() const { return true; }

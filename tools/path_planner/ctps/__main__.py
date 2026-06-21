@@ -23,9 +23,17 @@ It wires the three pure CTPS modules together end-to-end:
 
 Toolchain policy (CTPS plan, Error Handling): the Python side NEVER requires a
 C++ compiler when ``--trace`` is supplied. The compiler is located lazily, only
-on the default / ``--fixture`` build path, via ``vswhere.exe`` ->
-``vcvars64.bat``. A missing toolchain is reported with a clear message that
-points the user at ``--trace <existing_dump.json>`` and exits non-zero.
+on the default / ``--fixture`` build path, and the build is platform-specific:
+
+* On Windows the MSVC toolset is located via ``vswhere.exe`` ->
+  ``vcvars64.bat`` and the dump is built with cmake + Ninja inside a sourced
+  ``vcvars`` shell.
+* On non-Windows hosts there is no vcvars step: the dump is built with plain
+  ``cmake`` using the default generator and whatever C++ compiler (g++/clang)
+  is already on ``PATH`` — mirroring the CI invocation.
+
+A missing toolchain is reported with a clear message that points the user at
+``--trace <existing_dump.json>`` and exits non-zero.
 
 Stdlib only — no third-party dependencies.
 """
@@ -76,11 +84,8 @@ _PLANNER_ROOT: Path = _REPO_ROOT / "tools" / "path_planner"
 #: CMake source dir for the host test harness (holds the ``ctps_dump`` target).
 _TEST_DIR: Path = _REPO_ROOT / "WRO2026" / "test"
 
-#: Out-of-tree build dir for the ``ctps_dump`` target (gitignored by T11).
+#: Out-of-tree build dir for the ``ctps_dump`` target (gitignored).
 _BUILD_DIR: Path = _REPO_ROOT / "build" / "ctps"
-
-#: Built dump executable (Windows). ``cmd /c`` invokes it after the build.
-_DUMP_EXE: Path = _BUILD_DIR / "ctps_dump.exe"
 
 #: CMake target built by the configure/build step.
 _DUMP_TARGET: str = "ctps_dump"
@@ -95,7 +100,45 @@ _VSWHERE: Path = (
 
 
 # ---------------------------------------------------------------------------
-# Toolchain discovery (default / --fixture path only).
+# Built-binary discovery (generator-agnostic, cross-platform).
+# ---------------------------------------------------------------------------
+
+
+def _dump_exe_name() -> str:
+    """Return the platform-specific file name of the built dump executable.
+
+    :return: ``"ctps_dump.exe"`` on Windows, ``"ctps_dump"`` elsewhere.
+    """
+    return "ctps_dump.exe" if sys.platform.startswith("win") else "ctps_dump"
+
+
+def _find_dump_exe() -> Optional[Path]:
+    """Locate the freshly built ``ctps_dump`` binary, generator-agnostic.
+
+    Different CMake generators drop the binary in different places: single-
+    config generators (Ninja, Unix Makefiles) put it at the build root, while
+    multi-config generators (Visual Studio) nest it under ``Debug/`` or
+    ``Release/``. This searches all three locations for the platform exe name
+    and returns the newest existing match so a stale binary from a previous
+    generator never shadows the one just built.
+
+    :return: the most-recently-modified matching executable, or ``None`` when
+        no build output exists yet.
+    """
+    name = _dump_exe_name()
+    candidates: List[Path] = [
+        _BUILD_DIR / name,
+        _BUILD_DIR / "Debug" / name,
+        _BUILD_DIR / "Release" / name,
+    ]
+    existing = [c for c in candidates if c.is_file()]
+    if not existing:
+        return None
+    return max(existing, key=lambda p: p.stat().st_mtime)
+
+
+# ---------------------------------------------------------------------------
+# Toolchain discovery (Windows default / --fixture path only).
 # ---------------------------------------------------------------------------
 
 
@@ -112,7 +155,7 @@ def _toolchain_hint() -> str:
 
 
 def _find_vcvars() -> Optional[Path]:
-    """Locate ``vcvars64.bat`` via ``vswhere.exe``.
+    """Locate ``vcvars64.bat`` via ``vswhere.exe`` (Windows only).
 
     Runs ``vswhere -latest -products * -requires <VC tools> -property
     installationPath`` (``-products *`` so standalone Build Tools installs are
@@ -144,6 +187,7 @@ def _find_vcvars() -> Optional[Path]:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
     except OSError:
@@ -162,12 +206,12 @@ def _find_vcvars() -> Optional[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Build + dump (default / --fixture path only).
+# Build (default / --fixture path only) — one path per platform.
 # ---------------------------------------------------------------------------
 
 
-def _build_dump(vcvars: Path) -> int:
-    """Configure and build the ``ctps_dump`` target via vcvars + cmake + ninja.
+def _build_dump_windows(vcvars: Path) -> int:
+    """Configure and build ``ctps_dump`` via vcvars + cmake + ninja (Windows).
 
     Runs a single ``cmd /c`` that sources ``vcvars64.bat`` (to put the MSVC
     toolset, ninja, and cmake on PATH) and then chains the configure and build
@@ -200,8 +244,46 @@ def _build_dump(vcvars: Path) -> int:
     return completed.returncode
 
 
+def _build_dump_posix() -> int:
+    """Configure and build ``ctps_dump`` via plain cmake (non-Windows).
+
+    Mirrors the CI invocation: a default-generator configure
+    (``cmake -S WRO2026/test -B build/ctps``) followed by
+    ``cmake --build build/ctps --target ctps_dump``, using whatever C++
+    compiler is already on ``PATH``. No vcvars / no shell — each command is an
+    argv list run with ``shell=False`` so paths with spaces need no quoting.
+    Build output streams to this process's stdout/stderr.
+
+    A missing ``cmake`` raises :class:`FileNotFoundError`, which is allowed to
+    PROPAGATE to the caller so it can emit the "cmake not found" guidance; this
+    function does not catch it.
+
+    :return: the configure exit code if configure failed, otherwise the build
+        exit code (``0`` on success).
+    """
+    _BUILD_DIR.mkdir(parents=True, exist_ok=True)
+
+    configure = subprocess.run(
+        ["cmake", "-S", str(_TEST_DIR), "-B", str(_BUILD_DIR)],
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    if configure.returncode != 0:
+        return configure.returncode
+
+    build = subprocess.run(
+        ["cmake", "--build", str(_BUILD_DIR), "--target", _DUMP_TARGET],
+        cwd=str(_REPO_ROOT),
+        check=False,
+    )
+    return build.returncode
+
+
 def _run_dump(fixture: bool) -> str:
     """Run the built ``ctps_dump`` executable and capture its JSON stdout.
+
+    The binary is located with :func:`_find_dump_exe` so the lookup is
+    generator-agnostic (build root, ``Debug/``, or ``Release/``).
 
     :param fixture: when ``True``, pass ``--fixture`` so the harness dumps the
         synthetic fixture mission instead of the real ``buildMission``.
@@ -209,13 +291,14 @@ def _run_dump(fixture: bool) -> str:
     :raises RuntimeError: if the executable is missing or exits non-zero; the
         message carries the exe's stderr so the caller can surface it verbatim.
     """
-    if not _DUMP_EXE.is_file():
+    exe = _find_dump_exe()
+    if exe is None:
         raise RuntimeError(
             f"ctps: build reported success but the dump executable is missing "
-            f"at {_DUMP_EXE}."
+            f"in {_BUILD_DIR}."
         )
 
-    argv: List[str] = [str(_DUMP_EXE)]
+    argv: List[str] = [str(exe)]
     if fixture:
         argv.append("--fixture")
 
@@ -224,13 +307,14 @@ def _run_dump(fixture: bool) -> str:
         cwd=str(_REPO_ROOT),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
     if completed.returncode != 0:
         stderr = completed.stderr.strip() or "(no stderr)"
         raise RuntimeError(
-            f"ctps: {_DUMP_EXE.name} exited with code {completed.returncode}.\n"
+            f"ctps: {exe.name} exited with code {completed.returncode}.\n"
             f"{stderr}"
         )
 
@@ -238,30 +322,47 @@ def _run_dump(fixture: bool) -> str:
 
 
 def _produce_trace_json(fixture: bool) -> Optional[str]:
-    """Locate the toolchain, build ``ctps_dump``, and return its JSON stdout.
+    """Build ``ctps_dump`` for this platform and return its JSON stdout.
 
-    This is the default / ``--fixture`` path. On any failure it prints a clear,
-    actionable error (always including the ``--trace`` fallback) and returns
-    ``None`` so :func:`main` can exit non-zero without raising.
+    This is the default / ``--fixture`` path. On Windows the MSVC toolchain is
+    located via :func:`_find_vcvars` and the dump is built with vcvars + Ninja;
+    on non-Windows hosts vcvars is skipped entirely and the dump is built with
+    plain ``cmake`` (default generator, compiler from ``PATH``). On any failure
+    it prints a clear, actionable error (always including the ``--trace``
+    fallback) and returns ``None`` so :func:`main` can exit non-zero without
+    raising.
 
     :param fixture: forward the ``--fixture`` flag to the dump executable.
     :return: the dump JSON string, or ``None`` if the toolchain is missing or
         the build / dump failed.
     """
-    vcvars = _find_vcvars()
-    if vcvars is None:
-        print(
-            "ctps: no host C++ toolchain found.\n"
-            "  Could not locate vswhere.exe or vcvars64.bat for a Visual "
-            "Studio install.\n"
-            f"  Looked for vswhere at: {_VSWHERE}\n"
-            f"  {_toolchain_hint()}",
-            file=sys.stderr,
-        )
-        return None
-
     print(f"ctps: building {_DUMP_TARGET} ...", file=sys.stderr)
-    build_rc = _build_dump(vcvars)
+
+    if sys.platform.startswith("win"):
+        vcvars = _find_vcvars()
+        if vcvars is None:
+            print(
+                "ctps: no host C++ toolchain found.\n"
+                "  Could not locate vswhere.exe or vcvars64.bat for a Visual "
+                "Studio install.\n"
+                f"  Looked for vswhere at: {_VSWHERE}\n"
+                f"  {_toolchain_hint()}",
+                file=sys.stderr,
+            )
+            return None
+        build_rc = _build_dump_windows(vcvars)
+    else:
+        try:
+            build_rc = _build_dump_posix()
+        except FileNotFoundError:
+            print(
+                "ctps: cmake not found on PATH. Install CMake and a C++ "
+                "compiler (g++/clang).\n"
+                f"  {_toolchain_hint()}",
+                file=sys.stderr,
+            )
+            return None
+
     if build_rc != 0:
         print(
             f"ctps: cmake configure/build of {_DUMP_TARGET} failed "
@@ -272,7 +373,7 @@ def _produce_trace_json(fixture: bool) -> Optional[str]:
         return None
 
     mission = "fixture mission" if fixture else "real buildMission"
-    print(f"ctps: running {_DUMP_EXE.name} ({mission}) ...", file=sys.stderr)
+    print(f"ctps: running {_dump_exe_name()} ({mission}) ...", file=sys.stderr)
     try:
         return _run_dump(fixture)
     except RuntimeError as exc:

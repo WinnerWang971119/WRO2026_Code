@@ -205,7 +205,7 @@ def _drive_label(cmd: Command) -> str:
     The argument shown matches the method's geometry parameter so the side
     panel reads naturally:
 
-    * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``turnDeg(<deg>)`` /
+    * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``wallStop(<cm>)`` / ``turnDeg(<deg>)`` /
       ``turnToYaw(<deg>)``.
     * any other method (``stop``, unknown) renders as ``<method>()``.
 
@@ -213,7 +213,7 @@ def _drive_label(cmd: Command) -> str:
     :return: the side-panel label string.
     """
     method = cmd.method
-    if method == "driveDist" or method == "stopAtLine":
+    if method == "driveDist" or method == "stopAtLine" or method == "wallStop":
         return f"{method}({cmd.cm})"
     if method == "turnDeg":
         return f"turnDeg({cmd.deg})"
@@ -365,13 +365,12 @@ def build(trace: Trace, field_data) -> Track:
             # (before any geometry advance).
             event_t = t
             method = cmd.method
-            if method == "driveDist" or method == "stopAtLine":
-                # Both carry a forward distance in ``cm``. For ``stopAtLine``
-                # that is the nominal ``expectedCm`` to the line crossing — the
-                # robot drives ~that far before the sensor trips, so it is the
-                # best playback estimate of the advance. (Drift from the true
-                # stop point is unmodeled; see the CTPS plan for a future
-                # estimate-tagged keyframe.)
+            if method == "driveDist" or method == "stopAtLine" or method == "wallStop":
+                # These all carry a forward distance in ``cm``. For
+                # ``stopAtLine`` and ``wallStop`` that value is only nominal —
+                # the real robot stops on a sensor/physical wall rather than on
+                # exact odometry — but replaying the requested advance is still
+                # the best lightweight host estimate.
                 chassis.forward(float(cmd.cm))
                 append_geometry_keyframe(
                     chassis.x_cm, chassis.y_cm, chassis.heading_deg

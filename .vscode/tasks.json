@@ -1,17 +1,36 @@
 {
     "version": "2.0.0",
+    "options": {
+        "cwd": "${workspaceFolder}"
+    },
+    "osx": {
+        "options": {
+            "shell": {
+                "executable": "${env:SHELL}",
+                "args": [
+                    "-lc"
+                ]
+            }
+        }
+    },
+    "linux": {
+        "options": {
+            "shell": {
+                "executable": "${env:SHELL}",
+                "args": [
+                    "-lc"
+                ]
+            }
+        }
+    },
     "tasks": [
         {
             "label": "Path Planner: Build Routes",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/path_planner_task.ps1",
-                "${config:wro2026.pathPlanner.pythonPath}",
+                "run",
+                "python",
                 "${config:wro2026.pathPlanner.scriptPath}"
             ],
             "presentation": {
@@ -24,14 +43,10 @@
         {
             "label": "Editor: Open Field Editor GUI",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/path_planner_task.ps1",
-                "${config:wro2026.pathPlanner.pythonPath}",
+                "run",
+                "python",
                 "${config:wro2026.editor.scriptPath}"
             ],
             "presentation": {
@@ -44,14 +59,10 @@
         {
             "label": "Sim: Run PathTracker Demo",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/path_planner_task.ps1",
-                "${config:wro2026.pathPlanner.pythonPath}",
+                "run",
+                "python",
                 "${config:wro2026.sim.scriptPath}",
                 "--goals",
                 "${config:wro2026.sim.goals}"
@@ -66,14 +77,10 @@
         {
             "label": "Sim: Plot PathTracker Demo",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/path_planner_task.ps1",
-                "${config:wro2026.pathPlanner.pythonPath}",
+                "run",
+                "python",
                 "${config:wro2026.sim.scriptPath}",
                 "--goals",
                 "${config:wro2026.sim.goals}",
@@ -89,16 +96,17 @@
         {
             "label": "Arduino: Verify WRO2026",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "run",
+                "python",
+                "${workspaceFolder}/tools/arduino_cli_task.py",
                 "verify",
+                "--cli",
                 "${config:wro2026.arduino.cliPath}",
+                "--fqbn",
                 "${config:wro2026.arduino.fqbn}",
+                "--sketch",
                 "${config:wro2026.arduino.sketchPath}"
             ],
             "dependsOn": "Path Planner: Build Routes",
@@ -117,17 +125,19 @@
         {
             "label": "Arduino: Upload WRO2026",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "run",
+                "python",
+                "${workspaceFolder}/tools/arduino_cli_task.py",
                 "upload",
+                "--cli",
                 "${config:wro2026.arduino.cliPath}",
+                "--fqbn",
                 "${config:wro2026.arduino.fqbn}",
+                "--sketch",
                 "${config:wro2026.arduino.sketchPath}",
+                "--port",
                 "${config:wro2026.arduino.port}"
             ],
             "dependsOn": "Arduino: Verify WRO2026",
@@ -142,16 +152,17 @@
         {
             "label": "Arduino: List Boards",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "run",
+                "python",
+                "${workspaceFolder}/tools/arduino_cli_task.py",
                 "list-boards",
+                "--cli",
                 "${config:wro2026.arduino.cliPath}",
+                "--fqbn",
                 "${config:wro2026.arduino.fqbn}",
+                "--sketch",
                 "${config:wro2026.arduino.sketchPath}"
             ],
             "presentation": {
@@ -164,18 +175,21 @@
         {
             "label": "Arduino: Monitor Serial",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                "${workspaceFolder}/tools/arduino_cli_task.ps1",
+                "run",
+                "python",
+                "${workspaceFolder}/tools/arduino_cli_task.py",
                 "monitor",
+                "--cli",
                 "${config:wro2026.arduino.cliPath}",
+                "--fqbn",
                 "${config:wro2026.arduino.fqbn}",
+                "--sketch",
                 "${config:wro2026.arduino.sketchPath}",
+                "--port",
                 "${config:wro2026.arduino.port}",
+                "--baud",
                 "${config:wro2026.arduino.baudRate}"
             ],
             "presentation": {
@@ -195,9 +209,6 @@
                 "-m",
                 "tools.path_planner.ctps"
             ],
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
             "group": "build",
             "presentation": {
                 "reveal": "always",
