@@ -218,6 +218,10 @@ WRO2026_code/
 
 ## How to use
 
+New here? See [`docs/SETUP.md`](./docs/SETUP.md) for a full macOS + Windows
+developer setup — prerequisites, `uv`, `arduino-cli`, and how to run the tests,
+sim, editor, and CTPS on either OS.
+
 ### Arduino — build and flash
 
 Open `WRO2026/WRO2026.ino` in **Arduino IDE**, select board *Arduino UNO
