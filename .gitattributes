@@ -6,3 +6,30 @@ tools/path_planner/tests/golden/routes_toy.h   text eol=lf
 tools/path_planner/tests/golden/routes_toy.cpp text eol=lf
 WRO2026/routes.h                                text eol=lf
 WRO2026/routes.cpp                              text eol=lf
+
+# Cross-platform line-ending normalization. The project is developed on
+# Windows but also built on macOS/Linux; pin source and text files to LF so
+# contributors don't trade CRLF/LF diff noise. Run `git add --renormalize .`
+# once after changing these rules to apply them to already-tracked files.
+*.py            text eol=lf
+*.md            text eol=lf
+*.json          text eol=lf
+*.toml          text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+*.txt           text eol=lf
+*.cfg           text eol=lf
+*.ini           text eol=lf
+*.cpp           text eol=lf
+*.h             text eol=lf
+*.ino           text eol=lf
+*.cmake         text eol=lf
+CMakeLists.txt  text eol=lf
+*.sh            text eol=lf
+
+# Binary assets — never normalize.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+
