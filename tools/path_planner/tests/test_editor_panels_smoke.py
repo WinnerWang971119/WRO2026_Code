@@ -38,6 +38,8 @@ try:
 finally:
     matplotlib.use = _real_mpl_use
 
+import tkinter as tk  # noqa: E402
+
 import pytest  # noqa: E402
 
 from tools.path_planner.editor import loader  # noqa: E402
@@ -68,6 +70,11 @@ _EXPECTED_CALLBACKS: tuple[str, ...] = (
     "on_add_pivot",
     "on_delete_pivot",
     "on_global_knob_change",
+    # Added by the restyle wave (T6): the ghost "+ add projection" button and the
+    # status-strip key-hint that opens the shortcuts dialog. Enumerated here so a
+    # future rename of either slot fails this guard loudly (the T6 review note).
+    "on_add_projection",
+    "on_show_shortcuts",
 )
 
 # Every public method / property the app drives.  ``max_edge_length_cm`` is a
@@ -82,6 +89,11 @@ _EXPECTED_PUBLIC_MEMBERS: tuple[str, ...] = (
     "set_undo_enabled",
     "set_redo_enabled",
     "set_auto_create_state",
+    # Added by the restyle wave (T6): the title-bar dirty dot and filename label
+    # the app drives after every mutation / load. Enumerated so a dropped setter
+    # surfaces here rather than as a runtime AttributeError (the T6 review note).
+    "set_dirty",
+    "set_filename",
     "max_edge_length_cm",
 )
 
@@ -198,3 +210,48 @@ def test_side_panels_accepts_themed_runtime_updates(side_panels):
     # Re-refreshing after the updates must also stay clean (the suppress-callback
     # replay path runs over the themed widgets a second time).
     side_panels.refresh(model)
+
+
+# ---------------------------------------------------------------------------
+# TC9 -- the Save and Save & Build action buttons exist, are placed, and their
+# commands invoke the app's ``on_save`` / ``on_save_and_build`` slots.
+# ---------------------------------------------------------------------------
+
+
+def test_side_panels_save_buttons_exist_and_invoke_callbacks(side_panels):
+    """The Save and Save & Build buttons are real, grid-placed widgets whose
+    commands fire the wired ``on_save`` / ``on_save_and_build`` callbacks.
+
+    Verifies the action block survived the restyle end-to-end: both button
+    widgets exist on the panel, were placed by the grid geometry manager (a
+    withdrawn test root never reports ``winfo_ismapped``, so the geometry
+    manager is the robust "it's in the layout" check), and clicking each --
+    driven via :meth:`tk.Button.invoke`, which runs the bound command
+    synchronously without the window being visible -- fires the slot the app
+    assigns. A future rename that decouples the button from its slot fails here
+    rather than silently at runtime.
+    """
+    # Both action buttons exist as real Tk buttons.
+    assert isinstance(side_panels._save_button, tk.Button)
+    assert isinstance(side_panels._save_build_button, tk.Button)
+
+    # Each was placed via the grid geometry manager (the action block grids its
+    # four buttons into a two-column frame).
+    assert side_panels._save_button.winfo_manager() == "grid"
+    assert side_panels._save_build_button.winfo_manager() == "grid"
+
+    # Wire sentinel callbacks, then invoke each button's command. ``invoke``
+    # runs the bound command synchronously -- no event loop / visible window
+    # required -- so the count proves the button -> slot wiring is intact.
+    save_calls = {"n": 0}
+    build_calls = {"n": 0}
+    side_panels.on_save = lambda: save_calls.__setitem__("n", save_calls["n"] + 1)
+    side_panels.on_save_and_build = lambda: build_calls.__setitem__(
+        "n", build_calls["n"] + 1
+    )
+
+    side_panels._save_button.invoke()
+    side_panels._save_build_button.invoke()
+
+    assert save_calls["n"] == 1, "Save button must fire on_save"
+    assert build_calls["n"] == 1, "Save & Build button must fire on_save_and_build"

@@ -98,3 +98,33 @@ the requested change as a follow-up.
    edited.
    - [ ] Confirm "stale-VALID-until-next-Save" is acceptable, **or** request a
      dirty → neutral reset so an unsaved edit no longer reads as validated.
+
+## UI restyle + projection/reset (this change)
+
+These items cover the restyle layout and the projection-edge / reset-autofill
+interactions that the unit tests cannot eyeball. The logic underneath is unit
+tested (`tests/test_editor_projection.py`, `tests/test_editor_reset_autofill.py`,
+and the TC9/TC10 additions in `tests/test_editor_panels_smoke.py` /
+`tests/test_editor_inspector.py`); this list is the look-and-feel sign-off.
+
+- [ ] The window renders as a **3-pane layout** (map canvas, control column,
+  status surface) and nothing overlaps or clips at the default window size.
+- [ ] The **active mode** shows the terracotta accent bar on its row plus the
+  mode tint, and the bar moves when you switch modes.
+- [ ] The **Save & Build** button is visible (terracotta primary), and clicking
+  it regenerates `WRO2026/routes.h` + `routes.cpp` (check the file mtimes or a
+  `git status` after a build).
+- [ ] The map background is the **warm cream** paper tone, not grey/white.
+- [ ] The **add-node dialog offers `reset`** in the Type combo; picking `reset`
+  and creating the node **auto-opens the reset section** with an **auto-filled
+  wall coordinate + facing** already populated.
+- [ ] Pick a source node, then a destination, and press **P**: a **teal
+  projection arrow** is drawn from `u` to `v`.
+- [ ] Pressing **?** or **F1** opens the **keyboard-shortcuts dialog**; it lists
+  the bindings and dismisses on Escape / Close / the window "X".
+- [ ] **Position-change reset recompute (deferred TC6 visual half):** with a
+  reset node selected, **changing its axis** re-suggests a fresh wall + facing
+  (the recompute), while **hand-editing only the wall or facing** (axis
+  unchanged) keeps your typed values (no clobber). The dispatch logic for both
+  branches is unit tested in `tests/test_editor_reset_autofill.py` (TC6); this
+  checkbox is the on-screen confirmation that the panel reflects it.

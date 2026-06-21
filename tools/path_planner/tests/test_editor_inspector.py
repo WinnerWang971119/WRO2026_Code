@@ -42,6 +42,8 @@ try:
 finally:
     matplotlib.use = _real_mpl_use
 
+from tools.path_planner.editor import dialogs  # noqa: E402
+from tools.path_planner.editor.dialogs import ShortcutsDialog  # noqa: E402
 from tools.path_planner.editor.history import History  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 
@@ -315,3 +317,130 @@ def test_focus_guard_blocks_actual_nudge_dispatch_in_entry() -> None:
 
     assert repr(model.to_json_dict()) == pre
     assert app._history.can_undo is False
+
+
+# ---------------------------------------------------------------------------
+# TC7 -- the add-node dialog offers the "reset" type (module-scoped values)
+# ---------------------------------------------------------------------------
+
+
+def test_dialog_node_type_values_offer_reset() -> None:
+    """TC7: ``dialogs._NODE_TYPE_VALUES`` is exactly ``("line", "blind",
+    "reset")`` -- the add-node dialog offers the reset type (T5).
+
+    Pinning the module-scoped tuple guards the add-node dialog's combo values:
+    the restyle made ``"reset"`` selectable, and a future edit that drops it (or
+    re-orders the tuple) would break the "create a reset node" flow silently.
+    Module-scoped (not a per-instance read) so no Tk is needed.
+    """
+    assert dialogs._NODE_TYPE_VALUES == ("line", "blind", "reset")
+
+
+# ---------------------------------------------------------------------------
+# TC10 -- the ShortcutsDialog builds headless and retains every label
+# ---------------------------------------------------------------------------
+
+
+# Sample shortcut groups passed to the dialog. Named so the TC10 assertion reads
+# as deliberate fixture data; each key_label + description must surface in the
+# dialog's retained labels.
+_SAMPLE_SHORTCUT_GROUPS = (
+    (
+        "Editing",
+        (
+            ("Ctrl+Z", "Undo the last edit"),
+            ("Ctrl+Y", "Redo the last undone edit"),
+        ),
+    ),
+    (
+        "Files",
+        (
+            ("Ctrl+S", "Save the field"),
+            ("F5", "Save & build routes"),
+        ),
+    ),
+)
+
+
+def test_shortcuts_dialog_builds_and_retains_labels(tk_root) -> None:
+    """TC10: ``ShortcutsDialog`` constructs under the shared root without raising,
+    its retained labels contain every sample key_label + description, and it
+    dismisses cleanly.
+
+    Builds the REAL dialog on the session-scoped ``tk_root`` (never its own
+    ``tk.Tk()`` -- see ``conftest.py``). The dialog retains its rendered key /
+    description labels on ``_row_labels`` and its headers on ``_header_labels``
+    so the test can introspect the rendered text without the window being
+    mapped.
+    """
+    dialog = ShortcutsDialog(tk_root, _SAMPLE_SHORTCUT_GROUPS)
+    try:
+        # Constructing it is the first half of the assertion (it must not raise).
+        assert isinstance(dialog, ShortcutsDialog)
+
+        # Every header title surfaces (UPPERCASED by the dialog).
+        header_texts = {label.cget("text") for label in dialog._header_labels}
+        for category_title, _rows in _SAMPLE_SHORTCUT_GROUPS:
+            assert category_title.upper() in header_texts
+
+        # Every (key_label, description) pair surfaces in the retained rows.
+        key_texts = {key.cget("text") for key, _desc in dialog._row_labels}
+        desc_texts = {desc.cget("text") for _key, desc in dialog._row_labels}
+        for _category_title, rows in _SAMPLE_SHORTCUT_GROUPS:
+            for key_label, description in rows:
+                assert key_label in key_texts, f"missing key label {key_label!r}"
+                assert description in desc_texts, (
+                    f"missing description {description!r}"
+                )
+    finally:
+        # The dialog must dismiss cleanly (releases its grab, restores focus,
+        # destroys the toplevel) without raising.
+        dialog._on_close()
+
+    # After dismissal the toplevel is gone (winfo_exists -> 0).
+    assert not dialog.winfo_exists()
+
+
+# ---------------------------------------------------------------------------
+# TC12 -- JSON round-trip is stable and carries no projection edges
+# ---------------------------------------------------------------------------
+
+
+def test_json_round_trip_is_stable_and_has_no_projection_edges() -> None:
+    """TC12: ``from_json_dict(to_json_dict())`` reproduces an equal model and the
+    JSON dict carries NO projection edges (they live in ``field_data.py``'s
+    ``EDGES`` table, not the editor JSON).
+
+    Round-trips a model that exercises every optional slot (pivots + a valid
+    reset node) so the stability check is meaningful, then asserts the JSON dict
+    has no projection-edge key and no ``EDGE_PROJECTION`` marker anywhere in its
+    values -- the editor's JSON sidecar never carries projection edges.
+    """
+    model = make_model()
+    # Convert G to a valid reset node and add a pivot so the optional slots are
+    # populated; G at (250, 80), wall x=280 -> 30 cm standoff, facing 180.
+    model.node_types["G"] = "reset"
+    model.reset_nodes = {
+        "G": {"axis": "x", "wall_coord": 280.0, "facing": 180.0}
+    }
+    model.pivot_turns = [("A", "B", "G")]
+
+    json_dict = model.to_json_dict()
+    round_tripped = FieldModel.from_json_dict(json_dict)
+
+    # The round-trip reproduces an equal model, and re-serialising is stable.
+    assert round_tripped == model
+    assert round_tripped.to_json_dict() == json_dict
+
+    # No projection-edge surface in the JSON dict: not as a top-level key ...
+    for key in json_dict:
+        assert "PROJECTION" not in key.upper(), (
+            f"JSON dict must not carry a projection key, found {key!r}"
+        )
+    assert "EDGES" not in json_dict, (
+        "the editor JSON has no EDGES table -- projection edges live in "
+        "field_data.py, not the JSON sidecar"
+    )
+
+    # ... and no EDGE_PROJECTION marker buried anywhere in the serialised values.
+    assert "EDGE_PROJECTION" not in repr(json_dict)
