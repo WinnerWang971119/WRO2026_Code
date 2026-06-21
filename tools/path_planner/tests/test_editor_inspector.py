@@ -444,3 +444,83 @@ def test_json_round_trip_is_stable_and_has_no_projection_edges() -> None:
 
     # ... and no EDGE_PROJECTION marker buried anywhere in the serialised values.
     assert "EDGE_PROJECTION" not in repr(json_dict)
+
+
+# ---------------------------------------------------------------------------
+# #8 -- inspector skip-if-unchanged guards compare at DISPLAY precision so a
+# bare focus-out (no real edit) never truncates the stored full-precision value.
+# ---------------------------------------------------------------------------
+
+
+def test_node_coords_focusout_at_display_precision_is_noop() -> None:
+    """A focus-out returning the rounded coordinate of an UNEDITED node does not
+    dispatch a MoveNode (which would truncate the stored value to 0.1) (#8)."""
+    app, panels, model = make_app()
+    model.nodes["B"] = (200.34, 10.0)  # full precision; the entry shows "200.3"
+
+    # Tab away without editing: the entry returns the displayed rounded value.
+    app._on_panel_node_coords_change("B", 200.3, 10.0)
+
+    assert app._history.can_undo is False, "an unedited focus-out must not move"
+    assert model.nodes["B"] == (200.34, 10.0), "the stored value is not truncated"
+
+    # A genuine edit (differs at display precision) still dispatches.
+    app._on_panel_node_coords_change("B", 205.0, 10.0)
+    assert app._history.can_undo is True
+    assert model.nodes["B"] == (205.0, 10.0)
+
+
+def test_global_knob_focusout_at_display_precision_is_noop() -> None:
+    """A focus-out returning the rounded value of an unchanged knob does not
+    dispatch (the knob had NO unchanged-guard before the fix) (#8)."""
+    app, panels, model = make_app()
+    model.robot_radius_cm = 8.34  # entry shows "8.3"
+
+    app._on_panel_global_knob_change("robot_radius_cm", 8.3)
+
+    assert app._history.can_undo is False
+    assert model.robot_radius_cm == 8.34, "the stored knob is not truncated"
+
+    # A real change still dispatches.
+    app._on_panel_global_knob_change("robot_radius_cm", 9.0)
+    assert app._history.can_undo is True
+    assert model.robot_radius_cm == 9.0
+
+
+def test_start_heading_focusout_at_display_precision_is_noop() -> None:
+    """A focus-out returning the rounded start heading does not dispatch (the
+    latch held the full-precision value before the fix) (#8)."""
+    app, panels, model = make_app()
+    app._last_committed_heading = 45.67
+    model.start_heading_deg = 45.67  # spinbox shows "45.7"
+
+    app._on_panel_start_heading_change(45.7)
+
+    assert app._history.can_undo is False
+    assert model.start_heading_deg == 45.67
+
+    app._on_panel_start_heading_change(90.0)
+    assert app._history.can_undo is True
+    assert model.start_heading_deg == 90.0
+
+
+def test_reset_spec_axis_unchanged_focusout_at_display_precision_is_noop() -> None:
+    """A focus-out on an unchanged reset spec (same axis, rounded wall/facing)
+    does not dispatch (the axis-unchanged path had no guard before) (#8)."""
+    app, panels, model = make_app()
+    model.node_types["G"] = "reset"
+    model.reset_nodes["G"] = {
+        "axis": "y",
+        "wall_coord": 80.34,  # entry shows "80.3"
+        "facing": 270.0,
+    }
+
+    app._on_panel_reset_spec_change("G", "y", 80.3, 270.0)
+
+    assert app._history.can_undo is False
+    assert model.reset_nodes["G"]["wall_coord"] == 80.34, "spec not truncated"
+
+    # A genuine wall edit still dispatches.
+    app._on_panel_reset_spec_change("G", "y", 85.0, 270.0)
+    assert app._history.can_undo is True
+    assert model.reset_nodes["G"]["wall_coord"] == 85.0

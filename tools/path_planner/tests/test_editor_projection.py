@@ -438,6 +438,50 @@ def test_tc2_remove_is_noop_when_only_line_shares_uv(tmp_path) -> None:
     assert path.stat().st_mtime_ns == mtime_before, "mtime must be unchanged"
 
 
+def test_tc2_append_succeeds_when_only_line_shares_uv(tmp_path) -> None:
+    """A plain ``type=EDGE_LINE`` ``(A, B)`` must NOT block a projection append.
+
+    The appender's duplicate check gates on ``(type, u, v)``, not ``(u, v)``
+    alone -- a directed pair is not unique across edge types, so a line/blind
+    override sharing the pair is a different entry, not a duplicate. Before the
+    gate was added the line entry was mistaken for a duplicate and the
+    projection write was silently dropped (returned ``False``)."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_ONLY_LINE_SAME_UV)
+
+    # Sanity: only the EDGE_LINE entry for (A, B) exists going in.
+    assert _entry_types_for_uv(path.read_text(encoding="utf-8"), "A", "B") == [
+        "EDGE_LINE"
+    ]
+
+    result = append_projection_edge(path, "A", "B", 45.0, 90.0)
+
+    assert result is True, "the projection must be written, not mistaken for a dup"
+
+    new_text = path.read_text(encoding="utf-8")
+    edges_list = _parse_edges_list(new_text)
+    # Both typed entries now coexist on the same (A, B) pair.
+    assert _entry_types_for_uv(new_text, "A", "B") == ["EDGE_LINE", "EDGE_PROJECTION"]
+    assert len(_projection_entries(edges_list)) == 1, "one projection entry added"
+
+
+def test_tc2_append_same_projection_uv_is_still_noop(tmp_path) -> None:
+    """A second append of the same ``(u, v)`` PROJECTION is still a no-op.
+
+    The ``(type, u, v)`` gate must not regress the duplicate-projection
+    suppression: re-appending the same projection pair returns ``False`` and
+    leaves the file untouched."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_ONLY_LINE_SAME_UV)
+    assert append_projection_edge(path, "A", "B", 45.0, 90.0) is True
+    bytes_before = path.read_bytes()
+    mtime_before = path.stat().st_mtime_ns
+
+    result = append_projection_edge(path, "A", "B", 999.0, 12.0)
+
+    assert result is False, "a duplicate projection (u, v) append must be a no-op"
+    assert path.read_bytes() == bytes_before
+    assert path.stat().st_mtime_ns == mtime_before
+
+
 # ===========================================================================
 # TC3 -- projection_edges.reconcile
 # ===========================================================================

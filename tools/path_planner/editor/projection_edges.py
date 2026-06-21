@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from math import atan2, degrees, hypot
 
+from tools.path_planner.editor.model import RESET_AXIS_VALUES
 from tools.path_planner.graph_builder import EDGE_PROJECTION
 
 # MUST mirror validator.WALL_PIVOT_CLEARANCE_CM -- the pivot-sweep radius
@@ -44,9 +45,10 @@ from tools.path_planner.validator import WALL_PIVOT_CLEARANCE_CM
 _GEOMETRY_ROUND_DP = 4
 
 # The two axes a reset node may re-zero against (a wall parallel to one axis).
-# Mirrors validator._ALLOWED_RESET_AXES; kept as a local literal so this module
-# does not reach for a leading-underscore private of another module.
-_ALLOWED_AXES = ("x", "y")
+# Single-sourced from ``model.RESET_AXIS_VALUES`` (a PUBLIC constant -- not a
+# leading-underscore private of another module), which mirrors
+# ``validator._ALLOWED_RESET_AXES``.
+_ALLOWED_AXES = RESET_AXIS_VALUES
 
 # Required keys on a PROJECTION entry in a field-data ``EDGES`` list. An entry
 # missing any of these is skipped rather than crashed on (a half-authored edge

@@ -25,7 +25,11 @@ from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from tools.path_planner.editor import projection_edges
-from tools.path_planner.editor.model import FieldModel
+from tools.path_planner.editor.model import (
+    NODE_TYPE_VALUES,
+    RESET_AXIS_VALUES,
+    FieldModel,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -36,18 +40,19 @@ from tools.path_planner.editor.model import FieldModel
 #: also has a matching ``reset_nodes`` spec, so the plain type-setters
 #: (:class:`AddNode`, :class:`SetNodeType`) refuse it and route reset creation
 #: through :class:`SetResetSpec` / :class:`ClearResetSpec` instead.
-_VALID_NODE_TYPES: frozenset[str] = frozenset({"line", "blind", "reset"})
+_VALID_NODE_TYPES: frozenset[str] = frozenset(NODE_TYPE_VALUES)
 
 #: Plain (non-reset) node types the type-setters and :class:`ClearResetSpec`
 #: are allowed to assign directly.
-_PLAIN_NODE_TYPES: frozenset[str] = frozenset({"line", "blind"})
+_PLAIN_NODE_TYPES: frozenset[str] = frozenset(NODE_TYPE_VALUES) - {"reset"}
 
 #: Allowed ``kind`` values for edge-batch entries.
 _VALID_EDGE_KINDS: frozenset[str] = frozenset({"line", "blind"})
 
 #: Allowed ``axis`` values for a reset-node spec (the wall is parallel to one
-#: field axis); mirrors ``validator._ALLOWED_RESET_AXES``.
-_VALID_RESET_AXES: frozenset[str] = frozenset({"x", "y"})
+#: field axis); single-sourced from ``model.RESET_AXIS_VALUES`` (which mirrors
+#: ``validator._ALLOWED_RESET_AXES``).
+_VALID_RESET_AXES: frozenset[str] = frozenset(RESET_AXIS_VALUES)
 
 #: Heading bounds, in degrees, CCW from +x (matches ``field_data`` convention).
 _HEADING_MIN_DEG: float = 0.0
@@ -267,7 +272,14 @@ class RenameNode:
 
     Updates ``model.nodes``, ``model.node_types``, every entry of
     ``model.line_segments`` and ``model.blind_edges`` that mentions the old
-    name, and ``model.start_node`` if it equals the old name.
+    name, the ``model.reset_nodes`` key (a reset spec is keyed by node name),
+    every ``model.pivot_turns`` triple that names the node, and
+    ``model.start_node`` if it equals the old name.
+
+    .. note::
+       Projection edges live off-model in the app's ``ProjectionDelta`` and are
+       NOT visible here; the app re-keys that delta itself when it dispatches a
+       rename (see ``EditorApp._perform_rename``).
 
     :ivar old: Existing node name.
     :ivar new: Replacement node name.  Must not already exist.
@@ -323,6 +335,19 @@ class RenameNode:
         model.blind_edges = [
             self._rename_edge(edge) for edge in model.blind_edges
         ]
+        # Reset specs are keyed by node name: re-key the renamed node's spec so a
+        # reset-typed node keeps it. Without this the spec orphans on the old
+        # name and the validator rejects the next Save ("typed reset but has no
+        # RESET_NODES entry").
+        model.reset_nodes = {
+            (self.new if name == self.old else name): spec
+            for name, spec in model.reset_nodes.items()
+        }
+        # Pivot turns name nodes positionally in (u, v, w): rename every
+        # occurrence so a pivot triple survives a rename of any of its legs.
+        model.pivot_turns = [
+            self._rename_turn(turn) for turn in model.pivot_turns
+        ]
 
         self._start_node_was_old = model.start_node == self.old
         if self._start_node_was_old:
@@ -346,6 +371,13 @@ class RenameNode:
         ]
         model.blind_edges = [
             self._unrename_edge(edge) for edge in model.blind_edges
+        ]
+        model.reset_nodes = {
+            (self.old if name == self.new else name): spec
+            for name, spec in model.reset_nodes.items()
+        }
+        model.pivot_turns = [
+            self._unrename_turn(turn) for turn in model.pivot_turns
         ]
         if self._start_node_was_old:
             model.start_node = self.old
@@ -376,15 +408,39 @@ class RenameNode:
             self.old if b == self.new else b,
         )
 
+    def _rename_turn(
+        self, turn: tuple[str, str, str]
+    ) -> tuple[str, str, str]:
+        """Return pivot *turn* with ``self.old`` replaced by ``self.new``.
+
+        :param turn: Original ``(u, v, w)`` pivot triple.
+        :return: Triple with the rename applied to any matching leg.
+        """
+        return tuple(self.new if name == self.old else name for name in turn)
+
+    def _unrename_turn(
+        self, turn: tuple[str, str, str]
+    ) -> tuple[str, str, str]:
+        """Return pivot *turn* with ``self.new`` replaced by ``self.old``.
+
+        :param turn: Triple previously transformed by :meth:`_rename_turn`.
+        :return: Triple with the rename reversed.
+        """
+        return tuple(self.old if name == self.new else name for name in turn)
+
 
 @dataclass
 class DeleteNode:
     """Delete a node from the model.
 
     Refuses if any entry in ``model.line_segments`` or ``model.blind_edges``
-    still references the node, or if the node is the current
-    ``model.start_node`` -- the user must delete those edges (or re-point the
-    start node) first.
+    still references the node, if any ``model.pivot_turns`` triple names it, or
+    if the node is the current ``model.start_node`` -- the user must delete
+    those edges / pivots (or re-point the start node) first.
+
+    A reset spec keyed by the node, on the other hand, is CASCADE-removed: it is
+    the node's own attribute (not a relationship to another node), so it is
+    meaningless once the node is gone.  :meth:`revert` restores it.
 
     .. note::
        This command only checks the in-memory edge lists.  The rich ``EDGES``
@@ -402,6 +458,10 @@ class DeleteNode:
         default=None, init=False, repr=False
     )
     _deleted_type: str | None = field(default=None, init=False, repr=False)
+    # The node's own reset spec (if any), captured so revert restores it.
+    _deleted_reset_spec: dict | None = field(
+        default=None, init=False, repr=False
+    )
 
     def apply(self, model: FieldModel) -> None:
         """Remove ``self.name`` from ``model.nodes`` and ``model.node_types``.
@@ -409,9 +469,9 @@ class DeleteNode:
         :param model: Target model.
         :raises KeyError: If ``self.name`` is absent from ``model.nodes``.
         :raises ValueError: If any line segment or blind edge still references
-            the node, or if the node is the current ``model.start_node``.  The
-            message names the offending list and index (or the start-node
-            conflict).
+            the node, if any pivot turn names it, or if the node is the current
+            ``model.start_node``.  The message names the offending list and
+            index (or the start-node conflict).
         """
         if self.name not in model.nodes:
             raise KeyError(
@@ -431,6 +491,18 @@ class DeleteNode:
                     f"blind_edges[{index}] = {edge!r} still references it"
                 )
 
+        # Pivot turns reference the node as an endpoint (like an edge), so
+        # refuse the delete and tell the operator to remove the pivot first --
+        # the same posture as the edge guards above. A dangling pivot leg would
+        # otherwise fail the Save-time validator and block every later Save.
+        for index, turn in enumerate(model.pivot_turns):
+            if self.name in turn:
+                raise ValueError(
+                    f"DeleteNode: cannot delete {self.name!r}; "
+                    f"pivot_turns[{index}] = {turn!r} still references it -- "
+                    "remove the pivot turn first"
+                )
+
         # Guard the start node last, so an otherwise-blocking edge reference
         # still reports its own (more actionable) message first. Deleting the
         # start node would leave ``model.start_node`` dangling, which
@@ -446,8 +518,16 @@ class DeleteNode:
         # ``node_types`` may be missing in a malformed model; default to a
         # safe value for revert so we never re-introduce a half-deleted node.
         self._deleted_type = model.node_types.get(self.name)
+        # Cascade-remove the node's own reset spec (keyed by the node name).
+        # Deep-copied so a later in-place edit of the live dict cannot mutate
+        # the captured inverse.
+        reset_spec = model.reset_nodes.get(self.name)
+        self._deleted_reset_spec = (
+            dict(reset_spec) if reset_spec is not None else None
+        )
         del model.nodes[self.name]
         model.node_types.pop(self.name, None)
+        model.reset_nodes.pop(self.name, None)
 
     def revert(self, model: FieldModel) -> None:
         """Re-insert the node that :meth:`apply` removed.
@@ -458,6 +538,8 @@ class DeleteNode:
         model.nodes[self.name] = self._deleted_xy
         if self._deleted_type is not None:
             model.node_types[self.name] = self._deleted_type
+        if self._deleted_reset_spec is not None:
+            model.reset_nodes[self.name] = dict(self._deleted_reset_spec)
 
 
 @dataclass
@@ -557,7 +639,8 @@ class AddPivotTurn:
 
         :param model: Target model.
         :raises ValueError: If any of ``u`` / ``v`` / ``w`` is not in
-            ``model.nodes``, or if the exact triple already exists in
+            ``model.nodes``, if the triple is degenerate (``u == v`` or
+            ``v == w``), or if the exact triple already exists in
             ``model.pivot_turns``.
         """
         for role, name in (("u", self.u), ("v", self.v), ("w", self.w)):
@@ -566,6 +649,16 @@ class AddPivotTurn:
                     f"AddPivotTurn: unknown node {name!r} ({role}) -- all of "
                     "u, v, w must exist in model.nodes"
                 )
+        # Distinctness mirrors validator._validate_pivot_turns: a pivot needs
+        # three distinct steps (arrive from u, pivot at v, leave to w). Reject a
+        # degenerate triple inline rather than letting it pass and only fail the
+        # Save-time validator (which would block every later Save).
+        if self.u == self.v or self.v == self.w:
+            raise ValueError(
+                f"AddPivotTurn: degenerate pivot "
+                f"('{self.u}','{self.v}','{self.w}') -- u==v or v==w; a pivot "
+                "turn needs three distinct steps"
+            )
         turn = (self.u, self.v, self.w)
         if turn in model.pivot_turns:
             raise ValueError(
@@ -1032,9 +1125,17 @@ class AddEdgesBatch:
 
     :ivar edges: Sequence of ``(node_a, node_b, kind)`` triples where *kind*
         is either ``"line"`` or ``"blind"``.
+    :ivar projection_pairs: Undirected pairs (each a ``frozenset({a, b})``) that
+        already carry a PROJECTION edge. Projection edges live off-model in the
+        app's ``ProjectionDelta``, so this command cannot see them through
+        ``model``; the caller passes them in so a batch never adds a plain edge
+        to a pair that already has a projection (``graph_builder`` would then
+        emit a conflicting directed pair from both). Empty by default for
+        callers (and tests) with no projection edges in play.
     """
 
     edges: list[tuple[str, str, str]]
+    projection_pairs: frozenset = field(default_factory=frozenset)
 
     # Populated during apply(); each entry is ("line"|"blind", appended_index).
     # Stored in input order; revert walks this list in reverse.
@@ -1052,6 +1153,8 @@ class AddEdgesBatch:
         * Either endpoint is not in ``model.nodes``
         * The undirected pair ``{a, b}`` already exists in
           ``model.line_segments`` or ``model.blind_edges``
+        * The undirected pair ``{a, b}`` already carries a projection edge
+          (passed in via ``projection_pairs``)
         * The same undirected pair appears more than once within
           ``self.edges`` itself
 
@@ -1106,6 +1209,12 @@ class AddEdgesBatch:
                 raise ValueError(
                     f"AddEdgesBatch: edge {entry!r} conflicts with existing "
                     f"blind_edges[{blind_idx}]"
+                )
+
+            if pair in self.projection_pairs:
+                raise ValueError(
+                    f"AddEdgesBatch: edge {entry!r} conflicts with an existing "
+                    "projection edge on the same pair"
                 )
 
             seen_in_batch.add(pair)
@@ -1634,3 +1743,59 @@ class SetStartHeading:
             "SetStartHeading.revert before apply"
         )
         model.start_heading_deg = self._original
+
+
+# ---------------------------------------------------------------------------
+# Composite command
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MacroCommand:
+    """Bundle several sub-commands into ONE atomic, single-undo operation.
+
+    Used by the editor's edge-type override (delete the existing edge, then add
+    the replacement): dispatching the two steps as one macro means a single
+    Ctrl-Z restores the WHOLE override instead of leaving the pair with neither
+    edge -- the asymmetric-undo bug the two-dispatch pattern had.
+
+    Atomicity: :meth:`apply` runs the sub-commands in order; if any raises, the
+    already-applied prefix is reverted in reverse and the exception is
+    re-raised, so a rejected macro leaves the model untouched (the
+    :class:`Command` no-op-on-failure contract). :meth:`revert` reverts every
+    sub-command in reverse order. Because ``History`` only records a macro whose
+    :meth:`apply` fully succeeded, :meth:`revert` is always the inverse of a
+    complete application.
+
+    :ivar commands: The ordered sub-commands. Each must satisfy the
+        :class:`Command` protocol. An empty list is a legal no-op.
+    """
+
+    commands: list
+
+    def apply(self, model: FieldModel) -> None:
+        """Apply every sub-command in order, rolling back on any failure.
+
+        :param model: Target model.
+        :raises Exception: Whatever a sub-command's ``apply`` raises, after the
+            already-applied prefix has been reverted.
+        """
+        applied: list = []
+        try:
+            for command in self.commands:
+                command.apply(model)
+                applied.append(command)
+        except Exception:
+            # Roll the partially-applied prefix back so the model is untouched,
+            # matching the single-command no-op-on-failure contract.
+            for command in reversed(applied):
+                command.revert(model)
+            raise
+
+    def revert(self, model: FieldModel) -> None:
+        """Revert every sub-command in reverse order.
+
+        :param model: Target model.
+        """
+        for command in reversed(self.commands):
+            command.revert(model)

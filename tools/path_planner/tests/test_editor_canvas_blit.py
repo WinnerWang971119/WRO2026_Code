@@ -384,3 +384,114 @@ def test_move_drag_does_not_rebuild_listbox_until_release(field_canvas):
     assert app._drag_origin_xy is None
     # The single MoveNode is on the undo stack (one undoable entry per drag).
     assert app._history.can_undo
+
+
+# ---------------------------------------------------------------------------
+# TC5 -- button-release robustness (#9 None-button, #15 mismatched button).
+# ---------------------------------------------------------------------------
+
+
+_MOUSE_BUTTON_RIGHT = 3
+
+
+def _in_axes_event(field_canvas, *, button, xdata, ydata):
+    """Build a minimal in-axes matplotlib-style event for the release handler."""
+    return SimpleNamespace(
+        button=button,
+        inaxes=field_canvas._ax,
+        xdata=xdata,
+        ydata=ydata,
+        x=0.0,
+        y=0.0,
+    )
+
+
+def test_release_with_none_button_still_fires_on_release(field_canvas):
+    """An out-of-window release that reports button=None must still commit.
+
+    Some matplotlib backends pass ``None`` for the button on a release outside
+    the window. With a drag latched, the handler must clear the latch AND fire
+    ``on_release`` using the LATCHED button (#9) -- the old code early-returned
+    on a None button, leaving a MOVE drag stuck with no MoveNode and no undo.
+    """
+    field_canvas.render(_load_model())
+    # A left-button drag is in progress (press latched the button).
+    field_canvas._active_button = _MOUSE_BUTTON_LEFT
+    received: list = []
+    field_canvas.on_release = lambda x, y, b: received.append((x, y, b))
+
+    field_canvas._on_button_release(
+        _in_axes_event(field_canvas, button=None, xdata=10.0, ydata=20.0)
+    )
+
+    assert field_canvas._active_button is None  # latch cleared
+    assert received == [(10.0, 20.0, _MOUSE_BUTTON_LEFT)]  # fired w/ latched btn
+
+
+def test_release_with_mismatched_button_clears_latch(field_canvas):
+    """A different button's release must still clear the single-button latch.
+
+    Press right (latch=3); a backend delivers a LEFT release with no matching
+    right release. The latch must be cleared (#15) so bare-hover motion no
+    longer fires ``on_drag`` as if a drag were still in progress.
+    """
+    field_canvas.render(_load_model())
+    field_canvas._active_button = _MOUSE_BUTTON_RIGHT
+    field_canvas.on_release = lambda *_a: None
+
+    field_canvas._on_button_release(
+        _in_axes_event(
+            field_canvas, button=_MOUSE_BUTTON_LEFT, xdata=5.0, ydata=6.0
+        )
+    )
+
+    assert field_canvas._active_button is None
+
+    # A subsequent bare hover must NOT fire on_drag (the stuck-latch symptom).
+    drags: list = []
+    field_canvas.on_drag = lambda x, y: drags.append((x, y))
+    field_canvas._on_motion_notify(
+        _in_axes_event(
+            field_canvas, button=None, xdata=7.0, ydata=8.0
+        )
+    )
+    assert drags == []
+
+
+# ---------------------------------------------------------------------------
+# TC6 -- the OBSTACLE rubber-band drag is de-lagged via the blit fast-path (#11).
+# ---------------------------------------------------------------------------
+
+
+def test_obstacle_drag_blits_preview_without_full_render(field_canvas):
+    """Sizing an obstacle composites only the preview rect (no full render).
+
+    ``begin_obstacle_drag`` bakes the static scene + arms an animated preview
+    rectangle; ``update_obstacle_preview`` restores that background and blits
+    just the rectangle (the ~60 Hz fast-path the MOVE drag uses), instead of the
+    old full ``_refresh_view`` per motion event. ``end_obstacle_drag`` tears the
+    preview down.
+    """
+    field_canvas.render(_load_model())
+
+    field_canvas.begin_obstacle_drag()
+    rect = field_canvas._obstacle_preview_artist
+    assert rect is not None
+    assert rect.get_animated() is True
+
+    # Spy AFTER arming (begin uses draw/copy_from_bbox, not restore/blit).
+    restore_spy, blit_spy = _install_composite_spies(field_canvas)
+    field_canvas.update_obstacle_preview(10.0, 20.0, 40.0, 60.0)
+
+    # The blit compositing pair fired (NOT a full ax.clear + render).
+    assert restore_spy.calls >= 1
+    assert blit_spy.calls >= 1
+    # The rectangle spans the dragged extent (lower-left + width/height).
+    assert rect.get_x() == pytest.approx(10.0)
+    assert rect.get_y() == pytest.approx(20.0)
+    assert rect.get_width() == pytest.approx(30.0)
+    assert rect.get_height() == pytest.approx(40.0)
+
+    field_canvas.end_obstacle_drag()
+    assert field_canvas._obstacle_preview_artist is None
+    assert field_canvas._obstacle_blit_background is None

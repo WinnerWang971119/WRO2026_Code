@@ -60,6 +60,7 @@ from tools.path_planner.editor.commands import (
     DeleteObstacle,
     DeletePivotTurn,
     DeleteProjectionEdge,
+    MacroCommand,
     MoveNode,
     ProjectionDelta,
     RenameNode,
@@ -70,7 +71,11 @@ from tools.path_planner.editor.commands import (
     SetStartHeading,
 )
 from tools.path_planner.editor.history import History
-from tools.path_planner.editor.model import FieldModel
+from tools.path_planner.editor.model import (
+    NODE_TYPE_VALUES,
+    RESET_AXIS_VALUES,
+    FieldModel,
+)
 from tools.path_planner.editor.panels import Mode, SidePanels
 from tools.path_planner.editor import theme
 
@@ -137,11 +142,10 @@ _MIN_WINDOW_HEIGHT_PX: int = 400
 _NODE_TYPE_LINE: str = "line"
 _NODE_TYPE_BLIND: str = "blind"
 _NODE_TYPE_RESET: str = "reset"
-_VALID_NODE_TYPES: tuple[str, ...] = (
-    _NODE_TYPE_LINE,
-    _NODE_TYPE_BLIND,
-    _NODE_TYPE_RESET,
-)
+#: All node types the inline guard accepts; single-sourced from
+#: ``model.NODE_TYPE_VALUES`` so the GUI never accepts a type the validator
+#: rejects.
+_VALID_NODE_TYPES: tuple[str, ...] = NODE_TYPE_VALUES
 
 #: Plain (non-reset) node types a node may be retyped TO without touching a
 #: reset spec.  Used by the type-change router to decide whether a transition
@@ -164,16 +168,26 @@ _EDGE_KIND_BLIND: str = "blind"
 #: recompute when the operator changes the axis or moves the node.
 _RESET_SPEC_DEFAULT_AXIS: str = "x"
 
-#: Allowed wall-zero axis values for an inline reset-spec edit (mirrors
-#: ``commands._VALID_RESET_AXES`` and ``validator._ALLOWED_RESET_AXES``).  The
-#: inline guard rejects anything else before the command is dispatched.
-_RESET_AXES: tuple[str, ...] = ("x", "y")
+#: Allowed wall-zero axis values for an inline reset-spec edit; single-sourced
+#: from ``model.RESET_AXIS_VALUES`` (which mirrors
+#: ``validator._ALLOWED_RESET_AXES``).  The inline guard rejects anything else
+#: before the command is dispatched.
+_RESET_AXES: tuple[str, ...] = RESET_AXIS_VALUES
 
 #: Inclusive lower / exclusive upper bound (degrees, CCW from +x) for a reset
 #: node's parked facing and any other heading the inline guards check.  An
 #: out-of-range facing is an AC7 inline-reject case.
 _FACING_MIN_DEG: float = 0.0
 _FACING_MAX_DEG_EXCLUSIVE: float = 360.0
+
+#: Decimal places the inspector entry fields DISPLAY numeric values at (the
+#: panel formats coords / heading / reset coords with ``%.1f``).  The
+#: skip-if-unchanged guards compare an incoming committed value against the
+#: model's value AT THIS PRECISION: a field shows the rounded value, so a bare
+#: tab-away (no real edit) returns the rounded value and must be treated as
+#: unchanged -- comparing against full precision instead would dispatch a
+#: spurious move that truncates the stored value to 0.1 and dirties the buffer.
+_INSPECTOR_DISPLAY_DP: int = 1
 
 #: Boolean global knob (the blind-decay enable toggle) -- its value arrives as a
 #: ``bool`` and needs no numeric range check.  Mirrors
@@ -232,12 +246,8 @@ _OBSTACLE_MIN_SIDE_CM: float = 0.5
 #: not constrain it further.
 _DEFAULT_OBSTACLE_KIND: str = "obstacle"
 
-#: Matplotlib zorder for the transient obstacle-drag preview rectangle —
-#: above the normal obstacle layer but below the nodes.
-_OBSTACLE_PREVIEW_ZORDER: int = 5
-_OBSTACLE_PREVIEW_EDGECOLOR: str = "blue"
-_OBSTACLE_PREVIEW_LINESTYLE: str = ":"
-_OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
+# The transient obstacle-drag preview rectangle's style now lives with the blit
+# fast-path that draws it -- see ``canvas._OBSTACLE_PREVIEW_*`` (#11).
 
 #: Edge-selection cap. Two clicks = a candidate pair. A third click drops
 #: the oldest entry so the most recent two clicks always win.
@@ -1046,6 +1056,8 @@ class EditorApp:
         # the same call -- no need to know whether the rename was saved.
         if isinstance(undone, RenameNode):
             self._record_pending_rename(undone.new, undone.old)
+            # Mirror the rename onto the off-model projection delta (#5).
+            self._rename_proj_delta_endpoints(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
@@ -1062,6 +1074,8 @@ class EditorApp:
         # untouched.
         if isinstance(redone, RenameNode):
             self._record_pending_rename(redone.old, redone.new)
+            # Mirror the rename onto the off-model projection delta (#5).
+            self._rename_proj_delta_endpoints(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -1159,7 +1173,15 @@ class EditorApp:
         if current is None:
             return
         cx, cy = current
-        if float(cx) == x_cm and float(cy) == y_cm:
+        # Compare at the inspector's DISPLAY precision: the entry shows the
+        # rounded coordinate, so a bare tab-away returns that rounded value.
+        # Comparing against full precision would treat an unedited focus-out as
+        # a real move and truncate the stored coord to 0.1 cm (#8).
+        if round(float(cx), _INSPECTOR_DISPLAY_DP) == round(
+            x_cm, _INSPECTOR_DISPLAY_DP
+        ) and round(float(cy), _INSPECTOR_DISPLAY_DP) == round(
+            y_cm, _INSPECTOR_DISPLAY_DP
+        ):
             return
         self._dispatch(MoveNode(node_name, (x_cm, y_cm)))
 
@@ -1203,13 +1225,18 @@ class EditorApp:
         """Dispatch a :class:`SetStartHeading` when the spinbox commits.
 
         De-duplicates spurious ``<FocusOut>`` events (reviewer note T11 W1):
-        if the value equals the last successfully committed heading, the
-        change is ignored. The latch is updated only after the command
-        actually applies.
+        the incoming value is compared against the model's current heading at
+        the inspector's DISPLAY precision. The spinbox shows the rounded
+        heading, so a bare tab-away returns that rounded value; comparing at
+        full precision (the old latch held the full-precision committed value)
+        treated an unedited focus-out as a change and truncated the stored
+        heading to 0.1 deg (#8). The latch is still updated after a real commit.
 
         :param heading_deg: New heading in degrees, ``[0, 360)``.
         """
-        if heading_deg == self._last_committed_heading:
+        if round(heading_deg, _INSPECTOR_DISPLAY_DP) == round(
+            self._model.start_heading_deg, _INSPECTOR_DISPLAY_DP
+        ):
             return
         if self._dispatch(SetStartHeading(heading_deg)):
             self._last_committed_heading = heading_deg
@@ -1322,6 +1349,23 @@ class EditorApp:
                 f"got {facing}."
             )
             return
+        # Skip a no-op focus-out: the wall / facing entries SHOW rounded values,
+        # so a bare tab-away on an unchanged axis returns the same rounded pair.
+        # Without this guard the verbatim dispatch would truncate the stored
+        # spec to 0.1 and dirty the buffer on a focus-out that edited nothing
+        # (#8). A genuine edit differs at display precision and still dispatches.
+        stored = self._model.reset_nodes.get(name, {})
+        stored_wall = stored.get("wall_coord")
+        stored_facing = stored.get("facing")
+        if (
+            stored_wall is not None
+            and stored_facing is not None
+            and round(float(stored_wall), _INSPECTOR_DISPLAY_DP)
+            == round(wall_coord, _INSPECTOR_DISPLAY_DP)
+            and round(float(stored_facing), _INSPECTOR_DISPLAY_DP)
+            == round(facing, _INSPECTOR_DISPLAY_DP)
+        ):
+            return
         self._dispatch(SetResetSpec(name, axis, wall_coord, facing))
 
     def _on_panel_add_pivot(self, u: str, v: str, w: str) -> None:
@@ -1347,6 +1391,17 @@ class EditorApp:
                 )
                 self._panels.set_validation_badge(False)
                 return
+        # Distinctness (mirrors AddPivotTurn.apply + the Save-time validator):
+        # a pivot needs three distinct steps. Reject a degenerate triple inline
+        # so it is caught at the same tier as the other guards instead of only
+        # failing at Save and leaving the badge INVALID (#10).
+        if u == v or v == w:
+            self._set_status(
+                f"Pivot: degenerate triple ({u!r}, {v!r}, {w!r}) -- "
+                "u==v or v==w; pick three distinct nodes."
+            )
+            self._panels.set_validation_badge(False)
+            return
         if not self._edge_exists(u, v):
             self._set_status(
                 f"Pivot: no edge between {u!r} and {v!r}; "
@@ -1421,6 +1476,17 @@ class EditorApp:
             )
             return
 
+        # Skip a no-op focus-out: each float knob maps to a same-named model
+        # field shown at DISPLAY precision, so a bare tab-away returns the
+        # rounded value. Without this guard every FocusOut dispatched a
+        # SetGlobalKnob -- truncating the stored knob to 0.1 and dirtying the
+        # buffer on an edit that changed nothing (#8).
+        current = getattr(self._model, knob, None)
+        if isinstance(current, (int, float)) and round(
+            float(current), _INSPECTOR_DISPLAY_DP
+        ) == round(number, _INSPECTOR_DISPLAY_DP):
+            return
+
         self._dispatch(SetGlobalKnob(knob, number))
 
     def _edge_exists(self, a: str, b: str) -> bool:
@@ -1483,18 +1549,76 @@ class EditorApp:
                 return (u, v)
         return None
 
-    def _find_plain_edge_on_pair(self, a: str, b: str) -> bool:
-        """Return ``True`` if a line OR blind edge connects ``{a, b}``.
+    def _find_projection_referencing(
+        self, node: str
+    ) -> Optional[tuple[str, str]]:
+        """Return the ``(u, v)`` of a current projection edge naming *node*.
 
-        A thin alias over :meth:`_edge_exists` so the EDGE-mode override logic
-        reads symmetrically against :meth:`_find_projection_on_pair`: line /
-        blind edges are UNDIRECTED, so either pick ordering matches.
+        Scans ``_proj_delta.render()`` (loaded + pending adds, minus removes)
+        for any edge with *node* as either endpoint. Used by the delete guard:
+        a session-pending projection add is NOT yet in ``field_data.EDGES``, so
+        :meth:`_find_edges_reference` cannot see it -- this catches it so a node
+        deletion never orphans a projection edge endpoint (#5).
 
-        :param a: First picked node name.
-        :param b: Second picked node name.
-        :return: Whether an undirected line or blind edge exists on ``{a, b}``.
+        :param node: Node name to search for.
+        :return: The first ``(u, v)`` referencing *node*, or ``None``.
         """
-        return self._edge_exists(a, b)
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return None
+        for edge in delta.render():
+            if edge[0] == node or edge[1] == node:
+                return (edge[0], edge[1])
+        return None
+
+    def _rename_proj_delta_endpoints(self, old: str, new: str) -> None:
+        """Re-key the off-model projection delta when a node is renamed.
+
+        Projection edges live in ``_proj_delta`` (``loaded`` / ``adds`` /
+        ``removes``), keyed on node name, so a :class:`RenameNode` that re-keys
+        the model must re-key these too -- otherwise a session projection edge
+        keeps its stale endpoint and is written verbatim at Save (the model's
+        ``validate()`` cannot see it because the proxy omits ``EDGES``) (#5).
+        Pure string substitution, so it is its own inverse: ``_undo`` / ``_redo``
+        call it with the swapped arguments, mirroring ``_pending_renames``.
+
+        Defensive against a bare ``__new__`` instance (rename unit tests build
+        one without a ``_proj_delta``): a missing delta is a silent no-op.
+
+        :param old: Endpoint name to replace.
+        :param new: Replacement endpoint name.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None or old == new:
+            return
+
+        def _sub(name: str) -> str:
+            return new if name == old else name
+
+        delta.loaded = [
+            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.loaded
+        ]
+        delta.adds = [
+            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.adds
+        ]
+        delta.removes = [(_sub(u), _sub(v)) for (u, v) in delta.removes]
+
+    def _projection_pairs(self) -> frozenset:
+        """Return the undirected pairs that currently carry a projection edge.
+
+        Each as a ``frozenset({u, v})`` so :class:`AddEdgesBatch` can reject a
+        plain edge on a pair that already has a projection (the two cannot
+        coexist -- ``graph_builder`` would emit a conflicting directed pair from
+        both) (#7). Empty when there is no projection delta (bare instance).
+
+        :return: A frozenset of ``frozenset`` pairs.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return frozenset()
+        return frozenset(
+            frozenset({edge[0], edge[1]}) for edge in delta.render()
+        )
 
     def _plain_edge_kind(self, a: str, b: str) -> Optional[str]:
         """Return the kind of the plain edge on ``{a, b}`` -- line / blind / None.
@@ -1564,6 +1688,17 @@ class EditorApp:
         """
         max_len_cm = self._panels.max_edge_length_cm
         proposals = auto_edges.propose_edges(self._model, max_len_cm)
+        # Drop any proposed pair that already carries a projection edge: a plain
+        # and a projection edge cannot coexist on a pair, and AddEdgesBatch would
+        # reject the whole batch on it. propose_edges is model-only (no
+        # projection awareness), so filter here against the off-model delta (#7).
+        proj_pairs = self._projection_pairs()
+        if proj_pairs:
+            proposals = [
+                (a, b, k)
+                for (a, b, k) in proposals
+                if frozenset({a, b}) not in proj_pairs
+            ]
         if not proposals:
             self._set_status(
                 "No edges to propose (need >= 3 non-collinear nodes / all candidates filtered)."
@@ -1597,7 +1732,13 @@ class EditorApp:
         # re-paint the now-committed edges as a cyan overlay.
         self._proposed_edges = None
         self._panels.set_auto_create_state("idle")
-        if self._dispatch(AddEdgesBatch(batch)):
+        # Defense-in-depth: pass the current projection pairs so the command
+        # rejects a plain edge on a pair that gained a projection since the
+        # preview was built (the preview filter in _on_panel_auto_create_edges
+        # is the first line; this is the guarantee) (#7).
+        if self._dispatch(
+            AddEdgesBatch(batch, projection_pairs=self._projection_pairs())
+        ):
             self._set_status(f"Added {len(batch)} edges.")
         else:
             # Dispatch already wrote a status message about the conflict.
@@ -1777,9 +1918,12 @@ class EditorApp:
             # canvas merely slides the animated artists to follow the cursor.
             self._canvas.update_node_drag(self._drag_target, x, y)
         elif mode is Mode.OBSTACLE and self._obstacle_anchor is not None:
+            # De-lagged rubber-band: slide the preview rectangle through the
+            # canvas blit fast-path (no ax.clear, no full render, no validator,
+            # no per-frame obstacle inflation) -- mirrors the MOVE drag (#11).
             self._obstacle_cursor = (x, y)
-            self._refresh_view()
-            self._draw_obstacle_preview()
+            ax_anchor, ay_anchor = self._obstacle_anchor
+            self._canvas.update_obstacle_preview(ax_anchor, ay_anchor, x, y)
 
     def _on_canvas_release(self, x: float, y: float, button: int) -> None:
         """Route a release event to the per-mode handler.
@@ -1974,6 +2118,10 @@ class EditorApp:
         """
         self._obstacle_anchor = (x, y)
         self._obstacle_cursor = (x, y)
+        # Arm the blit fast-path: bake the static scene once now so each motion
+        # only re-draws the rubber-band rectangle instead of a full re-render
+        # (#11). begin_obstacle_drag is a no-op-safe call.
+        self._canvas.begin_obstacle_drag()
         self._set_status("Drag to size the obstacle, release to commit.")
 
     def _handle_start_click(self, x: float, y: float) -> None:
@@ -2053,6 +2201,9 @@ class EditorApp:
         # Always clear the drag state up front.
         self._obstacle_anchor = None
         self._obstacle_cursor = None
+        # Tear down the blit fast-path (remove the preview rect, re-bake the
+        # static scene). No-op-safe even if begin_obstacle_drag never armed (#11).
+        self._canvas.end_obstacle_drag()
         if anchor is None:
             return
 
@@ -2082,39 +2233,6 @@ class EditorApp:
         kind = kind.strip() or _DEFAULT_OBSTACLE_KIND
 
         self._dispatch(AddObstacle(xmin, ymin, xmax, ymax, kind))
-
-    def _draw_obstacle_preview(self) -> None:
-        """Overlay a dotted rectangle on the axes during an obstacle drag.
-
-        Called after :meth:`_refresh_view` clears and redraws everything;
-        the preview is therefore drawn on top of the freshly rendered
-        scene but is wiped on the next refresh, which keeps it ephemeral
-        without touching the model.
-        """
-        if self._obstacle_anchor is None or self._obstacle_cursor is None:
-            return
-        import matplotlib.patches as mpatches  # noqa: PLC0415
-
-        ax_anchor, ay_anchor = self._obstacle_anchor
-        ax_cursor, ay_cursor = self._obstacle_cursor
-        xmin = min(ax_anchor, ax_cursor)
-        ymin = min(ay_anchor, ay_cursor)
-        width = abs(ax_cursor - ax_anchor)
-        height = abs(ay_cursor - ay_anchor)
-        if width <= 0.0 or height <= 0.0:
-            return
-        rect = mpatches.Rectangle(
-            (xmin, ymin),
-            width,
-            height,
-            linewidth=_OBSTACLE_PREVIEW_LINEWIDTH,
-            edgecolor=_OBSTACLE_PREVIEW_EDGECOLOR,
-            linestyle=_OBSTACLE_PREVIEW_LINESTYLE,
-            facecolor="none",
-            zorder=_OBSTACLE_PREVIEW_ZORDER,
-        )
-        self._canvas.axes.add_patch(rect)
-        self._canvas.figure.canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Keyboard shortcut handlers
@@ -2156,7 +2274,7 @@ class EditorApp:
                 self._set_status(f"Deleted projection edge {u!r} -> {v!r}.")
                 self._refresh_view()
             return
-        if self._find_plain_edge_on_pair(a, b):
+        if self._plain_edge_kind(a, b) is not None:
             if self._dispatch(DeleteEdge(a, b)):
                 self._edge_selection.clear()
                 self._set_status(f"Deleted edge ({a!r}, {b!r}).")
@@ -2220,11 +2338,11 @@ class EditorApp:
           operator can flip an edge's type in place without a manual delete.
         * Nothing there -> the add runs directly.
 
-        Any override is delete-then-add: if the delete is rejected
-        (``_dispatch`` surfaced the ``ValueError``) the add is NOT attempted, so
-        the model is never left half-overridden. Both steps route through
-        :meth:`_dispatch`, so a two-step override is two undo entries --
-        acceptable.
+        Any override is delete-then-add, bundled into ONE :class:`MacroCommand`
+        so a single undo restores the WHOLE override instead of just the add
+        (which would leave the pair with neither edge). If the delete step is
+        rejected, ``MacroCommand.apply`` rolls back so the model is never left
+        half-overridden, and ``_dispatch`` surfaces the error (#12).
 
         :param add_command: The :class:`AddLineEdge` / :class:`AddBlindEdge` to
             dispatch once any override is cleared.
@@ -2242,23 +2360,22 @@ class EditorApp:
             return
         overridden_projection = self._find_projection_on_pair(a, b)
         overridden_kind: Optional[str] = None
+        steps: list = []
         if overridden_projection is not None:
             u, v = overridden_projection
-            # Delete the projection edge first; bail if that step is rejected so
-            # we never leave a half-applied override.
-            if not self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
-                return
-            self._sync_projection_render()
+            steps.append(DeleteProjectionEdge(self._proj_delta, u, v))
         else:
             # The same-kind case returned above, so any plain edge on the pair is
             # the OTHER kind: delete it first so the add won't collide, recording
             # the old kind for the status text.
             overridden_kind = self._plain_edge_kind(a, b)
-            if overridden_kind is not None and not self._dispatch(
-                DeleteEdge(a, b)
-            ):
-                return
-        if self._dispatch(add_command):
+            if overridden_kind is not None:
+                steps.append(DeleteEdge(a, b))
+        steps.append(add_command)
+        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
+        if self._dispatch(command):
+            if overridden_projection is not None:
+                self._sync_projection_render()
             self._edge_selection.clear()
             if overridden_projection is not None:
                 u, v = overridden_projection
@@ -2321,16 +2438,22 @@ class EditorApp:
             self._set_status(f"Projection: {exc}")
             return
         # Override line/blind -> projection: a projection edge cannot coexist
-        # with an undirected line / blind edge on the same pair, so delete the
-        # plain edge FIRST. If that step is rejected (``_dispatch`` surfaced the
-        # ValueError) we bail rather than leave a half-applied override.
-        overrode_plain = self._find_plain_edge_on_pair(u, v)
+        # with an undirected line / blind edge on the same pair, so the plain
+        # edge is deleted first. Gate on _plain_edge_kind (line/blind only) --
+        # NOT _edge_exists, which ALSO counts projection edges, so a reverse-
+        # direction projection on the pair would otherwise trigger a bogus
+        # DeleteEdge that raises and aborts a legitimate add (#6). The delete +
+        # add are bundled into ONE MacroCommand so a single undo restores the
+        # WHOLE override instead of leaving the pair with neither edge (#12).
+        overrode_plain = self._plain_edge_kind(u, v) is not None
+        steps: list = []
         if overrode_plain:
-            if not self._dispatch(DeleteEdge(u, v)):
-                return
-        if self._dispatch(
+            steps.append(DeleteEdge(u, v))
+        steps.append(
             AddProjectionEdge(self._proj_delta, u, v, distance_cm, heading_deg)
-        ):
+        )
+        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
+        if self._dispatch(command):
             # ``_dispatch`` already marked dirty and refreshed (which re-syncs
             # the overlay); re-sync explicitly too so the contract is met even
             # if the refresh path changes, then clear the picker.
@@ -2541,13 +2664,18 @@ class EditorApp:
         if not self._dispatch(RenameNode(target, new_name)):
             return False
         self._record_pending_rename(target, new_name)
+        # Re-key the off-model projection delta so a session projection edge
+        # follows the rename (#5); RenameNode only cascades the model.
+        self._rename_proj_delta_endpoints(target, new_name)
         if was_selected:
             # The dispatch's refresh ran while the panel still keyed off the OLD
             # name (so it dropped the listbox/inspector selection). Re-point the
-            # canonical selection var + status line at the renamed node, then
-            # refresh once more to re-select it and repopulate the inspector.
+            # canonical selection var + status line at the renamed node.
             self._select_node(new_name)
-            self._refresh_view()
+        # Refresh once more: re-sync the projection overlay to the re-keyed
+        # delta and (if it moved) re-select the renamed node + repopulate the
+        # inspector. The dispatch's earlier refresh painted the stale names.
+        self._refresh_view()
         return True
 
     def _context_set_type(self, target: str, new_type: str) -> None:
@@ -2591,6 +2719,22 @@ class EditorApp:
                 "Cannot delete node",
                 f"Cannot delete {target!r} -- it is the current start node. "
                 "Pick a different start node first.",
+                parent=self._root,
+            )
+            return
+
+        # A session-pending projection edge (in _proj_delta.adds) is not yet in
+        # field_data.EDGES, so _find_edges_reference can't see it. Refuse the
+        # delete if any current projection edge names this node (#5) -- the same
+        # posture as the edge/pivot guards; the operator deletes the projection
+        # edge (Delete in EDGE mode) first.
+        proj_ref = self._find_projection_referencing(target)
+        if proj_ref is not None:
+            messagebox.showerror(
+                "Cannot delete node",
+                f"Cannot delete {target!r} -- it is an endpoint of projection "
+                f"edge {proj_ref[0]!r} -> {proj_ref[1]!r}. Delete that edge "
+                "first (pick both nodes in EDGE mode, then Delete).",
                 parent=self._root,
             )
             return
@@ -2809,10 +2953,22 @@ class EditorApp:
                 # rename flush above) already reached disk, but these
                 # projection edits did not.
                 return False
-            # The flush reached disk: reload the cached field_data module so
-            # the re-seeded baseline reflects the just-written projection
-            # edges, then collapse the pending adds / removes into that
-            # baseline so the next session starts from a clean delta.
+            # The flush reached disk. Collapse the pending adds / removes into
+            # the baseline using the reconciled render set -- which is exactly
+            # what we just wrote to disk -- NOT by re-reading the module after a
+            # reload. The old code re-seeded from
+            # ``read_projection_edges(reloaded_module)`` inside a swallowed-
+            # exception reload: if the reload raised (e.g. the just-written
+            # field_data.py won't re-import), it left a half-reloaded module
+            # bound and re-seeded the baseline from its inconsistent EDGES while
+            # clear_pending() ran anyway -- so the next add/remove reconciled
+            # against a wrong baseline (#14). Computing the new baseline from
+            # render() before clearing sidesteps the reload entirely.
+            new_baseline = proj_delta.render()
+            # Still refresh the cached module (best-effort) so
+            # _find_edges_reference sees the new EDGES on the next delete; a
+            # failed reload just keeps the stale reference (delete-guard stays as
+            # accurate as it was pre-save), and the baseline above is unaffected.
             if self._field_data_module is not None:
                 import importlib  # noqa: PLC0415
                 try:
@@ -2821,12 +2977,7 @@ class EditorApp:
                     )
                 except Exception:  # noqa: BLE001 -- best-effort refresh
                     pass
-            if self._field_data_module is not None:
-                proj_delta.set_loaded(
-                    projection_edges.read_projection_edges(
-                        self._field_data_module
-                    )
-                )
+            proj_delta.set_loaded(new_baseline)
             proj_delta.clear_pending()
             self._sync_projection_render()
 

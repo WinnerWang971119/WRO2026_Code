@@ -51,6 +51,7 @@ from tools.path_planner.editor.commands import (  # noqa: E402
     AddProjectionEdge,
     DeleteEdge,
     DeleteProjectionEdge,
+    MacroCommand,
     ProjectionDelta,
 )
 from tools.path_planner.editor.history import History  # noqa: E402
@@ -257,7 +258,7 @@ def test_delete_targets_stored_orientation_not_click_order() -> None:
 
 def test_line_key_overrides_projection_with_line_edge() -> None:
     """``L`` on a pair carrying a projection edge deletes the projection FIRST,
-    then adds an undirected line edge -- two history entries, both effects."""
+    then adds an undirected line edge -- ONE atomic history entry (#12)."""
     app, panels, model, proj_delta = _make_app(
         mode=Mode.EDGE, selection=["A", "B"]
     )
@@ -272,14 +273,19 @@ def test_line_key_overrides_projection_with_line_edge() -> None:
     )
     assert ("A", "B") in model.line_segments, "a line edge must replace it"
     assert not model.blind_edges, "no blind edge should appear"
-    # Delete-then-add ordering: two genuine history entries, projection delete
-    # first, line add second.
-    assert len(app._history.undo_stack) == 2
-    assert isinstance(app._history.undo_stack[0], DeleteProjectionEdge)
-    # The second entry is the line add (no plain-edge command type is imported
-    # here, so assert its effect rather than its class).
-    assert app._history.undo_stack[1].__class__.__name__ == "AddLineEdge"
+    # The override is ONE MacroCommand bundling the projection delete + line add,
+    # so a single undo restores the WHOLE override (#12).
+    assert len(app._history.undo_stack) == 1
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    assert isinstance(macro.commands[0], DeleteProjectionEdge)
+    assert macro.commands[1].__class__.__name__ == "AddLineEdge"
     assert app._edge_selection == []
+
+    # One undo reverts BOTH halves: the projection returns, the line is gone.
+    app._history.undo(model)
+    assert _renders_pair(proj_delta, "A", "B")
+    assert ("A", "B") not in model.line_segments
 
 
 def test_blind_key_overrides_projection_with_blind_edge() -> None:
@@ -298,10 +304,17 @@ def test_blind_key_overrides_projection_with_blind_edge() -> None:
     )
     assert ("A", "B") in model.blind_edges, "a blind edge must replace it"
     assert not model.line_segments, "no line edge should appear"
-    assert len(app._history.undo_stack) == 2
-    assert isinstance(app._history.undo_stack[0], DeleteProjectionEdge)
-    assert app._history.undo_stack[1].__class__.__name__ == "AddBlindEdge"
+    # One atomic MacroCommand entry (#12).
+    assert len(app._history.undo_stack) == 1
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    assert isinstance(macro.commands[0], DeleteProjectionEdge)
+    assert macro.commands[1].__class__.__name__ == "AddBlindEdge"
     assert app._edge_selection == []
+
+    app._history.undo(model)
+    assert _renders_pair(proj_delta, "A", "B")
+    assert ("A", "B") not in model.blind_edges
 
 
 def test_line_key_override_finds_projection_in_reverse_orientation() -> None:
@@ -320,7 +333,11 @@ def test_line_key_override_finds_projection_in_reverse_orientation() -> None:
     )
     # The line edge is undirected; it lands on {A, B} as the picked (B, A).
     assert _plain_edge_exists(model, "A", "B")
-    deleted = app._history.undo_stack[0]
+    # The override is one MacroCommand; its first sub-command is the projection
+    # delete, targeting the STORED (A, B) despite the [B, A] picks.
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    deleted = macro.commands[0]
     assert isinstance(deleted, DeleteProjectionEdge)
     assert (deleted.u, deleted.v) == ("A", "B")
 
@@ -348,11 +365,18 @@ def test_projection_key_overrides_line_edge() -> None:
     assert _renders_pair(proj_delta, "A", "B"), (
         "a directed projection (A, B) must replace the line edge"
     )
-    # Delete-then-add ordering: DeleteEdge first, AddProjectionEdge second.
-    assert len(app._history.undo_stack) == 2
-    assert app._history.undo_stack[0].__class__.__name__ == "DeleteEdge"
-    assert isinstance(app._history.undo_stack[1], AddProjectionEdge)
+    # One atomic MacroCommand: DeleteEdge then AddProjectionEdge (#12).
+    assert len(app._history.undo_stack) == 1
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    assert macro.commands[0].__class__.__name__ == "DeleteEdge"
+    assert isinstance(macro.commands[1], AddProjectionEdge)
     assert app._edge_selection == []
+
+    # One undo restores the line edge AND drops the projection (#12).
+    app._history.undo(model)
+    assert _plain_edge_exists(model, "A", "B")
+    assert not _renders_pair(proj_delta, "A", "B")
 
 
 def test_projection_key_direction_follows_pick_order() -> None:
@@ -440,7 +464,7 @@ def test_plain_add_path_unchanged_with_no_other_type_edge() -> None:
 def test_blind_key_overrides_existing_line_edge() -> None:
     """``B`` on a pair that is currently a LINE edge deletes the line edge FIRST,
     then adds a blind edge in its place -- an in-place type flip, no manual
-    delete needed. Two history entries: DeleteEdge, then AddBlindEdge."""
+    delete needed. ONE atomic MacroCommand: DeleteEdge then AddBlindEdge (#12)."""
     app, panels, model, proj_delta = _make_app(
         mode=Mode.EDGE, selection=["A", "B"]
     )
@@ -450,13 +474,20 @@ def test_blind_key_overrides_existing_line_edge() -> None:
 
     assert ("A", "B") not in model.line_segments, "the line edge must be removed"
     assert ("A", "B") in model.blind_edges, "a blind edge must replace it"
-    assert len(app._history.undo_stack) == 2
-    assert app._history.undo_stack[0].__class__.__name__ == "DeleteEdge"
-    assert app._history.undo_stack[1].__class__.__name__ == "AddBlindEdge"
+    assert len(app._history.undo_stack) == 1
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    assert macro.commands[0].__class__.__name__ == "DeleteEdge"
+    assert macro.commands[1].__class__.__name__ == "AddBlindEdge"
     assert app._edge_selection == []
     assert any("from line to blind" in m for m in panels.status_messages), (
         "a status must name the in-place type change"
     )
+
+    # One undo restores the line edge AND drops the blind edge (#12).
+    app._history.undo(model)
+    assert ("A", "B") in model.line_segments
+    assert ("A", "B") not in model.blind_edges
 
 
 def test_line_key_overrides_existing_blind_edge() -> None:
@@ -471,11 +502,18 @@ def test_line_key_overrides_existing_blind_edge() -> None:
 
     assert ("A", "B") not in model.blind_edges, "the blind edge must be removed"
     assert ("A", "B") in model.line_segments, "a line edge must replace it"
-    assert len(app._history.undo_stack) == 2
-    assert app._history.undo_stack[0].__class__.__name__ == "DeleteEdge"
-    assert app._history.undo_stack[1].__class__.__name__ == "AddLineEdge"
+    assert len(app._history.undo_stack) == 1
+    macro = app._history.undo_stack[0]
+    assert isinstance(macro, MacroCommand)
+    assert macro.commands[0].__class__.__name__ == "DeleteEdge"
+    assert macro.commands[1].__class__.__name__ == "AddLineEdge"
     assert app._edge_selection == []
     assert any("from blind to line" in m for m in panels.status_messages)
+
+    # One undo restores the blind edge AND drops the line edge (#12).
+    app._history.undo(model)
+    assert ("A", "B") in model.blind_edges
+    assert ("A", "B") not in model.line_segments
 
 
 def test_type_flip_resolves_undirected_edge_in_reverse_pick_order() -> None:
@@ -814,3 +852,83 @@ def test_projection_into_line_head_is_unaffected(monkeypatch) -> None:
         "a line-head projection is authored normally"
     )
     assert not model.blind_edges
+
+
+# ---------------------------------------------------------------------------
+# #6 -- the override gate ignores projection edges (no bogus DeleteEdge)
+# ---------------------------------------------------------------------------
+
+
+def test_projection_key_reverse_projection_does_not_block_add() -> None:
+    """A projection ``B -> A`` on the pair must NOT block adding ``A -> B``.
+
+    The override gate uses ``_plain_edge_kind`` (line / blind only), NOT
+    ``_edge_exists`` (which also counted projection edges). Before the fix the
+    reverse projection made the old ``_find_plain_edge_on_pair(A, B)`` True,
+    firing a ``DeleteEdge(A, B)`` that raised 'edge not found' and aborted the
+    legitimate add (#6).
+    """
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    _seed_projection(proj_delta, model, "B", "A")  # reverse direction
+    assert _renders_pair(proj_delta, "B", "A")
+
+    app._handle_edge_projection_key()
+
+    # The A -> B projection was added (not blocked); both directions render.
+    assert _renders_pair(proj_delta, "A", "B"), (
+        "A -> B must be added despite the reverse B -> A on the pair"
+    )
+    assert _renders_pair(proj_delta, "B", "A"), "the reverse B -> A is untouched"
+    # No plain edge was created or deleted -- it is a pure projection add, so a
+    # single AddProjectionEdge entry (no MacroCommand override).
+    assert not _plain_edge_exists(model, "A", "B")
+    assert len(app._history.undo_stack) == 1
+    assert isinstance(app._history.undo_stack[0], AddProjectionEdge)
+
+
+# ---------------------------------------------------------------------------
+# #5 -- the off-model projection delta tracks node rename / delete
+# ---------------------------------------------------------------------------
+
+
+def test_rename_proj_delta_endpoints_rekeys_all_lists() -> None:
+    """Renaming a node re-keys the off-model projection delta in every list,
+    and is its own inverse (so undo / redo can mirror it) (#5)."""
+    app, panels, model, proj_delta = _make_app()
+    proj_delta.loaded = [("A", "B", 10.0, 0.0)]
+    proj_delta.adds = [("C", "A", 20.0, 90.0)]
+    proj_delta.removes = [("A", "C")]
+
+    app._rename_proj_delta_endpoints("A", "A2")
+    assert proj_delta.loaded == [("A2", "B", 10.0, 0.0)]
+    assert proj_delta.adds == [("C", "A2", 20.0, 90.0)]
+    assert proj_delta.removes == [("A2", "C")]
+
+    # Inverse application restores the original keys (the undo / redo mirror).
+    app._rename_proj_delta_endpoints("A2", "A")
+    assert proj_delta.loaded == [("A", "B", 10.0, 0.0)]
+    assert proj_delta.adds == [("C", "A", 20.0, 90.0)]
+    assert proj_delta.removes == [("A", "C")]
+
+
+def test_find_projection_referencing_catches_pending_add() -> None:
+    """The delete guard finds a node named by a pending projection add (#5).
+
+    A session-pending add is not yet in ``field_data.EDGES``, so
+    ``_find_edges_reference`` cannot see it; ``_find_projection_referencing``
+    scans the render set and catches it in either endpoint.
+    """
+    app, panels, model, proj_delta = _make_app()
+    _seed_projection(proj_delta, model, "A", "B")
+    assert app._find_projection_referencing("B") == ("A", "B")
+    assert app._find_projection_referencing("A") == ("A", "B")
+    assert app._find_projection_referencing("C") is None
+
+
+def test_projection_pairs_reports_undirected_pairs() -> None:
+    """``_projection_pairs`` returns frozenset pairs for AddEdgesBatch (#7)."""
+    app, panels, model, proj_delta = _make_app()
+    _seed_projection(proj_delta, model, "A", "B")
+    assert app._projection_pairs() == frozenset({frozenset({"A", "B"})})

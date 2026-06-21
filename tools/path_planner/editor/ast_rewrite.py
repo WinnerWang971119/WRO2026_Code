@@ -565,7 +565,10 @@ class _ProjectionAppender(cst.CSTTransformer):
         Only the list that IS the ``EDGES`` value is touched -- matched by
         object identity against the node stashed in :meth:`visit_Assign`, so a
         list nested as a dict value inside an ``EDGES`` entry is never grafted
-        into. A duplicate ``(u, v)`` is a no-op. The previous last element's
+        into. A duplicate ``(type, u, v)`` projection is a no-op, but a plain
+        line/blind entry sharing the same ``(u, v)`` does NOT block the append
+        (the ``type`` gate keeps the two kinds distinct). The previous last
+        element's
         comma, or -- for an empty list -- the opening bracket, is re-indented
         so the new element nests at the list's 4-space indent while any
         documentation comments those whitespace nodes carry are preserved; the
@@ -581,8 +584,13 @@ class _ProjectionAppender(cst.CSTTransformer):
         elements = list(updated_node.elements)
         target = (self._u, self._v)
         for element in elements:
-            if _element_uv(element) == target:
-                return updated_node  # Duplicate -- no-op preserves mtime.
+            # Match on (type, u, v), not (u, v) alone: a directed (u, v) pair is
+            # NOT unique across edge types, so a plain EDGE_LINE / EDGE_BLIND
+            # override sharing the same pair must NOT be mistaken for a duplicate
+            # -- otherwise the projection write is silently dropped. Gate on
+            # _is_projection_element exactly as _ProjectionRemover.leave_List does.
+            if _element_uv(element) == target and _is_projection_element(element):
+                return updated_node  # Duplicate projection -- no-op preserves mtime.
 
         new_element = _projection_element(
             self._u, self._v, self._distance_cm, self._heading_deg

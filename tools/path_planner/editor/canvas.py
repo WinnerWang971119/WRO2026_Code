@@ -200,6 +200,14 @@ _BLIT_MIN_INTERVAL_S: float = 1.0 / 60.0
 # can never throttle the opening frame.
 _BLIT_TIME_FORCE_FIRST: float = 0.0
 
+# Style of the dotted rubber-band rectangle drawn while an OBSTACLE is being
+# dragged. Lives here (not in the app) because the obstacle-drag blit fast-path
+# owns the preview artist now; the app no longer draws it.
+_OBSTACLE_PREVIEW_ZORDER: int = 5
+_OBSTACLE_PREVIEW_EDGECOLOR: str = "blue"
+_OBSTACLE_PREVIEW_LINESTYLE: str = ":"
+_OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
+
 # Resolve ``map_png`` relative to this directory (same as ``visualizer.py``
 # and ``pick_xy.py``: ``tools/path_planner/``).
 _PLANNER_ROOT: Path = Path(__file__).resolve().parent.parent
@@ -341,6 +349,19 @@ class FieldCanvas:
         self._blit_background: object = None
         self._animated_artists: list[object] = []
         self._last_blit_time: float = _BLIT_TIME_FORCE_FIRST
+
+        # ---- Obstacle rubber-band blit state (set by ``begin_obstacle_drag``) ----
+        # Mirrors the node-drag blit fast-path so sizing an obstacle restores a
+        # baked background + re-draws ONLY the dotted preview rectangle instead
+        # of clearing + re-rendering the whole scene per motion event.
+        # ``_obstacle_preview_artist``: the animated ``Rectangle`` patch, or
+        #   ``None`` when no obstacle drag is armed.
+        # ``_obstacle_blit_background``: the baked static-scene region.
+        # ``_last_obstacle_blit_time``: ``time.monotonic()`` of the last
+        #   composite, used by the same ~60 Hz throttle.
+        self._obstacle_preview_artist: Optional[object] = None
+        self._obstacle_blit_background: object = None
+        self._last_obstacle_blit_time: float = _BLIT_TIME_FORCE_FIRST
 
         # Wire matplotlib's event system into our three Python callbacks.
         # Connection IDs are stashed so a future ``destroy`` method (out of
@@ -654,6 +675,152 @@ class FieldCanvas:
         self._blit_background = None
         self._drag_node = None
         self._last_blit_time = _BLIT_TIME_FORCE_FIRST
+
+        if self._last_model is not None:
+            self.render(
+                self._last_model,
+                highlighted_nodes=self._last_highlighted_nodes,
+                proposed_edges=self._last_proposed_edges,
+            )
+
+    # ------------------------------------------------------------------
+    # Obstacle rubber-band blit fast-path
+    # ------------------------------------------------------------------
+
+    def begin_obstacle_drag(self) -> None:
+        """Arm the blit fast-path for an obstacle rubber-band drag.
+
+        Renders the current model once the normal way (so the static scene is
+        current), adds a single zero-size ``animated`` ``Rectangle`` for the
+        dotted preview, bakes the static scene with a full :meth:`draw`
+        (matplotlib excludes ``animated`` artists from that bake), and snapshots
+        it with ``copy_from_bbox``. Each subsequent
+        :meth:`update_obstacle_preview` then only restores that frozen
+        background and re-draws the one rectangle -- no ``ax.clear``, no model
+        re-render, no validator, no per-frame obstacle inflation (the lag the
+        old full-:meth:`render`-per-motion path caused).
+
+        Degrades gracefully: with no model rendered yet the fast-path is left
+        disarmed (``_obstacle_blit_background`` stays ``None``) so the next
+        :meth:`update_obstacle_preview` falls back to a defensive full render.
+
+        :return: ``None``.
+        """
+        model = self._last_model
+        if model is None:
+            return
+
+        # Render the current model first so the static scene under the preview
+        # is up to date, then rebuild the per-element artist handles.
+        self.render(
+            model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+        )
+
+        rect = mpatches.Rectangle(
+            (0.0, 0.0),
+            0.0,
+            0.0,
+            linewidth=_OBSTACLE_PREVIEW_LINEWIDTH,
+            edgecolor=_OBSTACLE_PREVIEW_EDGECOLOR,
+            linestyle=_OBSTACLE_PREVIEW_LINESTYLE,
+            facecolor="none",
+            zorder=_OBSTACLE_PREVIEW_ZORDER,
+            animated=True,
+        )
+        self._ax.add_patch(rect)
+        self._obstacle_preview_artist = rect
+
+        # Bake the static scene (the animated rect is excluded) and snapshot it.
+        self._canvas.draw()
+        self._obstacle_blit_background = self._canvas.copy_from_bbox(
+            self._ax.bbox
+        )
+        # Force the first ``update_obstacle_preview`` to composite.
+        self._last_obstacle_blit_time = _BLIT_TIME_FORCE_FIRST
+
+    def update_obstacle_preview(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> None:
+        """Resize the preview rectangle to span ``(x0, y0)``-``(x1, y1)`` and blit.
+
+        Updates the rectangle's lower-left corner + width/height on every call
+        (so the artist always holds the latest extent), then composites the
+        frame by restoring the baked background and re-drawing only the
+        rectangle. As with :meth:`update_node_drag`, only the visible composite
+        is throttled to ~60 Hz; a call arriving within
+        :data:`_BLIT_MIN_INTERVAL_S` of the last composite updates the geometry
+        but skips the restore/draw/blit.
+
+        Defensive paths mirror the node drag: if the fast-path was never armed
+        (``_obstacle_blit_background is None``) a full :meth:`render` is issued;
+        if the composite raises on an exotic backend it is caught, the
+        fast-path disarmed, and a full render issued for that tick so an
+        obstacle drag never crashes the editor.
+
+        :param x0: Anchor x (drag start), in centimetres.
+        :param y0: Anchor y (drag start), in centimetres.
+        :param x1: Cursor x (current), in centimetres.
+        :param y1: Cursor y (current), in centimetres.
+        :return: ``None``.
+        """
+        rect = self._obstacle_preview_artist
+        if self._obstacle_blit_background is None or rect is None:
+            # Fast-path not armed: fall back to a plain repaint so the drag is
+            # still reflected (defensive -- the app arms it on anchor-set).
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                )
+            return
+
+        # Always update the artist geometry, even on a throttled tick.
+        xmin = min(x0, x1)
+        ymin = min(y0, y1)
+        rect.set_bounds(xmin, ymin, abs(x1 - x0), abs(y1 - y0))
+
+        now = time.monotonic()
+        if now - self._last_obstacle_blit_time < _BLIT_MIN_INTERVAL_S:
+            return
+
+        try:
+            self._canvas.restore_region(self._obstacle_blit_background)
+            self._ax.draw_artist(rect)
+            self._canvas.blit(self._ax.bbox)
+        except Exception:  # noqa: BLE001 -- exotic backend: never crash a drag.
+            self._obstacle_blit_background = None
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                )
+            return
+
+        self._last_obstacle_blit_time = now
+
+    def end_obstacle_drag(self) -> None:
+        """Tear down the obstacle blit fast-path and re-bake the static scene.
+
+        Removes the preview rectangle, drops the drag state, and issues a full
+        :meth:`render` so the scene returns to normal. Safe to call when no
+        obstacle drag is active (the preview artist is simply ``None``).
+
+        :return: ``None``.
+        """
+        rect = self._obstacle_preview_artist
+        if rect is not None:
+            try:
+                rect.remove()
+            except (ValueError, NotImplementedError):
+                # Already detached (e.g. a full render cleared the axes): fine.
+                pass
+        self._obstacle_preview_artist = None
+        self._obstacle_blit_background = None
+        self._last_obstacle_blit_time = _BLIT_TIME_FORCE_FIRST
 
         if self._last_model is not None:
             self.render(
@@ -977,10 +1144,12 @@ class FieldCanvas:
     def _on_button_release(self, event) -> None:
         """Forward a ``button_release_event`` to :attr:`on_release`.
 
-        Always clears the latched ``_active_button`` once the matching
-        release is observed, even if the release happens outside the
-        axes — otherwise a drag that ends off-canvas would leave the
-        canvas stuck thinking the mouse is still down.
+        A release ends the in-progress drag, so the latched
+        ``_active_button`` is cleared UNCONDITIONALLY — the canvas only ever
+        tracks one button at a time. Clearing only on a button-matched release
+        (the old behaviour) left the latch stuck when a backend delivered a
+        *different* button's release, or ``None`` for an out-of-window release,
+        with ``_on_motion_notify`` then firing ``on_drag`` on every bare hover.
 
         Unlike :meth:`_on_button_press` / :meth:`_on_motion_notify`, the
         release fires :attr:`on_release` even when it lands *outside* the
@@ -990,28 +1159,35 @@ class FieldCanvas:
         editor's release logic entirely — a MOVE-mode drag would leave the
         node live-mutated with no undo command, and an OBSTACLE drag would
         never finish. Releasing off the plot is a common gesture when
-        dragging toward the field edge.
+        dragging toward the field edge. When the backend reports ``None`` for
+        the button on such a release, the LATCHED button is passed through so
+        the release still commits (the bug that left a node visually stuck
+        with no undo entry).
         """
         released_button = self._normalize_button(event.button)
-        # Clear the latch regardless of whether the release is in-axes.
-        # Without this, dragging off the canvas and releasing there would
-        # leave the next motion event firing as if a drag were still in
-        # progress.
-        if released_button is not None and released_button == self._active_button:
-            self._active_button = None
-        elif released_button is None and self._active_button is not None:
-            # Some matplotlib backends pass ``None`` for the button on
-            # an out-of-window release. Be conservative and clear the
-            # latch in that case too.
-            self._active_button = None
+        # A release ends any in-progress drag; clear the single-button latch
+        # unconditionally so a stray / mismatched / None-button release can
+        # never leave bare-hover motion firing on_drag.
+        active_button = self._active_button
+        self._active_button = None
 
-        if released_button is None:
+        # No drag was in progress: ignore the release entirely.
+        if active_button is None:
             return
+
         coords = self._clamped_world_coords(event)
         if coords is None:
             return
         if self.on_release is not None:
-            self.on_release(coords[0], coords[1], released_button)
+            # Prefer the released button; fall back to the latched one when the
+            # backend reports None for an out-of-window release, so a MOVE /
+            # OBSTACLE drag released off the plot still commits.
+            button = (
+                released_button
+                if released_button is not None
+                else active_button
+            )
+            self.on_release(coords[0], coords[1], button)
 
     # ------------------------------------------------------------------
     # Internal: rendering helpers

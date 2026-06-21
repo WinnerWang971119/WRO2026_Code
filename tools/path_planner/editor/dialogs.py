@@ -14,6 +14,7 @@ from tkinter import ttk
 from typing import Optional, Sequence
 
 from tools.path_planner.editor import theme
+from tools.path_planner.editor.model import NODE_TYPE_VALUES
 
 # One keyboard shortcut: (key_label, human description).
 ShortcutRow = tuple[str, str]
@@ -21,12 +22,13 @@ ShortcutRow = tuple[str, str]
 ShortcutGroup = tuple[str, "Sequence[ShortcutRow]"]
 
 
-# Allowed node-type values, mirroring panels._NODE_TYPE_VALUES and the
-# validator's rules. Duplicated here so dialogs.py doesn't import panels.
-# "reset" is selectable here; the app layer seeds a default reset spec and
-# opens the inspector after the node is created (T8) -- this dialog does not
-# collect the reset spec, so the (name, type) result contract is unchanged.
-_NODE_TYPE_VALUES: tuple[str, ...] = ("line", "blind", "reset")
+# Allowed node-type values, single-sourced from ``model.NODE_TYPE_VALUES``
+# (imported from the leaf model module, not panels, to avoid pulling the heavy
+# panel module into the dialog layer). "reset" is selectable here; the app
+# layer seeds a default reset spec and opens the inspector after the node is
+# created (T8) -- this dialog does not collect the reset spec, so the
+# (name, type) result contract is unchanged.
+_NODE_TYPE_VALUES: tuple[str, ...] = NODE_TYPE_VALUES
 _DEFAULT_NODE_TYPE: str = "line"
 
 # Dialog layout constants -- no magic numbers in the code body.

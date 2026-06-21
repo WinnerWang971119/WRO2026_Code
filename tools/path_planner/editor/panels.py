@@ -57,6 +57,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from tools.path_planner.editor import theme
+from tools.path_planner.editor.model import NODE_TYPE_VALUES, RESET_AXIS_VALUES
 
 if TYPE_CHECKING:
     from tools.path_planner.editor.model import FieldModel
@@ -98,17 +99,18 @@ _MODE_LABELS: tuple[tuple[Mode, str], ...] = (
     (Mode.START, "Strt"),
 )
 
-# Allowed values for a node's ``type`` field; mirrors validator rules.
-# ``"reset"`` is editable in the inspector combobox (the app routes the
-# selection to the right command), but the add-node dialog stays line/blind --
-# a reset node cannot be created from scratch.
-_NODE_TYPE_VALUES: tuple[str, ...] = ("line", "blind", "reset")
+# Allowed values for a node's ``type`` field; single-sourced from
+# ``model.NODE_TYPE_VALUES`` so the inspector combobox cannot offer a type the
+# validator rejects. ``"reset"`` is editable in the inspector combobox (the app
+# routes the selection to the right command), but the add-node dialog stays
+# line/blind -- a reset node cannot be created from scratch.
+_NODE_TYPE_VALUES: tuple[str, ...] = NODE_TYPE_VALUES
 
 # The node ``type`` string that enables the reset-spec sub-panel.
 _RESET_NODE_TYPE: str = "reset"
 
-# Allowed values for a reset node's wall-zero axis.
-_RESET_AXIS_VALUES: tuple[str, ...] = ("x", "y")
+# Allowed values for a reset node's wall-zero axis (single-sourced).
+_RESET_AXIS_VALUES: tuple[str, ...] = RESET_AXIS_VALUES
 
 # Keys of a reset-node spec dict in ``model.reset_nodes`` (mirrors the
 # validator's ``RESET_NODES`` schema).

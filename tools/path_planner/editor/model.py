@@ -21,6 +21,15 @@ import types
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
+# Canonical authoring vocabularies, single-sourced here (the lightest editor
+# module, a leaf in the import graph) so the GUI combobox values, the inline
+# guards, and the command validators cannot drift apart and accept-in-GUI /
+# reject-at-validate. They mirror the planner's validator (NODE_TYPES are
+# line/blind/reset; reset axes mirror ``validator._ALLOWED_RESET_AXES``); the
+# Save-time ``validate()`` is the ultimate authority and re-checks both.
+NODE_TYPE_VALUES: tuple[str, ...] = ("line", "blind", "reset")
+RESET_AXIS_VALUES: tuple[str, ...] = ("x", "y")
+
 
 @dataclass
 class FieldModel:
@@ -84,6 +93,7 @@ class FieldModel:
         "BLIND_EDGES",
         "pivot_turns",
         "RESET_NODES",
+        "blind_projection_auto_seek",
         "OBSTACLES",
     )
 
@@ -109,6 +119,13 @@ class FieldModel:
     # name -> {axis, wall_coord, facing}. Defaulted so existing call sites that
     # build a FieldModel without reset nodes stay valid.
     reset_nodes: dict[str, dict] = field(default_factory=dict)
+    # Optional field-wide flag (default True). Whether a BLIND hop that precedes
+    # a PROJECTION auto-emits a stop-at-line seek (ADR-037,
+    # BLIND_PROJECTION_AUTO_SEEK in field_data). Tracked here so an
+    # open -> save round-trip preserves a field that set it False; without it
+    # the editor's Save dropped the key and field_data.py's loader silently
+    # reverted the flag to its True default.
+    blind_projection_auto_seek: bool = True
 
     # ------------------------------------------------------------------
     # Snapshot / restore (used by the undo/redo stack)
@@ -155,6 +172,7 @@ class FieldModel:
         self.obstacles = copy.deepcopy(snap.obstacles)
         self.pivot_turns = copy.deepcopy(snap.pivot_turns)
         self.reset_nodes = copy.deepcopy(snap.reset_nodes)
+        self.blind_projection_auto_seek = snap.blind_projection_auto_seek
 
     # ------------------------------------------------------------------
     # JSON round-trip
@@ -233,6 +251,9 @@ class FieldModel:
                 name: dict(spec)
                 for name, spec in data.get("RESET_NODES", {}).items()
             },
+            blind_projection_auto_seek=data.get(
+                "blind_projection_auto_seek", True
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -270,9 +291,15 @@ class FieldModel:
         silently skips every reset-node rule (the dual-serialization trap --
         a field added to JSON but not the proxy is persisted-but-unvalidated).
 
+        ``BLIND_PROJECTION_AUTO_SEEK`` IS exposed too: the model persists it via
+        :meth:`to_json_dict`, so the proxy must carry it or
+        :func:`validator.validate`'s ``hasattr(..., 'BLIND_PROJECTION_AUTO_SEEK')``
+        type-check never runs against the edited value (the same
+        dual-serialization trap).
+
         :return: A :class:`types.SimpleNamespace` with the 14 required
             attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
-            ``PIVOT_TURNS`` and ``RESET_NODES``.
+            ``PIVOT_TURNS``, ``RESET_NODES``, and ``BLIND_PROJECTION_AUTO_SEEK``.
         """
         return types.SimpleNamespace(
             NODES=self.nodes,
@@ -291,6 +318,7 @@ class FieldModel:
             MAP_PNG=self.map_png,
             PIVOT_TURNS=self.pivot_turns,
             RESET_NODES=self.reset_nodes,
+            BLIND_PROJECTION_AUTO_SEEK=self.blind_projection_auto_seek,
         )
 
     def validate(self) -> None:
@@ -372,5 +400,10 @@ class FieldModel:
                 name: dict(self.reset_nodes[name])
                 for name in sorted(self.reset_nodes)
             }
+        # OPTIONAL: emit only when it differs from the loader default (True), so
+        # a field that never authored the key round-trips byte-identically
+        # (absent stays absent), matching pivot_turns / RESET_NODES.
+        if not self.blind_projection_auto_seek:
+            result["blind_projection_auto_seek"] = False
         result["OBSTACLES"] = [list(obs) for obs in self.obstacles]
         return result
