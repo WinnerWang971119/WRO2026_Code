@@ -68,6 +68,9 @@ _EXPECTED_CALLBACKS: tuple[str, ...] = (
     "on_node_select",
     "on_node_type_change",
     "on_node_coords_change",
+    # Inspector in-place rename + Delete button (property-panel edit).
+    "on_node_rename",
+    "on_node_delete",
     "on_auto_create_edges",
     "on_accept_proposed",
     "on_reject_proposed",
@@ -98,6 +101,7 @@ _EXPECTED_PUBLIC_MEMBERS: tuple[str, ...] = (
     "set_mode_display",
     "set_selection_display",
     "set_validation_badge",
+    "set_validation",
     "set_undo_enabled",
     "set_redo_enabled",
     "set_auto_create_state",
@@ -213,6 +217,10 @@ def test_side_panels_accepts_themed_runtime_updates(side_panels):
     # Both badge states must recolour without raising on the dedicated label.
     side_panels.set_validation_badge(True)
     side_panels.set_validation_badge(False)
+
+    # Per-move validation drives badge + message slot together (both states).
+    side_panels.set_validation(False, "pivot angle 4 < min 15")
+    side_panels.set_validation(True)
 
     # Mode / selection / status lines accept arbitrary themed text.
     side_panels.set_mode_display(_SAMPLE_MODE_TEXT)

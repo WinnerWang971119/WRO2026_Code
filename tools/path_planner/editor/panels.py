@@ -275,11 +275,11 @@ _FLAT_BORDER_PX: int = 0
 # Sunken border (pixels) kept on the status surface so it still reads as a
 # distinct sunk plane at the floor of the window.
 _STATUS_BORDER_PX: int = 1
-# Minimum wrap length (pixels) for the free-form status line.  The strip is now
-# full-window-width so the live wrap tracks the band's measured width, but it is
-# floored here so a momentary tiny width (first <Configure>) never collapses the
-# wrap to a single character per line.
-_STATUS_WRAP_MIN_PX: int = 200
+# Horizontal gap (pixels) between the status strip's segments.  The strip lays
+# its badge / message / mode / selection / key-hint segments out left-to-right
+# across the full-window width, so this spaces them instead of the old
+# vertical-stack padding.
+_STATUS_SEGMENT_GAP_PX: int = 14
 
 
 def _theme_color(name: str, fallback: str) -> str:
@@ -473,6 +473,10 @@ class SidePanels(tk.Frame):
         self.on_node_coords_change: Optional[
             Callable[[str, float, float], None]
         ] = None
+        # Inspector rename / delete: ``on_node_rename(old, new)`` commits an
+        # in-place name edit; ``on_node_delete(name)`` removes the selected node.
+        self.on_node_rename: Optional[Callable[[str, str], None]] = None
+        self.on_node_delete: Optional[Callable[[str], None]] = None
         self.on_auto_create_edges: Optional[Callable[[], None]] = None
         self.on_accept_proposed: Optional[Callable[[], None]] = None
         self.on_reject_proposed: Optional[Callable[[], None]] = None
@@ -501,6 +505,10 @@ class SidePanels(tk.Frame):
         # ---- Tk variables (single source of truth for widget state) -----
         self.mode_var = tk.StringVar(value=Mode.MOVE.value)
         self._selected_node_var = tk.StringVar(value="")
+        # The editable name entry binds to its OWN var, kept distinct from the
+        # canonical ``_selected_node_var`` (which the coords / type / reset
+        # handlers read) so a half-typed rename never poses as the selection.
+        self._name_edit_var = tk.StringVar(value="")
         self._selected_type_var = tk.StringVar(value="")
         self._selected_x_var = tk.StringVar(value="")
         self._selected_y_var = tk.StringVar(value="")
@@ -515,6 +523,10 @@ class SidePanels(tk.Frame):
         self._mode_display_var = tk.StringVar(value=_DEFAULT_MODE_TEXT)
         self._selection_display_var = tk.StringVar(value=_DEFAULT_SELECTION_TEXT)
         self._badge_var = tk.StringVar(value=_BADGE_UNKNOWN_TEXT)
+        # True while the message slot is painted with a validation error (so the
+        # next VALID re-validate clears the stale complaint instead of leaving it
+        # behind in the muted tone).  See :meth:`set_validation` / :meth:`set_status`.
+        self._status_showing_error: bool = False
 
         # ---- Title-bar Tk variables ------------------------------------
         self._filename_var = tk.StringVar(value=_DEFAULT_FILENAME_TEXT)
@@ -1188,17 +1200,33 @@ class SidePanels(tk.Frame):
         # --- Node inspector section header ---
         self._section_header(master, _SECTION_NODE_TITLE)
 
-        # --- Inspector: read-only name entry ---
+        # --- Inspector: editable name entry + Delete button ---
+        # The name entry renames the SELECTED node in place: committing it
+        # (Return / focus-out) fires ``on_node_rename(old, new)``.  The Delete
+        # button removes the selected node via ``on_node_delete(name)``.  Both
+        # start disabled and are enabled only while a node is selected (see
+        # :meth:`_apply_inspector` / :meth:`_clear_inspector`).
         name_row = self._themed_frame(master)
         name_row.pack(side="top", fill="x")
         self._themed_label(name_row, text="Name:").pack(side="left")
+        # Pack the Delete button to the RIGHT first so it reserves its width;
+        # the name entry then fills the gap between the label and the button.
+        self._delete_node_button = self._themed_button(
+            name_row,
+            text="Delete",
+            command=self._handle_node_delete,
+        )
+        self._delete_node_button.pack(side="right", padx=(6, 0))
+        self._delete_node_button.configure(state=tk.DISABLED)
         self._name_entry = self._themed_entry(
             name_row,
             mono=False,
-            textvariable=self._selected_node_var,
-            state="readonly",
+            textvariable=self._name_edit_var,
+            state="disabled",
         )
         self._name_entry.pack(side="left", fill="x", expand=True)
+        self._name_entry.bind("<Return>", self._handle_name_commit)
+        self._name_entry.bind("<FocusOut>", self._handle_name_commit)
 
         # --- Inspector: node type combobox ---
         type_row = self._themed_frame(master)
@@ -1625,16 +1653,23 @@ class SidePanels(tk.Frame):
         self.set_redo_enabled(False)
 
     def _build_status_strip(self) -> None:
-        """Create the tall, full-width status band at the window floor.
+        """Create the full-width status band as a single horizontal row.
 
         Builds :attr:`_status_frame` as a child of :attr:`_parent` (it is
         **not** placed here -- :meth:`layout_three_pane` grids it full-width
-        across the bottom row).  The band is two logical lines inside a sunken
-        frame.  Line one is the validation badge (a coloured indicator dot + a
-        Valid/Invalid word) and the active mode + selection text.  Line two is a
-        clickable key-hint that opens the shortcuts dialog via
-        :attr:`on_show_shortcuts`.  The badge, mode, and selection lines are
-        driven by the public setters :meth:`set_validation_badge`,
+        across the bottom row).  The strip is wide and short, so its segments
+        lay out **left-to-right** to use that width instead of stacking short
+        lines vertically::
+
+            [<dot> Valid]   [message / validation error -- expands]   [Mode  Sel]   [key-hint]
+
+        The validation badge (a coloured indicator dot + a Valid/Invalid word)
+        anchors the left and reads as the dominant element; the free-form
+        message / validation-error slot takes the elastic middle on ONE line;
+        the active mode and selection ride as compact chips on the right,
+        followed by the clickable key-hint that opens the shortcuts dialog via
+        :attr:`on_show_shortcuts`.  The segments are driven by the public
+        setters :meth:`set_validation_badge` / :meth:`set_validation`,
         :meth:`set_mode_display`, :meth:`set_selection_display`, and
         :meth:`set_status`.
         """
@@ -1643,7 +1678,7 @@ class SidePanels(tk.Frame):
         )
         self._status_frame = group
 
-        # Inner frame carries the lines with consistent padding; the band's own
+        # Inner frame carries the row with consistent padding; the band's own
         # edges are flush so the sunken relief reads as a full-width plane.
         body = self._themed_frame(group)
         body.pack(
@@ -1653,13 +1688,11 @@ class SidePanels(tk.Frame):
             pady=_PANEL_OUTER_PAD // 2,
         )
 
-        # --- Line 1: badge dot + badge word ---
-        badge_row = self._themed_frame(body)
-        badge_row.pack(side="top", fill="x")
+        # --- LEFT: the validation badge (dot + word), the dominant element ---
         # The indicator dot is a separate label so it can be recoloured per
         # validation state without disturbing the word next to it.
         self._badge_dot_label = self._themed_label(
-            badge_row,
+            body,
             text=_BADGE_DOT_GLYPH,
             foreground=theme.INK_MUTED,
             font=self._font_badge,
@@ -1668,75 +1701,58 @@ class SidePanels(tk.Frame):
         # The validation word ("Valid" / "Invalid" / "--").  Kept on its own
         # label so it can be recoloured alongside the dot.
         self._badge_label = self._themed_label(
-            badge_row,
+            body,
             textvariable=self._badge_var,
             anchor="w",
             foreground=theme.INK_MUTED,
             font=self._font_badge,
         )
-        self._badge_label.pack(side="left")
+        self._badge_label.pack(side="left", padx=(0, _STATUS_SEGMENT_GAP_PX))
 
-        self._mode_label = self._themed_label(
+        # --- RIGHT: key-hint, then mode / selection chips.  These are packed
+        #     BEFORE the elastic middle so they hug the right edge; pack order
+        #     is right-to-left, so the key-hint ends up furthest right. ---
+        self._key_hint_label = self._themed_label(
             body,
-            textvariable=self._mode_display_var,
-            anchor="w",
-            font=self._font_status,
+            text=_KEY_HINT_TEXT,
+            anchor="e",
+            foreground=theme.INK_MUTED,
+            font=self._font_hint,
+            cursor="hand2",
         )
-        self._mode_label.pack(side="top", fill="x")
+        self._key_hint_label.pack(side="right", padx=(_STATUS_SEGMENT_GAP_PX, 0))
+        self._key_hint_label.bind("<Button-1>", self._handle_show_shortcuts)
 
         self._selection_label = self._themed_label(
             body,
             textvariable=self._selection_display_var,
-            anchor="w",
+            anchor="e",
             font=self._font_status,
         )
-        self._selection_label.pack(side="top", fill="x")
+        self._selection_label.pack(side="right", padx=(_STATUS_SEGMENT_GAP_PX, 0))
 
-        # Free-form status line: wraps so a long message stays readable instead
-        # of being clipped to one row.  The strip is now full-window-width, so
-        # the wrap length tracks the band's live width via a <Configure> bind
-        # rather than a fixed column constant; it seeds to a sane minimum.
+        self._mode_label = self._themed_label(
+            body,
+            textvariable=self._mode_display_var,
+            anchor="e",
+            font=self._font_status,
+        )
+        self._mode_label.pack(side="right", padx=(_STATUS_SEGMENT_GAP_PX, 0))
+
+        # --- MIDDLE: the free-form message / validation-error slot.  Packed
+        #     LAST with ``expand`` so it absorbs the slack between the badge and
+        #     the right-hand chips.  It stays on ONE line (no wraplength) -- the
+        #     wide strip means a message reads across, not down; an over-long
+        #     message clips at the slot edge rather than growing the band tall. ---
         self._status_label = self._themed_label(
             body,
             textvariable=self._status_var,
             anchor="w",
             justify="left",
-            wraplength=_STATUS_WRAP_MIN_PX,
             foreground=theme.INK_MUTED,
             font=self._font_status,
         )
-        self._status_label.pack(side="top", fill="x")
-        # Keep the wrap length in step with the band's actual width so a long
-        # message reflows on window resize instead of clipping or overflowing.
-        self._status_frame.bind("<Configure>", self._on_status_frame_resize)
-
-        # --- Line 2: clickable key-hint -> on_show_shortcuts ---
-        self._key_hint_label = self._themed_label(
-            body,
-            text=_KEY_HINT_TEXT,
-            anchor="w",
-            foreground=theme.INK_MUTED,
-            font=self._font_hint,
-            cursor="hand2",
-        )
-        self._key_hint_label.pack(side="top", fill="x")
-        self._key_hint_label.bind("<Button-1>", self._handle_show_shortcuts)
-
-    def _on_status_frame_resize(self, event: tk.Event) -> None:
-        """Reflow the wrapping status line to the status band's live width.
-
-        Bound to the status band's ``<Configure>`` so the free-form status
-        message wraps to whatever width the full-width strip currently has,
-        clamped to a sane floor so a momentarily-tiny width never collapses the
-        wrap to nothing.
-
-        :param event: The Tk configure event carrying the band's new width.
-        """
-        wrap = max(_STATUS_WRAP_MIN_PX, int(event.width) - 2 * _PANEL_OUTER_PAD)
-        try:
-            self._status_label.configure(wraplength=wrap)
-        except tk.TclError:
-            pass
+        self._status_label.pack(side="left", fill="x", expand=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -1854,15 +1870,47 @@ class SidePanels(tk.Frame):
             self._suppress_callbacks = False
 
     def set_status(self, text: str) -> None:
-        """Replace the free-form status line with *text*.
+        """Replace the free-form message slot with *text* in the normal tone.
 
-        This drives the free-form line of the status strip.  The label wraps,
-        so a longer-than-one-line message stays readable rather than being
-        clipped.
+        This drives the elastic middle segment of the status strip.  A status
+        message is a transient, neutral note, so it is painted in the muted ink
+        tone and clears the validation-error flag -- the next VALID re-validate
+        then has nothing stale to wipe.
 
         :param text: Status message to display.
         """
         self._status_var.set(text)
+        self._status_label.configure(foreground=theme.INK_MUTED)
+        self._status_showing_error = False
+
+    def set_validation(self, ok: bool, detail: str = "") -> None:
+        """Reflect a full-model validation result in the badge AND message slot.
+
+        Drives the per-move validation feedback: the app re-validates the whole
+        model after every mutation and calls this.  It recolours the badge via
+        :meth:`set_validation_badge` and, when *ok* is ``False``, paints the
+        message slot with the validator's first-error *detail* in the INVALID
+        tone.  When *ok* is ``True`` it restores the slot to the normal tone and
+        -- only if a validation error was showing -- clears that stale complaint
+        back to the default text, so fixing the offending field does not leave
+        the old message behind.  A transient :meth:`set_status` note set by the
+        same edit is left untouched.
+
+        :param ok: ``True`` if ``model.validate()`` passed, ``False`` otherwise.
+        :param detail: The validator's first-error message, shown when invalid.
+        """
+        self.set_validation_badge(ok)
+        if ok:
+            if self._status_showing_error:
+                self._status_var.set(_DEFAULT_STATUS_TEXT)
+                self._status_showing_error = False
+            self._status_label.configure(foreground=theme.INK_MUTED)
+        else:
+            self._status_var.set(detail)
+            self._status_label.configure(
+                foreground=_theme_color("STATUS_INVALID", theme.INVALID)
+            )
+            self._status_showing_error = True
 
     def set_mode_display(self, text: str) -> None:
         """Replace the status strip's **mode** line with *text*.
@@ -1998,6 +2046,7 @@ class SidePanels(tk.Frame):
         :param node_name: Name of the node to display.
         """
         self._selected_node_var.set(node_name)
+        self._name_edit_var.set(node_name)
         self._selected_type_var.set(model.node_types.get(node_name, ""))
         x, y = model.nodes[node_name]
         self._selected_x_var.set(_COORD_FORMAT % float(x))
@@ -2005,16 +2054,21 @@ class SidePanels(tk.Frame):
         self._type_combo.configure(state="readonly")
         self._x_entry.configure(state="normal")
         self._y_entry.configure(state="normal")
+        self._name_entry.configure(state="normal")
+        self._delete_node_button.configure(state=tk.NORMAL)
 
     def _clear_inspector(self) -> None:
         """Reset the inspector to its empty / no-selection state."""
         self._selected_node_var.set("")
+        self._name_edit_var.set("")
         self._selected_type_var.set("")
         self._selected_x_var.set("")
         self._selected_y_var.set("")
         self._type_combo.configure(state="disabled")
         self._x_entry.configure(state="disabled")
         self._y_entry.configure(state="disabled")
+        self._name_entry.configure(state="disabled")
+        self._delete_node_button.configure(state=tk.DISABLED)
 
     def _apply_reset_spec(self, model: "FieldModel", node_name: str) -> None:
         """Populate + enable the reset-spec sub-panel from *node_name*.
@@ -2184,6 +2238,46 @@ class SidePanels(tk.Frame):
 
         if self.on_node_coords_change is not None:
             self.on_node_coords_change(node_name, x, y)
+
+    def _handle_name_commit(self, _event: tk.Event | None = None) -> None:
+        """Commit an in-place name edit, firing :attr:`on_node_rename`.
+
+        Triggered by ``<Return>`` or ``<FocusOut>`` on the name entry.  Reads
+        the OLD name from the canonical :attr:`_selected_node_var` and the new
+        text from the editable :attr:`_name_edit_var`.  An empty or unchanged
+        value is a no-op that reverts the entry to the canonical name (so a
+        stray focus-out never blanks or corrupts the name); otherwise the app's
+        :attr:`on_node_rename` performs the rename and re-syncs the panel.
+
+        :param _event: Tk event (unused; the binding passes it).
+        """
+        if self._suppress_callbacks:
+            return
+        old = self._selected_node_var.get()
+        if not old:
+            return
+        new = self._name_edit_var.get().strip()
+        if not new or new == old:
+            # Nothing to do: snap the entry back to the canonical name.
+            self._name_edit_var.set(old)
+            return
+        if self.on_node_rename is not None:
+            self.on_node_rename(old, new)
+
+    def _handle_node_delete(self) -> None:
+        """Delete the selected node, firing :attr:`on_node_delete`.
+
+        Triggered by the inspector's Delete button.  Reads the selected node
+        from the canonical :attr:`_selected_node_var`; the app handler runs the
+        same guards + confirmation as the right-click delete.
+        """
+        if self._suppress_callbacks:
+            return
+        node = self._selected_node_var.get()
+        if not node:
+            return
+        if self.on_node_delete is not None:
+            self.on_node_delete(node)
 
     def _handle_reset_spec_commit(self, _event: tk.Event | None = None) -> None:
         """Parse the reset-spec widgets and fire :attr:`on_reset_spec_change`.

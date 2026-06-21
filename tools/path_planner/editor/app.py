@@ -589,6 +589,8 @@ class EditorApp:
         self._panels.on_node_select = self._on_panel_node_select
         self._panels.on_node_type_change = self._on_panel_node_type_change
         self._panels.on_node_coords_change = self._on_panel_node_coords_change
+        self._panels.on_node_rename = self._on_panel_node_rename
+        self._panels.on_node_delete = self._on_panel_node_delete
         self._panels.on_start_node_change = self._on_panel_start_node_change
         self._panels.on_start_heading_change = (
             self._on_panel_start_heading_change
@@ -897,7 +899,12 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _refresh_view(self) -> None:
-        """Re-render canvas + side panels + button enable states + title."""
+        """Re-render canvas + side panels + button enable states + title.
+
+        Ends with a :meth:`_revalidate` so the validation badge + message slot
+        track the model after every mutation (dispatch / undo / redo all funnel
+        through here) -- "per move" validation, not just at Save.
+        """
         # Keep the canvas's projection overlay in lockstep with the delta's
         # reconciled render set before the repaint (a node move / undo / redo
         # can change the geometry the arrows are drawn against).
@@ -912,6 +919,35 @@ class EditorApp:
         self._panels.set_undo_enabled(self._history.can_undo)
         self._panels.set_redo_enabled(self._history.can_redo)
         self._update_title()
+        self._revalidate()
+
+    def _revalidate(self) -> None:
+        """Re-run the full validator and reflect the verdict in the status bar.
+
+        Hooked into :meth:`_refresh_view`, so it fires after every model
+        mutation -- this is the "per move" validation the operator sees live
+        rather than only at Save.  The full geometry validator runs in well
+        under a millisecond on a field this size, so there is no debounce; the
+        verdict drives the badge + message slot via
+        :meth:`SidePanels.set_validation`.
+
+        A refresh must never crash on a validator hiccup, so any exception is
+        caught and surfaced as the INVALID detail (the Save-time gate uses the
+        same broad catch).
+        """
+        from tools.path_planner.validator import (  # noqa: PLC0415
+            FieldDataError,
+        )
+
+        try:
+            self._model.validate()
+        except FieldDataError as exc:
+            self._panels.set_validation(False, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 -- a refresh must not crash
+            self._panels.set_validation(False, f"validation error: {exc}")
+            return
+        self._panels.set_validation(True)
 
     def _sync_projection_render(self) -> None:
         """Push the delta's reconciled projection edges onto the canvas.
@@ -1119,6 +1155,32 @@ class EditorApp:
             return
         self._dispatch(MoveNode(node_name, (x_cm, y_cm)))
 
+    def _on_panel_node_rename(self, old: str, new: str) -> None:
+        """Rename the selected node from the inspector's name entry.
+
+        Delegates to :meth:`_perform_rename` (shared with the right-click
+        rename).  When the rename is rejected -- a duplicate / invalid name, or
+        a dispatch pre-condition failure -- the model is untouched and we
+        re-sync the panel so the name entry snaps back to the node's current
+        name instead of keeping the rejected text.
+
+        :param old: The node's current name (the selection at edit time).
+        :param new: The proposed new name typed into the entry.
+        """
+        if not self._perform_rename(old, new):
+            self._refresh_view()
+
+    def _on_panel_node_delete(self, node: str) -> None:
+        """Delete the selected node from the inspector's Delete button.
+
+        Routes to :meth:`_context_delete` so the inspector button runs the same
+        start-node / EDGES-reference guards and confirmation dialog as the
+        right-click delete.
+
+        :param node: The node to delete (the current selection).
+        """
+        self._context_delete(node)
+
     def _on_panel_start_node_change(self, node_name: str) -> None:
         """Dispatch a :class:`SetStart` when the start-node combobox changes.
 
@@ -1151,10 +1213,13 @@ class EditorApp:
     # well-formedness guards (membership / range / incidence) BEFORE dispatch.
     # On a failed guard they write a specific status message, re-sync the panel
     # from the model via _refresh_view() so the bad widget value reverts, and do
-    # NOT dispatch. They deliberately do NOT call any heavy whole-field
-    # validator (no validator._validate_* helpers): those parse Config.h and
-    # build a networkx graph, far too expensive per keystroke. The authoritative
-    # geometry validation stays in model.validate() at Save (tier-2, unchanged).
+    # NOT dispatch -- so a malformed field value never reaches the model.
+    # The full geometry validator (model.validate()) is NOT run from these
+    # tier-1 guards -- it would fire on every rejected keystroke. Instead it
+    # runs once per COMMITTED move from _revalidate() (hooked into
+    # _refresh_view), which is fast enough (sub-millisecond on a field this
+    # size) to drive the live VALID/INVALID badge after each mutation; Save
+    # re-runs the same validator as the authoritative gate.
     # ------------------------------------------------------------------
 
     def _reject_inline_edit(self, message: str) -> None:
@@ -2345,10 +2410,7 @@ class EditorApp:
             )
 
     def _context_rename(self, target: str) -> None:
-        """Prompt for a new name and dispatch :class:`RenameNode`.
-
-        On success, queues the rename into :attr:`_pending_renames` so
-        the next Save flushes it through the LibCST EDGES rewriter.
+        """Prompt for a new name and rename *target* via :meth:`_perform_rename`.
 
         :param target: Existing node name.
         """
@@ -2360,17 +2422,37 @@ class EditorApp:
         )
         if new_name is None:
             return
+        self._perform_rename(target, new_name)
+
+    def _perform_rename(self, target: str, new_name: str) -> bool:
+        """Rename *target* to *new_name*, recording the pending EDGES rewrite.
+
+        Shared by the right-click rename and the inspector's in-place name edit.
+        A blank or unchanged *new_name* is a no-op; on a successful dispatch the
+        rename is queued into :attr:`_pending_renames` for the next Save and --
+        if *target* was the selected node -- the selection follows it to
+        *new_name* (latch + status line + inspector), so the renamed node stays
+        selected and a follow-up arrow nudge targets it.
+
+        :param target: Existing node name.
+        :param new_name: Proposed new name (stripped here).
+        :return: ``True`` if the rename was dispatched, ``False`` otherwise.
+        """
         new_name = new_name.strip()
         if not new_name or new_name == target:
-            return
-        if self._dispatch(RenameNode(target, new_name)):
-            self._record_pending_rename(target, new_name)
-            # Keep the selection latch (AC4) pointing at the renamed node so a
-            # follow-up arrow nudge targets the right node and the selection
-            # line shows the new name.
-            if self._selected_node == target:
-                self._selected_node = new_name
-                self._update_selection_display(new_name)
+            return False
+        was_selected = self._selected_node == target
+        if not self._dispatch(RenameNode(target, new_name)):
+            return False
+        self._record_pending_rename(target, new_name)
+        if was_selected:
+            # The dispatch's refresh ran while the panel still keyed off the OLD
+            # name (so it dropped the listbox/inspector selection). Re-point the
+            # canonical selection var + status line at the renamed node, then
+            # refresh once more to re-select it and repopulate the inspector.
+            self._select_node(new_name)
+            self._refresh_view()
+        return True
 
     def _context_set_type(self, target: str, new_type: str) -> None:
         """Dispatch a node-type change from the right-click submenu.

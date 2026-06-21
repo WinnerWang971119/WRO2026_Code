@@ -315,6 +315,12 @@ class _PanelsSpy:
     def set_dirty(self, dirty: bool) -> None:
         self.dirty = dirty
 
+    def set_validation(self, ok: bool, detail: str = "") -> None:
+        # Per-move validation runs at the tail of the real ``_refresh_view``;
+        # the blit test only cares about refresh/dirty bookkeeping, so record
+        # the latest verdict without asserting on it.
+        self.last_validation = (ok, detail)
+
 
 def test_move_drag_does_not_rebuild_listbox_until_release(field_canvas):
     """A live MOVE drag rebuilds the listbox zero times; release rebuilds once.
