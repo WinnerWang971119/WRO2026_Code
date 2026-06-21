@@ -49,6 +49,7 @@ from tools.path_planner.editor import projection_edges  # noqa: E402
 from tools.path_planner.editor.commands import (  # noqa: E402
     AddPivotTurn,
     AddProjectionEdge,
+    DeleteEdge,
     DeleteProjectionEdge,
     ProjectionDelta,
 )
@@ -429,6 +430,180 @@ def test_plain_add_path_unchanged_with_no_other_type_edge() -> None:
     assert len(app._history.undo_stack) == 1, "exactly one (the line add) entry"
     assert app._history.undo_stack[0].__class__.__name__ == "AddLineEdge"
     assert app._edge_selection == []
+
+
+# ---------------------------------------------------------------------------
+# L / B override: line <-> blind in-place type flip (no manual delete)
+# ---------------------------------------------------------------------------
+
+
+def test_blind_key_overrides_existing_line_edge() -> None:
+    """``B`` on a pair that is currently a LINE edge deletes the line edge FIRST,
+    then adds a blind edge in its place -- an in-place type flip, no manual
+    delete needed. Two history entries: DeleteEdge, then AddBlindEdge."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    model.line_segments.append(("A", "B"))
+
+    app._handle_edge_blind_key()
+
+    assert ("A", "B") not in model.line_segments, "the line edge must be removed"
+    assert ("A", "B") in model.blind_edges, "a blind edge must replace it"
+    assert len(app._history.undo_stack) == 2
+    assert app._history.undo_stack[0].__class__.__name__ == "DeleteEdge"
+    assert app._history.undo_stack[1].__class__.__name__ == "AddBlindEdge"
+    assert app._edge_selection == []
+    assert any("from line to blind" in m for m in panels.status_messages), (
+        "a status must name the in-place type change"
+    )
+
+
+def test_line_key_overrides_existing_blind_edge() -> None:
+    """Symmetric flip: ``L`` over a BLIND edge deletes it first, then adds a
+    line edge in its place."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    model.blind_edges.append(("A", "B"))
+
+    app._handle_edge_line_key()
+
+    assert ("A", "B") not in model.blind_edges, "the blind edge must be removed"
+    assert ("A", "B") in model.line_segments, "a line edge must replace it"
+    assert len(app._history.undo_stack) == 2
+    assert app._history.undo_stack[0].__class__.__name__ == "DeleteEdge"
+    assert app._history.undo_stack[1].__class__.__name__ == "AddLineEdge"
+    assert app._edge_selection == []
+    assert any("from blind to line" in m for m in panels.status_messages)
+
+
+def test_type_flip_resolves_undirected_edge_in_reverse_pick_order() -> None:
+    """The flip is undirected: picking ``[B, A]`` over a line edge stored
+    ``(A, B)`` still deletes that line edge and lands a blind edge on the pair."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["B", "A"]
+    )
+    model.line_segments.append(("A", "B"))
+
+    app._handle_edge_blind_key()
+
+    assert not any(
+        set(e) == {"A", "B"} for e in model.line_segments
+    ), "the line edge must be removed regardless of pick order"
+    assert any(
+        set(e) == {"A", "B"} for e in model.blind_edges
+    ), "a blind edge must land on the pair"
+
+
+def test_line_key_same_type_is_friendly_noop() -> None:
+    """``L`` on a pair that is ALREADY a line edge is a no-op: no command runs
+    (so no 'already exists' error), the edge is untouched, the selection clears,
+    and a friendly status names it."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    model.line_segments.append(("A", "B"))
+
+    app._handle_edge_line_key()
+
+    assert ("A", "B") in model.line_segments, "the edge is left exactly as-is"
+    assert app._history.can_undo is False, "no command dispatched on a no-op"
+    assert app._edge_selection == []
+    assert any("already a line edge" in m for m in panels.status_messages)
+
+
+def test_type_flip_bails_when_plain_delete_is_rejected() -> None:
+    """If the existing-edge delete is rejected, the add does NOT run -- the same
+    'never half-apply an override' contract as the projection path.
+
+    Forced by stubbing ``_plain_edge_kind`` to claim a LINE edge the model does
+    NOT actually hold, so the dispatched :class:`DeleteEdge` rejects (the edge is
+    absent) and the blind add must be skipped.
+    """
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    app._plain_edge_kind = lambda a, b: "line"
+
+    app._handle_edge_blind_key()
+
+    assert not model.blind_edges, "the add must not run after a rejected delete"
+    assert not model.line_segments
+    assert app._history.can_undo is False, "the rejected delete records nothing"
+    assert panels.status_messages, "the rejection must surface a status message"
+
+
+# ---------------------------------------------------------------------------
+# EDGE-mode status line reports the current edge type
+# ---------------------------------------------------------------------------
+
+
+class _StubCanvas:
+    """Minimal canvas stand-in whose ``find_node_at`` returns a fixed node."""
+
+    def __init__(self, node: str) -> None:
+        self._node = node
+
+    def find_node_at(self, x: float, y: float) -> str:
+        return self._node
+
+
+def test_describe_edge_on_pair_reports_each_kind() -> None:
+    """``_describe_edge_on_pair`` names the edge currently on the pair: a plain
+    line / blind edge by kind (undirected -- either pick order), a projection by
+    its STORED direction, else ``"none"``."""
+    app, panels, model, proj_delta = _make_app()
+
+    assert app._describe_edge_on_pair("A", "B") == "none"
+
+    model.line_segments.append(("A", "B"))
+    assert app._describe_edge_on_pair("A", "B") == "line"
+    assert app._describe_edge_on_pair("B", "A") == "line"
+
+    model.line_segments.clear()
+    model.blind_edges.append(("A", "B"))
+    assert app._describe_edge_on_pair("A", "B") == "blind"
+
+    model.blind_edges.clear()
+    _seed_projection(proj_delta, model, "A", "B")
+    assert app._describe_edge_on_pair("A", "B") == "projection 'A' -> 'B'"
+    assert app._describe_edge_on_pair("B", "A") == "projection 'A' -> 'B'", (
+        "a projection is reported in its STORED direction, not the pick order"
+    )
+
+
+def test_edge_click_status_reports_current_type_on_second_pick() -> None:
+    """When the second endpoint completes the pick, the status line names the
+    edge currently on the pair so the operator sees what L/B/P/Delete act on."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A"]
+    )
+    app._canvas = _StubCanvas("B")
+    model.line_segments.append(("A", "B"))
+
+    app._handle_edge_click(0.0, 0.0)
+
+    assert app._edge_selection == ["A", "B"]
+    assert panels.status_messages, "a status line must be written"
+    assert "(current: line)" in panels.status_messages[-1]
+    assert (
+        "Press L (line), B (blind), P (projection), or Delete."
+        in panels.status_messages[-1]
+    )
+
+
+def test_edge_click_status_reports_none_for_a_bare_pair() -> None:
+    """A pair with no edge of any type reads ``current: none`` on completion."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A"]
+    )
+    app._canvas = _StubCanvas("C")
+
+    app._handle_edge_click(0.0, 0.0)
+
+    assert app._edge_selection == ["A", "C"]
+    assert "(current: none)" in panels.status_messages[-1]
 
 
 # ---------------------------------------------------------------------------

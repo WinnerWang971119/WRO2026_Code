@@ -148,6 +148,14 @@ _VALID_NODE_TYPES: tuple[str, ...] = (
 #: out of ``"reset"`` is a clear-spec (line / blind target) operation.
 _PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
 
+#: Edge-kind tags for the two undirected plain edge lists. These are the string
+#: values threaded through the ``L`` / ``B`` override flow and reported on the
+#: EDGE-mode status line. They share their spelling with the node-type constants
+#: above but name an EDGE's list (``line_segments`` vs ``blind_edges``), not a
+#: node type -- kept distinct so the override / status code reads in edge terms.
+_EDGE_KIND_LINE: str = "line"
+_EDGE_KIND_BLIND: str = "blind"
+
 #: Default wall axis seeded when the operator first flips a plain node to the
 #: ``"reset"`` type from the inspector combobox.  The wall_coord / facing are
 #: NOT placeholders -- they are auto-filled from the node geometry against this
@@ -1488,6 +1496,55 @@ class EditorApp:
         """
         return self._edge_exists(a, b)
 
+    def _plain_edge_kind(self, a: str, b: str) -> Optional[str]:
+        """Return the kind of the plain edge on ``{a, b}`` -- line / blind / None.
+
+        Undirected scan of ``model.line_segments`` then ``model.blind_edges``
+        (each stored 2-tuple matches either ordering). Projection edges are NOT
+        plain edges and are deliberately ignored here -- they live off-model in
+        the :class:`ProjectionDelta` and are reported via
+        :meth:`_find_projection_on_pair`. At most one plain edge exists on a pair
+        (the L / B / P overrides enforce mutual exclusion), so the first match
+        wins.
+
+        :param a: First endpoint node name.
+        :param b: Second endpoint node name.
+        :return: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` for the
+            existing plain edge, or ``None`` when no line / blind edge connects
+            the pair.
+        """
+        pair = {a, b}
+        for edge in self._model.line_segments:
+            if set(edge) == pair:
+                return _EDGE_KIND_LINE
+        for edge in self._model.blind_edges:
+            if set(edge) == pair:
+                return _EDGE_KIND_BLIND
+        return None
+
+    def _describe_edge_on_pair(self, a: str, b: str) -> str:
+        """Return a human-readable description of the edge on ``{a, b}``.
+
+        Used by the EDGE-mode status line so the operator can see what (if
+        anything) currently connects the two picked nodes before pressing
+        L / B / P / Delete. Projection edges take priority and report their
+        STORED direction (they are directed); otherwise a plain line / blind
+        edge is named; otherwise ``"none"``.
+
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :return: e.g. ``"projection 'A' -> 'B'"``, ``"line"``, ``"blind"``, or
+            ``"none"``.
+        """
+        projection = self._find_projection_on_pair(a, b)
+        if projection is not None:
+            u, v = projection
+            return f"projection {u!r} -> {v!r}"
+        kind = self._plain_edge_kind(a, b)
+        if kind is not None:
+            return kind
+        return "none"
+
     # ------------------------------------------------------------------
     # Auto-create-edges (T8)
     # ------------------------------------------------------------------
@@ -1897,9 +1954,11 @@ class EditorApp:
         if len(self._edge_selection) > _EDGE_SELECTION_MAX:
             del self._edge_selection[0]
         if len(self._edge_selection) == _EDGE_SELECTION_MAX:
+            a, b = self._edge_selection
+            current = self._describe_edge_on_pair(a, b)
             self._set_status(
-                f"Edge endpoints: {self._edge_selection[0]!r} -> "
-                f"{self._edge_selection[1]!r}. Press L (line) or B (blind)."
+                f"Edge endpoints: {a!r} -> {b!r} (current: {current}). "
+                f"Press L (line), B (blind), P (projection), or Delete."
             )
         else:
             self._set_status(
@@ -2106,15 +2165,14 @@ class EditorApp:
         self._set_status(f"No edge between ({a!r}, {b!r}) to delete.")
 
     def _handle_edge_line_key(self) -> None:
-        """``L`` -- add a line edge, overriding any projection edge on the pair.
+        """``L`` -- add a line edge, overriding any other edge on the pair.
 
-        If a DIRECTED projection edge currently connects the two picked nodes
-        (in either orientation), it is deleted first via
-        :class:`DeleteProjectionEdge` so the undirected line edge replaces it --
-        the override is two undo entries (delete projection, then add line),
-        which is acceptable. Otherwise a plain :class:`AddLineEdge` is
-        dispatched. On the successful add the picker is cleared and the canvas
-        re-synced.
+        Overrides whatever currently connects the two picked nodes: a DIRECTED
+        projection edge (either orientation) or an existing BLIND edge is deleted
+        first, then the undirected line edge is added in its place (a two-entry
+        delete-then-add). A pair that is already a line edge is a friendly no-op.
+        With nothing there a plain :class:`AddLineEdge` is dispatched. See
+        :meth:`_add_plain_edge_with_override` for the full override contract.
         """
         if self._current_mode() is not Mode.EDGE:
             return
@@ -2122,14 +2180,17 @@ class EditorApp:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        self._add_plain_edge_with_override(AddLineEdge(a, b), a, b, "line")
+        self._add_plain_edge_with_override(
+            AddLineEdge(a, b), a, b, _EDGE_KIND_LINE
+        )
 
     def _handle_edge_blind_key(self) -> None:
-        """``B`` -- add a blind edge, overriding any projection edge on the pair.
+        """``B`` -- add a blind edge, overriding any other edge on the pair.
 
-        Symmetric to :meth:`_handle_edge_line_key`: a projection edge on the
-        picked pair (either orientation) is deleted first, then a plain
-        :class:`AddBlindEdge` is dispatched.
+        Symmetric to :meth:`_handle_edge_line_key`: a projection edge or an
+        existing LINE edge on the picked pair is deleted first, then a plain
+        :class:`AddBlindEdge` is added in its place. A pair that is already a
+        blind edge is a friendly no-op.
         """
         if self._current_mode() is not Mode.EDGE:
             return
@@ -2137,43 +2198,76 @@ class EditorApp:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        self._add_plain_edge_with_override(AddBlindEdge(a, b), a, b, "blind")
+        self._add_plain_edge_with_override(
+            AddBlindEdge(a, b), a, b, _EDGE_KIND_BLIND
+        )
 
     def _add_plain_edge_with_override(
         self, add_command, a: str, b: str, kind: str
     ) -> None:
-        """Add a line / blind edge, first overriding any projection edge there.
+        """Add a line / blind edge, overriding any other edge already on the pair.
 
-        Shared body for the ``L`` and ``B`` handlers. When a projection edge
-        connects ``{a, b}`` (in either orientation), it is deleted FIRST via
-        :class:`DeleteProjectionEdge` against the stored directed pair, so the
-        new undirected line / blind edge replaces it (override projection ->
-        line/blind). If that delete is rejected -- ``_dispatch`` surfaced the
-        ``ValueError`` -- the add is NOT attempted, leaving the model coherent.
-        With no projection edge present the add runs directly. Both steps route
-        through :meth:`_dispatch`, so each is its own undo entry (a two-step
-        override is two entries -- acceptable).
+        Shared body for the ``L`` and ``B`` handlers. The new undirected line /
+        blind edge replaces whatever currently connects ``{a, b}``:
+
+        * Same plain kind already there -> nothing to change; a friendly status
+          message, no dispatch (avoids the command's "already exists" error).
+        * A projection edge (either orientation) -> deleted FIRST via
+          :class:`DeleteProjectionEdge` against its stored directed pair, then
+          the add (override projection -> line/blind).
+        * The OTHER plain kind (line <-> blind) -> deleted FIRST via
+          :class:`DeleteEdge`, then the add (override line <-> blind), so the
+          operator can flip an edge's type in place without a manual delete.
+        * Nothing there -> the add runs directly.
+
+        Any override is delete-then-add: if the delete is rejected
+        (``_dispatch`` surfaced the ``ValueError``) the add is NOT attempted, so
+        the model is never left half-overridden. Both steps route through
+        :meth:`_dispatch`, so a two-step override is two undo entries --
+        acceptable.
 
         :param add_command: The :class:`AddLineEdge` / :class:`AddBlindEdge` to
-            dispatch once any projection override is cleared.
+            dispatch once any override is cleared.
         :param a: First picked node name.
         :param b: Second picked node name.
-        :param kind: ``"line"`` or ``"blind"`` -- only shapes the status text.
+        :param kind: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` -- shapes
+            the override decision and the status text.
         """
-        overridden = self._find_projection_on_pair(a, b)
-        if overridden is not None:
-            u, v = overridden
+        # Already the requested kind: a no-op the operator would otherwise hit as
+        # the command's "already exists" error. Report it plainly and stop.
+        if self._plain_edge_kind(a, b) == kind:
+            self._edge_selection.clear()
+            self._set_status(f"({a!r}, {b!r}) is already a {kind} edge.")
+            self._refresh_view()
+            return
+        overridden_projection = self._find_projection_on_pair(a, b)
+        overridden_kind: Optional[str] = None
+        if overridden_projection is not None:
+            u, v = overridden_projection
             # Delete the projection edge first; bail if that step is rejected so
             # we never leave a half-applied override.
             if not self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
                 return
             self._sync_projection_render()
+        else:
+            # The same-kind case returned above, so any plain edge on the pair is
+            # the OTHER kind: delete it first so the add won't collide, recording
+            # the old kind for the status text.
+            overridden_kind = self._plain_edge_kind(a, b)
+            if overridden_kind is not None and not self._dispatch(
+                DeleteEdge(a, b)
+            ):
+                return
         if self._dispatch(add_command):
             self._edge_selection.clear()
-            if overridden is not None:
-                u, v = overridden
+            if overridden_projection is not None:
+                u, v = overridden_projection
                 self._set_status(
                     f"Replaced projection {u!r} -> {v!r} with a {kind} edge."
+                )
+            elif overridden_kind is not None:
+                self._set_status(
+                    f"Changed ({a!r}, {b!r}) from {overridden_kind} to {kind}."
                 )
             else:
                 self._set_status(f"Added {kind} edge ({a!r}, {b!r}).")
@@ -2278,7 +2372,9 @@ class EditorApp:
                 f"Projection into blind node {v!r} cancelled."
             )
             return
-        self._add_plain_edge_with_override(AddBlindEdge(u, v), u, v, "blind")
+        self._add_plain_edge_with_override(
+            AddBlindEdge(u, v), u, v, _EDGE_KIND_BLIND
+        )
 
     # ------------------------------------------------------------------
     # Right-click context menu
