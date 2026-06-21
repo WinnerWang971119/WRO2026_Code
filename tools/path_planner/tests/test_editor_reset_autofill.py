@@ -342,3 +342,37 @@ def test_tc6_axis_unchanged_out_of_range_facing_is_rejected() -> None:
     assert app._history.can_undo is False
     assert panels.status_messages, "a reject status message must be set"
     assert panels.validation_badges[-1] is False
+
+
+# ===========================================================================
+# Convert-to-reset (inspector type combobox) seeds an auto-filled spec
+# ===========================================================================
+
+
+def test_convert_to_reset_autofills_wall_and_facing() -> None:
+    """Flipping a plain node to ``"reset"`` via the inspector type combobox
+    seeds wall_coord / facing from geometry (``reset_autofill``), NOT the old
+    ``(0, 0)`` placeholder.
+
+    Mirrors the Add-node-reset path so both reset-creation routes behave the
+    same: the operator gets a real, validator-realisable suggestion to confirm.
+    """
+    app, panels, model = _make_app()
+    # B is a plain line node at (200, 10) in a 300x200 cm field. Converting it to
+    # reset auto-fills against the default axis "x": the nearer wall (x=300,
+    # standoff 100 cm) with facing 180 deg (away from it) -- not (0, 0).
+    expected_wall, expected_facing = projection_edges.reset_autofill(
+        model.nodes["B"], "x", model.field_mm
+    )
+
+    app._on_panel_node_type_change("B", "reset")
+
+    spec = model.reset_nodes["B"]
+    assert model.node_types["B"] == "reset"
+    assert spec["axis"] == "x"
+    assert spec["wall_coord"] == pytest.approx(expected_wall)
+    assert spec["facing"] == pytest.approx(expected_facing)
+    # Concretely the nearer wall, not the (0, 0) placeholder the convert path
+    # used to plant.
+    assert (spec["wall_coord"], spec["facing"]) != (0.0, 0.0)
+    assert app._history.can_undo is True

@@ -44,8 +44,10 @@ try:
 finally:
     matplotlib.use = _real_mpl_use
 
+from tools.path_planner.editor import app as _app_module  # noqa: E402
 from tools.path_planner.editor import projection_edges  # noqa: E402
 from tools.path_planner.editor.commands import (  # noqa: E402
+    AddPivotTurn,
     AddProjectionEdge,
     DeleteProjectionEdge,
     ProjectionDelta,
@@ -95,12 +97,16 @@ class _PanelsSpy:
         self.mode_var = _PanelsSpy._ModeVar(mode.value)
         self.status_messages: list[str] = []
         self.refresh_count: int = 0
+        self.validation_badge: bool | None = None
 
     def set_status(self, text: str) -> None:
         self.status_messages.append(text)
 
     def refresh(self, model) -> None:
         self.refresh_count += 1
+
+    def set_validation_badge(self, valid: bool) -> None:
+        self.validation_badge = valid
 
 
 def _make_model() -> FieldModel:
@@ -504,3 +510,132 @@ def test_delete_key_reports_no_edge_when_pair_is_bare() -> None:
     assert app._history.can_undo is False
     assert _renders_pair(proj_delta, "A", "B"), "the unrelated edge survives"
     assert panels.status_messages, "a 'no edge' status must be set"
+
+
+# ---------------------------------------------------------------------------
+# Projection edge counts as a real incident pivot leg (Fix 3)
+# ---------------------------------------------------------------------------
+
+
+def test_edge_exists_counts_projection_edge_either_orientation() -> None:
+    """``_edge_exists`` recognises a projection edge on the pair in BOTH
+    orientations.
+
+    A projection edge lives in the off-model :class:`ProjectionDelta`, not in
+    ``line_segments`` / ``blind_edges``, but the Save-time validator accepts it
+    as a real incident leg (both directions exist in the authored graph), so the
+    pivot guard must count it -- in either pick orientation.
+    """
+    app, panels, model, proj_delta = _make_app()
+    assert app._edge_exists("A", "B") is False, "no edge of any type yet"
+    _seed_projection(proj_delta, model, "A", "B")
+    assert app._edge_exists("A", "B") is True, "the forward projection counts"
+    assert app._edge_exists("B", "A") is True, "the reverse orientation counts"
+
+
+def test_add_pivot_accepts_a_projection_arrive_leg() -> None:
+    """A pivot whose arrive leg ``u -> v`` is a projection edge is accepted.
+
+    The inline guard previously rejected a projection arrive leg with "no edge
+    between u and v" because ``_edge_exists`` only scanned the model's line /
+    blind edges. With the projection edge counted, the turn dispatches.
+    """
+    app, panels, model, proj_delta = _make_app()
+    # Arrive leg A -> B is a projection; leave leg B -> C is a blind edge.
+    _seed_projection(proj_delta, model, "A", "B")
+    model.blind_edges.append(("B", "C"))
+
+    app._on_panel_add_pivot("A", "B", "C")
+
+    assert ("A", "B", "C") in model.pivot_turns, (
+        "the pivot must be added when the arrive leg is a projection edge"
+    )
+    assert isinstance(app._history.undo_stack[-1], AddPivotTurn)
+
+
+def test_add_pivot_still_rejects_a_bare_pair() -> None:
+    """A pivot leg with NO edge of any type is still rejected inline -- the
+    guard is relaxed to count projection edges, not removed."""
+    app, panels, model, proj_delta = _make_app()
+    # Only the leave leg exists; the arrive leg A -> B has no edge of any kind.
+    model.blind_edges.append(("B", "C"))
+
+    app._on_panel_add_pivot("A", "B", "C")
+
+    assert ("A", "B", "C") not in model.pivot_turns, (
+        "a bare arrive leg (no edge of any type) must still be rejected"
+    )
+    assert app._history.can_undo is False
+    assert panels.status_messages, "a rejection status must be set"
+    assert panels.validation_badge is False
+
+
+# ---------------------------------------------------------------------------
+# Projection into a blind head -> offer a blind edge instead (Fix 1)
+# ---------------------------------------------------------------------------
+
+
+def test_projection_into_blind_head_offers_and_adds_blind_edge(monkeypatch) -> None:
+    """``P`` onto a pair whose HEAD is a blind node prompts, and on confirm adds
+    a BLIND edge for the leg instead of an invalid projection.
+
+    A line-follow projection can't end on a blind node, so the editor offers the
+    valid alternative up front rather than letting it fail at Save.
+    """
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    app._root = None  # askyesno's parent; stubbed below so the value is unused
+    model.node_types["B"] = "blind"  # the projection HEAD is a blind node
+    monkeypatch.setattr(
+        _app_module.messagebox, "askyesno", lambda *a, **k: True
+    )
+
+    app._handle_edge_projection_key()
+
+    assert not _renders_pair(proj_delta, "A", "B"), (
+        "no projection edge may be authored into a blind node"
+    )
+    assert ("A", "B") in model.blind_edges, (
+        "confirming the offer adds a blind edge to reach the blind node"
+    )
+    assert app._edge_selection == []
+
+
+def test_projection_into_blind_head_cancel_creates_nothing(monkeypatch) -> None:
+    """Declining the blind-edge offer authors nothing and leaves history clean."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+    app._root = None
+    model.node_types["B"] = "blind"
+    monkeypatch.setattr(
+        _app_module.messagebox, "askyesno", lambda *a, **k: False
+    )
+
+    app._handle_edge_projection_key()
+
+    assert not _renders_pair(proj_delta, "A", "B")
+    assert not model.blind_edges, "declining must create no edge"
+    assert app._history.can_undo is False
+    assert panels.status_messages, "a 'cancelled' status must be set"
+
+
+def test_projection_into_line_head_is_unaffected(monkeypatch) -> None:
+    """A projection whose head is a LINE node authors a projection edge as
+    before -- the blind-head offer must not fire for a valid line head."""
+    app, panels, model, proj_delta = _make_app(
+        mode=Mode.EDGE, selection=["A", "B"]
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("askyesno must not fire for a line head")
+
+    monkeypatch.setattr(_app_module.messagebox, "askyesno", _boom)
+
+    app._handle_edge_projection_key()
+
+    assert _renders_pair(proj_delta, "A", "B"), (
+        "a line-head projection is authored normally"
+    )
+    assert not model.blind_edges

@@ -148,16 +148,13 @@ _VALID_NODE_TYPES: tuple[str, ...] = (
 #: out of ``"reset"`` is a clear-spec (line / blind target) operation.
 _PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
 
-#: Default reset spec planted when the operator first flips a plain node to the
-#: ``"reset"`` type from the inspector combobox.  These values are deliberately
-#: a placeholder that the geometry validator at Save will reject: flipping the
-#: type opens the reset-spec sub-panel, and the validation badge stays INVALID
-#: (Save blocked) until the operator fills in real wall geometry.  We do NOT
-#: fabricate a passing spec -- a default that happened to validate would let a
-#: half-authored reset node slip through Save.
+#: Default wall axis seeded when the operator first flips a plain node to the
+#: ``"reset"`` type from the inspector combobox.  The wall_coord / facing are
+#: NOT placeholders -- they are auto-filled from the node geometry against this
+#: axis via :meth:`commands.SetResetSpec.autofilled` (the nearer qualifying
+#: wall, facing away), matching the Add-node-reset path.  Both stay editable and
+#: recompute when the operator changes the axis or moves the node.
 _RESET_SPEC_DEFAULT_AXIS: str = "x"
-_RESET_SPEC_DEFAULT_WALL_COORD: float = 0.0
-_RESET_SPEC_DEFAULT_FACING: float = 0.0
 
 #: Allowed wall-zero axis values for an inline reset-spec edit (mirrors
 #: ``commands._VALID_RESET_AXES`` and ``validator._ALLOWED_RESET_AXES``).  The
@@ -1053,10 +1050,10 @@ class EditorApp:
         dispatches by case:
 
         * ``new_type == "reset"`` and the node is NOT already reset -> plant a
-          DEFAULT reset spec via :class:`SetResetSpec`. The default geometry is
-          intentionally a placeholder the Save-time validator rejects: it opens
-          the reset-spec sub-panel so the operator can fill in real wall values,
-          and the validation badge stays INVALID (Save blocked) until they do.
+          reset spec via :meth:`SetResetSpec.autofilled`, seeding wall_coord /
+          facing from the node geometry (the nearer qualifying wall, facing
+          away) so the operator gets a real suggestion, not a placeholder. The
+          values stay editable and recompute on an axis / position change.
         * ``new_type`` in {line, blind} and the node IS currently reset ->
           :class:`ClearResetSpec`, which removes the spec and re-types the node.
         * Otherwise (a plain line <-> blind change) -> :class:`SetNodeType`.
@@ -1077,14 +1074,18 @@ class EditorApp:
 
         if new_type == _NODE_TYPE_RESET:
             # Plain -> reset: SetResetSpec atomically sets type=reset AND writes
-            # the (placeholder) reset_nodes spec, keeping the validator's
-            # type-and-spec invariant intact at every step.
+            # the reset_nodes spec, keeping the validator's type-and-spec
+            # invariant intact at every step. Seed wall_coord / facing from the
+            # node geometry via reset_autofill (the nearer qualifying wall,
+            # facing away), mirroring the Add-node-reset path so the operator
+            # gets a real suggestion instead of a (0,0) placeholder. Both stay
+            # editable and recompute on an axis / position change.
             self._dispatch(
-                SetResetSpec(
+                SetResetSpec.autofilled(
                     node_name,
-                    _RESET_SPEC_DEFAULT_AXIS,
-                    _RESET_SPEC_DEFAULT_WALL_COORD,
-                    _RESET_SPEC_DEFAULT_FACING,
+                    node_xy=self._model.nodes[node_name],
+                    axis=_RESET_SPEC_DEFAULT_AXIS,
+                    field_mm=self._model.field_mm,
                 )
             )
             return
@@ -1254,10 +1255,11 @@ class EditorApp:
         """Dispatch an :class:`AddPivotTurn` from the pivots add-row.
 
         Tier-1 guards (cheap, before dispatch): all three endpoints must be
-        known nodes, and both legs must be REAL incident edges -- the
-        undirected pairs ``{u, v}`` and ``{v, w}`` must each exist in
-        ``line_segments`` or ``blind_edges``. Without an incident leg the turn
-        could never be executed, so it is rejected inline. On any failed guard
+        known nodes, and both legs must be REAL incident edges -- each of the
+        pairs ``{u, v}`` and ``{v, w}`` must exist as a ``line_segments`` /
+        ``blind_edges`` entry OR a projection edge (see :meth:`_edge_exists`).
+        Without an incident leg the turn could never be executed, so it is
+        rejected inline. On any failed guard
         the edit is rejected (no panel revert is needed -- the readonly add-row
         pickers keep their chosen names so the operator can fix the third one).
 
@@ -1349,16 +1351,21 @@ class EditorApp:
         self._dispatch(SetGlobalKnob(knob, number))
 
     def _edge_exists(self, a: str, b: str) -> bool:
-        """Return ``True`` if an undirected edge ``{a, b}`` exists in the model.
+        """Return ``True`` if any edge connects ``{a, b}`` (line / blind / projection).
 
-        Scans both ``line_segments`` and ``blind_edges``, treating each stored
-        2-tuple as undirected (either ordering matches). Used by the pivot
-        inline guard to confirm both legs of a proposed turn are real incident
-        edges.
+        Scans ``line_segments`` and ``blind_edges`` (each stored 2-tuple is
+        undirected, so either ordering matches) AND the app's
+        :class:`ProjectionDelta` render set via :meth:`_find_projection_on_pair`.
+        A projection edge is tracked off-model in the delta, but the Save-time
+        validator accepts it as a real incident pivot leg in either direction
+        (``graph_builder._emit_directed_pair`` emits a directed pair for every
+        edge), so the pivot guard must count it too -- otherwise a projection
+        ``u -> v`` leg is wrongly rejected with "no edge between u and v".
 
         :param a: First endpoint node name.
         :param b: Second endpoint node name.
-        :return: ``True`` iff the pair is connected by a line or blind edge.
+        :return: ``True`` iff a line, blind, or projection edge connects the
+            pair.
         """
         pair = {a, b}
         for edge in self._model.line_segments:
@@ -1367,6 +1374,10 @@ class EditorApp:
         for edge in self._model.blind_edges:
             if set(edge) == pair:
                 return True
+        # Projection edges live in the app's ProjectionDelta, not the model;
+        # count one on this pair (either orientation) as a real incident leg.
+        if self._find_projection_on_pair(a, b) is not None:
+            return True
         return False
 
     def _find_projection_on_pair(
@@ -2132,6 +2143,14 @@ class EditorApp:
             self._edge_selection.clear()
             self._refresh_view()
             return
+        # A projection is a line-follow leg, so its HEAD must sit on a line: the
+        # Save-time validator (``_reject_line_follow_into_blind``, ADR-041)
+        # rejects a projection into a blind node (no line there to seek). Catch
+        # it here and offer the valid alternative -- a blind edge to reach the
+        # blind node -- instead of authoring an edge that only fails at Save.
+        if self._model.node_types.get(v) == _NODE_TYPE_BLIND:
+            self._offer_blind_instead_of_projection(u, v)
+            return
         try:
             distance_cm, heading_deg = (
                 projection_edges.compute_projection_geometry(
@@ -2168,6 +2187,33 @@ class EditorApp:
                     f"Added projection edge {u!r} -> {v!r}."
                 )
             self._refresh_view()
+
+    def _offer_blind_instead_of_projection(self, u: str, v: str) -> None:
+        """Offer a blind edge when a projection's head ``v`` is a blind node.
+
+        A line-follow projection cannot end on a blind node (no line to seek
+        there -- ``validator._reject_line_follow_into_blind``). Rather than
+        author an edge the Save-time validator will reject, prompt the operator:
+        on confirm, add a BLIND edge for the leg -- the valid way to reach a
+        blind node -- via :meth:`_add_plain_edge_with_override` (which clears the
+        picker and refreshes); on decline, leave the picked selection untouched
+        so they can re-pick a line head.
+
+        :param u: The projection source node (the picked first node).
+        :param v: The projection head node, known to be typed ``"blind"``.
+        """
+        add_blind = messagebox.askyesno(
+            "Can't project into a blind node",
+            f"{v!r} is a blind node -- a line-follow projection can't end "
+            f"there. Add a blind edge instead?",
+            parent=self._root,
+        )
+        if not add_blind:
+            self._set_status(
+                f"Projection into blind node {v!r} cancelled."
+            )
+            return
+        self._add_plain_edge_with_override(AddBlindEdge(u, v), u, v, "blind")
 
     # ------------------------------------------------------------------
     # Right-click context menu
