@@ -83,6 +83,54 @@ EDGES = [
 ]
 '''
 
+# Source whose ``EDGES`` list holds an ``EDGE_LINE`` entry AND an
+# ``EDGE_PROJECTION`` entry for the SAME directed pair ``(A, B)`` -- the rich
+# EDGES table allows per-edge ``EDGE_LINE`` / ``EDGE_BLIND`` overrides to share
+# a ``(u, v)`` with a projection edge. ``remove_projection_edge(A, B)`` must
+# drop ONLY the projection entry and leave the line entry intact. Both ``type``
+# names are imported as bare references so the module is valid Python.
+_SOURCE_MIXED_TYPE_SAME_UV = '''\
+"""Toy field: an EDGE_LINE and an EDGE_PROJECTION share the same (u, v)."""
+
+from tools.path_planner.graph_builder import EDGE_LINE, EDGE_PROJECTION
+
+EDGES = [
+    {
+        "type": EDGE_LINE,
+        "u": "A",
+        "v": "B",
+        "distance_cm": 50.0,
+        "heading_deg": 0.0,
+    },
+    {
+        "type": EDGE_PROJECTION,
+        "u": "A",
+        "v": "B",
+        "distance_cm": 45.0,
+        "heading_deg": 90.0,
+    },
+]
+'''
+
+# Source whose ``EDGES`` list holds ONLY an ``EDGE_LINE`` entry for ``(A, B)``
+# -- there is no projection entry to remove, so ``remove_projection_edge`` must
+# be a no-op that preserves the file bytes + mtime.
+_SOURCE_ONLY_LINE_SAME_UV = '''\
+"""Toy field: a lone EDGE_LINE entry with no projection sibling."""
+
+from tools.path_planner.graph_builder import EDGE_LINE, EDGE_PROJECTION
+
+EDGES = [
+    {
+        "type": EDGE_LINE,
+        "u": "A",
+        "v": "B",
+        "distance_cm": 50.0,
+        "heading_deg": 0.0,
+    },
+]
+'''
+
 # Required keys on the appended projection dict (matches
 # ``projection_edges._REQUIRED_EDGE_KEYS`` plus the bare ``type`` name).
 _REQUIRED_PROJECTION_KEYS: tuple[str, ...] = (
@@ -311,6 +359,83 @@ def test_tc2_w1_remove_of_uv_only_in_nested_list_is_noop(tmp_path) -> None:
     assert result is False, "a (u, v) only in a nested list must not match"
     assert path.read_bytes() == bytes_before
     assert path.stat().st_mtime_ns == mtime_before
+
+
+def _entry_types_for_uv(source: str, u: str, v: str) -> list[str]:
+    """Return the ``type`` token of every ``EDGES`` entry matching ``(u, v)``.
+
+    Each match yields the bare-name ``id`` (e.g. ``"EDGE_LINE"``) when the
+    entry's ``"type"`` is an ``ast.Name``, or the repr of the string when it is
+    a quoted literal -- enough to assert which typed entry survived a remove.
+
+    :param source: Python source containing an ``EDGES`` assignment.
+    :param u: Source node name to match against each entry's ``"u"`` value.
+    :param v: Destination node name to match against each entry's ``"v"`` value.
+    :return: The ``type`` tokens of all entries with that ``(u, v)``, in order.
+    """
+    edges_list = _parse_edges_list(source)
+    types: list[str] = []
+    for element in edges_list.elts:
+        if not isinstance(element, ast.Dict):
+            continue
+        pairs = {
+            key.value: value
+            for key, value in zip(element.keys, element.values)
+            if isinstance(key, ast.Constant)
+        }
+        u_node = pairs.get("u")
+        v_node = pairs.get("v")
+        type_node = pairs.get("type")
+        if (
+            isinstance(u_node, ast.Constant)
+            and u_node.value == u
+            and isinstance(v_node, ast.Constant)
+            and v_node.value == v
+        ):
+            if isinstance(type_node, ast.Name):
+                types.append(type_node.id)
+            elif isinstance(type_node, ast.Constant):
+                types.append(repr(type_node.value))
+    return types
+
+
+def test_tc2_remove_only_drops_projection_when_line_shares_uv(tmp_path) -> None:
+    """A ``type=EDGE_LINE`` and a ``type=EDGE_PROJECTION`` entry share ``(A, B)``:
+    ``remove_projection_edge(A, B)`` drops ONLY the projection entry and leaves
+    the ``EDGE_LINE`` override intact."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_MIXED_TYPE_SAME_UV)
+
+    # Sanity: before the remove, both typed entries for (A, B) are present.
+    before_types = _entry_types_for_uv(path.read_text(encoding="utf-8"), "A", "B")
+    assert before_types == ["EDGE_LINE", "EDGE_PROJECTION"]
+
+    result = remove_projection_edge(path, "A", "B")
+
+    assert result is True, "removing the projection sibling must report a write"
+
+    new_text = path.read_text(encoding="utf-8")
+    edges_list = _parse_edges_list(new_text)
+
+    # Exactly one EDGES entry remains, and it is the EDGE_LINE override -- the
+    # projection entry was removed without disturbing its line sibling.
+    assert len(edges_list.elts) == 1, "only the projection entry is removed"
+    assert _entry_types_for_uv(new_text, "A", "B") == ["EDGE_LINE"]
+    assert len(_projection_entries(edges_list)) == 0, "no projection entry remains"
+
+
+def test_tc2_remove_is_noop_when_only_line_shares_uv(tmp_path) -> None:
+    """When only a ``type=EDGE_LINE`` ``(A, B)`` exists (no projection sibling),
+    ``remove_projection_edge(A, B)`` is a no-op returning ``False`` with the file
+    bytes + mtime unchanged."""
+    path = _write(tmp_path, "field_data.py", _SOURCE_ONLY_LINE_SAME_UV)
+    bytes_before = path.read_bytes()
+    mtime_before = path.stat().st_mtime_ns
+
+    result = remove_projection_edge(path, "A", "B")
+
+    assert result is False, "no EDGE_PROJECTION entry to remove -- must be a no-op"
+    assert path.read_bytes() == bytes_before, "the EDGE_LINE entry must be untouched"
+    assert path.stat().st_mtime_ns == mtime_before, "mtime must be unchanged"
 
 
 # ===========================================================================

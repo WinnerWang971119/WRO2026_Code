@@ -479,6 +479,36 @@ def _element_uv(element: cst.BaseElement) -> Optional[tuple[str, str]]:
     return (found_u, found_v)
 
 
+def _is_projection_element(element: cst.BaseElement) -> bool:
+    """Return True if a list element is an ``EDGE_PROJECTION``-typed dict edge.
+
+    A projection edge carries ``"type": EDGE_PROJECTION`` where the value is the
+    *bare* ``cst.Name`` ``EDGE_PROJECTION`` -- matching how
+    :func:`_projection_dict` emits it (``field_data.py`` imports the name, so it
+    is never a quoted string). An element whose ``"type"`` is a string literal
+    (e.g. ``"EDGE_LINE"`` or even a quoted ``"EDGE_PROJECTION"``), a different
+    bare name, or absent entirely is NOT a projection edge.
+
+    :param element: A list element from the ``EDGES`` assignment.
+    :return: True only when the element is a ``cst.Dict`` with a ``"type"`` key
+        whose value is the bare name ``EDGE_PROJECTION``.
+    """
+    value = element.value
+    if not isinstance(value, cst.Dict):
+        return False
+    for dict_element in value.elements:
+        if not isinstance(dict_element, cst.DictElement):
+            continue
+        key = dict_element.key
+        if not isinstance(key, cst.SimpleString):
+            continue
+        if _strip_quotes(key.value) != "type":
+            continue
+        type_value = dict_element.value
+        return isinstance(type_value, cst.Name) and type_value.value == "EDGE_PROJECTION"
+    return False
+
+
 class _ProjectionAppender(cst.CSTTransformer):
     """Append one projection ``Element`` to the top-level ``EDGES`` list.
 
@@ -601,9 +631,13 @@ class _ProjectionRemover(cst.CSTTransformer):
 
     Scans the ``EDGES`` list -- and only that list, matched by object identity
     against the node stashed in :meth:`visit_Assign` -- for the first element
-    whose ``"u"`` and ``"v"`` values equal the targets, and drops it. Identity
-    matching (rather than a depth counter) means a list nested as the value of
-    a key inside an ``EDGES`` entry's dict (a future field such as
+    whose ``"u"`` and ``"v"`` values equal the targets AND whose ``"type"`` is
+    the bare name ``EDGE_PROJECTION`` (per :func:`_is_projection_element`), and
+    drops it. The ``type`` gate means a non-projection entry (e.g. a per-edge
+    ``EDGE_LINE`` / ``EDGE_BLIND`` override) sharing the same directed ``(u, v)``
+    is left untouched -- only ``EDGE_PROJECTION``-typed entries are removable.
+    Identity matching (rather than a depth counter) means a list nested as the
+    value of a key inside an ``EDGES`` entry's dict (a future field such as
     ``"waypoints": [...]``) is never scanned, so a ``(u, v)`` that exists only
     in such a nested list is not falsely matched and deleted. When the removed
     element was the list's last, the new last element's comma and the closing
@@ -644,8 +678,11 @@ class _ProjectionRemover(cst.CSTTransformer):
     def leave_List(
         self, original_node: cst.List, updated_node: cst.List
     ) -> cst.List:
-        """Drop the first ``(u, v)``-matching element from the EDGES list.
+        """Drop the first ``(u, v)``-matching ``EDGE_PROJECTION`` element.
 
+        An element is dropped only when its ``(u, v)`` equals the targets AND
+        :func:`_is_projection_element` confirms its ``"type"`` is the bare name
+        ``EDGE_PROJECTION``; a same-``(u, v)`` non-projection entry is skipped.
         Only the list that IS the ``EDGES`` value is touched -- matched by
         object identity against the node stashed in :meth:`visit_Assign`, so a
         list nested as a dict value inside an ``EDGES`` entry is never scanned.
@@ -662,7 +699,7 @@ class _ProjectionRemover(cst.CSTTransformer):
         elements = list(updated_node.elements)
         target = (self._u, self._v)
         for index, element in enumerate(elements):
-            if _element_uv(element) != target:
+            if _element_uv(element) != target or not _is_projection_element(element):
                 continue
             was_last = index == len(elements) - 1
             del elements[index]
@@ -757,32 +794,36 @@ def append_projection_edge(
 
 
 def remove_projection_edge(path: Path, u: str, v: str) -> bool:
-    """Remove the first ``EDGES`` entry whose ``(u, v)`` match ``u`` / ``v``.
+    """Remove the first ``EDGE_PROJECTION`` ``EDGES`` entry with ``(u, v)``.
 
     Loads ``path``, parses it with LibCST, and deletes the first dict element
     of the top-level ``EDGES = [...]`` assignment whose ``"u"`` value equals
-    ``u`` and ``"v"`` value equals ``v`` (string comparison after stripping
-    quotes via :func:`_strip_quotes`). The edge ``type`` is not inspected, so
-    a stray non-projection entry with the same ``(u, v)`` is matched too; in
-    the editor's data model an ``(u, v)`` pair is unique within ``EDGES``.
-    Surrounding comments and all other entries survive unchanged, and the
-    list whitespace is re-normalised so no blank line is left behind. A
-    removed element's OWN leading comment is retained in place: LibCST owns
-    that comment in the upstream whitespace (the prior element's comma, or the
-    opening bracket) and re-points it onto the following node, so it stays in
-    the file rather than being deleted with the element.
+    ``u``, whose ``"v"`` value equals ``v`` (string comparison after stripping
+    quotes via :func:`_strip_quotes`), AND whose ``"type"`` is the bare name
+    ``EDGE_PROJECTION``. The ``type`` gate matters because the rich ``EDGES``
+    table can also hold per-edge ``EDGE_LINE`` / ``EDGE_BLIND`` override entries:
+    a non-projection entry sharing the same directed ``(u, v)`` is NEVER removed,
+    only ``EDGE_PROJECTION``-typed entries are. An entry whose ``"type"`` is a
+    string literal (even ``"EDGE_PROJECTION"``), a different bare name, or absent
+    is treated as non-projection and left in place. Surrounding comments and all
+    other entries survive unchanged, and the list whitespace is re-normalised so
+    no blank line is left behind. A removed element's OWN leading comment is
+    retained in place: LibCST owns that comment in the upstream whitespace (the
+    prior element's comma, or the opening bracket) and re-points it onto the
+    following node, so it stays in the file rather than being deleted with the
+    element.
 
     The removal is a no-op (returns ``False``, file untouched, mtime
-    preserved) when no entry matches, or when there is no top-level ``EDGES``
-    assignment at all. The commented-out demo entry is a comment, not a list
-    element, so it is never matched.
+    preserved) when no ``EDGE_PROJECTION`` entry matches ``(u, v)``, or when
+    there is no top-level ``EDGES`` assignment at all. The commented-out demo
+    entry is a comment, not a list element, so it is never matched.
 
     :param path: Filesystem path to the Python source file (typically
         ``tools/path_planner/field_data.py``).
     :param u: Source node name to match against each entry's ``"u"`` value.
     :param v: Destination node name to match against each entry's ``"v"`` value.
-    :return: ``True`` if an entry was removed and the file rewritten; ``False``
-        if nothing matched.
+    :return: ``True`` if a projection entry was removed and the file rewritten;
+        ``False`` if nothing matched.
     :raises OSError: If the file cannot be read or written.
     :raises libcst.ParserSyntaxError: If the source is not valid Python.
     :note: Only the top-level ``EDGES`` list is touched; ``NODES`` and any
