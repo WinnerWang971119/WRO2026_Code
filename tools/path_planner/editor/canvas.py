@@ -592,23 +592,43 @@ class FieldCanvas:
         """Fallback full render when the blit fast-path is unavailable.
 
         Used when :meth:`update_node_drag` cannot blit (fast-path disarmed,
-        wrong node, or a backend that raised mid-composite). Moves the
-        animated artists to ``(x, y)`` first so a full render reflects the new
-        position even if the model has not yet been written by the caller,
-        then repaints the whole scene with the cached overlay arguments.
+        wrong node, or a backend that raised mid-composite). The drag must
+        still show the node under the cursor without mutating the model -- the
+        canvas never writes ``model.nodes`` during a drag (the caller dispatches
+        the final ``MoveNode`` on release).
+
+        Ordering matters: :meth:`render` does ``ax.clear()`` and rebuilds every
+        artist from :attr:`_last_model`, whose node coordinates still hold the
+        PRE-DRAG ORIGIN. So the live ``(x, y)`` geometry must be applied to the
+        artists AFTER they are rebuilt, not before -- applying it first would be
+        discarded by the clear-and-rebuild and the dragged node would snap back
+        to its origin on every fallback tick.
+
+        1. :meth:`render` rebuilds all artists at the model (origin) positions
+           and draws that scene (with the cached overlay arguments).
+        2. :meth:`_apply_drag_geometry` slides the freshly-rebuilt dot / label /
+           incident-edge artists to the cursor (it looks them up from the dicts
+           :meth:`render` just repopulated, so it MUST run after the render).
+           It no-ops gracefully if *name* has no rebuilt artist (e.g. the node
+           vanished from the model).
+        3. A forced :meth:`FigureCanvasTkAgg.draw_idle` paints those moved
+           artists, since :meth:`_apply_drag_geometry` only mutates artist data
+           -- the render in step 1 already drew the origin-positioned scene.
 
         :param name: Name of the dragged node.
         :param x: New world x coordinate, in centimetres.
         :param y: New world y coordinate, in centimetres.
         :return: ``None``.
         """
+        if self._last_model is None:
+            return
+        self.render(
+            self._last_model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+        )
         self._apply_drag_geometry(name, x, y)
-        if self._last_model is not None:
-            self.render(
-                self._last_model,
-                highlighted_nodes=self._last_highlighted_nodes,
-                proposed_edges=self._last_proposed_edges,
-            )
+        self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
     # Hit-testing + coordinate helpers
