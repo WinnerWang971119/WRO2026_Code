@@ -1,19 +1,29 @@
-"""Right-side Tk control panels for the WRO 2026 live field editor.
+"""Tk control panels for the WRO 2026 live field editor.
 
-This module owns the **widget tree** for the editor's right-hand column.  Since
-the de-lag UI restyle (T6) the column is laid out as a stacked three-band
-chrome that frames the canvas (which the app owns and packs as a sibling to the
-left of this frame):
+This module owns the **widget tree** for the editor's chrome.  Since the
+true-3-pane layout refactor (F1) the chrome is split into **four band frames**
+that are siblings of the app's canvas widget under one shared ``parent`` grid,
+so the window reads as a real three-pane editor rather than one fixed-width
+right column:
 
-* A **title bar** -- the product name, the edited filename, and an unsaved
-  "dirty" dot.
-* A **body** split into two side-by-side panes: a vertical **MODES** toolbar
-  (one accented row per :class:`Mode`) on the left and a **PROPERTIES**
-  inspector on the right (node fields, a collapsible reset-spec / pivots /
-  global-knobs stack, the auto-create + start-pose forms, ghost add buttons,
-  and the always-visible action-button block at its floor).
-* A **status strip** at the very bottom -- a validation badge, the active mode,
-  the current selection, and a clickable key-hint.
+* A **title bar** (:attr:`SidePanels._title_frame`) -- a full-width strip
+  carrying the product name, the edited filename, and an unsaved "dirty" dot.
+* A vertical **MODES rail** (:attr:`SidePanels._mode_frame`) -- one accented
+  row per :class:`Mode`, pinned to the far left at a fixed narrow width.
+* A **PROPERTIES inspector** (:attr:`SidePanels._inspector_frame`) -- the node
+  fields, a collapsible reset-spec / pivots / global-knobs stack, the
+  auto-create + start-pose forms, ghost add buttons, and the always-visible
+  action-button block at its floor, pinned to the right at a fixed comfortable
+  width.
+* A **status strip** (:attr:`SidePanels._status_frame`) -- a full-width strip
+  at the very bottom with a validation badge, the active mode, the current
+  selection, and a clickable key-hint.
+
+The canvas (owned by the app) sits between the mode rail and the inspector and
+is the only band that expands.  :class:`SidePanels` does **not** place itself
+or its bands; the app calls :meth:`SidePanels.layout_three_pane` once -- the
+single placement entry point -- to grid all four bands plus the canvas into the
+shared ``parent``.
 
 It does **not** own any application logic -- mouse handling on the map, the
 undo/redo stack, dialog flows, and the actual Save / Build pipeline all live in
@@ -110,17 +120,19 @@ _RESET_FACING_KEY: str = "facing"
 # Layout / sizing constants.  No magic numbers in the code body.
 # ---------------------------------------------------------------------------
 
-# Outer padding around the whole SidePanels frame (pixels).
+# Outer padding around the chrome band frames (pixels).
 _PANEL_OUTER_PAD = 6
 # Padding inside each section body (pixels).
 _GROUP_INNER_PAD = 4
 # Vertical gap between stacked sub-frames (pixels).
 _SECTION_SPACING = 6
-# Fixed width of the panel column (pixels) so the matplotlib canvas to its
-# left does not jitter when widget content changes.
-_PANEL_WIDTH_PX = 240
-# Fixed width of the left MODES toolbar column inside the body (pixels).
-_MODE_TOOLBAR_WIDTH_PX = 64
+# Fixed width of the far-left MODES rail band (pixels).  Just wide enough for
+# the short mode labels plus the accent strip; the rail never expands.
+_MODE_RAIL_WIDTH_PX = 90
+# Fixed width of the right PROPERTIES inspector band (pixels).  Sized
+# comfortably so section headers and field labels are NOT clipped -- the user
+# reported words being cut off in the old 240-px column.
+_INSPECTOR_WIDTH_PX = 312
 # Node listbox visible-row count.
 _NODE_LIST_HEIGHT = 8
 # Node listbox visible-column width (characters).
@@ -261,8 +273,13 @@ _MODE_ROW_PAD_Y: int = 1
 # (Listbox / Canvas / buttons) so they sit cleanly on the warm surface.
 _FLAT_BORDER_PX: int = 0
 # Sunken border (pixels) kept on the status surface so it still reads as a
-# distinct sunk plane at the floor of the column.
+# distinct sunk plane at the floor of the window.
 _STATUS_BORDER_PX: int = 1
+# Minimum wrap length (pixels) for the free-form status line.  The strip is now
+# full-window-width so the live wrap tracks the band's measured width, but it is
+# floored here so a momentary tiny width (first <Configure>) never collapses the
+# wrap to a single character per line.
+_STATUS_WRAP_MIN_PX: int = 200
 
 
 def _theme_color(name: str, fallback: str) -> str:
@@ -285,14 +302,23 @@ def _theme_color(name: str, fallback: str) -> str:
 
 
 class SidePanels(tk.Frame):
-    """Right-hand control column for the live field editor.
+    """Chrome controller for the live field editor's true three-pane window.
+
+    :class:`SidePanels` owns the four chrome band frames (title, mode rail,
+    inspector, status) that frame the app's canvas.  The bands are built as
+    children of the *master* parent so they are siblings of the canvas widget
+    and share one grid; :class:`SidePanels` itself is a (never placed) frame
+    that just holds the controller identity.
 
     Construction is pure widget-building: every callback attribute starts as
     ``None``, every Tk variable starts at its safe default, and no model is
     consulted.  The owning app is expected to:
 
-    1. Instantiate the frame: ``panels = SidePanels(root)``.
-    2. Pack / grid it: ``panels.pack(side="right", fill="y")``.
+    1. Instantiate the controller: ``panels = SidePanels(root)``.
+    2. Place the chrome + canvas with the single placement entry point:
+       ``panels.layout_three_pane(canvas.tk_widget)`` -- it grids the title and
+       status bands full-width, the mode rail and inspector at fixed widths, and
+       the canvas in the expanding centre cell.
     3. Assign every callback attribute (``on_node_select``,
        ``on_save_and_build``, etc.) to a closure that performs the real work.
     4. Call :meth:`refresh` once with the freshly loaded
@@ -300,6 +326,13 @@ class SidePanels(tk.Frame):
 
     :ivar mode_var: ``tk.StringVar`` holding the active :class:`Mode`'s
         ``value``.  Read via ``Mode(self.mode_var.get())``.
+    :ivar _title_frame: Full-width title band (wordmark + filename + dirty dot),
+        gridded across the top row by :meth:`layout_three_pane`.
+    :ivar _mode_frame: Fixed-width far-left MODES rail band, gridded into the
+        left column of the middle row.
+    :ivar _inspector_frame: Fixed-width right PROPERTIES inspector band, gridded
+        into the right column of the middle row.
+    :ivar _status_frame: Full-width status band, gridded across the bottom row.
     :ivar on_node_select: Fired when the listbox selection changes.  The
         sole argument is the selected node name, or ``None`` if the
         selection was cleared.
@@ -358,13 +391,22 @@ class SidePanels(tk.Frame):
         empty state and must be populated by a subsequent call to
         :meth:`refresh`.
 
-        :param master: The parent Tk container (usually the root window or
-            an outer ``ttk.PanedWindow``).
+        The four chrome bands (title, mode rail, inspector, status) are built
+        as children of *master* so they are siblings of the app's canvas widget
+        and can share one grid.  Construction does **not** place any band -- the
+        app calls :meth:`layout_three_pane` once to grid every band plus the
+        canvas into *master*.  :class:`SidePanels` itself remains a (never
+        placed) :class:`tk.Frame` purely so it keeps a Tk widget identity for
+        the smoke-test ``isinstance`` check; it is never the parent of a band.
+
+        :param master: The parent Tk container (the root window) into which the
+            four bands and the canvas are gridded.
         """
-        super().__init__(master, width=_PANEL_WIDTH_PX)
-        # Prevent the frame from shrinking to fit smaller children, so its
-        # width stays fixed regardless of which sub-section is tallest.
-        self.pack_propagate(False)
+        super().__init__(master)
+        # The shared parent every band frame is built into and gridded under by
+        # :meth:`layout_three_pane`.  Held so the band builders can parent their
+        # frame to it rather than to ``self`` (``self`` is never placed).
+        self._parent: tk.Misc = master
 
         # ---- Resolved fonts --------------------------------------------
         # Resolve the theme's fallback chains once, now that a Tk root almost
@@ -514,14 +556,16 @@ class SidePanels(tk.Frame):
         # Guarded internally; a no-op if no live root exists.
         self._apply_theme()
 
-        # ---- Build the three bands of the column -----------------------
-        # Title bar pinned to the top, status strip pinned to the bottom, and
-        # the body fills the remaining space between them.  The status strip is
-        # built (and packed to the bottom) before the body so it always anchors
-        # the column floor regardless of how tall the body grows.
+        # ---- Build the four chrome bands (no placement yet) ------------
+        # Each builder creates ONE band frame as a child of ``self._parent``
+        # and stores it on ``self``; none of them grids/packs the band -- that
+        # is :meth:`layout_three_pane`'s job, called once by the app.  Build
+        # order here is irrelevant to the final layout (grid is positional), so
+        # it just follows top-to-bottom reading order.
         self._build_title_bar()
+        self._build_mode_rail()
+        self._build_inspector_band()
         self._build_status_strip()
-        self._build_body()
 
         # ---- Drive the mode-toolbar accent from ``mode_var`` -----------
         # A pure-visual trace: it only recolours the accent strips / row tint,
@@ -879,34 +923,37 @@ class SidePanels(tk.Frame):
             record.chevron.configure(text=record.open_glyph)
 
     # ------------------------------------------------------------------
-    # Band builders: title bar / body / status strip
+    # Band builders: title / mode rail / inspector / status (built as
+    # siblings of the canvas under ``self._parent``; placed by
+    # ``layout_three_pane``).
     # ------------------------------------------------------------------
 
     def _build_title_bar(self) -> None:
-        """Create the top title strip: wordmark + filename + dirty dot.
+        """Create the full-width title band: wordmark + filename + dirty dot.
 
-        The title strip is pinned to the top of the column.  It shows the
-        product wordmark in the display font, the edited filename, and a dirty
-        dot that appears only when there are unsaved edits (driven by
-        :meth:`set_dirty`).
+        Builds :attr:`_title_frame` as a child of :attr:`_parent` (it is **not**
+        placed here -- :meth:`layout_three_pane` grids it full-width across the
+        top row).  It shows the product wordmark in the display font, the edited
+        filename, and a dirty dot that appears only when there are unsaved edits
+        (driven by :meth:`set_dirty`).
         """
-        bar = self._themed_frame(self)
-        bar.pack(
-            side="top",
-            fill="x",
-            padx=_PANEL_OUTER_PAD,
-            pady=(_PANEL_OUTER_PAD, 0),
-        )
+        bar = self._themed_frame(self._parent)
+        self._title_frame = bar
 
         self._themed_label(
             bar,
             text=_TITLE_TEXT,
             anchor="w",
             font=self._font_title,
-        ).pack(side="top", fill="x")
+        ).pack(
+            side="top",
+            fill="x",
+            padx=_PANEL_OUTER_PAD,
+            pady=(_PANEL_OUTER_PAD, 0),
+        )
 
         meta_row = self._themed_frame(bar)
-        meta_row.pack(side="top", fill="x")
+        meta_row.pack(side="top", fill="x", padx=_PANEL_OUTER_PAD)
         self._themed_label(
             meta_row,
             textvariable=self._filename_var,
@@ -931,34 +978,70 @@ class SidePanels(tk.Frame):
             background=_theme_color("HAIRLINE", theme.SPINE),
         ).pack(side="top", fill="x", pady=(_PANEL_OUTER_PAD // 2, 0))
 
-    def _build_body(self) -> None:
-        """Create the middle band: MODES toolbar (left) + inspector (right).
+    def _build_mode_rail(self) -> None:
+        """Create the far-left **MODES rail** band (fixed narrow width).
 
-        The body fills the space between the title bar and the status strip.
-        Its left column is the vertical mode toolbar; its right column is the
-        scrolling properties inspector that hosts the node fields, the
-        collapsible reset/pivots/globals stack, the auto-create + start-pose
-        forms, the ghost add buttons, and the always-visible action block.
+        Builds :attr:`_mode_frame` as a child of :attr:`_parent` and pins it to
+        a fixed :data:`_MODE_RAIL_WIDTH_PX` width via ``grid_propagate(False)``
+        so the rail stays just wide enough for the short mode labels + accent
+        strip and never steals width from the expanding canvas.  The band is
+        **not** placed here -- :meth:`layout_three_pane` grids it into the
+        left column of the middle row.
         """
-        body = self._themed_frame(self)
-        body.pack(
+        rail = self._themed_frame(self._parent, width=_MODE_RAIL_WIDTH_PX)
+        # Hold the fixed width regardless of how tall/narrow the rows are.  The
+        # rail's only child is the pack-managed inner frame below, so
+        # pack_propagate(False) -- not grid_propagate -- is what stops the band
+        # from collapsing to its content width.
+        rail.grid_propagate(False)
+        rail.pack_propagate(False)
+        self._mode_frame = rail
+
+        # Inner frame so the rail's content keeps padding without fighting the
+        # fixed-width outer band (a directly-padded fixed band would clip).
+        inner = self._themed_frame(rail)
+        inner.pack(
             side="top",
             fill="both",
             expand=True,
             padx=_PANEL_OUTER_PAD,
-            pady=(_PANEL_OUTER_PAD // 2, 0),
+            pady=(_PANEL_OUTER_PAD, 0),
         )
+        self._build_mode_toolbar(inner)
 
-        # ---- Left: MODES toolbar column (fixed width) ----
-        toolbar = self._themed_frame(body, width=_MODE_TOOLBAR_WIDTH_PX)
-        toolbar.pack(side="left", fill="y")
-        toolbar.pack_propagate(False)
-        self._build_mode_toolbar(toolbar)
+    def _build_inspector_band(self) -> None:
+        """Create the right **PROPERTIES inspector** band (fixed wide width).
 
-        # ---- Right: PROPERTIES inspector column (fills remaining width) ----
-        inspector = self._themed_frame(body)
-        inspector.pack(side="left", fill="both", expand=True)
-        self._build_inspector(inspector)
+        Builds :attr:`_inspector_frame` as a child of :attr:`_parent` and pins
+        it to a fixed :data:`_INSPECTOR_WIDTH_PX` width via
+        ``grid_propagate(False)`` -- chosen wide enough that section headers and
+        field labels are not clipped.  The band is **not** placed here --
+        :meth:`layout_three_pane` grids it into the right column of the middle
+        row.  Its contents (node fields, collapsible reset/pivots/globals stack,
+        auto-create + start-pose forms, ghost add buttons, and the
+        always-visible action block at the floor) are built by
+        :meth:`_build_inspector`.
+        """
+        band = self._themed_frame(self._parent, width=_INSPECTOR_WIDTH_PX)
+        # Hold the comfortable fixed width so labels never re-clip when content
+        # changes; only the canvas column is allowed to expand.  The band's only
+        # child is the pack-managed inner frame below, so pack_propagate(False)
+        # -- not grid_propagate -- is what keeps it from shrinking to content.
+        band.grid_propagate(False)
+        band.pack_propagate(False)
+        self._inspector_frame = band
+
+        # Inner frame carries the section content with consistent padding while
+        # the fixed-width band holds the column geometry.
+        inner = self._themed_frame(band)
+        inner.pack(
+            side="top",
+            fill="both",
+            expand=True,
+            padx=_PANEL_OUTER_PAD,
+            pady=(_PANEL_OUTER_PAD, 0),
+        )
+        self._build_inspector(inner)
 
     def _build_mode_toolbar(self, master: tk.Misc) -> None:
         """Populate the left **MODES** toolbar column.
@@ -1542,26 +1625,36 @@ class SidePanels(tk.Frame):
         self.set_redo_enabled(False)
 
     def _build_status_strip(self) -> None:
-        """Create the tall, full-width status strip at the column floor.
+        """Create the tall, full-width status band at the window floor.
 
-        The strip is two logical lines inside a sunken frame.  Line one is the
-        validation badge (a coloured indicator dot + a Valid/Invalid word) and
-        the active mode + selection text.  Line two is a clickable key-hint that
-        opens the shortcuts dialog via :attr:`on_show_shortcuts`.  The badge,
-        mode, and selection lines are driven by the public setters
-        :meth:`set_validation_badge`, :meth:`set_mode_display`,
-        :meth:`set_selection_display`, and :meth:`set_status`.
+        Builds :attr:`_status_frame` as a child of :attr:`_parent` (it is
+        **not** placed here -- :meth:`layout_three_pane` grids it full-width
+        across the bottom row).  The band is two logical lines inside a sunken
+        frame.  Line one is the validation badge (a coloured indicator dot + a
+        Valid/Invalid word) and the active mode + selection text.  Line two is a
+        clickable key-hint that opens the shortcuts dialog via
+        :attr:`on_show_shortcuts`.  The badge, mode, and selection lines are
+        driven by the public setters :meth:`set_validation_badge`,
+        :meth:`set_mode_display`, :meth:`set_selection_display`, and
+        :meth:`set_status`.
         """
-        group = self._themed_frame(self, relief="sunken", bd=_STATUS_BORDER_PX)
-        group.pack(
-            side="bottom",
+        group = self._themed_frame(
+            self._parent, relief="sunken", bd=_STATUS_BORDER_PX
+        )
+        self._status_frame = group
+
+        # Inner frame carries the lines with consistent padding; the band's own
+        # edges are flush so the sunken relief reads as a full-width plane.
+        body = self._themed_frame(group)
+        body.pack(
+            side="top",
             fill="x",
             padx=_PANEL_OUTER_PAD,
-            pady=(0, _PANEL_OUTER_PAD),
+            pady=_PANEL_OUTER_PAD // 2,
         )
 
         # --- Line 1: badge dot + badge word ---
-        badge_row = self._themed_frame(group)
+        badge_row = self._themed_frame(body)
         badge_row.pack(side="top", fill="x")
         # The indicator dot is a separate label so it can be recoloured per
         # validation state without disturbing the word next to it.
@@ -1584,7 +1677,7 @@ class SidePanels(tk.Frame):
         self._badge_label.pack(side="left")
 
         self._mode_label = self._themed_label(
-            group,
+            body,
             textvariable=self._mode_display_var,
             anchor="w",
             font=self._font_status,
@@ -1592,29 +1685,34 @@ class SidePanels(tk.Frame):
         self._mode_label.pack(side="top", fill="x")
 
         self._selection_label = self._themed_label(
-            group,
+            body,
             textvariable=self._selection_display_var,
             anchor="w",
             font=self._font_status,
         )
         self._selection_label.pack(side="top", fill="x")
 
-        # Free-form status line: wraps so a long message stays readable across
-        # the enlarged surface instead of being clipped to one row.
+        # Free-form status line: wraps so a long message stays readable instead
+        # of being clipped to one row.  The strip is now full-window-width, so
+        # the wrap length tracks the band's live width via a <Configure> bind
+        # rather than a fixed column constant; it seeds to a sane minimum.
         self._status_label = self._themed_label(
-            group,
+            body,
             textvariable=self._status_var,
             anchor="w",
             justify="left",
-            wraplength=_PANEL_WIDTH_PX - 2 * _PANEL_OUTER_PAD,
+            wraplength=_STATUS_WRAP_MIN_PX,
             foreground=theme.INK_MUTED,
             font=self._font_status,
         )
         self._status_label.pack(side="top", fill="x")
+        # Keep the wrap length in step with the band's actual width so a long
+        # message reflows on window resize instead of clipping or overflowing.
+        self._status_frame.bind("<Configure>", self._on_status_frame_resize)
 
         # --- Line 2: clickable key-hint -> on_show_shortcuts ---
         self._key_hint_label = self._themed_label(
-            group,
+            body,
             text=_KEY_HINT_TEXT,
             anchor="w",
             foreground=theme.INK_MUTED,
@@ -1624,9 +1722,59 @@ class SidePanels(tk.Frame):
         self._key_hint_label.pack(side="top", fill="x")
         self._key_hint_label.bind("<Button-1>", self._handle_show_shortcuts)
 
+    def _on_status_frame_resize(self, event: tk.Event) -> None:
+        """Reflow the wrapping status line to the status band's live width.
+
+        Bound to the status band's ``<Configure>`` so the free-form status
+        message wraps to whatever width the full-width strip currently has,
+        clamped to a sane floor so a momentarily-tiny width never collapses the
+        wrap to nothing.
+
+        :param event: The Tk configure event carrying the band's new width.
+        """
+        wrap = max(_STATUS_WRAP_MIN_PX, int(event.width) - 2 * _PANEL_OUTER_PAD)
+        try:
+            self._status_label.configure(wraplength=wrap)
+        except tk.TclError:
+            pass
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def layout_three_pane(self, canvas_widget: tk.Widget) -> None:
+        """Grid the four chrome bands + *canvas_widget* into the shared parent.
+
+        This is the **single placement entry point** for the editor chrome.  It
+        grids a true three-pane window into :attr:`_parent`::
+
+            row 0:  [ ---------------- TITLE band (full width) ---------------- ]
+            row 1:  [ MODE rail ] [ ------ CANVAS (expands) ------ ] [ INSPECTOR ]
+            row 2:  [ ---------------- STATUS band (full width) --------------- ]
+
+        Only the canvas row/column carries weight, so the title and status bands
+        stay full-width, the mode rail and inspector hold their fixed widths,
+        and the canvas absorbs every spare pixel on resize.  The app replaces
+        its old ``panels.pack(...)`` + ``canvas.tk_widget.pack(...)`` calls with
+        a single call to this method.
+
+        :param canvas_widget: The app's canvas Tk widget (a sibling of the four
+            bands under the same parent) to seat in the centre cell.
+        """
+        self._title_frame.grid(
+            row=0, column=0, columnspan=3, sticky="ew"
+        )
+        self._mode_frame.grid(row=1, column=0, sticky="ns")
+        canvas_widget.grid(row=1, column=1, sticky="nsew")
+        self._inspector_frame.grid(row=1, column=2, sticky="ns")
+        self._status_frame.grid(
+            row=2, column=0, columnspan=3, sticky="ew"
+        )
+
+        # Only the canvas row/column expand; the rail + inspector keep their
+        # fixed widths and the title + status bands keep their natural heights.
+        self._parent.grid_rowconfigure(1, weight=1)
+        self._parent.grid_columnconfigure(1, weight=1)
 
     def refresh(self, model: "FieldModel") -> None:
         """Re-sync every widget from *model*.
