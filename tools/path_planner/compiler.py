@@ -383,6 +383,12 @@ def compile_path(
                 # LINE->projection hop differs (compiler raw vs sim trimmed).
                 # Mirrors the REAR LINE->projection branch of
                 # ``PathTrackerSim.go_to`` in ``sim/runtime.py`` cell-for-cell.
+                #
+                # Pass-through is NOT compiled (T20, see the FRONT branch below):
+                # a reverse ``line(A)–projection(B)–line(C)`` collapse is an FSM
+                # transition the firmware owns, so the compiler emits the plain
+                # ``ACT_PROJECTION_REVERSE`` here; the sim emits the sim-only
+                # ``ACT_PROJECTION_REVERSE_PASS`` on the pass-through.
                 if is_projection_node(graph, v):
                     out.append((
                         ACT_PROJECTION_REVERSE,
@@ -440,6 +446,22 @@ def compile_path(
                 # line_mode_override, not a projection mode. Any other
                 # destination (a real junction) follows to the intersection
                 # marker and re-anchors there.
+                #
+                # PASS-THROUGH IS NOT COMPILED (T20, issue #64). A
+                # ``line(A)–projection(B)–line(C)`` triple routed PAST B collapses
+                # to one continuous A→C follow at runtime, but -- exactly like the
+                # collinear line-line-line ADR-023 pass-through -- that collapse is
+                # an FSM *transition* the firmware owns (the PROJECTION_FOLLOW
+                # `_projPassThrough` distance-gate branch, T19), NOT a compiled
+                # primitive. The compiler stays pass-through-UNAWARE: it emits the
+                # plain ``ACT_FOLLOW_DIST`` here whether or not B would pass through,
+                # just as it emits ``ACT_FOLLOW_INT`` for a line-line-line collapse
+                # without ever emitting the sim-only ``ACT_LINE_PASS``. The sim
+                # mirrors the firmware by emitting ``ACT_FOLLOW_DIST_PASS`` on the
+                # pass-through; the compiler↔sim parity tests are constructed on
+                # graphs whose NEXT_HOP never line-follows past a both-LINE-flanked
+                # projection node (the toy field keeps a direct A-B edge), so the
+                # two streams agree without the compiler tracking pass-through.
                 if is_projection_node(graph, v):
                     out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
                 else:

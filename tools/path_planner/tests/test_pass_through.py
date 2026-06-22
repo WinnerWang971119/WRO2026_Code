@@ -27,6 +27,7 @@ from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.sim import VirtualChassis, PathTrackerSim
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
+    ACT_FOLLOW_DIST_PASS,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
     LINE_SENSOR_AXLE_OFFSET_CM,
@@ -678,27 +679,31 @@ def test_tc11_position_invariant_line_pass_equals_overshoot():
 
 
 # ---------------------------------------------------------------------------
-# TC12 — PROJECTION-inbound: pass-through NOT applied, legacy sequence emitted
+# TC12 — line-proj-line routed PAST B: distance-gated pass-through (T20, #64)
 # ---------------------------------------------------------------------------
 
 
-def test_tc12_projection_node_arrival_no_line_pass():
-    """TC12: A path whose node B is a projection node (a LINE hop A->B that is
-    DISTANCE-terminated) emits FOLLOW_DIST at B — never LINE_PASS — because the
-    distance-terminated projection branch of go_to does not run the pass-through
-    peek (which lives in the junction-terminated EDGE_LINE branch).
+def test_tc12_projection_node_distance_gated_pass_through():
+    """T20 (issue #64): a ``line(A)–projection(B)–line(C)`` triple routed PAST B
+    collapses to one continuous A→C follow with a MID-FOLLOW dead-reckon advance
+    at the marker-less projection node B (no stop).
 
-    Issue #64: projection is a NODE property. ``B`` is a projection node, so the
-    ``A->B`` LINE hop is DISTANCE-terminated (FOLLOW_DIST, no FOLLOW_INT, no
-    overshoot, no pass-through). The onward ``B->C`` LINE hop into the junction
-    node ``C`` emits the normal FOLLOW_INT + LINE_OVERSHOOT.
+    The TRIGGER is the A→B DISTANCE gate, NOT an intersection: B is a projection
+    node with no junction marker, so the firmware's ``isAtIntersection()`` never
+    fires at B. The sim mirrors the firmware (T19) PROJECTION_FOLLOW
+    ``_projPassThrough`` branch by emitting :data:`ACT_FOLLOW_DIST_PASS` (the
+    projection twin of :data:`ACT_LINE_PASS`) instead of the plain
+    ``ACT_FOLLOW_DIST`` at B -- the chassis advance + ``on_dead_reckoned_advance``
+    re-anchor are identical, only the tag differs (the follower stays live across
+    B). The onward ``B->C`` LINE hop into the junction node ``C`` then re-anchors
+    on the real intersection (FOLLOW_INT + LINE_OVERSHOOT).
 
-    Layout:
+    Layout (both flanks LINE + collinear -> pass-through qualifies):
         A(0,0) --LINE heading 0°--> B(50,0) [projection] --LINE heading 0°--> C(100,0)
 
     Expected sequence from A to C:
-        (ACT_FOLLOW_DIST, 50.0)   ← A→B into a projection node (no FOLLOW_INT/overshoot)
-        (ACT_FOLLOW_INT, None)    ← B→C via LINE into a junction
+        (ACT_FOLLOW_DIST_PASS, 50.0)  ← A→B distance-gated pass-through (no stop)
+        (ACT_FOLLOW_INT, None)        ← B→C via LINE into a junction
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM) ← C is destination
     """
     nodes = {
@@ -715,11 +720,19 @@ def test_tc12_projection_node_arrival_no_line_pass():
     prims = sim.go_to("C")
 
     act_tags = [tag for tag, _ in prims]
-    # No LINE_PASS anywhere — arrival at B was DISTANCE-terminated (projection).
+    # No LINE_PASS anywhere — arrival at B was DISTANCE-terminated (projection),
+    # so the collapse surfaces as ACT_FOLLOW_DIST_PASS, not the junction-gated
+    # ACT_LINE_PASS.
     assert ACT_LINE_PASS not in act_tags
-    # The LINE-into-projection leg emits FOLLOW_DIST, not FOLLOW_INT + overshoot.
-    assert prims[0] == (ACT_FOLLOW_DIST, 50.0)
-    # The LINE leg B→C emits FOLLOW_INT + LINE_OVERSHOOT (C is the goal).
+    # The A→B LINE-into-projection leg passes through B (continuous A→C follow):
+    # the distance-gated pass-through tag, NOT the plain FOLLOW_DIST stop.
+    assert prims[0] == (ACT_FOLLOW_DIST_PASS, 50.0)
+    assert ACT_FOLLOW_DIST not in act_tags
+    # The LINE leg B→C re-anchors at the junction C (goal): FOLLOW_INT + overshoot.
     assert ACT_FOLLOW_INT in act_tags
     assert ACT_LINE_OVERSHOOT in act_tags
     assert sim.localization.current_node() == "C"
+    # Axle-on-node invariant: the continuous A→C follow nets exactly
+    # edge(A→B)+edge(B→C); the chassis axle lands ON C (no per-junction offset).
+    cx, cy = nodes["C"]
+    assert math.hypot(sim.chassis.x_cm - cx, sim.chassis.y_cm - cy) < _POS_TOL_CM

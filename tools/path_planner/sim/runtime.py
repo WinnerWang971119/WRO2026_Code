@@ -28,6 +28,23 @@ lookup on the destination node (no goal-relative ``NEXT_HOP`` peek):
   encoder gate already lands the chassis on the node. (Replaces the retired
   ``EDGE_PROJECTION`` dispatch; the motion profile now comes from the LINE
   edge's ``line_mode_override``, ``ProjectionMode`` having been deleted.)
+
+  **Pass-through (T20, issue #64).** When this projection node B is a
+  NON-goal node whose outbound B→C hop is a :data:`EDGE_LINE` edge into a
+  LINE (junction) node AND A→B→C are collinear / same-direction (the SAME
+  ADR-023 heading check, via :func:`_should_projection_pass_through`), the
+  ``line(A)–projection(B)–line(C)`` triple collapses to ONE continuous A→C
+  follow: the A→B distance gate stamps the dead-reckon advance MID-FOLLOW
+  (no stop) and the follower stays live across B. The emitted tag becomes
+  ``(ACT_FOLLOW_DIST_PASS, distance_cm)`` (the projection twin of
+  ``ACT_LINE_PASS``) -- the chassis advance + re-anchor are IDENTICAL, only
+  the tag differs. The TRIGGER is the A→B DISTANCE gate, not an intersection
+  (B has no junction marker). Mirrors the firmware PROJECTION_FOLLOW
+  ``_projPassThrough`` branch (T19). Any guard miss ⇒ the normal stop at B
+  (plain ``ACT_FOLLOW_DIST``). Like ``ACT_LINE_PASS``, the pass-through is an
+  FSM transition the firmware owns and is intentionally NOT compiled, so
+  :mod:`tools.path_planner.compiler` stays pass-through-unaware on the
+  line-proj-line collapse just as it is on the line-line-line one.
 * :data:`EDGE_BLIND` -- both FRONT and REAR traversal are mode-sensitive
   (mirrors the blind branch of
   :func:`tools.path_planner.compiler.compile_path`). The per-hop decision
@@ -296,6 +313,26 @@ ACT_LINE_OVERSHOOT: str = "line_overshoot"
 # See ADR-023 "Pass-through collinear intersections".
 ACT_LINE_PASS: str = "line_pass"
 
+# Sim-only primitive tag for the DISTANCE-gated `line(A)–projection(B)–line(C)`
+# pass-through (T20, issue #64). Emitted INSTEAD OF ACT_FOLLOW_DIST on the A→B
+# LINE-into-projection hop when B is a non-goal projection node whose outbound
+# B→C hop is a LINE edge into a LINE (junction) node AND A→B→C are collinear /
+# same-direction (the SAME ADR-023 heading check, plus the LINE-flank + LINE-C
+# guards the firmware `_evaluateProjectionPassThrough` applies). The chassis
+# advance and the `on_dead_reckoned_advance(B)` re-anchor are IDENTICAL to
+# ACT_FOLLOW_DIST -- only the primitive name differs, signalling that the
+# follower stays live across the marker-less node B for one continuous A→C
+# motion (no stop). This is the projection twin of ACT_LINE_PASS: the firmware
+# (T19) owns it as the `_projPassThrough` distance-gate FSM transition in the
+# PROJECTION_FOLLOW state, NOT as a compiled primitive, so -- exactly like
+# ACT_LINE_PASS / ACT_LINE_OVERSHOOT -- it is intentionally kept OUT of
+# :mod:`tools.path_planner.compiler` (the compiler is pass-through-unaware on
+# BOTH the line-line-line and the line-proj-line collapse; it emits the plain
+# follow primitive either way). The TRIGGER is the A→B DISTANCE gate, not an
+# intersection -- a projection node has no junction marker, so
+# `Intersection.isAtIntersection()` never fires at B.
+ACT_FOLLOW_DIST_PASS: str = "follow_line_to_distance_pass"
+
 # Bidirectional line-following primitive tags. Each mirrors its forward
 # counterpart (``ACT_FOLLOW_INT`` / ``ACT_FORWARD`` / ``ACT_FOLLOW_DIST``)
 # but drives the chassis BACKWARD along its current heading instead of
@@ -314,6 +351,21 @@ ACT_LINE_PASS: str = "line_pass"
 ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, target_node, line_mode)
 ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
 ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, line_mode)
+
+# REAR twin of :data:`ACT_FOLLOW_DIST_PASS` (T20, issue #64): the
+# `line(A)–projection(B)–line(C)` pass-through emitted INSTEAD OF
+# ``ACT_PROJECTION_REVERSE`` when the A→B reverse follow into a projection node
+# qualifies for the continuous A→C collapse (the gate's direction check
+# requires BOTH A→B and B→C to resolve REAR, so a REAR pass-through only fires
+# on a fully-reverse collinear triple). The chassis reverse advance + the
+# ``on_dead_reckoned_advance(B)`` re-anchor are IDENTICAL to
+# ``ACT_PROJECTION_REVERSE`` -- only the tag differs, signalling the follower
+# stays live across B. The firmware (T19) owns it as the same
+# ``_projPassThrough`` distance-gate transition in PROJECTION_FOLLOW (uniform
+# FRONT/REAR), so -- like the FRONT twin -- it is kept OUT of the compiler.
+# 4-tuple shape: ``(ACT_PROJECTION_REVERSE_PASS, target_node, distance_cm,
+# line_mode)``.
+ACT_PROJECTION_REVERSE_PASS: str = "projection_reverse_pass"
 
 # Reverse-direction stop-at-line primitive. Mirrors ``ACT_BLIND_REVERSE``'s
 # 4-tuple shape ``(action, target_node, distance_cm, blind_mode)`` but
@@ -561,10 +613,12 @@ def wrap_pm180(delta_deg: float) -> float:
 
 __all__ = [
     "ACT_BLIND_REVERSE",
+    "ACT_FOLLOW_DIST_PASS",
     "ACT_LINE_OVERSHOOT",
     "ACT_LINE_PASS",
     "ACT_LINE_REVERSE",
     "ACT_PROJECTION_REVERSE",
+    "ACT_PROJECTION_REVERSE_PASS",
     "ACT_REANCHOR",
     "ACT_RETURN_FORWARD",
     "ACT_RETURN_STOP_AT_LINE",
@@ -1323,6 +1377,110 @@ def _should_pass_through(
     # Mirror of the C++ guard in PathTracker.cpp's LINE_FOLLOW intersection
     # branch (PR #34 review).
     return next_dir == inbound_direction
+
+
+def _should_projection_pass_through(
+    graph,
+    next_hop,
+    projection_node,
+    goal_name,
+    *,
+    inbound_body_heading: float,
+    inbound_direction: "Direction",
+    pipeline_default: DirectionMode = None,
+    builder_route: "Direction" = None,
+    builder_arrival: "Direction" = None,
+    bidirectional_enabled: bool = None,
+    line_board_count: int = None,
+) -> bool:
+    """Return True iff a `line(A)–projection(B)–line(C)` triple collapses to one
+    continuous A→C follow at the marker-less projection node ``B``.
+
+    Function-identical Python mirror of the firmware
+    ``PathTracker::_evaluateProjectionPassThrough`` (T19, issue #64). Called on
+    the A→B LINE-into-projection hop (``B == projection_node``,
+    ``inbound_body_heading`` / ``inbound_direction`` are the A→B hop's resolved
+    body heading + travel direction). It decides WHETHER the distance-gated
+    follow into ``B`` keeps the follower live and continues to ``C`` (no stop),
+    emitting :data:`ACT_FOLLOW_DIST_PASS` instead of :data:`ACT_FOLLOW_DIST`. It
+    does NOT change which gate fires the state transition -- that is ALWAYS the
+    A→B DISTANCE gate (a projection node has no junction marker, so an
+    intersection never fires at ``B``). This is ROUTING LOOKAHEAD ONLY.
+
+    Every condition must hold; any miss ⇒ a normal stop at ``B`` (the per-hop
+    fallback, byte-identical to the pre-T20 ``ACT_FOLLOW_DIST`` stream):
+
+    1. The shared ADR-023 collinearity / direction / lookahead gate
+       (:func:`_should_pass_through`) passes: :data:`PATH_PASS_THROUGH_ENABLED`
+       is set, ``B`` is NOT the goal (so a ``goTo(B)`` stops at B -- the
+       firmware's not-final ``_nextHop == _destinationNode`` guard), a real
+       next-next hop ``C`` exists (non-``None``, non-self), A→B→C are collinear
+       (body-heading delta <= :data:`NAV_TURN_TOLERANCE_DEG`), and the resolved
+       direction matches across ``B`` (no mid-flight FRONT↔REAR board swap).
+    2. The outbound edge ``B→C`` is a :data:`EDGE_LINE` edge (both flanks LINE).
+       The inbound A→B is LINE by construction (this helper is only reached on
+       the LINE→projection dispatch path). A BLIND flank ⇒ a normal stop at B.
+    3. ``C`` is a LINE (junction) node, so the B→C hop re-anchors on a real
+       intersection marker (the firmware's ``getNodeType(c) == NodeType::LINE``).
+       A projection ``C`` (B→C would itself be a distance-gated follow with no
+       re-anchor) or any other type is rejected -- out of scope for the
+       line-proj-line collapse.
+
+    The shared :func:`_should_pass_through` owns the (1) checks, so the ADR-023
+    heading logic physically cannot drift between the intersection-gated
+    line-line-line pass-through and this distance-gated line-proj-line one. The
+    (2)/(3) flank + C-type guards are the projection-specific additions the
+    firmware applies on top.
+
+    :param projection_node: the middle node ``B`` (a projection node by the
+        caller's :func:`is_projection_node` check on this LINE hop's
+        destination).
+    :param inbound_body_heading: the body heading of the chassis as it
+        dead-reckons into ``B`` (FRONT: the A→B edge heading; REAR: +180°).
+    :param inbound_direction: the resolved travel direction of the A→B hop.
+    All remaining parameters carry the same meaning as in
+    :func:`_should_pass_through` (its keyword-only resolution context).
+    """
+    # (2)/(3) FIRST: read the projection-specific flank + C-type guards, then
+    # delegate the shared ADR-023 lookahead/collinearity to _should_pass_through.
+    # The order is immaterial to the result (all conditions must hold) but
+    # surfacing the LINE-flank / LINE-C guards here keeps the projection-specific
+    # logic in one place and leaves the shared heading check untouched.
+    if not PATH_PASS_THROUGH_ENABLED:
+        return False
+    if projection_node == goal_name:
+        return False
+    c = next_hop[projection_node][goal_name]
+    if c is None or c == projection_node:
+        return False
+
+    # (2) The outbound edge B→C must be a LINE edge (both flanks LINE).
+    outbound = graph.edges[projection_node, c]
+    if outbound["type"] != EDGE_LINE:
+        return False
+
+    # (3) C must be a LINE (junction) node so the B→C hop re-anchors on a real
+    # intersection marker. Read the node type LOCALLY off the graph, mirroring
+    # the firmware's `getNodeType(c) == NodeType::LINE`.
+    if graph.nodes[c].get("type") != "line":
+        return False
+
+    # (1) The shared ADR-023 collinearity / direction / lookahead gate -- the
+    # SAME helper the intersection-gated line-line-line pass-through uses, so the
+    # heading math never drifts between the two collapses.
+    return _should_pass_through(
+        graph,
+        next_hop,
+        projection_node,
+        goal_name,
+        inbound_body_heading=inbound_body_heading,
+        inbound_direction=inbound_direction,
+        pipeline_default=pipeline_default,
+        builder_route=builder_route,
+        builder_arrival=builder_arrival,
+        bidirectional_enabled=bidirectional_enabled,
+        line_board_count=line_board_count,
+    )
 
 
 class LocalizationSim:
@@ -2244,11 +2402,46 @@ class PathTrackerSim:
                 # cell) is never mutated. No LINE_OVERSHOOT step follows -- the
                 # encoder gate already lands the chassis on the node.
                 effective_dist_cm = self._pivot_trim_distance(edge)
+
+                # T20 (issue #64): `line(A)–projection(B)–line(C)` PASS-THROUGH.
+                # The TRIGGER is THIS A→B DISTANCE gate, not an intersection -- a
+                # projection node has no junction marker, so the firmware's
+                # `Intersection.isAtIntersection()` never fires at B (mirror of the
+                # PROJECTION_FOLLOW `_projPassThrough` branch in PathTracker.cpp,
+                # T19). When B is a non-goal projection node whose outbound B→C is
+                # a LINE edge into a LINE junction node AND A→B→C are collinear /
+                # same-direction, the follower stays live across B for one
+                # continuous A→C motion: stamp the dead-reckon advance at B
+                # MID-FOLLOW (no stop, same `on_dead_reckoned_advance(B)`) and emit
+                # the pass-variant tag (`ACT_FOLLOW_DIST_PASS` / its REAR twin)
+                # instead of the plain follow primitive. The chassis advance and
+                # the re-anchor are IDENTICAL to the non-pass branch -- only the
+                # tag differs (the projection twin of ADR-023's
+                # ACT_LINE_PASS-vs-ACT_LINE_OVERSHOOT). Any guard miss ⇒ the
+                # normal per-hop stop at B below (the T4/T5 fallback). The B→C hop
+                # then re-anchors at C's junction on the next loop iteration. The
+                # gate's own `inbound_direction == next_dir` check means a REAR
+                # pass-through only fires on a fully-reverse collinear triple.
+                proj_pass_through = _should_projection_pass_through(
+                    self._graph,
+                    self._next_hop,
+                    nxt,
+                    goal_name,
+                    inbound_body_heading=body_heading,
+                    inbound_direction=direction,
+                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                    builder_route=route_direction,
+                    builder_arrival=arrival_direction,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                    line_board_count=LINE_BOARD_COUNT,
+                )
                 if direction == Direction.REAR:
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (
-                        ACT_PROJECTION_REVERSE,
+                        ACT_PROJECTION_REVERSE_PASS
+                        if proj_pass_through
+                        else ACT_PROJECTION_REVERSE,
                         nxt,
                         effective_dist_cm,
                         resolve_line_mode(edge),
@@ -2256,7 +2449,10 @@ class PathTrackerSim:
                 else:
                     self._chassis.follow_line_to_distance(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FOLLOW_DIST, effective_dist_cm)
+                    yield (
+                        ACT_FOLLOW_DIST_PASS if proj_pass_through else ACT_FOLLOW_DIST,
+                        effective_dist_cm,
+                    )
             elif edge_type == EDGE_LINE:
                 # LINE -> junction (line) node: line-follow terminated by the
                 # physical intersection marker, then a LINE_OVERSHOOT roll.
@@ -2588,7 +2784,12 @@ class PathTrackerSim:
         into a projection node (issue #64) instead emits ``ACT_FOLLOW_DIST``
         and advances Localization via
         :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot step --
-        the encoder distance gate already lands the chassis on the node).
+        the encoder distance gate already lands the chassis on the node). When
+        that projection node is a non-goal middle node of a collinear
+        ``line(A)–projection(B)–line(C)`` triple routed PAST it (T20), the hop
+        instead emits ``ACT_FOLLOW_DIST_PASS`` -- the distance-gated pass-through
+        that keeps the follower live for one continuous A→C motion (see
+        :func:`_should_projection_pass_through`).
 
         Per-edge direction resolution mirrors the runtime
         ``PathTracker::_resolveDirection``: :func:`resolve_direction` is
