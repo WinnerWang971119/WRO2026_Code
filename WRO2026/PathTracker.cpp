@@ -25,8 +25,8 @@ PathTrackerClass PathTracker;
 // Mode resolution helpers (file-local).
 //
 // Each `Routes::EdgeInfo` carries per-category override fields
-// (`line_mode_override`, `blind_mode_override`, `projection_mode_override`,
-// `direction_override`). The value `DEFAULT` means "inherit from
+// (`line_mode_override`, `blind_mode_override`, `direction_override`,
+// `stop_at_line_override`). The value `DEFAULT` means "inherit from
 // `Routes::PIPELINE_CONFIG.<category>`"; anything else wins over the
 // pipeline-wide default. These helpers resolve DEFAULT → concrete at
 // edge-dispatch time so the FSM never has to chase the override semantics
@@ -52,14 +52,6 @@ namespace
             : edge.blind_mode_override;
     }
 
-    /// Resolve the PROJECTION-edge cruise-mode for the given edge.
-    Routes::ProjectionMode _resolveProjectionMode(const Routes::EdgeInfo& edge)
-    {
-        return (edge.projection_mode_override == Routes::ProjectionMode::DEFAULT)
-            ? Routes::PIPELINE_CONFIG.projection
-            : edge.projection_mode_override;
-    }
-
     // NOTE: the production direction-resolution helper has been promoted to
     // `DirectionPolicy.h::resolveDirection` (header-only inline) so both
     // production and the host-compile test target link the same definition.
@@ -69,11 +61,17 @@ namespace
     /// (the load-bearing pre-turn guard in `_onPlanNextHop` and the defensive post-turn
     /// guard in `_dispatchEdgeAfterTurn`) so the two messages cannot drift; @p site names
     /// which guard fired. The caller still issues `_enterFault(...)`.
+    ///
+    /// Issue #64: the only reverse-unservable edge type is now `LINE` (a REAR line-follow
+    /// needs the rear board; BLIND REAR is permitted on a 1-board chassis). The
+    /// `reverseUnavailable(...)` predicate is scoped to `EdgeType::LINE`, so this helper is
+    /// only ever reached with a LINE edge — the label is unconditional.
     void _printReverseUnavailable(uint8_t from, uint8_t to, Routes::EdgeType edgeType,
                                   const __FlashStringHelper* site)
     {
+        (void) edgeType;    // retained for the shared signature; only LINE reaches here
         Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
-        Serial.print(edgeType == Routes::EdgeType::LINE ? F("LINE") : F("PROJECTION"));
+        Serial.print(F("LINE"));
         Serial.print(F(" at u="));
         Serial.print(from);
         Serial.print(F(" v="));
@@ -99,25 +97,6 @@ namespace
             case Routes::LineMode::NORMAL:  return Config::SpeedPreset::NORMAL;
             case Routes::LineMode::DEFAULT:
             default:                        return Config::SpeedPreset::NORMAL;
-        }
-    }
-
-    /**
-     * @brief Map a `Routes::ProjectionMode` to a `Config::SpeedPreset` for
-     *        `LineFollower.setPreset(...)`. Mirrors `_lineModeToPreset`.
-     *
-     * @note `ProjectionMode::DEFAULT` should not reach this helper (callers resolve
-     *       it via `_resolveProjectionMode()` first). Mapped to `NORMAL` defensively.
-     */
-    Config::SpeedPreset _projectionModeToPreset(Routes::ProjectionMode m)
-    {
-        switch (m)
-        {
-            case Routes::ProjectionMode::SLOW:    return Config::SpeedPreset::SLOW;
-            case Routes::ProjectionMode::FAST:    return Config::SpeedPreset::FAST;
-            case Routes::ProjectionMode::NORMAL:  return Config::SpeedPreset::NORMAL;
-            case Routes::ProjectionMode::DEFAULT:
-            default:                              return Config::SpeedPreset::NORMAL;
         }
     }
 
@@ -923,10 +902,14 @@ void PathTrackerClass::_stepFsm()
 
         case State::PROJECTION_FOLLOW:
         {
-            // PROJECTION edges terminate at a node with no physical intersection
-            // marker; the runtime stops when the encoder distance gate
-            // (armed with `edge.distance_cm` in `_dispatchEdgeAfterTurn`) trips.
-            // No physical re-localisation event — use `onDeadReckonedAdvance`.
+            // A LINE edge into a projection DESTINATION node (issue #64): the
+            // projection node sits on the line but at NO physical intersection
+            // marker, so the line-follow is DISTANCE-terminated — the runtime stops
+            // when the encoder distance gate (armed with the pivot-trimmed edge
+            // distance in `_dispatchEdgeAfterTurn`) trips, NOT when an intersection
+            // is detected. There is no junction to re-anchor against, so advance the
+            // node by dead-reckoning (`onDeadReckonedAdvance`), mirroring the sim's
+            // `follow_line_to_distance` + `on_dead_reckoned_advance` (T5).
             if (LineFollower.isDistanceReached())
             {
                 LineFollower.setEnabled(false);
@@ -963,6 +946,14 @@ void PathTrackerClass::_stepFsm()
             // BLIND_FORWARD (which dead-reckons via `onDeadReckonedAdvance`), advance
             // the node with `onIntersection(...)` so this hop RE-ANCHORS the discrete
             // position on the real line (the "better localization" of issue #27).
+            //
+            // Issue #64: when `_nextHop` is a projection node, this is the
+            // BLIND→projection auto-seek's FULL-ADVANCE re-anchor. `onIntersection`
+            // sets the current node to the projection node and clears the operator
+            // offset, treating the seek-stop as the projection node's mapped position
+            // (there is no junction marker; the seek lands on the projection node's
+            // own line). Same call, no special branch — the auto-rule that routed the
+            // hop here lives in `_dispatchEdgeAfterTurn`.
             if (Drive.isIdle())
             {
                 Localization.onIntersection(_nextHop);
@@ -1545,17 +1536,23 @@ void PathTrackerClass::_onPlanNextHop()
     // ------------------------------------------------------------------------
     // Early reverse-availability guard.
     //
-    // Reject REAR LINE/PROJECTION on a 1-board chassis BEFORE the pre-edge turn
-    // is dispatched, otherwise the chassis physically rotates 180° to face the
+    // Reject a REAR LINE hop on a 1-board chassis BEFORE the pre-edge turn is
+    // dispatched, otherwise the chassis physically rotates 180° to face the
     // (unservable) REAR body-heading and then halts in fault — leaving the
     // robot pointing backward with REVERSE_UNAVAILABLE latched and the operator
     // forced to manually re-orient.
+    //
+    // Issue #64: the resolved PRIMITIVE — not a deleted projection edge type —
+    // decides serviceability. `reverseUnavailable` keys on `edge.type`, which is
+    // LINE or BLIND only now; a LINE edge into a projection DESTINATION node is
+    // STILL a reverse line-follow (it tracks the line backward to its distance
+    // gate), so it needs the rear board and is covered by the LINE clause.
     //
     // The auto branch of `_resolveDirection` short-circuits to FRONT when
     // `LINE_BOARD_COUNT < 2`, so this guard only fires for an operator-forced
     // REAR (per-edge override, pipeline default, or builder route/arrival).
     // BLIND REAR is permitted on 1-board chassis (no line sensor required),
-    // so the check is scoped to LINE / PROJECTION.
+    // so the check is scoped to LINE.
     //
     // The same guard is left in `_dispatchEdgeAfterTurn` as defensive
     // redundancy — if a future FSM change introduces a path into the
@@ -1694,16 +1691,22 @@ float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
 
 uint8_t PathTrackerClass::_peekNextNextHop() const
 {
-    // Shared one-hop lookahead guard. Two FSM sites peek the hop AFTER `_nextHop`
-    // toward `_destinationNode`: the LINE_FOLLOW pass-through decision and the
-    // BLIND auto-rule projection classification (`_nextHopIsProjection`). Both need
-    // the SAME three guards, kept in one place here so they cannot drift:
+    // Shared one-hop lookahead guard. The LINE_FOLLOW pass-through decision peeks
+    // the hop AFTER `_nextHop` toward `_destinationNode` and needs three guards,
+    // kept in one place here so they cannot drift:
     //   1. not-final  — `_nextHop` is the destination, so there is no next-next hop
-    //                   (the final/goal hop must never crash or trigger either rule).
+    //                   (the final/goal hop must never crash or trigger the rule).
     //   2. NODE_NONE  — `getNextHop` returns no route from `_nextHop` to the goal.
     //   3. self-loop  — the lookahead returns `_nextHop` itself.
     // Any failed guard yields `FieldMap::NODE_NONE`; otherwise the valid next-next
     // node id is returned for the caller to classify.
+    //
+    // Issue #64 retired the second caller (the BLIND auto-rule projection
+    // classification): the auto-seek decision is now a LOCAL read of the CURRENT
+    // hop's destination node (`isProjectionNode(_nextHop)`), so this helper has a
+    // single caller for now. Its three guards are kept intact and self-contained
+    // for the `line–proj–line` pass-through phase (T19), which re-adds a
+    // routing-lookahead caller.
     if (_nextHop == _destinationNode)
     {
         return FieldMap::NODE_NONE;
@@ -1714,27 +1717,6 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
         return FieldMap::NODE_NONE;
     }
     return nextNext;
-}
-
-bool PathTrackerClass::_nextHopIsProjection() const
-{
-    // ADR-038 auto-rule predicate: is the hop AFTER `_nextHop` a PROJECTION edge?
-    //
-    // Short-circuit to `false` (no NEXT_HOP work) when the feature is compiled out
-    // via `Routes::BLIND_PROJECTION_AUTO_SEEK == false`, so the auto-seek peek costs
-    // nothing on a build that never auto-seeks. When enabled, reuse the shared
-    // `_peekNextNextHop()` guard and classify the resulting edge — a `NODE_NONE`
-    // peek (final/goal hop, unreachable, or self-loop) classifies as not-projection.
-    if (!Routes::BLIND_PROJECTION_AUTO_SEEK)
-    {
-        return false;
-    }
-    const uint8_t nextNext = _peekNextNextHop();
-    if (nextNext == FieldMap::NODE_NONE)
-    {
-        return false;
-    }
-    return FieldMap::getEdge(_nextHop, nextNext).type == Routes::EdgeType::PROJECTION;
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()
@@ -1768,83 +1750,81 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     {
         case Routes::EdgeType::LINE:
         {
-            // ADR-036: a LINE outgoing edge applies no dead-reckon trim — it is
-            // sensor-terminated and re-anchors on the junction line. The departing
-            // trim is irrelevant on a LINE hop (the line corrects it); the approach
-            // trim for a LINE-incoming pivot is the overshoot-advance reduction in
-            // the LINE_FOLLOW state; the outgoing carry for the next hop is already
-            // owned by the `_pendingPivot` latch. Nothing to do here.
+            // Issue #64: a LINE edge is line-followed, but the DESTINATION node
+            // type decides how the follow terminates (the per-hop primitive falls
+            // out of `(edge_type, dest_node_type)` — mirrors compiler/sim T4/T5):
+            //   - line dest       → follow to the next physical intersection, then
+            //                        the LINE_OVERSHOOT roll + `onIntersection`
+            //                        re-anchor (today's behavior).
+            //   - projection dest → DISTANCE-gated follow (no junction wait): the
+            //                        projection node sits on the line but at NO
+            //                        junction marker, so the follow is terminated by
+            //                        the encoder distance gate and the node advances
+            //                        by dead-reckoning (`onDeadReckonedAdvance`), the
+            //                        retired `EDGE_PROJECTION` behavior moved onto the
+            //                        node. This is the silent-failure trap: a LINE
+            //                        edge into a projection node is DISTANCE-, not
+            //                        junction-terminated, so a pivot approaching it
+            //                        trims δ from the FOLLOW distance, not an overshoot
+            //                        budget (`_pivotTrimDistance`, the `distance`
+            //                        regime).
+            //
+            // Both branches take the motion profile from the LINE edge's own
+            // `line_mode_override` (`ProjectionMode` deleted in issue #64).
 
-            // Drain any stale Intersection edge so the first LINE_FOLLOW tick
-            // does not skip the segment.
+            // Drain any stale Intersection edge so the first follow tick does not
+            // skip the segment (junction dest) / latch a phantom edge (projection
+            // dest, which never reads Intersection).
             (void) Intersection.isAtIntersection();
 
             // Resolve the per-edge cruise-mode override (DEFAULT → pipeline
-            // default) and chain it onto the enable transition.
+            // default) and chain it onto the enable transition. `.setReverse(reverse)`
+            // selects forward-vs-rear board + error sign (T7 / issue #19); REAR is
+            // only reachable on a 2-board chassis (the guard above rejects REAR LINE
+            // on a 1-board chassis, projection dest included). `.setOvershootMode(false)`
+            // flips the controller back to normal P+D after any LINE_OVERSHOOT window.
             //
-            // Chain `.setOvershootMode(false)` to flip the controller back to
-            // normal P+D after the overshoot window. T4 always sets
-            // overshootMode=true during the LINE_OVERSHOOT arming; here we
-            // clear it so the new LINE segment runs the full PID controller.
-            //
-            // If _passThrough is true (pass-through into a collinear LINE next
-            // edge), the controller is already enabled — `setEnabled(true)`
-            // hits the already-enabled fast-path in `_applyEnableBuilder`, so
-            // no ramp-up reseed fires. Cruise PWM is preserved across the
-            // intersection (preset may snap if the new edge has a different
-            // LineMode override; see ADR-023 trade-off).
-            //
-            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
-            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
-            // — the guard above rejects REAR LINE on a 1-board chassis.
+            // For a pass-through into this edge the controller is already enabled —
+            // `setEnabled(true)` hits the already-enabled fast-path in
+            // `_applyEnableBuilder`, so no ramp-up reseed fires and cruise PWM is
+            // preserved across the intersection (preset may snap if the new edge has a
+            // different LineMode override; see ADR-023 trade-off). For non-pass-through
+            // the controller is freshly enabled with ramp-up.
             const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
             const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
-            LineFollower.setEnabled(true)
-                        .setPreset(preset)
-                        .setReverse(reverse)
-                        .setOvershootMode(false);
-            _state = State::LINE_FOLLOW;
-            _passThrough = false;    // consumed
-            break;
-        }
 
-        case Routes::EdgeType::PROJECTION:
-        {
-            // PROJECTION edges run the line follower like LINE edges, but the
-            // terminating node has no physical junction marker — so we arm the
-            // LineFollower's distance gate to `edge.distance_cm` and advance the
-            // graph node when `isDistanceReached()` fires (see PROJECTION_FOLLOW
-            // state in update()).
-            (void) Intersection.isAtIntersection();    // defensive — drain any latched edge
-
-            // For pass-through LINE→PROJECTION, the controller is already enabled
-            // from the LINE_OVERSHOOT pass-through (T5). `setEnabled(true)` hits
-            // the already-enabled fast-path → no ramp-up reseed; the new
-            // distance-target gate baseline is captured at this re-arm tick.
-            // `setOvershootMode(false)` flips the controller back to normal P+D.
-            //
-            // For non-pass-through, the controller is already disabled (T5 path);
-            // `setEnabled(true)` performs a fresh enable with ramp-up.
-            //
-            // `.setReverse(reverse)` selects forward-vs-rear board + error sign
-            // (T7 / issue #19). REAR is only reachable here on a 2-board chassis
-            // — the guard above rejects REAR PROJECTION on a 1-board chassis.
-            // ADR-036: PROJECTION is distance-terminated (the gate uses the
-            // edge length, no physical marker), so it takes both the departing
-            // trim (`_departingPivot`, the pivot we just left) and the approach
-            // trim (`_approachingPivot`, the pivot at `_nextHop`) — both folded
-            // into a LOCAL effective distance by `_pivotTrimDistance`.
-            // `distance_cm` itself is untouched.
-            const float effectiveDistCm = _pivotTrimDistance(edge);
-
-            const Routes::ProjectionMode resolvedProjMode = _resolveProjectionMode(edge);
-            const Config::SpeedPreset    preset           = _projectionModeToPreset(resolvedProjMode);
-            LineFollower.setEnabled(true)
-                        .setPreset(preset)
-                        .setReverse(reverse)
-                        .setOvershootMode(false)
-                        .setDistanceTarget(effectiveDistCm);
-            _state = State::PROJECTION_FOLLOW;
+            if (FieldMap::isProjectionNode(_nextHop))
+            {
+                // LINE → projection node: DISTANCE-gated follow. The gate uses the
+                // pivot-trimmed edge length — a DISTANCE-terminated hop takes BOTH
+                // the departing trim (`_departingPivot`, the pivot we just left) and
+                // the approach trim (`_approachingPivot`, the pivot at `_nextHop`),
+                // both folded into a LOCAL effective distance by `_pivotTrimDistance`.
+                // `distance_cm` itself is never mutated. The PROJECTION_FOLLOW state
+                // advances the node via `onDeadReckonedAdvance` when the gate trips.
+                const float effectiveDistCm = _pivotTrimDistance(edge);
+                LineFollower.setEnabled(true)
+                            .setPreset(preset)
+                            .setReverse(reverse)
+                            .setOvershootMode(false)
+                            .setDistanceTarget(effectiveDistCm);
+                _state = State::PROJECTION_FOLLOW;
+            }
+            else
+            {
+                // LINE → line (junction) node: follow to the next intersection.
+                // ADR-036: a LINE outgoing edge applies no dead-reckon trim — it is
+                // sensor-terminated and re-anchors on the junction line. The departing
+                // trim is irrelevant (the line corrects it); the approach trim for a
+                // LINE-incoming pivot is the overshoot-advance reduction in the
+                // LINE_FOLLOW state; the outgoing carry for the next hop is already
+                // owned by the `_pendingPivot` latch. Nothing to trim here.
+                LineFollower.setEnabled(true)
+                            .setPreset(preset)
+                            .setReverse(reverse)
+                            .setOvershootMode(false);
+                _state = State::LINE_FOLLOW;
+            }
             _passThrough = false;    // consumed
             break;
         }
@@ -1869,16 +1849,27 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
             // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
             //
-            // ADR-038 auto-rule: a blind hop that feeds a PROJECTION edge seeks a
-            // line first to re-anchor before the marker-less projection.
-            // `_nextHopIsProjection()` peeks the hop AFTER `_nextHop` toward the goal
-            // and classifies its edge type (folding in the `BLIND_PROJECTION_AUTO_SEEK`
-            // compile-time toggle so it short-circuits to `false` — no NEXT_HOP work —
-            // when the feature is built out). It shares the `_peekNextNextHop()` guard
-            // with the LINE_FOLLOW pass-through peek (same NODE_NONE / self-loop guard)
-            // so the final/goal blind hop (no next-next) never crashes and never
-            // auto-seeks. The result feeds the resolver's `autoRuleActive` input.
+            // Issue #64 auto-rule (LOCAL): a BLIND edge whose DESTINATION node is a
+            // projection node seeks a line first to re-anchor before the marker-less
+            // projection. This is a purely LOCAL read of THIS hop's destination
+            // `_nextHop` — `isProjectionNode(_nextHop)` — NOT a goal-relative
+            // `NEXT_HOP[next][goal]` / next-next peek (that retired transcription is
+            // gone). It fires only when the edge is BLIND, the destination is a
+            // projection node, and the field-wide `BLIND_PROJECTION_AUTO_SEEK` toggle
+            // is on. The toggle leads the `&&` so the `isProjectionNode` lookup is
+            // skipped entirely on a build that compiles the feature out. The same
+            // local bool flows unchanged into the FROZEN `resolveStopAtLine` resolver
+            // (its body + the 936-row CSV are untouched — only this caller input is
+            // computed differently). Mirrors `compile_path` (T4) and `sim/runtime`
+            // (T5) cell-for-cell.
+            //
+            // We are in the `EdgeType::BLIND` case, so the `(edge is BLIND)` clause
+            // of the contract is satisfied by construction; the explicit predicate
+            // here is the destination read gated by the toggle.
             // -----------------------------------------------------------------
+            const bool autoRuleActive =
+                Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(_nextHop);
+
             const StopAtLineQuery q{
                 _activeStopAtLine,
                 edge.stop_at_line_override,
@@ -1886,7 +1877,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 Routes::PIPELINE_CONFIG.blind,
                 _resolvedDirection,
                 Config::LINE_BOARD_COUNT,
-                _nextHopIsProjection()};
+                autoRuleActive};
             const StopAtLineResolution sal = resolveStopAtLine(q);
 
             if (sal.seek)

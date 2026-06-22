@@ -65,11 +65,13 @@
  *                          chassis center (axle) lands on the node, not
  *                          the sensor. Waits for
  *                          `LineFollower.isDistanceReached()`.
- *  - `PROJECTION_FOLLOW` — line-follows an edge of type `EdgeType::PROJECTION`
- *                          using the edge's `distance_cm` as the gate,
- *                          since the next node has no physical intersection
- *                          marker. Waits for
- *                          `LineFollower.isDistanceReached()`.
+ *  - `PROJECTION_FOLLOW` — line-follows a LINE edge whose DESTINATION is a
+ *                          `NodeType::PROJECTION` node, using the (pivot-trimmed)
+ *                          edge `distance_cm` as the gate, since a projection
+ *                          node sits on the line but at no physical intersection
+ *                          marker. Waits for `LineFollower.isDistanceReached()`,
+ *                          then dead-reckons the advance (`onDeadReckonedAdvance`)
+ *                          — there is no junction to re-anchor against.
  *  - `BLIND_FORWARD`     — waits for `Drive.isIdle()` after a dead-reckoned
  *                          forward move.
  *  - `STOP_AT_LINE`      — waits for `Drive.isIdle()` after a
@@ -111,11 +113,13 @@
  *
  * Per-edge motion-mode resolution:
  *  - Each `Routes::EdgeInfo` carries per-category override fields
- *    (`line_mode_override`, `blind_mode_override`,
- *    `projection_mode_override`, `direction_override`). `DEFAULT` means
- *    "inherit `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves
- *    DEFAULT → concrete at edge-dispatch time and chains the appropriate
- *    builder setters. The pre-edge turn wheel is no longer an `EdgeInfo`
+ *    (`line_mode_override`, `blind_mode_override`, `direction_override`,
+ *    `stop_at_line_override`). `DEFAULT` means "inherit
+ *    `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves DEFAULT →
+ *    concrete at edge-dispatch time and chains the appropriate builder setters.
+ *    Edges are LINE or BLIND only (issue #64); a LINE edge into a projection
+ *    DESTINATION node still takes its motion profile from the LINE edge's own
+ *    `line_mode_override`. The pre-edge turn wheel is no longer an `EdgeInfo`
  *    field: it is resolved per turn from the `Routes::PivotTurn` table
  *    (ADR-036) when the hop departs a pivot node, else the pipeline default.
  *
@@ -502,40 +506,31 @@ private:
     /**
      * @brief One-hop lookahead: the hop AFTER `_nextHop` toward `_destinationNode`.
      *
-     * Shared guard for the two FSM sites that peek the next-next hop — the
-     * `LINE_FOLLOW` pass-through decision in `update()` and the BLIND auto-rule
-     * projection classification (`_nextHopIsProjection()`). Centralises the three
-     * guards both need so they cannot drift: the not-final guard (`_nextHop` is the
-     * destination), the `NODE_NONE` guard (no route from `_nextHop` to the goal),
-     * and the self-loop guard (the lookahead returns `_nextHop` itself).
+     * Shared guard for the FSM site that peeks the next-next hop: the `LINE_FOLLOW`
+     * pass-through decision in `update()`. Centralises the three guards it needs so
+     * they cannot drift: the not-final guard (`_nextHop` is the destination), the
+     * `NODE_NONE` guard (no route from `_nextHop` to the goal), and the self-loop
+     * guard (the lookahead returns `_nextHop` itself).
      *
      * @return The next-next node id, or `FieldMap::NODE_NONE` when any guard fails
      *         (there is no valid next-next hop to classify).
+     *
+     * @note Issue #64 retired the second caller (the BLIND auto-rule projection
+     *       classification): the auto-seek decision is now a LOCAL read of the
+     *       CURRENT hop's destination node (`isProjectionNode(_nextHop)`), with no
+     *       next-next peek. This lookahead helper is retained — and its three
+     *       guards left intact and self-contained — for the `line–proj–line`
+     *       pass-through phase (T19), which re-adds a routing-lookahead caller.
      */
     uint8_t _peekNextNextHop() const;
-
-    /**
-     * @brief ADR-038 auto-rule predicate: is the hop after `_nextHop` a PROJECTION edge?
-     *
-     * Feeds the `autoRuleActive` input of `resolveStopAtLine(...)` on a BLIND hop —
-     * a blind hop that feeds a projection edge seeks a line first to re-anchor
-     * before the marker-less projection. Reuses the shared `_peekNextNextHop()`
-     * guard and classifies the resulting edge type.
-     *
-     * @return `true` when the next-next edge is `Routes::EdgeType::PROJECTION`.
-     * @note Short-circuits to `false` — with NO `NEXT_HOP` lookup — when the
-     *       feature is compiled out via `Routes::BLIND_PROJECTION_AUTO_SEEK ==
-     *       false`, so the auto-seek peek costs nothing on a build that never
-     *       auto-seeks.
-     */
-    bool _nextHopIsProjection() const;
 
     /**
      * @brief Compute the effective dead-reckon distance for a DISTANCE-terminated
      *        hop, applying the per-turn pivot trims (ADR-036).
      *
      * Called only on distance-terminated dispatches (BLIND dead-reckon
-     * `driveDist`, PROJECTION distance gate). Subtracts the two RESOLVED pivot
+     * `driveDist`, and a LINE edge into a projection DESTINATION node — the
+     * distance-gated follow). Subtracts the two RESOLVED pivot
      * trims latched at plan time into a LOCAL effective distance —
      * `EDGES[*][*].distance_cm` is never mutated:
      *   1. DEPARTING trim: if this hop LEAVES a pivot node (`_departingPivot`
