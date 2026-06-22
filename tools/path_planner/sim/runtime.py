@@ -7,21 +7,27 @@ collapsed into a single atomic transition. That is enough for end-to-end
 planning + heading-propagation verification on any graph without hardware.
 
 Edge dispatch (mirrors :func:`tools.path_planner.compiler.compile_path` plus
-the runtime-only LINE_OVERSHOOT FSM transition):
+the runtime-only LINE_OVERSHOOT FSM transition). Projection is no longer an
+edge type -- it is the *destination node* type (issue #64): the per-hop
+primitive falls out of ``(edge_type, destination_node_type)`` via
+:func:`tools.path_planner.graph_builder.is_projection_node`, a purely LOCAL
+lookup on the destination node (no goal-relative ``NEXT_HOP`` peek):
 
-* :data:`EDGE_LINE` -- emit ``(ACT_FOLLOW_INT, None)`` to walk to the
-  intersection marker, **then** emit a runtime-only
-  ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` step that advances
-  the chassis by the line-sensor-to-axle offset so the wheel axle (not
-  the sensor) ends up on the node. Localization then advances via
-  :meth:`LocalizationSim.on_intersection`.
-* :data:`EDGE_PROJECTION` -- emit ``(ACT_FOLLOW_DIST, distance_cm)``
-  (line-follow stopped by encoder distance, no intersection marker).
-  Localization advances via :meth:`LocalizationSim.on_dead_reckoned_advance`
-  (NOT ``on_intersection`` — the chassis is dead-reckoning into the node
-  via the encoder gate, not snapping to a physical marker). No
-  LINE_OVERSHOOT step follows -- the encoder gate already lands the
-  chassis on the node.
+* :data:`EDGE_LINE` **into a junction (line) node** -- emit
+  ``(ACT_FOLLOW_INT, None)`` to walk to the intersection marker, **then**
+  emit a runtime-only ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)``
+  step that advances the chassis by the line-sensor-to-axle offset so the
+  wheel axle (not the sensor) ends up on the node. Localization then
+  advances via :meth:`LocalizationSim.on_intersection`.
+* :data:`EDGE_LINE` **into a projection node** -- emit
+  ``(ACT_FOLLOW_DIST, distance_cm)`` (line-follow stopped by encoder
+  distance, no intersection marker). Localization advances via
+  :meth:`LocalizationSim.on_dead_reckoned_advance` (NOT ``on_intersection``
+  -- the chassis is dead-reckoning into the node via the encoder gate, not
+  snapping to a physical marker). No LINE_OVERSHOOT step follows -- the
+  encoder gate already lands the chassis on the node. (Replaces the retired
+  ``EDGE_PROJECTION`` dispatch; the motion profile now comes from the LINE
+  edge's ``line_mode_override``, ``ProjectionMode`` having been deleted.)
 * :data:`EDGE_BLIND` -- both FRONT and REAR traversal are mode-sensitive
   (mirrors the blind branch of
   :func:`tools.path_planner.compiler.compile_path`). The per-hop decision
@@ -31,13 +37,15 @@ the runtime-only LINE_OVERSHOOT FSM transition):
   per-edge ``stop_at_line_override`` → legacy ``STOP_AT_LINE`` tag →
   auto-rule → never) and returns ``(seek, motion_mode)``. The
   auto-rule fires when ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set AND
-  the hop after this blind hop is a projection edge, so a blind→projection
-  pair re-anchors on a line first. The DECISION to seek now also fires on the
-  auto-rule:
+  this BLIND edge's *destination node* is a projection node, so a
+  blind→projection hop re-anchors on the projection node's own line first.
+  The DECISION to seek now also fires on the auto-rule:
 
     * ``seek`` + FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)``; re-anchors via
       :meth:`LocalizationSim.on_intersection` (the front board stops on the
-      physical crossing line, so the chassis ends on the node).
+      physical crossing line, so the chassis ends on the node). A
+      BLIND→projection seek is a FULL-ADVANCE re-anchor: the seek-stop is
+      treated as the projection node's mapped position.
     * ``seek`` + REAR -> ``(ACT_STOP_AT_LINE_REVERSE, target, distance_cm,
       blind_mode)``; re-anchors via :meth:`LocalizationSim.on_intersection`
       (the rear board detects the crossing). Requires a 2-board chassis —
@@ -60,13 +68,14 @@ Public surface:
 * :class:`PathTrackerSim` -- the FSM. ``go_to(goal_name)`` walks NEXT_HOP.
 * :func:`walk_next_hop` -- given a NextHopTable, returns the explicit
   node-name list from source to target.
-* :func:`resolve_line_mode` / :func:`resolve_blind_mode` /
-  :func:`resolve_projection_mode` -- pure helpers that mirror the C++
-  ``_resolve*Mode(EdgeInfo)`` lookups: read the edge's optional override
-  attribute and fall back to :data:`PIPELINE_CONFIG` when the override is
-  absent or set to its ``DEFAULT`` sentinel. The pre-turn pivot wheel is no
+* :func:`resolve_line_mode` / :func:`resolve_blind_mode` -- pure helpers that
+  mirror the C++ ``_resolve*Mode(EdgeInfo)`` lookups: read the edge's optional
+  override attribute and fall back to :data:`PIPELINE_CONFIG` when the override
+  is absent or set to its ``DEFAULT`` sentinel. The pre-turn pivot wheel is no
   longer an edge field -- it is resolved per turn from the
   :data:`PivotTurnRecord` table (ADR-036) latched in :meth:`_walk_hops`.
+  (``resolve_projection_mode`` is gone -- ``ProjectionMode`` was deleted with
+  the projection edge type; a LINE→projection follow uses ``resolve_line_mode``.)
 * :class:`UnreachableGoalError` -- raised on ``next_hop[from][goal] is None``.
 * :data:`ACT_LINE_OVERSHOOT` -- sim-only primitive tag for the
   LINE_OVERSHOOT FSM transition. NOT emitted by
@@ -201,15 +210,13 @@ from tools.path_planner import pipeline_config as _pipeline_config
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    EDGE_PROJECTION,
-    next_hop_is_projection,
+    is_projection_node,
 )
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
     LineMode,
-    ProjectionMode,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -297,9 +304,16 @@ ACT_LINE_PASS: str = "line_pass"
 # the turn delta vs :data:`BIDIRECTIONAL_TURN_THRESHOLD_DEG`. The C++
 # runtime owns the matching ``EDGE_*_REVERSE`` dispatch path; the sim's
 # emission must stay byte-identical to the compiler's output (TC18 parity).
+#
+# ``ACT_PROJECTION_REVERSE`` is the REAR mirror of the LINE→projection
+# follow-to-distance hop (a LINE edge whose destination is a projection
+# node, driven backward). Projection is no longer an edge type (issue #64),
+# so the primitive's 4th element is the LINE edge's ``line_mode`` (via
+# :func:`resolve_line_mode`) -- ``ProjectionMode`` was deleted with the
+# projection edge type.
 ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, target_node, line_mode)
 ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
-ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, projection_mode)
+ACT_PROJECTION_REVERSE: str = "projection_reverse"    # (ACT_PROJECTION_REVERSE, target_node, distance_cm, line_mode)
 
 # Reverse-direction stop-at-line primitive. Mirrors ``ACT_BLIND_REVERSE``'s
 # 4-tuple shape ``(action, target_node, distance_cm, blind_mode)`` but
@@ -585,7 +599,6 @@ __all__ = [
     "resolve_blind_mode",
     "resolve_direction",
     "resolve_line_mode",
-    "resolve_projection_mode",
     "resolve_return_action",
     "resolve_sensor_overshoot_trim",
     "resolve_stop_at_line",
@@ -943,8 +956,9 @@ def resolve_stop_at_line(
        :attr:`BlindMode.STOP_AT_LINE` (the historical "STOP_AT_LINE tag means
        seek" behavior, kept for back-compat).
     4. Auto-rule: ``auto_rule_active`` (the caller's
-       ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection``) -- a blind
-       hop feeding a projection seeks a line first to re-anchor.
+       ``BLIND_PROJECTION_AUTO_SEEK and is_projection_node(destination)``) --
+       a BLIND edge whose destination is a projection node seeks that node's
+       own line first to re-anchor (full advance).
     5. Otherwise ``requested = False`` -- a call-site/edge ``AUTO``/``DEFAULT``
        with no rule active never seeks. This reproduces the pre-auto behavior
        across the FULL domain (including the degenerate
@@ -990,9 +1004,9 @@ def resolve_stop_at_line(
     :param line_board_count: number of MXColor reflectance boards on the
         chassis (mirrors ``Config::LINE_BOARD_COUNT``); gates a rear seek.
     :param auto_rule_active: the caller's
-        ``BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection`` -- True when
-        the field-wide auto-seek toggle is on AND this blind hop feeds a
-        projection edge.
+        ``BLIND_PROJECTION_AUTO_SEEK and is_projection_node(destination)`` --
+        True when the field-wide auto-seek toggle is on AND this BLIND edge's
+        destination node is a projection node.
     :return: a ``(seek, motion_mode)`` tuple. ``seek`` is True
         iff the ``Drive.stopAtLine`` seek should be dispatched; ``motion_mode``
         is the seek's drive mode (when seeking) or the dead-reckon fallback's
@@ -1040,13 +1054,6 @@ def resolve_stop_at_line(
         motion_mode = BlindMode.SYNC_TSHAPE if base == BlindMode.STOP_AT_LINE else base
 
     return seek, motion_mode
-
-
-def resolve_projection_mode(edge) -> ProjectionMode:
-    """Return the effective :class:`ProjectionMode` for an EDGE_PROJECTION traversal."""
-    return _resolve_override(
-        edge, "primitive_mode", PIPELINE_CONFIG.projection, ProjectionMode
-    )
 
 
 def resolve_direction(
@@ -1591,15 +1598,19 @@ class LocalizationSim:
 
 
 class PathTrackerSim:
-    """Mirror of ``PathTrackerClass`` (LINE + BLIND + PROJECTION).
+    """Mirror of ``PathTrackerClass`` (LINE + BLIND edges).
 
-    Per-edge dispatch:
+    Per-hop dispatch from ``(edge_type, destination_node_type)`` -- projection
+    is the *destination node* type (issue #64), not an edge type:
 
-    * ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)`` followed by a
-      sim-only ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` step
-      mirroring the runtime LINE_OVERSHOOT FSM transition.
-    * ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``;
-      Localization advances via :meth:`LocalizationSim.on_dead_reckoned_advance`.
+    * ``EDGE_LINE`` into a junction (line) node -> ``(ACT_FOLLOW_INT, None)``
+      followed by a sim-only ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)``
+      step mirroring the runtime LINE_OVERSHOOT FSM transition.
+    * ``EDGE_LINE`` into a projection node -> ``(ACT_FOLLOW_DIST, distance_cm)``;
+      Localization advances via :meth:`LocalizationSim.on_dead_reckoned_advance`
+      (the distance-terminated follow that retired the ``EDGE_PROJECTION``
+      dispatch; the destination is read locally via
+      :func:`tools.path_planner.graph_builder.is_projection_node`).
     * ``EDGE_BLIND`` -> resolved per :func:`resolve_stop_at_line`:
       ``seek`` FRONT -> ``(ACT_STOP_AT_LINE, distance_cm)`` +
       :meth:`LocalizationSim.on_intersection`; ``seek`` REAR ->
@@ -2028,10 +2039,6 @@ class PathTrackerSim:
         """See module-level :func:`resolve_blind_mode`."""
         return resolve_blind_mode(edge)
 
-    def resolve_projection_mode(self, edge) -> ProjectionMode:
-        """See module-level :func:`resolve_projection_mode`."""
-        return resolve_projection_mode(edge)
-
     def find_pivot_turn(
         self, u: str, v: str, w: str
     ) -> Optional[PivotTurnRecord]:
@@ -2212,7 +2219,48 @@ class PathTrackerSim:
 
             edge_type = edge["type"]
             distance_cm = float(edge["distance_cm"])
-            if edge_type == EDGE_LINE:
+            # Projection is now a DESTINATION-NODE type (issue #64), read
+            # LOCALLY off ``nxt`` -- no goal-relative ``NEXT_HOP`` peek. The
+            # per-hop primitive falls out of ``(edge_type, dest_node_type)``:
+            # a LINE edge into a projection node is line-followed but
+            # DISTANCE-terminated (the retired ``EDGE_PROJECTION`` behavior),
+            # while a LINE edge into a junction (line) node re-anchors on the
+            # crossing marker. Mirrors ``compile_path`` (T4) cell-for-cell.
+            dest_is_projection = is_projection_node(self._graph, nxt)
+            if edge_type == EDGE_LINE and dest_is_projection:
+                # LINE -> projection node: line-follow stopped by the encoder
+                # distance gate (no junction marker beneath the strip), so the
+                # chassis dead-reckons into the node via
+                # ``on_dead_reckoned_advance`` -- NOT ``on_intersection``. This
+                # is the distance-terminated follow that replaced the
+                # ``EDGE_PROJECTION`` dispatch; the motion profile comes from the
+                # LINE edge's ``line_mode`` (``ProjectionMode`` deleted).
+                #
+                # ADR-036: a DISTANCE-terminated hop takes BOTH the departing
+                # trim (the pivot we just left, ``_departing_pivot``) and the
+                # approach trim (the pivot at ``nxt``, ``_approaching_pivot``) --
+                # both folded into a LOCAL effective distance by
+                # ``_pivot_trim_distance``. ``distance_cm`` (the shared table
+                # cell) is never mutated. No LINE_OVERSHOOT step follows -- the
+                # encoder gate already lands the chassis on the node.
+                effective_dist_cm = self._pivot_trim_distance(edge)
+                if direction == Direction.REAR:
+                    self._chassis.reverse(effective_dist_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (
+                        ACT_PROJECTION_REVERSE,
+                        nxt,
+                        effective_dist_cm,
+                        resolve_line_mode(edge),
+                    )
+                else:
+                    self._chassis.follow_line_to_distance(effective_dist_cm)
+                    self._localization.on_dead_reckoned_advance(nxt)
+                    yield (ACT_FOLLOW_DIST, effective_dist_cm)
+            elif edge_type == EDGE_LINE:
+                # LINE -> junction (line) node: line-follow terminated by the
+                # physical intersection marker, then a LINE_OVERSHOOT roll.
+                #
                 # ADR-036: a LINE outgoing edge is SENSOR-terminated -- it
                 # re-anchors on the junction line, so it takes NO dead-reckon
                 # distance trim. The departing trim is irrelevant here (the line
@@ -2321,22 +2369,6 @@ class PathTrackerSim:
                     ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
                     overshoot_advance_cm,
                 )
-            elif edge_type == EDGE_PROJECTION:
-                # ADR-036: PROJECTION is DISTANCE-terminated (encoder gate, no
-                # physical marker), so it takes both the departing trim (the pivot
-                # we just left, ``_departing_pivot``) and the approach trim (the
-                # pivot at ``nxt``, ``_approaching_pivot``) -- both folded into a
-                # LOCAL effective distance by ``_pivot_trim_distance``.
-                # `distance_cm` (the shared table cell) is never mutated.
-                effective_dist_cm = self._pivot_trim_distance(edge)
-                if direction == Direction.REAR:
-                    self._chassis.reverse(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_PROJECTION_REVERSE, nxt, effective_dist_cm, resolve_projection_mode(edge))
-                else:
-                    self._chassis.follow_line_to_distance(effective_dist_cm)
-                    self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FOLLOW_DIST, effective_dist_cm)
             elif edge_type == EDGE_BLIND:
                 # Mode-sensitive blind dispatch (mirrors the blind branch of
                 # ``compile_path`` -- T7 must stay byte-identical,
@@ -2348,19 +2380,21 @@ class PathTrackerSim:
                 # ``resolve_stop_at_line`` returns ``seek=False`` for REAR on
                 # 1-board, degrading to the dead-reckon reverse below.
                 #
-                # Auto-rule: a blind hop that FEEDS a projection edge seeks a
-                # line first to re-anchor before the dead-reckoned projection.
-                # Peek the hop AFTER this one toward the goal (``nxt -> the next
-                # hop``) and check it is a projection edge. Mirrors the
-                # next-next peek pattern in ``_should_pass_through`` /
-                # ``find_pivot_turn``: ``None`` (this blind hop IS the final/goal
-                # hop) or a self-loop means no next-next edge, so no auto rule.
-                next_after_blind = self._next_hop[nxt][goal_name]
+                # Auto-rule (issue #64): a BLIND edge whose DESTINATION node is a
+                # projection node seeks that node's own line first to re-anchor
+                # via full advance. This is a purely LOCAL read off ``nxt``
+                # (``dest_is_projection`` resolved at the top of the dispatch
+                # block via ``is_projection_node``) -- it replaces the old
+                # goal-relative ``next_hop_is_projection(graph, nxt,
+                # next_hop[nxt][goal])`` peek. Mirrors the ``auto_rule_active``
+                # contract in ``compile_path`` (T4) and the firmware
+                # (``getNodeType(_nextHop) == PROJECTION``); the resolver body +
+                # the 936-row CSV are frozen -- only this caller input changes.
                 auto_rule_active = (
                     getattr(
                         self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True
                     )
-                    and next_hop_is_projection(self._graph, nxt, next_after_blind)
+                    and dest_is_projection
                 )
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
@@ -2380,50 +2414,68 @@ class PathTrackerSim:
                     # already owned by the ``_pending_pivot`` latch (a pivot
                     # reached via a seek still over-travels on its OUTGOING side;
                     # the next hop's ``_departing_pivot`` applies that trim).
-                    #
-                    # ADR-044 D1: a seek INTO an approaching pivot must land the
-                    # axle ``delta`` short of the node (like every other approach
-                    # mechanism), so the firmware reduces the post-detect axle
-                    # roll from the full ``offset`` to ``offset - delta`` (the
-                    # shared sensor-overshoot twin, clamped to the floor). A seek
-                    # is sensor-terminated, so the DEPARTING trim is auto-absorbed
-                    # on the line and never subtracted here. ``offset -
-                    # overshoot_cm`` is exactly how far short of the node the
-                    # firmware's axle lands (= delta in the clean delta <= offset
-                    # case; clamps when delta > offset). With no approaching pivot
-                    # the trim is 0 -> overshoot_cm == offset -> the advance is the
-                    # full ``distance_cm`` (unchanged; AC2). The sim's chassis
-                    # center is the axle, so shrinking the FORWARD displacement by
-                    # ``offset - overshoot_cm`` lands the center ``delta`` short --
-                    # exactly the firmware's reduced post-detect roll. Localization
-                    # still re-anchors at the node (the seek stops ON the line);
-                    # only the physical displacement shrinks, leaving the chassis
-                    # center at ``node - delta * h_in`` (T4 parity).
-                    #
-                    # Unconditional, helper-driven form mirroring the LINE
-                    # overshoot path above: trim defaults to 0 when there is no
-                    # approaching pivot, so ``offset - overshoot_cm == 0`` and the
-                    # advance is the full ``distance_cm`` (AC2) -- no separate
-                    # branch. This is the FRONT seek branch, so the offset is the
-                    # FRONT sensor-to-axle offset (force-FRONT guarantees every
-                    # pivot seek lands here).
-                    approach_trim_cm = (
-                        self._approaching_pivot.trim_cm
-                        if self._approaching_pivot is not None
-                        else 0.0
-                    )
-                    offset = LINE_SENSOR_AXLE_OFFSET_CM
-                    overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
-                        offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
-                    )
-                    # Clamp to 0 so a degenerate short sensor edge
-                    # (``distance_cm`` < delta) never models a backward drive --
-                    # the same guard the LINE follow uses
-                    # (``follow_cm = max(0.0, distance_cm - offset)``). The
-                    # firmware seek is sensor-terminated (it physically finds the
-                    # line), so it never drives backward; this clamp keeps the
-                    # net-displacement model honest on degenerate geometry.
-                    seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
+                    if dest_is_projection:
+                        # BLIND -> projection node (issue #64 auto-seek): a
+                        # FULL-ADVANCE re-anchor. The seek-stop IS treated as the
+                        # projection node's mapped position -- set current node =
+                        # projection node and clear the operator offset
+                        # (``on_intersection``-style). No pivot-trim reduction: a
+                        # pivot APPROACHING a projection node draws its delta from
+                        # the LINE->projection follow distance (the ``distance``
+                        # regime), never from a BLIND->projection seek, so this
+                        # branch advances the full ``distance_cm`` onto the node
+                        # (per the "Blind->projection re-anchor = full advance"
+                        # decision). Matches ``compile_path``'s ``(ACT_STOP_AT_LINE,
+                        # distance_cm)`` emission cell-for-cell.
+                        seek_advance_cm = distance_cm
+                    else:
+                        # BLIND -> line node via a call-flag / per-edge / legacy
+                        # STOP_AT_LINE override (NOT the projection auto-rule). The
+                        # pivot-trim model applies here.
+                        #
+                        # ADR-044 D1: a seek INTO an approaching pivot must land the
+                        # axle ``delta`` short of the node (like every other approach
+                        # mechanism), so the firmware reduces the post-detect axle
+                        # roll from the full ``offset`` to ``offset - delta`` (the
+                        # shared sensor-overshoot twin, clamped to the floor). A seek
+                        # is sensor-terminated, so the DEPARTING trim is auto-absorbed
+                        # on the line and never subtracted here. ``offset -
+                        # overshoot_cm`` is exactly how far short of the node the
+                        # firmware's axle lands (= delta in the clean delta <= offset
+                        # case; clamps when delta > offset). With no approaching pivot
+                        # the trim is 0 -> overshoot_cm == offset -> the advance is the
+                        # full ``distance_cm`` (unchanged; AC2). The sim's chassis
+                        # center is the axle, so shrinking the FORWARD displacement by
+                        # ``offset - overshoot_cm`` lands the center ``delta`` short --
+                        # exactly the firmware's reduced post-detect roll. Localization
+                        # still re-anchors at the node (the seek stops ON the line);
+                        # only the physical displacement shrinks, leaving the chassis
+                        # center at ``node - delta * h_in`` (T4 parity).
+                        #
+                        # Unconditional, helper-driven form mirroring the LINE
+                        # overshoot path above: trim defaults to 0 when there is no
+                        # approaching pivot, so ``offset - overshoot_cm == 0`` and the
+                        # advance is the full ``distance_cm`` (AC2) -- no separate
+                        # branch. This is the FRONT seek branch, so the offset is the
+                        # FRONT sensor-to-axle offset (force-FRONT guarantees every
+                        # pivot seek lands here).
+                        approach_trim_cm = (
+                            self._approaching_pivot.trim_cm
+                            if self._approaching_pivot is not None
+                            else 0.0
+                        )
+                        offset = LINE_SENSOR_AXLE_OFFSET_CM
+                        overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
+                            offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
+                        )
+                        # Clamp to 0 so a degenerate short sensor edge
+                        # (``distance_cm`` < delta) never models a backward drive --
+                        # the same guard the LINE follow uses
+                        # (``follow_cm = max(0.0, distance_cm - offset)``). The
+                        # firmware seek is sensor-terminated (it physically finds the
+                        # line), so it never drives backward; this clamp keeps the
+                        # net-displacement model honest on degenerate geometry.
+                        seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
                     self._chassis.forward(seek_advance_cm)
                     self._localization.on_intersection(nxt)
                     # The emitted primitive carries the COMMAND distance
@@ -2527,14 +2579,16 @@ class PathTrackerSim:
         """Walk from the current node to ``goal_name``.
 
         Emits per edge: an optional ``ACT_TURN_REL`` to align heading,
-        then the per-type motion primitive. For EDGE_LINE traversals, an
-        ``ACT_LINE_OVERSHOOT`` step is appended after ``ACT_FOLLOW_INT``,
-        mirroring the runtime LINE_OVERSHOOT FSM transition that
-        advances the chassis by :data:`LINE_SENSOR_AXLE_OFFSET_CM` so
-        the wheel axle (not the line sensor) lands on the node.
-        EDGE_PROJECTION emits ``ACT_FOLLOW_DIST`` and advances Localization
-        via :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot
-        step -- the encoder gate already lands the chassis on the node).
+        then the per-hop motion primitive derived from
+        ``(edge_type, destination_node_type)``. For an EDGE_LINE hop into a
+        junction (line) node, an ``ACT_LINE_OVERSHOOT`` step is appended after
+        ``ACT_FOLLOW_INT``, mirroring the runtime LINE_OVERSHOOT FSM transition
+        that advances the chassis by :data:`LINE_SENSOR_AXLE_OFFSET_CM` so the
+        wheel axle (not the line sensor) lands on the node. An EDGE_LINE hop
+        into a projection node (issue #64) instead emits ``ACT_FOLLOW_DIST``
+        and advances Localization via
+        :meth:`LocalizationSim.on_dead_reckoned_advance` (no overshoot step --
+        the encoder distance gate already lands the chassis on the node).
 
         Per-edge direction resolution mirrors the runtime
         ``PathTracker::_resolveDirection``: :func:`resolve_direction` is
