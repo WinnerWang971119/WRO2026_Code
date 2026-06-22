@@ -36,14 +36,6 @@ class BlindMode(IntEnum):
     STOP_AT_LINE = 4  # drive blind, arm near endpoint, stop on the crossing line, re-anchor
 
 
-class ProjectionMode(IntEnum):
-    """Cruise preset for an EDGE_PROJECTION traversal (line-follow stopped by encoder distance)."""
-    DEFAULT = 0  # inherit PIPELINE_CONFIG.projection at runtime
-    NORMAL  = 1
-    SLOW    = 2
-    FAST    = 3
-
-
 class TurnMode(IntEnum):
     """Wheel pattern for the new custom TurnGyro (replaces MiniR4.DriveDC.TurnGyro)."""
     DEFAULT     = 0  # inherit PIPELINE_CONFIG.turn at runtime
@@ -71,7 +63,6 @@ class PipelineConfig:
     """Mission-wide motion-mode defaults baked into routes.cpp at build time."""
     line:       LineMode       = LineMode.NORMAL
     blind:      BlindMode      = BlindMode.SYNC_TSHAPE
-    projection: ProjectionMode = ProjectionMode.NORMAL
     turn:       TurnMode       = TurnMode.COUNTER_ROT
     direction:  DirectionMode  = DirectionMode.DEFAULT
 
@@ -84,7 +75,6 @@ class PipelineConfig:
         _CATEGORY_FIELDS: tuple[tuple[str, object], ...] = (
             ("line",       LineMode.DEFAULT),
             ("blind",      BlindMode.DEFAULT),
-            ("projection", ProjectionMode.DEFAULT),
             ("turn",       TurnMode.DEFAULT),
         )
         for field_name, sentinel in _CATEGORY_FIELDS:
@@ -106,7 +96,6 @@ PIPELINE_CONFIG = PipelineConfig()
 __all__ = [
     "LineMode",
     "BlindMode",
-    "ProjectionMode",
     "TurnMode",
     "DirectionMode",
     "StopAtLineMode",
