@@ -1,23 +1,24 @@
-"""Pure geometry helpers for PROJECTION edges + reset auto-fill (T2).
+"""Reset-node wall auto-fill geometry helper.
 
 This module is the Tk-free, matplotlib-free core that the live field
-editor's projection-edge tooling and reset-node auto-fill UI lean on. It
-holds four pure functions:
+editor's reset-node auto-fill UI leans on. It holds a single pure function:
 
-* :func:`read_projection_edges` -- pluck the ``EDGE_PROJECTION`` entries out
-  of a field-data module's ``EDGES`` list (defensive against malformed
-  entries and a missing ``EDGES`` attribute).
-* :func:`compute_projection_geometry` -- derive ``(distance_cm,
-  heading_deg)`` for a projection edge between two points.
-* :func:`reconcile` -- fold a set of loaded projection edges with pending
-  adds and removes into one deterministic render set.
 * :func:`reset_autofill` -- suggest a ``(wall_coord, facing)`` pair for a
   reset node against the nearer qualifying field wall.
 
-It is imported by the commands layer (T4), the canvas (T7), the app (T8),
-and is unit-tested directly (T9), so it stays dependency-light: stdlib
-:mod:`math` plus two cheap module-level constants pulled from the planner
-package. **No Tk, no matplotlib.**
+It is imported by the commands layer (``SetResetSpec.autofilled``) and the
+app (the reset-spec inspector handler), and is unit-tested directly, so it
+stays dependency-light: stdlib only plus two cheap module-level constants
+pulled from the planner package. **No Tk, no matplotlib.**
+
+.. note::
+   The projection-edge tooling that previously lived here
+   (``read_projection_edges`` / ``compute_projection_geometry`` /
+   ``reconcile`` and the off-model ``ProjectionDelta`` it fed) was removed
+   when projection became an on-model node type (issue #64): a projection
+   node is now set through the normal ``SetNodeType`` command and rides
+   ``node_types`` through serialization, so the off-model store and its
+   geometry helpers are gone. Only the reset-node auto-fill survives.
 
 Conventions (inherited from ``field_data.py`` / ``graph_builder.py``):
     Origin at the field SW corner. X is East, Y is North. Distances in
@@ -28,10 +29,7 @@ Conventions (inherited from ``field_data.py`` / ``graph_builder.py``):
 
 from __future__ import annotations
 
-from math import atan2, degrees, hypot
-
 from tools.path_planner.editor.model import RESET_AXIS_VALUES
-from tools.path_planner.graph_builder import EDGE_PROJECTION
 
 # MUST mirror validator.WALL_PIVOT_CLEARANCE_CM -- the pivot-sweep radius
 # plus safety margin a reset node needs to stand off the wall it re-zeros
@@ -39,183 +37,16 @@ from tools.path_planner.graph_builder import EDGE_PROJECTION
 # value cannot silently desync from the Save-time validator that re-checks it.
 from tools.path_planner.validator import WALL_PIVOT_CLEARANCE_CM
 
-# Decimal places to which projection geometry is rounded. Trims float noise so
-# the value the editor writes into source is stable across runs (a re-derived
-# heading otherwise differs in the 12th decimal and churns the diff).
-_GEOMETRY_ROUND_DP = 4
-
 # The two axes a reset node may re-zero against (a wall parallel to one axis).
 # Single-sourced from ``model.RESET_AXIS_VALUES`` (a PUBLIC constant -- not a
 # leading-underscore private of another module), which mirrors
 # ``validator._ALLOWED_RESET_AXES``.
 _ALLOWED_AXES = RESET_AXIS_VALUES
 
-# Required keys on a PROJECTION entry in a field-data ``EDGES`` list. An entry
-# missing any of these is skipped rather than crashed on (a half-authored edge
-# in a live-edited module should not take the whole read down).
-_REQUIRED_EDGE_KEYS = ("u", "v", "distance_cm", "heading_deg")
-
 __all__ = [
     "WALL_PIVOT_CLEARANCE_CM",
-    "read_projection_edges",
-    "compute_projection_geometry",
-    "reconcile",
     "reset_autofill",
 ]
-
-
-def read_projection_edges(
-    field_data_module: object,
-) -> list[tuple[str, str, float, float]]:
-    """Return the PROJECTION edges authored in a field-data module's ``EDGES``.
-
-    Iterates ``field_data_module.EDGES`` (a list of dicts) in source order and
-    yields one ``(u, v, distance_cm, heading_deg)`` tuple for every entry whose
-    ``type`` equals :data:`graph_builder.EDGE_PROJECTION`. Non-PROJECTION
-    entries are ignored.
-
-    The read is deliberately defensive so a half-authored or malformed module
-    (the editor mutates ``field_data`` live) never crashes the caller:
-
-    * a missing ``EDGES`` attribute yields ``[]``;
-    * an ``EDGES`` value that is not iterable yields ``[]``;
-    * a non-dict entry, or a PROJECTION entry missing any of the required keys
-      (``u``, ``v``, ``distance_cm``, ``heading_deg``), is skipped.
-
-    ``distance_cm`` and ``heading_deg`` are coerced to ``float``; an entry whose
-    distance or heading is non-numeric is skipped rather than propagated as a
-    bad render value.
-
-    :param field_data_module: the ``tools.path_planner.field_data`` module, or
-        any object exposing an ``EDGES`` list-of-dicts attribute (or none).
-    :return: a list of ``(u, v, distance_cm, heading_deg)`` tuples in the source
-        order of ``EDGES``; ``[]`` when ``EDGES`` is absent or empty.
-    """
-    edges = getattr(field_data_module, "EDGES", None)
-    if edges is None:
-        return []
-    try:
-        iterator = iter(edges)
-    except TypeError:
-        # EDGES is present but not iterable -- treat as no projection edges.
-        return []
-
-    projections: list[tuple[str, str, float, float]] = []
-    for entry in iterator:
-        if not isinstance(entry, dict):
-            continue
-        if entry.get("type") != EDGE_PROJECTION:
-            continue
-        if any(key not in entry for key in _REQUIRED_EDGE_KEYS):
-            continue
-        try:
-            distance_cm = float(entry["distance_cm"])
-            heading_deg = float(entry["heading_deg"])
-        except (TypeError, ValueError):
-            # A non-numeric distance/heading is a malformed entry -- skip it
-            # rather than surface a bad value to the renderer.
-            continue
-        projections.append((entry["u"], entry["v"], distance_cm, heading_deg))
-    return projections
-
-
-def compute_projection_geometry(
-    p_u: tuple[float, float],
-    p_v: tuple[float, float],
-) -> tuple[float, float]:
-    """Return ``(distance_cm, heading_deg)`` for a projection edge ``u -> v``.
-
-    The distance is the Euclidean length ``hypot(dx, dy)``; the heading is
-    ``degrees(atan2(dy, dx)) % 360.0`` -- the module convention (``[0, 360)``,
-    ``0 deg`` = +x / East, CCW positive), matching
-    :func:`graph_builder._heading_deg`. Both results are rounded to
-    :data:`_GEOMETRY_ROUND_DP` decimal places so the value the editor writes
-    into ``field_data`` source is byte-stable across runs.
-
-    :param p_u: the source point ``(x_cm, y_cm)``.
-    :param p_v: the destination point ``(x_cm, y_cm)``.
-    :return: ``(distance_cm, heading_deg)`` -- both ``float``, rounded to
-        4 decimals.
-    :raises ValueError: if ``p_u`` and ``p_v`` are the same point. A
-        zero-length projection has no defined heading (``atan2(0, 0)`` is
-        meaningless here) and is never a valid edge.
-    """
-    dx = p_v[0] - p_u[0]
-    dy = p_v[1] - p_u[1]
-    if dx == 0.0 and dy == 0.0:
-        raise ValueError(
-            f"compute_projection_geometry: p_u and p_v are identical "
-            f"({p_u!r}); a zero-length projection edge has no heading. "
-            f"Place the destination node away from the source."
-        )
-    distance_cm = round(hypot(dx, dy), _GEOMETRY_ROUND_DP)
-    heading_deg = round(degrees(atan2(dy, dx)) % 360.0, _GEOMETRY_ROUND_DP)
-    return distance_cm, heading_deg
-
-
-def reconcile(
-    loaded: list[tuple[str, str, float, float]],
-    adds: list[tuple[str, str, float, float]],
-    removes: list[tuple[str, str]],
-) -> list[tuple[str, str, float, float]]:
-    """Fold loaded projection edges with pending adds/removes into a render set.
-
-    The render set is ``loaded`` plus ``adds``, minus every entry whose
-    ``(u, v)`` pair appears in ``removes``. Matching -- for both removal and
-    de-duplication -- is on the ``(u, v)`` first-two-elements only; the
-    ``distance_cm`` / ``heading_deg`` payload is not compared, so an add that
-    re-states an existing ``(u, v)`` *overrides* the loaded entry's geometry.
-
-    Determinism (so the canvas paints the same order every frame and tests are
-    stable):
-
-    1. Surviving ``loaded`` entries come first, in their original source order.
-       An entry is dropped if its ``(u, v)`` is in ``removes`` OR is overridden
-       by a same-pair entry in ``adds``.
-    2. Then the ``adds``, in their given order, each emitted once, skipping any
-       whose ``(u, v)`` is in ``removes`` and any whose ``(u, v)`` was already
-       emitted (an earlier add wins over a later duplicate).
-
-    A pair listed in ``removes`` is excluded even if it appears only in
-    ``adds`` -- a remove suppresses a pending add of the same pair.
-
-    :param loaded: projection edges read from the field-data module
-        (:func:`read_projection_edges` output), in source order.
-    :param adds: pending projection edges to add this session, in user order.
-        A same-``(u, v)`` add overrides the loaded entry.
-    :param removes: ``(u, v)`` pairs to suppress; only the first two elements of
-        each tuple are read, so a 4-tuple edge may be passed directly.
-    :return: the de-duplicated, remove-filtered render set as a list of
-        ``(u, v, distance_cm, heading_deg)`` tuples in the order described
-        above.
-    """
-    removed_pairs = {(pair[0], pair[1]) for pair in removes}
-    add_pairs = {(edge[0], edge[1]) for edge in adds}
-
-    render: list[tuple[str, str, float, float]] = []
-    emitted: set[tuple[str, str]] = set()
-
-    # 1. Surviving loaded entries first (source order). Drop a loaded entry if
-    #    it is removed, or if an add re-states the same pair (the add overrides).
-    for edge in loaded:
-        pair = (edge[0], edge[1])
-        if pair in removed_pairs or pair in add_pairs:
-            continue
-        if pair in emitted:
-            # Defensive: a duplicate pair already in `loaded` -- keep the first.
-            continue
-        render.append(edge)
-        emitted.add(pair)
-
-    # 2. Then the adds (user order), each pair once, skipping removed pairs.
-    for edge in adds:
-        pair = (edge[0], edge[1])
-        if pair in removed_pairs or pair in emitted:
-            continue
-        render.append(edge)
-        emitted.add(pair)
-
-    return render
 
 
 def reset_autofill(

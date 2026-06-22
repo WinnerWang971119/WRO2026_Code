@@ -53,16 +53,13 @@ from tools.path_planner.editor.commands import (
     AddNode,
     AddObstacle,
     AddPivotTurn,
-    AddProjectionEdge,
     ClearResetSpec,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
     DeletePivotTurn,
-    DeleteProjectionEdge,
     MacroCommand,
     MoveNode,
-    ProjectionDelta,
     RenameNode,
     SetGlobalKnob,
     SetNodeType,
@@ -253,14 +250,6 @@ _DEFAULT_OBSTACLE_KIND: str = "obstacle"
 #: the oldest entry so the most recent two clicks always win.
 _EDGE_SELECTION_MAX: int = 2
 
-#: Status hint shown when the operator opens the projection-edge authoring flow
-#: from the "+ add projection" ghost button. It reuses the EDGE-mode two-node
-#: picker; the order of the two picks is load-bearing (FIRST = source ``u``,
-#: SECOND = head ``v``) because a projection edge is DIRECTED.
-_STATUS_PROJECTION_HINT: str = (
-    "Projection: pick source then head, press P."
-)
-
 #: Single-key mode shortcuts (AC5). Each entry maps a Tk key *keysym* to the
 #: :class:`Mode` it activates; the handler sets ``mode_var`` to the mode's
 #: ``value`` (firing the existing ``_on_mode_change`` trace). Both the lower-
@@ -343,7 +332,6 @@ _SHORTCUT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("L", "Add line edge (EDGE mode)"),
             ("B", "Add blind edge (EDGE mode)"),
-            ("P", "Add projection edge (EDGE mode)"),
         ),
     ),
     (
@@ -425,21 +413,6 @@ class EditorApp:
         # history stacks -- doing so was the source of the undo-saved-rename
         # divergence, because History mutates (redo is cleared by any new edit).
         self._pending_renames: dict[str, str] = {}
-
-        # ---- 3b. Projection-edge working set ----
-        # The app owns exactly ONE ProjectionDelta. Its baseline (``loaded``)
-        # is seeded from the field_data module's EDGES below; the
-        # AddProjectionEdge / DeleteProjectionEdge commands push the pending
-        # adds / removes through the same History as every other edit, and the
-        # Save flow flushes them to field_data.py before re-seeding the
-        # baseline. The reconciled render() set is what the canvas paints.
-        self._proj_delta: ProjectionDelta = ProjectionDelta()
-        if self._field_data_module is not None:
-            self._proj_delta.set_loaded(
-                projection_edges.read_projection_edges(
-                    self._field_data_module
-                )
-            )
 
         # ---- 4. Tk root window ----
         self._owns_root: bool = root is None
@@ -528,9 +501,6 @@ class EditorApp:
         # (a freshly loaded model is clean).
         self._panels.set_filename(self._json_path.name)
         self._panels.set_dirty(False)
-        # Push the existing projection edges to the canvas so they render on
-        # load (the baseline was seeded into ``_proj_delta`` in step 3b).
-        self._sync_projection_render()
         # Seed the status surface's mode + selection lines so they read the
         # current truth from the first frame (nothing is selected yet, so the
         # selection line shows the "none" placeholder).
@@ -630,10 +600,7 @@ class EditorApp:
         self._panels.on_delete_pivot = self._on_panel_delete_pivot
         self._panels.on_global_knob_change = self._on_panel_global_knob_change
 
-        # Ghost "+ add projection" button and the status-strip shortcuts hint
-        # (T8 chrome). The projection handler enters the EDGE-mode picker; the
-        # shortcuts handler opens the read-only reference dialog.
-        self._panels.on_add_projection = self._on_panel_add_projection
+        # Status-strip shortcuts hint: opens the read-only reference dialog.
         self._panels.on_show_shortcuts = self._show_shortcuts_dialog
 
         # Clear transient drag / preview / selection state whenever the
@@ -661,7 +628,6 @@ class EditorApp:
         * ``Delete``                    -> :meth:`_handle_delete_key`
         * ``L``                         -> :meth:`_handle_edge_line_key`
         * ``B``                         -> :meth:`_handle_edge_blind_key`
-        * ``P``                         -> :meth:`_handle_edge_projection_key`
         * ``?`` / ``F1``                -> :meth:`_show_shortcuts_dialog`
         * ``A`` / ``M`` / ``E`` / ``O`` / ``S`` -> switch mode (AC5), per
           :data:`_MODE_SHORTCUT_KEYS` (Add node / Move / Edge / Obstacle /
@@ -696,12 +662,6 @@ class EditorApp:
         self._root.bind_all("<KeyPress-L>", guard(self._handle_edge_line_key))
         self._root.bind_all("<KeyPress-b>", guard(self._handle_edge_blind_key))
         self._root.bind_all("<KeyPress-B>", guard(self._handle_edge_blind_key))
-        self._root.bind_all(
-            "<KeyPress-p>", guard(self._handle_edge_projection_key)
-        )
-        self._root.bind_all(
-            "<KeyPress-P>", guard(self._handle_edge_projection_key)
-        )
 
         # Shortcuts-help dialog (AC9): ``?`` and ``F1`` both open it. ``?`` is
         # Shift+/ -- bind the keysym ``question`` (its plain glyph) so the
@@ -923,10 +883,6 @@ class EditorApp:
         track the model after every mutation (dispatch / undo / redo all funnel
         through here) -- "per move" validation, not just at Save.
         """
-        # Keep the canvas's projection overlay in lockstep with the delta's
-        # reconciled render set before the repaint (a node move / undo / redo
-        # can change the geometry the arrows are drawn against).
-        self._sync_projection_render()
         highlighted = list(self._edge_selection)
         self._canvas.render(
             self._model,
@@ -966,25 +922,6 @@ class EditorApp:
             self._panels.set_validation(False, f"validation error: {exc}")
             return
         self._panels.set_validation(True)
-
-    def _sync_projection_render(self) -> None:
-        """Push the delta's reconciled projection edges onto the canvas.
-
-        Called after every projection mutation and from :meth:`_refresh_view`
-        so the canvas overlay always mirrors ``_proj_delta.render()``. The
-        canvas stores the set as-is and replays it on its next paint; this
-        method does NOT itself trigger a repaint (the caller's refresh does).
-
-        Defensive against a bare instance (the rename unit tests build one via
-        ``__new__`` without a ``_proj_delta`` / ``_canvas``): a missing
-        collaborator makes this a silent no-op rather than an
-        :class:`AttributeError`.
-        """
-        delta = getattr(self, "_proj_delta", None)
-        canvas = getattr(self, "_canvas", None)
-        if delta is None or canvas is None:
-            return
-        canvas.set_projection_edges(delta.render())
 
     def _update_title(self) -> None:
         """Reflect :attr:`_dirty` in the window title bar."""
@@ -1056,8 +993,6 @@ class EditorApp:
         # the same call -- no need to know whether the rename was saved.
         if isinstance(undone, RenameNode):
             self._record_pending_rename(undone.new, undone.old)
-            # Mirror the rename onto the off-model projection delta (#5).
-            self._rename_proj_delta_endpoints(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
@@ -1074,8 +1009,6 @@ class EditorApp:
         # untouched.
         if isinstance(redone, RenameNode):
             self._record_pending_rename(redone.old, redone.new)
-            # Mirror the rename onto the off-model projection delta (#5).
-            self._rename_proj_delta_endpoints(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -1374,7 +1307,7 @@ class EditorApp:
         Tier-1 guards (cheap, before dispatch): all three endpoints must be
         known nodes, and both legs must be REAL incident edges -- each of the
         pairs ``{u, v}`` and ``{v, w}`` must exist as a ``line_segments`` /
-        ``blind_edges`` entry OR a projection edge (see :meth:`_edge_exists`).
+        ``blind_edges`` entry (see :meth:`_edge_exists`).
         Without an incident leg the turn could never be executed, so it is
         rejected inline. On any failed guard
         the edit is rejected (no panel revert is needed -- the readonly add-row
@@ -1490,21 +1423,16 @@ class EditorApp:
         self._dispatch(SetGlobalKnob(knob, number))
 
     def _edge_exists(self, a: str, b: str) -> bool:
-        """Return ``True`` if any edge connects ``{a, b}`` (line / blind / projection).
+        """Return ``True`` if any edge connects ``{a, b}`` (line / blind).
 
         Scans ``line_segments`` and ``blind_edges`` (each stored 2-tuple is
-        undirected, so either ordering matches) AND the app's
-        :class:`ProjectionDelta` render set via :meth:`_find_projection_on_pair`.
-        A projection edge is tracked off-model in the delta, but the Save-time
-        validator accepts it as a real incident pivot leg in either direction
-        (``graph_builder._emit_directed_pair`` emits a directed pair for every
-        edge), so the pivot guard must count it too -- otherwise a projection
-        ``u -> v`` leg is wrongly rejected with "no edge between u and v".
+        undirected, so either ordering matches). Used by the pivot guard: each
+        leg must be a real incident edge, otherwise the turn could never be
+        executed.
 
         :param a: First endpoint node name.
         :param b: Second endpoint node name.
-        :return: ``True`` iff a line, blind, or projection edge connects the
-            pair.
+        :return: ``True`` iff a line or blind edge connects the pair.
         """
         pair = {a, b}
         for edge in self._model.line_segments:
@@ -1513,123 +1441,15 @@ class EditorApp:
         for edge in self._model.blind_edges:
             if set(edge) == pair:
                 return True
-        # Projection edges live in the app's ProjectionDelta, not the model;
-        # count one on this pair (either orientation) as a real incident leg.
-        if self._find_projection_on_pair(a, b) is not None:
-            return True
         return False
-
-    def _find_projection_on_pair(
-        self, a: str, b: str
-    ) -> Optional[tuple[str, str]]:
-        """Return the directed ``(u, v)`` of any projection edge on ``{a, b}``.
-
-        Scans the app's single :class:`ProjectionDelta`'s reconciled
-        ``render()`` set for an entry whose endpoints are ``(a, b)`` OR
-        ``(b, a)`` -- a projection edge is DIRECTED, so it may be stored in
-        either orientation relative to the (orientation-free) two-node pick.
-        The stored directed pair is returned verbatim so a follow-up
-        :class:`DeleteProjectionEdge` targets the edge exactly as it renders.
-
-        Defensive against a bare ``__new__`` instance (the rename unit tests
-        build one without a ``_proj_delta``): a missing delta makes this a
-        silent ``None`` rather than an :class:`AttributeError`.
-
-        :param a: First picked node name.
-        :param b: Second picked node name.
-        :return: The stored ``(u, v)`` directed pair, or ``None`` when no
-            projection edge connects ``a`` and ``b`` in either direction.
-        """
-        delta = getattr(self, "_proj_delta", None)
-        if delta is None:
-            return None
-        for edge in delta.render():
-            u, v = edge[0], edge[1]
-            if (u == a and v == b) or (u == b and v == a):
-                return (u, v)
-        return None
-
-    def _find_projection_referencing(
-        self, node: str
-    ) -> Optional[tuple[str, str]]:
-        """Return the ``(u, v)`` of a current projection edge naming *node*.
-
-        Scans ``_proj_delta.render()`` (loaded + pending adds, minus removes)
-        for any edge with *node* as either endpoint. Used by the delete guard:
-        a session-pending projection add is NOT yet in ``field_data.EDGES``, so
-        :meth:`_find_edges_reference` cannot see it -- this catches it so a node
-        deletion never orphans a projection edge endpoint (#5).
-
-        :param node: Node name to search for.
-        :return: The first ``(u, v)`` referencing *node*, or ``None``.
-        """
-        delta = getattr(self, "_proj_delta", None)
-        if delta is None:
-            return None
-        for edge in delta.render():
-            if edge[0] == node or edge[1] == node:
-                return (edge[0], edge[1])
-        return None
-
-    def _rename_proj_delta_endpoints(self, old: str, new: str) -> None:
-        """Re-key the off-model projection delta when a node is renamed.
-
-        Projection edges live in ``_proj_delta`` (``loaded`` / ``adds`` /
-        ``removes``), keyed on node name, so a :class:`RenameNode` that re-keys
-        the model must re-key these too -- otherwise a session projection edge
-        keeps its stale endpoint and is written verbatim at Save (the model's
-        ``validate()`` cannot see it because the proxy omits ``EDGES``) (#5).
-        Pure string substitution, so it is its own inverse: ``_undo`` / ``_redo``
-        call it with the swapped arguments, mirroring ``_pending_renames``.
-
-        Defensive against a bare ``__new__`` instance (rename unit tests build
-        one without a ``_proj_delta``): a missing delta is a silent no-op.
-
-        :param old: Endpoint name to replace.
-        :param new: Replacement endpoint name.
-        """
-        delta = getattr(self, "_proj_delta", None)
-        if delta is None or old == new:
-            return
-
-        def _sub(name: str) -> str:
-            return new if name == old else name
-
-        delta.loaded = [
-            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.loaded
-        ]
-        delta.adds = [
-            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.adds
-        ]
-        delta.removes = [(_sub(u), _sub(v)) for (u, v) in delta.removes]
-
-    def _projection_pairs(self) -> frozenset:
-        """Return the undirected pairs that currently carry a projection edge.
-
-        Each as a ``frozenset({u, v})`` so :class:`AddEdgesBatch` can reject a
-        plain edge on a pair that already has a projection (the two cannot
-        coexist -- ``graph_builder`` would emit a conflicting directed pair from
-        both) (#7). Empty when there is no projection delta (bare instance).
-
-        :return: A frozenset of ``frozenset`` pairs.
-        """
-        delta = getattr(self, "_proj_delta", None)
-        if delta is None:
-            return frozenset()
-        return frozenset(
-            frozenset({edge[0], edge[1]}) for edge in delta.render()
-        )
 
     def _plain_edge_kind(self, a: str, b: str) -> Optional[str]:
         """Return the kind of the plain edge on ``{a, b}`` -- line / blind / None.
 
         Undirected scan of ``model.line_segments`` then ``model.blind_edges``
-        (each stored 2-tuple matches either ordering). Projection edges are NOT
-        plain edges and are deliberately ignored here -- they live off-model in
-        the :class:`ProjectionDelta` and are reported via
-        :meth:`_find_projection_on_pair`. At most one plain edge exists on a pair
-        (the L / B / P overrides enforce mutual exclusion), so the first match
-        wins.
+        (each stored 2-tuple matches either ordering). At most one plain edge
+        exists on a pair (the L / B overrides enforce mutual exclusion), so the
+        first match wins.
 
         :param a: First endpoint node name.
         :param b: Second endpoint node name.
@@ -1651,19 +1471,13 @@ class EditorApp:
 
         Used by the EDGE-mode status line so the operator can see what (if
         anything) currently connects the two picked nodes before pressing
-        L / B / P / Delete. Projection edges take priority and report their
-        STORED direction (they are directed); otherwise a plain line / blind
-        edge is named; otherwise ``"none"``.
+        L / B / Delete. Names the plain line / blind edge on the pair, or
+        ``"none"`` when the pair has no edge.
 
         :param a: First picked node name.
         :param b: Second picked node name.
-        :return: e.g. ``"projection 'A' -> 'B'"``, ``"line"``, ``"blind"``, or
-            ``"none"``.
+        :return: e.g. ``"line"``, ``"blind"``, or ``"none"``.
         """
-        projection = self._find_projection_on_pair(a, b)
-        if projection is not None:
-            u, v = projection
-            return f"projection {u!r} -> {v!r}"
         kind = self._plain_edge_kind(a, b)
         if kind is not None:
             return kind
@@ -1688,17 +1502,6 @@ class EditorApp:
         """
         max_len_cm = self._panels.max_edge_length_cm
         proposals = auto_edges.propose_edges(self._model, max_len_cm)
-        # Drop any proposed pair that already carries a projection edge: a plain
-        # and a projection edge cannot coexist on a pair, and AddEdgesBatch would
-        # reject the whole batch on it. propose_edges is model-only (no
-        # projection awareness), so filter here against the off-model delta (#7).
-        proj_pairs = self._projection_pairs()
-        if proj_pairs:
-            proposals = [
-                (a, b, k)
-                for (a, b, k) in proposals
-                if frozenset({a, b}) not in proj_pairs
-            ]
         if not proposals:
             self._set_status(
                 "No edges to propose (need >= 3 non-collinear nodes / all candidates filtered)."
@@ -1732,13 +1535,7 @@ class EditorApp:
         # re-paint the now-committed edges as a cyan overlay.
         self._proposed_edges = None
         self._panels.set_auto_create_state("idle")
-        # Defense-in-depth: pass the current projection pairs so the command
-        # rejects a plain edge on a pair that gained a projection since the
-        # preview was built (the preview filter in _on_panel_auto_create_edges
-        # is the first line; this is the guarantee) (#7).
-        if self._dispatch(
-            AddEdgesBatch(batch, projection_pairs=self._projection_pairs())
-        ):
+        if self._dispatch(AddEdgesBatch(batch)):
             self._set_status(f"Added {len(batch)} edges.")
         else:
             # Dispatch already wrote a status message about the conflict.
@@ -1760,21 +1557,8 @@ class EditorApp:
         self._refresh_view()
 
     # ------------------------------------------------------------------
-    # Projection-edge authoring (T8) + shortcuts dialog
+    # Shortcuts dialog
     # ------------------------------------------------------------------
-
-    def _on_panel_add_projection(self) -> None:
-        """Enter the projection-edge picker from the "+ add projection" button.
-
-        Projection edges are authored with the SAME EDGE-mode two-node picker as
-        line / blind edges -- no parallel picker. This handler switches to EDGE
-        mode (which clears any stale transient selection) and writes a status
-        hint telling the operator the directed convention: pick the source, then
-        the head, then press ``P``. The actual add happens in
-        :meth:`_handle_edge_projection_key`.
-        """
-        self._switch_mode(Mode.EDGE)
-        self._set_status(_STATUS_PROJECTION_HINT)
 
     def _show_shortcuts_dialog(self) -> None:
         """Open the read-only keyboard-shortcuts reference dialog (AC9).
@@ -2102,7 +1886,7 @@ class EditorApp:
             current = self._describe_edge_on_pair(a, b)
             self._set_status(
                 f"Edge endpoints: {a!r} -> {b!r} (current: {current}). "
-                f"Press L (line), B (blind), P (projection), or Delete."
+                f"Press L (line), B (blind), or Delete."
             )
         else:
             self._set_status(
@@ -2241,13 +2025,9 @@ class EditorApp:
     def _handle_delete_key(self) -> None:
         """``Delete`` -- if EDGE mode + two endpoints selected, drop the edge.
 
-        Deletes whatever edge connects the two picked nodes, in priority order:
-
-        * A DIRECTED projection edge on the pair (either orientation) ->
-          :class:`DeleteProjectionEdge` against the stored ``(u, v)``.
-        * Otherwise an UNDIRECTED line / blind edge on ``{a, b}`` ->
-          :class:`DeleteEdge`.
-        * Otherwise the pair has no edge -- a status message, no dispatch.
+        Deletes the undirected line / blind edge on ``{a, b}`` via
+        :class:`DeleteEdge`. If the pair has no edge, a status message is
+        shown and nothing is dispatched.
 
         In other modes the key is a no-op (deleting nodes is intentionally
         constrained to the right-click context menu so a stray Delete does
@@ -2262,18 +2042,6 @@ class EditorApp:
             )
             return
         a, b = self._edge_selection
-        # Projection edges take priority: a pair never carries both a projection
-        # edge and a plain edge at once (the L/B/P overrides enforce that), but
-        # the directed projection delete must target the stored orientation.
-        projection_pair = self._find_projection_on_pair(a, b)
-        if projection_pair is not None:
-            u, v = projection_pair
-            if self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
-                self._sync_projection_render()
-                self._edge_selection.clear()
-                self._set_status(f"Deleted projection edge {u!r} -> {v!r}.")
-                self._refresh_view()
-            return
         if self._plain_edge_kind(a, b) is not None:
             if self._dispatch(DeleteEdge(a, b)):
                 self._edge_selection.clear()
@@ -2283,13 +2051,13 @@ class EditorApp:
         self._set_status(f"No edge between ({a!r}, {b!r}) to delete.")
 
     def _handle_edge_line_key(self) -> None:
-        """``L`` -- add a line edge, overriding any other edge on the pair.
+        """``L`` -- add a line edge, overriding any blind edge on the pair.
 
-        Overrides whatever currently connects the two picked nodes: a DIRECTED
-        projection edge (either orientation) or an existing BLIND edge is deleted
-        first, then the undirected line edge is added in its place (a two-entry
-        delete-then-add). A pair that is already a line edge is a friendly no-op.
-        With nothing there a plain :class:`AddLineEdge` is dispatched. See
+        Overrides whatever currently connects the two picked nodes: an existing
+        BLIND edge is deleted first, then the undirected line edge is added in
+        its place (a two-entry delete-then-add). A pair that is already a line
+        edge is a friendly no-op. With nothing there a plain
+        :class:`AddLineEdge` is dispatched. See
         :meth:`_add_plain_edge_with_override` for the full override contract.
         """
         if self._current_mode() is not Mode.EDGE:
@@ -2303,12 +2071,11 @@ class EditorApp:
         )
 
     def _handle_edge_blind_key(self) -> None:
-        """``B`` -- add a blind edge, overriding any other edge on the pair.
+        """``B`` -- add a blind edge, overriding any line edge on the pair.
 
-        Symmetric to :meth:`_handle_edge_line_key`: a projection edge or an
-        existing LINE edge on the picked pair is deleted first, then a plain
-        :class:`AddBlindEdge` is added in its place. A pair that is already a
-        blind edge is a friendly no-op.
+        Symmetric to :meth:`_handle_edge_line_key`: an existing LINE edge on the
+        picked pair is deleted first, then a plain :class:`AddBlindEdge` is added
+        in its place. A pair that is already a blind edge is a friendly no-op.
         """
         if self._current_mode() is not Mode.EDGE:
             return
@@ -2323,16 +2090,13 @@ class EditorApp:
     def _add_plain_edge_with_override(
         self, add_command, a: str, b: str, kind: str
     ) -> None:
-        """Add a line / blind edge, overriding any other edge already on the pair.
+        """Add a line / blind edge, overriding the other plain kind on the pair.
 
         Shared body for the ``L`` and ``B`` handlers. The new undirected line /
         blind edge replaces whatever currently connects ``{a, b}``:
 
         * Same plain kind already there -> nothing to change; a friendly status
           message, no dispatch (avoids the command's "already exists" error).
-        * A projection edge (either orientation) -> deleted FIRST via
-          :class:`DeleteProjectionEdge` against its stored directed pair, then
-          the add (override projection -> line/blind).
         * The OTHER plain kind (line <-> blind) -> deleted FIRST via
           :class:`DeleteEdge`, then the add (override line <-> blind), so the
           operator can flip an edge's type in place without a manual delete.
@@ -2358,146 +2122,24 @@ class EditorApp:
             self._set_status(f"({a!r}, {b!r}) is already a {kind} edge.")
             self._refresh_view()
             return
-        overridden_projection = self._find_projection_on_pair(a, b)
-        overridden_kind: Optional[str] = None
+        # The same-kind case returned above, so any plain edge on the pair is the
+        # OTHER kind: delete it first so the add won't collide, recording the old
+        # kind for the status text.
+        overridden_kind = self._plain_edge_kind(a, b)
         steps: list = []
-        if overridden_projection is not None:
-            u, v = overridden_projection
-            steps.append(DeleteProjectionEdge(self._proj_delta, u, v))
-        else:
-            # The same-kind case returned above, so any plain edge on the pair is
-            # the OTHER kind: delete it first so the add won't collide, recording
-            # the old kind for the status text.
-            overridden_kind = self._plain_edge_kind(a, b)
-            if overridden_kind is not None:
-                steps.append(DeleteEdge(a, b))
+        if overridden_kind is not None:
+            steps.append(DeleteEdge(a, b))
         steps.append(add_command)
         command = MacroCommand(steps) if len(steps) > 1 else steps[0]
         if self._dispatch(command):
-            if overridden_projection is not None:
-                self._sync_projection_render()
             self._edge_selection.clear()
-            if overridden_projection is not None:
-                u, v = overridden_projection
-                self._set_status(
-                    f"Replaced projection {u!r} -> {v!r} with a {kind} edge."
-                )
-            elif overridden_kind is not None:
+            if overridden_kind is not None:
                 self._set_status(
                     f"Changed ({a!r}, {b!r}) from {overridden_kind} to {kind}."
                 )
             else:
                 self._set_status(f"Added {kind} edge ({a!r}, {b!r}).")
             self._refresh_view()
-
-    def _handle_edge_projection_key(self) -> None:
-        """``P`` -- add a DIRECTED projection edge from the two picked nodes.
-
-        Reuses the EDGE-mode two-node picker, but unlike the undirected L / B
-        edges the order is load-bearing: the FIRST-selected node is the source
-        ``u`` and the SECOND is the head ``v`` (a projection edge is directed
-        ``u -> v``). The geometry ``(distance_cm, heading_deg)`` is derived from
-        the two node positions, then an :class:`AddProjectionEdge` is dispatched
-        against the app's single :class:`ProjectionDelta`. On success the canvas
-        overlay is re-synced, the buffer is marked dirty (via ``_dispatch``),
-        and the selection is cleared. A duplicate / unknown / same-node edge
-        raises ``ValueError`` inside the command, which ``_dispatch`` surfaces on
-        the status bar.
-        """
-        if self._current_mode() is not Mode.EDGE:
-            return
-        if len(self._edge_selection) != _EDGE_SELECTION_MAX:
-            self._set_status("EDGE mode: pick two nodes first.")
-            return
-        u, v = self._edge_selection
-        # Both names came from a canvas hit-test, but a node could have been
-        # deleted between the pick and this keypress; guard before geometry.
-        if u not in self._model.nodes or v not in self._model.nodes:
-            self._set_status(
-                "Projection: a selected node no longer exists; re-pick."
-            )
-            self._edge_selection.clear()
-            self._refresh_view()
-            return
-        # A projection is a line-follow leg, so its HEAD must sit on a line: the
-        # Save-time validator (``_reject_line_follow_into_blind``, ADR-041)
-        # rejects a projection into a blind node (no line there to seek). Catch
-        # it here and offer the valid alternative -- a blind edge to reach the
-        # blind node -- instead of authoring an edge that only fails at Save.
-        if self._model.node_types.get(v) == _NODE_TYPE_BLIND:
-            self._offer_blind_instead_of_projection(u, v)
-            return
-        try:
-            distance_cm, heading_deg = (
-                projection_edges.compute_projection_geometry(
-                    self._model.nodes[u], self._model.nodes[v]
-                )
-            )
-        except ValueError as exc:
-            # Identical endpoints have no defined heading.
-            self._set_status(f"Projection: {exc}")
-            return
-        # Override line/blind -> projection: a projection edge cannot coexist
-        # with an undirected line / blind edge on the same pair, so the plain
-        # edge is deleted first. Gate on _plain_edge_kind (line/blind only) --
-        # NOT _edge_exists, which ALSO counts projection edges, so a reverse-
-        # direction projection on the pair would otherwise trigger a bogus
-        # DeleteEdge that raises and aborts a legitimate add (#6). The delete +
-        # add are bundled into ONE MacroCommand so a single undo restores the
-        # WHOLE override instead of leaving the pair with neither edge (#12).
-        overrode_plain = self._plain_edge_kind(u, v) is not None
-        steps: list = []
-        if overrode_plain:
-            steps.append(DeleteEdge(u, v))
-        steps.append(
-            AddProjectionEdge(self._proj_delta, u, v, distance_cm, heading_deg)
-        )
-        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
-        if self._dispatch(command):
-            # ``_dispatch`` already marked dirty and refreshed (which re-syncs
-            # the overlay); re-sync explicitly too so the contract is met even
-            # if the refresh path changes, then clear the picker.
-            self._sync_projection_render()
-            self._edge_selection.clear()
-            if overrode_plain:
-                self._set_status(
-                    f"Replaced edge ({u!r}, {v!r}) with a projection "
-                    f"{u!r} -> {v!r}."
-                )
-            else:
-                self._set_status(
-                    f"Added projection edge {u!r} -> {v!r}."
-                )
-            self._refresh_view()
-
-    def _offer_blind_instead_of_projection(self, u: str, v: str) -> None:
-        """Offer a blind edge when a projection's head ``v`` is a blind node.
-
-        A line-follow projection cannot end on a blind node (no line to seek
-        there -- ``validator._reject_line_follow_into_blind``). Rather than
-        author an edge the Save-time validator will reject, prompt the operator:
-        on confirm, add a BLIND edge for the leg -- the valid way to reach a
-        blind node -- via :meth:`_add_plain_edge_with_override` (which clears the
-        picker and refreshes); on decline, leave the picked selection untouched
-        so they can re-pick a line head.
-
-        :param u: The projection source node (the picked first node).
-        :param v: The projection head node, known to be typed ``"blind"``.
-        """
-        add_blind = messagebox.askyesno(
-            "Can't project into a blind node",
-            f"{v!r} is a blind node -- a line-follow projection can't end "
-            f"there. Add a blind edge instead?",
-            parent=self._root,
-        )
-        if not add_blind:
-            self._set_status(
-                f"Projection into blind node {v!r} cancelled."
-            )
-            return
-        self._add_plain_edge_with_override(
-            AddBlindEdge(u, v), u, v, _EDGE_KIND_BLIND
-        )
 
     # ------------------------------------------------------------------
     # Right-click context menu
@@ -2664,17 +2306,14 @@ class EditorApp:
         if not self._dispatch(RenameNode(target, new_name)):
             return False
         self._record_pending_rename(target, new_name)
-        # Re-key the off-model projection delta so a session projection edge
-        # follows the rename (#5); RenameNode only cascades the model.
-        self._rename_proj_delta_endpoints(target, new_name)
         if was_selected:
             # The dispatch's refresh ran while the panel still keyed off the OLD
             # name (so it dropped the listbox/inspector selection). Re-point the
             # canonical selection var + status line at the renamed node.
             self._select_node(new_name)
-        # Refresh once more: re-sync the projection overlay to the re-keyed
-        # delta and (if it moved) re-select the renamed node + repopulate the
-        # inspector. The dispatch's earlier refresh painted the stale names.
+        # Refresh once more: if the selection moved, re-select the renamed node
+        # and repopulate the inspector. The dispatch's earlier refresh painted
+        # the stale names.
         self._refresh_view()
         return True
 
@@ -2719,22 +2358,6 @@ class EditorApp:
                 "Cannot delete node",
                 f"Cannot delete {target!r} -- it is the current start node. "
                 "Pick a different start node first.",
-                parent=self._root,
-            )
-            return
-
-        # A session-pending projection edge (in _proj_delta.adds) is not yet in
-        # field_data.EDGES, so _find_edges_reference can't see it. Refuse the
-        # delete if any current projection edge names this node (#5) -- the same
-        # posture as the edge/pivot guards; the operator deletes the projection
-        # edge (Delete in EDGE mode) first.
-        proj_ref = self._find_projection_referencing(target)
-        if proj_ref is not None:
-            messagebox.showerror(
-                "Cannot delete node",
-                f"Cannot delete {target!r} -- it is an endpoint of projection "
-                f"edge {proj_ref[0]!r} -> {proj_ref[1]!r}. Delete that edge "
-                "first (pick both nodes in EDGE mode, then Delete).",
                 parent=self._root,
             )
             return
@@ -2920,66 +2543,6 @@ class EditorApp:
                     # delete-guard staying as accurate as it was pre-save.
                     pass
             self._pending_renames.clear()
-
-        # 4. Flush pending projection-edge edits into field_data.py's EDGES
-        # list (T3 LibCST appends / removes). Projection edges are NOT part of
-        # the JSON schema or model.validate(); a malformed one surfaces in Save
-        # & Build's existing planner error dialog, not here. The bare-instance
-        # rename unit tests build the app via __new__ without a _proj_delta, so
-        # guard on getattr -- a missing delta makes this a clean no-op.
-        proj_delta = getattr(self, "_proj_delta", None)
-        if proj_delta is not None and (proj_delta.adds or proj_delta.removes):
-            try:
-                from tools.path_planner.editor import ast_rewrite  # noqa: PLC0415
-                for u, v, distance_cm, heading_deg in proj_delta.adds:
-                    ast_rewrite.append_projection_edge(
-                        _FIELD_DATA_PY_PATH, u, v, distance_cm, heading_deg
-                    )
-                for u, v in proj_delta.removes:
-                    ast_rewrite.remove_projection_edge(
-                        _FIELD_DATA_PY_PATH, u, v
-                    )
-            except Exception as exc:  # noqa: BLE001 -- LibCST errors etc.
-                messagebox.showerror(
-                    "Projection-edge write failed",
-                    f"field_data.json was written, but rewriting projection "
-                    f"edges in {_FIELD_DATA_PY_PATH} failed: {exc}",
-                    parent=self._root,
-                )
-                self._set_status(
-                    "Save partial: JSON saved, projection-edge write failed."
-                )
-                # Keep the pending delta so the user can retry. JSON (and any
-                # rename flush above) already reached disk, but these
-                # projection edits did not.
-                return False
-            # The flush reached disk. Collapse the pending adds / removes into
-            # the baseline using the reconciled render set -- which is exactly
-            # what we just wrote to disk -- NOT by re-reading the module after a
-            # reload. The old code re-seeded from
-            # ``read_projection_edges(reloaded_module)`` inside a swallowed-
-            # exception reload: if the reload raised (e.g. the just-written
-            # field_data.py won't re-import), it left a half-reloaded module
-            # bound and re-seeded the baseline from its inconsistent EDGES while
-            # clear_pending() ran anyway -- so the next add/remove reconciled
-            # against a wrong baseline (#14). Computing the new baseline from
-            # render() before clearing sidesteps the reload entirely.
-            new_baseline = proj_delta.render()
-            # Still refresh the cached module (best-effort) so
-            # _find_edges_reference sees the new EDGES on the next delete; a
-            # failed reload just keeps the stale reference (delete-guard stays as
-            # accurate as it was pre-save), and the baseline above is unaffected.
-            if self._field_data_module is not None:
-                import importlib  # noqa: PLC0415
-                try:
-                    self._field_data_module = importlib.reload(
-                        self._field_data_module
-                    )
-                except Exception:  # noqa: BLE001 -- best-effort refresh
-                    pass
-            proj_delta.set_loaded(new_baseline)
-            proj_delta.clear_pending()
-            self._sync_projection_render()
 
         # After a successful Save, field_data.json, field_data.py EDGES, and
         # the model are all consistent, so the pending-rename delta is empty
