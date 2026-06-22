@@ -168,6 +168,9 @@ def test_chained_pivot_shared_sensor_edge_not_double_budgeted() -> None:
     """
     field = _make_field(
         nodes=_TC12_NODES,
+        # All edges are BLIND dead-reckon, so every node is blind; the START node
+        # A must be blind (the validator rejects an on-line start, issue #64).
+        node_types={name: "blind" for name in _TC12_NODES},
         line_segments=[],
         blind_edges=_TC12_FLANKING_BLIND_EDGES,
         pivot_turns=_TC12_PIVOT_TURNS,
@@ -201,6 +204,8 @@ def test_chained_pivot_shared_dead_reckon_edge_double_budgets() -> None:
     """
     field = _make_field(
         nodes=_TC12_NODES,
+        # All BLIND dead-reckon nodes; START A must be blind (issue #64).
+        node_types={name: "blind" for name in _TC12_NODES},
         line_segments=[],
         blind_edges=_TC12_FLANKING_BLIND_EDGES,
         pivot_turns=_TC12_PIVOT_TURNS,

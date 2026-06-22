@@ -16,7 +16,6 @@ from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    EDGE_PROJECTION,
     _reverse_heading,
     build_graph,
     directed_edge_heading,
@@ -131,22 +130,22 @@ def test_edges_distance_cm_override_is_honored() -> None:
     # A=(10, 10) -> B=(200, 10): true Euclidean = 190.0 cm. Inject a
     # bidirectional rich-edge override claiming the strip is 99.0 cm.
     # Drop the LINE_SEGMENTS A-B pair so the EDGES entry is the sole
-    # carrier of the A-B edge; otherwise the EDGES PROJECTION type would
-    # conflict with the existing LINE pair (findings #38/#47) and the
-    # validator would reject it before build_graph could emit the edge.
+    # carrier of the A-B edge; a same-type LINE override on an existing
+    # pair is legal, but dropping the pair isolates the geometry-override
+    # path under test (issue #64 retired the projection EDGE type, so a
+    # LINE edge is the override layer here).
     fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
     fd.EDGES = [
         {
-            "type":         EDGE_PROJECTION,
+            "type":         EDGE_LINE,
             "u":            "A",
             "v":            "B",
             "distance_cm":  99.0,
             "heading_deg":  0.0,    # geometric heading also happens to be 0
         },
     ]
-    # Replacing the cloned EDGES with a single entry leaves projection
-    # node P1 unreferenced; the resulting "node has no incident edges"
-    # warning is unrelated to the override path under test.
+    # Suppress any incidental "node has no incident edges" warning from the
+    # narrowed EDGES list; it is unrelated to the geometry-override path here.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         g = build_graph(fd)
@@ -162,12 +161,12 @@ def test_edges_heading_deg_override_is_honored_with_reverse() -> None:
     # 45.0 to prove the override path runs and the reverse is computed off
     # the override (45.0 + 180.0 == 225.0), not off the computed geometry.
     # Drop the LINE_SEGMENTS A-B pair so the EDGES entry is the sole carrier
-    # of the A-B edge; otherwise the PROJECTION type conflicts with the
-    # existing LINE pair (findings #38/#47) and the validator rejects it.
+    # of the A-B edge (issue #64 retired the projection EDGE type, so a LINE
+    # override carries the heading here).
     fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
     fd.EDGES = [
         {
-            "type":         EDGE_PROJECTION,
+            "type":         EDGE_LINE,
             "u":            "A",
             "v":            "B",
             "distance_cm":  190.0,   # validator wants a positive number
@@ -262,11 +261,11 @@ def test_directed_edge_heading_respects_heading_override() -> None:
     """When an EDGES entry supplies an explicit heading_deg, directed_edge_heading
     returns the overridden value, not the atan2-computed geometry."""
     fd = _clone_field_data()
-    # Drop the LINE_SEGMENTS A-B pair so the EDGES PROJECTION entry is sole carrier.
+    # Drop the LINE_SEGMENTS A-B pair so the EDGES LINE entry is sole carrier.
     fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
     fd.EDGES = [
         {
-            "type":        EDGE_PROJECTION,
+            "type":        EDGE_LINE,
             "u":           "A",
             "v":           "B",
             "distance_cm": 190.0,

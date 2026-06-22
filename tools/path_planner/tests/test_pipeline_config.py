@@ -1,9 +1,10 @@
 """TC6 — PipelineConfig self-referential DEFAULT validation.
 
-Finding #51: setting a category field (line/blind/projection/turn) on
-PipelineConfig to its own .DEFAULT sentinel is circular and must be rejected.
-DirectionMode.DEFAULT is the legitimate intended default for the direction
-field and must NOT be rejected.
+Finding #51: setting a category field (line/blind/turn) on PipelineConfig to
+its own .DEFAULT sentinel is circular and must be rejected. DirectionMode.DEFAULT
+is the legitimate intended default for the direction field and must NOT be
+rejected. Issue #64 retired the projection EDGE type and its ``ProjectionMode``
+enum, so PipelineConfig no longer carries a ``projection`` member.
 """
 
 from __future__ import annotations
@@ -16,7 +17,6 @@ from tools.path_planner.pipeline_config import (
     LineMode,
     PipelineConfig,
     PIPELINE_CONFIG,
-    ProjectionMode,
     TurnMode,
 )
 
@@ -30,7 +30,6 @@ def test_default_pipeline_config_is_valid() -> None:
     cfg = PipelineConfig()
     assert cfg.line       == LineMode.NORMAL
     assert cfg.blind      == BlindMode.SYNC_TSHAPE
-    assert cfg.projection == ProjectionMode.NORMAL
     assert cfg.turn       == TurnMode.COUNTER_ROT
     assert cfg.direction  == DirectionMode.DEFAULT
 
@@ -50,7 +49,6 @@ def test_explicit_non_default_values_accepted() -> None:
     cfg = PipelineConfig(
         line=LineMode.FAST,
         blind=BlindMode.GYRO_TSHAPE,
-        projection=ProjectionMode.SLOW,
         turn=TurnMode.PIVOT_LEFT,
         direction=DirectionMode.FORCE_FORWARD,
     )
@@ -69,11 +67,6 @@ def test_line_default_raises() -> None:
 def test_blind_default_raises() -> None:
     with pytest.raises(ValueError, match=r"PipelineConfig\.blind"):
         PipelineConfig(blind=BlindMode.DEFAULT)
-
-
-def test_projection_default_raises() -> None:
-    with pytest.raises(ValueError, match=r"PipelineConfig\.projection"):
-        PipelineConfig(projection=ProjectionMode.DEFAULT)
 
 
 def test_turn_default_raises() -> None:

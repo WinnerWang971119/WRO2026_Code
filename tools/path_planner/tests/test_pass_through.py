@@ -23,7 +23,7 @@ from tools.path_planner.compiler import (
     ACT_FORWARD,
     ACT_TURN_REL,
 )
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.sim import VirtualChassis, PathTrackerSim
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
@@ -55,15 +55,26 @@ def _minimal_field(nodes: dict, start_node: str, start_heading_deg: float) -> Si
     )
 
 
-def _make_graph(nodes: dict, edges: list) -> nx.DiGraph:
+def _make_graph(nodes: dict, edges: list, node_types: dict = None) -> nx.DiGraph:
     """Build a ``DiGraph`` from a list of ``(u, v, type, distance_cm, heading_deg)`` tuples.
 
     Adds a symmetric reverse edge for every forward edge so that
     ``next_hop`` tables can always cover return paths.
+
+    ``node_types`` (issue #64) sets each node's ``type`` attribute so the sim's
+    LOCAL ``is_projection_node`` read resolves correctly; an absent entry
+    defaults to ``"line"`` (the existing behavior -- a junction the pass-through
+    peek treats as a normal intersection).
     """
+    node_types = node_types or {}
     g = nx.DiGraph()
     for name, (x, y) in nodes.items():
-        g.add_node(name, x_cm=float(x), y_cm=float(y))
+        g.add_node(
+            name,
+            x_cm=float(x),
+            y_cm=float(y),
+            type=node_types.get(name, "line"),
+        )
     for u, v, edge_type, dist, hdg in edges:
         g.add_edge(u, v, type=edge_type, distance_cm=float(dist), heading_deg=float(hdg))
         g.add_edge(
@@ -121,10 +132,20 @@ def _dense_next_hop(nodes: dict, edges_raw: list) -> dict:
     return table
 
 
-def _make_sim(nodes: dict, edges_raw: list, start_node: str, start_heading_deg: float):
-    """Return a fully wired ``(sim, chassis)`` pair, ready for ``go_to()`` calls."""
+def _make_sim(
+    nodes: dict,
+    edges_raw: list,
+    start_node: str,
+    start_heading_deg: float,
+    node_types: dict = None,
+):
+    """Return a fully wired ``(sim, chassis)`` pair, ready for ``go_to()`` calls.
+
+    ``node_types`` (issue #64) is forwarded to :func:`_make_graph` so a fixture
+    can mark a node ``"projection"`` (an on-line, not-at-a-junction waypoint).
+    """
     fd = _minimal_field(nodes, start_node, start_heading_deg)
-    graph = _make_graph(nodes, edges_raw)
+    graph = _make_graph(nodes, edges_raw, node_types)
     next_hop = _dense_next_hop(nodes, edges_raw)
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
@@ -261,15 +282,21 @@ def test_tc3_tc4_heading_tolerance_boundary(heading_delta, expected_tag):
 # ---------------------------------------------------------------------------
 
 
-def test_tc5_collinear_line_to_projection():
-    """TC5: Collinear LINE→PROJECTION at B emits LINE_PASS then FOLLOW_DIST (no turn).
+def test_tc5_collinear_line_into_projection_node():
+    """TC5: Collinear LINE hop crossing B into a projection node C emits LINE_PASS
+    then FOLLOW_DIST (no turn).
+
+    Issue #64: projection is a NODE property. ``C`` is a projection node, so the
+    ``B->C`` hop is a LINE edge that is DISTANCE-terminated (FOLLOW_DIST). At the
+    collinear intersection ``B`` (a real junction) the inbound LINE hop ``A->B``
+    passes through (LINE_PASS) because the next hop ``B->C`` is collinear.
 
     Layout:
-        A(0,0) --LINE heading 0°--> B(50,0) --PROJECTION heading 0°--> C(100,0)
+        A(0,0) --LINE heading 0°--> B(50,0) --LINE heading 0°--> C(100,0)  [C projection]
 
     Expected sequence from A to C:
         (ACT_FOLLOW_INT, None)
-        (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM)  ← B (collinear into PROJECTION)
+        (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM)  ← B (collinear into projection C)
         (ACT_FOLLOW_DIST, 50.0)
     """
     nodes = {
@@ -279,9 +306,9 @@ def test_tc5_collinear_line_to_projection():
     }
     edges_raw = [
         ("A", "B", EDGE_LINE, 50.0, 0.0),
-        ("B", "C", EDGE_PROJECTION, 50.0, 0.0),
+        ("B", "C", EDGE_LINE, 50.0, 0.0),
     ]
-    sim, _ = _make_sim(nodes, edges_raw, "A", 0.0)
+    sim, _ = _make_sim(nodes, edges_raw, "A", 0.0, node_types={"C": "projection"})
 
     prims = sim.go_to("C")
 
@@ -655,17 +682,23 @@ def test_tc11_position_invariant_line_pass_equals_overshoot():
 # ---------------------------------------------------------------------------
 
 
-def test_tc12_projection_inbound_no_line_pass():
-    """TC12: A path whose intersection at B is reached via a PROJECTION edge (not LINE)
-    emits the legacy sequence — no LINE_PASS — because pass-through is only checked
-    in the EDGE_LINE branch of go_to.
+def test_tc12_projection_node_arrival_no_line_pass():
+    """TC12: A path whose node B is a projection node (a LINE hop A->B that is
+    DISTANCE-terminated) emits FOLLOW_DIST at B — never LINE_PASS — because the
+    distance-terminated projection branch of go_to does not run the pass-through
+    peek (which lives in the junction-terminated EDGE_LINE branch).
+
+    Issue #64: projection is a NODE property. ``B`` is a projection node, so the
+    ``A->B`` LINE hop is DISTANCE-terminated (FOLLOW_DIST, no FOLLOW_INT, no
+    overshoot, no pass-through). The onward ``B->C`` LINE hop into the junction
+    node ``C`` emits the normal FOLLOW_INT + LINE_OVERSHOOT.
 
     Layout:
-        A(0,0) --PROJECTION heading 0°--> B(50,0) --LINE heading 0°--> C(100,0)
+        A(0,0) --LINE heading 0°--> B(50,0) [projection] --LINE heading 0°--> C(100,0)
 
     Expected sequence from A to C:
-        (ACT_FOLLOW_DIST, 50.0)   ← A→B via PROJECTION (no FOLLOW_INT, no overshoot)
-        (ACT_FOLLOW_INT, None)    ← B→C via LINE
+        (ACT_FOLLOW_DIST, 50.0)   ← A→B into a projection node (no FOLLOW_INT/overshoot)
+        (ACT_FOLLOW_INT, None)    ← B→C via LINE into a junction
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM) ← C is destination
     """
     nodes = {
@@ -674,17 +707,17 @@ def test_tc12_projection_inbound_no_line_pass():
         "C": (100.0, 0.0),
     }
     edges_raw = [
-        ("A", "B", EDGE_PROJECTION, 50.0, 0.0),
+        ("A", "B", EDGE_LINE, 50.0, 0.0),
         ("B", "C", EDGE_LINE, 50.0, 0.0),
     ]
-    sim, _ = _make_sim(nodes, edges_raw, "A", 0.0)
+    sim, _ = _make_sim(nodes, edges_raw, "A", 0.0, node_types={"B": "projection"})
 
     prims = sim.go_to("C")
 
     act_tags = [tag for tag, _ in prims]
-    # No LINE_PASS anywhere — inbound to B was PROJECTION, not LINE.
+    # No LINE_PASS anywhere — arrival at B was DISTANCE-terminated (projection).
     assert ACT_LINE_PASS not in act_tags
-    # The PROJECTION leg emits FOLLOW_DIST, not FOLLOW_INT + overshoot.
+    # The LINE-into-projection leg emits FOLLOW_DIST, not FOLLOW_INT + overshoot.
     assert prims[0] == (ACT_FOLLOW_DIST, 50.0)
     # The LINE leg B→C emits FOLLOW_INT + LINE_OVERSHOOT (C is the goal).
     assert ACT_FOLLOW_INT in act_tags

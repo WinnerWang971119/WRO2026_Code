@@ -77,7 +77,11 @@ DIRECTIONS: Tuple[str, ...] = ("FRONT", "REAR")
 # Board counts: 1-board (front-only) vs 2-board (bidirectional-capable).
 LINE_BOARD_COUNTS: Tuple[int, ...] = (1, 2)
 
-# Auto-rule active flag (BLIND_PROJECTION_AUTO_SEEK and next_hop_is_projection).
+# Auto-rule active flag: the LOCAL Blind->Projection-node trigger
+# (BLIND_PROJECTION_AUTO_SEEK and the edge's OWN destination is a projection
+# node, issue #64 -- no goal-relative next-hop peek). The resolver only ever
+# sees this resolved bool, so the truth table is unchanged by the move from the
+# old goal-relative phrasing to the node-property one.
 AUTO_RULE_FLAGS: Tuple[bool, ...] = (False, True)
 
 # The bare seek tag whose presence in edgeMode forces a SYNC_TSHAPE motion.
