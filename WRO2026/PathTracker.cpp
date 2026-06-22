@@ -245,6 +245,7 @@ bool PathTrackerClass::begin()
     _nextHop                 = FieldMap::NODE_NONE;
     _activeEdgeType          = Routes::EdgeType::NONE;
     _passThrough             = false;
+    _projPassThrough         = false;
     _resolvedDirection       = Direction::AUTO;
     _resolvedBodyHeading     = 0.0f;
     _returnUsesLineSeek      = false;
@@ -307,6 +308,7 @@ void PathTrackerClass::abort()
     _nextHop                = FieldMap::NODE_NONE;
     _activeEdgeType         = Routes::EdgeType::NONE;
     _passThrough            = false;
+    _projPassThrough        = false;
     _resolvedDirection      = Direction::AUTO;
     _resolvedBodyHeading    = 0.0f;
     _returnUsesLineSeek     = false;
@@ -910,11 +912,52 @@ void PathTrackerClass::_stepFsm()
             // is detected. There is no junction to re-anchor against, so advance the
             // node by dead-reckoning (`onDeadReckonedAdvance`), mirroring the sim's
             // `follow_line_to_distance` + `on_dead_reckoned_advance` (T5).
+            //
+            // THE PASS-THROUGH TRIGGER IS THIS DISTANCE GATE (T19, issue #64).
+            // For a `line(A)–projection(B)–line(C)` triple routed PAST B, the A→B
+            // hop runs THIS state (projection node B has no junction marker, so
+            // `Intersection.isAtIntersection()` never fires at B — it only fires at
+            // the real junction C). The pass-through MUST therefore fire off this
+            // DISTANCE gate, NOT the intersection gate of the `LINE_FOLLOW` state.
+            // Eligibility was decided + latched at arm time (`_projPassThrough`) in
+            // `_dispatchEdgeAfterTurn`, which also armed the gate with
+            // `brakeOnGate == false` so the trip does NOT self-disable/brake the
+            // follower — the A→C follow stays continuous across B.
             if (LineFollower.isDistanceReached())
             {
+                if (_projPassThrough)
+                {
+                    // PASS-THROUGH: do NOT stop and do NOT re-enable the follower (a
+                    // fresh enable would re-seed the tShape ramp / deadband-snap the
+                    // PWM floor and lurch). The follower is still running (the gate
+                    // was armed brake-on-gate=false). Stamp the node advance at B
+                    // MID-FOLLOW — a dead-reckon advance (no junction re-anchor here;
+                    // C re-anchors), preserving the one-advance-per-node invariant —
+                    // then continue line-following the B→C hop. Set `_passThrough` so
+                    // the upcoming PLAN_NEXT_HOP → `_dispatchEdgeAfterTurn` LINE→line
+                    // branch hits the already-enabled LineFollower fast-path (no
+                    // ramp-up reseed) and cruise PWM is preserved across B. The B→C
+                    // pre-edge turn is a no-op because A→B→C are collinear (the gate
+                    // guaranteed it), so `_dispatchTurnIfNeeded` returns false and
+                    // never disables the follower. At C, `LINE_FOLLOW` +
+                    // `Intersection.isAtIntersection()` re-anchors normally. Mirrors
+                    // the sim's distance-gated mid-follow advance (T20).
+                    Localization.onDeadReckonedAdvance(_nextHop);
+                    _projPassThrough = false;    // consumed (re-evaluated per hop)
+                    _passThrough     = true;     // keep the follower live into B→C
+                    _state           = State::PLAN_NEXT_HOP;
+                    return;
+                }
+
+                // Normal per-hop path: stop at the projection node B. Disable the
+                // follower (active brake), dead-reckon the advance, then plan the
+                // next hop (or finish if B is the goal). This is the fallback for a
+                // `goTo(B)` and for any triple that failed the pass-through gate
+                // (BLIND flank, non-collinear, projection/blind C, …).
                 LineFollower.setEnabled(false);
                 Localization.onDeadReckonedAdvance(_nextHop);
-                _state = State::PLAN_NEXT_HOP;
+                _projPassThrough = false;    // consumed (defensive; already false here)
+                _state           = State::PLAN_NEXT_HOP;
             }
             return;
         }
@@ -1112,6 +1155,10 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _activeEdgeType         = Routes::EdgeType::NONE;
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
+    // A fault disables the follower above; drop both pass-through eligibility flags
+    // so a latched value cannot leak into a post-clearFault() goal's first dispatch.
+    _passThrough            = false;
+    _projPassThrough        = false;
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
@@ -1691,9 +1738,9 @@ float PathTrackerClass::_pivotTrimDistance(const Routes::EdgeInfo& edge)
 
 uint8_t PathTrackerClass::_peekNextNextHop() const
 {
-    // Shared one-hop lookahead guard. The LINE_FOLLOW pass-through decision peeks
-    // the hop AFTER `_nextHop` toward `_destinationNode` and needs three guards,
-    // kept in one place here so they cannot drift:
+    // Shared one-hop lookahead guard. A pass-through decision peeks the hop AFTER
+    // `_nextHop` toward `_destinationNode` and needs three guards, kept in one place
+    // here so they cannot drift:
     //   1. not-final  — `_nextHop` is the destination, so there is no next-next hop
     //                   (the final/goal hop must never crash or trigger the rule).
     //   2. NODE_NONE  — `getNextHop` returns no route from `_nextHop` to the goal.
@@ -1701,12 +1748,13 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
     // Any failed guard yields `FieldMap::NODE_NONE`; otherwise the valid next-next
     // node id is returned for the caller to classify.
     //
-    // Issue #64 retired the second caller (the BLIND auto-rule projection
-    // classification): the auto-seek decision is now a LOCAL read of the CURRENT
-    // hop's destination node (`isProjectionNode(_nextHop)`), so this helper has a
-    // single caller for now. Its three guards are kept intact and self-contained
-    // for the `line–proj–line` pass-through phase (T19), which re-adds a
-    // routing-lookahead caller.
+    // Two callers share this ONE guard set. Issue #64 retired the OLD second caller
+    // (the BLIND auto-rule projection classification — now a LOCAL
+    // `isProjectionNode(_nextHop)` read with no next-next peek), and T19 added a new
+    // one: `_evaluateProjectionPassThrough()` for the distance-gated
+    // `line–proj–line` collapse. The other caller is the intersection-gated
+    // `LINE_FOLLOW` pass-through. Both conform to the same three guards, kept intact
+    // and self-contained here.
     if (_nextHop == _destinationNode)
     {
         return FieldMap::NODE_NONE;
@@ -1717,6 +1765,85 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
         return FieldMap::NODE_NONE;
     }
     return nextNext;
+}
+
+bool PathTrackerClass::_evaluateProjectionPassThrough() const
+{
+    // `line(A)–projection(B)–line(C)` pass-through gate (T19, issue #64). Called at
+    // LINE→projection arm time: B == `_nextHop`, `_resolvedBodyHeading` /
+    // `_resolvedDirection` already hold the A→B hop's body heading + direction.
+    //
+    // ROUTING LOOKAHEAD ONLY. This decides WHETHER the distance-gated follow into B
+    // collapses the triple into one continuous A→C follow; it does NOT change which
+    // gate fires the state transition (always the A→B DISTANCE gate — a projection
+    // node has no junction marker). Every condition must hold; any miss ⇒ stop at B.
+
+    // (1) Compiled out → never pass through. Leads so the NEXT_HOP peek below is
+    // skipped entirely on a build without pass-through (matches the LINE_FOLLOW
+    // intersection-gated peek's `PATH_PASS_THROUGH_ENABLED &&` lead).
+    if (!Config::PATH_PASS_THROUGH_ENABLED)
+    {
+        return false;
+    }
+
+    // (2) B must be a NON-goal projection node with a real next hop C. The shared
+    // `_peekNextNextHop()` applies the not-final / NODE_NONE / self-loop guards —
+    // its not-final guard (`_nextHop == _destinationNode`) is exactly the `goTo(B)`
+    // case, so a goal-is-B route returns NODE_NONE here and correctly stops at B.
+    const uint8_t c = _peekNextNextHop();
+    if (c == FieldMap::NODE_NONE)
+    {
+        return false;
+    }
+
+    // (3) The outbound edge B→C must be a LINE edge (both flanks LINE). The inbound
+    // A→B is LINE by construction — this method is only reached on the LINE→projection
+    // dispatch path. A BLIND flank (B→C blind) is a normal stop at B.
+    const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, c);
+    if (outbound.type != Routes::EdgeType::LINE)
+    {
+        return false;
+    }
+
+    // (4) C must be a LINE (junction) node so the B→C hop re-anchors at a real
+    // intersection (`Intersection.isAtIntersection()` fires at C). A projection C
+    // (B→C would itself be a distance-gated follow with no re-anchor) or any other
+    // type is rejected — those are out of scope for the line-proj-line collapse.
+    if (FieldMap::getNodeType(c) != Routes::NodeType::LINE)
+    {
+        return false;
+    }
+
+    // (5) A→B→C collinear AND same direction — the SAME ADR-023 heading check the
+    // intersection-gated pass-through uses. Compare BODY headings (the chassis
+    // arrives facing `_resolvedBodyHeading`): re-resolve the B→C direction with the
+    // inbound body heading as the current heading, rotate the outbound edge heading
+    // 180° for REAR, then wrap-normalize the delta. The next-next hop is still part
+    // of the active goTo(), so the same cached route/arrival overrides apply
+    // (arrival only binds when C is the final destination, handled by the isLastHop
+    // flag). A FRONT↔REAR flip across B would force a mid-flight LineFollower board
+    // swap — never a pass-through, so require the resolved direction to match too.
+    const float inboundBody = _resolvedBodyHeading;
+    const Direction nextDir = resolveDirection(
+        outbound.direction_override,
+        Routes::PIPELINE_CONFIG.direction,
+        _activeArrivalDirection,
+        _activeRouteDirection,
+        inboundBody,
+        outbound.heading_deg,
+        (c == _destinationNode),
+        Config::BIDIRECTIONAL_AUTO_ENABLED,
+        Config::LINE_BOARD_COUNT);
+
+    float outboundBody = outbound.heading_deg;
+    if (nextDir == Direction::REAR)
+    {
+        outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
+        if (outboundBody < 0.0f) outboundBody += 360.0f;
+    }
+
+    const float delta = wrapDeltaDeg(outboundBody - inboundBody);
+    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG) && (nextDir == _resolvedDirection);
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()
@@ -1802,11 +1929,28 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // both folded into a LOCAL effective distance by `_pivotTrimDistance`.
                 // `distance_cm` itself is never mutated. The PROJECTION_FOLLOW state
                 // advances the node via `onDeadReckonedAdvance` when the gate trips.
+                //
+                // T19 (issue #64) — `line(A)–projection(B)–line(C)` PASS-THROUGH.
+                // Evaluate the routing lookahead gate NOW, at arm time, so the
+                // distance gate can be armed correctly: when the triple qualifies
+                // (B is a non-goal projection node, B→C is a LINE edge into a LINE
+                // junction node, A→B→C collinear + same direction), arm the gate
+                // with `brakeOnGate == false` so its trip latches `isDistanceReached`
+                // WITHOUT self-disabling or braking the follower — the A→C follow
+                // stays continuous across the marker-less node B. The
+                // `PROJECTION_FOLLOW` state reads `_projPassThrough` on the trip to
+                // stamp `onDeadReckonedAdvance(B)` mid-follow and continue to C,
+                // where `Intersection.isAtIntersection()` fires and re-anchors. The
+                // gate evaluation is the SAME ADR-023 heading check the intersection-
+                // gated pass-through uses; the TRIGGER differs — it is THIS distance
+                // gate, not `isAtIntersection()`, which never fires at B.
+                _projPassThrough = _evaluateProjectionPassThrough();
                 const float effectiveDistCm = _pivotTrimDistance(edge);
                 LineFollower.setEnabled(true)
                             .setPreset(preset)
                             .setReverse(reverse)
                             .setOvershootMode(false)
+                            .setBrakeOnGate(!_projPassThrough)
                             .setDistanceTarget(effectiveDistCm);
                 _state = State::PROJECTION_FOLLOW;
             }
