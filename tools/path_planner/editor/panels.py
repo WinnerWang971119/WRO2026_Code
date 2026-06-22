@@ -76,10 +76,11 @@ class Mode(enum.Enum):
     ``Mode(panels.mode_var.get())``.
 
     :cvar ADD_NODE: Left-click on the canvas creates a new node.
-    :cvar MOVE: Left-click selects; drag moves the picked node.
+    :cvar MOVE: Left-click arms a drag; drag moves the picked node.
     :cvar EDGE: Click two nodes, then press ``L`` / ``B`` to add an edge.
     :cvar OBSTACLE: Drag a rectangle to create a new obstacle.
     :cvar START: Click a node to set it as ``START_NODE``.
+    :cvar SELECT: Left-click selects the node under the cursor; an empty click clears the selection.
     """
 
     ADD_NODE = "add_node"
@@ -87,11 +88,13 @@ class Mode(enum.Enum):
     EDGE = "edge"
     OBSTACLE = "obstacle"
     START = "start"
+    SELECT = "select"
 
 
 # Human-readable labels shown next to each mode row, in display order.  These
 # are the short labels for the compact left toolbar column.
 _MODE_LABELS: tuple[tuple[Mode, str], ...] = (
+    (Mode.SELECT, "Sel"),
     (Mode.MOVE, "Move"),
     (Mode.ADD_NODE, "Add"),
     (Mode.EDGE, "Edge"),
@@ -1907,7 +1910,7 @@ class SidePanels(tk.Frame):
         Called by the app whenever the active :class:`Mode` changes so the
         strip always names the current editing mode.
 
-        :param text: Mode description (e.g. ``"Mode: Move / select"``).
+        :param text: Mode description (e.g. ``"Mode: Select"``).
         """
         self._mode_display_var.set(text)
 
