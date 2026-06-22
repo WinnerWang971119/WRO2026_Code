@@ -157,14 +157,6 @@ _PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
 _EDGE_KIND_LINE: str = "line"
 _EDGE_KIND_BLIND: str = "blind"
 
-#: Default wall axis seeded when the operator first flips a plain node to the
-#: ``"reset"`` type from the inspector combobox.  The wall_coord / facing are
-#: NOT placeholders -- they are auto-filled from the node geometry against this
-#: axis via :meth:`commands.SetResetSpec.autofilled` (the nearer qualifying
-#: wall, facing away), matching the Add-node-reset path.  Both stay editable and
-#: recompute when the operator changes the axis or moves the node.
-_RESET_SPEC_DEFAULT_AXIS: str = "x"
-
 #: Allowed wall-zero axis values for an inline reset-spec edit; single-sourced
 #: from ``model.RESET_AXIS_VALUES`` (which mirrors
 #: ``validator._ALLOWED_RESET_AXES``).  The inline guard rejects anything else
@@ -1041,10 +1033,11 @@ class EditorApp:
         dispatches by case:
 
         * ``new_type == "reset"`` and the node is NOT already reset -> plant a
-          reset spec via :meth:`SetResetSpec.autofilled`, seeding wall_coord /
-          facing from the node geometry (the nearer qualifying wall, facing
-          away) so the operator gets a real suggestion, not a placeholder. The
-          values stay editable and recompute on an axis / position change.
+          reset spec via :meth:`SetResetSpec.autofilled_auto`, seeding axis /
+          wall_coord / facing from the node geometry (the nearest of all four
+          walls, facing away) so the operator gets a real suggestion, not a
+          placeholder. The values stay editable and recompute on an axis /
+          position change.
         * ``new_type`` in {line, blind} and the node IS currently reset ->
           :class:`ClearResetSpec`, which removes the spec and re-types the node.
         * Otherwise (a plain line <-> blind change) -> :class:`SetNodeType`.
@@ -1066,19 +1059,25 @@ class EditorApp:
         if new_type == _NODE_TYPE_RESET:
             # Plain -> reset: SetResetSpec atomically sets type=reset AND writes
             # the reset_nodes spec, keeping the validator's type-and-spec
-            # invariant intact at every step. Seed wall_coord / facing from the
-            # node geometry via reset_autofill (the nearer qualifying wall,
-            # facing away), mirroring the Add-node-reset path so the operator
-            # gets a real suggestion instead of a (0,0) placeholder. Both stay
-            # editable and recompute on an axis / position change.
-            self._dispatch(
-                SetResetSpec.autofilled(
+            # invariant intact at every step. Seed axis / wall_coord / facing
+            # from the node geometry via reset_autofill_auto (the NEAREST of all
+            # four walls, facing away), mirroring the Add-node-reset path so the
+            # operator gets a real suggestion instead of a (0,0) placeholder.
+            # Both stay editable and recompute on an axis / position change.
+            if self._dispatch(
+                SetResetSpec.autofilled_auto(
                     node_name,
                     node_xy=self._model.nodes[node_name],
-                    axis=_RESET_SPEC_DEFAULT_AXIS,
                     field_mm=self._model.field_mm,
                 )
-            )
+            ):
+                # SetResetSpec.apply has written the auto-derived spec; read it
+                # back to warn the operator if the nearest wall is under the
+                # pivot-clearance floor (the spec stands; Save is the hard gate).
+                spec = self._model.reset_nodes[node_name]
+                self._warn_if_reset_too_close(
+                    node_name, spec["axis"], spec["wall_coord"]
+                )
             return
 
         if current_type == _NODE_TYPE_RESET:
@@ -1206,6 +1205,47 @@ class EditorApp:
         self._panels.set_validation_badge(False)
         self._refresh_view()
 
+    def _warn_if_reset_too_close(
+        self, name: str, axis: str, wall_coord: float
+    ) -> None:
+        """Warn (status + INVALID badge) when an auto-derived reset wall is too close.
+
+        Called right after a seed / axis-change :class:`SetResetSpec` dispatch
+        succeeds. When the auto-derived wall stands off the node by less than
+        :data:`projection_edges.WALL_PIVOT_CLEARANCE_CM` (the pivot-sweep
+        clearance the Save-time validator enforces), the spec is still applied --
+        auto-fill suggests, it never traps -- but the operator is told the actual
+        standoff and the distance to move the node back, and the validation badge
+        drops to INVALID. When the wall clears the floor this is a no-op.
+
+        The message is ASCII-only (no ``>=`` glyph, no em-dash) to avoid any
+        source / console encoding surprise; the clearance figure is interpolated
+        from the shared constant, never a hardcoded ``14``.
+
+        This deliberately calls :meth:`SidePanels.set_validation_badge` (not
+        :meth:`SidePanels.set_validation`): both drive the same badge widget, but
+        the headless test double implements only ``set_status`` / ``refresh`` /
+        ``set_validation_badge``. In the live app ``_dispatch -> _refresh_view ->
+        _revalidate`` already calls ``set_validation(False, ...)`` for a < 14 cm
+        node, so the two agree (both INVALID) rather than fighting.
+
+        :param name: Name of the reset node whose seeded spec is being checked.
+        :param axis: The auto-derived wall axis (``"x"`` or ``"y"``).
+        :param wall_coord: The auto-derived wall coordinate in centimetres.
+        """
+        node_xy = self._model.nodes[name]
+        if not projection_edges.is_reset_wall_too_close(node_xy, axis, wall_coord):
+            return
+        node_coord = node_xy[0] if axis == "x" else node_xy[1]
+        standoff = abs(wall_coord - node_coord)
+        clearance = projection_edges.WALL_PIVOT_CLEARANCE_CM
+        self._set_status(
+            f"Reset node '{name}' is {standoff:.1f} cm from the "
+            f"{axis}={wall_coord:g} wall, below the {clearance:g} cm pivot "
+            f"clearance; move it back to at least {clearance:g} cm."
+        )
+        self._panels.set_validation_badge(False)
+
     def _on_panel_reset_spec_change(
         self, name: str, axis: str, wall_coord: float, facing: float
     ) -> None:
@@ -1268,7 +1308,12 @@ class EditorApp:
                 # axis was already membership-checked above; this is defensive.
                 self._reject_inline_edit(f"Reset spec: {exc}")
                 return
-            self._dispatch(SetResetSpec(name, axis, new_wall, new_facing))
+            if self._dispatch(SetResetSpec(name, axis, new_wall, new_facing)):
+                # The re-derived axis is auto-fill too: warn if the nearest wall
+                # on the chosen axis is under the pivot-clearance floor (the
+                # spec stands; Save is the hard gate). We hold new_wall locally,
+                # so no read-back is needed here.
+                self._warn_if_reset_too_close(name, axis, new_wall)
             return
 
         # Axis unchanged: the operator edited wall / facing by hand. Range-check
@@ -1737,8 +1782,9 @@ class EditorApp:
         ``"reset"`` -- but :class:`AddNode` refuses a reset type (a reset node
         needs a paired spec), so a reset selection is created in two steps
         instead: an :class:`AddNode` as a plain ``"line"`` node, then a
-        :meth:`SetResetSpec.autofilled` that flips it to ``"reset"`` with an
-        auto-suggested wall + facing. The new node is then selected and the
+        :meth:`SetResetSpec.autofilled_auto` that flips it to ``"reset"`` with
+        an auto-suggested axis + wall + facing. The new node is then selected
+        and the
         Reset-spec inspector section opened so the operator can confirm /
         tweak the auto-filled geometry. (Two undo steps for a reset node is
         acceptable.) Validation of duplicate / illegal names happens downstream
@@ -1781,23 +1827,25 @@ class EditorApp:
         """Create a reset node in two undoable steps and open its spec panel.
 
         :class:`AddNode` rejects the ``"reset"`` type, so a reset node is built
-        as a plain ``"line"`` node first, then :meth:`SetResetSpec.autofilled`
-        flips it to ``"reset"`` with an auto-suggested wall coordinate / facing
-        (the nearer qualifying field wall on the default ``"x"`` axis). If the
-        first :class:`AddNode` is rejected (duplicate name etc.) the second
-        dispatch is skipped so a half-formed reset node is never planted. On
-        success the new node is selected and the Reset-spec inspector section
-        is opened so the operator sees and confirms the auto-fill.
+        as a plain ``"line"`` node first, then
+        :meth:`SetResetSpec.autofilled_auto` flips it to ``"reset"`` with an
+        auto-suggested axis / wall coordinate / facing (the NEAREST of all four
+        field walls, facing away). If the first :class:`AddNode` is rejected
+        (duplicate name etc.) the second dispatch is skipped so a half-formed
+        reset node is never planted. On success, if the seeded wall sits under
+        the pivot-clearance floor the operator is warned (the spec still stands;
+        Save is the hard gate), then the new node is selected and the Reset-spec
+        inspector section is opened so the operator sees and confirms the
+        auto-fill.
 
         :param name: Name of the new reset node.
         :param xy: ``(x_cm, y_cm)`` coordinates of the click.
         """
         if not self._dispatch(AddNode(name, xy, _NODE_TYPE_LINE)):
             return
-        spec = SetResetSpec.autofilled(
+        spec = SetResetSpec.autofilled_auto(
             name,
             node_xy=xy,
-            axis=_RESET_SPEC_DEFAULT_AXIS,
             field_mm=self._model.field_mm,
         )
         if not self._dispatch(spec):
@@ -1805,6 +1853,12 @@ class EditorApp:
             # Leave it selected so the operator can fix the type by hand.
             self._select_node(name)
             return
+        # SetResetSpec.apply has written the auto-derived spec; read it back and
+        # warn the operator BEFORE the select / reveal below if the nearest wall
+        # is under the pivot-clearance floor (the spec stands; Save is the hard
+        # gate). The select / reveal calls do not overwrite the status message.
+        seeded = self._model.reset_nodes[name]
+        self._warn_if_reset_too_close(name, seeded["axis"], seeded["wall_coord"])
         # Select the new reset node and reveal its spec section so the
         # auto-filled wall / facing are visible for confirmation.
         self._select_node(name)
