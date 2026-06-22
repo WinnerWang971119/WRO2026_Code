@@ -843,6 +843,42 @@ class SetResetSpec:
             name=name, axis=axis, wall_coord=wall_coord, facing=facing
         )
 
+    @classmethod
+    def autofilled_auto(
+        cls,
+        name: str,
+        node_xy: tuple[float, float],
+        field_mm: tuple[float, float],
+    ) -> "SetResetSpec":
+        """Build a :class:`SetResetSpec` with fully auto-derived axis, wall, and facing.
+
+        Mirrors :meth:`autofilled` but does **not** require the caller to supply
+        an axis.  Instead, it delegates to
+        :func:`projection_edges.reset_autofill_auto`, which evaluates all four
+        walls, picks the nearest qualifying one, and returns the axis together
+        with ``wall_coord`` and ``facing``.  The app supplies
+        ``node_xy=model.nodes[name]`` and ``model.field_mm``; keeping the inputs
+        pure (no ``FieldModel``) makes this classmethod directly unit-testable.
+
+        :param name: Name of the node to make (or keep) a reset node.  Not
+            validated here -- :meth:`apply` rejects an unknown node at command
+            time.
+        :param node_xy: The reset node position ``(x_cm, y_cm)``, used to choose
+            the nearest wall across both axes.
+        :param field_mm: Outer field size ``(width_mm, height_mm)`` in
+            millimetres (the ``FieldModel.field_mm`` value).
+        :return: A :class:`SetResetSpec` whose ``axis``, ``wall_coord``, and
+            ``facing`` are the auto-derived suggestion from the nearest wall.
+        :note: Does **not** raise -- the auto helper always returns a best-effort
+            spec (it never raises on a too-close wall).
+        """
+        axis, wall_coord, facing = projection_edges.reset_autofill_auto(
+            node_xy, field_mm
+        )
+        return cls(
+            name=name, axis=axis, wall_coord=wall_coord, facing=facing
+        )
+
 
 @dataclass
 class ClearResetSpec:
