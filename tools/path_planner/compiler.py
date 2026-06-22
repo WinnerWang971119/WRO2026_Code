@@ -11,23 +11,42 @@ Heading convention (matches :mod:`tools.path_planner.graph_builder`):
 * Continuous float degrees in ``[0, 360)``.
 * ``0 deg`` = +x axis (East), CCW positive.
 
+The per-hop primitive is derived from ``(edge_type, destination_node_type)``
+-- the source node type never matters. ``EDGE_PROJECTION`` no longer exists;
+a line-follow segment terminated by encoder distance (no physical
+intersection beneath the strip) is now expressed by giving the *destination*
+node the ``"projection"`` type, probed locally via
+:func:`tools.path_planner.graph_builder.is_projection_node`.
+
+================  ===========================  ===========================  ====================
+Edge \\ dest      line node                    projection node              blind node
+================  ===========================  ===========================  ====================
+``EDGE_LINE``     follow-to-intersection       follow-to-distance           illegal (validator)
+``EDGE_BLIND``   dead-reckon (seek via flag)  auto-seek stop-at-line       pure dead-reckon
+================  ===========================  ===========================  ====================
+
 Primitive vocabulary (forward hops):
 
 * ``("turn_relative", deg)`` -- in-place turn by ``deg`` degrees, CCW
   positive. Emitted between graph edges when the heading delta exceeds
   the per-degree epsilon.
 * ``("follow_line_to_intersection", None)`` -- line-follow until the
-  next intersection event. Emitted for :data:`EDGE_LINE` traversals.
+  next intersection event. Emitted for an :data:`EDGE_LINE` hop into a
+  ``line`` node.
 * ``("follow_line_to_distance", cm)`` -- line-follow stopped by encoder
-  distance. Emitted for :data:`EDGE_PROJECTION` traversals -- used when
-  the waypoint has no physical intersection marker beneath the strip.
-* ``("forward", cm)`` -- dead-reckoned forward move. Emitted for
-  :data:`EDGE_BLIND` traversals whose effective ``BlindMode`` is *not*
-  ``STOP_AT_LINE``.
+  distance (no junction wait). Emitted for an :data:`EDGE_LINE` hop into
+  a ``projection`` node -- the waypoint sits on the line but has no
+  physical intersection marker beneath the strip. Its motion profile
+  comes from the LINE edge's own ``line_mode`` / ``line_mode_override``.
+* ``("forward", cm)`` -- dead-reckoned forward move. Emitted for an
+  :data:`EDGE_BLIND` hop whose effective ``BlindMode`` is *not*
+  ``STOP_AT_LINE`` and that does not auto-seek.
 * ``("stop_at_line", cm)`` -- drive blind toward the expected crossing,
   arm a line detector near the endpoint, and stop on the perpendicular
-  line (re-anchoring localization). Emitted for :data:`EDGE_BLIND`
-  traversals whose effective ``BlindMode`` is ``STOP_AT_LINE``.
+  line (re-anchoring localization). Emitted for an :data:`EDGE_BLIND`
+  hop that seeks -- whose effective ``BlindMode`` is ``STOP_AT_LINE``,
+  or whose destination is a ``projection`` node and the field-wide
+  ``BLIND_PROJECTION_AUTO_SEEK`` toggle is set (the local auto-rule).
 
 Primitive vocabulary (reverse hops, T12+):
 
@@ -36,9 +55,18 @@ selects :class:`~tools.path_planner.sim.runtime.Direction.REAR`, the
 chassis turns to ``(edge_heading + 180) % 360`` (so the rear sensor
 faces along the edge) and dispatches the reverse-mirrored primitive:
 
-* ``("line_reverse", target_node, line_mode)``
+* ``("line_reverse", target_node, line_mode)`` -- a REAR :data:`EDGE_LINE`
+  hop into a ``line`` (junction) node: reverse line-follow terminated by
+  the next intersection event.
+* ``("projection_reverse", target_node, distance_cm, line_mode)`` -- a REAR
+  :data:`EDGE_LINE` hop into a ``projection`` node. Mirrors the FRONT
+  LINE->projection ``ACT_FOLLOW_DIST``: the projection node has no junction
+  marker beneath the strip, so the reverse follow stops by encoder distance
+  (no intersection wait) instead of sensing a crossing. ``distance_cm`` is
+  the RAW ``EDGES`` cell (``edge['distance_cm']``); the sim's pivot-trimmed
+  ``effective_dist_cm`` is its own displacement oracle, exactly as the
+  FORWARD LINE->projection hop differs (compiler raw vs sim trimmed).
 * ``("blind_reverse", target_node, distance_cm, blind_mode)``
-* ``("projection_reverse", target_node, distance_cm, projection_mode)``
 * ``("stop_at_line_reverse", target_node, distance_cm, blind_mode)`` --
   a REAR blind hop is mode-sensitive (mirrors the FRONT branch): the
   per-hop decision runs through
@@ -66,8 +94,7 @@ import networkx as nx
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    EDGE_PROJECTION,
-    next_hop_is_projection,
+    is_projection_node,
 )
 
 ACT_TURN_REL = "turn_relative"
@@ -77,16 +104,17 @@ ACT_FORWARD = "forward"
 ACT_STOP_AT_LINE = "stop_at_line"
 
 # Forward hops produce 2-tuples; reverse hops (REAR direction, T12+) produce
-# 3-tuples (EDGE_LINE) or 4-tuples (EDGE_PROJECTION / EDGE_BLIND variants).
+# 3-tuples (EDGE_LINE into a junction node) or 4-tuples (EDGE_LINE into a
+# projection node, plus the EDGE_BLIND variants).
 # The second slot of a reverse tuple is the target node name (str), not a float.
-# BlindMode / LineMode / ProjectionMode are imported lazily inside compile_path
-# to avoid a circular dependency with sim.runtime; Any stands in for those
-# IntEnum types here so this module-level alias is importable without
-# triggering that circular import.
+# BlindMode / LineMode are imported lazily inside compile_path to avoid a
+# circular dependency with sim.runtime; Any stands in for those IntEnum types
+# here so this module-level alias is importable without triggering that
+# circular import.
 Primitive = Union[
     Tuple[str, Optional[float]],      # forward: turn_rel / follow_* / forward / stop_at_line
-    Tuple[str, str, Any],             # REAR EDGE_LINE: (act, target_node, line_mode)
-    Tuple[str, str, float, Any],      # REAR EDGE_PROJECTION / EDGE_BLIND: (act, target_node, dist, mode)
+    Tuple[str, str, Any],             # REAR EDGE_LINE -> junction: (act, target_node, line_mode)
+    Tuple[str, str, float, Any],      # REAR EDGE_LINE -> projection / EDGE_BLIND: (act, target_node, dist, mode)
 ]
 
 _TURN_EPSILON_DEG = 1e-6
@@ -206,19 +234,27 @@ def compile_path(
          hops, ``(edge_heading + 180) % 360`` for REAR hops.
        * If ``abs(normalize_turn(body_target - current_heading))
          > 1e-6``, emit ``(ACT_TURN_REL, delta)``.
-       * Emit one motion primitive based on ``edge['type']`` and
-         direction. FRONT: ``EDGE_LINE`` -> ``(ACT_FOLLOW_INT, None)``,
-         ``EDGE_PROJECTION`` -> ``(ACT_FOLLOW_DIST, distance_cm)``,
-         ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE, distance_cm)`` when
+       * Emit one motion primitive based on ``(edge['type'],
+         destination_node_type)`` and direction. The destination node
+         type is read **locally** from ``v`` (the end of this hop) via
+         :func:`is_projection_node` -- there is no goal-relative
+         ``NEXT_HOP`` peek.
+         FRONT ``EDGE_LINE``: into a ``projection`` node ->
+         ``(ACT_FOLLOW_DIST, distance_cm)`` (line-follow stopped by
+         encoder distance, no junction wait); otherwise ->
+         ``(ACT_FOLLOW_INT, None)``.
+         FRONT ``EDGE_BLIND``: ``(ACT_STOP_AT_LINE, distance_cm)`` when
          :func:`resolve_stop_at_line` returns ``seek=True`` (the edge's
-         effective :class:`BlindMode` is ``STOP_AT_LINE``, or the auto-rule
-         fires because ``field_data.BLIND_PROJECTION_AUTO_SEEK`` is set and
-         the next hop is a ``PROJECTION`` edge), else
+         effective :class:`BlindMode` is ``STOP_AT_LINE``, or the local
+         auto-rule fires because ``field_data.BLIND_PROJECTION_AUTO_SEEK``
+         is set and ``v`` is a ``projection`` node), else
          ``(ACT_FORWARD, distance_cm)``.
-         REAR: ``EDGE_LINE`` ->
-         ``(ACT_LINE_REVERSE, v, line_mode)``, ``EDGE_PROJECTION`` ->
-         ``(ACT_PROJECTION_REVERSE, v, distance_cm, projection_mode)``,
-         ``EDGE_BLIND`` ->
+         REAR ``EDGE_LINE``: into a ``projection`` node ->
+         ``(ACT_PROJECTION_REVERSE, v, distance_cm, line_mode)`` (reverse
+         line-follow stopped by encoder distance, no junction wait, the REAR
+         mirror of the FRONT ``ACT_FOLLOW_DIST``); otherwise ->
+         ``(ACT_LINE_REVERSE, v, line_mode)``.
+         REAR ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE_REVERSE, ...)`` /
          ``(ACT_BLIND_REVERSE, v, distance_cm, blind_mode)``.
        * Update ``current_heading = body_target`` ONLY when a turn was
          actually emitted (delta exceeded the epsilon). Mirrors
@@ -235,10 +271,11 @@ def compile_path(
         chassis's current node.
     :param start_heading_deg: heading at ``path[0]`` in ``[0, 360)``.
     :param graph: directed graph from :func:`build_graph`.
-    :param field_data: read for ``BLIND_PROJECTION_AUTO_SEEK`` (the auto-rule
-        that fires a ``stop_at_line`` / ``stop_at_line_reverse`` seek on a
-        blind hop whose next hop is a projection edge). ``getattr`` fallback
-        to ``True`` keeps old callers that predate T11 working unchanged.
+    :param field_data: read for ``BLIND_PROJECTION_AUTO_SEEK`` (the local
+        auto-rule that fires a ``stop_at_line`` / ``stop_at_line_reverse``
+        seek on a blind hop whose *destination* node is a ``projection``
+        node). ``getattr`` fallback to ``True`` keeps old callers that
+        predate T11 working unchanged.
     :return: list of :data:`Primitive` tuples.
     :raises ValueError: if ``start_heading_deg`` is not in ``[0, 360)``
         or an edge has an unknown type tag.
@@ -272,7 +309,6 @@ def compile_path(
         resolve_blind_mode,
         resolve_direction,
         resolve_line_mode,
-        resolve_projection_mode,
         resolve_stop_at_line,
     )
 
@@ -285,22 +321,19 @@ def compile_path(
         edge_type = edge["type"]
         is_last_hop = ((i + 1) == last_index)
 
-        # Peek at the NEXT hop's edge type to implement the auto-seek rule: a
-        # blind hop that FEEDS a projection edge seeks a line first to
-        # re-anchor localization before the dead-reckoned slide.
-        #
-        # ``path[i+2]`` is the destination of that next hop -- valid only when
-        # the path was produced by the NEXT_HOP Dijkstra table (as it always is
-        # here and in PathTrackerSim/CTPS); never hand-construct a path that
-        # skips NEXT_HOP nodes or the peek fires incorrectly.  Past the end
-        # (final / second-last hop) there is no next-next, so pass ``None``;
-        # ``next_hop_is_projection`` (the one shared predicate the sim and
-        # firmware also call) absorbs the ``None`` / self-loop / missing-edge
-        # guard, so the three peeks stay byte-identical.
-        next_after = path[i + 2] if i + 2 < len(path) else None
+        # auto_rule_active CONTRACT (issue #64): the BLIND->projection
+        # auto-seek is a purely LOCAL decision on THIS hop's destination
+        # node ``v`` -- no goal-relative ``path[i+2]`` / ``NEXT_HOP[next][goal]``
+        # peek. It fires only when the edge is BLIND, ``v`` is a projection
+        # node, and the field-wide toggle is on. The same bool flows
+        # unchanged into the FROZEN ``resolve_stop_at_line`` resolver
+        # (computing it differently is the ONLY seek-path change). The sim
+        # (T5) and firmware (T10) compute the identical local predicate via
+        # ``is_projection_node`` / ``getNodeType(dest) == PROJECTION``.
         auto_rule_active = (
-            getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
-            and next_hop_is_projection(graph, path[i + 1], next_after)
+            edge_type == EDGE_BLIND
+            and is_projection_node(graph, v)
+            and getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
         )
 
         direction = resolve_direction(
@@ -336,14 +369,29 @@ def compile_path(
 
         if direction == Direction.REAR:
             if edge_type == EDGE_LINE:
-                out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge)))
-            elif edge_type == EDGE_PROJECTION:
-                out.append((
-                    ACT_PROJECTION_REVERSE,
-                    v,
-                    float(edge["distance_cm"]),
-                    resolve_projection_mode(edge),
-                ))
+                # The destination node type (read LOCALLY from ``v``) decides
+                # how the REAR LINE follow terminates, mirroring the FRONT
+                # branch. A ``projection`` node sits on the line but at NO
+                # junction, so an intersection-terminated reverse follow can
+                # never be sensed there; the hop instead line-follows backward
+                # yet stops by encoder distance (ACT_PROJECTION_REVERSE), a
+                # distance-terminated reverse. Any other destination (a real
+                # junction) keeps the intersection-terminated ACT_LINE_REVERSE.
+                # The distance payload is the RAW EDGES cell ``distance_cm`` --
+                # the sim's ``effective_dist_cm`` pivot-trim is the sim-side
+                # displacement oracle, identical to how the FORWARD
+                # LINE->projection hop differs (compiler raw vs sim trimmed).
+                # Mirrors the REAR LINE->projection branch of
+                # ``PathTrackerSim.go_to`` in ``sim/runtime.py`` cell-for-cell.
+                if is_projection_node(graph, v):
+                    out.append((
+                        ACT_PROJECTION_REVERSE,
+                        v,
+                        float(edge["distance_cm"]),
+                        resolve_line_mode(edge),
+                    ))
+                else:
+                    out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge)))
             elif edge_type == EDGE_BLIND:
                 # REAR blind is mode-sensitive via the unified resolver: a
                 # 2-board REAR STOP_AT_LINE hop seeks with the rear board and
@@ -384,9 +432,18 @@ def compile_path(
                 )
         else:
             if edge_type == EDGE_LINE:
-                out.append((ACT_FOLLOW_INT, None))
-            elif edge_type == EDGE_PROJECTION:
-                out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
+                # The destination node type (read LOCALLY from ``v``) decides
+                # how the LINE follow terminates: a ``projection`` node sits on
+                # the line but at NO junction, so the hop line-follows yet stops
+                # by encoder distance (no intersection wait) -- its motion
+                # profile still comes from the LINE edge's own line_mode /
+                # line_mode_override, not a projection mode. Any other
+                # destination (a real junction) follows to the intersection
+                # marker and re-anchors there.
+                if is_projection_node(graph, v):
+                    out.append((ACT_FOLLOW_DIST, float(edge["distance_cm"])))
+                else:
+                    out.append((ACT_FOLLOW_INT, None))
             elif edge_type == EDGE_BLIND:
                 # FRONT blind is mode-sensitive via the unified resolver: a
                 # STOP_AT_LINE edge stops on the physical crossing (and
@@ -425,7 +482,6 @@ __all__ = [
     "ACT_STOP_AT_LINE",
     "EDGE_LINE",
     "EDGE_BLIND",
-    "EDGE_PROJECTION",
     "Primitive",
     "compile_path",
     "final_heading_after",
