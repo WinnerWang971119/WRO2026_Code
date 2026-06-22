@@ -100,25 +100,6 @@ _PROPOSED_EDGE_LINESTYLE: tuple = (0, (3, 3))  # dashed
 _PROPOSED_EDGE_LINEWIDTH: float = 1.8
 _PROPOSED_EDGE_ZORDER: int = 4  # between _EDGE_ZORDER (3) and _NODE_ZORDER (6)
 
-# Projection-edge styling. A projection edge is a DIRECTED dead-reckoned hop
-# (``u -> v`` with a baked distance + heading); it is drawn as a teal solid
-# arrow with a head at ``v`` so it reads distinctly from the line (ink, solid)
-# and blind (brick, dashed) edges. ``FancyArrowPatch`` is the artist: it carries
-# its own arrowhead and re-points cheaply via ``set_positions`` during a drag,
-# which is what lets an incident projection edge ride the blit fast-path instead
-# of forcing a full render.
-_PROJECTION_EDGE_COLOR: str = theme.TEAL
-_PROJECTION_EDGE_LINEWIDTH: float = 1.8
-# ``FancyArrowPatch`` arrow style: a filled triangular head. ``head_length`` /
-# ``head_width`` are in points (display units), so the arrowhead stays a fixed
-# pixel size regardless of the data zoom -- the right behaviour for a glyph that
-# must stay legible at any field scale.
-_PROJECTION_EDGE_ARROWSTYLE: str = "-|>"
-_PROJECTION_EDGE_MUTATION_SCALE: float = 14.0
-# Drawn at the same layer as the proposed-edge overlay (above committed edges,
-# below nodes) so the directed hop sits visibly on top of the static graph.
-_PROJECTION_EDGE_ZORDER: int = 4
-
 # Hairline grid linewidth (points). Thin enough to read as a drafting-table
 # reference grid behind the nodes/edges without competing with the geometry.
 # The grid COLOR is set by ``theme.apply_to_axes`` (the warm tan ``theme.GRID``);
@@ -142,8 +123,8 @@ _NODE_LABEL_OFFSET_CM: float = 1.5
 _NODE_LABEL_ZORDER: int = 7
 
 # Node fill palette keyed by the model's node type. Sourced from the theme
-# (line = ink, blind = brick, reset = teal); an unknown type falls back to the
-# theme's muted-ink fallback.
+# (line = ink, projection = ochre, blind = brick, reset = teal); an unknown
+# type falls back to the theme's muted-ink fallback.
 _NODE_COLOR: dict[str, str] = theme.NODE_COLORS
 _NODE_COLOR_FALLBACK: str = theme.NODE_COLOR_FALLBACK
 
@@ -300,16 +281,6 @@ class FieldCanvas:
             list[tuple[str, str, str]]
         ] = None
 
-        # Committed projection edges to overlay, owned by the editor application
-        # (the reconciled render set out of ``projection_edges.reconcile``). Each
-        # entry is a ``(u, v, distance_cm, heading_deg)`` tuple; only ``u`` / ``v``
-        # are read here (coordinates are looked up in the model). Defaults to an
-        # empty list so callers / tests that never call
-        # :meth:`set_projection_edges` render exactly as before. Set via the
-        # public :meth:`set_projection_edges` setter, persisted across renders so
-        # the drag fast-path can replay the same overlay.
-        self._projection_edges: list[tuple] = []
-
         # ---- Per-element artist retention (rebuilt every ``render``) ----
         # ``ax.clear()`` drops every artist, so these are repopulated as the
         # nodes / edges are drawn. They give the drag fast-path direct handles
@@ -324,16 +295,6 @@ class FieldCanvas:
         self._node_dot_artists: dict[str, object] = {}
         self._node_label_artists: dict[str, object] = {}
         self._edge_artists: list[tuple[str, str, str, object]] = []
-
-        # ``_projection_edge_artists``: ``(u, v, FancyArrowPatch)`` per drawn
-        # projection edge. Kept SEPARATE from ``_edge_artists`` because a
-        # projection edge is a ``FancyArrowPatch`` (re-pointed via
-        # ``set_positions``), not a 2-point ``Line2D`` (re-pointed via
-        # ``set_data``), and because the blit test asserts directly on
-        # ``_edge_artists`` holding only the line/blind segments. The drag
-        # fast-path scans this list to find the arrows incident to a dragged
-        # node and slide their moved endpoint.
-        self._projection_edge_artists: list[tuple[str, str, object]] = []
 
         # ---- Drag-scoped blit state (set by ``begin_node_drag``) ----
         # ``_drag_node``: the node name currently being dragged, or ``None``.
@@ -402,36 +363,6 @@ class FieldCanvas:
         """Return the underlying :class:`matplotlib.axes.Axes`."""
         return self._ax
 
-    def set_projection_edges(self, edges: list[tuple]) -> None:
-        """Replace the committed projection-edge render set.
-
-        The editor application owns the projection render set (the reconciled
-        output of :func:`projection_edges.reconcile`) and pushes it here whenever
-        it changes. Each entry is a ``(u, v, distance_cm, heading_deg)`` tuple;
-        only the first two elements (the node names ``u`` / ``v``) are read by
-        the canvas, which looks their coordinates up in the model at draw time.
-        Entries with extra trailing elements are tolerated -- the canvas slices
-        the leading two -- and any edge whose ``u`` or ``v`` is not in the model
-        is silently skipped at draw time.
-
-        The list is stored as-is (not copied); the canvas only reads it. The
-        stored set persists across renders, so a later :meth:`render`,
-        :meth:`begin_node_drag`, or blit fallback replays the same overlay
-        without the app re-pushing it. Calling with an empty list clears the
-        overlay. The default before any call is ``[]`` (no projection edges), so
-        existing callers and tests that never invoke this method are unaffected.
-
-        This does NOT trigger a repaint; the caller issues the next
-        :meth:`render` (the app's standard refresh path) once it has pushed all
-        overlay state.
-
-        :param edges: The projection render set as a list of
-            ``(u, v, distance_cm, heading_deg)`` tuples (only ``u`` / ``v`` are
-            used). Pass ``[]`` to clear.
-        :return: ``None``.
-        """
-        self._projection_edges = edges
-
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -447,10 +378,8 @@ class FieldCanvas:
 
         Clears the axes, restores the cosmetic limits / labels / grid,
         then paints in fixed z-order: background → obstacles → edges →
-        projection-edge overlay → proposed-edge overlay → nodes → highlight
-        ring. The projection-edge overlay is the persistent render set last
-        pushed via :meth:`set_projection_edges` (empty by default). Calling this
-        after every model mutation is the editor's standard refresh path.
+        proposed-edge overlay → nodes → highlight ring. Calling this after
+        every model mutation is the editor's standard refresh path.
 
         :param model: The :class:`FieldModel` to render. Stored on the
             canvas for use by :meth:`find_node_at`.
@@ -479,7 +408,6 @@ class FieldCanvas:
         self._node_dot_artists = {}
         self._node_label_artists = {}
         self._edge_artists = []
-        self._projection_edge_artists = []
 
         width_cm, height_cm = self._field_extent_cm(model)
 
@@ -513,8 +441,6 @@ class FieldCanvas:
         self._draw_background(model, width_cm, height_cm)
         self._draw_obstacles(model)
         self._draw_edges(model)
-        if self._projection_edges:
-            self._draw_projection_edges(model)
         if proposed_edges:
             self._draw_proposed_edges(model, proposed_edges)
         self._draw_nodes(model)
@@ -573,14 +499,6 @@ class FieldCanvas:
         for u, v, _kind, edge_artist in self._edge_artists:
             if u == name or v == name:
                 animated.append(edge_artist)
-        # Projection arrows incident to the dragged node ride the same blit
-        # fast-path: their ``FancyArrowPatch`` re-points cheaply via
-        # ``set_positions`` in ``_apply_drag_geometry``, so an incident directed
-        # edge follows the cursor exactly like the line/blind segments instead of
-        # forcing a full render.
-        for u, v, arrow_artist in self._projection_edge_artists:
-            if u == name or v == name:
-                animated.append(arrow_artist)
 
         for artist in animated:
             artist.set_animated(True)
@@ -833,12 +751,11 @@ class FieldCanvas:
         """Move the dragged node's animated artists to ``(x, y)``.
 
         Repositions the node's dot and label (applying the same
-        :data:`_NODE_LABEL_OFFSET_CM` offset :meth:`_draw_nodes` uses), slides
-        the endpoint that equals *name* on each incident line/blind edge artist,
-        and re-points each incident projection arrow's moved end, leaving the
-        opposite endpoint of every incident edge fixed. The model is NOT mutated
-        here -- the editor application owns the model write; this method only
-        moves the on-canvas artists.
+        :data:`_NODE_LABEL_OFFSET_CM` offset :meth:`_draw_nodes` uses) and
+        slides the endpoint that equals *name* on each incident line/blind edge
+        artist, leaving the opposite endpoint of every incident edge fixed. The
+        model is NOT mutated here -- the editor application owns the model write;
+        this method only moves the on-canvas artists.
 
         :param name: Name of the dragged node.
         :param x: New world x coordinate, in centimetres.
@@ -869,58 +786,6 @@ class FieldCanvas:
                 ydata[1] = y
             if u == name or v == name:
                 edge_artist.set_data(xdata, ydata)
-
-        self._apply_drag_geometry_projection(name, x, y)
-
-    def _apply_drag_geometry_projection(
-        self, name: str, x: float, y: float
-    ) -> None:
-        """Slide the moved end of each incident projection arrow to ``(x, y)``.
-
-        A projection edge is a :class:`~matplotlib.patches.FancyArrowPatch`,
-        re-pointed via :meth:`~matplotlib.patches.FancyArrowPatch.set_positions`
-        (which takes BOTH endpoints) rather than a 2-point ``Line2D``
-        re-pointed via ``set_data``. ``set_positions`` needs the fixed endpoint
-        too, so the *opposite* node's coordinate is read from
-        :attr:`_last_model` -- the non-dragged endpoint never moves during a
-        drag, so the model still holds its (correct) position. A self-loop
-        (``u == v == name``) drags both ends to ``(x, y)``.
-
-        Skips an arrow whose fixed endpoint has vanished from the model (a node
-        deleted mid-drag) rather than crashing -- consistent with the defensive
-        style used throughout the render path. Pulled into its own method (off
-        the ``_edge_artists`` loop in :meth:`_apply_drag_geometry`) because the
-        artist type and re-point API differ.
-
-        :param name: Name of the dragged node.
-        :param x: New world x coordinate, in centimetres.
-        :param y: New world y coordinate, in centimetres.
-        :return: ``None``.
-        """
-        if not self._projection_edge_artists:
-            return
-        nodes = self._last_model.nodes if self._last_model is not None else {}
-        for u, v, arrow_artist in self._projection_edge_artists:
-            if u != name and v != name:
-                continue
-            # Tail = u (or the dragged cursor if u is the dragged node), head = v
-            # (or the cursor). The fixed endpoint comes from the model, which
-            # still holds its pre-drag position (only ``name`` is being moved).
-            if u == name:
-                pos_a: Optional[tuple[float, float]] = (x, y)
-            else:
-                coord = nodes.get(u)
-                pos_a = (float(coord[0]), float(coord[1])) if coord else None
-            if v == name:
-                pos_b: Optional[tuple[float, float]] = (x, y)
-            else:
-                coord = nodes.get(v)
-                pos_b = (float(coord[0]), float(coord[1])) if coord else None
-            if pos_a is None or pos_b is None:
-                # The fixed endpoint vanished from the model mid-drag; leave the
-                # arrow where it is rather than re-point against a missing node.
-                continue
-            arrow_artist.set_positions(pos_a, pos_b)
 
     def _full_render_during_drag(self, name: str, x: float, y: float) -> None:
         """Fallback full render when the blit fast-path is unavailable.
@@ -1402,61 +1267,6 @@ class FieldCanvas:
                 linewidth=_PROPOSED_EDGE_LINEWIDTH,
                 zorder=_PROPOSED_EDGE_ZORDER,
             )
-
-    def _draw_projection_edges(self, model: FieldModel) -> None:
-        """Overlay the committed projection edges as directed teal arrows.
-
-        Draws one :class:`~matplotlib.patches.FancyArrowPatch` per entry of
-        :attr:`_projection_edges` (the render set last pushed via
-        :meth:`set_projection_edges`), pointing from ``model.nodes[u]`` to
-        ``model.nodes[v]`` with a filled arrowhead at the head ``v``. The teal
-        solid arrow distinguishes a projection edge from the ink-solid line
-        edges and the brick-dashed blind edges, and the arrowhead makes the hop
-        *directed* (line/blind edges render undirected).
-
-        Each arrow's patch is retained in :attr:`_projection_edge_artists` as a
-        ``(u, v, patch)`` tuple so the drag fast-path can find the arrows
-        incident to a dragged node and slide the moved endpoint via
-        :meth:`~matplotlib.patches.FancyArrowPatch.set_positions` without a full
-        re-render.
-
-        Defensive, matching the rest of this class: an entry whose ``u`` or
-        ``v`` is not a current model node is silently skipped (the live-edited
-        model may briefly hold a half-deleted state), as is any malformed entry
-        with fewer than two elements. Only the leading two elements (``u``,
-        ``v``) are read; the trailing ``distance_cm`` / ``heading_deg`` are
-        irrelevant to the drawing.
-
-        :param model: Source of node coordinates.
-        :return: ``None``.
-        """
-        nodes = model.nodes
-        for edge in self._projection_edges:
-            if len(edge) < 2:
-                # Malformed render-set entry: a projection edge is at minimum a
-                # ``(u, v, ...)`` tuple. Skip rather than crash the render.
-                continue
-            u, v = edge[0], edge[1]
-            if u not in nodes or v not in nodes:
-                continue
-            ux, uy = nodes[u]
-            vx, vy = nodes[v]
-            arrow = mpatches.FancyArrowPatch(
-                (ux, uy),
-                (vx, vy),
-                arrowstyle=_PROJECTION_EDGE_ARROWSTYLE,
-                mutation_scale=_PROJECTION_EDGE_MUTATION_SCALE,
-                color=_PROJECTION_EDGE_COLOR,
-                linewidth=_PROJECTION_EDGE_LINEWIDTH,
-                zorder=_PROJECTION_EDGE_ZORDER,
-                # ``shrinkA`` / ``shrinkB`` default to 2 pt, which would pull the
-                # tail/head back off the node centres. Zero them so the arrow
-                # spans node-centre to node-centre like the line/blind edges.
-                shrinkA=0.0,
-                shrinkB=0.0,
-            )
-            self._ax.add_patch(arrow)
-            self._projection_edge_artists.append((u, v, arrow))
 
     def _draw_nodes(self, model: FieldModel) -> None:
         """Draw a coloured dot + name label per node, retaining each handle.

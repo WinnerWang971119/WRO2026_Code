@@ -82,6 +82,9 @@ TERRACOTTA: str = "#C56B45"
 TEAL: str = "#2A8C82"
 # Brick -- blind nodes and blind (dead-reckoned) edges.
 BRICK: str = "#B0413E"
+# Ochre -- projection nodes (a line crossing that is not a junction). A warm
+# amber that stays distinct from ink (line), brick (blind), and teal (reset).
+OCHRE: str = "#C8951F"
 
 # --- Supporting tones ----------------------------------------------------
 # Subtle grid line color on the plotting surface -- a warm low-contrast tan.
@@ -169,11 +172,12 @@ STATUS_INVALID: str = INVALID  # brick ⬤ in the status-strip badge
 # black/red literals with a single lookup table that tracks the palette.
 # ===========================================================================
 
-# Node fill color keyed by the model's ``type`` field. ``reset`` is included
-# for forward compatibility even though only ``line``/``blind`` are authored
-# today; an unknown type should fall back to :data:`NODE_COLOR_FALLBACK`.
+# Node fill color keyed by the model's ``type`` field. ``projection`` (a line
+# crossing that is not a junction) draws in ochre; ``reset`` in teal. An unknown
+# type should fall back to :data:`NODE_COLOR_FALLBACK`.
 NODE_COLORS: dict[str, str] = {
     "line": INK,
+    "projection": OCHRE,
     "blind": BRICK,
     "reset": TEAL,
 }
