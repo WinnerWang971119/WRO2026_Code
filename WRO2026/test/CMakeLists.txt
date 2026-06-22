@@ -380,6 +380,36 @@ add_toy_routes_force_include(test_path_tracker_projection)
 add_test(NAME path_tracker_projection COMMAND test_path_tracker_projection)
 
 # =========================================================================================
+# Test executable #3f — PathTracker `line(A)-projection(B)-line(C)` pass-through mirror
+# (issue #64, T19 / T21, TC11 / TC12 / TC13).
+#
+# Exercises the firmware pass-through DECISION (`PathTracker::_evaluateProjectionPassThrough`):
+#   - TC11: line(A)-projection(P1)-line(B) routed PAST P1 -> the gate FIRES (continuous A->B
+#           follow, dead-reckon advance at P1, re-anchor at B).
+#   - TC12: goTo(P1) where P1 is the goal -> the gate does NOT fire (not-final guard) -> stop.
+#   - TC13: a BLIND-flanked / non-collinear projection node -> the gate does NOT fire -> stop.
+#
+# Same link recipe as `test_path_tracker_projection` (#3e): links the TOY golden
+# `routes_toy.cpp` (the production field has NO projection node this phase), force-includes
+# `routes_toy.h` (guard `ROUTES_H`) ahead of the sketch `routes.h`, and links `MOCK_SOURCES`
+# for the `Serial` / `MiniR4` globals the mock `<Arduino.h>` / `<MatrixMiniR4.h>` (pulled in
+# transitively by `Config.h`) declare. The gate's next-next lookahead + flank-edge + node-type
+# reads come from the REAL `FieldMap` accessors over the toy graph, and the collinearity /
+# direction half from the REAL frozen `resolveDirection` (DirectionPolicy.h) + `wrapDeltaDeg`
+# (NavTypes.h). NO Drive force-include — none of the included headers pull in the production
+# `Drive.h`. The per-condition routing is inline-MIRRORED (`// MIRROR: PathTracker.cpp:<line>`)
+# since the full `PathTracker.cpp` is NOT host-linked by ANY target.
+# =========================================================================================
+add_executable(test_path_tracker_pass_through_projection
+    ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
+    ${TOY_ROUTES_DIR}/routes_toy.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_path_tracker_pass_through_projection PRIVATE ${COMMON_INCLUDES})
+add_toy_routes_force_include(test_path_tracker_pass_through_projection)
+add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pass_through_projection)
+
+# =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
 #
 # Tests the pure `WROMath.h` free functions `stopAtLineArmed` and `debounceStep`
