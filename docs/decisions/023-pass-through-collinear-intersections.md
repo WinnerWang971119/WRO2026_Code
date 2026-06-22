@@ -3,6 +3,14 @@
 **Status:** Implemented
 **Date decided:** 2026-05-23 (issue #19)
 
+> **Amended by [ADR-046](./046-projection-as-node-property.md) (issue #64).** Projection is now a
+> node type, not an edge type, so this ADR's collinear pass-through is narrowed to the
+> `line–proj–line` case. A projection node has **no junction marker**, so its pass-through fires off
+> the **distance gate** at the node, not the `Intersection.isAtIntersection()` branch this ADR
+> describes; the mid-traverse `onDeadReckonedAdvance` and the re-anchor at the next real junction are
+> unchanged. The "PROJECTION next" / "next edge is BLIND or PROJECTION" wording below refers to the
+> retired edge type — read "destination is a projection node" / "BLIND edge."
+
 ## Rule
 
 PathTracker peeks the next-hop edge at intersection-detect (`LINE_FOLLOW` state in
@@ -91,6 +99,7 @@ keeps the two "is this collinear enough?" decisions in lock-step.
   runtime-probe override.
 - [ADR-020: LineFollower PID freeze during junction dwell](./020-junction-pid-freeze.md) — junction-freeze + overshoot-mode coexist: when line IS online during overshoot,
   both branches can fire; both produce symmetric cruise.
+- [ADR-046: Projection is a node property, not an edge type](./046-projection-as-node-property.md) — amends this ADR; the `line–proj–line` pass-through fires off the distance gate (a projection node has no junction marker).
 - Issue #19 (the originating bug report).
 - `docs/plans/2026-05-23-pass-through-collinear-intersections.md` (this implementation
   plan).

@@ -90,17 +90,17 @@ namespace Routes {
     constexpr uint8_t START_NODE = 0;
     constexpr float   START_HEADING_DEG = 0.0f;
 
-    enum class NodeType : uint8_t { LINE = 0, BLIND = 1 };
-    enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, PROJECTION = 3 };
+    // projection is a NODE type (issue #64), not an edge type; edges are LINE/BLIND only.
+    enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2, PROJECTION = 3 };
+    enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2 };
 
     // Mode enums — per-edge overrides for how the firmware executes the move
-    enum class LineMode       : uint8_t { DEFAULT = 0, ... };
-    enum class BlindMode      : uint8_t { DEFAULT = 0, ... };
-    enum class ProjectionMode : uint8_t { DEFAULT = 0, ... };
-    enum class TurnMode       : uint8_t { DEFAULT = 0, ... };
+    enum class LineMode : uint8_t { DEFAULT = 0, ... };
+    enum class BlindMode : uint8_t { DEFAULT = 0, ... };
+    enum class TurnMode : uint8_t { DEFAULT = 0, ... };
 
     struct PipelineConfig {
-        LineMode line; BlindMode blind; ProjectionMode projection; TurnMode turn;
+        LineMode line; BlindMode blind; TurnMode turn;
     };
     extern const PipelineConfig PIPELINE_CONFIG;
 
@@ -113,7 +113,7 @@ namespace Routes {
 }
 ```
 
-`PathTracker` reads `NEXT_HOP[currentNode][goal]` at every intersection to pick the next neighbour, and looks up `EDGES[from][to]` for the per-edge primitive (line-follow, blind drive, projection-follow) and any mode overrides. The defaults in `PIPELINE_CONFIG` apply when an edge's mode field is `DEFAULT`.
+`PathTracker` reads `NEXT_HOP[currentNode][goal]` at every intersection to pick the next neighbour, and looks up `EDGES[from][to]` for the per-edge primitive and any mode overrides. The primitive falls out of `(edge type, destination node type)`: a LINE edge line-follows (to a junction, or distance-terminated into a projection node); a BLIND edge dead-reckons (or auto-seeks + re-anchors when its destination is a projection node). The defaults in `PIPELINE_CONFIG` apply when an edge's mode field is `DEFAULT`.
 
 ## Editing the field graph
 
@@ -129,7 +129,7 @@ Save / Save & Build buttons).
 
 | Mode | Action |
 | --- | --- |
-| Add Node | Left-click empty canvas → enter name + type (`line` / `blind`) |
+| Add Node | Left-click empty canvas → enter name + type (`line` / `blind` / `projection` / `reset`) |
 | Move | Left-click + drag a node |
 | Edge | Left-click selects up to 2 nodes; `L` adds a line edge; `B` adds a blind edge |
 | Obstacle | Drag a rectangle; release → enter `kind` label |
@@ -283,7 +283,7 @@ no separate "robot field" and "sim field" to keep in sync.
 | `graph_builder.py`      | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
 | `planner.py`            | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
 | `compiler.py`           | Heading-aware primitive emission for downstream `PathTracker`.                      |
-| `pipeline_config.py`    | Default `LineMode` / `BlindMode` / `ProjectionMode` / `TurnMode` baked into `routes.cpp`. |
+| `pipeline_config.py`    | Default `LineMode` / `BlindMode` / `TurnMode` baked into `routes.cpp`. |
 | `visualizer.py`         | Matplotlib renderer for `map.png` (Agg backend, headless-safe).                     |
 | `header_writer.py`      | Emits `routes.h` + `routes.cpp`; embeds `field_data.py`'s SHA256 in the banner.     |
 | `build_routes.py`       | CLI orchestrator — sequences every layer above, decides exit codes.                 |

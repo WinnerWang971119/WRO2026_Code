@@ -4,6 +4,8 @@
 **Date decided:** 2026-06 (issue #43, Phase 3)
 
 > **Soft-fallback sub-decision superseded by [ADR-039](./039-stop-at-line-normal-seek-no-soft-fallback.md).** The auto-rule, the per-edge `stop_at_line_override`, and the field-sourced toggle below are still in force; only the soft-fallback (`soft_fallback` output, `_activeSoftFallback` latch, `Config::STOP_AT_LINE_FAULT_FALL_BACK`) is removed — the auto-seek now fires a normal `stopAtLine` and a missed line is a hard fault.
+>
+> **Auto-rule *trigger* sub-decision superseded by [ADR-046](./046-projection-as-node-property.md).** Projection became a node type (issue #64). The auto-rule, the precedence ladder, the per-edge override, and the field-sourced toggle all survive — only the trigger changes: `auto_rule_active` now reads `(edge is BLIND) ∧ (destination node is PROJECTION)` from a **local** node-type lookup, replacing the route-relative `next_hop_is_projection` peek. The resolver and the 936-row CSV are unchanged.
 
 ## Rule
 
@@ -103,6 +105,7 @@ the cap alone (`setMaxDistance(distance_cm)`) does not land the axle on the node
 - [ADR-024 — Bidirectional line following — 3-layer override precedence](./024-bidirectional-line-following.md) — the `direction_override` directional convention mirrored here.
 - [ADR-029 — The validator is the single anti-ambiguity gate](./029-validator-anti-ambiguity.md) — extended with the optional bool + per-edge `stop_at_line` key.
 - [ADR-031 — Config split per domain](./031-config-split-per-domain.md) — why `BLIND_PROJECTION_AUTO_SEEK` goes to `routes.h`, not `Config.h`.
+- [ADR-046 — Projection is a node property, not an edge type](./046-projection-as-node-property.md) — supersedes the auto-rule *trigger* sub-decision (now a local destination-node read); ladder/override/toggle survive.
 - `WRO2026/StopAtLinePolicy.h` — the single C++ source of the resolver (extended by this ADR).
 - `docs/plans/2026-06-15-issue43-auto-stop-at-line-projection.md` — the originating plan.
 - Issue #43 (closed by this), issue #52 (deferred GUI authoring).

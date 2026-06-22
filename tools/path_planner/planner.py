@@ -19,10 +19,9 @@ have <50 nodes - the constant factor matters far less than readability.
 Cost model (blind-distance decay)
 ---------------------------------
 
-The cost of a :data:`tools.path_planner.graph_builder.EDGE_LINE` or
-:data:`tools.path_planner.graph_builder.EDGE_PROJECTION` edge equals its
-``distance_cm`` (factor ``1`` -- the chassis is tracking the line, the
-most reliable mode). A :data:`tools.path_planner.graph_builder.EDGE_BLIND`
+The cost of a :data:`tools.path_planner.graph_builder.EDGE_LINE` edge
+equals its ``distance_cm`` (factor ``1`` -- the chassis is tracking the
+line, the most reliable mode). A :data:`tools.path_planner.graph_builder.EDGE_BLIND`
 edge is penalised by a *convex, multiplicative* decay factor keyed on how
 deep its tail sits in line-free, anchor-far blind territory::
 

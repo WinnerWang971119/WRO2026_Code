@@ -3,6 +3,8 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (Phase 3)
 
+> **Auto-rule *trigger* sub-decision superseded by [ADR-046](./046-projection-as-node-property.md).** Projection became a node type (issue #64). This ADR's normal-seek / hard-fault-on-miss posture is unchanged; only the auto-FIRE trigger inherited from ADR-038 is retargeted — `auto_rule_active` reads `(BLIND edge) ∧ (destination node is PROJECTION)` locally, replacing the route-relative `next_hop_is_projection` peek. The resolver and the 936-row CSV stay frozen.
+
 ## Rule
 
 The blind→projection auto-seek (ADR-038) fires a **normal** `Drive.stopAtLine`: it
@@ -64,6 +66,7 @@ which will change miss-handling from "hard fault" to "recover, then fault" once 
 ## See also
 
 - [ADR-038 — Blind→projection auto stop-at-line](./038-blind-projection-auto-stop-at-line.md) — the auto-rule / per-edge override / field-sourced toggle survive; this ADR supersedes only its soft-fallback sub-decision.
+- [ADR-046 — Projection is a node property, not an edge type](./046-projection-as-node-property.md) — supersedes the auto-rule *trigger* sub-decision (local destination-node read); the normal-seek / hard-fault posture here is unchanged.
 - [ADR-027 — `Drive.stopAtLine()` re-anchors localization; arm-window rule; resolver](./027-drive-stop-at-line.md) — the seek primitive and its hard-fault-on-miss contract this aligns with.
 - `WRO2026/StopAtLinePolicy.h` — the `{seek, motionMode}` resolver this ADR restores.
 - #62 (**position-aware come-back recovery**) — the wanted overshoot recovery (carries the `LINE_NOT_FOUND` discrimination + fail-loud posture as design inputs); supersedes the recovery-debt tracker, issue #60 (closed).
