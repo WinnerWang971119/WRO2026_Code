@@ -208,7 +208,8 @@ _FLOAT_KNOB_BOUNDS: dict[str, tuple[float, bool]] = {
 #: does.
 _MODE_DISPLAY_LABELS: dict[str, str] = {
     "add_node": "Add node",
-    "move": "Move / select",
+    "move": "Move",
+    "select": "Select",
     "edge": "Edge (L / B)",
     "obstacle": "Obstacle",
     "start": "Set start",
@@ -252,7 +253,7 @@ _EDGE_SELECTION_MAX: int = 2
 #: The keys are deliberately disjoint from the existing shortcuts -- the Ctrl
 #: chords (``Ctrl-Z`` / ``Ctrl-Y`` / ``Ctrl-S``), ``Delete``, and the EDGE-mode
 #: edge-action keys ``L`` / ``B`` -- and from the arrow-key nudge below. Plain
-#: ``s`` (Set start) does NOT shadow ``Ctrl-S`` (Save): Tk dispatches the most
+#: ``s`` (Select) does NOT shadow ``Ctrl-S`` (Save): Tk dispatches the most
 #: specific binding for a modified keypress, so a ``Ctrl-S`` event fires only
 #: ``<Control-s>`` and never the plain ``<KeyPress-s>`` binding.
 _MODE_SHORTCUT_KEYS: dict[str, Mode] = {
@@ -260,7 +261,7 @@ _MODE_SHORTCUT_KEYS: dict[str, Mode] = {
     "m": Mode.MOVE,
     "e": Mode.EDGE,
     "o": Mode.OBSTACLE,
-    "s": Mode.START,
+    "s": Mode.SELECT,
 }
 
 #: Arrow-key nudge step (centimetres) for the currently-selected node (AC4).
@@ -303,10 +304,10 @@ _SHORTCUT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Modes",
         (
             ("A", "Add node"),
-            ("M", "Move / select"),
+            ("M", "Move"),
             ("E", "Edge"),
             ("O", "Obstacle"),
-            ("S", "Set start"),
+            ("S", "Select"),
         ),
     ),
     (
@@ -623,7 +624,7 @@ class EditorApp:
         * ``?`` / ``F1``                -> :meth:`_show_shortcuts_dialog`
         * ``A`` / ``M`` / ``E`` / ``O`` / ``S`` -> switch mode (AC5), per
           :data:`_MODE_SHORTCUT_KEYS` (Add node / Move / Edge / Obstacle /
-          Set start).
+          Select; Start is reachable only via the toolbar).
         * ``Up`` / ``Down`` / ``Left`` / ``Right`` -> nudge the selected node
           by :data:`_NUDGE_FINE_CM`; with ``Shift`` by :data:`_NUDGE_COARSE_CM`
           (AC4).
@@ -636,7 +637,7 @@ class EditorApp:
         matplotlib widget that is awkward to focus reliably); the focus check
         does the gating.
 
-        Plain ``s`` (Set start) and ``Ctrl-S`` (Save) coexist: Tk dispatches
+        Plain ``s`` (Select) and ``Ctrl-S`` (Save) coexist: Tk dispatches
         the most specific binding for a modified keypress, so a ``Ctrl-S``
         event fires ``<Control-s>`` only and never the plain ``<KeyPress-s>``.
         """
@@ -1721,6 +1722,8 @@ class EditorApp:
             self._handle_add_node_click(x, y)
         elif mode is Mode.MOVE:
             self._handle_move_click(x, y)
+        elif mode is Mode.SELECT:
+            self._handle_select_click(x, y)
         elif mode is Mode.EDGE:
             self._handle_edge_click(x, y)
         elif mode is Mode.OBSTACLE:
@@ -1976,6 +1979,32 @@ class EditorApp:
             self._set_status(f"{hit!r} is already the start node.")
             return
         self._dispatch(SetStart(hit))
+
+    def _handle_select_click(self, x: float, y: float) -> None:
+        """Select the node under the cursor (or clear the selection on a miss).
+
+        Mirrors clicking the node's row in the right-hand node list: the hit
+        branch reuses :meth:`_select_node` + :meth:`_refresh_view` (the same
+        programmatic-selection path used after node creation); the miss branch
+        clears the selection by pre-blanking ``_selected_node_var`` and routing
+        through the existing :meth:`_on_panel_node_select` deselect handler so the
+        listbox highlight and inspector both drop. Does NOT call
+        ``self._panels.on_node_select`` (that is the panel->app inbound edge).
+
+        :param x: World x coordinate (centimetres).
+        :param y: World y coordinate (centimetres).
+        """
+        hit = self._canvas.find_node_at(x, y)
+        if hit is None:
+            # Empty-canvas click clears the selection. Pre-blank the var so
+            # SidePanels.refresh sees no previously-selected node and drops the
+            # listbox highlight + inspector (it restores from _selected_node_var).
+            self._panels._selected_node_var.set("")
+            self._on_panel_node_select(None)
+            return
+        self._select_node(hit)
+        self._set_status(f"Selected node {hit!r}.")
+        self._refresh_view()
 
     # ------------------------------------------------------------------
     # Drag completion
