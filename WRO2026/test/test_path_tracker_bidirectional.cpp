@@ -139,7 +139,8 @@ static inline Direction replica_resolveDirection(
 /// glue, mirroring how `_enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt)`
 /// would latch when the guard fires; an empty FaultInfo (`kind ==
 /// Fault::NONE`) is returned when the guard does not fire — i.e. the
-/// dispatcher would have proceeded into the LINE / PROJECTION / BLIND branch.
+/// dispatcher would have proceeded into the LINE / BLIND branch (issue #64
+/// retired the standalone PROJECTION edge type).
 static PathTrackerClass::FaultInfo replica_dispatchEdgeAfterTurnGuard(
     Direction         resolvedDirection,
     uint8_t           lineBoardCount,
@@ -289,27 +290,16 @@ static void test_TC12_reverse_unavailable_on_line_1board_force_reverse()
     ASSERT_EQ  (info.destNode, nxt);
 }
 
-static void test_TC12_reverse_unavailable_on_projection_1board()
-{
-    TEST_SCOPE("TC12: PROJECTION edge with REAR on 1-board chassis → REVERSE_UNAVAILABLE");
-
-    // Same guard — PROJECTION is treated identically to LINE because both
-    // require a board to read the line, and a 1-board chassis only has a
-    // front board.
-    constexpr uint8_t cur = 2;
-    constexpr uint8_t nxt = 3;
-
-    const PathTrackerClass::FaultInfo info = replica_dispatchEdgeAfterTurnGuard(
-        /*resolvedDirection*/ Direction::REAR,
-        /*lineBoardCount*/    1,
-        /*edgeType*/          Routes::EdgeType::PROJECTION,
-        /*cur*/               cur,
-        /*nxt*/               nxt);
-
-    ASSERT_TRUE(info.kind     == PathTrackerClass::Fault::REVERSE_UNAVAILABLE);
-    ASSERT_EQ  (info.fromNode, cur);
-    ASSERT_EQ  (info.destNode, nxt);
-}
+// Issue #64 retired the standalone projection EDGE type — a projection is now a
+// NODE property, and the only reverse-unservable edge type is `LINE` (a REAR
+// line-follow needs the rear board; BLIND REAR is permitted on a 1-board
+// chassis). The old `test_TC12_reverse_unavailable_on_projection_1board` case
+// (which constructed the deleted `Routes::EdgeType::PROJECTION`) is therefore
+// gone. A LINE edge into a projection DESTINATION node is STILL a reverse
+// line-follow and is already covered by the LINE clause exercised in
+// `test_TC12_reverse_unavailable_on_line_1board_force_reverse` above —
+// `reverseUnavailable` keys on the LINE/BLIND `edge.type`, which never changes
+// with the destination node type.
 
 static void test_TC12_blind_rear_1board_allowed()
 {
@@ -674,7 +664,6 @@ int main()
 
     // TC12 — REVERSE_UNAVAILABLE guard.
     test_TC12_reverse_unavailable_on_line_1board_force_reverse();
-    test_TC12_reverse_unavailable_on_projection_1board();
     test_TC12_blind_rear_1board_allowed();
     test_TC12_line_rear_2board_allowed();
     test_TC12_line_front_1board_allowed();

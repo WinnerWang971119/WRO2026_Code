@@ -45,6 +45,16 @@ set(MOCKS_DIR      ${TEST_DIR}/mocks)
 # force-including them only into `test_tasks_dispatch` avoids that collision.
 set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
 
+# Toy-field golden routes (issue #64 / TC16). The PRODUCTION `routes.cpp` has NO
+# projection node — issue #64 keeps the real field unchanged this phase and only
+# the TOY field gains one — so the projection-dispatch host test
+# (`test_path_tracker_projection`) links the TOY golden instead. The toy
+# `routes_toy.h` shares the production `ROUTES_H` include guard and the identical
+# `Routes::` ABI, so force-including it ahead of the sketch `routes.h` shadows the
+# production data for that ONE target without disturbing every other target (which
+# keeps linking the real `routes.cpp`).
+set(TOY_ROUTES_DIR ${SKETCH_DIR}/../tools/path_planner/tests/golden)
+
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
 #   - LineFollower.cpp pulls in Drive.h / WROLineArray.h / Intersection.h via the include
@@ -184,6 +194,35 @@ function(add_task_mock_force_includes target)
     endif()
 endfunction()
 
+# -----------------------------------------------------------------------------------------
+# Force-include the TOY golden `routes_toy.h` BEFORE any source-file parsing — the same
+# load-bearing shadow trick as `add_mock_force_includes`, pointed at the toy routes header.
+#
+# Why: the projection-dispatch test needs a projection NODE, which lives ONLY in the toy
+# field (the production `routes.cpp` has none this phase). `routes_toy.h` carries the
+# production `ROUTES_H` include guard, so once force-included it shadows the sketch
+# `routes.h` everywhere it is transitively requested (FieldMap.h / PathTracker.h /
+# StopAtLinePolicy.h) — AND in `routes_toy.cpp` itself, whose `#include "routes.h"` then
+# no-ops so the 8-node data is sized against the toy `N_NODES`, not the sketch's 7.
+#
+# Applied PER TARGET (only `test_path_tracker_projection`), so no sibling target that
+# links the real `routes.cpp` inherits the toy shadow. An ABSOLUTE path is used (not a
+# bare name) because the real `routes.h` sits next to the test's other sketch includes, so
+# a bare-name force-include could resolve to the wrong header.
+# -----------------------------------------------------------------------------------------
+function(add_toy_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${TOY_ROUTES_DIR}/routes_toy.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${TOY_ROUTES_DIR}/routes_toy.h"
+        )
+    endif()
+endfunction()
+
 # =========================================================================================
 # Test executable #1 — LineFollower overshoot / brake-on-gate / junction-freeze.
 # Exercises T10a, T10b, T10d (AC6 + AC9).
@@ -228,7 +267,8 @@ add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough
 # =========================================================================================
 # Test executable #3a — BIDIRECTIONAL_AUTO_ENABLED == true build (kill-switch ON, default).
 #
-# Exercises TC12 (REVERSE_UNAVAILABLE fault on 1-board + REAR LINE/PROJECTION),
+# Exercises TC12 (REVERSE_UNAVAILABLE fault on 1-board + REAR LINE; issue #64
+# retired the projection edge type, so PROJECTION is no longer a guard input),
 # TC13 (Mission modifier no-op on non-GOTO step), and TC14c (compile-time kill-switch
 # override propagates into runtime behavior). See the test file's docblock for the
 # rationale on why the production .cpp sources for PathTracker / Mission are NOT
@@ -304,6 +344,40 @@ add_executable(test_path_tracker_stop_at_line
 target_include_directories(test_path_tracker_stop_at_line PRIVATE ${COMMON_INCLUDES})
 add_mock_force_includes(test_path_tracker_stop_at_line)
 add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
+
+# =========================================================================================
+# Test executable #3e — PathTracker projection-NODE dispatch mirror (issue #64, T14 / TC16).
+#
+# Exercises the two projection cells of the firmware `_dispatchEdgeAfterTurn`:
+#   - LINE  → projection : DISTANCE-gated follow (PROJECTION_FOLLOW), dead-reckon advance.
+#   - BLIND → projection : LOCAL auto-seek (BLIND_PROJECTION_AUTO_SEEK &&
+#                          isProjectionNode(_nextHop)) → STOP_AT_LINE, full-advance re-anchor.
+#
+# The LOCAL destination-node read that ROUTES each hop (`FieldMap::getNodeType` /
+# `isProjectionNode` / `getEdgeType`) is tested DIRECTLY against the REAL graph accessors,
+# and the BLIND auto-rule flows into the REAL frozen `resolveStopAtLine` (StopAtLinePolicy.h)
+# — mirroring `test_return_to_node_dispatch` (real `getNodeType` over real routes) +
+# `test_path_tracker_stop_at_line` (real resolver). The per-kind `_dispatchEdgeAfterTurn`
+# routing is inline-MIRRORED (`// MIRROR: PathTracker.cpp:<line>`) since the full
+# `PathTracker.cpp` is NOT host-linked by ANY target.
+#
+# Links the TOY golden `routes_toy.cpp` (NOT the production `routes.cpp`): the production
+# field has NO projection node this phase (issue #64 leaves the real field for P3.5), so
+# the projection node `P1` lives only in the toy field. `add_toy_routes_force_include`
+# force-includes `routes_toy.h` (guard `ROUTES_H`) ahead of the sketch `routes.h`, so BOTH
+# the test TU and `routes_toy.cpp` compile against the 8-node toy `Routes::` data. NO Drive
+# force-include — FieldMap.h / routes.h / StopAtLinePolicy.h never include the production
+# `Drive.h`. `MOCK_SOURCES` supplies the `Serial` / `MiniR4` globals the mock `<Arduino.h>`
+# / `<MatrixMiniR4.h>` (pulled in transitively by `Config.h` / `PathTracker.h`) declare.
+# =========================================================================================
+add_executable(test_path_tracker_projection
+    ${TEST_DIR}/test_path_tracker_projection.cpp
+    ${TOY_ROUTES_DIR}/routes_toy.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_path_tracker_projection PRIVATE ${COMMON_INCLUDES})
+add_toy_routes_force_include(test_path_tracker_projection)
+add_test(NAME path_tracker_projection COMMAND test_path_tracker_projection)
 
 # =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
