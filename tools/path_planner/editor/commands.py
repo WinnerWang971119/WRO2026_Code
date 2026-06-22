@@ -855,8 +855,9 @@ class SetResetSpec:
         Mirrors :meth:`autofilled` but does **not** require the caller to supply
         an axis.  Instead, it delegates to
         :func:`projection_edges.reset_autofill_auto`, which evaluates all four
-        walls, picks the nearest qualifying one, and returns the axis together
-        with ``wall_coord`` and ``facing``.  The app supplies
+        walls, picks the nearest one (qualifying or not -- best-effort), and
+        returns the axis together with ``wall_coord`` and ``facing``.  The app
+        supplies
         ``node_xy=model.nodes[name]`` and ``model.field_mm``; keeping the inputs
         pure (no ``FieldModel``) makes this classmethod directly unit-testable.
 
