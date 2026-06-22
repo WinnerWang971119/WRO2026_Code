@@ -2,9 +2,27 @@
 
 This module mirrors the public attribute surface of
 ``tools.path_planner.field_data`` but loads its values from
-``field_data_toy.json`` next to this file -- a frozen copy of the
-original placeholder field (nodes A/B/C/D/E/G/P1) the test suite was
-authored against.
+``field_data_toy.json`` next to this file -- a stable copy of the
+placeholder field the test suite was authored against.
+
+Topology (issue #64, T11): a blind dead-reckon start ``S`` feeds the line
+grid ``A/B/C/D/E`` (a square A-B-C-D with a central hub E) plus an off-line
+blind node ``G``. ``P1`` is a ``"projection"`` node at (55, 10) sitting ON
+the A-B line but NOT at a junction. It exercises both projection scenarios:
+
+* ``line(A) - projection(P1) - line(B)`` -- the LINE edges ``A-P1`` and
+  ``P1-B`` are collinear on ``y = 10`` (the pass-through triple; routed past
+  P1 collapses to one continuous A->C... line-follow with a dead-reckon
+  advance at P1). The direct ``A-B`` LINE edge is kept so the legacy planner
+  / compiler cost assertions (190 cm A->B) stay live.
+* ``blind -> projection`` -- the BLIND edge ``S-P1`` dead-reckons up from the
+  start to P1, where the auto-seek (``BLIND_PROJECTION_AUTO_SEEK``) finds the
+  A-B line and re-anchors. P1 is therefore reachable both by line-follow (its
+  LINE edges) and by blind seek (its BLIND in-edge).
+
+A projection node is NOT a blind-decay anchor, so ``d(S)`` to the nearest
+anchor is measured THROUGH P1 to ``A`` -- the ``S-P1`` blind hop is
+decay-priced while the ``A-P1`` LINE hop stays factor-1 (TC20).
 
 Why this exists
 ---------------

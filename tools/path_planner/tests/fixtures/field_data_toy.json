@@ -9,8 +9,8 @@
   "BLIND_DECAY_K": 0.05,
   "BLIND_DECAY_EXPONENT": 2.0,
   "BLIND_DECAY_D_REF": 50.0,
-  "START_NODE": "A",
-  "START_HEADING_DEG": 0.0,
+  "START_NODE": "S",
+  "START_HEADING_DEG": 90.0,
   "NODES": {
     "A": [
       10.0,
@@ -39,6 +39,10 @@
     "P1": [
       55.0,
       10.0
+    ],
+    "S": [
+      55.0,
+      -40.0
     ]
   },
   "NODE_TYPES": {
@@ -48,7 +52,8 @@
     "D": "line",
     "E": "line",
     "G": "blind",
-    "P1": "line"
+    "P1": "projection",
+    "S": "blind"
   },
   "LINE_SEGMENTS": [
     [
@@ -82,12 +87,28 @@
     [
       "D",
       "E"
+    ],
+    [
+      "A",
+      "P1"
+    ],
+    [
+      "P1",
+      "B"
     ]
   ],
   "BLIND_EDGES": [
     [
       "B",
       "G"
+    ],
+    [
+      "S",
+      "A"
+    ],
+    [
+      "S",
+      "P1"
     ]
   ],
   "OBSTACLES": []
