@@ -41,10 +41,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from tkinter import messagebox, simpledialog
 
-from tools.path_planner.editor.dialogs import AddNodeDialog
+from tools.path_planner.editor.dialogs import AddNodeDialog, ShortcutsDialog
 from typing import Optional
 
-from tools.path_planner.editor import auto_edges, loader
+from tools.path_planner.editor import auto_edges, loader, projection_edges
 from tools.path_planner.editor.canvas import FieldCanvas
 from tools.path_planner.editor.commands import (
     AddBlindEdge,
@@ -52,18 +52,32 @@ from tools.path_planner.editor.commands import (
     AddLineEdge,
     AddNode,
     AddObstacle,
+    AddPivotTurn,
+    AddProjectionEdge,
+    ClearResetSpec,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
+    DeletePivotTurn,
+    DeleteProjectionEdge,
+    MacroCommand,
     MoveNode,
+    ProjectionDelta,
     RenameNode,
+    SetGlobalKnob,
     SetNodeType,
+    SetResetSpec,
     SetStart,
     SetStartHeading,
 )
 from tools.path_planner.editor.history import History
-from tools.path_planner.editor.model import FieldModel
+from tools.path_planner.editor.model import (
+    NODE_TYPE_VALUES,
+    RESET_AXIS_VALUES,
+    FieldModel,
+)
 from tools.path_planner.editor.panels import Mode, SidePanels
+from tools.path_planner.editor import theme
 
 
 # ---------------------------------------------------------------------------
@@ -78,31 +92,146 @@ _DIRTY_TITLE_SUFFIX: str = " *"
 
 #: Initial canvas area width in pixels. The canvas height is derived from the
 #: loaded field's aspect ratio so the map renders without huge empty bars
-#: above and below it. The right-hand side panel (``_PANEL_WIDTH_PX``) and a
-#: small chrome margin are added on top of these to get the window geometry.
+#: above and below it. The two fixed chrome columns (the mode rail +
+#: inspector, ``_CHROME_TOTAL_WIDTH_PX``) and a small chrome margin are added
+#: on top of these to get the window geometry.
 _DEFAULT_CANVAS_WIDTH_PX: int = 900
 
-#: Width of the right-hand side panel column. Mirrors
-#: ``tools.path_planner.editor.panels._PANEL_WIDTH_PX``. Duplicated here
-#: rather than imported because the panels module pins its own column width
-#: with ``pack_propagate(0)`` -- this constant only feeds the initial window
+#: Width of the far-left MODES rail band, in pixels. Mirrors
+#: ``tools.path_planner.editor.panels._MODE_RAIL_WIDTH_PX``. Duplicated here
+#: rather than imported because the panels module pins its own band widths with
+#: ``pack_propagate(False)`` -- these constants only feed the initial window
 #: sizing math.
-_SIDE_PANEL_WIDTH_PX: int = 240
+_MODE_RAIL_WIDTH_PX: int = 90
 
-#: Extra vertical pixels reserved for the matplotlib figure's axis labels,
-#: title bar, and status row so the field rectangle itself fits inside the
-#: canvas area without being clipped.
-_CANVAS_CHROME_PX: int = 80
+#: Width of the right PROPERTIES inspector band, in pixels. Mirrors
+#: ``tools.path_planner.editor.panels._INSPECTOR_WIDTH_PX``. Duplicated for the
+#: same reason as :data:`_MODE_RAIL_WIDTH_PX`.
+_INSPECTOR_WIDTH_PX: int = 312
+
+#: Total fixed-chrome width the two side bands consume now that the layout is a
+#: true three-pane window (rail + inspector). The canvas is the only band that
+#: expands, so this is what the initial geometry reserves around the canvas.
+#: Replaces the old single 240-px right-column figure (F1 flagged it stale).
+_CHROME_TOTAL_WIDTH_PX: int = _MODE_RAIL_WIDTH_PX + _INSPECTOR_WIDTH_PX
+
+#: Extra vertical pixels reserved for the matplotlib figure's axis labels plus
+#: the full-width title band and status band that now bracket the canvas in the
+#: three-pane layout, so the field rectangle itself fits inside the canvas area
+#: without being clipped.
+_CANVAS_CHROME_PX: int = 120
+
+#: Minimum starting width for the expanding canvas band, in pixels. The window
+#: floor (:data:`_MIN_WINDOW_WIDTH_PX`) is derived from this plus the two fixed
+#: chrome columns so a degenerately tall / thin field still opens with a usable
+#: canvas rather than a window only as wide as the chrome.
+_MIN_CANVAS_WIDTH_PX: int = 480
 
 #: Hard floor on the initial window dimensions so a degenerately tall or thin
-#: field still produces a usable starting window.
-_MIN_WINDOW_WIDTH_PX: int = 800
+#: field still produces a usable starting window. The width floor reserves the
+#: two fixed chrome columns (rail + inspector) on top of a minimum canvas band.
+_MIN_WINDOW_WIDTH_PX: int = _CHROME_TOTAL_WIDTH_PX + _MIN_CANVAS_WIDTH_PX
 _MIN_WINDOW_HEIGHT_PX: int = 400
 
 #: Valid node-type strings as displayed in dialogs and combobox submenus.
+#: ``"reset"`` joins the inspector combobox's whitelist (a reset node IS a
+#: selectable type), but it is never assigned through the plain ``SetNodeType``
+#: path -- :meth:`EditorApp._on_panel_node_type_change` routes a transition into
+#: or out of ``"reset"`` through :class:`SetResetSpec` / :class:`ClearResetSpec`
+#: instead. The right-click "Set type" submenu still offers only line / blind.
 _NODE_TYPE_LINE: str = "line"
 _NODE_TYPE_BLIND: str = "blind"
-_VALID_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
+_NODE_TYPE_RESET: str = "reset"
+#: All node types the inline guard accepts; single-sourced from
+#: ``model.NODE_TYPE_VALUES`` so the GUI never accepts a type the validator
+#: rejects.
+_VALID_NODE_TYPES: tuple[str, ...] = NODE_TYPE_VALUES
+
+#: Plain (non-reset) node types a node may be retyped TO without touching a
+#: reset spec.  Used by the type-change router to decide whether a transition
+#: out of ``"reset"`` is a clear-spec (line / blind target) operation.
+_PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
+
+#: Edge-kind tags for the two undirected plain edge lists. These are the string
+#: values threaded through the ``L`` / ``B`` override flow and reported on the
+#: EDGE-mode status line. They share their spelling with the node-type constants
+#: above but name an EDGE's list (``line_segments`` vs ``blind_edges``), not a
+#: node type -- kept distinct so the override / status code reads in edge terms.
+_EDGE_KIND_LINE: str = "line"
+_EDGE_KIND_BLIND: str = "blind"
+
+#: Default wall axis seeded when the operator first flips a plain node to the
+#: ``"reset"`` type from the inspector combobox.  The wall_coord / facing are
+#: NOT placeholders -- they are auto-filled from the node geometry against this
+#: axis via :meth:`commands.SetResetSpec.autofilled` (the nearer qualifying
+#: wall, facing away), matching the Add-node-reset path.  Both stay editable and
+#: recompute when the operator changes the axis or moves the node.
+_RESET_SPEC_DEFAULT_AXIS: str = "x"
+
+#: Allowed wall-zero axis values for an inline reset-spec edit; single-sourced
+#: from ``model.RESET_AXIS_VALUES`` (which mirrors
+#: ``validator._ALLOWED_RESET_AXES``).  The inline guard rejects anything else
+#: before the command is dispatched.
+_RESET_AXES: tuple[str, ...] = RESET_AXIS_VALUES
+
+#: Inclusive lower / exclusive upper bound (degrees, CCW from +x) for a reset
+#: node's parked facing and any other heading the inline guards check.  An
+#: out-of-range facing is an AC7 inline-reject case.
+_FACING_MIN_DEG: float = 0.0
+_FACING_MAX_DEG_EXCLUSIVE: float = 360.0
+
+#: Decimal places the inspector entry fields DISPLAY numeric values at (the
+#: panel formats coords / heading / reset coords with ``%.1f``).  The
+#: skip-if-unchanged guards compare an incoming committed value against the
+#: model's value AT THIS PRECISION: a field shows the rounded value, so a bare
+#: tab-away (no real edit) returns the rounded value and must be treated as
+#: unchanged -- comparing against full precision instead would dispatch a
+#: spurious move that truncates the stored value to 0.1 and dirties the buffer.
+_INSPECTOR_DISPLAY_DP: int = 1
+
+#: Boolean global knob (the blind-decay enable toggle) -- its value arrives as a
+#: ``bool`` and needs no numeric range check.  Mirrors
+#: ``panels._BOOL_KNOB_NAME`` and the matching ``commands`` knob name.
+_KNOB_BLIND_DECAY_ENABLED: str = "blind_decay_enabled"
+
+#: Float global-knob names + their inline lower bounds.  Each maps a knob name to
+#: ``(minimum, inclusive)`` where ``inclusive`` selects ``>=`` vs ``>``.  These
+#: mirror the authoritative per-knob bounds in
+#: :meth:`commands.SetGlobalKnob._coerce_and_validate`; the inline guard is the
+#: cheap tier-1 copy that reverts a bad widget value without a dispatch round
+#: trip, while the command remains the authority on apply.
+_KNOB_BLIND_DECAY_K: str = "blind_decay_k"
+_KNOB_BLIND_DECAY_EXPONENT: str = "blind_decay_exponent"
+_KNOB_BLIND_DECAY_D_REF: str = "blind_decay_d_ref"
+_KNOB_ROBOT_RADIUS_CM: str = "robot_radius_cm"
+#: Per-knob ``(minimum, inclusive)`` bound. ``inclusive`` True -> value must be
+#: ``>= minimum``; False -> strictly ``> minimum``.
+_FLOAT_KNOB_BOUNDS: dict[str, tuple[float, bool]] = {
+    _KNOB_BLIND_DECAY_K: (0.0, True),
+    _KNOB_BLIND_DECAY_EXPONENT: (1.0, True),
+    _KNOB_BLIND_DECAY_D_REF: (0.0, False),
+    _KNOB_ROBOT_RADIUS_CM: (0.0, False),
+}
+
+#: Human-readable labels for the status-surface mode line, keyed by the
+#: :class:`Mode` enum's ``value`` string. Mirrors the radio-button labels in
+#: ``panels._MODE_LABELS`` so the surface names the mode the way the toolbar
+#: does.
+_MODE_DISPLAY_LABELS: dict[str, str] = {
+    "add_node": "Add node",
+    "move": "Move / select",
+    "edge": "Edge (L / B)",
+    "obstacle": "Obstacle",
+    "start": "Set start",
+}
+#: Fallback shown on the mode line when ``mode_var`` holds an unknown string.
+_MODE_DISPLAY_UNKNOWN: str = "--"
+
+#: Prefix + placeholder for the status-surface selection line.
+_SELECTION_DISPLAY_PREFIX: str = "Selection: "
+_SELECTION_DISPLAY_NONE: str = "none"
+#: Prefix for the status-surface mode line.
+_MODE_DISPLAY_PREFIX: str = "Mode: "
 
 #: Mouse button numbers per the matplotlib MouseEvent contract.
 _MOUSE_BUTTON_LEFT: int = 1
@@ -117,16 +246,58 @@ _OBSTACLE_MIN_SIDE_CM: float = 0.5
 #: not constrain it further.
 _DEFAULT_OBSTACLE_KIND: str = "obstacle"
 
-#: Matplotlib zorder for the transient obstacle-drag preview rectangle —
-#: above the normal obstacle layer but below the nodes.
-_OBSTACLE_PREVIEW_ZORDER: int = 5
-_OBSTACLE_PREVIEW_EDGECOLOR: str = "blue"
-_OBSTACLE_PREVIEW_LINESTYLE: str = ":"
-_OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
+# The transient obstacle-drag preview rectangle's style now lives with the blit
+# fast-path that draws it -- see ``canvas._OBSTACLE_PREVIEW_*`` (#11).
 
 #: Edge-selection cap. Two clicks = a candidate pair. A third click drops
 #: the oldest entry so the most recent two clicks always win.
 _EDGE_SELECTION_MAX: int = 2
+
+#: Status hint shown when the operator opens the projection-edge authoring flow
+#: from the "+ add projection" ghost button. It reuses the EDGE-mode two-node
+#: picker; the order of the two picks is load-bearing (FIRST = source ``u``,
+#: SECOND = head ``v``) because a projection edge is DIRECTED.
+_STATUS_PROJECTION_HINT: str = (
+    "Projection: pick source then head, press P."
+)
+
+#: Single-key mode shortcuts (AC5). Each entry maps a Tk key *keysym* to the
+#: :class:`Mode` it activates; the handler sets ``mode_var`` to the mode's
+#: ``value`` (firing the existing ``_on_mode_change`` trace). Both the lower-
+#: and upper-case form of every letter is bound in
+#: :meth:`EditorApp._wire_keyboard_shortcuts`, mirroring the existing ``L`` /
+#: ``B`` edge-action keys.
+#:
+#: The keys are deliberately disjoint from the existing shortcuts -- the Ctrl
+#: chords (``Ctrl-Z`` / ``Ctrl-Y`` / ``Ctrl-S``), ``Delete``, and the EDGE-mode
+#: edge-action keys ``L`` / ``B`` -- and from the arrow-key nudge below. Plain
+#: ``s`` (Set start) does NOT shadow ``Ctrl-S`` (Save): Tk dispatches the most
+#: specific binding for a modified keypress, so a ``Ctrl-S`` event fires only
+#: ``<Control-s>`` and never the plain ``<KeyPress-s>`` binding.
+_MODE_SHORTCUT_KEYS: dict[str, Mode] = {
+    "a": Mode.ADD_NODE,
+    "m": Mode.MOVE,
+    "e": Mode.EDGE,
+    "o": Mode.OBSTACLE,
+    "s": Mode.START,
+}
+
+#: Arrow-key nudge step (centimetres) for the currently-selected node (AC4).
+#: A plain arrow key nudges by the fine step; holding Shift uses the coarse
+#: step. The new position is clamped to the field bounds before dispatch.
+_NUDGE_FINE_CM: float = 0.2
+_NUDGE_COARSE_CM: float = 1.0
+
+#: Field-coordinate floor used when clamping a nudged node. The field's lower
+#: corner is the origin; the upper bound is derived from ``model.field_mm``.
+_FIELD_ORIGIN_CM: float = 0.0
+
+#: Millimetres-per-centimetre conversion for deriving the field's width/height
+#: in centimetres from ``model.field_mm`` (which is stored in millimetres).
+_MM_PER_CM: float = 10.0
+
+#: Status message shown when an arrow-key nudge fires with no node selected.
+_STATUS_NUDGE_NO_SELECTION: str = "Select a node to nudge."
 
 #: Status messages — collected here so the test suite (future work) and the
 #: developer can grep for the exact text the GUI surfaces.
@@ -140,6 +311,50 @@ _PLANNER_ROOT: Path = Path(__file__).resolve().parent.parent
 _FIELD_DATA_PY_PATH: Path = _PLANNER_ROOT / "field_data.py"
 _FIELD_DATA_JSON_PATH: Path = _PLANNER_ROOT / "field_data.json"
 
+#: Canonical keyboard-shortcut reference, the SINGLE source of truth for the
+#: shortcuts dialog (AC9). Each group is ``(category_title, [(key, desc), ...])``
+#: and mirrors the bindings installed in :meth:`EditorApp._wire_keyboard_shortcuts`.
+#: When a binding is added or changed there, this table must change with it so
+#: the operator-facing help stays accurate. The shape matches
+#: :class:`dialogs.ShortcutsDialog`'s ``shortcut_groups`` parameter exactly.
+_SHORTCUT_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Modes",
+        (
+            ("A", "Add node"),
+            ("M", "Move / select"),
+            ("E", "Edge"),
+            ("O", "Obstacle"),
+            ("S", "Set start"),
+        ),
+    ),
+    (
+        "Edit",
+        (
+            ("Ctrl+Z", "Undo"),
+            ("Ctrl+Y", "Redo"),
+            ("Delete", "Delete selected edge (EDGE mode)"),
+            ("Arrows", "Nudge selected node 0.2 cm"),
+            ("Shift+Arrows", "Nudge selected node 1 cm"),
+        ),
+    ),
+    (
+        "Edges",
+        (
+            ("L", "Add line edge (EDGE mode)"),
+            ("B", "Add blind edge (EDGE mode)"),
+            ("P", "Add projection edge (EDGE mode)"),
+        ),
+    ),
+    (
+        "File",
+        (
+            ("Ctrl+S", "Save"),
+            ("? / F1", "Show this help"),
+        ),
+    ),
+)
+
 
 class EditorApp:
     """Top-level Tk application class for the live field editor.
@@ -149,8 +364,15 @@ class EditorApp:
     * Loads ``field_data.json`` via the loader; raises if missing.
     * Constructs the in-memory :class:`FieldModel`.
     * Creates (or adopts) a :class:`tkinter.Tk` root window.
-    * Builds the :class:`FieldCanvas` and :class:`SidePanels`, packs them
-      into a horizontal layout (canvas on the left, panels on the right).
+    * Applies the warm "drafting-table" theme to that root via
+      :mod:`tools.path_planner.editor.theme` -- fonts then ttk palette then
+      root chrome -- *before* the panels/canvas build so they pick up the
+      base styling. Every theme call fails soft (no-op) when sv_ttk, a
+      bundled font, or a display is unavailable.
+    * Builds the :class:`FieldCanvas` and :class:`SidePanels`, then grids
+      them into the true three-pane window via the panels' single placement
+      entry point :meth:`SidePanels.layout_three_pane` (title + status bands
+      full-width, mode rail + inspector fixed-width, canvas expanding).
     * Wires every panel callback, every canvas mouse hook, and the
       keyboard shortcuts (``Ctrl-Z`` / ``Ctrl-Y`` / ``Ctrl-S`` /
       ``Delete``).
@@ -204,24 +426,65 @@ class EditorApp:
         # divergence, because History mutates (redo is cleared by any new edit).
         self._pending_renames: dict[str, str] = {}
 
+        # ---- 3b. Projection-edge working set ----
+        # The app owns exactly ONE ProjectionDelta. Its baseline (``loaded``)
+        # is seeded from the field_data module's EDGES below; the
+        # AddProjectionEdge / DeleteProjectionEdge commands push the pending
+        # adds / removes through the same History as every other edit, and the
+        # Save flow flushes them to field_data.py before re-seeding the
+        # baseline. The reconciled render() set is what the canvas paints.
+        self._proj_delta: ProjectionDelta = ProjectionDelta()
+        if self._field_data_module is not None:
+            self._proj_delta.set_loaded(
+                projection_edges.read_projection_edges(
+                    self._field_data_module
+                )
+            )
+
         # ---- 4. Tk root window ----
         self._owns_root: bool = root is None
         self._root: tk.Tk = root if root is not None else tk.Tk()
         self._root.title(_WINDOW_TITLE)
         self._root.geometry(self._initial_window_geometry())
 
-        # ---- 5. Side panels (right column, fixed width) ----
-        self._panels: SidePanels = SidePanels(self._root)
-        self._panels.pack(side="right", fill="y")
+        # ---- 5. Warm theme (must precede panels/canvas) ----
+        # Apply the drafting-table theme to the freshly-created root BEFORE the
+        # side panels and canvas are constructed so they pick up the base ttk
+        # styling and any bundled fonts as they build. Every call here fails
+        # soft (no-op) when sv_ttk / a bundled font / a display is unavailable,
+        # so this adds no new failure mode -- the __new__-bypassing headless
+        # tests never reach it. Order is deliberate:
+        #   1. Register bundled fonts first so panels resolve real families.
+        #   2. Apply the base ttk theme + palette. T11's panels then define
+        #      their OWN named styles on top, so this MUST run first or those
+        #      named styles would be overwritten by the base recolor.
+        #   3. Paint the root chrome the panel SURFACE tone so the window edge
+        #      has no cold-grey seam against the side panels.
+        theme.load_bundled_fonts()
+        theme.apply_ttk_theme(self._root)
+        self._root.configure(background=theme.SURFACE)
 
-        # ---- 6. Canvas (left, expands) ----
+        # ---- 6. Side panels (chrome bands, not yet placed) ----
+        # SidePanels builds the four chrome bands (title / mode rail /
+        # inspector / status) as siblings of the canvas under the shared root,
+        # but does NOT place them -- the single ``layout_three_pane`` call below
+        # grids every band plus the canvas into the true three-pane window.
+        self._panels: SidePanels = SidePanels(self._root)
+
+        # ---- 7. Canvas (centre band, expands) ----
         # The canvas resolves ``model.map_png`` against the planner root
         # itself; it does not need a field_data module reference.
         self._canvas: FieldCanvas = FieldCanvas(self._root)
         self._size_canvas_to_field()
-        self._canvas.tk_widget.pack(side="left", fill="both", expand=True)
 
-        # ---- 7. Mouse / mode state ----
+        # ---- 7b. Three-pane placement (single entry point) ----
+        # Now that BOTH the chrome bands and the canvas widget exist, hand the
+        # canvas to the panels' one placement method: it grids the title +
+        # status bands full-width, the mode rail + inspector at their fixed
+        # widths, and the canvas in the expanding centre cell.
+        self._panels.layout_three_pane(self._canvas.tk_widget)
+
+        # ---- 8. Mouse / mode state ----
         # Move mode: latched node currently being dragged.
         self._drag_target: Optional[str] = None
         # Move mode: original coords captured at press, so on release we
@@ -239,8 +502,13 @@ class EditorApp:
         # When non-None, the canvas renders the list as a dashed cyan overlay
         # and the SidePanels show Accept / Reject instead of Auto-create.
         self._proposed_edges: Optional[list[tuple[str, str, str]]] = None
+        # Name of the node currently selected in the inspector listbox, or
+        # ``None`` when nothing is selected. Maintained by
+        # _on_panel_node_select and consumed by the arrow-key nudge (AC4) so a
+        # nudge knows which node to move without re-reading the panel widget.
+        self._selected_node: Optional[str] = None
 
-        # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
+        # ---- 9. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
         # same value already committed. Compare against this latch and
         # short-circuit if equal.
@@ -248,13 +516,26 @@ class EditorApp:
             self._model.start_heading_deg
         )
 
-        # ---- 9. Wire callbacks ----
+        # ---- 10. Wire callbacks ----
         self._wire_panel_callbacks()
         self._wire_canvas_callbacks()
         self._wire_keyboard_shortcuts()
         self._wire_window_close()
 
-        # ---- 10. Initial render + panel population ----
+        # ---- 11. Initial render + panel population ----
+        # Seed the title-bar filename from the JSON sidecar's basename so the
+        # chrome names the file being edited; the dirty dot starts hidden
+        # (a freshly loaded model is clean).
+        self._panels.set_filename(self._json_path.name)
+        self._panels.set_dirty(False)
+        # Push the existing projection edges to the canvas so they render on
+        # load (the baseline was seeded into ``_proj_delta`` in step 3b).
+        self._sync_projection_render()
+        # Seed the status surface's mode + selection lines so they read the
+        # current truth from the first frame (nothing is selected yet, so the
+        # selection line shows the "none" placeholder).
+        self._update_mode_display()
+        self._update_selection_display(None)
         self._refresh_view()
 
     # ------------------------------------------------------------------
@@ -280,14 +561,16 @@ class EditorApp:
         """Compute a ``"WxH"`` geometry string sized to the field aspect.
 
         The canvas area is ``_DEFAULT_CANVAS_WIDTH_PX`` wide; its height is
-        derived from the field aspect so the map fills the canvas without
-        large empty bars. The window adds the side panel width and a small
-        vertical chrome margin for matplotlib's axis labels.
+        derived from the field aspect so the map fills the canvas without large
+        empty bars. The window adds the two fixed chrome columns (the mode rail
+        + inspector, :data:`_CHROME_TOTAL_WIDTH_PX`) on top of the canvas width
+        and a small vertical chrome margin for matplotlib's axis labels plus the
+        title / status bands.
         """
         aspect = self._field_aspect_ratio()
         canvas_w = _DEFAULT_CANVAS_WIDTH_PX
         canvas_h = max(int(round(canvas_w / aspect)), _MIN_WINDOW_HEIGHT_PX)
-        window_w = max(canvas_w + _SIDE_PANEL_WIDTH_PX, _MIN_WINDOW_WIDTH_PX)
+        window_w = max(canvas_w + _CHROME_TOTAL_WIDTH_PX, _MIN_WINDOW_WIDTH_PX)
         window_h = max(canvas_h + _CANVAS_CHROME_PX, _MIN_WINDOW_HEIGHT_PX)
         return f"{window_w}x{window_h}"
 
@@ -324,6 +607,8 @@ class EditorApp:
         self._panels.on_node_select = self._on_panel_node_select
         self._panels.on_node_type_change = self._on_panel_node_type_change
         self._panels.on_node_coords_change = self._on_panel_node_coords_change
+        self._panels.on_node_rename = self._on_panel_node_rename
+        self._panels.on_node_delete = self._on_panel_node_delete
         self._panels.on_start_node_change = self._on_panel_start_node_change
         self._panels.on_start_heading_change = (
             self._on_panel_start_heading_change
@@ -335,6 +620,21 @@ class EditorApp:
         self._panels.on_auto_create_edges = self._on_panel_auto_create_edges
         self._panels.on_accept_proposed = self._on_panel_accept_proposed
         self._panels.on_reject_proposed = self._on_panel_reject_proposed
+
+        # Property-inspector callbacks (T7): reset-spec edits, pivot add /
+        # delete, and the global decay / robot-radius knobs. Each handler does
+        # cheap tier-1 well-formedness checks before dispatching; the
+        # authoritative geometry validation stays in model.validate() at Save.
+        self._panels.on_reset_spec_change = self._on_panel_reset_spec_change
+        self._panels.on_add_pivot = self._on_panel_add_pivot
+        self._panels.on_delete_pivot = self._on_panel_delete_pivot
+        self._panels.on_global_knob_change = self._on_panel_global_knob_change
+
+        # Ghost "+ add projection" button and the status-strip shortcuts hint
+        # (T8 chrome). The projection handler enters the EDGE-mode picker; the
+        # shortcuts handler opens the read-only reference dialog.
+        self._panels.on_add_projection = self._on_panel_add_projection
+        self._panels.on_show_shortcuts = self._show_shortcuts_dialog
 
         # Clear transient drag / preview / selection state whenever the
         # user switches modes — otherwise a half-finished obstacle drag
@@ -361,13 +661,26 @@ class EditorApp:
         * ``Delete``                    -> :meth:`_handle_delete_key`
         * ``L``                         -> :meth:`_handle_edge_line_key`
         * ``B``                         -> :meth:`_handle_edge_blind_key`
+        * ``P``                         -> :meth:`_handle_edge_projection_key`
+        * ``?`` / ``F1``                -> :meth:`_show_shortcuts_dialog`
+        * ``A`` / ``M`` / ``E`` / ``O`` / ``S`` -> switch mode (AC5), per
+          :data:`_MODE_SHORTCUT_KEYS` (Add node / Move / Edge / Obstacle /
+          Set start).
+        * ``Up`` / ``Down`` / ``Left`` / ``Right`` -> nudge the selected node
+          by :data:`_NUDGE_FINE_CM`; with ``Shift`` by :data:`_NUDGE_COARSE_CM`
+          (AC4).
 
         Every binding is routed through :meth:`_shortcut_guard`, which drops
         the event when keyboard focus is on a text-entry or dialog widget so
-        typing an ``l`` / ``b`` / ``Delete`` (or a Ctrl chord) into the rename
-        dialog or a coordinate Entry does not fire an editor action behind it
-        (#67). ``bind_all`` is kept (the canvas is a matplotlib widget that is
-        awkward to focus reliably); the focus check does the gating.
+        typing an ``l`` / ``b`` / ``a`` / ``Delete`` / an arrow (or a Ctrl
+        chord) into the rename dialog or a coordinate Entry does not fire an
+        editor action behind it (#67). ``bind_all`` is kept (the canvas is a
+        matplotlib widget that is awkward to focus reliably); the focus check
+        does the gating.
+
+        Plain ``s`` (Set start) and ``Ctrl-S`` (Save) coexist: Tk dispatches
+        the most specific binding for a modified keypress, so a ``Ctrl-S``
+        event fires ``<Control-s>`` only and never the plain ``<KeyPress-s>``.
         """
         guard = self._shortcut_guard
         self._root.bind_all("<Control-z>", guard(self._undo))
@@ -383,6 +696,49 @@ class EditorApp:
         self._root.bind_all("<KeyPress-L>", guard(self._handle_edge_line_key))
         self._root.bind_all("<KeyPress-b>", guard(self._handle_edge_blind_key))
         self._root.bind_all("<KeyPress-B>", guard(self._handle_edge_blind_key))
+        self._root.bind_all(
+            "<KeyPress-p>", guard(self._handle_edge_projection_key)
+        )
+        self._root.bind_all(
+            "<KeyPress-P>", guard(self._handle_edge_projection_key)
+        )
+
+        # Shortcuts-help dialog (AC9): ``?`` and ``F1`` both open it. ``?`` is
+        # Shift+/ -- bind the keysym ``question`` (its plain glyph) so the
+        # focus-guard still gates it while typing into a field.
+        self._root.bind_all(
+            "<KeyPress-question>", guard(self._show_shortcuts_dialog)
+        )
+        self._root.bind_all("<F1>", guard(self._show_shortcuts_dialog))
+
+        # Mode-switch shortcuts (AC5). Bind both the lower- and upper-case form
+        # of each letter (mirroring L / B) so the key works regardless of Caps
+        # Lock / Shift state. Each closure captures its own ``mode`` -- a bare
+        # ``mode`` reference would late-bind to the loop's final value.
+        for key, mode in _MODE_SHORTCUT_KEYS.items():
+            handler = self._make_mode_switch_handler(mode)
+            self._root.bind_all(f"<KeyPress-{key}>", guard(handler))
+            self._root.bind_all(
+                f"<KeyPress-{key.upper()}>", guard(handler)
+            )
+
+        # Arrow-key nudge of the selected node (AC4). Plain arrows use the fine
+        # step; Shift-arrows use the coarse step. Up = +y, Down = -y, Left =
+        # -x, Right = +x (y is North/up in this model). Each closure captures
+        # its own (dx, dy) so the guard can fire it as a zero-arg handler.
+        nudge_bindings: tuple[tuple[str, float, float], ...] = (
+            ("<Up>", 0.0, _NUDGE_FINE_CM),
+            ("<Down>", 0.0, -_NUDGE_FINE_CM),
+            ("<Left>", -_NUDGE_FINE_CM, 0.0),
+            ("<Right>", _NUDGE_FINE_CM, 0.0),
+            ("<Shift-Up>", 0.0, _NUDGE_COARSE_CM),
+            ("<Shift-Down>", 0.0, -_NUDGE_COARSE_CM),
+            ("<Shift-Left>", -_NUDGE_COARSE_CM, 0.0),
+            ("<Shift-Right>", _NUDGE_COARSE_CM, 0.0),
+        )
+        for sequence, dx_cm, dy_cm in nudge_bindings:
+            handler = self._make_nudge_handler(dx_cm, dy_cm)
+            self._root.bind_all(sequence, guard(handler))
 
     def _shortcut_guard(self, handler):
         """Wrap a shortcut *handler* so it only fires when focus is not text.
@@ -440,6 +796,118 @@ class EditorApp:
         }
         return widget_class not in text_input_classes
 
+    def _make_mode_switch_handler(self, mode: Mode):
+        """Return a zero-arg handler that switches the active mode to *mode*.
+
+        The returned callable is what :meth:`_shortcut_guard` wraps: the guard
+        does the text-focus check, then invokes this handler with no arguments.
+        Each call binds *mode* per-closure so a loop over
+        :data:`_MODE_SHORTCUT_KEYS` does not late-bind to the final value.
+
+        :param mode: The :class:`Mode` this shortcut activates.
+        :return: A zero-argument callable suitable for :meth:`_shortcut_guard`.
+        """
+
+        def _handler() -> None:
+            self._switch_mode(mode)
+
+        return _handler
+
+    def _make_nudge_handler(self, dx_cm: float, dy_cm: float):
+        """Return a zero-arg handler that nudges the selected node by a delta.
+
+        The returned callable is what :meth:`_shortcut_guard` wraps: the guard
+        does the text-focus check, then invokes this handler with no arguments.
+        Each call binds *(dx_cm, dy_cm)* per-closure so the arrow-binding loop
+        does not late-bind every arrow key to the final delta.
+
+        :param dx_cm: Signed x displacement in centimetres.
+        :param dy_cm: Signed y displacement in centimetres.
+        :return: A zero-argument callable suitable for :meth:`_shortcut_guard`.
+        """
+
+        def _handler() -> None:
+            self._nudge_selected(dx_cm, dy_cm)
+
+        return _handler
+
+    def _switch_mode(self, mode: Mode) -> None:
+        """Set the active editing mode (AC5) by writing ``mode_var``.
+
+        Writing ``mode_var`` fires the existing ``_on_mode_change`` write trace,
+        which clears any in-progress drag / edge pick / obstacle preview and
+        re-renders -- the same path the toolbar radio buttons take -- so a
+        keyboard mode switch behaves identically to a click on the toolbar.
+        Writing the value it already holds is a Tk no-op (Tk only fires the
+        write trace when ``set`` is called, but the cleared transient state is
+        idempotent, so re-pressing the active mode's key is harmless).
+
+        :param mode: The :class:`Mode` to activate.
+        """
+        self._panels.mode_var.set(mode.value)
+
+    def _nudge_selected(self, dx_cm: float, dy_cm: float) -> None:
+        """Move the selected node by *(dx_cm, dy_cm)*, clamped to the field (AC4).
+
+        Acts only when a node is selected (tracked in :attr:`_selected_node`).
+        The new position is the current coordinates plus the delta, clamped to
+        the field bounds ``[0, width_cm] x [0, height_cm]`` derived from
+        ``model.field_mm``. A nudge that leaves the node unmoved -- already
+        sitting on the clamped bound -- is a no-op (no dispatch, no empty undo
+        entry), mirroring the inspector's "skip if unchanged" coords guard.
+
+        :param dx_cm: Signed x displacement in centimetres (Left -, Right +).
+        :param dy_cm: Signed y displacement in centimetres (Down -, Up +).
+        """
+        node = self._selected_node
+        if node is None:
+            self._set_status(_STATUS_NUDGE_NO_SELECTION)
+            return
+        # Defensive: the selection latch may name a node that was deleted or
+        # renamed since it was last set. Drop the stale latch and bail rather
+        # than dispatch a MoveNode against a missing node.
+        current = self._model.nodes.get(node)
+        if current is None:
+            self._selected_node = None
+            self._set_status(_STATUS_NUDGE_NO_SELECTION)
+            return
+
+        width_mm, height_mm = self._model.field_mm
+        width_cm = float(width_mm) / _MM_PER_CM
+        height_cm = float(height_mm) / _MM_PER_CM
+
+        cx, cy = float(current[0]), float(current[1])
+        new_x = self._clamp(cx + dx_cm, _FIELD_ORIGIN_CM, width_cm)
+        new_y = self._clamp(cy + dy_cm, _FIELD_ORIGIN_CM, height_cm)
+
+        # No-op shortcut: a nudge that would not move the node (already on the
+        # clamped bound) should not burn an undo entry.
+        if new_x == cx and new_y == cy:
+            return
+
+        self._dispatch(MoveNode(node, (new_x, new_y)))
+
+    @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        """Clamp *value* to the inclusive range ``[low, high]``.
+
+        Degenerate ranges (``high < low``, possible only for a field with a
+        non-positive dimension) collapse to *low* so the result still lies on a
+        defined bound rather than producing an inverted clamp.
+
+        :param value: The value to clamp.
+        :param low: Inclusive lower bound.
+        :param high: Inclusive upper bound.
+        :return: *value* clamped into ``[low, high]``.
+        """
+        if high < low:
+            return low
+        if value < low:
+            return low
+        if value > high:
+            return high
+        return value
+
     def _wire_window_close(self) -> None:
         """Intercept the window-manager close ("X") so we can warn on dirty."""
         self._root.protocol("WM_DELETE_WINDOW", self._on_close_request)
@@ -449,7 +917,16 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _refresh_view(self) -> None:
-        """Re-render canvas + side panels + button enable states + title."""
+        """Re-render canvas + side panels + button enable states + title.
+
+        Ends with a :meth:`_revalidate` so the validation badge + message slot
+        track the model after every mutation (dispatch / undo / redo all funnel
+        through here) -- "per move" validation, not just at Save.
+        """
+        # Keep the canvas's projection overlay in lockstep with the delta's
+        # reconciled render set before the repaint (a node move / undo / redo
+        # can change the geometry the arrows are drawn against).
+        self._sync_projection_render()
         highlighted = list(self._edge_selection)
         self._canvas.render(
             self._model,
@@ -460,6 +937,54 @@ class EditorApp:
         self._panels.set_undo_enabled(self._history.can_undo)
         self._panels.set_redo_enabled(self._history.can_redo)
         self._update_title()
+        self._revalidate()
+
+    def _revalidate(self) -> None:
+        """Re-run the full validator and reflect the verdict in the status bar.
+
+        Hooked into :meth:`_refresh_view`, so it fires after every model
+        mutation -- this is the "per move" validation the operator sees live
+        rather than only at Save.  The full geometry validator runs in well
+        under a millisecond on a field this size, so there is no debounce; the
+        verdict drives the badge + message slot via
+        :meth:`SidePanels.set_validation`.
+
+        A refresh must never crash on a validator hiccup, so any exception is
+        caught and surfaced as the INVALID detail (the Save-time gate uses the
+        same broad catch).
+        """
+        from tools.path_planner.validator import (  # noqa: PLC0415
+            FieldDataError,
+        )
+
+        try:
+            self._model.validate()
+        except FieldDataError as exc:
+            self._panels.set_validation(False, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 -- a refresh must not crash
+            self._panels.set_validation(False, f"validation error: {exc}")
+            return
+        self._panels.set_validation(True)
+
+    def _sync_projection_render(self) -> None:
+        """Push the delta's reconciled projection edges onto the canvas.
+
+        Called after every projection mutation and from :meth:`_refresh_view`
+        so the canvas overlay always mirrors ``_proj_delta.render()``. The
+        canvas stores the set as-is and replays it on its next paint; this
+        method does NOT itself trigger a repaint (the caller's refresh does).
+
+        Defensive against a bare instance (the rename unit tests build one via
+        ``__new__`` without a ``_proj_delta`` / ``_canvas``): a missing
+        collaborator makes this a silent no-op rather than an
+        :class:`AttributeError`.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        canvas = getattr(self, "_canvas", None)
+        if delta is None or canvas is None:
+            return
+        canvas.set_projection_edges(delta.render())
 
     def _update_title(self) -> None:
         """Reflect :attr:`_dirty` in the window title bar."""
@@ -467,14 +992,16 @@ class EditorApp:
         self._root.title(f"{_WINDOW_TITLE}{suffix}")
 
     def _mark_dirty(self) -> None:
-        """Set the dirty flag and update the title."""
+        """Set the dirty flag, update the title, and show the dirty dot."""
         self._dirty = True
         self._update_title()
+        self._panels.set_dirty(True)
 
     def _clear_dirty(self) -> None:
-        """Clear the dirty flag and update the title."""
+        """Clear the dirty flag, update the title, and hide the dirty dot."""
         self._dirty = False
         self._update_title()
+        self._panels.set_dirty(False)
 
     def _set_status(self, text: str) -> None:
         """Push *text* into the status bar."""
@@ -529,6 +1056,8 @@ class EditorApp:
         # the same call -- no need to know whether the rename was saved.
         if isinstance(undone, RenameNode):
             self._record_pending_rename(undone.new, undone.old)
+            # Mirror the rename onto the off-model projection delta (#5).
+            self._rename_proj_delta_endpoints(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
@@ -545,6 +1074,8 @@ class EditorApp:
         # untouched.
         if isinstance(redone, RenameNode):
             self._record_pending_rename(redone.old, redone.new)
+            # Mirror the rename onto the off-model projection delta (#5).
+            self._rename_proj_delta_endpoints(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -559,18 +1090,35 @@ class EditorApp:
 
         :param node_name: Selected node name, or ``None`` if cleared.
         """
+        # Track the selection so the arrow-key nudge (AC4) knows which node to
+        # move; ``None`` clears it.
+        self._selected_node = node_name
         if node_name is None:
             self._set_status("Selection cleared.")
         else:
             self._set_status(f"Selected node {node_name!r}.")
+        self._update_selection_display(node_name)
         self._refresh_view()
 
     def _on_panel_node_type_change(self, node_name: str, new_type: str) -> None:
-        """Dispatch a :class:`SetNodeType` command when the combobox changes.
+        """Route an inspector type-combobox change to the correct command.
+
+        The plain :class:`SetNodeType` command refuses any transition that
+        touches the ``"reset"`` type in either direction, so this handler
+        dispatches by case:
+
+        * ``new_type == "reset"`` and the node is NOT already reset -> plant a
+          reset spec via :meth:`SetResetSpec.autofilled`, seeding wall_coord /
+          facing from the node geometry (the nearer qualifying wall, facing
+          away) so the operator gets a real suggestion, not a placeholder. The
+          values stay editable and recompute on an axis / position change.
+        * ``new_type`` in {line, blind} and the node IS currently reset ->
+          :class:`ClearResetSpec`, which removes the spec and re-types the node.
+        * Otherwise (a plain line <-> blind change) -> :class:`SetNodeType`.
 
         :param node_name: Name of the node whose type was edited.
-        :param new_type: New type string (already constrained to
-            ``"line"``/``"blind"`` by the panel).
+        :param new_type: New type string (already constrained to one of
+            :data:`_VALID_NODE_TYPES` by the panel combobox).
         """
         if new_type not in _VALID_NODE_TYPES:
             self._set_status(f"Invalid node type {new_type!r}.")
@@ -578,8 +1126,35 @@ class EditorApp:
         # Skip the round-trip if the type is unchanged -- the panel's
         # spurious-event protection mostly handles this, but a belt-and-
         # braces check costs nothing and avoids a useless undo entry.
-        if self._model.node_types.get(node_name) == new_type:
+        current_type = self._model.node_types.get(node_name)
+        if current_type == new_type:
             return
+
+        if new_type == _NODE_TYPE_RESET:
+            # Plain -> reset: SetResetSpec atomically sets type=reset AND writes
+            # the reset_nodes spec, keeping the validator's type-and-spec
+            # invariant intact at every step. Seed wall_coord / facing from the
+            # node geometry via reset_autofill (the nearer qualifying wall,
+            # facing away), mirroring the Add-node-reset path so the operator
+            # gets a real suggestion instead of a (0,0) placeholder. Both stay
+            # editable and recompute on an axis / position change.
+            self._dispatch(
+                SetResetSpec.autofilled(
+                    node_name,
+                    node_xy=self._model.nodes[node_name],
+                    axis=_RESET_SPEC_DEFAULT_AXIS,
+                    field_mm=self._model.field_mm,
+                )
+            )
+            return
+
+        if current_type == _NODE_TYPE_RESET:
+            # Reset -> line/blind: ClearResetSpec removes the spec and re-types.
+            # SetNodeType would refuse a currently-reset node.
+            self._dispatch(ClearResetSpec(node_name, new_type))
+            return
+
+        # Plain line <-> blind: no reset spec involved.
         self._dispatch(SetNodeType(node_name, new_type))
 
     def _on_panel_node_coords_change(
@@ -598,9 +1173,43 @@ class EditorApp:
         if current is None:
             return
         cx, cy = current
-        if float(cx) == x_cm and float(cy) == y_cm:
+        # Compare at the inspector's DISPLAY precision: the entry shows the
+        # rounded coordinate, so a bare tab-away returns that rounded value.
+        # Comparing against full precision would treat an unedited focus-out as
+        # a real move and truncate the stored coord to 0.1 cm (#8).
+        if round(float(cx), _INSPECTOR_DISPLAY_DP) == round(
+            x_cm, _INSPECTOR_DISPLAY_DP
+        ) and round(float(cy), _INSPECTOR_DISPLAY_DP) == round(
+            y_cm, _INSPECTOR_DISPLAY_DP
+        ):
             return
         self._dispatch(MoveNode(node_name, (x_cm, y_cm)))
+
+    def _on_panel_node_rename(self, old: str, new: str) -> None:
+        """Rename the selected node from the inspector's name entry.
+
+        Delegates to :meth:`_perform_rename` (shared with the right-click
+        rename).  When the rename is rejected -- a duplicate / invalid name, or
+        a dispatch pre-condition failure -- the model is untouched and we
+        re-sync the panel so the name entry snaps back to the node's current
+        name instead of keeping the rejected text.
+
+        :param old: The node's current name (the selection at edit time).
+        :param new: The proposed new name typed into the entry.
+        """
+        if not self._perform_rename(old, new):
+            self._refresh_view()
+
+    def _on_panel_node_delete(self, node: str) -> None:
+        """Delete the selected node from the inspector's Delete button.
+
+        Routes to :meth:`_context_delete` so the inspector button runs the same
+        start-node / EDGES-reference guards and confirmation dialog as the
+        right-click delete.
+
+        :param node: The node to delete (the current selection).
+        """
+        self._context_delete(node)
 
     def _on_panel_start_node_change(self, node_name: str) -> None:
         """Dispatch a :class:`SetStart` when the start-node combobox changes.
@@ -616,16 +1225,449 @@ class EditorApp:
         """Dispatch a :class:`SetStartHeading` when the spinbox commits.
 
         De-duplicates spurious ``<FocusOut>`` events (reviewer note T11 W1):
-        if the value equals the last successfully committed heading, the
-        change is ignored. The latch is updated only after the command
-        actually applies.
+        the incoming value is compared against the model's current heading at
+        the inspector's DISPLAY precision. The spinbox shows the rounded
+        heading, so a bare tab-away returns that rounded value; comparing at
+        full precision (the old latch held the full-precision committed value)
+        treated an unedited focus-out as a change and truncated the stored
+        heading to 0.1 deg (#8). The latch is still updated after a real commit.
 
         :param heading_deg: New heading in degrees, ``[0, 360)``.
         """
-        if heading_deg == self._last_committed_heading:
+        if round(heading_deg, _INSPECTOR_DISPLAY_DP) == round(
+            self._model.start_heading_deg, _INSPECTOR_DISPLAY_DP
+        ):
             return
         if self._dispatch(SetStartHeading(heading_deg)):
             self._last_committed_heading = heading_deg
+
+    # ------------------------------------------------------------------
+    # Property-inspector handlers (T7): reset specs, pivots, global knobs.
+    #
+    # Two-tier validation. These handlers run cheap, hand-written tier-1
+    # well-formedness guards (membership / range / incidence) BEFORE dispatch.
+    # On a failed guard they write a specific status message, re-sync the panel
+    # from the model via _refresh_view() so the bad widget value reverts, and do
+    # NOT dispatch -- so a malformed field value never reaches the model.
+    # The full geometry validator (model.validate()) is NOT run from these
+    # tier-1 guards -- it would fire on every rejected keystroke. Instead it
+    # runs once per COMMITTED move from _revalidate() (hooked into
+    # _refresh_view), which is fast enough (sub-millisecond on a field this
+    # size) to drive the live VALID/INVALID badge after each mutation; Save
+    # re-runs the same validator as the authoritative gate.
+    # ------------------------------------------------------------------
+
+    def _reject_inline_edit(self, message: str) -> None:
+        """Report a rejected tier-1 inline edit and revert the offending widget.
+
+        Centralises the reject-and-revert path the inspector handlers share:
+        writes *message* to the status bar, drops the validation badge to its
+        INVALID state (the edit did not pass), and re-syncs every panel widget
+        from the model via :meth:`_refresh_view` so the rejected value is
+        overwritten with the model's current truth (mirrors the panel layer's
+        own reject-and-revert pattern in ``_handle_coords_commit``).
+
+        :param message: Specific reason the edit was rejected.
+        """
+        self._set_status(message)
+        self._panels.set_validation_badge(False)
+        self._refresh_view()
+
+    def _on_panel_reset_spec_change(
+        self, name: str, axis: str, wall_coord: float, facing: float
+    ) -> None:
+        """Dispatch a :class:`SetResetSpec` from the reset-spec sub-panel.
+
+        Tier-1 guards (cheap, before dispatch): the node must exist and the axis
+        must be ``"x"`` / ``"y"``. Then the handler branches on whether the axis
+        changed:
+
+        * **Axis changed** (new axis != the node's stored axis): the typed wall
+          / facing belong to the old axis, so both are RE-DERIVED from the node
+          position + field size against the new axis via
+          :func:`projection_edges.reset_autofill` and that auto-filled pair is
+          dispatched. This is the "can it auto-fill?" win -- flipping the axis
+          re-suggests a sensible wall + facing rather than carrying a stale one.
+        * **Axis unchanged** (the operator hand-edited wall or facing): the
+          facing is range-checked (``[0, 360)``; an out-of-range value is an AC7
+          inline-reject) and the operator's values are dispatched verbatim --
+          no recompute, so a manual edit is never clobbered.
+
+        The wall coordinate is unconstrained at this tier -- whether it actually
+        lies on the field wall is a geometry question for the Save-time
+        validator. On any failed guard the edit is rejected and the panel
+        reverts; otherwise the spec is dispatched.
+
+        :param name: Node whose reset spec is being authored.
+        :param axis: Wall-zero axis, expected to be ``"x"`` or ``"y"``.
+        :param wall_coord: Wall coordinate in centimetres along *axis* (used
+            only on an unchanged-axis edit).
+        :param facing: Parked heading in degrees, expected in ``[0, 360)``
+            (used only on an unchanged-axis edit).
+        """
+        if name not in self._model.nodes:
+            self._reject_inline_edit(
+                f"Reset spec: unknown node {name!r}."
+            )
+            return
+        if axis not in _RESET_AXES:
+            self._reject_inline_edit(
+                f"Reset spec: axis must be one of {_RESET_AXES!r}, "
+                f"got {axis!r}."
+            )
+            return
+
+        # Axis-change auto-fill (the "can it auto-fill?" win): when the operator
+        # picks a DIFFERENT axis than the node currently stores, the hand-typed
+        # wall / facing belong to the old axis and would be wrong for the new
+        # one. Re-derive both from the node position + field size against the
+        # new axis and dispatch THAT, so the panel shows a sensible wall +
+        # facing immediately. When the axis is UNCHANGED the operator is editing
+        # the wall or facing by hand -- dispatch their values verbatim (no
+        # recompute) so a manual edit is never clobbered.
+        current_axis = self._model.reset_nodes.get(name, {}).get("axis")
+        if axis != current_axis:
+            try:
+                new_wall, new_facing = projection_edges.reset_autofill(
+                    self._model.nodes[name], axis, self._model.field_mm
+                )
+            except ValueError as exc:
+                # axis was already membership-checked above; this is defensive.
+                self._reject_inline_edit(f"Reset spec: {exc}")
+                return
+            self._dispatch(SetResetSpec(name, axis, new_wall, new_facing))
+            return
+
+        # Axis unchanged: the operator edited wall / facing by hand. Range-check
+        # the facing (an out-of-range facing is an AC7 inline-reject case); the
+        # wall coordinate is unconstrained here -- whether it lies on the field
+        # wall is a geometry question for the Save-time validator.
+        if not (_FACING_MIN_DEG <= facing < _FACING_MAX_DEG_EXCLUSIVE):
+            self._reject_inline_edit(
+                f"Reset spec: facing must be in "
+                f"[{_FACING_MIN_DEG}, {_FACING_MAX_DEG_EXCLUSIVE}), "
+                f"got {facing}."
+            )
+            return
+        # Skip a no-op focus-out: the wall / facing entries SHOW rounded values,
+        # so a bare tab-away on an unchanged axis returns the same rounded pair.
+        # Without this guard the verbatim dispatch would truncate the stored
+        # spec to 0.1 and dirty the buffer on a focus-out that edited nothing
+        # (#8). A genuine edit differs at display precision and still dispatches.
+        stored = self._model.reset_nodes.get(name, {})
+        stored_wall = stored.get("wall_coord")
+        stored_facing = stored.get("facing")
+        if (
+            stored_wall is not None
+            and stored_facing is not None
+            and round(float(stored_wall), _INSPECTOR_DISPLAY_DP)
+            == round(wall_coord, _INSPECTOR_DISPLAY_DP)
+            and round(float(stored_facing), _INSPECTOR_DISPLAY_DP)
+            == round(facing, _INSPECTOR_DISPLAY_DP)
+        ):
+            return
+        self._dispatch(SetResetSpec(name, axis, wall_coord, facing))
+
+    def _on_panel_add_pivot(self, u: str, v: str, w: str) -> None:
+        """Dispatch an :class:`AddPivotTurn` from the pivots add-row.
+
+        Tier-1 guards (cheap, before dispatch): all three endpoints must be
+        known nodes, and both legs must be REAL incident edges -- each of the
+        pairs ``{u, v}`` and ``{v, w}`` must exist as a ``line_segments`` /
+        ``blind_edges`` entry OR a projection edge (see :meth:`_edge_exists`).
+        Without an incident leg the turn could never be executed, so it is
+        rejected inline. On any failed guard
+        the edit is rejected (no panel revert is needed -- the readonly add-row
+        pickers keep their chosen names so the operator can fix the third one).
+
+        :param u: Arrive-from node name.
+        :param v: Pivot node name.
+        :param w: Leave-to node name.
+        """
+        for role, node in (("u", u), ("v", v), ("w", w)):
+            if node not in self._model.nodes:
+                self._set_status(
+                    f"Pivot: unknown node {node!r} ({role})."
+                )
+                self._panels.set_validation_badge(False)
+                return
+        # Distinctness (mirrors AddPivotTurn.apply + the Save-time validator):
+        # a pivot needs three distinct steps. Reject a degenerate triple inline
+        # so it is caught at the same tier as the other guards instead of only
+        # failing at Save and leaving the badge INVALID (#10).
+        if u == v or v == w:
+            self._set_status(
+                f"Pivot: degenerate triple ({u!r}, {v!r}, {w!r}) -- "
+                "u==v or v==w; pick three distinct nodes."
+            )
+            self._panels.set_validation_badge(False)
+            return
+        if not self._edge_exists(u, v):
+            self._set_status(
+                f"Pivot: no edge between {u!r} and {v!r}; "
+                "the arrive leg must be a real incident edge."
+            )
+            self._panels.set_validation_badge(False)
+            return
+        if not self._edge_exists(v, w):
+            self._set_status(
+                f"Pivot: no edge between {v!r} and {w!r}; "
+                "the leave leg must be a real incident edge."
+            )
+            self._panels.set_validation_badge(False)
+            return
+        self._dispatch(AddPivotTurn(u, v, w))
+
+    def _on_panel_delete_pivot(self, turn) -> None:
+        """Dispatch a :class:`DeletePivotTurn` for a pivot row's Remove button.
+
+        Coerces *turn* to a ``tuple`` before constructing the command:
+        :class:`DeletePivotTurn` matches the stored turn by ``==``, and a list
+        would never equal a stored tuple, so a list payload would silently fail
+        to match (the command would raise "not found"). No model read is needed
+        -- the row only exists because the model holds the turn; the command's
+        own apply raises if it has since vanished, and ``_dispatch`` surfaces
+        that to the status bar.
+
+        :param turn: The ``(u, v, w)`` pivot to delete (any sequence; coerced).
+        """
+        self._dispatch(DeletePivotTurn(tuple(turn)))
+
+    def _on_panel_global_knob_change(self, knob: str, value) -> None:
+        """Dispatch a :class:`SetGlobalKnob` from a global-knob widget.
+
+        Tier-1 guards (cheap, before dispatch): the boolean
+        ``blind_decay_enabled`` knob needs no range check; every float knob is
+        bounded per :data:`_FLOAT_KNOB_BOUNDS` (``blind_decay_k >= 0``,
+        ``blind_decay_exponent >= 1``, ``blind_decay_d_ref > 0``,
+        ``robot_radius_cm > 0``). An unknown knob name or an out-of-range float
+        is rejected inline and the panel reverts; otherwise the value is
+        dispatched.
+
+        :param knob: Canonical knob name (one of the keys the panel feeds).
+        :param value: New value -- ``bool`` for ``blind_decay_enabled``,
+            otherwise a ``float``.
+        """
+        if knob == _KNOB_BLIND_DECAY_ENABLED:
+            # Boolean toggle: no range to enforce.
+            self._dispatch(SetGlobalKnob(knob, bool(value)))
+            return
+
+        bound = _FLOAT_KNOB_BOUNDS.get(knob)
+        if bound is None:
+            self._reject_inline_edit(f"Unknown global knob {knob!r}.")
+            return
+
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            self._reject_inline_edit(
+                f"Global knob {knob!r}: {value!r} is not a number."
+            )
+            return
+
+        minimum, inclusive = bound
+        in_range = number >= minimum if inclusive else number > minimum
+        if not in_range:
+            comparator = ">=" if inclusive else ">"
+            self._reject_inline_edit(
+                f"Global knob {knob!r} must be {comparator} {minimum}, "
+                f"got {number}."
+            )
+            return
+
+        # Skip a no-op focus-out: each float knob maps to a same-named model
+        # field shown at DISPLAY precision, so a bare tab-away returns the
+        # rounded value. Without this guard every FocusOut dispatched a
+        # SetGlobalKnob -- truncating the stored knob to 0.1 and dirtying the
+        # buffer on an edit that changed nothing (#8).
+        current = getattr(self._model, knob, None)
+        if isinstance(current, (int, float)) and round(
+            float(current), _INSPECTOR_DISPLAY_DP
+        ) == round(number, _INSPECTOR_DISPLAY_DP):
+            return
+
+        self._dispatch(SetGlobalKnob(knob, number))
+
+    def _edge_exists(self, a: str, b: str) -> bool:
+        """Return ``True`` if any edge connects ``{a, b}`` (line / blind / projection).
+
+        Scans ``line_segments`` and ``blind_edges`` (each stored 2-tuple is
+        undirected, so either ordering matches) AND the app's
+        :class:`ProjectionDelta` render set via :meth:`_find_projection_on_pair`.
+        A projection edge is tracked off-model in the delta, but the Save-time
+        validator accepts it as a real incident pivot leg in either direction
+        (``graph_builder._emit_directed_pair`` emits a directed pair for every
+        edge), so the pivot guard must count it too -- otherwise a projection
+        ``u -> v`` leg is wrongly rejected with "no edge between u and v".
+
+        :param a: First endpoint node name.
+        :param b: Second endpoint node name.
+        :return: ``True`` iff a line, blind, or projection edge connects the
+            pair.
+        """
+        pair = {a, b}
+        for edge in self._model.line_segments:
+            if set(edge) == pair:
+                return True
+        for edge in self._model.blind_edges:
+            if set(edge) == pair:
+                return True
+        # Projection edges live in the app's ProjectionDelta, not the model;
+        # count one on this pair (either orientation) as a real incident leg.
+        if self._find_projection_on_pair(a, b) is not None:
+            return True
+        return False
+
+    def _find_projection_on_pair(
+        self, a: str, b: str
+    ) -> Optional[tuple[str, str]]:
+        """Return the directed ``(u, v)`` of any projection edge on ``{a, b}``.
+
+        Scans the app's single :class:`ProjectionDelta`'s reconciled
+        ``render()`` set for an entry whose endpoints are ``(a, b)`` OR
+        ``(b, a)`` -- a projection edge is DIRECTED, so it may be stored in
+        either orientation relative to the (orientation-free) two-node pick.
+        The stored directed pair is returned verbatim so a follow-up
+        :class:`DeleteProjectionEdge` targets the edge exactly as it renders.
+
+        Defensive against a bare ``__new__`` instance (the rename unit tests
+        build one without a ``_proj_delta``): a missing delta makes this a
+        silent ``None`` rather than an :class:`AttributeError`.
+
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :return: The stored ``(u, v)`` directed pair, or ``None`` when no
+            projection edge connects ``a`` and ``b`` in either direction.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return None
+        for edge in delta.render():
+            u, v = edge[0], edge[1]
+            if (u == a and v == b) or (u == b and v == a):
+                return (u, v)
+        return None
+
+    def _find_projection_referencing(
+        self, node: str
+    ) -> Optional[tuple[str, str]]:
+        """Return the ``(u, v)`` of a current projection edge naming *node*.
+
+        Scans ``_proj_delta.render()`` (loaded + pending adds, minus removes)
+        for any edge with *node* as either endpoint. Used by the delete guard:
+        a session-pending projection add is NOT yet in ``field_data.EDGES``, so
+        :meth:`_find_edges_reference` cannot see it -- this catches it so a node
+        deletion never orphans a projection edge endpoint (#5).
+
+        :param node: Node name to search for.
+        :return: The first ``(u, v)`` referencing *node*, or ``None``.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return None
+        for edge in delta.render():
+            if edge[0] == node or edge[1] == node:
+                return (edge[0], edge[1])
+        return None
+
+    def _rename_proj_delta_endpoints(self, old: str, new: str) -> None:
+        """Re-key the off-model projection delta when a node is renamed.
+
+        Projection edges live in ``_proj_delta`` (``loaded`` / ``adds`` /
+        ``removes``), keyed on node name, so a :class:`RenameNode` that re-keys
+        the model must re-key these too -- otherwise a session projection edge
+        keeps its stale endpoint and is written verbatim at Save (the model's
+        ``validate()`` cannot see it because the proxy omits ``EDGES``) (#5).
+        Pure string substitution, so it is its own inverse: ``_undo`` / ``_redo``
+        call it with the swapped arguments, mirroring ``_pending_renames``.
+
+        Defensive against a bare ``__new__`` instance (rename unit tests build
+        one without a ``_proj_delta``): a missing delta is a silent no-op.
+
+        :param old: Endpoint name to replace.
+        :param new: Replacement endpoint name.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None or old == new:
+            return
+
+        def _sub(name: str) -> str:
+            return new if name == old else name
+
+        delta.loaded = [
+            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.loaded
+        ]
+        delta.adds = [
+            (_sub(u), _sub(v), d, h) for (u, v, d, h) in delta.adds
+        ]
+        delta.removes = [(_sub(u), _sub(v)) for (u, v) in delta.removes]
+
+    def _projection_pairs(self) -> frozenset:
+        """Return the undirected pairs that currently carry a projection edge.
+
+        Each as a ``frozenset({u, v})`` so :class:`AddEdgesBatch` can reject a
+        plain edge on a pair that already has a projection (the two cannot
+        coexist -- ``graph_builder`` would emit a conflicting directed pair from
+        both) (#7). Empty when there is no projection delta (bare instance).
+
+        :return: A frozenset of ``frozenset`` pairs.
+        """
+        delta = getattr(self, "_proj_delta", None)
+        if delta is None:
+            return frozenset()
+        return frozenset(
+            frozenset({edge[0], edge[1]}) for edge in delta.render()
+        )
+
+    def _plain_edge_kind(self, a: str, b: str) -> Optional[str]:
+        """Return the kind of the plain edge on ``{a, b}`` -- line / blind / None.
+
+        Undirected scan of ``model.line_segments`` then ``model.blind_edges``
+        (each stored 2-tuple matches either ordering). Projection edges are NOT
+        plain edges and are deliberately ignored here -- they live off-model in
+        the :class:`ProjectionDelta` and are reported via
+        :meth:`_find_projection_on_pair`. At most one plain edge exists on a pair
+        (the L / B / P overrides enforce mutual exclusion), so the first match
+        wins.
+
+        :param a: First endpoint node name.
+        :param b: Second endpoint node name.
+        :return: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` for the
+            existing plain edge, or ``None`` when no line / blind edge connects
+            the pair.
+        """
+        pair = {a, b}
+        for edge in self._model.line_segments:
+            if set(edge) == pair:
+                return _EDGE_KIND_LINE
+        for edge in self._model.blind_edges:
+            if set(edge) == pair:
+                return _EDGE_KIND_BLIND
+        return None
+
+    def _describe_edge_on_pair(self, a: str, b: str) -> str:
+        """Return a human-readable description of the edge on ``{a, b}``.
+
+        Used by the EDGE-mode status line so the operator can see what (if
+        anything) currently connects the two picked nodes before pressing
+        L / B / P / Delete. Projection edges take priority and report their
+        STORED direction (they are directed); otherwise a plain line / blind
+        edge is named; otherwise ``"none"``.
+
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :return: e.g. ``"projection 'A' -> 'B'"``, ``"line"``, ``"blind"``, or
+            ``"none"``.
+        """
+        projection = self._find_projection_on_pair(a, b)
+        if projection is not None:
+            u, v = projection
+            return f"projection {u!r} -> {v!r}"
+        kind = self._plain_edge_kind(a, b)
+        if kind is not None:
+            return kind
+        return "none"
 
     # ------------------------------------------------------------------
     # Auto-create-edges (T8)
@@ -646,6 +1688,17 @@ class EditorApp:
         """
         max_len_cm = self._panels.max_edge_length_cm
         proposals = auto_edges.propose_edges(self._model, max_len_cm)
+        # Drop any proposed pair that already carries a projection edge: a plain
+        # and a projection edge cannot coexist on a pair, and AddEdgesBatch would
+        # reject the whole batch on it. propose_edges is model-only (no
+        # projection awareness), so filter here against the off-model delta (#7).
+        proj_pairs = self._projection_pairs()
+        if proj_pairs:
+            proposals = [
+                (a, b, k)
+                for (a, b, k) in proposals
+                if frozenset({a, b}) not in proj_pairs
+            ]
         if not proposals:
             self._set_status(
                 "No edges to propose (need >= 3 non-collinear nodes / all candidates filtered)."
@@ -679,7 +1732,13 @@ class EditorApp:
         # re-paint the now-committed edges as a cyan overlay.
         self._proposed_edges = None
         self._panels.set_auto_create_state("idle")
-        if self._dispatch(AddEdgesBatch(batch)):
+        # Defense-in-depth: pass the current projection pairs so the command
+        # rejects a plain edge on a pair that gained a projection since the
+        # preview was built (the preview filter in _on_panel_auto_create_edges
+        # is the first line; this is the guarantee) (#7).
+        if self._dispatch(
+            AddEdgesBatch(batch, projection_pairs=self._projection_pairs())
+        ):
             self._set_status(f"Added {len(batch)} edges.")
         else:
             # Dispatch already wrote a status message about the conflict.
@@ -699,6 +1758,42 @@ class EditorApp:
         self._panels.set_auto_create_state("idle")
         self._set_status("Proposal rejected.")
         self._refresh_view()
+
+    # ------------------------------------------------------------------
+    # Projection-edge authoring (T8) + shortcuts dialog
+    # ------------------------------------------------------------------
+
+    def _on_panel_add_projection(self) -> None:
+        """Enter the projection-edge picker from the "+ add projection" button.
+
+        Projection edges are authored with the SAME EDGE-mode two-node picker as
+        line / blind edges -- no parallel picker. This handler switches to EDGE
+        mode (which clears any stale transient selection) and writes a status
+        hint telling the operator the directed convention: pick the source, then
+        the head, then press ``P``. The actual add happens in
+        :meth:`_handle_edge_projection_key`.
+        """
+        self._switch_mode(Mode.EDGE)
+        self._set_status(_STATUS_PROJECTION_HINT)
+
+    def _show_shortcuts_dialog(self) -> None:
+        """Open the read-only keyboard-shortcuts reference dialog (AC9).
+
+        Wired to the status-strip key-hint click (``on_show_shortcuts``) and to
+        the ``?`` / ``F1`` shortcuts. The dialog renders the canonical
+        :data:`_SHORTCUT_GROUPS` table -- the single source of truth that mirrors
+        the bindings installed in :meth:`_wire_keyboard_shortcuts` -- and is
+        modal until dismissed. Construction is wrapped so a transient Tk failure
+        (e.g. a torn-down root in a test) surfaces on the status bar rather than
+        raising out of an event callback.
+        """
+        groups = [
+            (title, list(rows)) for title, rows in _SHORTCUT_GROUPS
+        ]
+        try:
+            ShortcutsDialog(self._root, groups)
+        except tk.TclError as exc:  # pragma: no cover -- defensive
+            self._set_status(f"Could not open shortcuts: {exc}")
 
     # ------------------------------------------------------------------
     # Canvas mouse handlers (mode-routed)
@@ -748,10 +1843,35 @@ class EditorApp:
 
         The re-render is what makes the change visible: it wipes any
         highlight ring around the previously-selected edge endpoints and
-        any in-progress obstacle preview rectangle.
+        any in-progress obstacle preview rectangle.  Also pushes the new mode
+        name onto the status surface's mode line so it always names the active
+        editing mode (AC8).
         """
         self._clear_transient_state()
+        self._update_mode_display()
         self._refresh_view()
+
+    def _update_mode_display(self) -> None:
+        """Push a readable name for the active mode onto the status surface.
+
+        Reads ``mode_var`` directly (rather than via :meth:`_current_mode`) so
+        an unrecognised value still renders a clear ``"--"`` placeholder rather
+        than vanishing.
+        """
+        raw = self._panels.mode_var.get()
+        label = _MODE_DISPLAY_LABELS.get(raw, _MODE_DISPLAY_UNKNOWN)
+        self._panels.set_mode_display(f"{_MODE_DISPLAY_PREFIX}{label}")
+
+    def _update_selection_display(self, node_name: Optional[str]) -> None:
+        """Push the current selection onto the status surface's selection line.
+
+        :param node_name: Selected node name, or ``None`` when the selection is
+            cleared (rendered as the ``"none"`` placeholder).
+        """
+        shown = node_name if node_name else _SELECTION_DISPLAY_NONE
+        self._panels.set_selection_display(
+            f"{_SELECTION_DISPLAY_PREFIX}{shown}"
+        )
 
     def _on_canvas_click(self, x: float, y: float, button: int) -> None:
         """Route a press event to the per-mode handler.
@@ -790,17 +1910,20 @@ class EditorApp:
         """
         mode = self._current_mode()
         if mode is Mode.MOVE and self._drag_target is not None:
-            # Live LIVE-update the model so the canvas can re-render the
-            # node + its incident edges following the cursor. The
-            # eventual MoveNode command (issued on release) will undo
-            # this temporary mutation and re-apply the final delta as a
-            # single undo entry.
-            self._model.nodes[self._drag_target] = (x, y)
-            self._refresh_view()
+            # Route the live drag through the canvas blit fast-path armed by
+            # _handle_move_click's begin_node_drag: it animates ONLY the
+            # dragged node's dot, label, and incident edges (no model write,
+            # no listbox rebuild, no per-frame full render). The model is left
+            # untouched until the MoveNode command on release; until then the
+            # canvas merely slides the animated artists to follow the cursor.
+            self._canvas.update_node_drag(self._drag_target, x, y)
         elif mode is Mode.OBSTACLE and self._obstacle_anchor is not None:
+            # De-lagged rubber-band: slide the preview rectangle through the
+            # canvas blit fast-path (no ax.clear, no full render, no validator,
+            # no per-frame obstacle inflation) -- mirrors the MOVE drag (#11).
             self._obstacle_cursor = (x, y)
-            self._refresh_view()
-            self._draw_obstacle_preview()
+            ax_anchor, ay_anchor = self._obstacle_anchor
+            self._canvas.update_obstacle_preview(ax_anchor, ay_anchor, x, y)
 
     def _on_canvas_release(self, x: float, y: float, button: int) -> None:
         """Route a release event to the per-mode handler.
@@ -823,13 +1946,20 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _handle_add_node_click(self, x: float, y: float) -> None:
-        """Prompt for name + type then dispatch :class:`AddNode`.
+        """Prompt for name + type then dispatch the right command(s).
 
-        Opens the combined :class:`AddNodeDialog` (T3). OK dispatches
-        :class:`AddNode` at the clicked coordinates; Cancel is a no-op.
-        Validation of duplicate / illegal names happens downstream in
-        ``AddNode.apply`` -- any ``ValueError`` is surfaced by ``_dispatch``
-        in the status bar.
+        Opens the combined :class:`AddNodeDialog` (T3). OK creates the node at
+        the clicked coordinates; Cancel is a no-op. The dialog now also offers
+        ``"reset"`` -- but :class:`AddNode` refuses a reset type (a reset node
+        needs a paired spec), so a reset selection is created in two steps
+        instead: an :class:`AddNode` as a plain ``"line"`` node, then a
+        :meth:`SetResetSpec.autofilled` that flips it to ``"reset"`` with an
+        auto-suggested wall + facing. The new node is then selected and the
+        Reset-spec inspector section opened so the operator can confirm /
+        tweak the auto-filled geometry. (Two undo steps for a reset node is
+        acceptable.) Validation of duplicate / illegal names happens downstream
+        in the commands' ``apply`` -- any ``ValueError`` is surfaced by
+        ``_dispatch`` in the status bar.
 
         :param x: World x coordinate of the click.
         :param y: World y coordinate of the click.
@@ -853,7 +1983,79 @@ class EditorApp:
                 parent=self._root,
             )
             return
+
+        if node_type == _NODE_TYPE_RESET:
+            self._add_reset_node(name, (x, y))
+            return
+
+        # Plain line / blind node: one AddNode dispatch.
         self._dispatch(AddNode(name, (x, y), node_type))
+
+    def _add_reset_node(
+        self, name: str, xy: tuple[float, float]
+    ) -> None:
+        """Create a reset node in two undoable steps and open its spec panel.
+
+        :class:`AddNode` rejects the ``"reset"`` type, so a reset node is built
+        as a plain ``"line"`` node first, then :meth:`SetResetSpec.autofilled`
+        flips it to ``"reset"`` with an auto-suggested wall coordinate / facing
+        (the nearer qualifying field wall on the default ``"x"`` axis). If the
+        first :class:`AddNode` is rejected (duplicate name etc.) the second
+        dispatch is skipped so a half-formed reset node is never planted. On
+        success the new node is selected and the Reset-spec inspector section
+        is opened so the operator sees and confirms the auto-fill.
+
+        :param name: Name of the new reset node.
+        :param xy: ``(x_cm, y_cm)`` coordinates of the click.
+        """
+        if not self._dispatch(AddNode(name, xy, _NODE_TYPE_LINE)):
+            return
+        spec = SetResetSpec.autofilled(
+            name,
+            node_xy=xy,
+            axis=_RESET_SPEC_DEFAULT_AXIS,
+            field_mm=self._model.field_mm,
+        )
+        if not self._dispatch(spec):
+            # The autofill flip failed; the plain node is still in the model.
+            # Leave it selected so the operator can fix the type by hand.
+            self._select_node(name)
+            return
+        # Select the new reset node and reveal its spec section so the
+        # auto-filled wall / facing are visible for confirmation.
+        self._select_node(name)
+        self._panels.refresh(self._model)
+        self._reveal_reset_spec_section()
+
+    def _select_node(self, name: str) -> None:
+        """Latch *name* as the selected node and sync the selection surfaces.
+
+        Mirrors what :meth:`_on_panel_node_select` does for a user click, but
+        is driven programmatically (e.g. right after a node is created): it
+        updates the arrow-nudge latch and the status-strip selection line.
+        :meth:`SidePanels.refresh` (run by the caller's :meth:`_refresh_view`
+        or directly) reselects the listbox row and populates the inspector.
+
+        :param name: Name of the node to select.
+        """
+        self._selected_node = name
+        # The panel keys its listbox-restore + inspector-populate off this var.
+        self._panels._selected_node_var.set(name)
+        self._update_selection_display(name)
+
+    def _reveal_reset_spec_section(self) -> None:
+        """Open the inspector's collapsible Reset-spec section if it is closed.
+
+        Lets the operator immediately see the auto-filled wall / facing after a
+        reset node is created. Guarded against panel internals being absent
+        (the section starts open by default, so this is usually a no-op).
+        """
+        collapsibles = getattr(self._panels, "_collapsibles", None)
+        if not collapsibles:
+            return
+        record = collapsibles.get("reset_spec")
+        if record is not None and not record.is_open:
+            self._panels._toggle_collapsible("reset_spec")
 
     def _handle_move_click(self, x: float, y: float) -> None:
         """Pick a node under the cursor and latch it for dragging.
@@ -869,6 +2071,12 @@ class EditorApp:
             return
         self._drag_target = hit
         self._drag_origin_xy = self._model.nodes[hit]
+        # Arm the canvas blit fast-path before the first drag motion so each
+        # _on_canvas_drag tick only re-composites the dragged node's animated
+        # artists against a baked static background (see FieldCanvas.
+        # begin_node_drag / update_node_drag). _finish_move issues the matching
+        # end_node_drag on release.
+        self._canvas.begin_node_drag(hit)
         self._set_status(f"Dragging {hit!r}.")
 
     def _handle_edge_click(self, x: float, y: float) -> None:
@@ -890,9 +2098,11 @@ class EditorApp:
         if len(self._edge_selection) > _EDGE_SELECTION_MAX:
             del self._edge_selection[0]
         if len(self._edge_selection) == _EDGE_SELECTION_MAX:
+            a, b = self._edge_selection
+            current = self._describe_edge_on_pair(a, b)
             self._set_status(
-                f"Edge endpoints: {self._edge_selection[0]!r} -> "
-                f"{self._edge_selection[1]!r}. Press L (line) or B (blind)."
+                f"Edge endpoints: {a!r} -> {b!r} (current: {current}). "
+                f"Press L (line), B (blind), P (projection), or Delete."
             )
         else:
             self._set_status(
@@ -908,6 +2118,10 @@ class EditorApp:
         """
         self._obstacle_anchor = (x, y)
         self._obstacle_cursor = (x, y)
+        # Arm the blit fast-path: bake the static scene once now so each motion
+        # only re-draws the rubber-band rectangle instead of a full re-render
+        # (#11). begin_obstacle_drag is a no-op-safe call.
+        self._canvas.begin_obstacle_drag()
         self._set_status("Drag to size the obstacle, release to commit.")
 
     def _handle_start_click(self, x: float, y: float) -> None:
@@ -930,12 +2144,18 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _finish_move(self, x: float, y: float) -> None:
-        """Commit the live-dragged position via :class:`MoveNode`.
+        """Commit the dragged position via :class:`MoveNode`.
 
-        The model was mutated LIVE during the drag (so the canvas could
-        follow the cursor) -- restore the pre-drag value first so the
-        MoveNode command captures the correct ``_original_xy`` and
-        produces a single, fully-reversible undo entry.
+        With the T3 blit fast-path the model is NOT mutated during the drag:
+        :meth:`FieldCanvas.update_node_drag` animates the dragged node's
+        on-canvas artists while the model keeps holding the pre-drag value.
+        First tear down the canvas drag state via
+        :meth:`FieldCanvas.end_node_drag` (clears the animated flags, drops the
+        blit background, and re-bakes the static scene -- safe even if
+        ``begin_node_drag`` never armed anything), then dispatch a single
+        :class:`MoveNode` so the move lands as one fully-reversible undo entry.
+        ``_dispatch`` runs the one full :meth:`_refresh_view` that re-syncs the
+        inspector / listbox to the final position.
 
         :param x: World x coordinate at release (the final position).
         :param y: World y coordinate at release.
@@ -947,15 +2167,23 @@ class EditorApp:
         self._drag_target = None
         self._drag_origin_xy = None
 
+        # Always tear down the canvas drag fast-path on a MOVE release. It
+        # no-ops when no drag was armed and re-bakes the static scene either
+        # way, so it is safe to call before the early returns below.
+        self._canvas.end_node_drag()
+
         if target is None or origin is None:
             return
 
-        # Restore the original coordinates so MoveNode.apply captures them
-        # correctly as _original_xy.
+        # The model was never live-mutated (the canvas animated artists
+        # instead), so it still holds ``origin``; this assignment is a
+        # defensive no-op kept only to guarantee the pre-drag value before
+        # MoveNode.apply captures it as ``_original_xy``.
         self._model.nodes[target] = origin
 
         # No-op shortcut: if the drag ended where it started, there's no
-        # mutation to record.
+        # mutation to record. end_node_drag already re-rendered the canvas;
+        # refresh once more so the panels / inspector stay consistent.
         if (x, y) == origin:
             self._refresh_view()
             self._set_status(f"{target!r} unchanged.")
@@ -973,6 +2201,9 @@ class EditorApp:
         # Always clear the drag state up front.
         self._obstacle_anchor = None
         self._obstacle_cursor = None
+        # Tear down the blit fast-path (remove the preview rect, re-bake the
+        # static scene). No-op-safe even if begin_obstacle_drag never armed (#11).
+        self._canvas.end_obstacle_drag()
         if anchor is None:
             return
 
@@ -1003,45 +2234,20 @@ class EditorApp:
 
         self._dispatch(AddObstacle(xmin, ymin, xmax, ymax, kind))
 
-    def _draw_obstacle_preview(self) -> None:
-        """Overlay a dotted rectangle on the axes during an obstacle drag.
-
-        Called after :meth:`_refresh_view` clears and redraws everything;
-        the preview is therefore drawn on top of the freshly rendered
-        scene but is wiped on the next refresh, which keeps it ephemeral
-        without touching the model.
-        """
-        if self._obstacle_anchor is None or self._obstacle_cursor is None:
-            return
-        import matplotlib.patches as mpatches  # noqa: PLC0415
-
-        ax_anchor, ay_anchor = self._obstacle_anchor
-        ax_cursor, ay_cursor = self._obstacle_cursor
-        xmin = min(ax_anchor, ax_cursor)
-        ymin = min(ay_anchor, ay_cursor)
-        width = abs(ax_cursor - ax_anchor)
-        height = abs(ay_cursor - ay_anchor)
-        if width <= 0.0 or height <= 0.0:
-            return
-        rect = mpatches.Rectangle(
-            (xmin, ymin),
-            width,
-            height,
-            linewidth=_OBSTACLE_PREVIEW_LINEWIDTH,
-            edgecolor=_OBSTACLE_PREVIEW_EDGECOLOR,
-            linestyle=_OBSTACLE_PREVIEW_LINESTYLE,
-            facecolor="none",
-            zorder=_OBSTACLE_PREVIEW_ZORDER,
-        )
-        self._canvas.axes.add_patch(rect)
-        self._canvas.figure.canvas.draw_idle()
-
     # ------------------------------------------------------------------
     # Keyboard shortcut handlers
     # ------------------------------------------------------------------
 
     def _handle_delete_key(self) -> None:
         """``Delete`` -- if EDGE mode + two endpoints selected, drop the edge.
+
+        Deletes whatever edge connects the two picked nodes, in priority order:
+
+        * A DIRECTED projection edge on the pair (either orientation) ->
+          :class:`DeleteProjectionEdge` against the stored ``(u, v)``.
+        * Otherwise an UNDIRECTED line / blind edge on ``{a, b}`` ->
+          :class:`DeleteEdge`.
+        * Otherwise the pair has no edge -- a status message, no dispatch.
 
         In other modes the key is a no-op (deleting nodes is intentionally
         constrained to the right-click context menu so a stray Delete does
@@ -1056,36 +2262,242 @@ class EditorApp:
             )
             return
         a, b = self._edge_selection
-        if self._dispatch(DeleteEdge(a, b)):
-            self._edge_selection.clear()
-            self._set_status(f"Deleted edge ({a!r}, {b!r}).")
-            self._refresh_view()
+        # Projection edges take priority: a pair never carries both a projection
+        # edge and a plain edge at once (the L/B/P overrides enforce that), but
+        # the directed projection delete must target the stored orientation.
+        projection_pair = self._find_projection_on_pair(a, b)
+        if projection_pair is not None:
+            u, v = projection_pair
+            if self._dispatch(DeleteProjectionEdge(self._proj_delta, u, v)):
+                self._sync_projection_render()
+                self._edge_selection.clear()
+                self._set_status(f"Deleted projection edge {u!r} -> {v!r}.")
+                self._refresh_view()
+            return
+        if self._plain_edge_kind(a, b) is not None:
+            if self._dispatch(DeleteEdge(a, b)):
+                self._edge_selection.clear()
+                self._set_status(f"Deleted edge ({a!r}, {b!r}).")
+                self._refresh_view()
+            return
+        self._set_status(f"No edge between ({a!r}, {b!r}) to delete.")
 
     def _handle_edge_line_key(self) -> None:
-        """``L`` -- dispatch :class:`AddLineEdge` if two endpoints picked."""
+        """``L`` -- add a line edge, overriding any other edge on the pair.
+
+        Overrides whatever currently connects the two picked nodes: a DIRECTED
+        projection edge (either orientation) or an existing BLIND edge is deleted
+        first, then the undirected line edge is added in its place (a two-entry
+        delete-then-add). A pair that is already a line edge is a friendly no-op.
+        With nothing there a plain :class:`AddLineEdge` is dispatched. See
+        :meth:`_add_plain_edge_with_override` for the full override contract.
+        """
         if self._current_mode() is not Mode.EDGE:
             return
         if len(self._edge_selection) != _EDGE_SELECTION_MAX:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        if self._dispatch(AddLineEdge(a, b)):
-            self._edge_selection.clear()
-            self._set_status(f"Added line edge ({a!r}, {b!r}).")
-            self._refresh_view()
+        self._add_plain_edge_with_override(
+            AddLineEdge(a, b), a, b, _EDGE_KIND_LINE
+        )
 
     def _handle_edge_blind_key(self) -> None:
-        """``B`` -- dispatch :class:`AddBlindEdge` if two endpoints picked."""
+        """``B`` -- add a blind edge, overriding any other edge on the pair.
+
+        Symmetric to :meth:`_handle_edge_line_key`: a projection edge or an
+        existing LINE edge on the picked pair is deleted first, then a plain
+        :class:`AddBlindEdge` is added in its place. A pair that is already a
+        blind edge is a friendly no-op.
+        """
         if self._current_mode() is not Mode.EDGE:
             return
         if len(self._edge_selection) != _EDGE_SELECTION_MAX:
             self._set_status("EDGE mode: pick two nodes first.")
             return
         a, b = self._edge_selection
-        if self._dispatch(AddBlindEdge(a, b)):
+        self._add_plain_edge_with_override(
+            AddBlindEdge(a, b), a, b, _EDGE_KIND_BLIND
+        )
+
+    def _add_plain_edge_with_override(
+        self, add_command, a: str, b: str, kind: str
+    ) -> None:
+        """Add a line / blind edge, overriding any other edge already on the pair.
+
+        Shared body for the ``L`` and ``B`` handlers. The new undirected line /
+        blind edge replaces whatever currently connects ``{a, b}``:
+
+        * Same plain kind already there -> nothing to change; a friendly status
+          message, no dispatch (avoids the command's "already exists" error).
+        * A projection edge (either orientation) -> deleted FIRST via
+          :class:`DeleteProjectionEdge` against its stored directed pair, then
+          the add (override projection -> line/blind).
+        * The OTHER plain kind (line <-> blind) -> deleted FIRST via
+          :class:`DeleteEdge`, then the add (override line <-> blind), so the
+          operator can flip an edge's type in place without a manual delete.
+        * Nothing there -> the add runs directly.
+
+        Any override is delete-then-add, bundled into ONE :class:`MacroCommand`
+        so a single undo restores the WHOLE override instead of just the add
+        (which would leave the pair with neither edge). If the delete step is
+        rejected, ``MacroCommand.apply`` rolls back so the model is never left
+        half-overridden, and ``_dispatch`` surfaces the error (#12).
+
+        :param add_command: The :class:`AddLineEdge` / :class:`AddBlindEdge` to
+            dispatch once any override is cleared.
+        :param a: First picked node name.
+        :param b: Second picked node name.
+        :param kind: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` -- shapes
+            the override decision and the status text.
+        """
+        # Already the requested kind: a no-op the operator would otherwise hit as
+        # the command's "already exists" error. Report it plainly and stop.
+        if self._plain_edge_kind(a, b) == kind:
             self._edge_selection.clear()
-            self._set_status(f"Added blind edge ({a!r}, {b!r}).")
+            self._set_status(f"({a!r}, {b!r}) is already a {kind} edge.")
             self._refresh_view()
+            return
+        overridden_projection = self._find_projection_on_pair(a, b)
+        overridden_kind: Optional[str] = None
+        steps: list = []
+        if overridden_projection is not None:
+            u, v = overridden_projection
+            steps.append(DeleteProjectionEdge(self._proj_delta, u, v))
+        else:
+            # The same-kind case returned above, so any plain edge on the pair is
+            # the OTHER kind: delete it first so the add won't collide, recording
+            # the old kind for the status text.
+            overridden_kind = self._plain_edge_kind(a, b)
+            if overridden_kind is not None:
+                steps.append(DeleteEdge(a, b))
+        steps.append(add_command)
+        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
+        if self._dispatch(command):
+            if overridden_projection is not None:
+                self._sync_projection_render()
+            self._edge_selection.clear()
+            if overridden_projection is not None:
+                u, v = overridden_projection
+                self._set_status(
+                    f"Replaced projection {u!r} -> {v!r} with a {kind} edge."
+                )
+            elif overridden_kind is not None:
+                self._set_status(
+                    f"Changed ({a!r}, {b!r}) from {overridden_kind} to {kind}."
+                )
+            else:
+                self._set_status(f"Added {kind} edge ({a!r}, {b!r}).")
+            self._refresh_view()
+
+    def _handle_edge_projection_key(self) -> None:
+        """``P`` -- add a DIRECTED projection edge from the two picked nodes.
+
+        Reuses the EDGE-mode two-node picker, but unlike the undirected L / B
+        edges the order is load-bearing: the FIRST-selected node is the source
+        ``u`` and the SECOND is the head ``v`` (a projection edge is directed
+        ``u -> v``). The geometry ``(distance_cm, heading_deg)`` is derived from
+        the two node positions, then an :class:`AddProjectionEdge` is dispatched
+        against the app's single :class:`ProjectionDelta`. On success the canvas
+        overlay is re-synced, the buffer is marked dirty (via ``_dispatch``),
+        and the selection is cleared. A duplicate / unknown / same-node edge
+        raises ``ValueError`` inside the command, which ``_dispatch`` surfaces on
+        the status bar.
+        """
+        if self._current_mode() is not Mode.EDGE:
+            return
+        if len(self._edge_selection) != _EDGE_SELECTION_MAX:
+            self._set_status("EDGE mode: pick two nodes first.")
+            return
+        u, v = self._edge_selection
+        # Both names came from a canvas hit-test, but a node could have been
+        # deleted between the pick and this keypress; guard before geometry.
+        if u not in self._model.nodes or v not in self._model.nodes:
+            self._set_status(
+                "Projection: a selected node no longer exists; re-pick."
+            )
+            self._edge_selection.clear()
+            self._refresh_view()
+            return
+        # A projection is a line-follow leg, so its HEAD must sit on a line: the
+        # Save-time validator (``_reject_line_follow_into_blind``, ADR-041)
+        # rejects a projection into a blind node (no line there to seek). Catch
+        # it here and offer the valid alternative -- a blind edge to reach the
+        # blind node -- instead of authoring an edge that only fails at Save.
+        if self._model.node_types.get(v) == _NODE_TYPE_BLIND:
+            self._offer_blind_instead_of_projection(u, v)
+            return
+        try:
+            distance_cm, heading_deg = (
+                projection_edges.compute_projection_geometry(
+                    self._model.nodes[u], self._model.nodes[v]
+                )
+            )
+        except ValueError as exc:
+            # Identical endpoints have no defined heading.
+            self._set_status(f"Projection: {exc}")
+            return
+        # Override line/blind -> projection: a projection edge cannot coexist
+        # with an undirected line / blind edge on the same pair, so the plain
+        # edge is deleted first. Gate on _plain_edge_kind (line/blind only) --
+        # NOT _edge_exists, which ALSO counts projection edges, so a reverse-
+        # direction projection on the pair would otherwise trigger a bogus
+        # DeleteEdge that raises and aborts a legitimate add (#6). The delete +
+        # add are bundled into ONE MacroCommand so a single undo restores the
+        # WHOLE override instead of leaving the pair with neither edge (#12).
+        overrode_plain = self._plain_edge_kind(u, v) is not None
+        steps: list = []
+        if overrode_plain:
+            steps.append(DeleteEdge(u, v))
+        steps.append(
+            AddProjectionEdge(self._proj_delta, u, v, distance_cm, heading_deg)
+        )
+        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
+        if self._dispatch(command):
+            # ``_dispatch`` already marked dirty and refreshed (which re-syncs
+            # the overlay); re-sync explicitly too so the contract is met even
+            # if the refresh path changes, then clear the picker.
+            self._sync_projection_render()
+            self._edge_selection.clear()
+            if overrode_plain:
+                self._set_status(
+                    f"Replaced edge ({u!r}, {v!r}) with a projection "
+                    f"{u!r} -> {v!r}."
+                )
+            else:
+                self._set_status(
+                    f"Added projection edge {u!r} -> {v!r}."
+                )
+            self._refresh_view()
+
+    def _offer_blind_instead_of_projection(self, u: str, v: str) -> None:
+        """Offer a blind edge when a projection's head ``v`` is a blind node.
+
+        A line-follow projection cannot end on a blind node (no line to seek
+        there -- ``validator._reject_line_follow_into_blind``). Rather than
+        author an edge the Save-time validator will reject, prompt the operator:
+        on confirm, add a BLIND edge for the leg -- the valid way to reach a
+        blind node -- via :meth:`_add_plain_edge_with_override` (which clears the
+        picker and refreshes); on decline, leave the picked selection untouched
+        so they can re-pick a line head.
+
+        :param u: The projection source node (the picked first node).
+        :param v: The projection head node, known to be typed ``"blind"``.
+        """
+        add_blind = messagebox.askyesno(
+            "Can't project into a blind node",
+            f"{v!r} is a blind node -- a line-follow projection can't end "
+            f"there. Add a blind edge instead?",
+            parent=self._root,
+        )
+        if not add_blind:
+            self._set_status(
+                f"Projection into blind node {v!r} cancelled."
+            )
+            return
+        self._add_plain_edge_with_override(
+            AddBlindEdge(u, v), u, v, _EDGE_KIND_BLIND
+        )
 
     # ------------------------------------------------------------------
     # Right-click context menu
@@ -1217,10 +2629,7 @@ class EditorApp:
             )
 
     def _context_rename(self, target: str) -> None:
-        """Prompt for a new name and dispatch :class:`RenameNode`.
-
-        On success, queues the rename into :attr:`_pending_renames` so
-        the next Save flushes it through the LibCST EDGES rewriter.
+        """Prompt for a new name and rename *target* via :meth:`_perform_rename`.
 
         :param target: Existing node name.
         """
@@ -1232,20 +2641,63 @@ class EditorApp:
         )
         if new_name is None:
             return
+        self._perform_rename(target, new_name)
+
+    def _perform_rename(self, target: str, new_name: str) -> bool:
+        """Rename *target* to *new_name*, recording the pending EDGES rewrite.
+
+        Shared by the right-click rename and the inspector's in-place name edit.
+        A blank or unchanged *new_name* is a no-op; on a successful dispatch the
+        rename is queued into :attr:`_pending_renames` for the next Save and --
+        if *target* was the selected node -- the selection follows it to
+        *new_name* (latch + status line + inspector), so the renamed node stays
+        selected and a follow-up arrow nudge targets it.
+
+        :param target: Existing node name.
+        :param new_name: Proposed new name (stripped here).
+        :return: ``True`` if the rename was dispatched, ``False`` otherwise.
+        """
         new_name = new_name.strip()
         if not new_name or new_name == target:
-            return
-        if self._dispatch(RenameNode(target, new_name)):
-            self._record_pending_rename(target, new_name)
+            return False
+        was_selected = self._selected_node == target
+        if not self._dispatch(RenameNode(target, new_name)):
+            return False
+        self._record_pending_rename(target, new_name)
+        # Re-key the off-model projection delta so a session projection edge
+        # follows the rename (#5); RenameNode only cascades the model.
+        self._rename_proj_delta_endpoints(target, new_name)
+        if was_selected:
+            # The dispatch's refresh ran while the panel still keyed off the OLD
+            # name (so it dropped the listbox/inspector selection). Re-point the
+            # canonical selection var + status line at the renamed node.
+            self._select_node(new_name)
+        # Refresh once more: re-sync the projection overlay to the re-keyed
+        # delta and (if it moved) re-select the renamed node + repopulate the
+        # inspector. The dispatch's earlier refresh painted the stale names.
+        self._refresh_view()
+        return True
 
     def _context_set_type(self, target: str, new_type: str) -> None:
-        """Dispatch :class:`SetNodeType` from the right-click submenu.
+        """Dispatch a node-type change from the right-click submenu.
+
+        The submenu only ever offers the plain ``"line"`` / ``"blind"`` types
+        (reset is created / edited via the inspector). But the target may
+        CURRENTLY be a reset node, and :class:`SetNodeType` refuses to retype a
+        reset node, so this routes a reset -> line/blind change through
+        :class:`ClearResetSpec` (which removes the spec and retypes) instead.
 
         :param target: Node whose type is being changed.
-        :param new_type: ``"line"`` or ``"blind"``.
+        :param new_type: ``"line"`` or ``"blind"`` (the only submenu options).
         """
-        if self._model.node_types.get(target) == new_type:
+        current_type = self._model.node_types.get(target)
+        if current_type == new_type:
             self._set_status(f"{target!r} is already {new_type!r}.")
+            return
+        if current_type == _NODE_TYPE_RESET:
+            # SetNodeType would refuse a currently-reset node; clear the spec
+            # and retype atomically instead.
+            self._dispatch(ClearResetSpec(target, new_type))
             return
         self._dispatch(SetNodeType(target, new_type))
 
@@ -1271,6 +2723,22 @@ class EditorApp:
             )
             return
 
+        # A session-pending projection edge (in _proj_delta.adds) is not yet in
+        # field_data.EDGES, so _find_edges_reference can't see it. Refuse the
+        # delete if any current projection edge names this node (#5) -- the same
+        # posture as the edge/pivot guards; the operator deletes the projection
+        # edge (Delete in EDGE mode) first.
+        proj_ref = self._find_projection_referencing(target)
+        if proj_ref is not None:
+            messagebox.showerror(
+                "Cannot delete node",
+                f"Cannot delete {target!r} -- it is an endpoint of projection "
+                f"edge {proj_ref[0]!r} -> {proj_ref[1]!r}. Delete that edge "
+                "first (pick both nodes in EDGE mode, then Delete).",
+                parent=self._root,
+            )
+            return
+
         edges_index = self._find_edges_reference(target)
         if edges_index is not None:
             messagebox.showerror(
@@ -1291,7 +2759,11 @@ class EditorApp:
         if not confirm:
             return
 
-        self._dispatch(DeleteNode(target))
+        if self._dispatch(DeleteNode(target)) and self._selected_node == target:
+            # The selected node is gone; drop the stale latch (AC4) so an arrow
+            # nudge no longer targets it, and clear the selection line.
+            self._selected_node = None
+            self._update_selection_display(None)
 
     def _find_edges_reference(self, node_name: str) -> Optional[int]:
         """Return the index of the first ``EDGES`` entry referencing *node_name*.
@@ -1381,10 +2853,14 @@ class EditorApp:
         :return: ``True`` on success, ``False`` on validation or I/O failure
             (the user is informed via a modal dialog in that case).
         """
-        # 1. Validate first so we never write a half-broken JSON file.
+        # 1. Validate first so we never write a half-broken JSON file. This is
+        # the authoritative tier-2 gate -- the full geometry validator -- and
+        # the only place the validation badge is driven from a real validate()
+        # call (the per-edit inline guards only ever drop it to INVALID).
         try:
             self._model.validate()
         except Exception as exc:  # noqa: BLE001 -- show any validator error
+            self._panels.set_validation_badge(False)
             messagebox.showerror(
                 "Validation failed",
                 f"Cannot save: {exc}",
@@ -1445,12 +2921,76 @@ class EditorApp:
                     pass
             self._pending_renames.clear()
 
+        # 4. Flush pending projection-edge edits into field_data.py's EDGES
+        # list (T3 LibCST appends / removes). Projection edges are NOT part of
+        # the JSON schema or model.validate(); a malformed one surfaces in Save
+        # & Build's existing planner error dialog, not here. The bare-instance
+        # rename unit tests build the app via __new__ without a _proj_delta, so
+        # guard on getattr -- a missing delta makes this a clean no-op.
+        proj_delta = getattr(self, "_proj_delta", None)
+        if proj_delta is not None and (proj_delta.adds or proj_delta.removes):
+            try:
+                from tools.path_planner.editor import ast_rewrite  # noqa: PLC0415
+                for u, v, distance_cm, heading_deg in proj_delta.adds:
+                    ast_rewrite.append_projection_edge(
+                        _FIELD_DATA_PY_PATH, u, v, distance_cm, heading_deg
+                    )
+                for u, v in proj_delta.removes:
+                    ast_rewrite.remove_projection_edge(
+                        _FIELD_DATA_PY_PATH, u, v
+                    )
+            except Exception as exc:  # noqa: BLE001 -- LibCST errors etc.
+                messagebox.showerror(
+                    "Projection-edge write failed",
+                    f"field_data.json was written, but rewriting projection "
+                    f"edges in {_FIELD_DATA_PY_PATH} failed: {exc}",
+                    parent=self._root,
+                )
+                self._set_status(
+                    "Save partial: JSON saved, projection-edge write failed."
+                )
+                # Keep the pending delta so the user can retry. JSON (and any
+                # rename flush above) already reached disk, but these
+                # projection edits did not.
+                return False
+            # The flush reached disk. Collapse the pending adds / removes into
+            # the baseline using the reconciled render set -- which is exactly
+            # what we just wrote to disk -- NOT by re-reading the module after a
+            # reload. The old code re-seeded from
+            # ``read_projection_edges(reloaded_module)`` inside a swallowed-
+            # exception reload: if the reload raised (e.g. the just-written
+            # field_data.py won't re-import), it left a half-reloaded module
+            # bound and re-seeded the baseline from its inconsistent EDGES while
+            # clear_pending() ran anyway -- so the next add/remove reconciled
+            # against a wrong baseline (#14). Computing the new baseline from
+            # render() before clearing sidesteps the reload entirely.
+            new_baseline = proj_delta.render()
+            # Still refresh the cached module (best-effort) so
+            # _find_edges_reference sees the new EDGES on the next delete; a
+            # failed reload just keeps the stale reference (delete-guard stays as
+            # accurate as it was pre-save), and the baseline above is unaffected.
+            if self._field_data_module is not None:
+                import importlib  # noqa: PLC0415
+                try:
+                    self._field_data_module = importlib.reload(
+                        self._field_data_module
+                    )
+                except Exception:  # noqa: BLE001 -- best-effort refresh
+                    pass
+            proj_delta.set_loaded(new_baseline)
+            proj_delta.clear_pending()
+            self._sync_projection_render()
+
         # After a successful Save, field_data.json, field_data.py EDGES, and
         # the model are all consistent, so the pending-rename delta is empty
         # (cleared above when a flush ran; already empty otherwise). It now
         # tracks only renames made AFTER this Save -- no history-derived anchor
         # is needed, which is what makes undo-after-save robust.
 
+        # The model passed the full validator and reached disk: flip the badge
+        # to VALID. This is the only success path that runs the real validator,
+        # so it is the only place the badge is set TRUE.
+        self._panels.set_validation_badge(True)
         self._clear_dirty()
         self._set_status(_STATUS_SAVED)
         return True

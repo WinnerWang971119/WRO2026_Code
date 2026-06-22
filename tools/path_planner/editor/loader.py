@@ -110,6 +110,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "BLIND_EDGES",
     "pivot_turns",
     "RESET_NODES",
+    "blind_projection_auto_seek",
     "OBSTACLES",
 )
 
@@ -117,9 +118,14 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
 # valid field. The dump writer emits them only when present so a field that
 # never authored one round-trips byte-identically (absent stays absent),
 # while a field that did keeps it in the canonical slot above. ``pivot_turns``
-# (per-turn single-wheel pivots) and ``RESET_NODES`` (wall-zero reset nodes)
-# are the such keys today.
-_OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset({"pivot_turns", "RESET_NODES"})
+# (per-turn single-wheel pivots), ``RESET_NODES`` (wall-zero reset nodes), and
+# ``blind_projection_auto_seek`` (the field-wide BLIND->PROJECTION auto-seek
+# flag, emitted only when set to its non-default ``False``) are those keys
+# today. Without this membership the dump writer would drop a key the editor
+# tracks -- ``_build_ordered_payload`` only emits keys it knows.
+_OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {"pivot_turns", "RESET_NODES", "blind_projection_auto_seek"}
+)
 
 
 def load_field_json(path: Path | None = None) -> dict:
@@ -292,10 +298,11 @@ def _build_ordered_payload(data: dict) -> dict:
     (``LINE_SEGMENTS``, ``BLIND_EDGES``, ``pivot_turns``, ``OBSTACLES``) is
     preserved.
 
-    Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (``pivot_turns`` and
-    ``RESET_NODES``) are emitted only when present in ``data``: a field that
-    never authored one is omitted entirely so ``dump(load(x)) == dump(x)``
-    holds for an input that lacked the key on disk (absent stays absent).
+    Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (``pivot_turns``, ``RESET_NODES``,
+    and ``blind_projection_auto_seek``) are emitted only when present in
+    ``data``: a field that never authored one is omitted entirely so
+    ``dump(load(x)) == dump(x)`` holds for an input that lacked the key on disk
+    (absent stays absent).
 
     :param data: Source dict. Must contain every required key in
         :data:`_TOP_LEVEL_KEY_ORDER` (i.e. every key not in

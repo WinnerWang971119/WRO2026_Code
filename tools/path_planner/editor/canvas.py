@@ -25,6 +25,7 @@ Coordinate convention (inherited from
 
 from __future__ import annotations
 
+import time
 import warnings
 from pathlib import Path
 from typing import Callable, Optional
@@ -41,19 +42,30 @@ from matplotlib.axes import Axes  # noqa: E402
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
+from tools.path_planner.editor import theme  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.graph_builder import inflate_obstacles  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Rendering constants. Mirrors the static visualizer's look-and-feel but is
-# intentionally duplicated here -- importing the visualizer would race the
+# Rendering constants. Sizes / z-orders / alphas are local; every COLOR is
+# sourced from ``tools.path_planner.editor.theme`` (the warm "drafting-table"
+# palette) so the canvas, panels, and app share one palette. The static
+# visualizer is intentionally NOT imported here -- doing so would race the
 # matplotlib backend selector (Agg vs TkAgg) and break headless PNG dumps.
 # ---------------------------------------------------------------------------
 
 # Background image alpha (matches ``visualizer.py``).
 _BACKGROUND_ALPHA: float = 0.6
 _BACKGROUND_ZORDER: int = 0
+
+# Sentinel stored in the per-instance background cache when a map PNG is
+# missing or fails to decode. Caching the *failure* (rather than leaving the
+# key absent) is what stops :meth:`FieldCanvas._draw_background` from
+# re-attempting a doomed ``imread`` -- and re-warning -- on every render tick
+# during a drag. A cache value of ``_BACKGROUND_NONE`` means "this path has
+# no usable background; do not try again".
+_BACKGROUND_NONE: object = object()
 
 # Raw obstacle outline (axis-aligned rectangle from ``field_data.OBSTACLES``).
 _OBSTACLE_RAW_LINEWIDTH: float = 0.8
@@ -67,12 +79,13 @@ _OBSTACLE_INFLATED_EDGECOLOR: str = "gray"
 _OBSTACLE_INFLATED_ALPHA: float = 0.5
 _OBSTACLE_INFLATED_ZORDER: int = 2
 
-# Edge styling.
-_EDGE_LINE_COLOR: str = "black"
+# Edge styling. Colors come from the theme's edge palette (line = ink,
+# blind = brick); linestyle / linewidth stay local.
+_EDGE_LINE_COLOR: str = theme.EDGE_COLORS["line"]
 _EDGE_LINE_LINESTYLE: str = "solid"
 _EDGE_LINE_LINEWIDTH: float = 1.5
 
-_EDGE_BLIND_COLOR: str = "red"
+_EDGE_BLIND_COLOR: str = theme.EDGE_COLORS["blind"]
 _EDGE_BLIND_LINESTYLE: str = "dashed"
 _EDGE_BLIND_LINEWIDTH: float = 1.5
 
@@ -80,29 +93,66 @@ _EDGE_ZORDER: int = 3
 
 # Proposed-edge preview styling (used by FieldCanvas.render's proposed_edges
 # kwarg -- drawn ABOVE committed edges, BELOW the highlight ring, so the
-# operator can see the proposal sitting on top of the existing graph.
-_PROPOSED_EDGE_COLOR: str = "cyan"
+# operator can see the proposal sitting on top of the existing graph. The
+# color is the theme's proposed-edge accent (teal).
+_PROPOSED_EDGE_COLOR: str = theme.PROPOSED_EDGE
 _PROPOSED_EDGE_LINESTYLE: tuple = (0, (3, 3))  # dashed
 _PROPOSED_EDGE_LINEWIDTH: float = 1.8
 _PROPOSED_EDGE_ZORDER: int = 4  # between _EDGE_ZORDER (3) and _NODE_ZORDER (6)
 
+# Projection-edge styling. A projection edge is a DIRECTED dead-reckoned hop
+# (``u -> v`` with a baked distance + heading); it is drawn as a teal solid
+# arrow with a head at ``v`` so it reads distinctly from the line (ink, solid)
+# and blind (brick, dashed) edges. ``FancyArrowPatch`` is the artist: it carries
+# its own arrowhead and re-points cheaply via ``set_positions`` during a drag,
+# which is what lets an incident projection edge ride the blit fast-path instead
+# of forcing a full render.
+_PROJECTION_EDGE_COLOR: str = theme.TEAL
+_PROJECTION_EDGE_LINEWIDTH: float = 1.8
+# ``FancyArrowPatch`` arrow style: a filled triangular head. ``head_length`` /
+# ``head_width`` are in points (display units), so the arrowhead stays a fixed
+# pixel size regardless of the data zoom -- the right behaviour for a glyph that
+# must stay legible at any field scale.
+_PROJECTION_EDGE_ARROWSTYLE: str = "-|>"
+_PROJECTION_EDGE_MUTATION_SCALE: float = 14.0
+# Drawn at the same layer as the proposed-edge overlay (above committed edges,
+# below nodes) so the directed hop sits visibly on top of the static graph.
+_PROJECTION_EDGE_ZORDER: int = 4
+
+# Hairline grid linewidth (points). Thin enough to read as a drafting-table
+# reference grid behind the nodes/edges without competing with the geometry.
+# The grid COLOR is set by ``theme.apply_to_axes`` (the warm tan ``theme.GRID``);
+# this only pins the stroke weight.
+_GRID_LINEWIDTH: float = 0.5
+_GRID_ZORDER: int = 0  # behind edges (3) and nodes (6); level with background
+
 # Node dots + labels.
 _NODE_DOT_SIZE: float = 60.0
+# Per-node dot ``markersize`` (points) for the ``ax.plot``-drawn dots that the
+# drag fast-path animates individually. ``ax.scatter`` sizes markers by area in
+# points^2 (``s``), but ``ax.plot`` sizes them by diameter in points
+# (``markersize``), so the two are NOT interchangeable: the visual equivalent of
+# ``s`` is ``sqrt(s)``. ``sqrt(60) ~= 7.746`` keeps the per-node dots the same
+# apparent size as the old single-scatter-per-type dots. Rounded to one decimal
+# to read as a deliberate constant rather than a raw float tail.
+_NODE_DOT_MARKERSIZE: float = 7.7
 _NODE_ZORDER: int = 6
 _NODE_LABEL_FONTSIZE: int = 8
 _NODE_LABEL_OFFSET_CM: float = 1.5
 _NODE_LABEL_ZORDER: int = 7
 
-_NODE_COLOR: dict[str, str] = {
-    "line": "black",
-    "blind": "red",
-}
-_NODE_COLOR_FALLBACK: str = "gray"
+# Node fill palette keyed by the model's node type. Sourced from the theme
+# (line = ink, blind = brick, reset = teal); an unknown type falls back to the
+# theme's muted-ink fallback.
+_NODE_COLOR: dict[str, str] = theme.NODE_COLORS
+_NODE_COLOR_FALLBACK: str = theme.NODE_COLOR_FALLBACK
 
-# Highlight ring drawn on top of the selected node(s).
-_HIGHLIGHT_COLOR: str = "yellow"
+# Highlight ring drawn on top of the selected node(s). The ring color is the
+# theme's selection accent (terracotta); linewidth / dot size / z-order stay
+# local.
+_HIGHLIGHT_COLOR: str = theme.SELECTION_RING
 _HIGHLIGHT_LINEWIDTH: float = 2.5
-_HIGHLIGHT_EDGECOLOR: str = "yellow"
+_HIGHLIGHT_EDGECOLOR: str = theme.SELECTION_RING
 _HIGHLIGHT_DOT_SIZE: float = 140.0
 _HIGHLIGHT_ZORDER: int = 8
 
@@ -116,9 +166,47 @@ _DEFAULT_HIT_TOLERANCE_CM: float = 4.0
 # extent via :meth:`Axes.set_aspect` so this is just an initial hint.
 _DEFAULT_FIGSIZE_IN: tuple[float, float] = (8.0, 6.0)
 
+# Subplot margins (figure fractions) applied on every render so the map fills
+# the figure instead of floating in matplotlib's default ~12% borders.  The
+# left / bottom insets reserve just enough room for the y / x tick labels and
+# the "x (cm)" / "y (cm)" axis labels; the right / top sit near the edge.  This
+# lifts the drawn map from ~59% of the figure to ~78% -- the "too much blank"
+# fix -- while ``set_aspect("equal")`` keeps the field undistorted.
+_SUBPLOT_MARGINS: dict[str, float] = {
+    "left": 0.075,
+    "right": 0.985,
+    "bottom": 0.095,
+    "top": 0.985,
+}
+
 # Mouse button numbers per the matplotlib MouseEvent contract.
 _MOUSE_BUTTON_LEFT: int = 1
 _MOUSE_BUTTON_RIGHT: int = 3
+
+# Minimum wall-clock interval (seconds) between two blit composites during a
+# node drag. ``motion_notify_event`` can fire faster than the display can
+# usefully repaint, so :meth:`FieldCanvas.update_node_drag` always updates the
+# animated artists' data but only re-composites (restore_region -> draw_artist
+# -> blit) when at least this long has elapsed since the last composite. ~1/60 s
+# caps the visible repaint at roughly 60 Hz; the artist data is still current on
+# every tick, so the throttled-away frames lose nothing the next paint (or
+# :meth:`end_node_drag`) does not immediately restore.
+_BLIT_MIN_INTERVAL_S: float = 1.0 / 60.0
+
+# Sentinel ``_last_blit_time`` value that forces the first
+# :meth:`FieldCanvas.update_node_drag` of a drag to composite unconditionally.
+# ``0.0`` is far enough in the past relative to ``time.monotonic()`` (which is
+# always strongly positive after process start) that the first interval check
+# can never throttle the opening frame.
+_BLIT_TIME_FORCE_FIRST: float = 0.0
+
+# Style of the dotted rubber-band rectangle drawn while an OBSTACLE is being
+# dragged. Lives here (not in the app) because the obstacle-drag blit fast-path
+# owns the preview artist now; the app no longer draws it.
+_OBSTACLE_PREVIEW_ZORDER: int = 5
+_OBSTACLE_PREVIEW_EDGECOLOR: str = "blue"
+_OBSTACLE_PREVIEW_LINESTYLE: str = ":"
+_OBSTACLE_PREVIEW_LINEWIDTH: float = 1.5
 
 # Resolve ``map_png`` relative to this directory (same as ``visualizer.py``
 # and ``pick_xy.py``: ``tools/path_planner/``).
@@ -193,6 +281,88 @@ class FieldCanvas:
         # re-passing the model on every query.
         self._last_model: Optional[FieldModel] = None
 
+        # Per-instance background cache keyed by the *resolved* absolute map
+        # path string. A hit reuses the already-decoded image array; a miss
+        # calls ``mpimg.imread`` exactly once. Failed/missing loads store the
+        # ``_BACKGROUND_NONE`` sentinel so a doomed decode -- and its warning
+        # -- is not re-attempted on every render tick during a drag. The
+        # decoded array's type is backend-specific (a NumPy ``ndarray``), so
+        # the value is typed loosely as ``object``.
+        self._bg_cache: dict[str, object] = {}
+
+        # Last render's overlay arguments, cached so the drag fast-path
+        # (begin/update/end_node_drag) and the blit fallback can re-issue an
+        # identical full render -- same highlight ring, same proposed-edge
+        # overlay -- as the discrete-edit path produced. Refreshed on every
+        # :meth:`render` call.
+        self._last_highlighted_nodes: Optional[list[str]] = None
+        self._last_proposed_edges: Optional[
+            list[tuple[str, str, str]]
+        ] = None
+
+        # Committed projection edges to overlay, owned by the editor application
+        # (the reconciled render set out of ``projection_edges.reconcile``). Each
+        # entry is a ``(u, v, distance_cm, heading_deg)`` tuple; only ``u`` / ``v``
+        # are read here (coordinates are looked up in the model). Defaults to an
+        # empty list so callers / tests that never call
+        # :meth:`set_projection_edges` render exactly as before. Set via the
+        # public :meth:`set_projection_edges` setter, persisted across renders so
+        # the drag fast-path can replay the same overlay.
+        self._projection_edges: list[tuple] = []
+
+        # ---- Per-element artist retention (rebuilt every ``render``) ----
+        # ``ax.clear()`` drops every artist, so these are repopulated as the
+        # nodes / edges are drawn. They give the drag fast-path direct handles
+        # to the individual artists it animates instead of the type-grouped
+        # PathCollections the discrete-render path used to keep.
+        #
+        # ``_node_dot_artists``: node name -> its dedicated ``Line2D`` dot.
+        # ``_node_label_artists``: node name -> its ``Text`` label.
+        # ``_edge_artists``: ``(u, v, kind, Line2D)`` per committed edge, where
+        #   ``kind`` is ``"line"`` or ``"blind"``; used to find the edges
+        #   incident to a dragged node and to move the dragged endpoint.
+        self._node_dot_artists: dict[str, object] = {}
+        self._node_label_artists: dict[str, object] = {}
+        self._edge_artists: list[tuple[str, str, str, object]] = []
+
+        # ``_projection_edge_artists``: ``(u, v, FancyArrowPatch)`` per drawn
+        # projection edge. Kept SEPARATE from ``_edge_artists`` because a
+        # projection edge is a ``FancyArrowPatch`` (re-pointed via
+        # ``set_positions``), not a 2-point ``Line2D`` (re-pointed via
+        # ``set_data``), and because the blit test asserts directly on
+        # ``_edge_artists`` holding only the line/blind segments. The drag
+        # fast-path scans this list to find the arrows incident to a dragged
+        # node and slide their moved endpoint.
+        self._projection_edge_artists: list[tuple[str, str, object]] = []
+
+        # ---- Drag-scoped blit state (set by ``begin_node_drag``) ----
+        # ``_drag_node``: the node name currently being dragged, or ``None``.
+        # ``_blit_background``: the baked static-scene region captured by
+        #   ``copy_from_bbox`` in ``begin_node_drag``; ``None`` when no drag is
+        #   active (a missing background forces ``update_node_drag`` down its
+        #   defensive full-render path).
+        # ``_animated_artists``: the artists flagged ``.set_animated(True)`` for
+        #   the active drag (the dragged dot, its label, its incident edges).
+        # ``_last_blit_time``: ``time.monotonic()`` of the last composite,
+        #   used by the ~60 Hz blit throttle.
+        self._drag_node: Optional[str] = None
+        self._blit_background: object = None
+        self._animated_artists: list[object] = []
+        self._last_blit_time: float = _BLIT_TIME_FORCE_FIRST
+
+        # ---- Obstacle rubber-band blit state (set by ``begin_obstacle_drag``) ----
+        # Mirrors the node-drag blit fast-path so sizing an obstacle restores a
+        # baked background + re-draws ONLY the dotted preview rectangle instead
+        # of clearing + re-rendering the whole scene per motion event.
+        # ``_obstacle_preview_artist``: the animated ``Rectangle`` patch, or
+        #   ``None`` when no obstacle drag is armed.
+        # ``_obstacle_blit_background``: the baked static-scene region.
+        # ``_last_obstacle_blit_time``: ``time.monotonic()`` of the last
+        #   composite, used by the same ~60 Hz throttle.
+        self._obstacle_preview_artist: Optional[object] = None
+        self._obstacle_blit_background: object = None
+        self._last_obstacle_blit_time: float = _BLIT_TIME_FORCE_FIRST
+
         # Wire matplotlib's event system into our three Python callbacks.
         # Connection IDs are stashed so a future ``destroy`` method (out of
         # scope here) could ``mpl_disconnect`` cleanly if needed.
@@ -232,6 +402,36 @@ class FieldCanvas:
         """Return the underlying :class:`matplotlib.axes.Axes`."""
         return self._ax
 
+    def set_projection_edges(self, edges: list[tuple]) -> None:
+        """Replace the committed projection-edge render set.
+
+        The editor application owns the projection render set (the reconciled
+        output of :func:`projection_edges.reconcile`) and pushes it here whenever
+        it changes. Each entry is a ``(u, v, distance_cm, heading_deg)`` tuple;
+        only the first two elements (the node names ``u`` / ``v``) are read by
+        the canvas, which looks their coordinates up in the model at draw time.
+        Entries with extra trailing elements are tolerated -- the canvas slices
+        the leading two -- and any edge whose ``u`` or ``v`` is not in the model
+        is silently skipped at draw time.
+
+        The list is stored as-is (not copied); the canvas only reads it. The
+        stored set persists across renders, so a later :meth:`render`,
+        :meth:`begin_node_drag`, or blit fallback replays the same overlay
+        without the app re-pushing it. Calling with an empty list clears the
+        overlay. The default before any call is ``[]`` (no projection edges), so
+        existing callers and tests that never invoke this method are unaffected.
+
+        This does NOT trigger a repaint; the caller issues the next
+        :meth:`render` (the app's standard refresh path) once it has pushed all
+        overlay state.
+
+        :param edges: The projection render set as a list of
+            ``(u, v, distance_cm, heading_deg)`` tuples (only ``u`` / ``v`` are
+            used). Pass ``[]`` to clear.
+        :return: ``None``.
+        """
+        self._projection_edges = edges
+
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
@@ -247,16 +447,18 @@ class FieldCanvas:
 
         Clears the axes, restores the cosmetic limits / labels / grid,
         then paints in fixed z-order: background → obstacles → edges →
-        proposed-edge overlay → nodes → highlight ring. Calling this
+        projection-edge overlay → proposed-edge overlay → nodes → highlight
+        ring. The projection-edge overlay is the persistent render set last
+        pushed via :meth:`set_projection_edges` (empty by default). Calling this
         after every model mutation is the editor's standard refresh path.
 
         :param model: The :class:`FieldModel` to render. Stored on the
             canvas for use by :meth:`find_node_at`.
         :param highlighted_nodes: Optional list of node names to draw a
-            thick yellow ring around (on top of the regular node dots).
+            thick terracotta ring around (on top of the regular node dots).
             Unknown names are silently skipped.
         :param proposed_edges: Optional list of ``(a, b, kind)`` triples
-            drawn as a dashed cyan overlay above the committed edges.
+            drawn as a dashed teal overlay above the committed edges.
             ``kind`` is informational (caller may use it for status
             reporting); the canvas styles all proposed edges identically.
             Unknown node names are silently skipped (consistent with
@@ -264,28 +466,502 @@ class FieldCanvas:
         :return: ``None``.
         """
         self._last_model = model
+        # Remember the overlay args so the drag fast-path and the blit
+        # fallback can replay an identical full render.
+        self._last_highlighted_nodes = highlighted_nodes
+        self._last_proposed_edges = proposed_edges
 
         ax = self._ax
         ax.clear()
 
+        # ``ax.clear()`` just dropped every retained artist; rebuild the
+        # per-element handle collections from scratch as we draw below.
+        self._node_dot_artists = {}
+        self._node_label_artists = {}
+        self._edge_artists = []
+        self._projection_edge_artists = []
+
         width_cm, height_cm = self._field_extent_cm(model)
+
+        # Pull the axes out to near the figure edges so the map uses the space
+        # instead of floating in the default wide borders (the "too much blank"
+        # fix). ``ax.clear()`` does not reset subplot params, but re-applying is
+        # cheap and keeps the layout correct after a figure resize.
+        self._figure.subplots_adjust(**_SUBPLOT_MARGINS)
 
         ax.set_aspect("equal")
         ax.set_xlabel("x (cm)")
         ax.set_ylabel("y (cm)")
         ax.set_xlim(0.0, width_cm)
         ax.set_ylim(0.0, height_cm)
-        ax.grid(True)
+        # Hairline reference grid: thin warm-tan lines sitting behind the
+        # nodes/edges. ``apply_to_axes`` (below) re-issues ``grid(True, color=...)``
+        # to set the COLOR from the theme; this opening call pins the stroke
+        # WEIGHT and z-order so the grid reads as a subtle drafting-table
+        # underlay rather than a default-weight matplotlib grid.
+        ax.grid(True, linewidth=_GRID_LINEWIDTH, zorder=_GRID_ZORDER)
+
+        # Recolor the figure / axes / grid / spines / ticks from the warm
+        # "drafting-table" theme so the map area is the cream PAPER tone rather
+        # than the default matplotlib grey/white. This runs AFTER the ``grid``
+        # call above because ``apply_to_axes`` re-issues ``grid(True, color=...)``
+        # to set the grid color (it does not touch linewidth, so the hairline
+        # weight set above is preserved). The background PNG still draws on top
+        # via ``imshow`` at ``_BACKGROUND_ALPHA``, so the paper tone shows through.
+        theme.apply_to_axes(ax, self._figure)
 
         self._draw_background(model, width_cm, height_cm)
         self._draw_obstacles(model)
         self._draw_edges(model)
+        if self._projection_edges:
+            self._draw_projection_edges(model)
         if proposed_edges:
             self._draw_proposed_edges(model, proposed_edges)
         self._draw_nodes(model)
         if highlighted_nodes:
             self._draw_highlight(model, highlighted_nodes)
 
+        self._canvas.draw_idle()
+
+    # ------------------------------------------------------------------
+    # Drag-scoped blit fast-path
+    # ------------------------------------------------------------------
+
+    def begin_node_drag(self, name: str) -> None:
+        """Arm the blit fast-path for an interactive drag of node *name*.
+
+        Renders the current model once the normal way (so the static scene is
+        up to date), then flags the dragged node's dot, its label, and every
+        committed edge incident to it as ``animated``. A full
+        :meth:`FigureCanvasTkAgg.draw` bakes the *static* scene -- matplotlib
+        excludes ``animated`` artists from that bake -- and the resulting
+        pixels are captured with ``copy_from_bbox`` so each subsequent
+        :meth:`update_node_drag` only has to restore that frozen background and
+        re-draw the handful of moving artists.
+
+        Degrades gracefully: if *name* is not in the model or has no retained
+        dot artist (e.g. a stale selection), the fast-path is left disarmed
+        (``_blit_background`` stays ``None``) so the next
+        :meth:`update_node_drag` falls back to a defensive full render.
+
+        :param name: Name of the node about to be dragged.
+        :return: ``None``.
+        """
+        model = self._last_model
+        if model is None:
+            return
+
+        # Render the current model the normal way first; the app calls
+        # ``begin_node_drag`` right after a normal render, but re-rendering
+        # here keeps this method correct in isolation and rebuilds the
+        # per-element artist handles this method is about to look up.
+        self.render(
+            model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+        )
+
+        dot_artist = self._node_dot_artists.get(name)
+        if dot_artist is None:
+            # Unknown / stale node: leave the fast-path disarmed.
+            return
+
+        animated: list[object] = [dot_artist]
+        label_artist = self._node_label_artists.get(name)
+        if label_artist is not None:
+            animated.append(label_artist)
+        for u, v, _kind, edge_artist in self._edge_artists:
+            if u == name or v == name:
+                animated.append(edge_artist)
+        # Projection arrows incident to the dragged node ride the same blit
+        # fast-path: their ``FancyArrowPatch`` re-points cheaply via
+        # ``set_positions`` in ``_apply_drag_geometry``, so an incident directed
+        # edge follows the cursor exactly like the line/blind segments instead of
+        # forcing a full render.
+        for u, v, arrow_artist in self._projection_edge_artists:
+            if u == name or v == name:
+                animated.append(arrow_artist)
+
+        for artist in animated:
+            artist.set_animated(True)
+
+        # Bake the static scene (animated artists excluded) and snapshot it.
+        self._canvas.draw()
+        self._animated_artists = animated
+        self._blit_background = self._canvas.copy_from_bbox(self._ax.bbox)
+        self._drag_node = name
+        # Force the first ``update_node_drag`` to composite unconditionally.
+        self._last_blit_time = _BLIT_TIME_FORCE_FIRST
+
+    def update_node_drag(self, name: str, x: float, y: float) -> None:
+        """Move node *name* to ``(x, y)`` and blit, throttled to ~60 Hz.
+
+        Updates the dragged node's dot + label artist data and slides the
+        moved endpoint of each incident edge artist, then composites the frame
+        by restoring the baked background and re-drawing only the animated
+        artists. The artist data is updated on *every* call (so the artists
+        always hold the latest position); only the visible composite is
+        throttled -- a call that arrives within :data:`_BLIT_MIN_INTERVAL_S`
+        of the last composite updates the data but skips the
+        restore/draw/blit, letting the next un-throttled tick (or
+        :meth:`end_node_drag`) paint the final state.
+
+        This method's ``(self, name, x, y)`` signature is a fixed contract
+        with the editor application (task T3): do not change it.
+
+        Defensive paths:
+
+        * If the fast-path was never armed (``_blit_background is None``) or
+          *name* does not match the armed drag node, a full :meth:`render` is
+          issued instead.
+        * If the composite raises on an exotic backend, it is caught and a
+          full :meth:`render` is issued for that tick -- a drag must never
+          crash the editor.
+
+        :param name: Name of the node being dragged (must match the node
+            passed to :meth:`begin_node_drag`).
+        :param x: New world x coordinate, in centimetres.
+        :param y: New world y coordinate, in centimetres.
+        :return: ``None``.
+        """
+        if self._blit_background is None or name != self._drag_node:
+            # Fast-path not armed for this node: fall back to a full render so
+            # the move is still reflected on screen.
+            self._full_render_during_drag(name, x, y)
+            return
+
+        # Always update the artist data, even on a throttled tick, so the
+        # artists hold the latest position for the next paint.
+        self._apply_drag_geometry(name, x, y)
+
+        now = time.monotonic()
+        if now - self._last_blit_time < _BLIT_MIN_INTERVAL_S:
+            # Throttle the COMPOSITE only; data above is already current.
+            return
+
+        try:
+            self._canvas.restore_region(self._blit_background)
+            for artist in self._animated_artists:
+                self._ax.draw_artist(artist)
+            self._canvas.blit(self._ax.bbox)
+        except Exception:  # noqa: BLE001 -- exotic backend: never crash a drag.
+            # Disarm the fast-path: the about-to-run full render clears and
+            # rebuilds every artist, leaving the captured background stale, so
+            # subsequent ticks must take the full-render path until the next
+            # ``begin_node_drag`` re-bakes a fresh background.
+            self._blit_background = None
+            self._full_render_during_drag(name, x, y)
+            return
+
+        self._last_blit_time = now
+
+    def end_node_drag(self) -> None:
+        """Tear down the blit fast-path and re-bake the full static scene.
+
+        Clears the ``animated`` flag on every tracked artist, drops the drag
+        state, and issues a full :meth:`render` so the moved node and its
+        edges rejoin the normal static scene. A double render on release (the
+        app typically refreshes again afterwards) is harmless -- this runs
+        once per drag, not once per frame.
+
+        Safe to call when no drag is active: the tracked-artist list is empty
+        and the render simply repaints the current model.
+
+        :return: ``None``.
+        """
+        for artist in self._animated_artists:
+            artist.set_animated(False)
+        self._animated_artists = []
+        self._blit_background = None
+        self._drag_node = None
+        self._last_blit_time = _BLIT_TIME_FORCE_FIRST
+
+        if self._last_model is not None:
+            self.render(
+                self._last_model,
+                highlighted_nodes=self._last_highlighted_nodes,
+                proposed_edges=self._last_proposed_edges,
+            )
+
+    # ------------------------------------------------------------------
+    # Obstacle rubber-band blit fast-path
+    # ------------------------------------------------------------------
+
+    def begin_obstacle_drag(self) -> None:
+        """Arm the blit fast-path for an obstacle rubber-band drag.
+
+        Renders the current model once the normal way (so the static scene is
+        current), adds a single zero-size ``animated`` ``Rectangle`` for the
+        dotted preview, bakes the static scene with a full :meth:`draw`
+        (matplotlib excludes ``animated`` artists from that bake), and snapshots
+        it with ``copy_from_bbox``. Each subsequent
+        :meth:`update_obstacle_preview` then only restores that frozen
+        background and re-draws the one rectangle -- no ``ax.clear``, no model
+        re-render, no validator, no per-frame obstacle inflation (the lag the
+        old full-:meth:`render`-per-motion path caused).
+
+        Degrades gracefully: with no model rendered yet the fast-path is left
+        disarmed (``_obstacle_blit_background`` stays ``None``) so the next
+        :meth:`update_obstacle_preview` falls back to a defensive full render.
+
+        :return: ``None``.
+        """
+        model = self._last_model
+        if model is None:
+            return
+
+        # Render the current model first so the static scene under the preview
+        # is up to date, then rebuild the per-element artist handles.
+        self.render(
+            model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+        )
+
+        rect = mpatches.Rectangle(
+            (0.0, 0.0),
+            0.0,
+            0.0,
+            linewidth=_OBSTACLE_PREVIEW_LINEWIDTH,
+            edgecolor=_OBSTACLE_PREVIEW_EDGECOLOR,
+            linestyle=_OBSTACLE_PREVIEW_LINESTYLE,
+            facecolor="none",
+            zorder=_OBSTACLE_PREVIEW_ZORDER,
+            animated=True,
+        )
+        self._ax.add_patch(rect)
+        self._obstacle_preview_artist = rect
+
+        # Bake the static scene (the animated rect is excluded) and snapshot it.
+        self._canvas.draw()
+        self._obstacle_blit_background = self._canvas.copy_from_bbox(
+            self._ax.bbox
+        )
+        # Force the first ``update_obstacle_preview`` to composite.
+        self._last_obstacle_blit_time = _BLIT_TIME_FORCE_FIRST
+
+    def update_obstacle_preview(
+        self, x0: float, y0: float, x1: float, y1: float
+    ) -> None:
+        """Resize the preview rectangle to span ``(x0, y0)``-``(x1, y1)`` and blit.
+
+        Updates the rectangle's lower-left corner + width/height on every call
+        (so the artist always holds the latest extent), then composites the
+        frame by restoring the baked background and re-drawing only the
+        rectangle. As with :meth:`update_node_drag`, only the visible composite
+        is throttled to ~60 Hz; a call arriving within
+        :data:`_BLIT_MIN_INTERVAL_S` of the last composite updates the geometry
+        but skips the restore/draw/blit.
+
+        Defensive paths mirror the node drag: if the fast-path was never armed
+        (``_obstacle_blit_background is None``) a full :meth:`render` is issued;
+        if the composite raises on an exotic backend it is caught, the
+        fast-path disarmed, and a full render issued for that tick so an
+        obstacle drag never crashes the editor.
+
+        :param x0: Anchor x (drag start), in centimetres.
+        :param y0: Anchor y (drag start), in centimetres.
+        :param x1: Cursor x (current), in centimetres.
+        :param y1: Cursor y (current), in centimetres.
+        :return: ``None``.
+        """
+        rect = self._obstacle_preview_artist
+        if self._obstacle_blit_background is None or rect is None:
+            # Fast-path not armed: fall back to a plain repaint so the drag is
+            # still reflected (defensive -- the app arms it on anchor-set).
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                )
+            return
+
+        # Always update the artist geometry, even on a throttled tick.
+        xmin = min(x0, x1)
+        ymin = min(y0, y1)
+        rect.set_bounds(xmin, ymin, abs(x1 - x0), abs(y1 - y0))
+
+        now = time.monotonic()
+        if now - self._last_obstacle_blit_time < _BLIT_MIN_INTERVAL_S:
+            return
+
+        try:
+            self._canvas.restore_region(self._obstacle_blit_background)
+            self._ax.draw_artist(rect)
+            self._canvas.blit(self._ax.bbox)
+        except Exception:  # noqa: BLE001 -- exotic backend: never crash a drag.
+            self._obstacle_blit_background = None
+            if self._last_model is not None:
+                self.render(
+                    self._last_model,
+                    highlighted_nodes=self._last_highlighted_nodes,
+                    proposed_edges=self._last_proposed_edges,
+                )
+            return
+
+        self._last_obstacle_blit_time = now
+
+    def end_obstacle_drag(self) -> None:
+        """Tear down the obstacle blit fast-path and re-bake the static scene.
+
+        Removes the preview rectangle, drops the drag state, and issues a full
+        :meth:`render` so the scene returns to normal. Safe to call when no
+        obstacle drag is active (the preview artist is simply ``None``).
+
+        :return: ``None``.
+        """
+        rect = self._obstacle_preview_artist
+        if rect is not None:
+            try:
+                rect.remove()
+            except (ValueError, NotImplementedError):
+                # Already detached (e.g. a full render cleared the axes): fine.
+                pass
+        self._obstacle_preview_artist = None
+        self._obstacle_blit_background = None
+        self._last_obstacle_blit_time = _BLIT_TIME_FORCE_FIRST
+
+        if self._last_model is not None:
+            self.render(
+                self._last_model,
+                highlighted_nodes=self._last_highlighted_nodes,
+                proposed_edges=self._last_proposed_edges,
+            )
+
+    def _apply_drag_geometry(self, name: str, x: float, y: float) -> None:
+        """Move the dragged node's animated artists to ``(x, y)``.
+
+        Repositions the node's dot and label (applying the same
+        :data:`_NODE_LABEL_OFFSET_CM` offset :meth:`_draw_nodes` uses), slides
+        the endpoint that equals *name* on each incident line/blind edge artist,
+        and re-points each incident projection arrow's moved end, leaving the
+        opposite endpoint of every incident edge fixed. The model is NOT mutated
+        here -- the editor application owns the model write; this method only
+        moves the on-canvas artists.
+
+        :param name: Name of the dragged node.
+        :param x: New world x coordinate, in centimetres.
+        :param y: New world y coordinate, in centimetres.
+        :return: ``None``.
+        """
+        dot_artist = self._node_dot_artists.get(name)
+        if dot_artist is not None:
+            dot_artist.set_data([x], [y])
+        label_artist = self._node_label_artists.get(name)
+        if label_artist is not None:
+            label_artist.set_position(
+                (x + _NODE_LABEL_OFFSET_CM, y + _NODE_LABEL_OFFSET_CM)
+            )
+        for u, v, _kind, edge_artist in self._edge_artists:
+            # An edge can loop u == v defensively; update both ends if so.
+            xdata = list(edge_artist.get_xdata())
+            ydata = list(edge_artist.get_ydata())
+            if len(xdata) != 2 or len(ydata) != 2:
+                # Defensive: edge artists are always 2-point lines, but never
+                # index blindly into a malformed handle.
+                continue
+            if u == name:
+                xdata[0] = x
+                ydata[0] = y
+            if v == name:
+                xdata[1] = x
+                ydata[1] = y
+            if u == name or v == name:
+                edge_artist.set_data(xdata, ydata)
+
+        self._apply_drag_geometry_projection(name, x, y)
+
+    def _apply_drag_geometry_projection(
+        self, name: str, x: float, y: float
+    ) -> None:
+        """Slide the moved end of each incident projection arrow to ``(x, y)``.
+
+        A projection edge is a :class:`~matplotlib.patches.FancyArrowPatch`,
+        re-pointed via :meth:`~matplotlib.patches.FancyArrowPatch.set_positions`
+        (which takes BOTH endpoints) rather than a 2-point ``Line2D``
+        re-pointed via ``set_data``. ``set_positions`` needs the fixed endpoint
+        too, so the *opposite* node's coordinate is read from
+        :attr:`_last_model` -- the non-dragged endpoint never moves during a
+        drag, so the model still holds its (correct) position. A self-loop
+        (``u == v == name``) drags both ends to ``(x, y)``.
+
+        Skips an arrow whose fixed endpoint has vanished from the model (a node
+        deleted mid-drag) rather than crashing -- consistent with the defensive
+        style used throughout the render path. Pulled into its own method (off
+        the ``_edge_artists`` loop in :meth:`_apply_drag_geometry`) because the
+        artist type and re-point API differ.
+
+        :param name: Name of the dragged node.
+        :param x: New world x coordinate, in centimetres.
+        :param y: New world y coordinate, in centimetres.
+        :return: ``None``.
+        """
+        if not self._projection_edge_artists:
+            return
+        nodes = self._last_model.nodes if self._last_model is not None else {}
+        for u, v, arrow_artist in self._projection_edge_artists:
+            if u != name and v != name:
+                continue
+            # Tail = u (or the dragged cursor if u is the dragged node), head = v
+            # (or the cursor). The fixed endpoint comes from the model, which
+            # still holds its pre-drag position (only ``name`` is being moved).
+            if u == name:
+                pos_a: Optional[tuple[float, float]] = (x, y)
+            else:
+                coord = nodes.get(u)
+                pos_a = (float(coord[0]), float(coord[1])) if coord else None
+            if v == name:
+                pos_b: Optional[tuple[float, float]] = (x, y)
+            else:
+                coord = nodes.get(v)
+                pos_b = (float(coord[0]), float(coord[1])) if coord else None
+            if pos_a is None or pos_b is None:
+                # The fixed endpoint vanished from the model mid-drag; leave the
+                # arrow where it is rather than re-point against a missing node.
+                continue
+            arrow_artist.set_positions(pos_a, pos_b)
+
+    def _full_render_during_drag(self, name: str, x: float, y: float) -> None:
+        """Fallback full render when the blit fast-path is unavailable.
+
+        Used when :meth:`update_node_drag` cannot blit (fast-path disarmed,
+        wrong node, or a backend that raised mid-composite). The drag must
+        still show the node under the cursor without mutating the model -- the
+        canvas never writes ``model.nodes`` during a drag (the caller dispatches
+        the final ``MoveNode`` on release).
+
+        Ordering matters: :meth:`render` does ``ax.clear()`` and rebuilds every
+        artist from :attr:`_last_model`, whose node coordinates still hold the
+        PRE-DRAG ORIGIN. So the live ``(x, y)`` geometry must be applied to the
+        artists AFTER they are rebuilt, not before -- applying it first would be
+        discarded by the clear-and-rebuild and the dragged node would snap back
+        to its origin on every fallback tick.
+
+        1. :meth:`render` rebuilds all artists at the model (origin) positions
+           and draws that scene (with the cached overlay arguments).
+        2. :meth:`_apply_drag_geometry` slides the freshly-rebuilt dot / label /
+           incident-edge artists to the cursor (it looks them up from the dicts
+           :meth:`render` just repopulated, so it MUST run after the render).
+           It no-ops gracefully if *name* has no rebuilt artist (e.g. the node
+           vanished from the model).
+        3. A forced :meth:`FigureCanvasTkAgg.draw_idle` paints those moved
+           artists, since :meth:`_apply_drag_geometry` only mutates artist data
+           -- the render in step 1 already drew the origin-positioned scene.
+
+        :param name: Name of the dragged node.
+        :param x: New world x coordinate, in centimetres.
+        :param y: New world y coordinate, in centimetres.
+        :return: ``None``.
+        """
+        if self._last_model is None:
+            return
+        self.render(
+            self._last_model,
+            highlighted_nodes=self._last_highlighted_nodes,
+            proposed_edges=self._last_proposed_edges,
+        )
+        self._apply_drag_geometry(name, x, y)
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------
@@ -468,10 +1144,12 @@ class FieldCanvas:
     def _on_button_release(self, event) -> None:
         """Forward a ``button_release_event`` to :attr:`on_release`.
 
-        Always clears the latched ``_active_button`` once the matching
-        release is observed, even if the release happens outside the
-        axes — otherwise a drag that ends off-canvas would leave the
-        canvas stuck thinking the mouse is still down.
+        A release ends the in-progress drag, so the latched
+        ``_active_button`` is cleared UNCONDITIONALLY — the canvas only ever
+        tracks one button at a time. Clearing only on a button-matched release
+        (the old behaviour) left the latch stuck when a backend delivered a
+        *different* button's release, or ``None`` for an out-of-window release,
+        with ``_on_motion_notify`` then firing ``on_drag`` on every bare hover.
 
         Unlike :meth:`_on_button_press` / :meth:`_on_motion_notify`, the
         release fires :attr:`on_release` even when it lands *outside* the
@@ -481,28 +1159,35 @@ class FieldCanvas:
         editor's release logic entirely — a MOVE-mode drag would leave the
         node live-mutated with no undo command, and an OBSTACLE drag would
         never finish. Releasing off the plot is a common gesture when
-        dragging toward the field edge.
+        dragging toward the field edge. When the backend reports ``None`` for
+        the button on such a release, the LATCHED button is passed through so
+        the release still commits (the bug that left a node visually stuck
+        with no undo entry).
         """
         released_button = self._normalize_button(event.button)
-        # Clear the latch regardless of whether the release is in-axes.
-        # Without this, dragging off the canvas and releasing there would
-        # leave the next motion event firing as if a drag were still in
-        # progress.
-        if released_button is not None and released_button == self._active_button:
-            self._active_button = None
-        elif released_button is None and self._active_button is not None:
-            # Some matplotlib backends pass ``None`` for the button on
-            # an out-of-window release. Be conservative and clear the
-            # latch in that case too.
-            self._active_button = None
+        # A release ends any in-progress drag; clear the single-button latch
+        # unconditionally so a stray / mismatched / None-button release can
+        # never leave bare-hover motion firing on_drag.
+        active_button = self._active_button
+        self._active_button = None
 
-        if released_button is None:
+        # No drag was in progress: ignore the release entirely.
+        if active_button is None:
             return
+
         coords = self._clamped_world_coords(event)
         if coords is None:
             return
         if self.on_release is not None:
-            self.on_release(coords[0], coords[1], released_button)
+            # Prefer the released button; fall back to the latched one when the
+            # backend reports None for an out-of-window release, so a MOVE /
+            # OBSTACLE drag released off the plot still commits.
+            button = (
+                released_button
+                if released_button is not None
+                else active_button
+            )
+            self.on_release(coords[0], coords[1], button)
 
     # ------------------------------------------------------------------
     # Internal: rendering helpers
@@ -514,29 +1199,39 @@ class FieldCanvas:
         width_cm: float,
         height_cm: float,
     ) -> None:
-        """Overlay the field PNG (or a plain white background if missing).
+        """Overlay the field PNG (or the bare themed background if missing).
 
         Resolution order matches :mod:`tools.path_planner.visualizer`:
         absolute paths are used as-is; relative paths are resolved
         against ``tools/path_planner/``. A missing file is non-fatal —
-        the axes are simply left with their default white facecolor.
+        the axes are simply left with the warm PAPER facecolor that
+        :meth:`render` applied from the theme before this helper ran.
+
+        The decoded PNG is cached per-instance in :attr:`_bg_cache`, keyed by
+        the resolved absolute path string, so it is read from disk only once
+        and reused on every subsequent render. This matters because
+        :meth:`render` runs on every mouse-motion tick during a drag; without
+        the cache the PNG would be re-decoded dozens of times per second. A
+        missing or unreadable PNG caches a "no background" sentinel so the
+        doomed decode (and its warning) is not re-attempted every frame.
+
+        :param model: Source of the ``map_png`` path and field extent.
+        :param width_cm: Field width in centimetres (image extent x-max).
+        :param height_cm: Field height in centimetres (image extent y-max).
+        :return: ``None``.
         """
         map_path = self._resolve_map_png(model)
-        if map_path is None or not map_path.exists():
-            # No background image; the default white axes facecolor is
-            # fine. Render nothing.
+        if map_path is None:
+            # No ``map_png`` configured at all; the warm themed axes facecolor
+            # (applied in ``render``) is fine. Nothing to cache or draw.
             return
-        try:
-            img = mpimg.imread(str(map_path))
-        except (FileNotFoundError, PermissionError, OSError, ValueError) as exc:
-            warnings.warn(
-                f"FieldCanvas: failed to load map.png at {map_path} "
-                f"({type(exc).__name__}: {exc}); rendering without "
-                "background.",
-                UserWarning,
-                stacklevel=2,
-            )
+
+        image = self._cached_background(map_path)
+        if image is _BACKGROUND_NONE:
+            # Missing/unreadable PNG (already warned + cached as the
+            # sentinel). Render on the warm themed axes facecolor.
             return
+
         # ``origin="upper"`` (vs. the visualizer's ``"lower"``) flips the
         # PNG vertically so the editor view matches the operator's
         # physical orientation of the field mat. Nodes, edges, obstacles,
@@ -546,12 +1241,59 @@ class FieldCanvas:
         # set in :meth:`render`. Passing ``aspect="auto"`` would override
         # that and re-stretch the field rectangle on every window resize.
         self._ax.imshow(
-            img,
+            image,
             extent=(0.0, width_cm, 0.0, height_cm),
             origin="upper",
             alpha=_BACKGROUND_ALPHA,
             zorder=_BACKGROUND_ZORDER,
         )
+
+    def _cached_background(self, map_path: Path) -> object:
+        """Return the decoded background array for *map_path*, caching it.
+
+        On a cache miss the PNG is decoded from disk exactly once via
+        ``mpimg.imread`` and the resulting array is stored under the resolved
+        absolute path string. If the file is missing or ``imread`` raises, the
+        :data:`_BACKGROUND_NONE` sentinel is cached instead (warning once, the
+        first time the failure is recorded for that path) so the doomed decode
+        is never retried on subsequent renders. On a cache hit the stored
+        value — a decoded array or the sentinel — is returned untouched
+        without touching the disk.
+
+        :param map_path: Resolved absolute path to the candidate map PNG (from
+            :meth:`_resolve_map_png`).
+        :return: The decoded image array on success, or :data:`_BACKGROUND_NONE`
+            when the PNG is missing or could not be decoded.
+        """
+        key = str(map_path)
+        cached = self._bg_cache.get(key, None)
+        if cached is not None:
+            return cached
+
+        if not map_path.exists():
+            # Cache the failure so we don't re-stat / re-warn every frame.
+            # A missing file is non-fatal: the visualizer parity behaviour is
+            # to render on the default white facecolor, so we stay silent here
+            # to match the pre-cache contract (which only warned on a decode
+            # error, not on a plain absent file).
+            self._bg_cache[key] = _BACKGROUND_NONE
+            return _BACKGROUND_NONE
+
+        try:
+            image = mpimg.imread(key)
+        except (FileNotFoundError, PermissionError, OSError, ValueError) as exc:
+            warnings.warn(
+                f"FieldCanvas: failed to load map.png at {map_path} "
+                f"({type(exc).__name__}: {exc}); rendering without "
+                "background.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._bg_cache[key] = _BACKGROUND_NONE
+            return _BACKGROUND_NONE
+
+        self._bg_cache[key] = image
+        return image
 
     def _draw_obstacles(self, model: FieldModel) -> None:
         """Draw raw rectangles + C-space inflated polygons for obstacles."""
@@ -591,7 +1333,14 @@ class FieldCanvas:
             self._ax.add_patch(inflated_patch)
 
     def _draw_edges(self, model: FieldModel) -> None:
-        """Draw line-follow + blind edges with the standard styling."""
+        """Draw line-follow + blind edges, retaining a handle per edge.
+
+        Each edge's :class:`~matplotlib.lines.Line2D` is appended to
+        :attr:`_edge_artists` as a ``(u, v, kind, artist)`` tuple (``kind`` is
+        ``"line"`` or ``"blind"``). The drag fast-path uses those handles to
+        find the edges incident to a dragged node and to slide the moved
+        endpoint without a full re-render.
+        """
         nodes = model.nodes
         for u, v in model.line_segments:
             if u not in nodes or v not in nodes:
@@ -600,7 +1349,7 @@ class FieldCanvas:
                 continue
             ux, uy = nodes[u]
             vx, vy = nodes[v]
-            self._ax.plot(
+            (artist,) = self._ax.plot(
                 [ux, vx],
                 [uy, vy],
                 color=_EDGE_LINE_COLOR,
@@ -608,12 +1357,13 @@ class FieldCanvas:
                 linewidth=_EDGE_LINE_LINEWIDTH,
                 zorder=_EDGE_ZORDER,
             )
+            self._edge_artists.append((u, v, "line", artist))
         for u, v in model.blind_edges:
             if u not in nodes or v not in nodes:
                 continue
             ux, uy = nodes[u]
             vx, vy = nodes[v]
-            self._ax.plot(
+            (artist,) = self._ax.plot(
                 [ux, vx],
                 [uy, vy],
                 color=_EDGE_BLIND_COLOR,
@@ -621,13 +1371,14 @@ class FieldCanvas:
                 linewidth=_EDGE_BLIND_LINEWIDTH,
                 zorder=_EDGE_ZORDER,
             )
+            self._edge_artists.append((u, v, "blind", artist))
 
     def _draw_proposed_edges(
         self,
         model: FieldModel,
         proposed_edges: list[tuple[str, str, str]],
     ) -> None:
-        """Overlay the given (a, b, kind) edges in dashed cyan above committed edges.
+        """Overlay the given (a, b, kind) edges in dashed teal above committed edges.
 
         The third tuple element (``kind``) is currently informational only — every
         proposed edge is styled identically. Unknown node names are silently
@@ -652,45 +1403,113 @@ class FieldCanvas:
                 zorder=_PROPOSED_EDGE_ZORDER,
             )
 
+    def _draw_projection_edges(self, model: FieldModel) -> None:
+        """Overlay the committed projection edges as directed teal arrows.
+
+        Draws one :class:`~matplotlib.patches.FancyArrowPatch` per entry of
+        :attr:`_projection_edges` (the render set last pushed via
+        :meth:`set_projection_edges`), pointing from ``model.nodes[u]`` to
+        ``model.nodes[v]`` with a filled arrowhead at the head ``v``. The teal
+        solid arrow distinguishes a projection edge from the ink-solid line
+        edges and the brick-dashed blind edges, and the arrowhead makes the hop
+        *directed* (line/blind edges render undirected).
+
+        Each arrow's patch is retained in :attr:`_projection_edge_artists` as a
+        ``(u, v, patch)`` tuple so the drag fast-path can find the arrows
+        incident to a dragged node and slide the moved endpoint via
+        :meth:`~matplotlib.patches.FancyArrowPatch.set_positions` without a full
+        re-render.
+
+        Defensive, matching the rest of this class: an entry whose ``u`` or
+        ``v`` is not a current model node is silently skipped (the live-edited
+        model may briefly hold a half-deleted state), as is any malformed entry
+        with fewer than two elements. Only the leading two elements (``u``,
+        ``v``) are read; the trailing ``distance_cm`` / ``heading_deg`` are
+        irrelevant to the drawing.
+
+        :param model: Source of node coordinates.
+        :return: ``None``.
+        """
+        nodes = model.nodes
+        for edge in self._projection_edges:
+            if len(edge) < 2:
+                # Malformed render-set entry: a projection edge is at minimum a
+                # ``(u, v, ...)`` tuple. Skip rather than crash the render.
+                continue
+            u, v = edge[0], edge[1]
+            if u not in nodes or v not in nodes:
+                continue
+            ux, uy = nodes[u]
+            vx, vy = nodes[v]
+            arrow = mpatches.FancyArrowPatch(
+                (ux, uy),
+                (vx, vy),
+                arrowstyle=_PROJECTION_EDGE_ARROWSTYLE,
+                mutation_scale=_PROJECTION_EDGE_MUTATION_SCALE,
+                color=_PROJECTION_EDGE_COLOR,
+                linewidth=_PROJECTION_EDGE_LINEWIDTH,
+                zorder=_PROJECTION_EDGE_ZORDER,
+                # ``shrinkA`` / ``shrinkB`` default to 2 pt, which would pull the
+                # tail/head back off the node centres. Zero them so the arrow
+                # spans node-centre to node-centre like the line/blind edges.
+                shrinkA=0.0,
+                shrinkB=0.0,
+            )
+            self._ax.add_patch(arrow)
+            self._projection_edge_artists.append((u, v, arrow))
+
     def _draw_nodes(self, model: FieldModel) -> None:
-        """Draw a coloured dot + name label per node."""
-        # Group by type so we can call ``scatter`` once per type instead
-        # of once per node. ``node_types`` is the source of truth; nodes
-        # missing a type entry fall back to ``"line"`` (consistent with
-        # ``visualizer.py``).
-        by_type: dict[str, list[tuple[float, float, str]]] = {}
+        """Draw a coloured dot + name label per node, retaining each handle.
+
+        Unlike the old type-grouped single ``scatter`` per node type, each
+        node gets its OWN ``Line2D`` dot (drawn with ``marker="o"`` /
+        ``linestyle="none"``) and its own ``Text`` label, retained in
+        :attr:`_node_dot_artists` / :attr:`_node_label_artists` keyed by node
+        name. Dedicated per-node artists are what let the drag fast-path
+        animate a single node out of the scene; a shared PathCollection could
+        not be re-positioned one point at a time.
+
+        ``ax.plot`` sizes markers by diameter in points (``markersize``),
+        whereas ``ax.scatter`` sized them by area in points^2 (``s``); see
+        :data:`_NODE_DOT_MARKERSIZE` for the area->diameter conversion that
+        keeps the dots visually identical to the pre-refactor look.
+
+        ``node_types`` is the source of truth; nodes missing a type entry fall
+        back to ``"line"`` (consistent with ``visualizer.py``). Sorting by
+        ``(type, name)`` preserves the previous, deterministic draw order.
+        """
+        entries: list[tuple[str, float, float, str]] = []
         for name, (x, y) in model.nodes.items():
             node_type = model.node_types.get(name, "line")
-            by_type.setdefault(node_type, []).append(
-                (float(x), float(y), name)
-            )
-        for node_type, entries in sorted(by_type.items()):
-            xs = [e[0] for e in entries]
-            ys = [e[1] for e in entries]
+            entries.append((node_type, float(x), float(y), name))
+        for node_type, x, y, name in sorted(entries):
             color = _NODE_COLOR.get(node_type, _NODE_COLOR_FALLBACK)
-            self._ax.scatter(
-                xs,
-                ys,
+            (dot_artist,) = self._ax.plot(
+                [x],
+                [y],
+                marker="o",
+                linestyle="none",
                 color=color,
-                s=_NODE_DOT_SIZE,
+                markersize=_NODE_DOT_MARKERSIZE,
                 zorder=_NODE_ZORDER,
             )
-            for x, y, name in entries:
-                self._ax.text(
-                    x + _NODE_LABEL_OFFSET_CM,
-                    y + _NODE_LABEL_OFFSET_CM,
-                    name,
-                    fontsize=_NODE_LABEL_FONTSIZE,
-                    color=color,
-                    zorder=_NODE_LABEL_ZORDER,
-                )
+            self._node_dot_artists[name] = dot_artist
+            label_artist = self._ax.text(
+                x + _NODE_LABEL_OFFSET_CM,
+                y + _NODE_LABEL_OFFSET_CM,
+                name,
+                fontsize=_NODE_LABEL_FONTSIZE,
+                color=color,
+                zorder=_NODE_LABEL_ZORDER,
+            )
+            self._node_label_artists[name] = label_artist
 
     def _draw_highlight(
         self,
         model: FieldModel,
         highlighted_nodes: list[str],
     ) -> None:
-        """Outline the given nodes with a thick yellow ring above all else.
+        """Outline the given nodes with a thick terracotta ring above all else.
 
         Unknown node names are silently skipped — the editor may pass a
         stale selection during a multi-step mutation and we don't want to

@@ -9,16 +9,11 @@
   "BLIND_DECAY_K": 0.05,
   "BLIND_DECAY_EXPONENT": 2.0,
   "BLIND_DECAY_D_REF": 50.0,
-  "blind_projection_auto_seek": true,
   "START_NODE": "Start",
   "START_HEADING_DEG": 0.0,
   "NODES": {
     "Inter1": [
       67.9,
-      36.9
-    ],
-    "Inter2": [
-      240.3,
       36.9
     ],
     "Inter3": [
@@ -33,6 +28,10 @@
       24.154545037397327,
       23.51148225469729
     ],
+    "Wall1": [
+      165.0,
+      139.0
+    ],
     "final": [
       91.40549717799293,
       59.90533657596476
@@ -40,34 +39,21 @@
     "position1": [
       165.11723948056715,
       119.22713715413207
-    ],
-    "Wall1": [
-      165.0,
-      139.0
     ]
   },
   "NODE_TYPES": {
     "Inter1": "line",
-    "Inter2": "line",
     "Inter3": "line",
     "Inter4": "line",
     "Start": "blind",
+    "Wall1": "reset",
     "final": "blind",
-    "position1": "blind",
-    "Wall1": "reset"
+    "position1": "blind"
   },
   "LINE_SEGMENTS": [
     [
       "Inter1",
-      "Inter2"
-    ],
-    [
-      "Inter1",
       "Inter3"
-    ],
-    [
-      "Inter2",
-      "Inter4"
     ]
   ],
   "BLIND_EDGES": [
@@ -77,10 +63,6 @@
     ],
     [
       "Inter1",
-      "final"
-    ],
-    [
-      "Inter2",
       "final"
     ],
     [
@@ -108,7 +90,6 @@
       "Wall1"
     ]
   ],
-  "pivot_turns": [],
   "RESET_NODES": {
     "Wall1": {
       "axis": "y",

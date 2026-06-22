@@ -17,9 +17,11 @@ from tools.path_planner.editor.commands import (
     AddLineEdge,
     AddNode,
     AddObstacle,
+    AddPivotTurn,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
+    MacroCommand,
     MoveNode,
     RenameNode,
     SetStart,
@@ -157,6 +159,136 @@ def test_delete_node_succeeds_when_no_edges_reference_it() -> None:
     cmd.revert(model)
     assert "X" in model.nodes
     assert "X" in model.node_types
+
+
+def test_rename_node_cascades_reset_spec_and_pivot_turns() -> None:
+    """RenameNode must re-key a reset spec and rename pivot-turn legs; revert
+    must restore both."""
+    model = make_model()
+    model.nodes["C"] = (300.0, 10.0)
+    model.node_types["A"] = "reset"
+    model.node_types["C"] = "line"
+    model.reset_nodes = {"A": {"axis": "x", "wall_coord": 0.0, "facing": 0.0}}
+    model.pivot_turns = [("B", "A", "C")]
+
+    cmd = RenameNode("A", "AA")
+    cmd.apply(model)
+
+    # Reset spec re-keyed onto the new name (same spec body); pivot leg renamed.
+    assert "A" not in model.reset_nodes
+    assert model.reset_nodes["AA"] == {
+        "axis": "x",
+        "wall_coord": 0.0,
+        "facing": 0.0,
+    }
+    assert model.pivot_turns == [("B", "AA", "C")]
+
+    cmd.revert(model)
+    assert "AA" not in model.reset_nodes
+    assert model.reset_nodes["A"] == {
+        "axis": "x",
+        "wall_coord": 0.0,
+        "facing": 0.0,
+    }
+    assert model.pivot_turns == [("B", "A", "C")]
+
+
+def test_delete_node_cascades_reset_spec_and_revert_restores() -> None:
+    """Deleting a reset node removes its own reset spec; revert restores it."""
+    model = make_model()
+    model.nodes["R"] = (400.0, 400.0)
+    model.node_types["R"] = "reset"
+    spec = {"axis": "y", "wall_coord": 0.0, "facing": 90.0}
+    model.reset_nodes = {"R": dict(spec)}
+
+    cmd = DeleteNode("R")
+    cmd.apply(model)
+    assert "R" not in model.nodes
+    assert "R" not in model.reset_nodes
+
+    cmd.revert(model)
+    assert "R" in model.nodes
+    assert model.reset_nodes["R"] == spec
+
+
+def test_delete_node_refuses_when_pivot_references_it() -> None:
+    """DeleteNode.apply must raise (model untouched) when a pivot turn names the
+    node, and the message must name 'pivot_turns'."""
+    model = make_model()
+    model.nodes["C"] = (300.0, 10.0)
+    model.node_types["C"] = "line"
+    model.pivot_turns = [("A", "B", "C")]
+
+    with pytest.raises(ValueError) as exc_info:
+        DeleteNode("C").apply(model)
+
+    assert "pivot_turns" in str(exc_info.value)
+    assert "C" in model.nodes  # untouched
+
+
+def test_add_pivot_turn_rejects_degenerate_triple() -> None:
+    """AddPivotTurn must reject u==v or v==w (mirrors the validator)."""
+    model = make_model()
+    model.nodes["C"] = (300.0, 10.0)
+    model.node_types["C"] = "line"
+
+    with pytest.raises(ValueError, match="degenerate"):
+        AddPivotTurn("A", "A", "B").apply(model)  # u == v
+    with pytest.raises(ValueError, match="degenerate"):
+        AddPivotTurn("A", "B", "B").apply(model)  # v == w
+    assert model.pivot_turns == []  # nothing committed
+
+
+def test_add_edges_batch_rejects_projection_pair_conflict() -> None:
+    """A batch edge on a pair that already carries a projection edge is
+    rejected, and the model is left untouched."""
+    model = make_model()
+    model.nodes["C"] = (300.0, 10.0)
+    model.node_types["C"] = "line"
+    # (B, C) has no plain edge, but the caller reports a projection on it.
+    batch = AddEdgesBatch(
+        [("B", "C", "line")],
+        projection_pairs=frozenset({frozenset({"B", "C"})}),
+    )
+    with pytest.raises(ValueError, match="projection"):
+        batch.apply(model)
+    assert ("B", "C") not in model.line_segments
+    assert ("C", "B") not in model.line_segments
+
+
+# ---------------------------------------------------------------------------
+# MacroCommand (atomic override)
+# ---------------------------------------------------------------------------
+
+
+def test_macro_command_applies_and_reverts_as_one_unit() -> None:
+    """A MacroCommand bundling delete-then-add applies both, and a single revert
+    restores both (one undo for the whole override)."""
+    model = make_model()  # line_segments == [("A", "B")]
+    macro = MacroCommand([DeleteEdge("A", "B"), AddBlindEdge("A", "B")])
+
+    macro.apply(model)
+    assert model.line_segments == []
+    assert model.blind_edges == [("A", "B")]
+
+    macro.revert(model)
+    assert model.line_segments == [("A", "B")]
+    assert model.blind_edges == []
+
+
+def test_macro_command_rolls_back_prefix_on_subcommand_failure() -> None:
+    """If a later sub-command raises, the already-applied prefix is reverted so
+    the model is left untouched and the exception propagates."""
+    model = make_model()
+    pre = repr(model.to_json_dict())
+    # First delete succeeds; the second delete of the now-gone pair raises.
+    macro = MacroCommand([DeleteEdge("A", "B"), DeleteEdge("A", "B")])
+
+    with pytest.raises(ValueError):
+        macro.apply(model)
+
+    # The first delete was rolled back -> model byte-identical to pre-apply.
+    assert repr(model.to_json_dict()) == pre
 
 
 # ---------------------------------------------------------------------------

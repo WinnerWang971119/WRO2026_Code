@@ -660,3 +660,73 @@ def test_history_undo_redo_preserves_decay_knobs() -> None:
     assert history.redo(model) is True
     assert _current() == before
     assert "Z" in model.nodes
+
+
+# ---------------------------------------------------------------------------
+# blind_projection_auto_seek (field-wide BLIND->PROJECTION auto-seek flag)
+# ---------------------------------------------------------------------------
+
+
+def test_blind_projection_auto_seek_defaults_true() -> None:
+    """A model built without the flag defaults it to True (the loader default)."""
+    model = make_model()
+    assert model.blind_projection_auto_seek is True
+
+
+def test_blind_projection_auto_seek_omitted_when_default_true() -> None:
+    """to_json_dict omits the key when it equals the default True (absent stays
+    absent), so a field that never set it produces no spurious diff."""
+    model = make_model()
+    json_dict = model.to_json_dict()
+    assert "blind_projection_auto_seek" not in json_dict
+    assert tuple(json_dict.keys())[-1] == "OBSTACLES"
+
+
+def test_blind_projection_auto_seek_emitted_and_round_trips_when_false() -> None:
+    """Setting the flag False emits it, and from_json_dict reads it back.
+
+    This is the dual-serialization fix: before the field was tracked, saving
+    from the editor dropped the key and field_data.py reverted it to True.
+    """
+    model = make_model()
+    model.blind_projection_auto_seek = False
+
+    json_dict = model.to_json_dict()
+    assert json_dict["blind_projection_auto_seek"] is False
+    # Canonical slot: between RESET_NODES (absent here) and OBSTACLES.
+    keys = tuple(json_dict.keys())
+    assert keys.index("blind_projection_auto_seek") == keys.index("OBSTACLES") - 1
+
+    restored = FieldModel.from_json_dict(json_dict)
+    assert restored.blind_projection_auto_seek is False
+    assert restored == model
+
+
+def test_from_json_dict_tolerates_absent_blind_projection_auto_seek() -> None:
+    """A JSON dict predating the flag loads with the True default, not KeyError."""
+    model = make_model()
+    data = model.to_json_dict()
+    assert "blind_projection_auto_seek" not in data  # absent (default True)
+    restored = FieldModel.from_json_dict(data)
+    assert restored.blind_projection_auto_seek is True
+
+
+def test_to_module_proxy_exposes_blind_projection_auto_seek() -> None:
+    """The validator proxy carries BLIND_PROJECTION_AUTO_SEEK so validate() can
+    type-check the edited value (otherwise it is persisted-but-unvalidated)."""
+    model = make_model()
+    model.blind_projection_auto_seek = False
+    proxy = model.to_module_proxy()
+    assert proxy.BLIND_PROJECTION_AUTO_SEEK is False
+
+
+def test_snapshot_restore_preserves_blind_projection_auto_seek() -> None:
+    """snapshot()/restore() round-trips the flag so undo unwinding keeps it."""
+    model = make_model()
+    model.blind_projection_auto_seek = False
+    snap = model.snapshot()
+
+    model.blind_projection_auto_seek = True
+    model.restore(snap)
+
+    assert model.blind_projection_auto_seek is False

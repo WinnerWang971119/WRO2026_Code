@@ -75,8 +75,12 @@ static float offsetMag(const Offset2D& o)
     return std::sqrt(o.x * o.x + o.y * o.y);
 }
 
-// The toy field's sole RESET node and its authored reset record (routes.cpp:21,129).
-static constexpr uint8_t kResetNode   = 5;       // "Wall1"
+// The field's sole RESET node and its authored reset record. Resolve "Wall1" by
+// NAME, not a hardcoded index: the real routes.cpp node order shifts whenever
+// field_data.json gains or drops a node (removing Inter2 moved Wall1 from index
+// 5 to 4), so a literal index silently points at the wrong node after a map
+// edit. findNodeByName is the API built for exactly this lookup.
+static const uint8_t kResetNode   = FieldMap::findNodeByName("Wall1");
 static constexpr uint8_t kAxisY       = 1;       // axis 1 = y
 static constexpr float   kWallCoordY  = 154.0f;  // wall_coord on y
 static constexpr float   kFacingDeg   = 270.0f;  // parked heading away from the wall (routes facing)
