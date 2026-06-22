@@ -28,8 +28,14 @@ planner, the on-robot `Localization` + `PathTracker`, and the Mission
 operator DSL are all live. Issues #16 (8-ch line sensor), #22
 (junction PID freeze), and #21 (bidirectional line following — runtime
 auto-direction with 3-layer override, ADR-024) have landed.
-Manipulator v0 mechanism is in progress on the mech track; perception
-(camera) and the Tasks layer are not yet started. Phase 3 is next.
+Manipulator v0 mechanism is in progress on the mech track. The software
+originally scoped to later phases has been pulled forward and shipped to
+`main` ahead of its hardware gates: the `Vision` mosaic-read module
+(Phase 4), the `Manipulator` control API (Phase 5, ADR-032), and the
+`Tasks` framework with the `Mission.task()` verb (Phase 5/6,
+ADR-025/026). What remains gated is on-hardware verification — the
+Phase 3 drive / line / nav benchmarks — which awaits the real chassis and
+the real 2026 field. Phase 3 is next.
 
 **Two physical chassis.** Phases 3-6 run on the **test rover** (TT
 motors; switch the alias to `MatrixTT` in `Config.h`). The **competition
