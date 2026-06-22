@@ -340,6 +340,7 @@ setups and pass criteria.
 
 ## Quick links
 
+- Contributing (PRs, issues, labels): [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - Hardware quick map and required init sequence: [`CLAUDE.md`](./CLAUDE.md).
 - Path planner pipeline: [`tools/path_planner/README.md`](./tools/path_planner/README.md).
 - Design decisions (ADRs): [`docs/decisions/`](./docs/decisions/).
