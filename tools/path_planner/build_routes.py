@@ -183,7 +183,6 @@ def _run(
     log(
         f"pipeline_config: line={PIPELINE_CONFIG.line.name}, "
         f"blind={PIPELINE_CONFIG.blind.name}, "
-        f"projection={PIPELINE_CONFIG.projection.name}, "
         f"turn={PIPELINE_CONFIG.turn.name}"
     )
     log("validating field_data.py ...")
