@@ -181,13 +181,21 @@ def _model_with_reset_typed_node_no_spec() -> FieldModel:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        # ``S`` is a dead-reckon spawn (blind) so the issue #64 validator -- which
+        # rejects a ``"line"`` / ``"projection"`` START node -- has a legal start
+        # to land on, isolating the TC8 failure on the reset divergence alone.
+        start_node="S",
         start_heading_deg=0.0,
-        nodes={"A": (0.0, 50.0), "B": (200.0, 10.0), "G": (250.0, 80.0)},
+        nodes={
+            "S": (250.0, 150.0),
+            "A": (0.0, 50.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+        },
         # ``G`` is typed reset but has NO reset_nodes entry -> divergence.
-        node_types={"A": "line", "B": "line", "G": "reset"},
+        node_types={"S": "blind", "A": "line", "B": "line", "G": "reset"},
         line_segments=[("A", "B")],
-        blind_edges=[("B", "G")],
+        blind_edges=[("B", "G"), ("S", "G")],
         obstacles=[],
         reset_nodes={},  # the missing half of the invariant
     )
@@ -268,12 +276,20 @@ def _make_app() -> tuple[EditorApp, _PanelsSpy, FieldModel]:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        # ``S`` is a dead-reckon spawn (blind): the issue #64 validator rejects a
+        # ``"line"`` / ``"projection"`` START node, so the start must be a blind
+        # origin for the handler's Save-path validate to stay clean.
+        start_node="S",
         start_heading_deg=0.0,
-        nodes={"A": (0.0, 50.0), "B": (200.0, 10.0), "G": (250.0, 80.0)},
-        node_types={"A": "line", "B": "line", "G": "reset"},
+        nodes={
+            "S": (250.0, 150.0),
+            "A": (0.0, 50.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+        },
+        node_types={"S": "blind", "A": "line", "B": "line", "G": "reset"},
         line_segments=[("A", "B")],
-        blind_edges=[("B", "G")],
+        blind_edges=[("B", "G"), ("S", "G")],
         obstacles=[],
         reset_nodes={"G": {"axis": "x", "wall_coord": 280.0, "facing": 180.0}},
     )

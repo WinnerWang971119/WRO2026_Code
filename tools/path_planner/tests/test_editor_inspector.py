@@ -320,20 +320,23 @@ def test_focus_guard_blocks_actual_nudge_dispatch_in_entry() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TC7 -- the add-node dialog offers the "reset" type (module-scoped values)
+# TC7 -- the add-node dialog offers the "reset" and "projection" types
 # ---------------------------------------------------------------------------
 
 
-def test_dialog_node_type_values_offer_reset() -> None:
-    """TC7: ``dialogs._NODE_TYPE_VALUES`` is exactly ``("line", "blind",
-    "reset")`` -- the add-node dialog offers the reset type (T5).
+def test_dialog_node_type_values_offer_reset_and_projection() -> None:
+    """TC7: ``dialogs._NODE_TYPE_VALUES`` is exactly ``("line", "projection",
+    "blind", "reset")`` -- the add-node dialog offers every on-model node type.
 
     Pinning the module-scoped tuple guards the add-node dialog's combo values:
-    the restyle made ``"reset"`` selectable, and a future edit that drops it (or
-    re-orders the tuple) would break the "create a reset node" flow silently.
-    Module-scoped (not a per-instance read) so no Tk is needed.
+    the restyle made ``"reset"`` selectable, and issue #64 added the on-model
+    ``"projection"`` type (a line crossing with no junction marker), so a future
+    edit that drops one or re-orders the tuple would break a "create node" flow
+    silently. The tuple is single-sourced from ``model.NODE_TYPE_VALUES``, so it
+    must match that vocabulary exactly. Module-scoped (not a per-instance read)
+    so no Tk is needed.
     """
-    assert dialogs._NODE_TYPE_VALUES == ("line", "blind", "reset")
+    assert dialogs._NODE_TYPE_VALUES == ("line", "projection", "blind", "reset")
 
 
 # ---------------------------------------------------------------------------
@@ -432,17 +435,24 @@ def test_json_round_trip_is_stable_and_has_no_projection_edges() -> None:
     assert round_tripped == model
     assert round_tripped.to_json_dict() == json_dict
 
-    # No projection-edge surface in the JSON dict: not as a top-level key ...
+    # No projection-EDGE surface in the JSON dict. Issue #64 retired the
+    # projection EDGE type entirely -- projection is now an on-model node TYPE
+    # carried in ``NODE_TYPES`` (and the only legitimate "projection" key is the
+    # field-wide ``blind_projection_auto_seek`` toggle, which is not an edge),
+    # so the JSON sidecar still never carries a projection edge or an EDGES table.
     for key in json_dict:
+        if key == "blind_projection_auto_seek":
+            continue  # the auto-seek toggle is a flag, not a projection edge.
         assert "PROJECTION" not in key.upper(), (
-            f"JSON dict must not carry a projection key, found {key!r}"
+            f"JSON dict must not carry a projection-edge key, found {key!r}"
         )
     assert "EDGES" not in json_dict, (
-        "the editor JSON has no EDGES table -- projection edges live in "
-        "field_data.py, not the JSON sidecar"
+        "the editor JSON has no EDGES table -- projection is an on-model node "
+        "type now, never an edge in the JSON sidecar"
     )
 
-    # ... and no EDGE_PROJECTION marker buried anywhere in the serialised values.
+    # ... and no EDGE_PROJECTION marker buried anywhere in the serialised values
+    # (the projection edge type and its constant are gone tree-wide, issue #64).
     assert "EDGE_PROJECTION" not in repr(json_dict)
 
 

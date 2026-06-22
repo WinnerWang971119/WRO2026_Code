@@ -9,9 +9,13 @@
   "BLIND_DECAY_K": 0.05,
   "BLIND_DECAY_EXPONENT": 2.0,
   "BLIND_DECAY_D_REF": 50.0,
-  "START_NODE": "A",
+  "START_NODE": "S",
   "START_HEADING_DEG": 0.0,
   "NODES": {
+    "S": [
+      250.0,
+      150.0
+    ],
     "A": [
       10.0,
       10.0
@@ -26,6 +30,7 @@
     ]
   },
   "NODE_TYPES": {
+    "S": "blind",
     "A": "line",
     "B": "line",
     "G": "blind"
@@ -39,6 +44,10 @@
   "BLIND_EDGES": [
     [
       "B",
+      "G"
+    ],
+    [
+      "S",
       "G"
     ]
   ],

@@ -85,10 +85,11 @@ _EXPECTED_CALLBACKS: tuple[str, ...] = (
     "on_add_pivot",
     "on_delete_pivot",
     "on_global_knob_change",
-    # Added by the restyle wave (T6): the ghost "+ add projection" button and the
-    # status-strip key-hint that opens the shortcuts dialog. Enumerated here so a
-    # future rename of either slot fails this guard loudly (the T6 review note).
-    "on_add_projection",
+    # The status-strip key-hint that opens the shortcuts dialog. Enumerated here
+    # so a future rename of the slot fails this guard loudly (the T6 review note).
+    # (The "+ add projection" button slot was removed in issue #64 -- projection
+    # is now an on-model node TYPE set via the inspector combobox, not an edge
+    # added through a panel button.)
     "on_show_shortcuts",
 )
 

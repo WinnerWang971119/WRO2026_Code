@@ -20,7 +20,15 @@ from tools.path_planner.validator import FieldDataError
 
 
 def make_model() -> FieldModel:
-    """Return a small but fully-valid FieldModel built in memory."""
+    """Return a small but fully-valid FieldModel built in memory.
+
+    ``S`` is a dead-reckon spawn (a ``"blind"`` node) used as the ``START_NODE``:
+    issue #64's validator rejects a ``"line"`` / ``"projection"`` start (an
+    on-line spawn presumes a sensor-anchored arrival the chassis has not made at
+    t=0), so the start must be a blind origin. ``S`` carries no incident edge --
+    the blind-edge list stays empty so the snapshot deep-copy guard still sees
+    ``blind_edges == []`` -- and an isolated blind node validates clean.
+    """
     return FieldModel(
         field_mm=(3000, 2000),
         map_png="maps/map.png",
@@ -29,10 +37,10 @@ def make_model() -> FieldModel:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        start_node="S",
         start_heading_deg=0.0,
-        nodes={"A": (10.0, 10.0), "B": (200.0, 10.0)},
-        node_types={"A": "line", "B": "line"},
+        nodes={"S": (10.0, 100.0), "A": (10.0, 10.0), "B": (200.0, 10.0)},
+        node_types={"S": "blind", "A": "line", "B": "line"},
         line_segments=[("A", "B")],
         blind_edges=[],
         obstacles=[(50.0, 50.0, 80.0, 80.0, "pillar")],
@@ -236,15 +244,25 @@ def test_validate_enforces_pivot_geometry_via_proxy() -> None:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        # ``S`` is a blind dead-reckon spawn so the issue #64 line-/projection-
+        # START rejection (which runs before the pivot rules) does not pre-empt
+        # the pivot error this test asserts on.
+        start_node="S",
         start_heading_deg=0.0,
         nodes={
+            "S": (10.0, 100.0),
             "A": (10.0, 10.0),
             "B": (200.0, 10.0),
             "C": (200.0, 200.0),
             "D": (10.0, 200.0),
         },
-        node_types={"A": "line", "B": "line", "C": "line", "D": "line"},
+        node_types={
+            "S": "blind",
+            "A": "line",
+            "B": "line",
+            "C": "line",
+            "D": "line",
+        },
         line_segments=[("A", "B"), ("B", "D"), ("C", "D")],
         blind_edges=[],
         obstacles=[],
@@ -439,9 +457,10 @@ def test_validate_reaches_reset_rules_via_proxy() -> None:
     proxy plumbs the spec through, not just the node type.
     """
     model = make_model()
-    # Use B as the reset node (A is the START node, and the validator rejects a
-    # reset-typed START node before any spec check).
-    model.start_node = "A"
+    # Use B as the reset node. ``S`` is the (blind) START node, so the
+    # reset-typed node B is NOT the start -- the validator rejects a reset-typed
+    # START node before any spec check, so keeping the start off B lets the bad
+    # SPEC (here, an unknown axis) reach the validator.
     model.node_types["B"] = "reset"
     model.reset_nodes = {"B": {"axis": "z", "wall_coord": 10.0, "facing": 0.0}}
     with pytest.raises(FieldDataError, match=r"RESET_NODES\['B'\]\.axis"):

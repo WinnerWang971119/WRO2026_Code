@@ -239,23 +239,6 @@ def test_add_pivot_turn_rejects_degenerate_triple() -> None:
     assert model.pivot_turns == []  # nothing committed
 
 
-def test_add_edges_batch_rejects_projection_pair_conflict() -> None:
-    """A batch edge on a pair that already carries a projection edge is
-    rejected, and the model is left untouched."""
-    model = make_model()
-    model.nodes["C"] = (300.0, 10.0)
-    model.node_types["C"] = "line"
-    # (B, C) has no plain edge, but the caller reports a projection on it.
-    batch = AddEdgesBatch(
-        [("B", "C", "line")],
-        projection_pairs=frozenset({frozenset({"B", "C"})}),
-    )
-    with pytest.raises(ValueError, match="projection"):
-        batch.apply(model)
-    assert ("B", "C") not in model.line_segments
-    assert ("C", "B") not in model.line_segments
-
-
 # ---------------------------------------------------------------------------
 # MacroCommand (atomic override)
 # ---------------------------------------------------------------------------
