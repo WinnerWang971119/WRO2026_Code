@@ -117,7 +117,7 @@ _EXPECTED_PUBLIC_MEMBERS: tuple[str, ...] = (
 # Mode-display / selection-display strings passed to the status-surface setters
 # in the second smoke check.  Named so the assertion reads as a deliberate themed
 # update rather than a bare literal.
-_SAMPLE_MODE_TEXT: str = "Mode: Move / select"
+_SAMPLE_MODE_TEXT: str = "Mode: Select"
 _SAMPLE_SELECTION_TEXT: str = "Selection: A"
 
 
