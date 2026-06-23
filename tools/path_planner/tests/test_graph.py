@@ -277,3 +277,65 @@ def test_directed_edge_heading_respects_heading_override() -> None:
         g = build_graph(fd)
     assert directed_edge_heading(g, "A", "B") == pytest.approx(45.0, abs=1e-9)
     assert directed_edge_heading(g, "B", "A") == pytest.approx(225.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: graph_builder needs NO change -- it already (a) forwards
+# a string-tag ``primitive_mode`` verbatim onto both directions and (b) derives
+# geometry from node coords when an EDGES entry omits distance_cm / heading_deg.
+# These pin BOTH behaviors so the "graph_builder needs no change" claim is
+# guarded, not merely asserted in prose.
+# ---------------------------------------------------------------------------
+
+
+def test_edges_string_tag_primitive_mode_forwarded_verbatim() -> None:
+    """graph_builder forwards a JSON string-tag primitive_mode onto both edges.
+
+    The validator owns the string<->enum cross-check; graph_builder just carries
+    the value through. A string tag (``"FAST"``, NOT a LineMode instance) must
+    appear unchanged on both the forward and reverse directed edges, exactly like
+    an enum instance would -- the header_writer then resolves it.
+    """
+    fd = _clone_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "primitive_mode": "FAST",  # string TAG, forwarded verbatim
+        }
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["primitive_mode"] == "FAST"
+    assert g.edges["B", "A"]["primitive_mode"] == "FAST"
+
+
+def test_edges_override_only_entry_derives_geometry_from_coords() -> None:
+    """graph_builder derives distance/heading when an EDGES entry omits geometry.
+
+    An override-only overlay entry carries no distance_cm / heading_deg, so
+    ``_emit_directed_pair`` must fall back to the Euclidean / atan2 of the node
+    coords -- byte-identically to a legacy LINE_SEGMENTS pair. A=(10,10),
+    B=(200,10): 190 cm due East, reverse 180 deg. The override still rides along.
+    """
+    fd = _clone_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "primitive_mode": "FAST",  # no distance_cm / heading_deg -> derived
+        }
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
+    assert g.edges["A", "B"]["heading_deg"] == pytest.approx(0.0, abs=1e-6)
+    assert g.edges["B", "A"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
+    assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
+    assert g.edges["A", "B"]["primitive_mode"] == "FAST"

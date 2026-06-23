@@ -635,6 +635,192 @@ def test_edge_primitive_mode_override_emit(emit_targets):
 
 
 # ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: JSON string-tag overrides + field-sourced PIPELINE_CONFIG.
+#
+# These build a SMALL dedicated field (NOT the toy golden) so the committed
+# routes_toy.{h,cpp} stay byte-identical (the toy field omits the new keys ->
+# default emission). TC1 here is the EMIT half (the validate/build half lives
+# in test_field_data); TC7 proves a field-sourced pipeline default emits the
+# custom enum; TC8 proves the absent-keys path re-runs the golden emitter on the
+# UNMODIFIED toy field with ZERO diff against the committed golden bytes.
+# ---------------------------------------------------------------------------
+
+
+def test_tc1_string_tag_primitive_mode_emits_line_mode_fast(emit_targets):
+    """TC1 (emit): a JSON string-tag primitive_mode='FAST' emits LineMode::FAST.
+
+    The validate/build half is in test_field_data; this proves the JSON string
+    encoding (a bare member NAME, NOT a LineMode instance) resolves all the way
+    through ``header_writer._override_enum_value`` to the C++ ``LineMode::FAST``
+    literal in the edge's ``line_mode_override`` slot.
+    """
+    header_path, source_path = emit_targets
+    fd = _build_toy_field_data()
+    # Isolate the override onto the sole carrier of the A-E edge.
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "E"}]
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "E",
+            "primitive_mode": "FAST",  # a JSON string TAG, not LineMode.FAST
+        }
+    ]
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    assert "LineMode::FAST" in cpp_text
+
+
+def _small_pipeline_field() -> SimpleNamespace:
+    """A minimal valid field for field-sourced PIPELINE_CONFIG emit tests.
+
+    Deliberately NOT the toy golden fixture -- it carries the optional
+    PIPELINE_* keys, so using it for the golden would drift routes_toy. A blind
+    spawn ``S`` (the validator rejects an on-line START) feeds a single A-B LINE
+    edge plus a B-G BLIND edge. PIPELINE_* default to None (absent); callers set
+    the keys they exercise.
+    """
+    return SimpleNamespace(
+        NODES={
+            "A": (10.0, 10.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+            "S": (10.0, -40.0),
+        },
+        NODE_TYPES={"A": "line", "B": "line", "G": "blind", "S": "blind"},
+        LINE_SEGMENTS=[("A", "B")],
+        BLIND_EDGES=[("B", "G"), ("S", "A")],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        RESET_NODES={},
+        PIPELINE_LINE_MODE=None,
+        PIPELINE_BLIND_MODE=None,
+        PIPELINE_TURN_MODE=None,
+        PIPELINE_DIRECTION_MODE=None,
+    )
+
+
+def test_tc7_field_sourced_pipeline_blind_mode_emits_custom(emit_targets):
+    """TC7: pipeline_blind_mode='GYRO_TSHAPE' emits BlindMode::GYRO_TSHAPE.
+
+    A field-sourced PIPELINE_* default (a string member name) must resolve into
+    the emitted ``PIPELINE_CONFIG`` struct, overriding the pipeline_config.py
+    singleton's ``SYNC_TSHAPE`` for the blind category. The other three
+    categories (absent here) keep their singleton defaults.
+    """
+    header_path, source_path = emit_targets
+    fd = _small_pipeline_field()
+    fd.PIPELINE_BLIND_MODE = "GYRO_TSHAPE"
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    # Slice the PIPELINE_CONFIG struct so the assertion is about the pipeline
+    # default, not an incidental per-edge override elsewhere.
+    cfg_start = cpp_text.index("const PipelineConfig PIPELINE_CONFIG = {")
+    cfg_end = cpp_text.index("};", cfg_start)
+    cfg_block = cpp_text[cfg_start:cfg_end]
+    assert "BlindMode::GYRO_TSHAPE" in cfg_block
+    # The blind default is no longer the singleton SYNC_TSHAPE.
+    assert "BlindMode::SYNC_TSHAPE" not in cfg_block
+    # Absent categories fall back to the pipeline_config.py singleton defaults.
+    assert "LineMode::NORMAL" in cfg_block
+    assert "TurnMode::COUNTER_ROT" in cfg_block
+
+
+def test_tc7_field_sourced_pipeline_all_categories_emit(emit_targets):
+    """TC7 (all four): every field-sourced PIPELINE_* key resolves into the struct.
+
+    Pins that line / blind / turn / direction each read from the field-sourced
+    name, not just the blind category above.
+    """
+    header_path, source_path = emit_targets
+    fd = _small_pipeline_field()
+    fd.PIPELINE_LINE_MODE = "FAST"
+    fd.PIPELINE_BLIND_MODE = "RAW_FLAT"
+    fd.PIPELINE_TURN_MODE = "PIVOT_RIGHT"
+    fd.PIPELINE_DIRECTION_MODE = "FORCE_REVERSE"
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    cfg_start = cpp_text.index("const PipelineConfig PIPELINE_CONFIG = {")
+    cfg_end = cpp_text.index("};", cfg_start)
+    cfg_block = cpp_text[cfg_start:cfg_end]
+    assert "LineMode::FAST" in cfg_block
+    assert "BlindMode::RAW_FLAT" in cfg_block
+    assert "TurnMode::PIVOT_RIGHT" in cfg_block
+    assert "DirectionMode::FORCE_REVERSE" in cfg_block
+
+
+def test_tc8_absent_pipeline_keys_emit_singleton_defaults(emit_targets):
+    """TC8 (defaults): a field that omits every PIPELINE_* key emits the singleton.
+
+    The toy fixture authors no PIPELINE_* keys (and the small field here leaves
+    them None), so the emitted struct must be the pipeline_config.py singleton:
+    line NORMAL, blind SYNC_TSHAPE, turn COUNTER_ROT, direction DEFAULT. This is
+    the half that makes the byte-golden hold: absent keys => default emission.
+    """
+    header_path, source_path = emit_targets
+    fd = _small_pipeline_field()  # all PIPELINE_* are None
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    cfg_start = cpp_text.index("const PipelineConfig PIPELINE_CONFIG = {")
+    cfg_end = cpp_text.index("};", cfg_start)
+    cfg_block = cpp_text[cfg_start:cfg_end]
+    assert "LineMode::NORMAL" in cfg_block
+    assert "BlindMode::SYNC_TSHAPE" in cfg_block
+    assert "TurnMode::COUNTER_ROT" in cfg_block
+    assert "DirectionMode::DEFAULT" in cfg_block
+
+
+def test_tc8_toy_field_has_no_pipeline_keys_and_golden_is_byte_identical(emit_targets):
+    """TC8: re-run the golden emitter on the UNMODIFIED toy field -> ZERO diff.
+
+    The toy SimpleNamespace fixture must NOT carry any of the new optional keys
+    (EDGES / PIPELINE_*) -- if it did, the field-sourced emission would drift the
+    committed golden. This asserts both halves explicitly:
+
+    1. ``_build_toy_field_data()`` exposes no EDGES and no PIPELINE_* attribute
+       (so the emitter takes the absent-key default path), and
+    2. emitting the unmodified toy field produces routes.{h,cpp} byte-identical
+       to the committed ``routes_toy.{h,cpp}`` golden.
+
+    This is the load-bearing absent-keys-stay-byte-identical guarantee (AC4).
+    """
+    toy = _build_toy_field_data()
+    # The toy golden fixture must omit the new optional keys entirely so the
+    # emitter takes the absent -> default path (any PIPELINE_* attr present would
+    # silently rebaseline the golden).
+    for absent_key in (
+        "EDGES",
+        "PIPELINE_LINE_MODE",
+        "PIPELINE_BLIND_MODE",
+        "PIPELINE_TURN_MODE",
+        "PIPELINE_DIRECTION_MODE",
+    ):
+        assert not hasattr(toy, absent_key), (
+            f"the toy golden fixture must NOT set {absent_key!r} -- it would "
+            "drift routes_toy.{h,cpp}; cover field-sourced emission via a "
+            "dedicated small field instead"
+        )
+
+    if not (_GOLDEN_HEADER.exists() and _GOLDEN_SOURCE.exists()):
+        pytest.skip("golden routes_toy.{h,cpp} missing; regenerate them")
+
+    header_path, source_path = emit_targets
+    _emit_toy(toy, header_path, source_path)
+    assert header_path.read_bytes() == _GOLDEN_HEADER.read_bytes()
+    assert source_path.read_bytes() == _GOLDEN_SOURCE.read_bytes()
+
+
+# ---------------------------------------------------------------------------
 # T11: per-turn PIVOT_TURNS table (TC13, TC24) + EdgeInfo shrink (TC14).
 #
 # Single-wheel pivots moved off ``EdgeInfo`` into a sparse, sorted

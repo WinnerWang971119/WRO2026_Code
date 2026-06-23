@@ -175,8 +175,8 @@ def test_tc9_migrate_round_trip_repr_equality(
     3. Monkeypatch migrate paths and _capture_module_attributes to read from
        the synthetic module (bypassing importlib.reload's package-path lookup).
     4. Call migrate.run(); assert exit 0.
-    5. Verify the rewritten file no longer has NODES = { literals but still
-       has the EDGES block and banner.
+    5. Verify the rewritten file no longer has NODES = { literals and (issue #79)
+       reads EDGES from the JSON via _data.get(...) with NO Python EDGES tail.
     6. Load the rewritten field_data.py with loader._DEFAULT_JSON_PATH patched
        to our tmp JSON; compare repr() of each attr.
     """
@@ -206,12 +206,14 @@ def test_tc9_migrate_round_trip_repr_equality(
         "Rewritten field_data.py still contains 'NODES = {'; migration did not remove literals"
     )
 
-    # The rewritten file must still contain the EDGES block and the banner.
-    assert "EDGES = [" in rewritten_source, (
-        "Rewritten field_data.py lost the EDGES block"
+    # Issue #79 / ADR-047: EDGES is JSON-sourced now. The rewritten file must
+    # read EDGES back from the JSON via _data.get(...), and must NOT re-append a
+    # Python EDGES literal tail (a stale second source of truth).
+    assert 'EDGES                 = _data.get("EDGES", [])' in rewritten_source, (
+        "Rewritten field_data.py must read EDGES from the JSON, not a Python literal"
     )
-    assert "# ---" in rewritten_source, (
-        "Rewritten field_data.py lost the banner comment line"
+    assert "EDGES = [" not in rewritten_source, (
+        "Rewritten field_data.py must NOT re-append a Python 'EDGES = [' literal tail"
     )
 
     # Load the rewritten field_data.py.
@@ -371,6 +373,154 @@ def test_migrate_omits_pivot_turns_when_source_lacks_it(
     monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
     post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
     assert post_module.PIVOT_TURNS == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: TC22 -- --migrate carries a legacy Python EDGES literal
+# INTO field_data.json's "EDGES" key (override-only string-tag form), and the
+# regenerated field_data.py reads it back via _data.get(...) with NO Python tail.
+# ---------------------------------------------------------------------------
+
+
+def test_tc22_migrate_carries_python_edges_literal_into_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TC22: a legacy Python EDGES = [...] literal migrates into the JSON EDGES key.
+
+    A source module exposing a Python ``EDGES`` list of enum-instance overrides
+    (the legacy authoring form) must, after ``--migrate``:
+
+    1. land those entries in ``field_data.json``'s ``"EDGES"`` key as override-only
+       STRING-TAG dicts -- enum-instance ``primitive_mode`` converted to its
+       member NAME, derived geometry (distance_cm / heading_deg) DROPPED, and the
+       DEFAULT sentinel DROPPED (absence already means inherit);
+    2. land in the canonical slot (between blind_projection / pivot keys and
+       OBSTACLES); and
+    3. leave the regenerated ``field_data.py`` reading EDGES from the JSON via
+       ``_data.get("EDGES", [])`` with NO Python ``EDGES = [`` literal tail (AC14).
+    """
+    import json
+
+    from tools.path_planner.pipeline_config import BlindMode, LineMode
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    # Attach a legacy Python EDGES literal carrying enum-instance overrides,
+    # pinned geometry, and a DEFAULT sentinel that must be dropped on migration.
+    pre_module.EDGES = [
+        {
+            "type": "LINE",
+            "u": "A",
+            "v": "B",
+            "distance_cm": 190.0,  # derived geometry -> dropped on migration
+            "heading_deg": 0.0,    # derived geometry -> dropped on migration
+            "primitive_mode": LineMode.FAST,  # enum instance -> "FAST" name
+        },
+        {
+            "type": "BLIND",
+            "u": "B",
+            "v": "G",
+            "primitive_mode": BlindMode.DEFAULT,  # DEFAULT sentinel -> dropped
+            "stop_at_line": "on",
+        },
+    ]
+
+    def _capture_with_edges() -> dict[str, Any]:
+        # Mirror migrate._capture_module_attributes' EDGES path exactly: the 14
+        # required attrs plus the EDGES list reduced via the production helper.
+        captured = {
+            attr: getattr(pre_module, attr) for attr in migrate._ATTRS_TO_CAPTURE
+        }
+        captured["EDGES"] = [
+            migrate._edge_to_override_dict(entry) for entry in pre_module.EDGES
+        ]
+        return captured
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    monkeypatch.setattr(migrate, "_capture_module_attributes", _capture_with_edges)
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "EDGES" in written, "migration did not carry EDGES into the JSON"
+    # (1) override-only string-tag form: geometry dropped, enum -> name, DEFAULT
+    # dropped.
+    line_entry = next(e for e in written["EDGES"] if e["type"] == "LINE")
+    assert line_entry == {
+        "type": "LINE",
+        "u": "A",
+        "v": "B",
+        "primitive_mode": "FAST",  # enum instance reduced to its member name
+    }, "LINE entry must drop geometry and stringify the enum"
+    assert "distance_cm" not in line_entry
+    assert "heading_deg" not in line_entry
+
+    blind_entry = next(e for e in written["EDGES"] if e["type"] == "BLIND")
+    # DEFAULT sentinel dropped (absence == inherit); stop_at_line preserved.
+    assert "primitive_mode" not in blind_entry, "DEFAULT sentinel must be dropped"
+    assert blind_entry == {
+        "type": "BLIND",
+        "u": "B",
+        "v": "G",
+        "stop_at_line": "on",
+    }
+
+    # (2) EDGES lands in its canonical slot.
+    keys = list(written.keys())
+    assert keys.index("BLIND_EDGES") < keys.index("EDGES") < keys.index("OBSTACLES")
+
+    # (3) The regenerated field_data.py reads EDGES from the JSON, no Python tail.
+    rewritten_source = pre_py.read_text(encoding="utf-8")
+    assert 'EDGES                 = _data.get("EDGES", [])' in rewritten_source
+    assert "EDGES = [" not in rewritten_source, (
+        "no Python EDGES literal tail may be re-appended (AC14)"
+    )
+
+    # The rewritten module loads the migrated overrides back through the JSON.
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.EDGES == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+    ]
+
+
+def test_tc22_migrate_omits_edges_when_source_lacks_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TC22 (control): an override-free source migrates to JSON WITHOUT an EDGES key.
+
+    A field that never authored a Python EDGES literal must not gain an empty
+    ``"EDGES": []`` in the JSON (absent stays absent), and the regenerated module
+    still re-exports EDGES defaulted to an empty list from the JSON.
+    """
+    import json
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    # _make_capture_fn captures only the 14 required attrs (no EDGES), matching a
+    # source whose EDGES is empty (the real capture omits an empty/absent list).
+    monkeypatch.setattr(
+        migrate, "_capture_module_attributes", _make_capture_fn(pre_module)
+    )
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+    assert "EDGES" not in written
+
+    # The rewritten module still re-exports EDGES, defaulted to [].
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.EDGES == []
 
 
 # ---------------------------------------------------------------------------
