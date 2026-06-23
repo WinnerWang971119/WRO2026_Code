@@ -7,13 +7,14 @@ PR3 schema removals: PROJECTIONS, GOAL_APPROACH.
 from __future__ import annotations
 
 import copy
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.pipeline_config import BlindMode, LineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
@@ -190,6 +191,161 @@ def test_node_type_unknown_value() -> None:
         validate(fd)
 
 
+# -- issue #64: projection NODE type (TC1..TC5) -------------------------------
+#
+# Projection is a 4th, mutually-exclusive NODE type. The validator accepts
+# ``"projection"`` in NODE_TYPES, rejects a projection (or line) START node,
+# allows a LINE edge into a projection node (the line passes through it), and
+# warns on a projection node only when it is otherwise unreachable (a
+# Blind->Proj in-edge exempts it).
+
+
+def _projection_field(node_types_overrides=None, line_segments=None,
+                      blind_edges=None, start_node="S") -> SimpleNamespace:
+    """Build a tiny S/A/B/P field for projection-node validator tests.
+
+    ``S`` is a blind dead-reckon origin; ``A`` and ``B`` are junction line nodes
+    on a LINE edge; ``P`` is a projection node sitting on the A-B line. By default
+    ``P`` is reached both by a LINE edge (``A-P``) and a blind in-edge (``S-P``),
+    so the base field validates cleanly. Tests pass overrides to author the
+    specific case.
+    """
+    node_types = {
+        "S": "blind", "A": "line", "B": "line", "P": "projection",
+    }
+    if node_types_overrides is not None:
+        node_types = dict(node_types_overrides)
+    return SimpleNamespace(
+        NODES={
+            "S": (50.0, -40.0),
+            "A": (0.0, 0.0),
+            "B": (100.0, 0.0),
+            "P": (50.0, 0.0),
+        },
+        NODE_TYPES=node_types,
+        LINE_SEGMENTS=[("A", "B"), ("A", "P"), ("P", "B")]
+        if line_segments is None else line_segments,
+        BLIND_EDGES=[("S", "A"), ("S", "P")]
+        if blind_edges is None else blind_edges,
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE=start_node,
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+    )
+
+
+def test_tc1_projection_node_type_accepted() -> None:
+    """TC1: ``NODE_TYPES[x] = "projection"`` validates; an unknown type is rejected.
+
+    The base field types ``P`` projection and validates. A bogus type still fails
+    the NODE_TYPES value gate, proving the accept is not a blanket pass.
+    """
+    assert validate(_projection_field()) is None
+    fd_bad = _projection_field()
+    fd_bad.NODE_TYPES["P"] = "weird"
+    with pytest.raises(FieldDataError, match=r"NODE_TYPES\['P'\]"):
+        validate(fd_bad)
+
+
+def test_tc2_line_edge_into_projection_node_accepted() -> None:
+    """TC2 (positive): a LINE edge into a ``projection`` node is legal.
+
+    Only a LINE edge into a ``blind`` node is rejected; the line passes THROUGH a
+    projection node, so ``A-P`` / ``P-B`` LINE edges into ``P`` validate. (The
+    LINE-into-blind rejection itself is pinned in the ADR-041 section below.)
+    """
+    assert validate(_projection_field()) is None
+
+
+def test_tc3_projection_start_node_rejected() -> None:
+    """TC3: a ``projection`` START node is rejected (sensor-anchored arrival at t=0).
+
+    The chassis is operator-placed with no prior line-follow, so a projection
+    START (reached by a distance-gated / blind seek) presumes an arrival that has
+    not happened at mission start. The validator rejects it and points the author
+    at a blind origin.
+    """
+    fd = _projection_field(start_node="P")
+    with pytest.raises(
+        FieldDataError, match=r"START_NODE 'P' is typed 'projection'"
+    ):
+        validate(fd)
+
+
+def test_tc3_line_start_node_rejected() -> None:
+    """TC3 (mirror): a ``line`` START node is rejected for the same reason."""
+    fd = _projection_field(start_node="A")
+    with pytest.raises(
+        FieldDataError, match=r"START_NODE 'A' is typed 'line'"
+    ):
+        validate(fd)
+
+
+def test_tc4_line_node_zero_line_edges_warns() -> None:
+    """TC4: a ``line`` node with no incident LINE edge warns (reachability nudge).
+
+    A junction must sit on a line edge. Here ``B`` is typed ``line`` but its only
+    incidence is the BLIND edge ``S-B`` (the LINE segments are dropped to a single
+    ``A-P`` edge that does not touch ``B``), so the reachability warn fires for
+    ``B``. The blind spawn ``S`` stays the START node, so the line-as-start guard
+    never pre-empts the warn.
+    """
+    fd = _projection_field(
+        line_segments=[("A", "P")],          # B has no LINE edge now
+        blind_edges=[("S", "A"), ("S", "B")],
+    )
+    with pytest.warns(UserWarning, match=r"line node 'B' has no incident LINE edge"):
+        validate(fd)
+
+
+def test_tc4_projection_node_blind_in_edge_does_not_warn() -> None:
+    """TC4: a projection node reachable ONLY by a Blind->Proj in-edge does NOT warn.
+
+    ``P`` has no LINE edge but keeps its ``S-P`` blind in-edge, so it is
+    blind-seek-reachable and exempt from the reachability warn. An isolated
+    projection node (no LINE, no BLIND) WOULD warn -- the control below. The
+    ``A-B`` LINE segment keeps both junction nodes LINE-incident, so no
+    reachability warning of any kind should fire.
+    """
+    fd = _projection_field(
+        line_segments=[("A", "B")],   # drop A-P / P-B so P has no LINE edge
+        blind_edges=[("S", "A"), ("S", "P")],
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert validate(fd) is None
+    reachability = [
+        w for w in caught
+        if issubclass(w.category, UserWarning) and "no incident" in str(w.message)
+        or (issubclass(w.category, UserWarning) and "is unreachable" in str(w.message))
+    ]
+    assert not reachability, (
+        "no reachability warning should fire for a blind-seek-reachable "
+        f"projection node; got: {[str(w.message) for w in reachability]}"
+    )
+
+
+def test_tc4_isolated_projection_node_warns() -> None:
+    """TC4 (control): an otherwise-unreachable projection node warns.
+
+    ``P`` with neither a LINE edge nor a BLIND in-edge is unreachable and trips
+    the projection reachability warn -- proving the exemption above is the
+    blind-seek-reachability, not a blanket projection exemption.
+    """
+    fd = _projection_field(
+        line_segments=[("A", "B")],
+        blind_edges=[("S", "A")],     # P now has no incident edge at all
+    )
+    with pytest.warns(UserWarning, match=r"projection node 'P' is unreachable"):
+        validate(fd)
+
+
 def test_field_mm_must_be_pair_of_positives() -> None:
     fd = _clone_field_data()
     fd.FIELD_MM = (3000,)
@@ -354,24 +510,27 @@ def test_validator_rejects_edge_line_over_blind_edge_pair() -> None:
         validate(fd)
 
 
-def test_validator_rejects_edge_projection_over_line_segment_pair() -> None:
-    """TC5: EDGE_PROJECTION on a LINE_SEGMENTS pair is a conflict.
+def test_validator_rejects_retired_projection_edge_type() -> None:
+    """TC5 / issue #64: the retired ``"PROJECTION"`` EDGES type is rejected.
 
-    EDGE_PROJECTION maps to neither LINE_SEGMENTS nor BLIND_EDGES, so a
-    PROJECTION entry on an existing line pair still reclassifies the edge and
-    must be rejected. ('B','C') is a LINE_SEGMENTS pair in the toy field.
+    Issue #64 reduced the edge-type vocabulary to LINE / BLIND -- projection is a
+    NODE property now, not an edge type. A stale EDGES entry still spelling
+    ``type="PROJECTION"`` must fail the edge-type guard with a precise message
+    that points the author at the node-typing migration. ('B','C') is a
+    LINE_SEGMENTS pair in the toy field, but the type guard fires first (before
+    the anti-ambiguity cross-check).
     """
     fd = _clone_field_data()
     fd.EDGES = [
         {
-            "type": EDGE_PROJECTION,
+            "type": "PROJECTION",
             "u": "B",
             "v": "C",
             "distance_cm": 100.0,
             "heading_deg": 0.0,
         }
     ]
-    with pytest.raises(FieldDataError, match=r"LINE_SEGMENTS"):
+    with pytest.raises(FieldDataError, match=r"expected one of"):
         validate(fd)
 
 
@@ -486,10 +645,11 @@ def test_validator_rejects_obsolete_pre_turn_mode_edge_key() -> None:
 # directed-edge headings, computes the single-wheel over-travel
 # delta = (track/2)*tan(|theta|/2) with the live track (Config::TRACK_MM = 180
 # mm -> 18.0 cm), and raises a precise FieldDataError on geometry the chassis
-# cannot realise. A regime is SENSOR-terminated (LINE, or BLIND whose effective
-# mode is STOP_AT_LINE) -- it re-anchors on the physical line and self-corrects
-# -- or DISTANCE-terminated (plain BLIND / PROJECTION) -- dead-reckoned, where
-# the over-travel trim actually bites.
+# cannot realise. A regime is SENSOR-terminated (LINE into a junction node, or
+# BLIND that SEEKS -- STOP_AT_LINE / override-ON / the Blind->projection-node
+# auto-rule) -- it re-anchors on the physical line and self-corrects -- or
+# DISTANCE-terminated (plain BLIND, or LINE into a projection node) --
+# dead-reckoned, where the over-travel trim actually bites (issue #64).
 #
 # Reference geometry at track = 18.0 cm:
 #   theta = 90 deg  -> delta = 9.000 cm
@@ -515,8 +675,17 @@ def _pivot_field(edges, pivot_turns, node_types=None) -> SimpleNamespace:
 
     ``node_types`` defaults to ``B/C/D`` all blind (the BLIND-incoming pivot
     cases). A LINE-incoming pivot must override it to type the pivot node ``B``
-    as ``"line"`` -- a LINE/PROJECTION (line-follow) edge cannot terminate on a
-    blind node, since the validator now rejects that (ADR-041).
+    as ``"line"`` -- a LINE (line-follow) edge cannot terminate on a blind node,
+    since the validator rejects that (ADR-041). A ``"projection"`` destination is
+    legal for a LINE hop (issue #64), used by the Blind->projection auto-rule
+    cases below.
+
+    ``START_NODE`` is the spare blind node ``D``: issue #64's validator rejects a
+    ``line`` / ``projection`` START node (the operator-placed spawn is
+    dead-reckoned), and the pivot node ``A`` is often typed ``line`` (a
+    LINE-incoming pivot). ``D`` is blind in every ``node_types`` map here and is
+    not part of the single-pivot triples, so it is a legal dead-reckon spawn that
+    leaves the pivot geometry untouched.
     """
     if node_types is None:
         node_types = {"A": "line", "B": "blind", "C": "blind", "D": "blind"}
@@ -536,7 +705,7 @@ def _pivot_field(edges, pivot_turns, node_types=None) -> SimpleNamespace:
         BLIND_DECAY_K=0.05,
         BLIND_DECAY_EXPONENT=2.0,
         BLIND_DECAY_D_REF=50.0,
-        START_NODE="A",
+        START_NODE="D",          # spare blind spawn (validator rejects an on-line start)
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
@@ -859,53 +1028,63 @@ def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_defau
     assert validate(fd) is None
 
 
-def test_pivot_turn_incoming_mode_read_via_bidirectional_resolver() -> None:
-    """TC9: STOP_AT_LINE authored on the reverse leg classifies incoming as sensor.
+def test_pivot_turn_incoming_blind_seeks_under_stop_at_line_pipeline_default(
+    monkeypatch,
+) -> None:
+    """TC9: a no-override BLIND incoming leg classifies sensor under the STOP_AT_LINE pipeline default.
 
-    ``primitive_mode`` is a bidirectional edge attribute in graph_builder, so a
-    STOP_AT_LINE override authored on the REVERSE leg ``B->A`` must still
-    classify the forward incoming continuation ``A->B`` as SENSOR-terminated.
-    The reverse leg ``B->A`` is authored heading 180 deg, so the forward
-    ``A->B`` resolves to heading 0 deg -- the same 90 deg pivot whose
-    incoming edge is only 2.0 cm long, yet the STOP_AT_LINE exemption applies
-    (sensor takes no approach trim) and the INCOMING dead-reckon gate is
-    skipped.
+    Issue #64 retired the per-edge ``primitive_mode``-drives-the-seek arm of
+    ``_regime``: a BLIND leg's seek now resolves against the pipeline-default
+    ``BlindMode`` (plus its per-edge ``stop_at_line`` override and the local
+    auto-rule), never its bidirectional ``primitive_mode`` motion bundle. So the
+    surviving "incoming seeks" path on the INCOMING side is the STOP_AT_LINE
+    pipeline default: with ``PIPELINE_CONFIG.blind == STOP_AT_LINE`` a no-override
+    BLIND incoming leg ``A->B`` is SENSOR-terminated (takes no approach trim), so
+    a 90 deg pivot whose incoming edge is only 2.0 cm must NOT be rejected as a
+    too-short dead-reckon. With the live default (SYNC_TSHAPE) the same fixture
+    WOULD reject, pinning the regime to STOP_AT_LINE.
     """
+    import tools.path_planner.pipeline_config as pc
+    from tools.path_planner.pipeline_config import PipelineConfig
+
+    monkeypatch.setattr(
+        pc, "PIPELINE_CONFIG", PipelineConfig(blind=BlindMode.STOP_AT_LINE)
+    )
+
     fd = _pivot_field(
         edges=[
-            # Author the incoming leg on the REVERSE sense (B->A) with the
-            # STOP_AT_LINE override; graph_builder mirrors primitive_mode onto
-            # the forward A->B edge.
-            {"type": EDGE_BLIND, "u": "B", "v": "A",
-             "distance_cm": 2.0, "heading_deg": 180.0,
-             "primitive_mode": BlindMode.STOP_AT_LINE},
+            {"type": EDGE_BLIND, "u": "A", "v": "B",
+             "distance_cm": 2.0, "heading_deg": 0.0},  # no primitive_mode override
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
     )
+    # Incoming leg classifies sensor (inherits STOP_AT_LINE), so the short
+    # incoming edge takes no trim and the dead-reckon gate must not fire.
     assert validate(fd) is None
 
 
 def test_pivot_turn_rejects_stop_at_line_incoming_over_overshoot_budget() -> None:
     """ADR-044: a STOP_AT_LINE (sensor)-incoming pivot is now budgeted too.
 
-    A BLIND incoming edge whose effective mode is STOP_AT_LINE classifies as
-    'sensor' and re-anchors via the seek, reducing the post-detect overshoot by
-    delta exactly like a LINE incoming -- so it shares the same FRONT overshoot
-    budget (12.02 cm). A 120 deg pivot (delta = 15.588 cm, well over the budget)
-    is therefore REJECTED, not exempt: the pre-ADR-044 exemption is removed.
-    Mirrors ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget``
-    (LINE incoming, same 120 deg, rejected).
+    A BLIND incoming edge that SEEKS classifies as 'sensor' and re-anchors via the
+    seek, reducing the post-detect overshoot by delta exactly like a LINE incoming
+    -- so it shares the same FRONT overshoot budget (12.02 cm). A 120 deg pivot
+    (delta = 15.588 cm, well over the budget) is therefore REJECTED, not exempt.
+    Issue #64 retired the per-edge ``primitive_mode``-drives-the-seek arm, so the
+    seek trigger here is the per-edge ``stop_at_line: "on"`` override on the
+    INCOMING leg (a surviving seek trigger ``_regime`` reads). Mirrors
+    ``test_pivot_turn_rejects_delta_exceeds_line_overshoot_budget`` (LINE
+    incoming, same 120 deg, rejected).
     """
     fd = _pivot_field(
         edges=[
             {"type": EDGE_BLIND, "u": "A", "v": "B",
              "distance_cm": 100.0, "heading_deg": 0.0,
-             "primitive_mode": BlindMode.STOP_AT_LINE},
+             "stop_at_line": "on"},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
-             "distance_cm": 100.0, "heading_deg": 120.0,
-             "primitive_mode": BlindMode.STOP_AT_LINE},
+             "distance_cm": 100.0, "heading_deg": 120.0},
         ],
         pivot_turns=[("A", "B", "C")],
     )
@@ -1041,53 +1220,116 @@ def test_pivot_turn_outgoing_stop_at_line_override_on_is_sensor_exempt() -> None
     assert validate(fd) is None
 
 
-def test_pivot_turn_incoming_blind_feeding_projection_auto_seeks_sensor() -> None:
-    """TC15: an incoming BLIND that FEEDS a PROJECTION auto-seeks -> sensor.
+def test_pivot_turn_incoming_blind_into_projection_node_auto_seeks_sensor() -> None:
+    """TC15: an incoming BLIND whose DESTINATION is a projection node auto-seeks -> sensor.
 
-    With ``BLIND_PROJECTION_AUTO_SEEK`` on (the default), a blind hop whose
-    continuation toward the pivot is a PROJECTION seeks a line first to
-    re-anchor before the dead-reckoned slide. For the pivot ``(A, B, C)`` the
-    incoming leg ``A->B`` feeds the outgoing PROJECTION ``B->C``, so ``A->B`` is
-    SENSOR-terminated and takes no approach trim -- a 90 deg pivot whose short
-    (2.0 cm) incoming edge would otherwise reject as a too-short dead-reckon
-    must validate.
+    Issue #64: projection is a NODE property and the auto-rule is LOCAL. With
+    ``BLIND_PROJECTION_AUTO_SEEK`` on (the default), a blind hop whose OWN
+    destination is a projection node seeks that node's line first to re-anchor
+    before the dead-reckoned slide. For the pivot ``(A, B, C)`` the incoming leg
+    ``A->B`` lands on the projection node ``B``, so ``A->B`` is SENSOR-terminated
+    and takes no approach trim -- a 90 deg pivot whose short (2.0 cm) incoming
+    edge would otherwise reject as a too-short dead-reckon must validate. (The
+    outgoing leg ``B->C`` is a plain BLIND into a line node, dead-reckoned.)
     """
     fd = _pivot_field(
         edges=[
             {"type": EDGE_BLIND, "u": "A", "v": "B",
              "distance_cm": 2.0, "heading_deg": 0.0},
-            {"type": EDGE_PROJECTION, "u": "B", "v": "C",
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
-        # The PROJECTION seeks the line at its head C, so C must be a line node;
-        # the blind tail B is allowed (the hop projects out of blind territory).
-        node_types={"A": "line", "B": "blind", "C": "line", "D": "blind"},
+        # B is the projection node (the incoming A->B Blind->Proj hop seeks +
+        # re-anchors on B's line). A is a blind dead-reckon origin; C is a blind
+        # pivot exit reached by the plain B->C dead-reckon.
+        node_types={"A": "blind", "B": "projection", "C": "blind", "D": "blind"},
     )
     assert validate(fd) is None
 
 
-def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off() -> None:
+def test_pivot_turn_incoming_blind_into_projection_node_dead_reckons_when_auto_off() -> None:
     """TC15 (control): auto-seek OFF removes the trigger, so the leg dead-reckons.
 
     Disabling ``BLIND_PROJECTION_AUTO_SEEK`` removes the only seek trigger on the
-    incoming ``A->B`` leg (no override, not STOP_AT_LINE), so it classifies
-    'distance' again and the short 2.0 cm incoming edge is rejected -- proving
-    the accept above is the auto-rule firing, not an unrelated exemption.
+    incoming ``A->B`` leg (no override, not STOP_AT_LINE, even though ``B`` is a
+    projection node), so it classifies 'distance' again and the short 2.0 cm
+    incoming edge is rejected -- proving the accept above is the auto-rule firing,
+    not an unrelated exemption.
     """
     fd = _pivot_field(
         edges=[
             {"type": EDGE_BLIND, "u": "A", "v": "B",
              "distance_cm": 2.0, "heading_deg": 0.0},
-            {"type": EDGE_PROJECTION, "u": "B", "v": "C",
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],
         pivot_turns=[("A", "B", "C")],
-        # The PROJECTION seeks the line at its head C, so C must be a line node;
-        # the blind tail B is allowed (the hop projects out of blind territory).
-        node_types={"A": "line", "B": "blind", "C": "line", "D": "blind"},
+        node_types={"A": "blind", "B": "projection", "C": "blind", "D": "blind"},
     )
     fd.BLIND_PROJECTION_AUTO_SEEK = False
+    with pytest.raises(
+        FieldDataError, match=r"the INCOMING dead-reckoned edge length"
+    ):
+        validate(fd)
+
+
+# -- TC5 / TC18: the LINE->projection regime is DISTANCE-terminated ------------
+#
+# Issue #64 silent-failure trap: a LINE edge into a projection node has NO
+# junction to overshoot onto, so the pivot regime flips from 'line' (overshoot-
+# budget) to 'distance' (follow-distance budget). A pivot APPROACHING a
+# projection node over a LINE edge therefore draws its delta from the follow
+# distance -- the validator must reject delta > follow distance there, and must
+# NOT (falsely) treat it as overshoot-budgeted.
+
+
+def test_pivot_turn_line_into_projection_node_is_distance_terminated() -> None:
+    """TC5/TC18: a LINE->projection incoming pivot is DISTANCE-terminated and trims OK.
+
+    The incoming leg ``A->B`` is a LINE edge into the projection node ``B``, so
+    its regime is ``"distance"`` (not ``"line"``): the over-travel ``delta``
+    bites the FOLLOW distance, not the overshoot budget. A 90 deg pivot
+    (delta = 9.0 cm) onto a LONG (100 cm) LINE->projection edge clears the
+    follow-distance floor and validates. (``A`` is the line origin; ``C`` is a
+    plain blind pivot exit.)
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 100.0, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+        # B is the projection node the LINE A->B distance-terminates on; A is the
+        # line origin (LINE-incident via A->B). C is the blind pivot exit.
+        node_types={"A": "line", "B": "projection", "C": "blind", "D": "blind"},
+    )
+    assert validate(fd) is None
+
+
+def test_pivot_turn_line_into_projection_node_rejects_delta_over_follow_distance() -> None:
+    """TC18 (reject): a LINE->projection pivot whose delta exceeds the FOLLOW distance.
+
+    Because the LINE->projection leg is DISTANCE-terminated, a 90 deg pivot
+    (delta = 9.0 cm) onto a SHORT (9.3 cm) LINE->projection incoming edge leaves
+    0.3 cm < the 0.5 cm trim floor and is rejected by the SAME dead-reckon floor
+    gate the plain-BLIND distance regime uses -- NOT the overshoot budget. The
+    error names the INCOMING dead-reckoned edge (the follow distance), proving
+    the regime flip is in force: a 'line' regime would have budgeted this against
+    the 12.02 cm overshoot offset and wrongly accepted it.
+    """
+    fd = _pivot_field(
+        edges=[
+            {"type": EDGE_LINE, "u": "A", "v": "B",
+             "distance_cm": 9.3, "heading_deg": 0.0},
+            {"type": EDGE_BLIND, "u": "B", "v": "C",
+             "distance_cm": 100.0, "heading_deg": 90.0},
+        ],
+        pivot_turns=[("A", "B", "C")],
+        node_types={"A": "line", "B": "projection", "C": "blind", "D": "blind"},
+    )
     with pytest.raises(
         FieldDataError, match=r"the INCOMING dead-reckoned edge length"
     ):
@@ -1106,16 +1348,20 @@ def test_pivot_turn_incoming_blind_feeding_projection_dead_reckons_when_auto_off
 
 
 def _reset_field(
-    node_types_overrides=None, reset_nodes=None, start_node="B"
+    node_types_overrides=None, reset_nodes=None, start_node="S"
 ) -> SimpleNamespace:
-    """Build a minimal A/B field carrying the given NODE_TYPES + RESET_NODES.
+    """Build a minimal S/A/B field carrying the given NODE_TYPES + RESET_NODES.
 
-    Two real nodes A/B joined by a LINE segment. ``A`` is the candidate reset
-    node: by default it is typed ``"reset"`` and carries a valid RESET_NODES
-    entry, so the base field validates. The START_NODE defaults to ``B`` (not the
-    reset node) because the validator rejects a reset-typed START node; pass
-    ``start_node="A"`` to exercise that guard. Tests pass ``node_types_overrides``
-    / ``reset_nodes`` to author the specific malformed (or absent) case.
+    Real nodes A/B joined by a LINE segment, plus a blind dead-reckon spawn ``S``
+    on a BLIND edge into ``B``. ``A`` is the candidate reset node: by default it
+    is typed ``"reset"`` and carries a valid RESET_NODES entry, so the base field
+    validates. The START_NODE defaults to the blind spawn ``S`` -- issue #64's
+    validator rejects an on-line (``line`` / ``projection``) START as well as a
+    reset-typed START, so the spawn must be a blind dead-reckon origin. Pass
+    ``start_node="A"`` to exercise the reset-START guard. Tests pass
+    ``node_types_overrides`` / ``reset_nodes`` to author the specific malformed
+    (or absent) case; ``S`` is always re-typed ``"blind"`` AFTER any override so
+    callers need not carry it.
 
     The default spec re-zeroes against a +y wall at ``wall_coord=220`` (A is at
     y=200, so the standoff is 20 cm -- clear of the ``WALL_PIVOT_CLEARANCE_CM``
@@ -1126,13 +1372,17 @@ def _reset_field(
     node_types = {"A": "reset", "B": "line"}
     if node_types_overrides is not None:
         node_types = dict(node_types_overrides)
+    # The blind spawn S is a fixture detail (the legal dead-reckon origin), not
+    # part of the reset-typing cases the overrides author -- inject it AFTER any
+    # override so callers stay focused on A/B.
+    node_types["S"] = "blind"
     if reset_nodes is None:
         reset_nodes = {"A": {"axis": "y", "wall_coord": 220.0, "facing": 270.0}}
     return SimpleNamespace(
-        NODES={"A": (12.0, 200.0), "B": (12.0, 50.0)},
+        NODES={"A": (12.0, 200.0), "B": (12.0, 50.0), "S": (60.0, 50.0)},
         NODE_TYPES=node_types,
         LINE_SEGMENTS=[("A", "B")],
-        BLIND_EDGES=[],
+        BLIND_EDGES=[("S", "B")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,
@@ -1523,11 +1773,12 @@ def test_decay_d_ref_non_finite_rejected() -> None:
 
 # -- Fix A (ADR-041): a line-follow edge cannot be incident to a blind node ----
 #
-# A LINE / PROJECTION edge is a line-follow segment; it needs a line under the
-# sensor, so it cannot terminate on a node typed "blind". Beyond being
-# physically impossible, such a seam would let the planner's blind-decay
-# inf->factor-1 fallback silently under-price the pocket behind it. A blind node
-# must be reached by a BLIND edge instead.
+# A LINE edge is a line-follow segment; it needs a line under the sensor, so it
+# cannot terminate on a node typed "blind". Beyond being physically impossible,
+# such a seam would let the planner's blind-decay inf->factor-1 fallback silently
+# under-price the pocket behind it. A blind node must be reached by a BLIND edge
+# instead. (Issue #64 retired the projection EDGE type; a LINE edge into a
+# projection node stays legal -- the line passes through it.)
 
 
 def test_line_segment_into_blind_node_rejected() -> None:
@@ -1543,11 +1794,16 @@ def test_line_segment_into_blind_node_rejected() -> None:
         validate(fd)
 
 
-def test_projection_edge_into_blind_node_rejected() -> None:
-    """A PROJECTION EDGES override into a blind node is rejected too."""
+def test_line_edges_override_into_blind_node_rejected() -> None:
+    """A LINE EDGES override into a blind node is rejected too.
+
+    Issue #64 retired the projection EDGE type; the line-follow-into-blind guard
+    now fires on a LINE EDGES override (the same path the old PROJECTION override
+    exercised). 'G' is the toy field's blind node.
+    """
     fd = _clone_field_data()
     fd.EDGES = [
-        {"type": EDGE_PROJECTION, "u": "A", "v": "G",
+        {"type": EDGE_LINE, "u": "A", "v": "G",
          "distance_cm": 50.0, "heading_deg": 0.0},
     ]
     with pytest.raises(

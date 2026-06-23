@@ -128,24 +128,24 @@ def _make_blind_chain_graph() -> nx.DiGraph:
     return g
 
 
-def _make_line_projection_graph() -> nx.DiGraph:
-    """Three line nodes: a LINE edge ``A<->B`` and a PROJECTION edge ``B<->C``.
+def _make_line_into_projection_graph() -> nx.DiGraph:
+    """Three nodes: a LINE edge ``A<->B`` and a LINE edge ``B<->C`` into a projection C.
 
-    The two non-blind edge types sit on DISTINCT node pairs (a ``DiGraph``
-    keeps only one edge per ordered pair, so a parallel A->B would clobber the
-    first), letting the TC14 assertion exercise one LINE (30 cm) and one
-    PROJECTION (45 cm) edge in a single graph.
+    Issue #64 retired the projection EDGE type: a line-follow segment terminated
+    by encoder distance is now a LINE edge whose DESTINATION node is typed
+    ``"projection"``. ``C`` is the projection node, so ``B<->C`` is still a plain
+    LINE edge (factor-1 in the planner cost model -- the LINE carve-out holds by
+    construction). The two LINE edges (30 cm + 45 cm) let the TC14 assertion
+    exercise the non-blind / projection-incident cost path in a single graph.
     """
-    from tools.path_planner.graph_builder import EDGE_PROJECTION
-
     g = nx.DiGraph()
     g.add_node("A", x_cm=0.0, y_cm=0.0, type="line")
     g.add_node("B", x_cm=30.0, y_cm=0.0, type="line")
-    g.add_node("C", x_cm=75.0, y_cm=0.0, type="line")
+    g.add_node("C", x_cm=75.0, y_cm=0.0, type="projection")
     g.add_edge("A", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=0.0)
     g.add_edge("B", "A", type=EDGE_LINE, distance_cm=30.0, heading_deg=180.0)
-    g.add_edge("B", "C", type=EDGE_PROJECTION, distance_cm=45.0, heading_deg=0.0)
-    g.add_edge("C", "B", type=EDGE_PROJECTION, distance_cm=45.0, heading_deg=180.0)
+    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=45.0, heading_deg=0.0)
+    g.add_edge("C", "B", type=EDGE_LINE, distance_cm=45.0, heading_deg=180.0)
     return g
 
 
@@ -388,31 +388,36 @@ def test_blind_distance_unreachable_tail_falls_back_to_factor_one() -> None:
 
 
 def test_line_and_projection_edges_keep_weight_equal_length() -> None:
-    """TC14 (AC13): LINE and PROJECTION edges cost exactly their length.
+    """TC14 (AC13): LINE edges (incl. LINE-into-projection) cost exactly their length.
 
-    Neither edge type carries the blind-decay factor, so every non-blind edge
-    in the weighted graph keeps ``cost == distance_cm`` even at a high gain
-    ``k``. The fixture carries one LINE (30 cm) and one PROJECTION (45 cm)
-    edge so both non-blind types are exercised.
+    A LINE edge never carries the blind-decay factor, so every LINE cell in the
+    weighted graph keeps ``cost == distance_cm`` even at a high gain ``k`` -- and
+    that includes a LINE edge into a ``projection`` node (issue #64: the retired
+    projection EDGE is now a LINE edge whose destination is a projection node, and
+    it stays factor-1 by the LINE carve-out). The fixture carries one LINE (30 cm)
+    into a junction and one LINE (45 cm) into a projection node, so both the
+    plain-line and the line-into-projection cost paths are exercised.
     """
-    from tools.path_planner.graph_builder import EDGE_LINE as _EL, EDGE_PROJECTION as _EP
+    from tools.path_planner.graph_builder import EDGE_LINE as _EL
     from tools.path_planner.planner import _weighted_copy
 
-    g = _make_line_projection_graph()
+    g = _make_line_into_projection_graph()
     high_k = _params(2.0)
 
     # LINE A->B: 30 cm, factor 1 (also checks compute_path_cost on a LINE hop).
     assert compute_path_cost(g, ["A", "B"], high_k) == pytest.approx(30.0, abs=1e-6)
+    # LINE B->C into a projection node: still 45 cm, factor 1 (LINE carve-out).
+    assert compute_path_cost(g, ["B", "C"], high_k) == pytest.approx(45.0, abs=1e-6)
 
-    # Every LINE / PROJECTION cell in the weighted copy carries cost == length.
+    # Every LINE cell in the weighted copy carries cost == length.
     weighted = _weighted_copy(g, high_k)
-    non_blind = [
+    line_cells = [
         (u, v, data)
         for u, v, data in weighted.edges(data=True)
-        if data["type"] in (_EL, _EP)
+        if data["type"] == _EL
     ]
-    assert non_blind, "fixture must contain at least one LINE / PROJECTION edge"
-    for _u, _v, data in non_blind:
+    assert line_cells, "fixture must contain at least one LINE edge"
+    for _u, _v, data in line_cells:
         assert data["cost"] == pytest.approx(data["distance_cm"], abs=1e-6)
 
 
@@ -894,11 +899,14 @@ def test_direction_override_not_mirrored_to_reverse_edge():
     The reverse (B, A) edge must retain DEFAULT -- mirroring would silently
     flip the chassis on backward traversal of an unrelated hop.
     """
+    # Issue #64: the validator rejects an on-line START node, so a blind spawn
+    # ``S`` (on a BLIND edge into A) is the dead-reckon origin. The override under
+    # test is still authored on the A->B LINE edge.
     fd = SimpleNamespace(
-        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0)},
-        NODE_TYPES={"A": "line", "B": "line"},
+        NODES={"A": (0.0, 0.0), "B": (100.0, 0.0), "S": (0.0, -40.0)},
+        NODE_TYPES={"A": "line", "B": "line", "S": "blind"},
         LINE_SEGMENTS=[("A", "B")],
-        BLIND_EDGES=[],
+        BLIND_EDGES=[("S", "A")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=1.0,
         BLIND_DECAY_ENABLED=True,
@@ -907,7 +915,7 @@ def test_direction_override_not_mirrored_to_reverse_edge():
         BLIND_DECAY_D_REF=50.0,
         EDGES=[{"type": EDGE_LINE, "u": "A", "v": "B", "distance_cm": 100.0,
                 "heading_deg": 0.0, "direction": "rear"}],
-        START_NODE="A",
+        START_NODE="S",
         START_HEADING_DEG=0.0,
         FIELD_MM=(200, 200),
         MAP_PNG="maps/map.png",
@@ -919,3 +927,97 @@ def test_direction_override_not_mirrored_to_reverse_edge():
     assert fwd["direction_override"] == 2
     # Reverse edge must NOT have the override copied (absent or DEFAULT==0).
     assert rev.get("direction_override", 0) == 0
+
+
+# -- TC20: toy-field NEXT_HOP / weights through the projection node (issue #64) -
+#
+# The toy fixture (T11) carries a projection node ``P1`` on the A-B line,
+# reachable by LINE edges (A-P1, P1-B) and a BLIND edge (S-P1). The planner cost
+# model must treat projection per the documented intent:
+#   * a projection node is NOT a blind-decay anchor (``_ANCHOR_NODE_TYPES`` stays
+#     {line, reset}), so it does NOT seed the blind-distance search;
+#   * a LINE edge incident to the projection node stays factor-1;
+#   * a BLIND edge into the projection node is decay-priced (it is a blind move).
+
+
+def test_tc20_projection_node_is_not_a_blind_decay_anchor() -> None:
+    """TC20: the toy projection node ``P1`` does NOT seed the blind-distance search.
+
+    An anchor maps to ``d == 0``. ``P1`` is a projection node, NOT an anchor, so
+    its blind-distance is the shortest blind chain to a real (line/reset) anchor
+    -- a strictly positive value -- never ``0``. The line nodes A/B (anchors) map
+    to ``0``; the blind start ``S`` reaches the anchor ``A`` over the ``S-A`` blind
+    edge.
+    """
+    graph = build_graph(real_field_data)
+    d = compute_blind_distance_to_anchor(graph)
+
+    # Line anchors seed at 0.
+    assert d["A"] == pytest.approx(0.0, abs=1e-9)
+    assert d["B"] == pytest.approx(0.0, abs=1e-9)
+    # The projection node is NOT an anchor: its distance is the blind chain back
+    # to a real anchor (positive), never 0.
+    assert d["P1"] > 0.0
+    # P1's only blind edge is S-P1 (S is blind, not an anchor), and its LINE
+    # edges (A-P1 / P1-B) are NOT in the blind subgraph -- so the nearest anchor
+    # over blind edges is reached via S then A: d(P1) = |P1-S| + |S-A|.
+    px, py = real_field_data.NODES["P1"]
+    sx, sy = real_field_data.NODES["S"]
+    ax, ay = real_field_data.NODES["A"]
+    expected = math.hypot(px - sx, py - sy) + math.hypot(sx - ax, sy - ay)
+    assert d["P1"] == pytest.approx(expected, abs=1e-6)
+
+
+def test_tc20_line_into_projection_is_factor_1_blind_into_projection_is_priced() -> None:
+    """TC20: a LINE edge into ``P1`` stays factor-1; the BLIND edge into ``P1`` is decay-priced.
+
+    In the decay-weighted toy graph, the LINE edges incident to the projection
+    node (A-P1 / P1-B) carry ``cost == distance_cm`` (the LINE carve-out holds by
+    construction), while the BLIND edge ``S-P1`` carries the full blind-decay
+    multiplier (it is a blind move). A non-trivial decay gain ``k`` is used so the
+    priced edge is observably above its raw length.
+    """
+    from tools.path_planner.planner import _weighted_copy
+
+    graph = build_graph(real_field_data)
+    high_k = BlindDecayParams(enabled=True, k=0.5, exponent=2.0, d_ref=50.0)
+    weighted = _weighted_copy(graph, high_k)
+
+    # LINE edges incident to the projection node are factor-1.
+    for u, v in (("A", "P1"), ("P1", "B"), ("P1", "A"), ("B", "P1")):
+        data = weighted.edges[u, v]
+        assert data["type"] == EDGE_LINE
+        assert data["cost"] == pytest.approx(data["distance_cm"], abs=1e-9)
+
+    # The BLIND edge into the projection node is decay-priced: cost STRICTLY
+    # exceeds the raw length (the tail S has a positive d-to-anchor, so the
+    # convex penalty fires). Mirrors the toy fixture docstring's TC20 note.
+    sp1 = weighted.edges["S", "P1"]
+    assert sp1["type"] == EDGE_BLIND
+    assert sp1["cost"] > sp1["distance_cm"]
+
+
+def test_tc20_next_hop_routes_through_projection_when_intended() -> None:
+    """TC20: NEXT_HOP is well-formed with the projection node in the toy graph.
+
+    The projection node ``P1`` is a real routable node: every node is reachable
+    from the blind start ``S`` (no NONE entries on the S row except a self-hop),
+    and the first hop from ``S`` toward ``P1`` is a real neighbor (the planner
+    walks the blind/line graph, with the projection node priced per the two tests
+    above). This guards that adding the projection node did not orphan any node
+    or break the all-pairs table.
+    """
+    graph = build_graph(real_field_data)
+    next_hop = compute_all_pairs_next_hop(graph, _TOY_DECAY)
+
+    start = real_field_data.START_NODE
+    for target in real_field_data.NODES:
+        if target == start:
+            assert next_hop[start][target] == start
+        else:
+            assert next_hop[start][target] is not None, (
+                f"{target} unreachable from {start} after adding the projection node"
+            )
+    # The first hop toward P1 is one of P1's real graph neighbors.
+    first = next_hop[start]["P1"]
+    assert graph.has_edge(start, first)

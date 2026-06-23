@@ -30,7 +30,6 @@ from tools.path_planner.compiler import (
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    EDGE_PROJECTION,
     build_graph,
 )
 from tools.path_planner.pipeline_config import BlindMode, DirectionMode
@@ -223,20 +222,27 @@ def test_final_heading_after_forward_hop_returns_edge_heading() -> None:
     assert replayed[-1] == pytest.approx(end, abs=1e-9)
 
 
-# -- compile_path: PROJECTION (TC4) -------------------------------------------
+# -- compile_path: LINE into a projection node (TC6) --------------------------
+#
+# Issue #64 retired the projection EDGE type: a line-follow segment terminated
+# by encoder distance is now a LINE edge whose DESTINATION node is typed
+# ``"projection"``. The compiler reads the destination type LOCALLY via
+# ``is_projection_node(graph, v)`` -- no goal-relative peek -- so a LINE hop into
+# a projection node compiles to ``(ACT_FOLLOW_DIST, distance_cm)`` exactly where
+# the old PROJECTION edge did.
 
 
-def test_compile_projection_edge_emits_follow_line_to_distance() -> None:
-    """A PROJECTION edge in the graph emits ``(ACT_FOLLOW_DIST, distance_cm)``.
+def test_compile_line_into_projection_node_emits_follow_line_to_distance() -> None:
+    """TC6: a LINE edge into a ``projection`` node emits ``(ACT_FOLLOW_DIST, distance_cm)``.
 
-    Heading delta is zero so no ACT_TURN_REL is emitted; the compiler
-    must produce exactly one primitive: the encoder-distance-gated
-    line-follow that EDGE_PROJECTION encodes.
+    Heading delta is zero so no ACT_TURN_REL is emitted; the compiler must
+    produce exactly one primitive: the encoder-distance-gated line-follow the
+    destination projection node now encodes (replacing the retired EDGE_PROJECTION).
     """
     g = nx.DiGraph()
-    g.add_node("A")
-    g.add_node("B")
-    g.add_edge("A", "B", type=EDGE_PROJECTION, distance_cm=12.0, heading_deg=0.0)
+    g.add_node("A", type="line")
+    g.add_node("B", type="projection")
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=12.0, heading_deg=0.0)
 
     prims = compile_path(["A", "B"], 0.0, g, None)
 
@@ -244,12 +250,13 @@ def test_compile_projection_edge_emits_follow_line_to_distance() -> None:
     assert prims == [(ACT_FOLLOW_DIST, 12.0)]
 
 
-def test_compile_projection_edge_with_turn_emits_turn_then_follow_dist() -> None:
-    """A PROJECTION edge with a non-zero heading delta emits TURN_REL then FOLLOW_DIST."""
+def test_compile_line_into_projection_node_with_turn_emits_turn_then_follow_dist() -> None:
+    """TC6 (turn variant): a LINE hop into a projection node with a heading delta
+    emits TURN_REL then FOLLOW_DIST."""
     g = nx.DiGraph()
-    g.add_node("A")
-    g.add_node("B")
-    g.add_edge("A", "B", type=EDGE_PROJECTION, distance_cm=20.0, heading_deg=90.0)
+    g.add_node("A", type="line")
+    g.add_node("B", type="projection")
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=20.0, heading_deg=90.0)
 
     prims = compile_path(["A", "B"], 0.0, g, None)
 
@@ -257,28 +264,31 @@ def test_compile_projection_edge_with_turn_emits_turn_then_follow_dist() -> None
 
 
 def test_compile_mixed_path_interleaves_primitives_correctly() -> None:
-    """A LINE -> turn -> PROJECTION -> BLIND path emits primitives in the right order.
+    """A LINE -> turn -> LINE(into projection) -> BLIND path emits in the right order.
 
-    Builds a four-node path with one of each edge type and a heading
-    change between every consecutive pair, then asserts the full
-    primitive sequence interleaves TURN_REL + the per-type motion
-    primitive in the order the compiler walks the edges.
+    Builds a four-node path exercising each per-hop primitive cell and a heading
+    change between every consecutive pair, then asserts the full primitive
+    sequence interleaves TURN_REL + the per-type motion primitive in the order
+    the compiler walks the edges. Issue #64: the projection middle hop is a LINE
+    edge into a ``projection`` node (``C``), DISTANCE-terminated to FOLLOW_DIST.
 
     Graph:
-        A --LINE 30 cm  heading 0    --> B
-        B --PROJ 15 cm  heading 90   --> C
-        C --BLIND 25 cm heading 180  --> D
+        A --LINE 30 cm  heading 0    --> B (line node)
+        B --LINE 15 cm  heading 90   --> C (projection node)
+        C --BLIND 25 cm heading 180  --> D (blind node)
 
     Starting heading 0 deg:
         edge A->B: delta 0  -> no turn, FOLLOW_INT (None)
-        edge B->C: delta 90 -> TURN_REL 90,  FOLLOW_DIST 15.0
+        edge B->C: delta 90 -> TURN_REL 90,  FOLLOW_DIST 15.0  (LINE into projection)
         edge C->D: delta 90 -> TURN_REL 90,  FORWARD 25.0
     """
     g = nx.DiGraph()
-    for n in ("A", "B", "C", "D"):
-        g.add_node(n)
+    g.add_node("A", type="line")
+    g.add_node("B", type="line")
+    g.add_node("C", type="projection")
+    g.add_node("D", type="blind")
     g.add_edge("A", "B", type=EDGE_LINE, distance_cm=30.0, heading_deg=0.0)
-    g.add_edge("B", "C", type=EDGE_PROJECTION, distance_cm=15.0, heading_deg=90.0)
+    g.add_edge("B", "C", type=EDGE_LINE, distance_cm=15.0, heading_deg=90.0)
     g.add_edge("C", "D", type=EDGE_BLIND, distance_cm=25.0, heading_deg=180.0)
 
     prims = compile_path(["A", "B", "C", "D"], 0.0, g, None)
@@ -290,6 +300,69 @@ def test_compile_mixed_path_interleaves_primitives_correctly() -> None:
         (ACT_TURN_REL, 90.0),
         (ACT_FORWARD, 25.0),
     ]
+
+
+# -- compile_path: BLIND into a projection node (TC8 auto-seek) ----------------
+
+
+def test_compile_blind_into_projection_node_auto_seeks_stop_at_line() -> None:
+    """TC8: a BLIND edge into a ``projection`` node auto-seeks ``(ACT_STOP_AT_LINE, dist)``.
+
+    The local auto-rule (issue #64): a BLIND hop whose OWN destination node is a
+    ``projection`` node seeks that node's line to re-anchor, with
+    ``BLIND_PROJECTION_AUTO_SEEK`` on (the default). The decision is purely LOCAL
+    on ``v`` -- no goal-relative ``NEXT_HOP`` peek -- so a single 2-node path
+    A->B (B a projection node) compiles to a stop-at-line, NOT a dead-reckon
+    forward. Mirrors the sim (T5) and firmware (T10) cell-for-cell.
+    """
+    fd = SimpleNamespace(BLIND_PROJECTION_AUTO_SEEK=True)
+    g = nx.DiGraph()
+    g.add_node("A", type="blind")
+    g.add_node("B", type="projection")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=30.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=30.0, heading_deg=180.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, fd)
+
+    assert prims == [(ACT_STOP_AT_LINE, pytest.approx(30.0, abs=1e-9))]
+
+
+def test_compile_blind_into_projection_node_dead_reckons_when_auto_off() -> None:
+    """TC8 (control): with the toggle OFF, a BLIND->projection hop dead-reckons.
+
+    Disabling ``BLIND_PROJECTION_AUTO_SEEK`` removes the only seek trigger on the
+    plain (non-STOP_AT_LINE) BLIND edge, so the hop emits ``(ACT_FORWARD, dist)``
+    -- proving the seek above is the auto-rule firing, not an unrelated default.
+    """
+    fd = SimpleNamespace(BLIND_PROJECTION_AUTO_SEEK=False)
+    g = nx.DiGraph()
+    g.add_node("A", type="blind")
+    g.add_node("B", type="projection")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=30.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=30.0, heading_deg=180.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, fd)
+
+    assert prims == [(ACT_FORWARD, pytest.approx(30.0, abs=1e-9))]
+
+
+def test_compile_blind_into_blind_node_dead_reckons() -> None:
+    """TC8 (boundary): a BLIND edge into a ``blind`` node never auto-seeks.
+
+    Only a projection DESTINATION triggers the local auto-rule. A BLIND hop into
+    a plain blind node keeps the dead-reckon ``(ACT_FORWARD, dist)`` even with the
+    toggle ON -- the destination, not the edge type alone, gates the seek.
+    """
+    fd = SimpleNamespace(BLIND_PROJECTION_AUTO_SEEK=True)
+    g = nx.DiGraph()
+    g.add_node("A", type="blind")
+    g.add_node("B", type="blind")
+    g.add_edge("A", "B", type=EDGE_BLIND, distance_cm=30.0, heading_deg=0.0)
+    g.add_edge("B", "A", type=EDGE_BLIND, distance_cm=30.0, heading_deg=180.0)
+
+    prims = compile_path(["A", "B"], 0.0, g, fd)
+
+    assert prims == [(ACT_FORWARD, pytest.approx(30.0, abs=1e-9))]
 
 
 # -- Property: random graphs ---------------------------------------------------

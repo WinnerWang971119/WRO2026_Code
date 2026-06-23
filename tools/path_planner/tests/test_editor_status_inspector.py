@@ -51,7 +51,14 @@ from tools.path_planner.editor.panels import (  # noqa: E402
 
 def _make_model(**override) -> FieldModel:
     """A small, fully-valid in-memory model (``A`` -- ``B`` line, ``B`` -- ``G``
-    blind); ``override`` lets a test break exactly one field to force INVALID."""
+    blind, ``S`` a blind dead-reckon spawn wired to ``G``); ``override`` lets a
+    test break exactly one field to force INVALID.
+
+    ``S`` is the ``START_NODE`` because the issue #64 validator rejects a
+    ``"line"`` / ``"projection"`` start (an on-line spawn presumes a
+    sensor-anchored arrival the chassis has not made at t=0), so the start must
+    be a dead-reckon ``"blind"`` origin for the model to validate clean.
+    """
     base = dict(
         field_mm=(3000, 2000),
         map_png="maps/map.png",
@@ -60,12 +67,17 @@ def _make_model(**override) -> FieldModel:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        start_node="S",
         start_heading_deg=0.0,
-        nodes={"A": (0.0, 50.0), "B": (200.0, 10.0), "G": (250.0, 80.0)},
-        node_types={"A": "line", "B": "line", "G": "blind"},
+        nodes={
+            "S": (250.0, 150.0),
+            "A": (0.0, 50.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+        },
+        node_types={"S": "blind", "A": "line", "B": "line", "G": "blind"},
         line_segments=[("A", "B")],
-        blind_edges=[("B", "G")],
+        blind_edges=[("B", "G"), ("S", "G")],
         obstacles=[],
     )
     base.update(override)

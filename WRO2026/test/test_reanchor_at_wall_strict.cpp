@@ -42,7 +42,7 @@
 #include "WROMath.h"          // cmToEncDeg.
 #include "Config.h"           // Config::WALL_NORMAL_STRICT_ENABLED (forced ON via the shadow).
 #include "FieldMap.h"         // FieldMap::getNode — believed-coordinate post-condition.
-#include "routes.h"           // Routes::NODES / N_NODES (data in routes.cpp).
+#include "routes.h"           // Routes::NODES / N_NODES (data in the issue #91 routes_fixture.cpp).
 
 static int g_failures = 0;
 

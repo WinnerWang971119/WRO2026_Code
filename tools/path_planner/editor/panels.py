@@ -76,10 +76,11 @@ class Mode(enum.Enum):
     ``Mode(panels.mode_var.get())``.
 
     :cvar ADD_NODE: Left-click on the canvas creates a new node.
-    :cvar MOVE: Left-click selects; drag moves the picked node.
+    :cvar MOVE: Left-click arms a drag; drag moves the picked node.
     :cvar EDGE: Click two nodes, then press ``L`` / ``B`` to add an edge.
     :cvar OBSTACLE: Drag a rectangle to create a new obstacle.
     :cvar START: Click a node to set it as ``START_NODE``.
+    :cvar SELECT: Left-click selects the node under the cursor; an empty click clears the selection.
     """
 
     ADD_NODE = "add_node"
@@ -87,11 +88,13 @@ class Mode(enum.Enum):
     EDGE = "edge"
     OBSTACLE = "obstacle"
     START = "start"
+    SELECT = "select"
 
 
 # Human-readable labels shown next to each mode row, in display order.  These
 # are the short labels for the compact left toolbar column.
 _MODE_LABELS: tuple[tuple[Mode, str], ...] = (
+    (Mode.SELECT, "Sel"),
     (Mode.MOVE, "Move"),
     (Mode.ADD_NODE, "Add"),
     (Mode.EDGE, "Edge"),
@@ -233,7 +236,6 @@ _CHEVRON_GAP_PX: int = 4
 
 # Ghost-button text.
 _GHOST_ADD_PIVOT_TEXT: str = "+ add pivot"
-_GHOST_ADD_PROJECTION_TEXT: str = "+ add projection"
 # Thin border width (pixels) drawn around a ghost button at rest.
 _GHOST_BUTTON_BORDER_PX: int = 1
 
@@ -379,8 +381,6 @@ class SidePanels(tk.Frame):
         the float entries it is a ``float``.  Arguments are
         ``(knob_name, value)``.  A bad numeric parse sets a status message and
         does **not** fire.
-    :ivar on_add_projection: Fired when the **+ add projection** ghost button
-        is clicked.  No arguments.  Defaults to ``None``; the app wires it.
     :ivar on_show_shortcuts: Fired when the status strip's key-hint area is
         clicked.  No arguments.  Defaults to ``None``; the app wires it to open
         the shortcuts dialog.
@@ -501,7 +501,6 @@ class SidePanels(tk.Frame):
         ] = None
         # New slots (wired by the app in a later task).  Defaulted to None /
         # no-op like every other slot so the panel builds standalone.
-        self.on_add_projection: Optional[Callable[[], None]] = None
         self.on_show_shortcuts: Optional[Callable[[], None]] = None
 
         # ---- Tk variables (single source of truth for widget state) -----
@@ -1396,9 +1395,8 @@ class SidePanels(tk.Frame):
         a hover-red delete button that fires :attr:`on_delete_pivot`.  Below it
         an add-row of three node-name comboboxes plus an **Add** button fires
         :attr:`on_add_pivot` once all three pickers hold a value, and a
-        **+ add projection** ghost button fires :attr:`on_add_projection`.  The
-        list is rebuilt and the picker dropdowns repopulated on every
-        :meth:`refresh`.
+        **+ add pivot** ghost button repeats that add affordance.  The list is
+        rebuilt and the picker dropdowns repopulated on every :meth:`refresh`.
 
         :param master: Parent inspector column.
         """
@@ -1482,7 +1480,7 @@ class SidePanels(tk.Frame):
         )
         self._pivot_add_button.pack(side="right")
 
-        # --- Ghost add-buttons row: + add pivot / + add projection ---
+        # --- Ghost add-button row: + add pivot ---
         ghost_row = self._themed_frame(body)
         ghost_row.pack(side="top", fill="x", pady=(4, 0))
         self._add_pivot_ghost_button = self._ghost_button(
@@ -1491,14 +1489,6 @@ class SidePanels(tk.Frame):
             command=self._handle_add_pivot,
         )
         self._add_pivot_ghost_button.pack(side="left", fill="x", expand=True)
-        self._add_projection_ghost_button = self._ghost_button(
-            ghost_row,
-            text=_GHOST_ADD_PROJECTION_TEXT,
-            command=self._handle_add_projection,
-        )
-        self._add_projection_ghost_button.pack(
-            side="left", fill="x", expand=True
-        )
 
     def _build_global_knobs_panel(self, master: tk.Misc) -> None:
         """Create the collapsible **Global knobs** section (starts collapsed).
@@ -1920,7 +1910,7 @@ class SidePanels(tk.Frame):
         Called by the app whenever the active :class:`Mode` changes so the
         strip always names the current editing mode.
 
-        :param text: Mode description (e.g. ``"Mode: Move / select"``).
+        :param text: Mode description (e.g. ``"Mode: Select"``).
         """
         self._mode_display_var.set(text)
 
@@ -2352,13 +2342,6 @@ class SidePanels(tk.Frame):
             return
         if self.on_delete_pivot is not None:
             self.on_delete_pivot(triple)
-
-    def _handle_add_projection(self) -> None:
-        """Fire :attr:`on_add_projection` if assigned."""
-        if self._suppress_callbacks:
-            return
-        if self.on_add_projection is not None:
-            self.on_add_projection()
 
     def _handle_blind_decay_toggle(self) -> None:
         """Fire :attr:`on_global_knob_change` for the blind-decay checkbutton."""

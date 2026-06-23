@@ -639,6 +639,15 @@ static void test_TC20_auto_rule_active_front_seeks()
     // The auto rung (rung 4) fires when nothing above it decided: call AUTO,
     // edgeOverride DEFAULT, edge is a plain non-STOP_AT_LINE mode. FRONT board
     // always services the seek → seek=true. motionMode keeps the edge's GYRO_TSHAPE.
+    //
+    // Issue #64: `autoRuleActive` here models the LOCAL caller computation
+    // `Routes::BLIND_PROJECTION_AUTO_SEEK && isProjectionNode(_nextHop)` — a BLIND
+    // edge whose DESTINATION is a projection node — NOT the retired goal-relative
+    // `next_hop_is_projection` / `NEXT_HOP[next][goal]` peek. The resolver body and
+    // the 936-row CSV are frozen; only this caller INPUT is computed differently,
+    // so the resolver's response to a `true`/`false` autoRuleActive is unchanged.
+    // The end-to-end LOCAL read over the real graph is exercised in TC16
+    // (`test_path_tracker_projection.cpp`).
     const StopAtLineResolution r = resolveStopAtLine(StopAtLineQuery{
         /*callFlag*/       StopAtLine::AUTO,
         /*edgeOverride*/   Routes::StopAtLineMode::DEFAULT,

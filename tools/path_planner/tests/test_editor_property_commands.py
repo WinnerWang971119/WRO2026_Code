@@ -74,7 +74,11 @@ def make_model() -> FieldModel:
 
     ``A`` -- ``B`` is a line segment, ``B`` -- ``G`` a blind edge, ``G`` a blind
     node sitting clear of the x=280 wall so it can be converted to a valid reset
-    node. The field is 300 x 200 cm so every coordinate is inside the bounds.
+    node. ``S`` is a dead-reckon spawn (a ``"blind"`` node) wired to ``G`` by a
+    blind edge: issue #64's validator rejects a ``"line"`` / ``"projection"``
+    ``START_NODE`` (an on-line spawn presumes a sensor-anchored arrival the
+    chassis has not made at t=0), so the start must be a blind origin. The field
+    is 300 x 200 cm so every coordinate is inside the bounds.
     """
     return FieldModel(
         field_mm=(3000, 2000),
@@ -84,12 +88,17 @@ def make_model() -> FieldModel:
         blind_decay_k=0.05,
         blind_decay_exponent=2.0,
         blind_decay_d_ref=50.0,
-        start_node="A",
+        start_node="S",
         start_heading_deg=0.0,
-        nodes={"A": (10.0, 10.0), "B": (200.0, 10.0), "G": (250.0, 80.0)},
-        node_types={"A": "line", "B": "line", "G": "blind"},
+        nodes={
+            "S": (250.0, 150.0),
+            "A": (10.0, 10.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+        },
+        node_types={"S": "blind", "A": "line", "B": "line", "G": "blind"},
         line_segments=[("A", "B")],
-        blind_edges=[("B", "G")],
+        blind_edges=[("B", "G"), ("S", "G")],
         obstacles=[(50.0, 50.0, 80.0, 80.0, "pillar")],
     )
 

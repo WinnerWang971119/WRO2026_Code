@@ -82,19 +82,25 @@ inline Direction resolveDirection(
 /**
  * @brief Whether a resolved REAR hop is unservable on the current chassis.
  *
- * REAR LINE / PROJECTION needs a rear line sensor (>= 2 boards). BLIND REAR is
+ * A REAR LINE hop needs a rear line sensor (>= 2 boards). BLIND REAR is
  * permitted on a 1-board chassis (dead-reckoned reverse needs only negative
- * PWM, no sensor), so the check is scoped to LINE / PROJECTION. Promoted from
+ * PWM, no sensor), so the check is scoped to LINE. Promoted from
  * PathTracker.cpp's two guard sites so the host-compile test links the same
  * predicate instead of a hand-copied replica (trace #77; same rationale as
  * resolveDirection above).
+ *
+ * Issue #64: the serviceability question keys on the resolved PRIMITIVE
+ * (`edgeType`), which is LINE or BLIND only now — `EdgeType::PROJECTION` is
+ * retired. Projection is a DESTINATION-NODE property, not an edge type; a LINE
+ * edge into a projection node is still a reverse line-follow (it tracks the line
+ * backward to a distance gate), so the rear-board requirement is already covered
+ * by the LINE clause.
  */
 inline bool reverseUnavailable(Direction resolved, Routes::EdgeType edgeType,
                                uint8_t lineBoardCount)
 {
     return resolved == Direction::REAR && lineBoardCount < 2 &&
-           (edgeType == Routes::EdgeType::LINE ||
-            edgeType == Routes::EdgeType::PROJECTION);
+           edgeType == Routes::EdgeType::LINE;
 }
 
 #endif    // DIRECTION_POLICY_H

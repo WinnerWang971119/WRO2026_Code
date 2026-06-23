@@ -14,8 +14,7 @@ Heading convention (matches PR1/PR2 PathTracker):
 
 Edge attributes (every edge in the returned graph carries these):
 
-* ``type``        : :data:`EDGE_LINE`, :data:`EDGE_BLIND`, or
-  :data:`EDGE_PROJECTION`.
+* ``type``        : :data:`EDGE_LINE` or :data:`EDGE_BLIND`.
 * ``distance_cm`` : float, Euclidean length of the directed edge.
 * ``heading_deg`` : float in ``[0, 360)`` per the convention above.
 
@@ -41,27 +40,33 @@ Edge-type semantics:
 
 * :data:`EDGE_LINE`       -- line-follow segment terminated by an
   intersection marker. Cost multiplier 1.0.
-* :data:`EDGE_PROJECTION` -- line-follow segment terminated by encoder
-  distance (no physical intersection beneath the strip). Used for
-  waypoints that sit on the line graph but have no intersection cross.
-  Cost multiplier 1.0 (same as LINE -- the chassis is still tracking
-  the line, just with a distance gate).
 * :data:`EDGE_BLIND`      -- dead-reckoning move with no line under the
   sensor. Penalised by the planner's blind-decay factor
   ``1 + k*(d/d_ref)**exponent``, where ``d`` is the blind-subgraph
   distance from the edge's tail to the nearest line/reset anchor (see
   :mod:`tools.path_planner.planner`).
 
+Per-hop projection behavior is no longer carried by an edge type. A
+line-follow segment terminated by encoder distance (no physical
+intersection beneath the strip) is now expressed by giving the
+*destination node* the ``"projection"`` type; the per-hop primitive is
+derived downstream from ``(edge_type, destination_node_type)`` via
+:func:`is_projection_node`.
+
 Node attributes:
 
 * ``x_cm``, ``y_cm`` : float coordinates.
-* ``type``           : ``"line" | "blind" | "reset"`` (from ``field_data.NODE_TYPES``).
+* ``type``           : ``"line" | "projection" | "blind" | "reset"``
+  (from ``field_data.NODE_TYPES``). A ``"projection"`` node sits on a
+  line but is NOT at a junction -- the hop into it is line-followed but
+  terminated by an encoder-distance gate rather than an intersection
+  marker.
 
 PR3 schema vs PR2: off-line goals are first-class ``blind`` nodes joined
 to the line graph by explicit :data:`field_data.BLIND_EDGES`
 (bidirectional by default, so the chassis can return the way it came).
-:data:`EDGE_PROJECTION` is re-introduced for line-follow waypoints
-without an intersection marker.
+Projection waypoints are line-graph nodes typed ``"projection"`` rather
+than a dedicated edge type.
 """
 
 from __future__ import annotations
@@ -79,24 +84,23 @@ from tools.path_planner.validator import validate
 EDGE_LINE = "LINE"
 EDGE_BLIND = "BLIND"
 
-# Line-follow segment terminated by encoder distance (not by an
-# intersection marker). Used for waypoints that sit on the line graph
-# but have no physical cross beneath the strip. Cost-equivalent to
-# :data:`EDGE_LINE` (the chassis is still tracking the line, just with
-# a distance gate instead of an intersection gate). Consumers:
-# ``validator`` (T6), ``compiler`` (T8), ``header_writer`` (T7),
-# ``simulator`` (T9).
-EDGE_PROJECTION = "PROJECTION"
+# Node type marking a line-follow waypoint that is on the line but NOT at
+# a junction. The hop *into* a projection node is line-followed yet
+# terminated by an encoder-distance gate (no physical cross beneath the
+# strip). Per-hop behavior is derived downstream from
+# ``(edge_type, destination_node_type)`` via :func:`is_projection_node`.
+NODE_PROJECTION = "projection"
 
 
 __all__ = [
     "EDGE_LINE",
     "EDGE_BLIND",
-    "EDGE_PROJECTION",
+    "NODE_PROJECTION",
     "inflate_obstacles",
     "edge_clips_obstacle",
     "build_graph",
     "directed_edge_heading",
+    "is_projection_node",
 ]
 
 
@@ -137,30 +141,28 @@ def directed_edge_heading(graph: "nx.DiGraph", u: str, v: str) -> float:
     return float(graph[u][v]["heading_deg"])
 
 
-def next_hop_is_projection(graph: "nx.DiGraph", u, v) -> bool:
-    """Return True iff the directed edge ``u -> v`` exists and is a PROJECTION.
+def is_projection_node(graph: "nx.DiGraph", n) -> bool:
+    """Return True iff node ``n`` exists and has the ``"projection"`` type.
 
-    The single shared predicate for the BLIND->PROJECTION auto-seek rule: a
-    blind hop that FEEDS a projection edge seeks a line first to re-anchor
-    before the dead-reckoned slide.  The compiler, the sim, and the validator
-    each need the "is the NEXT hop a projection?" peek; centralizing it here
-    keeps the three from drifting in shape (the firmware mirrors this as
-    ``PathTracker::_nextHopIsProjection``).
+    The single shared predicate for the projection-hop rule: the hop *into* a
+    projection node is line-followed but terminated by an encoder-distance
+    gate rather than an intersection marker. The compiler (T4), the sim (T5),
+    and the validator (T2) each ask "is the *destination* a projection node?"
+    -- a purely **local** lookup on the destination node, with no goal-relative
+    ``NEXT_HOP`` peek. Centralizing it here keeps the three from drifting in
+    shape (the firmware mirrors this as ``PathTracker::_isProjectionNode``).
 
-    Tolerant of a *degenerate* peek so callers need not special-case it: a
-    ``None`` endpoint (this hop is the final/goal hop, no next-next), a
-    self-loop (``u == v``), or a missing edge all return ``False`` -- the same
-    "no auto rule" answer the firmware's bounds-guarded ``getEdge`` degrades
-    to, never a ``KeyError``.
+    Tolerant of a *degenerate* lookup so callers need not special-case it: a
+    ``None`` node or a name absent from the graph returns ``False`` -- the same
+    "not a projection" answer, never a ``KeyError``.
 
     :param graph: directed graph returned by :func:`build_graph`.
-    :param u:     source node of the peeked next hop (or ``None``).
-    :param v:     destination of the peeked next hop (or ``None``).
-    :return:      True only for a real ``u -> v`` PROJECTION edge.
+    :param n:     destination node name to test (or ``None``).
+    :return:      True only when ``n`` is a real node typed ``"projection"``.
     """
-    if u is None or v is None or u == v or not graph.has_edge(u, v):
+    if n is None or n not in graph:
         return False
-    return graph.edges[u, v]["type"] == EDGE_PROJECTION
+    return graph.nodes[n].get("type") == NODE_PROJECTION
 
 
 def inflate_obstacles(
@@ -389,7 +391,7 @@ def _emit_directed_pair(
     )
 
 
-_LEGAL_EDGE_TYPES = (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION)
+_LEGAL_EDGE_TYPES = (EDGE_LINE, EDGE_BLIND)
 
 
 def build_graph(field_data) -> nx.DiGraph:
@@ -406,12 +408,12 @@ def build_graph(field_data) -> nx.DiGraph:
        entry, with the same obstacle-clip drop.
     6. **Optional**: emit bidirectional edges for every dict in
        ``field_data.EDGES`` (if the attribute exists). Each dict supplies
-       ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`,
-       :data:`EDGE_PROJECTION`), ``u``, and ``v``, plus any of the
-       optional keys ``primitive_mode``, ``direction``, ``stop_at_line``
-       which are forwarded verbatim to the resulting directed edges.
-       Same obstacle-clip drop applies; PROJECTION drops warn the same
-       way BLIND_EDGES drops do because the routing intent is explicit.
+       ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`), ``u``,
+       and ``v``, plus any of the optional keys ``primitive_mode``,
+       ``direction``, ``stop_at_line`` which are forwarded verbatim to
+       the resulting directed edges. Same obstacle-clip drop applies, and
+       drops warn the same way BLIND_EDGES drops do because the routing
+       intent is explicit.
     7. Warn (``UserWarning``) for any node that ended up with no incident
        edges.
 
@@ -464,9 +466,9 @@ def build_graph(field_data) -> nx.DiGraph:
             continue
         _emit_directed_pair(g, u, v, pu, pv, EDGE_BLIND)
 
-    # Optional rich-edge list. Absent on legacy fixtures; present once T4
-    # introduces example PROJECTION / direction-override edges. Iteration
-    # order is preserved so deterministic graph output stays diff-friendly.
+    # Optional rich-edge list. Absent on legacy fixtures; present once
+    # example direction-override edges are introduced. Iteration order is
+    # preserved so deterministic graph output stays diff-friendly.
     rich_edges = getattr(field_data, "EDGES", None)
     if rich_edges is not None:
         if not isinstance(rich_edges, (list, tuple)):

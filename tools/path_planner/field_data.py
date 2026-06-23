@@ -2,8 +2,12 @@
 
 PR3 simplification (vs PR1/PR2):
 
-* No projection nodes. Every line-graph node is reached by line-following
-  to the next intersection.
+* Projection is a NODE property, not an edge type (issue #64): a
+  ``"projection"``-typed node sits on a line but not at a junction, and the
+  hop into it is encoder-distance- (LINE edge) or auto-seek- (BLIND edge)
+  terminated. The production field below carries no projection nodes this
+  phase (deferred to P3.5); see the EDGES authoring comment for how to add
+  one when the time comes.
 * No goal-approach blind sequences. Off-line positions are first-class
   nodes connected to the line graph by explicit ``BLIND_EDGES``.
 * The robot's ``Mission`` DSL (``Mission.goTo("A").beep(...).wait(...)``)
@@ -33,8 +37,8 @@ so editor saves do not flip the planner suite red.
 """
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION  # noqa: F401
-from tools.path_planner.pipeline_config import LineMode, BlindMode, ProjectionMode, TurnMode  # noqa: F401
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE  # noqa: F401
+from tools.path_planner.pipeline_config import LineMode, BlindMode, TurnMode  # noqa: F401
 
 _data = load_field_json()
 FIELD_MM              = _data["FIELD_MM"]
@@ -57,8 +61,11 @@ OBSTACLES             = _data["OBSTACLES"]
 # empty means no pivots; the downstream planner/validator/header consume this.
 PIVOT_TURNS           = _data.get("pivot_turns", [])
 
-# Field-wide toggle: when True, blind/projection moves auto-seek the next line
-# before stopping (the default). Set to False to restore exact dead-reckoning.
+# Field-wide toggle: when True, a BLIND hop whose DESTINATION is a "projection"
+# node auto-seeks the next line and re-anchors before stopping (the default).
+# Set to False to restore exact dead-reckoning into projection nodes. (Issue #64
+# retargeted this from the retired EDGE_PROJECTION edge type to the destination
+# node type; the toggle name and value are unchanged.)
 BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
 
 # Wall-zero reset nodes: a sparse table keyed by node name, mapping each
@@ -75,16 +82,29 @@ RESET_NODES           = _data.get("RESET_NODES", {})
 # (LINE_SEGMENTS / BLIND_EDGES). Entries here let an author attach enum-typed
 # overrides (primitive_mode) to a specific edge that JSON cannot represent.
 # Leaving the list empty is fine — every edge then inherits the pipeline-wide
-# PIPELINE_CONFIG defaults at C++ dispatch time.
-# The example below is commented out and uses placeholder node names; uncomment
-# (and rename ``u`` / ``v`` to nodes that exist in ``NODES``) to attach overrides.
+# PIPELINE_CONFIG defaults at C++ dispatch time. The real field carries no
+# overrides today; append a dict per the schema below to attach one.
 #
 # Single-wheel pivots are NOT authored here — they live in the ``pivot_turns``
 # list above as (u, v, w) node-name triples (a pivot is a property of a turn,
 # not of one edge).
 #
+# Authoring a PROJECTION waypoint (issue #64): projection is a NODE property,
+# not an edge type. A projection node sits ON a line but NOT at a junction —
+# there is no cross marker beneath the strip. To author one, set its type in
+# the geometry: ``NODE_TYPES["<name>"] = "projection"`` (and place the node on
+# a line in ``NODES`` / ``LINE_SEGMENTS``). Termination of the hop INTO it is
+# decided by the incident edge type:
+#   * reached by a LINE edge  -> dead-reckon to the encoder distance (no cross
+#     to detect, so the chassis stops by distance rather than an intersection);
+#   * reached by a BLIND edge -> drive blind, then (when
+#     BLIND_PROJECTION_AUTO_SEEK is True, the default) auto-seek the next line
+#     and re-anchor before stopping.
+# The per-hop primitive falls out of ``(edge_type, destination_node_type)``
+# downstream — there is no projection EDGE type and no per-edge projection mode.
+#
 # Schema: each dict MUST supply:
-#   type          : EDGE_LINE | EDGE_BLIND | EDGE_PROJECTION
+#   type          : EDGE_LINE | EDGE_BLIND
 #   u             : source node name (must exist in NODES)
 #   v             : destination node name (must exist in NODES)
 #   distance_cm   : Euclidean length in centimetres (float)
@@ -92,7 +112,7 @@ RESET_NODES           = _data.get("RESET_NODES", {})
 #
 # Optional overrides (absent = inherit the pipeline-wide PIPELINE_CONFIG
 # default for that edge's category at C++ dispatch time):
-#   primitive_mode : LineMode | BlindMode | ProjectionMode value
+#   primitive_mode : LineMode | BlindMode value
 #   direction      : "front" | "rear" — asymmetric per-directed-edge
 #                    traversal override; applies only to the forward
 #                    (u → v) edge, never mirrored to the reverse. Use
@@ -105,15 +125,4 @@ RESET_NODES           = _data.get("RESET_NODES", {})
 # These entries are ADDITIVE alongside LINE_SEGMENTS / BLIND_EDGES, not a
 # replacement; the planner merges all edge sources into one DiGraph.
 # ---------------------------------------------------------------------------
-EDGES = [
-    # [0] PROJECTION demo — A to P1 along the A-B line strip; no intersection
-    #     marker at P1 so the chassis stops by encoder distance, not by a
-    #     detected cross. Exercises the EDGE_PROJECTION compile path (T8/T11).
-    #{
-    #    "type":         EDGE_PROJECTION,
-    #    "u":            "A",
-    #    "v":            "P1",
-    #    "distance_cm":  45.0,   # |P1 - A| = |(55-10, 10-10)| = 45 cm
-    #    "heading_deg":  0.0,    # due East (+x direction)
-    #},
-]
+EDGES = []

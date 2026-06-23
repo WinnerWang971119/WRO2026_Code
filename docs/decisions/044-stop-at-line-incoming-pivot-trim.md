@@ -3,6 +3,14 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #65, Phase 3)
 
+> **Amended by [ADR-046](./046-projection-as-node-property.md) (issue #64).** Projection is now a
+> node type. The `_regime` classification this ADR budgets against is re-derived from
+> `(edge_type, destination_node_type)` — a pivot approaching a projection node sits on the LINE→proj
+> `distance` regime and draws its trim δ from the follow distance, not the overshoot budget. Where the
+> body below reads the auto-rule as `auto_seek_enabled and next_hop_is_projection` (the route-relative
+> peek, rung 4 of the ladder), read instead the **local** `(BLIND edge) ∧ (destination node is
+> PROJECTION)`. The δ ≤ offset budget and the regime matrix are otherwise unchanged.
+
 ## Rule
 
 The pivot regime matrix (ADR-035, carried by ADR-036) gains a third incoming row. A
@@ -116,5 +124,6 @@ overshoot, which would also cover the LINE follow) is **deferred to issue #75**.
 - [ADR-038 — Blind→projection auto stop-at-line; precedence ladder](./038-blind-projection-auto-stop-at-line.md) — the seek precedence ladder this fix is rung-agnostic across.
 - [ADR-039 — Auto stop-at-line fires a normal seek; a missed line is a hard fault](./039-stop-at-line-normal-seek-no-soft-fallback.md) — the seek the trim adjusts; LINE_NOT_FOUND still hard-faults.
 - [ADR-029 — The validator is the single anti-ambiguity gate](./029-validator-anti-ambiguity.md) — extended here with the δ ≤ offset budget on `"sensor"`-incoming pivots.
+- [ADR-046 — Projection is a node property, not an edge type](./046-projection-as-node-property.md) — amends this ADR; `_regime` is derived from `(edge_type, destination_node_type)` and a LINE→proj pivot trims from the follow distance.
 - `docs/plans/2026-06-19-issue65-pivot-seek-reanchor.md` — the originating plan.
 - Issues #65 (closed by this), #75 (reverse re-seat for δ>offset), #54 (REAR pivots).

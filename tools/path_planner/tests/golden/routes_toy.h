@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 namespace Routes {
-    constexpr uint8_t N_NODES = 6;
+    constexpr uint8_t N_NODES = 8;
 
     // Field-wide: auto stop-at-line seek on a BLIND hop that precedes
     // a PROJECTION.
@@ -16,19 +16,20 @@ namespace Routes {
 
     // Node category. LINE nodes are reached by line-following
     // to the next intersection; BLIND nodes are reached by a
-    // dead-reckoned turn + forward move from a connected node.
-    enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2 };
+    // dead-reckoned turn + forward move from a connected node;
+    // PROJECTION nodes sit on a line but at no junction (dead-
+    // reckon to identity; a BLIND hop into one auto-seeks).
+    enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2, PROJECTION = 3 };
 
     // Edge motion class, dispatched by the runtime.
-    enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, PROJECTION = 3 };
+    enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2 };
 
     // Per-category motion-mode selectors. DEFAULT (= 0) means
     // 'inherit PIPELINE_CONFIG.<category>' at dispatch time.
-    enum class LineMode       : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
-    enum class BlindMode      : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };
-    enum class ProjectionMode : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
-    enum class TurnMode       : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
-    enum class DirectionMode  : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };
+    enum class LineMode      : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
+    enum class BlindMode     : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };
+    enum class TurnMode      : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
+    enum class DirectionMode : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };
 
     // Per-edge stop-at-line seek override, decoupled from BlindMode.
     enum class StopAtLineMode : uint8_t { DEFAULT = 0, ON = 1, OFF = 2 };
@@ -36,11 +37,10 @@ namespace Routes {
     // Mission-wide motion-mode defaults, baked in from
     // tools/path_planner/pipeline_config.py at build time.
     struct PipelineConfig {
-        LineMode       line;
-        BlindMode      blind;
-        ProjectionMode projection;
-        TurnMode       turn;
-        DirectionMode  direction;
+        LineMode      line;
+        BlindMode     blind;
+        TurnMode      turn;
+        DirectionMode direction;
     };
     extern const PipelineConfig PIPELINE_CONFIG;
 
@@ -51,7 +51,6 @@ namespace Routes {
         float          heading_deg;
         LineMode       line_mode_override;
         BlindMode      blind_mode_override;
-        ProjectionMode projection_mode_override;
         DirectionMode  direction_override;
         StopAtLineMode stop_at_line_override;
     };
@@ -99,7 +98,7 @@ namespace Routes {
     // Sentinel for unreachable next-hop entries; PathTracker
     // treats this as 'no path; halt and report'.
     constexpr uint8_t NEXT_HOP_NONE = 0xFF;
-    constexpr uint8_t START_NODE = 0;
-    constexpr float   START_HEADING_DEG = 0.000000f;
+    constexpr uint8_t START_NODE = 7;
+    constexpr float   START_HEADING_DEG = 90.000000f;
 }  // namespace Routes
 #endif  // ROUTES_H

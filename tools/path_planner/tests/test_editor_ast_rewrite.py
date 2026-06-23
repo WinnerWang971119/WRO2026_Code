@@ -25,9 +25,9 @@ _SOURCE_TC7 = '''\
 
 # Stand-in for the real EDGES table. Comments here must survive.
 EDGES = [
-    # [0] PROJECTION demo
+    # [0] BLIND demo
     {
-        "type":         "EDGE_PROJECTION",
+        "type":         "EDGE_BLIND",
         "u":            "A",
         "v":            "P1",
         "distance_cm":  45.0,
@@ -122,7 +122,7 @@ def test_tc7_only_renamed_literals_change(tmp_path: Path) -> None:
     assert new_text.count('"Q"') == 2, "Exactly two v-values should be renamed to Q"
 
     # "E" as a bare letter (the old name) must not appear as a standalone string value.
-    # The only "E" left should be inside "EDGE_LINE", "EDGE_PROJECTION" — not as "E".
+    # The only "E" left should be inside "EDGE_LINE", "EDGE_BLIND" — not as "E".
     assert '"E"' not in new_text, (
         'The old bare string "E" must not appear in the output; only "Q" should.'
     )
@@ -130,7 +130,7 @@ def test_tc7_only_renamed_literals_change(tmp_path: Path) -> None:
     # All comments must survive verbatim.
     for comment in (
         "# Stand-in for the real EDGES table. Comments here must survive.",
-        "# [0] PROJECTION demo",
+        "# [0] BLIND demo",
         "# [1] LINE edge",
         "# [2] LINE edge",
     ):

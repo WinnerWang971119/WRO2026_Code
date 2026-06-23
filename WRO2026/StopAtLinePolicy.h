@@ -25,8 +25,9 @@
  *      `Routes::BlindMode::STOP_AT_LINE` (the historical "STOP_AT_LINE tag means
  *      seek" behaviour, kept for back-compat).
  *   4. Auto-rule: `q.autoRuleActive` (the caller's
- *      `autoSeekEnabled && nextHopIsProjection`) — a blind hop feeding a
- *      projection seeks a line first to re-anchor.
+ *      `BLIND_PROJECTION_AUTO_SEEK && destinationIsProjectionNode`) — true when
+ *      the field-wide auto-seek toggle is on and this BLIND edge's destination
+ *      is a projection node; the hop seeks a line to re-anchor.
  *   5. Otherwise `requested = false` — a call-site/edge `AUTO`/`DEFAULT` with no
  *      rule active never seeks. There is intentionally NO pipeline-default seek
  *      rung: the resolved `edgeMode` already encodes the pipeline default, so
@@ -79,7 +80,7 @@ struct StopAtLineQuery
     Routes::BlindMode      pipelineBlind;     ///< Routes::PIPELINE_CONFIG.blind.
     Direction              direction;         ///< FRONT / REAR (never AUTO).
     uint8_t                lineBoardCount;    ///< Config::LINE_BOARD_COUNT.
-    bool                   autoRuleActive;    ///< autoSeekEnabled && nextHopIsProjection.
+    bool                   autoRuleActive;    ///< true when BLIND_PROJECTION_AUTO_SEEK is on and this BLIND edge's destination is a projection node.
 };
 
 /**
@@ -112,10 +113,8 @@ struct StopAtLineResolution
  *          - `direction`      `_resolvedDirection` — the post-`resolveDirection`
  *                             travel direction (FRONT/REAR; never AUTO here).
  *          - `lineBoardCount` `Config::LINE_BOARD_COUNT` — gates a rear seek.
- *          - `autoRuleActive` the caller's
- *                             `autoSeekEnabled && nextHopIsProjection` — true when
- *                             the field-wide auto-seek toggle is on AND this blind
- *                             hop feeds a projection edge.
+ *          - `autoRuleActive` true when `BLIND_PROJECTION_AUTO_SEEK` is on AND
+ *                             this BLIND edge's destination is a projection node.
  * @return The `{seek, motionMode}` decision per the T0 truth table.
  *         `seek` is true iff the `Drive.stopAtLine` seek should be dispatched;
  *         `motionMode` is the seek's drive mode (when seeking) or the dead-reckon

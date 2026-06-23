@@ -41,14 +41,13 @@ namespace FieldMap
     inline const Routes::EdgeInfo& noEdge()
     {
         static const Routes::EdgeInfo kNoEdge = {
-            Routes::EdgeType::NONE,        // type
-            0.0f,                          // distance_cm
-            0.0f,                          // heading_deg
-            Routes::LineMode::DEFAULT,     // line_mode_override
-            Routes::BlindMode::DEFAULT,    // blind_mode_override
-            Routes::ProjectionMode::DEFAULT, // projection_mode_override
-            Routes::DirectionMode::DEFAULT,  // direction_override
-            Routes::StopAtLineMode::DEFAULT  // stop_at_line_override
+            Routes::EdgeType::NONE,         // type
+            0.0f,                           // distance_cm
+            0.0f,                           // heading_deg
+            Routes::LineMode::DEFAULT,      // line_mode_override
+            Routes::BlindMode::DEFAULT,     // blind_mode_override
+            Routes::DirectionMode::DEFAULT, // direction_override
+            Routes::StopAtLineMode::DEFAULT // stop_at_line_override
         };
         return kNoEdge;
     }
@@ -138,6 +137,23 @@ namespace FieldMap
         // from a real LINE node. Callers that must tell the two apart should range-check
         // the id (`id < N_NODES`) before calling, or use getNode() and inspect the name.
         return getNode(id).type;
+    }
+
+    /**
+     * @brief Test whether a node is a `PROJECTION` node (on a line, off any junction).
+     *
+     * @param id Node index to classify.
+     * @return `true` iff `id` is in range and its category is `NodeType::PROJECTION`.
+     *
+     * @note Convenience over `getNodeType(id)` for the firmware auto-seek dispatch: a BLIND
+     *       hop into a projection destination triggers the stop-at-line seek, and a LINE hop
+     *       into one switches from junction-detect to a distance-gated dead-reckon advance.
+     *       Out-of-range ids report `NodeType::LINE` (see `getNodeType`), so they are not
+     *       projection nodes and this returns `false` for them.
+     */
+    inline bool isProjectionNode(uint8_t id)
+    {
+        return getNodeType(id) == Routes::NodeType::PROJECTION;
     }
 
     /**

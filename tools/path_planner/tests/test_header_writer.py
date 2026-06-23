@@ -49,7 +49,6 @@ before touching the goldens.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import re as _re
 import tempfile
@@ -84,28 +83,6 @@ from tools.path_planner.planner import (
     compute_all_pairs_next_hop,
 )
 
-_FIELD_ATTRS = (
-    "NODES",
-    "NODE_TYPES",
-    "LINE_SEGMENTS",
-    "BLIND_EDGES",
-    "OBSTACLES",
-    "ROBOT_RADIUS_CM",
-    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
-    "BLIND_DECAY_ENABLED",
-    "BLIND_DECAY_K",
-    "BLIND_DECAY_EXPONENT",
-    "BLIND_DECAY_D_REF",
-    "START_NODE",
-    "START_HEADING_DEG",
-    "FIELD_MM",
-    "MAP_PNG",
-    "BLIND_PROJECTION_AUTO_SEEK",
-    # Optional sparse table (empty on every fixture here) -- carried so the
-    # strict header_writer read of field_data.RESET_NODES never AttributeErrors.
-    "RESET_NODES",
-)
-
 _GOLDEN_DIR = Path(__file__).parent / "golden"
 _GOLDEN_HEADER = _GOLDEN_DIR / "routes_toy.h"
 _GOLDEN_SOURCE = _GOLDEN_DIR / "routes_toy.cpp"
@@ -114,21 +91,27 @@ _GOLDEN_SOURCE = _GOLDEN_DIR / "routes_toy.cpp"
 # purely a hash anchor -- editing it would force a golden rebaseline.
 _TOY_FIELD_SOURCE = _GOLDEN_DIR / "_toy_field_source.py"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_FIELD_DATA_SRC = _REPO_ROOT / FIELD_DATA_PATH
-
-
-def _clone_field_data() -> SimpleNamespace:
-    snapshot = {attr: copy.deepcopy(getattr(real_field_data, attr)) for attr in _FIELD_ATTRS}
-    return SimpleNamespace(**snapshot)
 
 
 def _build_toy_field_data() -> SimpleNamespace:
     """Construct the canonical toy field_data fixture used by the goldens.
 
-    Stable, minimal, exercises every node category (LINE + BLIND) and
-    every classic edge category (LINE + BLIND). Per-edge overrides and
-    PROJECTION edges live in the override-specific tests (TC2/TC3) so
-    the byte-identical golden tests stay simple to diff.
+    Stable, minimal, exercises every node category (LINE + BLIND + PROJECTION +
+    the implicit reset coverage elsewhere) and every edge category (LINE + BLIND).
+    Per-edge overrides live in the override-specific tests (TC2/TC3) so the
+    byte-identical golden tests stay simple to diff.
+
+    Issue #64 (TC15): the validator now rejects an on-line START node, so the
+    spawn is a blind node ``S`` (mirroring the toy fixture). A ``projection`` node
+    ``P1`` sits on the A-B line at (55, 10) and exercises both projection
+    scenarios so the golden emits ``NodeType::PROJECTION`` and the 7-field
+    ``EdgeInfo`` struct (no ``ProjectionMode`` / ``projection_mode_override`` /
+    ``EdgeType::PROJECTION``):
+
+    * ``line(A) - projection(P1) - line(B)`` -- the collinear LINE triple
+      (pass-through scenario); the direct ``A-B`` LINE edge is kept too.
+    * ``blind(S) -> projection(P1)`` -- the BLIND edge ``S-P1`` (auto-seek +
+      re-anchor), so P1 is reachable by both line-follow and blind seek.
     """
     return SimpleNamespace(
         NODES={
@@ -138,24 +121,27 @@ def _build_toy_field_data() -> SimpleNamespace:
             "D": (10.0, 150.0),
             "E": (100.0, 80.0),
             "G": (250.0, 80.0),
+            "P1": (55.0, 10.0),
+            "S": (55.0, -40.0),
         },
         NODE_TYPES={
             "A": "line", "B": "line", "C": "line", "D": "line", "E": "line",
-            "G": "blind",
+            "G": "blind", "P1": "projection", "S": "blind",
         },
         LINE_SEGMENTS=[
             ("A", "B"), ("B", "C"), ("C", "D"), ("D", "A"),
             ("A", "E"), ("B", "E"), ("C", "E"), ("D", "E"),
+            ("A", "P1"), ("P1", "B"),
         ],
-        BLIND_EDGES=[("B", "G")],
+        BLIND_EDGES=[("B", "G"), ("S", "A"), ("S", "P1")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,
         BLIND_DECAY_K=0.05,
         BLIND_DECAY_EXPONENT=2.0,
         BLIND_DECAY_D_REF=50.0,
-        START_NODE="A",
-        START_HEADING_DEG=0.0,
+        START_NODE="S",
+        START_HEADING_DEG=90.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
         BLIND_PROJECTION_AUTO_SEEK=True,
@@ -303,8 +289,16 @@ def test_source_sha256_matches_field_data(emit_targets):
 
 
 def test_unreachable_pair_emits_0xff(emit_targets):
-    """Removing BLIND_EDGES makes G unreachable; NEXT_HOP must show 0xFF."""
-    fd = _clone_field_data()
+    """Removing BLIND_EDGES isolates the blind nodes; NEXT_HOP must show 0xFF.
+
+    Built on the self-contained toy fixture rather than the production field so
+    the test holds regardless of how ``field_data.json`` is encoded -- between
+    phases the real field may collapse to a single spawn node, which cannot
+    produce an unreachable pair. The toy field's ``G`` and ``S`` nodes are only
+    reachable via BLIND edges, so stripping ``BLIND_EDGES`` strands both and the
+    emitted NEXT_HOP table must carry multiple ``0xFF`` sentinels.
+    """
+    fd = _build_toy_field_data()
     fd.BLIND_EDGES = []
     # Pin EDGES empty so this unreachable-pair test exercises only the
     # geometry graph: no rich-edge overrides, no pivot tags, nothing that
@@ -318,7 +312,7 @@ def test_unreachable_pair_emits_0xff(emit_targets):
     emit_routes(
         fd, graph, next_hop,
         header_path=header_path, source_path=source_path,
-        field_data_source_path=_FIELD_DATA_SRC,
+        field_data_source_path=_TOY_FIELD_SOURCE,
     )
     cpp_text = source_path.read_text(encoding="utf-8")
     assert NEXT_HOP_NONE_HEX in cpp_text
@@ -354,17 +348,84 @@ def test_edge_types_use_enum(emit_targets):
     """Edges render as ``EdgeType::*`` literals, not integers.
 
     PR4 dropped the ``_E`` suffix; the new spelling is bare ``LINE`` /
-    ``BLIND`` (and a new ``PROJECTION``). The toy fixture has no
-    PROJECTION edges, so only LINE + BLIND are asserted here -- the
-    PROJECTION emit path is covered separately in
-    :func:`test_edge_primitive_mode_override_emit` via a fixture that
-    seeds a PROJECTION edge.
+    ``BLIND``. Issue #64 reduced ``EdgeType`` to ``NONE`` / ``LINE`` / ``BLIND``
+    (projection is a NODE type now), so ``EdgeType::PROJECTION`` must be ABSENT;
+    the projection node emits ``NodeType::PROJECTION`` instead (asserted by
+    :func:`test_projection_node_emits_nodetype_projection`).
     """
     _, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
     cpp_text = source_path.read_text(encoding="utf-8")
     assert "EdgeType::LINE," in cpp_text or "EdgeType::LINE " in cpp_text
     assert "EdgeType::BLIND," in cpp_text or "EdgeType::BLIND " in cpp_text
+    # Issue #64: the projection EDGE type is retired.
+    assert "EdgeType::PROJECTION" not in cpp_text
+
+
+def test_projection_node_emits_nodetype_projection(emit_targets):
+    """TC15: the toy projection node ``P1`` emits ``NodeType::PROJECTION`` on its NODES row.
+
+    The toy fixture carries a ``projection`` node, so the emitter must render the
+    ``NodeType`` enum value ``PROJECTION = 3`` and stamp it on P1's NODES row --
+    the same on-model treatment as ``RESET``. This is the load-bearing positive
+    half of TC15 (the negatives -- ``EdgeType::PROJECTION`` / ``ProjectionMode``
+    / ``projection_mode_override`` ABSENT, ``EdgeInfo`` 7 fields -- are asserted
+    in :func:`test_projection_node_drops_retired_projection_symbols`).
+    """
+    header_path, source_path = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    # routes.h: the NodeType enum gains PROJECTION = 3.
+    assert "PROJECTION = 3" in header_text
+    node_type_line = next(
+        line for line in header_text.splitlines()
+        if "enum class NodeType" in line
+    )
+    assert "PROJECTION = 3" in node_type_line
+    assert "RESET = 2" in node_type_line
+
+    # routes.cpp: P1's NODES row carries NodeType::PROJECTION (not LINE / BLIND).
+    assert 'NodeType::PROJECTION, "P1"' in cpp_text
+
+
+def test_projection_node_drops_retired_projection_symbols(emit_targets):
+    """TC15 (negatives): EdgeType::PROJECTION / ProjectionMode / projection_mode_override absent; EdgeInfo is 7 fields.
+
+    Issue #64 retired the projection EDGE type and its motion override. The
+    emitted routes.{h,cpp} must carry NONE of: ``EdgeType::PROJECTION``,
+    ``ProjectionMode`` (the enum), ``projection`` (the PipelineConfig member), or
+    ``projection_mode_override`` (the EdgeInfo field). The ``EdgeInfo`` struct
+    must therefore have exactly 7 fields, ending on ``stop_at_line_override``.
+    """
+    header_path, source_path = emit_targets
+    _emit_with_toy_field(emit_targets)
+    header_text = header_path.read_text(encoding="utf-8")
+    cpp_text = source_path.read_text(encoding="utf-8")
+
+    for retired in (
+        "EdgeType::PROJECTION",
+        "ProjectionMode",
+        "projection_mode_override",
+    ):
+        assert retired not in header_text, f"{retired!r} leaked into routes.h"
+        assert retired not in cpp_text, f"{retired!r} leaked into routes.cpp"
+
+    # EdgeInfo is exactly 7 fields: type, distance_cm, heading_deg,
+    # line_mode_override, blind_mode_override, direction_override,
+    # stop_at_line_override. Slice the struct body and count the field lines.
+    struct_start = header_text.index("struct EdgeInfo {")
+    struct_end = header_text.index("};", struct_start)
+    struct_body = header_text[struct_start:struct_end]
+    field_lines = [
+        ln.strip() for ln in struct_body.splitlines()
+        if ln.strip().endswith(";") and "struct EdgeInfo" not in ln
+    ]
+    assert len(field_lines) == 7, (
+        f"EdgeInfo must have 7 fields; got {len(field_lines)}: {field_lines}"
+    )
+    assert field_lines[-1].startswith("StopAtLineMode") and "stop_at_line_override" in field_lines[-1]
 
 
 def test_compute_source_hash_is_full_sha256():
@@ -463,11 +524,15 @@ def test_emit_accepts_255_nodes(emit_targets):
     """
     header_path, source_path = emit_targets
     names = [f"N{i}" for i in range(255)]
+    # Issue #64: the validator rejects an on-line START, so N0 is a blind spawn
+    # joined to the line chain N1..N254 by a BLIND edge (the rest stay LINE).
+    node_types = {name: "line" for name in names}
+    node_types["N0"] = "blind"
     fd = SimpleNamespace(
         NODES={name: (float(i), 0.0) for i, name in enumerate(names)},
-        NODE_TYPES={name: "line" for name in names},
-        LINE_SEGMENTS=[(names[i], names[i + 1]) for i in range(254)],
-        BLIND_EDGES=[],
+        NODE_TYPES=node_types,
+        LINE_SEGMENTS=[(names[i], names[i + 1]) for i in range(1, 254)],
+        BLIND_EDGES=[(names[0], names[1])],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,
@@ -500,15 +565,21 @@ def test_emit_accepts_255_nodes(emit_targets):
 # ---------------------------------------------------------------------------
 
 def test_pipeline_config_default_emit(emit_targets):
-    """TC1: PIPELINE_CONFIG defaults emit canonical struct in routes.cpp."""
+    """TC1: PIPELINE_CONFIG defaults emit canonical struct in routes.cpp.
+
+    Issue #64 dropped the ``projection`` PipelineConfig member (and the
+    ``ProjectionMode`` enum), so the emitted struct now carries only
+    line / blind / turn / direction.
+    """
     _, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
     cpp_text = source_path.read_text(encoding="utf-8")
     assert "const PipelineConfig PIPELINE_CONFIG = {" in cpp_text
     assert "LineMode::NORMAL" in cpp_text
     assert "BlindMode::SYNC_TSHAPE" in cpp_text
-    assert "ProjectionMode::NORMAL" in cpp_text
     assert "TurnMode::COUNTER_ROT" in cpp_text
+    # ProjectionMode was retired (issue #64) -- it must NOT appear anywhere.
+    assert "ProjectionMode" not in cpp_text
 
 
 def test_blind_mode_enum_emits_stop_at_line(emit_targets):
@@ -586,23 +657,29 @@ def _two_pivot_graph() -> tuple[SimpleNamespace, nx.DiGraph]:
     normalize(0 - 90) = -90, right). Built via ``build_graph`` so the geometry /
     headings are real, and the edges are long enough that both pivots validate.
     """
+    # Issue #64: the validator rejects an on-line START, so a blind spawn ``S``
+    # (on a BLIND edge into A) is the dead-reckon origin. ``S`` sorts AFTER A-D
+    # alphabetically, so the A=0/B=1/C=2/D=3 indices the pivot-row assertions rely
+    # on are unchanged.
     fd = SimpleNamespace(
         NODES={
             "A": (0.0, 0.0),
             "B": (100.0, 0.0),
             "C": (100.0, 100.0),
             "D": (200.0, 100.0),
+            "S": (0.0, -40.0),
         },
-        NODE_TYPES={"A": "line", "B": "line", "C": "line", "D": "line"},
+        NODE_TYPES={"A": "line", "B": "line", "C": "line", "D": "line",
+                    "S": "blind"},
         LINE_SEGMENTS=[("A", "B"), ("B", "C"), ("C", "D")],
-        BLIND_EDGES=[],
+        BLIND_EDGES=[("S", "A")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,
         BLIND_DECAY_K=0.05,
         BLIND_DECAY_EXPONENT=2.0,
         BLIND_DECAY_D_REF=50.0,
-        START_NODE="A",
+        START_NODE="S",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3000, 2000),
         MAP_PNG="maps/map.png",
@@ -939,25 +1016,29 @@ def test_reset_nodes_table_emits_row_and_count(emit_targets):
       encodes to ``1`` (the load-bearing x=0/y=1 contract), wall_coord as a
       float, facing rounded to an ``int16_t``.
 
-    The node order is alphabetical (``Inter`` < ``Wall1``), so Wall1 lands at
-    index 1; the assertion derives the index from the sorted NODES rather than
-    hard-coding it so a future node addition would not silently pass.
+    The node order is alphabetical; the assertion derives Wall1's index from the
+    sorted NODES rather than hard-coding it so a future node addition would not
+    silently pass.
+
+    Issue #64: the validator rejects an on-line START, so a blind spawn ``Spawn``
+    (on a BLIND edge into Inter) is the dead-reckon origin.
     """
     fd = SimpleNamespace(
         NODES={
             "Inter": (165.0, 119.0),
             "Wall1": (165.0, 139.0),
+            "Spawn": (200.0, 119.0),
         },
-        NODE_TYPES={"Inter": "line", "Wall1": "reset"},
+        NODE_TYPES={"Inter": "line", "Wall1": "reset", "Spawn": "blind"},
         LINE_SEGMENTS=[],
-        BLIND_EDGES=[("Inter", "Wall1")],
+        BLIND_EDGES=[("Inter", "Wall1"), ("Spawn", "Inter")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,
         BLIND_DECAY_K=0.05,
         BLIND_DECAY_EXPONENT=2.0,
         BLIND_DECAY_D_REF=50.0,
-        START_NODE="Inter",
+        START_NODE="Spawn",
         START_HEADING_DEG=0.0,
         FIELD_MM=(3200, 1540),
         MAP_PNG="maps/map.png",

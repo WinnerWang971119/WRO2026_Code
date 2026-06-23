@@ -9,16 +9,18 @@ files the runtime ``PathTracker`` consumes:
   (``NODES``, ``NEXT_HOP``, ``EDGES``, ``PIPELINE_CONFIG``).
 
 PR3 simplification: drops ``GoalApproach`` struct, ``BlindAction`` enum,
-projection-related node category, and the per-goal blind-move arrays.
-Every node is either a ``LINE`` or ``BLIND`` type; the runtime reaches
-each one via the corresponding edge type.
+and the per-goal blind-move arrays.
+
+Node category (issue #64): a node is a ``LINE``, ``BLIND``, ``RESET``, or
+``PROJECTION`` type. ``EdgeType`` is reduced to ``NONE`` / ``LINE`` /
+``BLIND`` -- projection is a node property, not an edge type, so the
+per-hop behavior falls out of ``(edge_type, destination_node_type)``.
 
 Pipeline-mode extension (T7): emits mission-wide motion-mode defaults
-(``PIPELINE_CONFIG``) plus three optional per-edge override slots
-(``line_mode_override``, ``blind_mode_override``,
-``projection_mode_override``) and a ``direction_override`` slot. Each enum
-carries a ``DEFAULT = 0`` sentinel meaning "inherit
-``PIPELINE_CONFIG.<category>``" at runtime dispatch.
+(``PIPELINE_CONFIG``) plus two optional per-edge mode-override slots
+(``line_mode_override``, ``blind_mode_override``) and a
+``direction_override`` slot. Each enum carries a ``DEFAULT = 0`` sentinel
+meaning "inherit ``PIPELINE_CONFIG.<category>``" at runtime dispatch.
 
 Per-turn pivot extension (ADR-036, supersedes the per-edge issue-#44
 model): single-wheel pivots are no longer a per-edge field. The planner's
@@ -63,13 +65,12 @@ from typing import (
 
 import networkx as nx
 
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE, EDGE_PROJECTION
+from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
     LineMode,
-    ProjectionMode,
     StopAtLineMode,
     TurnMode,
 )
@@ -93,15 +94,15 @@ _REGEN_COMMAND = "uv run python tools/path_planner/build_routes.py"
 _INDENT = "    "
 
 _EDGE_TYPE_TO_ENUM: Dict[str, str] = {
-    EDGE_LINE:       "EdgeType::LINE",
-    EDGE_BLIND:      "EdgeType::BLIND",
-    EDGE_PROJECTION: "EdgeType::PROJECTION",
+    EDGE_LINE:  "EdgeType::LINE",
+    EDGE_BLIND: "EdgeType::BLIND",
 }
 
 _NODE_TYPE_TO_ENUM: Dict[str, str] = {
-    "line":  "NodeType::LINE",
-    "blind": "NodeType::BLIND",
-    "reset": "NodeType::RESET",
+    "line":       "NodeType::LINE",
+    "blind":      "NodeType::BLIND",
+    "reset":      "NodeType::RESET",
+    "projection": "NodeType::PROJECTION",
 }
 
 # Wall-zero reset axis encoding -- the load-bearing cross-task contract
@@ -118,9 +119,8 @@ _RESET_AXIS_TO_UINT8: Dict[str, int] = {
 # per-edge field -- single-wheel pivots moved to the sparse ``PIVOT_TURNS``
 # table (ADR-036) -- so there is no longer a per-edge turn slot here.
 _PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE: Dict[str, str] = {
-    EDGE_LINE:       "line_mode_override",
-    EDGE_BLIND:      "blind_mode_override",
-    EDGE_PROJECTION: "projection_mode_override",
+    EDGE_LINE:  "line_mode_override",
+    EDGE_BLIND: "blind_mode_override",
 }
 
 # Default sentinel strings emitted when an override slot is unset. Each
@@ -128,7 +128,6 @@ _PRIMITIVE_MODE_SLOT_BY_EDGE_TYPE: Dict[str, str] = {
 # zero-initialised EdgeInfo means "inherit PIPELINE_CONFIG".
 _LINE_MODE_DEFAULT         = "LineMode::DEFAULT"
 _BLIND_MODE_DEFAULT        = "BlindMode::DEFAULT"
-_PROJECTION_MODE_DEFAULT   = "ProjectionMode::DEFAULT"
 _DIRECTION_MODE_DEFAULT    = "DirectionMode::DEFAULT"
 _STOP_AT_LINE_MODE_DEFAULT = "StopAtLineMode::DEFAULT"
 
@@ -138,7 +137,7 @@ _STOP_AT_LINE_MODE_DEFAULT = "StopAtLineMode::DEFAULT"
 # ``_emit_pipeline_config`` qualifies its ``TurnMode`` value.
 _TURN_MODE_PREFIX = "TurnMode::"
 
-# The five per-category motion-mode enums, in the order their C++ bodies are
+# The per-category motion-mode enums, in the order their C++ bodies are
 # emitted into routes.h. The bodies are generated from these Python ``IntEnum``
 # definitions (single source of truth) so a member added/renamed in
 # ``pipeline_config.py`` can never drift out of sync with routes.h. NodeType and
@@ -147,14 +146,13 @@ _TURN_MODE_PREFIX = "TurnMode::"
 _MODE_ENUMS: Tuple[type, ...] = (
     LineMode,
     BlindMode,
-    ProjectionMode,
     TurnMode,
     DirectionMode,
 )
 
 
 def _emit_mode_enum_lines() -> List[str]:
-    """Generate the C++ ``enum class`` bodies for the five mode enums.
+    """Generate the C++ ``enum class`` bodies for the mode enums.
 
     Each line is built from the Python :class:`~enum.IntEnum` members
     (``NAME = value`` in definition order). The enum-name column is padded so
@@ -237,14 +235,14 @@ def _override_enum_value(
     return enum_cls.__name__ + "::" + member.name
 
 
-def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
-    """Compute the five override-enum literals for one edge.
+def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
+    """Compute the four override-enum literals for one edge.
 
-    Returns ``(line_override, blind_override, projection_override,
-    direction_override, stop_at_line_override)`` in the same order they appear
-    on the C++ ``EdgeInfo`` struct. The ``primitive_mode`` attribute lands on
-    exactly one slot, picked by the edge's ``type``; the other two primitive
-    slots stay DEFAULT. The ``direction_override`` attribute always lands on
+    Returns ``(line_override, blind_override, direction_override,
+    stop_at_line_override)`` in the same order they appear on the C++
+    ``EdgeInfo`` struct. The ``primitive_mode`` attribute lands on exactly one
+    slot, picked by the edge's ``type`` (LINE or BLIND); the other primitive
+    slot stays DEFAULT. The ``direction_override`` attribute always lands on
     the direction slot; absent today, so defaults to ``DirectionMode::DEFAULT``.
     The ``stop_at_line_override`` attribute is a second directional slot read
     straight off the edge (a ``StopAtLineMode`` member baked on by the graph
@@ -256,7 +254,6 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
     """
     line_override         = _LINE_MODE_DEFAULT
     blind_override        = _BLIND_MODE_DEFAULT
-    projection_override   = _PROJECTION_MODE_DEFAULT
     direction_override    = _DIRECTION_MODE_DEFAULT
     stop_at_line_override = _STOP_AT_LINE_MODE_DEFAULT
 
@@ -271,10 +268,6 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
         elif slot == "blind_mode_override":
             blind_override = _override_enum_value(
                 BlindMode, primitive_mode, _BLIND_MODE_DEFAULT
-            )
-        elif slot == "projection_mode_override":
-            projection_override = _override_enum_value(
-                ProjectionMode, primitive_mode, _PROJECTION_MODE_DEFAULT
             )
         # Unknown edge_type -> drop the override silently; validator owns
         # the strict check.
@@ -294,7 +287,6 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
     return (
         line_override,
         blind_override,
-        projection_override,
         direction_override,
         stop_at_line_override,
     )
@@ -303,16 +295,16 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
 def _none_edge_cell() -> str:
     # Field order MUST match the C++ ``EdgeInfo`` struct positionally (ADR-036:
     # ``pivot_trim_cm`` / ``pre_turn_mode_override`` are gone -- pivots live in
-    # the sparse ``PIVOT_TURNS`` table now). Both this and ``_edge_cell`` must
-    # emit the same five override slots in the same order (line, blind,
-    # projection, direction, stop_at_line) or the brace-enclosed aggregate
+    # the sparse ``PIVOT_TURNS`` table now; issue #64: ``projection_mode_override``
+    # is gone -- projection is a node type, not an edge type). Both this and
+    # ``_edge_cell`` must emit the same four override slots in the same order
+    # (line, blind, direction, stop_at_line) or the brace-enclosed aggregate
     # initialiser misaligns.
     return (
         "{ EdgeType::NONE, "
         + _format_float(0.0) + ", " + _format_float(0.0) + ", "
         + _LINE_MODE_DEFAULT + ", "
         + _BLIND_MODE_DEFAULT + ", "
-        + _PROJECTION_MODE_DEFAULT + ", "
         + _DIRECTION_MODE_DEFAULT
         + ", " + _STOP_AT_LINE_MODE_DEFAULT
         + " }"
@@ -329,7 +321,6 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
     (
         line_override,
         blind_override,
-        projection_override,
         direction_override,
         stop_at_line_override,
     ) = _resolve_overrides(edge)
@@ -337,7 +328,6 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
         "{ " + enum_name + ", " + distance + ", " + heading + ", "
         + line_override + ", "
         + blind_override + ", "
-        + projection_override + ", "
         + direction_override
         + ", " + stop_at_line_override
         + " }"
@@ -451,17 +441,19 @@ def _build_routes_h_lines(
     lines.append("")
     lines.append(_INDENT + "// Node category. LINE nodes are reached by line-following")
     lines.append(_INDENT + "// to the next intersection; BLIND nodes are reached by a")
-    lines.append(_INDENT + "// dead-reckoned turn + forward move from a connected node.")
+    lines.append(_INDENT + "// dead-reckoned turn + forward move from a connected node;")
+    lines.append(_INDENT + "// PROJECTION nodes sit on a line but at no junction (dead-")
+    lines.append(_INDENT + "// reckon to identity; a BLIND hop into one auto-seeks).")
     lines.append(
         _INDENT
-        + "enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2 };"
+        + "enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2, "
+        + "PROJECTION = 3 };"
     )
     lines.append("")
     lines.append(_INDENT + "// Edge motion class, dispatched by the runtime.")
     lines.append(
         _INDENT
-        + "enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2, "
-        + "PROJECTION = 3 };"
+        + "enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2 };"
     )
     lines.append("")
     lines.append(
@@ -491,11 +483,10 @@ def _build_routes_h_lines(
         _INDENT + "// tools/path_planner/pipeline_config.py at build time."
     )
     lines.append(_INDENT + "struct PipelineConfig {")
-    lines.append(_INDENT * 2 + "LineMode       line;")
-    lines.append(_INDENT * 2 + "BlindMode      blind;")
-    lines.append(_INDENT * 2 + "ProjectionMode projection;")
-    lines.append(_INDENT * 2 + "TurnMode       turn;")
-    lines.append(_INDENT * 2 + "DirectionMode  direction;")
+    lines.append(_INDENT * 2 + "LineMode      line;")
+    lines.append(_INDENT * 2 + "BlindMode     blind;")
+    lines.append(_INDENT * 2 + "TurnMode      turn;")
+    lines.append(_INDENT * 2 + "DirectionMode direction;")
     lines.append(_INDENT + "};")
     lines.append(_INDENT + "extern const PipelineConfig PIPELINE_CONFIG;")
     lines.append("")
@@ -510,7 +501,6 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "float          heading_deg;")
     lines.append(_INDENT * 2 + "LineMode       line_mode_override;")
     lines.append(_INDENT * 2 + "BlindMode      blind_mode_override;")
-    lines.append(_INDENT * 2 + "ProjectionMode projection_mode_override;")
     lines.append(_INDENT * 2 + "DirectionMode  direction_override;")
     lines.append(_INDENT * 2 + "StopAtLineMode stop_at_line_override;")
     lines.append(_INDENT + "};")
@@ -692,11 +682,10 @@ def _emit_pipeline_config() -> List[str]:
     """Bake the Python-side PIPELINE_CONFIG singleton into a C++ definition."""
     return [
         _INDENT + "const PipelineConfig PIPELINE_CONFIG = {",
-        _INDENT * 2 + "LineMode::"       + PIPELINE_CONFIG.line.name       + ",",
-        _INDENT * 2 + "BlindMode::"      + PIPELINE_CONFIG.blind.name      + ",",
-        _INDENT * 2 + "ProjectionMode::" + PIPELINE_CONFIG.projection.name + ",",
-        _INDENT * 2 + "TurnMode::"       + PIPELINE_CONFIG.turn.name       + ",",
-        _INDENT * 2 + "DirectionMode::"  + PIPELINE_CONFIG.direction.name  + ",",
+        _INDENT * 2 + "LineMode::"      + PIPELINE_CONFIG.line.name      + ",",
+        _INDENT * 2 + "BlindMode::"     + PIPELINE_CONFIG.blind.name     + ",",
+        _INDENT * 2 + "TurnMode::"      + PIPELINE_CONFIG.turn.name      + ",",
+        _INDENT * 2 + "DirectionMode::" + PIPELINE_CONFIG.direction.name + ",",
         _INDENT + "};",
     ]
 

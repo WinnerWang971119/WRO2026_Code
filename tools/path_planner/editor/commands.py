@@ -274,12 +274,9 @@ class RenameNode:
     ``model.line_segments`` and ``model.blind_edges`` that mentions the old
     name, the ``model.reset_nodes`` key (a reset spec is keyed by node name),
     every ``model.pivot_turns`` triple that names the node, and
-    ``model.start_node`` if it equals the old name.
-
-    .. note::
-       Projection edges live off-model in the app's ``ProjectionDelta`` and are
-       NOT visible here; the app re-keys that delta itself when it dispatches a
-       rename (see ``EditorApp._perform_rename``).
+    ``model.start_node`` if it equals the old name. A ``"projection"``-typed
+    node renames through ``model.node_types`` like any other node type -- it
+    is an on-model node, so no off-model bookkeeping is involved (issue #64).
 
     :ivar old: Existing node name.
     :ivar new: Replacement node name.  Must not already exist.
@@ -846,6 +843,43 @@ class SetResetSpec:
             name=name, axis=axis, wall_coord=wall_coord, facing=facing
         )
 
+    @classmethod
+    def autofilled_auto(
+        cls,
+        name: str,
+        node_xy: tuple[float, float],
+        field_mm: tuple[float, float],
+    ) -> "SetResetSpec":
+        """Build a :class:`SetResetSpec` with fully auto-derived axis, wall, and facing.
+
+        Mirrors :meth:`autofilled` but does **not** require the caller to supply
+        an axis.  Instead, it delegates to
+        :func:`projection_edges.reset_autofill_auto`, which evaluates all four
+        walls, picks the nearest one (qualifying or not -- best-effort), and
+        returns the axis together with ``wall_coord`` and ``facing``.  The app
+        supplies
+        ``node_xy=model.nodes[name]`` and ``model.field_mm``; keeping the inputs
+        pure (no ``FieldModel``) makes this classmethod directly unit-testable.
+
+        :param name: Name of the node to make (or keep) a reset node.  Not
+            validated here -- :meth:`apply` rejects an unknown node at command
+            time.
+        :param node_xy: The reset node position ``(x_cm, y_cm)``, used to choose
+            the nearest wall across both axes.
+        :param field_mm: Outer field size ``(width_mm, height_mm)`` in
+            millimetres (the ``FieldModel.field_mm`` value).
+        :return: A :class:`SetResetSpec` whose ``axis``, ``wall_coord``, and
+            ``facing`` are the auto-derived suggestion from the nearest wall.
+        :note: Does **not** raise -- the auto helper always returns a best-effort
+            spec (it never raises on a too-close wall).
+        """
+        axis, wall_coord, facing = projection_edges.reset_autofill_auto(
+            node_xy, field_mm
+        )
+        return cls(
+            name=name, axis=axis, wall_coord=wall_coord, facing=facing
+        )
+
 
 @dataclass
 class ClearResetSpec:
@@ -1125,17 +1159,9 @@ class AddEdgesBatch:
 
     :ivar edges: Sequence of ``(node_a, node_b, kind)`` triples where *kind*
         is either ``"line"`` or ``"blind"``.
-    :ivar projection_pairs: Undirected pairs (each a ``frozenset({a, b})``) that
-        already carry a PROJECTION edge. Projection edges live off-model in the
-        app's ``ProjectionDelta``, so this command cannot see them through
-        ``model``; the caller passes them in so a batch never adds a plain edge
-        to a pair that already has a projection (``graph_builder`` would then
-        emit a conflicting directed pair from both). Empty by default for
-        callers (and tests) with no projection edges in play.
     """
 
     edges: list[tuple[str, str, str]]
-    projection_pairs: frozenset = field(default_factory=frozenset)
 
     # Populated during apply(); each entry is ("line"|"blind", appended_index).
     # Stored in input order; revert walks this list in reverse.
@@ -1153,8 +1179,6 @@ class AddEdgesBatch:
         * Either endpoint is not in ``model.nodes``
         * The undirected pair ``{a, b}`` already exists in
           ``model.line_segments`` or ``model.blind_edges``
-        * The undirected pair ``{a, b}`` already carries a projection edge
-          (passed in via ``projection_pairs``)
         * The same undirected pair appears more than once within
           ``self.edges`` itself
 
@@ -1209,12 +1233,6 @@ class AddEdgesBatch:
                 raise ValueError(
                     f"AddEdgesBatch: edge {entry!r} conflicts with existing "
                     f"blind_edges[{blind_idx}]"
-                )
-
-            if pair in self.projection_pairs:
-                raise ValueError(
-                    f"AddEdgesBatch: edge {entry!r} conflicts with an existing "
-                    "projection edge on the same pair"
                 )
 
             seen_in_batch.add(pair)
@@ -1312,262 +1330,6 @@ class DeleteEdge:
             model.line_segments.insert(self._origin_index, self._origin_value)
         else:
             model.blind_edges.insert(self._origin_index, self._origin_value)
-
-
-# ---------------------------------------------------------------------------
-# Projection-edge commands
-#
-# Projection edges are NOT part of ``FieldModel`` / the JSON schema: they live
-# in ``field_data.py``'s ``EDGES`` list and are flushed at Save via LibCST
-# (T8).  To make add / remove undoable through the SAME ``History`` as every
-# other edit, the app owns a single :class:`ProjectionDelta` and the commands
-# below mutate THAT delta -- never the model.  ``model`` is consulted only for
-# read-only validation (node existence).  The delta's ``render()`` is the
-# source of truth the canvas paints and the Save flow flushes.
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ProjectionDelta:
-    """App-owned, undoable working set of projection edges.
-
-    The app holds exactly one of these.  ``loaded`` is the baseline read from
-    ``field_data.py``'s ``EDGES`` at Open (and re-seeded after Save);
-    ``adds`` and ``removes`` are the pending session edits the
-    :class:`AddProjectionEdge` / :class:`DeleteProjectionEdge` commands push
-    and pop.  :meth:`render` folds the three into the deterministic set the
-    canvas paints and the Save flow flushes.
-
-    The delta is plain data: it owns no model reference and performs no
-    validation.  Node-existence checks live in the commands (which have the
-    model in hand); the delta only tracks membership.
-
-    :ivar loaded: Baseline projection edges read from ``field_data.py`` EDGES,
-        each ``(u, v, distance_cm, heading_deg)``.  Set by the app at load and
-        re-seeded after Save.
-    :ivar adds: Pending new projection edges, each
-        ``(u, v, distance_cm, heading_deg)``.
-    :ivar removes: Pending removals of *loaded* edges, each ``(u, v)``.
-    """
-
-    loaded: list[tuple[str, str, float, float]] = field(default_factory=list)
-    adds: list[tuple[str, str, float, float]] = field(default_factory=list)
-    removes: list[tuple[str, str]] = field(default_factory=list)
-
-    def render(self) -> list[tuple[str, str, float, float]]:
-        """Return the current projection-edge render set.
-
-        Delegates to :func:`projection_edges.reconcile`, which yields the
-        surviving ``loaded`` entries (source order) followed by the ``adds``
-        (user order), with every ``(u, v)`` in ``removes`` suppressed and a
-        same-pair add overriding the loaded geometry.
-
-        :return: ``(u, v, distance_cm, heading_deg)`` tuples in render order.
-        """
-        return projection_edges.reconcile(self.loaded, self.adds, self.removes)
-
-    def has(self, u: str, v: str) -> bool:
-        """Return ``True`` if ``(u, v)`` is in the current :meth:`render` set.
-
-        Matching is on the first two elements only (the ``(u, v)`` pair); the
-        distance / heading payload is not compared.
-
-        :param u: Source node name.
-        :param v: Destination node name.
-        :return: Whether an edge with this exact ``(u, v)`` pair currently
-            renders.
-        """
-        return any(edge[0] == u and edge[1] == v for edge in self.render())
-
-    def set_loaded(
-        self, loaded: list[tuple[str, str, float, float]]
-    ) -> None:
-        """Replace the baseline ``loaded`` set (app load / post-Save re-seed).
-
-        :param loaded: The new baseline projection edges, each
-            ``(u, v, distance_cm, heading_deg)``.
-        """
-        self.loaded = loaded
-
-    def clear_pending(self) -> None:
-        """Empty both pending lists (``adds`` and ``removes``).
-
-        Called by the app's Save flow once the pending edits have been flushed
-        into the baseline, so the next session starts from a clean delta.
-        """
-        self.adds.clear()
-        self.removes.clear()
-
-
-@dataclass
-class AddProjectionEdge:
-    """Add a projection edge ``u -> v`` to an app-owned :class:`ProjectionDelta`.
-
-    Mutates ``self.delta`` only -- the ``model`` is consulted purely for
-    read-only validation (both endpoints must exist).  Re-adding a *loaded*
-    edge the user had pending-deleted is handled by un-cancelling that removal
-    rather than appending a duplicate add, so an add then undo restores the
-    delta byte-identically.
-
-    :ivar delta: The app's single projection-edge working set to mutate.
-    :ivar u: Source node name; must exist in ``model.nodes``.
-    :ivar v: Destination node name; must exist in ``model.nodes`` and differ
-        from *u*.
-    :ivar distance_cm: Edge length in centimetres.
-    :ivar heading_deg: Edge heading in degrees, CCW from +x.
-    """
-
-    delta: ProjectionDelta
-    u: str
-    v: str
-    distance_cm: float
-    heading_deg: float
-
-    # ``"appended"`` -> a new 4-tuple was pushed onto ``delta.adds``;
-    # ``"uncanceled_remove"`` -> a pending ``(u, v)`` removal of a loaded edge
-    # was dropped from ``delta.removes`` (re-adding what the user had deleted).
-    _mode: str | None = field(default=None, init=False, repr=False)
-
-    def apply(self, model: FieldModel) -> None:
-        """Add the ``(u, v)`` projection edge to ``self.delta``.
-
-        Validates against the model (read-only) before any mutation, so a
-        rejected add is a clean no-op for ``History``.
-
-        :param model: Target model, used only for node-existence validation.
-        :raises ValueError: If *u* or *v* is not in ``model.nodes``, if
-            ``u == v``, or if ``(u, v)`` already renders in ``self.delta``.
-        """
-        if self.u not in model.nodes:
-            raise ValueError(
-                f"AddProjectionEdge: unknown source node {self.u!r}"
-            )
-        if self.v not in model.nodes:
-            raise ValueError(
-                f"AddProjectionEdge: unknown destination node {self.v!r}"
-            )
-        if self.u == self.v:
-            raise ValueError(
-                f"AddProjectionEdge: u and v must differ (both {self.u!r}); "
-                "a projection edge needs two distinct endpoints"
-            )
-        if self.delta.has(self.u, self.v):
-            raise ValueError(
-                f"AddProjectionEdge: edge ({self.u!r}, {self.v!r}) already "
-                "exists in the projection delta"
-            )
-
-        # Re-adding a loaded edge the user had pending-deleted: drop the
-        # removal instead of appending a (would-be-shadowed) duplicate add.
-        pair = (self.u, self.v)
-        if pair in self.delta.removes:
-            self.delta.removes.remove(pair)
-            self._mode = "uncanceled_remove"
-        else:
-            self.delta.adds.append(
-                (self.u, self.v, self.distance_cm, self.heading_deg)
-            )
-            self._mode = "appended"
-
-    def revert(self, model: FieldModel) -> None:
-        """Undo the add, restoring ``self.delta`` byte-identically.
-
-        :param model: Unused (the delta, not the model, was mutated); accepted
-            to satisfy the :class:`Command` protocol.
-        """
-        assert self._mode is not None, (
-            "AddProjectionEdge.revert before apply"
-        )
-        if self._mode == "appended":
-            # Remove the first ``(u, v)``-matching add this command appended.
-            for index, edge in enumerate(self.delta.adds):
-                if edge[0] == self.u and edge[1] == self.v:
-                    del self.delta.adds[index]
-                    return
-        else:  # self._mode == "uncanceled_remove"
-            # Re-cancel: restore the removal this command had dropped.
-            self.delta.removes.append((self.u, self.v))
-
-
-@dataclass
-class DeleteProjectionEdge:
-    """Remove a projection edge ``u -> v`` from an app-owned
-    :class:`ProjectionDelta`.
-
-    Mutates ``self.delta`` only -- the ``model`` is consulted purely for
-    read-only validation (the edge must currently render).  A pending *add* is
-    dropped outright (and re-inserted at its original index on revert); a
-    *loaded* edge is suppressed by appending its ``(u, v)`` to ``removes``.
-
-    :ivar delta: The app's single projection-edge working set to mutate.
-    :ivar u: Source node name of the edge to remove.
-    :ivar v: Destination node name of the edge to remove.
-    """
-
-    delta: ProjectionDelta
-    u: str
-    v: str
-
-    # ``"dropped_add"`` -> a pending add was removed from ``delta.adds``;
-    # ``"added_remove"`` -> a loaded edge was suppressed via ``delta.removes``.
-    _mode: str | None = field(default=None, init=False, repr=False)
-    # For ``"dropped_add"``: the removed 4-tuple and the index it lived at, so
-    # revert re-inserts it exactly where it was.
-    _dropped_add: tuple[str, str, float, float] | None = field(
-        default=None, init=False, repr=False
-    )
-    _dropped_index: int | None = field(default=None, init=False, repr=False)
-
-    def apply(self, model: FieldModel) -> None:
-        """Remove the ``(u, v)`` projection edge from ``self.delta``.
-
-        Validates that the edge currently renders before any mutation, so a
-        rejected delete is a clean no-op for ``History``.
-
-        :param model: Unused for mutation; accepted to satisfy the
-            :class:`Command` protocol (validation is against the delta, not the
-            model).
-        :raises ValueError: If ``(u, v)`` is not in ``self.delta.render()``.
-        """
-        if not self.delta.has(self.u, self.v):
-            raise ValueError(
-                f"DeleteProjectionEdge: edge ({self.u!r}, {self.v!r}) is not "
-                "in the projection delta"
-            )
-
-        # A pending add for this pair is dropped outright; otherwise the edge
-        # is a loaded one and is suppressed via ``removes``.
-        for index, edge in enumerate(self.delta.adds):
-            if edge[0] == self.u and edge[1] == self.v:
-                self._dropped_add = edge
-                self._dropped_index = index
-                del self.delta.adds[index]
-                self._mode = "dropped_add"
-                return
-
-        self.delta.removes.append((self.u, self.v))
-        self._mode = "added_remove"
-
-    def revert(self, model: FieldModel) -> None:
-        """Undo the delete, restoring ``self.delta`` byte-identically.
-
-        :param model: Unused (the delta, not the model, was mutated); accepted
-            to satisfy the :class:`Command` protocol.
-        """
-        assert self._mode is not None, (
-            "DeleteProjectionEdge.revert before apply"
-        )
-        if self._mode == "dropped_add":
-            assert self._dropped_add is not None
-            assert self._dropped_index is not None
-            self.delta.adds.insert(self._dropped_index, self._dropped_add)
-        else:  # self._mode == "added_remove"
-            # Remove the ``(u, v)`` suppression this command appended.
-            pair = (self.u, self.v)
-            for index in range(len(self.delta.removes) - 1, -1, -1):
-                if self.delta.removes[index] == pair:
-                    del self.delta.removes[index]
-                    return
 
 
 # ---------------------------------------------------------------------------

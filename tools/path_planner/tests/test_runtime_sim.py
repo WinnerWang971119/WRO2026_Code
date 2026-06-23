@@ -1,11 +1,12 @@
 """End-to-end tests for the PathTracker runtime simulator (PR3).
 
-PR3 (post T9) emission contract: every EDGE_LINE traversal emits the
-canonical ``(ACT_FOLLOW_INT, None)`` followed by a runtime-only
-``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` step that mirrors
-the C++ LINE_OVERSHOOT FSM transition. EDGE_PROJECTION traversals emit
-``(ACT_FOLLOW_DIST, distance_cm)`` and advance Localization via
-``on_dead_reckoned_advance``. EDGE_BLIND traversals still emit
+PR3 (post T9) emission contract: every EDGE_LINE traversal into a junction
+(line) node emits the canonical ``(ACT_FOLLOW_INT, None)`` followed by a
+runtime-only ``(ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM)`` step that
+mirrors the C++ LINE_OVERSHOOT FSM transition. A LINE hop into a ``projection``
+node (issue #64) emits ``(ACT_FOLLOW_DIST, distance_cm)`` and advances
+Localization via ``on_dead_reckoned_advance`` (no overshoot -- the encoder gate
+lands the chassis on the node). EDGE_BLIND traversals still emit
 ``(ACT_FORWARD, distance_cm)``.
 
 These tests cover the runtime-sim equivalence proof (sim primitive
@@ -40,7 +41,6 @@ from tools.path_planner.compiler import (
 from tools.path_planner.graph_builder import (
     EDGE_BLIND,
     EDGE_LINE,
-    EDGE_PROJECTION,
     build_graph,
 )
 from tools.path_planner.pipeline_config import (
@@ -48,7 +48,6 @@ from tools.path_planner.pipeline_config import (
     BlindMode,
     DirectionMode,
     LineMode,
-    ProjectionMode,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -95,7 +94,6 @@ from tools.path_planner.sim.runtime import (
     resolve_blind_mode,
     resolve_direction,
     resolve_line_mode,
-    resolve_projection_mode,
     resolve_return_action,
     resolve_stop_at_line,
 )
@@ -248,7 +246,9 @@ def _line_count(primitives: List[Primitive]) -> int:
 def test_goto_B_matches_compile_path(toy_field, fresh_sim, toy_graph_and_table):
     graph, next_hop = toy_graph_and_table
     primitives = fresh_sim.go_to("B")
-    walked = walk_next_hop(next_hop, "A", "B")
+    # Walk from the toy field's START node (issue #64: a blind ``S`` spawn, not
+    # ``A``) so the compiled expectation tracks the same hops the sim drives.
+    walked = walk_next_hop(next_hop, toy_field.START_NODE, "B")
     expected = compile_path(walked, toy_field.START_HEADING_DEG, graph, toy_field)
     assert primitives == _interleave_overshoot(expected)
     bx, by = toy_field.NODES["B"]
@@ -264,7 +264,7 @@ def test_goto_B_matches_compile_path(toy_field, fresh_sim, toy_graph_and_table):
 def test_goto_C_via_path(toy_field, fresh_sim, toy_graph_and_table):
     graph, next_hop = toy_graph_and_table
     primitives = fresh_sim.go_to("C")
-    walked = walk_next_hop(next_hop, "A", "C")
+    walked = walk_next_hop(next_hop, toy_field.START_NODE, "C")
     expected = compile_path(walked, toy_field.START_HEADING_DEG, graph, toy_field)
     assert primitives == _interleave_overshoot(expected)
     assert fresh_sim.localization.current_node() == "C"
@@ -418,16 +418,23 @@ def _single_edge_graph(
     edge_type: str,
     distance_cm: float,
     heading_deg: float,
+    *,
+    u_type: str = "line",
+    v_type: str = "line",
 ) -> nx.DiGraph:
     """Build a 2-node DiGraph with a single directed edge.
 
     Skips the validator + builder path entirely so the test fixture stays
     independent of field_data schema rules. Adds the reverse edge so
     Dijkstra's all-pairs sweep doesn't trip over a dead-end target.
+
+    ``u_type`` / ``v_type`` (issue #64) set each node's ``type`` attribute so the
+    sim's LOCAL ``is_projection_node`` read resolves correctly -- a LINE edge into
+    a ``v_type="projection"`` node is DISTANCE-terminated (FOLLOW_DIST).
     """
     g = nx.DiGraph()
-    g.add_node(u)
-    g.add_node(v)
+    g.add_node(u, type=u_type)
+    g.add_node(v, type=v_type)
     g.add_edge(u, v, type=edge_type, distance_cm=float(distance_cm), heading_deg=float(heading_deg))
     g.add_edge(
         v, u,
@@ -511,20 +518,21 @@ def test_sim_line_edge_step_through_yields_overshoot_step():
 # ---------------------------------------------------------------------------
 
 
-def test_sim_projection_edge_advances_position_and_localization():
-    """PathTrackerSim handles EDGE_PROJECTION via follow_line_to_distance + on_dead_reckoned_advance.
+def test_sim_line_into_projection_node_advances_position_and_localization():
+    """PathTrackerSim handles a LINE hop into a projection node via follow_line_to_distance + on_dead_reckoned_advance.
 
-    A 12 cm PROJECTION edge A->B heading 0 must produce exactly
-    ``[(ACT_FOLLOW_DIST, 12.0)]`` (no LINE_OVERSHOOT step — the encoder
-    gate already lands the chassis on the node), advance the chassis x by
-    exactly 12 cm, and advance Localization.current_node() to ``B``.
+    Issue #64: a LINE edge into a ``projection`` node is DISTANCE-terminated. A
+    12 cm LINE hop A->B (B a projection node) heading 0 must produce exactly
+    ``[(ACT_FOLLOW_DIST, 12.0)]`` (no LINE_OVERSHOOT step — the encoder gate
+    already lands the chassis on the node), advance the chassis x by exactly
+    12 cm, and advance Localization.current_node() to ``B``.
     """
     fd = _minimal_field(
         nodes={"A": (0.0, 0.0), "B": (12.0, 0.0)},
         start_node="A",
         start_heading_deg=0.0,
     )
-    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, 12.0, 0.0)
+    graph = _single_edge_graph("A", "B", EDGE_LINE, 12.0, 0.0, v_type="projection")
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
@@ -538,14 +546,14 @@ def test_sim_projection_edge_advances_position_and_localization():
     assert sim.localization.current_node() == "B"
 
 
-def test_sim_projection_edge_step_through_emits_follow_dist_only():
-    """step_through over a PROJECTION edge yields only the FOLLOW_DIST step (no overshoot)."""
+def test_sim_line_into_projection_node_step_through_emits_follow_dist_only():
+    """step_through over a LINE hop into a projection node yields only the FOLLOW_DIST step (no overshoot)."""
     fd = _minimal_field(
         nodes={"A": (0.0, 0.0), "B": (12.0, 0.0)},
         start_node="A",
         start_heading_deg=0.0,
     )
-    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, 12.0, 0.0)
+    graph = _single_edge_graph("A", "B", EDGE_LINE, 12.0, 0.0, v_type="projection")
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
@@ -579,7 +587,8 @@ def test_sim_blind_edge_emits_forward_no_overshoot():
 
 
 # ---------------------------------------------------------------------------
-# TC11 — per-edge override resolution (LineMode / BlindMode / ProjectionMode / TurnMode)
+# TC11 — per-edge override resolution (LineMode / BlindMode / TurnMode)
+# (issue #64 retired ProjectionMode along with the projection EDGE type)
 # ---------------------------------------------------------------------------
 
 
@@ -617,28 +626,14 @@ def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
     assert resolve_blind_mode(edge_raw) == BlindMode.RAW_FLAT
 
 
-def test_resolve_projection_mode_default_falls_back_to_pipeline_config():
-    """resolve_projection_mode: missing/DEFAULT override -> PIPELINE_CONFIG.projection, concrete -> as-is."""
-    edge_missing: dict = {}
-    assert resolve_projection_mode(edge_missing) == PIPELINE_CONFIG.projection
-
-    edge_default = {"primitive_mode": ProjectionMode.DEFAULT}
-    assert resolve_projection_mode(edge_default) == PIPELINE_CONFIG.projection
-
-    edge_slow = {"primitive_mode": ProjectionMode.SLOW}
-    assert resolve_projection_mode(edge_slow) == ProjectionMode.SLOW
-
-    edge_fast = {"primitive_mode": ProjectionMode.FAST}
-    assert resolve_projection_mode(edge_fast) == ProjectionMode.FAST
-
-
 def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph_and_table):
     """PathTrackerSim.resolve_*_mode instance methods mirror the module-level helpers.
 
     ADR-036 removed the per-edge ``pre_turn_mode`` override (and its
     ``resolve_pre_turn_mode`` helper): the pivot wheel is now resolved per turn
-    from the ``PivotTurnRecord`` table, not an edge field. Only the surviving
-    per-edge mode passthroughs (line / blind / projection) are checked here.
+    from the ``PivotTurnRecord`` table, not an edge field. Issue #64 removed the
+    per-edge ``resolve_projection_mode`` (projection is a node type now). Only the
+    surviving per-edge mode passthroughs (line / blind) are checked here.
     """
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
@@ -646,11 +641,9 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
 
     edge_line_fast = {"primitive_mode": LineMode.FAST}
     edge_blind_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
-    edge_proj_slow = {"primitive_mode": ProjectionMode.SLOW}
 
     assert sim.resolve_line_mode(edge_line_fast) == LineMode.FAST
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
-    assert sim.resolve_projection_mode(edge_proj_slow) == ProjectionMode.SLOW
 
 
 # ---------------------------------------------------------------------------
@@ -709,16 +702,16 @@ def test_line_overshoot_no_rampup_only_rampdown():
 
 
 def test_projection_full_trapezoid():
-    """A long PROJECTION edge runs ramp-up + plateau + ramp-down and lands on the node.
+    """A long LINE-into-projection hop runs ramp-up + plateau + ramp-down and lands on the node.
 
-    Mirrors the hardware contract for a long PROJECTION edge: the C++
-    ``LineFollower`` ramps up from 0 to cruise, holds the plateau, then
-    ramps down to ``Config::PWM_MIN_MAGNITUDE`` before the distance gate
-    actively brakes the chassis. The sim collapses all three phases into
-    a single atomic ``follow_line_to_distance(100.0)`` advance, so the
-    FSM-level invariants are: a single ``ACT_FOLLOW_DIST`` primitive, no
-    ``ACT_LINE_OVERSHOOT`` (the encoder gate already lands the chassis on
-    the node), and a chassis position exactly at the edge's terminus.
+    Mirrors the hardware contract for a long LINE hop into a projection node
+    (issue #64, DISTANCE-terminated): the C++ ``LineFollower`` ramps up from 0 to
+    cruise, holds the plateau, then ramps down to ``Config::PWM_MIN_MAGNITUDE``
+    before the distance gate actively brakes the chassis. The sim collapses all
+    three phases into a single atomic ``follow_line_to_distance(100.0)`` advance,
+    so the FSM-level invariants are: a single ``ACT_FOLLOW_DIST`` primitive, no
+    ``ACT_LINE_OVERSHOOT`` (the encoder gate already lands the chassis on the
+    node), and a chassis position exactly at the edge's terminus.
     """
     distance_cm = 100.0
     fd = _minimal_field(
@@ -726,7 +719,7 @@ def test_projection_full_trapezoid():
         start_node="A",
         start_heading_deg=0.0,
     )
-    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, distance_cm, 0.0)
+    graph = _single_edge_graph("A", "B", EDGE_LINE, distance_cm, 0.0, v_type="projection")
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
@@ -735,7 +728,7 @@ def test_projection_full_trapezoid():
     prims = sim.go_to("B")
 
     assert prims == [(ACT_FOLLOW_DIST, distance_cm)]
-    # No overshoot step on PROJECTION — encoder gate lands the chassis on the node.
+    # No overshoot step on a projection arrival — encoder gate lands the chassis on the node.
     assert not any(action == ACT_LINE_OVERSHOOT for action, _ in prims)
     assert chassis.x_cm == pytest.approx(distance_cm, abs=1e-9)
     assert chassis.y_cm == pytest.approx(0.0, abs=1e-9)
@@ -743,13 +736,13 @@ def test_projection_full_trapezoid():
 
 
 def test_projection_short_truncated_triangle():
-    """A PROJECTION edge shorter than 2*TSHAPE_RAMP_MIN_CM collapses to a half-clamped triangle.
+    """A LINE-into-projection hop shorter than 2*TSHAPE_RAMP_MIN_CM collapses to a half-clamped triangle.
 
-    With both ramp-up and ramp-down active on a very short edge, the C++
-    ``LineFollower`` clamps each ramp to half the distance target so the
-    two zones cannot overlap — producing a triangular profile with no
-    plateau. The sim still collapses the whole thing to a single atomic
-    ``follow_line_to_distance(cm)`` advance, so the FSM-level invariants
+    With both ramp-up and ramp-down active on a very short LINE-into-projection
+    hop (issue #64), the C++ ``LineFollower`` clamps each ramp to half the
+    distance target so the two zones cannot overlap — producing a triangular
+    profile with no plateau. The sim still collapses the whole thing to a single
+    atomic ``follow_line_to_distance(cm)`` advance, so the FSM-level invariants
     are unchanged: a single ``ACT_FOLLOW_DIST`` primitive, no
     ``ACT_LINE_OVERSHOOT``, and chassis position exactly at the terminus.
     The picked distance ``3.0`` cm is below ``2 * TSHAPE_RAMP_MIN_CM`` =
@@ -762,7 +755,7 @@ def test_projection_short_truncated_triangle():
         start_node="A",
         start_heading_deg=0.0,
     )
-    graph = _single_edge_graph("A", "B", EDGE_PROJECTION, distance_cm, 0.0)
+    graph = _single_edge_graph("A", "B", EDGE_LINE, distance_cm, 0.0, v_type="projection")
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
     sim = PathTrackerSim(fd, graph, next_hop, chassis)
@@ -1125,11 +1118,17 @@ def test_bidir_tc10_blind_edge_rear_emits_blind_reverse():
 # ---------------------------------------------------------------------------
 
 
-def test_bidir_tc11_projection_edge_rear_emits_projection_reverse():
-    """TC11: A PROJECTION edge traversed with REAR direction emits ACT_PROJECTION_REVERSE.
+def test_bidir_tc11_line_into_projection_rear_emits_projection_reverse():
+    """TC11: A REAR LINE hop into a projection node emits ACT_PROJECTION_REVERSE.
 
-    Tuple shape: (ACT_PROJECTION_REVERSE, target_node, distance_cm, proj_mode).
-    Per-edge FORCE_REVERSE override used for determinism.  Verifies AC11.
+    Issue #64: a REAR LINE edge into a ``projection`` node mirrors the FORWARD
+    LINE->projection ``ACT_FOLLOW_DIST`` -- the projection node has no junction
+    marker, so the reverse follow is DISTANCE-terminated. Tuple shape:
+    (ACT_PROJECTION_REVERSE, target_node, distance_cm, line_mode). The mode slot
+    carries the resolved ``LineMode`` (``PIPELINE_CONFIG.line`` = NORMAL), since
+    a LINE->projection follow takes its motion profile from the LINE edge's own
+    line_mode (``ProjectionMode`` deleted). Per-edge FORCE_REVERSE override used
+    for determinism.  Verifies AC11.
     """
     distance_cm = 25.0
     nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
@@ -1140,18 +1139,18 @@ def test_bidir_tc11_projection_edge_rear_emits_projection_reverse():
         PIVOT_TURNS=[],
     )
     g = nx.DiGraph()
-    g.add_node("A")
-    g.add_node("B")
+    g.add_node("A", type="line")
+    g.add_node("B", type="projection")
     g.add_edge(
         "A", "B",
-        type=EDGE_PROJECTION,
+        type=EDGE_LINE,
         distance_cm=distance_cm,
         heading_deg=0.0,
         direction_override=int(DirectionMode.FORCE_REVERSE),
     )
     g.add_edge(
         "B", "A",
-        type=EDGE_PROJECTION,
+        type=EDGE_LINE,
         distance_cm=distance_cm,
         heading_deg=180.0,
     )
@@ -1171,7 +1170,7 @@ def test_bidir_tc11_projection_edge_rear_emits_projection_reverse():
     _, target_node, emitted_dist, emitted_mode = proj_rev_prims[0]
     assert target_node == "B"
     assert emitted_dist == pytest.approx(distance_cm, abs=1e-9)
-    assert emitted_mode == ProjectionMode.NORMAL   # PIPELINE_CONFIG.projection default
+    assert emitted_mode == LineMode.NORMAL   # PIPELINE_CONFIG.line default (LINE->proj motion)
 
     assert sim.localization.current_node() == "B"
 
@@ -2220,9 +2219,14 @@ def test_pivot_tc17_non_pivot_route_through_pivot_node_drives_full_distance():
 def test_pivot_tc18_line_incoming_overshoot_reduced_and_outgoing_trimmed():
     """TC18: a LINE-incoming pivot reduces the overshoot advance by delta and trims the outgoing hop.
 
-    On the route ``L0 -> L1 -> L2`` the pivot ``(L0, L1, L2)`` arrives over a
-    LINE edge (``L0 -> L1`` re-anchors on the junction line, so it cannot stop
-    short on its approach) and leaves over a BLIND edge. With a 70 deg turn at
+    Issue #64 (T12 fixture migration): the validator now rejects an on-line START
+    node, so ``make_line_incoming_pivot_field`` prepends a blind spawn ``S0`` on a
+    BLIND edge into ``L0``. The route to ``L2`` is therefore ``S0 -> L0 -> L1 ->
+    L2``, and the FIRST emitted primitive is the leading ``S0 -> L0`` blind hop
+    ``(ACT_FORWARD, 60.0)`` -- NOT the pivot's LINE-incoming ``ACT_FOLLOW_INT``.
+    The pivot ``(L0, L1, L2)`` is unchanged: it arrives over the LINE edge
+    ``L0 -> L1`` (re-anchors on the junction line, so it cannot stop short on its
+    approach) and leaves over the BLIND edge ``L1 -> L2``. With a 70 deg turn at
     track 18 cm, ``delta ~= 6.30`` cm, within the FRONT overshoot budget
     (12.02 cm). The latch therefore:
 
@@ -2244,9 +2248,11 @@ def test_pivot_tc18_line_incoming_overshoot_reduced_and_outgoing_trimmed():
 
     prims = sim.go_to("L2")
 
-    # LINE incoming: FOLLOW_INT then a reduced LINE_OVERSHOOT (offset - delta),
-    # then the turn, then the outgoing BLIND hop trimmed by delta.
+    # Leading S0 -> L0 blind hop (60 cm, no pivot, heading 0 so no turn), then the
+    # LINE-incoming pivot: FOLLOW_INT then a reduced LINE_OVERSHOOT (offset -
+    # delta), the turn, and the outgoing BLIND hop trimmed by delta.
     assert prims == [
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
         (ACT_FOLLOW_INT, None),
         (ACT_LINE_OVERSHOOT, pytest.approx(LINE_SENSOR_AXLE_OFFSET_CM - delta, abs=1e-9)),
         (ACT_TURN_REL, pytest.approx(_PIVOT_TURN_70_DEG, abs=1e-9)),
@@ -2263,16 +2269,29 @@ def test_pivot_tc18_non_pivot_line_traversal_drives_full_overshoot():
     node L1 -- rolls the FULL ``LINE_SENSOR_AXLE_OFFSET_CM`` overshoot with no
     delta reduction, proving a non-pivot route through the same line node is
     unaffected.
+
+    Issue #64: the validator rejects an on-line START, so we cannot start at the
+    line node ``L1`` directly. A blind spawn ``Z`` is added on a BLIND edge into
+    ``L1``, placed collinear with the ``L1 -> L0`` line (so ``Z -> L1`` heads the
+    same -x direction, no turn) -- the route ``Z -> L1 -> L0`` then drives the
+    reverse non-pivot LINE traversal as the second hop after the leading blind hop.
     """
     field = pivot_field_data.make_line_incoming_pivot_field()
-    # Re-seed at L1 facing back toward L0 (heading 180 deg) and drive L1 -> L0.
-    field.START_NODE = "L1"
+    # Add a blind spawn Z collinear with L1->L0 (both heading 180 / -x), on a
+    # BLIND edge into L1, and start there facing -x.
+    field.NODES = {**field.NODES, "Z": (120.0, 0.0)}
+    field.NODE_TYPES = {**field.NODE_TYPES, "Z": "blind"}
+    field.BLIND_EDGES = [*field.BLIND_EDGES, ("Z", "L1")]
+    field.START_NODE = "Z"
     field.START_HEADING_DEG = 180.0
     sim, _chassis, _graph, _next_hop = _make_pivot_sim(field)
 
     prims = sim.go_to("L0")
 
+    # Leading Z -> L1 blind hop (60 cm, heading 180 = collinear so no turn), then
+    # the reverse non-pivot LINE traversal L1 -> L0 with the FULL overshoot.
     assert prims == [
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
         (ACT_FOLLOW_INT, None),
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_CM),
     ]
@@ -3233,15 +3252,22 @@ def test_tc18a_post_return_tail_matches_clean_goto():
 def test_tc18a_clean_goto_after_return_nets_zero_drift_on_toy_fixture(toy_field, toy_graph_and_table):
     """TC18a (toy fixture): a return then a clean go_to lands on the goal, drift~0.
 
-    On the shared toy fixture, push the chassis off node A, issue go_to(C): the
-    prologue returns to A (line-backed) then walks A->...->C. The chassis lands
-    on C within _POSITION_TOL_CM and the node advances to C -- proving the
-    return erased the excursion end-to-end on a multi-hop route.
+    On the shared toy fixture, first drive to the line node ``A`` (issue #64: the
+    toy START is now the blind spawn ``S``, so the chassis must re-anchor on a
+    line node before the line-backed return can be exercised). Then push the
+    chassis off ``A`` and issue go_to(C): the prologue returns to ``A``
+    (line-backed) via the seek then walks A->...->C. The chassis lands on C within
+    _POSITION_TOL_CM and the node advances to C -- proving the return erased the
+    excursion end-to-end on a multi-hop route.
     """
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
     sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()
+
+    # Re-anchor on the line node A first (the blind START S is not line-backed).
+    sim.go_to("A")
+    assert sim.localization.current_node() == "A"
 
     sim.operator_move(-20.0)    # above the axle lead (line seek), within cap; heading 0deg
     prims = sim.go_to("C")
@@ -3253,6 +3279,60 @@ def test_tc18a_clean_goto_after_return_nets_zero_drift_on_toy_fixture(toy_field,
     assert sim.localization.get_offset_from_node().magnitude_cm() == pytest.approx(
         0.0, abs=1e-9
     )
+
+
+def test_tc14_return_to_projection_node_dead_reckons_no_line_seek():
+    """TC14 (issue #64): a RETURN_TO_NODE to a projection node DEAD-RECKONS, no junction-seek.
+
+    A projection node sits on a line but at NO junction, so there is no junction
+    marker to re-acquire -- ``is_line_backed`` returns False for it (it tests
+    ``== "line"``), and the return prologue MUST dead-reckon (``ACT_RETURN_FORWARD``)
+    rather than line-seek (``ACT_RETURN_STOP_AT_LINE``). No projection special-case
+    branch is added; the default ``!= "line"`` path handles it.
+
+    Topology: a blind spawn ``S`` feeds a projection node ``P`` over a BLIND edge
+    (the auto-seek re-anchors the chassis ON ``P``). Standing on ``P``, push the
+    chassis off by more than the axle lead, then issue a go_to back toward ``S``:
+    the return prologue, finding the current node ``P`` NOT line-backed,
+    dead-reckons.
+    """
+    nodes = {"S": (0.0, 0.0), "P": (60.0, 0.0)}
+    fd = _minimal_field(nodes, start_node="S", start_heading_deg=0.0)
+    # The return prologue reads node types off field_data.NODE_TYPES (the
+    # LocalizationSim mirror of FieldMap::getNodeType), so author them here -- the
+    # bench-fidelity guard requires every graph node be covered once NODE_TYPES
+    # is present.
+    fd.NODE_TYPES = {"S": "blind", "P": "projection"}
+    g = nx.DiGraph()
+    g.add_node("S", type="blind")
+    g.add_node("P", type="projection")
+    g.add_edge("S", "P", type=EDGE_BLIND, distance_cm=60.0, heading_deg=0.0)
+    g.add_edge("P", "S", type=EDGE_BLIND, distance_cm=60.0, heading_deg=180.0)
+    next_hop = {"S": {"S": "S", "P": "P"}, "P": {"S": "S", "P": "P"}}
+
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    # Drive S -> P: the BLIND->projection auto-seek re-anchors the chassis ON P.
+    sim.go_to("P")
+    assert sim.localization.current_node() == "P"
+    assert sim.localization.is_line_backed("P") is False
+
+    # Push the chassis off P by more than the FRONT axle lead (so a line-backed
+    # node WOULD line-seek), then return toward S.
+    sim.operator_move(-20.0)
+    prims = sim.go_to("S")
+
+    # The return DEAD-RECKONS (no junction at a projection node) -- the head
+    # primitive is ACT_RETURN_FORWARD, never ACT_RETURN_STOP_AT_LINE.
+    return_tags = [
+        p[0] for p in prims if p[0] in (ACT_RETURN_FORWARD, ACT_RETURN_STOP_AT_LINE)
+    ]
+    assert return_tags, "expected a return primitive in the prologue"
+    assert return_tags[0] == ACT_RETURN_FORWARD
+    assert ACT_RETURN_STOP_AT_LINE not in [p[0] for p in prims]
+    assert sim.localization.current_node() == "S"
 
 
 # ===========================================================================

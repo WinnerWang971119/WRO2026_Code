@@ -152,78 +152,57 @@ def _seek_snapshot(sim, goal):
 # ===========================================================================
 
 
-def test_tc7_autorule_seek_lands_delta_short_of_pivot_node():
-    """TC7: the BLIND->PROJECTION auto-rule seek lands the axle ``delta`` short of B.
+def test_tc7_autorule_blind_into_projection_seek_lands_delta_short_of_pivot_node():
+    """TC7/TC10 (issue #64): the BLIND->projection auto-seek lands ``delta`` short of B.
 
-    The user's scenario (``make_sensor_autorule_pivot_field``): incoming
-    ``A -> B`` is a plain BLIND hop, outgoing ``B -> C`` a PROJECTION. With
-    ``BLIND_PROJECTION_AUTO_SEEK=True`` the blind hop FEEDS a projection, so the
-    auto-rule makes ``A -> B`` a ``Drive.stopAtLine`` seek; the declared pivot
-    ``(A, B, C)`` is a 90 deg turn (``delta = 9.0`` cm, within the 12.02 cm FRONT
-    overshoot budget). ADR-044 D1: a seek INTO an approaching pivot reduces its
-    post-detect axle roll by ``delta`` so the chassis center settles ``delta``
-    short of B along the incoming heading ``h_in`` (the A->B unit heading, +x).
+    The user's scenario (``make_sensor_autorule_pivot_field``): incoming ``A -> B``
+    is a plain BLIND hop whose DESTINATION ``B`` is a projection node, and ``B`` is
+    the pivot node of the turn ``A->B->C``. With ``BLIND_PROJECTION_AUTO_SEEK=True``
+    the LOCAL auto-rule makes ``A -> B`` a ``Drive.stopAtLine`` seek.
 
-    The seek hop emits the full command distance ``(ACT_STOP_AT_LINE, distance)``
-    -- matching ``Drive.stopAtLine(edge.distance_cm)`` -- while the chassis center
-    lands at ``B - delta * h_in`` (captured via the step_through snapshot at the
-    seek hop). WITHOUT the trim the chassis would have advanced the full
-    ``distance`` and landed ON B, so the numeric gap in the snapshot pose is
-    exactly ``delta`` -- asserted directly. The expected delta-short landing is
-    derived through ``compute_pivot_compensation`` so the test tracks the
-    implementation.
+    A seek INTO an approaching pivot lands the axle ``delta`` short of the node, and
+    the firmware arms EVERY seek with that trim and NO projection special-case
+    (``Drive.stopAtLine(edge.distance_cm).setOvershoot(offset - delta)`` --
+    ``PathTracker.cpp`` STOP_AT_LINE dispatch). The pivot leg ``(A, B, C)`` here is the
+    ``sensor`` regime -- ``_validate_pivot_turns`` budgets ``delta`` against the seek
+    overshoot, asserted by ``delta <= LINE_SENSOR_AXLE_OFFSET_CM`` below -- so the
+    delta is drawn from THIS seek, not a (nonexistent) LINE->projection follow. The
+    sim must mirror the delta-short landing or it stops being the firmware's pose
+    oracle at this validator-legal turn (PR #92 review). A plain BLIND->projection
+    re-anchor with NO approaching pivot still full-advances: trim 0 -> the advance is
+    the full ``distance_cm``.
     """
     field = pivot_field_data.make_sensor_autorule_pivot_field()
     sim, _chassis, _graph, next_hop = _make_pivot_sim(field)
     delta = compute_pivot_compensation(_AUTORULE_TURN_DEG, _PIVOT_TRACK_CM)
-    # delta fits the FRONT overshoot budget (single-sourced) -- the clean,
-    # un-clamped regime, so offset - overshoot == delta exactly.
     assert delta <= LINE_SENSOR_AXLE_OFFSET_CM
 
-    # Sanity: the route really drives the seek hop A->B into the pivot node B.
+    # Sanity: the route really drives the seek hop A->B into the projection node B.
     assert walk_next_hop(next_hop, "A", "C") == ["A", "B", "C"]
 
-    ax, ay = field.NODES["A"]
     bx, by = field.NODES["B"]
+    ax, ay = field.NODES["A"]
     incoming_dist = math.hypot(bx - ax, by - ay)
-    # Unit incoming heading h_in (A->B). The fixture places A/B on +x, so this is
-    # (1, 0); computed geometrically rather than assumed.
-    h_in_x = (bx - ax) / incoming_dist
-    h_in_y = (by - ay) / incoming_dist
 
     seek_prim, snap = _seek_snapshot(sim, "C")
 
-    # The seek hop is a FRONT ACT_STOP_AT_LINE whose payload is the full COMMAND
-    # distance (firmware ``Drive.stopAtLine(edge.distance_cm)`` / compile_path),
-    # NOT the delta-short physical advance -- the trim shows up in the snapshot
-    # pose below, never in the primitive payload.
+    # The seek hop is a FRONT ACT_STOP_AT_LINE carrying the full COMMAND distance
+    # (firmware ``Drive.stopAtLine(edge.distance_cm)`` / compile_path); the delta-short
+    # trim lives in the snapshot pose below, not the commanded primitive.
     assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(incoming_dist, abs=1e-9))
-    # The delta-short physical advance, recomputed through the production overshoot
-    # helper, equals the snapshot displacement asserted below (A is the origin).
     expected_seek_advance = _seek_advance_into_pivot(incoming_dist, delta)
     assert expected_seek_advance == pytest.approx(incoming_dist - delta, abs=1e-9)
 
-    # Position contract: the axle lands delta short of B along h_in, i.e. at
-    # B - delta * h_in. With h_in = +x that is (B.x - delta, B.y).
-    expected_x = bx - delta * h_in_x
-    expected_y = by - delta * h_in_y
-    assert snap.x_cm == pytest.approx(expected_x, abs=1e-9)
-    assert snap.y_cm == pytest.approx(expected_y, abs=1e-9)
+    # Delta-short re-anchor: the chassis center lands ``delta`` short of B along the
+    # A->B approach -- exactly the firmware's reduced post-detect axle roll.
+    hx = (bx - ax) / incoming_dist
+    hy = (by - ay) / incoming_dist
+    assert snap.x_cm == pytest.approx(bx - delta * hx, abs=1e-9)
+    assert snap.y_cm == pytest.approx(by - delta * hy, abs=1e-9)
+    assert math.hypot(snap.x_cm - bx, snap.y_cm - by) == pytest.approx(delta, abs=1e-9)
 
-    # Contrast: WITHOUT the trim the seek would advance the full incoming_dist and
-    # land ON B. The shortfall between the two landings is exactly delta.
-    landed_short_cm = math.hypot(snap.x_cm - bx, snap.y_cm - by)
-    assert landed_short_cm == pytest.approx(delta, abs=1e-9)
-    assert landed_short_cm > _POSITION_TOL_CM, (
-        "the delta-short landing must be observably off-node; a delta below the "
-        "position tolerance would make the contrast assertion vacuous"
-    )
-
-    # Localization re-anchors at the seek node B (the seek stops ON the crossing
-    # line) even though the point-model center sits delta short. The snapshot is
-    # captured AT the seek hop (step_through is abandoned there), so current_node
-    # is the seek's re-anchor node B -- the logical node is exact while the
-    # physical center sits delta short, which is the whole point.
+    # Localization re-anchors at the seek node B (the seek stops ON B's line): the
+    # logical node is exact while the physical center lands ``delta`` short.
     assert sim.localization.current_node() == "B"
 
 
@@ -313,7 +292,12 @@ def test_tc6_pivot_adjacent_seek_is_forced_front():
 # departs one pivot and approaches the next:
 #
 #   A(0,0) --BLIND,90deg--> B(60,0) --BLIND seek 'on',90deg--> C(60,60)
-#                                                --PROJECTION,90deg--> D(-40,60)
+#                                                --LINE,90deg--> D(-40,60) [proj]
+#
+# Issue #64: the C->D departure is a LINE edge into a PROJECTION node ``D`` (the
+# DISTANCE-terminated FOLLOW_DIST that replaced the retired PROJECTION edge). ``C``
+# is typed ``line`` (the B->C seek re-anchors on its line; C->D line-follows out
+# of it); ``A`` / ``B`` are blind; ``D`` is the projection exit.
 #
 # Pivots (A,B,C) at B and (B,C,D) at C, each a 90 deg turn (delta = 9 cm).
 # The middle hop B->C is a STOP_AT_LINE seek: it DEPARTS pivot B and APPROACHES
@@ -337,13 +321,19 @@ def _make_chained_seek_field():
 
     ``A -> B`` BLIND (dead-reckon approach into pivot B), ``B -> C`` BLIND
     authored ``stop_at_line: "on"`` (a seek that departs B and approaches C),
-    ``C -> D`` PROJECTION (dead-reckon departure from pivot C). Pivots
+    ``C -> D`` LINE into the PROJECTION node ``D`` (issue #64: the
+    DISTANCE-terminated dead-reckon departure from pivot C that replaced the
+    retired PROJECTION edge -> still emits ``ACT_FOLLOW_DIST``). Pivots
     ``(A, B, C)`` and ``(B, C, D)`` are each a 90 deg turn. PASSES ``validate``
     by construction (the two trims fit every edge; the seek hop carries only the
-    approaching trim).
+    approaching trim; ``C`` is a line node so the LINE C->D edge is legal).
     """
     return _make_field(
         nodes=_TC8_NODES,
+        # A/B are blind dead-reckon nodes; C is a line node (the B->C seek
+        # re-anchors on its line, and the LINE C->D departs from it); D is the
+        # projection exit the LINE C->D distance-terminates on. START A is blind.
+        node_types={"A": "blind", "B": "blind", "C": "line", "D": "projection"},
         line_segments=[],
         blind_edges=[("A", "B")],
         pivot_turns=[("A", "B", "C"), ("B", "C", "D")],
@@ -359,7 +349,7 @@ def _make_chained_seek_field():
                 "stop_at_line": "on",    # force the middle hop to seek
             },
             {
-                "type": "PROJECTION",
+                "type": "LINE",
                 "u": "C",
                 "v": "D",
                 "distance_cm": _TC8_OUT_CM,
@@ -750,6 +740,9 @@ def _make_short_seek_into_pivot_field():
     """
     return _make_field(
         nodes={"A": (0.0, 0.0), "B": (5.0, 0.0), "C": (5.0, 100.0)},
+        # A is the blind dead-reckon spawn; B is a line node (the A->B seek
+        # re-anchors on its line); C is the blind pivot exit. START A is blind.
+        node_types={"A": "blind", "B": "line", "C": "blind"},
         line_segments=[],
         blind_edges=[("B", "C")],
         pivot_turns=[("A", "B", "C")],

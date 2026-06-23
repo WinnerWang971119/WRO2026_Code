@@ -13,8 +13,8 @@
 //   safety net we want).
 //
 // REAL Localization IS LINKED (the "even better" path in the T18 brief)
-//   The REANCHOR step calls the REAL `Localization.reanchorAtWall(...)` over the REAL `routes.cpp`
-//   reset record (node 5 "Wall1", { axis=1, wall_coord=154, facing=270 }), so the success-path
+//   The REANCHOR step calls the REAL `Localization.reanchorAtWall(...)` over the issue #91 fixture
+//   reset record ("Wall1", node 4, { axis=1, wall_coord=154, facing=270 }), so the success-path
 //   re-anchor and its post-conditions are genuine, not mocked. This target compiles against the
 //   SHIPPED default (strict wall-normal OFF), so the live IMU heading does not gate the re-anchor —
 //   that lets TC10b drive the advisory-timeout + success cases through real Localization.
@@ -50,7 +50,8 @@
 //     here — it is covered by those compile-time / authoring guarantees, not a runtime test.
 //   - A non-reset node is a true no-op (the interlude is not entered).
 //
-// Links the real `Localization.cpp` + `routes.cpp` + the mock surface (same shape as
+// Links the real `Localization.cpp` + the issue #91 fixture `routes_fixture.cpp` (force-included
+// `routes_fixture.h` shadows the sketch `routes.h`) + the mock surface (same shape as
 // `test_localization_offset` / `test_return_to_node_dispatch`). Pass/fail + final-line conventions
 // mirror `test_return_to_node_dispatch.cpp`.
 // =========================================================================================
@@ -62,8 +63,8 @@
 #include "Drive.h"            // mock Drive (isIdle modelled; no wallStop surface — see mirror inputs).
 #include "MatrixMiniR4.h"     // mock mmL for real Localization's IMU read.
 #include "Localization.h"     // REAL Localization.cpp linked — reanchorAtWall is genuine.
-#include "FieldMap.h"         // FieldMap::getNodeType / getNode / getResetInfo over real routes.cpp.
-#include "routes.h"           // Routes::NodeType, RESET_NODES (data in routes.cpp).
+#include "FieldMap.h"         // FieldMap::getNodeType / getNode / getResetInfo over the fixture routes.
+#include "routes.h"           // Routes::NodeType, RESET_NODES (data in the issue #91 routes_fixture.cpp).
 #include "PathTracker.h"      // PathTrackerClass::Fault (the real enum the mirror routes to).
 
 static int g_failures = 0;
@@ -224,11 +225,11 @@ int main()
     // on the success/advisory cases without the live IMU heading gating it.
     check(Config::WALL_NORMAL_STRICT_ENABLED == false,
           "precondition: this target compiles with WALL_NORMAL_STRICT_ENABLED OFF (shipped default)");
-    // The fixture must actually have node 5 tagged RESET for the interlude to be exercised.
+    // The fixture must actually have "Wall1" tagged RESET for the interlude to be exercised.
     check(FieldMap::getNodeType(kResetNode) == Routes::NodeType::RESET,
-          "precondition: routes.cpp node 5 (Wall1) is a RESET node");
+          "precondition: routes_fixture.cpp Wall1 is a RESET node");
     check(FieldMap::getResetInfo(kResetNode) != nullptr,
-          "precondition: node 5 carries a reset record");
+          "precondition: Wall1 carries a reset record");
 
     // -------------------------------------------------------------------------------------
     // TC10b primary — advisory-timeout arrival: STILL re-anchors, surfaces the advisory, and

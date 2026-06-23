@@ -12,90 +12,15 @@
   "START_NODE": "Start",
   "START_HEADING_DEG": 0.0,
   "NODES": {
-    "Inter1": [
-      67.9,
-      36.9
-    ],
-    "Inter3": [
-      69.38007617124765,
-      93.67764878630754
-    ],
-    "Inter4": [
-      251.45688982700864,
-      94.26499334648742
-    ],
     "Start": [
       24.154545037397327,
       23.51148225469729
-    ],
-    "Wall1": [
-      165.0,
-      139.0
-    ],
-    "final": [
-      91.40549717799293,
-      59.90533657596476
-    ],
-    "position1": [
-      165.11723948056715,
-      119.22713715413207
     ]
   },
   "NODE_TYPES": {
-    "Inter1": "line",
-    "Inter3": "line",
-    "Inter4": "line",
-    "Start": "blind",
-    "Wall1": "reset",
-    "final": "blind",
-    "position1": "blind"
+    "Start": "blind"
   },
-  "LINE_SEGMENTS": [
-    [
-      "Inter1",
-      "Inter3"
-    ]
-  ],
-  "BLIND_EDGES": [
-    [
-      "Inter1",
-      "Start"
-    ],
-    [
-      "Inter1",
-      "final"
-    ],
-    [
-      "Inter3",
-      "Start"
-    ],
-    [
-      "Inter3",
-      "final"
-    ],
-    [
-      "Inter3",
-      "position1"
-    ],
-    [
-      "Inter4",
-      "position1"
-    ],
-    [
-      "final",
-      "position1"
-    ],
-    [
-      "position1",
-      "Wall1"
-    ]
-  ],
-  "RESET_NODES": {
-    "Wall1": {
-      "axis": "y",
-      "wall_coord": 154.0,
-      "facing": 270.0
-    }
-  },
+  "LINE_SEGMENTS": [],
+  "BLIND_EDGES": [],
   "OBSTACLES": []
 }

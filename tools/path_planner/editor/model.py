@@ -25,9 +25,13 @@ from typing import Any, ClassVar
 # module, a leaf in the import graph) so the GUI combobox values, the inline
 # guards, and the command validators cannot drift apart and accept-in-GUI /
 # reject-at-validate. They mirror the planner's validator (NODE_TYPES are
-# line/blind/reset; reset axes mirror ``validator._ALLOWED_RESET_AXES``); the
-# Save-time ``validate()`` is the ultimate authority and re-checks both.
-NODE_TYPE_VALUES: tuple[str, ...] = ("line", "blind", "reset")
+# line/projection/blind/reset; reset axes mirror ``validator._ALLOWED_RESET_AXES``);
+# the Save-time ``validate()`` is the ultimate authority and re-checks both.
+# ``projection`` is an on-model, type-only node (a line crossing with no junction
+# marker, dead-reckoned to) -- no sub-panel, mirroring the ``reset`` precedent
+# minus the reset spec; it rides ``node_types`` through both serialization
+# surfaces, so no extra plumbing is needed here (issue #64).
+NODE_TYPE_VALUES: tuple[str, ...] = ("line", "projection", "blind", "reset")
 RESET_AXIS_VALUES: tuple[str, ...] = ("x", "y")
 
 
@@ -52,7 +56,9 @@ class FieldModel:
     :param start_node: Name of the node where the robot begins.
     :param start_heading_deg: Initial robot heading in degrees, CCW from +x.
     :param nodes: Mapping of node name to ``(x_cm, y_cm)`` position.
-    :param node_types: Mapping of node name to ``"line"`` or ``"blind"``.
+    :param node_types: Mapping of node name to one of ``"line"``,
+        ``"projection"``, ``"blind"``, or ``"reset"`` (see
+        ``NODE_TYPE_VALUES``).
     :param line_segments: Undirected line-following edges, each as
         ``(node_a, node_b)``.
     :param blind_edges: Undirected dead-reckoning edges, each as

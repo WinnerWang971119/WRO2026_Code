@@ -17,8 +17,14 @@ PR3 schema (vs PR1/PR2): drops ``PROJECTIONS`` and ``GOAL_APPROACH``,
 adds required ``BLIND_EDGES`` and ``FIELD_MM`` / ``MAP_PNG``.
 
 PR4 (T3/T6) adds an optional ``EDGES`` table for rich per-edge metadata
-(EDGE_PROJECTION, per-edge mode overrides). Absence of ``EDGES`` is benign
-for backward compatibility.
+(per-edge mode / direction / stop-at-line overrides). Absence of ``EDGES``
+is benign for backward compatibility.
+
+Issue #64 retires the ``EDGE_PROJECTION`` edge type: a line-follow segment
+terminated by encoder distance (no junction under the strip) is now
+expressed by typing the *destination* node ``"projection"``. Edge types are
+``LINE`` / ``BLIND`` only, and every per-hop primitive falls out of
+``(edge_type, destination_node_type)``.
 
 Single-wheel pivots are authored **per turn**, not per edge: a pivot is a
 3-node triple ``(u, v, w)`` in ``field_data.PIVOT_TURNS`` (arrive from
@@ -42,6 +48,7 @@ imports :func:`validate` from this module).
 from __future__ import annotations
 
 import math
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Optional, Tuple
 
@@ -64,13 +71,26 @@ _REQUIRED_ATTRS = (
     "MAP_PNG",
 )
 
-_ALLOWED_NODE_TYPES = ("line", "blind", "reset")
+_ALLOWED_NODE_TYPES = ("line", "projection", "blind", "reset")
 
 # The off-line node kind: a node with no line under the sensor, reachable only
-# by dead reckoning. A LINE / PROJECTION (line-follow) edge can never be
-# incident to one -- you cannot line-follow to a node that has no line -- so the
-# validator rejects such an edge (see :func:`_reject_line_follow_into_blind`).
+# by dead reckoning. A LINE (line-follow) edge can never be incident to one --
+# you cannot line-follow to a node that has no line -- so the validator rejects
+# such an edge (see :func:`_reject_line_follow_into_blind`).
 _BLIND_NODE_TYPE = "blind"
+
+# A line-follow waypoint that is on the line but NOT at a junction. The line
+# passes through it (longitudinally detectable as a crossing), so a BLIND edge
+# can still stop on it; there is just no junction marker, hence the hop into it
+# is dead-reckoned for identity/distance. A LINE edge into a projection node is
+# DISTANCE-terminated (no junction to overshoot), which flips its pivot regime
+# to ``distance`` (issue #64). Mirrors ``graph_builder.NODE_PROJECTION``.
+_PROJECTION_NODE_TYPE = "projection"
+
+# The on-line node kind reachable by line-following: it sits at a junction.
+# Used by the reachability warning -- a ``line`` node needs >= 1 incident LINE
+# edge (a junction must sit on a line edge).
+_LINE_NODE_TYPE = "line"
 
 # Inclusive upper bound on BLIND_DECAY_EXPONENT. The decay weight is
 # ``length * (1 + k * (d / d_ref) ** exponent)``; with no ceiling a fat-fingered
@@ -257,14 +277,28 @@ def _build_authored_graph(field_data):
     from tools.path_planner.graph_builder import (
         EDGE_BLIND,
         EDGE_LINE,
-        EDGE_PROJECTION,
         _emit_directed_pair,
     )
 
     nodes = getattr(field_data, "NODES", {})
+    # Stamp the node ``type`` exactly as build_graph does (graph_builder.py:438,
+    # ``type=field_data.NODE_TYPES[name]``) so the shared ``is_projection_node``
+    # predicate resolves on this mini-graph identically to the real planner
+    # graph. Without it the BLIND->projection-node auto-seek rule in ``_regime``
+    # reads projection-ness off an untyped node and always sees False, so the
+    # auto-rule is dead in the pivot/regime checks (issue #64). This is the only
+    # node-creation site: every ``_emit_directed_pair`` below is guarded by
+    # ``a in nodes and b in nodes``, so its ``add_edge`` calls never mint an
+    # untyped endpoint node.
+    node_types = getattr(field_data, "NODE_TYPES", {})
     g = nx.DiGraph()
     for name, coord in nodes.items():
-        g.add_node(name, x_cm=float(coord[0]), y_cm=float(coord[1]))
+        g.add_node(
+            name,
+            x_cm=float(coord[0]),
+            y_cm=float(coord[1]),
+            type=node_types.get(name),
+        )
 
     # Match build_graph's source precedence exactly: LINE_SEGMENTS, then
     # BLIND_EDGES, then EDGES (a later source's directed edge overwrites an
@@ -286,7 +320,7 @@ def _build_authored_graph(field_data):
         etype = entry.get("type")
         if eu not in nodes or ev not in nodes:
             continue  # unknown node; the per-entry shape check reports it.
-        if etype not in (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION):
+        if etype not in (EDGE_LINE, EDGE_BLIND):
             continue  # bad type; the per-entry shape check reports it.
         if "distance_cm" not in entry or "heading_deg" not in entry:
             continue  # malformed entry; the per-entry shape check reports it.
@@ -363,17 +397,18 @@ def _validate_pivot_turns(field_data) -> None:
        (T3 -- no reimplemented ``hypot`` / ``atan2`` / ``+180`` here) wrapped
        by the one canonical :func:`tools.path_planner.compiler.normalize_turn`
        (the same normalizer the planner's ``build_pivot_turns`` emits with);
-    3. classifies each side's edge into a regime -- ``"line"`` (true LINE,
-       overshoot-budget-bearing), ``"sensor"`` (a BLIND edge that SEEKS a line
-       at runtime -- via the legacy STOP_AT_LINE tag, a per-edge ``stop_at_line``
-       override of ON, or the BLIND->PROJECTION auto-rule on the incoming leg --
-       self-corrects, no trim, no budget), or ``"distance"`` (a non-seeking
-       BLIND / any PROJECTION -- dead-reckoned, where the trim actually bites).
-       The seek is decided by the one shared
+    3. classifies each side's edge into a regime from
+       ``(edge_type, destination_node_type)`` (issue #64) -- ``"line"`` (a LINE
+       edge into a junction ``line`` node, overshoot-budget-bearing), ``"sensor"``
+       (a BLIND edge that SEEKS a line at runtime -- via the legacy STOP_AT_LINE
+       pipeline default, a per-edge ``stop_at_line`` override of ON, or the
+       BLIND->projection-node auto-rule -- self-corrects, no trim, no budget), or
+       ``"distance"`` (a non-seeking BLIND edge, OR a LINE edge into a
+       ``projection`` node -- dead-reckoned, where the trim bites the follow
+       distance). The seek is decided by the one shared
        :func:`tools.path_planner.sim.runtime.resolve_stop_at_line` resolver, not
-       re-derived. The outgoing leg's auto-rule is goal-relative (the hop after
-       ``w``) and not visible per-triple, so it is treated conservatively as
-       non-seeking;
+       re-derived. The auto-rule is now LOCAL (the edge's OWN destination is a
+       projection node), so BOTH legs evaluate it -- no goal-relative peek;
     4. computes the single-wheel over-travel
        ``delta = compute_pivot_compensation(theta, track_cm)`` (issue #44
        closed form -- reused, not re-derived); and
@@ -406,12 +441,12 @@ def _validate_pivot_turns(field_data) -> None:
     The supported incoming x outgoing matrix (``line`` / ``sensor`` =
     sensor-terminated; ``distance`` = dead-reckoned) is::
 
-        incoming \\ outgoing | sensor (line / STOP_AT_LINE) | distance (BLIND / PROJ)
-        --------------------+------------------------------+-------------------------
-        line / sensor       | overshoot-reduce in;          | overshoot-reduce in;
-        (re-anchor / seek)  | out no-op (self-corrects @w)  | out drive trimmed
-        distance            | approach trim in;             | approach trim in;
-                            | out no-op (self-corrects @w)  | out drive trimmed
+        incoming \\ outgoing | sensor (LINE->junction / STOP_AT_LINE) | distance (BLIND / LINE->proj)
+        --------------------+----------------------------------------+------------------------------
+        line / sensor       | overshoot-reduce in;                    | overshoot-reduce in;
+        (re-anchor / seek)  | out no-op (self-corrects @w)            | out drive trimmed
+        distance            | approach trim in;                       | approach trim in;
+                            | out no-op (self-corrects @w)            | out drive trimmed
 
     :param field_data: the ``tools.path_planner.field_data`` module (or any
         object exposing the same top-level attributes -- including
@@ -442,13 +477,11 @@ def _validate_pivot_turns(field_data) -> None:
     from tools.path_planner.graph_builder import (
         EDGE_BLIND,
         EDGE_LINE,
-        EDGE_PROJECTION,
         directed_edge_heading,
-        next_hop_is_projection,
+        is_projection_node,
     )
     from tools.path_planner.pipeline_config import (
         PIPELINE_CONFIG,
-        BlindMode,
         StopAtLineMode,
     )
     from tools.path_planner.planner import (
@@ -491,58 +524,70 @@ def _validate_pivot_turns(field_data) -> None:
     # _build_authored_graph). All directed-edge geometry comes from here.
     graph = _build_authored_graph(field_data)
 
-    # Field-wide auto-seek toggle (default ON): a blind hop that feeds a
-    # PROJECTION seeks a line first. Read once; the per-leg auto-rule below ANDs
-    # it with the "feeds a projection?" peek.
+    # Field-wide auto-seek toggle (default ON): a blind hop whose DESTINATION is
+    # a projection node seeks a line first to re-anchor. Read once; the per-leg
+    # auto-rule below ANDs it with the LOCAL "is the destination a projection
+    # node?" lookup (issue #64 -- no goal-relative NEXT_HOP peek).
     auto_seek_enabled = getattr(field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
 
+    # A projection node is NOT a blind-decay anchor -- planner._ANCHOR_NODE_TYPES
+    # stays {line, reset} by decision; do not add projection to the anchor set.
+    # (Issue #64: a projection arrival is still dead-reckoned for routing cost.)
+
     def _edge_attrs(a: str, b: str):
-        """Return (type, distance_cm, primitive_mode, stop_at_line_override) or None."""
+        """Return (type, distance_cm, stop_at_line_override) or None."""
         if not graph.has_edge(a, b):
             return None
         data = graph[a][b]
         return (
             data["type"],
             float(data["distance_cm"]),
-            data.get("primitive_mode"),
             data.get("stop_at_line_override"),
         )
 
-    def _regime(edge_type, primitive_mode, stop_override, auto_rule_active) -> str | None:
-        """Classify a directed edge: 'line', 'sensor', 'distance', or None.
+    def _regime(edge_type, dest_node_type, stop_override, auto_rule_active) -> str | None:
+        """Classify a directed edge from ``(edge_type, destination_node_type)``.
 
-        ``line``     -- a true LINE edge: re-anchors on the junction line; its
-                        incoming trim is bounded by the LINE overshoot budget.
+        Returns ``'line'``, ``'sensor'``, ``'distance'``, or ``None`` (issue #64
+        retires the projection EDGE type; the destination NODE type now decides
+        how a LINE hop terminates):
+
+        ``line``     -- a LINE edge into a ``line`` (junction) node: re-anchors
+                        on the junction line; its incoming trim is bounded by the
+                        LINE overshoot budget.
+        ``distance`` -- a LINE edge into a ``projection`` node (no junction to
+                        overshoot, so the hop is DISTANCE-terminated -- the
+                        silent-failure trap: its trim draws from the follow
+                        distance, not the overshoot budget), OR a non-seeking
+                        BLIND edge: dead-reckoned; the trim bites the edge length.
         ``sensor``   -- a BLIND edge that SEEKS a line at runtime, so it self-
                         corrects: takes no trim, and is NOT subject to the
                         overshoot budget. A blind hop seeks when ANY trigger
                         fires -- a per-edge ``stop_at_line`` override of ON, the
-                        legacy ``BlindMode.STOP_AT_LINE`` tag (incl. a
-                        no-override edge inheriting a STOP_AT_LINE pipeline
-                        default), or the BLIND->PROJECTION auto-rule
-                        (``auto_rule_active``). The decision is the ONE shared
+                        legacy ``BlindMode.STOP_AT_LINE`` pipeline default, or the
+                        BLIND->projection-node auto-rule (``auto_rule_active``).
+                        The decision is the ONE shared
                         :func:`resolve_stop_at_line` resolver -- the same
                         precedence ladder the compiler / sim / firmware run --
                         never re-derived here, so the validator can never drift
                         from what the robot actually does.
-        ``distance`` -- a non-seeking BLIND edge, or any PROJECTION edge:
-                        dead-reckoned; the trim bites.
         ``None``     -- an unclassifiable edge type (unsupported combo).
+
+        Per-edge ``primitive_mode`` no longer feeds this classification: with the
+        projection EDGE type gone, a BLIND edge's seek resolves against the
+        pipeline-default :class:`BlindMode` (``PIPELINE_CONFIG.blind``) plus its
+        per-edge ``stop_at_line`` override and the local auto-rule.
 
         Pivots are FRONT-only in v1 (reverse pivots are #54), so the seek is
         resolved with ``Direction.FRONT`` -- a front board always faces travel,
         so ``LINE_BOARD_COUNT`` never suppresses it.
         """
         if edge_type == EDGE_LINE:
-            return "line"
-        if edge_type == EDGE_PROJECTION:
-            return "distance"
+            # The destination node type decides termination: a junction line
+            # node re-anchors (overshoot budget), a projection node is
+            # distance-terminated (follow-distance budget).
+            return "distance" if dest_node_type == _PROJECTION_NODE_TYPE else "line"
         if edge_type == EDGE_BLIND:
-            edge_mode = (
-                primitive_mode
-                if isinstance(primitive_mode, BlindMode)
-                else PIPELINE_CONFIG.blind
-            )
             edge_override = (
                 stop_override
                 if isinstance(stop_override, StopAtLineMode)
@@ -551,7 +596,7 @@ def _validate_pivot_turns(field_data) -> None:
             seek, _motion_mode = resolve_stop_at_line(
                 StopAtLine.AUTO,
                 edge_override,
-                edge_mode,
+                PIPELINE_CONFIG.blind,
                 PIPELINE_CONFIG.blind,
                 Direction.FRONT,
                 LINE_BOARD_COUNT,
@@ -572,6 +617,7 @@ def _validate_pivot_turns(field_data) -> None:
     in_edge_deltas: dict = {}
 
     nodes = getattr(field_data, "NODES", {})
+    node_types = getattr(field_data, "NODE_TYPES", {})
     for i, triple in enumerate(pivot_turns):
         # Shape: a pivot turn is a 3-element sequence of known node names. The
         # loader (T1) already produces (u, v, w) string tuples, but the
@@ -624,8 +670,15 @@ def _validate_pivot_turns(field_data) -> None:
                 f"('{v}','{w}') that is not authored -- add it to "
                 f"LINE_SEGMENTS / BLIND_EDGES / EDGES or fix the triple."
             )
-        in_type, in_distance, in_primitive, in_stop_override = in_attrs
-        out_type, out_distance, out_primitive, out_stop_override = out_attrs
+        in_type, in_distance, in_stop_override = in_attrs
+        out_type, out_distance, out_stop_override = out_attrs
+
+        # Destination node types drive the regime (issue #64): a LINE hop into a
+        # projection node is DISTANCE-terminated, a LINE hop into a junction line
+        # node re-anchors. ``v`` is the head of the incoming leg ``u -> v``;
+        # ``w`` is the head of the outgoing leg ``v -> w``.
+        in_dest_type = node_types.get(v)
+        out_dest_type = node_types.get(w)
 
         # FRONT-only: reject authored REAR on either pivot-adjacent leg ------
         # (review fix 4 / FRONT-only; reverse pivots are #54). Check the exact
@@ -663,25 +716,25 @@ def _validate_pivot_turns(field_data) -> None:
             )
 
         # 2. Unsupported incoming x outgoing combo --------------------------
-        # The INCOMING blind leg's auto-seek rule is knowable here: its
-        # continuation toward the pivot IS the outgoing leg ``v -> w``, so it
-        # seeks (re-anchors) when that outgoing leg is a PROJECTION. The
-        # OUTGOING leg's auto-rule depends on the hop AFTER ``w`` -- chosen by
-        # the route per goal, not visible in this per-triple check -- so it is
-        # left False: conservative, since assuming dead-reckon never validates a
-        # real over-travel away (a v->w blind the author KNOWS will seek should
-        # carry an explicit ``stop_at_line: "on"``, which IS honored below).
-        in_auto_rule = auto_seek_enabled and next_hop_is_projection(graph, v, w)
-        in_regime = _regime(in_type, in_primitive, in_stop_override, in_auto_rule)
-        out_regime = _regime(out_type, out_primitive, out_stop_override, False)
+        # The auto-seek rule is now LOCAL (issue #64): a BLIND hop seeks +
+        # re-anchors when its OWN destination is a projection node -- no
+        # goal-relative NEXT_HOP peek. The incoming leg ``u -> v`` keys off ``v``;
+        # the outgoing leg ``v -> w`` keys off ``w`` (both heads are visible in
+        # this per-triple check, so the outgoing side is no longer conservatively
+        # forced False). A LINE hop's regime keys off the same destination type
+        # (LINE -> projection node is DISTANCE-terminated).
+        in_auto_rule = auto_seek_enabled and is_projection_node(graph, v)
+        out_auto_rule = auto_seek_enabled and is_projection_node(graph, w)
+        in_regime = _regime(in_type, in_dest_type, in_stop_override, in_auto_rule)
+        out_regime = _regime(out_type, out_dest_type, out_stop_override, out_auto_rule)
         if in_regime is None or out_regime is None:
             raise FieldDataError(
                 f"PIVOT_TURNS[{i}] ('{u}','{v}','{w}') has an unsupported "
                 f"regime combo: incoming type {in_type!r} x outgoing type "
                 f"{out_type!r}. The two-sided pivot compensation only models "
-                f"sensor-terminated (LINE / BLIND STOP_AT_LINE) and "
-                f"distance-terminated (BLIND / PROJECTION) edges -- reclassify "
-                f"the offending edge or remove the pivot turn."
+                f"sensor-terminated (LINE-into-junction / BLIND STOP_AT_LINE) and "
+                f"distance-terminated (BLIND / LINE-into-projection) edges -- "
+                f"reclassify the offending edge or remove the pivot turn."
             )
 
         # Single-source the delta formula (no inline re-derive).
@@ -714,14 +767,17 @@ def _validate_pivot_turns(field_data) -> None:
             )
 
         # 4. delta leaves < the trim floor of the sensor/LINE overshoot budget
-        # BOTH a true LINE incoming edge AND a 'sensor' (STOP_AT_LINE seek)
-        # incoming edge realise their correction as a reduction of the
-        # post-detect overshoot advance, bounded by the same FRONT sensor-to-axle
-        # offset (pivots are FRONT-only). The classifier already folds authored
-        # STOP_AT_LINE edges, per-edge overrides, AND auto-rule BLIND->PROJECTION
-        # seeks into 'sensor', so both regimes share this one budget (ADR-044).
-        # The firmware clamps the reduced advance to PIVOT_TRIM_MIN_DRIVE_CM, so
-        # reject when budget - delta < the floor.
+        # BOTH a 'line' incoming edge (LINE into a junction node) AND a 'sensor'
+        # (STOP_AT_LINE seek) incoming edge realise their correction as a
+        # reduction of the post-detect overshoot advance, bounded by the same
+        # FRONT sensor-to-axle offset (pivots are FRONT-only). The classifier
+        # already folds per-edge overrides, the legacy STOP_AT_LINE pipeline
+        # default, AND the local auto-rule BLIND->projection-node seek into
+        # 'sensor', so both regimes share this one budget (ADR-044). A LINE edge
+        # into a PROJECTION node is NOT 'line' here -- it is 'distance', so its
+        # trim draws from the follow distance in check 3, not this overshoot
+        # budget (issue #64). The firmware clamps the reduced advance to
+        # PIVOT_TRIM_MIN_DRIVE_CM, so reject when budget - delta < the floor.
         if (
             in_regime in ("line", "sensor")
             and line_overshoot_budget_cm - delta < pivot_trim_min_drive_cm
@@ -823,20 +879,21 @@ def _validate_edges_field(field_data) -> None:
     An anti-ambiguity cross-check rejects an entry whose unordered pair
     ``{u, v}`` already exists in ``LINE_SEGMENTS`` or ``BLIND_EDGES``
     with a *conflicting* type (:data:`EDGE_LINE` matches LINE_SEGMENTS,
-    :data:`EDGE_BLIND` matches BLIND_EDGES, :data:`EDGE_PROJECTION`
-    matches neither): such an entry would silently overwrite the earlier
-    edge's type and geometry in :mod:`graph_builder`. A *matching*-type
-    entry on an existing pair is a legitimate override layer and is
-    accepted.
+    :data:`EDGE_BLIND` matches BLIND_EDGES): such an entry would silently
+    overwrite the earlier edge's type and geometry in :mod:`graph_builder`.
+    A *matching*-type entry on an existing pair is a legitimate override
+    layer and is accepted.
 
     Single-wheel pivots are no longer authored here. The old per-edge
     ``pivot`` / ``pre_turn_mode`` keys are gone; pivots are per-turn
     triples validated by :func:`_validate_pivot_turns`, which runs after
     this per-entry shape check.
 
-    Imports of :class:`LineMode`, :class:`BlindMode`, and
-    :class:`ProjectionMode` are performed inside the function to avoid a
-    circular import with :mod:`tools.path_planner.graph_builder`.
+    Imports of :class:`LineMode` and :class:`BlindMode` are performed
+    inside the function to avoid a circular import with
+    :mod:`tools.path_planner.graph_builder`. Edge types are ``LINE`` /
+    ``BLIND`` only (issue #64 retired ``EDGE_PROJECTION``); the destination
+    NODE type, not the edge type, now carries projection semantics.
 
     :param field_data: the ``tools.path_planner.field_data`` module (or
         any object exposing the same top-level attributes).
@@ -863,20 +920,17 @@ def _validate_edges_field(field_data) -> None:
     from tools.path_planner.graph_builder import (
         EDGE_BLIND,
         EDGE_LINE,
-        EDGE_PROJECTION,
     )
     from tools.path_planner.pipeline_config import (
         BlindMode,
         LineMode,
-        ProjectionMode,
         StopAtLineMode,
     )
 
-    legal_edge_types = (EDGE_LINE, EDGE_BLIND, EDGE_PROJECTION)
+    legal_edge_types = (EDGE_LINE, EDGE_BLIND)
     mode_class_by_edge_type = {
         EDGE_LINE: (LineMode, "LineMode"),
         EDGE_BLIND: (BlindMode, "BlindMode"),
-        EDGE_PROJECTION: (ProjectionMode, "ProjectionMode"),
     }
     nodes = getattr(field_data, "NODES", {})
     node_types = getattr(field_data, "NODE_TYPES", {})
@@ -886,11 +940,11 @@ def _validate_edges_field(field_data) -> None:
     # with a *conflicting* type silently overwrites the earlier edge's type
     # and geometry in graph_builder (LINE then BLIND then EDGES; networkx
     # add_edge replaces attributes). EDGE_LINE matches LINE_SEGMENTS and
-    # EDGE_BLIND matches BLIND_EDGES; EDGE_PROJECTION matches neither, so a
-    # PROJECTION entry on a LINE/BLIND pair is a conflict. A *matching*-type
-    # entry (e.g. EDGE_LINE on a LINE_SEGMENTS pair) is a legitimate override
-    # layer (distance/heading/direction) and is accepted. This mirrors, via
-    # EDGES, the LINE-vs-BLIND guard in :func:`validate`.
+    # EDGE_BLIND matches BLIND_EDGES, so an EDGE_BLIND entry on a LINE_SEGMENTS
+    # pair (or an EDGE_LINE entry on a BLIND_EDGES pair) is a conflict. A
+    # *matching*-type entry (e.g. EDGE_LINE on a LINE_SEGMENTS pair) is a
+    # legitimate override layer (distance/heading/direction) and is accepted.
+    # This mirrors, via EDGES, the LINE-vs-BLIND guard in :func:`validate`.
     line_segment_keys = {
         _segment_key(a, b)
         for a, b in getattr(field_data, "LINE_SEGMENTS", ())
@@ -946,8 +1000,9 @@ def _validate_edges_field(field_data) -> None:
         if edge_type not in legal_edge_types:
             raise FieldDataError(
                 f"EDGES[{i}].type = {edge_type!r}; expected one of "
-                f"{legal_edge_types} -- use EDGE_LINE, EDGE_BLIND, or "
-                "EDGE_PROJECTION from graph_builder"
+                f"{legal_edge_types} -- use EDGE_LINE or EDGE_BLIND from "
+                "graph_builder (the projection EDGE type was retired in issue "
+                "#64; type the destination NODE 'projection' instead)"
             )
 
         if u == v:
@@ -968,18 +1023,20 @@ def _validate_edges_field(field_data) -> None:
                 "add it to NODES or fix the entry"
             )
 
-        # A LINE / PROJECTION override is a line-follow edge; like a
-        # LINE_SEGMENTS pair it cannot be incident to a blind node (no line under
-        # the sensor), which also keeps the planner's blind-decay fallback
-        # correct-by-construction (ADR-041).
-        if edge_type in (EDGE_LINE, EDGE_PROJECTION):
+        # A LINE override is a line-follow edge; like a LINE_SEGMENTS pair it
+        # cannot be incident to a blind node (no line under the sensor), which
+        # also keeps the planner's blind-decay fallback correct-by-construction
+        # (ADR-041). A LINE edge into a PROJECTION node is LEGAL -- the line
+        # passes through the projection node, the hop is just distance-terminated
+        # (issue #64) -- so only a BLIND destination is rejected here.
+        if edge_type == EDGE_LINE:
             _reject_line_follow_into_blind(
                 u, v, edge_type, node_types, f"EDGES[{i}]"
             )
 
         # Conflicting-type cross-check (findings #38/#47). A matching-type
         # override is allowed; only a type that reclassifies an existing
-        # LINE/BLIND pair (or a PROJECTION entry over either) is rejected.
+        # LINE/BLIND pair is rejected.
         pair_key = _segment_key(u, v)
         if pair_key in line_segment_keys and edge_type != EDGE_LINE:
             raise FieldDataError(
@@ -1026,8 +1083,7 @@ def _validate_edges_field(field_data) -> None:
                 raise FieldDataError(
                     f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
                     f"type {edge_type} requires a {expected_name} instance "
-                    "(LineMode on LINE edges, BlindMode on BLIND edges, "
-                    "ProjectionMode on PROJECTION edges)"
+                    "(LineMode on LINE edges, BlindMode on BLIND edges)"
                 )
             if primitive_mode == expected_cls.DEFAULT:
                 raise FieldDataError(
@@ -1071,6 +1127,117 @@ def _validate_edges_field(field_data) -> None:
                     "(DEFAULT, ON, OFF), the string 'on' / 'off' "
                     f"(case-insensitive), or absent; got {stop_at_line!r}"
                 )
+
+
+def _line_and_blind_incident_nodes(field_data) -> Tuple[set, set]:
+    """Return ``(line_incident, blind_incident)`` node-name sets from authored topology.
+
+    A node is **LINE-incident** when it is an endpoint of any authored LINE edge
+    (a ``LINE_SEGMENTS`` pair, or an ``EDGES`` entry of type :data:`EDGE_LINE`),
+    and **BLIND-incident** when it is an endpoint of any authored BLIND edge (a
+    ``BLIND_EDGES`` pair, or an ``EDGES`` entry of type :data:`EDGE_BLIND`).
+    Authored edges are bidirectional in the planner graph
+    (:func:`graph_builder._emit_directed_pair` emits both directions), so an
+    endpoint of a BLIND edge always has a BLIND *in*-edge -- which is what makes a
+    projection node blind-seek-reachable.
+
+    Reads the AUTHORED topology (no obstacle-clip drop), matching
+    :func:`_build_authored_graph`'s stance: reachability is an authoring property,
+    and edges lost to C-space clipping are a separate concern (graph_builder warns
+    on a fully-disconnected node after inflation). Malformed ``EDGES`` entries are
+    skipped here -- :func:`_validate_edges_field` (which runs first) has already
+    rejected them.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing ``LINE_SEGMENTS`` / ``BLIND_EDGES`` / optional ``EDGES``).
+    :return: a ``(line_incident, blind_incident)`` pair of node-name sets.
+    """
+    # Deferred import to avoid a circular import: graph_builder imports
+    # `validate` from this module.
+    from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
+
+    line_incident: set = set()
+    blind_incident: set = set()
+
+    for a, b in getattr(field_data, "LINE_SEGMENTS", ()) or ():
+        line_incident.add(a)
+        line_incident.add(b)
+    for a, b in getattr(field_data, "BLIND_EDGES", ()) or ():
+        blind_incident.add(a)
+        blind_incident.add(b)
+
+    for entry in getattr(field_data, "EDGES", ()) or ():
+        if not isinstance(entry, dict):
+            continue
+        etype = entry.get("type")
+        eu = entry.get("u")
+        ev = entry.get("v")
+        if eu is None or ev is None:
+            continue
+        if etype == EDGE_LINE:
+            line_incident.add(eu)
+            line_incident.add(ev)
+        elif etype == EDGE_BLIND:
+            blind_incident.add(eu)
+            blind_incident.add(ev)
+
+    return line_incident, blind_incident
+
+
+def _warn_unreachable_nodes(field_data) -> None:
+    """Warn (never raise) on a node the authored topology cannot reach correctly.
+
+    Two reachability nudges, both :class:`UserWarning` (authoring guidance, not a
+    hard error -- a partial field is still buildable):
+
+    * A ``"line"`` node sits at a junction, so it MUST have at least one incident
+      LINE edge (a junction is *defined* by the lines crossing through it). A line
+      node with zero incident LINE edges is almost certainly a mis-typed blind /
+      projection node -- warn.
+    * A ``"projection"`` node is on a line but not at a junction. It is reachable
+      either by line-following (an incident LINE edge -- a ``line-proj-line``
+      pass-through or a ``line->proj`` distance hop) OR by a blind seek (a BLIND
+      in-edge -- ``Blind->Proj`` auto-seek + re-anchor, issue #64). A projection
+      node with **only** a ``Blind->Proj`` in-edge is therefore VALID and must NOT
+      warn; warn only when it is *otherwise* unreachable -- it has neither an
+      incident LINE edge nor an incident BLIND edge.
+
+    Runs after :func:`_validate_edges_field` so the ``EDGES`` rows it scans are
+    well-formed. Mutates no state; emits the warnings and returns.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the same top-level attributes).
+    :return: ``None``.
+    """
+    node_types = getattr(field_data, "NODE_TYPES", {})
+    line_incident, blind_incident = _line_and_blind_incident_nodes(field_data)
+
+    for name, node_type in node_types.items():
+        if node_type == _LINE_NODE_TYPE and name not in line_incident:
+            warnings.warn(
+                f"line node '{name}' has no incident LINE edge -- a 'line' node "
+                "sits at a junction, which must lie on a line edge. Add a "
+                "LINE_SEGMENTS / EDGES(LINE) edge through it, or re-type it "
+                "('projection' for an on-line non-junction waypoint, 'blind' for "
+                "an off-line dead-reckon node).",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif node_type == _PROJECTION_NODE_TYPE and (
+            name not in line_incident and name not in blind_incident
+        ):
+            # A Blind->Proj in-edge (any incident BLIND edge -> a BLIND in-edge,
+            # since authored edges are bidirectional) makes it blind-seek-
+            # reachable and exempt; an incident LINE edge makes it
+            # line-follow-reachable. Only an isolated projection node warns.
+            warnings.warn(
+                f"projection node '{name}' is unreachable -- it has no incident "
+                "LINE edge (line-follow / pass-through) and no incident BLIND "
+                "edge (Blind->Proj auto-seek). Wire it to the graph with a LINE "
+                "or BLIND edge, or remove it.",
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 def _validate_reset_nodes(field_data) -> None:
@@ -1319,11 +1486,11 @@ def _reject_line_follow_into_blind(
     """Reject a line-follow edge that needs a line where a node has none.
 
     A ``LINE`` edge follows a line for its whole length, so *neither* endpoint
-    may be typed ``"blind"``. A ``PROJECTION`` edge may *start* off the line -- a
-    blind tail is allowed, the chassis projects out of dead-reckoned territory --
-    but it SEEKS and re-acquires the line at its head, so its **head** ``v`` may
-    not be ``"blind"`` (there is no line there to seek). Per ADR-041 a projection
-    is "wired to a line node" at its destination; only its head is checked.
+    may be typed ``"blind"`` (there is no line under the sensor at a blind node).
+    A ``"projection"`` destination is LEGAL: the line passes through a projection
+    node (longitudinally detectable as a crossing), so a LINE hop can follow into
+    it -- the hop is just distance-terminated, not junction-terminated (issue
+    #64). Only a ``"blind"`` endpoint is rejected.
 
     Beyond being physically impossible, a line-follow edge that *terminates on* a
     blind node breaks the planner's blind-decay model (ADR-041): a blind pocket
@@ -1331,32 +1498,25 @@ def _reject_line_follow_into_blind(
     blind-distance search, so its interior blind hops get ``d == inf`` and the
     ``inf -> factor 1`` fallback prices the deepest-drift hops the *cheapest* --
     silently, because the disconnected-node warning never fires (the node is
-    reachable in the full graph). A projection's blind *tail* is exempt: it
-    leaves a pocket toward a line rather than entering one, so the seeding stays
-    correct-by-construction (``d == inf`` still means a genuinely disconnected
-    island, the only case the factor-1 fallback is meant for).
+    reachable in the full graph). A blind pocket must therefore be entered by a
+    BLIND edge, never a line-follow seam.
 
     :param u: the edge tail node name.
     :param v: the edge head node name.
-    :param edge_kind: the edge type label for the message (``"LINE"`` /
-        ``"PROJECTION"``).
+    :param edge_kind: the edge type label for the message (``"LINE"``).
     :param node_types: the validated ``NODE_TYPES`` map.
     :param where: a key-path label for the message (e.g. ``"LINE_SEGMENTS"`` or
         ``"EDGES[3]"``).
-    :raises FieldDataError: when a checked endpoint is typed ``"blind"`` -- both
-        endpoints for ``LINE``, the head ``v`` only for ``PROJECTION``.
+    :raises FieldDataError: when either endpoint is typed ``"blind"``.
     """
-    from tools.path_planner.graph_builder import EDGE_PROJECTION
-
-    endpoints = (v,) if edge_kind == EDGE_PROJECTION else (u, v)
-    for endpoint in endpoints:
+    for endpoint in (u, v):
         if node_types.get(endpoint) == _BLIND_NODE_TYPE:
             raise FieldDataError(
                 f"{where} ('{u}','{v}') is a {edge_kind} (line-follow) edge "
                 f"incident to blind node '{endpoint}' -- line-following needs a "
                 "line under the sensor, so a blind node must be reached by a "
-                "BLIND edge (in BLIND_EDGES), not a LINE/PROJECTION edge. Re-type "
-                "the node in NODE_TYPES or move the pair to BLIND_EDGES."
+                "BLIND edge (in BLIND_EDGES), not a LINE edge. Re-type the node "
+                "in NODE_TYPES or move the pair to BLIND_EDGES."
             )
 
 
@@ -1478,13 +1638,14 @@ def validate(field_data) -> None:
         if name not in node_types:
             raise FieldDataError(
                 f"node '{name}' missing from NODE_TYPES -- "
-                "every NODES key needs a type ('line', 'blind', or 'reset')"
+                "every NODES key needs a type "
+                "('line', 'projection', 'blind', or 'reset')"
             )
     for name, value in node_types.items():
         if value not in _ALLOWED_NODE_TYPES:
             raise FieldDataError(
                 f"NODE_TYPES['{name}'] = '{value}'; expected one of "
-                "{'line','blind','reset'}"
+                "{'line','projection','blind','reset'}"
             )
 
     # 4. LINE_SEGMENTS coverage.
@@ -1567,6 +1728,24 @@ def validate(field_data) -> None:
             f"START_NODE references unknown node: '{start_node}' -- "
             "add it to NODES or pick an existing node"
         )
+    # The chassis is operator-placed at mission start with no prior line-follow,
+    # so the START node may not be on-line-and-sensor-anchored: a 'line' node
+    # (reached by line-following into a junction) and a 'projection' node
+    # (reached by a distance-gated / blind seek) both presume an arrival the
+    # robot has not made at t=0. The start origin is dead-reckoned -- a 'blind'
+    # node -- (a 'reset' START is separately rejected by _validate_reset_nodes,
+    # since its wall-zero interlude only fires post-hop). Reject both here so the
+    # author re-homes the spawn onto a blind origin (issue #64).
+    start_type = node_types.get(start_node)
+    if start_type in (_LINE_NODE_TYPE, _PROJECTION_NODE_TYPE):
+        raise FieldDataError(
+            f"START_NODE '{start_node}' is typed '{start_type}' -- the chassis "
+            "is operator-placed at mission start with no prior line-follow, so a "
+            "'line' (junction) or 'projection' (distance-gated) start node "
+            "presumes a sensor-anchored arrival that has not happened at t=0. "
+            "Author the spawn as a 'blind' node (dead-reckoned origin), or move "
+            f"the on-line typing off START_NODE; fix NODE_TYPES['{start_node}']."
+        )
     if not _is_number(start_heading) or not (0.0 <= float(start_heading) < 360.0):
         raise FieldDataError(
             "START_HEADING_DEG must be a number in [0, 360); "
@@ -1604,6 +1783,12 @@ def validate(field_data) -> None:
 
     # 9. Optional rich-edge table (PR4 / T6). Absent on legacy fixtures.
     _validate_edges_field(field_data)
+
+    # 9b. Reachability warnings (issue #64). Runs after the EDGES shape check so
+    # the authored topology it scans is well-formed. Warns (never raises) on a
+    # 'line' node with no incident LINE edge and on an otherwise-unreachable
+    # 'projection' node -- a 'Blind->Proj' projection node is exempt.
+    _warn_unreachable_nodes(field_data)
 
     # 10. Per-turn single-wheel pivots (issue #44 per-turn model, T5). Runs
     # after the EDGES shape check so the directed-edge legs it reads are
