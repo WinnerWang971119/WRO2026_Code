@@ -45,15 +45,15 @@ Deadlines: Regional `2026-07-21`, National `2026-08-24`, World final
 ### Three layers, top-down only
 
 ```
-planning   (Mission, Tasks, PathTracker, Pathfinder)
+planning   (Mission, Tasks, PathTracker)
    |
    v
 map        (FieldMap, Localization, routes.h)
    |
    v
 perception + actuation
-           (LineFollower, Intersection, Camera (mosaic + color),
-            Drive, Manipulator)
+           (LineFollower, Intersection, Vision (mosaic camera),
+            YawSource, Drive, Manipulator)
    |
    v
 MatrixMiniR4 vendor library (motors, IMU, OLED, I2C, servos)
@@ -120,16 +120,16 @@ there is exactly one place to look.
 
 ### Path planning is offline
 
-`tools/path_planner/` is a Python pipeline that turns
-hand-authored field data (`field_data.py`) into `WRO2026/routes.h` +
-`WRO2026/routes.cpp`. The robot never runs Dijkstra at runtime — it walks
-a pre-computed next-hop table that the planner emits. The `routes.h`
-banner embeds `sha256(field_data.py)` so reviewers can spot a stale
-header at a glance.
+`tools/path_planner/` is a Python pipeline that turns the field data
+(`field_data.json` geometry + the `EDGES` table in `field_data.py`) into
+`WRO2026/routes.h` + `WRO2026/routes.cpp`. The robot never runs Dijkstra
+at runtime — it walks a pre-computed next-hop table that the planner emits.
+The `routes.h` banner embeds a SHA256 over the field-data sources so
+reviewers can spot a stale header at a glance.
 
 ### Mission DSL
 
-Missions are hand-authored in `buildMission()` inside `WRO2026.ino`,
+Missions are hand-authored in `buildMission()` inside `MissionScript.cpp`,
 using a chainable fluent DSL:
 
 ```cpp
@@ -139,13 +139,15 @@ Mission
     .goTo("B")
     .beep(1000, 150)
     .wait(500)
-    .goTo("G")
+    .goTo("G").setStopAtLine(StopAtLine::AUTO)
+    .task("placeMosaic")
     .goTo("A")
     .print("DONE");
 Mission.start();
 ```
 
-Verbs available today: `goTo`, `wait`, `print`, `beep`, `led`. See
+Verbs available today: `goTo` (with `.setStopAtLine(...)`), `wait`, `print`,
+`beep`, `led`, and `task("name", args...)` to dispatch a `Tasks` routine. See
 `Mission.h` for exact signatures.
 
 ## Coding rules
@@ -184,24 +186,34 @@ highlights:
 ```
 WRO2026_code/
 ├── WRO2026/                  Arduino sketch — firmware that runs on the robot.
-│   ├── WRO2026.ino           setup() + loop() + the hand-typed mission DSL.
-│   ├── Config.h              pins, PID gains, MAX_NODES, default speeds.
-│   ├── Drive.{h,cpp}         fluent builders, command queue, motor bias.
+│   ├── WRO2026.ino           setup() + loop() + cooperativeTick() + cal menu.
+│   ├── MissionScript.{h,cpp} buildMission() — the hand-typed mission.
+│   ├── Config.h              umbrella over config/ (pins, gains, speeds).
+│   ├── Drive.{h,cpp}         fluent builders, queue, tShape, stopAtLine, wallStop.
+│   ├── *Policy.h             header-only resolvers (StopAtLine / Direction / ...).
 │   ├── LineFollower.{h,cpp}  PID + distance-gated stop with tShape.
 │   ├── Intersection.{h,cpp}  intersection detection from the sensor array.
+│   ├── WROLineArray.{h,cpp}  8-channel reflectance array over MXColor boards.
+│   ├── YawSource.{h,cpp}     sole owner of raw IMU-yaw I/O (IMU_YAW_SIGN).
 │   ├── Localization.{h,cpp}  currentNode + heading, single source of truth.
 │   ├── PathTracker.{h,cpp}   walks the routes table node-by-node.
 │   ├── FieldMap.h            field graph helpers over routes.h.
 │   ├── routes.{h,cpp}        GENERATED — do not hand-edit.
-│   ├── Mission.{h,cpp}       fluent DSL: goTo / wait / print / beep / led.
-│   ├── Manipulator.{h,cpp}   setLift / setGripper / setArm (control only).
+│   ├── Mission.{h,cpp}       fluent DSL: goTo / wait / print / beep / led / task.
+│   ├── Tasks.{h,cpp}         composite routines dispatched by name.
+│   ├── Manipulator.{h,cpp}   3 servos + belt: grab / sortTo / dump / reset.
+│   ├── Vision.{h,cpp}        HUE12 mosaic read + on-device hue classification.
 │   ├── EventTrace.{h,cpp}    OLED + serial event log.
-│   ├── StateMachine.h        header-only state-machine helper.
-│   └── WROMath.h             angle wrap, clamp, etc.
+│   ├── StateMachine.h        header-only state-machine helper (unused).
+│   ├── WROMath.h             angle wrap, clamp, etc.
+│   └── test/                 host C++ ctest harness (CI-enforced).
 │
 ├── tools/path_planner/       offline Python pipeline.
-│   ├── field_data.py         hand-authored nodes, edges, projections.
+│   ├── field_data.json       field geometry — source of truth.
+│   ├── field_data.py         thin loader + the enum-valued EDGES table.
+│   ├── edit_field.py         Tk GUI field editor (editor/ package).
 │   ├── build_routes.py       validator → graph → planner → header writer.
+│   ├── ctps/                 compiled-trace path sim → HTML player.
 │   ├── sim/                  PathTracker simulator (chassis + runtime).
 │   ├── tests/                pytest suite (run from repo root).
 │   └── README.md             full pipeline docs + CLI flags + exit codes.
@@ -254,14 +266,16 @@ uv run python tools/path_planner/build_routes.py
 That regenerates `WRO2026/routes.{h,cpp}` and a sanity-check
 `tools/path_planner/output/map.png`. Workflow when you edit the field:
 
-1. Edit `tools/path_planner/field_data.py`.
+1. Edit the geometry in `tools/path_planner/field_data.json` (use the
+   `edit_field.py` GUI editor, or hand-edit). Edge motion modes live in the
+   `EDGES` table in `field_data.py`.
 2. Re-run `build_routes.py`.
 3. Open `output/map.png` and eyeball the geometry — nodes in the right
    places, blind edges hopping the right gaps, no edge clipping an
    obstacle.
-4. Commit `field_data.py`, `routes.h`, and `routes.cpp` **in the same
-   commit**. If the SHA256 in the `routes.h` banner ≠ `sha256(field_data.py)`,
-   the commit is incomplete.
+4. Commit `field_data.json`, `field_data.py`, `routes.h`, and `routes.cpp`
+   **in the same commit**. If the SHA256 in the `routes.h` banner ≠ the hash
+   of the field-data sources, the commit is incomplete (CI rejects it).
 
 Full CLI flags, exit codes, and pipeline architecture:
 [`tools/path_planner/README.md`](./tools/path_planner/README.md).
@@ -270,7 +284,7 @@ Full CLI flags, exit codes, and pipeline architecture:
 
 `tools/path_planner/sim/` runs the same node-by-node PathTracker
 semantics as the firmware, in Python. Great for catching bad
-`field_data.py` edits before flashing.
+field edits before flashing.
 
 ```powershell
 uv run python tools/path_planner/sim/demo.py --goals B,G,D,A
@@ -292,14 +306,24 @@ uv run --extra dev pytest tools/path_planner/tests/ -v
 
 (Or `python -m pytest tools/path_planner/tests/ -v` with a plain venv.)
 
-There is no host-side test runner for the Arduino code. Firmware "tests"
-are hardware benchmarks per phase — see `Roadmap.md` section 13 ("Test
-Fixture & Measurement Plan") for the exact setups and pass criteria.
+Firmware logic that can be exercised off-hardware (`LineFollower`, the
+resolver policies, `Manipulator`, `Tasks`, ...) has a host C++ CMake/ctest
+harness under `WRO2026/test/`, run on every push by the `host-tests` CI job:
+
+```powershell
+cmake -S WRO2026/test -B build/test
+cmake --build build/test
+ctest --test-dir build/test --output-on-failure
+```
+
+Anything that genuinely needs the chassis is a hardware benchmark per phase —
+see `Roadmap.md` section 13 ("Test Fixture & Measurement Plan") for the exact
+setups and pass criteria.
 
 ### Author a mission + run it on the bench
 
-1. Edit `buildMission()` in `WRO2026/WRO2026.ino`. Chain `Mission.<verb>(...)`
-   calls, end with `Mission.start()`.
+1. Edit `buildMission()` in `WRO2026/MissionScript.cpp`. Chain
+   `Mission.<verb>(...)` calls, end with `Mission.start()`.
 2. Verify + upload (Arduino IDE or VS Code tasks).
 3. Start `Arduino: Monitor Serial` in VS Code if you want the live event log.
 4. Power on the robot. `setup()` runs every module's `begin()`. OLED
@@ -316,6 +340,7 @@ Fixture & Measurement Plan") for the exact setups and pass criteria.
 
 ## Quick links
 
+- Contributing (PRs, issues, labels): [`CONTRIBUTING.md`](./CONTRIBUTING.md).
 - Hardware quick map and required init sequence: [`CLAUDE.md`](./CLAUDE.md).
 - Path planner pipeline: [`tools/path_planner/README.md`](./tools/path_planner/README.md).
 - Design decisions (ADRs): [`docs/decisions/`](./docs/decisions/).
