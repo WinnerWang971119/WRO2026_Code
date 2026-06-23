@@ -58,6 +58,12 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from tools.path_planner.editor import theme
 from tools.path_planner.editor.model import NODE_TYPE_VALUES, RESET_AXIS_VALUES
+from tools.path_planner.pipeline_config import (
+    BlindMode,
+    DirectionMode,
+    LineMode,
+    TurnMode,
+)
 
 if TYPE_CHECKING:
     from tools.path_planner.editor.model import FieldModel
@@ -192,6 +198,102 @@ _FLOAT_KNOB_LABELS: tuple[tuple[str, str], ...] = (
 # Name of the boolean global knob driven by the checkbutton.
 _BOOL_KNOB_NAME: str = "blind_decay_enabled"
 
+# ---------------------------------------------------------------------------
+# Edge-overrides / pipeline-defaults / extended-globals constants (issue #79).
+# ---------------------------------------------------------------------------
+
+# The two edge kinds an override can attach to.  The override ``type`` field is
+# always one of these; it is AUTO-DERIVED from the matching existing segment and
+# shown read-only (the operator cannot author a conflicting-type override).
+_EDGE_TYPE_LINE: str = "LINE"
+_EDGE_TYPE_BLIND: str = "BLIND"
+
+# The sentinel a combobox shows for "no override key -- inherit the pipeline
+# default".  Selecting it means the corresponding key is OMITTED from the
+# override entry (and from the dispatched value, which is ``None``).  Presented
+# verbatim per the sidecar's "default (inherit)" wording for primitive_mode and
+# the bare "default" wording for direction / stop_at_line.
+_INHERIT_PRIMITIVE_LABEL: str = "default (inherit)"
+_INHERIT_LABEL: str = "default"
+
+# ``primitive_mode`` tag vocabularies, single-sourced from the planner enums so
+# the GUI can never offer a tag the validator rejects.  ``DEFAULT`` is excluded
+# from the authorable tags (it == absence; the inherit sentinel covers it).
+_LINE_MODE_TAGS: tuple[str, ...] = tuple(
+    member.name for member in LineMode if member is not LineMode.DEFAULT
+)
+_BLIND_MODE_TAGS: tuple[str, ...] = tuple(
+    member.name for member in BlindMode if member is not BlindMode.DEFAULT
+)
+
+# Combobox values for the primitive-mode picker, keyed by the derived edge type.
+# The inherit sentinel leads each list so it is the natural "no override" choice.
+_PRIMITIVE_VALUES_BY_TYPE: dict[str, tuple[str, ...]] = {
+    _EDGE_TYPE_LINE: (_INHERIT_PRIMITIVE_LABEL, *_LINE_MODE_TAGS),
+    _EDGE_TYPE_BLIND: (_INHERIT_PRIMITIVE_LABEL, *_BLIND_MODE_TAGS),
+}
+
+# ``direction`` override vocabulary (forward ``u->v`` only).  The inherit
+# sentinel maps to an omitted key; ``front`` / ``rear`` map to those literals.
+_DIRECTION_VALUES: tuple[str, ...] = (_INHERIT_LABEL, "front", "rear")
+# ``stop_at_line`` override vocabulary (forward only).  Inherit -> omitted key.
+_STOP_AT_LINE_VALUES: tuple[str, ...] = (_INHERIT_LABEL, "on", "off")
+
+# ``PIPELINE DEFAULTS`` combobox vocabularies, single-sourced from the enums.
+# line / blind / turn may NOT be DEFAULT (mirrors PipelineConfig.__post_init__);
+# direction MAY be DEFAULT.  An empty leading value means "unset -> key absent"
+# so the planner falls back to the pipeline_config.py default.
+_PIPELINE_UNSET_LABEL: str = ""
+_PIPELINE_LINE_VALUES: tuple[str, ...] = (
+    _PIPELINE_UNSET_LABEL,
+    *(member.name for member in LineMode if member is not LineMode.DEFAULT),
+)
+_PIPELINE_BLIND_VALUES: tuple[str, ...] = (
+    _PIPELINE_UNSET_LABEL,
+    *(member.name for member in BlindMode if member is not BlindMode.DEFAULT),
+)
+_PIPELINE_TURN_VALUES: tuple[str, ...] = (
+    _PIPELINE_UNSET_LABEL,
+    *(member.name for member in TurnMode if member is not TurnMode.DEFAULT),
+)
+_PIPELINE_DIRECTION_VALUES: tuple[str, ...] = (
+    _PIPELINE_UNSET_LABEL,
+    *(member.name for member in DirectionMode),
+)
+
+# The four pipeline-mode categories, as ``(which, label, values_tuple)`` triples
+# in display order.  ``which`` is the string the command/contract keys on; it
+# also names the model attribute ``pipeline_<which>_mode``.
+_PIPELINE_MODE_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("line", "Line:", _PIPELINE_LINE_VALUES),
+    ("blind", "Blind:", _PIPELINE_BLIND_VALUES),
+    ("turn", "Turn:", _PIPELINE_TURN_VALUES),
+    ("direction", "Direction:", _PIPELINE_DIRECTION_VALUES),
+)
+
+# Canonical flag name for the field-wide blind->projection auto-seek toggle.
+_BLIND_PROJECTION_AUTO_SEEK_FLAG: str = "blind_projection_auto_seek"
+
+# Edge-override list visible-row count (scrollable area height in pixels),
+# matching the pivots-list idiom.
+_EDGE_OVERRIDE_LIST_HEIGHT_PX: int = 84
+# Edge-override add-row u/v combobox width (characters).
+_EDGE_OVERRIDE_COMBO_WIDTH: int = 6
+# Field-dimension entry width (characters).
+_FIELD_MM_ENTRY_WIDTH: int = 7
+# Field-dimension entry format string (millimetres, integer).
+_FIELD_MM_FORMAT: str = "%d"
+
+# Ghost-button text for the edge-overrides add affordance.
+_GHOST_ADD_OVERRIDE_TEXT: str = "+ add override"
+# Per-row edit / delete glyphs (mirroring the pivots-row delete glyph).
+_OVERRIDE_EDIT_GLYPH: str = "e"
+_OVERRIDE_DELETE_GLYPH: str = "✕"  # multiplication x as a delete glyph
+# Directed-pair arrow rendered in an override row summary (forward-only).
+_OVERRIDE_ARROW: str = "->"
+# Empty-state hint shown when no overrides exist.
+_OVERRIDE_EMPTY_HINT: str = "no edge overrides"
+
 # Default mode-display text before the app sets anything.
 _DEFAULT_MODE_TEXT: str = "Mode: --"
 # Default selection-display text before the app sets anything.
@@ -226,6 +328,8 @@ _KEY_HINT_TEXT: str = "arrows = 0.2 cm · shift = 1 cm"
 _SECTION_NODE_TITLE: str = "Node"
 _SECTION_RESET_TITLE: str = "Reset spec"
 _SECTION_PIVOTS_TITLE: str = "Pivots"
+_SECTION_EDGE_OVERRIDES_TITLE: str = "Edge overrides"
+_SECTION_PIPELINE_DEFAULTS_TITLE: str = "Pipeline defaults"
 _SECTION_GLOBALS_TITLE: str = "Global knobs"
 _SECTION_NODES_LIST_TITLE: str = "Nodes"
 _SECTION_START_TITLE: str = "Start"
@@ -499,6 +603,54 @@ class SidePanels(tk.Frame):
         self.on_global_knob_change: Optional[
             Callable[[str, Union[bool, float]], None]
         ] = None
+        # ---- Edge-overrides / pipeline-defaults / extended-globals slots ----
+        # Wired by the app (T8) to the new editor commands.  This panel only
+        # surfaces the controls and fires the slots; it never instantiates or
+        # dispatches a command itself.  Every slot defaults to ``None`` so the
+        # panel still builds + refreshes standalone (headless smoke test).
+        #
+        # ``on_set_edge_override`` fires when the inline editor's Save commits
+        # for a derived-type edge.  Arguments are
+        # ``(edge_type, u, v, primitive_mode, direction, stop_at_line)`` where
+        # ``edge_type`` is ``"LINE"`` / ``"BLIND"`` (derived, not operator-set),
+        # ``u`` / ``v`` are node names, and the three override values are each a
+        # string tag or ``None`` (``None`` == "inherit", key omitted).  The app
+        # routes this to a ``SetEdgeOverride`` command.
+        self.on_set_edge_override: Optional[
+            Callable[
+                [str, str, str, Optional[str], Optional[str], Optional[str]],
+                None,
+            ]
+        ] = None
+        # ``on_clear_edge_override`` fires when a row's delete (``x``) button is
+        # clicked.  Arguments are ``(edge_type, u, v)`` -- the full
+        # ``(type, u, v)`` identity triple.  Routed to ``ClearEdgeOverride``.
+        self.on_clear_edge_override: Optional[
+            Callable[[str, str, str], None]
+        ] = None
+        # ``on_pipeline_mode_change`` fires when a PIPELINE DEFAULTS combobox
+        # commits.  Arguments are ``(which, value)`` where ``which`` is one of
+        # ``"line"`` / ``"blind"`` / ``"turn"`` / ``"direction"`` and ``value``
+        # is the chosen mode-member name or ``None`` (the unset sentinel, key
+        # absent -> planner falls back to the pipeline_config.py default).
+        # Routed to ``SetPipelineMode``.
+        self.on_pipeline_mode_change: Optional[
+            Callable[[str, Optional[str]], None]
+        ] = None
+        # ``on_field_wide_flag_change`` fires when a field-wide boolean toggle
+        # commits.  Arguments are ``(flag, value)`` -- today only
+        # ``flag == "blind_projection_auto_seek"``.  Routed to
+        # ``SetFieldWideFlag``.
+        self.on_field_wide_flag_change: Optional[
+            Callable[[str, bool], None]
+        ] = None
+        # ``on_field_dimensions_change`` fires when the FIELD_MM width/height
+        # entries commit a valid pair.  Arguments are ``(width_mm, height_mm)``
+        # as floats.  A bad numeric parse sets a status message and does NOT
+        # fire.  Routed to ``SetFieldDimensions``.
+        self.on_field_dimensions_change: Optional[
+            Callable[[float, float], None]
+        ] = None
         # New slots (wired by the app in a later task).  Defaulted to None /
         # no-op like every other slot so the panel builds standalone.
         self.on_show_shortcuts: Optional[Callable[[], None]] = None
@@ -552,6 +704,54 @@ class SidePanels(tk.Frame):
         self._float_knob_vars: dict[str, tk.StringVar] = {
             name: tk.StringVar(value="") for name, _label in _FLOAT_KNOB_LABELS
         }
+
+        # ---- Edge-overrides add/edit form Tk variables (issue #79) -----
+        # The inline editor sets the edge by u/v comboboxes; ``type`` is
+        # auto-derived and shown read-only.  The three override controls each
+        # default to their inherit sentinel (no override key).
+        self._edge_override_u_var = tk.StringVar(value="")
+        self._edge_override_v_var = tk.StringVar(value="")
+        self._edge_override_type_var = tk.StringVar(value="")
+        self._edge_override_primitive_var = tk.StringVar(
+            value=_INHERIT_PRIMITIVE_LABEL
+        )
+        self._edge_override_direction_var = tk.StringVar(value=_INHERIT_LABEL)
+        self._edge_override_stop_at_line_var = tk.StringVar(value=_INHERIT_LABEL)
+
+        # ---- Pipeline-defaults Tk variables (issue #79) ----------------
+        # One readonly-combobox StringVar per pipeline category, keyed by the
+        # ``which`` string the contract / command uses.
+        self._pipeline_mode_vars: dict[str, tk.StringVar] = {
+            which: tk.StringVar(value=_PIPELINE_UNSET_LABEL)
+            for which, _label, _values in _PIPELINE_MODE_SPECS
+        }
+
+        # ---- Extended global-knobs Tk variables (issue #79) ------------
+        # Field-wide blind->projection auto-seek flag (default True) + the
+        # FIELD_MM width/height millimetre entries.
+        self._blind_projection_auto_seek_var = tk.BooleanVar(value=True)
+        self._field_width_mm_var = tk.StringVar(value="")
+        self._field_height_mm_var = tk.StringVar(value="")
+
+        # The model's per-edge override overlay, cached from the most recent
+        # :meth:`refresh` so the inline editor / graft methods can derive an
+        # edge's ``type`` and look up an existing override without a back-ref to
+        # the app.  ``None`` until the first refresh runs.
+        self._edges_overlay: Optional[list[dict]] = None
+        # Existing LINE / BLIND segment pairs (each a frozenset of two node
+        # names) cached from refresh so the inline editor can derive the
+        # ``type`` of the picked ``u`` / ``v`` edge.  Empty until first refresh.
+        self._line_segment_pairs: set[frozenset[str]] = set()
+        self._blind_segment_pairs: set[frozenset[str]] = set()
+        # The override row frames keyed by their ``(type, u, v)`` identity, so
+        # the graft's :meth:`locate_override_row` can scroll to + highlight a row
+        # and a later refresh can clear stale highlights.  Rebuilt every refresh.
+        self._edge_override_row_frames: dict[
+            tuple[str, str, str], tk.Frame
+        ] = {}
+        # The identity of the override row currently highlighted by the graft, so
+        # the next highlight / refresh can clear the prior terracotta ring.
+        self._highlighted_override_row: Optional[tuple[str, str, str]] = None
 
         # Field bounds cached from refresh() so coord validation doesn't need
         # to round-trip through the app -> model on every keystroke.
@@ -1153,6 +1353,10 @@ class SidePanels(tk.Frame):
         self._build_node_list_and_inspector(master)
         self._build_reset_spec_panel(master)
         self._build_pivots_panel(master)
+        # EDGE OVERRIDES sits directly below Pivots, mirroring its idiom; then
+        # PIPELINE DEFAULTS, then the (extended) Global knobs section.
+        self._build_edge_overrides_panel(master)
+        self._build_pipeline_defaults_panel(master)
         self._build_global_knobs_panel(master)
         self._build_start_pose_panel(master)
 
@@ -1490,6 +1694,255 @@ class SidePanels(tk.Frame):
         )
         self._add_pivot_ghost_button.pack(side="left", fill="x", expand=True)
 
+    def _build_edge_overrides_panel(self, master: tk.Misc) -> None:
+        """Create the collapsible **Edge overrides** section (issue #79).
+
+        Mirrors the Pivots list idiom exactly: a count badge ``(N)`` in the
+        header, a scrollable column of override rows (each reading
+        ``u -> v  [TYPE]  <tag summary>`` with an edit ``e`` + delete ``x``
+        affordance), a ``+ add override`` ghost button, and an inline editor
+        sub-frame that is hidden until the operator clicks ``+ add override`` or
+        a row's ``e``.  The inline editor sets the edge by ``u`` / ``v``
+        comboboxes, derives + locks the ``type``, and exposes the
+        ``primitive_mode`` / ``direction`` / ``stop_at_line`` override controls;
+        geometry (distance / heading) is never shown.
+
+        The list is rebuilt and the picker dropdowns repopulated on every
+        :meth:`refresh`.  This builder wires the widgets only; it never
+        instantiates a command -- the app (T8) connects the callback slots to
+        the ``SetEdgeOverride`` / ``ClearEdgeOverride`` commands.
+
+        :param master: Parent inspector column.
+        """
+        body = self._collapsible_section(
+            master,
+            "edge_overrides",
+            _SECTION_EDGE_OVERRIDES_TITLE,
+            start_open=True,
+        )
+        # The count badge label rides in the header alongside the title; the
+        # collapsible helper owns the chevron + title, so the badge is packed
+        # into the section body's own header proxy here.  Keep it in the body so
+        # it collapses with the section.  A dedicated label so refresh can update
+        # just the count.
+        self._edge_override_count_label = self._themed_label(
+            body,
+            text="(0)",
+            anchor="e",
+            foreground=_theme_color("SECTION_HEADER_FG", theme.INK_MUTED),
+            font=self._font_section,
+        )
+        self._edge_override_count_label.pack(side="top", fill="x")
+
+        # --- Scrollable list of existing override rows ---
+        list_frame = self._themed_frame(
+            body, height=_EDGE_OVERRIDE_LIST_HEIGHT_PX
+        )
+        list_frame.pack(side="top", fill="x")
+        list_frame.pack_propagate(False)
+
+        self._edge_override_canvas = tk.Canvas(
+            list_frame,
+            height=_EDGE_OVERRIDE_LIST_HEIGHT_PX,
+            highlightthickness=_FLAT_BORDER_PX,
+            background=theme.SURFACE,
+        )
+        override_scroll = tk.Scrollbar(
+            list_frame,
+            orient="vertical",
+            command=self._edge_override_canvas.yview,
+            background=theme.SURFACE,
+            troughcolor=theme.PAPER,
+            highlightthickness=_FLAT_BORDER_PX,
+        )
+        override_scroll.pack(side="right", fill="y")
+        self._edge_override_canvas.pack(side="left", fill="both", expand=True)
+        self._edge_override_canvas.configure(
+            yscrollcommand=override_scroll.set
+        )
+
+        # Inner frame that actually holds the rows; rebuilt by ``refresh``.
+        self._edge_override_rows_frame = self._themed_frame(
+            self._edge_override_canvas
+        )
+        self._edge_override_canvas.create_window(
+            (0, 0), window=self._edge_override_rows_frame, anchor="nw"
+        )
+        self._edge_override_rows_frame.bind(
+            "<Configure>",
+            lambda _event: self._edge_override_canvas.configure(
+                scrollregion=self._edge_override_canvas.bbox("all")
+            ),
+        )
+
+        # --- Ghost add-button row: + add override ---
+        ghost_row = self._themed_frame(body)
+        ghost_row.pack(side="top", fill="x", pady=(4, 0))
+        self._add_override_ghost_button = self._ghost_button(
+            ghost_row,
+            text=_GHOST_ADD_OVERRIDE_TEXT,
+            command=self._handle_open_add_override,
+        )
+        self._add_override_ghost_button.pack(side="left", fill="x", expand=True)
+
+        # --- Inline editor sub-frame (hidden until add / edit) ---
+        # Held packed-or-unpacked via :meth:`_show_override_editor` /
+        # :meth:`_hide_override_editor`; built once here.
+        self._edge_override_editor = self._themed_frame(body)
+
+        # Edge row: u / v comboboxes + a read-only derived type label.
+        edge_row = self._themed_frame(self._edge_override_editor)
+        edge_row.pack(side="top", fill="x")
+        self._themed_label(edge_row, text="Edge:").pack(side="left")
+        self._edge_override_u_combo = ttk.Combobox(
+            edge_row,
+            textvariable=self._edge_override_u_var,
+            values=[],
+            state="readonly",
+            width=_EDGE_OVERRIDE_COMBO_WIDTH,
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_u_combo.pack(side="left", padx=(0, 6))
+        self._edge_override_u_combo.bind(
+            "<<ComboboxSelected>>", self._handle_override_edge_pick
+        )
+        self._themed_label(edge_row, text=_OVERRIDE_ARROW).pack(side="left")
+        self._edge_override_v_combo = ttk.Combobox(
+            edge_row,
+            textvariable=self._edge_override_v_var,
+            values=[],
+            state="readonly",
+            width=_EDGE_OVERRIDE_COMBO_WIDTH,
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_v_combo.pack(side="left", padx=(6, 0))
+        self._edge_override_v_combo.bind(
+            "<<ComboboxSelected>>", self._handle_override_edge_pick
+        )
+
+        # Type row: a read-only derived-type label (never operator-editable).
+        type_row = self._themed_frame(self._edge_override_editor)
+        type_row.pack(side="top", fill="x")
+        self._themed_label(type_row, text="Type:").pack(side="left")
+        # A plain label (not a combobox) so the derived type can never be picked
+        # by the operator; tinted by edge kind on derive.
+        self._edge_override_type_label = self._themed_label(
+            type_row,
+            textvariable=self._edge_override_type_var,
+            anchor="w",
+            font=self._font_mono,
+        )
+        self._edge_override_type_label.pack(side="left", padx=(6, 0))
+
+        # Primitive-mode row: combobox whose VALUES switch on the derived type.
+        primitive_row = self._themed_frame(self._edge_override_editor)
+        primitive_row.pack(side="top", fill="x")
+        self._themed_label(primitive_row, text="Primitive:").pack(side="left")
+        self._edge_override_primitive_combo = ttk.Combobox(
+            primitive_row,
+            textvariable=self._edge_override_primitive_var,
+            values=list(_PRIMITIVE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]),
+            state="readonly",
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_primitive_combo.pack(
+            side="right", fill="x", expand=True
+        )
+
+        # Direction row.
+        direction_row = self._themed_frame(self._edge_override_editor)
+        direction_row.pack(side="top", fill="x")
+        self._themed_label(direction_row, text="Direction:").pack(side="left")
+        self._edge_override_direction_combo = ttk.Combobox(
+            direction_row,
+            textvariable=self._edge_override_direction_var,
+            values=list(_DIRECTION_VALUES),
+            state="readonly",
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_direction_combo.pack(
+            side="right", fill="x", expand=True
+        )
+
+        # Stop-at-line row.
+        stop_row = self._themed_frame(self._edge_override_editor)
+        stop_row.pack(side="top", fill="x")
+        self._themed_label(stop_row, text="Stop@line:").pack(side="left")
+        self._edge_override_stop_combo = ttk.Combobox(
+            stop_row,
+            textvariable=self._edge_override_stop_at_line_var,
+            values=list(_STOP_AT_LINE_VALUES),
+            state="readonly",
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_stop_combo.pack(side="right", fill="x", expand=True)
+
+        # A muted hint that geometry is auto-derived (never an editable field).
+        self._themed_label(
+            self._edge_override_editor,
+            text="(distance / heading auto-derived)",
+            anchor="w",
+            foreground=theme.INK_MUTED,
+            font=self._font_hint,
+        ).pack(side="top", fill="x")
+
+        # Save / Cancel buttons.
+        buttons_row = self._themed_frame(self._edge_override_editor)
+        buttons_row.pack(side="top", fill="x", pady=(4, 0))
+        self._override_save_button = self._themed_button(
+            buttons_row, text="save", command=self._handle_save_override
+        )
+        self._override_save_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self._override_cancel_button = self._themed_button(
+            buttons_row, text="cancel", command=self._handle_cancel_override
+        )
+        self._override_cancel_button.pack(
+            side="left", fill="x", expand=True, padx=(2, 0)
+        )
+
+    def _build_pipeline_defaults_panel(self, master: tk.Misc) -> None:
+        """Create the collapsible **Pipeline defaults** section (issue #79).
+
+        Four mode comboboxes (Line / Blind / Turn / Direction).  Line / Blind /
+        Turn cannot be ``DEFAULT`` (matches ``PipelineConfig.__post_init__``);
+        Direction may.  Leaving a value at the empty "unset" sentinel keeps the
+        corresponding field absent so the planner falls back to the
+        ``pipeline_config.py`` default.  Each combobox commit fires
+        :attr:`on_pipeline_mode_change` with the category ``which`` and the
+        chosen value (or ``None`` for the unset sentinel).
+
+        :param master: Parent inspector column.
+        """
+        body = self._collapsible_section(
+            master,
+            "pipeline_defaults",
+            _SECTION_PIPELINE_DEFAULTS_TITLE,
+            start_open=True,
+        )
+
+        # One labelled readonly combobox per pipeline category.  Capture
+        # ``which`` in the lambda's default arg to dodge the late-binding trap.
+        self._pipeline_mode_combos: dict[str, ttk.Combobox] = {}
+        for which, label_text, values in _PIPELINE_MODE_SPECS:
+            row = self._themed_frame(body)
+            row.pack(side="top", fill="x")
+            self._themed_label(row, text=label_text).pack(side="left")
+            combo = ttk.Combobox(
+                row,
+                textvariable=self._pipeline_mode_vars[which],
+                values=list(values),
+                state="readonly",
+                style=_STYLE_COMBOBOX,
+            )
+            combo.pack(side="right", fill="x", expand=True)
+            combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, key=which: self._handle_pipeline_mode_change(
+                    key
+                ),
+            )
+            self._pipeline_mode_combos[which] = combo
+
     def _build_global_knobs_panel(self, master: tk.Misc) -> None:
         """Create the collapsible **Global knobs** section (starts collapsed).
 
@@ -1552,6 +2005,51 @@ class SidePanels(tk.Frame):
                 ),
             )
             self._float_knob_entries[knob_name] = entry
+
+        # --- NEW (issue #79): field-wide blind->projection auto-seek toggle ---
+        auto_seek_row = self._themed_frame(body)
+        auto_seek_row.pack(side="top", fill="x")
+        self._blind_projection_auto_seek_check = tk.Checkbutton(
+            auto_seek_row,
+            text="blind_projection_auto_seek",
+            variable=self._blind_projection_auto_seek_var,
+            anchor="w",
+            command=self._handle_blind_projection_auto_seek_toggle,
+            background=theme.SURFACE,
+            foreground=theme.INK,
+            activebackground=theme.SURFACE,
+            activeforeground=theme.TERRACOTTA,
+            selectcolor=theme.PAPER_LIGHT,
+            highlightthickness=_FLAT_BORDER_PX,
+            font=self._font_ui,
+        )
+        self._blind_projection_auto_seek_check.pack(side="left", fill="x")
+
+        # --- NEW (issue #79): FIELD_MM width / height entries (no MAP_PNG) ---
+        # A single row: "Field size  W[..] H[..] mm" matching the sidecar.
+        field_mm_row = self._themed_frame(body)
+        field_mm_row.pack(side="top", fill="x")
+        self._themed_label(field_mm_row, text="Field size:").pack(side="left")
+        self._themed_label(field_mm_row, text="mm").pack(side="right")
+        self._field_height_entry = self._themed_entry(
+            field_mm_row,
+            mono=True,
+            textvariable=self._field_height_mm_var,
+            width=_FIELD_MM_ENTRY_WIDTH,
+        )
+        self._field_height_entry.pack(side="right", padx=(0, 4))
+        self._themed_label(field_mm_row, text="H").pack(side="right")
+        self._field_width_entry = self._themed_entry(
+            field_mm_row,
+            mono=True,
+            textvariable=self._field_width_mm_var,
+            width=_FIELD_MM_ENTRY_WIDTH,
+        )
+        self._field_width_entry.pack(side="right", padx=(6, 4))
+        self._themed_label(field_mm_row, text="W").pack(side="right")
+        for entry in (self._field_width_entry, self._field_height_entry):
+            entry.bind("<Return>", self._handle_field_dimensions_commit)
+            entry.bind("<FocusOut>", self._handle_field_dimensions_commit)
 
     def _build_start_pose_panel(self, master: tk.Misc) -> None:
         """Create the **Start** section: node combobox + heading spinbox.
@@ -1842,11 +2340,47 @@ class SidePanels(tk.Frame):
             ):
                 combo.configure(values=sorted_names)
 
+            # --- Edge overrides: cache the overlay + segment pairs, rebuild the
+            #     rows + count badge, and repopulate the add-row u/v pickers. ---
+            self._edges_overlay = [dict(entry) for entry in model.edges]
+            self._line_segment_pairs = {
+                frozenset(seg) for seg in model.line_segments
+            }
+            self._blind_segment_pairs = {
+                frozenset(edge) for edge in model.blind_edges
+            }
+            self._rebuild_edge_override_rows(model)
+            for combo in (
+                self._edge_override_u_combo,
+                self._edge_override_v_combo,
+            ):
+                combo.configure(values=sorted_names)
+            # A model replay (load / undo / redo) closes the inline editor so a
+            # half-entered override never survives the state change.
+            self._hide_override_editor()
+
+            # --- Pipeline defaults: sync each combobox from the model. ---
+            for which, _label, _values in _PIPELINE_MODE_SPECS:
+                stored = getattr(model, f"pipeline_{which}_mode")
+                self._pipeline_mode_vars[which].set(
+                    stored if stored is not None else _PIPELINE_UNSET_LABEL
+                )
+
             # --- Global knobs: sync the checkbutton + float entries. ---
             self._blind_decay_enabled_var.set(bool(model.blind_decay_enabled))
             for knob_name, _label in _FLOAT_KNOB_LABELS:
                 value = float(getattr(model, knob_name))
                 self._float_knob_vars[knob_name].set(_COORD_FORMAT % value)
+
+            # --- Extended globals (issue #79): auto-seek flag + FIELD_MM. ---
+            self._blind_projection_auto_seek_var.set(
+                bool(model.blind_projection_auto_seek)
+            )
+            field_width_mm, field_height_mm = model.field_mm
+            self._field_width_mm_var.set(_FIELD_MM_FORMAT % round(field_width_mm))
+            self._field_height_mm_var.set(
+                _FIELD_MM_FORMAT % round(field_height_mm)
+            )
 
             # --- Start-pose combobox: refresh node list + current value. ---
             self._start_node_combo.configure(values=sorted_names)
@@ -2155,6 +2689,373 @@ class SidePanels(tk.Frame):
         )
 
     # ------------------------------------------------------------------
+    # Edge-overrides helpers (issue #79)
+    # ------------------------------------------------------------------
+
+    def _derive_edge_type(self, u: str, v: str) -> Optional[str]:
+        """Return the edge ``type`` of the existing ``u`` / ``v`` segment.
+
+        The override ``type`` is never operator-chosen -- it is derived from the
+        matching existing ``LINE_SEGMENTS`` / ``BLIND_EDGES`` pair (undirected,
+        so ``u`` / ``v`` order does not matter) cached on the last
+        :meth:`refresh`.  Returns ``"LINE"`` / ``"BLIND"`` if exactly one kind
+        matches the pair, or ``None`` if the pair is not an existing segment of
+        either kind (or ``u`` / ``v`` are empty / identical), so the inline
+        editor can reject an add that has no segment to attach to.
+
+        :param u: First node name.
+        :param v: Second node name.
+        :return: ``"LINE"`` / ``"BLIND"`` or ``None`` when no segment matches.
+        """
+        if not u or not v or u == v:
+            return None
+        pair = frozenset((u, v))
+        is_line = pair in self._line_segment_pairs
+        is_blind = pair in self._blind_segment_pairs
+        # A pair that is BOTH a line and a blind segment is ambiguous; the
+        # operator must disambiguate via the canvas/edge-mode graft, so report
+        # None here rather than silently guessing a type.
+        if is_line and not is_blind:
+            return _EDGE_TYPE_LINE
+        if is_blind and not is_line:
+            return _EDGE_TYPE_BLIND
+        return None
+
+    @staticmethod
+    def _override_tag_summary(entry: dict) -> str:
+        """Return the short ``<tag summary>`` shown in an override row.
+
+        Renders only the override keys that are PRESENT, forward-only
+        (``direction`` / ``stop_at_line`` apply to ``u->v`` only), as a compact
+        space-joined string -- e.g. ``"FAST"`` or ``"seek=on dir=front"``.  An
+        entry that carries no override keys (only ``type`` / ``u`` / ``v``)
+        reads as an empty string.
+
+        :param entry: An EDGES overlay dict ``{type, u, v, + optional keys}``.
+        :return: The tag-summary fragment for the row label.
+        """
+        parts: list[str] = []
+        primitive = entry.get("primitive_mode")
+        if primitive is not None:
+            # ``primitive_mode`` may be a string tag or a legacy enum instance;
+            # render the enum's NAME so the row reads as the authored tag.
+            parts.append(getattr(primitive, "name", str(primitive)))
+        direction = entry.get("direction")
+        if direction is not None:
+            parts.append(f"dir={direction}")
+        stop_at_line = entry.get("stop_at_line")
+        if stop_at_line is not None:
+            parts.append(f"seek={stop_at_line}")
+        return " ".join(parts)
+
+    def _rebuild_edge_override_rows(self, model: "FieldModel") -> None:
+        """Rebuild the edge-override list rows + count badge from ``model.edges``.
+
+        Every existing row widget is destroyed and re-created so the list always
+        mirrors the model exactly (no stale rows survive an undo / delete).  Each
+        row shows ``u -> v  [TYPE]  <tag summary>`` with an edit (``e``) and
+        delete (``x``) affordance, mirroring a pivot row.  The ``(type, u, v)``
+        identity of each row is recorded in :attr:`_edge_override_row_frames` so
+        the graft's :meth:`locate_override_row` can scroll to + highlight it.
+
+        :param model: Source of truth for ``edges``.
+        """
+        for child in self._edge_override_rows_frame.winfo_children():
+            child.destroy()
+        self._edge_override_row_frames = {}
+        # A fresh row set drops any prior highlight (the widget is gone).
+        self._highlighted_override_row = None
+
+        accent_fg = _theme_color("GHOST_BUTTON_FG_ACCENT", theme.TERRACOTTA)
+        for entry in model.edges:
+            edge_type = str(entry.get("type", ""))
+            u = str(entry.get("u", ""))
+            v = str(entry.get("v", ""))
+            identity = (edge_type, u, v)
+
+            row = self._themed_frame(self._edge_override_rows_frame)
+            row.pack(side="top", fill="x")
+            self._edge_override_row_frames[identity] = row
+
+            # The directed pair + bracketed type + tag summary.  The type tag is
+            # tinted by kind (BLIND -> brick, LINE/other -> ink) per the sidecar.
+            tag_color = (
+                theme.BRICK if edge_type == _EDGE_TYPE_BLIND else theme.INK
+            )
+            self._themed_label(
+                row,
+                text=f"{u}{_OVERRIDE_ARROW}{v}",
+                anchor="w",
+                font=self._font_mono,
+            ).pack(side="left")
+            self._themed_label(
+                row,
+                text=f"[{edge_type}]",
+                anchor="w",
+                foreground=tag_color,
+                font=self._font_mono,
+            ).pack(side="left", padx=(6, 0))
+            summary = self._override_tag_summary(entry)
+            if summary:
+                self._themed_label(
+                    row,
+                    text=summary,
+                    anchor="w",
+                    font=self._font_mono,
+                ).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+            # Per-row delete (x) then edit (e), packed right-to-left so edit ends
+            # up left of delete.  Capture the identity in default args to dodge
+            # the late-binding closure trap.
+            delete_button = self._themed_button(
+                row,
+                text=_OVERRIDE_DELETE_GLYPH,
+                command=lambda i=identity: self._handle_delete_override(i),
+                background=theme.SURFACE,
+                foreground=theme.INK_MUTED,
+                activebackground=accent_fg,
+                activeforeground=theme.PAPER,
+            )
+            delete_button.pack(side="right")
+            edit_button = self._themed_button(
+                row,
+                text=_OVERRIDE_EDIT_GLYPH,
+                command=lambda e=entry: self._handle_edit_override(e),
+                background=theme.SURFACE,
+                foreground=theme.INK_MUTED,
+                activebackground=accent_fg,
+                activeforeground=theme.PAPER,
+            )
+            edit_button.pack(side="right", padx=(0, 4))
+
+        # Update the header count badge.
+        self._edge_override_count_label.configure(
+            text=f"({len(model.edges)})"
+        )
+        if not model.edges:
+            # Empty-state hint when no overrides exist.
+            hint = self._themed_label(
+                self._edge_override_rows_frame,
+                text=_OVERRIDE_EMPTY_HINT,
+                anchor="w",
+                foreground=theme.INK_MUTED,
+                font=self._font_hint,
+            )
+            hint.pack(side="top", fill="x")
+
+        # Recompute the scrollregion now that the row count changed.
+        self._edge_override_rows_frame.update_idletasks()
+        self._edge_override_canvas.configure(
+            scrollregion=self._edge_override_canvas.bbox("all")
+        )
+
+    def _find_override_entry(
+        self, edge_type: str, u: str, v: str
+    ) -> Optional[dict]:
+        """Return the cached override entry for ``(edge_type, u, v)``, if any.
+
+        Identity is the full ``(type, u, v)`` triple -- a directed pair is not
+        unique across types -- so all three must match.  Reads the overlay cached
+        on the last :meth:`refresh`; returns ``None`` before the first refresh or
+        when no entry matches.
+
+        :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``).
+        :param u: The directed-pair source node name.
+        :param v: The directed-pair destination node name.
+        :return: The matching overlay dict, or ``None``.
+        """
+        if self._edges_overlay is None:
+            return None
+        for entry in self._edges_overlay:
+            if (
+                str(entry.get("type", "")) == edge_type
+                and str(entry.get("u", "")) == u
+                and str(entry.get("v", "")) == v
+            ):
+                return entry
+        return None
+
+    def _set_override_primitive_values(self, edge_type: str) -> None:
+        """Switch the primitive-mode combobox VALUES for the derived edge type.
+
+        ``LineMode`` tags for a LINE edge, ``BlindMode`` tags for a BLIND edge
+        (each led by the inherit sentinel).  An unknown / empty derived type
+        falls back to the LINE list so the combobox is never value-less.
+
+        :param edge_type: The derived edge type (``"LINE"`` / ``"BLIND"``).
+        """
+        values = _PRIMITIVE_VALUES_BY_TYPE.get(
+            edge_type, _PRIMITIVE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]
+        )
+        self._edge_override_primitive_combo.configure(values=list(values))
+
+    def _set_override_form(self, entry: Optional[dict]) -> None:
+        """Populate the inline-editor override controls from *entry*.
+
+        Each control is set to the entry's authored tag, or to its inherit
+        sentinel when the key is absent / *entry* is ``None`` (the add case).
+        The type-derived primitive-mode VALUES are NOT set here -- the caller
+        sets them via :meth:`_set_override_primitive_values` once the type is
+        known.
+
+        :param entry: An overlay dict to read from, or ``None`` for a blank
+            add-form.
+        """
+        if entry is None:
+            self._edge_override_primitive_var.set(_INHERIT_PRIMITIVE_LABEL)
+            self._edge_override_direction_var.set(_INHERIT_LABEL)
+            self._edge_override_stop_at_line_var.set(_INHERIT_LABEL)
+            return
+        primitive = entry.get("primitive_mode")
+        if primitive is None:
+            self._edge_override_primitive_var.set(_INHERIT_PRIMITIVE_LABEL)
+        else:
+            self._edge_override_primitive_var.set(
+                getattr(primitive, "name", str(primitive))
+            )
+        direction = entry.get("direction")
+        self._edge_override_direction_var.set(
+            direction if direction is not None else _INHERIT_LABEL
+        )
+        stop_at_line = entry.get("stop_at_line")
+        self._edge_override_stop_at_line_var.set(
+            stop_at_line if stop_at_line is not None else _INHERIT_LABEL
+        )
+
+    def _apply_derived_type_to_form(self, edge_type: Optional[str]) -> None:
+        """Reflect a derived edge ``type`` in the read-only type label + combo.
+
+        Sets the type label text (blank when no segment matches) and tints it by
+        kind, then switches the primitive-mode combobox VALUES to the matching
+        tag set.
+
+        :param edge_type: The derived type, or ``None`` when the picked pair is
+            not an existing segment.
+        """
+        self._edge_override_type_var.set(edge_type or "")
+        tag_color = theme.BRICK if edge_type == _EDGE_TYPE_BLIND else theme.INK
+        self._edge_override_type_label.configure(foreground=tag_color)
+        self._set_override_primitive_values(edge_type or _EDGE_TYPE_LINE)
+
+    def _show_override_editor(self) -> None:
+        """Reveal the inline override editor sub-frame (idempotent)."""
+        if not self._edge_override_editor.winfo_manager():
+            self._edge_override_editor.pack(side="top", fill="x", pady=(4, 0))
+
+    def _hide_override_editor(self) -> None:
+        """Hide the inline override editor sub-frame (idempotent)."""
+        if self._edge_override_editor.winfo_manager():
+            self._edge_override_editor.pack_forget()
+
+    def _highlight_override_row(
+        self, identity: Optional[tuple[str, str, str]]
+    ) -> None:
+        """Paint a TERRACOTTA selection ring on the row for *identity*.
+
+        Clears any previously highlighted row first, then -- if *identity* names
+        a live row -- draws a 1-px terracotta border around it (the sidecar's
+        selection ring) and records it so the next call / refresh can clear it.
+
+        :param identity: The ``(type, u, v)`` row to highlight, or ``None`` to
+            just clear the prior highlight.
+        """
+        prior = self._highlighted_override_row
+        if prior is not None:
+            prior_row = self._edge_override_row_frames.get(prior)
+            if prior_row is not None:
+                try:
+                    prior_row.configure(
+                        highlightthickness=_FLAT_BORDER_PX,
+                        highlightbackground=theme.SURFACE,
+                    )
+                except tk.TclError:
+                    pass
+        self._highlighted_override_row = None
+
+        if identity is None:
+            return
+        row = self._edge_override_row_frames.get(identity)
+        if row is None:
+            return
+        try:
+            row.configure(
+                highlightthickness=_GHOST_BUTTON_BORDER_PX,
+                highlightbackground=_theme_color(
+                    "SELECTION_RING", theme.TERRACOTTA
+                ),
+                highlightcolor=_theme_color("SELECTION_RING", theme.TERRACOTTA),
+            )
+        except tk.TclError:
+            pass
+        self._highlighted_override_row = identity
+
+    # ------------------------------------------------------------------
+    # Edge-overrides graft methods (issue #79) -- invoked by the app (T8)
+    # ------------------------------------------------------------------
+
+    def locate_override_row(
+        self, edge_type: str, u: str, v: str
+    ) -> bool:
+        """Scroll to + highlight the existing override row for ``(type, u, v)``.
+
+        The graft's panel side: when the operator clicks an existing edge in the
+        canvas Edge mode, the app calls this to surface that edge's override row
+        (if one exists).  Identity is the full ``(type, u, v)`` triple.  Draws
+        the TERRACOTTA selection ring (per the sidecar) and scrolls the row into
+        view; closes the inline editor first so a stale add/edit form does not
+        obscure the located row.
+
+        :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``).
+        :param u: The directed-pair source node name.
+        :param v: The directed-pair destination node name.
+        :return: ``True`` if a matching row was found + highlighted; ``False``
+            if no override row exists for that identity (the app then falls back
+            to :meth:`prefill_add_row`).
+        """
+        identity = (edge_type, u, v)
+        row = self._edge_override_row_frames.get(identity)
+        if row is None:
+            return False
+        self._hide_override_editor()
+        self._highlight_override_row(identity)
+        # Scroll the located row into view within the list canvas.
+        try:
+            self._edge_override_rows_frame.update_idletasks()
+            self._edge_override_canvas.configure(
+                scrollregion=self._edge_override_canvas.bbox("all")
+            )
+            row_top = row.winfo_y()
+            total = max(1, self._edge_override_rows_frame.winfo_height())
+            self._edge_override_canvas.yview_moveto(row_top / total)
+        except (tk.TclError, ZeroDivisionError):
+            pass
+        return True
+
+    def prefill_add_row(self, edge_type: str, u: str, v: str) -> None:
+        """Open the inline editor pre-filled from a clicked edge's ``u``/``v``.
+
+        The graft's other half: when the operator clicks an existing edge that
+        has NO override row yet, the app calls this to open the add-row inline
+        editor with the clicked edge's ``u`` / ``v`` selected and its derived
+        ``type`` shown read-only, so the operator can attach a fresh override.
+        The three override controls open at their inherit sentinels (no override
+        key).  *edge_type* is taken as the authoritative derived type (the app
+        derives it from the clicked segment); the override controls' VALUES are
+        switched to match.
+
+        :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``) derived
+            from the clicked segment by the app.
+        :param u: The directed-pair source node name.
+        :param v: The directed-pair destination node name.
+        """
+        self._highlight_override_row(None)
+        self._edge_override_u_var.set(u)
+        self._edge_override_v_var.set(v)
+        self._apply_derived_type_to_form(edge_type)
+        self._set_override_form(None)
+        self._show_override_editor()
+
+    # ------------------------------------------------------------------
     # Widget event handlers -- forward to user callbacks, if assigned.
     # ------------------------------------------------------------------
 
@@ -2351,6 +3252,194 @@ class SidePanels(tk.Frame):
             self.on_global_knob_change(
                 _BOOL_KNOB_NAME, bool(self._blind_decay_enabled_var.get())
             )
+
+    # ------------------------------------------------------------------
+    # Edge-overrides / pipeline-defaults / extended-globals handlers (#79)
+    # ------------------------------------------------------------------
+
+    def _handle_open_add_override(self) -> None:
+        """Open a BLANK inline override editor (the ``+ add override`` ghost).
+
+        Clears any located-row highlight and resets the add-form to its empty
+        state (no edge picked, no derived type, every control at its inherit
+        sentinel) so a prior edit does not leak into a fresh add.
+        """
+        if self._suppress_callbacks:
+            return
+        self._highlight_override_row(None)
+        self._edge_override_u_var.set("")
+        self._edge_override_v_var.set("")
+        self._apply_derived_type_to_form(None)
+        self._set_override_form(None)
+        self._show_override_editor()
+
+    def _handle_edit_override(self, entry: dict) -> None:
+        """Open the inline editor pre-filled from an existing row's *entry*.
+
+        Triggered by a row's ``e`` button.  Loads the edge ``u`` / ``v``, the
+        derived (read-only) type, and the three override controls from the
+        clicked overlay entry so the operator can amend it; re-Saving dispatches
+        a fresh :attr:`on_set_edge_override` for the same identity (the command
+        replaces in place, keyed on ``(type, u, v)``).
+
+        :param entry: The overlay dict captured from the edited row.
+        """
+        if self._suppress_callbacks:
+            return
+        edge_type = str(entry.get("type", ""))
+        u = str(entry.get("u", ""))
+        v = str(entry.get("v", ""))
+        self._highlight_override_row(None)
+        self._edge_override_u_var.set(u)
+        self._edge_override_v_var.set(v)
+        self._apply_derived_type_to_form(edge_type)
+        self._set_override_form(entry)
+        self._show_override_editor()
+
+    def _handle_override_edge_pick(self, _event: tk.Event) -> None:
+        """Re-derive the override ``type`` when ``u`` / ``v`` changes.
+
+        Triggered by either edge combobox.  Looks up the picked pair against the
+        cached segment sets, shows the derived (read-only) type, and
+        context-switches the primitive-mode combobox VALUES.  A pair that is not
+        an existing segment leaves the type blank (Save then inline-rejects).
+        A pre-existing override for the newly-picked edge pre-loads its controls
+        so re-picking an already-overridden edge surfaces its current values.
+
+        :param _event: Tk combobox-selected event (unused).
+        """
+        if self._suppress_callbacks:
+            return
+        u = self._edge_override_u_var.get()
+        v = self._edge_override_v_var.get()
+        edge_type = self._derive_edge_type(u, v)
+        self._apply_derived_type_to_form(edge_type)
+        existing = (
+            self._find_override_entry(edge_type, u, v)
+            if edge_type is not None
+            else None
+        )
+        self._set_override_form(existing)
+
+    def _handle_save_override(self) -> None:
+        """Validate the inline editor and fire :attr:`on_set_edge_override`.
+
+        Reads ``u`` / ``v`` and re-derives the ``type`` (never trusting a stale
+        label).  An edge that does not name an existing LINE / BLIND segment is
+        inline-rejected with a status message (mirrors the existing inline-reject
+        pattern).  Each override control maps its inherit sentinel to ``None``
+        (key omitted) and any tag to the verbatim string; the slot then receives
+        ``(edge_type, u, v, primitive_mode, direction, stop_at_line)``.  The
+        editor is hidden on a successful dispatch.
+        """
+        if self._suppress_callbacks:
+            return
+        u = self._edge_override_u_var.get()
+        v = self._edge_override_v_var.get()
+        edge_type = self._derive_edge_type(u, v)
+        if edge_type is None:
+            self._status_var.set(
+                "pick an existing line or blind edge to override"
+            )
+            return
+
+        primitive_label = self._edge_override_primitive_var.get()
+        primitive_mode = (
+            None
+            if primitive_label == _INHERIT_PRIMITIVE_LABEL
+            else primitive_label
+        )
+        direction_label = self._edge_override_direction_var.get()
+        direction = None if direction_label == _INHERIT_LABEL else direction_label
+        stop_label = self._edge_override_stop_at_line_var.get()
+        stop_at_line = None if stop_label == _INHERIT_LABEL else stop_label
+
+        if self.on_set_edge_override is not None:
+            self.on_set_edge_override(
+                edge_type, u, v, primitive_mode, direction, stop_at_line
+            )
+        self._hide_override_editor()
+
+    def _handle_cancel_override(self) -> None:
+        """Close the inline override editor without dispatching (Cancel)."""
+        if self._suppress_callbacks:
+            return
+        self._hide_override_editor()
+
+    def _handle_delete_override(
+        self, identity: tuple[str, str, str]
+    ) -> None:
+        """Fire :attr:`on_clear_edge_override` for a row's delete (``x``) button.
+
+        :param identity: The ``(type, u, v)`` triple captured from the row.
+        """
+        if self._suppress_callbacks:
+            return
+        edge_type, u, v = identity
+        if self.on_clear_edge_override is not None:
+            self.on_clear_edge_override(edge_type, u, v)
+
+    def _handle_pipeline_mode_change(self, which: str) -> None:
+        """Fire :attr:`on_pipeline_mode_change` for a pipeline combobox.
+
+        Triggered by a PIPELINE DEFAULTS combobox selection.  The empty unset
+        sentinel maps to ``None`` (key absent -> inherit the pipeline_config.py
+        default); any member name is forwarded verbatim.
+
+        :param which: The pipeline category (``"line"`` / ``"blind"`` /
+            ``"turn"`` / ``"direction"``) whose combobox committed.
+        """
+        if self._suppress_callbacks:
+            return
+        raw = self._pipeline_mode_vars[which].get()
+        value = None if raw == _PIPELINE_UNSET_LABEL else raw
+        if self.on_pipeline_mode_change is not None:
+            self.on_pipeline_mode_change(which, value)
+
+    def _handle_blind_projection_auto_seek_toggle(self) -> None:
+        """Fire :attr:`on_field_wide_flag_change` for the auto-seek checkbutton."""
+        if self._suppress_callbacks:
+            return
+        if self.on_field_wide_flag_change is not None:
+            self.on_field_wide_flag_change(
+                _BLIND_PROJECTION_AUTO_SEEK_FLAG,
+                bool(self._blind_projection_auto_seek_var.get()),
+            )
+
+    def _handle_field_dimensions_commit(
+        self, _event: tk.Event | None = None
+    ) -> None:
+        """Parse the FIELD_MM entries and fire :attr:`on_field_dimensions_change`.
+
+        Triggered by ``<Return>`` / ``<FocusOut>`` on either dimension entry.
+        Both width and height must parse to positive numbers; an unparseable or
+        non-positive value sets a status message and does NOT fire (mirrors the
+        coordinate-entry commit pattern).
+
+        :param _event: Tk event (unused; the binding passes it).
+        """
+        if self._suppress_callbacks:
+            return
+        raw_w = self._field_width_mm_var.get()
+        raw_h = self._field_height_mm_var.get()
+        try:
+            width_mm = float(raw_w)
+        except ValueError:
+            self._status_var.set("field width must be a number")
+            return
+        try:
+            height_mm = float(raw_h)
+        except ValueError:
+            self._status_var.set("field height must be a number")
+            return
+        if width_mm <= 0.0:
+            self._status_var.set("field width must be > 0")
+            return
+        if height_mm <= 0.0:
+            self._status_var.set("field height must be > 0")
+            return
+        if self.on_field_dimensions_change is not None:
+            self.on_field_dimensions_change(width_mm, height_mm)
 
     def _handle_float_knob_commit(self, knob_name: str) -> None:
         """Parse a float-knob entry and fire :attr:`on_global_knob_change`.
