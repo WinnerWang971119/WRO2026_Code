@@ -87,6 +87,58 @@ class PipelineConfig:
                     f"config itself to DEFAULT is circular."
                 )
 
+    @classmethod
+    def from_field_data(cls, field_data) -> "PipelineConfig":
+        """Build a :class:`PipelineConfig` from the field-sourced PIPELINE_* keys.
+
+        Reads the four optional mission-wide motion-mode defaults the field data
+        may carry (ADR-047) and resolves each into the matching enum member:
+
+        * ``PIPELINE_LINE_MODE``      -> :class:`LineMode`
+        * ``PIPELINE_BLIND_MODE``     -> :class:`BlindMode`
+        * ``PIPELINE_TURN_MODE``      -> :class:`TurnMode`
+        * ``PIPELINE_DIRECTION_MODE`` -> :class:`DirectionMode`
+
+        Each attribute may be an enum member NAME (e.g. ``"FAST"``), an enum
+        INSTANCE (legacy / programmatic authoring), or ``None``. ``None`` (the
+        absent-key case) falls back to the matching field on the module-level
+        :data:`PIPELINE_CONFIG` singleton, so a field that omits every key
+        produces a config byte-identical to the singleton and committed
+        ``routes.cpp`` stays unchanged. Reads use ``getattr(..., None)`` so the
+        many ``SimpleNamespace`` test fixtures that omit these keys keep working.
+
+        The constructed instance runs through :meth:`__post_init__`, so the
+        same DEFAULT-sentinel rule the validator enforces (line/blind/turn may
+        not be DEFAULT; direction may) is re-asserted here as a second gate.
+
+        :param field_data: the ``tools.path_planner.field_data`` module (or any
+            object exposing the optional ``PIPELINE_*`` attributes).
+        :return: a fully-resolved :class:`PipelineConfig`.
+        :raises KeyError: if a string name does not name a member of its enum
+            (the validator catches this first in a normal build).
+        :raises ValueError: from :meth:`__post_init__` on a circular DEFAULT.
+        """
+        # (attr, EnumCls, singleton-field) for each mission-wide category. The
+        # singleton field supplies the inherit-on-absent fallback.
+        _SPECS: tuple[tuple[str, type, str], ...] = (
+            ("PIPELINE_LINE_MODE",      LineMode,      "line"),
+            ("PIPELINE_BLIND_MODE",     BlindMode,     "blind"),
+            ("PIPELINE_TURN_MODE",      TurnMode,      "turn"),
+            ("PIPELINE_DIRECTION_MODE", DirectionMode, "direction"),
+        )
+        resolved: dict[str, object] = {}
+        for attr, enum_cls, ctor_field in _SPECS:
+            value = getattr(field_data, attr, None)
+            if value is None:
+                resolved[ctor_field] = getattr(PIPELINE_CONFIG, ctor_field)
+            elif isinstance(value, enum_cls):
+                resolved[ctor_field] = value
+            else:
+                # A bare member name; ``enum_cls[name]`` raises KeyError on an
+                # unknown name (the validator rejects it before emit).
+                resolved[ctor_field] = enum_cls[value]
+        return cls(**resolved)
+
 
 # Mission-wide default. Edit here to swap defaults globally. Per-edge overrides
 # in field_data.EDGES take precedence over these.
