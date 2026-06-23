@@ -322,8 +322,18 @@ def _build_authored_graph(field_data):
             continue  # unknown node; the per-entry shape check reports it.
         if etype not in (EDGE_LINE, EDGE_BLIND):
             continue  # bad type; the per-entry shape check reports it.
-        if "distance_cm" not in entry or "heading_deg" not in entry:
-            continue  # malformed entry; the per-entry shape check reports it.
+        # Geometry is OPTIONAL on an EDGES override entry (issue #79): an
+        # override-only overlay (e.g. ``{type, u, v, primitive_mode}``) carries
+        # no ``distance_cm`` / ``heading_deg``. Do NOT skip such an entry --
+        # ``_emit_directed_pair`` derives both from the node coords (``_euclid``
+        # / ``_heading_deg`` on ``nodes[eu]`` / ``nodes[ev]``) whenever a key is
+        # absent from ``options``, byte-identically to the planner graph. Earlier
+        # this helper ``continue``d past geometry-less entries, which silently
+        # dropped every override-only entry -- including a pivot leg -- from the
+        # pivot-validation graph (the #1 trap on issue #79's T1). The dict
+        # comprehension below already includes only the keys that ARE present, so
+        # an absent ``distance_cm`` / ``heading_deg`` flows through as "derive
+        # from coords".
         # Belt-and-suspenders for W1: forward ONLY the geometry/mode keys the
         # pivot checks read off the graph, never the whole entry. The shape
         # check (`_validate_edges_field`) already rejects a stale `pivot` /
@@ -868,13 +878,29 @@ def _validate_edges_field(field_data) -> None:
     """Validate the optional ``field_data.EDGES`` rich-edge table.
 
     Runs only when ``field_data`` exposes an ``EDGES`` attribute. Each
-    entry must be a dict carrying required keys (``type``, ``u``, ``v``,
-    ``distance_cm``, ``heading_deg``) and may carry optional keys
-    (``primitive_mode``, ``direction``). Mode overrides are cross-checked
-    against the edge ``type`` -- e.g. a :class:`LineMode` is illegal on an
-    :data:`EDGE_BLIND` edge -- and the :class:`DEFAULT
-    <pipeline_config.LineMode>` sentinel is rejected on any override
-    (DEFAULT == "absent", so being explicit about it is a confusion).
+    entry must be a dict carrying the required keys ``type``, ``u``, ``v``
+    and may carry the optional keys ``primitive_mode``, ``direction``,
+    ``stop_at_line``, ``distance_cm``, ``heading_deg``. Geometry
+    (``distance_cm`` / ``heading_deg``) is OPTIONAL (issue #79): an
+    override-only overlay omits it, and downstream
+    (:func:`graph_builder._emit_directed_pair`) derives both from the node
+    coordinates; range/type checks still apply when geometry IS present, and
+    a hand-authored geometry-carrying entry still validates (backward
+    compatible).
+
+    ``primitive_mode`` may be authored as an enum INSTANCE (legacy Python:
+    ``LineMode.FAST`` / ``BlindMode.STOP_AT_LINE``) OR as the bare string
+    member NAME of the matching enum (JSON: ``"FAST"`` / ``"STOP_AT_LINE"``).
+    The name is cross-checked against the edge ``type`` -- a :class:`LineMode`
+    name (``"NORMAL"`` / ``"SLOW"`` / ``"FAST"``) is legal only on an
+    :data:`EDGE_LINE` edge, a :class:`BlindMode` name (``"SYNC_TSHAPE"`` /
+    ``"GYRO_TSHAPE"`` / ``"RAW_FLAT"`` / ``"STOP_AT_LINE"``) only on an
+    :data:`EDGE_BLIND` edge. The :class:`DEFAULT <pipeline_config.LineMode>`
+    sentinel is rejected in BOTH forms -- the enum instance AND the literal
+    string ``"DEFAULT"`` -- because ``LineMode["DEFAULT"]`` /
+    ``BlindMode["DEFAULT"]`` resolve successfully (DEFAULT is a real member),
+    so authoring it explicitly is a confusion (DEFAULT == "absent"). An
+    unknown name is rejected with a precise diagnostic.
 
     An anti-ambiguity cross-check rejects an entry whose unordered pair
     ``{u, v}`` already exists in ``LINE_SEGMENTS`` or ``BLIND_EDGES``
@@ -958,8 +984,7 @@ def _validate_edges_field(field_data) -> None:
         if not isinstance(entry, dict):
             raise FieldDataError(
                 f"EDGES[{i}] must be a dict; got: {entry!r} -- "
-                "each entry needs at least 'type', 'u', 'v', "
-                "'distance_cm', 'heading_deg'"
+                "each entry needs at least 'type', 'u', and 'v'"
             )
 
         # Obsolete per-edge pivot keys (issue #44, T5) ---------------------
@@ -983,19 +1008,23 @@ def _validate_edges_field(field_data) -> None:
                 )
 
         # Required keys ----------------------------------------------------
-        for required_key in ("type", "u", "v", "distance_cm", "heading_deg"):
+        # Geometry (``distance_cm`` / ``heading_deg``) is OPTIONAL (issue #79):
+        # an override-only overlay omits it and the geometry is derived from the
+        # node coords downstream (graph_builder._emit_directed_pair). Only the
+        # identity keys are required; the geometry range checks below run only
+        # when a value IS present.
+        for required_key in ("type", "u", "v"):
             if required_key not in entry:
                 raise FieldDataError(
                     f"EDGES[{i}] missing required key '{required_key}' -- "
-                    "each entry needs 'type', 'u', 'v', 'distance_cm', "
-                    "and 'heading_deg'"
+                    "each entry needs at least 'type', 'u', and 'v' "
+                    "('distance_cm' / 'heading_deg' are optional and derived "
+                    "from the node coordinates when absent)"
                 )
 
         edge_type = entry["type"]
         u = entry["u"]
         v = entry["v"]
-        distance_cm = entry["distance_cm"]
-        heading_deg = entry["heading_deg"]
 
         if edge_type not in legal_edge_types:
             raise FieldDataError(
@@ -1055,42 +1084,107 @@ def _validate_edges_field(field_data) -> None:
                 "pair from BLIND_EDGES if it is not blind-reachable"
             )
 
-        if not _is_number(distance_cm) or distance_cm <= 0:
-            raise FieldDataError(
-                f"EDGES[{i}].distance_cm must be a positive number; "
-                f"got: {distance_cm!r} -- use a value > 0 in centimetres"
-            )
+        # Optional geometry (issue #79). When ABSENT, both are derived from the
+        # node coords by graph_builder._emit_directed_pair -- skip the check.
+        # When PRESENT (a hand-authored geometry-carrying entry), keep the full
+        # type/range gates so a bad pinned value still fails fast.
+        if "distance_cm" in entry:
+            distance_cm = entry["distance_cm"]
+            if not _is_number(distance_cm) or distance_cm <= 0:
+                raise FieldDataError(
+                    f"EDGES[{i}].distance_cm must be a positive number; "
+                    f"got: {distance_cm!r} -- use a value > 0 in centimetres "
+                    "(or omit it to derive the distance from the node coords)"
+                )
 
-        if (
-            not _is_number(heading_deg)
-            or not (0.0 <= float(heading_deg) < 360.0)
-        ):
-            raise FieldDataError(
-                f"EDGES[{i}].heading_deg must be a number in [0, 360); "
-                f"got: {heading_deg!r} -- normalize via "
-                "`heading % 360.0`"
-            )
+        if "heading_deg" in entry:
+            heading_deg = entry["heading_deg"]
+            if (
+                not _is_number(heading_deg)
+                or not (0.0 <= float(heading_deg) < 360.0)
+            ):
+                raise FieldDataError(
+                    f"EDGES[{i}].heading_deg must be a number in [0, 360); "
+                    f"got: {heading_deg!r} -- normalize via "
+                    "`heading % 360.0` (or omit it to derive the heading from "
+                    "the node coords)"
+                )
 
         # Optional: primitive_mode ----------------------------------------
-        # Any concrete member of the edge type's mode enum is accepted --
-        # for BLIND edges this includes BlindMode.STOP_AT_LINE. Only the
-        # DEFAULT sentinel (== "absent") and values of the wrong enum type
-        # (or no enum type at all) are rejected.
+        # Accepts EITHER an enum INSTANCE (legacy Python authoring:
+        # ``LineMode.FAST`` / ``BlindMode.STOP_AT_LINE``) OR the bare string
+        # member NAME of the edge type's mode enum (JSON authoring: ``"FAST"`` /
+        # ``"STOP_AT_LINE"`` -- the same vocabulary header_writer's
+        # ``_override_enum_value`` resolves via ``enum_cls[name]``, issue #79).
+        # Both forms are cross-checked against the edge ``type`` (a LineMode tag
+        # only on a LINE edge, a BlindMode tag only on a BLIND edge) and BOTH
+        # reject the DEFAULT sentinel:
+        #   * the enum instance ``expected_cls.DEFAULT``, and
+        #   * the literal string ``"DEFAULT"`` -- which ``enum_cls["DEFAULT"]``
+        #     would resolve SUCCESSFULLY (DEFAULT is a real member), so the
+        #     unknown-name guard below would NOT catch it. DEFAULT == "absent",
+        #     so authoring it explicitly is a confusion.
+        # An unknown string name is rejected with a precise diagnostic; a value
+        # that is neither an enum instance nor a string is rejected as a
+        # category error.
         if "primitive_mode" in entry:
             primitive_mode = entry["primitive_mode"]
             expected_cls, expected_name = mode_class_by_edge_type[edge_type]
-            if not isinstance(primitive_mode, expected_cls):
+
+            if isinstance(primitive_mode, str):
+                # Reject the DEFAULT name explicitly BEFORE the enum lookup --
+                # enum_cls["DEFAULT"] resolves, so the KeyError guard misses it.
+                if primitive_mode == "DEFAULT":
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = 'DEFAULT' -- DEFAULT "
+                        "means 'inherit PIPELINE_CONFIG', which is what absence "
+                        "already encodes; omit the override or pick a concrete "
+                        f"{expected_name} tag"
+                    )
+                try:
+                    resolved = expected_cls[primitive_mode]
+                except KeyError:
+                    valid_tags = [
+                        member.name
+                        for member in expected_cls
+                        if member is not expected_cls.DEFAULT
+                    ]
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
+                        f"type {edge_type} requires a {expected_name} member "
+                        f"name (one of {valid_tags}); the name is unknown. "
+                        "A LineMode tag is legal only on a LINE edge and a "
+                        "BlindMode tag only on a BLIND edge"
+                    )
+                # Defensive: a concrete member resolved, but guard against any
+                # future alias to DEFAULT slipping through the name check above.
+                if resolved == expected_cls.DEFAULT:
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {primitive_mode!r} "
+                        f"resolves to {expected_name}.DEFAULT -- DEFAULT means "
+                        "'inherit PIPELINE_CONFIG', which is what absence "
+                        "already encodes; omit the override or pick a concrete "
+                        f"{expected_name} tag"
+                    )
+            elif isinstance(primitive_mode, expected_cls):
+                if primitive_mode == expected_cls.DEFAULT:
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT "
+                        "-- DEFAULT means 'inherit PIPELINE_CONFIG', which is "
+                        "what absence already encodes; omit the override or "
+                        "pick a concrete mode"
+                    )
+            else:
+                # Either a string-or-enum of the WRONG enum class, or a value
+                # of no enum class at all (and not a string). A LineMode
+                # INSTANCE on a BLIND edge (and vice versa) lands here -- a
+                # category error -- and must name the expected class so the
+                # cross-type message matches the existing diagnostic.
                 raise FieldDataError(
                     f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
-                    f"type {edge_type} requires a {expected_name} instance "
-                    "(LineMode on LINE edges, BlindMode on BLIND edges)"
-                )
-            if primitive_mode == expected_cls.DEFAULT:
-                raise FieldDataError(
-                    f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT -- "
-                    "DEFAULT means 'inherit PIPELINE_CONFIG', which is "
-                    "what absence already encodes; omit the override or "
-                    "pick a concrete mode"
+                    f"type {edge_type} requires a {expected_name} instance or "
+                    "the string name of one (LineMode on LINE edges, BlindMode "
+                    "on BLIND edges)"
                 )
 
         # Optional: direction --------------------------------------------
@@ -1561,6 +1655,119 @@ def _validate_blind_decay(field_data) -> None:
         raise FieldDataError(f"BLIND_DECAY_{field.upper()} {reason}")
 
 
+def _validate_pipeline_config(field_data) -> None:
+    """Reject a malformed field-sourced ``PIPELINE_*`` default (issue #79).
+
+    The mission-wide motion-mode defaults baked into ``routes.cpp``'s
+    ``PIPELINE_CONFIG`` may be authored in the field data as four optional
+    top-level keys carrying enum member NAMES:
+
+    * ``PIPELINE_LINE_MODE``      -- a :class:`LineMode` name      (no ``DEFAULT``)
+    * ``PIPELINE_BLIND_MODE``     -- a :class:`BlindMode` name     (no ``DEFAULT``)
+    * ``PIPELINE_TURN_MODE``      -- a :class:`TurnMode` name      (no ``DEFAULT``)
+    * ``PIPELINE_DIRECTION_MODE`` -- a :class:`DirectionMode` name (``DEFAULT`` OK)
+
+    Each is OPTIONAL: an absent key inherits the ``pipeline_config.py``
+    ``PIPELINE_CONFIG`` default at emit time. Reads are non-strict
+    (``getattr(field_data, "PIPELINE_*", None)``) so the many ``SimpleNamespace``
+    fixtures that omit these keys keep validating unchanged.
+
+    This mirrors :meth:`pipeline_config.PipelineConfig.__post_init__` exactly:
+    a category default (line / blind / turn) may NOT be its own ``DEFAULT``
+    sentinel -- ``DEFAULT`` means "inherit PIPELINE_CONFIG.<category>", which is
+    self-referential when applied to the pipeline config itself and silently
+    degrades to the C++ hardcoded fallback. ``DirectionMode.DEFAULT`` is the one
+    exception ("defer to the builder auto algorithm") and is allowed. Running
+    this check in :func:`validate` (BEFORE emit) means a build never reaches
+    ``header_writer`` with a value ``<EnumCls>[name]`` cannot resolve.
+
+    A value that is already an enum INSTANCE (legacy / programmatic authoring)
+    is also accepted, cross-checked against the same DEFAULT rule -- so a Python
+    fixture that sets ``PIPELINE_LINE_MODE = LineMode.FAST`` validates too.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the optional ``PIPELINE_*`` attributes).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``PIPELINE_*`` key path and a
+        one-line fix hint on the first malformed value.
+    """
+    # Deferred import to avoid a circular import via graph_builder, which
+    # imports `validate` from this module (pipeline_config is a leaf, but keep
+    # the import local to mirror the other validators' deferred-import policy and
+    # to skip the cost on a field that omits every pipeline key).
+    from tools.path_planner.pipeline_config import (
+        BlindMode,
+        DirectionMode,
+        LineMode,
+        TurnMode,
+    )
+
+    # (attr, EnumCls, enum-class-name, DEFAULT-allowed?). line/blind/turn reject
+    # DEFAULT; direction allows it -- byte-for-byte the PipelineConfig.__post_init__
+    # split (its _CATEGORY_FIELDS is line/blind/turn; direction is exempt).
+    pipeline_specs = (
+        ("PIPELINE_LINE_MODE", LineMode, "LineMode", False),
+        ("PIPELINE_BLIND_MODE", BlindMode, "BlindMode", False),
+        ("PIPELINE_TURN_MODE", TurnMode, "TurnMode", False),
+        ("PIPELINE_DIRECTION_MODE", DirectionMode, "DirectionMode", True),
+    )
+
+    for attr, enum_cls, enum_name, default_allowed in pipeline_specs:
+        value = getattr(field_data, attr, None)
+        if value is None:
+            continue  # absent -> inherit pipeline_config.py default at emit.
+
+        if isinstance(value, str):
+            # The DEFAULT name must be judged against `default_allowed` BEFORE
+            # the resolve: `enum_cls["DEFAULT"]` resolves (DEFAULT is a real
+            # member), so the unknown-name guard would not catch a disallowed
+            # DEFAULT.
+            if value == "DEFAULT":
+                if not default_allowed:
+                    raise FieldDataError(
+                        f"{attr} = 'DEFAULT' -- {enum_name}.DEFAULT means "
+                        f"'inherit PIPELINE_CONFIG.{enum_name.lower()}', which "
+                        "is circular when set as the pipeline default itself; "
+                        "omit the key (to inherit the pipeline_config.py "
+                        f"default) or pick a concrete {enum_name} tag"
+                    )
+                continue  # DirectionMode.DEFAULT is a legitimate value.
+            try:
+                resolved = enum_cls[value]
+            except KeyError:
+                valid_tags = [
+                    member.name
+                    for member in enum_cls
+                    if default_allowed or member is not enum_cls.DEFAULT
+                ]
+                raise FieldDataError(
+                    f"{attr} = {value!r} -- expected a {enum_name} member name "
+                    f"(one of {valid_tags}); the name is unknown. Omit the key "
+                    "to inherit the pipeline_config.py default."
+                )
+            if resolved == enum_cls.DEFAULT and not default_allowed:
+                raise FieldDataError(
+                    f"{attr} = {value!r} resolves to {enum_name}.DEFAULT -- "
+                    f"DEFAULT means 'inherit PIPELINE_CONFIG.{enum_name.lower()}', "
+                    "which is circular when set as the pipeline default itself; "
+                    f"omit the key or pick a concrete {enum_name} tag"
+                )
+        elif isinstance(value, enum_cls):
+            if value == enum_cls.DEFAULT and not default_allowed:
+                raise FieldDataError(
+                    f"{attr} = {enum_name}.DEFAULT -- DEFAULT means 'inherit "
+                    f"PIPELINE_CONFIG.{enum_name.lower()}', which is circular "
+                    "when set as the pipeline default itself; omit the key or "
+                    f"pick a concrete {enum_name} tag"
+                )
+        else:
+            raise FieldDataError(
+                f"{attr} = {value!r} -- expected a {enum_name} member name "
+                f"(string) or a {enum_name} instance; omit the key to inherit "
+                "the pipeline_config.py default."
+            )
+
+
 def validate(field_data) -> None:
     """Raise :class:`FieldDataError` on the first problem; return ``None`` on success.
 
@@ -1805,3 +2012,11 @@ def validate(field_data) -> None:
     # _REQUIRED_ATTRS structural check above; this pass enforces each value's
     # domain (k >= 0, exponent >= 1, d_ref > 0, enabled is a bool).
     _validate_blind_decay(field_data)
+
+    # 13. Optional field-sourced PIPELINE_CONFIG defaults (issue #79). Each
+    # PIPELINE_* key (when present) must name a valid enum member; line/blind/turn
+    # reject DEFAULT, direction allows it (mirrors PipelineConfig.__post_init__).
+    # Runs BEFORE the emitter so a build never reaches header_writer with a value
+    # `<EnumCls>[name]` cannot resolve. Reads are non-strict, so a field that
+    # omits every key (the common case) passes inertly.
+    _validate_pipeline_config(field_data)
