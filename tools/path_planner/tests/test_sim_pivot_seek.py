@@ -152,23 +152,25 @@ def _seek_snapshot(sim, goal):
 # ===========================================================================
 
 
-def test_tc7_autorule_blind_into_projection_seek_full_advances_onto_node():
-    """TC7/TC10 (issue #64): the BLIND->projection auto-seek FULL-advances onto B.
+def test_tc7_autorule_blind_into_projection_seek_lands_delta_short_of_pivot_node():
+    """TC7/TC10 (issue #64): the BLIND->projection auto-seek lands ``delta`` short of B.
 
-    The user's scenario (``make_sensor_autorule_pivot_field``): incoming
-    ``A -> B`` is a plain BLIND hop whose DESTINATION ``B`` is a projection node.
-    With ``BLIND_PROJECTION_AUTO_SEEK=True`` the LOCAL auto-rule makes ``A -> B``
-    a ``Drive.stopAtLine`` seek that RE-ANCHORS via a FULL advance: the seek-stop
-    is treated as the projection node's mapped position, so the chassis lands ON
-    B and the operator offset is cleared.
+    The user's scenario (``make_sensor_autorule_pivot_field``): incoming ``A -> B``
+    is a plain BLIND hop whose DESTINATION ``B`` is a projection node, and ``B`` is
+    the pivot node of the turn ``A->B->C``. With ``BLIND_PROJECTION_AUTO_SEEK=True``
+    the LOCAL auto-rule makes ``A -> B`` a ``Drive.stopAtLine`` seek.
 
-    This is the issue-#64 behavioral relocation: a pivot APPROACHING a projection
-    node draws its delta from the LINE->projection FOLLOW distance (the ``distance``
-    regime), NEVER from a BLIND->projection seek. So this seek takes NO pivot-trim
-    reduction -- it advances the FULL ``distance_cm`` onto the node, NOT
-    ``distance - delta``. (The delta-short BLIND->line seek is exercised by the
-    AUTHORED variant below, where the seek targets a blind node via a per-edge
-    override, not the projection auto-rule.)
+    A seek INTO an approaching pivot lands the axle ``delta`` short of the node, and
+    the firmware arms EVERY seek with that trim and NO projection special-case
+    (``Drive.stopAtLine(edge.distance_cm).setOvershoot(offset - delta)`` --
+    ``PathTracker.cpp`` STOP_AT_LINE dispatch). The pivot leg ``(A, B, C)`` here is the
+    ``sensor`` regime -- ``_validate_pivot_turns`` budgets ``delta`` against the seek
+    overshoot, asserted by ``delta <= LINE_SENSOR_AXLE_OFFSET_CM`` below -- so the
+    delta is drawn from THIS seek, not a (nonexistent) LINE->projection follow. The
+    sim must mirror the delta-short landing or it stops being the firmware's pose
+    oracle at this validator-legal turn (PR #92 review). A plain BLIND->projection
+    re-anchor with NO approaching pivot still full-advances: trim 0 -> the advance is
+    the full ``distance_cm``.
     """
     field = pivot_field_data.make_sensor_autorule_pivot_field()
     sim, _chassis, _graph, next_hop = _make_pivot_sim(field)
@@ -184,19 +186,23 @@ def test_tc7_autorule_blind_into_projection_seek_full_advances_onto_node():
 
     seek_prim, snap = _seek_snapshot(sim, "C")
 
-    # The seek hop is a FRONT ACT_STOP_AT_LINE carrying the full command distance
-    # (firmware ``Drive.stopAtLine(edge.distance_cm)`` / compile_path).
+    # The seek hop is a FRONT ACT_STOP_AT_LINE carrying the full COMMAND distance
+    # (firmware ``Drive.stopAtLine(edge.distance_cm)`` / compile_path); the delta-short
+    # trim lives in the snapshot pose below, not the commanded primitive.
     assert seek_prim == (ACT_STOP_AT_LINE, pytest.approx(incoming_dist, abs=1e-9))
+    expected_seek_advance = _seek_advance_into_pivot(incoming_dist, delta)
+    assert expected_seek_advance == pytest.approx(incoming_dist - delta, abs=1e-9)
 
-    # FULL-advance re-anchor (issue #64): the chassis center lands ON B -- there is
-    # NO delta-short reduction for a BLIND->projection seek, because the approach
-    # trim is owned by the LINE->projection follow distance, not the seek.
-    assert snap.x_cm == pytest.approx(bx, abs=1e-9)
-    assert snap.y_cm == pytest.approx(by, abs=1e-9)
-    assert math.hypot(snap.x_cm - bx, snap.y_cm - by) < _POSITION_TOL_CM
+    # Delta-short re-anchor: the chassis center lands ``delta`` short of B along the
+    # A->B approach -- exactly the firmware's reduced post-detect axle roll.
+    hx = (bx - ax) / incoming_dist
+    hy = (by - ay) / incoming_dist
+    assert snap.x_cm == pytest.approx(bx - delta * hx, abs=1e-9)
+    assert snap.y_cm == pytest.approx(by - delta * hy, abs=1e-9)
+    assert math.hypot(snap.x_cm - bx, snap.y_cm - by) == pytest.approx(delta, abs=1e-9)
 
-    # Localization re-anchors at the seek node B (offset cleared on the full-advance
-    # re-anchor) -- the logical node and the physical center both land on B.
+    # Localization re-anchors at the seek node B (the seek stops ON B's line): the
+    # logical node is exact while the physical center lands ``delta`` short.
     assert sim.localization.current_node() == "B"
 
 

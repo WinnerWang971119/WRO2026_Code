@@ -2610,68 +2610,52 @@ class PathTrackerSim:
                     # already owned by the ``_pending_pivot`` latch (a pivot
                     # reached via a seek still over-travels on its OUTGOING side;
                     # the next hop's ``_departing_pivot`` applies that trim).
-                    if dest_is_projection:
-                        # BLIND -> projection node (issue #64 auto-seek): a
-                        # FULL-ADVANCE re-anchor. The seek-stop IS treated as the
-                        # projection node's mapped position -- set current node =
-                        # projection node and clear the operator offset
-                        # (``on_intersection``-style). No pivot-trim reduction: a
-                        # pivot APPROACHING a projection node draws its delta from
-                        # the LINE->projection follow distance (the ``distance``
-                        # regime), never from a BLIND->projection seek, so this
-                        # branch advances the full ``distance_cm`` onto the node
-                        # (per the "Blind->projection re-anchor = full advance"
-                        # decision). Matches ``compile_path``'s ``(ACT_STOP_AT_LINE,
-                        # distance_cm)`` emission cell-for-cell.
-                        seek_advance_cm = distance_cm
-                    else:
-                        # BLIND -> line node via a call-flag / per-edge / legacy
-                        # STOP_AT_LINE override (NOT the projection auto-rule). The
-                        # pivot-trim model applies here.
-                        #
-                        # ADR-044 D1: a seek INTO an approaching pivot must land the
-                        # axle ``delta`` short of the node (like every other approach
-                        # mechanism), so the firmware reduces the post-detect axle
-                        # roll from the full ``offset`` to ``offset - delta`` (the
-                        # shared sensor-overshoot twin, clamped to the floor). A seek
-                        # is sensor-terminated, so the DEPARTING trim is auto-absorbed
-                        # on the line and never subtracted here. ``offset -
-                        # overshoot_cm`` is exactly how far short of the node the
-                        # firmware's axle lands (= delta in the clean delta <= offset
-                        # case; clamps when delta > offset). With no approaching pivot
-                        # the trim is 0 -> overshoot_cm == offset -> the advance is the
-                        # full ``distance_cm`` (unchanged; AC2). The sim's chassis
-                        # center is the axle, so shrinking the FORWARD displacement by
-                        # ``offset - overshoot_cm`` lands the center ``delta`` short --
-                        # exactly the firmware's reduced post-detect roll. Localization
-                        # still re-anchors at the node (the seek stops ON the line);
-                        # only the physical displacement shrinks, leaving the chassis
-                        # center at ``node - delta * h_in`` (T4 parity).
-                        #
-                        # Unconditional, helper-driven form mirroring the LINE
-                        # overshoot path above: trim defaults to 0 when there is no
-                        # approaching pivot, so ``offset - overshoot_cm == 0`` and the
-                        # advance is the full ``distance_cm`` (AC2) -- no separate
-                        # branch. This is the FRONT seek branch, so the offset is the
-                        # FRONT sensor-to-axle offset (force-FRONT guarantees every
-                        # pivot seek lands here).
-                        approach_trim_cm = (
-                            self._approaching_pivot.trim_cm
-                            if self._approaching_pivot is not None
-                            else 0.0
-                        )
-                        offset = LINE_SENSOR_AXLE_OFFSET_CM
-                        overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
-                            offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
-                        )
-                        # Clamp to 0 so a degenerate short sensor edge
-                        # (``distance_cm`` < delta) never models a backward drive --
-                        # the same guard the LINE follow uses
-                        # (``follow_cm = max(0.0, distance_cm - offset)``). The
-                        # firmware seek is sensor-terminated (it physically finds the
-                        # line), so it never drives backward; this clamp keeps the
-                        # net-displacement model honest on degenerate geometry.
-                        seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
+                    # ADR-044 D1 / issue #64 seek-trim parity: a seek INTO an
+                    # approaching pivot must land the axle ``delta`` short of the node
+                    # (like every other approach mechanism), so the firmware reduces
+                    # the post-detect axle roll from the full ``offset`` to
+                    # ``offset - delta`` (the shared sensor-overshoot twin, clamped to
+                    # the floor). The firmware seek-arming has NO projection
+                    # special-case -- a BLIND->projection auto-seek and a BLIND->line
+                    # override seek arm the SAME
+                    # ``Drive.stopAtLine(edge.distance_cm).setOvershoot(offset - delta)``
+                    # (``PathTracker.cpp`` STOP_AT_LINE dispatch) -- so this branch
+                    # applies the trim uniformly regardless of ``dest_is_projection``.
+                    # A ``(u, projection, w)`` pivot whose ``u->P`` is a BLIND auto-seek
+                    # is validator-legal (``_validate_pivot_turns`` resolves that leg
+                    # through the ``sensor`` regime and budgets the overshoot), so a
+                    # projection-special full advance here would stop the sim short of
+                    # mirroring the firmware's delta-short pose (the sim is the
+                    # firmware's pose oracle). A seek is sensor-terminated, so the
+                    # DEPARTING trim is auto-absorbed on the line and never subtracted
+                    # here. With NO approaching pivot the trim is 0 ->
+                    # ``offset - overshoot_cm == 0`` -> the advance is the full
+                    # ``distance_cm`` (AC2): a plain BLIND->projection re-anchor still
+                    # full-advances onto the node, and only a pivot-approaching seek
+                    # lands delta-short.
+                    #
+                    # The sim chassis center is the axle, so shrinking the FORWARD
+                    # displacement by ``offset - overshoot_cm`` lands the center
+                    # ``delta`` short -- exactly the firmware's reduced post-detect
+                    # roll. Localization still re-anchors at the node (the seek stops
+                    # ON the line; ``on_intersection`` below); only the physical
+                    # displacement shrinks. This is the FRONT seek branch, so the
+                    # offset is the FRONT sensor-to-axle offset (force-FRONT guarantees
+                    # every pivot seek lands here). The ``max(0.0, ...)`` clamp mirrors
+                    # the LINE follow's degenerate-geometry guard; the firmware instead
+                    # hard-faults on ``delta > offset`` (PIVOT_TRIM_UNDERFLOW), which
+                    # the validator's delta-budget precludes for any legal sensor-regime
+                    # pivot.
+                    approach_trim_cm = (
+                        self._approaching_pivot.trim_cm
+                        if self._approaching_pivot is not None
+                        else 0.0
+                    )
+                    offset = LINE_SENSOR_AXLE_OFFSET_CM
+                    overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
+                        offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
+                    )
+                    seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
                     self._chassis.forward(seek_advance_cm)
                     self._localization.on_intersection(nxt)
                     # The emitted primitive carries the COMMAND distance
