@@ -543,6 +543,31 @@ private:
     uint8_t _peekNextNextHop() const;
 
     /**
+     * @brief Shared ADR-023 pass-through heading test for a mid→next (B→C) edge.
+     *
+     * The collinearity + same-direction half of BOTH pass-through gates: the
+     * intersection-gated `line(A)–line(B)–line(C)` collapse in `LINE_FOLLOW` and the
+     * distance-gated `line(A)–projection(B)–line(C)` collapse in
+     * `_evaluateProjectionPassThrough()`. Both require the SAME two conditions across
+     * the mid node, so the math lives here once (mirroring the Python sim's single
+     * `_should_pass_through()`) rather than verbatim at both sites where a future edit
+     * to the heading rule could update one and silently miss the other.
+     *
+     * Compares BODY headings: the chassis arrives facing `_resolvedBodyHeading`, so the
+     * B→C direction is re-resolved with that as the current heading, the outbound edge
+     * heading is rotated 180° for a REAR result, and the wrap-normalized delta is tested
+     * against `Config::NAV_TURN_TOLERANCE_DEG`. The resolved B→C direction must also
+     * equal `_resolvedDirection` — a FRONT↔REAR flip would force a mid-flight
+     * LineFollower board swap, never a pass-through.
+     *
+     * @param outbound The mid→next (B→C) edge under evaluation.
+     * @param next     The next-next node id (C), for the isLastHop arrival-direction flag
+     *                 (`next == _destinationNode`).
+     * @return `true` iff B→C is collinear with A→B within tolerance AND same-direction.
+     */
+    bool _passThroughHeadingOk(const Routes::EdgeInfo& outbound, uint8_t next) const;
+
+    /**
      * @brief `line(A)–projection(B)–line(C)` pass-through eligibility for the
      *        in-flight LINE→projection follow (T19, issue #64).
      *

@@ -65,11 +65,9 @@ namespace
     /// Issue #64: the only reverse-unservable edge type is now `LINE` (a REAR line-follow
     /// needs the rear board; BLIND REAR is permitted on a 1-board chassis). The
     /// `reverseUnavailable(...)` predicate is scoped to `EdgeType::LINE`, so this helper is
-    /// only ever reached with a LINE edge — the label is unconditional.
-    void _printReverseUnavailable(uint8_t from, uint8_t to, Routes::EdgeType edgeType,
-                                  const __FlashStringHelper* site)
+    /// only ever reached with a LINE edge — the label is unconditional (no edge-type param).
+    void _printReverseUnavailable(uint8_t from, uint8_t to, const __FlashStringHelper* site)
     {
-        (void) edgeType;    // retained for the shared signature; only LINE reaches here
         Serial.print(F("[PathTracker] REVERSE_UNAVAILABLE: edge "));
         Serial.print(F("LINE"));
         Serial.print(F(" at u="));
@@ -739,56 +737,19 @@ void PathTrackerClass::_stepFsm()
                     const Routes::EdgeInfo& outbound = FieldMap::getEdge(_nextHop, nextNext);
                     if (outbound.type != Routes::EdgeType::NONE)
                     {
-                        // Body-heading peek: the pass-through
-                        // delta MUST compare BODY-headings, not raw forward edge
-                        // headings. The chassis arrives at the intersection
-                        // facing `_resolvedBodyHeading` (set by `_onPlanNextHop`
-                        // for the inbound hop), which is either the inbound
-                        // edge heading (FRONT) or `+180°` (REAR). The outbound
-                        // body-heading is computed by re-resolving direction for
-                        // the next-next hop with `inboundBody` as currentHeading.
-                        // See TC9 (passthrough) + TC9c (mixed FRONT/REAR pass).
-                        const float inboundBody = _resolvedBodyHeading;
-
-                        // Read the builder overrides cached on DEQUEUE for the
-                        // in-flight goal. The next-next hop is still part of the
-                        // active goTo() call, so the same route_direction /
-                        // arrival_direction values apply (arrival only takes effect
-                        // when this is the final hop into the destination, which
-                        // _resolveDirection handles via the isLastHop flag).
-                        const Direction nextDir = resolveDirection(
-                            outbound.direction_override,
-                            Routes::PIPELINE_CONFIG.direction,
-                            _activeArrivalDirection,
-                            _activeRouteDirection,
-                            inboundBody,
-                            outbound.heading_deg,
-                            (nextNext == _destinationNode),
-                            Config::BIDIRECTIONAL_AUTO_ENABLED,
-                            Config::LINE_BOARD_COUNT);
-
-                        float outboundBody = outbound.heading_deg;
-                        if (nextDir == Direction::REAR)
-                        {
-                            outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
-                            if (outboundBody < 0.0f) outboundBody += 360.0f;
-                        }
-
-                        const float delta = wrapDeltaDeg(outboundBody - inboundBody);
-
-                        // Pass-through requires BOTH (1) collinear body
-                        // headings AND (2) matching direction across the
-                        // intersection. A REAR→FRONT or FRONT→REAR transition
-                        // would force the dispatcher to flip
-                        // LineFollower.setReverse(...) mid-flight — instantly
-                        // swapping the active line board and inverting cruise
-                        // sign in one tick, jolting the chassis without a
-                        // controlled stop. Falling through to LINE_OVERSHOOT
-                        // (with brake, no pass-through) gives the controller
-                        // a clean re-init window before the new edge starts.
-                        // PR #34 review.
-                        if (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG &&
-                            nextDir == _resolvedDirection)
+                        // Pass-through requires BOTH (1) collinear body headings
+                        // AND (2) matching direction across the intersection — the
+                        // shared ADR-023 `_passThroughHeadingOk()` predicate (also
+                        // used by the distance-gated projection collapse) compares
+                        // BODY headings, not raw forward edge headings. A REAR→FRONT
+                        // or FRONT→REAR transition would force the dispatcher to flip
+                        // LineFollower.setReverse(...) mid-flight — instantly swapping
+                        // the active line board and inverting cruise sign in one tick,
+                        // jolting the chassis without a controlled stop. Falling
+                        // through to LINE_OVERSHOOT (with brake, no pass-through) gives
+                        // the controller a clean re-init window before the new edge
+                        // starts. PR #34 review; see TC9 / TC9c.
+                        if (_passThroughHeadingOk(outbound, nextNext))
                         {
                             _passThrough = true;
                         }
@@ -1607,7 +1568,7 @@ void PathTrackerClass::_onPlanNextHop()
     // ------------------------------------------------------------------------
     if (reverseUnavailable(resolved, edge.type, Config::LINE_BOARD_COUNT))
     {
-        _printReverseUnavailable(cur, nxt, edge.type, F("pre-turn guard"));
+        _printReverseUnavailable(cur, nxt, F("pre-turn guard"));
         _enterFault(Fault::REVERSE_UNAVAILABLE, cur, nxt);
         return;
     }
@@ -1767,6 +1728,46 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
     return nextNext;
 }
 
+bool PathTrackerClass::_passThroughHeadingOk(const Routes::EdgeInfo& outbound,
+                                             uint8_t next) const
+{
+    // Shared ADR-023 collinearity + same-direction test for a mid→next (B→C) edge.
+    // Both pass-through gates (the intersection-gated line–line–line collapse in
+    // LINE_FOLLOW and the distance-gated line–proj–line collapse in
+    // `_evaluateProjectionPassThrough`) call this so the heading rule lives in ONE
+    // place (mirrors the Python sim's single `_should_pass_through()`).
+    //
+    // Compare BODY headings (the chassis arrives facing `_resolvedBodyHeading`):
+    // re-resolve the B→C direction with the inbound body heading as the current
+    // heading, rotate the outbound edge heading 180° for REAR, then wrap-normalize the
+    // delta. The next-next hop is still part of the active goTo(), so the same cached
+    // route/arrival overrides apply (arrival only binds when C is the final
+    // destination, handled by the isLastHop flag). A FRONT↔REAR flip would force a
+    // mid-flight LineFollower board swap — never a pass-through, so the resolved
+    // direction must match too.
+    const float inboundBody = _resolvedBodyHeading;
+    const Direction nextDir = resolveDirection(
+        outbound.direction_override,
+        Routes::PIPELINE_CONFIG.direction,
+        _activeArrivalDirection,
+        _activeRouteDirection,
+        inboundBody,
+        outbound.heading_deg,
+        (next == _destinationNode),
+        Config::BIDIRECTIONAL_AUTO_ENABLED,
+        Config::LINE_BOARD_COUNT);
+
+    float outboundBody = outbound.heading_deg;
+    if (nextDir == Direction::REAR)
+    {
+        outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
+        if (outboundBody < 0.0f) outboundBody += 360.0f;
+    }
+
+    const float delta = wrapDeltaDeg(outboundBody - inboundBody);
+    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG) && (nextDir == _resolvedDirection);
+}
+
 bool PathTrackerClass::_evaluateProjectionPassThrough() const
 {
     // `line(A)–projection(B)–line(C)` pass-through gate (T19, issue #64). Called at
@@ -1815,35 +1816,9 @@ bool PathTrackerClass::_evaluateProjectionPassThrough() const
     }
 
     // (5) A→B→C collinear AND same direction — the SAME ADR-023 heading check the
-    // intersection-gated pass-through uses. Compare BODY headings (the chassis
-    // arrives facing `_resolvedBodyHeading`): re-resolve the B→C direction with the
-    // inbound body heading as the current heading, rotate the outbound edge heading
-    // 180° for REAR, then wrap-normalize the delta. The next-next hop is still part
-    // of the active goTo(), so the same cached route/arrival overrides apply
-    // (arrival only binds when C is the final destination, handled by the isLastHop
-    // flag). A FRONT↔REAR flip across B would force a mid-flight LineFollower board
-    // swap — never a pass-through, so require the resolved direction to match too.
-    const float inboundBody = _resolvedBodyHeading;
-    const Direction nextDir = resolveDirection(
-        outbound.direction_override,
-        Routes::PIPELINE_CONFIG.direction,
-        _activeArrivalDirection,
-        _activeRouteDirection,
-        inboundBody,
-        outbound.heading_deg,
-        (c == _destinationNode),
-        Config::BIDIRECTIONAL_AUTO_ENABLED,
-        Config::LINE_BOARD_COUNT);
-
-    float outboundBody = outbound.heading_deg;
-    if (nextDir == Direction::REAR)
-    {
-        outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
-        if (outboundBody < 0.0f) outboundBody += 360.0f;
-    }
-
-    const float delta = wrapDeltaDeg(outboundBody - inboundBody);
-    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG) && (nextDir == _resolvedDirection);
+    // intersection-gated pass-through uses, factored into the one shared
+    // `_passThroughHeadingOk()` predicate so the two sites cannot drift.
+    return _passThroughHeadingOk(outbound, c);
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()
@@ -1866,7 +1841,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     // -----------------------------------------------------------------------
     if (reverseUnavailable(_resolvedDirection, edge.type, Config::LINE_BOARD_COUNT))
     {
-        _printReverseUnavailable(cur, _nextHop, edge.type, F("post-turn guard"));
+        _printReverseUnavailable(cur, _nextHop, F("post-turn guard"));
         _enterFault(Fault::REVERSE_UNAVAILABLE, cur, _nextHop);
         return;
     }
