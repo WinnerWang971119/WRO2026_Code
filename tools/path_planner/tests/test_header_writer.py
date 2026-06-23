@@ -49,7 +49,6 @@ before touching the goldens.
 
 from __future__ import annotations
 
-import copy
 import hashlib
 import re as _re
 import tempfile
@@ -84,28 +83,6 @@ from tools.path_planner.planner import (
     compute_all_pairs_next_hop,
 )
 
-_FIELD_ATTRS = (
-    "NODES",
-    "NODE_TYPES",
-    "LINE_SEGMENTS",
-    "BLIND_EDGES",
-    "OBSTACLES",
-    "ROBOT_RADIUS_CM",
-    # Blind-decay knobs (replace the old COST_BLIND_MULTIPLIER; PR3 / T22).
-    "BLIND_DECAY_ENABLED",
-    "BLIND_DECAY_K",
-    "BLIND_DECAY_EXPONENT",
-    "BLIND_DECAY_D_REF",
-    "START_NODE",
-    "START_HEADING_DEG",
-    "FIELD_MM",
-    "MAP_PNG",
-    "BLIND_PROJECTION_AUTO_SEEK",
-    # Optional sparse table (empty on every fixture here) -- carried so the
-    # strict header_writer read of field_data.RESET_NODES never AttributeErrors.
-    "RESET_NODES",
-)
-
 _GOLDEN_DIR = Path(__file__).parent / "golden"
 _GOLDEN_HEADER = _GOLDEN_DIR / "routes_toy.h"
 _GOLDEN_SOURCE = _GOLDEN_DIR / "routes_toy.cpp"
@@ -114,12 +91,6 @@ _GOLDEN_SOURCE = _GOLDEN_DIR / "routes_toy.cpp"
 # purely a hash anchor -- editing it would force a golden rebaseline.
 _TOY_FIELD_SOURCE = _GOLDEN_DIR / "_toy_field_source.py"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_FIELD_DATA_SRC = _REPO_ROOT / FIELD_DATA_PATH
-
-
-def _clone_field_data() -> SimpleNamespace:
-    snapshot = {attr: copy.deepcopy(getattr(real_field_data, attr)) for attr in _FIELD_ATTRS}
-    return SimpleNamespace(**snapshot)
 
 
 def _build_toy_field_data() -> SimpleNamespace:
@@ -318,8 +289,16 @@ def test_source_sha256_matches_field_data(emit_targets):
 
 
 def test_unreachable_pair_emits_0xff(emit_targets):
-    """Removing BLIND_EDGES makes G unreachable; NEXT_HOP must show 0xFF."""
-    fd = _clone_field_data()
+    """Removing BLIND_EDGES isolates the blind nodes; NEXT_HOP must show 0xFF.
+
+    Built on the self-contained toy fixture rather than the production field so
+    the test holds regardless of how ``field_data.json`` is encoded -- between
+    phases the real field may collapse to a single spawn node, which cannot
+    produce an unreachable pair. The toy field's ``G`` and ``S`` nodes are only
+    reachable via BLIND edges, so stripping ``BLIND_EDGES`` strands both and the
+    emitted NEXT_HOP table must carry multiple ``0xFF`` sentinels.
+    """
+    fd = _build_toy_field_data()
     fd.BLIND_EDGES = []
     # Pin EDGES empty so this unreachable-pair test exercises only the
     # geometry graph: no rich-edge overrides, no pivot tags, nothing that
@@ -333,7 +312,7 @@ def test_unreachable_pair_emits_0xff(emit_targets):
     emit_routes(
         fd, graph, next_hop,
         header_path=header_path, source_path=source_path,
-        field_data_source_path=_FIELD_DATA_SRC,
+        field_data_source_path=_TOY_FIELD_SOURCE,
     )
     cpp_text = source_path.read_text(encoding="utf-8")
     assert NEXT_HOP_NONE_HEX in cpp_text

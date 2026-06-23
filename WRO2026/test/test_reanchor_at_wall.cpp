@@ -25,12 +25,15 @@
 // HOW THE SUT IS LINKED (see CMakeLists.txt `test_reanchor_at_wall`): identical to
 // `test_localization_offset` — `Localization.cpp` compiled UNCHANGED, the mock `Drive.h`
 // force-included (guard `DRIVE_H`) to shadow the real one, `<MatrixMiniR4.h>` / `<Arduino.h>`
-// resolved by the `mocks/`-first include path, and `routes.cpp` linked for the
-// `Routes::START_NODE / NODES / N_NODES` symbols Localization odr-uses.
+// resolved by the `mocks/`-first include path, and the issue #91 fixture `routes_fixture.cpp`
+// linked (force-included `routes_fixture.h` shadows the sketch `routes.h`) for the
+// `Routes::START_NODE / NODES / N_NODES` symbols Localization odr-uses — the single-node
+// production field carries no RESET node to re-anchor against.
 //
-// Node fixture (routes.cpp): node 5 ("Wall1") is the toy field's sole RESET node at
+// Node fixture (routes_fixture.cpp): node 4 ("Wall1") is the fixture's sole RESET node at
 // (x=165, y=139); its reset record is { axis=1 (y), wall_coord=154, facing=270 }. The test
-// anchors the believed node to 5 via declarePosition(5) before each reanchor so the on-axis
+// resolves "Wall1" BY NAME (not the literal index) and anchors the believed node to it before
+// each reanchor so the on-axis
 // post-condition (nodeCoord.y + offset.y == wall_coord - WALL_CONTACT_OFFSET_CM, the wheel
 // axle) is checked against the real node coordinate.
 //

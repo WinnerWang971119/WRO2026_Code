@@ -55,6 +55,20 @@ set(TASK_MOCKS_DIR ${TEST_DIR}/task_mocks)
 # keeps linking the real `routes.cpp`).
 set(TOY_ROUTES_DIR ${SKETCH_DIR}/../tools/path_planner/tests/golden)
 
+# Issue #91 host-test fixture routes. The FSM-logic tests below
+# (`return_to_node_dispatch`, `reanchor_at_wall`[`_strict`],
+# `path_tracker_reset_arrival`, and the `ctps_dump` self-test) assert
+# PathTracker / Localization LOGIC that is field-INDEPENDENT, but resolve LINE /
+# BLIND / RESET("Wall1") nodes BY NAME. The production `routes.cpp` carries none of
+# those once the real field collapses to a single spawn node (#64), so these
+# targets link this dedicated, STABLE 7-node fixture instead of
+# `${SKETCH_DIR}/routes.cpp`. `routes_fixture.h` shares the production `ROUTES_H`
+# guard, so force-including it ahead of the sketch `routes.h` shadows the
+# production data for those targets only. The fixture is frozen and is NOT part of
+# the CI routes-freshness gate; regenerate it only on a `routes.h` schema change
+# with `WRO2026/test/fixtures/regenerate_routes_fixture.py`.
+set(FIXTURE_ROUTES_DIR ${TEST_DIR}/fixtures)
+
 # -----------------------------------------------------------------------------------------
 # Production sources under test — compiled UNCHANGED.
 #   - LineFollower.cpp pulls in Drive.h / WROLineArray.h / Intersection.h via the include
@@ -219,6 +233,30 @@ function(add_toy_routes_force_include target)
         # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
         target_compile_options(${target} PRIVATE
             "SHELL:-include ${TOY_ROUTES_DIR}/routes_toy.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
+# Force-include the issue #91 fixture `routes_fixture.h` BEFORE any source-file parsing —
+# the same shadow trick as `add_toy_routes_force_include`, pointed at the host-test fixture
+# routes. `routes_fixture.h` carries the production `ROUTES_H` guard, so once force-included
+# it shadows the sketch `routes.h` everywhere it is transitively requested (FieldMap.h /
+# PathTracker.h / Localization.h) — AND in `routes_fixture.cpp` itself, whose
+# `#include "routes.h"` then no-ops so the 7-node fixture data is sized against the fixture
+# `N_NODES`. Applied PER TARGET (only the field-independent FSM-logic tests), so no sibling
+# target that links the real `routes.cpp` inherits the fixture shadow. An ABSOLUTE path is
+# used (not a bare name) because the real `routes.h` sits next to the test's sketch includes.
+# -----------------------------------------------------------------------------------------
+function(add_fixture_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${FIXTURE_ROUTES_DIR}/routes_fixture.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_fixture.h"
         )
     endif()
 endfunction()
@@ -653,8 +691,10 @@ add_test(NAME test_vision COMMAND test_vision)
 # =========================================================================================
 # CTPS dump #8 — `ctps_dump` (Mechanism #4, task T4).
 #
-# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + `routes.cpp`
-# against the recording mocks under `ctps_mocks/` (NOT the sibling `mocks/`
+# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + the issue #91
+# fixture `routes_fixture.cpp` (the self-test's `Start` / `final` nodes are absent
+# from the single-node production field, #64) against the recording mocks under
+# `ctps_mocks/` (NOT the sibling `mocks/`
 # LineFollower harness). Running the executable executes a mission to completion
 # and serializes the captured, ordered command stream to the Data-Model-A JSON.
 # `--self-test` asserts the op stream + the tick-budget hang-guard (TC8 / TC9 /
@@ -715,12 +755,18 @@ add_executable(ctps_dump
     ${SKETCH_DIR}/Mission.cpp
     ${SKETCH_DIR}/Tasks.cpp
     ${SKETCH_DIR}/MissionScript.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${CTPS_MOCKS_DIR}/ctps_record.cpp
 )
 # `${CTPS_MOCKS_DIR}` FIRST; `${MOCKS_DIR}` intentionally omitted (see the block comment).
 target_include_directories(ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
 target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
+# Issue #91: the `--self-test` fixture mission resolves `Start` / `final` by name, which the
+# single-node production field (#64) no longer carries. Link + force-include the stable
+# fixture routes so the self-test sees a multi-node graph. Force-include it FIRST so its
+# `ROUTES_H` wins before the recording mocks (`PathTracker.h` / `Localization.h`) pull in the
+# production `routes.h`.
+add_fixture_routes_force_include(ctps_dump)
 add_ctps_mock_force_includes(ctps_dump)
 # Pin the dump binary to the build-tree root so the Python orchestrator
 # (tools/path_planner/ctps) locates it under any generator. Single-config
@@ -852,10 +898,13 @@ add_test(NAME return_to_node_policy COMMAND test_return_to_node_policy)
 # =========================================================================================
 add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_return_to_node_dispatch PRIVATE ${COMMON_INCLUDES})
+# Issue #91: links the stable fixture routes (LINE + BLIND + RESET nodes) instead of the
+# single-node production `routes.cpp`, which no longer carries the kinds TC4 discriminates.
+add_fixture_routes_force_include(test_return_to_node_dispatch)
 add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)
 
 # =========================================================================================
@@ -876,10 +925,14 @@ add_executable(test_reanchor_at_wall
     ${TEST_DIR}/test_reanchor_at_wall.cpp
     ${SKETCH_DIR}/Localization.cpp
     ${SKETCH_DIR}/YawSource.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_reanchor_at_wall PRIVATE ${COMMON_INCLUDES})
+# Issue #91: links the stable fixture routes for the `Wall1` RESET node Localization
+# re-anchors against (resolved by name); the single-node production field carries none.
+# Force-include FIRST so the fixture `ROUTES_H` wins before any header pulls in routes.h.
+add_fixture_routes_force_include(test_reanchor_at_wall)
 add_mock_force_includes(test_reanchor_at_wall)   # shadows the real Drive.h with the mock
 add_test(NAME reanchor_at_wall COMMAND test_reanchor_at_wall)
 
@@ -900,7 +953,7 @@ add_executable(test_reanchor_at_wall_strict
     ${TEST_DIR}/test_reanchor_at_wall_strict.cpp
     ${SKETCH_DIR}/Localization.cpp
     ${SKETCH_DIR}/YawSource.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_reanchor_at_wall_strict PRIVATE ${COMMON_INCLUDES})
@@ -910,6 +963,8 @@ target_include_directories(test_reanchor_at_wall_strict PRIVATE ${COMMON_INCLUDE
 # per-target Config shadow header or the cross-TU `constexpr` override trap. Mirrors the
 # `MISSION_ALLOW_REARM_DEFAULT` / `PATH_PASS_THROUGH_ENABLED_DEFAULT` idiom.
 target_compile_definitions(test_reanchor_at_wall_strict PRIVATE WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)
+# Issue #91 (fixture FIRST — see test_reanchor_at_wall).
+add_fixture_routes_force_include(test_reanchor_at_wall_strict)
 add_mock_force_includes(test_reanchor_at_wall_strict)   # shadows the real Drive.h with the mock
 add_test(NAME reanchor_at_wall_strict COMMAND test_reanchor_at_wall_strict)
 
@@ -973,10 +1028,14 @@ add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
     ${SKETCH_DIR}/Localization.cpp
     ${SKETCH_DIR}/YawSource.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_path_tracker_reset_arrival PRIVATE ${COMMON_INCLUDES})
+# Issue #91: links the stable fixture routes for the `Wall1` RESET record the interlude
+# re-anchors against (resolved by name); the single-node production field carries none.
+# Force-include FIRST so the fixture `ROUTES_H` wins before any header pulls in routes.h.
+add_fixture_routes_force_include(test_path_tracker_reset_arrival)
 add_mock_force_includes(test_path_tracker_reset_arrival)   # shadows the real Drive.h with the mock
 add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
 

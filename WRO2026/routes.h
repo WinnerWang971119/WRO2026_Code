@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 namespace Routes {
-    constexpr uint8_t N_NODES = 11;
+    constexpr uint8_t N_NODES = 1;
 
     // Field-wide: auto stop-at-line seek on a BLIND hop that precedes
     // a PROJECTION.
@@ -86,19 +86,19 @@ namespace Routes {
     // Sparse, sorted single-wheel pivot table (ADR-036). Sorted by
     // (u, v, w) node-index tuple for a deterministic golden and a
     // short bounded linear scan in FieldMap::findPivotTurn.
-    constexpr uint8_t N_PIVOT_TURNS = 1;
+    constexpr uint8_t N_PIVOT_TURNS = 0;
     extern const PivotTurn PIVOT_TURNS[1];
 
     // Sparse, sorted wall-zero reset table (PR2). Sorted by node
     // index for a deterministic golden and a short bounded linear
     // scan in FieldMap::getResetInfo.
-    constexpr uint8_t N_RESET_NODES = 3;
-    extern const ResetNode RESET_NODES[3];
+    constexpr uint8_t N_RESET_NODES = 0;
+    extern const ResetNode RESET_NODES[1];
 
     // Sentinel for unreachable next-hop entries; PathTracker
     // treats this as 'no path; halt and report'.
     constexpr uint8_t NEXT_HOP_NONE = 0xFF;
-    constexpr uint8_t START_NODE = 3;
+    constexpr uint8_t START_NODE = 0;
     constexpr float   START_HEADING_DEG = 0.000000f;
 }  // namespace Routes
 #endif  // ROUTES_H

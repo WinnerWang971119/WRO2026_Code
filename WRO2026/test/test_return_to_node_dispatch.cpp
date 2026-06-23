@@ -6,12 +6,14 @@
 //
 //   1. The line-seek CLASSIFICATION (`_returnUsesLineSeek = nodeIsLine && _returnDistCm >=
 //      Config::LINE_SENSOR_AXLE_OFFSET_CM` in `_dispatchReturnMove`). The node-kind half is
-//      tested DIRECTLY against the REAL `FieldMap::getNodeType` over the REAL `routes.cpp` graph
-//      data — the same symbol and the same node table production reads (TC4); the distance-gate
-//      half is tested against the REAL `Config::LINE_SENSOR_AXLE_OFFSET_CM` (TC4c, #14). The toy
-//      fixture carries BOTH LINE nodes (indices 0..3, "Inter1..4") and BLIND nodes (indices 4..6,
-//      "Start"/"final"/"position1"), so this is a genuine LINE-vs-BLIND discrimination, NOT a
-//      tautology.
+//      tested DIRECTLY against the REAL `FieldMap::getNodeType` — the same accessor production
+//      uses — over the issue #91 host-test fixture graph
+//      (`WRO2026/test/fixtures/routes_fixture.cpp`), a stable map decoupled from the production
+//      field (TC4); the distance-gate half is tested against the REAL
+//      `Config::LINE_SENSOR_AXLE_OFFSET_CM` (TC4c, #14). The fixture carries LINE nodes
+//      (indices 0..2, "Inter1"/"Inter3"/"Inter4"), a BLIND spawn + BLIND waypoints
+//      ("Start"/"final"/"position1"), and one RESET node ("Wall1", index 4), so this is a
+//      genuine LINE-vs-non-LINE discrimination, NOT a tautology.
 //
 //   2. The per-kind RETURN_TO_NODE state-body ROUTING (which Drive observations lead to a
 //      successful re-anchor vs which lead to which fault) is inline-MIRRORED, following the
@@ -32,11 +34,12 @@
 // policy test (`test_return_to_node_policy.cpp`), which links the same `resolveReturnAction`
 // symbol production uses.
 //
-// Links `routes.cpp` (and the mock surface for the angle-bracket `<Arduino.h>` /
-// `<MatrixMiniR4.h>` that FieldMap.h -> routes.h pull in) but NO SUT `.cpp` and NO Drive
-// force-include — FieldMap.h / routes.h are header-only / const-POD data and never include
-// the production `Drive.h`. The pass/fail + final-line conventions mirror
-// `test_pivot_trim_policy.cpp` / `test_return_to_node_policy.cpp`.
+// Links the issue #91 fixture `routes_fixture.cpp` (force-included `routes_fixture.h` shadows
+// the sketch `routes.h`; see CMakeLists `add_fixture_routes_force_include`) + the mock surface
+// for the angle-bracket `<Arduino.h>` / `<MatrixMiniR4.h>` that FieldMap.h -> routes.h pull in,
+// but NO SUT `.cpp` and NO Drive force-include — FieldMap.h / routes.h are header-only /
+// const-POD data and never include the production `Drive.h`. The pass/fail + final-line
+// conventions mirror `test_pivot_trim_policy.cpp` / `test_return_to_node_policy.cpp`.
 // =========================================================================================
 
 #include <cstdio>
@@ -179,11 +182,11 @@ int main()
                 "RETURN_TO_NODE routing mirror (TC4b)\n");
 
     // -------------------------------------------------------------------------------------
-    // TC4 — node-kind CLASSIFICATION against the REAL FieldMap::getNodeType over the REAL
-    // routes.cpp graph. The toy fixture has LINE nodes 0..3 and BLIND nodes 4..6, so the
+    // TC4 — node-kind CLASSIFICATION against the REAL FieldMap::getNodeType over the issue #91
+    // fixture graph. The fixture has LINE nodes (0..2) plus BLIND/RESET nodes (3..6), so the
     // node-kind HALF of the `_returnUsesLineSeek` predicate (getNodeType(cur) == NodeType::LINE)
-    // discriminates the two kinds for real. The distance HALF (dist >= the axle lead) is covered
-    // by TC4c below.
+    // discriminates LINE from non-LINE for real. The distance HALF (dist >= the axle lead) is
+    // covered by TC4c below.
     // -------------------------------------------------------------------------------------
     // MIRROR: PathTracker.cpp _dispatchReturnMove
     //         (nodeIsLine = getNodeType(cur) == NodeType::LINE).
@@ -202,12 +205,12 @@ int main()
         check(sawLine, "TC4 precondition: routes.cpp toy fixture has at least one LINE node");
         check(sawBlind, "TC4 precondition: routes.cpp toy fixture has at least one BLIND node");
 
-        // Spot-check known node ids against the fixture's authored types (routes.cpp:16-22):
-        // node 0 is LINE-backed (a long-enough return uses the seek), node 4 is BLIND-only.
+        // Spot-check known node ids against the fixture's authored types (routes_fixture.cpp):
+        // node 0 is LINE-backed (a long-enough return uses the seek), node 4 is non-LINE.
         const bool lineBacked0 = (FieldMap::getNodeType(0) == Routes::NodeType::LINE);
         const bool lineBacked4 = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
         check(lineBacked0, "TC4: node 0 (Inter1) is LINE-backed -> stopAtLine-seek return");
-        check(!lineBacked4, "TC4: node 4 (Start) is BLIND-only -> dead-reckon return");
+        check(!lineBacked4, "TC4: node 4 (Wall1) is non-LINE -> dead-reckon return");
     }
 
     // -------------------------------------------------------------------------------------
@@ -233,10 +236,10 @@ int main()
         check(atUsesSeek, "TC4c: a LINE return exactly at the axle lead uses the line seek (>=)");
         check(longUsesSeek, "TC4c: a LINE return above the axle lead uses the line seek");
 
-        // A BLIND node never uses the seek regardless of distance.
+        // A non-LINE node never uses the seek regardless of distance.
         const bool node4IsLine = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
         const bool blindLongUsesSeek = node4IsLine && ((axle + 10.0f) >= axle);
-        check(!blindLongUsesSeek, "TC4c: a BLIND anchor never uses the line seek (any distance)");
+        check(!blindLongUsesSeek, "TC4c: a non-LINE anchor never uses the line seek (any distance)");
 
         // A short LINE return (usesLineSeek == false) drives the BLIND routing: an idle, no-fault
         // arrival re-anchors via clearOffset; a faulted arrival is a genuine DRIVE_FAULT.
