@@ -10,10 +10,11 @@
 //      uses — over the issue #91 host-test fixture graph
 //      (`WRO2026/test/fixtures/routes_fixture.cpp`), a stable map decoupled from the production
 //      field (TC4); the distance-gate half is tested against the REAL
-//      `Config::LINE_SENSOR_AXLE_OFFSET_CM` (TC4c, #14). The fixture carries LINE nodes
-//      (indices 0..2, "Inter1"/"Inter3"/"Inter4"), a BLIND spawn + BLIND waypoints
-//      ("Start"/"final"/"position1"), and one RESET node ("Wall1", index 4), so this is a
-//      genuine LINE-vs-non-LINE discrimination, NOT a tautology.
+//      `Config::LINE_SENSOR_AXLE_OFFSET_CM` (TC4c, #14). The feature-complete fixture carries
+//      every node kind (LINE / BLIND / RESET / PROJECTION), so this is a genuine LINE-vs-non-LINE
+//      discrimination, NOT a tautology. The test resolves only the kinds it needs BY NAME -- a
+//      LINE anchor (`Inter1`) and a BLIND anchor (`Start`) -- so it never depends on the fixture's
+//      index order or node set (issue #91).
 //
 //   2. The per-kind RETURN_TO_NODE state-body ROUTING (which Drive observations lead to a
 //      successful re-anchor vs which lead to which fault) is inline-MIRRORED, following the
@@ -60,6 +61,14 @@ static void check(bool cond, const char* what)
         ++g_failures;
     }
 }
+
+// The two node kinds this test discriminates, resolved BY NAME (issue #91): a LINE
+// anchor (`Inter1`) and a BLIND anchor (`Start`). The fixture is feature-complete and
+// its alphabetical index order shifts whenever a node is added, so a hardcoded index
+// would silently point at the wrong node. findNodeByName keeps the test decoupled from
+// the fixture's shape -- it depends only on these two names existing with their kinds.
+static const uint8_t kLineNode  = FieldMap::findNodeByName("Inter1");  // LINE-backed
+static const uint8_t kBlindNode = FieldMap::findNodeByName("Start");   // BLIND-only
 
 // ===========================================================================
 // RETURN_TO_NODE state-body routing replica (per node kind).
@@ -202,15 +211,16 @@ int main()
             if (t == Routes::NodeType::LINE) { sawLine = true; }
             if (t == Routes::NodeType::BLIND) { sawBlind = true; }
         }
-        check(sawLine, "TC4 precondition: routes.cpp toy fixture has at least one LINE node");
-        check(sawBlind, "TC4 precondition: routes.cpp toy fixture has at least one BLIND node");
+        check(sawLine, "TC4 precondition: fixture has at least one LINE node");
+        check(sawBlind, "TC4 precondition: fixture has at least one BLIND node");
 
-        // Spot-check known node ids against the fixture's authored types (routes_fixture.cpp):
-        // node 0 is LINE-backed (a long-enough return uses the seek), node 4 is non-LINE.
-        const bool lineBacked0 = (FieldMap::getNodeType(0) == Routes::NodeType::LINE);
-        const bool lineBacked4 = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
-        check(lineBacked0, "TC4: node 0 (Inter1) is LINE-backed -> stopAtLine-seek return");
-        check(!lineBacked4, "TC4: node 4 (Wall1) is non-LINE -> dead-reckon return");
+        // Spot-check the two named anchors (resolved by name above): a LINE node uses
+        // the seek; a BLIND node dead-reckons. No index assumptions -- the fixture's
+        // shape can change freely as long as Inter1 stays LINE and Start stays BLIND.
+        const bool lineAnchorIsLine  = (FieldMap::getNodeType(kLineNode)  == Routes::NodeType::LINE);
+        const bool blindAnchorIsLine = (FieldMap::getNodeType(kBlindNode) == Routes::NodeType::LINE);
+        check(lineAnchorIsLine, "TC4: Inter1 is LINE-backed -> stopAtLine-seek return");
+        check(!blindAnchorIsLine, "TC4: Start is BLIND-only -> dead-reckon return");
     }
 
     // -------------------------------------------------------------------------------------
@@ -226,19 +236,19 @@ int main()
     //         (_returnUsesLineSeek = nodeIsLine && _returnDistCm >= LINE_SENSOR_AXLE_OFFSET_CM).
     {
         const float axle = Config::LINE_SENSOR_AXLE_OFFSET_CM;
-        // Node 0 is LINE (asserted in TC4). The decision mirror:
-        const bool node0IsLine = (FieldMap::getNodeType(0) == Routes::NodeType::LINE);
+        // The LINE anchor (Inter1) is LINE (asserted in TC4). The decision mirror:
+        const bool lineAnchorIsLine = (FieldMap::getNodeType(kLineNode) == Routes::NodeType::LINE);
 
-        const bool shortUsesSeek = node0IsLine && ((axle - 1.0f) >= axle);     // short return
-        const bool atUsesSeek    = node0IsLine && (axle >= axle);              // exactly the lead
-        const bool longUsesSeek  = node0IsLine && ((axle + 10.0f) >= axle);    // comfortably long
+        const bool shortUsesSeek = lineAnchorIsLine && ((axle - 1.0f) >= axle);     // short return
+        const bool atUsesSeek    = lineAnchorIsLine && (axle >= axle);              // exactly the lead
+        const bool longUsesSeek  = lineAnchorIsLine && ((axle + 10.0f) >= axle);    // comfortably long
         check(!shortUsesSeek, "TC4c: a LINE return below the axle lead does NOT use the line seek");
         check(atUsesSeek, "TC4c: a LINE return exactly at the axle lead uses the line seek (>=)");
         check(longUsesSeek, "TC4c: a LINE return above the axle lead uses the line seek");
 
-        // A non-LINE node never uses the seek regardless of distance.
-        const bool node4IsLine = (FieldMap::getNodeType(4) == Routes::NodeType::LINE);
-        const bool blindLongUsesSeek = node4IsLine && ((axle + 10.0f) >= axle);
+        // A non-LINE node (the BLIND anchor Start) never uses the seek regardless of distance.
+        const bool blindAnchorIsLine = (FieldMap::getNodeType(kBlindNode) == Routes::NodeType::LINE);
+        const bool blindLongUsesSeek = blindAnchorIsLine && ((axle + 10.0f) >= axle);
         check(!blindLongUsesSeek, "TC4c: a non-LINE anchor never uses the line seek (any distance)");
 
         // A short LINE return (usesLineSeek == false) drives the BLIND routing: an idle, no-fault
