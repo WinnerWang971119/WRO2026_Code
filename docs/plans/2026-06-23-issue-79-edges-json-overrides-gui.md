@@ -77,9 +77,12 @@ with no veto.
   geometry when nodes move and minimizes the dual-serialization surface. Hand-authored entries that
   DO carry geometry still validate (backward compatible).
 - **PIPELINE_CONFIG field-sourced via the JSON (already hashed)** (Fable amendment) — the four keys
-  live in `field_data.json`, which `compute_source_hash` already hashes; the emitter reads
-  field-sourced values with `pipeline_config.py` fallback. The stale "not part of SHA256" comment is
-  corrected. Absent keys → defaults emit, so committed routes are byte-identical.
+  live in `field_data.json`, which `compute_source_hash` already hashes (via `extra_source_paths`);
+  the emitter reads field-sourced values with `pipeline_config.py` fallback. Absent keys → defaults
+  emit, so committed routes are byte-identical. NOTE: the header_writer "PIPELINE_CONFIG … NOT part of
+  the SHA256 input" comment is **accurate today** (the singleton comes from `pipeline_config.py`, which
+  is not hashed) and only becomes wrong once T3 moves the source into the hashed JSON — T3 corrects it
+  as part of the same change, not before.
 - **Retire `ast_rewrite.py`** (Fable amendment) — its only surviving job (rename `u`/`v` in the
   Python EDGES literal) is dead once EDGES is JSON.
 - **GUI edge `type` is auto-derived from the selected segment, read-only** (Fable caution) — prevents
@@ -104,8 +107,10 @@ with no veto.
 - [ ] AC5: `validate()` rejects: an unknown `primitive_mode` tag; a `LineMode` tag on a BLIND edge
       (and vice versa); a `DEFAULT`-named tag; `pipeline_line_mode:"DEFAULT"` (line/blind/turn may not
       be DEFAULT); each with a precise `FieldDataError` message.
-- [ ] AC6: Editor open→save round-trip of a field with EDGES + pipeline keys is byte-identical
-      (`dump(load(dump(x))) == dump(x)`); a field WITHOUT them round-trips with the keys still absent
+- [ ] AC6: Editor open→save round-trip is byte-identical (`dump(load(dump(x))) == dump(x)`)
+      **unconditionally** — including a field whose EDGES entry carries `distance_cm`/`heading_deg`
+      (the model stores entries verbatim, so geometry-carrying hand-authored entries are preserved,
+      not normalized); a field WITHOUT the new keys round-trips with them still absent
       (absent-stays-absent).
 - [ ] AC7: `FieldModel.to_module_proxy()` exposes `EDGES` + `PIPELINE_*` so `validate()` runs against
       the edited values (dual-serialization parity test passes).
@@ -124,6 +129,9 @@ with no veto.
       unchanged (or regenerated+committed if a deliberate exemplar is added — see Notes).
 - [ ] AC13: ADR-047 exists, `DECISIONS.md` indexes it (+ status table), and ADR-022
       (`022-field-data-json-loader.md`) is marked partially superseded.
+- [ ] AC14: `edit_field.py --migrate` on a `field_data.py` carrying a legacy Python `EDGES = [...]`
+      literal moves those entries into `field_data.json`'s `EDGES` key (override-only string-tag form)
+      and emits `EDGES = _data.get("EDGES", [])` — no Python EDGES tail is re-appended.
 
 ## UI/UX Specification
 
@@ -199,6 +207,9 @@ comboboxes (line/blind/turn may not be DEFAULT; direction may). `GLOBAL KNOBS` g
 | GRID | `#D7C9AC` | section dividers |
 | VALID | `#5C8A3A` | validation-OK badge |
 
+(Edge-relevant tokens only; the full palette incl. `OCHRE #C8951F` / `TEAL #2A8C82` node tints is in
+the sidecar.)
+
 ### Type & spacing tokens
 
 Fonts: `FONT_SANS` (labels/headers), `FONT_MONO` (numeric entries). Title 16 pt, section header 9 pt
@@ -267,8 +278,18 @@ name/shape here; it does not redefine it.
 - `"EDGES"` — list of override-only dicts (shape below). Optional; absent-stays-absent.
 - `"pipeline_line_mode"`, `"pipeline_blind_mode"`, `"pipeline_turn_mode"`, `"pipeline_direction_mode"`
   — string (enum name) or absent. Optional; absent-stays-absent.
-- Added to `loader._TOP_LEVEL_KEY_ORDER` (after `blind_projection_auto_seek`, before `OBSTACLES`) and
-  `loader._OPTIONAL_TOP_LEVEL_KEYS`. `EDGES` slotted last among the new keys, before `OBSTACLES`.
+- **Exact final `_TOP_LEVEL_KEY_ORDER` / `_JSON_KEY_ORDER` tuple** (T2 `loader.py` and T5 `model.py` MUST
+  use this identical ordering — pinned once here):
+
+  ```
+  "FIELD_MM", "MAP_PNG", "ROBOT_RADIUS_CM", "BLIND_DECAY_ENABLED", "BLIND_DECAY_K",
+  "BLIND_DECAY_EXPONENT", "BLIND_DECAY_D_REF", "START_NODE", "START_HEADING_DEG",
+  "NODES", "NODE_TYPES", "LINE_SEGMENTS", "BLIND_EDGES", "pivot_turns", "RESET_NODES",
+  "blind_projection_auto_seek",
+  "pipeline_line_mode", "pipeline_blind_mode", "pipeline_turn_mode", "pipeline_direction_mode",
+  "EDGES", "OBSTACLES"
+  ```
+- New keys added to `_OPTIONAL_TOP_LEVEL_KEYS`: the 4 `pipeline_*` keys + `"EDGES"` (absent-stays-absent).
 
 ### EDGES entry shape (owners: T1 validator, T2 field_data, T5 model, T6 commands, T7 panels)
 
@@ -334,7 +355,11 @@ BLIND_EDGES pair) — the validator's anti-ambiguity rule rejects a conflicting 
 | `docs/decisions/047-*.md`, `DECISIONS.md`, `022-field-data-json-loader.md`, `README.md` | T12 | — |
 
 `graph_builder.py` needs **no change** (already forwards `primitive_mode` verbatim and derives
-geometry when absent) — verification only, covered by T10.
+geometry when absent in `_emit_directed_pair`) — verification only, covered by T10. **But the
+geometry-optional change is NOT confined to graph_builder:** `validator.py::_build_authored_graph`
+(T1's file) has its OWN geometry-absent `continue` skip (lines ~325-326) that must also be patched to
+derive instead of skip (see T1). Do not conflate "graph_builder needs no change" with "the whole
+geometry path needs no change."
 
 ## Error Handling
 
@@ -364,11 +389,11 @@ end-to-end, editor save→load round-trip, panels smoke).
 | TC5 | `primitive_mode:"BOGUS"` | Unit | `FieldDataError` (unknown tag) |
 | TC6 | `primitive_mode:"DEFAULT"` | Unit | `FieldDataError` (DEFAULT == absence) |
 | TC7 | `pipeline_blind_mode:"GYRO_TSHAPE"` | Integration | emit `BlindMode::GYRO_TSHAPE` in `PIPELINE_CONFIG` |
-| TC8 | pipeline keys absent | Integration | emit defaults; toy golden byte-identical |
+| TC8 | pipeline keys absent → re-run the golden emitter on the unmodified toy SimpleNamespace | Integration | emit `pipeline_config.py` defaults; `routes_toy.{h,cpp}` regenerate with **zero diff** (assert the emitter output equals the committed golden) |
 | TC9 | `pipeline_line_mode:"DEFAULT"` | Unit | `FieldDataError` (line/blind/turn may not be DEFAULT) |
 | TC10 | loader dump→load→dump with EDGES + pipeline keys | Unit | byte-identical |
 | TC11 | loader round-trip of a field WITHOUT the new keys | Unit | keys stay absent (absent-stays-absent) |
-| TC12 | `to_module_proxy()` carries EDGES + PIPELINE_* | Unit | `validate()` runs against edited values (dual-serialization parity) |
+| TC12 | `to_module_proxy()` AND `to_json_dict()` BOTH carry EDGES + PIPELINE_* | Unit | `validate()` runs against edited values; assert both surfaces emit the same key set (dual-serialization parity — the #1 risk) |
 | TC13 | `SetEdgeOverride` apply/revert | Unit | apply adds entry; revert restores prior state exactly |
 | TC14 | `ClearEdgeOverride` / `SetPipelineMode` / `SetFieldWideFlag` / `SetFieldDimensions` apply/revert | Unit | round-trip invariant holds |
 | TC15 | panels smoke after restyle | Integration (real Tk, xvfb) | new sections + callback slots present |
@@ -376,6 +401,9 @@ end-to-end, editor save→load round-trip, panels smoke).
 | TC17 | node rename in a field with EDGES | Unit | EDGES `u`/`v` updated in model/JSON (no `ast_rewrite`) |
 | TC18 | no module imports `ast_rewrite`; file + its test deleted | Unit/CI | import scan clean; ctest+pytest green |
 | TC19 | `build_routes` freshness | Integration | regenerate → `git diff --exit-code` clean |
+| TC20 | an override-only EDGES entry (no geometry) that is ALSO a pivot leg | Unit | `_validate_pivot_turns` still sees the edge (geometry derived, not skipped); pivot classification + `stop_at_line`/`direction` on that leg resolve correctly (guards the `_build_authored_graph` fix) |
+| TC21 | a node rename in a field that has an EDGES override on the renamed node | Unit | `RenameNode` cascades into `model.edges` so the entry's `u`/`v` follow the rename (replaces the deleted `ast_rewrite` path) |
+| TC22 | `--migrate` on a Python `EDGES = [...]` literal | Integration | entries land in `field_data.json` `EDGES`; regenerated `field_data.py` has no Python EDGES tail (AC14) |
 
 **Test data:** extend `tests/fixtures/field_data_stop_at_line.json` patterns; a small in-test field
 with one LINE + one BLIND override; reuse `_clone_field_data` SimpleNamespace fixtures (they keep
@@ -389,17 +417,17 @@ existing `reset_nodes` round-trip tests.
 
 | ID | Task | Blocked By | Risk | Files | Description |
 |----|------|------------|------|-------|-------------|
-| T1 | Validator: string-tag `primitive_mode` + optional geometry + pipeline-key validation | — | high | `tools/path_planner/validator.py` | In `_validate_edges_field`: accept `primitive_mode` as an enum instance OR a valid `LineMode`/`BlindMode` member NAME (cross-checked by edge type; reject a `DEFAULT` name and unknown names with precise `FieldDataError`). Make `distance_cm`/`heading_deg` OPTIONAL (skip the required-key check for them; keep range checks when present). Add `_validate_pipeline_config(field_data)` reading optional `PIPELINE_LINE_MODE`/`_BLIND_MODE`/`_TURN_MODE`/`_DIRECTION_MODE` (string name → enum; line/blind/turn reject DEFAULT, direction allows it; mirror `PipelineConfig.__post_init__`); call it from `validate()`. Satisfies AC1–3,5; TC1–6,9. |
-| T2 | JSON as EDGES source of truth + loader/field_data keys | — | med | `tools/path_planner/field_data.py`, `tools/path_planner/editor/loader.py` | `field_data.py`: replace `EDGES = []` with `EDGES = _data.get("EDGES", [])`; add `PIPELINE_LINE_MODE`/`_BLIND_MODE`/`_TURN_MODE`/`_DIRECTION_MODE = _data.get("pipeline_*", None)`; rewrite the EDGES authoring docstring (JSON, string tags, optional geometry). `loader.py`: add `"EDGES"` + the 4 `pipeline_*` keys to `_TOP_LEVEL_KEY_ORDER` (4 pipeline keys after `blind_projection_auto_seek`, `EDGES` immediately before `OBSTACLES`) and `_OPTIONAL_TOP_LEVEL_KEYS`; confirm `_convert_arrays_to_tuples` passes EDGES dicts through unchanged. Satisfies AC1,6; TC10–11. |
+| T1 | Validator: string-tag `primitive_mode` + optional geometry (incl. `_build_authored_graph`) + pipeline-key validation | — | high | `tools/path_planner/validator.py` | In `_validate_edges_field`: accept `primitive_mode` as an enum instance OR a valid `LineMode`/`BlindMode` member NAME (cross-checked by edge type). **Reject the literal `"DEFAULT"` name explicitly** — `LineMode["DEFAULT"]` SUCCEEDS, so the existing `== expected_cls.DEFAULT` check (which only catches enum instances) must be extended to also reject the string `"DEFAULT"` before/after `enum_cls[name]` resolution; reject unknown names with precise `FieldDataError`. Make `distance_cm`/`heading_deg` OPTIONAL in `_validate_edges_field` (skip the required-key check; keep range checks when present). **ALSO patch `_build_authored_graph` (lines ~325-326): it currently `continue`s past any entry lacking `distance_cm`/`heading_deg`, which would silently drop every override-only entry (incl. pivot legs) from the pivot-validation graph — change it to derive geometry from node coords (via `_emit_directed_pair`) instead of skipping.** Add `_validate_pipeline_config(field_data)` reading optional `PIPELINE_LINE_MODE`/`_BLIND_MODE`/`_TURN_MODE`/`_DIRECTION_MODE` (string name → enum; line/blind/turn reject DEFAULT, direction allows it; mirror `PipelineConfig.__post_init__`); call it from `validate()`. Satisfies AC1–3,5; TC1–6,9,20. |
+| T2 | JSON as EDGES source of truth + loader/field_data keys + migrate.py EDGES-tail retirement | — | med | `tools/path_planner/field_data.py`, `tools/path_planner/editor/loader.py`, `tools/path_planner/editor/migrate.py` | `field_data.py`: replace `EDGES = []` with `EDGES = _data.get("EDGES", [])`; add `PIPELINE_LINE_MODE`/`_BLIND_MODE`/`_TURN_MODE`/`_DIRECTION_MODE = _data.get("pipeline_*", None)`; rewrite the EDGES authoring docstring (JSON, string tags, optional geometry). `loader.py`: add `"EDGES"` + the 4 `pipeline_*` keys to `_TOP_LEVEL_KEY_ORDER` and `_OPTIONAL_TOP_LEVEL_KEYS` — use the **exact final tuple pinned in Contracts §"JSON top-level keys"**; confirm `_convert_arrays_to_tuples` passes EDGES dicts through unchanged. `migrate.py`: the EDGES-tail machinery (`_EDGES_BANNER`, `_extract_edges_tail`, `_EDGES_ASSIGN_TOKEN`, and the `_build_rewritten_source` template that preserves the Python `EDGES = [` block verbatim) is now obsolete — the legacy Python EDGES literal must migrate INTO the JSON `EDGES` key, not be preserved as a Python tail. Update `migrate.py` so a one-shot `--migrate` carries any existing Python EDGES entries into `field_data.json` (as override-only string-tag dicts) and emits `EDGES = _data.get("EDGES", [])` rather than re-appending the literal tail. Satisfies AC1,6,14; TC10–11. |
 | T3 | Header_writer: field-sourced `PIPELINE_CONFIG` + SHA256 comment fix | T2 | high | `tools/path_planner/header_writer.py`, `tools/path_planner/pipeline_config.py` | `_emit_pipeline_config(field_data)` reads `getattr(field_data, "PIPELINE_*", None)`, resolves via `<EnumCls>[name]`, falls back to the `pipeline_config.py` `PIPELINE_CONFIG` default when `None`; thread `field_data` into its caller (`_build_routes_cpp_lines`). Replace the stale "PIPELINE_CONFIG … NOT part of the SHA256 input" comment (now field-sourced from the hashed JSON). Optional `pipeline_config.PipelineConfig.from_field_data(field_data)` helper reusing `__post_init__`. Satisfies AC4; TC7–8. |
-| T5 | `FieldModel` carries `edges` + 4 pipeline keys (both serialization surfaces) | — | high | `tools/path_planner/editor/model.py` | Add `edges: list[dict]` + 4 `pipeline_*: str|None` fields (defaulted). Thread through `_JSON_KEY_ORDER`, `from_json_dict` (read `EDGES` as override-only dicts — keep `type`/`u`/`v` + override keys, drop any on-disk geometry; read pipeline keys), `to_json_dict` (emit EDGES override-only + pipeline keys; absent-when-empty), `to_module_proxy` (expose `EDGES` + `PIPELINE_*` SCREAMING_SNAKE — the dual-serialization seam), `snapshot`/`restore`. Mirror the `reset_nodes` precedent exactly. Satisfies AC6–7; TC10,12. |
+| T5 | `FieldModel` carries `edges` + 4 pipeline keys (both serialization surfaces) | — | high | `tools/path_planner/editor/model.py` | Add `edges: list[dict]` + 4 `pipeline_*: str|None` fields (defaulted). Thread through `_JSON_KEY_ORDER`, `from_json_dict` (read `EDGES` entries **verbatim** — store each dict as-is, preserving whatever keys are present incl. any geometry, so geometry-carrying hand-authored entries round-trip byte-identically; read pipeline keys), `to_json_dict` (emit EDGES entries verbatim + pipeline keys; absent-when-empty), `to_module_proxy` (expose `EDGES` + `PIPELINE_*` SCREAMING_SNAKE — the dual-serialization seam), `snapshot`/`restore` (deep-copy `edges`). Mirror the `reset_nodes` precedent (verbatim-preserve; NOTE the model stores EDGES verbatim — it does NOT normalize/drop geometry, so byte-identical round-trip holds unconditionally; the editor's *new* overrides are authored override-only by T6, not normalized here). Satisfies AC6–7; TC10,12. |
 | T6 | New editor `Command`s (apply/revert) | T5 | med | `tools/path_planner/editor/commands.py` | `SetEdgeOverride` / `ClearEdgeOverride` / `SetPipelineMode` / `SetFieldWideFlag` / `SetFieldDimensions`, following the `SetResetSpec` apply/revert + captured-original pattern; mutate `FieldModel.edges` keyed by `(type,u,v)` and the pipeline/flag/dim fields. Satisfies AC8,10; TC13–14. |
-| T7 | Inspector panels: EDGE OVERRIDES list + PIPELINE DEFAULTS + toggles + FIELD_MM | T5 | med | `tools/path_planner/editor/panels.py` | Build the base-C `EDGE OVERRIDES` collapsible list (mirror the Pivots list: rows + per-row edit/delete + add-row inline editor; `type` auto-derived & read-only; `primitive_mode` combobox values context-switch on edge type; `direction`/`stop_at_line` comboboxes; geometry not shown). New `PIPELINE DEFAULTS` collapsible (4 mode comboboxes). Extend GLOBAL KNOBS with `blind_projection_auto_seek` checkbutton + `FIELD_MM` width/height entries. Use house widgets/styles; expose callback slots. Implements the `## UI/UX Specification`. Satisfies AC8,10. |
-| T8 | App wiring: selection→inspector, edge-mode click graft, pure-JSON save | T5, T6, T7 | high | `tools/path_planner/editor/app.py` | Wire panel callbacks → dispatch the new commands; refresh inspector from model (edges + pipeline + flag + FIELD_MM). Graft: reuse existing Edge mode `_edge_selection` so clicking an existing edge locates/highlights its override row, else pre-fills the add-row's `u`/`v`/`type` from the clicked segment. Remove the `ast_rewrite.rewrite_edges_uv` call from Save (Save becomes pure-JSON); confirm rename now updates EDGES via the model. Satisfies AC8,9,11; TC16–17. |
-| T9 | Retire `ast_rewrite.py` (+ tests + migrate call sites) | T8 | low | `tools/path_planner/editor/ast_rewrite.py` (delete), `tools/path_planner/editor/migrate.py`, `tools/path_planner/tests/test_editor_ast_rewrite.py` (delete) | Delete `ast_rewrite.py` and its test; remove any `rewrite_edges_uv` / `ast_rewrite` import + call in `migrate.py` (and confirm `app.py`'s call was removed in T8); ensure no remaining importers. Satisfies AC11; TC18. |
-| T10 | Python data-layer tests + golden check | T1, T2, T3 | low | `tools/path_planner/tests/test_field_data.py`, `test_editor_loader.py`, `test_header_writer.py`, `test_build_routes.py`, `test_graph_builder*.py` | Add TC1–12,19. Assert string-tag + enum-instance primitive_mode; optional geometry derivation; pipeline-key validation + field-sourced emission (present → custom, absent → default + golden byte-identical); loader/round-trip + absent-stays-absent; `to_module_proxy` parity; build_routes freshness. Verify `graph_builder` needs no change. Satisfies AC1–7,12. |
-| T11 | Editor GUI tests | T6, T7, T8 | low | `tools/path_planner/tests/test_editor_commands.py`, `test_editor_panels_smoke.py`, `test_editor_inspector.py` | Add TC13–16: command apply/revert round-trips; panels smoke (new sections + callback slots survive); app inspector behavior (edge-mode click locates row; refresh shows overrides + pipeline + toggle + dims). Satisfies AC8–11. |
-| T12 | ADR-047 + docs | — | low | `docs/decisions/047-json-edges-overrides-and-pipeline-config.md`, `DECISIONS.md`, `docs/decisions/022-field-data-json-loader.md`, `tools/path_planner/README.md` | Write ADR-047 (JSON string-tag encoding for EDGES overrides; `EDGES`/`PIPELINE_CONFIG` field-sourced via JSON; geometry-optional overlay; editor owns EDGES; `ast_rewrite` retired). Mark `022-field-data-json-loader.md` status "Partially superseded by ADR-047" + cross-link. Update `DECISIONS.md` index + status table. Update `README.md` editor usage (override list, pipeline defaults). Satisfies AC13. |
+| T7 | Inspector panels: EDGE OVERRIDES list + PIPELINE DEFAULTS + toggles + FIELD_MM | T5 | med | `tools/path_planner/editor/panels.py` | Build the base-C `EDGE OVERRIDES` collapsible list (mirror the Pivots list: rows + per-row edit/delete + add-row inline editor; `type` auto-derived & read-only; `primitive_mode` combobox values context-switch on edge type; `direction`/`stop_at_line` comboboxes; geometry not shown). New `PIPELINE DEFAULTS` collapsible (4 mode comboboxes). Extend GLOBAL KNOBS with `blind_projection_auto_seek` checkbutton + `FIELD_MM` width/height entries. Use house widgets/styles; expose callback slots. **Own the graft's panel side: a `locate_override_row(edge_type,u,v)` method that scrolls to + highlights an existing row, and a `prefill_add_row(edge_type,u,v)` method** — both invoked by T8. Implements the `## UI/UX Specification`. Satisfies AC8,10. |
+| T8 | App wiring: selection→inspector, edge-mode click graft, pure-JSON save, retire `_pending_renames` | T5, T6, T7 | high | `tools/path_planner/editor/app.py` | Wire panel callbacks → dispatch the new commands; refresh inspector from model (edges + pipeline + flag + FIELD_MM). Graft: reuse existing Edge mode `_edge_selection` so clicking an existing edge calls `panels.locate_override_row(...)` if a row exists, else `panels.prefill_add_row(...)` from the clicked segment (panel owns the scroll/highlight; app owns the wiring). **Remove the entire `_pending_renames` rename→Python-EDGES-flush subsystem in `app.py` — the actual `ast_rewrite` call sites (NOT in migrate.py): the `_save()` flush (lines ~2593-2595), `_record_pending_rename` (~2513), and the EDGES-row finder (~2506).** Save becomes pure-JSON; confirm a node rename now updates EDGES `u`/`v` through the model (the `RenameNode` command must cascade into `model.edges`). Satisfies AC8,9,11; TC16–17. |
+| T9 | Retire `ast_rewrite.py` (+ its two tests) | T8 | low | `tools/path_planner/editor/ast_rewrite.py` (delete), `tools/path_planner/tests/test_editor_ast_rewrite.py` (delete), `tools/path_planner/tests/test_editor_app_renames.py` (delete or rewrite) | Delete `ast_rewrite.py` and `test_editor_ast_rewrite.py`. `test_editor_app_renames.py` imports `ast_rewrite` and monkeypatches `rewrite_edges_uv` to assert the old Save flush — it will fail collection once `ast_rewrite` is gone; **delete it (its rename→EDGES-in-model behavior is re-covered by TC17) or rewrite it to assert the new model-cascade path**. Confirm no remaining importers of `ast_rewrite` (migrate.py has none — its EDGES-tail change is in T2). Satisfies AC11; TC18. |
+| T10 | Python data-layer tests + golden check | T1, T2, T3 | low | `tools/path_planner/tests/test_field_data.py`, `test_editor_loader.py`, `test_header_writer.py`, `test_build_routes.py`, `test_graph_builder*.py`, `test_editor_migrate.py` | Add TC1–12,19,20,22. Assert string-tag + enum-instance primitive_mode; explicit string-`"DEFAULT"` rejection; optional geometry derivation (incl. TC20 pivot-leg path through `_build_authored_graph`); pipeline-key validation + field-sourced emission (present → custom, absent → default + TC8 golden re-run zero-diff); loader/round-trip incl. a geometry-carrying entry (verbatim) + absent-stays-absent; `to_module_proxy` AND `to_json_dict` parity; build_routes freshness; `--migrate` carries the Python EDGES literal into JSON. Verify `graph_builder` needs no change. Satisfies AC1–7,12,14. |
+| T11 | Editor GUI tests | T6, T7, T8 | low | `tools/path_planner/tests/test_editor_commands.py`, `test_editor_panels_smoke.py`, `test_editor_inspector.py` | Add TC13–16,21: command apply/revert round-trips; panels smoke (new sections + callback slots + `locate_override_row`/`prefill_add_row` survive); app inspector behavior (edge-mode click locates/pre-fills row; refresh shows overrides + pipeline + toggle + dims); TC21 node-rename cascades into `model.edges` (replaces the deleted `test_editor_app_renames.py` assertions). Satisfies AC8–11. |
+| T12 | ADR-047 + docs | — | low | `docs/decisions/047-json-edges-overrides-and-pipeline-config.md`, `DECISIONS.md`, `docs/decisions/022-field-data-json-loader.md`, `tools/path_planner/README.md` | Write ADR-047 (JSON string-tag encoding for EDGES overrides; `EDGES`/`PIPELINE_CONFIG` field-sourced via JSON; geometry-optional overlay; editor owns EDGES; `ast_rewrite` retired). Mark `022-field-data-json-loader.md` status "Partially superseded by ADR-047" + cross-link. Update `DECISIONS.md` index + status table. Update `README.md` editor usage (override list, pipeline defaults) **and remove the `editor/ast_rewrite.py` row at README line ~293 (and the LibCST rename-cascade mention) since the module is deleted**. Satisfies AC13. |
 
 Parallelizable start set: **T1, T2, T5, T12** (no blockers). Then T3 (after T2); T6, T7 (after T5);
 T8 (after T5,T6,T7); T9 (after T8); T10 (after T1,T2,T3); T11 (after T6,T7,T8).
@@ -416,6 +444,14 @@ T8 (after T5,T6,T7); T9 (after T8); T10 (after T1,T2,T3); T11 (after T6,T7,T8).
 - **Keep `field_data`/`header_writer` reads of the new keys non-strict** (`getattr(..., default)` /
   `_data.get(..., default)`) so the many `SimpleNamespace` fixtures (which omit them) keep working —
   this avoids the strict-emitter-field-fixtures blast radius.
+- **Confirm the production `field_data.json` has no `EDGES` / `pipeline_*` keys before relying on
+  "routes byte-identical"** (AC12). The production field carries no overrides today; if it somehow
+  does, regenerate + commit `routes.{h,cpp}` with the change. (The `field_data_stop_at_line.json`
+  *test fixture* DOES carry a geometry-bearing EDGES entry — that's intentional backward-compat and is
+  loaded via a `SimpleNamespace`, not the editor `FieldModel`; pin its behavior in TC2/round-trip.)
+- **Backward-compat for geometry-bearing entries:** a hand-authored EDGES entry that DOES carry
+  `distance_cm`/`heading_deg` still validates and is stored/emitted verbatim by `FieldModel` (no
+  normalization). Only the editor's *newly authored* overrides are override-only.
 - **Goldens:** do NOT add the new keys to the toy field — keep `routes_toy.{h,cpp}` byte-identical
   (absent keys → default emission). Cover field-sourced pipeline emission + string-tag overrides via
   dedicated tests building a small field, not via the toy golden. If you nonetheless add a deliberate
