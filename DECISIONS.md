@@ -20,7 +20,8 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 - [ADR-042 — `Localization` tracks a 2D operator-offset delta from the last anchored node](./docs/decisions/042-operator-offset-localization.md)
 - [ADR-043 — Wall-zero reset nodes: a `"reset"` node kind re-anchors pose against a known wall](./docs/decisions/043-wall-zero-reset-nodes.md) (Amends ADR-005)
 - [ADR-041 — Blind-decay routing: convex multiplicative penalty on blind-edge distance to nearest anchor (line or reset)](./docs/decisions/041-blind-decay-routing.md)
-- [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md)
+- [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./docs/decisions/022-field-data-json-loader.md) (Partially superseded by ADR-047)
+- [ADR-047 — JSON-native EDGES overrides + field-sourced PIPELINE_CONFIG; `primitive_mode` string-tag encoding; geometry optional in override entries; `ast_rewrite.py` retired](./docs/decisions/047-json-edges-overrides-and-pipeline-config.md)
 - [ADR-028 — FieldMap accessors bounds-check every index and return a safe sentinel](./docs/decisions/028-fieldmap-accessor-bounds.md)
 - [ADR-029 — The validator is the single anti-ambiguity and input-finiteness gate](./docs/decisions/029-validator-anti-ambiguity.md)
 
@@ -76,7 +77,7 @@ This file is an **index** into the architecture decision records (ADRs) under [`
 
 | Status | Count | ADRs |
 |---|---|---|
-| Implemented | 41 | 001, 002, 003, 004, 005 (amended by 042, 043), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022, 023 (amended by 046), 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 044), 037, 038 (soft-fallback sub-decision superseded by 039; auto-rule trigger sub-decision superseded by 046), 039 (auto-rule trigger sub-decision superseded by 046), 040, 041, 042 (amends 005 "never stored" clause — parent stays Implemented), 043 (amends 005 "yaw written only by zeroHeadingFromCurrent" clause — parent stays Implemented), 044 (extends the 035/036 pivot regime matrix; amended by 046), 045, 046 (supersedes the 038/039 auto-rule trigger sub-decision; amends 023, 044) |
+| Implemented | 42 | 001, 002, 003, 004, 005 (amended by 042, 043), 006 (refined by 037), 010, 011, 012, 013, 014, 015, 016, 017 (refined by 034), 018 (refined by 023), 019, 020, 021 (refined by 037), 022 (partially superseded by 047), 023 (amended by 046), 024, 025 (sim-parity sub-decision superseded by 033), 026, 027, 028, 029, 031 (refined by 040), 032, 033, 034, 036 (extended by 044), 037, 038 (soft-fallback sub-decision superseded by 039; auto-rule trigger sub-decision superseded by 046), 039 (auto-rule trigger sub-decision superseded by 046), 040, 041, 042 (amends 005 "never stored" clause — parent stays Implemented), 043 (amends 005 "yaw written only by zeroHeadingFromCurrent" clause — parent stays Implemented), 044 (extends the 035/036 pivot regime matrix; amended by 046), 045, 046 (supersedes the 038/039 auto-rule trigger sub-decision; amends 023, 044), 047 (partially supersedes 022) |
 | Partially implemented | 3 | 008 (Mission DSL shipped; greedy scheduler + time guard deferred to Phase 6), 009 (lost-line + missed-intersection in Phase 1/2; failed-grip pending manipulator), 030 (CI gate + `resolveDirection`/reverse-guard linked; real Tasks/Mission linking in PR-4) |
 | Pending implementation | 0 | — |
 | Deferred | 0 | — |

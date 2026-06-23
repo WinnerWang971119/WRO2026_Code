@@ -136,16 +136,28 @@ Save / Save & Build buttons).
 | Start | Click a node to set it as `START_NODE` |
 
 Right-click on a node: Rename / Set type / Delete (Delete refuses if `EDGES` references
-the node — hand-edit `field_data.py` first).
+the node; remove the override row in the EDGE OVERRIDES panel first).
 
 Shortcuts: `Ctrl-Z` undo, `Ctrl-Y` / `Ctrl-Shift-Z` redo, `Ctrl-S` save,
 `Delete` removes the selected edge (Edge mode with 2 nodes selected).
 
-**Save** validates the model, writes `field_data.json`, and (if any node was renamed)
-rewrites the `"u"` / `"v"` keys of the rich `EDGES` table in `field_data.py` via
-LibCST — preserving all comments and formatting.
+**Save** validates the model and writes `field_data.json` (pure-JSON; node renames cascade
+into any `EDGES` override entries automatically through the model — no external source
+rewriting). **Save & Build** does Save, then regenerates `routes.h` + `routes.cpp` in-process.
 
-**Save & Build** does Save, then regenerates `routes.h` + `routes.cpp` in-process.
+The inspector panel (right side) exposes three additional collapsible sections:
+
+- **EDGE OVERRIDES** — add/edit/delete per-edge primitive overrides (`primitive_mode`,
+  `direction`, `stop_at_line`). Edge `type` is auto-derived from the selected segment
+  (read-only). Clicking an existing edge in Edge mode locates its override row or pre-fills
+  the add-row. Override entries use string-tag names verbatim: `NORMAL`/`SLOW`/`FAST` for
+  LINE edges, `SYNC_TSHAPE`/`GYRO_TSHAPE`/`RAW_FLAT`/`STOP_AT_LINE` for BLIND edges.
+  Geometry (distance/heading) is derived from node coords — not shown or stored.
+- **PIPELINE DEFAULTS** — four comboboxes (`Line`, `Blind`, `Turn`, `Direction`) that set
+  field-sourced `PIPELINE_CONFIG` defaults. Absent → `pipeline_config.py` fallback (routes
+  stay byte-identical). Line/Blind/Turn may not be `DEFAULT`; Direction may.
+- **GLOBAL KNOBS** (extended) — `blind_projection_auto_seek` toggle and `FIELD_MM`
+  width/height fields, in addition to the existing blind-decay and robot-radius controls.
 
 ### Reading coordinates only
 
@@ -163,8 +175,9 @@ uv run python tools/path_planner/edit_field.py --migrate
 ```
 
 Ports the legacy Python-literal `field_data.py` to `field_data.json` + a thin loader
-stub. Idempotent: subsequent runs are no-ops. The rich `EDGES` block (with `Pivot` /
-`LineMode` / `TurnMode` references) stays in Python.
+stub. Any Python-literal `EDGES = [...]` entries are migrated into `field_data.json`'s
+`EDGES` key as override-only string-tag dicts; `field_data.py` is rewritten to
+`EDGES = _data.get("EDGES", [])`. Idempotent: subsequent runs are no-ops.
 
 ### Hand-editing JSON directly
 
@@ -229,11 +242,11 @@ it.
 
 ## Editing field_data — workflow
 
-Since [ADR-022](../../docs/decisions/022-field-data-json-loader.md), geometry input lives
-in `field_data.json` and `field_data.py` is a thin loader. Use the GUI or hand-edit
-the JSON (see [Editing the field graph](#editing-the-field-graph) above). The rich
-`EDGES` table (per-edge enum overrides) is still hand-edited directly in
-`field_data.py`.
+Since [ADR-022](../../docs/decisions/022-field-data-json-loader.md) and
+[ADR-047](../../docs/decisions/047-json-edges-overrides-and-pipeline-config.md),
+`field_data.json` is the single source of truth for geometry **and** per-edge EDGES
+overrides. `field_data.py` is a thin loader; use the GUI or hand-edit the JSON directly
+(see [Editing the field graph](#editing-the-field-graph) above).
 
 After any edit:
 
@@ -241,11 +254,10 @@ After any edit:
 2. Open `tools/path_planner/output/map.png` and sanity-check the
    geometry (nodes in the right places, blind edges hop the right
    gaps, no edge clips an obstacle).
-3. Commit `field_data.json`, `field_data.py` (if EDGES changed),
-   `WRO2026/routes.h`, and `WRO2026/routes.cpp` **together** in the same
-   commit. The `routes.h` banner SHA256 must equal the combined
-   **LF-normalized** SHA256 of `field_data.py` + `field_data.json` — see the
-   Determinism section above for the one-liner. If reviewers see a mismatch,
+3. Commit `field_data.json`, `WRO2026/routes.h`, and `WRO2026/routes.cpp`
+   **together** in the same commit. The `routes.h` banner SHA256 must equal the
+   combined **LF-normalized** SHA256 of `field_data.py` + `field_data.json` — see
+   the Determinism section above for the one-liner. If reviewers see a mismatch,
    the commit is incomplete.
 
 ## Authoring real-field NODES
@@ -278,7 +290,7 @@ no separate "robot field" and "sim field" to keep in sync.
 | File                    | Role                                                                                |
 | ----------------------- | ----------------------------------------------------------------------------------- |
 | `field_data.json`       | Machine- and human-editable geometry: nodes, edges, obstacles, start pose.          |
-| `field_data.py`         | Thin loader (`load_field_json()`) + hand-authored rich `EDGES` table.               |
+| `field_data.py`         | Thin loader (`load_field_json()`); reads `EDGES` from `field_data.json`.            |
 | `validator.py`          | Strict shape + reference checks. Raises `FieldDataError` on the first problem.      |
 | `graph_builder.py`      | Builds a `networkx.DiGraph`, inflates obstacles by `ROBOT_RADIUS_CM`, drops clipped edges. |
 | `planner.py`            | Dijkstra all-pairs next-hop table; `cost = distance * (mult if blind else 1.0)`.    |
@@ -289,8 +301,7 @@ no separate "robot field" and "sim field" to keep in sync.
 | `build_routes.py`       | CLI orchestrator — sequences every layer above, decides exit codes.                 |
 | `edit_field.py`         | Entry point for the live Tk field-graph editor (issue #10 scope 2).                 |
 | `editor/loader.py`      | JSON load + deterministic dump for `field_data.json`.                               |
-| `editor/migrate.py`     | One-shot port from legacy Python-literal `field_data.py` to JSON.                  |
-| `editor/ast_rewrite.py` | LibCST-based rename cascade for `"u"` / `"v"` keys in the `EDGES` table.           |
+| `editor/migrate.py`     | One-shot port from legacy Python-literal `field_data.py` to JSON; migrates any Python `EDGES` literal into `field_data.json`. |
 | `pick_xy.py`            | Read-only Tk/matplotlib coordinate probe against `maps/map.png` (issue #10 scope 1). |
 | `sim/`                  | Pure-Python mirror of the R4 `PathTracker` FSM for hardware-free verification.      |
 | `tests/`                | pytest suite + golden files for the whole pipeline.                                 |
