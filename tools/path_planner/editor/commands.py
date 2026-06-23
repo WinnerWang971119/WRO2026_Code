@@ -21,6 +21,7 @@ from the test suite (T8) without instantiating Tk or any canvas widget.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
@@ -81,6 +82,32 @@ _BLIND_DECAY_EXPONENT_MIN: float = 1.0
 #: Lower bound (exclusive) for the strictly-positive knobs ``blind_decay_d_ref``
 #: (the decay normalizer in cm) and ``robot_radius_cm`` (the inflation radius).
 _POSITIVE_KNOB_MIN_EXCLUSIVE: float = 0.0
+
+#: Recognized ``which`` selectors :class:`SetPipelineMode` may target, each
+#: mapping to the same-named ``FieldModel.pipeline_<which>_mode`` attribute.
+#: The validator (``_validate_pipeline_config``) enforces the per-category tag
+#: vocabulary and the DEFAULT rule at Save time; this command only routes the
+#: selector to the right field, so it accepts any string tag (or ``None`` to
+#: inherit) verbatim and leaves the value check to ``validate()``.
+_VALID_PIPELINE_WHICH: frozenset[str] = frozenset(
+    {"line", "blind", "turn", "direction"}
+)
+
+#: Recognized field-wide boolean flags :class:`SetFieldWideFlag` may toggle,
+#: each mapping to a same-named ``FieldModel`` attribute.
+_VALID_FIELD_WIDE_FLAGS: frozenset[str] = frozenset(
+    {"blind_projection_auto_seek"}
+)
+
+#: The override-entry keys that carry an actual override (everything except the
+#: identity triple ``type`` / ``u`` / ``v``). :class:`SetEdgeOverride` writes
+#: only the non-``None`` ones; an omitted key means "inherit", so absence is
+#: semantically distinct from a present-but-default value.
+_OVERRIDE_VALUE_KEYS: tuple[str, ...] = (
+    "primitive_mode",
+    "direction",
+    "stop_at_line",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +188,37 @@ def _find_edge_index(
     """
     for index, existing in enumerate(edges):
         if _edge_equivalent(existing, target):
+            return index
+    return -1
+
+
+def _find_override_index(
+    edges: list[dict], edge_type: str, u: str, v: str
+) -> int:
+    """Return the index of the override entry identified by ``(edge_type, u, v)``.
+
+    An ``EDGES`` overlay entry's identity is the **directed, typed** triple
+    ``(type, u, v)`` -- NOT the ``(u, v)`` pair alone.  A directed pair is not
+    unique across edge types (a ``LINE`` and a ``BLIND`` override may share the
+    same ``u -> v`` direction), and the overlay is forward-only (``u -> v`` is
+    distinct from ``v -> u``).  Every add / replace / clear of an override must
+    match on all three components or it would clobber or remove the wrong-typed
+    (or reverse-direction) entry -- a latent corruption bug.  This helper is the
+    single place that triple-match rule lives.
+
+    :param edges: The model's ``edges`` overlay list to search.
+    :param edge_type: The edge type tag, e.g. ``"LINE"`` or ``"BLIND"``.
+    :param u: The source node name (forward direction ``u -> v``).
+    :param v: The destination node name.
+    :return: The first index ``i`` such that ``edges[i]`` has a matching
+        ``type`` / ``u`` / ``v``, or ``-1`` if no such entry exists.
+    """
+    for index, entry in enumerate(edges):
+        if (
+            entry.get("type") == edge_type
+            and entry.get("u") == u
+            and entry.get("v") == v
+        ):
             return index
     return -1
 
@@ -1052,6 +1110,355 @@ class SetGlobalKnob:
                 )
 
         return number
+
+
+# ---------------------------------------------------------------------------
+# Per-edge override + field-tunable commands (issue #79)
+#
+# These back the inspector's EDGE OVERRIDES list, PIPELINE DEFAULTS section, and
+# the new field-wide toggles / FIELD_MM control.  They follow the same apply /
+# revert + captured-original contract as SetResetSpec above: apply() captures
+# the EXACT prior state needed to restore (deep-copying any captured dict so the
+# inverse is not aliased to the live model), and revert() restores it precisely,
+# so undo -> redo -> undo is stable.  Edge-override identity is the typed,
+# directed triple (type, u, v) -- never (u, v) alone (see
+# _find_override_index).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SetEdgeOverride:
+    """Add or replace the per-edge override overlay entry for ``(type, u, v)``.
+
+    Writes an **override-only** entry into ``model.edges``: the identity triple
+    ``{"type", "u", "v"}`` plus whichever of ``primitive_mode`` / ``direction``
+    / ``stop_at_line`` are non-``None``.  A ``None`` field is OMITTED from the
+    entry -- absence means "inherit" (the planner derives that aspect from the
+    pipeline default / node geometry), which is semantically distinct from a
+    present-but-default value.  NO geometry keys (``distance_cm`` /
+    ``heading_deg``) are ever written -- the editor authors override-only
+    overlays and the planner derives geometry from node coordinates at build
+    time.
+
+    If an entry with the same ``(type, u, v)`` identity already exists it is
+    REPLACED in place (preserving its list position); otherwise a new entry is
+    appended.  Either way the override is keyed on all three of ``(type, u, v)``
+    -- a directed pair is not unique across edge types, so matching on
+    ``(u, v)`` alone would clobber the wrong-typed (or reverse-direction)
+    override.
+
+    :ivar edge_type: The edge type tag of the segment the override attaches to,
+        e.g. ``"LINE"`` or ``"BLIND"`` (the panel derives it read-only from the
+        selected segment).  Stored verbatim as the entry's ``"type"``.
+    :ivar u: Source node name (forward direction ``u -> v``).
+    :ivar v: Destination node name.
+    :ivar primitive_mode: ``LineMode`` tag (on a LINE edge) / ``BlindMode`` tag
+        (on a BLIND edge), or ``None`` to inherit.  Validated at Save by
+        ``validator._validate_edges_field``; this command stores it verbatim.
+    :ivar direction: ``"front"`` / ``"rear"`` (forward ``u -> v`` only), or
+        ``None`` to inherit.
+    :ivar stop_at_line: ``"on"`` / ``"off"`` (forward ``u -> v`` only), or
+        ``None`` to inherit.
+    """
+
+    edge_type: str
+    u: str
+    v: str
+    primitive_mode: str | None = None
+    direction: str | None = None
+    stop_at_line: str | None = None
+
+    # Captured at apply time so revert restores the exact prior state.
+    # ``_had_entry`` distinguishes "no entry existed for this identity" (revert
+    # by removing the entry apply added) from "an entry existed and was
+    # replaced" (revert by restoring the captured snapshot at its index).
+    _had_entry: bool = field(default=False, init=False, repr=False)
+    _original_index: int | None = field(default=None, init=False, repr=False)
+    _original_entry: dict | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Insert or replace the override entry for ``(edge_type, u, v)``.
+
+        :param model: Target model.
+        """
+        new_entry = self._build_entry()
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if index >= 0:
+            self._had_entry = True
+            self._original_index = index
+            # Deep-copy the displaced entry so a later in-place edit of the live
+            # model cannot mutate the captured inverse.
+            self._original_entry = copy.deepcopy(model.edges[index])
+            model.edges[index] = new_entry
+        else:
+            self._had_entry = False
+            self._original_index = None
+            self._original_entry = None
+            model.edges.append(new_entry)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the override list to its exact pre-:meth:`apply` state.
+
+        :param model: Target model.
+        """
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if self._had_entry:
+            # apply replaced an existing entry: restore the captured snapshot.
+            # Re-resolve the index defensively (another command may have
+            # shifted the list between apply and revert); fall back to the
+            # captured index if the entry is somehow gone.
+            assert self._original_entry is not None, (
+                "SetEdgeOverride.revert before apply"
+            )
+            restore_index = index if index >= 0 else self._original_index
+            assert restore_index is not None
+            model.edges[restore_index] = copy.deepcopy(self._original_entry)
+        else:
+            # apply appended a brand-new entry: remove it.  Guard the index in
+            # case an external mutation already removed it.
+            if index >= 0:
+                del model.edges[index]
+
+    # -- internal helpers ------------------------------------------------
+
+    def _build_entry(self) -> dict:
+        """Build the override-only entry dict for this command.
+
+        :return: A dict with the identity triple plus only the non-``None``
+            override keys (omitted keys mean "inherit").  No geometry keys.
+        """
+        entry: dict = {
+            "type": self.edge_type,
+            "u": self.u,
+            "v": self.v,
+        }
+        for key in _OVERRIDE_VALUE_KEYS:
+            value = getattr(self, key)
+            if value is not None:
+                entry[key] = value
+        return entry
+
+
+@dataclass
+class ClearEdgeOverride:
+    """Remove the per-edge override overlay entry for ``(type, u, v)``.
+
+    Matches on the full typed, directed identity ``(type, u, v)`` -- never
+    ``(u, v)`` alone, so a same-direction override of the other type (or the
+    reverse-direction override) is never removed by mistake.  The removed entry
+    (and its list position) is captured so :meth:`revert` re-inserts it exactly
+    where it was.
+
+    :ivar edge_type: The edge type tag of the override to remove
+        (``"LINE"`` / ``"BLIND"``).
+    :ivar u: Source node name (forward direction ``u -> v``).
+    :ivar v: Destination node name.
+    """
+
+    edge_type: str
+    u: str
+    v: str
+
+    _removed_index: int | None = field(default=None, init=False, repr=False)
+    _removed_entry: dict | None = field(default=None, init=False, repr=False)
+
+    def apply(self, model: FieldModel) -> None:
+        """Locate and remove the override entry for ``(edge_type, u, v)``.
+
+        :param model: Target model.
+        :raises ValueError: If no override entry with that identity exists.
+        """
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if index < 0:
+            raise ValueError(
+                f"ClearEdgeOverride: no override for "
+                f"({self.edge_type!r}, {self.u!r}, {self.v!r}) in model.edges"
+            )
+        self._removed_index = index
+        # Deep-copy so the captured inverse is immune to later live mutation.
+        self._removed_entry = copy.deepcopy(model.edges[index])
+        del model.edges[index]
+
+    def revert(self, model: FieldModel) -> None:
+        """Re-insert the removed override entry at its original index.
+
+        :param model: Target model.
+        """
+        assert self._removed_index is not None, (
+            "ClearEdgeOverride.revert before apply"
+        )
+        assert self._removed_entry is not None
+        model.edges.insert(
+            self._removed_index, copy.deepcopy(self._removed_entry)
+        )
+
+
+@dataclass
+class SetPipelineMode:
+    """Set one field-sourced ``PIPELINE_CONFIG`` default mode (or clear it).
+
+    Backs the inspector's PIPELINE DEFAULTS comboboxes.  ``which`` selects the
+    category and maps to the same-named ``model.pipeline_<which>_mode``
+    attribute; ``value`` is a mode member NAME (string tag), or ``None`` to
+    clear the field-sourced default (inherit the ``pipeline_config.py``
+    default).  The per-category tag vocabulary and the DEFAULT rule
+    (line / blind / turn may not be ``DEFAULT``; direction may) are enforced at
+    Save by ``validator._validate_pipeline_config``; this command only routes
+    the selector to the right field and stores the value verbatim, mirroring how
+    the model carries the four keys as opaque string tags.
+
+    :ivar which: Category selector; one of ``"line"`` / ``"blind"`` /
+        ``"turn"`` / ``"direction"``.
+    :ivar value: Mode member name (string tag), or ``None`` to inherit.
+    """
+
+    which: str
+    value: str | None
+
+    _attr: str | None = field(default=None, init=False, repr=False)
+    _original_value: str | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Set ``model.pipeline_<which>_mode`` to ``self.value``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.which`` is not one of the four recognized
+            category selectors.  The model is untouched in that case.
+        """
+        if self.which not in _VALID_PIPELINE_WHICH:
+            raise ValueError(
+                f"SetPipelineMode: which must be one of "
+                f"{sorted(_VALID_PIPELINE_WHICH)!r}, got {self.which!r}"
+            )
+        attr = f"pipeline_{self.which}_mode"
+        self._attr = attr
+        self._original_value = getattr(model, attr)
+        setattr(model, attr, self.value)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the prior mode value for this category.
+
+        :param model: Target model.
+        """
+        assert self._attr is not None, "SetPipelineMode.revert before apply"
+        setattr(model, self._attr, self._original_value)
+
+
+@dataclass
+class SetFieldWideFlag:
+    """Toggle a field-wide boolean flag on the model.
+
+    Backs the inspector's field-wide checkbuttons (currently
+    ``blind_projection_auto_seek``).  ``flag`` names the attribute and ``value``
+    is coerced to ``bool`` before being set; the prior value is captured so
+    :meth:`revert` restores it exactly.
+
+    :ivar flag: Flag attribute name; one of ``_VALID_FIELD_WIDE_FLAGS``
+        (currently only ``"blind_projection_auto_seek"``).
+    :ivar value: New value, coerced to ``bool``.
+    """
+
+    flag: str
+    value: bool
+
+    _original_value: bool | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Coerce ``self.value`` to ``bool`` and set ``model.<flag>``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.flag`` is not a recognized field-wide
+            flag.  The model is untouched in that case.
+        """
+        if self.flag not in _VALID_FIELD_WIDE_FLAGS:
+            raise ValueError(
+                f"SetFieldWideFlag: flag must be one of "
+                f"{sorted(_VALID_FIELD_WIDE_FLAGS)!r}, got {self.flag!r}"
+            )
+        self._original_value = getattr(model, self.flag)
+        setattr(model, self.flag, bool(self.value))
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the flag's prior value.
+
+        :param model: Target model.
+        """
+        assert self._original_value is not None, (
+            "SetFieldWideFlag.revert before apply"
+        )
+        setattr(model, self.flag, self._original_value)
+
+
+@dataclass
+class SetFieldDimensions:
+    """Set the outer field dimensions ``model.field_mm`` (the ``FIELD_MM`` pair).
+
+    Backs the inspector's FIELD_MM width/height control.  ``model.field_mm`` is
+    a ``(width_mm, height_mm)`` tuple (millimetres); both values are coerced to
+    ``float`` and stored as a tuple, matching the canonical in-memory type the
+    loader / ``from_json_dict`` produce.  The prior pair is captured so
+    :meth:`revert` restores it exactly.
+
+    :ivar width_mm: New field width in millimetres.  Must be ``> 0``.
+    :ivar height_mm: New field height in millimetres.  Must be ``> 0``.
+    """
+
+    width_mm: float
+    height_mm: float
+
+    _original_field_mm: tuple[float, float] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Set ``model.field_mm`` to ``(width_mm, height_mm)``.
+
+        :param model: Target model.
+        :raises ValueError: If either dimension is not a positive number.  The
+            model is untouched in that case.
+        """
+        try:
+            width = float(self.width_mm)
+            height = float(self.height_mm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"SetFieldDimensions: width_mm / height_mm must be numbers, "
+                f"got ({self.width_mm!r}, {self.height_mm!r})"
+            ) from exc
+        if width <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+            raise ValueError(
+                f"SetFieldDimensions: width_mm must be "
+                f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} mm, got {width}"
+            )
+        if height <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+            raise ValueError(
+                f"SetFieldDimensions: height_mm must be "
+                f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} mm, got {height}"
+            )
+        self._original_field_mm = model.field_mm
+        model.field_mm = (width, height)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the prior ``field_mm`` pair.
+
+        :param model: Target model.
+        """
+        assert self._original_field_mm is not None, (
+            "SetFieldDimensions.revert before apply"
+        )
+        model.field_mm = self._original_field_mm
 
 
 # ---------------------------------------------------------------------------
