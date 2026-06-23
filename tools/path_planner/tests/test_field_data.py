@@ -14,8 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.editor.loader import load_field_json
-from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
-from tools.path_planner.pipeline_config import BlindMode, LineMode
+from tools.path_planner.graph_builder import build_graph, EDGE_BLIND, EDGE_LINE
+from tools.path_planner.pipeline_config import BlindMode, LineMode, StopAtLineMode
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
     BLIND_DECAY_EXPONENT_MAX,
@@ -576,20 +576,24 @@ def test_validator_accepts_same_type_blind_override() -> None:
 
 
 def test_stop_at_line_fixture_loads_and_validates() -> None:
-    """TC4: the committed STOP_AT_LINE fixture field loads and passes validation.
+    """TC4: the committed STOP_AT_LINE fixture field loads, validates, and seeks.
 
     The fixture authors the stop-at-line BLIND edge in the on-disk JSON
-    schema. Loading it through the editor loader and validating the result
-    must succeed, so the fixture stays a usable, schema-clean exemplar of a
-    field carrying a STOP_AT_LINE edge.
+    schema via the only key JSON can express it with: ``stop_at_line: "on"``
+    (a raw ``primitive_mode`` string is rejected -- see
+    ``test_validator_rejects_unknown_blind_mode``). Loading it through the
+    editor loader and validating the result must succeed, and building the
+    graph must resolve the override onto the edge -- otherwise the "exemplar"
+    silently dead-reckons through a crossing meant to re-seek the line
+    (issue #93). Asserting the resolved ``StopAtLineMode.ON`` on the built
+    edge, not a raw dict key, is what makes this test prove anything.
     """
     data = load_field_json(_STOP_AT_LINE_FIXTURE)
     fd = SimpleNamespace(**data)
     assert validate(fd) is None
-    # The fixture carries exactly the one stop-at-line BLIND edge.
-    assert any(
-        edge.get("blind_mode") == "STOP_AT_LINE" for edge in data["EDGES"]
-    )
+    # The override survives the build: the one BLIND edge actually seeks.
+    g = build_graph(fd)
+    assert g.get_edge_data("B", "G")["stop_at_line_override"] is StopAtLineMode.ON
 
 
 # -- Obsolete per-edge pivot keys rejected (issue #44 per-turn model, T5) -----
