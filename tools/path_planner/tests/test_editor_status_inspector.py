@@ -240,7 +240,6 @@ def _rename_app(model: FieldModel) -> EditorApp:
     app._model = model
     app._history = History()
     app._panels = panels
-    app._pending_renames = {}
     app._selected_node = "A"
     app._mark_dirty = lambda: None
     app._refresh_view = lambda: None
@@ -249,12 +248,13 @@ def _rename_app(model: FieldModel) -> EditorApp:
     return app
 
 
-def test_perform_rename_dispatches_records_and_follows_selection():
+def test_perform_rename_dispatches_and_follows_selection():
     app = _rename_app(_make_model())
 
     assert app._perform_rename("A", "AA") is True
+    # The rename cascades through the model (no separate pending-rename delta --
+    # that subsystem is retired in issue #79; EDGES cascade is covered by TC21).
     assert "AA" in app._model.nodes and "A" not in app._model.nodes
-    assert app._pending_renames == {"A": "AA"}
     # Selection follows the renamed node.
     assert app._selected_node == "AA"
 
@@ -266,4 +266,3 @@ def test_perform_rename_blank_or_unchanged_returns_false():
     assert app._perform_rename("A", "   ") is False
     # Model untouched by either no-op.
     assert "A" in app._model.nodes
-    assert app._pending_renames == {}

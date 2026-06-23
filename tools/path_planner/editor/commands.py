@@ -331,10 +331,19 @@ class RenameNode:
     Updates ``model.nodes``, ``model.node_types``, every entry of
     ``model.line_segments`` and ``model.blind_edges`` that mentions the old
     name, the ``model.reset_nodes`` key (a reset spec is keyed by node name),
-    every ``model.pivot_turns`` triple that names the node, and
+    every ``model.pivot_turns`` triple that names the node, every
+    ``model.edges`` override overlay entry whose ``u`` / ``v`` is the node, and
     ``model.start_node`` if it equals the old name. A ``"projection"``-typed
     node renames through ``model.node_types`` like any other node type -- it
     is an on-model node, so no off-model bookkeeping is involved (issue #64).
+
+    The ``model.edges`` cascade rewrites only the ``u`` / ``v`` strings of an
+    overlay entry, leaving its ``type`` and every other override key intact:
+    an entry's identity is ``(type, u, v)``, so only the directed-pair strings
+    move with the rename. This is the model-native replacement for the retired
+    ``ast_rewrite`` LibCST EDGES rewriter -- because the rename mutates
+    ``model.edges`` directly, undo / redo come for free through the normal
+    command history (no separate pending-rename delta to track).
 
     :ivar old: Existing node name.
     :ivar new: Replacement node name.  Must not already exist.
@@ -403,6 +412,13 @@ class RenameNode:
         model.pivot_turns = [
             self._rename_turn(turn) for turn in model.pivot_turns
         ]
+        # EDGES override overlays reference the directed pair as the ``u`` / ``v``
+        # keys: rewrite both to the new name where they match, keeping ``type``
+        # and every other override key so the entry's (type, u, v) identity
+        # tracks the rename (the model-native replacement for ast_rewrite).
+        model.edges = [
+            self._rename_edge_entry(entry) for entry in model.edges
+        ]
 
         self._start_node_was_old = model.start_node == self.old
         if self._start_node_was_old:
@@ -433,6 +449,9 @@ class RenameNode:
         }
         model.pivot_turns = [
             self._unrename_turn(turn) for turn in model.pivot_turns
+        ]
+        model.edges = [
+            self._unrename_edge_entry(entry) for entry in model.edges
         ]
         if self._start_node_was_old:
             model.start_node = self.old
@@ -483,6 +502,44 @@ class RenameNode:
         """
         return tuple(self.old if name == self.new else name for name in turn)
 
+    def _rename_edge_entry(self, entry: dict) -> dict:
+        """Return EDGES overlay *entry* with ``self.old`` swapped for ``self.new``.
+
+        Rewrites only the directed-pair ``u`` / ``v`` keys where they equal the
+        old name; ``type`` and every other override key (``primitive_mode`` /
+        ``direction`` / ``stop_at_line`` / any hand-authored geometry) are copied
+        through unchanged so the entry's ``(type, u, v)`` identity tracks the
+        rename without merging or dropping it. A fresh dict is returned (the list
+        is rebuilt) so an undo's :meth:`_unrename_edge_entry` operates on the
+        renamed copy, never an aliased original.
+
+        :param entry: Original overlay entry dict.
+        :return: A new dict with the rename applied to ``u`` / ``v``.
+        """
+        renamed = dict(entry)
+        if renamed.get("u") == self.old:
+            renamed["u"] = self.new
+        if renamed.get("v") == self.old:
+            renamed["v"] = self.new
+        return renamed
+
+    def _unrename_edge_entry(self, entry: dict) -> dict:
+        """Return EDGES overlay *entry* with ``self.new`` swapped back to ``self.old``.
+
+        Inverse of :meth:`_rename_edge_entry`: restores the directed-pair
+        ``u`` / ``v`` keys to the old name, leaving ``type`` and every other key
+        intact.
+
+        :param entry: Entry previously transformed by :meth:`_rename_edge_entry`.
+        :return: A new dict with the rename reversed.
+        """
+        restored = dict(entry)
+        if restored.get("u") == self.new:
+            restored["u"] = self.old
+        if restored.get("v") == self.new:
+            restored["v"] = self.old
+        return restored
+
 
 @dataclass
 class DeleteNode:
@@ -498,11 +555,11 @@ class DeleteNode:
     meaningless once the node is gone.  :meth:`revert` restores it.
 
     .. note::
-       This command only checks the in-memory edge lists.  The rich ``EDGES``
-       dictionary in ``field_data.py`` (per-edge metadata) is NOT visible to
-       the :class:`FieldModel` and therefore NOT checked here.  T12's Save
-       handler is responsible for peeking at the imported ``field_data``
-       module before allowing the deletion to be flushed to disk.
+       Per-edge ``EDGES`` overrides now live in ``model.edges`` (ADR-047) and
+       only ever attach to an existing ``line_segments`` / ``blind_edges``
+       pair, so the segment guards above already cover them: a node carrying an
+       override cannot be deleted while the underlying segment still references
+       it.  No separate EDGES check is needed.
 
     :ivar name: Name of the node to delete.
     """
