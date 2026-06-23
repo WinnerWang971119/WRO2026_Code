@@ -78,6 +78,29 @@ class FieldModel:
         carried verbatim so an open -> save round-trip preserves any reset
         nodes authored directly in ``field_data.json``. Defaults to an empty
         dict when the JSON omits the optional ``RESET_NODES`` key.
+    :param edges: Per-edge override overlay entries, each a plain dict
+        ``{"type", "u", "v", + optional override keys}`` (see the ``EDGES``
+        entry shape in the planner contract). Stored VERBATIM -- whatever keys
+        an entry carries on load (including hand-authored ``distance_cm`` /
+        ``heading_deg`` geometry) are preserved unchanged so an open -> save
+        round-trip is byte-identical; the model never normalizes or drops
+        geometry. Identity is ``(type, u, v)`` (a directed pair is not unique
+        across types). Defaults to an empty list when the JSON omits the
+        optional ``EDGES`` key (absent stays absent).
+    :param pipeline_line_mode: Field-sourced ``PIPELINE_CONFIG`` default for the
+        line-following primitive mode, as a ``LineMode`` member name (string
+        tag) or ``None`` to inherit the ``pipeline_config.py`` default. Carried
+        through both serialization surfaces so the editor can author it;
+        ``None`` round-trips as an absent JSON key (absent stays absent).
+    :param pipeline_blind_mode: Field-sourced ``PIPELINE_CONFIG`` default for
+        the blind-drive primitive mode, as a ``BlindMode`` member name or
+        ``None`` (inherit). Absent-stays-absent like ``pipeline_line_mode``.
+    :param pipeline_turn_mode: Field-sourced ``PIPELINE_CONFIG`` default for the
+        turn mode, as a ``TurnMode`` member name or ``None`` (inherit).
+        Absent-stays-absent like ``pipeline_line_mode``.
+    :param pipeline_direction_mode: Field-sourced ``PIPELINE_CONFIG`` default
+        for the direction mode, as a ``DirectionMode`` member name or ``None``
+        (inherit). Absent-stays-absent like ``pipeline_line_mode``.
     """
 
     # Ordered list of top-level JSON keys.  ``to_json_dict`` produces keys in
@@ -100,6 +123,11 @@ class FieldModel:
         "pivot_turns",
         "RESET_NODES",
         "blind_projection_auto_seek",
+        "pipeline_line_mode",
+        "pipeline_blind_mode",
+        "pipeline_turn_mode",
+        "pipeline_direction_mode",
+        "EDGES",
         "OBSTACLES",
     )
 
@@ -132,6 +160,25 @@ class FieldModel:
     # the editor's Save dropped the key and field_data.py's loader silently
     # reverted the flag to its True default.
     blind_projection_auto_seek: bool = True
+    # Optional per-edge override overlay. A list of plain dicts, each
+    # {type, u, v, + optional override keys}, stored VERBATIM (the model never
+    # normalizes -- a geometry-carrying hand-authored entry round-trips
+    # byte-identically). Identity is (type, u, v). Mutated by the editor's
+    # edge-override commands keyed on that triple. Defaulted (empty list) so
+    # existing call sites that build a FieldModel without overrides stay valid;
+    # absent in JSON stays absent on save.
+    edges: list[dict] = field(default_factory=list)
+    # Optional field-sourced PIPELINE_CONFIG defaults, each a LineMode /
+    # BlindMode / TurnMode / DirectionMode member NAME (string tag) or None to
+    # inherit the pipeline_config.py default. Carried through BOTH serialization
+    # surfaces (the dual-serialization seam): to_module_proxy exposes them as
+    # SCREAMING_SNAKE PIPELINE_* so validate() runs against the edited values,
+    # and to_json_dict emits them under their snake/JSON keys. None
+    # round-trips as an absent key (absent stays absent).
+    pipeline_line_mode: str | None = None
+    pipeline_blind_mode: str | None = None
+    pipeline_turn_mode: str | None = None
+    pipeline_direction_mode: str | None = None
 
     # ------------------------------------------------------------------
     # Snapshot / restore (used by the undo/redo stack)
@@ -179,6 +226,15 @@ class FieldModel:
         self.pivot_turns = copy.deepcopy(snap.pivot_turns)
         self.reset_nodes = copy.deepcopy(snap.reset_nodes)
         self.blind_projection_auto_seek = snap.blind_projection_auto_seek
+        # edges is a list of dicts; deep-copy so undo/redo cannot alias and
+        # corrupt the nested override dicts (a shallow copy would share them).
+        self.edges = copy.deepcopy(snap.edges)
+        # pipeline_* are immutable (str | None); plain assignment is enough,
+        # mirroring blind_projection_auto_seek.
+        self.pipeline_line_mode = snap.pipeline_line_mode
+        self.pipeline_blind_mode = snap.pipeline_blind_mode
+        self.pipeline_turn_mode = snap.pipeline_turn_mode
+        self.pipeline_direction_mode = snap.pipeline_direction_mode
 
     # ------------------------------------------------------------------
     # JSON round-trip
@@ -216,6 +272,11 @@ class FieldModel:
         ``BLIND_EDGES``     ``blind_edges``
         ``pivot_turns``     ``pivot_turns``
         ``RESET_NODES``     ``reset_nodes``
+        ``EDGES``           ``edges``
+        ``pipeline_line_mode`` ``pipeline_line_mode``
+        ``pipeline_blind_mode`` ``pipeline_blind_mode``
+        ``pipeline_turn_mode`` ``pipeline_turn_mode``
+        ``pipeline_direction_mode`` ``pipeline_direction_mode``
         ``OBSTACLES``       ``obstacles``
         =================== ====================
 
@@ -227,6 +288,17 @@ class FieldModel:
         absent key maps to an empty dict, and each present per-node spec is
         deep-copied so the model owns an independent table (its values are
         plain JSON objects, so no tuple conversion applies).
+
+        ``EDGES`` is optional (absent stays absent): an absent key maps to an
+        empty list. Each present entry is a plain dict carried VERBATIM --
+        deep-copied so the model owns it, but with every key preserved
+        unchanged (including any hand-authored ``distance_cm`` / ``heading_deg``
+        geometry). The model never normalizes an entry, so a geometry-carrying
+        entry round-trips byte-identically through :meth:`to_json_dict`.
+
+        The four ``pipeline_*`` keys are optional too (absent stays absent):
+        an absent key maps to ``None``; a present value is a mode member NAME
+        (string tag) stored as-is.
 
         :param data: Dict as returned by
             :func:`~tools.path_planner.editor.loader.load_field_json`.
@@ -260,6 +332,14 @@ class FieldModel:
             blind_projection_auto_seek=data.get(
                 "blind_projection_auto_seek", True
             ),
+            # VERBATIM: deep-copy each entry so the model owns it, but preserve
+            # every key as-is (no normalization, no geometry drop) so a
+            # geometry-carrying hand-authored entry round-trips byte-identically.
+            edges=[copy.deepcopy(entry) for entry in data.get("EDGES", [])],
+            pipeline_line_mode=data.get("pipeline_line_mode"),
+            pipeline_blind_mode=data.get("pipeline_blind_mode"),
+            pipeline_turn_mode=data.get("pipeline_turn_mode"),
+            pipeline_direction_mode=data.get("pipeline_direction_mode"),
         )
 
     # ------------------------------------------------------------------
@@ -278,10 +358,20 @@ class FieldModel:
         lists) so that the validator's ``isinstance`` checks pass without
         any conversion.
 
-        The optional ``EDGES`` attribute is intentionally absent from the
-        proxy: the GUI model does not own rich per-edge metadata, and the
-        validator treats a missing ``EDGES`` as benign (backward-compatible
-        with pre-PR4 fixtures).
+        ``EDGES`` IS exposed (as ``self.edges``): the model now owns per-edge
+        override overlays and persists them via :meth:`to_json_dict`, so the
+        proxy MUST carry them too or the editor's Save would persist overrides
+        that :func:`validator._validate_edges_field` never checks (its
+        ``getattr(..., 'EDGES', None)`` early-return -- the dual-serialization
+        trap). Exposed verbatim so the validator sees exactly what is saved.
+
+        ``PIPELINE_LINE_MODE`` / ``PIPELINE_BLIND_MODE`` / ``PIPELINE_TURN_MODE``
+        / ``PIPELINE_DIRECTION_MODE`` ARE exposed for the same reason: the model
+        persists the four ``pipeline_*`` keys via :meth:`to_json_dict`, so the
+        proxy must carry their SCREAMING_SNAKE forms or
+        :func:`validator._validate_pipeline_config` (which reads
+        ``getattr(field_data, 'PIPELINE_LINE_MODE', None)`` etc.) never checks
+        the edited values -- the same dual-serialization trap.
 
         ``PIVOT_TURNS`` IS exposed: the model persists it via
         :meth:`to_json_dict`, so the proxy must carry it too or
@@ -305,7 +395,8 @@ class FieldModel:
 
         :return: A :class:`types.SimpleNamespace` with the 14 required
             attributes ``validator._REQUIRED_ATTRS`` lists plus the optional
-            ``PIVOT_TURNS``, ``RESET_NODES``, and ``BLIND_PROJECTION_AUTO_SEEK``.
+            ``PIVOT_TURNS``, ``RESET_NODES``, ``BLIND_PROJECTION_AUTO_SEEK``,
+            ``EDGES``, and the four ``PIPELINE_*`` mode attributes.
         """
         return types.SimpleNamespace(
             NODES=self.nodes,
@@ -325,6 +416,11 @@ class FieldModel:
             PIVOT_TURNS=self.pivot_turns,
             RESET_NODES=self.reset_nodes,
             BLIND_PROJECTION_AUTO_SEEK=self.blind_projection_auto_seek,
+            EDGES=self.edges,
+            PIPELINE_LINE_MODE=self.pipeline_line_mode,
+            PIPELINE_BLIND_MODE=self.pipeline_blind_mode,
+            PIPELINE_TURN_MODE=self.pipeline_turn_mode,
+            PIPELINE_DIRECTION_MODE=self.pipeline_direction_mode,
         )
 
     def validate(self) -> None:
@@ -374,6 +470,17 @@ class FieldModel:
           A reset-free field omits the key entirely, matching the same
           "absent stays absent" round-trip so a save produces no spurious
           ``RESET_NODES: {}`` diff.
+        - The four ``pipeline_*`` keys are OPTIONAL: each is emitted (in its
+          canonical slot, before ``EDGES``) only when not ``None``. A field
+          that never authored a pipeline default omits the key entirely
+          (absent stays absent) so a save produces no spurious ``null`` diff.
+        - ``EDGES`` is OPTIONAL: it is emitted (in its canonical slot, between
+          the ``pipeline_*`` keys and ``OBSTACLES``) only when non-empty. Each
+          entry is emitted VERBATIM (deep-copied so the caller cannot alias the
+          model, but with every key preserved unchanged -- the model never
+          normalizes, so a geometry-carrying hand-authored entry round-trips
+          byte-identically). An override-free field omits the key entirely
+          (absent stays absent), producing no spurious ``EDGES: []`` diff.
 
         :return: A :class:`dict` whose values are JSON-native types (``str``,
             ``float``, ``int``, ``list``, ``dict``).  No tuples are present.
@@ -411,5 +518,23 @@ class FieldModel:
         # (absent stays absent), matching pivot_turns / RESET_NODES.
         if not self.blind_projection_auto_seek:
             result["blind_projection_auto_seek"] = False
+        # OPTIONAL pipeline defaults: emit each only when authored (not None),
+        # in canonical key order, so an unauthored field omits the key entirely
+        # (absent stays absent) -- no spurious null diff.
+        if self.pipeline_line_mode is not None:
+            result["pipeline_line_mode"] = self.pipeline_line_mode
+        if self.pipeline_blind_mode is not None:
+            result["pipeline_blind_mode"] = self.pipeline_blind_mode
+        if self.pipeline_turn_mode is not None:
+            result["pipeline_turn_mode"] = self.pipeline_turn_mode
+        if self.pipeline_direction_mode is not None:
+            result["pipeline_direction_mode"] = self.pipeline_direction_mode
+        # OPTIONAL EDGES overlay: emit only when non-empty, each entry VERBATIM
+        # (deep-copied so the caller cannot alias the model's dicts, every key
+        # preserved unchanged -- no normalization), so a geometry-carrying
+        # hand-authored entry round-trips byte-identically and an override-free
+        # field omits the key entirely (absent stays absent).
+        if self.edges:
+            result["EDGES"] = [copy.deepcopy(entry) for entry in self.edges]
         result["OBSTACLES"] = [list(obs) for obs in self.obstacles]
         return result
