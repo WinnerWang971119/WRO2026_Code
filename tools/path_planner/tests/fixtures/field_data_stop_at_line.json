@@ -102,7 +102,7 @@
       "v": "G",
       "distance_cm": 86.0232526704263,
       "heading_deg": 54.46232220802563,
-      "blind_mode": "STOP_AT_LINE"
+      "stop_at_line": "on"
     }
   ]
 }
