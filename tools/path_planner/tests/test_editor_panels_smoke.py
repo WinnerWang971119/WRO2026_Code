@@ -22,6 +22,7 @@ be created (no display, even under xvfb).
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import matplotlib
@@ -39,6 +40,7 @@ finally:
     matplotlib.use = _real_mpl_use
 
 import tkinter as tk  # noqa: E402
+from tkinter import ttk  # noqa: E402
 
 import pytest  # noqa: E402
 
@@ -48,6 +50,12 @@ from tools.path_planner.editor.panels import (  # noqa: E402
     _INSPECTOR_WIDTH_PX,
     _MODE_RAIL_WIDTH_PX,
     SidePanels,
+)
+from tools.path_planner.pipeline_config import (  # noqa: E402
+    BlindMode,
+    DirectionMode,
+    LineMode,
+    TurnMode,
 )
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "field_data_small.json"
@@ -395,3 +403,224 @@ def test_layout_three_pane_title_and_status_span_three_columns(laid_out_panels):
     assert int(panels._mode_frame.grid_info()["row"]) == 1
     assert int(canvas.grid_info()["row"]) == 1
     assert int(panels._inspector_frame.grid_info()["row"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# TC15 (Issue #79) -- the EDGE OVERRIDES / PIPELINE DEFAULTS / extended-globals
+# surface survived construction: the new section widgets exist, the five new
+# callback slots default to None, and the graft methods exist with the right
+# signatures and survive a refresh.  Single-sourced widget set so a renamed
+# attribute in panels.py fails this guard loudly rather than at runtime in the
+# app wiring (AC8, AC10).
+# ---------------------------------------------------------------------------
+
+# Every NEW (issue #79) ``on_*`` callback slot the app (T8) assigns after
+# construction.  All start at ``None``; routed to the five new commands.
+# Enumerated explicitly (not introspected) so a rename in panels.py that drops
+# or renames a slot fails this test loudly.
+_ISSUE79_CALLBACKS: tuple[str, ...] = (
+    "on_set_edge_override",
+    "on_clear_edge_override",
+    "on_pipeline_mode_change",
+    "on_field_wide_flag_change",
+    "on_field_dimensions_change",
+)
+
+# The new section widgets the app drives / refresh() syncs.  Each must be a real
+# Tk widget on the constructed panel.  Named so a dropped section surfaces here
+# rather than as an AttributeError on the first refresh.
+_ISSUE79_SECTION_WIDGETS: tuple[str, ...] = (
+    # EDGE OVERRIDES list: the count badge + the scrollable rows canvas + the
+    # ghost add-button + the inline editor sub-frame.
+    "_edge_override_count_label",
+    "_edge_override_canvas",
+    "_edge_override_rows_frame",
+    "_add_override_ghost_button",
+    "_edge_override_editor",
+    # PIPELINE DEFAULTS: the four mode comboboxes (keyed dict).
+    "_pipeline_mode_combos",
+    # Extended GLOBAL KNOBS: the auto-seek checkbutton + the FIELD_MM entries.
+    "_blind_projection_auto_seek_check",
+    "_field_width_entry",
+    "_field_height_entry",
+)
+
+# The four PIPELINE DEFAULTS categories, in the contract's ``which`` spelling.
+_PIPELINE_WHICH: tuple[str, ...] = ("line", "blind", "turn", "direction")
+
+
+def test_side_panels_exposes_issue79_callback_slots(side_panels):
+    """Every issue #79 ``on_*`` callback slot exists and defaults to ``None``.
+
+    The app wires these to the five new editor commands AFTER construction, so
+    each must be present and unset at build time.  A rename or a dropped slot in
+    panels.py fails here instead of silently breaking the app wiring.
+    """
+    for name in _ISSUE79_CALLBACKS:
+        assert hasattr(side_panels, name), f"missing callback slot: {name}"
+        assert getattr(side_panels, name) is None, (
+            f"callback slot {name} must default to None at construction"
+        )
+
+
+def test_side_panels_builds_issue79_section_widgets(side_panels):
+    """The EDGE OVERRIDES, PIPELINE DEFAULTS, and extended GLOBAL KNOBS section
+    widgets all constructed.
+
+    Each new section widget must be a real Tk widget present on the panel: the
+    EDGE OVERRIDES list (count badge + rows canvas + add button + inline
+    editor), the four PIPELINE DEFAULTS comboboxes, and the extended-globals
+    auto-seek checkbutton + FIELD_MM width/height entries.
+    """
+    for name in _ISSUE79_SECTION_WIDGETS:
+        assert hasattr(side_panels, name), f"missing section widget: {name}"
+
+    # The four mode comboboxes are keyed by the contract's ``which`` spelling.
+    combos = side_panels._pipeline_mode_combos
+    assert isinstance(combos, dict)
+    for which in _PIPELINE_WHICH:
+        assert which in combos, f"missing pipeline combobox for {which!r}"
+        assert isinstance(combos[which], ttk.Combobox)
+
+    # The auto-seek toggle is a real checkbutton; the FIELD_MM controls are
+    # real entries.
+    assert isinstance(
+        side_panels._blind_projection_auto_seek_check, tk.Checkbutton
+    )
+    assert isinstance(side_panels._field_width_entry, tk.Entry)
+    assert isinstance(side_panels._field_height_entry, tk.Entry)
+
+
+def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
+    side_panels,
+):
+    """The PIPELINE DEFAULTS comboboxes offer the right tag vocabulary.
+
+    Single-sourced from the ``pipeline_config`` enums so a future enum change
+    cannot silently desync this guard (per the executor note): line / blind /
+    turn must NOT offer ``DEFAULT`` (mirrors ``PipelineConfig.__post_init__``),
+    while direction MAY.  Every category leads with the empty "unset" sentinel
+    (key absent -> inherit the pipeline_config.py default).
+    """
+    combos = side_panels._pipeline_mode_combos
+
+    enum_for_which = {
+        "line": LineMode,
+        "blind": BlindMode,
+        "turn": TurnMode,
+        "direction": DirectionMode,
+    }
+
+    for which, enum_cls in enum_for_which.items():
+        values = tuple(combos[which].cget("values"))
+        # The unset sentinel leads every list.
+        assert values[0] == "", f"{which}: unset sentinel must lead the values"
+
+        offered = set(values[1:])
+        if which == "direction":
+            # DEFAULT is a legal direction default, so it IS offered.
+            assert {member.name for member in DirectionMode} == offered
+            assert DirectionMode.DEFAULT.name in offered
+        else:
+            # line / blind / turn must exclude DEFAULT (== absence/inherit).
+            expected = {
+                member.name
+                for member in enum_cls
+                if member is not enum_cls.DEFAULT
+            }
+            assert offered == expected, f"{which}: tag vocabulary mismatch"
+            assert enum_cls.DEFAULT.name not in offered, (
+                f"{which} must not offer DEFAULT"
+            )
+
+
+def test_side_panels_graft_methods_exist_with_signatures(side_panels):
+    """The graft methods ``locate_override_row`` / ``prefill_add_row`` exist as
+    callables with the contracted ``(edge_type, u, v)`` signature.
+
+    The app (T8) calls these from the edge-mode click handler.  Pinning the
+    parameter names guards the seam: a renamed parameter would still be callable
+    positionally but documents intent drift, so the signature is asserted.
+    """
+    assert callable(side_panels.locate_override_row)
+    assert callable(side_panels.prefill_add_row)
+
+    locate_params = list(
+        inspect.signature(side_panels.locate_override_row).parameters
+    )
+    prefill_params = list(
+        inspect.signature(side_panels.prefill_add_row).parameters
+    )
+    # ``self`` is bound on the instance method, so the visible params are the
+    # three positional edge-identity arguments.
+    assert locate_params == ["edge_type", "u", "v"]
+    assert prefill_params == ["edge_type", "u", "v"]
+
+
+def test_side_panels_graft_methods_survive_refresh(side_panels):
+    """``locate_override_row`` / ``prefill_add_row`` run cleanly after a refresh.
+
+    Refreshing from a real model caches the overlay + segment pairs and rebuilds
+    the override rows; both graft methods must then operate without raising.
+    ``locate_override_row`` returns ``False`` for an absent override (the app's
+    fall-through signal) and ``True`` once the override exists; ``prefill_add_row``
+    opens the inline editor pre-filled from the clicked segment.
+    """
+    model = _load_model()
+    side_panels.refresh(model)
+
+    # No override exists yet on the A -> B line segment -> locate returns False.
+    assert side_panels.locate_override_row("LINE", "A", "B") is False
+
+    # Pre-fill the add-row from the clicked segment: must not raise, and the
+    # inline editor's u/v vars reflect the clicked pair with the derived type.
+    side_panels.prefill_add_row("LINE", "A", "B")
+    assert side_panels._edge_override_u_var.get() == "A"
+    assert side_panels._edge_override_v_var.get() == "B"
+    assert side_panels._edge_override_type_var.get() == "LINE"
+
+    # Author an override into the model, refresh, then locate must find its row.
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    side_panels.refresh(model)
+    assert side_panels.locate_override_row("LINE", "A", "B") is True
+
+
+def test_side_panels_refresh_reflects_issue79_model_state(side_panels):
+    """``refresh`` syncs the new widgets from ``model.edges`` / ``pipeline_*`` /
+    ``blind_projection_auto_seek`` / ``field_mm``.
+
+    Drives the same model-replay path the app runs after every mutation / load
+    and asserts the new section widgets reflect the model: the override count
+    badge, the four pipeline comboboxes, the auto-seek checkbutton, and the
+    FIELD_MM entries.
+    """
+    model = _load_model()
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+    ]
+    model.pipeline_line_mode = "FAST"
+    model.pipeline_blind_mode = "GYRO_TSHAPE"
+    model.blind_projection_auto_seek = False
+    model.field_mm = (2362.0, 1143.0)
+
+    side_panels.refresh(model)
+
+    # Override count badge shows the two authored overrides.
+    assert "2" in side_panels._edge_override_count_label.cget("text")
+
+    # Pipeline comboboxes reflect the set values; an unset category shows the
+    # empty sentinel.
+    assert side_panels._pipeline_mode_vars["line"].get() == "FAST"
+    assert side_panels._pipeline_mode_vars["blind"].get() == "GYRO_TSHAPE"
+    assert side_panels._pipeline_mode_vars["turn"].get() == ""
+    assert side_panels._pipeline_mode_vars["direction"].get() == ""
+
+    # Auto-seek checkbutton var reflects the model flag.
+    assert side_panels._blind_projection_auto_seek_var.get() is False
+
+    # FIELD_MM entries reflect the model dimensions (integer mm).
+    assert side_panels._field_width_mm_var.get() == "2362"
+    assert side_panels._field_height_mm_var.get() == "1143"

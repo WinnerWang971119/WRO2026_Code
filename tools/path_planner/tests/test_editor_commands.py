@@ -18,12 +18,17 @@ from tools.path_planner.editor.commands import (
     AddNode,
     AddObstacle,
     AddPivotTurn,
+    ClearEdgeOverride,
     DeleteEdge,
     DeleteNode,
     DeleteObstacle,
     MacroCommand,
     MoveNode,
     RenameNode,
+    SetEdgeOverride,
+    SetFieldDimensions,
+    SetFieldWideFlag,
+    SetPipelineMode,
     SetStart,
     SetStartHeading,
 )
@@ -683,3 +688,469 @@ def test_add_edges_batch_round_trip_apply_revert_apply() -> None:
     # Re-apply — _applied_indices must be rebuilt from scratch.
     cmd.apply(model)
     assert model.to_json_dict() == state_after_first_apply
+
+
+# ---------------------------------------------------------------------------
+# Issue #79 — per-edge override + field-tunable commands
+#
+# Fixture factory carrying both a LINE and a BLIND segment so an override can
+# attach to each, and the (type, u, v) identity guard (TC14) can prove a LINE
+# and a BLIND override on the SAME directed pair are independent entries.
+# ---------------------------------------------------------------------------
+
+
+def make_override_model() -> FieldModel:
+    """Return a model with one LINE and one BLIND segment, no overrides yet.
+
+    ``A``--``B`` is a line segment and ``B``--``G`` a blind edge.  The two
+    share no direction, but the identity-guard test deliberately authors a
+    LINE and a BLIND override on the SAME ``A -> B`` directed pair to prove the
+    ``(type, u, v)`` key keeps them distinct.
+    """
+    return FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node="A",
+        start_heading_deg=0.0,
+        nodes={
+            "A": (10.0, 10.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 80.0),
+        },
+        node_types={"A": "line", "B": "line", "G": "blind"},
+        line_segments=[("A", "B")],
+        blind_edges=[("B", "G")],
+        obstacles=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# TC13 — SetEdgeOverride apply / revert
+# ---------------------------------------------------------------------------
+
+
+def test_set_edge_override_apply_adds_entry_and_revert_restores_exactly() -> None:
+    """TC13: applying SetEdgeOverride adds the override-only entry; reverting
+    restores the model byte-identically to its pre-apply state."""
+    model = make_override_model()
+    pre_apply_repr = repr(model.to_json_dict())
+    assert model.edges == []
+
+    cmd = SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST")
+    cmd.apply(model)
+
+    # The override entry is present and override-only (identity triple + the
+    # one non-None override key; no geometry keys are ever written).
+    assert model.edges == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+
+    cmd.revert(model)
+    assert model.edges == []
+    assert repr(model.to_json_dict()) == pre_apply_repr
+
+
+def test_set_edge_override_omits_inherit_keys() -> None:
+    """TC13: a None override field is OMITTED from the entry (absence == inherit),
+    so only the explicitly-set keys appear alongside the identity triple."""
+    model = make_override_model()
+
+    # Only stop_at_line is set; primitive_mode + direction stay None (omitted).
+    SetEdgeOverride("BLIND", "B", "G", stop_at_line="on").apply(model)
+
+    assert model.edges == [
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"}
+    ]
+
+
+def test_set_edge_override_replace_in_place_preserves_position_and_reverts() -> None:
+    """TC13: re-setting an existing (type, u, v) REPLACES the entry in place
+    (same list position); revert restores the exact prior entry, not a removal."""
+    model = make_override_model()
+
+    # Seed two overrides so the replaced one is NOT at the tail (position matters).
+    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("BLIND", "B", "G", direction="front").apply(model)
+    pre_replace_repr = repr(model.to_json_dict())
+
+    replace = SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW")
+    replace.apply(model)
+
+    # The LINE entry stays at index 0 (replaced in place), now carrying SLOW.
+    assert model.edges[0] == {
+        "type": "LINE",
+        "u": "A",
+        "v": "B",
+        "primitive_mode": "SLOW",
+    }
+    assert model.edges[1] == {
+        "type": "BLIND",
+        "u": "B",
+        "v": "G",
+        "direction": "front",
+    }
+
+    # Revert restores the displaced (FAST) entry at its original index.
+    replace.revert(model)
+    assert repr(model.to_json_dict()) == pre_replace_repr
+
+
+def test_set_edge_override_undo_redo_undo_is_stable() -> None:
+    """TC13: SetEdgeOverride survives an undo -> redo -> undo cycle through the
+    real History stack and lands back at the pre-apply state each time."""
+    model = make_override_model()
+    history = History()
+    original_json = model.to_json_dict()
+
+    history.do(SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST"), model)
+    state_after_apply = model.to_json_dict()
+    assert state_after_apply != original_json
+
+    # undo -> back to empty.
+    assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+
+    # redo -> back to the override.
+    assert history.redo(model) is True
+    assert model.to_json_dict() == state_after_apply
+
+    # undo again -> stable, identical to the first undo.
+    assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+
+
+# ---------------------------------------------------------------------------
+# TC14 — ClearEdgeOverride / SetPipelineMode / SetFieldWideFlag /
+#        SetFieldDimensions apply / revert round-trip invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_clear_edge_override_apply_revert_round_trip() -> None:
+    """TC14: ClearEdgeOverride removes the entry on apply and re-inserts it at
+    its original index on revert (round-trip invariant)."""
+    model = make_override_model()
+    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("BLIND", "B", "G", stop_at_line="on").apply(model)
+    pre_clear_repr = repr(model.to_json_dict())
+
+    # Clear the FIRST entry so revert's index restoration is meaningful.
+    cmd = ClearEdgeOverride("LINE", "A", "B")
+    cmd.apply(model)
+
+    assert model.edges == [
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"}
+    ]
+
+    cmd.revert(model)
+    assert repr(model.to_json_dict()) == pre_clear_repr
+    # The re-inserted entry is back at index 0 (its original position).
+    assert model.edges[0] == {
+        "type": "LINE",
+        "u": "A",
+        "v": "B",
+        "primitive_mode": "FAST",
+    }
+
+
+def test_clear_edge_override_missing_identity_raises() -> None:
+    """TC14: clearing a non-existent (type, u, v) raises ValueError and leaves
+    the model untouched (History treats it as a no-op)."""
+    model = make_override_model()
+    pre = repr(model.to_json_dict())
+
+    with pytest.raises(ValueError):
+        ClearEdgeOverride("LINE", "A", "B").apply(model)
+
+    assert repr(model.to_json_dict()) == pre
+
+
+def test_edge_override_type_u_v_identity_is_independent() -> None:
+    """TC14 (identity guard): a LINE and a BLIND override sharing the SAME
+    ``u -> v`` directed pair are independent entries.
+
+    Setting both must produce two distinct entries (keyed on the full
+    ``(type, u, v)`` triple), and clearing ONE must leave the other untouched --
+    a clear keyed on ``(u, v)`` alone would clobber the wrong-typed override.
+    """
+    model = make_override_model()
+
+    # Both overrides target the SAME directed pair A -> B but different types.
+    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("BLIND", "A", "B", stop_at_line="on").apply(model)
+
+    # Two distinct entries — the directed pair is NOT unique across types.
+    assert len(model.edges) == 2
+    line_entry = {
+        "type": "LINE",
+        "u": "A",
+        "v": "B",
+        "primitive_mode": "FAST",
+    }
+    blind_entry = {"type": "BLIND", "u": "A", "v": "B", "stop_at_line": "on"}
+    assert line_entry in model.edges
+    assert blind_entry in model.edges
+
+    # Clear ONLY the LINE override; the BLIND one on the same pair survives.
+    ClearEdgeOverride("LINE", "A", "B").apply(model)
+    assert model.edges == [blind_entry]
+
+    # Symmetrically, clearing the BLIND one now empties the overlay.
+    ClearEdgeOverride("BLIND", "A", "B").apply(model)
+    assert model.edges == []
+
+
+@pytest.mark.parametrize(
+    ("which", "attr", "value"),
+    [
+        ("line", "pipeline_line_mode", "FAST"),
+        ("blind", "pipeline_blind_mode", "GYRO_TSHAPE"),
+        ("turn", "pipeline_turn_mode", "COUNTER_ROT"),
+        ("direction", "pipeline_direction_mode", "DEFAULT"),
+    ],
+)
+def test_set_pipeline_mode_apply_revert_round_trip(
+    which: str, attr: str, value: str
+) -> None:
+    """TC14: SetPipelineMode for each of the four categories sets the matching
+    ``pipeline_<which>_mode`` attribute on apply and restores the prior value
+    (None by default) on revert."""
+    model = make_override_model()
+    assert getattr(model, attr) is None  # absent-by-default
+
+    cmd = SetPipelineMode(which, value)
+    cmd.apply(model)
+    assert getattr(model, attr) == value
+
+    cmd.revert(model)
+    assert getattr(model, attr) is None
+
+
+def test_set_pipeline_mode_clear_to_none_round_trip() -> None:
+    """TC14: SetPipelineMode with value=None clears a previously-set mode back to
+    inherit; revert restores the prior member name exactly."""
+    model = make_override_model()
+    SetPipelineMode("line", "FAST").apply(model)
+    assert model.pipeline_line_mode == "FAST"
+
+    clear = SetPipelineMode("line", None)
+    clear.apply(model)
+    assert model.pipeline_line_mode is None
+
+    clear.revert(model)
+    assert model.pipeline_line_mode == "FAST"
+
+
+def test_set_pipeline_mode_unknown_which_raises() -> None:
+    """TC14: an unrecognized ``which`` selector raises ValueError and leaves the
+    model untouched."""
+    model = make_override_model()
+    pre = repr(model.to_json_dict())
+
+    with pytest.raises(ValueError):
+        SetPipelineMode("bogus", "FAST").apply(model)
+
+    assert repr(model.to_json_dict()) == pre
+
+
+def test_set_field_wide_flag_apply_revert_round_trip() -> None:
+    """TC14: SetFieldWideFlag toggles ``blind_projection_auto_seek`` on apply and
+    restores the prior boolean on revert."""
+    model = make_override_model()
+    original = model.blind_projection_auto_seek  # defaults True
+
+    cmd = SetFieldWideFlag("blind_projection_auto_seek", not original)
+    cmd.apply(model)
+    assert model.blind_projection_auto_seek == (not original)
+
+    cmd.revert(model)
+    assert model.blind_projection_auto_seek == original
+
+
+def test_set_field_wide_flag_unknown_flag_raises() -> None:
+    """TC14: an unrecognized field-wide flag raises ValueError and leaves the
+    model untouched."""
+    model = make_override_model()
+    pre = repr(model.to_json_dict())
+
+    with pytest.raises(ValueError):
+        SetFieldWideFlag("not_a_flag", True).apply(model)
+
+    assert repr(model.to_json_dict()) == pre
+
+
+def test_set_field_dimensions_apply_revert_round_trip() -> None:
+    """TC14: SetFieldDimensions writes the new (width, height) pair on apply and
+    restores the captured prior pair on revert."""
+    model = make_override_model()
+    original = model.field_mm  # (3000, 2000)
+
+    cmd = SetFieldDimensions(2362.0, 1143.0)
+    cmd.apply(model)
+    assert model.field_mm == (2362.0, 1143.0)
+
+    cmd.revert(model)
+    assert model.field_mm == original
+
+
+def test_set_field_dimensions_non_positive_raises() -> None:
+    """TC14: a non-positive dimension raises ValueError and leaves the model
+    untouched (History treats it as a no-op)."""
+    model = make_override_model()
+    pre = repr(model.to_json_dict())
+
+    with pytest.raises(ValueError):
+        SetFieldDimensions(0.0, 1143.0).apply(model)
+    with pytest.raises(ValueError):
+        SetFieldDimensions(2362.0, -1.0).apply(model)
+
+    assert repr(model.to_json_dict()) == pre
+
+
+def test_issue79_commands_undo_redo_round_trip_through_history() -> None:
+    """TC14 (cont.): all five new commands round-trip cleanly through the real
+    History stack — apply each via do(), undo all, redo all, and the model
+    returns to (and re-reaches) the captured states at each step."""
+    model = make_override_model()
+    history = History()
+    original_json = model.to_json_dict()
+
+    states_after: list[dict] = []
+
+    history.do(SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST"), model)
+    states_after.append(model.to_json_dict())
+
+    history.do(SetEdgeOverride("BLIND", "B", "G", stop_at_line="on"), model)
+    states_after.append(model.to_json_dict())
+
+    history.do(ClearEdgeOverride("LINE", "A", "B"), model)
+    states_after.append(model.to_json_dict())
+
+    history.do(SetPipelineMode("blind", "GYRO_TSHAPE"), model)
+    states_after.append(model.to_json_dict())
+
+    history.do(SetFieldWideFlag("blind_projection_auto_seek", False), model)
+    states_after.append(model.to_json_dict())
+
+    history.do(SetFieldDimensions(2362.0, 1143.0), model)
+    states_after.append(model.to_json_dict())
+
+    # Undo all six — back to the original state.
+    for _ in range(len(states_after)):
+        assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+    assert history.can_undo is False
+
+    # Redo all six — each step re-reaches the captured intermediate state.
+    for step in range(len(states_after)):
+        assert history.redo(model) is True
+        assert model.to_json_dict() == states_after[step], (
+            f"redo step {step} diverged from the captured state"
+        )
+    assert history.can_redo is False
+
+
+# ---------------------------------------------------------------------------
+# TC21 — node rename cascades into model.edges (replaces the deleted
+# test_editor_app_renames.py assertions; pure model/command level here).
+# ---------------------------------------------------------------------------
+
+
+def test_rename_node_cascades_into_edges_forward_and_reverse() -> None:
+    """TC21: a RenameNode on a node carrying EDGES overrides rewrites the entry's
+    ``u`` / ``v`` for BOTH the forward (u == renamed) and reverse (v == renamed)
+    directed overrides, preserving each entry's ``(type, u, v)`` identity and all
+    other override keys; undo restores the original names.
+
+    This is the model-native replacement for the retired ``ast_rewrite`` EDGES
+    rewriter.
+    """
+    model = make_override_model()
+    # Forward override A -> B (A is renamed) and a reverse override B -> A
+    # (A appears as v).  A second BLIND override on B -> G (untouched by the
+    # rename) proves only matching endpoints move.
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "B", "v": "A", "direction": "rear"},
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+    ]
+    pre_rename_repr = repr(model.to_json_dict())
+
+    cmd = RenameNode("A", "AA")
+    cmd.apply(model)
+
+    # Forward entry: u rewritten A -> AA; type + primitive_mode preserved.
+    assert model.edges[0] == {
+        "type": "LINE",
+        "u": "AA",
+        "v": "B",
+        "primitive_mode": "FAST",
+    }
+    # Reverse entry: v rewritten A -> AA; type + direction preserved.
+    assert model.edges[1] == {
+        "type": "LINE",
+        "u": "B",
+        "v": "AA",
+        "direction": "rear",
+    }
+    # Untouched entry: neither endpoint was the renamed node.
+    assert model.edges[2] == {
+        "type": "BLIND",
+        "u": "B",
+        "v": "G",
+        "stop_at_line": "on",
+    }
+
+    # Undo restores every name exactly.
+    cmd.revert(model)
+    assert repr(model.to_json_dict()) == pre_rename_repr
+    assert model.edges[0]["u"] == "A"
+    assert model.edges[1]["v"] == "A"
+
+
+def test_rename_node_edges_cascade_does_not_alias_original_entries() -> None:
+    """TC21: the rename rebuilds each EDGES entry as a fresh dict, so a later
+    revert operates on the renamed copy — never mutating an aliased original.
+
+    Guards against an in-place ``entry["u"] = ...`` mutation that would corrupt
+    the captured pre-rename state and break undo.
+    """
+    model = make_override_model()
+    original_entry = {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    model.edges = [original_entry]
+
+    RenameNode("A", "AA").apply(model)
+
+    # The model's live entry is renamed...
+    assert model.edges[0]["u"] == "AA"
+    # ...but the dict object the test still holds is a DIFFERENT object that was
+    # not mutated in place (the command rebuilt the list with fresh dicts).
+    assert original_entry["u"] == "A"
+    assert model.edges[0] is not original_entry
+
+
+def test_rename_node_through_history_redo_keeps_edges_cascade() -> None:
+    """TC21: rename -> undo -> redo through History keeps the EDGES cascade in
+    lockstep (redo re-applies the u/v rewrite, undo reverts it)."""
+    model = make_override_model()
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    history = History()
+    original_json = model.to_json_dict()
+
+    history.do(RenameNode("A", "AA"), model)
+    renamed_json = model.to_json_dict()
+    assert model.edges[0]["u"] == "AA"
+
+    assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+    assert model.edges[0]["u"] == "A"
+
+    assert history.redo(model) is True
+    assert model.to_json_dict() == renamed_json
+    assert model.edges[0]["u"] == "AA"
