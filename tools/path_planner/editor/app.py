@@ -2002,7 +2002,7 @@ class EditorApp:
 
         Lets the operator immediately see the auto-filled wall / facing after a
         reset node is created. Guarded against panel internals being absent
-        (the section starts open by default, so this is usually a no-op).
+        (the section starts collapsed by default, so this expands it on demand).
         """
         collapsibles = getattr(self._panels, "_collapsibles", None)
         if not collapsibles:

@@ -675,7 +675,7 @@ class SidePanels(tk.Frame):
         self.on_show_shortcuts: Optional[Callable[[], None]] = None
 
         # ---- Tk variables (single source of truth for widget state) -----
-        self.mode_var = tk.StringVar(value=Mode.MOVE.value)
+        self.mode_var = tk.StringVar(value=Mode.SELECT.value)
         self._selected_node_var = tk.StringVar(value="")
         # The editable name entry binds to its OWN var, kept distinct from the
         # canonical ``_selected_node_var`` (which the coords / type / reset
@@ -1574,7 +1574,7 @@ class SidePanels(tk.Frame):
         :param master: Parent inspector column.
         """
         body = self._collapsible_section(
-            master, "reset_spec", _SECTION_RESET_TITLE, start_open=True
+            master, "reset_spec", _SECTION_RESET_TITLE, start_open=False
         )
 
         axis_row = self._themed_frame(body)
@@ -1646,7 +1646,7 @@ class SidePanels(tk.Frame):
         :param master: Parent inspector column.
         """
         body = self._collapsible_section(
-            master, "pivots", _SECTION_PIVOTS_TITLE, start_open=True
+            master, "pivots", _SECTION_PIVOTS_TITLE, start_open=False
         )
 
         # --- Scrollable list of existing pivot triples ---
@@ -1759,7 +1759,7 @@ class SidePanels(tk.Frame):
             master,
             "edge_overrides",
             _SECTION_EDGE_OVERRIDES_TITLE,
-            start_open=True,
+            start_open=False,
         )
         # The count badge label rides in the header alongside the title; the
         # collapsible helper owns the chevron + title, so the badge is packed
@@ -1958,7 +1958,7 @@ class SidePanels(tk.Frame):
             master,
             "pipeline_defaults",
             _SECTION_PIPELINE_DEFAULTS_TITLE,
-            start_open=True,
+            start_open=False,
         )
 
         # One labelled readonly combobox per pipeline category.  Capture
