@@ -63,6 +63,7 @@ from tools.path_planner.pipeline_config import (
     BlindMode,
     DirectionMode,
     LineMode,
+    StopAtLineMode,
     TurnMode,
 )
 
@@ -299,6 +300,18 @@ _OVERRIDE_DELETE_GLYPH: str = "✕"  # multiplication x as a delete glyph
 _OVERRIDE_ARROW: str = "->"
 # Empty-state hint shown when no overrides exist.
 _OVERRIDE_EMPTY_HINT: str = "no edge overrides"
+
+# Status message naming the one rejected primitive/stop combination (U2): a
+# ``primitive_mode`` of ``BlindMode.STOP_AT_LINE`` (a seek bundle) together with
+# ``stop_at_line='off'`` (force dead-reckon) directly contradict, so the inline
+# editor refuses the Save and leaves the form open for correction.  Mirrors the
+# validator's single anti-ambiguity gate (``validator._validate_edges_field``)
+# so the GUI and the Save-to-disk validator never disagree.
+_OVERRIDE_STOP_AT_LINE_CONFLICT_MSG: str = (
+    "STOP_AT_LINE seek conflicts with stop_at_line=off -- drop one: keep "
+    "STOP_AT_LINE (omit stop_at_line or set it on) to seek, or pick a "
+    "non-seeking primitive to dead-reckon."
+)
 
 # Default mode-display text before the app sets anything.
 _DEFAULT_MODE_TEXT: str = "Mode: --"
@@ -750,8 +763,9 @@ class SidePanels(tk.Frame):
         self._line_segment_pairs: set[frozenset[str]] = set()
         self._blind_segment_pairs: set[frozenset[str]] = set()
         # The override row frames keyed by their ``(type, u, v)`` identity, so
-        # the graft's :meth:`locate_override_row` can scroll to + highlight a row
-        # and a later refresh can clear stale highlights.  Rebuilt every refresh.
+        # the graft's :meth:`prefill_edit_row` can highlight an existing override's
+        # row and a later refresh can clear stale highlights.  Rebuilt every
+        # refresh.
         self._edge_override_row_frames: dict[
             tuple[str, str, str], tk.Frame
         ] = {}
@@ -777,6 +791,14 @@ class SidePanels(tk.Frame):
         # ``(width_cm, height_cm)`` once the first refresh runs; ``None``
         # until then.
         self._field_extent_cm: Optional[tuple[float, float]] = None
+
+        # The model's exact ``field_mm`` pair cached from the last refresh, kept
+        # at FULL precision (the FIELD_MM entries DISPLAY it rounded to integer
+        # millimetres via ``_FIELD_MM_FORMAT``).  The dimensions commit reads the
+        # un-edited dimension from here rather than its rounded display var, so
+        # editing only one dimension never truncates the other's sub-mm value
+        # (R6).  ``None`` until the first refresh seeds it.
+        self._field_mm: Optional[tuple[float, float]] = None
 
         # Re-entrancy guard: ``refresh`` writes to Tk variables, which would
         # otherwise re-fire user-callback bindings.  Setting this flag tells
@@ -2324,6 +2346,10 @@ class SidePanels(tk.Frame):
                 float(width_mm) / 10.0,
                 float(height_mm) / 10.0,
             )
+            # Cache the exact (full-precision) field_mm pair so the dimensions
+            # commit can carry forward the un-edited dimension's true value rather
+            # than the rounded display var (R6).
+            self._field_mm = (float(width_mm), float(height_mm))
 
             previously_selected = self._selected_node_var.get() or None
 
@@ -2829,7 +2855,7 @@ class SidePanels(tk.Frame):
         row shows ``u -> v  [TYPE]  <tag summary>`` with an edit (``e``) and
         delete (``x``) affordance, mirroring a pivot row.  The ``(type, u, v)``
         identity of each row is recorded in :attr:`_edge_override_row_frames` so
-        the graft's :meth:`locate_override_row` can scroll to + highlight it.
+        the graft's :meth:`prefill_edit_row` can highlight it.
 
         :param model: Source of truth for ``edges``.
         """
@@ -3061,44 +3087,6 @@ class SidePanels(tk.Frame):
     # ------------------------------------------------------------------
     # Edge-overrides graft methods (issue #79) -- invoked by the app (T8)
     # ------------------------------------------------------------------
-
-    def locate_override_row(
-        self, edge_type: str, u: str, v: str
-    ) -> bool:
-        """Scroll to + highlight the existing override row for ``(type, u, v)``.
-
-        The graft's panel side: when the operator clicks an existing edge in the
-        canvas Edge mode, the app calls this to surface that edge's override row
-        (if one exists).  Identity is the full ``(type, u, v)`` triple.  Draws
-        the TERRACOTTA selection ring (per the sidecar) and scrolls the row into
-        view; closes the inline editor first so a stale add/edit form does not
-        obscure the located row.
-
-        :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``).
-        :param u: The directed-pair source node name.
-        :param v: The directed-pair destination node name.
-        :return: ``True`` if a matching row was found + highlighted; ``False``
-            if no override row exists for that identity (the app then falls back
-            to :meth:`prefill_add_row`).
-        """
-        identity = (edge_type, u, v)
-        row = self._edge_override_row_frames.get(identity)
-        if row is None:
-            return False
-        self._hide_override_editor()
-        self._highlight_override_row(identity)
-        # Scroll the located row into view within the list canvas.
-        try:
-            self._edge_override_rows_frame.update_idletasks()
-            self._edge_override_canvas.configure(
-                scrollregion=self._edge_override_canvas.bbox("all")
-            )
-            row_top = row.winfo_y()
-            total = max(1, self._edge_override_rows_frame.winfo_height())
-            self._edge_override_canvas.yview_moveto(row_top / total)
-        except (tk.TclError, ZeroDivisionError):
-            pass
-        return True
 
     def prefill_add_row(self, edge_type: str, u: str, v: str) -> None:
         """Open the inline editor pre-filled from a clicked edge's ``u``/``v``.
@@ -3458,11 +3446,55 @@ class SidePanels(tk.Frame):
         stop_label = self._edge_override_stop_at_line_var.get()
         stop_at_line = None if stop_label == _INHERIT_LABEL else stop_label
 
+        # U2: reject the one contradiction -- primitive_mode = STOP_AT_LINE (a
+        # seek bundle) together with stop_at_line='off' (force dead-reckon).  The
+        # same predicate the validator's single anti-ambiguity gate uses, mirrored
+        # here for fast feedback so the GUI and the Save-to-disk validator agree.
+        # On a hit: name the contradiction in the status bar, do NOT dispatch, and
+        # leave the editor OPEN so the operator can correct one of the two fields.
+        if self._is_stop_at_line_conflict(primitive_mode, stop_at_line):
+            self._status_var.set(_OVERRIDE_STOP_AT_LINE_CONFLICT_MSG)
+            return
+
         if self.on_set_edge_override is not None:
             self.on_set_edge_override(
                 edge_type, u, v, primitive_mode, direction, stop_at_line
             )
         self._hide_override_editor()
+
+    @staticmethod
+    def _is_stop_at_line_conflict(
+        primitive_mode: Optional[str], stop_at_line: Optional[str]
+    ) -> bool:
+        """Return ``True`` for the rejected STOP_AT_LINE + ``stop_at_line='off'`` pair.
+
+        Mirrors the contradiction predicate in
+        :func:`tools.path_planner.validator._validate_edges_field`: a
+        ``primitive_mode`` resolving to :attr:`BlindMode.STOP_AT_LINE` together
+        with ``stop_at_line`` resolving to ``OFF``.  Both arguments arrive as the
+        inline editor's verbatim tag strings (or ``None`` for "inherit"), but the
+        check also accepts the enum forms so it stays identical to the validator's
+        predicate should a caller pass an enum instance.
+
+        :param primitive_mode: The override's ``primitive_mode`` tag / enum, or
+            ``None`` when the key is inherited.
+        :param stop_at_line: The override's ``stop_at_line`` tag / enum, or
+            ``None`` when the key is inherited.
+        :return: ``True`` iff the pair is the rejected contradiction.
+        """
+        primitive_is_stop_at_line = False
+        if isinstance(primitive_mode, BlindMode):
+            primitive_is_stop_at_line = primitive_mode == BlindMode.STOP_AT_LINE
+        elif isinstance(primitive_mode, str):
+            primitive_is_stop_at_line = (
+                primitive_mode == BlindMode.STOP_AT_LINE.name
+            )
+        stop_is_off = False
+        if isinstance(stop_at_line, StopAtLineMode):
+            stop_is_off = stop_at_line == StopAtLineMode.OFF
+        elif isinstance(stop_at_line, str):
+            stop_is_off = stop_at_line.lower() == "off"
+        return primitive_is_stop_at_line and stop_is_off
 
     def _handle_cancel_override(self) -> None:
         """Close the inline override editor without dispatching (Cancel)."""
@@ -3520,6 +3552,15 @@ class SidePanels(tk.Frame):
         non-positive value sets a status message and does NOT fire (mirrors the
         coordinate-entry commit pattern).
 
+        The two entries DISPLAY their dimension rounded to integer millimetres
+        (``_FIELD_MM_FORMAT``), so a dimension the operator did not touch reads
+        back as the rounded integer -- which would TRUNCATE any sub-mm value the
+        model holds for it.  To preserve precision, an un-edited dimension (its
+        entry still rounding to the cached ``field_mm`` value) is carried forward
+        from the cached full-precision ``model.field_mm`` rather than its rounded
+        display var, so editing only one dimension never alters the other's
+        stored value (R6).
+
         :param _event: Tk event (unused; the binding passes it).
         """
         if self._suppress_callbacks:
@@ -3542,8 +3583,42 @@ class SidePanels(tk.Frame):
         if height_mm <= 0.0:
             self._status_var.set("field height must be > 0")
             return
+        # Carry forward the un-edited dimension's exact stored value (R6): if an
+        # entry still rounds to the model's cached dimension (the integer the
+        # entry displays), the operator did not edit it, so use the cached
+        # full-precision value instead of the rounded readback -- this prevents a
+        # single-dimension edit from truncating the other dimension's sub-mm
+        # value.  A genuine edit differs at integer precision and is dispatched.
+        width_mm, height_mm = self._preserve_unedited_field_mm(width_mm, height_mm)
         if self.on_field_dimensions_change is not None:
             self.on_field_dimensions_change(width_mm, height_mm)
+
+    def _preserve_unedited_field_mm(
+        self, width_mm: float, height_mm: float
+    ) -> tuple[float, float]:
+        """Substitute the cached exact value for an un-edited FIELD_MM dimension.
+
+        For each of *width_mm* / *height_mm*, if the committed value rounds to the
+        same integer millimetre as the cached :attr:`_field_mm` dimension (the
+        integer the entry shows), the operator did not change it -- so the cached
+        full-precision value is returned in its place.  An edited dimension (one
+        that differs at the displayed integer precision) passes through verbatim.
+        With no cache yet (no refresh has run) both values pass through unchanged.
+
+        :param width_mm: The width parsed from the entry (rounded integer mm if
+            untouched).
+        :param height_mm: The height parsed from the entry.
+        :return: The ``(width_mm, height_mm)`` pair with any un-edited dimension
+            replaced by its cached exact value.
+        """
+        if self._field_mm is None:
+            return width_mm, height_mm
+        cached_w, cached_h = self._field_mm
+        if round(width_mm) == round(cached_w):
+            width_mm = cached_w
+        if round(height_mm) == round(cached_h):
+            height_mm = cached_h
+        return width_mm, height_mm
 
     def _handle_float_knob_commit(self, knob_name: str) -> None:
         """Parse a float-knob entry and fire :attr:`on_global_knob_change`.

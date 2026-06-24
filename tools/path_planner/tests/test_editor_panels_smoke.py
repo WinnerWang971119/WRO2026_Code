@@ -532,42 +532,45 @@ def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
 
 
 def test_side_panels_graft_methods_exist_with_signatures(side_panels):
-    """The graft methods ``locate_override_row`` / ``prefill_add_row`` exist as
+    """The graft methods ``prefill_edit_row`` / ``prefill_add_row`` exist as
     callables with the contracted ``(edge_type, u, v)`` signature.
 
-    The app (T8) calls these from the edge-mode click handler.  Pinning the
-    parameter names guards the seam: a renamed parameter would still be callable
-    positionally but documents intent drift, so the signature is asserted.
+    The app calls these from the edge-mode click handler (existing-override edges
+    route through ``prefill_edit_row``, fresh edges fall through to
+    ``prefill_add_row``).  Pinning the parameter names guards the seam: a renamed
+    parameter would still be callable positionally but documents intent drift, so
+    the signature is asserted.
     """
-    assert callable(side_panels.locate_override_row)
+    assert callable(side_panels.prefill_edit_row)
     assert callable(side_panels.prefill_add_row)
 
-    locate_params = list(
-        inspect.signature(side_panels.locate_override_row).parameters
+    edit_params = list(
+        inspect.signature(side_panels.prefill_edit_row).parameters
     )
     prefill_params = list(
         inspect.signature(side_panels.prefill_add_row).parameters
     )
     # ``self`` is bound on the instance method, so the visible params are the
     # three positional edge-identity arguments.
-    assert locate_params == ["edge_type", "u", "v"]
+    assert edit_params == ["edge_type", "u", "v"]
     assert prefill_params == ["edge_type", "u", "v"]
 
 
 def test_side_panels_graft_methods_survive_refresh(side_panels):
-    """``locate_override_row`` / ``prefill_add_row`` run cleanly after a refresh.
+    """``prefill_edit_row`` / ``prefill_add_row`` run cleanly after a refresh.
 
     Refreshing from a real model caches the overlay + segment pairs and rebuilds
     the override rows; both graft methods must then operate without raising.
-    ``locate_override_row`` returns ``False`` for an absent override (the app's
+    ``prefill_edit_row`` returns ``False`` for an absent override (the app's
     fall-through signal) and ``True`` once the override exists; ``prefill_add_row``
     opens the inline editor pre-filled from the clicked segment.
     """
     model = _load_model()
     side_panels.refresh(model)
 
-    # No override exists yet on the A -> B line segment -> locate returns False.
-    assert side_panels.locate_override_row("LINE", "A", "B") is False
+    # No override exists yet on the A -> B line segment -> edit returns False (the
+    # app's signal to fall through to the add-form).
+    assert side_panels.prefill_edit_row("LINE", "A", "B") is False
 
     # Pre-fill the add-row from the clicked segment: must not raise, and the
     # inline editor's u/v vars reflect the clicked pair with the derived type.
@@ -576,12 +579,12 @@ def test_side_panels_graft_methods_survive_refresh(side_panels):
     assert side_panels._edge_override_v_var.get() == "B"
     assert side_panels._edge_override_type_var.get() == "LINE"
 
-    # Author an override into the model, refresh, then locate must find its row.
+    # Author an override into the model, refresh, then edit must find + open it.
     model.edges = [
         {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
     ]
     side_panels.refresh(model)
-    assert side_panels.locate_override_row("LINE", "A", "B") is True
+    assert side_panels.prefill_edit_row("LINE", "A", "B") is True
 
 
 def test_side_panels_refresh_reflects_issue79_model_state(side_panels):

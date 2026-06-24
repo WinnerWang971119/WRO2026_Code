@@ -165,7 +165,7 @@ _EDGE_KIND_BLIND: str = "blind"
 #: TYPE tag the panel + the ``EDGES`` overlay use (``"LINE"`` / ``"BLIND"``).
 #: The edge-mode click graft derives the kind from the clicked segment, then
 #: translates it through this map before calling the panel's
-#: ``locate_override_row`` / ``prefill_add_row`` (which key on the type tag).
+#: ``prefill_edit_row`` / ``prefill_add_row`` (which key on the type tag).
 _EDGE_KIND_TO_TYPE_TAG: dict[str, str] = {
     _EDGE_KIND_LINE: "LINE",
     _EDGE_KIND_BLIND: "BLIND",
@@ -301,6 +301,17 @@ _STATUS_READY: str = "Ready."
 _STATUS_SAVED: str = "Saved field_data.json"
 _STATUS_BUILT: str = "Built routes.h + routes.cpp"
 _STATUS_BUILD_FAILED: str = "Build failed; see dialog for details."
+
+#: Status message naming a refused LINE edge incident to a reset node (U5). A
+#: reset node is reached by dead reckoning, so it is BLIND-incident only -- a
+#: LINE (line-follow) edge can never touch one (validator rejects it via
+#: ``_reject_line_follow_into_blind``). The ``{nodes}`` placeholder lists the
+#: reset endpoint(s); the operator must use ``B`` (blind) instead. A PROJECTION
+#: endpoint stays LINE-legal (ADR-046) and never reaches this message.
+_STATUS_LINE_INTO_RESET: str = (
+    "Cannot make a LINE edge incident to reset node {nodes}; a reset node is "
+    "reached by dead reckoning -- press B for a blind edge instead."
+)
 
 #: Path to the field JSON the Save handler writes. Save is pure-JSON now -- the
 #: EDGES table lives in the model and round-trips through this file, so there is
@@ -1571,9 +1582,18 @@ class EditorApp:
         pair for undo; ``_dispatch`` funnels it through history + refresh so the
         canvas re-sizes to the new aspect.
 
+        Skips the round-trip when ``(width_mm, height_mm)`` already equals
+        ``model.field_mm`` (R7) -- a bare ``<FocusOut>`` on an unchanged field
+        would otherwise dispatch a no-op ``SetFieldDimensions``, burning an undo
+        entry and dirtying the buffer (and the panel now carries the un-edited
+        dimension forward verbatim, so an untouched commit lands here byte-equal).
+        Mirrors the no-op guard in :meth:`_on_panel_global_knob_change`.
+
         :param width_mm: New field width in millimetres.
         :param height_mm: New field height in millimetres.
         """
+        if (width_mm, height_mm) == self._model.field_mm:
+            return
         self._dispatch(SetFieldDimensions(width_mm, height_mm))
 
     def _edge_exists(self, a: str, b: str) -> bool:
@@ -2312,6 +2332,27 @@ class EditorApp:
             AddBlindEdge(a, b), a, b, _EDGE_KIND_BLIND
         )
 
+    def _reset_endpoints(self, a: str, b: str) -> list[str]:
+        """Return the reset-typed nodes among ``(a, b)``, in click order.
+
+        Reads the node type straight off the model (``model.node_types``) and
+        keeps an endpoint only when its type is :data:`_NODE_TYPE_RESET`.  Used by
+        the U5 LINE-edge guard: a LINE edge incident to a reset node is illegal
+        (the validator rejects it), so the L-key handler refuses such a pair. A
+        PROJECTION (or plain line / blind) endpoint is never returned, so a
+        LINE->projection edge stays legal (ADR-046).
+
+        :param a: First picked node name (the directed source).
+        :param b: Second picked node name (the directed destination).
+        :return: The reset-typed endpoints, ``[]`` when neither is a reset node.
+        """
+        node_types = self._model.node_types
+        return [
+            name
+            for name in (a, b)
+            if node_types.get(name) == _NODE_TYPE_RESET
+        ]
+
     def _add_plain_edge_with_override(
         self, add_command, a: str, b: str, kind: str
     ) -> None:
@@ -2340,6 +2381,18 @@ class EditorApp:
         :param kind: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` -- shapes
             the override decision and the status text.
         """
+        # U5: a LINE edge can never be incident to a reset node -- a reset node is
+        # reached by dead reckoning (BLIND-incident only), so refuse the L key on a
+        # reset-incident pair with a status message and no dispatch (the operator
+        # must use B for blind). This mirrors the validator's LINE->reset rejection
+        # (_reject_line_follow_into_blind), keeping the GUI and the Save-to-disk
+        # validator in agreement. A PROJECTION endpoint stays LINE-legal (ADR-046).
+        if kind == _EDGE_KIND_LINE:
+            reset_endpoints = self._reset_endpoints(a, b)
+            if reset_endpoints:
+                names = ", ".join(repr(name) for name in reset_endpoints)
+                self._set_status(_STATUS_LINE_INTO_RESET.format(nodes=names))
+                return
         # Already the requested kind: a no-op the operator would otherwise hit as
         # the command's "already exists" error. Report it plainly and stop.
         if self._plain_edge_kind(a, b) == kind:
