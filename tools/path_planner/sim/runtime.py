@@ -234,6 +234,7 @@ from tools.path_planner.pipeline_config import (
     BlindMode,
     DirectionMode,
     LineMode,
+    PipelineConfig,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -967,20 +968,36 @@ def _resolve_override(
     return coerced
 
 
-def resolve_line_mode(edge) -> LineMode:
+def resolve_line_mode(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> LineMode:
     """Return the effective :class:`LineMode` for an EDGE_LINE traversal.
 
     :param edge: directed graph edge attribute mapping (e.g.
         ``graph.edges[u, v]``). May or may not carry ``primitive_mode``.
-    :return: the override if set (non-DEFAULT), else
-        ``PIPELINE_CONFIG.line``.
+    :param cfg: the resolved :class:`PipelineConfig` whose ``line`` field
+        supplies the inherit-on-DEFAULT fallback. Defaults to the module-level
+        :data:`PIPELINE_CONFIG` singleton so legacy callers (and the many
+        ``SimpleNamespace`` fixtures) keep working unchanged. ``compile_path``
+        and ``PathTrackerSim._walk_hops`` pass a
+        :meth:`PipelineConfig.from_field_data` result so a field-sourced
+        ``PIPELINE_LINE_MODE`` reaches the offline sim, not just the emitted
+        ``routes.cpp`` (R4: the sim must mirror the robot).
+    :return: the override if set (non-DEFAULT), else ``cfg.line``.
     """
-    return _resolve_override(edge, "primitive_mode", PIPELINE_CONFIG.line, LineMode)
+    return _resolve_override(edge, "primitive_mode", cfg.line, LineMode)
 
 
-def resolve_blind_mode(edge) -> BlindMode:
-    """Return the effective :class:`BlindMode` for an EDGE_BLIND traversal."""
-    return _resolve_override(edge, "primitive_mode", PIPELINE_CONFIG.blind, BlindMode)
+def resolve_blind_mode(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> BlindMode:
+    """Return the effective :class:`BlindMode` for an EDGE_BLIND traversal.
+
+    :param edge: directed graph edge attribute mapping. May or may not carry
+        ``primitive_mode``.
+    :param cfg: the resolved :class:`PipelineConfig` whose ``blind`` field
+        supplies the inherit-on-DEFAULT fallback. Defaults to the module-level
+        :data:`PIPELINE_CONFIG` singleton (see :func:`resolve_line_mode` for
+        why ``compile_path`` / ``_walk_hops`` thread a field-sourced config).
+    :return: the override if set (non-DEFAULT), else ``cfg.blind``.
+    """
+    return _resolve_override(edge, "primitive_mode", cfg.blind, BlindMode)
 
 
 def resolve_stop_at_line(
@@ -2189,13 +2206,26 @@ class PathTrackerSim:
 
     # -- mode resolution (instance-method passthroughs) ----------------------
 
-    def resolve_line_mode(self, edge) -> LineMode:
-        """See module-level :func:`resolve_line_mode`."""
-        return resolve_line_mode(edge)
+    def resolve_line_mode(
+        self, edge, cfg: PipelineConfig = PIPELINE_CONFIG
+    ) -> LineMode:
+        """See module-level :func:`resolve_line_mode`.
 
-    def resolve_blind_mode(self, edge) -> BlindMode:
-        """See module-level :func:`resolve_blind_mode`."""
-        return resolve_blind_mode(edge)
+        ``cfg`` defaults to the :data:`PIPELINE_CONFIG` singleton so existing
+        callers keep working; ``_walk_hops`` threads the field-sourced config
+        so the sim mirrors the robot's per-field pipeline default (R4).
+        """
+        return resolve_line_mode(edge, cfg)
+
+    def resolve_blind_mode(
+        self, edge, cfg: PipelineConfig = PIPELINE_CONFIG
+    ) -> BlindMode:
+        """See module-level :func:`resolve_blind_mode`.
+
+        ``cfg`` defaults to the :data:`PIPELINE_CONFIG` singleton; ``_walk_hops``
+        threads the field-sourced config (R4).
+        """
+        return resolve_blind_mode(edge, cfg)
 
     def find_pivot_turn(
         self, u: str, v: str, w: str
@@ -2306,6 +2336,16 @@ class PathTrackerSim:
             hop.
         :raises UnreachableGoalError: if any intermediate hop is unreachable.
         """
+        # R4: resolve the field-sourced pipeline defaults ONCE per walk and
+        # thread the same ``cfg`` through every direction / mode resolution so
+        # the sim mirrors the robot. A field-set ``PIPELINE_LINE_MODE`` /
+        # ``BLIND_MODE`` / ``DIRECTION_MODE`` reaches the emitted primitives
+        # here exactly as it reaches ``routes.cpp`` via ``header_writer``;
+        # ``from_field_data`` falls back to the ``PIPELINE_CONFIG`` singleton
+        # for a field that omits the keys, so the many ``SimpleNamespace``
+        # fixtures are byte-identical to the prior behaviour.
+        cfg = PipelineConfig.from_field_data(self._field_data)
+
         current = self._localization.current_node()
         while current != goal_name:
             nxt = self._next_hop[current][goal_name]
@@ -2338,7 +2378,7 @@ class PathTrackerSim:
 
             direction = resolve_direction(
                 edge_dir_override=_read_edge_dir_override(edge),
-                pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                pipeline_default=cfg.direction,
                 builder_arrival=arrival_direction,
                 builder_route=route_direction,
                 current_heading=self._chassis.heading_deg,
@@ -2429,7 +2469,7 @@ class PathTrackerSim:
                     goal_name,
                     inbound_body_heading=body_heading,
                     inbound_direction=direction,
-                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                    pipeline_default=cfg.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
                     bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
@@ -2444,7 +2484,7 @@ class PathTrackerSim:
                         else ACT_PROJECTION_REVERSE,
                         nxt,
                         effective_dist_cm,
-                        resolve_line_mode(edge),
+                        resolve_line_mode(edge, cfg),
                     )
                 else:
                     self._chassis.follow_line_to_distance(effective_dist_cm)
@@ -2523,7 +2563,7 @@ class PathTrackerSim:
 
                 if direction == Direction.REAR:
                     self._chassis.reverse(follow_cm)
-                    yield (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge))
+                    yield (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge, cfg))
                 else:
                     self._chassis.follow_line_to_intersection(follow_cm)
                     yield (ACT_FOLLOW_INT, None)
@@ -2545,7 +2585,7 @@ class PathTrackerSim:
                     goal_name,
                     inbound_body_heading=body_heading,
                     inbound_direction=direction,
-                    pipeline_default=_pipeline_config.PIPELINE_CONFIG.direction,
+                    pipeline_default=cfg.direction,
                     builder_route=route_direction,
                     builder_arrival=arrival_direction,
                     bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
@@ -2595,8 +2635,8 @@ class PathTrackerSim:
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
-                    resolve_blind_mode(edge),
-                    PIPELINE_CONFIG.blind,
+                    resolve_blind_mode(edge, cfg),
+                    cfg.blind,
                     direction,
                     LINE_BOARD_COUNT,
                     auto_rule_active,
@@ -2692,7 +2732,7 @@ class PathTrackerSim:
                     # ``_departing_pivot``.
                     self._chassis.reverse(distance_cm)
                     self._localization.on_intersection(nxt)
-                    yield (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge))
+                    yield (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge, cfg))
                 elif direction == Direction.FRONT:
                     # Dead-reckoned forward blind move (byte-identical to the
                     # pre-resolver FRONT non-STOP_AT_LINE output when no pivot
@@ -2715,7 +2755,7 @@ class PathTrackerSim:
                     effective_dist_cm = self._pivot_trim_distance(edge)
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge))
+                    yield (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge, cfg))
             else:    # pragma: no cover -- defensive only
                 raise ValueError(
                     f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"

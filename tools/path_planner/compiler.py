@@ -294,7 +294,7 @@ def compile_path(
     # the ACT_* primitive tags and ``normalize_turn`` from this module. We
     # only need direction-resolution machinery inside the loop, so deferring
     # the import here keeps the module-level graph clean.
-    from tools.path_planner.pipeline_config import PIPELINE_CONFIG
+    from tools.path_planner.pipeline_config import PipelineConfig
     from tools.path_planner.sim.runtime import (
         ACT_BLIND_REVERSE,
         ACT_LINE_REVERSE,
@@ -311,6 +311,15 @@ def compile_path(
         resolve_line_mode,
         resolve_stop_at_line,
     )
+
+    # R4: resolve the field-sourced pipeline defaults ONCE and thread the same
+    # ``cfg`` through every direction / line / blind resolution below, so a
+    # field-set ``PIPELINE_*_MODE`` reaches the compiled primitives exactly as
+    # it reaches the emitted ``routes.cpp`` (and the sim, which threads the
+    # identical config). ``from_field_data`` falls back to the
+    # ``PIPELINE_CONFIG`` singleton for a field that omits the keys, so the
+    # many ``SimpleNamespace`` fixtures stay byte-identical.
+    cfg = PipelineConfig.from_field_data(field_data)
 
     current_heading = start_heading_deg
     last_index = len(path) - 1
@@ -338,7 +347,7 @@ def compile_path(
 
         direction = resolve_direction(
             edge_dir_override=_read_edge_dir_override(edge),
-            pipeline_default=PIPELINE_CONFIG.direction,
+            pipeline_default=cfg.direction,
             builder_arrival=Direction.AUTO,
             builder_route=Direction.AUTO,
             current_heading=current_heading,
@@ -394,10 +403,10 @@ def compile_path(
                         ACT_PROJECTION_REVERSE,
                         v,
                         float(edge["distance_cm"]),
-                        resolve_line_mode(edge),
+                        resolve_line_mode(edge, cfg),
                     ))
                 else:
-                    out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge)))
+                    out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge, cfg)))
             elif edge_type == EDGE_BLIND:
                 # REAR blind is mode-sensitive via the unified resolver: a
                 # 2-board REAR STOP_AT_LINE hop seeks with the rear board and
@@ -412,8 +421,8 @@ def compile_path(
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
-                    resolve_blind_mode(edge),
-                    PIPELINE_CONFIG.blind,
+                    resolve_blind_mode(edge, cfg),
+                    cfg.blind,
                     direction,
                     LINE_BOARD_COUNT,
                     auto_rule_active,
@@ -423,14 +432,14 @@ def compile_path(
                         ACT_STOP_AT_LINE_REVERSE,
                         v,
                         float(edge["distance_cm"]),
-                        resolve_blind_mode(edge),
+                        resolve_blind_mode(edge, cfg),
                     ))
                 else:
                     out.append((
                         ACT_BLIND_REVERSE,
                         v,
                         float(edge["distance_cm"]),
-                        resolve_blind_mode(edge),
+                        resolve_blind_mode(edge, cfg),
                     ))
             else:
                 raise ValueError(
@@ -478,8 +487,8 @@ def compile_path(
                 seek, _motion_mode = resolve_stop_at_line(
                     StopAtLine.AUTO,
                     _read_edge_stop_at_line_override(edge),
-                    resolve_blind_mode(edge),
-                    PIPELINE_CONFIG.blind,
+                    resolve_blind_mode(edge, cfg),
+                    cfg.blind,
                     direction,
                     LINE_BOARD_COUNT,
                     auto_rule_active,
