@@ -67,6 +67,8 @@ public:
      * Must be a power of two for the wrap mask to work correctly.
      */
     static constexpr uint8_t MOCK_RING_CAPACITY = 16;
+    static_assert((MOCK_RING_CAPACITY & (MOCK_RING_CAPACITY - 1)) == 0,
+                  "MOCK_RING_CAPACITY must be a power of two for the & (CAP - 1) wrap mask");
 
     // -----------------------------------------------------------------------------------------
     // Production surface (called by Mission.cpp, Tasks.cpp, etc.)
