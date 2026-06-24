@@ -222,6 +222,20 @@ def _capture_module_attributes() -> dict[str, Any]:
     pivot_turns = getattr(module, "PIVOT_TURNS", None)
     if pivot_turns is not None:
         captured["pivot_turns"] = pivot_turns
+    # ``RESET_NODES`` is optional (absent / empty means no reset nodes). Capture
+    # it under its uppercase JSON key when non-empty so a reset-free migration
+    # omits the key entirely (dump_field_json drops absent optional keys).
+    reset_nodes = getattr(module, "RESET_NODES", None)
+    if reset_nodes:
+        captured["RESET_NODES"] = reset_nodes
+    # ``BLIND_PROJECTION_AUTO_SEEK`` is optional with a default of ``True``
+    # (absent == True). The JSON only carries it when explicitly ``False``
+    # (the loader comment: "emitted only when set to its non-default False").
+    # Capture the lowercase key only when the legacy module sets it to False
+    # so a default-True field round-trips without a spurious JSON key.
+    blind_proj_auto_seek = getattr(module, "BLIND_PROJECTION_AUTO_SEEK", None)
+    if blind_proj_auto_seek is False:
+        captured["blind_projection_auto_seek"] = False
     # A legacy Python ``EDGES`` literal (enum-instance overrides) is carried into
     # the JSON ``"EDGES"`` key as override-only string-tag dicts (ADR-047). An
     # empty list contributes nothing -- omit the key so a field with no overrides
@@ -398,6 +412,8 @@ def _build_rewritten_source(docstring: str) -> str:
         'BLIND_EDGES           = _data["BLIND_EDGES"]',
         'OBSTACLES             = _data["OBSTACLES"]',
         'PIVOT_TURNS           = _data.get("pivot_turns", [])',
+        'BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)',
+        'RESET_NODES           = _data.get("RESET_NODES", {})',
         'EDGES                 = _data.get("EDGES", [])',
         "",
     ]

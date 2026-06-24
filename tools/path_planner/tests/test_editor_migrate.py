@@ -555,3 +555,155 @@ def test_tc11_build_routes_byte_identical_graph_payload(
 
     Skipped -- see skip reason above for the full rationale.
     """
+
+
+# ---------------------------------------------------------------------------
+# TC11 (R3): migrate captures RESET_NODES + BLIND_PROJECTION_AUTO_SEEK and
+# re-exposes both in the regenerated module under the correct JSON key names.
+# ---------------------------------------------------------------------------
+
+
+def test_tc11_r3_migrate_captures_reset_nodes_and_blind_projection_auto_seek(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TC11 (R3): a legacy field_data.py defining RESET_NODES and
+    BLIND_PROJECTION_AUTO_SEEK=False migrates both attributes into the JSON
+    sidecar under the correct key names and re-exposes them in the rewritten
+    module.
+
+    Asserts:
+    - RESET_NODES reaches the JSON under key "RESET_NODES" (uppercase).
+    - BLIND_PROJECTION_AUTO_SEEK=False reaches the JSON under key
+      "blind_projection_auto_seek" (lowercase).
+    - Both keys appear in the correct canonical slot positions.
+    - The regenerated field_data.py re-exposes RESET_NODES and
+      BLIND_PROJECTION_AUTO_SEEK as module attributes with the correct values.
+    """
+    import json
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+
+    # Attach RESET_NODES and BLIND_PROJECTION_AUTO_SEEK to the synthetic module.
+    pre_module.RESET_NODES = {
+        "R1": {"axis": "x", "wall_coord": 0.0, "facing": 90.0},
+    }
+    pre_module.BLIND_PROJECTION_AUTO_SEEK = False
+
+    def _capture_with_reset_and_seek() -> dict[str, Any]:
+        captured = {attr: getattr(pre_module, attr) for attr in migrate._ATTRS_TO_CAPTURE}
+        # Mirror migrate._capture_module_attributes optional-key paths:
+        # RESET_NODES captured under "RESET_NODES" when non-empty.
+        if pre_module.RESET_NODES:
+            captured["RESET_NODES"] = pre_module.RESET_NODES
+        # BLIND_PROJECTION_AUTO_SEEK captured under "blind_projection_auto_seek"
+        # only when False (non-default; absent == True).
+        if pre_module.BLIND_PROJECTION_AUTO_SEEK is False:
+            captured["blind_projection_auto_seek"] = False
+        return captured
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    monkeypatch.setattr(migrate, "_capture_module_attributes", _capture_with_reset_and_seek)
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+
+    # RESET_NODES must be present under the uppercase key name.
+    assert "RESET_NODES" in written, (
+        "migration did not carry RESET_NODES into the JSON"
+    )
+    assert written["RESET_NODES"] == {
+        "R1": {"axis": "x", "wall_coord": 0.0, "facing": 90.0}
+    }
+
+    # BLIND_PROJECTION_AUTO_SEEK must be present under the lowercase key name.
+    assert "blind_projection_auto_seek" in written, (
+        "migration did not carry blind_projection_auto_seek into the JSON"
+    )
+    assert written["blind_projection_auto_seek"] is False
+
+    # Key ordering: RESET_NODES is between pivot_turns and blind_projection_auto_seek
+    # in the canonical schema order (BLIND_EDGES < pivot_turns < RESET_NODES <
+    # blind_projection_auto_seek < pipeline_* < EDGES < OBSTACLES).
+    keys = list(written.keys())
+    assert keys.index("BLIND_EDGES") < keys.index("RESET_NODES"), (
+        "RESET_NODES must appear after BLIND_EDGES in the JSON"
+    )
+    assert keys.index("RESET_NODES") < keys.index("OBSTACLES"), (
+        "RESET_NODES must appear before OBSTACLES in the JSON"
+    )
+    assert keys.index("blind_projection_auto_seek") < keys.index("OBSTACLES"), (
+        "blind_projection_auto_seek must appear before OBSTACLES in the JSON"
+    )
+
+    # The regenerated field_data.py must re-expose both attributes.
+    rewritten_source = pre_py.read_text(encoding="utf-8")
+    assert 'RESET_NODES           = _data.get("RESET_NODES", {})' in rewritten_source, (
+        "Rewritten field_data.py must re-expose RESET_NODES from the JSON"
+    )
+    assert 'BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)' in rewritten_source, (
+        "Rewritten field_data.py must re-expose BLIND_PROJECTION_AUTO_SEEK from the JSON"
+    )
+
+    # Load the rewritten module and verify both attributes come back correctly.
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.RESET_NODES == {"R1": {"axis": "x", "wall_coord": 0.0, "facing": 90.0}}
+    assert post_module.BLIND_PROJECTION_AUTO_SEEK is False
+
+
+def test_tc11_r3_migrate_omits_reset_nodes_and_seek_when_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TC11 (R3 control): a legacy field_data.py with empty RESET_NODES and
+    BLIND_PROJECTION_AUTO_SEEK=True (the defaults) does NOT emit those keys into
+    the JSON sidecar, and the regenerated module still exposes both attributes
+    with their default values.
+    """
+    import json
+
+    pre_py = _write_pre_migration_source(tmp_path)
+    json_path = tmp_path / "field_data.json"
+
+    pre_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    # Explicitly set defaults so the capture path is exercised.
+    pre_module.RESET_NODES = {}
+    pre_module.BLIND_PROJECTION_AUTO_SEEK = True
+
+    def _capture_with_defaults() -> dict[str, Any]:
+        captured = {attr: getattr(pre_module, attr) for attr in migrate._ATTRS_TO_CAPTURE}
+        if pre_module.RESET_NODES:
+            captured["RESET_NODES"] = pre_module.RESET_NODES
+        if pre_module.BLIND_PROJECTION_AUTO_SEEK is False:
+            captured["blind_projection_auto_seek"] = False
+        return captured
+
+    monkeypatch.setattr(migrate, "_FIELD_DATA_PY", pre_py)
+    monkeypatch.setattr(migrate, "_FIELD_DATA_JSON", json_path)
+    monkeypatch.setattr(migrate, "_capture_module_attributes", _capture_with_defaults)
+
+    assert migrate.run() == 0
+
+    written = json.loads(json_path.read_text(encoding="utf-8"))
+
+    # Neither optional key should appear when at default values.
+    assert "RESET_NODES" not in written, (
+        "RESET_NODES must be absent from the JSON when empty"
+    )
+    assert "blind_projection_auto_seek" not in written, (
+        "blind_projection_auto_seek must be absent from the JSON when True (default)"
+    )
+
+    # The rewritten module still re-exposes both with their default values.
+    rewritten_source = pre_py.read_text(encoding="utf-8")
+    assert 'RESET_NODES           = _data.get("RESET_NODES", {})' in rewritten_source
+    assert 'BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)' in rewritten_source
+
+    monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
+    post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
+    assert post_module.RESET_NODES == {}
+    assert post_module.BLIND_PROJECTION_AUTO_SEEK is True
