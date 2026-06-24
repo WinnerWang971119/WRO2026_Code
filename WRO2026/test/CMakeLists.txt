@@ -1122,3 +1122,77 @@ add_test(NAME imu_yaw_sign_zero_compile_fail
 )
 set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "IMU_YAW_SIGN must be exactly")
+
+# =========================================================================================
+# Test executable #20 — shared host-test mock HAL signature conformance (issue #105).
+#
+# `test_mock_hal` is the self-test for the unified `hal_mocks/` mock HAL — the one shared
+# `MiniR4` facade + full Drive-builder mock + `EventTrace` mock that the later epic-#107
+# issues (#106 PathTracker/Drive, #46 Phase 2 Mission) will host-link the REAL `.cpp`
+# against. This target proves the surface WITHOUT linking any heavy production `.cpp`:
+#
+#   - a never-run signature-conformance block in `test_mock_hal.cpp` writes every
+#     `Drive.` / `MiniR4.` / `EventTrace.` call expression grepped from the real
+#     `Drive.cpp` / `Mission.cpp` / `PathTracker.cpp`, so a missing or wrong-signature
+#     mock method is a COMPILE error (DCE runs post-typecheck);
+#   - live `TestAssert.h` cases exercise the control surface (fault set->observe, builder
+#     argument capture, `resetCounter` zeroes degrees, `pushEvent` ordered capture, reset).
+#
+# Only `hal_mocks/hal_mocks.cpp` is linked (the single definer of the `hal_mocks/`
+# globals `MiniR4` / `Drive` / `EventTrace` + the `<Arduino.h>` globals the target
+# odr-uses); NO production `.cpp` and NEVER `mocks/mocks.cpp`.
+#
+# Like `ctps_dump`, this is an INDEPENDENT include + force-include surface from the
+# LineFollower harness: `hal_mocks/` must come FIRST so the angle-bracket
+# `<MatrixMiniR4.h>` / `<Arduino.h>` resolve to the HAL mocks, and `${MOCKS_DIR}` is
+# DELIBERATELY OMITTED from this target's include path. That omission is the
+# ODR mutual-exclusion invariant: `mocks/Drive.h` and `hal_mocks/Drive.h` are two
+# different `class DriveClass` definitions sharing the `DRIVE_H` guard (likewise the two
+# facades), so no single target may have BOTH dirs reachable — pulling `mocks/` in would
+# double-define the facade / Drive surface. Mirror `ctps_dump`'s isolation exactly.
+# =========================================================================================
+set(HAL_MOCKS_DIR ${TEST_DIR}/hal_mocks)
+
+# -----------------------------------------------------------------------------------------
+# Force-include the QUOTE-included HAL mock headers BEFORE any source-file parsing — the same
+# load-bearing shadow trick as `add_ctps_mock_force_includes`, pointed at `hal_mocks/` and
+# using ABSOLUTE `${HAL_MOCKS_DIR}/` paths.
+#
+# ONLY the quote-included production headers need force-including: `hal_mocks/Drive.h`
+# (guard `DRIVE_H`) and `hal_mocks/EventTrace.h` (guard `EVENTTRACE_H`). The real
+# `Drive.h` / `EventTrace.h` sit next to `Drive.cpp` / `Mission.cpp` in `${SKETCH_DIR}`, so
+# a quote-include would otherwise resolve source-relative to the REAL header; force-including
+# the mock first makes the production header no-op (its guard is already defined) when it is
+# re-requested transitively.
+#
+# `MatrixMiniR4.h` / `Arduino.h` are ANGLE-bracket includes, so the `${HAL_MOCKS_DIR}`-first
+# include order alone picks the mock versions — no force-include needed for those two (exactly
+# like `add_ctps_mock_force_includes` force-includes Drive/PathTracker/EventTrace but NOT
+# MatrixMiniR4/Arduino).
+# -----------------------------------------------------------------------------------------
+function(add_hal_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${HAL_MOCKS_DIR}/Drive.h"
+            "/FI${HAL_MOCKS_DIR}/EventTrace.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build
+        # (`cannot specify -o with -c ... multiple files`).
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${HAL_MOCKS_DIR}/Drive.h"
+            "SHELL:-include ${HAL_MOCKS_DIR}/EventTrace.h"
+        )
+    endif()
+endfunction()
+
+add_executable(test_mock_hal
+    ${TEST_DIR}/test_mock_hal.cpp
+    ${HAL_MOCKS_DIR}/hal_mocks.cpp
+)
+# hal_mocks/ FIRST so <MatrixMiniR4.h>/<Arduino.h> resolve to the HAL mock; mocks/ is
+# DELIBERATELY OMITTED (ODR mutual-exclusion invariant — mirror ctps_dump's isolation).
+target_include_directories(test_mock_hal PRIVATE ${HAL_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+add_hal_force_includes(test_mock_hal)
+add_test(NAME mock_hal COMMAND test_mock_hal)

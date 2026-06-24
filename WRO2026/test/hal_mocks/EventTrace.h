@@ -111,8 +111,14 @@ public:
         }
 
         // Truncate to MAX_LINE_LEN - 1 usable characters, then NUL-terminate.
-        strncpy(_events[_head], msg, MAX_LINE_LEN - 1);
-        _events[_head][MAX_LINE_LEN - 1] = '\0';
+        // Bounded copy (portable, warning-free on MSVC /W3 and g++ -Wall -Wextra):
+        // copies at most MAX_LINE_LEN - 1 chars, stops early on the input NUL.
+        uint8_t i = 0;
+        for (; i < MAX_LINE_LEN - 1 && msg[i] != '\0'; ++i)
+        {
+            _events[_head][i] = msg[i];
+        }
+        _events[_head][i] = '\0';
 
         _head = static_cast<uint8_t>((_head + 1) & (MOCK_RING_CAPACITY - 1));
 

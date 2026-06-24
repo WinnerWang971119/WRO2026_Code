@@ -507,6 +507,7 @@ static void test_TC8_mockReset_clears_all_state()
 
     // --- EventTrace ---
 
+    EventTrace.mockReset();   // establish a clean ring regardless of prior test cases
     EventTrace.pushEvent("X");
     EventTrace.pushEvent("Y");
     ASSERT_EQ(EventTrace.mockCount(), (uint8_t) 2);
@@ -521,13 +522,10 @@ static void test_TC8_mockReset_clears_all_state()
 
 int main()
 {
-    // Reference the conformance function to prevent a "defined but not used" warning.
-    // Passing its address to a volatile sink is the idiomatic trick: the compiler sees
-    // a potential use (the sink is volatile-qualified so it can't be optimised away),
-    // yet the function itself is never called (the call would require the volatile
-    // pointer to be dereferenced and is never performed).
-    volatile void (*_conformance_ref)() = hal_signature_conformance;
-    (void) _conformance_ref;
+    // Reference the never-run conformance function so it is type-checked and not
+    // reported unused, without ever calling it. Taking its address counts as a use
+    // on MSVC (no C4505) and g++ (no -Wunused-function); the cast discards the value.
+    (void) &hal_signature_conformance;
 
     test_TC2_driveDC_move_capture();
     test_TC3_driveDC_isPrevTaskDone_testset();
