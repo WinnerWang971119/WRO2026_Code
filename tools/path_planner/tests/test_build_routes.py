@@ -182,27 +182,14 @@ def test_tc19_build_routes_is_deterministic_on_real_field(tmp_path) -> None:
     assert (out_a / "routes.cpp").read_bytes() == (out_b / "routes.cpp").read_bytes()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "TC19 dependency: T2 edited the hashed field_data.py, so the committed "
-        "WRO2026/routes.{h,cpp} Source SHA256 stamp is legitimately stale until "
-        "the orchestrator regenerates + commits routes in a later phase. This "
-        "check mirrors the CI `git diff --exit-code` freshness gate and flips to "
-        "PASS automatically once routes are regenerated (xfail strict=False). The "
-        "always-green determinism guarantee is "
-        "test_tc19_build_routes_is_deterministic_on_real_field."
-    ),
-)
 def test_tc19_committed_routes_match_a_fresh_regeneration(tmp_path) -> None:
     """TC19: the committed routes.{h,cpp} equal a fresh regeneration (freshness gate).
 
     Mirrors the CI `git diff --exit-code` check directly: regenerate routes into a
     temp dir from the real field and compare byte-for-byte against the committed
-    ``WRO2026/routes.{h,cpp}``. Currently xfail (see the marker): the committed
-    routes carry the pre-T2 Source-SHA stamp and are regenerated + committed by
-    the orchestrator in a later phase. Skips gracefully if the committed files are
-    absent so the suite stays green on a partial checkout.
+    ``WRO2026/routes.{h,cpp}``. The always-green determinism guarantee is
+    test_tc19_build_routes_is_deterministic_on_real_field. Skips gracefully if the
+    committed files are absent so the suite stays green on a partial checkout.
     """
     repo_root = Path(__file__).resolve().parents[3]
     committed_h = repo_root / "WRO2026" / "routes.h"
