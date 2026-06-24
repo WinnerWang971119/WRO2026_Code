@@ -57,6 +57,7 @@ from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from tools.path_planner.editor import theme
+from tools.path_planner.editor.commands import _find_override_index
 from tools.path_planner.editor.model import NODE_TYPE_VALUES, RESET_AXIS_VALUES
 from tools.path_planner.pipeline_config import (
     BlindMode,
@@ -240,9 +241,10 @@ _DIRECTION_VALUES: tuple[str, ...] = (_INHERIT_LABEL, "front", "rear")
 _STOP_AT_LINE_VALUES: tuple[str, ...] = (_INHERIT_LABEL, "on", "off")
 
 # ``PIPELINE DEFAULTS`` combobox vocabularies, single-sourced from the enums.
-# line / blind / turn may NOT be DEFAULT (mirrors PipelineConfig.__post_init__);
-# direction MAY be DEFAULT.  An empty leading value means "unset -> key absent"
-# so the planner falls back to the pipeline_config.py default.
+# NONE of the four categories offers ``DEFAULT``: the empty leading "unset"
+# sentinel is the single way to mean "inherit the pipeline_config.py default"
+# (== key absent), so a redundant ``DEFAULT`` member would be a second spelling
+# of the same intent and is excluded everywhere (R12).
 _PIPELINE_UNSET_LABEL: str = ""
 _PIPELINE_LINE_VALUES: tuple[str, ...] = (
     _PIPELINE_UNSET_LABEL,
@@ -258,7 +260,11 @@ _PIPELINE_TURN_VALUES: tuple[str, ...] = (
 )
 _PIPELINE_DIRECTION_VALUES: tuple[str, ...] = (
     _PIPELINE_UNSET_LABEL,
-    *(member.name for member in DirectionMode),
+    *(
+        member.name
+        for member in DirectionMode
+        if member is not DirectionMode.DEFAULT
+    ),
 )
 
 # The four pipeline-mode categories, as ``(which, label, values_tuple)`` triples
@@ -752,6 +758,19 @@ class SidePanels(tk.Frame):
         # The identity of the override row currently highlighted by the graft, so
         # the next highlight / refresh can clear the prior terracotta ring.
         self._highlighted_override_row: Optional[tuple[str, str, str]] = None
+        # Dirty-check signature of the override-list inputs as of the last
+        # rebuild: a deep snapshot of ``model.edges`` plus the two segment-pair
+        # sets.  :meth:`refresh` skips the (full-teardown) row rebuild when this
+        # is unchanged, so a node nudge / coord edit -- which never touches edges
+        # or segments -- does not needlessly destroy + re-create the whole widget
+        # tree (R11).  ``None`` until the first rebuild seeds it.
+        self._override_rows_signature: Optional[
+            tuple[
+                tuple[tuple[tuple[str, object], ...], ...],
+                frozenset[frozenset[str]],
+                frozenset[frozenset[str]],
+            ]
+        ] = None
 
         # Field bounds cached from refresh() so coord validation doesn't need
         # to round-trip through the app -> model on every keystroke.
@@ -2349,7 +2368,20 @@ class SidePanels(tk.Frame):
             self._blind_segment_pairs = {
                 frozenset(edge) for edge in model.blind_edges
             }
-            self._rebuild_edge_override_rows(model)
+            # Dirty-check (R11): the override-list widget tree depends ONLY on
+            # ``model.edges`` (the rows) and the line/blind segment-pair sets
+            # (which gate whether a pair is overridable).  A node nudge / coord
+            # edit leaves all three untouched, so a full row teardown + rebuild
+            # is wasted work -- skip it and PRESERVE ``_edge_override_row_frames``
+            # so the edge-mode graft (which reads it post-refresh) still resolves.
+            new_signature = (
+                self._edges_signature(model.edges),
+                frozenset(self._line_segment_pairs),
+                frozenset(self._blind_segment_pairs),
+            )
+            if new_signature != self._override_rows_signature:
+                self._rebuild_edge_override_rows(model)
+                self._override_rows_signature = new_signature
             for combo in (
                 self._edge_override_u_combo,
                 self._edge_override_v_combo,
@@ -2722,6 +2754,25 @@ class SidePanels(tk.Frame):
         return None
 
     @staticmethod
+    def _override_identity(entry: dict) -> tuple[str, str, str]:
+        """Return the ``(type, u, v)`` identity triple of an overlay *entry*.
+
+        The single place panels derives a row / dirty-snapshot key from an
+        overlay dict, mirroring the planner's directed-typed identity rule
+        (``commands._find_override_index``).  ``str``-coerces each component so a
+        legacy non-string value never produces a tuple a later string lookup
+        cannot match.
+
+        :param entry: An EDGES overlay dict ``{type, u, v, + optional keys}``.
+        :return: The ``(type, u, v)`` identity triple, each component a ``str``.
+        """
+        return (
+            str(entry.get("type", "")),
+            str(entry.get("u", "")),
+            str(entry.get("v", "")),
+        )
+
+    @staticmethod
     def _override_tag_summary(entry: dict) -> str:
         """Return the short ``<tag summary>`` shown in an override row.
 
@@ -2748,6 +2799,28 @@ class SidePanels(tk.Frame):
             parts.append(f"seek={stop_at_line}")
         return " ".join(parts)
 
+    @staticmethod
+    def _edges_signature(
+        edges: list[dict],
+    ) -> tuple[tuple[tuple[str, object], ...], ...]:
+        """Return a hashable, order-sensitive snapshot of an ``edges`` overlay.
+
+        Each overlay entry (a plain dict) becomes a tuple of its
+        ``(key, value)`` items sorted by key, so two refreshes whose
+        ``model.edges`` are content-equal (same entries, same order, same keys
+        and values) produce the SAME signature -- the basis for the dirty-check
+        that skips a needless full row-rebuild (R11).  Entry order is preserved
+        (a reordered overlay is a real change worth re-rendering); only
+        per-entry key order is normalised.
+
+        :param edges: The model's ``edges`` overlay list.
+        :return: A nested tuple usable as a comparison key.
+        """
+        return tuple(
+            tuple(sorted(entry.items(), key=lambda kv: kv[0]))
+            for entry in edges
+        )
+
     def _rebuild_edge_override_rows(self, model: "FieldModel") -> None:
         """Rebuild the edge-override list rows + count badge from ``model.edges``.
 
@@ -2768,10 +2841,8 @@ class SidePanels(tk.Frame):
 
         accent_fg = _theme_color("GHOST_BUTTON_FG_ACCENT", theme.TERRACOTTA)
         for entry in model.edges:
-            edge_type = str(entry.get("type", ""))
-            u = str(entry.get("u", ""))
-            v = str(entry.get("v", ""))
-            identity = (edge_type, u, v)
+            identity = self._override_identity(entry)
+            edge_type, u, v = identity
 
             row = self._themed_frame(self._edge_override_rows_frame)
             row.pack(side="top", fill="x")
@@ -2857,7 +2928,9 @@ class SidePanels(tk.Frame):
         Identity is the full ``(type, u, v)`` triple -- a directed pair is not
         unique across types -- so all three must match.  Reads the overlay cached
         on the last :meth:`refresh`; returns ``None`` before the first refresh or
-        when no entry matches.
+        when no entry matches.  The triple-match itself is delegated to the
+        single shared identity helper :func:`commands._find_override_index` so the
+        rule lives in exactly one place (R10).
 
         :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``).
         :param u: The directed-pair source node name.
@@ -2866,14 +2939,10 @@ class SidePanels(tk.Frame):
         """
         if self._edges_overlay is None:
             return None
-        for entry in self._edges_overlay:
-            if (
-                str(entry.get("type", "")) == edge_type
-                and str(entry.get("u", "")) == u
-                and str(entry.get("v", "")) == v
-            ):
-                return entry
-        return None
+        index = _find_override_index(self._edges_overlay, edge_type, u, v)
+        if index < 0:
+            return None
+        return self._edges_overlay[index]
 
     def _set_override_primitive_values(self, edge_type: str) -> None:
         """Switch the primitive-mode combobox VALUES for the derived edge type.
@@ -3054,6 +3123,41 @@ class SidePanels(tk.Frame):
         self._apply_derived_type_to_form(edge_type)
         self._set_override_form(None)
         self._show_override_editor()
+
+    def prefill_edit_row(self, edge_type: str, u: str, v: str) -> bool:
+        """Open the inline editor PRE-FILLED from an existing override, for edit.
+
+        The edge-mode graft's existing-override half (U1/U3): when the operator
+        clicks an edge that ALREADY carries an override, the app calls this to
+        OPEN the inline editor populated from that override -- the directed pair,
+        the derived (read-only) type, and the three override controls at their
+        authored tags -- so the operator can correct it in place.  Re-Saving
+        dispatches a fresh :attr:`on_set_edge_override` for the same identity (the
+        command replaces in place, keyed on ``(type, u, v)``), so editing never
+        creates a duplicate.  The matching row is highlighted so the operator sees
+        which override the editor is amending.
+
+        Reads the overlay cached on the last :meth:`refresh`; the app calls this
+        AFTER the refresh has rebuilt that cache, so the entry is current.
+
+        :param edge_type: The edge ``type`` (``"LINE"`` / ``"BLIND"``) derived
+            from the clicked segment by the app.
+        :param u: The directed-pair source node name.
+        :param v: The directed-pair destination node name.
+        :return: ``True`` if an override existed for ``(type, u, v)`` and the
+            editor was opened pre-filled for edit; ``False`` if no such override
+            exists (the app then falls back to :meth:`prefill_add_row`).
+        """
+        entry = self._find_override_entry(edge_type, u, v)
+        if entry is None:
+            return False
+        self._edge_override_u_var.set(u)
+        self._edge_override_v_var.set(v)
+        self._apply_derived_type_to_form(edge_type)
+        self._set_override_form(entry)
+        self._highlight_override_row((edge_type, u, v))
+        self._show_override_editor()
+        return True
 
     # ------------------------------------------------------------------
     # Widget event handlers -- forward to user callbacks, if assigned.

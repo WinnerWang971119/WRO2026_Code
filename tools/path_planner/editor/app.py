@@ -2038,31 +2038,45 @@ class EditorApp:
                 f"Edge endpoints: {a!r} -> {b!r} (current: {current}). "
                 f"Press L (line), B (blind), or Delete."
             )
+            # Refresh FIRST, THEN graft (U1/U3): ``_refresh_view`` -> the panel's
+            # ``refresh`` unconditionally hides the inline editor and (when the
+            # overlay changed) rebuilds the override rows, so a graft run BEFORE
+            # it would be torn straight back down -- the editor would flash open
+            # then shut.  Running the refresh first means the graft opens its
+            # editor / highlight against the freshly-rebuilt row set and survives.
+            self._refresh_view()
             # Edge-mode override graft (Direction A via the existing Edge mode):
             # if the picked pair is an existing line / blind segment, surface its
-            # override row -- locate + highlight an existing one, else pre-fill
-            # the add-row from the clicked segment -- so the operator can attach
-            # / inspect an override on the edge they just clicked.
+            # override -- OPEN the inline editor pre-filled from an existing one
+            # for edit, else pre-fill the add-form from the clicked segment -- so
+            # the operator can correct / attach an override on the clicked edge.
             self._graft_edge_override_panel(a, b)
         else:
             self._set_status(
                 f"Selected {hit!r}; click a second node to form an edge."
             )
-        self._refresh_view()
+            self._refresh_view()
 
     def _graft_edge_override_panel(self, a: str, b: str) -> None:
-        """Surface the override row for the clicked edge ``a -> b`` (the graft).
+        """Surface the override editor for the clicked edge ``a -> b`` (the graft).
 
         The panel side of the Direction-A graft, ridden off the existing Edge
         mode selection (no new canvas selection state). When the two-endpoint
         pick names an existing line / blind segment, the ``type`` is derived from
         that segment (the panel's overlays key on the full ``(type, u, v)``
-        triple): the app asks the panel to LOCATE + highlight that edge's
-        override row, and if no row exists it asks the panel to PRE-FILL the
-        add-row's ``u`` / ``v`` / ``type`` from the clicked segment. The directed
-        ``u -> v`` is taken in click order (``a`` then ``b``) -- the operator
-        authors per directed edge, so a reverse-direction override simply doesn't
-        match and falls through to the pre-fill on the clicked order.
+        triple): the app asks the panel to OPEN the inline editor PRE-FILLED from
+        that edge's existing override for edit, and if no override exists it asks
+        the panel to PRE-FILL the blank add-form's ``u`` / ``v`` / ``type`` from
+        the clicked segment instead. Either way the inline editor opens so the
+        operator can author / correct the override in one click (U1/U3). The
+        directed ``u -> v`` is taken in click order (``a`` then ``b``) -- the
+        operator authors per directed edge, so a reverse-direction override
+        simply doesn't match and falls through to the add-form on the clicked
+        order.
+
+        Called AFTER :meth:`_handle_edge_click` has already run
+        :meth:`_refresh_view`, so both panel methods operate against the
+        freshly-rebuilt overlay / row set and the opened editor survives.
 
         A pair that is not an existing segment (no line / blind edge) is a no-op
         here: there is nothing to attach an override to, so the operator uses
@@ -2076,7 +2090,7 @@ class EditorApp:
         if kind is None:
             return
         edge_type = _EDGE_KIND_TO_TYPE_TAG[kind]
-        if not self._panels.locate_override_row(edge_type, a, b):
+        if not self._panels.prefill_edit_row(edge_type, a, b):
             self._panels.prefill_add_row(edge_type, a, b)
 
     def _handle_obstacle_click(self, x: float, y: float) -> None:

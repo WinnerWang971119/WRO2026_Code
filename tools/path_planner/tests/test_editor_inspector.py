@@ -552,17 +552,18 @@ class _GraftPanelsSpy:
 
     Extends the inspector-handler surface of :class:`_PanelsSpy` with the two
     graft methods the app calls from the edge-mode click handler:
-    ``locate_override_row`` (whose return value the app branches on) and
-    ``prefill_add_row``.  ``locate_returns`` is the configurable bool the app
-    treats as "row found" (``True``) vs "no row -> pre-fill" (``False``).
+    ``prefill_edit_row`` (whose return value the app branches on) and
+    ``prefill_add_row``.  ``edit_returns`` is the configurable bool the app
+    treats as "existing override -> opened editor pre-filled for edit"
+    (``True``) vs "no override -> open the add-form" (``False``).
     """
 
-    def __init__(self, locate_returns: bool = False) -> None:
+    def __init__(self, edit_returns: bool = False) -> None:
         self.status_messages: list[str] = []
         self.refresh_count: int = 0
         self.validation_badges: list[bool] = []
-        self.locate_returns: bool = locate_returns
-        self.locate_calls: list[tuple[str, str, str]] = []
+        self.edit_returns: bool = edit_returns
+        self.edit_calls: list[tuple[str, str, str]] = []
         self.prefill_calls: list[tuple[str, str, str]] = []
 
     def set_status(self, text: str) -> None:
@@ -574,16 +575,16 @@ class _GraftPanelsSpy:
     def set_validation_badge(self, ok: bool) -> None:
         self.validation_badges.append(ok)
 
-    def locate_override_row(self, edge_type: str, u: str, v: str) -> bool:
-        self.locate_calls.append((edge_type, u, v))
-        return self.locate_returns
+    def prefill_edit_row(self, edge_type: str, u: str, v: str) -> bool:
+        self.edit_calls.append((edge_type, u, v))
+        return self.edit_returns
 
     def prefill_add_row(self, edge_type: str, u: str, v: str) -> None:
         self.prefill_calls.append((edge_type, u, v))
 
 
 def make_graft_app(
-    locate_returns: bool = False,
+    edit_returns: bool = False,
 ) -> tuple[EditorApp, _GraftPanelsSpy, FieldModel]:
     """Return a bare ``EditorApp`` wired for headless graft testing.
 
@@ -592,12 +593,13 @@ def make_graft_app(
     (it reads ``model.line_segments`` / ``model.blind_edges``); only the panel is
     a spy.
 
-    :param locate_returns: What the panel spy's ``locate_override_row`` returns
-        (the "row found" vs "pre-fill" branch the app takes).
+    :param edit_returns: What the panel spy's ``prefill_edit_row`` returns
+        (the "existing override -> edit" vs "no override -> add-form" branch the
+        app takes).
     :return: ``(app, panels_spy, model)``.
     """
     model = make_model()
-    panels = _GraftPanelsSpy(locate_returns=locate_returns)
+    panels = _GraftPanelsSpy(edit_returns=edit_returns)
 
     app = EditorApp.__new__(EditorApp)
     app._model = model
@@ -607,51 +609,52 @@ def make_graft_app(
 
 
 # ---------------------------------------------------------------------------
-# TC16 -- edge-mode click locates / pre-fills the override row
+# TC16 -- edge-mode click opens the editor pre-filled for edit / for add
 # ---------------------------------------------------------------------------
 
 
-def test_graft_locates_existing_override_row() -> None:
-    """TC16: clicking an existing edge whose override row EXISTS locates that row
-    (no pre-fill).
+def test_graft_opens_editor_for_existing_override() -> None:
+    """TC16: clicking an existing edge whose override EXISTS opens the inline
+    editor pre-filled for edit (no add-form).
 
-    The panel spy reports the row was found (``locate_returns=True``); the app
-    must call ``locate_override_row`` with the derived type + directed pair and
-    must NOT fall through to ``prefill_add_row``.
+    The panel spy reports the override was found and the editor opened
+    (``edit_returns=True``); the app must call ``prefill_edit_row`` with the
+    derived type + directed pair and must NOT fall through to ``prefill_add_row``.
     """
-    app, panels, model = make_graft_app(locate_returns=True)
+    app, panels, model = make_graft_app(edit_returns=True)
 
     # A--B is a LINE segment in the model; click order A then B -> directed A->B.
     app._graft_edge_override_panel("A", "B")
 
-    assert panels.locate_calls == [("LINE", "A", "B")]
-    assert panels.prefill_calls == [], "located row must NOT pre-fill"
+    assert panels.edit_calls == [("LINE", "A", "B")]
+    assert panels.prefill_calls == [], "opened edit form must NOT add-prefill"
 
 
 def test_graft_prefills_add_row_when_no_override_exists() -> None:
-    """TC16: clicking an existing edge with NO override row pre-fills the add-row's
-    u/v/derived-type from the clicked segment.
+    """TC16: clicking an existing edge with NO override opens the add-form
+    pre-filled with the clicked segment's u/v/derived-type.
 
-    The panel spy reports no row found (``locate_returns=False``); the app must
-    then call ``prefill_add_row`` with the same derived type + directed pair.
+    The panel spy reports no override found (``edit_returns=False``); the app
+    must then call ``prefill_add_row`` with the same derived type + directed
+    pair.
     """
-    app, panels, model = make_graft_app(locate_returns=False)
+    app, panels, model = make_graft_app(edit_returns=False)
 
     app._graft_edge_override_panel("A", "B")
 
-    assert panels.locate_calls == [("LINE", "A", "B")]
+    assert panels.edit_calls == [("LINE", "A", "B")]
     assert panels.prefill_calls == [("LINE", "A", "B")]
 
 
 def test_graft_derives_blind_type_from_blind_segment() -> None:
     """TC16: the derived type follows the clicked segment's kind -- a BLIND
     segment derives the ``"BLIND"`` type tag, not ``"LINE"``."""
-    app, panels, model = make_graft_app(locate_returns=False)
+    app, panels, model = make_graft_app(edit_returns=False)
 
     # B--G is a BLIND edge in the model; click order B then G -> directed B->G.
     app._graft_edge_override_panel("B", "G")
 
-    assert panels.locate_calls == [("BLIND", "B", "G")]
+    assert panels.edit_calls == [("BLIND", "B", "G")]
     assert panels.prefill_calls == [("BLIND", "B", "G")]
 
 
@@ -659,14 +662,14 @@ def test_graft_is_noop_on_pair_with_no_segment() -> None:
     """TC16: clicking a pair that is NOT an existing line / blind segment is a
     no-op -- there is nothing to attach an override to, so neither graft method
     fires (the operator must create the segment first)."""
-    app, panels, model = make_graft_app(locate_returns=False)
+    app, panels, model = make_graft_app(edit_returns=False)
 
     # A--G is not a segment (A--B and B--G are); the derive returns None.
     assert app._plain_edge_kind("A", "G") is None
 
     app._graft_edge_override_panel("A", "G")
 
-    assert panels.locate_calls == []
+    assert panels.edit_calls == []
     assert panels.prefill_calls == []
 
 
@@ -675,12 +678,12 @@ def test_graft_directed_order_follows_click_order() -> None:
     the undirected A--B segment derives the reverse-direction ``B -> A`` identity
     (the operator authors per directed edge; a reverse override simply doesn't
     match the forward row)."""
-    app, panels, model = make_graft_app(locate_returns=False)
+    app, panels, model = make_graft_app(edit_returns=False)
 
     # Undirected A--B segment, clicked B then A -> directed B->A.
     app._graft_edge_override_panel("B", "A")
 
-    assert panels.locate_calls == [("LINE", "B", "A")]
+    assert panels.edit_calls == [("LINE", "B", "A")]
     assert panels.prefill_calls == [("LINE", "B", "A")]
 
 

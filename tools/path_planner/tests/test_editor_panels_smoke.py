@@ -497,10 +497,12 @@ def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
     """The PIPELINE DEFAULTS comboboxes offer the right tag vocabulary.
 
     Single-sourced from the ``pipeline_config`` enums so a future enum change
-    cannot silently desync this guard (per the executor note): line / blind /
-    turn must NOT offer ``DEFAULT`` (mirrors ``PipelineConfig.__post_init__``),
-    while direction MAY.  Every category leads with the empty "unset" sentinel
-    (key absent -> inherit the pipeline_config.py default).
+    cannot silently desync this guard (per the executor note): NONE of the four
+    categories offers ``DEFAULT`` -- the empty "unset" sentinel is the single way
+    to mean "inherit the pipeline_config.py default" (== key absent), so a
+    redundant ``DEFAULT`` member would be a second spelling of the same intent
+    and is excluded everywhere (R12; direction joined line/blind/turn here).
+    Every category leads with that empty unset sentinel.
     """
     combos = side_panels._pipeline_mode_combos
 
@@ -517,21 +519,16 @@ def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
         assert values[0] == "", f"{which}: unset sentinel must lead the values"
 
         offered = set(values[1:])
-        if which == "direction":
-            # DEFAULT is a legal direction default, so it IS offered.
-            assert {member.name for member in DirectionMode} == offered
-            assert DirectionMode.DEFAULT.name in offered
-        else:
-            # line / blind / turn must exclude DEFAULT (== absence/inherit).
-            expected = {
-                member.name
-                for member in enum_cls
-                if member is not enum_cls.DEFAULT
-            }
-            assert offered == expected, f"{which}: tag vocabulary mismatch"
-            assert enum_cls.DEFAULT.name not in offered, (
-                f"{which} must not offer DEFAULT"
-            )
+        # Every category -- direction included -- excludes DEFAULT (== inherit).
+        expected = {
+            member.name
+            for member in enum_cls
+            if member is not enum_cls.DEFAULT
+        }
+        assert offered == expected, f"{which}: tag vocabulary mismatch"
+        assert enum_cls.DEFAULT.name not in offered, (
+            f"{which} must not offer DEFAULT"
+        )
 
 
 def test_side_panels_graft_methods_exist_with_signatures(side_panels):
