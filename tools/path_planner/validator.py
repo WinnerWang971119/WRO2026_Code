@@ -92,6 +92,16 @@ _PROJECTION_NODE_TYPE = "projection"
 # edge (a junction must sit on a line edge).
 _LINE_NODE_TYPE = "line"
 
+# The wall-zero re-anchor node kind: the chassis dead-reckons up to it, then
+# square-turns and presses a known wall to re-localize. Like a ``blind`` node it
+# carries no line under the sensor (the wall press happens off the line
+# backbone), so a LINE (line-follow) edge can never be incident to one -- a reset
+# node must be reached by a BLIND edge (see :func:`_reject_line_follow_into_blind`,
+# which rejects both blind and reset endpoints). A LINE edge into a PROJECTION
+# node stays LEGAL (ADR-046); only blind and reset are off-line. Mirrors
+# ``planner.NODE_TYPE_RESET``.
+_RESET_NODE_TYPE = "reset"
+
 # Inclusive upper bound on BLIND_DECAY_EXPONENT. The decay weight is
 # ``length * (1 + k * (d / d_ref) ** exponent)``; with no ceiling a fat-fingered
 # exponent (e.g. 400) makes ``(d / d_ref) ** exponent`` overflow to an uncaught
@@ -910,6 +920,19 @@ def _validate_edges_field(field_data) -> None:
     A *matching*-type entry on an existing pair is a legitimate override
     layer and is accepted.
 
+    An :data:`EDGE_LINE` override incident to a ``"blind"`` or ``"reset"``
+    node is rejected (via :func:`_reject_line_follow_into_blind`): neither
+    carries a line under the sensor, so a line-follow hop cannot reach it
+    (ADR-046 / ADR-048). A LINE edge into a ``"projection"`` node stays
+    legal -- the line passes through it (issue #64).
+
+    A per-entry contradiction is rejected (U2 / ADR-048): an entry whose
+    ``primitive_mode`` resolves to :attr:`BlindMode.STOP_AT_LINE` (the seek
+    bundle) together with ``stop_at_line`` of ``OFF`` (force dead-reckon).
+    The two directly oppose; the resolver would silently let OFF win and
+    dead-reckon an edge the author asked to stop on. Only this one
+    primitive/stop combination is rejected.
+
     Single-wheel pivots are no longer authored here. The old per-edge
     ``pivot`` / ``pre_turn_mode`` keys are gone; pivots are per-turn
     triples validated by :func:`_validate_pivot_turns`, which runs after
@@ -1053,11 +1076,13 @@ def _validate_edges_field(field_data) -> None:
             )
 
         # A LINE override is a line-follow edge; like a LINE_SEGMENTS pair it
-        # cannot be incident to a blind node (no line under the sensor), which
-        # also keeps the planner's blind-decay fallback correct-by-construction
-        # (ADR-041). A LINE edge into a PROJECTION node is LEGAL -- the line
-        # passes through the projection node, the hop is just distance-terminated
-        # (issue #64) -- so only a BLIND destination is rejected here.
+        # cannot be incident to a blind OR a reset node (neither carries a line
+        # under the sensor), which also keeps the planner's blind-decay fallback
+        # correct-by-construction (ADR-041) and a reset node honest as a
+        # line-backbone anchor (ADR-048). A LINE edge into a PROJECTION node is
+        # LEGAL -- the line passes through the projection node, the hop is just
+        # distance-terminated (issue #64 / ADR-046) -- so only a BLIND or RESET
+        # destination is rejected here (both handled by the one helper).
         if edge_type == EDGE_LINE:
             _reject_line_follow_into_blind(
                 u, v, edge_type, node_types, f"EDGES[{i}]"
@@ -1221,6 +1246,47 @@ def _validate_edges_field(field_data) -> None:
                     "(DEFAULT, ON, OFF), the string 'on' / 'off' "
                     f"(case-insensitive), or absent; got {stop_at_line!r}"
                 )
+
+        # Contradiction: STOP_AT_LINE primitive + stop_at_line='off' (U2) ----
+        # A ``primitive_mode`` of ``BlindMode.STOP_AT_LINE`` says "seek the line
+        # near the endpoint and re-anchor on it", while ``stop_at_line: OFF`` says
+        # "force dead-reckon, do NOT seek". Authored together on one edge the two
+        # directly contradict: the motion bundle asks for the seek the per-edge
+        # override forbids. The resolver (sim/firmware) would silently let the OFF
+        # override win, dead-reckoning an edge the author asked to stop on -- a
+        # quiet behavior the author did not intend. Reject it here (the single
+        # anti-ambiguity gate, ADR-029) so the contradiction fails loud at author
+        # time. This is the ONLY primitive/stop combination rejected; every other
+        # pairing (e.g. STOP_AT_LINE + ON, SYNC_TSHAPE + OFF) stays legal. Both
+        # fields are already shape-validated above, so a resolve here is safe: a
+        # STOP_AT_LINE tag is a BlindMode member name or instance (legal only on a
+        # BLIND edge), and an OFF stop is the StopAtLineMode.OFF member or the
+        # case-insensitive string "off".
+        primitive_is_stop_at_line = False
+        if "primitive_mode" in entry:
+            pm = entry["primitive_mode"]
+            if isinstance(pm, BlindMode):
+                primitive_is_stop_at_line = pm == BlindMode.STOP_AT_LINE
+            elif isinstance(pm, str):
+                primitive_is_stop_at_line = pm == BlindMode.STOP_AT_LINE.name
+        stop_is_off = False
+        if "stop_at_line" in entry:
+            sal = entry["stop_at_line"]
+            if isinstance(sal, StopAtLineMode):
+                stop_is_off = sal == StopAtLineMode.OFF
+            elif isinstance(sal, str):
+                stop_is_off = sal.lower() == "off"
+        if primitive_is_stop_at_line and stop_is_off:
+            raise FieldDataError(
+                f"EDGES[{i}] ('{u}','{v}') sets primitive_mode = "
+                "BlindMode.STOP_AT_LINE together with stop_at_line='off' -- a "
+                "contradiction: STOP_AT_LINE commands the edge to seek the line "
+                "and re-anchor, while stop_at_line='off' forces dead-reckon (no "
+                "seek). Drop one of the two: keep STOP_AT_LINE (and omit "
+                "stop_at_line, or set it ON) to seek, or keep stop_at_line='off' "
+                "(and pick a non-seeking BlindMode such as SYNC_TSHAPE) to "
+                "dead-reckon."
+            )
 
 
 def _line_and_blind_incident_nodes(field_data) -> Tuple[set, set]:
@@ -1577,14 +1643,17 @@ def validate_blind_decay_domain(
 def _reject_line_follow_into_blind(
     u: str, v: str, edge_kind: str, node_types: dict, where: str
 ) -> None:
-    """Reject a line-follow edge that needs a line where a node has none.
+    """Reject a line-follow edge incident to an off-line (blind / reset) node.
 
     A ``LINE`` edge follows a line for its whole length, so *neither* endpoint
-    may be typed ``"blind"`` (there is no line under the sensor at a blind node).
-    A ``"projection"`` destination is LEGAL: the line passes through a projection
-    node (longitudinally detectable as a crossing), so a LINE hop can follow into
-    it -- the hop is just distance-terminated, not junction-terminated (issue
-    #64). Only a ``"blind"`` endpoint is rejected.
+    may be typed ``"blind"`` (there is no line under the sensor at a blind node)
+    or ``"reset"`` (a wall-zero re-anchor node is reached by dead reckoning and
+    presses a wall off the line backbone -- it carries no line under the sensor
+    either, exactly like a blind node). A ``"projection"`` destination stays
+    LEGAL: the line passes through a projection node (longitudinally detectable
+    as a crossing), so a LINE hop can follow into it -- the hop is just
+    distance-terminated, not junction-terminated (issue #64 / ADR-046). Only a
+    ``"blind"`` or ``"reset"`` endpoint is rejected.
 
     Beyond being physically impossible, a line-follow edge that *terminates on* a
     blind node breaks the planner's blind-decay model (ADR-041): a blind pocket
@@ -1592,8 +1661,11 @@ def _reject_line_follow_into_blind(
     blind-distance search, so its interior blind hops get ``d == inf`` and the
     ``inf -> factor 1`` fallback prices the deepest-drift hops the *cheapest* --
     silently, because the disconnected-node warning never fires (the node is
-    reachable in the full graph). A blind pocket must therefore be entered by a
-    BLIND edge, never a line-follow seam.
+    reachable in the full graph). A reset node is a blind-decay anchor
+    (``planner._ANCHOR_NODE_TYPES`` is ``{line, reset}``): reaching it by a
+    line-follow seam would make it advertise itself as a line-backbone anchor it
+    is not. A blind / reset node must therefore be entered by a BLIND edge, never
+    a line-follow seam (ADR-046 / ADR-048).
 
     :param u: the edge tail node name.
     :param v: the edge head node name.
@@ -1601,7 +1673,8 @@ def _reject_line_follow_into_blind(
     :param node_types: the validated ``NODE_TYPES`` map.
     :param where: a key-path label for the message (e.g. ``"LINE_SEGMENTS"`` or
         ``"EDGES[3]"``).
-    :raises FieldDataError: when either endpoint is typed ``"blind"``.
+    :raises FieldDataError: when either endpoint is typed ``"blind"`` or
+        ``"reset"``.
     """
     for endpoint in (u, v):
         if node_types.get(endpoint) == _BLIND_NODE_TYPE:
@@ -1611,6 +1684,16 @@ def _reject_line_follow_into_blind(
                 "line under the sensor, so a blind node must be reached by a "
                 "BLIND edge (in BLIND_EDGES), not a LINE edge. Re-type the node "
                 "in NODE_TYPES or move the pair to BLIND_EDGES."
+            )
+        if node_types.get(endpoint) == _RESET_NODE_TYPE:
+            raise FieldDataError(
+                f"{where} ('{u}','{v}') is a {edge_kind} (line-follow) edge "
+                f"incident to reset node '{endpoint}' -- a wall-zero reset node "
+                "is reached by dead reckoning and presses a wall off the line "
+                "backbone, so it carries no line under the sensor (like a blind "
+                "node). A reset node must be reached by a BLIND edge (in "
+                "BLIND_EDGES), not a LINE edge (ADR-046 / ADR-048). Re-type the "
+                "node in NODE_TYPES or move the pair to BLIND_EDGES."
             )
 
 
@@ -1702,17 +1785,23 @@ def _validate_pipeline_config(field_data) -> None:
         TurnMode,
     )
 
-    # (attr, EnumCls, enum-class-name, DEFAULT-allowed?). line/blind/turn reject
-    # DEFAULT; direction allows it -- byte-for-byte the PipelineConfig.__post_init__
-    # split (its _CATEGORY_FIELDS is line/blind/turn; direction is exempt).
+    # (attr, EnumCls, enum-class-name, DEFAULT-allowed?, singleton-field-name).
+    # line/blind/turn reject DEFAULT; direction allows it -- byte-for-byte the
+    # PipelineConfig.__post_init__ split (its _CATEGORY_FIELDS is line/blind/turn;
+    # direction is exempt). The 5th element is the actual PipelineConfig singleton
+    # field name (``line`` / ``blind`` / ``turn`` / ``direction``, matching
+    # PipelineConfig.from_field_data's ``_SPECS`` ctor field), interpolated into
+    # the DEFAULT-rejection messages so they name the real field. It is NOT
+    # ``enum_name.lower()`` -- ``"LineMode".lower()`` is ``"linemode"``, which
+    # names no field on PIPELINE_CONFIG (R8).
     pipeline_specs = (
-        ("PIPELINE_LINE_MODE", LineMode, "LineMode", False),
-        ("PIPELINE_BLIND_MODE", BlindMode, "BlindMode", False),
-        ("PIPELINE_TURN_MODE", TurnMode, "TurnMode", False),
-        ("PIPELINE_DIRECTION_MODE", DirectionMode, "DirectionMode", True),
+        ("PIPELINE_LINE_MODE", LineMode, "LineMode", False, "line"),
+        ("PIPELINE_BLIND_MODE", BlindMode, "BlindMode", False, "blind"),
+        ("PIPELINE_TURN_MODE", TurnMode, "TurnMode", False, "turn"),
+        ("PIPELINE_DIRECTION_MODE", DirectionMode, "DirectionMode", True, "direction"),
     )
 
-    for attr, enum_cls, enum_name, default_allowed in pipeline_specs:
+    for attr, enum_cls, enum_name, default_allowed, config_field in pipeline_specs:
         value = getattr(field_data, attr, None)
         if value is None:
             continue  # absent -> inherit pipeline_config.py default at emit.
@@ -1726,7 +1815,7 @@ def _validate_pipeline_config(field_data) -> None:
                 if not default_allowed:
                     raise FieldDataError(
                         f"{attr} = 'DEFAULT' -- {enum_name}.DEFAULT means "
-                        f"'inherit PIPELINE_CONFIG.{enum_name.lower()}', which "
+                        f"'inherit PIPELINE_CONFIG.{config_field}', which "
                         "is circular when set as the pipeline default itself; "
                         "omit the key (to inherit the pipeline_config.py "
                         f"default) or pick a concrete {enum_name} tag"
@@ -1748,7 +1837,7 @@ def _validate_pipeline_config(field_data) -> None:
             if resolved == enum_cls.DEFAULT and not default_allowed:
                 raise FieldDataError(
                     f"{attr} = {value!r} resolves to {enum_name}.DEFAULT -- "
-                    f"DEFAULT means 'inherit PIPELINE_CONFIG.{enum_name.lower()}', "
+                    f"DEFAULT means 'inherit PIPELINE_CONFIG.{config_field}', "
                     "which is circular when set as the pipeline default itself; "
                     f"omit the key or pick a concrete {enum_name} tag"
                 )
@@ -1756,7 +1845,7 @@ def _validate_pipeline_config(field_data) -> None:
             if value == enum_cls.DEFAULT and not default_allowed:
                 raise FieldDataError(
                     f"{attr} = {enum_name}.DEFAULT -- DEFAULT means 'inherit "
-                    f"PIPELINE_CONFIG.{enum_name.lower()}', which is circular "
+                    f"PIPELINE_CONFIG.{config_field}', which is circular "
                     "when set as the pipeline default itself; omit the key or "
                     f"pick a concrete {enum_name} tag"
                 )
@@ -1864,11 +1953,12 @@ def validate(field_data) -> None:
     _validate_edge_list(line_segments, nodes, "LINE_SEGMENTS")
 
     # 4b. A LINE_SEGMENTS edge is a line-follow segment, so neither endpoint may
-    # be a blind node (you cannot line-follow to a node with no line). This also
-    # keeps the planner's blind-decay inf->factor-1 fallback correct-by-
+    # be a blind OR a reset node (you cannot line-follow to a node with no line;
+    # a reset node presses a wall off the line backbone, like a blind node). This
+    # also keeps the planner's blind-decay inf->factor-1 fallback correct-by-
     # construction -- a blind pocket must be entered by a BLIND edge, never a
-    # line-follow seam (ADR-041). Runs after NODE_TYPES (pass 3) so the typing is
-    # validated.
+    # line-follow seam (ADR-041) -- and a reset node honest as a line-backbone
+    # anchor (ADR-048). Runs after NODE_TYPES (pass 3) so the typing is validated.
     for a, b in line_segments:
         _reject_line_follow_into_blind(a, b, "LINE", node_types, "LINE_SEGMENTS")
 

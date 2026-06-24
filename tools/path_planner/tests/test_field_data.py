@@ -987,6 +987,200 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     assert g.get_edge_data("B", "G")["stop_at_line_override"] is StopAtLineMode.ON
 
 
+# -- ADR-048 (PR #98 / U2 + U5): new validator-contract rejections ------------
+#
+# Two new EDGES-contract rules land together (ADR-048):
+#   * U2 -- an entry whose primitive_mode resolves to BlindMode.STOP_AT_LINE
+#     together with stop_at_line='off' is a contradiction and is rejected.
+#   * U5 -- a LINE edge incident to a reset node is rejected (a reset node
+#     carries no line under the sensor, like a blind node). A LINE edge into a
+#     PROJECTION node stays legal (ADR-046).
+
+
+def test_tc1_stop_at_line_primitive_with_stop_off_rejected() -> None:
+    """TC1 (U2): primitive_mode=STOP_AT_LINE + stop_at_line='off' is rejected.
+
+    The toy field's ``B-G`` pair is its single BLIND_EDGES entry, so a same-type
+    BLIND override on it is a legitimate overlay -- the contradiction is the
+    motion bundle (STOP_AT_LINE, "seek the line") fighting the per-edge override
+    (stop_at_line='off', "force dead-reckon"). The validator must reject it with a
+    message that NAMES both halves of the contradiction (STOP_AT_LINE and
+    stop_at_line='off') so the author sees exactly which two keys conflict.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "primitive_mode": BlindMode.STOP_AT_LINE,
+            "stop_at_line": "off",
+        }
+    ]
+    with pytest.raises(FieldDataError) as excinfo:
+        validate(fd)
+    message = str(excinfo.value)
+    assert "STOP_AT_LINE" in message
+    assert "stop_at_line='off'" in message
+
+
+def test_tc1_stop_at_line_string_tag_with_stop_off_member_rejected() -> None:
+    """TC1 (U2, mirror): the string tag + StopAtLineMode.OFF member also contradicts.
+
+    The same contradiction authored in the JSON vocabulary -- a
+    ``primitive_mode`` string NAME ``"STOP_AT_LINE"`` plus a
+    ``StopAtLineMode.OFF`` member -- must reject identically. This pins that the
+    rule resolves BOTH the string and the enum-instance forms of each field, not
+    only the legacy enum-instance pairing.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "primitive_mode": "STOP_AT_LINE",
+            "stop_at_line": StopAtLineMode.OFF,
+        }
+    ]
+    with pytest.raises(FieldDataError, match="STOP_AT_LINE"):
+        validate(fd)
+
+
+def test_tc1_stop_at_line_primitive_with_stop_on_accepted() -> None:
+    """TC1 (U2, negative): STOP_AT_LINE + stop_at_line='on' is NOT a contradiction.
+
+    Only the STOP_AT_LINE + OFF pairing is rejected. STOP_AT_LINE together with a
+    seek-affirming ON override agrees with the motion bundle, so it must validate
+    -- proving the rule is the one contradiction, not a blanket ban on pairing the
+    two keys.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "primitive_mode": BlindMode.STOP_AT_LINE,
+            "stop_at_line": "on",
+        }
+    ]
+    assert validate(fd) is None
+
+
+def test_tc1_non_seeking_blind_with_stop_off_accepted() -> None:
+    """TC1 (U2, negative): a non-seeking BlindMode + stop_at_line='off' is fine.
+
+    A ``SYNC_TSHAPE`` (dead-reckon) bundle authored with ``stop_at_line='off'``
+    is internally consistent (both say "do not seek"), so it must validate. This
+    is the second control proving the U2 gate fires ONLY on STOP_AT_LINE + OFF.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "primitive_mode": BlindMode.SYNC_TSHAPE,
+            "stop_at_line": "off",
+        }
+    ]
+    assert validate(fd) is None
+
+
+def test_tc2_line_edge_incident_to_reset_node_rejected() -> None:
+    """TC2 (U5): a LINE edge incident to a reset node is rejected.
+
+    A reset node is reached by dead reckoning and presses a wall off the line
+    backbone -- it carries no line under the sensor, like a blind node. A LINE
+    (line-follow) edge into one is therefore physically impossible AND would make
+    the reset node advertise itself as a line-backbone anchor it is not. The
+    fixture defaults ``A`` to ``"reset"`` reached over a BLIND edge; adding a LINE
+    segment ``A-B`` makes ``A`` LINE-incident and must fail with a message naming
+    the reset node.
+    """
+    fd = _reset_field()
+    fd.LINE_SEGMENTS = [("A", "B")]  # A is "reset" -> a LINE edge into it
+    fd.BLIND_EDGES = [("S", "B")]    # drop the S-A blind edge to isolate the cause
+    with pytest.raises(FieldDataError, match=r"reset node 'A'"):
+        validate(fd)
+
+
+def test_tc2_line_edge_into_reset_via_edges_table_rejected() -> None:
+    """TC2 (U5, mirror): the same rejection fires for an EDGES(LINE) override.
+
+    The reset-incidence rule must hold through the rich ``EDGES`` table too, not
+    only ``LINE_SEGMENTS`` -- otherwise an author could slip a LINE edge into a
+    reset node via the override overlay. ``A-B`` LINE edge (with ``A`` reset) is
+    authored as an EDGES entry and must be rejected.
+    """
+    fd = _reset_field()
+    fd.BLIND_EDGES = [("S", "B")]  # keep A blind-unreachable so EDGES is the cause
+    fd.EDGES = [{"type": EDGE_LINE, "u": "B", "v": "A"}]
+    with pytest.raises(FieldDataError, match=r"reset node 'A'"):
+        validate(fd)
+
+
+def test_tc3_line_edge_incident_to_projection_node_still_accepted() -> None:
+    """TC3 (U5 regression guard): a LINE edge into a PROJECTION node stays legal.
+
+    ADR-046: the line passes THROUGH a projection node, so a line-follow hop into
+    it is legal (just distance-terminated). The new reset/blind incidence rule
+    must NOT regress this -- only blind and reset endpoints are rejected. The
+    ``_projection_field`` helper authors ``A-P`` / ``P-B`` LINE edges into the
+    projection node ``P`` and must validate cleanly.
+    """
+    assert validate(_projection_field()) is None
+
+
+# -- TC4 (R8): pipeline DEFAULT error names the real field --------------------
+#
+# The pipeline DEFAULT-rejection message must name the actual PipelineConfig
+# singleton field (``line`` / ``blind`` / ``turn``), not ``enum_name.lower()``
+# (which yields the bogus ``"linemode"`` / ``"blindmode"`` / ``"turnmode"``).
+
+
+@pytest.mark.parametrize(
+    "attr, field",
+    [
+        ("PIPELINE_LINE_MODE", "line"),
+        ("PIPELINE_BLIND_MODE", "blind"),
+        ("PIPELINE_TURN_MODE", "turn"),
+    ],
+)
+def test_tc4_pipeline_default_error_names_real_field(attr: str, field: str) -> None:
+    """TC4 (R8): the DEFAULT rejection names PIPELINE_CONFIG.<field>, not <mode>.
+
+    Each line/blind/turn pipeline key, when authored as ``"DEFAULT"``, is
+    circular and rejected. The message must read ``PIPELINE_CONFIG.line`` (etc.),
+    the real singleton field name -- never ``PIPELINE_CONFIG.linemode``, which
+    ``enum_name.lower()`` would have produced and which names no field at all.
+    """
+    fd = _clone_field_data()
+    setattr(fd, attr, "DEFAULT")
+    with pytest.raises(FieldDataError) as excinfo:
+        validate(fd)
+    message = str(excinfo.value)
+    assert f"PIPELINE_CONFIG.{field}" in message
+    assert f"PIPELINE_CONFIG.{field}mode" not in message
+
+
+def test_tc4_pipeline_default_enum_instance_error_names_real_field() -> None:
+    """TC4 (R8, mirror): the enum-INSTANCE DEFAULT path also names the real field.
+
+    A legacy/programmatic ``PIPELINE_BLIND_MODE = BlindMode.DEFAULT`` reaches the
+    enum-instance rejection branch (a separate message site from the string
+    branch). It too must name ``PIPELINE_CONFIG.blind``, not ``.blindmode``.
+    """
+    fd = _clone_field_data()
+    fd.PIPELINE_BLIND_MODE = BlindMode.DEFAULT
+    with pytest.raises(FieldDataError) as excinfo:
+        validate(fd)
+    message = str(excinfo.value)
+    assert "PIPELINE_CONFIG.blind" in message
+    assert "PIPELINE_CONFIG.blindmode" not in message
+
+
 # -- Obsolete per-edge pivot keys rejected (issue #44 per-turn model, T5) -----
 #
 # The per-turn model removed the per-edge ``pivot`` / ``pre_turn_mode`` EDGES
@@ -1747,16 +1941,21 @@ def _reset_field(
 ) -> SimpleNamespace:
     """Build a minimal S/A/B field carrying the given NODE_TYPES + RESET_NODES.
 
-    Real nodes A/B joined by a LINE segment, plus a blind dead-reckon spawn ``S``
-    on a BLIND edge into ``B``. ``A`` is the candidate reset node: by default it
-    is typed ``"reset"`` and carries a valid RESET_NODES entry, so the base field
-    validates. The START_NODE defaults to the blind spawn ``S`` -- issue #64's
-    validator rejects an on-line (``line`` / ``projection``) START as well as a
-    reset-typed START, so the spawn must be a blind dead-reckon origin. Pass
-    ``start_node="A"`` to exercise the reset-START guard. Tests pass
-    ``node_types_overrides`` / ``reset_nodes`` to author the specific malformed
-    (or absent) case; ``S`` is always re-typed ``"blind"`` AFTER any override so
-    callers need not carry it.
+    A blind dead-reckon spawn ``S`` reaches both ``A`` and ``B`` over BLIND edges.
+    ``A`` is the candidate reset node: by default it is typed ``"reset"`` and
+    carries a valid RESET_NODES entry, so the base field validates. ``A`` is
+    reached by a BLIND edge (``S-A``), never a LINE edge -- a reset node carries
+    no line under the sensor, so the validator (ADR-048) rejects a LINE edge
+    incident to one; the topology must enter it blind. ``B`` is a plain ``line``
+    node (a benign reachability warn fires because it has no incident LINE edge,
+    which never fails ``validate`` -- the suite does not escalate warnings).
+
+    The START_NODE defaults to the blind spawn ``S`` -- issue #64's validator
+    rejects an on-line (``line`` / ``projection``) START as well as a reset-typed
+    START, so the spawn must be a blind dead-reckon origin. Pass ``start_node="A"``
+    to exercise the reset-START guard. Tests pass ``node_types_overrides`` /
+    ``reset_nodes`` to author the specific malformed (or absent) case; ``S`` is
+    always re-typed ``"blind"`` AFTER any override so callers need not carry it.
 
     The default spec re-zeroes against a +y wall at ``wall_coord=220`` (A is at
     y=200, so the standoff is 20 cm -- clear of the ``WALL_PIVOT_CLEARANCE_CM``
@@ -1776,8 +1975,11 @@ def _reset_field(
     return SimpleNamespace(
         NODES={"A": (12.0, 200.0), "B": (12.0, 50.0), "S": (60.0, 50.0)},
         NODE_TYPES=node_types,
-        LINE_SEGMENTS=[("A", "B")],
-        BLIND_EDGES=[("S", "B")],
+        # A reset node is BLIND-incident only (ADR-048): S reaches A by a BLIND
+        # edge, never a LINE segment. B is also blind-reached here (no LINE
+        # segment), which only triggers a benign reachability warn.
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[("S", "A"), ("S", "B")],
         OBSTACLES=[],
         ROBOT_RADIUS_CM=8.0,
         BLIND_DECAY_ENABLED=True,

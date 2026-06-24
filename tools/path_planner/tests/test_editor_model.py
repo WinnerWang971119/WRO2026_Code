@@ -462,6 +462,12 @@ def test_validate_reaches_reset_rules_via_proxy() -> None:
     # START node before any spec check, so keeping the start off B lets the bad
     # SPEC (here, an unknown axis) reach the validator.
     model.node_types["B"] = "reset"
+    # A reset node is BLIND-incident only (ADR-048): drop the ``A-B`` LINE segment
+    # (which would now be rejected as a LINE edge into a reset node, masking the
+    # axis-spec error this test asserts) and reach B over a BLIND edge from the
+    # blind spawn instead.
+    model.line_segments = []
+    model.blind_edges = [("S", "B")]
     model.reset_nodes = {"B": {"axis": "z", "wall_coord": 10.0, "facing": 0.0}}
     with pytest.raises(FieldDataError, match=r"RESET_NODES\['B'\]\.axis"):
         model.validate()
