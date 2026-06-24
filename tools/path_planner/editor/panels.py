@@ -2799,33 +2799,6 @@ class SidePanels(tk.Frame):
         )
 
     @staticmethod
-    def _override_tag_summary(entry: dict) -> str:
-        """Return the short ``<tag summary>`` shown in an override row.
-
-        Renders only the override keys that are PRESENT, forward-only
-        (``direction`` / ``stop_at_line`` apply to ``u->v`` only), as a compact
-        space-joined string -- e.g. ``"FAST"`` or ``"seek=on dir=front"``.  An
-        entry that carries no override keys (only ``type`` / ``u`` / ``v``)
-        reads as an empty string.
-
-        :param entry: An EDGES overlay dict ``{type, u, v, + optional keys}``.
-        :return: The tag-summary fragment for the row label.
-        """
-        parts: list[str] = []
-        primitive = entry.get("primitive_mode")
-        if primitive is not None:
-            # ``primitive_mode`` may be a string tag or a legacy enum instance;
-            # render the enum's NAME so the row reads as the authored tag.
-            parts.append(getattr(primitive, "name", str(primitive)))
-        direction = entry.get("direction")
-        if direction is not None:
-            parts.append(f"dir={direction}")
-        stop_at_line = entry.get("stop_at_line")
-        if stop_at_line is not None:
-            parts.append(f"seek={stop_at_line}")
-        return " ".join(parts)
-
-    @staticmethod
     def _edges_signature(
         edges: list[dict],
     ) -> tuple[tuple[tuple[str, object], ...], ...]:
@@ -2852,8 +2825,10 @@ class SidePanels(tk.Frame):
 
         Every existing row widget is destroyed and re-created so the list always
         mirrors the model exactly (no stale rows survive an undo / delete).  Each
-        row shows ``u -> v  [TYPE]  <tag summary>`` with an edit (``e``) and
-        delete (``x``) affordance, mirroring a pivot row.  The ``(type, u, v)``
+        row shows ``u -> v  [TYPE]`` with an edit (``e``) and delete (``x``)
+        affordance, mirroring a pivot row.  The override's tag values are seen by
+        clicking edit; keeping the row short stops a long summary from pushing the
+        buttons off the (vertical-only-scrolling) canvas.  The ``(type, u, v)``
         identity of each row is recorded in :attr:`_edge_override_row_frames` so
         the graft's :meth:`prefill_edit_row` can highlight it.
 
@@ -2892,14 +2867,6 @@ class SidePanels(tk.Frame):
                 foreground=tag_color,
                 font=self._font_mono,
             ).pack(side="left", padx=(6, 0))
-            summary = self._override_tag_summary(entry)
-            if summary:
-                self._themed_label(
-                    row,
-                    text=summary,
-                    anchor="w",
-                    font=self._font_mono,
-                ).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
             # Per-row delete (x) then edit (e), packed right-to-left so edit ends
             # up left of delete.  Capture the identity in default args to dodge
