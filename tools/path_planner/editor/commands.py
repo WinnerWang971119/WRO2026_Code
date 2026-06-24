@@ -21,11 +21,13 @@ from the test suite (T8) without instantiating Tk or any canvas widget.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 from tools.path_planner.editor import projection_edges
 from tools.path_planner.editor.model import (
+    NODE_BEARING_CONTAINERS,
     NODE_TYPE_VALUES,
     RESET_AXIS_VALUES,
     FieldModel,
@@ -48,6 +50,13 @@ _PLAIN_NODE_TYPES: frozenset[str] = frozenset(NODE_TYPE_VALUES) - {"reset"}
 
 #: Allowed ``kind`` values for edge-batch entries.
 _VALID_EDGE_KINDS: frozenset[str] = frozenset({"line", "blind"})
+
+#: Maps the lowercase edge-list kind (``DeleteEdge._origin_list`` -- the list an
+#: edge was removed from) to the SCREAMING ``EDGES`` overlay ``type`` tag that
+#: ``graph_builder`` / the ``EDGES`` entries use (``"LINE"`` / ``"BLIND"``).
+#: A single source for the kind <-> tag correspondence so the override cascade
+#: matches the same tag the emitter writes.
+_EDGE_KIND_TO_TYPE_TAG: dict[str, str] = {"line": "LINE", "blind": "BLIND"}
 
 #: Allowed ``axis`` values for a reset-node spec (the wall is parallel to one
 #: field axis); single-sourced from ``model.RESET_AXIS_VALUES`` (which mirrors
@@ -81,6 +90,32 @@ _BLIND_DECAY_EXPONENT_MIN: float = 1.0
 #: Lower bound (exclusive) for the strictly-positive knobs ``blind_decay_d_ref``
 #: (the decay normalizer in cm) and ``robot_radius_cm`` (the inflation radius).
 _POSITIVE_KNOB_MIN_EXCLUSIVE: float = 0.0
+
+#: Recognized ``which`` selectors :class:`SetPipelineMode` may target, each
+#: mapping to the same-named ``FieldModel.pipeline_<which>_mode`` attribute.
+#: The validator (``_validate_pipeline_config``) enforces the per-category tag
+#: vocabulary and the DEFAULT rule at Save time; this command only routes the
+#: selector to the right field, so it accepts any string tag (or ``None`` to
+#: inherit) verbatim and leaves the value check to ``validate()``.
+_VALID_PIPELINE_WHICH: frozenset[str] = frozenset(
+    {"line", "blind", "turn", "direction"}
+)
+
+#: Recognized field-wide boolean flags :class:`SetFieldWideFlag` may toggle,
+#: each mapping to a same-named ``FieldModel`` attribute.
+_VALID_FIELD_WIDE_FLAGS: frozenset[str] = frozenset(
+    {"blind_projection_auto_seek"}
+)
+
+#: The override-entry keys that carry an actual override (everything except the
+#: identity triple ``type`` / ``u`` / ``v``). :class:`SetEdgeOverride` writes
+#: only the non-``None`` ones; an omitted key means "inherit", so absence is
+#: semantically distinct from a present-but-default value.
+_OVERRIDE_VALUE_KEYS: tuple[str, ...] = (
+    "primitive_mode",
+    "direction",
+    "stop_at_line",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +196,37 @@ def _find_edge_index(
     """
     for index, existing in enumerate(edges):
         if _edge_equivalent(existing, target):
+            return index
+    return -1
+
+
+def _find_override_index(
+    edges: list[dict], edge_type: str, u: str, v: str
+) -> int:
+    """Return the index of the override entry identified by ``(edge_type, u, v)``.
+
+    An ``EDGES`` overlay entry's identity is the **directed, typed** triple
+    ``(type, u, v)`` -- NOT the ``(u, v)`` pair alone.  A directed pair is not
+    unique across edge types (a ``LINE`` and a ``BLIND`` override may share the
+    same ``u -> v`` direction), and the overlay is forward-only (``u -> v`` is
+    distinct from ``v -> u``).  Every add / replace / clear of an override must
+    match on all three components or it would clobber or remove the wrong-typed
+    (or reverse-direction) entry -- a latent corruption bug.  This helper is the
+    single place that triple-match rule lives.
+
+    :param edges: The model's ``edges`` overlay list to search.
+    :param edge_type: The edge type tag, e.g. ``"LINE"`` or ``"BLIND"``.
+    :param u: The source node name (forward direction ``u -> v``).
+    :param v: The destination node name.
+    :return: The first index ``i`` such that ``edges[i]`` has a matching
+        ``type`` / ``u`` / ``v``, or ``-1`` if no such entry exists.
+    """
+    for index, entry in enumerate(edges):
+        if (
+            entry.get("type") == edge_type
+            and entry.get("u") == u
+            and entry.get("v") == v
+        ):
             return index
     return -1
 
@@ -273,10 +339,19 @@ class RenameNode:
     Updates ``model.nodes``, ``model.node_types``, every entry of
     ``model.line_segments`` and ``model.blind_edges`` that mentions the old
     name, the ``model.reset_nodes`` key (a reset spec is keyed by node name),
-    every ``model.pivot_turns`` triple that names the node, and
+    every ``model.pivot_turns`` triple that names the node, every
+    ``model.edges`` override overlay entry whose ``u`` / ``v`` is the node, and
     ``model.start_node`` if it equals the old name. A ``"projection"``-typed
     node renames through ``model.node_types`` like any other node type -- it
     is an on-model node, so no off-model bookkeeping is involved (issue #64).
+
+    The ``model.edges`` cascade rewrites only the ``u`` / ``v`` strings of an
+    overlay entry, leaving its ``type`` and every other override key intact:
+    an entry's identity is ``(type, u, v)``, so only the directed-pair strings
+    move with the rename. This is the model-native replacement for the retired
+    ``ast_rewrite`` LibCST EDGES rewriter -- because the rename mutates
+    ``model.edges`` directly, undo / redo come for free through the normal
+    command history (no separate pending-rename delta to track).
 
     :ivar old: Existing node name.
     :ivar new: Replacement node name.  Must not already exist.
@@ -311,40 +386,25 @@ class RenameNode:
                 f"RenameNode: a node named {self.new!r} already exists"
             )
 
-        # Rebuild nodes / node_types in place to preserve insertion order
-        # where possible.  A simple pop + insert would push the renamed node
-        # to the end, which would change ``to_json_dict`` output ordering for
-        # any caller relying on it.  Sorted output (the JSON writer's
-        # responsibility) makes order moot for the saved file, but in-memory
-        # ordering still matters for deterministic tests.
-        model.nodes = {
-            (self.new if name == self.old else name): xy
-            for name, xy in model.nodes.items()
-        }
-        model.node_types = {
-            (self.new if name == self.old else name): ntype
-            for name, ntype in model.node_types.items()
-        }
-
-        model.line_segments = [
-            self._rename_edge(edge) for edge in model.line_segments
-        ]
-        model.blind_edges = [
-            self._rename_edge(edge) for edge in model.blind_edges
-        ]
-        # Reset specs are keyed by node name: re-key the renamed node's spec so a
-        # reset-typed node keeps it. Without this the spec orphans on the old
-        # name and the validator rejects the next Save ("typed reset but has no
-        # RESET_NODES entry").
-        model.reset_nodes = {
-            (self.new if name == self.old else name): spec
-            for name, spec in model.reset_nodes.items()
-        }
-        # Pivot turns name nodes positionally in (u, v, w): rename every
-        # occurrence so a pivot triple survives a rename of any of its legs.
-        model.pivot_turns = [
-            self._rename_turn(turn) for turn in model.pivot_turns
-        ]
+        # Rewrite every node-bearing container named in the single
+        # NODE_BEARING_CONTAINERS registry, rebuilding each in place. A simple
+        # pop + insert on the dicts would push the renamed node to the end,
+        # changing ``to_json_dict`` output ordering for any caller relying on
+        # it; the per-shape helpers below preserve order. Walking the registry
+        # (instead of hand-listing the seven containers) keeps the rename
+        # cascade and the model's snapshot/restore surface in lockstep -- a
+        # newly registered container is renamed here automatically. Notes on the
+        # per-container semantics retained from the hand-listed version:
+        #  * ``reset_nodes`` re-keys the renamed node's spec so a reset-typed
+        #    node keeps it (else the spec orphans and the next Save is rejected).
+        #  * ``pivot_turns`` renames every positional (u, v, w) leg so a triple
+        #    survives a rename of any leg.
+        #  * ``edges`` rewrites only the directed ``u`` / ``v`` keys where they
+        #    match, keeping ``type`` and every other override key intact so the
+        #    entry's (type, u, v) identity tracks the rename (the model-native
+        #    replacement for ast_rewrite).
+        for attr in NODE_BEARING_CONTAINERS:
+            self._rename_container(model, attr, self.old, self.new)
 
         self._start_node_was_old = model.start_node == self.old
         if self._start_node_was_old:
@@ -355,75 +415,106 @@ class RenameNode:
 
         :param model: Target model.
         """
-        model.nodes = {
-            (self.old if name == self.new else name): xy
-            for name, xy in model.nodes.items()
-        }
-        model.node_types = {
-            (self.old if name == self.new else name): ntype
-            for name, ntype in model.node_types.items()
-        }
-        model.line_segments = [
-            self._unrename_edge(edge) for edge in model.line_segments
-        ]
-        model.blind_edges = [
-            self._unrename_edge(edge) for edge in model.blind_edges
-        ]
-        model.reset_nodes = {
-            (self.old if name == self.new else name): spec
-            for name, spec in model.reset_nodes.items()
-        }
-        model.pivot_turns = [
-            self._unrename_turn(turn) for turn in model.pivot_turns
-        ]
+        # Reverse the rename across the same registry: swap the new name back to
+        # the old in every node-bearing container (the exact inverse of
+        # :meth:`apply`'s loop).
+        for attr in NODE_BEARING_CONTAINERS:
+            self._rename_container(model, attr, self.new, self.old)
         if self._start_node_was_old:
             model.start_node = self.old
 
     # -- internal helpers ------------------------------------------------
 
-    def _rename_edge(self, edge: tuple[str, str]) -> tuple[str, str]:
-        """Return *edge* with ``self.old`` replaced by ``self.new``.
+    def _rename_container(
+        self, model: FieldModel, attr: str, frm: str, to: str
+    ) -> None:
+        """Rewrite one node-bearing container, replacing name *frm* with *to*.
 
-        :param edge: Original edge tuple.
-        :return: Edge with the rename applied to either or both endpoints.
+        Dispatches on the container's shape (every container in
+        ``NODE_BEARING_CONTAINERS`` is one of three shapes): a node-keyed dict
+        (``nodes`` / ``node_types`` / ``reset_nodes``), a list of name tuples
+        (``line_segments`` / ``blind_edges``: 2-tuples, ``pivot_turns``:
+        3-tuples), or the ``edges`` overlay (a list of ``{type, u, v, ...}``
+        dicts).  Each container is rebuilt in place so a later inverse call
+        operates on a fresh copy, never an aliased original.  This single
+        direction-agnostic rewriter backs both :meth:`apply` (``frm=old``,
+        ``to=new``) and :meth:`revert` (``frm=new``, ``to=old``).
+
+        :param model: Target model.
+        :param attr: Container attribute name from ``NODE_BEARING_CONTAINERS``.
+        :param frm: Name to replace.
+        :param to: Replacement name.
         """
-        a, b = edge
-        return (
-            self.new if a == self.old else a,
-            self.new if b == self.old else b,
-        )
+        if attr == "edges":
+            # EDGES overlay: rewrite only the directed ``u`` / ``v`` keys where
+            # they match, keeping ``type`` and every other override key intact so
+            # the entry's (type, u, v) identity tracks the rename. Fresh dicts so
+            # the inverse never mutates an aliased original.
+            model.edges = [
+                self._rename_entry(entry, frm, to) for entry in model.edges
+            ]
+            return
 
-    def _unrename_edge(self, edge: tuple[str, str]) -> tuple[str, str]:
-        """Return *edge* with ``self.new`` replaced by ``self.old``.
+        current = getattr(model, attr)
+        if isinstance(current, dict):
+            # Node-keyed dict (nodes / node_types / reset_nodes): re-key the
+            # renamed node, preserving every other key's insertion order.
+            setattr(
+                model,
+                attr,
+                {
+                    (to if name == frm else name): value
+                    for name, value in current.items()
+                },
+            )
+        else:
+            # List of name tuples (line_segments / blind_edges / pivot_turns):
+            # rename every positional occurrence in each tuple.
+            setattr(
+                model,
+                attr,
+                [self._rename_tuple(item, frm, to) for item in current],
+            )
 
-        :param edge: Edge previously transformed by :meth:`_rename_edge`.
-        :return: Edge with the rename reversed.
+    @staticmethod
+    def _rename_tuple(
+        item: tuple[str, ...], frm: str, to: str
+    ) -> tuple[str, ...]:
+        """Return name-tuple *item* with every occurrence of *frm* set to *to*.
+
+        Works uniformly for the 2-tuple edge lists and the 3-tuple
+        ``pivot_turns`` (each element is a node name), so a pivot triple
+        survives a rename of any leg.
+
+        :param item: Original name tuple.
+        :param frm: Name to replace.
+        :param to: Replacement name.
+        :return: A new tuple with the rename applied.
         """
-        a, b = edge
-        return (
-            self.old if a == self.new else a,
-            self.old if b == self.new else b,
-        )
+        return tuple(to if name == frm else name for name in item)
 
-    def _rename_turn(
-        self, turn: tuple[str, str, str]
-    ) -> tuple[str, str, str]:
-        """Return pivot *turn* with ``self.old`` replaced by ``self.new``.
+    @staticmethod
+    def _rename_entry(entry: dict, frm: str, to: str) -> dict:
+        """Return EDGES overlay *entry* with ``u`` / ``v`` == *frm* set to *to*.
 
-        :param turn: Original ``(u, v, w)`` pivot triple.
-        :return: Triple with the rename applied to any matching leg.
+        Rewrites only the directed-pair ``u`` / ``v`` keys; ``type`` and every
+        other override key (``primitive_mode`` / ``direction`` /
+        ``stop_at_line`` / any hand-authored geometry) are copied through
+        unchanged so the entry's ``(type, u, v)`` identity tracks the rename
+        without merging or dropping it.  A fresh dict is returned so an undo
+        operates on the renamed copy, never an aliased original.
+
+        :param entry: Original overlay entry dict.
+        :param frm: Name to replace in ``u`` / ``v``.
+        :param to: Replacement name.
+        :return: A new dict with the rename applied to ``u`` / ``v``.
         """
-        return tuple(self.new if name == self.old else name for name in turn)
-
-    def _unrename_turn(
-        self, turn: tuple[str, str, str]
-    ) -> tuple[str, str, str]:
-        """Return pivot *turn* with ``self.new`` replaced by ``self.old``.
-
-        :param turn: Triple previously transformed by :meth:`_rename_turn`.
-        :return: Triple with the rename reversed.
-        """
-        return tuple(self.old if name == self.new else name for name in turn)
+        renamed = dict(entry)
+        if renamed.get("u") == frm:
+            renamed["u"] = to
+        if renamed.get("v") == frm:
+            renamed["v"] = to
+        return renamed
 
 
 @dataclass
@@ -440,11 +531,14 @@ class DeleteNode:
     meaningless once the node is gone.  :meth:`revert` restores it.
 
     .. note::
-       This command only checks the in-memory edge lists.  The rich ``EDGES``
-       dictionary in ``field_data.py`` (per-edge metadata) is NOT visible to
-       the :class:`FieldModel` and therefore NOT checked here.  T12's Save
-       handler is responsible for peeking at the imported ``field_data``
-       module before allowing the deletion to be flushed to disk.
+       Per-edge ``EDGES`` overrides in ``model.edges`` (ADR-047) are also
+       CASCADE-removed: every overlay entry whose ``u`` or ``v`` is the deleted
+       node (any type) is captured and dropped here.  The segment guards above
+       do NOT cover them -- an override can outlive its segment (e.g. after a
+       kind-flip, or when an entry was authored for a hop the editor no longer
+       lists), so leaving it would orphan a reference to a now-deleted node and
+       the next Save would fail the validator ("EDGES references unknown node").
+       :meth:`revert` re-inserts every captured entry at its original index.
 
     :ivar name: Name of the node to delete.
     """
@@ -457,6 +551,13 @@ class DeleteNode:
     _deleted_type: str | None = field(default=None, init=False, repr=False)
     # The node's own reset spec (if any), captured so revert restores it.
     _deleted_reset_spec: dict | None = field(
+        default=None, init=False, repr=False
+    )
+    # Every ``model.edges`` overlay entry incident to the deleted node, captured
+    # as (original_index, deep-copied entry) so revert re-inserts each at its
+    # exact prior position. Sorted by ascending index so the re-insert loop can
+    # walk in order without an earlier insert shifting a later index.
+    _deleted_overrides: list[tuple[int, dict]] | None = field(
         default=None, init=False, repr=False
     )
 
@@ -522,6 +623,21 @@ class DeleteNode:
         self._deleted_reset_spec = (
             dict(reset_spec) if reset_spec is not None else None
         )
+        # Cascade-remove every override overlay entry incident to the node
+        # (either endpoint, any type). Capture each with its original index --
+        # deep-copied so a later in-place edit of the live model cannot mutate
+        # the captured inverse -- BEFORE mutating the list, so the indices are
+        # the pre-deletion positions revert restores to. Collect first, then
+        # delete in descending index order so each ``del`` leaves the remaining
+        # (lower) indices undisturbed.
+        incident = [
+            (index, copy.deepcopy(entry))
+            for index, entry in enumerate(model.edges)
+            if entry.get("u") == self.name or entry.get("v") == self.name
+        ]
+        self._deleted_overrides = incident
+        for index, _entry in reversed(incident):
+            del model.edges[index]
         del model.nodes[self.name]
         model.node_types.pop(self.name, None)
         model.reset_nodes.pop(self.name, None)
@@ -537,6 +653,15 @@ class DeleteNode:
             model.node_types[self.name] = self._deleted_type
         if self._deleted_reset_spec is not None:
             model.reset_nodes[self.name] = dict(self._deleted_reset_spec)
+        # Re-insert each captured override at its original index. ``incident``
+        # was built in ascending index order, so inserting in that same order
+        # places each entry back exactly where it was (an earlier re-insert
+        # restores the slot a later one's index expects).
+        assert self._deleted_overrides is not None, (
+            "DeleteNode.revert before apply"
+        )
+        for index, entry in self._deleted_overrides:
+            model.edges.insert(index, copy.deepcopy(entry))
 
 
 @dataclass
@@ -1055,6 +1180,398 @@ class SetGlobalKnob:
 
 
 # ---------------------------------------------------------------------------
+# Per-edge override + field-tunable commands (issue #79)
+#
+# These back the inspector's EDGE OVERRIDES list, PIPELINE DEFAULTS section, and
+# the new field-wide toggles / FIELD_MM control.  They follow the same apply /
+# revert + captured-original contract as SetResetSpec above: apply() captures
+# the EXACT prior state needed to restore (deep-copying any captured dict so the
+# inverse is not aliased to the live model), and revert() restores it precisely,
+# so undo -> redo -> undo is stable.  Edge-override identity is the typed,
+# directed triple (type, u, v) -- never (u, v) alone (see
+# _find_override_index).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SetEdgeOverride:
+    """Add or replace the per-edge override overlay entry for ``(type, u, v)``.
+
+    On an ADD (no existing entry for the identity), writes an **override-only**
+    entry into ``model.edges``: the identity triple ``{"type", "u", "v"}`` plus
+    whichever of ``primitive_mode`` / ``direction`` / ``stop_at_line`` are
+    non-``None``.  A ``None`` field is OMITTED from the entry -- absence means
+    "inherit" (the planner derives that aspect from the pipeline default / node
+    geometry), which is semantically distinct from a present-but-default value.
+    A freshly authored override carries NO geometry keys (``distance_cm`` /
+    ``heading_deg``); the editor authors override-only overlays and the planner
+    derives geometry from node coordinates at build time.
+
+    On a REPLACE (an entry with the same ``(type, u, v)`` identity already
+    exists), the entry is replaced IN PLACE (preserving its list position) and
+    every key the editor does NOT own is CARRIED FORWARD from the prior entry --
+    hand-authored ``distance_cm`` / ``heading_deg`` geometry (or any other
+    non-editor key) survives the edit; only the three editor-owned keys are
+    set (when the command supplies a value) or removed (when ``None`` -- absent
+    from the form means set-to-inherit). This is what stops an inline edit from
+    silently dropping geometry a non-editor surface authored (R5).
+
+    Either way the override is keyed on all three of ``(type, u, v)`` -- a
+    directed pair is not unique across edge types, so matching on ``(u, v)``
+    alone would clobber the wrong-typed (or reverse-direction) override.
+
+    :ivar edge_type: The edge type tag of the segment the override attaches to,
+        e.g. ``"LINE"`` or ``"BLIND"`` (the panel derives it read-only from the
+        selected segment).  Stored verbatim as the entry's ``"type"``.
+    :ivar u: Source node name (forward direction ``u -> v``).
+    :ivar v: Destination node name.
+    :ivar primitive_mode: ``LineMode`` tag (on a LINE edge) / ``BlindMode`` tag
+        (on a BLIND edge), or ``None`` to inherit.  Validated at Save by
+        ``validator._validate_edges_field``; this command stores it verbatim.
+    :ivar direction: ``"front"`` / ``"rear"`` (forward ``u -> v`` only), or
+        ``None`` to inherit.
+    :ivar stop_at_line: ``"on"`` / ``"off"`` (forward ``u -> v`` only), or
+        ``None`` to inherit.
+    """
+
+    edge_type: str
+    u: str
+    v: str
+    primitive_mode: str | None = None
+    direction: str | None = None
+    stop_at_line: str | None = None
+
+    # Captured at apply time so revert restores the exact prior state.
+    # ``_had_entry`` distinguishes "no entry existed for this identity" (revert
+    # by removing the entry apply added) from "an entry existed and was
+    # replaced" (revert by restoring the captured snapshot at its index).
+    _had_entry: bool = field(default=False, init=False, repr=False)
+    _original_index: int | None = field(default=None, init=False, repr=False)
+    _original_entry: dict | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Insert or replace the override entry for ``(edge_type, u, v)``.
+
+        :param model: Target model.
+        """
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if index >= 0:
+            self._had_entry = True
+            self._original_index = index
+            # Deep-copy the displaced entry so a later in-place edit of the live
+            # model cannot mutate the captured inverse.
+            self._original_entry = copy.deepcopy(model.edges[index])
+            # REPLACE in place: build the new entry from the prior one so every
+            # key the editor does not own (hand-authored geometry like
+            # distance_cm / heading_deg, or any future non-editor key) survives;
+            # only the three editor-owned keys are set-or-removed.
+            model.edges[index] = self._build_entry(self._original_entry)
+        else:
+            self._had_entry = False
+            self._original_index = None
+            self._original_entry = None
+            # ADD fresh: no prior entry to preserve -- build from the identity
+            # triple plus the non-None override keys only.
+            model.edges.append(self._build_entry(None))
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the override list to its exact pre-:meth:`apply` state.
+
+        :param model: Target model.
+        """
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if self._had_entry:
+            # apply replaced an existing entry: restore the captured snapshot.
+            # Re-resolve the index defensively (another command may have
+            # shifted the list between apply and revert); fall back to the
+            # captured index if the entry is somehow gone.
+            assert self._original_entry is not None, (
+                "SetEdgeOverride.revert before apply"
+            )
+            restore_index = index if index >= 0 else self._original_index
+            assert restore_index is not None
+            model.edges[restore_index] = copy.deepcopy(self._original_entry)
+        else:
+            # apply appended a brand-new entry: remove it.  Guard the index in
+            # case an external mutation already removed it.
+            if index >= 0:
+                del model.edges[index]
+
+    # -- internal helpers ------------------------------------------------
+
+    def _build_entry(self, prior: dict | None) -> dict:
+        """Build the entry dict for this command, preserving non-owned keys.
+
+        Two modes, distinguished by *prior*:
+
+        * **Add** (``prior is None``): build an override-only entry -- the
+          identity triple plus only the non-``None`` editor-owned keys. An
+          omitted (``None``) key means "inherit"; no geometry keys are ever
+          written, because a freshly authored override carries none.
+
+        * **Replace** (*prior* is the existing entry): start from a deep copy of
+          *prior* so every key the editor does NOT own (hand-authored
+          ``distance_cm`` / ``heading_deg`` geometry, or any other non-editor
+          key) survives the edit. Then reassert the identity triple and, for
+          each of the three editor-owned keys (``primitive_mode`` /
+          ``direction`` / ``stop_at_line``), SET it when the command supplies a
+          value and REMOVE it when the command's value is ``None`` (absent from
+          the form == set-to-inherit). This is what stops an edit through the
+          inline editor from silently dropping hand-authored geometry (R5).
+
+        :param prior: The existing entry being replaced, or ``None`` for an add.
+        :return: The entry dict to store at the override's list position.
+        """
+        if prior is None:
+            entry: dict = {
+                "type": self.edge_type,
+                "u": self.u,
+                "v": self.v,
+            }
+            for key in _OVERRIDE_VALUE_KEYS:
+                value = getattr(self, key)
+                if value is not None:
+                    entry[key] = value
+            return entry
+
+        # Replace: preserve every non-editor-owned key (the geometry survives),
+        # reassert identity, set/remove only the editor-owned keys.
+        entry = copy.deepcopy(prior)
+        entry["type"] = self.edge_type
+        entry["u"] = self.u
+        entry["v"] = self.v
+        for key in _OVERRIDE_VALUE_KEYS:
+            value = getattr(self, key)
+            if value is not None:
+                entry[key] = value
+            else:
+                entry.pop(key, None)
+        return entry
+
+
+@dataclass
+class ClearEdgeOverride:
+    """Remove the per-edge override overlay entry for ``(type, u, v)``.
+
+    Matches on the full typed, directed identity ``(type, u, v)`` -- never
+    ``(u, v)`` alone, so a same-direction override of the other type (or the
+    reverse-direction override) is never removed by mistake.  The removed entry
+    (and its list position) is captured so :meth:`revert` re-inserts it exactly
+    where it was.
+
+    :ivar edge_type: The edge type tag of the override to remove
+        (``"LINE"`` / ``"BLIND"``).
+    :ivar u: Source node name (forward direction ``u -> v``).
+    :ivar v: Destination node name.
+    """
+
+    edge_type: str
+    u: str
+    v: str
+
+    _removed_index: int | None = field(default=None, init=False, repr=False)
+    _removed_entry: dict | None = field(default=None, init=False, repr=False)
+
+    def apply(self, model: FieldModel) -> None:
+        """Locate and remove the override entry for ``(edge_type, u, v)``.
+
+        :param model: Target model.
+        :raises ValueError: If no override entry with that identity exists.
+        """
+        index = _find_override_index(
+            model.edges, self.edge_type, self.u, self.v
+        )
+        if index < 0:
+            raise ValueError(
+                f"ClearEdgeOverride: no override for "
+                f"({self.edge_type!r}, {self.u!r}, {self.v!r}) in model.edges"
+            )
+        self._removed_index = index
+        # Deep-copy so the captured inverse is immune to later live mutation.
+        self._removed_entry = copy.deepcopy(model.edges[index])
+        del model.edges[index]
+
+    def revert(self, model: FieldModel) -> None:
+        """Re-insert the removed override entry at its original index.
+
+        :param model: Target model.
+        """
+        assert self._removed_index is not None, (
+            "ClearEdgeOverride.revert before apply"
+        )
+        assert self._removed_entry is not None
+        model.edges.insert(
+            self._removed_index, copy.deepcopy(self._removed_entry)
+        )
+
+
+@dataclass
+class SetPipelineMode:
+    """Set one field-sourced ``PIPELINE_CONFIG`` default mode (or clear it).
+
+    Backs the inspector's PIPELINE DEFAULTS comboboxes.  ``which`` selects the
+    category and maps to the same-named ``model.pipeline_<which>_mode``
+    attribute; ``value`` is a mode member NAME (string tag), or ``None`` to
+    clear the field-sourced default (inherit the ``pipeline_config.py``
+    default).  The per-category tag vocabulary and the DEFAULT rule
+    (line / blind / turn may not be ``DEFAULT``; direction may) are enforced at
+    Save by ``validator._validate_pipeline_config``; this command only routes
+    the selector to the right field and stores the value verbatim, mirroring how
+    the model carries the four keys as opaque string tags.
+
+    :ivar which: Category selector; one of ``"line"`` / ``"blind"`` /
+        ``"turn"`` / ``"direction"``.
+    :ivar value: Mode member name (string tag), or ``None`` to inherit.
+    """
+
+    which: str
+    value: str | None
+
+    _attr: str | None = field(default=None, init=False, repr=False)
+    _original_value: str | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Set ``model.pipeline_<which>_mode`` to ``self.value``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.which`` is not one of the four recognized
+            category selectors.  The model is untouched in that case.
+        """
+        if self.which not in _VALID_PIPELINE_WHICH:
+            raise ValueError(
+                f"SetPipelineMode: which must be one of "
+                f"{sorted(_VALID_PIPELINE_WHICH)!r}, got {self.which!r}"
+            )
+        attr = f"pipeline_{self.which}_mode"
+        self._attr = attr
+        self._original_value = getattr(model, attr)
+        setattr(model, attr, self.value)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the prior mode value for this category.
+
+        :param model: Target model.
+        """
+        assert self._attr is not None, "SetPipelineMode.revert before apply"
+        setattr(model, self._attr, self._original_value)
+
+
+@dataclass
+class SetFieldWideFlag:
+    """Toggle a field-wide boolean flag on the model.
+
+    Backs the inspector's field-wide checkbuttons (currently
+    ``blind_projection_auto_seek``).  ``flag`` names the attribute and ``value``
+    is coerced to ``bool`` before being set; the prior value is captured so
+    :meth:`revert` restores it exactly.
+
+    :ivar flag: Flag attribute name; one of ``_VALID_FIELD_WIDE_FLAGS``
+        (currently only ``"blind_projection_auto_seek"``).
+    :ivar value: New value, coerced to ``bool``.
+    """
+
+    flag: str
+    value: bool
+
+    _original_value: bool | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Coerce ``self.value`` to ``bool`` and set ``model.<flag>``.
+
+        :param model: Target model.
+        :raises ValueError: If ``self.flag`` is not a recognized field-wide
+            flag.  The model is untouched in that case.
+        """
+        if self.flag not in _VALID_FIELD_WIDE_FLAGS:
+            raise ValueError(
+                f"SetFieldWideFlag: flag must be one of "
+                f"{sorted(_VALID_FIELD_WIDE_FLAGS)!r}, got {self.flag!r}"
+            )
+        self._original_value = getattr(model, self.flag)
+        setattr(model, self.flag, bool(self.value))
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the flag's prior value.
+
+        :param model: Target model.
+        """
+        assert self._original_value is not None, (
+            "SetFieldWideFlag.revert before apply"
+        )
+        setattr(model, self.flag, self._original_value)
+
+
+@dataclass
+class SetFieldDimensions:
+    """Set the outer field dimensions ``model.field_mm`` (the ``FIELD_MM`` pair).
+
+    Backs the inspector's FIELD_MM width/height control.  ``model.field_mm`` is
+    a ``(width_mm, height_mm)`` tuple (millimetres); both values are coerced to
+    ``float`` and stored as a tuple, matching the canonical in-memory type the
+    loader / ``from_json_dict`` produce.  The prior pair is captured so
+    :meth:`revert` restores it exactly.
+
+    :ivar width_mm: New field width in millimetres.  Must be ``> 0``.
+    :ivar height_mm: New field height in millimetres.  Must be ``> 0``.
+    """
+
+    width_mm: float
+    height_mm: float
+
+    _original_field_mm: tuple[float, float] | None = field(
+        default=None, init=False, repr=False
+    )
+
+    def apply(self, model: FieldModel) -> None:
+        """Set ``model.field_mm`` to ``(width_mm, height_mm)``.
+
+        :param model: Target model.
+        :raises ValueError: If either dimension is not a positive number.  The
+            model is untouched in that case.
+        """
+        try:
+            width = float(self.width_mm)
+            height = float(self.height_mm)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"SetFieldDimensions: width_mm / height_mm must be numbers, "
+                f"got ({self.width_mm!r}, {self.height_mm!r})"
+            ) from exc
+        if width <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+            raise ValueError(
+                f"SetFieldDimensions: width_mm must be "
+                f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} mm, got {width}"
+            )
+        if height <= _POSITIVE_KNOB_MIN_EXCLUSIVE:
+            raise ValueError(
+                f"SetFieldDimensions: height_mm must be "
+                f"> {_POSITIVE_KNOB_MIN_EXCLUSIVE} mm, got {height}"
+            )
+        self._original_field_mm = model.field_mm
+        model.field_mm = (width, height)
+
+    def revert(self, model: FieldModel) -> None:
+        """Restore the prior ``field_mm`` pair.
+
+        :param model: Target model.
+        """
+        assert self._original_field_mm is not None, (
+            "SetFieldDimensions.revert before apply"
+        )
+        model.field_mm = self._original_field_mm
+
+
+# ---------------------------------------------------------------------------
 # Edge commands
 # ---------------------------------------------------------------------------
 
@@ -1276,6 +1793,23 @@ class DeleteEdge:
 
     Edges are undirected, so the command matches either ordering.
 
+    Cascade: every ``model.edges`` overlay entry whose ``type`` equals the
+    DELETED edge's kind tag (``"LINE"`` for a line segment, ``"BLIND"`` for a
+    blind edge) and whose ``{u, v}`` equals the undirected pair ``{a, b}`` --
+    in BOTH directed orientations -- is also removed and captured for
+    :meth:`revert`. Without this the override outlives its segment and
+    ``graph_builder`` re-emits the "deleted" edge straight back into the graph
+    (an overlay entry emits a directed pair regardless of the segment lists).
+
+    This cascade is the SOLE owner of the kind-flip override clear: the
+    edge-type flip path (``app._add_plain_edge_with_override``) issues
+    ``DeleteEdge(a, b)`` as the first step of its ``MacroCommand``, so removing
+    the old-kind overrides here cleans the flip too -- no separate clear step is
+    added elsewhere (a second mechanism would have to be kept in sync). The
+    override's identity is the typed, directed triple ``(type, u, v)``, so the
+    cascade matches ONLY the deleted kind's tag: a same-pair override of the
+    OTHER kind (which still has a live segment, e.g. mid-flip) is untouched.
+
     :ivar a: First endpoint node name.
     :ivar b: Second endpoint node name.
     """
@@ -1289,9 +1823,19 @@ class DeleteEdge:
     _origin_value: tuple[str, str] | None = field(
         default=None, init=False, repr=False
     )
+    # Every cascaded ``model.edges`` overlay entry, captured as
+    # (original_index, deep-copied entry) in ascending index order so revert
+    # re-inserts each at its exact prior position.
+    _deleted_overrides: list[tuple[int, dict]] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def apply(self, model: FieldModel) -> None:
         """Locate and remove the edge from ``line_segments`` or ``blind_edges``.
+
+        After removing the segment, cascade-remove every overlay entry of the
+        deleted edge's kind on the undirected pair ``{a, b}`` (both directed
+        orientations), capturing them for :meth:`revert`.
 
         :param model: Target model.
         :raises ValueError: If the edge is not found in either list.
@@ -1303,6 +1847,7 @@ class DeleteEdge:
             self._origin_index = line_index
             self._origin_value = model.line_segments[line_index]
             del model.line_segments[line_index]
+            self._cascade_remove_overrides(model)
             return
 
         blind_index = _find_edge_index(model.blind_edges, target)
@@ -1311,6 +1856,7 @@ class DeleteEdge:
             self._origin_index = blind_index
             self._origin_value = model.blind_edges[blind_index]
             del model.blind_edges[blind_index]
+            self._cascade_remove_overrides(model)
             return
 
         raise ValueError(
@@ -1321,6 +1867,8 @@ class DeleteEdge:
     def revert(self, model: FieldModel) -> None:
         """Re-insert the edge at its original index in its original list.
 
+        Also re-inserts every cascaded override entry at its captured index.
+
         :param model: Target model.
         """
         assert self._origin_list is not None, "DeleteEdge.revert before apply"
@@ -1330,6 +1878,42 @@ class DeleteEdge:
             model.line_segments.insert(self._origin_index, self._origin_value)
         else:
             model.blind_edges.insert(self._origin_index, self._origin_value)
+        # Re-insert each captured override at its original index. The list was
+        # built in ascending index order, so inserting in that same order
+        # restores every slot exactly (an earlier re-insert restores the slot a
+        # later one's index expects).
+        assert self._deleted_overrides is not None, (
+            "DeleteEdge.revert before apply"
+        )
+        for index, entry in self._deleted_overrides:
+            model.edges.insert(index, copy.deepcopy(entry))
+
+    # -- internal helpers ------------------------------------------------
+
+    def _cascade_remove_overrides(self, model: FieldModel) -> None:
+        """Remove + capture every overlay entry of the deleted kind on ``{a, b}``.
+
+        Matches an entry iff its ``type`` equals the deleted edge's kind tag
+        (derived from ``self._origin_list``) AND its ``{u, v}`` equals the
+        undirected pair ``{self.a, self.b}`` (so both ``a -> b`` and ``b -> a``
+        directed entries are removed). Each match is captured (original index +
+        deep copy) in ascending index order, then deleted in descending order so
+        each ``del`` leaves the remaining lower indices undisturbed.
+
+        :param model: Target model (its ``edges`` list is mutated in place).
+        """
+        assert self._origin_list is not None
+        type_tag = _EDGE_KIND_TO_TYPE_TAG[self._origin_list]
+        pair = {self.a, self.b}
+        matched = [
+            (index, copy.deepcopy(entry))
+            for index, entry in enumerate(model.edges)
+            if entry.get("type") == type_tag
+            and {entry.get("u"), entry.get("v")} == pair
+        ]
+        self._deleted_overrides = matched
+        for index, _entry in reversed(matched):
+            del model.edges[index]
 
 
 # ---------------------------------------------------------------------------

@@ -151,6 +151,69 @@ def test_run_emits_populated_pivot_turns_table(tmp_path, monkeypatch):
     assert "TurnMode::PIVOT_RIGHT" in cpp
 
 
+# ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: TC19 build_routes freshness.
+#
+# The plan's CI gate runs build_routes then `git diff --exit-code`. T2 edited the
+# hashed field_data.py, so the committed routes.{h,cpp} Source-SHA stamp
+# legitimately changed (the orchestrator regenerates + commits routes in a later
+# phase). These tests therefore assert the emitter is DETERMINISTIC against the
+# REAL committed field -- re-running build_routes produces zero diff -- WITHOUT
+# hardcoding the old SHA. This is exactly what `git diff --exit-code` checks once
+# routes are regenerated: a second regeneration matches the first byte-for-byte.
+# ---------------------------------------------------------------------------
+
+
+def test_tc19_build_routes_is_deterministic_on_real_field(tmp_path) -> None:
+    """TC19: regenerating routes.{h,cpp} from the real field is byte-stable.
+
+    Runs the full validate -> build_graph -> compute_next_hop -> emit pipeline on
+    the committed ``field_data`` twice into separate output dirs and asserts the
+    two emissions are byte-identical. This is the deterministic-emitter guarantee
+    the `git diff --exit-code` freshness gate relies on: once the routes are
+    regenerated and committed, a re-run leaves no diff. No SHA is hardcoded, so
+    the test stays robust across the legitimate T2 stamp change.
+    """
+    out_a = tmp_path / "a"
+    out_b = tmp_path / "b"
+    assert build_routes._run(out_dir=out_a, no_viz=True) == 0
+    assert build_routes._run(out_dir=out_b, no_viz=True) == 0
+    assert (out_a / "routes.h").read_bytes() == (out_b / "routes.h").read_bytes()
+    assert (out_a / "routes.cpp").read_bytes() == (out_b / "routes.cpp").read_bytes()
+
+
+def test_tc19_committed_routes_match_a_fresh_regeneration(tmp_path) -> None:
+    """TC19: the committed routes.{h,cpp} equal a fresh regeneration (freshness gate).
+
+    Mirrors the CI `git diff --exit-code` check directly: regenerate routes into a
+    temp dir from the real field and compare byte-for-byte against the committed
+    ``WRO2026/routes.{h,cpp}``. The always-green determinism guarantee is
+    test_tc19_build_routes_is_deterministic_on_real_field. Skips gracefully if the
+    committed files are absent so the suite stays green on a partial checkout.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    committed_h = repo_root / "WRO2026" / "routes.h"
+    committed_cpp = repo_root / "WRO2026" / "routes.cpp"
+    if not (committed_h.exists() and committed_cpp.exists()):
+        pytest.skip("committed WRO2026/routes.{h,cpp} not present")
+
+    out_dir = tmp_path / "fresh"
+    assert build_routes._run(out_dir=out_dir, no_viz=True) == 0
+
+    fresh_h = (out_dir / "routes.h").read_bytes()
+    fresh_cpp = (out_dir / "routes.cpp").read_bytes()
+    # Normalize CRLF -> LF so an autocrlf=true Windows checkout of the committed
+    # files does not spuriously diverge from the LF-only emitter output.
+    assert fresh_h == committed_h.read_bytes().replace(b"\r\n", b"\n"), (
+        "committed WRO2026/routes.h is stale -- regenerate with "
+        "`uv run python tools/path_planner/build_routes.py` and commit"
+    )
+    assert fresh_cpp == committed_cpp.read_bytes().replace(b"\r\n", b"\n"), (
+        "committed WRO2026/routes.cpp is stale -- regenerate with "
+        "`uv run python tools/path_planner/build_routes.py` and commit"
+    )
+
+
 def test_run_disconnected_node_warns_but_succeeds(tmp_path, monkeypatch, capsys):
     # Use the stable toy fixture, not the live field_data module: in the toy
     # layout node "G" is a blind node whose only edge is the BLIND_EDGES pair

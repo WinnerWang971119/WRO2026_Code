@@ -92,6 +92,16 @@ _PROJECTION_NODE_TYPE = "projection"
 # edge (a junction must sit on a line edge).
 _LINE_NODE_TYPE = "line"
 
+# The wall-zero re-anchor node kind: the chassis dead-reckons up to it, then
+# square-turns and presses a known wall to re-localize. Like a ``blind`` node it
+# carries no line under the sensor (the wall press happens off the line
+# backbone), so a LINE (line-follow) edge can never be incident to one -- a reset
+# node must be reached by a BLIND edge (see :func:`_reject_line_follow_into_blind`,
+# which rejects both blind and reset endpoints). A LINE edge into a PROJECTION
+# node stays LEGAL (ADR-046); only blind and reset are off-line. Mirrors
+# ``planner.NODE_TYPE_RESET``.
+_RESET_NODE_TYPE = "reset"
+
 # Inclusive upper bound on BLIND_DECAY_EXPONENT. The decay weight is
 # ``length * (1 + k * (d / d_ref) ** exponent)``; with no ceiling a fat-fingered
 # exponent (e.g. 400) makes ``(d / d_ref) ** exponent`` overflow to an uncaught
@@ -322,8 +332,18 @@ def _build_authored_graph(field_data):
             continue  # unknown node; the per-entry shape check reports it.
         if etype not in (EDGE_LINE, EDGE_BLIND):
             continue  # bad type; the per-entry shape check reports it.
-        if "distance_cm" not in entry or "heading_deg" not in entry:
-            continue  # malformed entry; the per-entry shape check reports it.
+        # Geometry is OPTIONAL on an EDGES override entry (issue #79): an
+        # override-only overlay (e.g. ``{type, u, v, primitive_mode}``) carries
+        # no ``distance_cm`` / ``heading_deg``. Do NOT skip such an entry --
+        # ``_emit_directed_pair`` derives both from the node coords (``_euclid``
+        # / ``_heading_deg`` on ``nodes[eu]`` / ``nodes[ev]``) whenever a key is
+        # absent from ``options``, byte-identically to the planner graph. Earlier
+        # this helper ``continue``d past geometry-less entries, which silently
+        # dropped every override-only entry -- including a pivot leg -- from the
+        # pivot-validation graph (the #1 trap on issue #79's T1). The dict
+        # comprehension below already includes only the keys that ARE present, so
+        # an absent ``distance_cm`` / ``heading_deg`` flows through as "derive
+        # from coords".
         # Belt-and-suspenders for W1: forward ONLY the geometry/mode keys the
         # pivot checks read off the graph, never the whole entry. The shape
         # check (`_validate_edges_field`) already rejects a stale `pivot` /
@@ -868,13 +888,29 @@ def _validate_edges_field(field_data) -> None:
     """Validate the optional ``field_data.EDGES`` rich-edge table.
 
     Runs only when ``field_data`` exposes an ``EDGES`` attribute. Each
-    entry must be a dict carrying required keys (``type``, ``u``, ``v``,
-    ``distance_cm``, ``heading_deg``) and may carry optional keys
-    (``primitive_mode``, ``direction``). Mode overrides are cross-checked
-    against the edge ``type`` -- e.g. a :class:`LineMode` is illegal on an
-    :data:`EDGE_BLIND` edge -- and the :class:`DEFAULT
-    <pipeline_config.LineMode>` sentinel is rejected on any override
-    (DEFAULT == "absent", so being explicit about it is a confusion).
+    entry must be a dict carrying the required keys ``type``, ``u``, ``v``
+    and may carry the optional keys ``primitive_mode``, ``direction``,
+    ``stop_at_line``, ``distance_cm``, ``heading_deg``. Geometry
+    (``distance_cm`` / ``heading_deg``) is OPTIONAL (issue #79): an
+    override-only overlay omits it, and downstream
+    (:func:`graph_builder._emit_directed_pair`) derives both from the node
+    coordinates; range/type checks still apply when geometry IS present, and
+    a hand-authored geometry-carrying entry still validates (backward
+    compatible).
+
+    ``primitive_mode`` may be authored as an enum INSTANCE (legacy Python:
+    ``LineMode.FAST`` / ``BlindMode.STOP_AT_LINE``) OR as the bare string
+    member NAME of the matching enum (JSON: ``"FAST"`` / ``"STOP_AT_LINE"``).
+    The name is cross-checked against the edge ``type`` -- a :class:`LineMode`
+    name (``"NORMAL"`` / ``"SLOW"`` / ``"FAST"``) is legal only on an
+    :data:`EDGE_LINE` edge, a :class:`BlindMode` name (``"SYNC_TSHAPE"`` /
+    ``"GYRO_TSHAPE"`` / ``"RAW_FLAT"`` / ``"STOP_AT_LINE"``) only on an
+    :data:`EDGE_BLIND` edge. The :class:`DEFAULT <pipeline_config.LineMode>`
+    sentinel is rejected in BOTH forms -- the enum instance AND the literal
+    string ``"DEFAULT"`` -- because ``LineMode["DEFAULT"]`` /
+    ``BlindMode["DEFAULT"]`` resolve successfully (DEFAULT is a real member),
+    so authoring it explicitly is a confusion (DEFAULT == "absent"). An
+    unknown name is rejected with a precise diagnostic.
 
     An anti-ambiguity cross-check rejects an entry whose unordered pair
     ``{u, v}`` already exists in ``LINE_SEGMENTS`` or ``BLIND_EDGES``
@@ -883,6 +919,19 @@ def _validate_edges_field(field_data) -> None:
     overwrite the earlier edge's type and geometry in :mod:`graph_builder`.
     A *matching*-type entry on an existing pair is a legitimate override
     layer and is accepted.
+
+    An :data:`EDGE_LINE` override incident to a ``"blind"`` or ``"reset"``
+    node is rejected (via :func:`_reject_line_follow_into_blind`): neither
+    carries a line under the sensor, so a line-follow hop cannot reach it
+    (ADR-046 / ADR-048). A LINE edge into a ``"projection"`` node stays
+    legal -- the line passes through it (issue #64).
+
+    A per-entry contradiction is rejected (U2 / ADR-048): an entry whose
+    ``primitive_mode`` resolves to :attr:`BlindMode.STOP_AT_LINE` (the seek
+    bundle) together with ``stop_at_line`` of ``OFF`` (force dead-reckon).
+    The two directly oppose; the resolver would silently let OFF win and
+    dead-reckon an edge the author asked to stop on. Only this one
+    primitive/stop combination is rejected.
 
     Single-wheel pivots are no longer authored here. The old per-edge
     ``pivot`` / ``pre_turn_mode`` keys are gone; pivots are per-turn
@@ -958,8 +1007,7 @@ def _validate_edges_field(field_data) -> None:
         if not isinstance(entry, dict):
             raise FieldDataError(
                 f"EDGES[{i}] must be a dict; got: {entry!r} -- "
-                "each entry needs at least 'type', 'u', 'v', "
-                "'distance_cm', 'heading_deg'"
+                "each entry needs at least 'type', 'u', and 'v'"
             )
 
         # Obsolete per-edge pivot keys (issue #44, T5) ---------------------
@@ -983,19 +1031,23 @@ def _validate_edges_field(field_data) -> None:
                 )
 
         # Required keys ----------------------------------------------------
-        for required_key in ("type", "u", "v", "distance_cm", "heading_deg"):
+        # Geometry (``distance_cm`` / ``heading_deg``) is OPTIONAL (issue #79):
+        # an override-only overlay omits it and the geometry is derived from the
+        # node coords downstream (graph_builder._emit_directed_pair). Only the
+        # identity keys are required; the geometry range checks below run only
+        # when a value IS present.
+        for required_key in ("type", "u", "v"):
             if required_key not in entry:
                 raise FieldDataError(
                     f"EDGES[{i}] missing required key '{required_key}' -- "
-                    "each entry needs 'type', 'u', 'v', 'distance_cm', "
-                    "and 'heading_deg'"
+                    "each entry needs at least 'type', 'u', and 'v' "
+                    "('distance_cm' / 'heading_deg' are optional and derived "
+                    "from the node coordinates when absent)"
                 )
 
         edge_type = entry["type"]
         u = entry["u"]
         v = entry["v"]
-        distance_cm = entry["distance_cm"]
-        heading_deg = entry["heading_deg"]
 
         if edge_type not in legal_edge_types:
             raise FieldDataError(
@@ -1024,11 +1076,13 @@ def _validate_edges_field(field_data) -> None:
             )
 
         # A LINE override is a line-follow edge; like a LINE_SEGMENTS pair it
-        # cannot be incident to a blind node (no line under the sensor), which
-        # also keeps the planner's blind-decay fallback correct-by-construction
-        # (ADR-041). A LINE edge into a PROJECTION node is LEGAL -- the line
-        # passes through the projection node, the hop is just distance-terminated
-        # (issue #64) -- so only a BLIND destination is rejected here.
+        # cannot be incident to a blind OR a reset node (neither carries a line
+        # under the sensor), which also keeps the planner's blind-decay fallback
+        # correct-by-construction (ADR-041) and a reset node honest as a
+        # line-backbone anchor (ADR-048). A LINE edge into a PROJECTION node is
+        # LEGAL -- the line passes through the projection node, the hop is just
+        # distance-terminated (issue #64 / ADR-046) -- so only a BLIND or RESET
+        # destination is rejected here (both handled by the one helper).
         if edge_type == EDGE_LINE:
             _reject_line_follow_into_blind(
                 u, v, edge_type, node_types, f"EDGES[{i}]"
@@ -1055,42 +1109,107 @@ def _validate_edges_field(field_data) -> None:
                 "pair from BLIND_EDGES if it is not blind-reachable"
             )
 
-        if not _is_number(distance_cm) or distance_cm <= 0:
-            raise FieldDataError(
-                f"EDGES[{i}].distance_cm must be a positive number; "
-                f"got: {distance_cm!r} -- use a value > 0 in centimetres"
-            )
+        # Optional geometry (issue #79). When ABSENT, both are derived from the
+        # node coords by graph_builder._emit_directed_pair -- skip the check.
+        # When PRESENT (a hand-authored geometry-carrying entry), keep the full
+        # type/range gates so a bad pinned value still fails fast.
+        if "distance_cm" in entry:
+            distance_cm = entry["distance_cm"]
+            if not _is_number(distance_cm) or distance_cm <= 0:
+                raise FieldDataError(
+                    f"EDGES[{i}].distance_cm must be a positive number; "
+                    f"got: {distance_cm!r} -- use a value > 0 in centimetres "
+                    "(or omit it to derive the distance from the node coords)"
+                )
 
-        if (
-            not _is_number(heading_deg)
-            or not (0.0 <= float(heading_deg) < 360.0)
-        ):
-            raise FieldDataError(
-                f"EDGES[{i}].heading_deg must be a number in [0, 360); "
-                f"got: {heading_deg!r} -- normalize via "
-                "`heading % 360.0`"
-            )
+        if "heading_deg" in entry:
+            heading_deg = entry["heading_deg"]
+            if (
+                not _is_number(heading_deg)
+                or not (0.0 <= float(heading_deg) < 360.0)
+            ):
+                raise FieldDataError(
+                    f"EDGES[{i}].heading_deg must be a number in [0, 360); "
+                    f"got: {heading_deg!r} -- normalize via "
+                    "`heading % 360.0` (or omit it to derive the heading from "
+                    "the node coords)"
+                )
 
         # Optional: primitive_mode ----------------------------------------
-        # Any concrete member of the edge type's mode enum is accepted --
-        # for BLIND edges this includes BlindMode.STOP_AT_LINE. Only the
-        # DEFAULT sentinel (== "absent") and values of the wrong enum type
-        # (or no enum type at all) are rejected.
+        # Accepts EITHER an enum INSTANCE (legacy Python authoring:
+        # ``LineMode.FAST`` / ``BlindMode.STOP_AT_LINE``) OR the bare string
+        # member NAME of the edge type's mode enum (JSON authoring: ``"FAST"`` /
+        # ``"STOP_AT_LINE"`` -- the same vocabulary header_writer's
+        # ``_override_enum_value`` resolves via ``enum_cls[name]``, issue #79).
+        # Both forms are cross-checked against the edge ``type`` (a LineMode tag
+        # only on a LINE edge, a BlindMode tag only on a BLIND edge) and BOTH
+        # reject the DEFAULT sentinel:
+        #   * the enum instance ``expected_cls.DEFAULT``, and
+        #   * the literal string ``"DEFAULT"`` -- which ``enum_cls["DEFAULT"]``
+        #     would resolve SUCCESSFULLY (DEFAULT is a real member), so the
+        #     unknown-name guard below would NOT catch it. DEFAULT == "absent",
+        #     so authoring it explicitly is a confusion.
+        # An unknown string name is rejected with a precise diagnostic; a value
+        # that is neither an enum instance nor a string is rejected as a
+        # category error.
         if "primitive_mode" in entry:
             primitive_mode = entry["primitive_mode"]
             expected_cls, expected_name = mode_class_by_edge_type[edge_type]
-            if not isinstance(primitive_mode, expected_cls):
+
+            if isinstance(primitive_mode, str):
+                # Reject the DEFAULT name explicitly BEFORE the enum lookup --
+                # enum_cls["DEFAULT"] resolves, so the KeyError guard misses it.
+                if primitive_mode == "DEFAULT":
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = 'DEFAULT' -- DEFAULT "
+                        "means 'inherit PIPELINE_CONFIG', which is what absence "
+                        "already encodes; omit the override or pick a concrete "
+                        f"{expected_name} tag"
+                    )
+                try:
+                    resolved = expected_cls[primitive_mode]
+                except KeyError:
+                    valid_tags = [
+                        member.name
+                        for member in expected_cls
+                        if member is not expected_cls.DEFAULT
+                    ]
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
+                        f"type {edge_type} requires a {expected_name} member "
+                        f"name (one of {valid_tags}); the name is unknown. "
+                        "A LineMode tag is legal only on a LINE edge and a "
+                        "BlindMode tag only on a BLIND edge"
+                    )
+                # Defensive: a concrete member resolved, but guard against any
+                # future alias to DEFAULT slipping through the name check above.
+                if resolved == expected_cls.DEFAULT:
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {primitive_mode!r} "
+                        f"resolves to {expected_name}.DEFAULT -- DEFAULT means "
+                        "'inherit PIPELINE_CONFIG', which is what absence "
+                        "already encodes; omit the override or pick a concrete "
+                        f"{expected_name} tag"
+                    )
+            elif isinstance(primitive_mode, expected_cls):
+                if primitive_mode == expected_cls.DEFAULT:
+                    raise FieldDataError(
+                        f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT "
+                        "-- DEFAULT means 'inherit PIPELINE_CONFIG', which is "
+                        "what absence already encodes; omit the override or "
+                        "pick a concrete mode"
+                    )
+            else:
+                # Either a string-or-enum of the WRONG enum class, or a value
+                # of no enum class at all (and not a string). A LineMode
+                # INSTANCE on a BLIND edge (and vice versa) lands here -- a
+                # category error -- and must name the expected class so the
+                # cross-type message matches the existing diagnostic.
                 raise FieldDataError(
                     f"EDGES[{i}].primitive_mode = {primitive_mode!r} -- "
-                    f"type {edge_type} requires a {expected_name} instance "
-                    "(LineMode on LINE edges, BlindMode on BLIND edges)"
-                )
-            if primitive_mode == expected_cls.DEFAULT:
-                raise FieldDataError(
-                    f"EDGES[{i}].primitive_mode = {expected_name}.DEFAULT -- "
-                    "DEFAULT means 'inherit PIPELINE_CONFIG', which is "
-                    "what absence already encodes; omit the override or "
-                    "pick a concrete mode"
+                    f"type {edge_type} requires a {expected_name} instance or "
+                    "the string name of one (LineMode on LINE edges, BlindMode "
+                    "on BLIND edges)"
                 )
 
         # Optional: direction --------------------------------------------
@@ -1127,6 +1246,47 @@ def _validate_edges_field(field_data) -> None:
                     "(DEFAULT, ON, OFF), the string 'on' / 'off' "
                     f"(case-insensitive), or absent; got {stop_at_line!r}"
                 )
+
+        # Contradiction: STOP_AT_LINE primitive + stop_at_line='off' (U2) ----
+        # A ``primitive_mode`` of ``BlindMode.STOP_AT_LINE`` says "seek the line
+        # near the endpoint and re-anchor on it", while ``stop_at_line: OFF`` says
+        # "force dead-reckon, do NOT seek". Authored together on one edge the two
+        # directly contradict: the motion bundle asks for the seek the per-edge
+        # override forbids. The resolver (sim/firmware) would silently let the OFF
+        # override win, dead-reckoning an edge the author asked to stop on -- a
+        # quiet behavior the author did not intend. Reject it here (the single
+        # anti-ambiguity gate, ADR-029) so the contradiction fails loud at author
+        # time. This is the ONLY primitive/stop combination rejected; every other
+        # pairing (e.g. STOP_AT_LINE + ON, SYNC_TSHAPE + OFF) stays legal. Both
+        # fields are already shape-validated above, so a resolve here is safe: a
+        # STOP_AT_LINE tag is a BlindMode member name or instance (legal only on a
+        # BLIND edge), and an OFF stop is the StopAtLineMode.OFF member or the
+        # case-insensitive string "off".
+        primitive_is_stop_at_line = False
+        if "primitive_mode" in entry:
+            pm = entry["primitive_mode"]
+            if isinstance(pm, BlindMode):
+                primitive_is_stop_at_line = pm == BlindMode.STOP_AT_LINE
+            elif isinstance(pm, str):
+                primitive_is_stop_at_line = pm == BlindMode.STOP_AT_LINE.name
+        stop_is_off = False
+        if "stop_at_line" in entry:
+            sal = entry["stop_at_line"]
+            if isinstance(sal, StopAtLineMode):
+                stop_is_off = sal == StopAtLineMode.OFF
+            elif isinstance(sal, str):
+                stop_is_off = sal.lower() == "off"
+        if primitive_is_stop_at_line and stop_is_off:
+            raise FieldDataError(
+                f"EDGES[{i}] ('{u}','{v}') sets primitive_mode = "
+                "BlindMode.STOP_AT_LINE together with stop_at_line='off' -- a "
+                "contradiction: STOP_AT_LINE commands the edge to seek the line "
+                "and re-anchor, while stop_at_line='off' forces dead-reckon (no "
+                "seek). Drop one of the two: keep STOP_AT_LINE (and omit "
+                "stop_at_line, or set it ON) to seek, or keep stop_at_line='off' "
+                "(and pick a non-seeking BlindMode such as SYNC_TSHAPE) to "
+                "dead-reckon."
+            )
 
 
 def _line_and_blind_incident_nodes(field_data) -> Tuple[set, set]:
@@ -1483,14 +1643,17 @@ def validate_blind_decay_domain(
 def _reject_line_follow_into_blind(
     u: str, v: str, edge_kind: str, node_types: dict, where: str
 ) -> None:
-    """Reject a line-follow edge that needs a line where a node has none.
+    """Reject a line-follow edge incident to an off-line (blind / reset) node.
 
     A ``LINE`` edge follows a line for its whole length, so *neither* endpoint
-    may be typed ``"blind"`` (there is no line under the sensor at a blind node).
-    A ``"projection"`` destination is LEGAL: the line passes through a projection
-    node (longitudinally detectable as a crossing), so a LINE hop can follow into
-    it -- the hop is just distance-terminated, not junction-terminated (issue
-    #64). Only a ``"blind"`` endpoint is rejected.
+    may be typed ``"blind"`` (there is no line under the sensor at a blind node)
+    or ``"reset"`` (a wall-zero re-anchor node is reached by dead reckoning and
+    presses a wall off the line backbone -- it carries no line under the sensor
+    either, exactly like a blind node). A ``"projection"`` destination stays
+    LEGAL: the line passes through a projection node (longitudinally detectable
+    as a crossing), so a LINE hop can follow into it -- the hop is just
+    distance-terminated, not junction-terminated (issue #64 / ADR-046). Only a
+    ``"blind"`` or ``"reset"`` endpoint is rejected.
 
     Beyond being physically impossible, a line-follow edge that *terminates on* a
     blind node breaks the planner's blind-decay model (ADR-041): a blind pocket
@@ -1498,8 +1661,11 @@ def _reject_line_follow_into_blind(
     blind-distance search, so its interior blind hops get ``d == inf`` and the
     ``inf -> factor 1`` fallback prices the deepest-drift hops the *cheapest* --
     silently, because the disconnected-node warning never fires (the node is
-    reachable in the full graph). A blind pocket must therefore be entered by a
-    BLIND edge, never a line-follow seam.
+    reachable in the full graph). A reset node is a blind-decay anchor
+    (``planner._ANCHOR_NODE_TYPES`` is ``{line, reset}``): reaching it by a
+    line-follow seam would make it advertise itself as a line-backbone anchor it
+    is not. A blind / reset node must therefore be entered by a BLIND edge, never
+    a line-follow seam (ADR-046 / ADR-048).
 
     :param u: the edge tail node name.
     :param v: the edge head node name.
@@ -1507,7 +1673,8 @@ def _reject_line_follow_into_blind(
     :param node_types: the validated ``NODE_TYPES`` map.
     :param where: a key-path label for the message (e.g. ``"LINE_SEGMENTS"`` or
         ``"EDGES[3]"``).
-    :raises FieldDataError: when either endpoint is typed ``"blind"``.
+    :raises FieldDataError: when either endpoint is typed ``"blind"`` or
+        ``"reset"``.
     """
     for endpoint in (u, v):
         if node_types.get(endpoint) == _BLIND_NODE_TYPE:
@@ -1517,6 +1684,16 @@ def _reject_line_follow_into_blind(
                 "line under the sensor, so a blind node must be reached by a "
                 "BLIND edge (in BLIND_EDGES), not a LINE edge. Re-type the node "
                 "in NODE_TYPES or move the pair to BLIND_EDGES."
+            )
+        if node_types.get(endpoint) == _RESET_NODE_TYPE:
+            raise FieldDataError(
+                f"{where} ('{u}','{v}') is a {edge_kind} (line-follow) edge "
+                f"incident to reset node '{endpoint}' -- a wall-zero reset node "
+                "is reached by dead reckoning and presses a wall off the line "
+                "backbone, so it carries no line under the sensor (like a blind "
+                "node). A reset node must be reached by a BLIND edge (in "
+                "BLIND_EDGES), not a LINE edge (ADR-046 / ADR-048). Re-type the "
+                "node in NODE_TYPES or move the pair to BLIND_EDGES."
             )
 
 
@@ -1559,6 +1736,125 @@ def _validate_blind_decay(field_data) -> None:
     if result is not None:
         field, reason = result
         raise FieldDataError(f"BLIND_DECAY_{field.upper()} {reason}")
+
+
+def _validate_pipeline_config(field_data) -> None:
+    """Reject a malformed field-sourced ``PIPELINE_*`` default (issue #79).
+
+    The mission-wide motion-mode defaults baked into ``routes.cpp``'s
+    ``PIPELINE_CONFIG`` may be authored in the field data as four optional
+    top-level keys carrying enum member NAMES:
+
+    * ``PIPELINE_LINE_MODE``      -- a :class:`LineMode` name      (no ``DEFAULT``)
+    * ``PIPELINE_BLIND_MODE``     -- a :class:`BlindMode` name     (no ``DEFAULT``)
+    * ``PIPELINE_TURN_MODE``      -- a :class:`TurnMode` name      (no ``DEFAULT``)
+    * ``PIPELINE_DIRECTION_MODE`` -- a :class:`DirectionMode` name (``DEFAULT`` OK)
+
+    Each is OPTIONAL: an absent key inherits the ``pipeline_config.py``
+    ``PIPELINE_CONFIG`` default at emit time. Reads are non-strict
+    (``getattr(field_data, "PIPELINE_*", None)``) so the many ``SimpleNamespace``
+    fixtures that omit these keys keep validating unchanged.
+
+    This mirrors :meth:`pipeline_config.PipelineConfig.__post_init__` exactly:
+    a category default (line / blind / turn) may NOT be its own ``DEFAULT``
+    sentinel -- ``DEFAULT`` means "inherit PIPELINE_CONFIG.<category>", which is
+    self-referential when applied to the pipeline config itself and silently
+    degrades to the C++ hardcoded fallback. ``DirectionMode.DEFAULT`` is the one
+    exception ("defer to the builder auto algorithm") and is allowed. Running
+    this check in :func:`validate` (BEFORE emit) means a build never reaches
+    ``header_writer`` with a value ``<EnumCls>[name]`` cannot resolve.
+
+    A value that is already an enum INSTANCE (legacy / programmatic authoring)
+    is also accepted, cross-checked against the same DEFAULT rule -- so a Python
+    fixture that sets ``PIPELINE_LINE_MODE = LineMode.FAST`` validates too.
+
+    :param field_data: the ``tools.path_planner.field_data`` module (or any
+        object exposing the optional ``PIPELINE_*`` attributes).
+    :return: ``None`` on success.
+    :raises FieldDataError: with a precise ``PIPELINE_*`` key path and a
+        one-line fix hint on the first malformed value.
+    """
+    # Deferred import to avoid a circular import via graph_builder, which
+    # imports `validate` from this module (pipeline_config is a leaf, but keep
+    # the import local to mirror the other validators' deferred-import policy and
+    # to skip the cost on a field that omits every pipeline key).
+    from tools.path_planner.pipeline_config import (
+        BlindMode,
+        DirectionMode,
+        LineMode,
+        TurnMode,
+    )
+
+    # (attr, EnumCls, enum-class-name, DEFAULT-allowed?, singleton-field-name).
+    # line/blind/turn reject DEFAULT; direction allows it -- byte-for-byte the
+    # PipelineConfig.__post_init__ split (its _CATEGORY_FIELDS is line/blind/turn;
+    # direction is exempt). The 5th element is the actual PipelineConfig singleton
+    # field name (``line`` / ``blind`` / ``turn`` / ``direction``, matching
+    # PipelineConfig.from_field_data's ``_SPECS`` ctor field), interpolated into
+    # the DEFAULT-rejection messages so they name the real field. It is NOT
+    # ``enum_name.lower()`` -- ``"LineMode".lower()`` is ``"linemode"``, which
+    # names no field on PIPELINE_CONFIG (R8).
+    pipeline_specs = (
+        ("PIPELINE_LINE_MODE", LineMode, "LineMode", False, "line"),
+        ("PIPELINE_BLIND_MODE", BlindMode, "BlindMode", False, "blind"),
+        ("PIPELINE_TURN_MODE", TurnMode, "TurnMode", False, "turn"),
+        ("PIPELINE_DIRECTION_MODE", DirectionMode, "DirectionMode", True, "direction"),
+    )
+
+    for attr, enum_cls, enum_name, default_allowed, config_field in pipeline_specs:
+        value = getattr(field_data, attr, None)
+        if value is None:
+            continue  # absent -> inherit pipeline_config.py default at emit.
+
+        if isinstance(value, str):
+            # The DEFAULT name must be judged against `default_allowed` BEFORE
+            # the resolve: `enum_cls["DEFAULT"]` resolves (DEFAULT is a real
+            # member), so the unknown-name guard would not catch a disallowed
+            # DEFAULT.
+            if value == "DEFAULT":
+                if not default_allowed:
+                    raise FieldDataError(
+                        f"{attr} = 'DEFAULT' -- {enum_name}.DEFAULT means "
+                        f"'inherit PIPELINE_CONFIG.{config_field}', which "
+                        "is circular when set as the pipeline default itself; "
+                        "omit the key (to inherit the pipeline_config.py "
+                        f"default) or pick a concrete {enum_name} tag"
+                    )
+                continue  # DirectionMode.DEFAULT is a legitimate value.
+            try:
+                resolved = enum_cls[value]
+            except KeyError:
+                valid_tags = [
+                    member.name
+                    for member in enum_cls
+                    if default_allowed or member is not enum_cls.DEFAULT
+                ]
+                raise FieldDataError(
+                    f"{attr} = {value!r} -- expected a {enum_name} member name "
+                    f"(one of {valid_tags}); the name is unknown. Omit the key "
+                    "to inherit the pipeline_config.py default."
+                )
+            if resolved == enum_cls.DEFAULT and not default_allowed:
+                raise FieldDataError(
+                    f"{attr} = {value!r} resolves to {enum_name}.DEFAULT -- "
+                    f"DEFAULT means 'inherit PIPELINE_CONFIG.{config_field}', "
+                    "which is circular when set as the pipeline default itself; "
+                    f"omit the key or pick a concrete {enum_name} tag"
+                )
+        elif isinstance(value, enum_cls):
+            if value == enum_cls.DEFAULT and not default_allowed:
+                raise FieldDataError(
+                    f"{attr} = {enum_name}.DEFAULT -- DEFAULT means 'inherit "
+                    f"PIPELINE_CONFIG.{config_field}', which is circular "
+                    "when set as the pipeline default itself; omit the key or "
+                    f"pick a concrete {enum_name} tag"
+                )
+        else:
+            raise FieldDataError(
+                f"{attr} = {value!r} -- expected a {enum_name} member name "
+                f"(string) or a {enum_name} instance; omit the key to inherit "
+                "the pipeline_config.py default."
+            )
 
 
 def validate(field_data) -> None:
@@ -1657,11 +1953,12 @@ def validate(field_data) -> None:
     _validate_edge_list(line_segments, nodes, "LINE_SEGMENTS")
 
     # 4b. A LINE_SEGMENTS edge is a line-follow segment, so neither endpoint may
-    # be a blind node (you cannot line-follow to a node with no line). This also
-    # keeps the planner's blind-decay inf->factor-1 fallback correct-by-
+    # be a blind OR a reset node (you cannot line-follow to a node with no line;
+    # a reset node presses a wall off the line backbone, like a blind node). This
+    # also keeps the planner's blind-decay inf->factor-1 fallback correct-by-
     # construction -- a blind pocket must be entered by a BLIND edge, never a
-    # line-follow seam (ADR-041). Runs after NODE_TYPES (pass 3) so the typing is
-    # validated.
+    # line-follow seam (ADR-041) -- and a reset node honest as a line-backbone
+    # anchor (ADR-048). Runs after NODE_TYPES (pass 3) so the typing is validated.
     for a, b in line_segments:
         _reject_line_follow_into_blind(a, b, "LINE", node_types, "LINE_SEGMENTS")
 
@@ -1805,3 +2102,11 @@ def validate(field_data) -> None:
     # _REQUIRED_ATTRS structural check above; this pass enforces each value's
     # domain (k >= 0, exponent >= 1, d_ref > 0, enabled is a bool).
     _validate_blind_decay(field_data)
+
+    # 13. Optional field-sourced PIPELINE_CONFIG defaults (issue #79). Each
+    # PIPELINE_* key (when present) must name a valid enum member; line/blind/turn
+    # reject DEFAULT, direction allows it (mirrors PipelineConfig.__post_init__).
+    # Runs BEFORE the emitter so a build never reaches header_writer with a value
+    # `<EnumCls>[name]` cannot resolve. Reads are non-strict, so a field that
+    # omits every key (the common case) passes inertly.
+    _validate_pipeline_config(field_data)

@@ -12,16 +12,14 @@ previous tasks of the live-editor plan:
 The app owns:
 
 * A single :class:`FieldModel` instance loaded from ``field_data.json``.
+  The model now owns the per-edge ``EDGES`` override overlays
+  (:attr:`FieldModel.edges`) and the field-sourced ``PIPELINE_CONFIG``
+  defaults, so a node rename cascades into ``EDGES`` THROUGH THE MODEL via
+  :class:`~tools.path_planner.editor.commands.RenameNode` and Save is a pure
+  JSON dump -- there is no separate ``field_data.py`` EDGES rewrite (issue
+  #79; the former ``ast_rewrite`` / ``_pending_renames`` subsystem is retired).
 * A single :class:`History` instance — every mutation funnelled through
   ``History.do`` for unbounded undo/redo.
-* A reference to the imported ``tools.path_planner.field_data`` module,
-  used solely to peek at the rich ``EDGES`` table when a node delete is
-  attempted (the model doesn't own ``EDGES`` — see T5's note on
-  :class:`~tools.path_planner.editor.commands.DeleteNode`).
-* A set of pending node renames (``_pending_renames``) accumulated since
-  the last successful Save; flushed to ``field_data.py`` via
-  :func:`tools.path_planner.editor.ast_rewrite.rewrite_edges_uv` during
-  the Save handler.
 
 Mouse handling is mode-driven: the canvas exposes raw ``(x, y, button)``
 events and this class routes them through the panel's currently selected
@@ -53,6 +51,7 @@ from tools.path_planner.editor.commands import (
     AddNode,
     AddObstacle,
     AddPivotTurn,
+    ClearEdgeOverride,
     ClearResetSpec,
     DeleteEdge,
     DeleteNode,
@@ -61,8 +60,12 @@ from tools.path_planner.editor.commands import (
     MacroCommand,
     MoveNode,
     RenameNode,
+    SetEdgeOverride,
+    SetFieldDimensions,
+    SetFieldWideFlag,
     SetGlobalKnob,
     SetNodeType,
+    SetPipelineMode,
     SetResetSpec,
     SetStart,
     SetStartHeading,
@@ -156,6 +159,17 @@ _PLAIN_NODE_TYPES: tuple[str, ...] = (_NODE_TYPE_LINE, _NODE_TYPE_BLIND)
 #: node type -- kept distinct so the override / status code reads in edge terms.
 _EDGE_KIND_LINE: str = "line"
 _EDGE_KIND_BLIND: str = "blind"
+
+#: Maps the app's lowercase edge-KIND (``line_segments`` / ``blind_edges``
+#: spelling used by :meth:`EditorApp._plain_edge_kind`) to the uppercase edge
+#: TYPE tag the panel + the ``EDGES`` overlay use (``"LINE"`` / ``"BLIND"``).
+#: The edge-mode click graft derives the kind from the clicked segment, then
+#: translates it through this map before calling the panel's
+#: ``prefill_edit_row`` / ``prefill_add_row`` (which key on the type tag).
+_EDGE_KIND_TO_TYPE_TAG: dict[str, str] = {
+    _EDGE_KIND_LINE: "LINE",
+    _EDGE_KIND_BLIND: "BLIND",
+}
 
 #: Allowed wall-zero axis values for an inline reset-spec edit; single-sourced
 #: from ``model.RESET_AXIS_VALUES`` (which mirrors
@@ -288,9 +302,21 @@ _STATUS_SAVED: str = "Saved field_data.json"
 _STATUS_BUILT: str = "Built routes.h + routes.cpp"
 _STATUS_BUILD_FAILED: str = "Build failed; see dialog for details."
 
-#: Sibling-of-field_data paths the Save handler writes to.
+#: Status message naming a refused LINE edge incident to a reset node (U5). A
+#: reset node is reached by dead reckoning, so it is BLIND-incident only -- a
+#: LINE (line-follow) edge can never touch one (validator rejects it via
+#: ``_reject_line_follow_into_blind``). The ``{nodes}`` placeholder lists the
+#: reset endpoint(s); the operator must use ``B`` (blind) instead. A PROJECTION
+#: endpoint stays LINE-legal (ADR-046) and never reaches this message.
+_STATUS_LINE_INTO_RESET: str = (
+    "Cannot make a LINE edge incident to reset node {nodes}; a reset node is "
+    "reached by dead reckoning -- press B for a blind edge instead."
+)
+
+#: Path to the field JSON the Save handler writes. Save is pure-JSON now -- the
+#: EDGES table lives in the model and round-trips through this file, so there is
+#: no longer a sibling ``field_data.py`` rewrite (issue #79).
 _PLANNER_ROOT: Path = Path(__file__).resolve().parent.parent
-_FIELD_DATA_PY_PATH: Path = _PLANNER_ROOT / "field_data.py"
 _FIELD_DATA_JSON_PATH: Path = _PLANNER_ROOT / "field_data.json"
 
 #: Canonical keyboard-shortcut reference, the SINGLE source of truth for the
@@ -385,35 +411,21 @@ class EditorApp:
         self._json_path: Path = json_path
         self._model: FieldModel = FieldModel.from_json_dict(data)
 
-        # ---- 2. Import the field_data module to peek at EDGES on delete ----
-        # Done lazily so unit tests that monkeypatch the JSON path can
-        # avoid the import. The reference is captured once -- live edits
-        # to field_data.py during a session are intentionally NOT
-        # picked up (the user must restart the editor for those).
-        try:
-            from tools.path_planner import field_data as _field_data_module
-            self._field_data_module = _field_data_module
-        except Exception:  # noqa: BLE001 -- module import is best-effort
-            self._field_data_module = None
-
-        # ---- 3. History + dirty tracking + rename queue ----
+        # ---- 2. History + dirty tracking ----
+        # The model owns EDGES + the pipeline defaults, so a node rename cascades
+        # into ``model.edges`` through RenameNode (undo/redo come for free via the
+        # command history) and Save is a pure JSON dump -- no pending-rename delta
+        # and no field_data.py peek are needed any more (issue #79).
         self._history: History = History()
         self._dirty: bool = False
-        # Net node renames awaiting flush into field_data.py EDGES on the next
-        # Save, keyed {current-EDGES-name: target-name}. Maintained as a delta:
-        # a fresh rename records forward, an undo records the inverse, a redo
-        # re-records forward (see _undo / _redo). It is NEVER rebuilt from the
-        # history stacks -- doing so was the source of the undo-saved-rename
-        # divergence, because History mutates (redo is cleared by any new edit).
-        self._pending_renames: dict[str, str] = {}
 
-        # ---- 4. Tk root window ----
+        # ---- 3. Tk root window ----
         self._owns_root: bool = root is None
         self._root: tk.Tk = root if root is not None else tk.Tk()
         self._root.title(_WINDOW_TITLE)
         self._root.geometry(self._initial_window_geometry())
 
-        # ---- 5. Warm theme (must precede panels/canvas) ----
+        # ---- 4. Warm theme (must precede panels/canvas) ----
         # Apply the drafting-table theme to the freshly-created root BEFORE the
         # side panels and canvas are constructed so they pick up the base ttk
         # styling and any bundled fonts as they build. Every call here fails
@@ -430,27 +442,27 @@ class EditorApp:
         theme.apply_ttk_theme(self._root)
         self._root.configure(background=theme.SURFACE)
 
-        # ---- 6. Side panels (chrome bands, not yet placed) ----
+        # ---- 5. Side panels (chrome bands, not yet placed) ----
         # SidePanels builds the four chrome bands (title / mode rail /
         # inspector / status) as siblings of the canvas under the shared root,
         # but does NOT place them -- the single ``layout_three_pane`` call below
         # grids every band plus the canvas into the true three-pane window.
         self._panels: SidePanels = SidePanels(self._root)
 
-        # ---- 7. Canvas (centre band, expands) ----
+        # ---- 6. Canvas (centre band, expands) ----
         # The canvas resolves ``model.map_png`` against the planner root
         # itself; it does not need a field_data module reference.
         self._canvas: FieldCanvas = FieldCanvas(self._root)
         self._size_canvas_to_field()
 
-        # ---- 7b. Three-pane placement (single entry point) ----
+        # ---- 6b. Three-pane placement (single entry point) ----
         # Now that BOTH the chrome bands and the canvas widget exist, hand the
         # canvas to the panels' one placement method: it grids the title +
         # status bands full-width, the mode rail + inspector at their fixed
         # widths, and the canvas in the expanding centre cell.
         self._panels.layout_three_pane(self._canvas.tk_widget)
 
-        # ---- 8. Mouse / mode state ----
+        # ---- 7. Mouse / mode state ----
         # Move mode: latched node currently being dragged.
         self._drag_target: Optional[str] = None
         # Move mode: original coords captured at press, so on release we
@@ -474,7 +486,7 @@ class EditorApp:
         # nudge knows which node to move without re-reading the panel widget.
         self._selected_node: Optional[str] = None
 
-        # ---- 9. Spinbox de-dup guard (reviewer note T11 W1) ----
+        # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
         # same value already committed. Compare against this latch and
         # short-circuit if equal.
@@ -482,13 +494,13 @@ class EditorApp:
             self._model.start_heading_deg
         )
 
-        # ---- 10. Wire callbacks ----
+        # ---- 9. Wire callbacks ----
         self._wire_panel_callbacks()
         self._wire_canvas_callbacks()
         self._wire_keyboard_shortcuts()
         self._wire_window_close()
 
-        # ---- 11. Initial render + panel population ----
+        # ---- 10. Initial render + panel population ----
         # Seed the title-bar filename from the JSON sidecar's basename so the
         # chrome names the file being edited; the dirty dot starts hidden
         # (a freshly loaded model is clean).
@@ -592,6 +604,26 @@ class EditorApp:
         self._panels.on_add_pivot = self._on_panel_add_pivot
         self._panels.on_delete_pivot = self._on_panel_delete_pivot
         self._panels.on_global_knob_change = self._on_panel_global_knob_change
+
+        # Edge-overrides / pipeline-defaults / extended-globals callbacks (T7).
+        # Each slot routes a panel commit to its T6 command through _dispatch
+        # (same history / refresh path as every other inspector edit). The panel
+        # has already done its inline well-formedness check (sentinel -> None,
+        # type derivation, positive-number / valid-which guards) before firing,
+        # so these handlers are thin command builders.
+        self._panels.on_set_edge_override = self._on_panel_set_edge_override
+        self._panels.on_clear_edge_override = (
+            self._on_panel_clear_edge_override
+        )
+        self._panels.on_pipeline_mode_change = (
+            self._on_panel_pipeline_mode_change
+        )
+        self._panels.on_field_wide_flag_change = (
+            self._on_panel_field_wide_flag_change
+        )
+        self._panels.on_field_dimensions_change = (
+            self._on_panel_field_dimensions_change
+        )
 
         # Status-strip shortcuts hint: opens the read-only reference dialog.
         self._panels.on_show_shortcuts = self._show_shortcuts_dialog
@@ -968,40 +1000,34 @@ class EditorApp:
     # ------------------------------------------------------------------
 
     def _undo(self) -> None:
-        """Pop one command off the undo stack and re-render."""
-        # Peek the command BEFORE undo pops it so we can mirror its effect onto
-        # the pending-rename delta.
-        undone = self._history.undo_stack[-1] if self._history.can_undo else None
+        """Pop one command off the undo stack and re-render.
+
+        A ``RenameNode`` undo restores the old name everywhere it cascaded --
+        including ``model.edges`` -- through the command's own ``revert``, so no
+        extra bookkeeping is needed here (the retired ``_pending_renames`` delta
+        used to mirror the rename onto a separate EDGES rewrite; that surface is
+        gone now that the model owns EDGES, issue #79).
+        """
         if not self._history.undo(self._model):
             self._set_status("Nothing to undo.")
             return
         # Any undo brings the buffer back into "dirty vs saved" ambiguity --
         # we conservatively mark dirty so the user is prompted on close.
         self._mark_dirty()
-        # Undoing a rename reverts new -> old in the model, so the pending
-        # EDGES rewrite must move the same way. _record_pending_rename's
-        # chain-collapse cancels a not-yet-saved rename (A->B then its inverse
-        # collapses to {}) and inverts an already-saved one (leaving {B: A} so
-        # the next Save reverts field_data.py to match field_data.json) with
-        # the same call -- no need to know whether the rename was saved.
-        if isinstance(undone, RenameNode):
-            self._record_pending_rename(undone.new, undone.old)
         self._refresh_view()
         self._set_status("Undid last action.")
 
     def _redo(self) -> None:
-        """Re-apply one command from the redo stack and re-render."""
-        # Peek the command BEFORE redo pops it (redo re-applies redo_stack[-1]).
-        redone = self._history.redo_stack[-1] if self._history.can_redo else None
+        """Re-apply one command from the redo stack and re-render.
+
+        A ``RenameNode`` redo re-establishes the new name everywhere it cascades
+        (``model.edges`` included) through the command's own ``apply``; like
+        :meth:`_undo`, no extra rename bookkeeping is needed (issue #79).
+        """
         if not self._history.redo(self._model):
             self._set_status("Nothing to redo.")
             return
         self._mark_dirty()
-        # Re-applying a rename re-establishes old -> new; record it forward so
-        # the queue is symmetric with _undo. A non-rename redo leaves the queue
-        # untouched.
-        if isinstance(redone, RenameNode):
-            self._record_pending_rename(redone.old, redone.new)
         self._refresh_view()
         self._set_status("Redid last action.")
 
@@ -1468,6 +1494,108 @@ class EditorApp:
 
         self._dispatch(SetGlobalKnob(knob, number))
 
+    def _on_panel_set_edge_override(
+        self,
+        edge_type: str,
+        u: str,
+        v: str,
+        primitive_mode: Optional[str],
+        direction: Optional[str],
+        stop_at_line: Optional[str],
+    ) -> None:
+        """Dispatch a :class:`SetEdgeOverride` from the inline override editor.
+
+        The panel has already re-derived ``edge_type`` from the existing segment
+        and mapped each inherit sentinel to ``None`` (key omitted) before firing,
+        so this handler is a thin command builder. Identity is the full
+        ``(edge_type, u, v)`` triple; the command adds-or-replaces the overlay
+        entry, and ``_dispatch`` funnels it through history + refresh so the
+        EDGE OVERRIDES list, undo/redo, and per-move validation all update.
+
+        :param edge_type: Derived edge type tag (``"LINE"`` / ``"BLIND"``).
+        :param u: Source node name (forward ``u -> v``).
+        :param v: Destination node name.
+        :param primitive_mode: Mode tag, or ``None`` to inherit.
+        :param direction: ``"front"`` / ``"rear"``, or ``None`` to inherit.
+        :param stop_at_line: ``"on"`` / ``"off"``, or ``None`` to inherit.
+        """
+        self._dispatch(
+            SetEdgeOverride(
+                edge_type, u, v, primitive_mode, direction, stop_at_line
+            )
+        )
+
+    def _on_panel_clear_edge_override(
+        self, edge_type: str, u: str, v: str
+    ) -> None:
+        """Dispatch a :class:`ClearEdgeOverride` from a row's delete (``x``).
+
+        Matches on the full ``(edge_type, u, v)`` identity so a same-pair
+        override of the other type (or the reverse direction) is never removed by
+        mistake. The command raises if no such override exists; ``_dispatch``
+        surfaces that to the status bar.
+
+        :param edge_type: Edge type tag of the override to remove.
+        :param u: Source node name (forward ``u -> v``).
+        :param v: Destination node name.
+        """
+        self._dispatch(ClearEdgeOverride(edge_type, u, v))
+
+    def _on_panel_pipeline_mode_change(
+        self, which: str, value: Optional[str]
+    ) -> None:
+        """Dispatch a :class:`SetPipelineMode` from a PIPELINE DEFAULTS combobox.
+
+        The panel maps its unset sentinel to ``None`` (field absent -> inherit
+        the ``pipeline_config.py`` default) before firing; any member name is
+        forwarded verbatim. The per-category tag vocabulary and the DEFAULT rule
+        are enforced at Save by the validator, so this handler just routes the
+        selector to the command.
+
+        :param which: Pipeline category (``"line"`` / ``"blind"`` / ``"turn"`` /
+            ``"direction"``).
+        :param value: Mode member name, or ``None`` to inherit.
+        """
+        self._dispatch(SetPipelineMode(which, value))
+
+    def _on_panel_field_wide_flag_change(
+        self, flag: str, value: bool
+    ) -> None:
+        """Dispatch a :class:`SetFieldWideFlag` from a field-wide checkbutton.
+
+        Currently the only field-wide flag is ``blind_projection_auto_seek``.
+        The value arrives already coerced to ``bool`` from the checkbutton var.
+
+        :param flag: Flag attribute name.
+        :param value: New boolean value.
+        """
+        self._dispatch(SetFieldWideFlag(flag, bool(value)))
+
+    def _on_panel_field_dimensions_change(
+        self, width_mm: float, height_mm: float
+    ) -> None:
+        """Dispatch a :class:`SetFieldDimensions` from the FIELD_MM entries.
+
+        The panel parses both entries and rejects an unparseable / non-positive
+        value (status message, no fire) before this handler runs, so the values
+        arrive as positive floats. The command captures the prior ``field_mm``
+        pair for undo; ``_dispatch`` funnels it through history + refresh so the
+        canvas re-sizes to the new aspect.
+
+        Skips the round-trip when ``(width_mm, height_mm)`` already equals
+        ``model.field_mm`` (R7) -- a bare ``<FocusOut>`` on an unchanged field
+        would otherwise dispatch a no-op ``SetFieldDimensions``, burning an undo
+        entry and dirtying the buffer (and the panel now carries the un-edited
+        dimension forward verbatim, so an untouched commit lands here byte-equal).
+        Mirrors the no-op guard in :meth:`_on_panel_global_knob_change`.
+
+        :param width_mm: New field width in millimetres.
+        :param height_mm: New field height in millimetres.
+        """
+        if (width_mm, height_mm) == self._model.field_mm:
+            return
+        self._dispatch(SetFieldDimensions(width_mm, height_mm))
+
     def _edge_exists(self, a: str, b: str) -> bool:
         """Return ``True`` if any edge connects ``{a, b}`` (line / blind).
 
@@ -1802,21 +1930,6 @@ class EditorApp:
         if dlg.result is None:
             return
         name, node_type = dlg.result
-        # Forbid reusing a name that is still the source of an unflushed rename
-        # (#65). The pending-rename map keys on the original (old) name, so a
-        # new node reusing that freed name would let a later rename of the new
-        # node clobber the original mapping and corrupt the Save-time EDGES
-        # rewrite. Block it until the pending rename is flushed by a Save.
-        if name in self._pending_renames:
-            messagebox.showerror(
-                "Cannot add node",
-                f"Cannot reuse the name {name!r} -- it is the source of a "
-                "pending rename that has not been saved yet. Save first, then "
-                "reuse the name.",
-                parent=self._root,
-            )
-            return
-
         if node_type == _NODE_TYPE_RESET:
             self._add_reset_node(name, (x, y))
             return
@@ -1889,7 +2002,7 @@ class EditorApp:
 
         Lets the operator immediately see the auto-filled wall / facing after a
         reset node is created. Guarded against panel internals being absent
-        (the section starts open by default, so this is usually a no-op).
+        (the section starts collapsed by default, so this expands it on demand).
         """
         collapsibles = getattr(self._panels, "_collapsibles", None)
         if not collapsibles:
@@ -1945,11 +2058,60 @@ class EditorApp:
                 f"Edge endpoints: {a!r} -> {b!r} (current: {current}). "
                 f"Press L (line), B (blind), or Delete."
             )
+            # Refresh FIRST, THEN graft (U1/U3): ``_refresh_view`` -> the panel's
+            # ``refresh`` unconditionally hides the inline editor and (when the
+            # overlay changed) rebuilds the override rows, so a graft run BEFORE
+            # it would be torn straight back down -- the editor would flash open
+            # then shut.  Running the refresh first means the graft opens its
+            # editor / highlight against the freshly-rebuilt row set and survives.
+            self._refresh_view()
+            # Edge-mode override graft (Direction A via the existing Edge mode):
+            # if the picked pair is an existing line / blind segment, surface its
+            # override -- OPEN the inline editor pre-filled from an existing one
+            # for edit, else pre-fill the add-form from the clicked segment -- so
+            # the operator can correct / attach an override on the clicked edge.
+            self._graft_edge_override_panel(a, b)
         else:
             self._set_status(
                 f"Selected {hit!r}; click a second node to form an edge."
             )
-        self._refresh_view()
+            self._refresh_view()
+
+    def _graft_edge_override_panel(self, a: str, b: str) -> None:
+        """Surface the override editor for the clicked edge ``a -> b`` (the graft).
+
+        The panel side of the Direction-A graft, ridden off the existing Edge
+        mode selection (no new canvas selection state). When the two-endpoint
+        pick names an existing line / blind segment, the ``type`` is derived from
+        that segment (the panel's overlays key on the full ``(type, u, v)``
+        triple): the app asks the panel to OPEN the inline editor PRE-FILLED from
+        that edge's existing override for edit, and if no override exists it asks
+        the panel to PRE-FILL the blank add-form's ``u`` / ``v`` / ``type`` from
+        the clicked segment instead. Either way the inline editor opens so the
+        operator can author / correct the override in one click (U1/U3). The
+        directed ``u -> v`` is taken in click order (``a`` then ``b``) -- the
+        operator authors per directed edge, so a reverse-direction override
+        simply doesn't match and falls through to the add-form on the clicked
+        order.
+
+        Called AFTER :meth:`_handle_edge_click` has already run
+        :meth:`_refresh_view`, so both panel methods operate against the
+        freshly-rebuilt overlay / row set and the opened editor survives.
+
+        A pair that is not an existing segment (no line / blind edge) is a no-op
+        here: there is nothing to attach an override to, so the operator uses
+        L / B first to create the segment. Both panel methods no-op safely when
+        the new override sections were not built (headless smoke path).
+
+        :param a: First picked node name (the directed source ``u``).
+        :param b: Second picked node name (the directed destination ``v``).
+        """
+        kind = self._plain_edge_kind(a, b)
+        if kind is None:
+            return
+        edge_type = _EDGE_KIND_TO_TYPE_TAG[kind]
+        if not self._panels.prefill_edit_row(edge_type, a, b):
+            self._panels.prefill_add_row(edge_type, a, b)
 
     def _handle_obstacle_click(self, x: float, y: float) -> None:
         """Latch the obstacle drag anchor at the press point.
@@ -2170,6 +2332,27 @@ class EditorApp:
             AddBlindEdge(a, b), a, b, _EDGE_KIND_BLIND
         )
 
+    def _reset_endpoints(self, a: str, b: str) -> list[str]:
+        """Return the reset-typed nodes among ``(a, b)``, in click order.
+
+        Reads the node type straight off the model (``model.node_types``) and
+        keeps an endpoint only when its type is :data:`_NODE_TYPE_RESET`.  Used by
+        the U5 LINE-edge guard: a LINE edge incident to a reset node is illegal
+        (the validator rejects it), so the L-key handler refuses such a pair. A
+        PROJECTION (or plain line / blind) endpoint is never returned, so a
+        LINE->projection edge stays legal (ADR-046).
+
+        :param a: First picked node name (the directed source).
+        :param b: Second picked node name (the directed destination).
+        :return: The reset-typed endpoints, ``[]`` when neither is a reset node.
+        """
+        node_types = self._model.node_types
+        return [
+            name
+            for name in (a, b)
+            if node_types.get(name) == _NODE_TYPE_RESET
+        ]
+
     def _add_plain_edge_with_override(
         self, add_command, a: str, b: str, kind: str
     ) -> None:
@@ -2198,6 +2381,18 @@ class EditorApp:
         :param kind: :data:`_EDGE_KIND_LINE` / :data:`_EDGE_KIND_BLIND` -- shapes
             the override decision and the status text.
         """
+        # U5: a LINE edge can never be incident to a reset node -- a reset node is
+        # reached by dead reckoning (BLIND-incident only), so refuse the L key on a
+        # reset-incident pair with a status message and no dispatch (the operator
+        # must use B for blind). This mirrors the validator's LINE->reset rejection
+        # (_reject_line_follow_into_blind), keeping the GUI and the Save-to-disk
+        # validator in agreement. A PROJECTION endpoint stays LINE-legal (ADR-046).
+        if kind == _EDGE_KIND_LINE:
+            reset_endpoints = self._reset_endpoints(a, b)
+            if reset_endpoints:
+                names = ", ".join(repr(name) for name in reset_endpoints)
+                self._set_status(_STATUS_LINE_INTO_RESET.format(nodes=names))
+                return
         # Already the requested kind: a no-op the operator would otherwise hit as
         # the command's "already exists" error. Report it plainly and stop.
         if self._plain_edge_kind(a, b) == kind:
@@ -2369,14 +2564,18 @@ class EditorApp:
         self._perform_rename(target, new_name)
 
     def _perform_rename(self, target: str, new_name: str) -> bool:
-        """Rename *target* to *new_name*, recording the pending EDGES rewrite.
+        """Rename *target* to *new_name* through a :class:`RenameNode` command.
 
         Shared by the right-click rename and the inspector's in-place name edit.
-        A blank or unchanged *new_name* is a no-op; on a successful dispatch the
-        rename is queued into :attr:`_pending_renames` for the next Save and --
-        if *target* was the selected node -- the selection follows it to
-        *new_name* (latch + status line + inspector), so the renamed node stays
-        selected and a follow-up arrow nudge targets it.
+        A blank or unchanged *new_name* is a no-op. The command cascades the
+        rename through every model container that names the node -- ``nodes`` /
+        ``node_types`` / ``line_segments`` / ``blind_edges`` / ``reset_nodes`` /
+        ``pivot_turns`` AND the ``model.edges`` override overlays -- so the
+        EDGES ``u`` / ``v`` follow the rename in the model (and through Save into
+        JSON) with undo/redo for free; no separate EDGES rewrite is involved
+        (issue #79). On a successful dispatch, if *target* was the selected node
+        the selection follows it to *new_name* (latch + status line + inspector),
+        so the renamed node stays selected and a follow-up arrow nudge targets it.
 
         :param target: Existing node name.
         :param new_name: Proposed new name (stripped here).
@@ -2388,7 +2587,6 @@ class EditorApp:
         was_selected = self._selected_node == target
         if not self._dispatch(RenameNode(target, new_name)):
             return False
-        self._record_pending_rename(target, new_name)
         if was_selected:
             # The dispatch's refresh ran while the panel still keyed off the OLD
             # name (so it dropped the listbox/inspector selection). Re-point the
@@ -2424,11 +2622,18 @@ class EditorApp:
         self._dispatch(SetNodeType(target, new_type))
 
     def _context_delete(self, target: str) -> None:
-        """Confirm + dispatch :class:`DeleteNode`, checking EDGES first.
+        """Confirm + dispatch :class:`DeleteNode`.
 
-        Refuses the delete if the imported ``field_data.EDGES`` references
-        the node (the model doesn't own ``EDGES``; we peek at the module's
-        live attribute). The user is told the offending entry index.
+        The hard guards live in :meth:`DeleteNode.apply`: it refuses to delete a
+        node still referenced by ``line_segments`` / ``blind_edges`` / a pivot
+        turn, or the current start node. Because a ``model.edges`` override
+        overlay can only attach to an existing line / blind segment (the panel
+        derives its type from that segment), a node an override references is
+        always also referenced by a segment, so the segment guard already blocks
+        the delete -- no separate ``EDGES`` peek is needed now that the model
+        owns EDGES (issue #79). The start node is guarded up front here too, so
+        the operator gets a clear message before the confirm dialog rather than
+        an opaque validator failure at the next Save.
 
         :param target: Node to delete.
         """
@@ -2441,16 +2646,6 @@ class EditorApp:
                 "Cannot delete node",
                 f"Cannot delete {target!r} -- it is the current start node. "
                 "Pick a different start node first.",
-                parent=self._root,
-            )
-            return
-
-        edges_index = self._find_edges_reference(target)
-        if edges_index is not None:
-            messagebox.showerror(
-                "Cannot delete node",
-                f"Cannot delete {target!r} -- referenced by "
-                f"EDGES[{edges_index}]. Edit field_data.py first.",
                 parent=self._root,
             )
             return
@@ -2471,90 +2666,20 @@ class EditorApp:
             self._selected_node = None
             self._update_selection_display(None)
 
-    def _find_edges_reference(self, node_name: str) -> Optional[int]:
-        """Return the index of the first ``EDGES`` entry referencing *node_name*.
-
-        Scans the live ``tools.path_planner.field_data.EDGES`` list (if the
-        module was importable). Returns ``None`` when the node is unmentioned
-        or when the module / attribute is unavailable.
-
-        The cached ``EDGES`` list is only refreshed on a successful Save, so it
-        still holds the *pre-rename* names for any in-session rename that has
-        not been flushed yet. Resolve *node_name* back through the pending
-        rename map (target ``Y`` -> source ``X``) before scanning, so deleting
-        a renamed-but-unsaved node still sees the EDGES reference under its old
-        name and the guard fires.
-
-        :param node_name: Node to search for (its current, possibly renamed,
-            display name).
-        :return: Index into ``EDGES`` or ``None``.
-        """
-        if self._field_data_module is None:
-            return None
-        edges = getattr(self._field_data_module, "EDGES", None)
-        if not isinstance(edges, list):
-            return None
-        # Map the current display name back to the name the cached EDGES table
-        # still uses. A pending rename X -> Y means EDGES holds 'X'; deleting
-        # 'Y' must search for 'X'. The map keys on the original source name and
-        # values are the latest target, so invert it for the lookup.
-        search_name = node_name
-        for source, target in self._pending_renames.items():
-            if target == node_name:
-                search_name = source
-                break
-        for index, entry in enumerate(edges):
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("u") == search_name or entry.get("v") == search_name:
-                return index
-        return None
-
-    def _record_pending_rename(self, old: str, new: str) -> None:
-        """Accumulate a rename for the next Save, collapsing chains.
-
-        If a prior rename mapped ``X -> Y`` and the user now renames
-        ``Y -> Z``, the resulting pending entry must be ``X -> Z`` (and
-        the intermediate ``X -> Y`` mapping is dropped) so the LibCST
-        rewriter only sees the latest target name for each original.
-
-        Degenerate chains that collapse to identity (``X -> Y -> X``)
-        are dropped entirely rather than recorded as ``{X: X}`` — the
-        latter would force :func:`tools.path_planner.editor.ast_rewrite.
-        rewrite_edges_uv` to rewrite the EDGES tree to a byte-identical
-        result and burn mtime for no reason, violating its
-        no-op-preserves-mtime contract.
-
-        :param old: Name as it was before this rename.
-        :param new: New name.
-        """
-        # Find any prior rename whose target was ``old`` and forward it.
-        forwarded_source: Optional[str] = None
-        for src, dst in list(self._pending_renames.items()):
-            if dst == old:
-                forwarded_source = src
-                break
-        if forwarded_source is not None:
-            # Chain collapse: the original source was already in the queue.
-            if forwarded_source == new:
-                # X -> Y followed by Y -> X collapses to identity; drop the
-                # entry entirely so Save doesn't trigger a no-op rewrite.
-                del self._pending_renames[forwarded_source]
-            else:
-                self._pending_renames[forwarded_source] = new
-        else:
-            # Fresh rename. Don't insert an identity entry in the first
-            # place (the panel layer already short-circuits ``old == new``,
-            # but be defensive in case a future caller bypasses it).
-            if old != new:
-                self._pending_renames[old] = new
-
     # ------------------------------------------------------------------
     # Save / Save & Build
     # ------------------------------------------------------------------
 
     def _save(self) -> bool:
-        """Validate, write JSON, then flush pending EDGES renames.
+        """Validate the model, then write it to ``field_data.json`` (pure-JSON).
+
+        Save is a two-step pure-JSON dump now: validate, then write the model's
+        ``to_json_dict()`` to the sidecar. The model owns the per-edge ``EDGES``
+        overlays and the pipeline defaults, so a node rename already moved those
+        through the model (via :class:`RenameNode`) and they round-trip in the
+        same JSON write -- there is no separate ``field_data.py`` EDGES rewrite
+        (the former ``ast_rewrite`` / ``_pending_renames`` flush is retired,
+        issue #79).
 
         :return: ``True`` on success, ``False`` on validation or I/O failure
             (the user is informed via a modal dialog in that case).
@@ -2575,7 +2700,8 @@ class EditorApp:
             self._set_status("Save aborted: validation failed.")
             return False
 
-        # 2. Write the JSON sidecar.
+        # 2. Write the JSON sidecar. The model's to_json_dict() carries EDGES +
+        # the pipeline defaults, so this single write is the whole Save.
         try:
             loader.dump_field_json(self._model.to_json_dict(), self._json_path)
         except OSError as exc:
@@ -2586,52 +2712,6 @@ class EditorApp:
             )
             self._set_status("Save aborted: JSON write failed.")
             return False
-
-        # 3. Flush pending node renames into field_data.py's EDGES table.
-        if self._pending_renames:
-            try:
-                from tools.path_planner.editor import ast_rewrite  # noqa: PLC0415
-                ast_rewrite.rewrite_edges_uv(
-                    _FIELD_DATA_PY_PATH, dict(self._pending_renames)
-                )
-            except Exception as exc:  # noqa: BLE001 -- LibCST errors etc.
-                messagebox.showerror(
-                    "EDGES rewrite failed",
-                    f"field_data.json was written, but rewriting EDGES in "
-                    f"{_FIELD_DATA_PY_PATH} failed: {exc}",
-                    parent=self._root,
-                )
-                self._set_status(
-                    "Save partial: JSON saved, EDGES rewrite failed."
-                )
-                # Keep the pending renames so the user can retry. JSON was
-                # written, but the rewrite did not happen.
-                return False
-            # Refresh the cached field_data module so _find_edges_reference
-            # sees the rewritten u/v values on the next delete attempt
-            # (Codex PR29 #14). Without this, the in-memory EDGES list keeps
-            # the pre-rewrite names and a later delete of the new name would
-            # silently succeed even though field_data.py still references it.
-            if self._field_data_module is not None:
-                import importlib  # noqa: PLC0415
-                try:
-                    self._field_data_module = importlib.reload(
-                        self._field_data_module
-                    )
-                except Exception:  # noqa: BLE001 -- best-effort refresh
-                    # If the reload fails (e.g. the rewriter produced a file
-                    # the import machinery rejects), keep the stale reference
-                    # rather than wiping it. JSON has already been saved and
-                    # the rewrite already touched disk; the worst case is the
-                    # delete-guard staying as accurate as it was pre-save.
-                    pass
-            self._pending_renames.clear()
-
-        # After a successful Save, field_data.json, field_data.py EDGES, and
-        # the model are all consistent, so the pending-rename delta is empty
-        # (cleared above when a flush ran; already empty otherwise). It now
-        # tracks only renames made AFTER this Save -- no history-derived anchor
-        # is needed, which is what makes undo-after-save robust.
 
         # The model passed the full validator and reached disk: flip the badge
         # to VALID. This is the only success path that runs the real validator,

@@ -12,7 +12,9 @@ of the node positions, with the following filters applied in order:
 3. **Skip pre-existing** -- drop candidates that already appear in
    ``model.line_segments`` or ``model.blind_edges`` (undirected match).
 4. **Type classification** -- :func:`_classify_edge_type` assigns
-   ``"blind"`` if either endpoint is a blind node, otherwise ``"line"``.
+   ``"blind"`` if either endpoint is a blind or reset node, otherwise
+   ``"line"``.  Projection nodes are NOT treated as blind (ADR-046: a
+   LINE edge into a projection node is legal).
 
 The resulting list is deduplicated (undirected) and sorted lexicographically
 by ``(min(a, b), max(a, b))`` so callers get a deterministic preview every
@@ -56,21 +58,28 @@ def _classify_edge_type(
 ) -> EdgeType:
     """Classify an undirected edge as ``"line"`` or ``"blind"``.
 
-    Rule: if either endpoint is typed ``"blind"``, the edge is a blind edge;
-    otherwise the edge is a line edge.  Endpoints absent from *node_types*
-    fall back to ``"line"`` so a half-populated model still classifies
-    sensibly -- :func:`propose_edges` itself only ever sees endpoints that
-    came out of ``model.nodes``, and the validator guarantees every node has
-    a matching ``node_types`` entry, so the default arm is purely defensive.
+    Rule: if either endpoint is typed ``"blind"`` **or** ``"reset"``, the
+    edge is a blind edge; otherwise the edge is a line edge.  Reset nodes
+    must be reached by BLIND edges (ADR-047/ADR-048), so a reset endpoint is
+    treated identically to a blind one here.  Projection endpoints are NOT
+    included in this set -- a LINE edge into a projection node is legal
+    (ADR-046) and projection nodes deliberately remain ``"line"``-classified.
 
-    :param node_types: Mapping of node name to ``"line"`` or ``"blind"``.
+    Endpoints absent from *node_types* fall back to ``"line"`` so a
+    half-populated model still classifies sensibly -- :func:`propose_edges`
+    itself only ever sees endpoints that came out of ``model.nodes``, and the
+    validator guarantees every node has a matching ``node_types`` entry, so
+    the default arm is purely defensive.
+
+    :param node_types: Mapping of node name to its type string (e.g.
+        ``"line"``, ``"blind"``, ``"reset"``, ``"projection"``).
     :param a: First endpoint name.
     :param b: Second endpoint name.
-    :return: ``"blind"`` if either endpoint is blind, else ``"line"``.
+    :return: ``"blind"`` if either endpoint is blind or reset, else ``"line"``.
     """
     ta = node_types.get(a, "line")
     tb = node_types.get(b, "line")
-    if ta == "blind" or tb == "blind":
+    if ta in ("blind", "reset") or tb in ("blind", "reset"):
         return "blind"
     return "line"
 

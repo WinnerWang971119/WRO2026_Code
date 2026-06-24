@@ -259,6 +259,239 @@ def test_pivot_turns_present_dump_is_byte_deterministic(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: EDGES override overlay + the four pipeline_* mode keys
+# round-trip through the loader in their canonical slots, byte-deterministically,
+# and stay ABSENT when the input never authored them (absent-stays-absent).
+# ---------------------------------------------------------------------------
+
+
+def _small_fixture_with_edges_and_pipeline(tmp_path: Path) -> Path:
+    """Write a copy of the small fixture carrying EDGES + all four pipeline keys.
+
+    The EDGES overlay attaches a string-tag override to the existing A-B LINE
+    pair (an override-only entry, no geometry) plus a geometry-bearing entry on
+    the B-G BLIND pair (the backward-compat form). The four ``pipeline_*`` keys
+    carry concrete enum member NAMES. ('A', 'B', 'G') are nodes the small
+    fixture already defines, so the loaded dict stays well-formed.
+    """
+    data = json.loads(_SMALL_FIXTURE.read_text(encoding="utf-8"))
+    data["pipeline_line_mode"] = "FAST"
+    data["pipeline_blind_mode"] = "GYRO_TSHAPE"
+    data["pipeline_turn_mode"] = "PIVOT_LEFT"
+    data["pipeline_direction_mode"] = "DEFAULT"
+    data["EDGES"] = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {
+            "type": "BLIND",
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "stop_at_line": "on",
+        },
+    ]
+    target = tmp_path / "field_data_with_edges_pipeline.json"
+    target.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8", newline="\n")
+    return target
+
+
+def test_tc10_edges_and_pipeline_round_trip_data_equality(tmp_path: Path) -> None:
+    """TC10: load -> dump -> load preserves EDGES + pipeline keys as an equal dict.
+
+    EDGES is a list of plain dicts (not array-of-arrays), so the loader must NOT
+    tuple-convert it; the entries pass through verbatim, including the
+    geometry-bearing one. The four pipeline keys are plain strings and pass
+    through unchanged.
+    """
+    fixture = _small_fixture_with_edges_and_pipeline(tmp_path)
+    first_load = load_field_json(fixture)
+
+    # EDGES entries are dicts, NOT tuples (the tuple discipline does not apply).
+    assert isinstance(first_load["EDGES"], list)
+    for entry in first_load["EDGES"]:
+        assert isinstance(entry, dict)
+    assert first_load["pipeline_line_mode"] == "FAST"
+    assert first_load["pipeline_blind_mode"] == "GYRO_TSHAPE"
+    assert first_load["pipeline_turn_mode"] == "PIVOT_LEFT"
+    assert first_load["pipeline_direction_mode"] == "DEFAULT"
+
+    dumped_path = tmp_path / "field_data_edges_rt.json"
+    dump_field_json(first_load, dumped_path)
+    second_load = load_field_json(dumped_path)
+
+    assert first_load == second_load
+    # The geometry-bearing entry round-trips verbatim (not normalized / dropped).
+    blind_entry = next(e for e in second_load["EDGES"] if e["type"] == "BLIND")
+    assert blind_entry["distance_cm"] == 86.0
+    assert blind_entry["stop_at_line"] == "on"
+
+
+def test_tc10_edges_and_pipeline_dump_is_byte_deterministic(tmp_path: Path) -> None:
+    """TC10: dump(load(dump(d))) is byte-identical when EDGES + pipeline are set."""
+    fixture = _small_fixture_with_edges_and_pipeline(tmp_path)
+    first_load = load_field_json(fixture)
+
+    dump1_path = tmp_path / "edges_dump1.json"
+    dump_field_json(first_load, dump1_path)
+
+    second_load = load_field_json(dump1_path)
+    dump2_path = tmp_path / "edges_dump2.json"
+    dump_field_json(second_load, dump2_path)
+
+    assert dump1_path.read_bytes() == dump2_path.read_bytes()
+
+
+def test_tc10_edges_and_pipeline_dumped_in_canonical_slots(tmp_path: Path) -> None:
+    """TC10: the new keys land in their pinned slots before OBSTACLES.
+
+    The contract pins the order: the four ``pipeline_*`` keys, then ``EDGES``,
+    then ``OBSTACLES`` (all after ``blind_projection_auto_seek`` /
+    ``BLIND_EDGES``). The loader re-orders on dump regardless of input order.
+    """
+    fixture = _small_fixture_with_edges_and_pipeline(tmp_path)
+    first_load = load_field_json(fixture)
+
+    dumped_path = tmp_path / "edges_order.json"
+    dump_field_json(first_load, dumped_path)
+    keys = list(json.loads(dumped_path.read_text(encoding="utf-8")).keys())
+
+    # Pipeline keys precede EDGES, EDGES precedes OBSTACLES.
+    assert (
+        keys.index("pipeline_line_mode")
+        < keys.index("pipeline_blind_mode")
+        < keys.index("pipeline_turn_mode")
+        < keys.index("pipeline_direction_mode")
+        < keys.index("EDGES")
+        < keys.index("OBSTACLES")
+    )
+
+
+def test_tc11_new_keys_absent_round_trip_absent(tmp_path: Path) -> None:
+    """TC11: a field WITHOUT the new keys round-trips with them still absent.
+
+    The small fixture omits EDGES and all four pipeline keys; the loader must not
+    synthesise them and the dump must not inject empty placeholders, so
+    dump(load(x)) == dump(x) holds byte-for-byte (absent stays absent).
+    """
+    first_load = load_field_json(_SMALL_FIXTURE)
+    for key in (
+        "EDGES",
+        "pipeline_line_mode",
+        "pipeline_blind_mode",
+        "pipeline_turn_mode",
+        "pipeline_direction_mode",
+    ):
+        assert key not in first_load
+
+    dumped_path = tmp_path / "no_new_keys.json"
+    dump_field_json(first_load, dumped_path)
+    second_load = load_field_json(dumped_path)
+
+    for key in (
+        "EDGES",
+        "pipeline_line_mode",
+        "pipeline_blind_mode",
+        "pipeline_turn_mode",
+        "pipeline_direction_mode",
+    ):
+        assert key not in second_load
+    assert first_load == second_load
+
+
+# ---------------------------------------------------------------------------
+# Issue #79 / ADR-047: FieldModel dual-serialization parity (TC12, the #1 risk).
+#
+# A field that lands in to_json_dict but NOT to_module_proxy (or vice versa) is
+# persisted-but-unvalidated. The model must carry EDGES + PIPELINE_* through BOTH
+# surfaces; this proves the validator runs against the edited values AND both
+# surfaces emit the same logical key set.
+# ---------------------------------------------------------------------------
+
+
+def test_tc12_model_dual_serialization_parity() -> None:
+    """TC12: to_module_proxy() AND to_json_dict() BOTH carry EDGES + PIPELINE_*.
+
+    The dual-serialization seam (the #1 risk). Build a model with an EDGES
+    override and all four pipeline keys, then assert:
+
+    1. ``to_module_proxy()`` exposes EDGES + the SCREAMING_SNAKE PIPELINE_*
+       attributes so the validator sees the edited values (validate runs clean);
+    2. an INVALID edited value (a DEFAULT pipeline_line_mode) is actually CAUGHT
+       through the proxy -- proving the proxy is wired into validate(), not inert;
+    3. ``to_json_dict()`` emits EDGES (snake) + the four pipeline keys; and
+    4. both surfaces carry the SAME logical key set (proxy SCREAMING_SNAKE <->
+       json snake), so neither persists a value the other never validates.
+    """
+    from tools.path_planner.editor.model import FieldModel
+
+    model = FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node="S",
+        start_heading_deg=0.0,
+        nodes={"S": (10.0, 100.0), "A": (10.0, 10.0), "B": (200.0, 10.0)},
+        node_types={"S": "blind", "A": "line", "B": "line"},
+        line_segments=[("A", "B")],
+        blind_edges=[],
+        obstacles=[],
+        edges=[{"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}],
+        pipeline_line_mode="FAST",
+        pipeline_blind_mode="GYRO_TSHAPE",
+        pipeline_turn_mode="PIVOT_LEFT",
+        pipeline_direction_mode="DEFAULT",
+    )
+
+    # (1) The proxy exposes the edited values, and validate() runs clean.
+    proxy = model.to_module_proxy()
+    assert proxy.EDGES == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    assert proxy.PIPELINE_LINE_MODE == "FAST"
+    assert proxy.PIPELINE_BLIND_MODE == "GYRO_TSHAPE"
+    assert proxy.PIPELINE_TURN_MODE == "PIVOT_LEFT"
+    assert proxy.PIPELINE_DIRECTION_MODE == "DEFAULT"
+    model.validate()  # must not raise -- the edited values are checked
+
+    # (2) An invalid edited pipeline value is CAUGHT through the proxy, proving
+    # the proxy is actually wired into validate (not a persisted-but-unvalidated
+    # field). line may not be DEFAULT (circular).
+    model.pipeline_line_mode = "DEFAULT"
+    with pytest.raises(FieldDataError, match="PIPELINE_LINE_MODE"):
+        model.validate()
+    model.pipeline_line_mode = "FAST"  # restore for the serialization checks
+
+    # (3) to_json_dict emits EDGES (snake) + the four pipeline keys.
+    json_dict = model.to_json_dict()
+    assert json_dict["EDGES"] == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    assert json_dict["pipeline_line_mode"] == "FAST"
+    assert json_dict["pipeline_blind_mode"] == "GYRO_TSHAPE"
+    assert json_dict["pipeline_turn_mode"] == "PIVOT_LEFT"
+    assert json_dict["pipeline_direction_mode"] == "DEFAULT"
+
+    # (4) Both surfaces carry the SAME logical key set (the dual-serialization
+    # parity guarantee): the JSON snake keys map 1:1 onto the proxy SCREAMING_SNAKE
+    # attributes, so no surface persists a key the other never validates.
+    json_to_proxy = {
+        "EDGES": "EDGES",
+        "pipeline_line_mode": "PIPELINE_LINE_MODE",
+        "pipeline_blind_mode": "PIPELINE_BLIND_MODE",
+        "pipeline_turn_mode": "PIPELINE_TURN_MODE",
+        "pipeline_direction_mode": "PIPELINE_DIRECTION_MODE",
+    }
+    for json_key, proxy_attr in json_to_proxy.items():
+        assert json_key in json_dict, f"{json_key} missing from to_json_dict"
+        assert hasattr(proxy, proxy_attr), f"{proxy_attr} missing from proxy"
+        assert json_dict[json_key] == getattr(proxy, proxy_attr)
+
+
+# ---------------------------------------------------------------------------
 # Error path: missing file must mention --migrate
 # ---------------------------------------------------------------------------
 

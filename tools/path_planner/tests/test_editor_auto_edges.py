@@ -333,3 +333,96 @@ def test_tc13_classify_edge_type(
     """Edge classification: any blind endpoint poisons the whole edge."""
     node_types = {"x": type_a, "y": type_b}
     assert _classify_edge_type(node_types, "x", "y") == expected
+
+
+# ---------------------------------------------------------------------------
+# TC12 (plan) -- reset endpoint is classified "blind";
+#                projection endpoint stays "line"  (ADR-046, ADR-047/048)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "type_a,type_b,expected",
+    [
+        # Reset endpoint → blind edge (reset nodes must be BLIND-incident).
+        ("reset", "line", "blind"),
+        ("line", "reset", "blind"),
+        ("reset", "reset", "blind"),
+        # blind + reset → still blind.
+        ("blind", "reset", "blind"),
+        ("reset", "blind", "blind"),
+        # Projection endpoint → LINE edge stays line (ADR-046).
+        ("projection", "line", "line"),
+        ("line", "projection", "line"),
+        # projection + projection → line.
+        ("projection", "projection", "line"),
+    ],
+)
+def test_classify_edge_type_reset_and_projection(
+    type_a: str, type_b: str, expected: str
+) -> None:
+    """Reset endpoints classify as blind; projection endpoints stay line.
+
+    This verifies the ADR-047/048 rule: a reset node must only be reached by
+    a BLIND edge, so ``_classify_edge_type`` treats ``"reset"`` identically to
+    ``"blind"``.  Projection nodes are LINE-legal per ADR-046 and must NOT be
+    pulled into the blind set.
+    """
+    node_types = {"x": type_a, "y": type_b}
+    assert _classify_edge_type(node_types, "x", "y") == expected
+
+
+def test_propose_edges_reset_endpoint_classified_blind() -> None:
+    """propose_edges classifies a candidate with a reset-typed endpoint as blind.
+
+    TC12 (plan): a 3-node triangle where one node is typed ``"reset"`` must
+    have all edges incident to that node classified ``"blind"``.  The
+    line/line edge between the two non-reset nodes stays ``"line"``.
+    """
+    model = _model(
+        nodes={
+            "a": (0.0, 0.0),
+            "b": (10.0, 0.0),
+            "r": (5.0, 10.0),  # reset node
+        },
+        types={"a": "line", "b": "line", "r": "reset"},
+    )
+
+    result = propose_edges(model, max_edge_length_cm=100.0)
+
+    assert len(result) == 3, f"expected 3 triangle edges, got {result!r}"
+    for edge_a, edge_b, kind in result:
+        if "r" in (edge_a, edge_b):
+            assert kind == "blind", (
+                f"edge ({edge_a!r}, {edge_b!r}) incident to reset node"
+                f" should be 'blind', got {kind!r}"
+            )
+        else:
+            assert kind == "line", (
+                f"edge ({edge_a!r}, {edge_b!r}) between two line nodes"
+                f" should be 'line', got {kind!r}"
+            )
+
+
+def test_propose_edges_projection_endpoint_stays_line() -> None:
+    """propose_edges leaves a projection-incident edge as "line" (ADR-046).
+
+    A projection node is not blind and not reset, so it must NOT trigger the
+    blind-classification rule.
+    """
+    model = _model(
+        nodes={
+            "a": (0.0, 0.0),
+            "b": (10.0, 0.0),
+            "p": (5.0, 10.0),  # projection node
+        },
+        types={"a": "line", "b": "line", "p": "projection"},
+    )
+
+    result = propose_edges(model, max_edge_length_cm=100.0)
+
+    assert len(result) == 3, f"expected 3 triangle edges, got {result!r}"
+    assert all(kind == "line" for _, _, kind in result), (
+        f"all edges incident to a projection node should remain 'line':"
+        f" {result!r}"
+    )

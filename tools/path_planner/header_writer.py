@@ -43,10 +43,14 @@ Determinism contract: byte-identical re-emit on identical inputs.
 * Line endings are LF only (``newline=''``).
 * No ``datetime.now()`` in the output -- the embedded SHA256 of
   ``field_data.py`` is the only "version stamp."
-* ``PIPELINE_CONFIG`` values are baked in from the Python singleton at
-  emit time; they are intentionally NOT part of the SHA256 input (the
-  hash continues to cover ``field_data.py`` only -- changing that is a
-  separate behavior decision deferred past T7).
+* ``PIPELINE_CONFIG`` values are field-sourced (ADR-047): the four
+  optional ``PIPELINE_*`` keys in ``field_data.json`` resolve to enum
+  members, falling back to the ``pipeline_config.py`` singleton when a key
+  is absent. Because they live in ``field_data.json`` -- which IS folded
+  into the ``Source SHA256:`` stamp via ``compute_source_hash`` /
+  ``emit_routes(..., extra_source_paths=...)`` -- editing a pipeline
+  default DOES change the hash. A field that omits every key emits the
+  singleton defaults, so committed routes stay byte-identical.
 """
 
 from __future__ import annotations
@@ -67,10 +71,10 @@ import networkx as nx
 
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.pipeline_config import (
-    PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
     LineMode,
+    PipelineConfig,
     StopAtLineMode,
     TurnMode,
 )
@@ -678,14 +682,29 @@ def _emit_edges_table(graph: nx.DiGraph, node_names: List[str]) -> List[str]:
     return out
 
 
-def _emit_pipeline_config() -> List[str]:
-    """Bake the Python-side PIPELINE_CONFIG singleton into a C++ definition."""
+def _emit_pipeline_config(field_data) -> List[str]:
+    """Bake the field-sourced PIPELINE_CONFIG defaults into a C++ definition.
+
+    Resolves the four mission-wide motion-mode defaults from the field data's
+    optional ``PIPELINE_*`` attributes (ADR-047), each an enum member NAME, an
+    enum INSTANCE, or ``None`` (absent -> inherit the ``pipeline_config.py``
+    :data:`PIPELINE_CONFIG` singleton default for that category). A field that
+    omits every key yields a config byte-identical to the singleton, so the
+    committed goldens stay unchanged.
+
+    Resolution and the DEFAULT-sentinel rule live in
+    :meth:`PipelineConfig.from_field_data`; the validator
+    (``_validate_pipeline_config``) catches a bad value before emit, so an
+    unresolvable name reaching here raises :class:`KeyError` rather than
+    emitting garbage.
+    """
+    config = PipelineConfig.from_field_data(field_data)
     return [
         _INDENT + "const PipelineConfig PIPELINE_CONFIG = {",
-        _INDENT * 2 + "LineMode::"      + PIPELINE_CONFIG.line.name      + ",",
-        _INDENT * 2 + "BlindMode::"     + PIPELINE_CONFIG.blind.name     + ",",
-        _INDENT * 2 + "TurnMode::"      + PIPELINE_CONFIG.turn.name      + ",",
-        _INDENT * 2 + "DirectionMode::" + PIPELINE_CONFIG.direction.name + ",",
+        _INDENT * 2 + "LineMode::"      + config.line.name      + ",",
+        _INDENT * 2 + "BlindMode::"     + config.blind.name     + ",",
+        _INDENT * 2 + "TurnMode::"      + config.turn.name      + ",",
+        _INDENT * 2 + "DirectionMode::" + config.direction.name + ",",
         _INDENT + "};",
     ]
 
@@ -930,7 +949,7 @@ def _build_routes_cpp_lines(
     lines.append("")
     lines.append("namespace Routes {")
 
-    lines.extend(_emit_pipeline_config())
+    lines.extend(_emit_pipeline_config(field_data))
     lines.append("")
     lines.extend(_emit_nodes_array(field_data, node_names))
     lines.append("")

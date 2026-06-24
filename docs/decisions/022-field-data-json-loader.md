@@ -1,6 +1,6 @@
 # ADR-022: field_data geometry lives in JSON; field_data.py is a loader
 
-**Status:** Implemented
+**Status:** Partially superseded by ADR-047
 **Date decided:** 2026-05 (Issue #10 Phase 2)
 
 ## Rule
@@ -31,5 +31,6 @@ The `EDGES` table stays in Python because per-edge `primitive_mode` / `pre_turn_
 - [docs/plans/2026-05-20-issue-10-live-field-editor.md](../plans/2026-05-20-issue-10-live-field-editor.md)
 - [tools/path_planner/editor/loader.py](../../tools/path_planner/editor/loader.py) — JSON load + dump.
 - [tools/path_planner/editor/migrate.py](../../tools/path_planner/editor/migrate.py) — one-shot Python→JSON port.
-- [tools/path_planner/editor/ast_rewrite.py](../../tools/path_planner/editor/ast_rewrite.py) — LibCST EDGES rename cascade.
+- `tools/path_planner/editor/ast_rewrite.py` — LibCST EDGES rename cascade (retired in ADR-047; EDGES is now JSON and renames cascade through `FieldModel.edges`).
 - [tools/path_planner/README.md](../../tools/path_planner/README.md) — editor usage guide.
+- [ADR-047 — JSON-native EDGES overrides + field-sourced PIPELINE_CONFIG](./047-json-edges-overrides-and-pipeline-config.md) — supersedes the "JSON can't hold the enums" and "PIPELINE_CONFIG out of GUI scope" clauses above.

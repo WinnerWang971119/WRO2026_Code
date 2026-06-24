@@ -534,3 +534,271 @@ def test_reset_spec_axis_unchanged_focusout_at_display_precision_is_noop() -> No
     app._on_panel_reset_spec_change("G", "y", 85.0, 270.0)
     assert app._history.can_undo is True
     assert model.reset_nodes["G"]["wall_coord"] == 85.0
+
+
+# ---------------------------------------------------------------------------
+# Issue #79 -- edge-mode click graft + app-inspector refresh (TC16, app wiring)
+#
+# The graft (``_graft_edge_override_panel``) rides the existing Edge-mode
+# selection: clicking an existing edge locates its override row if one exists,
+# else pre-fills the add-row's u/v/type from the clicked segment.  Tested with a
+# graft-aware panel spy so no real Tk is needed; the real ``_plain_edge_kind``
+# (which reads the model's segment lists) drives the derive.
+# ---------------------------------------------------------------------------
+
+
+class _GraftPanelsSpy:
+    """Panel spy recording the graft + dispatch surfaces the app drives.
+
+    Extends the inspector-handler surface of :class:`_PanelsSpy` with the two
+    graft methods the app calls from the edge-mode click handler:
+    ``prefill_edit_row`` (whose return value the app branches on) and
+    ``prefill_add_row``.  ``edit_returns`` is the configurable bool the app
+    treats as "existing override -> opened editor pre-filled for edit"
+    (``True``) vs "no override -> open the add-form" (``False``).
+    """
+
+    def __init__(self, edit_returns: bool = False) -> None:
+        self.status_messages: list[str] = []
+        self.refresh_count: int = 0
+        self.validation_badges: list[bool] = []
+        self.edit_returns: bool = edit_returns
+        self.edit_calls: list[tuple[str, str, str]] = []
+        self.prefill_calls: list[tuple[str, str, str]] = []
+
+    def set_status(self, text: str) -> None:
+        self.status_messages.append(text)
+
+    def refresh(self, model) -> None:
+        self.refresh_count += 1
+
+    def set_validation_badge(self, ok: bool) -> None:
+        self.validation_badges.append(ok)
+
+    def prefill_edit_row(self, edge_type: str, u: str, v: str) -> bool:
+        self.edit_calls.append((edge_type, u, v))
+        return self.edit_returns
+
+    def prefill_add_row(self, edge_type: str, u: str, v: str) -> None:
+        self.prefill_calls.append((edge_type, u, v))
+
+
+def make_graft_app(
+    edit_returns: bool = False,
+) -> tuple[EditorApp, _GraftPanelsSpy, FieldModel]:
+    """Return a bare ``EditorApp`` wired for headless graft testing.
+
+    Reuses ``make_model`` (A--B line, B--G blind) so an existing LINE and BLIND
+    segment are present for the derive.  ``_plain_edge_kind`` is the real method
+    (it reads ``model.line_segments`` / ``model.blind_edges``); only the panel is
+    a spy.
+
+    :param edit_returns: What the panel spy's ``prefill_edit_row`` returns
+        (the "existing override -> edit" vs "no override -> add-form" branch the
+        app takes).
+    :return: ``(app, panels_spy, model)``.
+    """
+    model = make_model()
+    panels = _GraftPanelsSpy(edit_returns=edit_returns)
+
+    app = EditorApp.__new__(EditorApp)
+    app._model = model
+    app._history = History()
+    app._panels = panels
+    return app, panels, model
+
+
+# ---------------------------------------------------------------------------
+# TC16 -- edge-mode click opens the editor pre-filled for edit / for add
+# ---------------------------------------------------------------------------
+
+
+def test_graft_opens_editor_for_existing_override() -> None:
+    """TC16: clicking an existing edge whose override EXISTS opens the inline
+    editor pre-filled for edit (no add-form).
+
+    The panel spy reports the override was found and the editor opened
+    (``edit_returns=True``); the app must call ``prefill_edit_row`` with the
+    derived type + directed pair and must NOT fall through to ``prefill_add_row``.
+    """
+    app, panels, model = make_graft_app(edit_returns=True)
+
+    # A--B is a LINE segment in the model; click order A then B -> directed A->B.
+    app._graft_edge_override_panel("A", "B")
+
+    assert panels.edit_calls == [("LINE", "A", "B")]
+    assert panels.prefill_calls == [], "opened edit form must NOT add-prefill"
+
+
+def test_graft_prefills_add_row_when_no_override_exists() -> None:
+    """TC16: clicking an existing edge with NO override opens the add-form
+    pre-filled with the clicked segment's u/v/derived-type.
+
+    The panel spy reports no override found (``edit_returns=False``); the app
+    must then call ``prefill_add_row`` with the same derived type + directed
+    pair.
+    """
+    app, panels, model = make_graft_app(edit_returns=False)
+
+    app._graft_edge_override_panel("A", "B")
+
+    assert panels.edit_calls == [("LINE", "A", "B")]
+    assert panels.prefill_calls == [("LINE", "A", "B")]
+
+
+def test_graft_derives_blind_type_from_blind_segment() -> None:
+    """TC16: the derived type follows the clicked segment's kind -- a BLIND
+    segment derives the ``"BLIND"`` type tag, not ``"LINE"``."""
+    app, panels, model = make_graft_app(edit_returns=False)
+
+    # B--G is a BLIND edge in the model; click order B then G -> directed B->G.
+    app._graft_edge_override_panel("B", "G")
+
+    assert panels.edit_calls == [("BLIND", "B", "G")]
+    assert panels.prefill_calls == [("BLIND", "B", "G")]
+
+
+def test_graft_is_noop_on_pair_with_no_segment() -> None:
+    """TC16: clicking a pair that is NOT an existing line / blind segment is a
+    no-op -- there is nothing to attach an override to, so neither graft method
+    fires (the operator must create the segment first)."""
+    app, panels, model = make_graft_app(edit_returns=False)
+
+    # A--G is not a segment (A--B and B--G are); the derive returns None.
+    assert app._plain_edge_kind("A", "G") is None
+
+    app._graft_edge_override_panel("A", "G")
+
+    assert panels.edit_calls == []
+    assert panels.prefill_calls == []
+
+
+def test_graft_directed_order_follows_click_order() -> None:
+    """TC16: the directed ``u -> v`` follows click order -- clicking B then A on
+    the undirected A--B segment derives the reverse-direction ``B -> A`` identity
+    (the operator authors per directed edge; a reverse override simply doesn't
+    match the forward row)."""
+    app, panels, model = make_graft_app(edit_returns=False)
+
+    # Undirected A--B segment, clicked B then A -> directed B->A.
+    app._graft_edge_override_panel("B", "A")
+
+    assert panels.edit_calls == [("LINE", "B", "A")]
+    assert panels.prefill_calls == [("LINE", "B", "A")]
+
+
+# ---------------------------------------------------------------------------
+# App-inspector refresh: after dispatching the new commands, the panel is
+# refreshed and the model reflects model.edges / pipeline_* / the auto-seek
+# flag / field_mm (the app wiring half of AC8 / AC10).  Driven through the real
+# panel callbacks so the wire (callback -> handler -> _dispatch -> command ->
+# model -> refresh) is exercised end-to-end headless.
+# ---------------------------------------------------------------------------
+
+
+def make_dispatch_app() -> tuple[EditorApp, _PanelsSpy, FieldModel]:
+    """Return a bare ``EditorApp`` wired for headless dispatch testing.
+
+    Identical harness to :func:`make_app` but named for the issue #79 dispatch
+    tests; the real ``_dispatch`` runs (history + ``_refresh_view`` stubbed to
+    the panel-spy refresh), so a panel callback drives a real command end-to-end.
+    """
+    return make_app()
+
+
+def test_app_set_edge_override_callback_dispatches_and_refreshes() -> None:
+    """The ``on_set_edge_override`` handler dispatches a SetEdgeOverride command,
+    the model gains the override-only entry, and the panel is refreshed."""
+    app, panels, model = make_dispatch_app()
+    before_refresh = panels.refresh_count
+
+    # A--B is a LINE segment; the panel fires the derived type + the picked pair.
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+
+    assert app._history.can_undo is True
+    assert model.edges == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    assert panels.refresh_count > before_refresh, "refresh must run after dispatch"
+
+
+def test_app_clear_edge_override_callback_dispatches() -> None:
+    """The ``on_clear_edge_override`` handler dispatches a ClearEdgeOverride; the
+    overlay entry is removed and undo/redo is available."""
+    app, panels, model = make_dispatch_app()
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+    assert len(model.edges) == 1
+
+    app._on_panel_clear_edge_override("LINE", "A", "B")
+
+    assert model.edges == []
+    assert app._history.can_undo is True
+
+
+def test_app_pipeline_mode_callback_dispatches() -> None:
+    """The ``on_pipeline_mode_change`` handler routes the category to the matching
+    ``pipeline_<which>_mode`` model attribute."""
+    app, panels, model = make_dispatch_app()
+
+    app._on_panel_pipeline_mode_change("blind", "GYRO_TSHAPE")
+
+    assert model.pipeline_blind_mode == "GYRO_TSHAPE"
+    assert app._history.can_undo is True
+
+
+def test_app_field_wide_flag_callback_dispatches() -> None:
+    """The ``on_field_wide_flag_change`` handler toggles
+    ``blind_projection_auto_seek`` on the model."""
+    app, panels, model = make_dispatch_app()
+    original = model.blind_projection_auto_seek
+
+    app._on_panel_field_wide_flag_change(
+        "blind_projection_auto_seek", not original
+    )
+
+    assert model.blind_projection_auto_seek == (not original)
+    assert app._history.can_undo is True
+
+
+def test_app_field_dimensions_callback_dispatches() -> None:
+    """The ``on_field_dimensions_change`` handler sets ``model.field_mm`` to the
+    new (width, height) pair."""
+    app, panels, model = make_dispatch_app()
+
+    app._on_panel_field_dimensions_change(2362.0, 1143.0)
+
+    assert model.field_mm == (2362.0, 1143.0)
+    assert app._history.can_undo is True
+
+
+def test_app_inspector_refresh_reflects_all_issue79_state_after_dispatch() -> None:
+    """After dispatching all five issue #79 commands through the panel callbacks,
+    the model reflects every edited surface and the panel was refreshed each time.
+
+    This is the app-wiring half of the refresh contract: the real ``_dispatch``
+    runs every command through history and re-invokes the panel refresh, so the
+    inspector (the real :meth:`SidePanels.refresh`, spied here) re-syncs from the
+    model after each edit -- the full edges / pipeline / flag / dims surface.
+    """
+    app, panels, model = make_dispatch_app()
+    before = panels.refresh_count
+
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+    app._on_panel_set_edge_override("BLIND", "B", "G", None, None, "on")
+    app._on_panel_pipeline_mode_change("line", "SLOW")
+    app._on_panel_field_wide_flag_change("blind_projection_auto_seek", False)
+    app._on_panel_field_dimensions_change(2362.0, 1143.0)
+
+    # The model carries every edited surface.
+    assert {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"} in (
+        model.edges
+    )
+    assert {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"} in (
+        model.edges
+    )
+    assert model.pipeline_line_mode == "SLOW"
+    assert model.blind_projection_auto_seek is False
+    assert model.field_mm == (2362.0, 1143.0)
+
+    # The panel was refreshed once per dispatched command (five edits).
+    assert panels.refresh_count - before == 5

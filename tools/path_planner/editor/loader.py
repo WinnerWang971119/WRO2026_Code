@@ -28,6 +28,12 @@ the module-level attributes the existing
       "BLIND_EDGES":           [["<a>", "<b>"], ...],
       "pivot_turns":           [["<u>", "<v>", "<w>"], ...],
       "RESET_NODES":           {"<name>": {"axis": "x"|"y", "wall_coord": <float>, "facing": <float in [0, 360)>}, ...},
+      "blind_projection_auto_seek": <bool>,
+      "pipeline_line_mode":      "<LineMode name>",
+      "pipeline_blind_mode":     "<BlindMode name>",
+      "pipeline_turn_mode":      "<TurnMode name>",
+      "pipeline_direction_mode": "<DirectionMode name>",
+      "EDGES":                 [{"type": "LINE"|"BLIND", "u": "<a>", "v": "<b>", ...overrides}, ...],
       "OBSTACLES":             [[x_min, y_min, x_max, y_max, "<kind>"], ...]
     }
 
@@ -44,12 +50,21 @@ re-localization. Unlike the array-of-arrays fields above, its values are
 plain JSON objects (no tuple conversion applies); they round-trip through the
 loader unchanged.
 
-The rich ``EDGES`` table that lives in ``field_data.py`` is deliberately
-**not** part of the JSON schema -- it carries enum references
-(``LineMode.FAST``, ``TurnMode.PIVOT_LEFT``, ...) and free-form Python comments
-that JSON cannot represent losslessly. The migration tool keeps that
-block in ``field_data.py`` and uses LibCST to rewrite it in place when
-the editor renames a referenced node (see Issue #10 plan T6).
+``EDGES`` is the per-edge override overlay (ADR-047, superseding ADR-022's
+"JSON can't hold the enums" clause). It is a list of override-only objects, each
+``{"type": "LINE"|"BLIND", "u", "v"}`` plus any of the optional override keys
+``primitive_mode`` (an enum member NAME string -- ``"FAST"``, ``"GYRO_TSHAPE"``,
+... -- the validator/header resolve to a ``LineMode`` / ``BlindMode`` member),
+``direction`` (``"front"|"rear"``), and ``stop_at_line`` (``"on"|"off"``).
+Geometry (``distance_cm`` / ``heading_deg``) is OPTIONAL -- derived from node
+coords downstream when absent; only legacy hand-authored entries carry it, and
+they round-trip verbatim. EDGES entries are dicts, so the tuple discipline below
+does NOT apply -- they pass through :func:`load_field_json` unchanged.
+
+The four ``pipeline_*`` keys are the field-sourced PIPELINE_CONFIG defaults
+(ADR-047): each is an enum member NAME string (``"NORMAL"``, ``"SYNC_TSHAPE"``,
+...) or absent (= inherit the ``pipeline_config.py`` default). ``EDGES`` and the
+four ``pipeline_*`` keys are optional (absent-stays-absent on round-trip).
 
 Tuple-vs-list discipline
 ------------------------
@@ -111,20 +126,37 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "pivot_turns",
     "RESET_NODES",
     "blind_projection_auto_seek",
+    "pipeline_line_mode",
+    "pipeline_blind_mode",
+    "pipeline_turn_mode",
+    "pipeline_direction_mode",
+    "EDGES",
     "OBSTACLES",
 )
 
 # Top-level keys that are optional in the JSON schema: absent / empty is a
 # valid field. The dump writer emits them only when present so a field that
 # never authored one round-trips byte-identically (absent stays absent),
-# while a field that did keeps it in the canonical slot above. ``pivot_turns``
-# (per-turn single-wheel pivots), ``RESET_NODES`` (wall-zero reset nodes), and
-# ``blind_projection_auto_seek`` (the field-wide BLIND->PROJECTION auto-seek
-# flag, emitted only when set to its non-default ``False``) are those keys
-# today. Without this membership the dump writer would drop a key the editor
-# tracks -- ``_build_ordered_payload`` only emits keys it knows.
+# while a field that did keeps it in the canonical slot above. The keys today:
+# ``pivot_turns`` (per-turn single-wheel pivots), ``RESET_NODES`` (wall-zero
+# reset nodes), ``blind_projection_auto_seek`` (the field-wide BLIND->PROJECTION
+# auto-seek flag, emitted only when set to its non-default ``False``), the four
+# ``pipeline_*`` mode defaults (ADR-047 field-sourced PIPELINE_CONFIG; absent =
+# inherit the pipeline_config.py default), and ``EDGES`` (the override-only
+# per-edge overlay; absent = no overrides). Without this membership the dump
+# writer would drop a key the editor tracks -- ``_build_ordered_payload`` only
+# emits keys it knows.
 _OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"pivot_turns", "RESET_NODES", "blind_projection_auto_seek"}
+    {
+        "pivot_turns",
+        "RESET_NODES",
+        "blind_projection_auto_seek",
+        "pipeline_line_mode",
+        "pipeline_blind_mode",
+        "pipeline_turn_mode",
+        "pipeline_direction_mode",
+        "EDGES",
+    }
 )
 
 
@@ -239,6 +271,11 @@ def _convert_arrays_to_tuples(parsed: dict) -> dict:
     ``pivot_turns`` / ``OBSTACLES`` entries, and the top-level ``FIELD_MM``
     pair.
 
+    ``EDGES`` is a list of override dicts (not array-of-arrays), so it is NOT
+    tuple-converted -- it passes through verbatim. The four ``pipeline_*`` keys
+    are plain strings and likewise pass through. Both are simply carried by the
+    initial ``dict(parsed)`` shallow copy below.
+
     Fields that are absent in ``parsed`` are absent in the result -- this
     function is not a validator. Missing-key errors are surfaced
     downstream by :func:`tools.path_planner.validator.validate`.
@@ -299,10 +336,10 @@ def _build_ordered_payload(data: dict) -> dict:
     preserved.
 
     Keys in :data:`_OPTIONAL_TOP_LEVEL_KEYS` (``pivot_turns``, ``RESET_NODES``,
-    and ``blind_projection_auto_seek``) are emitted only when present in
-    ``data``: a field that never authored one is omitted entirely so
-    ``dump(load(x)) == dump(x)`` holds for an input that lacked the key on disk
-    (absent stays absent).
+    ``blind_projection_auto_seek``, the four ``pipeline_*`` mode defaults, and
+    ``EDGES``) are emitted only when present in ``data``: a field that never
+    authored one is omitted entirely so ``dump(load(x)) == dump(x)`` holds for an
+    input that lacked the key on disk (absent stays absent).
 
     :param data: Source dict. Must contain every required key in
         :data:`_TOP_LEVEL_KEY_ORDER` (i.e. every key not in
