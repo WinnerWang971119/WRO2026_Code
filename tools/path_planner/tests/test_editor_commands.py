@@ -9,6 +9,8 @@ No GUI, no file I/O -- everything is built in memory.
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from tools.path_planner.editor.commands import (
@@ -1154,3 +1156,474 @@ def test_rename_node_through_history_redo_keeps_edges_cascade() -> None:
     assert history.redo(model) is True
     assert model.to_json_dict() == renamed_json
     assert model.edges[0]["u"] == "AA"
+
+
+# ---------------------------------------------------------------------------
+# T2 (issue #98) — command-overlay lifecycle: node/edge delete + kind-flip
+# cascade the EDGES overlay so a "deleted" override never orphans (R1, R2), and
+# an in-place override edit preserves hand-authored geometry (R5).
+#
+# TC5  DeleteNode + override apply/revert (removed then restored, no orphan)
+# TC6  DeleteEdge + override apply/revert; graph_builder does not re-emit
+# TC7  kind-flip LINE->BLIND drops the LINE override; Save not rejected
+# TC8  no-orphan invariant after a fixed-seed delete/flip sequence
+# TC9  SetEdgeOverride edit preserves distance_cm / heading_deg
+# ---------------------------------------------------------------------------
+
+
+#: The lowercase edge-list kind -> SCREAMING overlay ``type`` tag mapping, kept
+#: local to the test so the invariant helper does not import a private command
+#: constant (it must mirror ``graph_builder.EDGE_LINE`` / ``EDGE_BLIND``).
+_SEGMENT_KIND_TO_TYPE_TAG = {"line": "LINE", "blind": "BLIND"}
+
+
+def make_valid_override_model() -> FieldModel:
+    """Return a FULLY validate-clean model carrying a LINE and a BLIND segment.
+
+    Distinct from :func:`make_override_model` (which is convenient but not
+    Save-valid: its start node is a ``"line"`` node).  The two tests that run a
+    real ``validate()`` -- directly (TC7) or transitively through
+    ``build_graph`` (TC6, which validates its input) -- need a field that passes
+    every schema rule, so the override-cascade behavior is what's under test,
+    not an unrelated rejection.
+
+    Topology: ``S`` is the blind (dead-reckoned) spawn, ``S``--``A`` a blind
+    edge, ``A``--``B`` the LINE segment an override attaches to, and ``B``--``G``
+    a second blind edge.  Every node is reachable.
+    """
+    return FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node="S",
+        start_heading_deg=0.0,
+        nodes={
+            "S": (10.0, 10.0),
+            "A": (100.0, 10.0),
+            "B": (200.0, 10.0),
+            "G": (250.0, 120.0),
+        },
+        node_types={"S": "blind", "A": "line", "B": "line", "G": "blind"},
+        line_segments=[("A", "B")],
+        blind_edges=[("S", "A"), ("B", "G")],
+        obstacles=[],
+    )
+
+
+def _undirected(pair: tuple[str, str]) -> frozenset[str]:
+    """Return the order-independent key for an undirected node pair."""
+    return frozenset(pair)
+
+
+def _assert_no_orphan_overrides(model: FieldModel) -> None:
+    """Assert every ``model.edges`` entry has a live SAME-TYPE segment.
+
+    The no-orphan invariant (R1/R2): an overlay entry's identity is
+    ``(type, u, v)``, and it may only exist while a segment of that exact type
+    still connects ``{u, v}``.  A LINE override needs a live ``line_segments``
+    pair; a BLIND override needs a live ``blind_edges`` pair.  An entry that
+    survives without its underlying segment is an orphan -- ``graph_builder``
+    would re-emit the "deleted" edge, and a node-delete orphan fails the Save
+    validator ("EDGES references unknown node").
+    """
+    live_line = {_undirected(seg) for seg in model.line_segments}
+    live_blind = {_undirected(seg) for seg in model.blind_edges}
+    for entry in model.edges:
+        pair = frozenset({entry["u"], entry["v"]})
+        if entry["type"] == _SEGMENT_KIND_TO_TYPE_TAG["line"]:
+            assert pair in live_line, (
+                f"orphaned LINE override {entry!r}: no live line_segments pair"
+            )
+        elif entry["type"] == _SEGMENT_KIND_TO_TYPE_TAG["blind"]:
+            assert pair in live_blind, (
+                f"orphaned BLIND override {entry!r}: no live blind_edges pair"
+            )
+        else:  # pragma: no cover - defensive: unknown tag is itself a bug
+            raise AssertionError(f"unexpected override type tag: {entry!r}")
+
+
+# ---------------------------------------------------------------------------
+# TC5 — DeleteNode cascades its incident overrides (apply removes, revert
+# restores), so deleting a node carrying an override leaves no orphan.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_node_cascades_incident_overrides_and_reverts() -> None:
+    """TC5: DeleteNode.apply removes every overlay entry incident to the node
+    (either endpoint, any type) and revert re-inserts each at its original
+    index; a subsequent state has no orphaned override referencing the node."""
+    model = make_override_model()
+    # Make G isolated-deletable: only the B--G blind edge references it, and
+    # G is not the start node. Author two overrides incident to G (forward and
+    # reverse) plus one NOT incident, to prove only the incident ones cascade
+    # and the untouched one keeps its position.
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+        {"type": "BLIND", "u": "G", "v": "B", "direction": "rear"},
+    ]
+    # Remove the only segment referencing G so DeleteNode is not blocked by the
+    # edge guard (the override cascade is what we are exercising, not the guard).
+    model.blind_edges = []
+    pre_apply_repr = repr(model.to_json_dict())
+
+    cmd = DeleteNode("G")
+    cmd.apply(model)
+
+    # Both G-incident overrides are gone; the A--B override survives untouched.
+    assert model.edges == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    assert "G" not in model.nodes
+    # No surviving entry references the deleted node (no orphan).
+    for entry in model.edges:
+        assert entry["u"] != "G" and entry["v"] != "G"
+
+    cmd.revert(model)
+    # Every captured override is back at its exact original index, node restored.
+    assert "G" in model.nodes
+    assert repr(model.to_json_dict()) == pre_apply_repr
+
+
+def test_delete_node_override_cascade_survives_history_undo_redo() -> None:
+    """TC5 (cont.): the cascade round-trips through the real History stack --
+    undo restores node + overrides, redo re-removes them."""
+    model = make_override_model()
+    model.edges = [
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+        {"type": "BLIND", "u": "G", "v": "B", "direction": "rear"},
+    ]
+    model.blind_edges = []
+    history = History()
+    original_json = model.to_json_dict()
+
+    history.do(DeleteNode("G"), model)
+    deleted_json = model.to_json_dict()
+    assert model.edges == []
+
+    assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+    assert len(model.edges) == 2
+
+    assert history.redo(model) is True
+    assert model.to_json_dict() == deleted_json
+    assert model.edges == []
+
+
+# ---------------------------------------------------------------------------
+# TC6 — DeleteEdge cascades the matching-kind override, so graph_builder no
+# longer re-emits the deleted edge; revert restores both segment and override.
+# ---------------------------------------------------------------------------
+
+
+def test_delete_edge_cascades_override_and_graph_builder_does_not_reemit() -> None:
+    """TC6: DeleteEdge removes the matching-kind override on the pair (both
+    orientations); afterwards graph_builder does NOT re-emit the deleted edge,
+    and revert restores the segment + override exactly."""
+    from tools.path_planner.graph_builder import build_graph
+
+    model = make_valid_override_model()
+    # A--B is a LINE segment; author a LINE override on it (forward + reverse).
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "B", "v": "A", "direction": "rear"},
+    ]
+    pre_apply_repr = repr(model.to_json_dict())
+
+    # Sanity: before the delete, the graph contains the A<->B directed pair.
+    graph_before = build_graph(model.to_module_proxy())
+    assert graph_before.has_edge("A", "B")
+    assert graph_before.has_edge("B", "A")
+
+    cmd = DeleteEdge("A", "B")
+    cmd.apply(model)
+
+    # The LINE segment is gone AND both LINE overrides on the pair are gone.
+    assert ("A", "B") not in model.line_segments
+    assert model.edges == []
+
+    # graph_builder must NOT re-emit A<->B: without the cascade the orphaned
+    # override would put the "deleted" edge straight back into the graph.
+    graph_after = build_graph(model.to_module_proxy())
+    assert not graph_after.has_edge("A", "B")
+    assert not graph_after.has_edge("B", "A")
+
+    cmd.revert(model)
+    assert ("A", "B") in model.line_segments
+    assert repr(model.to_json_dict()) == pre_apply_repr
+
+
+def test_delete_edge_cascade_matches_only_the_deleted_kind() -> None:
+    """TC6 (identity guard): DeleteEdge removes only the DELETED kind's override
+    on the pair; a same-pair override of the OTHER kind (with a live segment of
+    that other kind) is left untouched."""
+    model = make_override_model()
+    # A--B is a LINE segment. Add a BLIND segment on the SAME pair is illegal
+    # (mutually exclusive), so instead use the B--G blind segment and put a
+    # BLIND override on A--B that has NO live segment is the orphan we DON'T
+    # want to touch here -- so test the realistic case: a LINE override on the
+    # deleted LINE pair AND a BLIND override on a DIFFERENT live blind pair.
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
+    ]
+
+    DeleteEdge("A", "B").apply(model)
+
+    # Only the LINE override on A--B was cascaded; the BLIND override on the
+    # still-live B--G blind segment survives.
+    assert model.edges == [
+        {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"}
+    ]
+
+
+# ---------------------------------------------------------------------------
+# TC7 — kind-flip LINE->BLIND (the MacroCommand the editor dispatches) drops the
+# stale LINE override via DeleteEdge's cascade, so the post-flip model has no
+# wrong-typed override and Save is not rejected.
+# ---------------------------------------------------------------------------
+
+
+def test_kind_flip_line_to_blind_drops_line_override_and_save_ok() -> None:
+    """TC7: flipping A--B from LINE to BLIND through the editor's
+    MacroCommand([DeleteEdge, AddBlindEdge]) removes the stale LINE override
+    (DeleteEdge is the sole owner of that clear), leaving no LINE-typed override
+    on a now-BLIND segment; validate() accepts the result."""
+    model = make_valid_override_model()
+    # Re-type A / B to blind so the post-flip topology (A--B as a blind edge
+    # between two nodes) is fully warning-clean -- this isolates the assertion to
+    # "no wrong-typed override survives", not an unrelated line-node warning.
+    model.node_types["A"] = "blind"
+    model.node_types["B"] = "blind"
+    # A--B carries a LINE override; flip it to a BLIND edge.
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    pre_flip_repr = repr(model.to_json_dict())
+
+    flip = MacroCommand([DeleteEdge("A", "B"), AddBlindEdge("A", "B")])
+    flip.apply(model)
+
+    # The segment is now blind, and NO stale LINE override survives on the pair.
+    assert ("A", "B") in model.blind_edges
+    assert ("A", "B") not in model.line_segments
+    assert model.edges == []
+    _assert_no_orphan_overrides(model)
+
+    # Save must not be rejected: no LINE override on a BLIND segment, no
+    # orphaned reference. (The model is otherwise a valid field.)
+    model.validate()
+
+    # The MacroCommand revert restores both the segment and the override.
+    flip.revert(model)
+    assert ("A", "B") in model.line_segments
+    assert repr(model.to_json_dict()) == pre_flip_repr
+
+
+def test_kind_flip_macro_revert_through_history_restores_override() -> None:
+    """TC7 (cont.): the kind-flip macro round-trips through History -- undo
+    restores the LINE segment + its override, redo re-flips and re-drops it."""
+    model = make_override_model()
+    model.edges = [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+    history = History()
+    original_json = model.to_json_dict()
+
+    history.do(
+        MacroCommand([DeleteEdge("A", "B"), AddBlindEdge("A", "B")]), model
+    )
+    flipped_json = model.to_json_dict()
+    assert model.edges == []
+    assert ("A", "B") in model.blind_edges
+
+    assert history.undo(model) is True
+    assert model.to_json_dict() == original_json
+    assert model.edges == [
+        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    ]
+
+    assert history.redo(model) is True
+    assert model.to_json_dict() == flipped_json
+    assert model.edges == []
+
+
+# ---------------------------------------------------------------------------
+# TC8 — no-orphan invariant after a fixed-seed delete / edge-delete / kind-flip
+# sequence: every surviving model.edges entry has a live same-type segment.
+# ---------------------------------------------------------------------------
+
+
+def _make_invariant_seed_model() -> FieldModel:
+    """Return a model with a few nodes, line + blind segments, and overrides on
+    several of them, for the fixed-seed mutation fuzz (TC8)."""
+    return FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node="S",
+        start_heading_deg=0.0,
+        nodes={
+            "S": (10.0, 10.0),
+            "A": (100.0, 10.0),
+            "B": (200.0, 10.0),
+            "C": (300.0, 10.0),
+            "D": (400.0, 10.0),
+        },
+        node_types={
+            "S": "line",
+            "A": "line",
+            "B": "line",
+            "C": "blind",
+            "D": "blind",
+        },
+        line_segments=[("S", "A"), ("A", "B")],
+        blind_edges=[("B", "C"), ("C", "D")],
+        obstacles=[],
+        edges=[
+            {"type": "LINE", "u": "S", "v": "A", "primitive_mode": "FAST"},
+            {"type": "LINE", "u": "A", "v": "B", "direction": "front"},
+            {"type": "BLIND", "u": "B", "v": "C", "stop_at_line": "on"},
+            {"type": "BLIND", "u": "C", "v": "D", "primitive_mode": "GYRO"},
+            # A reverse-direction override on a live pair, to exercise both
+            # orientations of the DeleteEdge cascade.
+            {"type": "BLIND", "u": "D", "v": "C", "direction": "rear"},
+        ],
+    )
+
+
+def test_no_orphan_override_invariant_after_fixed_seed_sequence() -> None:
+    """TC8: apply a deterministic (fixed-seed) sequence of edge-deletes and
+    kind-flips; after EVERY step the no-orphan invariant holds -- no surviving
+    overlay entry lacks a live segment of its exact type."""
+    model = _make_invariant_seed_model()
+    rng = random.Random(20260624)
+
+    # The undirected pairs we will churn, with each pair's current kind tracked
+    # so a flip targets the right Add command.
+    pairs = [("S", "A"), ("A", "B"), ("B", "C"), ("C", "D")]
+
+    # Precondition: the seed itself is orphan-free.
+    _assert_no_orphan_overrides(model)
+
+    for _ in range(40):
+        a, b = rng.choice(pairs)
+        # Determine the pair's current kind (it may have been flipped already).
+        in_line = (a, b) in model.line_segments or (b, a) in model.line_segments
+        in_blind = (a, b) in model.blind_edges or (b, a) in model.blind_edges
+        if not (in_line or in_blind):
+            # The pair was deleted outright on a prior step; re-add it as a
+            # line edge so the churn continues (no override attached).
+            AddLineEdge(a, b).apply(model)
+            _assert_no_orphan_overrides(model)
+            continue
+
+        action = rng.choice(("delete", "flip"))
+        if action == "delete":
+            DeleteEdge(a, b).apply(model)
+        else:  # flip to the opposite kind
+            add = AddBlindEdge(a, b) if in_line else AddLineEdge(a, b)
+            MacroCommand([DeleteEdge(a, b), add]).apply(model)
+
+        # INVARIANT: after every mutating step, no override is orphaned.
+        _assert_no_orphan_overrides(model)
+
+
+# ---------------------------------------------------------------------------
+# TC9 — SetEdgeOverride edit of an entry carrying hand-authored geometry
+# (distance_cm / heading_deg) preserves those keys; an editor-owned key absent
+# from the edit is removed (inherit).
+# ---------------------------------------------------------------------------
+
+
+def test_set_edge_override_replace_preserves_hand_authored_geometry() -> None:
+    """TC9: editing an existing override that carries hand-authored
+    distance_cm / heading_deg keeps those (non-editor-owned) keys after the
+    replace; the editor-owned keys are updated."""
+    model = make_override_model()
+    # Seed an entry with geometry plus an editor-owned primitive_mode, as a
+    # hand-authored field_data.json EDGES entry would carry.
+    model.edges = [
+        {
+            "type": "LINE",
+            "u": "A",
+            "v": "B",
+            "primitive_mode": "FAST",
+            "distance_cm": 42.5,
+            "heading_deg": 17.0,
+        }
+    ]
+
+    # Edit only the editor-owned primitive_mode (the inline editor's add-form
+    # carries no geometry controls, so distance_cm / heading_deg are absent).
+    SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW").apply(model)
+
+    entry = model.edges[0]
+    # Editor-owned key updated...
+    assert entry["primitive_mode"] == "SLOW"
+    # ...and the hand-authored geometry survives the in-place replace.
+    assert entry["distance_cm"] == 42.5
+    assert entry["heading_deg"] == 17.0
+    # Identity intact, single entry (replaced in place, no duplicate).
+    assert len(model.edges) == 1
+    assert (entry["type"], entry["u"], entry["v"]) == ("LINE", "A", "B")
+
+
+def test_set_edge_override_replace_removes_omitted_editor_key_keeps_geometry() -> None:
+    """TC9 (cont.): an editor-owned key present on the prior entry but ABSENT
+    from the edit is removed (set-to-inherit), while non-editor-owned geometry
+    keys still survive."""
+    model = make_override_model()
+    model.edges = [
+        {
+            "type": "BLIND",
+            "u": "B",
+            "v": "G",
+            "primitive_mode": "GYRO",
+            "stop_at_line": "on",
+            "distance_cm": 60.0,
+        }
+    ]
+
+    # Re-author with ONLY direction set: primitive_mode and stop_at_line are
+    # absent from the form -> they must be removed (inherit), geometry survives.
+    SetEdgeOverride("BLIND", "B", "G", direction="rear").apply(model)
+
+    entry = model.edges[0]
+    assert entry["direction"] == "rear"
+    assert "primitive_mode" not in entry  # omitted -> removed (inherit)
+    assert "stop_at_line" not in entry  # omitted -> removed (inherit)
+    assert entry["distance_cm"] == 60.0  # non-editor-owned key preserved
+    assert len(model.edges) == 1
+
+
+def test_set_edge_override_replace_preserving_geometry_reverts_exactly() -> None:
+    """TC9 (cont.): reverting a geometry-preserving replace restores the EXACT
+    prior entry (geometry and all), not a stripped override-only entry."""
+    model = make_override_model()
+    original_entry = {
+        "type": "LINE",
+        "u": "A",
+        "v": "B",
+        "primitive_mode": "FAST",
+        "distance_cm": 42.5,
+        "heading_deg": 17.0,
+    }
+    model.edges = [dict(original_entry)]
+    pre_replace_repr = repr(model.to_json_dict())
+
+    cmd = SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW")
+    cmd.apply(model)
+    assert model.edges[0]["primitive_mode"] == "SLOW"
+
+    cmd.revert(model)
+    assert model.edges[0] == original_entry
+    assert repr(model.to_json_dict()) == pre_replace_repr

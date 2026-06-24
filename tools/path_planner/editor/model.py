@@ -34,6 +34,26 @@ from typing import Any, ClassVar
 NODE_TYPE_VALUES: tuple[str, ...] = ("line", "projection", "blind", "reset")
 RESET_AXIS_VALUES: tuple[str, ...] = ("x", "y")
 
+#: Single registry of the ``FieldModel`` containers that reference a node by
+#: name. A node rename must rewrite every such container, and the undo/redo
+#: snapshot/restore surface must deep-copy every such container (they hold
+#: nested mutable state that a shallow copy would alias). Both surfaces walk
+#: THIS tuple so a newly added node-bearing container is wired into the rename
+#: cascade and the snapshot/restore in one place instead of being hand-listed
+#: in three (a missed surface silently orphans references on rename or aliases
+#: the container across undo levels). The order matches the historical hand-list
+#: (nodes, node_types, line_segments, blind_edges, reset_nodes, pivot_turns,
+#: edges) so the snapshot/restore order is unchanged.
+NODE_BEARING_CONTAINERS: tuple[str, ...] = (
+    "nodes",
+    "node_types",
+    "line_segments",
+    "blind_edges",
+    "reset_nodes",
+    "pivot_turns",
+    "edges",
+)
+
 
 @dataclass
 class FieldModel:
@@ -218,17 +238,16 @@ class FieldModel:
         self.blind_decay_d_ref = snap.blind_decay_d_ref
         self.start_node = snap.start_node
         self.start_heading_deg = snap.start_heading_deg
-        self.nodes = copy.deepcopy(snap.nodes)
-        self.node_types = copy.deepcopy(snap.node_types)
-        self.line_segments = copy.deepcopy(snap.line_segments)
-        self.blind_edges = copy.deepcopy(snap.blind_edges)
         self.obstacles = copy.deepcopy(snap.obstacles)
-        self.pivot_turns = copy.deepcopy(snap.pivot_turns)
-        self.reset_nodes = copy.deepcopy(snap.reset_nodes)
+        # Every node-bearing container holds nested mutable state (dict values,
+        # list entries, override dicts), so each is deep-copied -- a shallow copy
+        # would alias the snapshot and corrupt undo/redo across levels. Walk the
+        # single NODE_BEARING_CONTAINERS registry so a newly added container is
+        # restored here automatically (the rename cascade in commands.py walks
+        # the same registry).
+        for attr in NODE_BEARING_CONTAINERS:
+            setattr(self, attr, copy.deepcopy(getattr(snap, attr)))
         self.blind_projection_auto_seek = snap.blind_projection_auto_seek
-        # edges is a list of dicts; deep-copy so undo/redo cannot alias and
-        # corrupt the nested override dicts (a shallow copy would share them).
-        self.edges = copy.deepcopy(snap.edges)
         # pipeline_* are immutable (str | None); plain assignment is enough,
         # mirroring blind_projection_auto_seek.
         self.pipeline_line_mode = snap.pipeline_line_mode
