@@ -32,4 +32,4 @@ uint32_t           mockTickCount = 0;
 DriveClass        Drive;
 WROLineArrayClass LineArray;
 IntersectionClass Intersection;
-MockMatrixMiniR4  MiniR4;
+MatrixMiniR4      MiniR4;
