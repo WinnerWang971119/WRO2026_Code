@@ -38,6 +38,21 @@ enable_testing()
 set(SKETCH_DIR     ${CMAKE_CURRENT_SOURCE_DIR}/..)
 set(TEST_DIR       ${CMAKE_CURRENT_SOURCE_DIR})
 set(MOCKS_DIR      ${TEST_DIR}/mocks)
+# Shared host-test HAL mock dir (issue #105). Hoisted here from its historical
+# definition near `test_mock_hal` because the issue-#106 PathTracker+Drive
+# real-link targets below ALSO consume it: their `add_path_force_includes` helper
+# force-includes `${HAL_MOCKS_DIR}/EventTrace.h`, and their include list leads with
+# `${HAL_MOCKS_DIR}` so the angle-bracket `<MatrixMiniR4.h>` / `<Arduino.h>` resolve
+# to the HAL mock. A `set()` must execute before any line that expands the variable,
+# and those targets sit ABOVE the old definition site — so the dir var lives here now.
+set(HAL_MOCKS_DIR  ${TEST_DIR}/hal_mocks)
+# Issue #106 PathTracker + Drive host-link thin-peripheral mocks. Holds the
+# record-and-test-set `WROLineArray.h` / `Intersection.h` / `LineFollower.h` the real
+# `Drive.cpp` + `PathTracker.cpp` command, plus `path_mocks.cpp` (the facade-globals TU
+# these targets link — it defines `MiniR4` / `Serial` / `Serial1` / `g_mockMillis` /
+# `mockTickCount` / `EventTrace` but DELIBERATELY NOT `Drive`, so it never collides with
+# the real `Drive.cpp` that is the sole definer of the `Drive` global).
+set(PATH_MOCKS_DIR ${TEST_DIR}/path_mocks)
 # Task-body facade mocks (PathTracker / LineFollower / Manipulator) live in their
 # OWN dir, NOT `mocks/`. `mocks/` is on every target's include path, so a mock
 # there would shadow the REAL header for the sibling tests that compile the real
@@ -261,6 +276,65 @@ function(add_fixture_routes_force_include target)
     endif()
 endfunction()
 
+# -----------------------------------------------------------------------------------------
+# Force-include the issue-#106 PathTracker+Drive real-link peripheral mocks BEFORE any
+# source-file parsing — the same load-bearing shadow trick as `add_hal_force_includes` /
+# `add_mission_mock_force_includes`, pointed at `hal_mocks/EventTrace.h` + the three
+# `path_mocks/` peripherals, using ABSOLUTE paths.
+#
+# THE INVERSION (vs `test_mission_dispatch` / #111 — read this before copying that recipe):
+# these targets host-link the REAL `Drive.cpp` + `PathTracker.cpp`, so the PRODUCTION
+# `Drive.h` (guard `DRIVE_H`) and `PathTracker.h` (guard `PATHTRACKER_H`) MUST be the
+# definitions that compile. We therefore do **NOT** force-include `hal_mocks/Drive.h` (that
+# would swap in the mock `DriveClass` and the real `Drive.cpp` would fail to find its own
+# private members + multiply-type `Drive`), and there is **NO** PathTracker mock at all.
+# Likewise NO `Localization.h` / `YawSource.h` force-include — the real headers win, paired
+# with the real `Localization.cpp` / `YawSource.cpp` these targets link. The trust boundary
+# sits one layer DOWN: the `MatrixMiniR4` facade + the line-sensor leaf are mocked, and real
+# Drive/PathTracker/Localization/YawSource win above it.
+#
+# What IS force-included (in this order):
+#   - `${HAL_MOCKS_DIR}/EventTrace.h` (guard `EVENTTRACE_H`) — the no-op EventTrace mock.
+#     Real `PathTracker.cpp` only calls `EventTrace.pushEvent(...)`, which the no-op mock
+#     satisfies; no real `EventTrace.cpp` is linked (so the `MiniR4OLED.h WHITE`-macro
+#     concern never arises — satisfied-by-avoidance, same as #111).
+#   - `${PATH_MOCKS_DIR}/WROLineArray.h` (guard `WROLINEARRAY_H`) — real `Drive.cpp` calls
+#     `getJunctionType()` / `setReverseActive(bool)` on it; the `Intersection` / `LineFollower`
+#     mocks reference its `JunctionType` enum.
+#   - `${PATH_MOCKS_DIR}/Intersection.h`  (guard `INTERSECTION_H`).
+#   - `${PATH_MOCKS_DIR}/LineFollower.h`  (guard `LINEFOLLOWER_H`).
+#
+# NO `MatrixMiniR4.h` force-include: `<MatrixMiniR4.h>` / `<Arduino.h>` are ANGLE-bracket
+# includes with NO counterpart in `${SKETCH_DIR}` (the sketch never ships them), so the
+# `${HAL_MOCKS_DIR}`-on-the-include-path order alone picks the HAL mock — exactly like the
+# sibling force-include helpers. Each mock's guard matches the production header's guard, so
+# once force-included the real header no-ops when re-requested transitively (FieldMap.h /
+# PathTracker.h / Drive.h …) — the SKETCH_DIR-FIRST include order does NOT un-shadow them.
+#
+# Composed AFTER `add_fixture_routes_force_include(target)` (which must win FIRST so its
+# `ROUTES_H` is defined before any header pulls production `routes.h`), exactly like #111.
+# -----------------------------------------------------------------------------------------
+function(add_path_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${HAL_MOCKS_DIR}/EventTrace.h"
+            "/FI${PATH_MOCKS_DIR}/WROLineArray.h"
+            "/FI${PATH_MOCKS_DIR}/Intersection.h"
+            "/FI${PATH_MOCKS_DIR}/LineFollower.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise collapse the four to
+        # one and break the build (`cannot specify -o with -c ... multiple files`).
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${HAL_MOCKS_DIR}/EventTrace.h"
+            "SHELL:-include ${PATH_MOCKS_DIR}/WROLineArray.h"
+            "SHELL:-include ${PATH_MOCKS_DIR}/Intersection.h"
+            "SHELL:-include ${PATH_MOCKS_DIR}/LineFollower.h"
+        )
+    endif()
+endfunction()
+
 # =========================================================================================
 # Test executable #1 — LineFollower overshoot / brake-on-gate / junction-freeze.
 # Exercises T10a, T10b, T10d (AC6 + AC9).
@@ -275,176 +349,207 @@ add_mock_force_includes(test_line_follower_overshoot)
 add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 
 # =========================================================================================
-# Test executable #2a — PATH_PASS_THROUGH_ENABLED == true build.
+# Test executables #2/#3 — the FIVE PathTracker mirror tests, re-wired to host-link the
+# REAL `PathTracker.cpp` + `Drive.cpp` (issue #106, closing the last gap in ADR-030).
+#
+# THE SHARED RECIPE (all seven `add_executable` blocks below — the passthrough + bidirectional
+# groups are doubled for their ON/OFF compile flag — use it identically). It INVERTS the #111
+# `test_mission_dispatch` wiring on two load-bearing points:
+#
+#   1. LINK the REAL sources, not mocks: `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+#      `YawSource.cpp` + the feature-complete `fixtures/routes_fixture.cpp` (all five resolve
+#      nodes BY NAME) + `path_mocks/path_mocks.cpp` — the facade-globals TU. We link
+#      `path_mocks.cpp` and **NOT** `hal_mocks/hal_mocks.cpp`: `hal_mocks.cpp` defines a MOCK
+#      `DriveClass Drive`, which alongside the real `Drive.cpp` (the sole real definer of
+#      `Drive`) would multiply-define `Drive` (and `MiniR4` / `EventTrace` / `Serial` /
+#      `g_mockMillis`, which `path_mocks.cpp` already provides). `path_mocks.cpp` defines the
+#      facade globals WITHOUT a mock `Drive`. NEVER link `hal_mocks.cpp` or `mocks/mocks.cpp`
+#      into these five targets.
+#
+#   2. Include order leads with `${SKETCH_DIR}`, NOT `${HAL_MOCKS_DIR}`. The harness
+#      (`test_path_tracker_harness.h`) and the test `.cpp`s quote-include `"Drive.h"` /
+#      `"PathTracker.h"` / `"Localization.h"` / `"YawSource.h"` / `"FieldMap.h"` / `"Config.h"`
+#      with no source-relative match in `${TEST_DIR}`, so they resolve via the `-I` order.
+#      `${HAL_MOCKS_DIR}` CONTAINS a `Drive.h` (the MOCK `DriveClass`) — if it led, `"Drive.h"`
+#      would resolve to the mock (missing `isTurnDone()` / `isLineFound()` / `getFault()` the
+#      harness calls, AND an ODR clash with real `Drive.cpp`). `${SKETCH_DIR}`-FIRST makes the
+#      real sketch headers win — THE INVERSION holds. The mocks still win exactly where intended:
+#        - `<Arduino.h>` / `<MatrixMiniR4.h>` are ANGLE includes with no `${SKETCH_DIR}`
+#          counterpart, so they fall through to `${HAL_MOCKS_DIR}` → the HAL mock.
+#        - `WROLineArray.h` / `Intersection.h` / `LineFollower.h` / `EventTrace.h` DO have
+#          `${SKETCH_DIR}` counterparts, but `add_path_force_includes` force-includes the
+#          `path_mocks/` / `hal_mocks/` versions by ABSOLUTE path FIRST, so their guards are
+#          already defined → the real sketch headers no-op (SKETCH_DIR-first does not un-shadow).
+#        - `routes.h` is shadowed by the force-included `routes_fixture.h` (guard `ROUTES_H`).
+#      `${MOCKS_DIR}` is OMITTED entirely: `mocks/Drive.h` and `hal_mocks/Drive.h` share the
+#      `DRIVE_H` guard (ODR mutual-exclusion), so no target may see both dirs.
+#
+# Force-include ORDER (critical): `add_fixture_routes_force_include` FIRST (its `ROUTES_H`
+# must win before any header pulls production `routes.h`, else "too many initializers"), THEN
+# `add_path_force_includes` (EventTrace + the three `path_mocks/` peripherals). NO Drive.h, NO
+# PathTracker.h, NO MatrixMiniR4.h, NO Localization.h/YawSource.h force-include — see the
+# `add_path_force_includes` block comment above for why each is omitted.
+#
+# The targets inherit the directory-wide warning suppressions (`add_compile_options` near the
+# top) just like the LineFollower harness, and preserve their ctest names + ON/OFF flag defs
+# (CI greps the names; the flags prove the compile-time toggle drives runtime behaviour).
 # =========================================================================================
+
+# --- Test executable #2a — PATH_PASS_THROUGH_ENABLED == true build. ---
 add_executable(test_path_tracker_passthrough_on
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
-    ${SUT_SOURCES}
-    ${MOCK_SOURCES}
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 target_compile_definitions(test_path_tracker_passthrough_on
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=true)
-target_include_directories(test_path_tracker_passthrough_on PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_path_tracker_passthrough_on)
+# SKETCH_DIR FIRST (the inversion); hal_mocks/ + path_mocks/ supply the angle-bracket vendor
+# headers + the force-included peripheral mocks; mocks/ OMITTED (ODR mutual-exclusion).
+target_include_directories(test_path_tracker_passthrough_on PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_passthrough_on)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_passthrough_on)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_passthrough_on COMMAND test_path_tracker_passthrough_on)
 
-# =========================================================================================
-# Test executable #2b — PATH_PASS_THROUGH_ENABLED == false build (legacy stop-and-go).
-# =========================================================================================
+# --- Test executable #2b — PATH_PASS_THROUGH_ENABLED == false build (legacy stop-and-go). ---
 add_executable(test_path_tracker_passthrough_off
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
-    ${SUT_SOURCES}
-    ${MOCK_SOURCES}
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 target_compile_definitions(test_path_tracker_passthrough_off
     PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false)
-target_include_directories(test_path_tracker_passthrough_off PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_path_tracker_passthrough_off)
+target_include_directories(test_path_tracker_passthrough_off PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_passthrough_off)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_passthrough_off)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough_off)
 
-# =========================================================================================
-# Test executable #3a — BIDIRECTIONAL_AUTO_ENABLED == true build (kill-switch ON, default).
-#
-# Exercises TC12 (REVERSE_UNAVAILABLE fault on 1-board + REAR LINE; issue #64
-# retired the projection edge type, so PROJECTION is no longer a guard input),
-# TC13 (Mission modifier no-op on non-GOTO step), and TC14c (compile-time kill-switch
-# override propagates into runtime behavior). See the test file's docblock for the
-# rationale on why the production .cpp sources for PathTracker / Mission are NOT
-# linked in here — the test mirrors the relevant slices inline, following the same
-# precedent as `test_path_tracker_passthrough.cpp`.
-#
-# `routes.cpp` IS linked (both ON and OFF builds) so the `extern` graph-data symbols
-# declared by `routes.h` (NODES / NEXT_HOP / EDGES / PIPELINE_CONFIG, pulled in
-# transitively via DirectionPolicy.h / PathTracker.h / FieldMap.h) have a definition.
-# It is pure const POD data with no hardware deps, so it compiles cleanly against the
-# mock surface and is the sole definer of those symbols. The PathTracker / Mission
-# *logic* is still mirrored inline — only the data definitions are linked in, so a
-# future fixture that odr-uses `FieldMap::getNextHop/getEdge/getNode` or reads
-# `PIPELINE_CONFIG` will link instead of failing on undefined references.
-# =========================================================================================
+# --- Test executable #3a — BIDIRECTIONAL_AUTO_ENABLED == true build (kill-switch ON, default). ---
+# The compile-flag toggle flips the resolved direction the REAL FSM takes on the same fixture
+# heading; the rear-override LINE hop on the default 2-board config drives through the real
+# `Drive.cpp` + `PathTracker.cpp` (no board-count target split — `LINE_BOARD_COUNT` has no
+# per-target override hook, so the 1-board REVERSE_UNAVAILABLE fault is asserted at the frozen
+# `reverseUnavailable` resolver level inside the test, not via a 1-board real-FSM build).
 add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
-    ${SUT_SOURCES}
-    ${MOCK_SOURCES}
-    ${SKETCH_DIR}/routes.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_on
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true)
-target_include_directories(test_path_tracker_bidirectional_on PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_path_tracker_bidirectional_on)
+target_include_directories(test_path_tracker_bidirectional_on PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_bidirectional_on)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_bidirectional_on)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_bidirectional_on COMMAND test_path_tracker_bidirectional_on)
 
-# =========================================================================================
-# Test executable #3b — BIDIRECTIONAL_AUTO_ENABLED == false build (kill-switch OFF).
-#
-# Asserts that the same 175-deg fixture that picks REAR on the ON build picks FRONT
-# on the OFF build — i.e. the compile-time toggle genuinely controls runtime behavior,
-# not just compilation.
-# =========================================================================================
+# --- Test executable #3b — BIDIRECTIONAL_AUTO_ENABLED == false build (kill-switch OFF). ---
+# Asserts that the same fixture heading the ON build resolves one way, the OFF build resolves
+# the other — i.e. the compile-time toggle genuinely controls the REAL FSM's runtime direction
+# resolution, not just compilation.
 add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
-    ${SUT_SOURCES}
-    ${MOCK_SOURCES}
-    ${SKETCH_DIR}/routes.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
 target_compile_definitions(test_path_tracker_bidirectional_off
     PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false)
-target_include_directories(test_path_tracker_bidirectional_off PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_path_tracker_bidirectional_off)
+target_include_directories(test_path_tracker_bidirectional_off PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_bidirectional_off)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_bidirectional_off)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirectional_off)
 
-# =========================================================================================
-# Test executable #3c — PathTracker STOP_AT_LINE mirror-slice (TC7..TC10, T16).
-#
-# Exercises the STOP_AT_LINE FSM slice introduced by the 2026-05-30 stop-at-line
-# plan: re-anchor-on-success (TC7), DRIVE_FAULT-on-no-line (TC8), and the
-# call-flag OFF/ON precedence over the per-edge BlindMode (TC9/TC10).
-#
-# Rationale for NOT linking the real `PathTracker.cpp` and NOT mocking
-# `Drive.stopAtLine` (mirrors the precedent set by
-# `test_path_tracker_passthrough.cpp` and `test_path_tracker_bidirectional.cpp`):
-# the test inline-mirrors the small STOP_AT_LINE decision slice rather than drag
-# in the full Drive-builder / Localization / FieldMap / routes.cpp / MatrixMiniR4
-# / EventTrace surface. Mirror sites are annotated `// MIRROR: PathTracker.cpp:<line>`
-# for drift detection at PR-review time. The mock `Drive.h` is deliberately NOT
-# extended with a fault surface — the production `Drive.hasFault()` / `isIdle()`
-# observations are modelled as plain `bool` inputs to the replicated tick.
-#
-# Links `SUT_SOURCES` for parity with the sibling mirror targets (the test does
-# not touch LineFollower, but the force-included Drive/LineArray/Intersection
-# mocks resolve against the same TU set).
-# =========================================================================================
+# --- Test executable #3c — PathTracker STOP_AT_LINE seek/re-anchor/fault, real-linked. ---
+# Drives the REAL STOP_AT_LINE state body: `Start→Inter1` seek success re-anchor (via real
+# `Localization.onIntersection`), DRIVE_FAULT on no-line (the real `Drive` seek latches its
+# no-line fault, the real PathTracker reads `Drive.hasFault()` → `Fault::DRIVE_FAULT`), and the
+# seek-overshoot trim on the sensor-regime pivot — all over the real frozen resolvers
+# (`resolveStopAtLine` / `resolveSensorOvershootTrim`). The KEPT direct-call resolver truth-table
+# TCs are NOT mirrors and stay.
 add_executable(test_path_tracker_stop_at_line
     ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
-    ${SUT_SOURCES}
-    ${MOCK_SOURCES}
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_path_tracker_stop_at_line PRIVATE ${COMMON_INCLUDES})
-add_mock_force_includes(test_path_tracker_stop_at_line)
+target_include_directories(test_path_tracker_stop_at_line PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_stop_at_line)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_stop_at_line)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
 
-# =========================================================================================
-# Test executable #3e — PathTracker projection-NODE dispatch mirror (issue #64, T14 / TC16).
+# --- Test executable #3e — PathTracker projection-NODE dispatch, real-linked (issue #64 / #106). ---
+# Drives the two projection cells of the REAL `_dispatchEdgeAfterTurn` through the real FSM:
+#   - LINE  → projection : distance-gated PROJECTION_FOLLOW, dead-reckon advance (`Inter1→ProjL`).
+#   - BLIND → projection : LOCAL auto-seek (`BLIND_PROJECTION_AUTO_SEEK && isProjectionNode`)
+#                          → real `Drive.stopAtLine` seek, full-advance re-anchor (`Corner→ProjB`).
+# The auto-rule is graph DATA baked into the fixture, asserted via the real frozen resolver.
 #
-# Exercises the two projection cells of the firmware `_dispatchEdgeAfterTurn`:
-#   - LINE  → projection : DISTANCE-gated follow (PROJECTION_FOLLOW), dead-reckon advance.
-#   - BLIND → projection : LOCAL auto-seek (BLIND_PROJECTION_AUTO_SEEK &&
-#                          isProjectionNode(_nextHop)) → STOP_AT_LINE, full-advance re-anchor.
-#
-# The LOCAL destination-node read that ROUTES each hop (`FieldMap::getNodeType` /
-# `isProjectionNode` / `getEdgeType`) is tested DIRECTLY against the REAL graph accessors,
-# and the BLIND auto-rule flows into the REAL frozen `resolveStopAtLine` (StopAtLinePolicy.h)
-# — mirroring `test_return_to_node_dispatch` (real `getNodeType` over real routes) +
-# `test_path_tracker_stop_at_line` (real resolver). The per-kind `_dispatchEdgeAfterTurn`
-# routing is inline-MIRRORED (`// MIRROR: PathTracker.cpp:<line>`) since the full
-# `PathTracker.cpp` is NOT host-linked by ANY target.
-#
-# Links the TOY golden `routes_toy.cpp` (NOT the production `routes.cpp`): the production
-# field has NO projection node this phase (issue #64 leaves the real field for P3.5), so
-# the projection node `P1` lives only in the toy field. `add_toy_routes_force_include`
-# force-includes `routes_toy.h` (guard `ROUTES_H`) ahead of the sketch `routes.h`, so BOTH
-# the test TU and `routes_toy.cpp` compile against the 8-node toy `Routes::` data. NO Drive
-# force-include — FieldMap.h / routes.h / StopAtLinePolicy.h never include the production
-# `Drive.h`. `MOCK_SOURCES` supplies the `Serial` / `MiniR4` globals the mock `<Arduino.h>`
-# / `<MatrixMiniR4.h>` (pulled in transitively by `Config.h` / `PathTracker.h`) declare.
-# =========================================================================================
+# SWITCHED off the TOY golden `routes_toy.cpp` onto the feature-complete
+# `fixtures/routes_fixture.cpp` (the consolidation: all five tests resolve nodes BY NAME over
+# the one fixture, which already carries the `ProjL` / `ProjB` projection nodes). Same shared
+# recipe as the siblings — real `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+# `YawSource.cpp`, `path_mocks.cpp` globals, fixture routes force-included FIRST.
 add_executable(test_path_tracker_projection
     ${TEST_DIR}/test_path_tracker_projection.cpp
-    ${TOY_ROUTES_DIR}/routes_toy.cpp
-    ${MOCK_SOURCES}
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_path_tracker_projection PRIVATE ${COMMON_INCLUDES})
-add_toy_routes_force_include(test_path_tracker_projection)
+target_include_directories(test_path_tracker_projection PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_projection)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_projection)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_projection COMMAND test_path_tracker_projection)
 
-# =========================================================================================
-# Test executable #3f — PathTracker `line(A)-projection(B)-line(C)` pass-through mirror
-# (issue #64, T19 / T21, TC11 / TC12 / TC13).
+# --- Test executable #3f — PathTracker `line(A)-projection(B)-line(C)` pass-through, real-linked. ---
+# Drives the REAL pass-through gate (`PathTracker::_evaluateProjectionPassThrough`) over
+# `Inter1→ProjL→Inter2`: TC-PP1 the distance-gated gate FIRES (continuous follow, dead-reckon
+# advance at `ProjL`, re-anchor at `Inter2`); TC-PP2 `goTo(ProjL)` where `ProjL` is the goal →
+# not-final guard → stop; TC-PP3 BLIND-flanked / non-collinear → gate does NOT fire → stop.
+# Each pins routing with `getNextHop` + `assertNoBypass(Inter1,Inter2)` (the bypass edge is NONE).
 #
-# Exercises the firmware pass-through DECISION (`PathTracker::_evaluateProjectionPassThrough`):
-#   - TC11: line(A)-projection(P1)-line(B) routed PAST P1 -> the gate FIRES (continuous A->B
-#           follow, dead-reckon advance at P1, re-anchor at B).
-#   - TC12: goTo(P1) where P1 is the goal -> the gate does NOT fire (not-final guard) -> stop.
-#   - TC13: a BLIND-flanked / non-collinear projection node -> the gate does NOT fire -> stop.
-#
-# Same link recipe as `test_path_tracker_projection` (#3e): links the TOY golden
-# `routes_toy.cpp` (the production field has NO projection node this phase), force-includes
-# `routes_toy.h` (guard `ROUTES_H`) ahead of the sketch `routes.h`, and links `MOCK_SOURCES`
-# for the `Serial` / `MiniR4` globals the mock `<Arduino.h>` / `<MatrixMiniR4.h>` (pulled in
-# transitively by `Config.h`) declare. The gate's next-next lookahead + flank-edge + node-type
-# reads come from the REAL `FieldMap` accessors over the toy graph, and the collinearity /
-# direction half from the REAL frozen `resolveDirection` (DirectionPolicy.h) + `wrapDeltaDeg`
-# (NavTypes.h). NO Drive force-include — none of the included headers pull in the production
-# `Drive.h`. The per-condition routing is inline-MIRRORED (`// MIRROR: PathTracker.cpp:<line>`)
-# since the full `PathTracker.cpp` is NOT host-linked by ANY target.
-# =========================================================================================
+# SWITCHED off the TOY golden `routes_toy.cpp` onto the feature-complete
+# `fixtures/routes_fixture.cpp` (same consolidation as `test_path_tracker_projection`). Same
+# shared recipe — real `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp`,
+# `path_mocks.cpp` globals, fixture routes force-included FIRST.
 add_executable(test_path_tracker_pass_through_projection
     ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
-    ${TOY_ROUTES_DIR}/routes_toy.cpp
-    ${MOCK_SOURCES}
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_path_tracker_pass_through_projection PRIVATE ${COMMON_INCLUDES})
-add_toy_routes_force_include(test_path_tracker_pass_through_projection)
+target_include_directories(test_path_tracker_pass_through_projection PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_pass_through_projection)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_pass_through_projection)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pass_through_projection)
 
 # =========================================================================================
@@ -1152,7 +1257,8 @@ set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
 # facades), so no single target may have BOTH dirs reachable — pulling `mocks/` in would
 # double-define the facade / Drive surface. Mirror `ctps_dump`'s isolation exactly.
 # =========================================================================================
-set(HAL_MOCKS_DIR ${TEST_DIR}/hal_mocks)
+# `HAL_MOCKS_DIR` is now set in the top dir-var block (hoisted there for the issue-#106
+# PathTracker+Drive real-link targets that also consume it) — no re-`set()` needed here.
 
 # -----------------------------------------------------------------------------------------
 # Force-include the QUOTE-included HAL mock headers BEFORE any source-file parsing — the same
