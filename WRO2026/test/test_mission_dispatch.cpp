@@ -622,6 +622,16 @@ static void tc15_abort_cancels_subsystems()
     ASSERT_GE(Drive.mockRecord().stopBrakeTrueCount, (uint32_t) 1);
     ASSERT_TRUE(Mission.isIdle());
 
+    // NOT asserted here: the relative ORDER of the cancel calls (Mission.cpp:211-214
+    // runs Tasks.abort() before the chassis-shutdown verbs so a task body polling
+    // Tasks.isAborted() sees the latch before motion stops). The mocks record per-verb
+    // counts with no shared sequence, and Tasks here is the REAL class with no ordering
+    // surface, so call order is unobservable without coupling a mock to the Tasks
+    // global. Ordering is also not load-bearing yet — Mission.cpp's abort() notes the
+    // flag is wired but subsystems do not poll it (an in-flight body unwinds via
+    // PathTracker.abort()/Drive.stop()). The start()→Tasks.clearAbort() pairing is
+    // covered separately by TC20.
+
     // Queue was cleared: a post-abort update() runs nothing and the "after" print never fires.
     Serial.clearCapture();
     Mission.update();
@@ -697,8 +707,16 @@ static void tc18_declare_position_clears_faults()
     ASSERT_TRUE(PathTracker.hasFault());
     ASSERT_TRUE(Drive.hasFault());
 
-    // PathTracker is "not idle" while faulted, but hasFault() is true so the
-    // idle-OR-faulted guard still passes — recovery is the whole point.
+    // Mirror the real PathTracker invariant: isIdle() is `_qCount==0 && _state==IDLE
+    // && fault==NONE` (PathTracker.cpp), so it returns FALSE whenever a fault is
+    // latched. The mock's idle/fault knobs are independent, so set busy explicitly —
+    // otherwise isIdle() keeps its default true and the declarePosition guard
+    // `!isIdle() && !hasFault()` short-circuits on the (false) `!isIdle()` term,
+    // letting this case pass WITHOUT ever depending on hasFault(). With idle=false the
+    // guard's pass genuinely hinges on the fault term, so narrowing the guard to
+    // strictly-idle would correctly FAIL TC18 (this is the busy+faulted quadrant).
+    PathTracker.mockSetIdle(false);
+
     const bool ok = Mission.declarePosition("Inter1");
 
     ASSERT_TRUE(ok);
@@ -707,6 +725,66 @@ static void tc18_declare_position_clears_faults()
     ASSERT_FALSE(PathTracker.hasFault());
     ASSERT_FALSE(Drive.hasFault());    // Drive.clearFault() reached on the success path
     ASSERT_TRUE(eventPresent("DECL Inter1"));
+}
+
+// ===========================================================================
+// TC19 — _push queue-overflow rejection (re-establishes the deleted mirror case).
+// ===========================================================================
+
+static void tc19_queue_overflow_rejected()
+{
+    TEST_SCOPE("TC19 _push overflow: fill MAX steps, the next push is dropped with a warning, count unchanged");
+    resetAll();
+
+    // Fill the queue to exactly capacity. None of the in-capacity pushes warn.
+    for (uint8_t i = 0; i < Config::MAX_MISSION_STEPS; ++i)
+    {
+        Mission.print("fill");
+    }
+    ASSERT_FALSE(serialHas("queue full"));    // every in-capacity push was accepted
+
+    // The NEXT push overflows: _push rejects it (Mission.cpp:49-53) and warns.
+    Serial.clearCapture();
+    Mission.print("OVERFLOW_SENTINEL");
+    ASSERT_TRUE(serialHas("queue full; step dropped"));
+
+    // Prove the count is unchanged (still MAX, not MAX+1): arm + drain the whole
+    // queue and confirm the dropped step never executed — a wrongly-stored 65th
+    // PRINT step would emit its "OVERFLOW_SENTINEL" text on its tick.
+    Serial.clearCapture();
+    Mission.start();
+    for (uint16_t i = 0; i < (uint16_t) Config::MAX_MISSION_STEPS + 2u && !Mission.isIdle(); ++i)
+    {
+        Mission.update();
+    }
+    ASSERT_TRUE(Mission.isIdle());                  // all in-capacity steps drained
+    ASSERT_FALSE(serialHas("OVERFLOW_SENTINEL"));   // the dropped step was never stored
+}
+
+// ===========================================================================
+// TC20 — start() clears a stale abort latch (Mission.cpp:189 → Tasks.clearAbort()).
+// ===========================================================================
+
+static void tc20_start_clears_abort_latch()
+{
+    TEST_SCOPE("TC20 start() clears a stale abort latch → Tasks.isAborted() false on the new run");
+    resetAll();
+
+    // Run then abort a mission so the framework abort latch is set.
+    PathTracker.mockSetIdle(false);
+    Mission.goTo("Inter1");
+    Mission.start();
+    Mission.update();    // GOTO ENTER → ACTIVE
+    Mission.abort();     // Mission.abort() → Tasks.abort() sets the latch
+    ASSERT_TRUE(Tasks.isAborted());
+
+    // Arm a fresh mission. start() must clear the stale latch (Mission.cpp:189) so a
+    // task body polling Tasks.isAborted() in THIS run sees a clean state — an abort
+    // from the prior run must not bleed across.
+    Mission.print("fresh");
+    Mission.start();
+    ASSERT_FALSE(Tasks.isAborted());
+    ASSERT_FALSE(Mission.isIdle());    // armed → RUNNING
 }
 
 // ===========================================================================
@@ -733,6 +811,8 @@ int main()
     tc16_declare_position_success();
     tc17_declare_position_guards();
     tc18_declare_position_clears_faults();
+    tc19_queue_overflow_rejected();
+    tc20_start_clears_abort_latch();
 
     TEST_REPORT();
 }
