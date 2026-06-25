@@ -1,7 +1,8 @@
 # ADR-030: The host-compile harness links the real production symbols, CI-enforced
 
-**Status:** Partially implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), and real `Mission.cpp` (#46 Phase 2) are all linked from production; remaining gap is real `PathTracker.cpp` / `Drive.cpp`, still mocked, tracked as issue #106)
+**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), and real `PathTracker.cpp` / `Drive.cpp` (#106) are all linked from production. Two narrowly-scoped FSM mirror slices remain in `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch`, tracked as a follow-up issue — see How to apply.)
 **Date decided:** 2026-06 (PR-35 trace-findings fix rollout)
+**Implemented:** 2026-06 (#106 — real `PathTracker.cpp` / `Drive.cpp` host-link)
 
 ## Rule
 
@@ -37,14 +38,29 @@ push and PR turns the harness from documentation into an enforced contract.
   `#include` it, so there is one definition to drift from.
 - **New host test:** add the target to `WRO2026/test/CMakeLists.txt` so the
   `host-tests` ctest job picks it up. A test the job cannot reach is not enforced.
-- **Remaining gap:** real `Tasks.cpp` is linked by `test_tasks_dispatch` (#46
+- **Tasks / Mission:** real `Tasks.cpp` is linked by `test_tasks_dispatch` (#46
   Phase 1) and real `Mission.cpp` by `test_mission_dispatch` (#46 Phase 2), both
   via the shared `hal_mocks/` HAL and per-target mocks; the `TasksMirror` /
-  `MissionMirror` inline replicas are deleted. The remaining gap is the real
-  `PathTracker.cpp` / `Drive.cpp` (still mocked behind `hal_mocks/Drive.h`,
-  `mission_mocks/PathTracker.h`, and the inline `// MIRROR:` slices in the
-  PathTracker mirror tests) — host-linking those is issue #106, after which
-  this rule is fully in force.
+  `MissionMirror` inline replicas are deleted.
+- **PathTracker / Drive (#106):** the five named mirror tests —
+  `test_path_tracker_passthrough`, `_pass_through_projection`, `_projection`,
+  `_stop_at_line`, `_bidirectional` — now host-link the real `PathTracker.cpp` +
+  `Drive.cpp` (plus real `Localization.cpp` / `YawSource.cpp`), so their per-edge
+  FSM and Drive builder/queue/profile logic is asserted against production code in
+  CI. Every `// MIRROR:` slice in those five is deleted. The trust boundary
+  inverts vs `test_mission_dispatch`: these targets do NOT force-include a `Drive`
+  or `PathTracker` mock (the real headers win); they mock only the `MatrixMiniR4`
+  facade + the line-sensor leaf + the upper peripherals (`Intersection` /
+  `LineFollower`) via `path_mocks/`, and link a dedicated `path_mocks/path_mocks.cpp`
+  for facade globals (NOT `hal_mocks.cpp`, which defines a mock `Drive` that would
+  collide with the real one).
+- **Remaining FSM mirrors (follow-up):** `test_path_tracker_reset_arrival` +
+  `test_return_to_node_dispatch` STILL carry narrowly-scoped PathTracker FSM
+  `// MIRROR:` slices (over real `Localization` + the fixture routes). They were
+  out of #106's named five; de-mirroring them is a tracked fast-follow now that
+  real `PathTracker.cpp` is host-linkable — see the follow-up issue. So the rule
+  is in force for all new and rewritten targets, with these two slices the last
+  known exception.
 
 ## Trigger to revisit
 
@@ -62,4 +78,4 @@ push and PR turns the harness from documentation into an enforced contract.
 - `WRO2026/DirectionPolicy.h` — the header-only `inline` shared-symbol pattern.
 - `WRO2026/test/CMakeLists.txt` — the ctest target list the job runs.
 - `WRO2026/test/test_mission_dispatch.cpp` — the Phase 2 target linking real `Mission.cpp`.
-- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, remaining gap).
+- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources; `reset_arrival` + `return_to_node_dispatch` FSM slices tracked as a follow-up).

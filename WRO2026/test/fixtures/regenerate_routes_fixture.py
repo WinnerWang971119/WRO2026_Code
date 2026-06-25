@@ -34,13 +34,32 @@ and the identical ``Routes::`` ABI, so the CMake harness force-includes it ahead
 of the sketch ``routes.h`` to shadow the production data for those targets only.
 
 Decoupling contract (issue #91): NO test depends on this field's SHAPE. The host
-tests resolve only the nodes they need BY NAME -- ``Wall1`` (RESET), ``Inter1``
-(LINE), ``Start`` (BLIND spawn), ``final`` (BLIND) -- with zero assumptions about
-node indices, the total count, or which other nodes exist. Those four names are
-the only stable contract; everything else here may be freely edited/extended
-without touching a single test. (Keep ``Wall1`` at its coords + reset record:
-``test_reanchor_at_wall`` checks the believed-coordinate post-condition against
-``wall_coord 154`` over node y ``139``.)
+tests resolve only the nodes they need BY NAME, with zero assumptions about node
+indices, the total count, or which other nodes exist. The original four anchors
+were ``Wall1`` (RESET), ``Inter1`` (LINE), ``Start`` (BLIND spawn), and ``final``
+(BLIND), used by ``reanchor_at_wall[_strict]``, ``path_tracker_reset_arrival``,
+``return_to_node_dispatch``, and the ``ctps_dump`` self-test.
+
+Issue #106 added five PathTracker mirror tests that host-link the real
+``PathTracker.cpp`` + ``Drive.cpp`` and consolidate onto this fixture, resolving
+ten nodes BY NAME:
+
+  * ``passthrough`` -- ``Inter2``, ``Inter3``, ``Inter4`` (line-line-line);
+  * ``pass_through_projection`` -- ``Inter1``, ``ProjL``, ``Inter2`` (line-proj-line);
+  * ``projection`` -- ``Inter1``, ``ProjL`` (LINE->proj), ``Corner``, ``ProjB``
+    (BLIND->proj auto-seek);
+  * ``stop_at_line`` -- ``Start``, ``Inter1`` (BLIND seek), ``Corner``, ``ProjB``,
+    ``Zed`` (the sensor-regime pivot);
+  * ``bidirectional`` -- ``Inter1``, ``Spur`` (rear-override LINE).
+
+So the full stable-name contract is twelve names: ``Start``, ``Inter1``,
+``ProjL``, ``Inter2``, ``Inter3``, ``Inter4``, ``Corner``, ``Spur``, ``ProjB``,
+``Zed`` (the #106 set), plus the original ``Wall1`` (RESET) and ``final``
+(BLIND). Renaming any of these breaks a test that resolves it by name; everything
+else here (node count, the other nodes, coordinates that no test pins) may be
+freely edited/extended without touching a single test. (Keep ``Wall1`` at its
+coords + reset record: ``test_reanchor_at_wall`` checks the believed-coordinate
+post-condition against ``wall_coord 154`` over node y ``139``.)
 
 The output is committed and frozen. Re-run this ONLY when the ``routes.h`` SCHEMA
 changes (a new ``EdgeInfo`` field, an enum value, etc.) makes the committed fixture
