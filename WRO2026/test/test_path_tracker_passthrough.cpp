@@ -1,211 +1,130 @@
 /**
  * @file test_path_tracker_passthrough.cpp
- * @brief Host-compile test for the PATH_PASS_THROUGH_ENABLED behavioral toggle
- *        (T10c / AC7b).
+ * @brief Host-link test for the `PATH_PASS_THROUGH_ENABLED` behavioral toggle,
+ *        driving the REAL `PathTracker` + `Drive` FSMs through the shared
+ *        cooperative-tick harness (issue #106, T5a).
  *
- * Rather than mock the full PathTracker + FieldMap + Localization +
- * routes.cpp graph (which would balloon the harness surface 5×), this test
- * **directly executes the LineFollower arming sequence PathTracker issues at
- * intersection-detect**, parameterised on the post-peek `pass_through` decision.
+ * @details
+ * Rewritten from the original mirror-slice test. The old file directly executed
+ * an inline copy of the LineFollower arming sequence (`wrapDelta` /
+ * `computePassThrough` / `armLineFollowerForOvershoot`) against a hand-mocked
+ * FieldMap fixture — a `// MIRROR:` of `PathTracker.cpp`. That is gone: this file
+ * now drives the production `PathTracker` FSM over the REAL fixture graph and
+ * asserts the pass-through arm cascade the FSM itself issues.
  *
- * The test is built TWICE — once with `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=true`
- * and once with `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=false`. CMake registers
- * both binaries as separate `ctest` cases.
+ * THE HOP (`fixtures/routes_fixture.h`): the collinear `line-line-line` triple
+ * `Inter2 -> Inter3 -> Inter4` (all LINE edges at heading 0, all LINE nodes). A
+ * `goTo(Inter4)` from `Inter2` walks `NEXT_HOP` through the mid junction
+ * `Inter3`. The bypass edge `Inter2 -> Inter4` is `EdgeType::NONE`, so Dijkstra
+ * MUST traverse `Inter3` — pinned with the routing guard + `assertNoBypass`.
  *
- * In both builds we run the SAME canonical collinear scenario (heading delta = 0
- * which is well within `Config::NAV_TURN_TOLERANCE_DEG`, `nextNext` is a non-NONE
- * non-goal node — the standard "pass-through eligible" geometry). The test
- * then asserts:
+ * Built TWICE by CMake — once with `-DPATH_PASS_THROUGH_ENABLED_DEFAULT=true`
+ * (`test_path_tracker_passthrough_on`) and once with `=false`
+ * (`test_path_tracker_passthrough_off`). Both binaries run the SAME hop; the
+ * assertions branch on the COMPILED `Config::PATH_PASS_THROUGH_ENABLED`
+ * constexpr (resolved from that flag in `ConfigNav.h`):
  *
- *   - With `PATH_PASS_THROUGH_ENABLED == true`:  PathTracker WOULD set
- *     `_passThrough = true` and arm LineFollower with brake-on-gate=false.
- *     LineFollower's gate trip stays enabled.
+ *   - TC-PT1 (flag ON):  pass-through FIRES. At the mid junction `Inter3` the
+ *     real FSM line-follows past WITHOUT braking — the LINE_OVERSHOOT arm carries
+ *     `brakeOnGate == false` (and `tShapeRampDown == false`). `Localization`
+ *     advances `Inter2 -> Inter3 -> Inter4`.
  *
- *   - With `PATH_PASS_THROUGH_ENABLED == false`: PathTracker WOULD set
- *     `_passThrough = false` regardless of geometry. LineFollower's gate trip
- *     self-disables with active brake (today's behavior).
+ *   - TC-PT2 (flag OFF): pass-through SUPPRESSED. At `Inter3` the FSM brakes +
+ *     re-plans (stop-and-go) — the LINE_OVERSHOOT arm carries
+ *     `brakeOnGate == true`. Proves the compile flag changes runtime behaviour.
  *
- * The `pass_through` decision is computed inline using the same logic
- * PathTracker.cpp uses (the exact peek block from the plan's "Peek data
- * sources" section), with mocked FieldMap responses for the canonical fixture.
- *
- * @note AC7b acceptance criterion: "Each target asserts the corresponding
- *       primitive sequence on the canonical collinear fixture. Compile-only is
- *       not sufficient — the flag must be exercised behaviorally on both
- *       branches." This test satisfies that by branching off the constant
- *       directly and exercising the downstream LineFollower behavior.
+ * A LINE hop has no lower-MCU `MiniR4.DriveDC` move (the LineFollower drives
+ * `setSpeed`, absorbed by the path mock), so the representative observable is the
+ * LineFollower arm cascade (`LineFollower.lastBrakeOnGate` etc.), asserted
+ * directly on the path mock. The lower-MCU `DriveDC` gyro/seek asserts live in the
+ * projection / stop_at_line / bidirectional tests, not here.
  */
 
-#include "TestAssert.h"
+#include "test_path_tracker_harness.h"
 
-#include "Arduino.h"
-#include "Drive.h"
-#include "WROLineArray.h"
-#include "Intersection.h"
-
-// Production code under test:
-#include "LineFollower.h"
-#include "Config.h"
-#include "WROMath.h"
-
-#include <math.h>
-
+namespace
+{
 // ---------------------------------------------------------------------------
-// Mocked FieldMap responses for the canonical collinear fixture.
+// Drive the real PathTracker from a clean world up to the LINE_FOLLOW state of
+// the FIRST hop (`Inter2 -> Inter3`), with the LineFollower armed for the line
+// follow — exactly the precondition `expectLineHop()` assumes (harness caveat
+// S2). Returns with the FSM in LINE_FOLLOW, the follower freshly enabled (the
+// `_dispatchEdgeAfterTurn` LINE -> line arm: overshootMode=false, no brake-on-gate
+// yet), and no Drive move in flight (a LINE hop issues none).
 //
-// Graph: A → B → C → D (all collinear, all LINE edges).
-// Active goal: D (final node).
-// Inbound edge: A → B with heading 0.0°.
-// Next-hop after B: C, with heading 0.0° (delta = 0.0 — collinear).
-// `nextNext` is C != B != goal_D — pass-through eligible.
+// Sequence the real FSM runs to get here (PathTracker.cpp):
+//   IDLE -> DEQUEUE (pop goal, offset~0 return-gate -> PLAN_NEXT_HOP)
+//        -> PLAN_NEXT_HOP (Inter2->Inter3 LINE, heading 0 == current world 0, so
+//           `_dispatchTurnIfNeeded` skips the pre-turn) -> _dispatchEdgeAfterTurn
+//        -> LINE_FOLLOW (LineFollower armed: setEnabled(true).setPreset(...)
+//           .setReverse(false).setOvershootMode(false)).
+// No pre-edge turn fires because Inter2->Inter3 departs at heading 0 and
+// `seatAt("Inter2")` bound the world frame at app-yaw 0 (harness caveat S3 does
+// not bite: the departure heading IS the default heading).
 // ---------------------------------------------------------------------------
-
-namespace fixture
+void driveToFirstLineFollow()
 {
-    constexpr float inbound_heading_deg = 0.0f;
-    constexpr float next_heading_deg    = 0.0f;
-    constexpr bool  next_hop_valid      = true;   // FieldMap::getNextHop returned a valid node
-    constexpr bool  next_hop_is_goal    = false;  // Intersected node is not the destination
-}    // namespace fixture
-
-/// Wrap-normalize a heading delta to (-180, +180].
-/// Mirrors the inline block in `PathTrackerClass::_onLineFollow` (the pass-through
-/// peek) and the duplicated copy in `_onPlanNextHop` — keep all three in sync
-/// until the TODO to extract a `WROMath::wrapNormalize180` helper is resolved.
-static float wrapDelta(float delta)
-{
-    while (delta >  180.0f) { delta -= 360.0f; }
-    while (delta <= -180.0f) { delta += 360.0f; }
-    return delta;
-}
-
-/// Compute the pass-through decision exactly as PathTracker.cpp does.
-///
-/// This is the canonical peek-and-classify the LINE_FOLLOW case runs in the
-/// production FSM. By executing it here against the mocked fixture, we cover
-/// the (`Config::PATH_PASS_THROUGH_ENABLED ? eligibility-check : false`) branch
-/// behaviorally — exactly the AC7b contract.
-static bool computePassThrough()
-{
-    if (!Config::PATH_PASS_THROUGH_ENABLED)
-    {
-        return false;
-    }
-    if (fixture::next_hop_is_goal)
-    {
-        return false;
-    }
-    if (!fixture::next_hop_valid)
-    {
-        return false;
-    }
-    const float delta = wrapDelta(fixture::next_heading_deg - fixture::inbound_heading_deg);
-    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG);
-}
-
-// ---------------------------------------------------------------------------
-// Apply the LINE_FOLLOW arming chain PathTracker.cpp issues at
-// intersection-detect, with the `pass_through` decision flowing into both
-// `setOvershootMode` (always true — overshoot semantics changed
-// project-wide per ADR-023) and `setBrakeOnGate` / `setTShapeRampDown`.
-// ---------------------------------------------------------------------------
-
-static void armLineFollowerForOvershoot(bool passThrough)
-{
-    LineFollower.setEnabled(true)
-                .setTShapeRampUp(false)
-                .setTShapeRampDown(!passThrough)
-                .setOvershootMode(true)
-                .setBrakeOnGate(!passThrough)
-                .setDistanceTarget(Config::LINE_SENSOR_AXLE_OFFSET_CM);
-}
-
-static void resetWorld()
-{
-    mockResetMillis();
-    Drive.mockReset();
-    LineArray.mockReset();
-    Intersection.mockReset();
-    LineFollower.begin();
-    // See `test_line_follower_overshoot.cpp::resetWorld()` for why we also
-    // issue a disable cycle after begin() — `begin()` does not reset every
-    // cross-tick field on its own.
-    LineFollower.setEnabled(false);
-    Drive.mockReset();
-    // Default the sensor to a "line is online, no junction, error=0" baseline
-    // so the controller takes the simple P+D path.
-    LineArray.mockSetOnline(true);
-    LineArray.mockSetError(0.0f);
-    LineArray.mockSetJunctionType(JunctionType::NONE);
-}
-
-static int32_t encDegsForCm(float cm)
-{
-    return (int32_t) cmToEncDeg(cm);
-}
-
-// ===========================================================================
-// T10c — The PATH_PASS_THROUGH_ENABLED toggle drives divergent gate-trip
-// behavior on the canonical collinear fixture.
-// ===========================================================================
-
-static void test_T10c_passThrough_decision_matches_config_flag()
-{
-    TEST_SCOPE("T10c: pass-through decision tracks Config::PATH_PASS_THROUGH_ENABLED");
-
-    const bool decision = computePassThrough();
-
-    // The fixture is collinear & non-terminal. With the flag ON, pass-through
-    // fires; with it OFF, the same geometry must NOT pass through.
-    ASSERT_EQ(decision, Config::PATH_PASS_THROUGH_ENABLED);
-}
-
-static void test_T10c_arm_and_trip_gate_diverges_by_flag()
-{
-    TEST_SCOPE("T10c: gate-trip behavior diverges between flag=true and flag=false builds");
-
     resetWorld();
+    seatAt("Inter2");    // bind world frame @ app-yaw 0 + declare Localization at Inter2
 
-    const bool passThrough = computePassThrough();
-    armLineFollowerForOvershoot(passThrough);
+    // Enqueue the multi-hop goal; the FINAL node only — PathTracker walks NEXT_HOP
+    // hop-by-hop (Inter2 -> Inter3 -> Inter4). `.async()` so the harness drives the
+    // cooperative tick loop instead of the builder's blocking drain.
+    PathTracker.goTo(nodeByName("Inter4")).async();
 
-    ASSERT_TRUE(LineFollower.isEnabled());
-
-    // Drive past the 5 cm gate.
-    Drive.mockAdvanceEncoders(encDegsForCm(Config::LINE_SENSOR_AXLE_OFFSET_CM + 1.0f),
-                              encDegsForCm(Config::LINE_SENSOR_AXLE_OFFSET_CM + 1.0f));
-
-    const uint32_t stopBefore = Drive.mockRecord().stopCallCount;
-    LineFollower.update();
-
-    // Both branches latch the distance-reached one-shot.
-    ASSERT_TRUE(LineFollower.isDistanceReached());
-
-    if (Config::PATH_PASS_THROUGH_ENABLED)
+    // Tick until the FSM dispatches the first LINE hop and arms the follower for the
+    // line follow (the LINE -> line arm: enabled + overshootMode=false). That arm is
+    // the LINE_FOLLOW entry; the follower is enabled and no Drive move is pending, so
+    // `expectLineHop()` can latch the junction next.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
     {
-        // Build mode A — flag is true and the fixture is eligible, so
-        // PathTracker armed with brake-on-gate=false. Controller stays enabled,
-        // no Drive.stop fires.
-        ASSERT_TRUE(LineFollower.isEnabled());
-        ASSERT_EQ(Drive.mockRecord().stopCallCount, stopBefore);
+        cooperativeTick();
+        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode)
+        {
+            return;    // LINE_FOLLOW reached, follower armed for the line follow
+        }
     }
-    else
-    {
-        // Build mode B — flag is false, so PathTracker armed with the legacy
-        // brake-on-gate=true behavior. Controller self-disables + brakes.
-        ASSERT_FALSE(LineFollower.isEnabled());
-        ASSERT_GT(Drive.mockRecord().stopCallCount, stopBefore);
-        ASSERT_GE(Drive.mockRecord().stopBrakeTrueCount, (uint32_t) 1);
-    }
+    ASSERT_TRUE(false);    // budget exhausted: the FSM never reached LINE_FOLLOW
+}
+}    // namespace
+
+// ===========================================================================
+// Routing guard — pin the hop so a future fixture re-weight fails LOUDLY rather
+// than silently re-routing the pass-through under test (Fable amendment 2).
+// ===========================================================================
+
+void test_routing_is_forced_through_mid_junction()
+{
+    TEST_SCOPE("routing: goTo(Inter4) from Inter2 MUST traverse Inter3 (no bypass)");
+
+    const uint8_t inter2 = nodeByName("Inter2");
+    const uint8_t inter3 = nodeByName("Inter3");
+    const uint8_t inter4 = nodeByName("Inter4");
+
+    // The fixture must resolve these three names (the stable-name contract).
+    ASSERT_TRUE(inter2 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(inter3 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(inter4 != FieldMap::NODE_NONE);
+
+    // Dijkstra's first hop Inter2 -> Inter4 is Inter3 ...
+    ASSERT_EQ(routedFirstHop(inter2, inter4), inter3);
+    // ... and there is NO direct Inter2 -> Inter4 edge, so the only route is THROUGH
+    // Inter3 — the pass-through triple is genuinely traversed, not bypassed.
+    assertNoBypass(inter2, inter4);
+
+    // Both flanks of the triple are LINE edges (the line-line-line geometry the
+    // pass-through collapses).
+    ASSERT_TRUE(FieldMap::getEdge(inter2, inter3).type == Routes::EdgeType::LINE);
+    ASSERT_TRUE(FieldMap::getEdge(inter3, inter4).type == Routes::EdgeType::LINE);
 }
 
-// ---------------------------------------------------------------------------
-// Print which build mode we're running in for ctest log clarity.
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Announce the compiled build mode for ctest log clarity.
+// ===========================================================================
 
-static void test_T10c_announce_build_mode()
+void test_announce_build_mode()
 {
-    TEST_SCOPE("T10c: build-mode announcement");
+    TEST_SCOPE("build-mode announcement");
     if (Config::PATH_PASS_THROUGH_ENABLED)
     {
         std::printf("INFO: PATH_PASS_THROUGH_ENABLED == true (pass-through build)\n");
@@ -217,13 +136,104 @@ static void test_T10c_announce_build_mode()
 }
 
 // ===========================================================================
+// TC-PT1 / TC-PT2 — the real FSM's mid-junction LINE_OVERSHOOT arm tracks the
+// compile flag, and Localization advances across the full triple.
+// ===========================================================================
+
+void test_passthrough_arm_and_advance_diverge_by_flag()
+{
+    if (Config::PATH_PASS_THROUGH_ENABLED)
+    {
+        TEST_SCOPE("TC-PT1: flag ON — pass-through FIRES at Inter3 (no brake) + advances");
+    }
+    else
+    {
+        TEST_SCOPE("TC-PT2: flag OFF — pass-through SUPPRESSED at Inter3 (brakes) + advances");
+    }
+
+    const uint8_t inter2 = nodeByName("Inter2");
+    const uint8_t inter3 = nodeByName("Inter3");
+    const uint8_t inter4 = nodeByName("Inter4");
+
+    driveToFirstLineFollow();
+
+    // Precondition: the FSM is in LINE_FOLLOW for Inter2 -> Inter3, still at Inter2,
+    // the follower enabled for the (non-overshoot) line follow.
+    ASSERT_EQ(Localization.getCurrentNode(), inter2);
+    ASSERT_TRUE(LineFollower.isEnabled());
+    ASSERT_FALSE(LineFollower.lastOvershootMode);
+
+    // ---- Cross the mid junction Inter3 -------------------------------------
+    // `expectLineHop()` latches `Intersection.isAtIntersection(true)` and ticks: the
+    // real LINE_FOLLOW case runs the pass-through peek (next-next = Inter4, collinear,
+    // non-goal) and re-arms LINE_OVERSHOOT with `setBrakeOnGate(!_passThrough)`. It then
+    // trips the overshoot distance gate, advancing Localization onto Inter3.
+    const int armsBefore = LineFollower.setEnabledCount;
+    expectLineHop();
+
+    // The overshoot arm happened (re-enable on the junction-detect tick) ...
+    ASSERT_GT(LineFollower.setEnabledCount, armsBefore);
+    // ... it carried the overshoot semantics (project-wide ADR-023 rule: always
+    // overshootMode=true at the junction-detect re-arm) ...
+    ASSERT_TRUE(LineFollower.lastOvershootMode);
+    // ... and the distance gate was set to the axle offset (the overshoot window).
+    ASSERT_TRUE(LineFollower.lastDistanceTarget > 0.0f);
+
+    // THE FLAG-DIVERGENT ASSERT: brake-on-gate (and ramp-down) flip with the compile
+    // flag. ON => pass-through fires => no brake; OFF => stop-and-go => brake.
+    if (Config::PATH_PASS_THROUGH_ENABLED)
+    {
+        // TC-PT1: pass-through FIRES — line-follow past Inter3 WITHOUT braking.
+        ASSERT_FALSE(LineFollower.lastBrakeOnGate);
+        ASSERT_FALSE(LineFollower.lastTShapeRampDown);
+    }
+    else
+    {
+        // TC-PT2: pass-through SUPPRESSED — brake + re-plan (stop-and-go) at Inter3.
+        ASSERT_TRUE(LineFollower.lastBrakeOnGate);
+        ASSERT_TRUE(LineFollower.lastTShapeRampDown);
+    }
+
+    // The overshoot gate trip advanced the discrete node onto Inter3 (the mid junction)
+    // via `Localization.onIntersection(_nextHop)` — the FSM is now back in PLAN_NEXT_HOP.
+    ASSERT_EQ(Localization.getCurrentNode(), inter3);
+
+    // ---- Drive the second hop Inter3 -> Inter4 to the goal ------------------
+    // PLAN_NEXT_HOP re-plans Inter3 -> Inter4 (LINE, heading 0, no pre-turn) and arms
+    // LINE_FOLLOW again. Tick into that LINE_FOLLOW, then cross the final junction.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
+    {
+        cooperativeTick();
+        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
+            && Localization.getCurrentNode() == inter3)
+        {
+            break;    // LINE_FOLLOW for the Inter3 -> Inter4 hop
+        }
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), inter3);
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    // Cross Inter4. This is the FINAL hop (Inter4 == goal), so the pass-through peek's
+    // not-final guard rejects pass-through here regardless of the flag — the arm brakes
+    // on the goal junction. We only assert the node advanced to the destination.
+    expectLineHop();
+    ASSERT_EQ(Localization.getCurrentNode(), inter4);
+
+    // The whole triple was traversed Inter2 -> Inter3 -> Inter4 by the real FSM, and the
+    // goal is reached (no fault). One more tick lets PLAN_NEXT_HOP see cur == goal and
+    // settle to IDLE.
+    cooperativeTick();
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
 int main()
 {
-    test_T10c_announce_build_mode();
-    test_T10c_passThrough_decision_matches_config_flag();
-    test_T10c_arm_and_trip_gate_diverges_by_flag();
+    test_announce_build_mode();
+    test_routing_is_forced_through_mid_junction();
+    test_passthrough_arm_and_advance_diverge_by_flag();
     TEST_REPORT();
 }
