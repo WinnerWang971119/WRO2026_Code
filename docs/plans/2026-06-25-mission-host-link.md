@@ -84,7 +84,7 @@ mocked here — that is the sibling issue #106.
 - [ ] Comprehensive FSM assertions pass (see Testing Strategy): queue drain order; `start()`
       empty/build-error/normal; GOTO happy/unknown-node/holds-on-not-idle; WAIT/PRINT/BEEP/LED;
       TASK-case dispatch + `T>`/`T+`/`T-` events + real Tasks Serial body capture + unknown-task fault +
-      post-task fault; FAULT_BEEPING→FAULT_AWAIT_RESET→BTN_DOWN reset; `abort()`; `declarePosition`
+      drain-time PathTracker fault (`NAV FAULT OFN` content); FAULT_BEEPING→FAULT_AWAIT_RESET→BTN_DOWN reset; `abort()`; `declarePosition`
       success/busy/unknown/clears-faults.
 - [ ] Time is advanced only via `mockAdvanceMillis`/`mockResetMillis` (no `delay()`); the target uses a
       custom include list (`hal_mocks/` first, `mocks/` omitted) and force-includes `routes_fixture.h` first.
@@ -135,7 +135,9 @@ static const char* faultMnemonic(Fault);  // exhaustive switch; EXACT strings fr
                                           // OK/NZ/UNR/DRV/BAD/DRN/REV/OFN/WSQ/PTU, "??" default
 
 // goTo builder (move+copy deleted, [[nodiscard]]): async()/setRouteDirection/setArrivalDirection/setStopAtLine → *this
-[[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId);   // record goalId + bump count
+[[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId);      // Mission's call — record goalId + bump count
+[[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName); // REQUIRED: real Tasks.cpp testOne/test1 call this
+                                                                 // overload; omit it and the linked Tasks.cpp TU won't compile
 
 bool isIdle() const;          // returns _mockIdle (default true)
 bool hasFault() const;        // returns _mockFault.kind != NONE
@@ -166,21 +168,24 @@ void mockReset();
 
 ### CMake helper (T4) — `add_mission_mock_force_includes(target)`
 
+The target COMPOSES three force-include helpers in this ORDER (do NOT fork the HAL set — reuse the
+existing `add_hal_force_includes` so it stays single-sourced; if `hal_mocks/` grows a third
+force-included header this target inherits it):
+
 ```cmake
-# /FI (MSVC) + "SHELL:-include" (g++). ORDER MATTERS — fixture routes FIRST:
-#   1. ${FIXTURE_ROUTES_DIR}/routes_fixture.h   (guard ROUTES_H — must win before
-#                                                Mission.cpp/FieldMap.h/Localization mock pull routes.h)
-#   2. ${HAL_MOCKS_DIR}/Drive.h                 (guard DRIVE_H)
-#   3. ${HAL_MOCKS_DIR}/EventTrace.h            (guard EVENTTRACE_H)
-#   4. ${MISSION_MOCKS_DIR}/PathTracker.h       (guard PATHTRACKER_H)
-#   5. ${MISSION_MOCKS_DIR}/LineFollower.h      (guard LINEFOLLOWER_H)
-#   6. ${MISSION_MOCKS_DIR}/Manipulator.h       (guard MANIPULATOR_H)
-#   7. ${MISSION_MOCKS_DIR}/Localization.h      (guard LOCALIZATION_H)
+#   1. add_fixture_routes_force_include(t)  # routes_fixture.h (guard ROUTES_H) — MUST win FIRST,
+#                                           #   before Mission.cpp/FieldMap.h/Localization mock pull routes.h
+#   2. add_hal_force_includes(t)            # REUSED as-is: hal_mocks/Drive.h (DRIVE_H) + EventTrace.h (EVENTTRACE_H)
+#   3. add_mission_mock_force_includes(t)   # NEW — the 4 mission mocks ONLY (/FI MSVC, "SHELL:-include" g++):
+#        ${MISSION_MOCKS_DIR}/PathTracker.h   (guard PATHTRACKER_H)
+#        ${MISSION_MOCKS_DIR}/LineFollower.h  (guard LINEFOLLOWER_H)
+#        ${MISSION_MOCKS_DIR}/Manipulator.h   (guard MANIPULATOR_H)
+#        ${MISSION_MOCKS_DIR}/Localization.h  (guard LOCALIZATION_H)
 ```
-`<MatrixMiniR4.h>` / `<Arduino.h>` are angle-bracket includes resolved by the include-path order
+`add_mission_mock_force_includes` must NOT re-list Drive/EventTrace (that's `add_hal_force_includes`'s
+job). `<MatrixMiniR4.h>` / `<Arduino.h>` are angle-bracket includes resolved by the include-path order
 (`hal_mocks/` first → the HAL facade + the `hal_mocks/Arduino.h` forward to `mocks/Arduino.h`) — NOT
-force-included. The fixture force-include uses `add_fixture_routes_force_include` (already exists);
-call it BEFORE `add_mission_mock_force_includes`.
+force-included.
 
 ### Target wiring (T4)
 
@@ -196,8 +201,9 @@ add_executable(test_mission_dispatch
 # hal_mocks/ FIRST; mocks/ OMITTED; mission_mocks/ on the path so its quote-included peers resolve.
 target_include_directories(test_mission_dispatch PRIVATE
     ${HAL_MOCKS_DIR} ${MISSION_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
-add_fixture_routes_force_include(test_mission_dispatch)   # FIRST
-add_mission_mock_force_includes(test_mission_dispatch)
+add_fixture_routes_force_include(test_mission_dispatch)   # FIRST (ROUTES_H)
+add_hal_force_includes(test_mission_dispatch)             # REUSED — hal_mocks/Drive.h + EventTrace.h
+add_mission_mock_force_includes(test_mission_dispatch)    # the 4 mission mocks only
 add_test(NAME mission_dispatch COMMAND test_mission_dispatch)
 ```
 
@@ -248,23 +254,29 @@ at entry, then builds a mission via the real builder API and ticks `Mission.upda
 | TC5 | GOTO happy path | Integration | ENTER records `PathTracker.goTo(goal)` (count==1); with `mockSetIdle(false)` the step holds (no advance); after `mockSetIdle(true)` → `ARR <name>` event + advance. |
 | TC6 | GOTO unknown node | Unit | `goTo("Nowhere")` → Serial "unknown node" + `NAV FAULT BAD` event + FAULT_BEEPING (`Drive.stop(true)` count, `Buzzer.Tone` count, `LED.setColor` red). |
 | TC7 | WAIT / PRINT / BEEP / LED | Unit | WAIT advances only after `mockAdvanceMillis(dur)`; PRINT emits event + advances; BEEP records `Buzzer.Tone(freq,dur)`; LED records `LED.setColor` (0-dur advances now, non-zero clears after timeout). |
-| TC8 | TASK dispatch (real Tasks) | Integration | `task("demoEcho",{7,42})` → `T> demoEcho` event before dispatch; MockSerial captures `[Tasks] demoEcho a=7 b=42`; then `T+ demoEcho` event; advances. |
+| TC8 | TASK dispatch (real Tasks) | Integration | `task("demoEcho", uint8_t{7}, uint8_t{42})` (pass TYPED scalars — a braced-init-list `{7,42}` is a non-deduced context for the variadic `task<Args...>` and won't compile) → `T> demoEcho` event before dispatch; MockSerial captures `[Tasks] demoEcho a=7 b=42`; then `T+ demoEcho` event; advances. |
 | TC9 | TASK yield | Integration | `task("debugYield")` → real body returns false → `T- debugYield` event + Serial "yielded"; `Tasks.isAborted()`==false; advances. |
-| TC10 | TASK unknown at queue time | Unit | `task("nope")` sets build-error (Serial warning); `start()` refuses → `MIS BUILD ERR` event + FAULT_BEEPING; no chassis motion. |
-| TC11 | Post-task PathTracker fault | Integration | With `PathTracker.mockSetFault(OFF_NODE,...)` latched before the TASK step's `runTask` returns, Mission sees `hasFault()` → `NAV FAULT OFN` event + Serial "FAULT OFN from= to="; no `T+`; FAULT_BEEPING. |
-| TC12 | Drain-time fault (GOTO leg) | Integration | A latched PathTracker fault at top-of-RUNNING → `_emitFault` + FAULT_BEEPING; step does not advance. |
-| TC13 | FAULT_BEEPING schedule | Integration | Advancing the clock by `MISSION_FAULT_BEEP_MS*2` per cycle emits `MISSION_FAULT_BEEPS` `Buzzer.Tone` calls + LED on/off flips; after the last cycle → FAULT_AWAIT_RESET + `PRESS BTN_DOWN` event + LED solid red. |
+| TC10 | TASK unknown at queue time | Unit | `task("nope")` sets build-error (Serial warning); `start()` refuses → `MIS BUILD ERR` event + FAULT_BEEPING; assert NO chassis motion beyond the fault brake (`Drive.mockRecord().driveDistCallCount==0` / `turnDegCallCount==0`; only the FAULT_BEEPING `stop(true)` recorded). |
+| TC11 | PathTracker fault during RUNNING (drain-time, OFN content) | Integration | `PathTracker.mockSetFault(OFF_NODE, from, dest)` latched before a tick → the top-of-RUNNING drain check (Mission.cpp:372) fires → `NAV FAULT OFN` event + Serial `FAULT OFN from=<n> to=<n>`; FAULT_BEEPING; the step never advances. (The post-`runTask` check at Mission.cpp:547 is genuinely unreachable with the fixed registry — see Documented unreachable.) |
+| TC12 | Fault appears mid-ACTIVE GOTO | Integration | After a GOTO step goes ACTIVE (ENTER fired, awaiting `isIdle`), latch a PathTracker fault → the next `update()` top-of-RUNNING check enters FAULT_BEEPING instead of arriving; the GOTO never reports `ARR`. (Distinct entry sub-state from TC11, same line-372 branch.) |
+| TC13 | FAULT_BEEPING schedule | Integration | Advancing the clock by `MISSION_FAULT_BEEP_MS*2` per cycle emits exactly `MISSION_FAULT_BEEPS` `Buzzer.Tone` calls total (the first from `_enterFaultBeeping` on entry, then `MISSION_FAULT_BEEPS-1` more at cycle boundaries) + LED on/off flips; after the last cycle → FAULT_AWAIT_RESET + `PRESS BTN_DOWN` event + LED solid red. |
 | TC14 | BTN_DOWN reset | Integration | In FAULT_AWAIT_RESET, `MiniR4.BTN_DOWN.mockSetPressed(true)` rising edge → LED off, `PathTracker.clearFault` (count++), IDLE, Serial "fault cleared" + `MIS RESET` event. |
 | TC15 | `abort()` cancels subsystems | Unit | From RUNNING: `Tasks.isAborted()`==true, `PathTracker.abortCallCount`==1, `LineFollower.lastEnabled`==false, `Drive` stop(true) recorded; queue cleared; IDLE. |
 | TC16 | `declarePosition` success | Unit | PathTracker idle: `declarePosition("Inter1")` → `Localization.lastDeclaredNode`==id, `Drive.clearFault` called, `DECL Inter1` event, returns true. |
 | TC17 | `declarePosition` guards | Unit | `mockSetIdle(false)` (no fault) → false + "PathTracker busy"; `declarePosition("Nowhere")` → false + "unknown node". |
 | TC18 | `declarePosition` clears latched faults | Unit | With PathTracker + Drive faults latched: re-anchor clears both (`PathTracker.clearFault` + `Drive.clearFault`), returns true. |
 
-**Documented unreachable (NOT faked):** task-body `Mission.abort()` bail (`_state != RUNNING` after
-`runTask`), execute-time unknown-task (`findTask` null at execute while valid at queue),
-`update()`-during-`inTask` short-circuit — all require a task body the **fixed** real registry
-(`demoEcho`/`debugYield`) doesn't provide; faking them via a synthetic registry row would assert a
-fabricated surface (same justification as `test_tasks_dispatch.cpp`).
+**Documented unreachable (NOT faked):** the **post-`runTask` PathTracker-fault check** (Mission.cpp:547 —
+only fires if a fault latches *during* `runTask`; on host `runTask` is fake-blocking and no registry task
+latches a PathTracker fault, so the top-of-RUNNING check at line 372 always fires first — TC11/TC12 cover
+that reachable branch); task-body `Mission.abort()` bail (`_state != RUNNING` after `runTask`);
+execute-time unknown-task (`findTask` null at execute while valid at queue); and `update()`-during-`inTask`
+short-circuit — all require a task body the **fixed 8-entry registry** (`demoEcho`, `debugYield`,
+`servoTest`, `home`, `testChassis`, `testOne`, `test1`, `test0621`) doesn't provide. The tests invoke only
+`demoEcho`/`debugYield`, but ALL 8 compile into the linked `Tasks.cpp` TU, so the mock surface must satisfy
+every body's call sites (e.g. `testOne`/`test1`'s `PathTracker.goTo(const char*)` and the servo/belt verbs).
+Faking the unreachable branches via a synthetic registry row would assert a fabricated surface (same
+justification as `test_tasks_dispatch.cpp`).
 
 **Run command:** `cmake -S WRO2026/test -B build/test && cmake --build build/test && ctest --test-dir build/test --output-on-failure` (locally inside `vcvars64`; CI runs g++ on ubuntu).
 
@@ -272,10 +284,10 @@ fabricated surface (same justification as `test_tasks_dispatch.cpp`).
 
 | ID | Task | Blocked By | Risk | Files | Description |
 |----|------|------------|------|-------|-------------|
-| T1 | `mission_mocks/PathTracker.h` controllable mock | — | med | `WRO2026/test/mission_mocks/PathTracker.h` | Author per Contracts → PathTracker seam: REAL 10-value `Fault` enum + exhaustive `faultMnemonic` with EXACT strings (verify against `PathTracker.h:239-251` + `PathTracker.cpp:327-342`), `FaultInfo{kind,fromNode,destNode}`, move/copy-deleted `[[nodiscard]]` goTo builder (chain setters → `*this`, record goal at construction — keep the builder self-contained, no facade deref), `isIdle`/`hasFault`/`getFault`/`clearFault`/`abort`/`begin`/`update`/`setTickCallback`, independent `mockSetIdle`/`mockSetFault(kind,from,dest)`, capture (`lastGoToGoal`, `goToCallCount`, `abortCallCount`, `clearFaultCallCount`), `mockReset`, `inline PathTrackerClass PathTracker;`. Doxygen + a "Fidelity — where this mock can lie" docblock. Satisfies AC4. |
+| T1 | `mission_mocks/PathTracker.h` controllable mock | — | med | `WRO2026/test/mission_mocks/PathTracker.h` | Author per Contracts → PathTracker seam: REAL 10-value `Fault` enum + exhaustive `faultMnemonic` with EXACT strings (verify against `PathTracker.h:239-251` + `PathTracker.cpp:327-342`), `FaultInfo{kind,fromNode,destNode}`, move/copy-deleted `[[nodiscard]]` goTo builder (chain setters → `*this`, record goal at construction — keep the builder self-contained, no facade deref) reachable via BOTH `goTo(uint8_t)` (Mission's call) AND `goTo(const char*)` (real `Tasks.cpp` testOne/test1 use it — omit it and the Tasks TU won't compile), `isIdle`/`hasFault`/`getFault`/`clearFault`/`abort`/`begin`/`update`/`setTickCallback`, independent `mockSetIdle`/`mockSetFault(kind,from,dest)`, capture (`lastGoToGoal`, `goToCallCount`, `abortCallCount`, `clearFaultCallCount`), `mockReset`, `inline PathTrackerClass PathTracker;`. Doxygen + a "Fidelity — where this mock can lie" docblock. Satisfies AC4. |
 | T2 | `mission_mocks/` LineFollower + Manipulator + Localization | — | low | `WRO2026/test/mission_mocks/LineFollower.h`, `.../Manipulator.h`, `.../Localization.h` | `LineFollower.h`: copy `task_mocks/LineFollower.h` but make `setEnabled(bool)` record `lastEnabled` + count (+ `mockReset`). `Manipulator.h`: copy `task_mocks/Manipulator.h` verbatim (pure no-op, for the Tasks.cpp TU). `Localization.h`: extend `ctps_mocks/Localization.h` to record `declarePosition(uint8_t)` → `lastDeclaredNode` + count (+ `mockReset`). All `inline` globals, real guards, Doxygen + "Fidelity" docblock. |
 | T3 | `test_mission_dispatch.cpp` — comprehensive FSM test | T1, T2 | med | `WRO2026/test/test_mission_dispatch.cpp` | Author TC1–TC18 (Testing Strategy) against the real `Mission` + real `Tasks` singletons. Include real `../Mission.h` + `../Tasks.h`; use `TestAssert.h`. Per-case reset of all mocks + `mockResetMillis`; advance time ONLY via `mockAdvanceMillis` (never `delay()`). Assert via `EventTrace.mockEventAt/mockCount`, `Serial.captured()`, `Drive.mockRecord()`/`getFault`, `MiniR4.Buzzer/LED/BTN_DOWN`, `PathTracker`/`LineFollower`/`Localization` records. Header docblock documents the 3 unreachable branches. Satisfies AC3/AC5/AC7. |
-| T4 | Wire `test_mission_dispatch` + `add_mission_mock_force_includes` + refresh CMake marker | T1, T2, T3 | med | `WRO2026/test/CMakeLists.txt` | Add `MISSION_MOCKS_DIR`; `add_mission_mock_force_includes(target)` (`/FI` MSVC, `SHELL:-include` g++) in the exact order in Contracts (fixture handled separately by `add_fixture_routes_force_include`, called FIRST). `add_executable` + custom include list (`hal_mocks/` first, `mocks/` OMITTED) + link `Mission.cpp`+`Tasks.cpp`+`routes_fixture.cpp`+`hal_mocks.cpp` + `add_test(NAME mission_dispatch ...)`. Refresh the `#46 Phase 2` comment block near `test_tasks_dispatch`. Satisfies AC1/AC6. |
+| T4 | Wire `test_mission_dispatch` + `add_mission_mock_force_includes` + refresh CMake marker | T1, T2, T3 | med | `WRO2026/test/CMakeLists.txt` | Add `MISSION_MOCKS_DIR`; author a NEW `add_mission_mock_force_includes(target)` that force-includes ONLY the 4 mission mocks (`/FI` MSVC, `SHELL:-include` g++). Compose force-includes in order: `add_fixture_routes_force_include` (FIRST, ROUTES_H) → REUSE the existing `add_hal_force_includes` (Drive+EventTrace) → `add_mission_mock_force_includes` — do NOT re-list Drive/EventTrace (keep the HAL set single-sourced). `add_executable` + custom include list (`hal_mocks/` first, `mocks/` OMITTED) + link `Mission.cpp`+`Tasks.cpp`+`routes_fixture.cpp`+`hal_mocks.cpp` + `add_test(NAME mission_dispatch ...)`. Refresh the `#46 Phase 2` comment block near `test_tasks_dispatch`. Satisfies AC1/AC6. |
 | T5 | Build + run locally (MSVC) + g++ notes | T4 | low | — | `cmake -S WRO2026/test -B build/test -G Ninja` inside `vcvars64`; build + `ctest -C Debug`; confirm `mission_dispatch` + ALL prior targets green (no regression). Document g++-specific concerns (`SHELL:-include`, `-Wswitch`) for the CI gate. Satisfies AC1/AC2. |
 | T6 | Cleanup: markers + ADR-030 status | T5 | low | `WRO2026/test/test_tasks_dispatch.cpp`, `docs/decisions/030-harness-links-real-sources-ci-enforced.md` | Refresh the "Out of scope (#46 Phase 2)" notes in `test_tasks_dispatch.cpp` to say Mission is now linked by `test_mission_dispatch`. Update ADR-030's status line: real `Mission.cpp` now linked (keep "Partially implemented" until #106 lands PathTracker/Drive). PR body: `Closes #46`. (Distinct files from T4 — no conflict.) Satisfies AC8. |
 
@@ -296,12 +308,17 @@ reality). No two tasks edit the same file.
   `Serial1`/`mockTickCount`, which the inline `delay()` odr-uses → link failure on this target only.
 - **Custom include list, `mocks/` omitted.** Do not reach for `COMMON_INCLUDES`; do not force-include any
   `mocks/` header (the `hal_mocks/Arduino.h` → `mocks/Arduino.h` forward is the only sanctioned bridge).
-  `WROLineArray.h`/`Intersection.h` mocks are NOT needed (nothing pulls them once `LineFollower.h` is the mock).
+  `WROLineArray.h`/`Intersection.h` mocks are NOT needed — but ONLY because the mock `LineFollower.h` is
+  force-included first (the real `LineFollower.h` would pull them in). That force-include is therefore
+  load-bearing, not incidental: drop it and the real `LineFollower.h` leaks `WROLineArray.h`/`Intersection.h`
+  (which exist only under the forbidden `mocks/`) and the link breaks.
 - **`inline` global trap (future):** mission_mocks use `inline` globals (force-included into one target). If a
   future PR ever defines `Localization`/`PathTracker` in `hal_mocks.cpp`, switch the mission_mocks global to
   `extern` to avoid a multiply-defined symbol — note this where the `inline` global is declared.
 - **WHITE macro is a non-issue here** — this target links the EventTrace MOCK (no-op `update()`), not real
-  `EventTrace.cpp`, so the `MiniR4OLED.h` `#define WHITE` collision (ADR-049 trigger) never arises. Don't add a guard.
+  `EventTrace.cpp`, so the `MiniR4OLED.h` `#define WHITE` collision never arises. ADR-049's "add a guarded
+  `#define WHITE`" trigger assumes real `EventTrace.cpp` is linked (that is #106-adjacent, not this issue);
+  here it is satisfied-by-avoidance, not skipped. Don't add a guard.
 - **Fixture nodes resolve by name** (`Inter1`..`Inter4`, `Start`, `final`, `Wall1`, `Spur`, `position1`, ...);
   never by index ([[gotcha-host-tests-link-production-routes]]). Use a bogus name (e.g. `"Nowhere"`) for the
   unknown-node fault.
