@@ -1,6 +1,6 @@
 # ADR-030: The host-compile harness links the real production symbols, CI-enforced
 
-**Status:** Partially implemented (CI gate is live, and `LineFollower` / `DirectionPolicy.resolveDirection` / the reverse-availability guard are linked from production; real `Tasks.cpp` / `Mission.cpp` linking is scheduled for PR-4, finding #78)
+**Status:** Partially implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), and real `Mission.cpp` (#46 Phase 2) are all linked from production; remaining gap is real `PathTracker.cpp` / `Drive.cpp`, still mocked, tracked as issue #106)
 **Date decided:** 2026-06 (PR-35 trace-findings fix rollout)
 
 ## Rule
@@ -37,11 +37,14 @@ push and PR turns the harness from documentation into an enforced contract.
   `#include` it, so there is one definition to drift from.
 - **New host test:** add the target to `WRO2026/test/CMakeLists.txt` so the
   `host-tests` ctest job picks it up. A test the job cannot reach is not enforced.
-- **Remaining gap:** `WRO2026/test/test_tasks_dispatch.cpp` still exercises
-  `TasksMirror` / `MissionMirror` inline reimplementations rather than the real
-  `Tasks.cpp` / `Mission.cpp`. PR-4 (finding #78) will link the production
-  sources and delete those mirrors; until then Tasks/Mission dispatch is tested
-  against mirrors and this rule is only partially in force.
+- **Remaining gap:** real `Tasks.cpp` is linked by `test_tasks_dispatch` (#46
+  Phase 1) and real `Mission.cpp` by `test_mission_dispatch` (#46 Phase 2), both
+  via the shared `hal_mocks/` HAL and per-target mocks; the `TasksMirror` /
+  `MissionMirror` inline replicas are deleted. The remaining gap is the real
+  `PathTracker.cpp` / `Drive.cpp` (still mocked behind `hal_mocks/Drive.h`,
+  `mission_mocks/PathTracker.h`, and the inline `// MIRROR:` slices in the
+  PathTracker mirror tests) — host-linking those is issue #106, after which
+  this rule is fully in force.
 
 ## Trigger to revisit
 
@@ -58,4 +61,5 @@ push and PR turns the harness from documentation into an enforced contract.
 - `.github/workflows/ci.yml` — the `host-tests` job (added by PR #41, finding #75).
 - `WRO2026/DirectionPolicy.h` — the header-only `inline` shared-symbol pattern.
 - `WRO2026/test/CMakeLists.txt` — the ctest target list the job runs.
-- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, PR-4).
+- `WRO2026/test/test_mission_dispatch.cpp` — the Phase 2 target linking real `Mission.cpp`.
+- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, remaining gap).
