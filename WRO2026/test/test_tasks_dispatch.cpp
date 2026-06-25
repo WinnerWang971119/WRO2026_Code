@@ -16,9 +16,9 @@
  *     the unknown-name path, and the ``debugYield`` yield path.
  *   - the ``inTask()`` RAII invariant (false before AND after every ``runTask``).
  *
- * Out of scope (#46 Phase 2 — needs ``Mission.cpp`` + a ``MiniR4`` / Drive /
- * PathTracker / EventTrace mock layer): Mission's queue FSM and its abort
- * ordering. Those are covered by the inline ``MissionMirror`` no longer.
+ * Out of scope for this target: Mission's queue FSM and its abort ordering.
+ * Those are covered by ``test_mission_dispatch`` (#46 Phase 2), which links the
+ * real ``Mission.cpp`` against the ``hal_mocks/`` HAL + ``mission_mocks/`` layer.
  *
  * Two production branches in ``TasksClass::runTask`` are intentionally NOT
  * asserted here because they are UNREACHABLE against the real, fixed registry
