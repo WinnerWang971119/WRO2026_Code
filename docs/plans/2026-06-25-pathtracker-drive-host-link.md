@@ -22,8 +22,11 @@ recipe (#111) with **one inversion** called out below.
 - **In scope:**
   - New `WRO2026/test/path_mocks/` dir: thin recording-mocks `WROLineArray.h`, `Intersection.h`,
     `LineFollower.h` (`inline` globals, real include guards, record-and-test-set fidelity).
-  - `hal_mocks/hal_mocks.cpp`: add `MockHardwareSerial Serial1;` + `uint32_t mockTickCount;`
-    definitions (forced by real `Drive.cpp`'s compiled `delay()`).
+  - New `WRO2026/test/path_mocks/path_mocks.cpp`: the single facade-globals TU these five targets
+    link — defines `MiniR4` / `Serial` / `Serial1` / `g_mockMillis` / `mockTickCount` / `EventTrace`,
+    and crucially does NOT define `DriveClass Drive` (real `Drive.cpp` is the sole definer). `Serial1` +
+    `mockTickCount` are added HERE (forced by real `Drive.cpp`'s compiled `delay()`), NOT in
+    `hal_mocks.cpp` — which stays untouched for its `test_mock_hal` / `test_mission_dispatch` consumers.
   - Rewrite the five mirror tests to drive the **real** `PathTracker` + `Drive` singletons and
     **delete every `// MIRROR:` slice**: `test_path_tracker_passthrough.cpp`,
     `_bidirectional.cpp`, `_stop_at_line.cpp`, `_projection.cpp`, `_pass_through_projection.cpp`.
@@ -36,12 +39,17 @@ recipe (#111) with **one inversion** called out below.
     asserted against real `Mission.cpp` in `test_mission_dispatch`, #111).
   - Extend `routes_fixture` regenerate-script docstring's "stable-name contract" to the node names
     the five tests resolve. (No graph regeneration — the fixture already carries every needed node.)
-  - Update ADR-030 status (Partially implemented → Implemented); PR body `Closes #106`.
+  - Update ADR-030 to **Implemented** but **scope the claim**: its status line + How-to-apply record
+    that the five named PathTracker mirror tests now link real `PathTracker.cpp`/`Drive.cpp` (closing
+    #106), while `test_path_tracker_reset_arrival.cpp` + `test_return_to_node_dispatch.cpp` retain
+    narrowly-scoped PathTracker FSM `// MIRROR:` slices tracked by a named follow-up issue (do NOT
+    leave the ADR asserting zero mirrored FSM logic remains). PR body `Closes #106`.
 
 - **Out of scope:**
-  - Any change to `PathTracker.cpp` / `Drive.cpp` runtime behavior — this is a test-only change. A
-    real bug the link surfaces is **reported, not silently patched** (file an issue / flag in the
-    PR; present fix options before touching firmware).
+  - Any change to ANY production file — this is a **strictly test-only** change (no `ConfigLine.h` /
+    `Config` edit; the REVERSE_UNAVAILABLE 1-board path is asserted at the frozen-resolver level
+    instead — see Testing Strategy / TC-BD1). A real bug the link surfaces is **reported, not silently
+    patched** (file an issue / flag in the PR; present fix options before touching firmware).
   - `test_path_tracker_reset_arrival.cpp` + `test_return_to_node_dispatch.cpp` — these ALSO carry
     PathTracker FSM `// MIRROR` slices (over real `Localization` + fixture routes) but are **not**
     in this issue's named five. De-mirroring them is a natural fast-follow once real
@@ -104,7 +112,17 @@ recipe (#111) with **one inversion** called out below.
   `EventTrace.pushEvent(...)`, which the no-op mock satisfies; no real `EventTrace.cpp` is linked, so
   ADR-049's `MiniR4OLED.h WHITE`-macro revisit trigger never fires (satisfied-by-avoidance, same as
   #111). Do not add a `WHITE` guard.
-- **No new ADR.** ADR-030 flips Partially implemented → Implemented on landing.
+- **REVERSE_UNAVAILABLE (1-board) asserted at the resolver level, NO production edit** (user choice,
+  Phase 5.8). The real `reverseUnavailable` guard reads `Config::LINE_BOARD_COUNT` (a compile-time
+  `constexpr` = 2 with no per-target override hook), so a 1-board REVERSE_UNAVAILABLE fault cannot be
+  driven through the real FSM without editing `ConfigLine.h`. To keep the change strictly test-only,
+  the 1-board fault is asserted via a direct call to the frozen `reverseUnavailable(REAR, LINE, 1)`
+  Policy (a KEPT resolver test — the same symbol `PathTracker.cpp`'s guard calls); the real FSM drives
+  only the 2-board-allowed + AUTO-toggle cases. Adding the `_DEFAULT` hook was considered and declined
+  (no production edit).
+- **No new ADR.** ADR-030 flips to Implemented on landing **with an explicit scoped note** that two
+  PathTracker host tests (`reset_arrival`, `return_to_node_dispatch`) still carry FSM `// MIRROR:`
+  slices, tracked as a follow-up issue — the ADR must not claim zero mirrored FSM logic remains.
 - **Approach consult:** Fable (run as Opus per the skill's Fable-unavailable note) **ENDORSED** the
   balanced approach with three amendments, all folded in above (per-hop helpers, routing guards,
   DriveDC done-bit/translation asserts). Codex consult **skipped** — the subagent call was rejected
@@ -129,9 +147,13 @@ recipe (#111) with **one inversion** called out below.
 - [ ] Real `Drive.h` / `PathTracker.h` win in every target — **no** target force-includes
       `hal_mocks/Drive.h` or any PathTracker mock; the `DRIVE_H` / `PATHTRACKER_H` guards resolve to
       the production headers.
-- [ ] `hal_mocks.cpp` defines `Serial1` + `mockTickCount`; a `WROLineArray` mock is reachable via
-      `path_mocks/` (NOT via `mocks/` on the include path — ODR mutual-exclusion holds: no target
-      sees both `mocks/` and `hal_mocks/`).
+- [ ] `path_mocks/path_mocks.cpp` (the facade-globals TU these targets link, NOT `hal_mocks.cpp`)
+      defines `Serial1` + `mockTickCount` (+ `MiniR4` / `Serial` / `g_mockMillis` / `EventTrace`) and
+      does NOT define `Drive`; a `WROLineArray` mock is reachable via `path_mocks/` (NOT via `mocks/`
+      on the include path — ODR mutual-exclusion holds: no target sees both `mocks/` and `hal_mocks/`).
+- [ ] No production file is edited (the diff is confined to `WRO2026/test/` + the ADR + the fixture
+      docstring). The REVERSE_UNAVAILABLE 1-board path is asserted via a direct
+      `reverseUnavailable(REAR, LINE, 1)` resolver call (TC-BD1), not a 1-board real-FSM build.
 - [ ] The done-bit is driven via `MiniR4.DriveDC.mockSetPrevTaskDone` (+ encoder advance) — grep the
       tests for no `Drive.mockSetIdle` (which does not exist on the real `DriveClass`).
 - [ ] Each test pins its routing with a `getNextHop` guard (and the `getEdge(A,C).type == NONE`
@@ -142,8 +164,10 @@ recipe (#111) with **one inversion** called out below.
       distance-gated), bidirectional REVERSE_UNAVAILABLE guard + AUTO toggle, STOP_AT_LINE
       re-anchor/fault + seek-overshoot trim, projection LINE/BLIND dispatch + auto-rule toggle — all
       against the real FSM, both compile-flag builds where applicable.
-- [ ] Cleanup landed: `mission_replica` deleted; `routes_fixture` stable-name contract extended;
-      ADR-030 status updated; PR body `Closes #106`. Any real bug surfaced is reported, not patched.
+- [ ] Cleanup landed: `mission_replica` deleted; `routes_fixture` stable-name contract extended to all
+      ten names the tests resolve (incl. `Corner` + `Zed`); ADR-030 flipped to Implemented WITH the
+      scoped note (two FSM mirror tests deferred to a follow-up); PR body `Closes #106`. Any real bug
+      surfaced is reported, not patched.
 
 ## Data Model
 
@@ -166,7 +190,7 @@ Single source of truth for every seam more than one task touches.
 | `WRO2026/test/path_mocks/WROLineArray.h` | T1 | T2, T4 (force-include) |
 | `WRO2026/test/path_mocks/Intersection.h` | T1 | T2, T4 |
 | `WRO2026/test/path_mocks/LineFollower.h` | T1 | T2, T4 |
-| `WRO2026/test/hal_mocks/hal_mocks.cpp` (Serial1 + mockTickCount) | T2 | T4 |
+| `WRO2026/test/path_mocks/path_mocks.cpp` (facade globals incl. Serial1 + mockTickCount; NOT Drive) | T2 | T4 (link) |
 | `WRO2026/test/test_path_tracker_harness.h` (shared `expect*` helpers) | T3 | T5a–T5e |
 | `WRO2026/test/test_path_tracker_passthrough.cpp` | T5a | — |
 | `WRO2026/test/test_path_tracker_pass_through_projection.cpp` | T5b | — |
@@ -222,43 +246,36 @@ add_test(NAME path_tracker_<name> COMMAND test_path_tracker_<name>)
 
 Compile-flag dimensions (target-wide `target_compile_definitions`, exactly like today):
 - `passthrough` → two targets, `PATH_PASS_THROUGH_ENABLED_DEFAULT={true,false}`.
-- `bidirectional` → `BIDIRECTIONAL_AUTO_ENABLED_DEFAULT={true,false}`. **AND** `LINE_BOARD_COUNT` is
-  a target-wide compile constant the real `reverseUnavailable` guard reads — the REVERSE_UNAVAILABLE
-  (1-board) case and any reverse-allowed (2-board) case need their board count set per target via
-  `target_compile_definitions(... LINE_BOARD_COUNT_DEFAULT=<1|2>)`. Factor the bidirectional targets
-  so each board-count/flag combination a case needs has a matching binary (the implementer chooses
-  the minimal target set; document which combo each TC runs under).
+- `bidirectional` → two targets, `BIDIRECTIONAL_AUTO_ENABLED_DEFAULT={true,false}` — both on the
+  default 2-board config. No board-count dimension: `LINE_BOARD_COUNT` has no per-target override hook
+  and we do not add one (strictly test-only), so the REVERSE_UNAVAILABLE 1-board fault is asserted at
+  the frozen-`reverseUnavailable`-resolver level (TC-BD1), not through a 1-board real-FSM build.
 
 ### Global-singleton strategy
 
-- **`hal_mocks/hal_mocks.cpp`** (extern + defined): `Drive`? — **NO.** This target links the **real**
-  `Drive` (defined in real `Drive.cpp`) and the **real** `PathTracker` (real `PathTracker.cpp`). What
-  `hal_mocks.cpp` provides for these targets: `MatrixMiniR4 MiniR4`, `MockSerial Serial`,
-  `uint32_t g_mockMillis`, **+ new** `MockHardwareSerial Serial1` + `uint32_t mockTickCount`. The
-  `EventTraceClass EventTrace` global comes from `hal_mocks.cpp` too (its `extern` is in
-  `hal_mocks/EventTrace.h`, force-included). **Do NOT** let `hal_mocks.cpp`'s `DriveClass Drive`
-  definition reach these targets — it would multiply-define against real `Drive.cpp`'s `Drive`. (See
-  Error Handling: `hal_mocks.cpp` defines `Drive` for the `test_mock_hal`/`test_mission_dispatch`
-  world; linking it here means real `Drive.cpp`'s `Drive` and the mock `Drive` collide. **Resolution
-  in T2/T4:** split the Arduino-core + `MiniR4`/`Serial1`/`mockTickCount`/`EventTrace` globals these
-  targets need into a unit that does NOT also define the mock `DriveClass Drive` — e.g. these targets
-  link a small `path_mocks/path_mocks.cpp` that defines only `MiniR4 / Serial / Serial1 /
-  g_mockMillis / mockTickCount / EventTrace`, and do NOT link `hal_mocks.cpp`. Real `Drive.cpp`
-  defines `Drive`; `path_mocks/` `inline` globals define `LineArray / Intersection / LineFollower`.)
-- **`path_mocks/` facades:** `inline` globals (`LineArray`, `Intersection`, `LineFollower`) — one
-  definition across the target's TUs, no extra `.cpp` for them.
-- **Never link `mocks/mocks.cpp`** (defines the old-world `Drive`) into these targets.
+**Resolved: these five targets link a dedicated `path_mocks/path_mocks.cpp` for facade globals, and do
+NOT link `hal_mocks.cpp`.** Rationale: `hal_mocks.cpp` defines a MOCK `DriveClass Drive` (hal_mocks.cpp
+line 50); linking it alongside real `Drive.cpp` (which defines the real `Drive`, Drive.cpp line ~34)
+multiply-defines the symbol. So:
 
-> NOTE (resolve in T2): the cleanest factoring is a dedicated `path_mocks/path_mocks.cpp` defining the
-> Arduino-core + facade globals these targets need (`MiniR4`, `Serial`, `Serial1`, `g_mockMillis`,
-> `mockTickCount`, `EventTrace`) — leaving `Drive` to real `Drive.cpp`. Adding `Serial1`/`mockTickCount`
-> to `hal_mocks.cpp` (the AC wording) is correct for the *symbol*, but these targets must obtain the
-> facade globals from a source that does **not** also define a mock `Drive`. T2 decides: either (a) a
-> new `path_mocks/path_mocks.cpp`, or (b) confirm `hal_mocks.cpp`'s `Drive` definition can be
-> conditionally excluded. **(a) is recommended** — it keeps `hal_mocks.cpp` untouched for its existing
-> consumers and avoids any ODR risk. If (a), the `Serial1`/`mockTickCount` definitions live in
-> `path_mocks/path_mocks.cpp`, and the AC line about `hal_mocks.cpp` is satisfied by the equivalent
-> `path_mocks/path_mocks.cpp` (note the deviation in the PR).
+- **`path_mocks/path_mocks.cpp`** defines exactly: `MatrixMiniR4 MiniR4`, `MockSerial Serial`,
+  `uint32_t g_mockMillis`, `MockHardwareSerial Serial1`, `uint32_t mockTickCount`, and
+  `EventTraceClass EventTrace` (its `extern` lives in the force-included `hal_mocks/EventTrace.h`). It
+  does **NOT** define `Drive`. It MUST resolve its headers under the SAME include order as the test
+  TUs (`hal_mocks/`-first, with `add_path_force_includes` applied to it) so its
+  `MiniR4`/`EventTrace`/`Serial1` types match the test TUs — compile this TU with the target's
+  force-include set, or have it `#include "MatrixMiniR4.h"` + `"EventTrace.h"` + `"Arduino.h"` against
+  the `hal_mocks/`-first path.
+- **Real `Drive.cpp`** is the sole definer of `Drive`; **real `PathTracker.cpp`** of `PathTracker`;
+  **real `Localization.cpp`** of `Localization`; **real `YawSource.cpp`** of `YawSource`.
+- **`path_mocks/` peripheral facades** declare their globals (`LineArray`, `Intersection`,
+  `LineFollower`) `inline` in-header (the `mocks/` / `task_mocks/` / `mmL` idiom) — one definition
+  across the target's TUs, nothing extra in `path_mocks.cpp`, and it breaks any T1→T2 ordering coupling.
+- **Never link `hal_mocks.cpp` or `mocks/mocks.cpp`** (both define a mock `Drive`) into these targets.
+
+(Rejected alternative, kept on record only: conditionally excluding `hal_mocks.cpp`'s `Drive`
+definition — it churns `hal_mocks.cpp` and risks its existing `test_mock_hal`/`test_mission_dispatch`
+consumers, so `path_mocks/path_mocks.cpp` is chosen instead.)
 
 ### `path_mocks/` thin-mock surfaces (T1 owns)
 
@@ -280,7 +297,10 @@ include guards; `inline` globals (defined in `path_mocks/path_mocks.cpp` per the
   Records the arm cascade so PathTracker's arming is assertable: `setEnabled(bool)` (record
   `lastEnabled` + count), the fluent enable builder returning `*this` with `setBrake`/`setBrakeOnGate`/
   `setDistanceTarget`/`setTShapeRampDown`/`tShape` recording their key arg, `followDistance`/
-  `followUntilIntersection`. State queries test-set: `isDistanceReached()`, `isLineLost()`. No-op
+  `followUntilIntersection`. State queries test-set: `isDistanceReached()`, `isLineLost()`. **Also
+  provide `isEnabled()` (test-set) and the `setEnabled(bool).setBrake(bool)` chain** — real `Drive.cpp`'s
+  `_dispatchNext` race-guard calls `LineFollower.isEnabled()` + `setEnabled(false).setBrake(false)`
+  (Drive.cpp ~1607-1609), so omitting them fails the real `Drive.cpp` link. No-op
   `begin()`/`update()`/`setTickCallback`. `mockSetDistanceReached(bool)` / `mockReset()` / capture
   fields (`lastEnabled`, `lastBrakeOnGate`, `lastTShapeRampDown`, `lastDistanceTarget`). Base it on
   the existing `mocks/LineFollower.h` / `task_mocks/LineFollower.h` builder shape so the `[[nodiscard]]`
@@ -314,6 +334,12 @@ The done-bit driving contract: a bounded Drive move is "in flight" while
 `MiniR4.DriveDC.mockSetPrevTaskDone(false)`; the helper flips it `true` (and advances encoders for
 distance-terminated moves) to retire the move, then `cooperativeTick()` lets real `Drive.update()`
 report idle and real `PathTracker.update()` advance. Time advances only via `mockAdvanceMillis`.
+
+**Yaw-frame caveat:** the recorded `MiniR4.DriveDC.lastMoveGyroDegsTarget` is the HARDWARE-frame yaw —
+real `YawSource.toHwHeading` applies `Config::IMU_YAW_SIGN` (= -1), so it equals
+`IMU_YAW_SIGN * appHeading`. Scripted IMU yaw is set via `MiniR4.mmL.mockYawDeg` (also raw/hw frame);
+a lower-MCU assert written in the app frame is off by the sign. `expectPreTurn` takes the app-frame
+target and converts via `Config::IMU_YAW_SIGN` so the test reads in the app frame.
 
 ### Naming
 
@@ -370,7 +396,7 @@ Concrete fixture hops (by name) each test drives:
 | `pass_through_projection` | `Inter1→ProjL→Inter2` line-proj-line; `goTo(Inter2)` from `Inter1`; also `goTo(ProjL)` (not-final → stop) | `getEdge(Inter1,Inter2).type==NONE` |
 | `projection` | LINE→proj `Inter1→ProjL` (distance follow + dead-reckon); BLIND→proj `Corner→ProjB` (auto-seek + re-anchor); BLIND→non-proj negative | local dest-node read |
 | `stop_at_line` | BLIND seek `Start→Inter1` (`stop_at_line="on"`): success re-anchor + DRIVE_FAULT on no-line; seek-overshoot trim on the sensor-regime pivot `Corner→ProjB→Zed` | edge override + pivot table |
-| `bidirectional` (BIDIRECTIONAL_AUTO on/off; LINE_BOARD_COUNT per target) | rear-override LINE `Inter1→Spur` (`direction="rear"`) → REVERSE_UNAVAILABLE on 1-board, allowed on 2-board; AUTO toggle heading branch | edge `direction` override + board-count compile-def |
+| `bidirectional` (BIDIRECTIONAL_AUTO on/off; 2-board) | rear-override LINE `Inter1→Spur` (`direction="rear"`) allowed through the real FSM on 2-board; AUTO toggle heading branch; REVERSE_UNAVAILABLE (1-board) asserted at the resolver level | edge `direction` override + frozen `reverseUnavailable` resolver |
 
 | ID | Test Case | File | Expected Behavior |
 |----|-----------|------|-------------------|
@@ -382,12 +408,12 @@ Concrete fixture hops (by name) each test drives:
 | TC-PJ1 | LINE→projection dispatch | projection | `Inter1→ProjL`: real `_dispatchEdgeAfterTurn` → PROJECTION_FOLLOW distance gate → dead-reckon advance (no junction). |
 | TC-PJ2 | BLIND→projection auto-seek + re-anchor | projection | `Corner→ProjB` (`BLIND_PROJECTION_AUTO_SEEK` + `isProjectionNode`): real FSM issues `Drive.stopAtLine` (assert the lower-MCU seek move); on `isLineFound` → full-advance re-anchor via `onIntersection`. |
 | TC-PJ3 | BLIND→non-projection does NOT auto-seek | projection | A BLIND hop into a non-projection node → BLIND_FORWARD dead-reckon, no seek. |
-| TC-PJ4 | auto-rule toggle gates the dest read | projection | Compose: with `BLIND_PROJECTION_AUTO_SEEK` effectively off the same hop dead-reckons. |
+| TC-PJ4 | auto-rule is a local dest-node read | projection | `BLIND_PROJECTION_AUTO_SEEK` is graph DATA baked into `routes_fixture.h` (NOT a Config `_DEFAULT` compile hook), so it cannot be toggled per-target without a second fixture. Assert the auto-rule at the resolver level — a direct call proving `isProjectionNode(dest) && BLIND_PROJECTION_AUTO_SEEK` drives the seek decision (a KEPT resolver test, not a real-FSM toggle). Do NOT fabricate a per-target toggle. |
 | TC-SL1 | STOP_AT_LINE success re-anchor | stop_at_line | `Start→Inter1` (`stop_at_line="on"`): real FSM seeks; script `isLineFound=true` + done-bit → `Localization.onIntersection(Inter1)` re-anchor; FSM advances. |
-| TC-SL2 | STOP_AT_LINE → DRIVE_FAULT on no-line | stop_at_line | Same seek; script `Drive` `LINE_NOT_FOUND` fault (via `MiniR4.DriveDC` no-line + the real seek's fault path) → real PathTracker `Fault::DRIVE_FAULT`, FSM halts. |
+| TC-SL2 | STOP_AT_LINE → DRIVE_FAULT on no-line | stop_at_line | Drive the real seek to its no-line fault: keep `LineArray.getJunctionType()` returning NONE (no crossing) and advance the encoder PAST `expected + STOP_AT_LINE_MAX_MARGIN_CM` over enough ticks so real `Drive`'s seek latches `Fault::LINE_NOT_FOUND` → real PathTracker `STOP_AT_LINE` state reads `Drive.hasFault()` → `Fault::DRIVE_FAULT`, FSM halts. (`expectStopAtLine(cm, found=false)` encapsulates the over-advance + tick budget.) |
 | TC-SL3 | seek-overshoot trim (sensor-regime pivot) | stop_at_line | Seek into the `Corner→ProjB→Zed` sensor pivot: assert the lower-MCU seek distance reflects `resolveSensorOvershootTrim` (real frozen resolver kept). |
 | TC-SL4 | resolver truth-table (KEPT, not mirror) | stop_at_line | The existing `resolveStopAtLine` / `resolveSensorOvershootTrim` direct-call TCs stay green (they call the real frozen resolvers). |
-| TC-BD1 | REVERSE_UNAVAILABLE on rear LINE, 1-board | bidirectional (1-board) | `goTo(Spur)` from `Inter1` (rear-forced LINE) on `LINE_BOARD_COUNT=1` → real `_dispatchEdgeAfterTurn` raises `Fault::REVERSE_UNAVAILABLE` (from/dest set). |
+| TC-BD1 | REVERSE_UNAVAILABLE guard (resolver-level, KEPT) | bidirectional | Direct call to the frozen `reverseUnavailable(Direction::REAR, EdgeType::LINE, /*boards=*/1)` → true (and `(REAR, LINE, 2)` / `(REAR, BLIND, 1)` / `(FRONT, …)` → false). This is the SAME symbol `PathTracker.cpp`'s pre-turn guard calls (PathTracker.cpp ~1569-1573); no 1-board build, no production edit. NOT a mirror — it exercises the real Policy directly. |
 | TC-BD2 | rear LINE allowed on 2-board | bidirectional (2-board) | Same hop on `LINE_BOARD_COUNT=2` → no fault; rear dispatch proceeds. |
 | TC-BD3 | AUTO toggle changes direction resolution | bidirectional on/off | The `BIDIRECTIONAL_AUTO_ENABLED` flag flips the resolved direction on the same fixture heading; assert via the real `resolveDirection` path the FSM took. |
 | TC-REG | no regression | (all prior) | Every previously-green ctest still passes. |
@@ -400,23 +426,25 @@ ubuntu).
 
 | ID | Task | Blocked By | Risk | Files | Description |
 |----|------|------------|------|-------|-------------|
-| T1 | `path_mocks/` thin peripheral mocks | — | med | `WRO2026/test/path_mocks/WROLineArray.h`, `.../Intersection.h`, `.../LineFollower.h` | Author the three record-and-test-set mocks per Contracts → `path_mocks/` surfaces: real guards (`WROLINEARRAY_H`/`INTERSECTION_H`/`LINEFOLLOWER_H`), production-matching enums (`JunctionType`) + `[[nodiscard]]` builder shapes (base on existing `mocks/`/`task_mocks/` versions), test-set state (`isAtIntersection` read-and-clear, `isDistanceReached`, `getJunctionType`) + capture (`setEnabled`/`setBrakeOnGate`/`setReverseActive`/`lastEnabled`), `mockReset`. Doxygen + "Fidelity" docblock each. Globals declared `extern` here (defined in T2's `path_mocks.cpp`) OR `inline` — pick one, consistent with T2. Satisfies the `path_mocks/` ACs. |
-| T2 | Facade-globals source + `Serial1`/`mockTickCount` | T1 | med | `WRO2026/test/path_mocks/path_mocks.cpp` (recommended) **or** `hal_mocks/hal_mocks.cpp` | Provide ONE TU these targets link that defines the facade/Arduino globals WITHOUT a mock `DriveClass Drive`: `MatrixMiniR4 MiniR4`, `MockSerial Serial`, `uint32_t g_mockMillis`, `MockHardwareSerial Serial1`, `uint32_t mockTickCount`, `EventTraceClass EventTrace`, and the `path_mocks/` `LineArray`/`Intersection`/`LineFollower` globals (if extern). Decide (a) new `path_mocks/path_mocks.cpp` [recommended — leaves `hal_mocks.cpp` untouched] vs (b) conditional exclusion in `hal_mocks.cpp`; document the choice. Real `Drive` comes from real `Drive.cpp`. Satisfies the Serial1/mockTickCount + no-multiple-Drive ACs. |
+| T1 | `path_mocks/` thin peripheral mocks | — | med | `WRO2026/test/path_mocks/WROLineArray.h`, `.../Intersection.h`, `.../LineFollower.h` | Author the three record-and-test-set mocks per Contracts → `path_mocks/` surfaces: real guards (`WROLINEARRAY_H`/`INTERSECTION_H`/`LINEFOLLOWER_H`), production-matching enums (`JunctionType`) + `[[nodiscard]]` builder shapes (base on existing `mocks/`/`task_mocks/` versions), test-set state (`isAtIntersection` read-and-clear, `isDistanceReached`, `getJunctionType`) + capture (`setEnabled`/`setBrakeOnGate`/`setReverseActive`/`lastEnabled`), `mockReset`. Doxygen + "Fidelity" docblock each. Declare the `LineArray`/`Intersection`/`LineFollower` globals `inline` in-header (the `mocks/`/`task_mocks/`/`mmL` idiom) so no definition is needed in `path_mocks.cpp` and T2 stays decoupled. Satisfies the `path_mocks/` ACs. |
+| T2 | Facade-globals TU `path_mocks/path_mocks.cpp` | — | med | `WRO2026/test/path_mocks/path_mocks.cpp` | Author the ONE facade-globals TU these targets link, defining the globals WITHOUT a mock `DriveClass Drive`: `MatrixMiniR4 MiniR4`, `MockSerial Serial`, `uint32_t g_mockMillis`, `MockHardwareSerial Serial1`, `uint32_t mockTickCount`, `EventTraceClass EventTrace`. The `path_mocks/` `LineArray`/`Intersection`/`LineFollower` globals are `inline` in their headers (T1), so they need NO definition here — which decouples T2 from T1. Real `Drive` comes from real `Drive.cpp`. Compile this TU under the same `hal_mocks/`-first include order / force-include set as the test TUs so its types match. (`hal_mocks.cpp` is NOT linked into these targets; the rejected "conditionally exclude `hal_mocks.cpp`'s Drive" alternative is recorded in Contracts.) Satisfies the Serial1/mockTickCount + no-multiple-Drive ACs. |
 | T3 | Shared harness `test_path_tracker_harness.h` | T1, T2 | high | `WRO2026/test/test_path_tracker_harness.h` | Author the header-only helpers per Contracts → harness: `cooperativeTick()` (production tick order), `resetWorld()`, `expectPreTurn`/`expectLineHop`/`expectBlindHop`/`expectStopAtLine` (each runs the done-bit/sensor handshake + asserts the representative lower-MCU `MiniR4.DriveDC` call + retires the phase), `routedFirstHop`/`assertNoBypass`/`nodeByName`, raw `tick()` escape hatch. Done-bit driven via `MiniR4.DriveDC.mockSetPrevTaskDone` + encoder advance; time via `mockAdvanceMillis`. This is the load-bearing readability layer. Satisfies the harness/done-bit/lower-MCU-assert ACs. |
-| T4 | CMake: `add_path_force_includes` + re-wire 5 targets | T1, T2, T3 | high | `WRO2026/test/CMakeLists.txt` | Add `PATH_MOCKS_DIR`; author `add_path_force_includes(target)` force-including (in order) `hal_mocks/EventTrace.h` + the three `path_mocks/` peripherals (`/FI` MSVC, `SHELL:-include` g++) — **NO Drive.h, NO PathTracker.h, NO MatrixMiniR4.h** force-include. Re-wire the five targets (passthrough on/off, bidirectional on/off + board-count dimension, stop_at_line, projection, pass_through_projection) to link real `Drive.cpp`+`PathTracker.cpp`+`Localization.cpp`+`YawSource.cpp`+`routes_fixture.cpp`+the T2 globals TU; custom include list (`hal_mocks/`+`path_mocks/` first, `mocks/` OMITTED); `add_fixture_routes_force_include` FIRST then `add_path_force_includes`; preserve ctest names + the ON/OFF flag defs; add `LINE_BOARD_COUNT_DEFAULT` per board-count target. Satisfies the link/ODR/inversion ACs. |
+| T4 | CMake: `add_path_force_includes` + re-wire 5 targets | T1, T2, T3 | high | `WRO2026/test/CMakeLists.txt` | Add `PATH_MOCKS_DIR`; author `add_path_force_includes(target)` force-including (in order) `hal_mocks/EventTrace.h` + the three `path_mocks/` peripherals (`/FI` MSVC, `SHELL:-include` g++) — **NO Drive.h, NO PathTracker.h, NO MatrixMiniR4.h** force-include. Re-wire the five tests' targets (passthrough on/off, bidirectional on/off, stop_at_line, projection, pass_through_projection — all on the default 2-board config, no board-count dimension) to link real `Drive.cpp`+`PathTracker.cpp`+`Localization.cpp`+`YawSource.cpp`+`routes_fixture.cpp`+the T2 globals TU; custom include list (`hal_mocks/`+`path_mocks/` first, `mocks/` OMITTED); `add_fixture_routes_force_include` FIRST then `add_path_force_includes`; preserve ctest names + the ON/OFF flag defs. Satisfies the link/ODR/inversion ACs. |
 | T5a | Rewrite `test_path_tracker_passthrough.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_passthrough.cpp` | Delete `wrapDelta`/`computePassThrough`/`armLineFollowerForOvershoot` MIRROR slices. Drive real PathTracker over `Inter2→Inter3→Inter4` with routing guard + `assertNoBypass(Inter2,Inter4)`; TC-PT1 (flag ON fires) / TC-PT2 (flag OFF brakes) asserting LineFollower arm (`brakeOnGate`) + advance. Real both ON/OFF builds. |
 | T5b | Rewrite `test_path_tracker_pass_through_projection.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_pass_through_projection.cpp` | Delete `bodyHeadingFor`/`replica_evaluateProjectionPassThrough`/`resolveInboundLineHop` MIRRORs. Drive real PathTracker over `Inter1→ProjL→Inter2` + guards; TC-PP1/PP2/PP3. |
 | T5c | Rewrite `test_path_tracker_projection.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_projection.cpp` | Delete `replica_dispatchProjectionCell` + `firmwareAutoRuleActive`/`resolveBareBlindHop` MIRRORs (keep the real-accessor calls). Drive real PathTracker: TC-PJ1 (`Inter1→ProjL`), TC-PJ2 (`Corner→ProjB` auto-seek, assert lower-MCU seek + re-anchor), TC-PJ3, TC-PJ4. |
 | T5d | Rewrite `test_path_tracker_stop_at_line.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_stop_at_line.cpp` | Delete `replica_stopAtLineTick`/`replica_dispatchDrainOrdering`/`replica_seekOvershoot` FSM-slice MIRRORs. **KEEP** the real-resolver truth-table TCs (TC-SL4). Drive real PathTracker `Start→Inter1` seek: TC-SL1 (success re-anchor), TC-SL2 (DRIVE_FAULT on no-line), TC-SL3 (seek-overshoot trim on `Corner→ProjB→Zed`). |
-| T5e | Rewrite `test_path_tracker_bidirectional.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_bidirectional.cpp` | **Delete the `mission_replica` namespace** (covered by #111) and the `replica_dispatchEdgeAfterTurnGuard` MIRROR. Drive real PathTracker over the rear-override `Inter1→Spur`: TC-BD1 (REVERSE_UNAVAILABLE 1-board), TC-BD2 (allowed 2-board), TC-BD3 (AUTO toggle). Coordinate the board-count/flag target matrix with T4. |
-| T6 | Cleanup: stable-name contract + ADR-030 | T5a–T5e | low | `WRO2026/test/fixtures/regenerate_routes_fixture.py` (docstring), `docs/decisions/030-harness-links-real-sources-ci-enforced.md` | Extend the fixture regenerate-script's "Decoupling contract" docstring to list the node names the five tests now resolve (so a future fixture edit knows not to rename them). Flip ADR-030 status Partially implemented → Implemented, refresh its "remaining gap" / `See also` lines (PathTracker/Drive now linked). PR body `Closes #106` + note the Codex-consult-skipped + any deviation (T2 choice) + any reported real bug. |
+| T5e | Rewrite `test_path_tracker_bidirectional.cpp` | T3, T4 | high | `WRO2026/test/test_path_tracker_bidirectional.cpp` | **Delete the `mission_replica` namespace** (covered by #111). KEEP `replica_dispatchEdgeAfterTurnGuard`'s call to the frozen `reverseUnavailable` resolver as a direct resolver test (TC-BD1 — NOT a mirror; it exercises the real Policy). Drive real PathTracker over the rear-override `Inter1→Spur` on 2-board: TC-BD2 (rear allowed), TC-BD3 (AUTO toggle on/off heading branch). No board-count target split, no production edit. |
+| T6 | Cleanup: stable-name contract + ADR-030 scoped note | T5a–T5e | low | `WRO2026/test/fixtures/regenerate_routes_fixture.py` (docstring), `docs/decisions/030-harness-links-real-sources-ci-enforced.md` | Extend the fixture regenerate-script's "Decoupling contract" docstring to list ALL ten node names the five tests now resolve (`Start`, `Inter1`, `ProjL`, `Inter2`, `Inter3`, `Inter4`, `Corner`, `Spur`, `ProjB`, `Zed`) so a future fixture edit knows not to rename them. Flip ADR-030 to **Implemented WITH a scoped note**: edit its status line + Rule/How-to-apply to record the five named tests now link real `PathTracker.cpp`/`Drive.cpp` (closing #106) AND that `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` still carry FSM `// MIRROR:` slices tracked by a follow-up — the ADR must NOT claim zero mirrored FSM logic remains. PR body `Closes #106` + note Codex-consult-skipped + the T2 `path_mocks.cpp` choice + any reported real bug. |
 | T7 | Build + run both toolchains; no-regression sweep | T4, T5a–T5e, T6 | med | — | `cmake -S WRO2026/test -B build/test -G Ninja` inside `vcvars64`; build + `ctest -C Debug --output-on-failure`; confirm all five rewritten ctests + ALL prior targets green (incl. the four `*_compile_fail` on a clean rebuild). Document g++ concerns (`SHELL:-include`, `-Wswitch`) for the CI gate; request the CI g++ run. If a real Drive/PathTracker bug surfaces, STOP and report (do not patch). |
 
-T1 and (the global-defs half of) T2 are near-independent; T2 depends on T1 only for the `path_mocks/`
-global declarations. T3 needs T1+T2 (the mock surfaces + globals to compile against). T4 needs
-T1+T2+T3 (files must exist). T5a–T5e are independent of each other (distinct files) and all need
-T3+T4 (harness + buildable targets). T6 edits distinct files (fixture docstring + ADR) — no conflict
-with T5*. T7 is the verification gate after everything. No two tasks edit the same file.
+T1 (`path_mocks/` mocks with `inline` globals) and T2 (`path_mocks/path_mocks.cpp` facade globals) are
+independent and run in parallel — pinning the peripheral globals `inline` in T1's headers means T2
+defines no peripheral global, so it does not depend on T1. T3 needs T1+T2 (the mock surfaces + globals
+to compile against). T4 needs T1+T2+T3 (files must exist). T5a–T5e are independent of each other
+(distinct files) and all need T3+T4 (harness + buildable targets). T6 edits distinct files (fixture
+docstring + ADR) — no conflict with T5*. T7 is the verification gate after everything. No two tasks
+edit the same file.
 
 ## Notes for Implementer
 
