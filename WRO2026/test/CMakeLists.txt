@@ -482,8 +482,9 @@ add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 # Tasks-owned behaviour only: registry lookup, `runTask` dispatch + capture, the
 # unknown-name path, the `debugYield` yield path, and the `inTask()` RAII
 # invariant. Mission-owned behaviour (queue FSM, abort ordering) stays out of
-# scope — that needs `Mission.cpp`, which drags in EventTrace / the `MiniR4`
-# global and is #46 Phase 2.
+# scope HERE — it links the REAL `Mission.cpp` in the dedicated
+# `test_mission_dispatch` target below (#46 Phase 2, which landed), against the
+# `hal_mocks/` EventTrace + `MiniR4` that this `mocks/`-world target lacks.
 # =========================================================================================
 add_executable(test_tasks_dispatch
     ${TEST_DIR}/test_tasks_dispatch.cpp
@@ -1196,3 +1197,93 @@ add_executable(test_mock_hal
 target_include_directories(test_mock_hal PRIVATE ${HAL_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
 add_hal_force_includes(test_mock_hal)
 add_test(NAME mock_hal COMMAND test_mock_hal)
+
+# =========================================================================================
+# Test executable #21 — Mission queue FSM + TASK dispatch, real-linked (#46 Phase 2).
+#
+# Links the REAL `Mission.cpp` + REAL `Tasks.cpp` and asserts the production Mission queue
+# FSM — queue drain order, `start()` build-error / empty / normal, GOTO happy / unknown-node
+# / holds-on-not-idle, WAIT / PRINT / BEEP / LED, the `TASK`-case dispatch into the real
+# `Tasks.cpp` (with `T>`/`T+`/`T-` events + real task Serial bodies), the drain-time
+# PathTracker-fault check, the FAULT_BEEPING -> FAULT_AWAIT_RESET -> BTN_DOWN reset path,
+# `abort()`, and `declarePosition` success / busy / unknown / clears-faults — against the
+# production singletons (no inline `MissionMirror`). This closes the gap Phase 1 left when it
+# deleted the inline mirror.
+#
+# Upper-facade surfaces the HAL deliberately doesn't cover come from the new `mission_mocks/`:
+# a test-CONTROLLABLE `PathTracker` (independent `mockSetIdle` / `mockSetFault` knobs, the REAL
+# 10-value `Fault` enum + exact mnemonics) plus record/no-op `LineFollower` / `Manipulator` /
+# `Localization`. The chassis HAL (the `MiniR4` facade + Drive-builder mock + EventTrace mock)
+# is the shared `hal_mocks/`. The 14-node `fixtures/routes_fixture.cpp` resolves graph nodes
+# BY NAME (`Inter1`.. / `Start` / `final` / `Wall1` / ...) — never by index.
+#
+# This is the epic-#107 sibling that stays Drive/PathTracker-MOCKED: host-linking the REAL
+# `PathTracker.cpp` / `Drive.cpp` (and deleting their `// MIRROR:` slices) is the adjacent
+# issue #106, not this target.
+#
+# Like `ctps_dump` / `test_mock_hal`, this is an INDEPENDENT include + force-include surface:
+# `hal_mocks/` must come FIRST so the angle-bracket `<MatrixMiniR4.h>` / `<Arduino.h>` resolve
+# to the HAL mock, and `${MOCKS_DIR}` is DELIBERATELY OMITTED from this target's include path.
+# That omission is the ODR mutual-exclusion invariant: `mocks/Drive.h` and `hal_mocks/Drive.h`
+# are two different `class DriveClass` definitions sharing the `DRIVE_H` guard, so a target
+# that reached BOTH would silently drop the second definition (the include guard no-ops it)
+# with NO linker error. Mirror `ctps_dump`'s isolation exactly.
+# =========================================================================================
+set(MISSION_MOCKS_DIR ${TEST_DIR}/mission_mocks)
+
+# -----------------------------------------------------------------------------------------
+# Force-include ONLY the 4 mission-mock headers BEFORE any source-file parsing — the same
+# load-bearing shadow trick as `add_hal_force_includes`, pointed at `mission_mocks/` and using
+# ABSOLUTE `${MISSION_MOCKS_DIR}/` paths.
+#
+# This helper does NOT re-list `Drive.h` / `EventTrace.h` — those are `add_hal_force_includes`'s
+# job, kept single-sourced so the HAL set stays one definition (if `hal_mocks/` grows a third
+# force-included header, the target inherits it through that helper, not this one). The real
+# `PathTracker.h` / `LineFollower.h` / `Manipulator.h` / `Localization.h` sit next to
+# `Mission.cpp` / `Tasks.cpp` in `${SKETCH_DIR}`, so a quote-include would otherwise resolve
+# source-relative to the REAL header; force-including the mock first makes the production header
+# no-op (its guard `PATHTRACKER_H` / `LINEFOLLOWER_H` / `MANIPULATOR_H` / `LOCALIZATION_H` is
+# already defined) when it is re-requested transitively.
+#
+# `MatrixMiniR4.h` / `Arduino.h` are ANGLE-bracket includes, so the `${HAL_MOCKS_DIR}`-first
+# include order alone picks the mock versions — no force-include needed for those two.
+# -----------------------------------------------------------------------------------------
+function(add_mission_mock_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${MISSION_MOCKS_DIR}/PathTracker.h"
+            "/FI${MISSION_MOCKS_DIR}/LineFollower.h"
+            "/FI${MISSION_MOCKS_DIR}/Manipulator.h"
+            "/FI${MISSION_MOCKS_DIR}/Localization.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise break the build
+        # (`cannot specify -o with -c ... multiple files`).
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${MISSION_MOCKS_DIR}/PathTracker.h"
+            "SHELL:-include ${MISSION_MOCKS_DIR}/LineFollower.h"
+            "SHELL:-include ${MISSION_MOCKS_DIR}/Manipulator.h"
+            "SHELL:-include ${MISSION_MOCKS_DIR}/Localization.h"
+        )
+    endif()
+endfunction()
+
+add_executable(test_mission_dispatch
+    ${TEST_DIR}/test_mission_dispatch.cpp
+    ${SKETCH_DIR}/Mission.cpp
+    ${SKETCH_DIR}/Tasks.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${HAL_MOCKS_DIR}/hal_mocks.cpp)
+# CUSTOM include list — NOT COMMON_INCLUDES (which contains mocks/, breaking the ODR
+# mutual-exclusion: mocks/Drive.h and hal_mocks/Drive.h share the DRIVE_H guard, so the
+# second definition is silently dropped with NO linker error). hal_mocks/ FIRST so the
+# angle-bracket <MatrixMiniR4.h>/<Arduino.h> resolve to the HAL mock; mocks/ OMITTED;
+# mission_mocks/ on the path so the test's quote-includes of the mission mocks resolve.
+target_include_directories(test_mission_dispatch PRIVATE
+    ${HAL_MOCKS_DIR} ${MISSION_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+# Force-include composition ORDER (critical):
+add_fixture_routes_force_include(test_mission_dispatch)   # FIRST — routes_fixture.h (guard ROUTES_H) MUST win before Mission.cpp/FieldMap.h/Localization pull routes.h
+add_hal_force_includes(test_mission_dispatch)             # REUSE as-is — hal_mocks/Drive.h (DRIVE_H) + EventTrace.h (EVENTTRACE_H)
+add_mission_mock_force_includes(test_mission_dispatch)    # the 4 mission mocks only
+add_test(NAME mission_dispatch COMMAND test_mission_dispatch)
