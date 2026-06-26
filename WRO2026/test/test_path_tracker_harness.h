@@ -215,10 +215,20 @@ inline void tick()
  *                                   must be reset on its own (same idiom as
  *                                   `test_localization_offset.cpp`).
  *   4. peripheral `mockReset()`s  — LineArray / Intersection / LineFollower path mocks.
- *   5. `Drive.begin()`            — real Drive: clears fault, seeds done flags true, pushes PID.
+ *   5. `Drive.begin()`            — real Drive: seeds done flags true, pushes PID. Does NOT clear a
+ *                                   latched fault — `Drive::begin()` never touches `_fault` /
+ *                                   `_stopState` (Drive.cpp:40); the fault-reset path is
+ *                                   `clearFault()` (step 8), not `begin()`.
  *   6. `Localization.begin()`     — real Localization: seeds `_currentNode = START_NODE` (=Start,
  *                                   BLIND), clears offset + integrator baselines + `_zeroed`.
  *   7. `PathTracker.begin()`      — real PathTracker: FSM to IDLE, queue empty, fault cleared.
+ *   8. `Drive.clearFault()` +     — clear BOTH fault surfaces so a Drive fault latched by a prior
+ *      `PathTracker.clearFault()`   case (e.g. `LINE_NOT_FOUND` from a TC-SL2 no-line seek) cannot
+ *                                   leak in and stall / mis-fault the next case's first `goTo()`.
+ *                                   PathTracker already cleared its own in step 7; Drive's is the
+ *                                   load-bearing one (its `begin()` does not), and clearing both
+ *                                   keeps every rewritten file order-independent without a per-test
+ *                                   workaround.
  *
  * After this, `Localization` is seated at `Routes::START_NODE` (`Start`) with `_zeroed == false`.
  * A test that drives a hop MUST (a) bind the world frame and (b) seat Localization at the hop's
@@ -243,6 +253,13 @@ inline void resetWorld()
     Drive.begin();
     Localization.begin();
     PathTracker.begin();
+
+    // begin() re-seeds done/idle state but does NOT clear a latched fault (Drive::begin() never
+    // touches _fault/_stopState). Clear both so a Drive fault latched by a prior case cannot leak
+    // into this one and stall / mis-fault its first goTo() — every rewritten file is then
+    // order-independent with no per-test workaround.
+    Drive.clearFault();
+    PathTracker.clearFault();
 }
 
 // ===========================================================================================

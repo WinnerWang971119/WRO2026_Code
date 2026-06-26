@@ -34,12 +34,13 @@
  *     this mock never derives them from a planned route.
  *
  * The `goTo` builder mirrors the real immovable (copy- and move-deleted),
- * `[[nodiscard]]` chain surface (all setters no-op, returning `*this`) so an
- * arbitrarily chained call
- * (`PathTracker.goTo(g).async().setRouteDirection(...).setArrivalDirection(...)
- * .setStopAtLine(...)`) compiles unchanged. The builder is self-contained — it
- * holds no `PathTrackerClass&` back-reference and dereferences no facade, so its
- * destruction (at the chained call's `;`) is a true no-op (no enqueue).
+ * `[[nodiscard]]` chain surface so an arbitrarily chained call
+ * (`PathTracker.goTo(g).setRouteDirection(...).setArrivalDirection(...)
+ * .setStopAtLine(...).async()`) compiles unchanged. Unlike the real builder (which
+ * defers its apply to the destructor), it holds a `PathTrackerClass&` back-reference
+ * and RECORDS each chain setter's arg into the owner ON CALL (`lastRouteDirection` /
+ * `lastArrivalDirection` / `lastStopAtLine`), so a test asserts exactly what Mission
+ * forwarded to `PathTracker.goTo(...)` at GOTO execute. `async()` stays a no-op.
  */
 
 // NOTE: SAME include guard (`PATHTRACKER_H`) as the production header so the
@@ -51,18 +52,28 @@
 
 #include "NavTypes.h"    // real, header-only — Direction / StopAtLine for the chain setters
 
+// Forward declaration so the builder can hold a reference to its owner type.
+class PathTrackerClass;
+
 /**
- * @brief No-op mock of `PathTrackerGoToBuilder`.
+ * @brief Recording mock of `PathTrackerGoToBuilder`.
  *
  * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]`, matching
  * the real builder's call-as-temporary contract — `goTo()` returns it by value via
- * guaranteed copy elision (C++17), not a move. Construction and destruction do
- * nothing — there is no queue and no facade back-reference.
+ * guaranteed copy elision (C++17), not a move. Unlike the real builder (which defers
+ * its apply to the destructor), this mock holds a `PathTrackerClass&` back-reference
+ * and RECORDS each chain setter's arg into the owner ON CALL, so a test can assert
+ * exactly what Mission forwarded at GOTO execute. `async()` stays a no-op.
  */
 class [[nodiscard]] PathTrackerGoToBuilder
 {
 public:
-    PathTrackerGoToBuilder() = default;
+    /**
+     * @brief Construct the builder bound to its owner.
+     * @param owner The owning `PathTrackerClass` singleton; outlives this stack temporary
+     *              (trivially true for a temporary returned from a singleton method).
+     */
+    explicit PathTrackerGoToBuilder(PathTrackerClass& owner) : _owner(owner) {}
 
     PathTrackerGoToBuilder(const PathTrackerGoToBuilder&)            = delete;
     PathTrackerGoToBuilder& operator=(const PathTrackerGoToBuilder&) = delete;
@@ -71,24 +82,15 @@ public:
 
     /** @brief No-op; returns `*this` so a chained call compiles. */
     PathTrackerGoToBuilder& async() { return *this; }
-    /** @brief No-op; returns `*this`. @param d ignored. */
-    PathTrackerGoToBuilder& setRouteDirection(Direction d)
-    {
-        (void)d;
-        return *this;
-    }
-    /** @brief No-op; returns `*this`. @param d ignored. */
-    PathTrackerGoToBuilder& setArrivalDirection(Direction d)
-    {
-        (void)d;
-        return *this;
-    }
-    /** @brief No-op; returns `*this`. @param s ignored. */
-    PathTrackerGoToBuilder& setStopAtLine(StopAtLine s)
-    {
-        (void)s;
-        return *this;
-    }
+    /** @brief Record the per-route direction override into the owner. @return `*this`. */
+    PathTrackerGoToBuilder& setRouteDirection(Direction d);
+    /** @brief Record the final-hop arrival direction override into the owner. @return `*this`. */
+    PathTrackerGoToBuilder& setArrivalDirection(Direction d);
+    /** @brief Record the call-site stop-at-line override into the owner. @return `*this`. */
+    PathTrackerGoToBuilder& setStopAtLine(StopAtLine s);
+
+private:
+    PathTrackerClass& _owner;    ///< Owner whose capture fields each setter records into.
 };
 
 /**
@@ -153,7 +155,7 @@ public:
     {
         lastGoToGoal = goalId;
         ++goToCallCount;
-        return PathTrackerGoToBuilder{};
+        return PathTrackerGoToBuilder{*this};
     }
 
     /**
@@ -168,7 +170,7 @@ public:
     {
         (void)goalName;
         ++goToCallCount;
-        return PathTrackerGoToBuilder{};
+        return PathTrackerGoToBuilder{*this};
     }
 
     // --- state queries ---
@@ -253,10 +255,13 @@ public:
     {
         _mockIdle           = true;
         _mockFault          = FaultInfo{};
-        lastGoToGoal        = 0xFF;
-        goToCallCount       = 0;
-        abortCallCount      = 0;
-        clearFaultCallCount = 0;
+        lastGoToGoal         = 0xFF;
+        goToCallCount        = 0;
+        abortCallCount       = 0;
+        clearFaultCallCount  = 0;
+        lastRouteDirection   = Direction::AUTO;
+        lastArrivalDirection = Direction::AUTO;
+        lastStopAtLine       = StopAtLine::AUTO;
     }
 
     // --- public capture fields (T3 asserts on these EXACT names) ---
@@ -266,10 +271,36 @@ public:
     uint16_t abortCallCount      = 0;       ///< Total `abort()` calls.
     uint16_t clearFaultCallCount = 0;       ///< Total `clearFault()` calls.
 
+    // Builder-forwarded overrides, recorded ON CALL by the chain setters (default AUTO when the
+    // GOTO step carried no modifier). These observe what Mission forwarded at GOTO execute.
+    Direction  lastRouteDirection   = Direction::AUTO;    ///< Last `setRouteDirection(...)` arg.
+    Direction  lastArrivalDirection = Direction::AUTO;    ///< Last `setArrivalDirection(...)` arg.
+    StopAtLine lastStopAtLine       = StopAtLine::AUTO;   ///< Last `setStopAtLine(...)` arg.
+
 private:
     bool      _mockIdle  = true;       ///< Test-set idle knob (default idle).
     FaultInfo _mockFault = FaultInfo{}; ///< Test-set latched fault (default NONE).
 };
+
+// --- PathTrackerGoToBuilder setter definitions (after the owner is complete) ---
+
+inline PathTrackerGoToBuilder& PathTrackerGoToBuilder::setRouteDirection(Direction d)
+{
+    _owner.lastRouteDirection = d;
+    return *this;
+}
+
+inline PathTrackerGoToBuilder& PathTrackerGoToBuilder::setArrivalDirection(Direction d)
+{
+    _owner.lastArrivalDirection = d;
+    return *this;
+}
+
+inline PathTrackerGoToBuilder& PathTrackerGoToBuilder::setStopAtLine(StopAtLine s)
+{
+    _owner.lastStopAtLine = s;
+    return *this;
+}
 
 // Single global instance. `inline` (not `extern` + a .cpp definition) because this
 // mock is force-included ONLY into `test_mission_dispatch`; `inline` dedups across

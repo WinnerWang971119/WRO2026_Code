@@ -47,10 +47,10 @@
  *     trapezoidal ramp, no encoder distance gate. `update()` / `begin()` /
  *     `setTickCallback()` are no-ops.
  *   - State queries (`isEnabled()` / `isDistanceReached()` / `isLineLost()`) return
- *     test-set fields — they do NOT derive from any scripted move. `isDistanceReached()`
- *     does NOT auto-clear on read (unlike the real read-and-clear): the test owns when the
- *     gate "trips" via `mockSetDistanceReached(...)`, which is the single observation point
- *     the FSM tests need.
+ *     test-set fields — they do NOT derive from any scripted move. The test arms the gate trip
+ *     via `mockSetDistanceReached(...)`; `isDistanceReached()` is READ-AND-CLEAR and the
+ *     enable/disable verb also disarms the latch, exactly like the real one-shot gate
+ *     (LineFollower.cpp:717/742/789-794), so a trip cannot leak across hops.
  *   - The arm-cascade capture fields record the LAST value passed; a multi-call sequence
  *     overwrites (last-write-wins), matching the simplest scripted-sensor pattern. The
  *     count fields (`setEnabledCount`) let a test assert how many arm transitions ran.
@@ -218,12 +218,18 @@ public:
      *       race-guard both record. The real `Drive.cpp`/`PathTracker.cpp` discard the
      *       returned builder at end-of-statement; the `[[nodiscard]]` is satisfied by their
      *       chained `.setBrake(...)` / void-context use.
+     * @note Clears `_distanceReached` on every enable/disable, matching the real controller —
+     *       which disarms the latch both when disabled (LineFollower.cpp:742) and when a fresh
+     *       distance target arms (LineFollower.cpp:717). Without this a trip set for one hop would
+     *       survive the next hop's re-arm and false-pass a regression that re-armed without a new
+     *       gate trip.
      */
     [[nodiscard]] LineFollowerEnableBuilder setEnabled(bool on)
     {
         lastEnabled = on;
         setEnabledCount++;
-        _enabled = on;
+        _enabled         = on;
+        _distanceReached = false;    // re-arm / disable clears the one-shot latch (matches production)
         return LineFollowerEnableBuilder{*this};
     }
 
@@ -269,13 +275,21 @@ public:
     float getRawError() const { return 0.0f; }
 
     /**
-     * @brief Whether the distance gate has tripped (test-set).
-     * @return The `_distanceReached` field.
-     * @note Unlike the real read-and-clear latch, this does NOT auto-clear on read: the test
-     *       owns the trip via `mockSetDistanceReached(...)`. This is the single observation
-     *       point the PROJECTION_FOLLOW / LINE_OVERSHOOT FSM tests poll.
+     * @brief Whether the distance gate has tripped — READ-AND-CLEAR, matching production.
+     * @return The latched `_distanceReached` value; the latch is cleared as a side effect.
+     * @note Mirrors the real one-shot latch (`LineFollowerClass::isDistanceReached`,
+     *       LineFollower.cpp:789-794): the first read returns the trip and consumes it. The test
+     *       arms the trip with `mockSetDistanceReached(true)` just before the single FSM poll; the
+     *       FSM reads it once and transitions in the same tick (PathTracker.cpp:858/887), so the
+     *       consume-on-read never starves the FSM. A sticky latch here would false-pass a
+     *       regression that stopped polling the gate or ended a hop one gate early.
      */
-    bool isDistanceReached() { return _distanceReached; }
+    bool isDistanceReached()
+    {
+        const bool latched = _distanceReached;
+        _distanceReached   = false;
+        return latched;
+    }
 
     // --- shared sensor handle (never dereferenced in the mock) ---
 

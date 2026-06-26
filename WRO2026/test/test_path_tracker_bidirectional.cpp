@@ -9,9 +9,10 @@
  *
  *   1. The `mission_replica` namespace (a hand-copied `MissionClass` Step queue +
  *      `setRouteDirection` / `setArrivalDirection` modifier guard) is DELETED.
- *      Mission's modifier no-op behaviour is now asserted against the REAL
- *      `Mission.cpp` in `test_mission_dispatch` (#111), so re-mirroring it here is
- *      redundant drift risk.
+ *      Mission's modifier behaviour is asserted against the REAL `Mission.cpp` in
+ *      `test_mission_dispatch` (TC21-TC23: write-through to `PathTracker.goTo` at
+ *      execute, no-op off a non-GOTO step / empty queue, and last-GOTO-only
+ *      targeting), so re-mirroring it here is redundant drift risk.
  *
  *   2. The REVERSE_UNAVAILABLE / AUTO-toggle cases that USED to be exercised on a
  *      synthetic `replica_resolveDirection` are now split:

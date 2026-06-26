@@ -3,14 +3,14 @@
  * @brief Host-link test for the firmware `line(A)-projection(B)-line(C)`
  *        distance-gated pass-through, driving the REAL `PathTracker` + `Drive` +
  *        `Localization` FSMs through the shared cooperative-tick harness
- *        (issue #106, T5b; behavioral coverage TC-PP1 / TC-PP2 / TC-PP3).
+ *        (issue #106, T5b; behavioral coverage TC-PP1..TC-PP5).
  *
  * @details
  * Rewritten from the original mirror-slice test. The old file re-implemented the
  * `PathTracker::_evaluateProjectionPassThrough` decision cell-for-cell in three
  * annotated firmware-mirror helpers over a TOY routes graph and asserted only the
  * gate's boolean return. Those mirror slices are deleted: this file now drives the
- * production `PathTracker` FSM over the REAL 14-node `fixtures/routes_fixture.h`
+ * production `PathTracker` FSM over the REAL `fixtures/routes_fixture.h` graph
  * and asserts the OBSERVABLE outcomes the FSM itself produces — the node-advance
  * sequence, the LineFollower brake-on-gate arm, and the re-anchor state.
  *
@@ -30,38 +30,44 @@
  * This target does NOT override `PATH_PASS_THROUGH_ENABLED_DEFAULT`, so the
  * production default (`true`) compiles in and TC-PP1's collapse can fire.
  *
- * Three behavioral cases:
+ * Five behavioral cases:
  *   - TC-PP1: `goTo(Inter2)` from `Inter1` — the gate FIRES. The PROJECTION_FOLLOW
  *             gate trips on DISTANCE at `ProjL`, the FSM stamps
  *             `onDeadReckonedAdvance(ProjL)` MID-FOLLOW (no stop), keeps the
  *             follower live (`brakeOnGate == false`), and continues to the real
  *             junction `Inter2` where it re-anchors. Node advances
  *             `Inter1 -> ProjL -> Inter2`.
- *   - TC-PP2: `goTo(ProjL)` where `ProjL` IS the goal — the not-final guard
- *             rejects the collapse (a collinear LINE flank `ProjL -> Inter2`
- *             genuinely exists, so the ONLY reason it declines is goal-is-ProjL).
- *             The FSM stops AT `ProjL` (`brakeOnGate == true`, follower disabled).
+ *   - TC-PP2: `goTo(ProjL)` where `ProjL` IS the goal — the not-final guard (gate
+ *             condition 2) rejects the collapse (a collinear LINE flank
+ *             `ProjL -> Inter2` genuinely exists, so the ONLY reason it declines is
+ *             goal-is-ProjL). The FSM stops AT `ProjL` (`brakeOnGate == true`,
+ *             follower disabled).
  *   - TC-PP3: a BLIND-flanked projection node (`ProjB`) — the LINE-projection
- *             pass-through gate does NOT fire (it is reached by a BLIND edge, never
- *             a LINE edge, so the gate is never even evaluated). The BLIND ->
- *             projection auto-seek path runs instead and re-anchors AT `ProjB`,
- *             stopping at the projection node.
+ *             pass-through gate is NEVER EVALUATED (`ProjB` is reached by a BLIND
+ *             edge, not a LINE edge, so the dispatch takes the BLIND->projection
+ *             auto-seek path). The seek re-anchors AT `ProjB`. The "gate not even
+ *             reached" case.
+ *   - TC-PP4: `goTo(Cend)` over `Inter2 -> ProjC -> Cend` — the gate IS evaluated
+ *             (LINE into the projection `ProjC`) and DECLINES on gate condition 3:
+ *             the outbound flank `ProjC -> Cend` is a BLIND edge. `ProjC` is NOT
+ *             the goal, so the not-final guard is not the decliner — isolating
+ *             condition 3. The FSM stops AT `ProjC` (`brakeOnGate == true`), then
+ *             dead-reckons the onward BLIND hop to `Cend`.
+ *   - TC-PP5: `goTo(Efar)` over `Inter3 -> ProjE -> Efar` — the gate DECLINES on
+ *             gate condition 5: both flanks are LINE and `Efar` is a LINE junction
+ *             (conditions 3 + 4 PASS), but `ProjE -> Efar` (heading 0) is NOT
+ *             collinear with `Inter3 -> ProjE` (heading 270) — a 90 deg bend at the
+ *             marker-less node. `ProjE` is NOT the goal, isolating the collinearity
+ *             check. The FSM stops AT `ProjE` (`brakeOnGate == true`).
  *
- * FIXTURE-ROUTING DEVIATION (reported): the spec's TC-PP3 asks for a LINE hop into
- * a projection node whose OUTBOUND flank is BLIND / non-collinear so the gate's
- * condition 3/5 declines. The fixture has no such route — `ProjL` is the ONLY
- * LINE-reached projection node and both its onward flanks (`-> Inter1` heading
- * 180, `-> Inter2` heading 0) are LINE edges collinear with whichever inbound hop
- * reaches it (the node sits mid-line). `ProjB` is BLIND-flanked but is reached
- * ONLY by BLIND edges, so the LINE-projection gate is never evaluated for it.
- * Through the REAL FSM the gate can therefore decline at `ProjL` only via the
- * not-final guard (TC-PP2). TC-PP3 is adapted to the genuinely-reachable
- * fixture behavior that matches the spec's intent and node hint ("the fixture's
- * `ProjB` may be the BLIND-flanked one"): drive `goTo(ProjB)` from `Corner` (a
- * BLIND edge into the BLIND-flanked projection node) and assert the LINE-projection
- * pass-through gate never fires — the FSM takes the auto-seek STOP_AT_LINE path and
- * stops AT `ProjB`. This is pinned with a routing + flank guard so a future fixture
- * edit that grows a LINE edge into a projection node fails loudly here.
+ * TC-PP4 / TC-PP5 (#112) close the two gate-decline branches the earlier rewrite
+ * could not reach: the original `routes_fixture` had only ONE LINE-reached
+ * projection (`ProjL`), whose flanks are both LINE and collinear, so through the
+ * REAL FSM the gate could decline there only via the not-final guard (TC-PP2). The
+ * fixture now also carries `Inter2 -> ProjC -> Cend` (BLIND outbound flank) and
+ * `Inter3 -> ProjE -> Efar` (non-collinear LINE flank) — two pendants off the main
+ * line that change no existing route — so condition 3 and condition 5 are exercised
+ * through the real FSM (see `WRO2026/test/fixtures/regenerate_routes_fixture.py`).
  */
 
 #include "test_path_tracker_harness.h"
@@ -69,29 +75,37 @@
 namespace
 {
 // ---------------------------------------------------------------------------
-// Drive the real PathTracker from a clean world up to the PROJECTION_FOLLOW state
-// of the `Inter1 -> ProjL` hop, with the LineFollower armed for the distance-gated
-// projection follow. Returns with the FSM in PROJECTION_FOLLOW, the follower
+// Drive the real PathTracker from a clean world up to the PROJECTION_FOLLOW state of
+// the `<start> -> <projection>` hop (the first hop of `goTo(goalName)` seated at
+// `startName` facing `startAppYaw`), with the LineFollower armed for the distance-
+// gated projection follow. Returns with the FSM in PROJECTION_FOLLOW, the follower
 // freshly enabled (the LINE -> projection arm: overshootMode=false), and no Drive
 // move in flight (a LINE/projection follow issues no lower-MCU move).
 //
 // Sequence the real FSM runs to get here (PathTracker.cpp):
 //   IDLE -> DEQUEUE (pop goal, offset~0 return-gate -> PLAN_NEXT_HOP)
-//        -> PLAN_NEXT_HOP (Inter1->ProjL LINE, heading 0 == current world 0, so
+//        -> PLAN_NEXT_HOP (LINE first hop; if the edge heading == the seated facing,
 //           `_dispatchTurnIfNeeded` skips the pre-turn) -> _dispatchEdgeAfterTurn
-//        -> (isProjectionNode(ProjL)) evaluate `_evaluateProjectionPassThrough`,
+//        -> (isProjectionNode(proj)) evaluate `_evaluateProjectionPassThrough`,
 //           arm LineFollower with brakeOnGate=!_projPassThrough -> PROJECTION_FOLLOW.
-// No pre-edge turn fires because Inter1->ProjL departs at heading 0 and
-// `seatAt("Inter1")` bound the world frame at app-yaw 0 (harness caveat S3 does
-// not bite: the departure heading IS the default heading).
 //
-// @param goalName The active goTo destination ("Inter2" for the routed-PAST
-//                 pass-through case; "ProjL" for the not-final stop case).
+// @param startName Node to seat Localization at (the LINE->projection hop origin).
+// @param goalName  The active goTo destination — drives which onward flank the gate
+//                  peeks at (a routed-PAST goal, the projection itself, or a node
+//                  beyond a declining flank).
 // ---------------------------------------------------------------------------
-void driveToProjectionFollow(const char* goalName)
+void driveToProjectionFollowHop(const char* startName, const char* goalName)
 {
     resetWorld();
-    seatAt("Inter1");    // bind world frame @ app-yaw 0 + declare Localization at Inter1
+    seatAt(startName);    // bind world frame @ app-yaw 0 + declare Localization at the hop origin
+
+    const uint8_t start    = nodeByName(startName);
+    const uint8_t firstHop = routedFirstHop(start, nodeByName(goalName));
+    // `seatAt` always binds the facing to START_HEADING_DEG (0). If the inbound edge departs at a
+    // non-zero heading the FSM dispatches a FRONT pre-edge turn first (BIDIRECTIONAL_AUTO ties go
+    // FRONT, so a 90 deg bend stays FRONT). Park the corrected IMU read at the edge heading each
+    // tick so that pre-turn settles immediately on its body target — the driveToSeekInFlight idiom.
+    const int16_t hwHeading = hwYaw((int16_t) lroundf(FieldMap::getEdge(start, firstHop).heading_deg));
 
     // Enqueue the goal; PathTracker walks NEXT_HOP hop-by-hop. `.async()` so the
     // harness drives the cooperative tick loop instead of the builder's blocking drain.
@@ -103,14 +117,22 @@ void driveToProjectionFollow(const char* goalName)
     // pending, so the projection distance gate can be tripped next.
     for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
     {
+        mmL.mockYawDeg = (double) hwHeading;
         cooperativeTick();
         if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
-            && Localization.getCurrentNode() == nodeByName("Inter1"))
+            && Localization.getCurrentNode() == start)
         {
             return;    // PROJECTION_FOLLOW reached, follower armed for the projection follow
         }
     }
     ASSERT_TRUE(false);    // budget exhausted: the FSM never reached PROJECTION_FOLLOW
+}
+
+// Inter1 -> ProjL convenience wrapper for the collinear triple (TC-PP1 / TC-PP2):
+// the Inter1->ProjL edge departs heading 0 == the seated facing, so no pre-turn fires.
+void driveToProjectionFollow(const char* goalName)
+{
+    driveToProjectionFollowHop("Inter1", goalName);
 }
 }    // namespace
 
@@ -303,10 +325,10 @@ void test_TC_PP2_goto_projection_goal_stops_at_projection()
 //          projection auto-seek path runs instead (BLIND_PROJECTION_AUTO_SEEK), and
 //          the seek re-anchors AT ProjB — the robot stops at the projection node.
 //
-// (Adapted from the spec's "BLIND-flanked / non-collinear projection -> no
-// pass-through" intent — see the file-level FIXTURE-ROUTING DEVIATION note: no
-// fixture route exists for a LINE hop into a projection node with a BLIND/non-
-// collinear outbound flank, so this drives the genuinely-reachable ProjB behavior.)
+// This is the "gate never evaluated" case (a BLIND-reached projection never takes
+// the LINE->projection dispatch path). The two LINE-reached decline branches — a
+// BLIND outbound flank (condition 3) and a non-collinear LINE flank (condition 5) —
+// are covered by TC-PP4 / TC-PP5 below.
 // ===========================================================================
 
 void test_TC_PP3_blind_flanked_projection_node_no_pass_through()
@@ -375,19 +397,161 @@ void test_TC_PP3_blind_flanked_projection_node_no_pass_through()
 }
 
 // ===========================================================================
+// TC-PP4 — LINE->projection with a BLIND outbound flank: the pass-through gate IS
+//          evaluated and DECLINES on condition 3 (outbound flank not LINE). Drives
+//          `goTo(Cend)` over `Inter2 -> ProjC -> Cend`: ProjC is a projection node
+//          reached by a LINE edge (so the gate runs), it is NOT the goal (so the
+//          not-final guard is not the decliner), and its onward flank ProjC->Cend is
+//          a BLIND edge — so condition 3 rejects the collapse, the FSM stops AT
+//          ProjC, then dead-reckons the BLIND hop on to Cend. (#112: a decline
+//          branch the collinear ProjL triple could not reach.)
+// ===========================================================================
+
+void test_TC_PP4_line_projection_blind_flank_declines()
+{
+    TEST_SCOPE("TC-PP4: LINE->projection ProjC, BLIND outbound flank -> gate declines (cond 3), stop at ProjC");
+
+    const uint8_t inter2 = nodeByName("Inter2");
+    const uint8_t projC  = nodeByName("ProjC");
+    const uint8_t cend   = nodeByName("Cend");
+
+    ASSERT_TRUE(inter2 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(projC != FieldMap::NODE_NONE);
+    ASSERT_TRUE(cend != FieldMap::NODE_NONE);
+
+    // Isolate the decline to condition 3 (outbound flank not LINE):
+    //   - the inbound Inter2->ProjC is a LINE edge into a projection node (the gate IS evaluated);
+    //   - ProjC is NOT the goal (Cend is, beyond it) -> not the not-final guard (condition 2);
+    //   - the onward flank ProjC->Cend is a BLIND edge -> condition 3 rejects.
+    ASSERT_TRUE(FieldMap::isProjectionNode(projC));
+    ASSERT_TRUE(FieldMap::getEdge(inter2, projC).type == Routes::EdgeType::LINE);
+    ASSERT_EQ(routedFirstHop(inter2, cend), projC);
+    ASSERT_EQ(routedFirstHop(projC, cend), cend);
+    ASSERT_TRUE(FieldMap::getEdge(projC, cend).type == Routes::EdgeType::BLIND);
+    assertNoBypass(inter2, cend);    // the only route Inter2->Cend is THROUGH ProjC
+
+    // Inter2->ProjC departs heading 270 (straight down off the y=40 main line); the helper settles
+    // the FRONT pre-turn before the LINE->projection follow.
+    driveToProjectionFollowHop("Inter2", "Cend");
+
+    // Precondition: PROJECTION_FOLLOW for Inter2->ProjC, still at Inter2, follower armed.
+    ASSERT_EQ(Localization.getCurrentNode(), inter2);
+    ASSERT_TRUE(LineFollower.isEnabled());
+    ASSERT_FALSE(LineFollower.lastOvershootMode);
+
+    // THE DECLINE ASSERT: the gate evaluated and DECLINED on the BLIND outbound flank, so the
+    // projection follow armed with brake-on-gate=TRUE — a normal stop at ProjC, NOT a pass-through.
+    ASSERT_TRUE(LineFollower.lastBrakeOnGate);
+
+    // Trip the projection distance gate: the FSM stops, dead-reckons the advance onto ProjC, and
+    // disables the follower. ProjC is NOT the goal, so the mission continues.
+    LineFollower.mockSetDistanceReached(true);
+    cooperativeTick();
+    ASSERT_EQ(Localization.getCurrentNode(), projC);
+    ASSERT_FALSE(LineFollower.isEnabled());
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // The onward ProjC->Cend hop is a plain BLIND dead-reckon (Cend is a blind node, no auto-seek):
+    // it pre-turns from the 270-facing to the BLIND heading, then drives forward. Feed both the turn
+    // settle (park the IMU at the edge heading) and the move retire (advance the encoder + done-bit)
+    // each tick until the node advances to Cend.
+    const int16_t cendHwHeading = hwYaw((int16_t) lroundf(FieldMap::getEdge(projC, cend).heading_deg));
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() != cend; ++i)
+    {
+        mmL.mockYawDeg = (double) cendHwHeading;
+        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.DriveDC.mockSetPrevTaskDone(true);
+        cooperativeTick();
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), cend);
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================
+// TC-PP5 — LINE->projection with a non-collinear LINE outbound flank: the gate
+//          DECLINES on condition 5 (the collinearity / same-direction check). Drives
+//          `goTo(Efar)` over `Inter3 -> ProjE -> Efar`: both flanks are LINE and Efar
+//          is a LINE junction (conditions 3 + 4 PASS), ProjE is NOT the goal (the
+//          not-final guard is not the decliner), but ProjE->Efar (heading 0) is a
+//          90 deg bend off the inbound Inter3->ProjE (heading 270) — so ONLY the
+//          collinearity check can reject, isolating condition 5. The FSM stops AT
+//          ProjE. (#112: the heading-half of the gate, previously a contrived unit
+//          probe, now exercised through the real FSM.)
+//
+// Scope: this asserts the gate DECISION (decline -> stop at ProjE). The onward
+// ProjE->Efar LINE hop (a real 90 deg pre-turn + line follow) is out of scope — the
+// next test's resetWorld() reclaims the mid-mission FSM.
+// ===========================================================================
+
+void test_TC_PP5_line_projection_non_collinear_flank_declines()
+{
+    TEST_SCOPE("TC-PP5: LINE->projection ProjE, non-collinear LINE flank -> gate declines (cond 5), stop at ProjE");
+
+    const uint8_t inter3 = nodeByName("Inter3");
+    const uint8_t projE  = nodeByName("ProjE");
+    const uint8_t efar   = nodeByName("Efar");
+
+    ASSERT_TRUE(inter3 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(projE != FieldMap::NODE_NONE);
+    ASSERT_TRUE(efar != FieldMap::NODE_NONE);
+
+    // Isolate the decline to condition 5 (non-collinear), NOT 3 / 4 / not-final:
+    //   - inbound Inter3->ProjE is LINE into a projection node (gate evaluated);
+    //   - ProjE is NOT the goal (Efar is) -> not the not-final guard (condition 2);
+    //   - the onward flank ProjE->Efar is a LINE edge -> condition 3 PASSES;
+    //   - Efar is a LINE junction node -> condition 4 PASSES;
+    //   - but ProjE->Efar (heading 0) is NOT collinear with Inter3->ProjE (heading 270):
+    //     |wrapDelta| == 90 deg > NAV_TURN_TOLERANCE_DEG -> ONLY condition 5 can reject.
+    ASSERT_TRUE(FieldMap::isProjectionNode(projE));
+    ASSERT_TRUE(FieldMap::getEdge(inter3, projE).type == Routes::EdgeType::LINE);
+    ASSERT_EQ(routedFirstHop(inter3, efar), projE);
+    ASSERT_EQ(routedFirstHop(projE, efar), efar);
+    ASSERT_TRUE(FieldMap::getEdge(projE, efar).type == Routes::EdgeType::LINE);
+    ASSERT_TRUE(FieldMap::getNodeType(efar) == Routes::NodeType::LINE);
+    const float bend = wrapDeltaDeg(FieldMap::getEdge(projE, efar).heading_deg
+                                    - FieldMap::getEdge(inter3, projE).heading_deg);
+    ASSERT_TRUE(fabsf(bend) > Config::NAV_TURN_TOLERANCE_DEG);
+    assertNoBypass(inter3, efar);    // the only route Inter3->Efar is THROUGH ProjE
+
+    // Inter3->ProjE departs heading 270; the helper settles the FRONT pre-turn before the follow.
+    driveToProjectionFollowHop("Inter3", "Efar");
+
+    // Precondition: PROJECTION_FOLLOW for Inter3->ProjE, still at Inter3, follower armed.
+    ASSERT_EQ(Localization.getCurrentNode(), inter3);
+    ASSERT_TRUE(LineFollower.isEnabled());
+    ASSERT_FALSE(LineFollower.lastOvershootMode);
+
+    // THE DECLINE ASSERT: every other gate condition passes, so brake-on-gate=TRUE here can only be
+    // the collinearity check (condition 5) rejecting the 90 deg bend — a normal stop at ProjE.
+    ASSERT_TRUE(LineFollower.lastBrakeOnGate);
+
+    // Trip the gate -> stop + dead-reckon advance onto ProjE, follower disabled. ProjE != goal, so
+    // the FSM did NOT pass through and is NOT done — it stopped at the projection and will continue.
+    LineFollower.mockSetDistanceReached(true);
+    cooperativeTick();
+    ASSERT_EQ(Localization.getCurrentNode(), projE);
+    ASSERT_FALSE(LineFollower.isEnabled());
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_FALSE(PathTracker.isIdle());    // a stop (decline), not a mission-end arrival
+}
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
 int main()
 {
-    std::printf("INFO: PathTracker line(Inter1)-projection(ProjL)-line(Inter2) "
-                "distance-gated pass-through (issue #106, T5b, TC-PP1/PP2/PP3) -- "
-                "real PathTracker + Drive + Localization over routes_fixture\n");
+    std::printf("INFO: PathTracker line(A)-projection(B)-line(C) distance-gated "
+                "pass-through (issue #106, T5b, TC-PP1..PP5; #112 decline branches) "
+                "-- real PathTracker + Drive + Localization over routes_fixture\n");
 
     test_routing_is_forced_through_projection_node();
     test_TC_PP1_distance_gated_pass_through_fires();
     test_TC_PP2_goto_projection_goal_stops_at_projection();
     test_TC_PP3_blind_flanked_projection_node_no_pass_through();
+    test_TC_PP4_line_projection_blind_flank_declines();
+    test_TC_PP5_line_projection_non_collinear_flank_declines();
 
     TEST_REPORT();
 }

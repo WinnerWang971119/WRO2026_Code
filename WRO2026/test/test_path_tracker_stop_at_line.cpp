@@ -92,16 +92,9 @@ namespace
 // ===========================================================================
 float driveToSeekInFlight(const char* startName, const char* goalName)
 {
-    resetWorld();
-
-    // `resetWorld()` re-`begin()`s Drive, but `Drive::begin()` does NOT clear a latched
-    // fault (the production fault-reset path is `clearFault()`, called by the operator /
-    // PathTracker, not by `begin()` — which runs once at boot with no fault). A prior case
-    // that drove Drive into `LINE_NOT_FOUND` (TC-SL2) would otherwise leak its fault into
-    // this seek, so clear both fault surfaces explicitly to keep the seek driver
-    // order-independent. (Test-local isolation only — no firmware/harness change.)
-    Drive.clearFault();
-    PathTracker.clearFault();
+    resetWorld();    // clears both Drive + PathTracker faults, so a prior TC-SL2 LINE_NOT_FOUND
+                     // cannot leak into this seek (the order-independence guarantee now lives in
+                     // the shared harness, not a per-driver workaround).
 
     seatAt(startName);    // bind world frame @ app-yaw 0 + declare Localization at the start node
 
@@ -316,6 +309,15 @@ void test_TC_SL3_seek_overshoot_trim_on_sensor_pivot()
     const float expectedCm = driveToSeekInFlight("Corner", "Zed");
     ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, 0u);
     ASSERT_FALSE(PathTracker.hasFault());    // no PIVOT_TRIM_UNDERFLOW: the trim fit the budget
+
+    // THE TRIM ASSERT (closes the TC-SL3 gap): observe the EXACT overshoot the real FSM fed the
+    // seek's `Drive.stopAtLine(...).setOvershoot(...)` — Drive captured it into `_stopOvershoot` at
+    // dispatch (Drive.cpp:1724), and `getStopOvershoot()` exposes it. It must equal the frozen
+    // resolver's offset-minus-trim (the same value asserted above), and be strictly below the
+    // untrimmed full axle offset. A regression that fed the full offset, fed 0, or skipped the trim
+    // entirely would change this value and fail here — the direct resolver call alone could not.
+    ASSERT_TRUE(std::fabs(Drive.getStopOvershoot() - trimmed.overshootCm) < 1e-4f);
+    ASSERT_TRUE(Drive.getStopOvershoot() < Config::LINE_SENSOR_AXLE_OFFSET_CM);
 
     // Retire the seek to a confirmed crossing; the harness rolls the overshoot to
     // DONE and asserts Drive latched the line. The re-anchor lands on ProjB.

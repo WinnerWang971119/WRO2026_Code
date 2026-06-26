@@ -788,6 +788,103 @@ static void tc20_start_clears_abort_latch()
 }
 
 // ===========================================================================
+// TC21 — setRouteDirection / setArrivalDirection write through to PathTracker.goTo
+//        at GOTO execute. (Restores the direction-modifier coverage the old
+//        test_path_tracker_bidirectional mirror deleted and wrongly claimed had
+//        moved here — #112 triage. Asserted against the REAL Mission this time.)
+// ===========================================================================
+
+static void tc21_direction_modifiers_write_through_to_goto()
+{
+    TEST_SCOPE("TC21 goTo().setRouteDirection(REAR).setArrivalDirection(FRONT) → both forwarded at execute");
+    resetAll();
+
+    const uint8_t inter1 = FieldMap::findNodeByName("Inter1");
+    ASSERT_TRUE(inter1 != FieldMap::NODE_NONE);
+
+    // Hold PathTracker busy so the GOTO step dispatches on ENTER and stays ACTIVE — ENTER is
+    // where Mission forwards the per-step direction overrides to PathTracker.goTo(...).
+    PathTracker.mockSetIdle(false);
+
+    Mission.goTo("Inter1").setRouteDirection(Direction::REAR).setArrivalDirection(Direction::FRONT);
+    Mission.start();
+
+    Mission.update();    // GOTO ENTER → goTo(goal).setRouteDirection(REAR).setArrivalDirection(FRONT)
+
+    ASSERT_EQ(PathTracker.goToCallCount, (uint16_t) 1);
+    ASSERT_EQ(PathTracker.lastGoToGoal, inter1);
+    ASSERT_TRUE(PathTracker.lastRouteDirection == Direction::REAR);
+    ASSERT_TRUE(PathTracker.lastArrivalDirection == Direction::FRONT);
+}
+
+// ===========================================================================
+// TC22 — direction modifiers are no-ops off a GOTO step: chained on a non-GOTO
+//        step they warn and must NOT corrupt an earlier GOTO; on an empty queue
+//        they warn "did not enqueue" (the _lastPushOk guard, Mission.cpp:124).
+// ===========================================================================
+
+static void tc22_direction_modifier_noop_off_goto()
+{
+    TEST_SCOPE("TC22 modifier off a GOTO → warns + leaves the earlier goTo at AUTO; empty queue warns");
+    resetAll();
+
+    const uint8_t inter1 = FieldMap::findNodeByName("Inter1");
+    ASSERT_TRUE(inter1 != FieldMap::NODE_NONE);
+
+    PathTracker.mockSetIdle(false);    // hold the GOTO ACTIVE after ENTER
+
+    // GOTO then PRINT, then chain the modifier on the PRINT: the last step is not a GOTO, so the
+    // modifier must no-op (warn) WITHOUT rewriting the earlier GOTO's direction (Mission.cpp:129).
+    Mission.goTo("Inter1");
+    Mission.print("x").setRouteDirection(Direction::REAR);
+    ASSERT_TRUE(serialHas("no preceding goTo step (ignored)"));
+
+    Mission.start();
+    Mission.update();    // GOTO ENTER → dispatch the earlier goTo, which stayed at AUTO (uncorrupted)
+    ASSERT_EQ(PathTracker.lastGoToGoal, inter1);
+    ASSERT_TRUE(PathTracker.lastRouteDirection == Direction::AUTO);
+
+    // Empty-queue modifier: nothing pushed, so the `!_lastPushOk` guard fires first with the
+    // "did not enqueue" message (begin() seeds _lastPushOk = false).
+    resetAll();
+    Mission.setArrivalDirection(Direction::REAR);
+    ASSERT_TRUE(serialHas("did not enqueue"));
+}
+
+// ===========================================================================
+// TC23 — a direction modifier targets the MOST-RECENT goTo only: a second goTo's
+//        setRouteDirection must not rewrite the first goTo's direction.
+// ===========================================================================
+
+static void tc23_direction_modifier_targets_last_goto_only()
+{
+    TEST_SCOPE("TC23 two goTos; setRouteDirection after the 2nd → only the 2nd is REAR, the 1st stays AUTO");
+    resetAll();
+
+    const uint8_t inter1 = FieldMap::findNodeByName("Inter1");
+    const uint8_t inter2 = FieldMap::findNodeByName("Inter2");
+    ASSERT_TRUE(inter1 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(inter2 != FieldMap::NODE_NONE);
+
+    PathTracker.mockSetIdle(false);    // hold goto #1 ACTIVE after its ENTER
+
+    Mission.goTo("Inter1");                                       // goto #1 — no modifier (AUTO)
+    Mission.goTo("Inter2").setRouteDirection(Direction::REAR);    // goto #2 — REAR
+    Mission.start();
+
+    Mission.update();    // goto #1 ENTER → dispatch
+    ASSERT_EQ(PathTracker.lastGoToGoal, inter1);
+    ASSERT_TRUE(PathTracker.lastRouteDirection == Direction::AUTO);    // #1 untouched by #2's modifier
+
+    // Let goto #1 arrive, then goto #2 dispatches with its own REAR override.
+    PathTracker.mockSetIdle(true);
+    Mission.update();    // goto #1 ACTIVE → idle → arrived → advance
+    Mission.update();    // goto #2 ENTER → dispatch
+    ASSERT_EQ(PathTracker.lastGoToGoal, inter2);
+    ASSERT_TRUE(PathTracker.lastRouteDirection == Direction::REAR);    // only #2 got REAR
+}
+
+// ===========================================================================
 // Entry point.
 // ===========================================================================
 
@@ -813,6 +910,9 @@ int main()
     tc18_declare_position_clears_faults();
     tc19_queue_overflow_rejected();
     tc20_start_clears_abort_latch();
+    tc21_direction_modifiers_write_through_to_goto();
+    tc22_direction_modifier_noop_off_goto();
+    tc23_direction_modifier_targets_last_goto_only();
 
     TEST_REPORT();
 }
