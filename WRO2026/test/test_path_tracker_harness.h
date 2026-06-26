@@ -638,6 +638,16 @@ namespace path_harness
 ///        real-FSM regression that never idles still fails as a budget-exhausted assert, not a hang.
 constexpr int kMaxWallStopTicks = 256;
 
+/// @brief Number of extra progress ticks the STALL-SUCCESS path runs (after the wall-stop is
+///        dispatched out of IDLE) to guarantee the FSM has advanced SQUARE -> PUSH and run at
+///        least one PUSH progress tick, re-baselining the no-progress watchdog (`_wallLastProgressMs`)
+///        to the LIVE clock BEFORE the single stall-window jump. The wall-stop needs: one tick to
+///        dispatch the queued push into SQUARE (the no-op turn short-circuits, since the facing is
+///        already parked), one tick for `_updateWallStop` to seed SQUARE -> PUSH, and one PUSH tick
+///        to register progress. 4 clears that 3-tick worst case with a margin, and a frozen-encoder
+///        regression that idles early simply exits the trailing stall loop sooner — never a hang.
+constexpr int kWallPushSettleTicks = 4;
+
 /// @brief Clock step (ms) per ADVISORY-path PUSH tick in `expectWallStop`. Kept STRICTLY BELOW
 ///        `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` (= 1500) so the inner stall watchdog can never
 ///        trip between two progress ticks — the advisory branch re-baselines the watchdog every
@@ -684,15 +694,26 @@ constexpr int kMaxOffsetPushTicks = 256;
  *      harness (CONTRACT 2 / `expectPreTurn`), it settles only if `mmL.mockYawDeg` is parked at the
  *      hardware-frame facing EACH tick — so park `hwYaw(wallFacingAppDeg)` and advance the clock in
  *      SMALL `kMillisPerTick` steps until `Drive.isTurnDone()` (the SQUARE turn reached BRAKE, OR was
- *      a no-op turn that short-circuited at dispatch). On that same tick `_updateWallStop` sees the
- *      turn idle and seeds the PUSH watchdogs from the CURRENT (still-small) clock, so the big clock
- *      advance below cannot retroactively trip the SQUARE turn's stall watchdog.
+ *      a no-op turn that short-circuited at dispatch). NOTE: this loop can exit with the wall-stop
+ *      still QUEUED (not yet dispatched) when `Drive.isTurnDone()` was ALREADY true from the inbound
+ *      hop — the dispatch + SQUARE -> PUSH seeding then happen inside Phase 2's warm-up, which is why
+ *      Phase 2 (stall-success) seeds the PUSH watchdogs from a LIVE clock before any big jump rather
+ *      than assuming they were seeded here.
  *   2. **Retire the PUSH** per @p timedOut:
- *        - `timedOut == false` (stall-success): step `MiniR4.M2` ONCE past
- *          `Config::STOP_AT_LINE_PROGRESS_EPS_CM` (resets the no-progress baseline at the current
- *          clock), HOLD it (no further encoder motion = wheels stalled against the wall), then
- *          advance the clock past `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` so the next PUSH tick
- *          confirms the stall -> BACK_OFF. Back-off is 0 here (`_dispatchWallStop` `.setBackOff(0)`),
+ *        - `timedOut == false` (stall-success): the wall-stop is typically STILL QUEUED after
+ *          Phase 1 — the inbound hop already left `Drive.isTurnDone()` true, so the Phase-1 settle
+ *          loop exited WITHOUT ticking the queued push through its dispatch + SQUARE -> PUSH
+ *          transitions. So FIRST warm up the PUSH: advance `MiniR4.M2`/`M3` by a real progress step
+ *          (> `Config::STOP_AT_LINE_PROGRESS_EPS_CM`) EVERY tick until the push is dispatched out of
+ *          IDLE (`!Drive.isIdle()`), then a fixed `path_harness::kWallPushSettleTicks` more progress
+ *          ticks so `_updateWallStop` has advanced SQUARE -> PUSH and run at least one PUSH progress
+ *          tick — re-baselining the no-progress watchdog `_wallLastProgressMs` to the LIVE
+ *          (still-small) clock. ONLY THEN HOLD the encoder (no further motion = wheels stalled
+ *          against the wall) and jump the clock once past `Config::STOP_AT_LINE_STALL_TIMEOUT_MS`,
+ *          so the next PUSH tick confirms the stall -> BACK_OFF. (Seeding the watchdog from a
+ *          CURRENT clock is load-bearing: if the jump preceded the SQUARE -> PUSH seed, the seed
+ *          would capture the already-jumped clock and the frozen encoder could never accrue a full
+ *          stall window within budget.) Back-off is 0 here (`_dispatchWallStop` `.setBackOff(0)`),
  *          so BACK_OFF falls straight through to DONE. `wallStopTimedOut()` stays false.
  *        - `timedOut == true` (advisory): the GENUINE "wheels turned freely, never reached the wall"
  *          scenario (Drive.cpp:1482). The stall gate (`now - _wallLastProgressMs >= 1500`) is checked
@@ -727,33 +748,62 @@ constexpr int kMaxOffsetPushTicks = 256;
 inline void expectWallStop(int16_t wallFacingAppDeg, bool timedOut)
 {
     // --- Phase 1: settle the internal SQUARE turn (park the wall facing every tick, small clock
-    // steps). One tick dispatches the queued wallStop (pops it, enters SQUARE); the loop then
-    // settles the in-place turn. `isTurnDone()` reads true once the SQUARE turn BRAKEs (or was a
-    // no-op turn that short-circuited at dispatch) — and on that same tick `_updateWallStop` has
-    // already advanced SQUARE -> PUSH, seeding the push watchdogs from the current small clock.
+    // steps). One tick lets the queued wallStop dispatch (pops it, enters SQUARE — a no-op turn
+    // short-circuits at dispatch since the facing is already parked); the loop then settles any
+    // real in-place turn. `isTurnDone()` reads true once the SQUARE turn BRAKEs (or was the no-op).
+    // NOTE: when `isTurnDone()` was ALREADY true from the inbound hop, this loop exits with the
+    // wall-stop still QUEUED (un-dispatched) — Phase 2 (stall-success) then drives the dispatch +
+    // SQUARE -> PUSH seeding itself, from a live clock, before any big stall-window jump.
     mmL.mockYawDeg = (double) hwYaw(wallFacingAppDeg);
-    cooperativeTick();    // dispatch the queued wallStop -> SQUARE (or straight to PUSH if no-op).
+    cooperativeTick();    // let the queued wallStop dispatch -> SQUARE (or stay queued if idle already).
 
     for (int i = 0; i < path_harness::kMaxWallStopTicks && !Drive.isTurnDone(); ++i)
     {
         mmL.mockYawDeg = (double) hwYaw(wallFacingAppDeg);    // re-park EVERY tick (CONTRACT 2).
         cooperativeTick();
     }
-    ASSERT_TRUE(Drive.isTurnDone());    // SQUARE settled; PUSH is under way.
+    ASSERT_TRUE(Drive.isTurnDone());    // SQUARE settled (or the no-op turn short-circuited).
 
     // --- Phase 2: retire the PUSH. The seek/wall watchdogs compare `traveled` (M2 encoder delta from
     // the push baseline) and the clock; the mock has no physics, so the encoder is driven explicitly.
     if (!timedOut)
     {
-        // Stall-success: register ONE progress step so the no-progress watchdog re-baselines at the
-        // current clock, then HOLD the encoder (stalled) and jump the clock past the stall window. A
-        // single `cooperativeTick()` lets the PUSH tick observe the progress + reset its mark.
-        MiniR4.M2.mockAdvanceDegrees(
-            (int32_t) cmToEncDeg(Config::STOP_AT_LINE_PROGRESS_EPS_CM + 1.0f));
-        cooperativeTick();    // PUSH observes progress -> resets `_wallLastProgressMs` to now.
+        // Stall-success.
+        //
+        // After Phase 1 the wall-stop is NOT yet in its PUSH phase: the inbound hop already left
+        // `Drive.isTurnDone()` true, so the Phase-1 settle loop exited without ticking the
+        // wall-stop through its dispatch + SQUARE -> PUSH transitions. The queued wall-stop is
+        // dispatched on the FIRST tick below (`_isIdle() && _qCount > 0` -> SQUARE, a no-op turn
+        // since the facing is already parked), and `_updateWallStop` advances SQUARE -> PUSH a
+        // tick later, seeding the no-progress watchdog (`_wallLastProgressMs`) at the clock AT THAT
+        // TICK. If the big stall-window jump happened BEFORE the watchdog was seeded, the seed
+        // would capture the already-jumped clock and the stall could never trip within budget.
+        //
+        // So WARM UP the PUSH first with `kWallPushSettleTicks` progress ticks, each advancing
+        // `MiniR4.M2`/`M3` by a real progress step. The wall-stop is QUEUED at Phase 2 entry (the
+        // inbound hop left `Drive.isTurnDone()` true, so Phase 1 exited without ticking it past
+        // dispatch — `Drive.isIdle()` is already false here because the queue is non-empty). Tick 1
+        // dispatches it (`_isIdle() && _qCount > 0` -> SQUARE, a no-op turn since the facing is
+        // parked), tick 2 advances SQUARE -> PUSH (seeding the no-progress watchdog
+        // `_wallLastProgressMs` at the live clock), and the remaining ticks run PUSH progress so the
+        // mark sits at ~now. Only then freeze the encoder (wheels stalled against the wall) and jump
+        // the clock once past the stall window — the next PUSH tick confirms the stall -> BACK_OFF ->
+        // (back-off 0) -> DONE, all from a CURRENT baseline (a pre-seed jump could never trip it in
+        // budget). A fixed count is correct and deterministic: tick 1 dispatch, tick 2 SQUARE->PUSH,
+        // the rest PUSH progress — `kWallPushSettleTicks` covers it with margin for any entry state.
+        const int32_t progressStepEnc =
+            (int32_t) cmToEncDeg(Config::STOP_AT_LINE_PROGRESS_EPS_CM + 1.0f);
 
-        // Encoder now held (no further advance) => stalled. Jump the clock past the stall timeout so
-        // the next PUSH tick confirms the stall -> BACK_OFF -> (back-off 0) -> DONE.
+        for (int i = 0; i < path_harness::kWallPushSettleTicks; ++i)
+        {
+            mmL.mockYawDeg = (double) hwYaw(wallFacingAppDeg);
+            MiniR4.M2.mockAdvanceDegrees(progressStepEnc);
+            MiniR4.M3.mockAdvanceDegrees(progressStepEnc);
+            cooperativeTick();
+        }
+
+        // (c) Encoder now held (no further advance) => stalled. Jump the clock past the stall
+        //     timeout so the next PUSH tick confirms the stall -> BACK_OFF -> DONE.
         mockAdvanceMillis(Config::STOP_AT_LINE_STALL_TIMEOUT_MS + 1);
 
         for (int i = 0; i < path_harness::kMaxWallStopTicks && !Drive.isIdle(); ++i)
