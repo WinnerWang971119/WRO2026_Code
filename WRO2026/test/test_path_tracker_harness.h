@@ -889,6 +889,10 @@ inline void expectWallStop(int16_t wallFacingAppDeg, bool timedOut)
  *          inactive; `resetWorld()` leaves it inactive and a tick with the FSM IDLE keeps it so), and
  *          BEFORE `goTo(...)`, which re-activates nav and freezes the offset for the DEQUEUE
  *          return-gate read.
+ * @note    Callers must keep @p targetCm comfortably below `Config::RETURN_DISTANCE_CAP_CM` (50):
+ *          the loop overshoots the target by at most one `kOffsetPushStepCm` step, so a target near
+ *          the cap could nudge the achieved magnitude over it into the OVER_CAP gate path. The
+ *          current call sites (6 and 20 cm) sit well under the cap.
  */
 inline float pushOperatorOffset(float targetCm, int16_t alongAppHeadingDeg = 0)
 {

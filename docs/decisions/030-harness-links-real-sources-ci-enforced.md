@@ -1,6 +1,6 @@
 # ADR-030: The host-compile harness links the real production symbols, CI-enforced
 
-**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), real `PathTracker.cpp` / `Drive.cpp` (#106), and the two former mirror slices `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` (#113) are all linked from production — zero mirrored FSM logic remains across the host suite.)
+**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), real `PathTracker.cpp` / `Drive.cpp` (#106), and the two former mirror slices `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` (#113) are all linked from production — zero mirrored PathTracker FSM logic remains. The sole remaining inline mirror is the Drive wall-stop watchdog slice in `test_wall_stop_watchdog`.)
 **Date decided:** 2026-06 (PR-35 trace-findings fix rollout)
 **Implemented:** 2026-06 (#106 — real `PathTracker.cpp` / `Drive.cpp` host-link)
 
@@ -58,7 +58,12 @@ push and PR turns the harness from documentation into an enforced contract.
   into a strict-OFF case + a `test_path_tracker_reset_arrival_strict` sibling for
   strict-ON) and `test_return_to_node_dispatch` have been rewritten to host-link
   the real `PathTracker.cpp` and drive the real FSM — every `// MIRROR:` slice is
-  deleted. Zero mirrored FSM logic remains across the whole host suite.
+  deleted. Zero mirrored PathTracker FSM logic remains. The only inline mirror
+  still in the host suite is the Drive wall-stop watchdog slice in
+  `test_wall_stop_watchdog` (its `stopAtLineProgressed` / `stopAtLineStalled`
+  primitives are shared with production via `WROMath.h`, not byte-copied). Now that
+  `expectWallStop` drives the real `_updateWallStop` end-to-end through the
+  reset-arrival tests, retiring that last mirror is a possible follow-up.
 
 ## Trigger to revisit
 
@@ -86,4 +91,4 @@ push and PR turns the harness from documentation into an enforced contract.
 - `WRO2026/DirectionPolicy.h` — the header-only `inline` shared-symbol pattern.
 - `WRO2026/test/CMakeLists.txt` — the ctest target list the job runs.
 - `WRO2026/test/test_mission_dispatch.cpp` — the Phase 2 target linking real `Mission.cpp`.
-- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources); issue #113 (`reset_arrival` + `return_to_node_dispatch` de-mirrored, landed — zero mirrored FSM logic remains).
+- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources); issue #113 (`reset_arrival` + `return_to_node_dispatch` de-mirrored, landed — zero mirrored PathTracker FSM logic remains; the Drive wall-stop watchdog mirror in `test_wall_stop_watchdog` is the last inline mirror).
