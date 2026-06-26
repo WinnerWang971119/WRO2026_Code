@@ -2,18 +2,20 @@
  * @file Arduino.h (HOST MOCK)
  * @brief Host-compile shim for the Arduino core runtime.
  *
- * Provides just enough of the Arduino API surface for `LineFollower.cpp` to compile
- * on a host x86 toolchain (MSVC / gcc / clang) without any Arduino hardware
- * dependency. This file replaces `<Arduino.h>` because `WRO2026/test/mocks/` is
- * the FIRST entry on the include path.
+ * Provides just enough of the Arduino API surface for the host-linked production
+ * sources (`LineFollower.cpp`, and — since #106 — the real `Drive.cpp` /
+ * `PathTracker.cpp`) to compile on a host x86 toolchain (MSVC / gcc / clang) without
+ * any Arduino hardware dependency. This file replaces `<Arduino.h>` because
+ * `WRO2026/test/mocks/` is the FIRST entry on the include path.
  *
  * Only the symbols actually referenced from `LineFollower.cpp`, `Config.h`,
- * `WROMath.h`, and the mock Drive/LineArray/Intersection are stubbed:
+ * `WROMath.h`, the real `Drive.cpp` / `PathTracker.cpp`, and the mock
+ * Drive/LineArray/Intersection are stubbed:
  *
  *   - basic fixed-width integer types (via `<stdint.h>`)
  *   - `PI`, `abs()` macros
  *   - `delay` (advances the mock clock), `millis`, `yield`
- *   - `F()` flash-string macro (host: returns its argument unchanged)
+ *   - `F()` flash-string macro (host: casts to `const __FlashStringHelper*`, as on real Arduino)
  *   - a `Serial` singleton whose `print`/`println` overloads capture all
  *     written text into an inspectable buffer (`Serial.captured()`)
  *
@@ -43,6 +45,22 @@
 #ifndef PI
 #define PI 3.14159265358979323846
 #endif
+
+// ---------------------------------------------------------------------------
+// `__FlashStringHelper` — incomplete forward declaration (#106).
+//
+// Real Arduino declares this as an opaque class used only through pointers: a
+// flash-string literal wrapped by `F(...)` is a `const __FlashStringHelper*`,
+// and `Print::print(const __FlashStringHelper*)` reads it from PROGMEM. The
+// first host-linked production `.cpp`s that use this surface are `Drive.cpp`
+// and `PathTracker.cpp` (#106): two PathTracker diagnostic helpers take a
+// `const __FlashStringHelper* site/adrTag` parameter, and the `F()` macro below
+// now yields that pointer type so those parameters match their call args. Since
+// the type is only ever used as a pointer, an incomplete (forward-declared)
+// type is sufficient — no members are needed.
+// ---------------------------------------------------------------------------
+
+class __FlashStringHelper;
 
 // ---------------------------------------------------------------------------
 // `abs(x)` — Arduino's avr-libc defines `abs` as a function-like MACRO. On
@@ -113,11 +131,24 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 }
 
 // ---------------------------------------------------------------------------
-// `F()` flash-string macro — on host we just pass through the C-string literal.
+// `F()` flash-string macro (#106).
+//
+// Real Arduino defines `F(s)` as `reinterpret_cast<const __FlashStringHelper*>(s)`
+// so a wrapped literal carries the flash-string TYPE, which selects the PROGMEM
+// `Print::print` overload. We now mirror that exactly (instead of the former
+// passthrough `(string_literal)`) because `PathTracker.cpp` passes `F("...")`
+// into helper params typed `const __FlashStringHelper*` (e.g. `_printReverse-
+// Unavailable`, `_printOvershootTrimUnderflow`); with the old passthrough the
+// arg was `const char*` and the param type would not match. The cast back to
+// `const char*` happens in `MockSerial`'s `__FlashStringHelper*` overloads
+// below, so captured text is byte-for-byte identical to the old `const char*`
+// path. No test `.cpp` consumes an `F(...)` result as a `const char*` (verified),
+// so this type change is regression-safe. The macro is defined only here — no
+// real `<Arduino.h>` competes for the name.
 // ---------------------------------------------------------------------------
 
 #ifndef F
-#define F(string_literal) (string_literal)
+#define F(string_literal) (reinterpret_cast<const __FlashStringHelper*>(string_literal))
 #endif
 
 // ---------------------------------------------------------------------------
@@ -148,7 +179,57 @@ inline void mockAdvanceMillis(uint32_t deltaMs)
 // overload, so no distinct `uint16_t` overload is needed. No `char` overload is
 // added because no caller prints a bare `char` — adding one would make
 // `print(uint8_t)` ambiguous since `uint8_t == unsigned char`.
+//
+// #106 additions (real Drive.cpp / PathTracker.cpp link):
+//   - `print/println(const __FlashStringHelper*)`: a flash-string wrapped by the
+//     `F(...)` macro now has this pointer type. The overload reinterpret_casts it
+//     back to `const char*` and appends IDENTICALLY to the `const char*` overload
+//     (same null-guard, same bytes), so every existing `Serial.print(F("..."))`
+//     captures exactly the text it did before — the key no-regression property.
+//   - radix constants `DEC/HEX/OCT/BIN` + `print/println(uint8_t, int base)`:
+//     `Drive.cpp:1788` does `Serial.println(rc, HEX)` where `rc` is `uint8_t`,
+//     formatting the lower-MCU result code in hex. ONLY the exact `uint8_t` base
+//     overload is added — a generic `(int, int)` or `(float, int)` base overload
+//     would make `(rc, HEX)` ambiguous (uint8_t->int and uint8_t->float are both
+//     conversions, and `print(float, int=2)` already exists). The 1-arg integer
+//     and float overloads above are left untouched.
 // ---------------------------------------------------------------------------
+
+// Radix bases for the `(value, base)` print overloads. Real Arduino exposes these
+// as plain ints (`#define`s in `Print.h`); an unnamed enum gives the same int
+// values without polluting the namespace with macros. `Serial.println(rc, HEX)`
+// (Drive.cpp:1788) is the sole current user.
+enum
+{
+    DEC = 10,
+    HEX = 16,
+    OCT = 8,
+    BIN = 2
+};
+
+// Format `value` as text in `base` (2/8/10/16, like Arduino's `Print`). Lower-case
+// hex digits, no `0x` prefix — the caller emits its own prefix (Drive.cpp prints
+// "rc=0x" then `println(rc, HEX)`). `base <= 1` falls back to decimal. Free helper
+// (not a member) so both `MockSerial` base overloads share one implementation.
+inline std::string mockFormatRadix(unsigned long value, int base)
+{
+    if (base <= 1)
+    {
+        return std::to_string(value);
+    }
+    if (value == 0)
+    {
+        return std::string("0");
+    }
+    static const char digits[] = "0123456789abcdef";
+    std::string       out;
+    while (value != 0)
+    {
+        out.push_back(digits[value % static_cast<unsigned long>(base)]);
+        value /= static_cast<unsigned long>(base);
+    }
+    return std::string(out.rbegin(), out.rend());
+}
 
 class MockSerial
 {
@@ -157,11 +238,25 @@ public:
 
     // --- print: append text, no trailing newline. ---
     void print(const char* s) { if (s != nullptr) _captured.append(s); }
+    // Flash-string overload (#106): `F("...")` is a `const __FlashStringHelper*`;
+    // cast back to `const char*` and append IDENTICALLY to the `const char*` path
+    // (same null-guard, same bytes) so captured text is byte-for-byte unchanged.
+    void print(const __FlashStringHelper* s)
+    {
+        const char* p = reinterpret_cast<const char*>(s);
+        if (p != nullptr)
+        {
+            _captured.append(p);
+        }
+    }
     void print(int n) { _captured.append(std::to_string(n)); }
     void print(unsigned int n) { _captured.append(std::to_string(n)); }
     void print(long n) { _captured.append(std::to_string(n)); }
     void print(unsigned long n) { _captured.append(std::to_string(n)); }
     void print(uint8_t n) { _captured.append(std::to_string(static_cast<unsigned>(n))); }
+    // Radix overload (#106) — exact `uint8_t` match for `Serial.print(rc, HEX)`-style
+    // calls. Only `uint8_t` is provided so `(rc, HEX)` is unambiguous (see header note).
+    void print(uint8_t n, int base) { _captured.append(mockFormatRadix(n, base)); }
     void print(float v, int /*decimals*/ = 2) { _captured.append(std::to_string(v)); }
 
     // --- println: append text, then a single '\n'. ---
@@ -174,6 +269,17 @@ public:
         }
         _captured.push_back('\n');
     }
+    // Flash-string overload (#106): mirrors `println(const char*)` after casting the
+    // `F("...")` pointer back to `const char*` — same bytes, then a single '\n'.
+    void println(const __FlashStringHelper* s)
+    {
+        const char* p = reinterpret_cast<const char*>(s);
+        if (p != nullptr)
+        {
+            _captured.append(p);
+        }
+        _captured.push_back('\n');
+    }
     void println(int n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
     void println(unsigned int n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
     void println(long n) { _captured.append(std::to_string(n)); _captured.push_back('\n'); }
@@ -181,6 +287,13 @@ public:
     void println(uint8_t n)
     {
         _captured.append(std::to_string(static_cast<unsigned>(n)));
+        _captured.push_back('\n');
+    }
+    // Radix overload (#106) — the call that motivated this change: `Drive.cpp:1788`
+    // `Serial.println(rc, HEX)`, `rc` typed `uint8_t`. Format in `base`, then '\n'.
+    void println(uint8_t n, int base)
+    {
+        _captured.append(mockFormatRadix(n, base));
         _captured.push_back('\n');
     }
     void println(float v, int /*decimals*/ = 2)
@@ -271,6 +384,9 @@ public:
     size_t write(uint8_t /*b*/) { return 1; }
     size_t write(const uint8_t* /*buf*/, size_t n) { return n; }
     void   print(const char* /*s*/) {}
+    // Flash-string no-op (#106): defensive symmetry so `Serial1.print(F("..."))` still
+    // compiles after the `F()` macro yields `const __FlashStringHelper*`. TX is unused.
+    void   print(const __FlashStringHelper* /*s*/) {}
     void   print(int /*n*/) {}
     void   print(unsigned int /*n*/) {}
     void   print(long /*n*/) {}
@@ -278,6 +394,7 @@ public:
     void   print(uint8_t /*n*/) {}
     void   println() {}
     void   println(const char* /*s*/) {}
+    void   println(const __FlashStringHelper* /*s*/) {}    // (#106) — see print() above.
     void   println(int /*n*/) {}
     void   println(unsigned int /*n*/) {}
     void   println(long /*n*/) {}

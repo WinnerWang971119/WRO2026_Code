@@ -496,6 +496,20 @@ public:
     bool isLineFound() const;
 
     /**
+     * @brief The overshoot distance the in-flight (or most recent) `stopAtLine` seek rolls past
+     *        the line after detection (cm).
+     *
+     * Captured at seek dispatch from the builder's `setOvershoot(...)` (default
+     * `Config::LINE_SENSOR_AXLE_OFFSET_CM`); the `OVERSHOOT` phase rolls this far past the
+     * confirmed crossing before finishing. Exposed so a host test can assert the value a higher
+     * layer (e.g. PathTracker's pivot-trim dispatch) fed the seek, which is otherwise private state.
+     *
+     * @return The dispatched overshoot in cm. Meaningful only after a `stopAtLine` has been
+     *         dispatched; reads the default before the first seek.
+     */
+    float getStopOvershoot() const;
+
+    /**
      * @brief Advisory result of the most recent `wallStop` move (AC8): did it time out without
      *        ever stalling against a wall?
      *

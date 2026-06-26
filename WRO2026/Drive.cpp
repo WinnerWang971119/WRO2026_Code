@@ -472,6 +472,11 @@ bool DriveClass::isLineFound() const
     return _isLineFound;
 }
 
+float DriveClass::getStopOvershoot() const
+{
+    return _stopOvershoot;
+}
+
 bool DriveClass::wallStopTimedOut() const
 {
     return _wallStopTimedOut;

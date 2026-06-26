@@ -21,6 +21,10 @@ stress map (not a 7-node toy):
     collinear ``line-projection-line`` triple (distance-gated pass-through);
   * a LINE->projection hop (distance-terminated) and a BLIND->projection hop
     (auto-seek + re-anchor, ``BLIND_PROJECTION_AUTO_SEEK``);
+  * two LINE->projection hops whose OUTBOUND flank makes the line-projection
+    pass-through gate DECLINE -- a BLIND flank (``Inter2->ProjC->Cend``, condition 3)
+    and a non-collinear LINE flank (``Inter3->ProjE->Efar``, condition 5) -- so both
+    gate-decline branches are reachable by the real FSM (#112);
   * two single-wheel pivot turns -- one ``line`` regime (LINE legs) and one
     ``sensor`` regime (BLIND auto-seek into a projection node);
   * per-edge ``EDGES`` overrides -- ``primitive_mode`` (a ``LineMode`` and a
@@ -34,13 +38,35 @@ and the identical ``Routes::`` ABI, so the CMake harness force-includes it ahead
 of the sketch ``routes.h`` to shadow the production data for those targets only.
 
 Decoupling contract (issue #91): NO test depends on this field's SHAPE. The host
-tests resolve only the nodes they need BY NAME -- ``Wall1`` (RESET), ``Inter1``
-(LINE), ``Start`` (BLIND spawn), ``final`` (BLIND) -- with zero assumptions about
-node indices, the total count, or which other nodes exist. Those four names are
-the only stable contract; everything else here may be freely edited/extended
-without touching a single test. (Keep ``Wall1`` at its coords + reset record:
-``test_reanchor_at_wall`` checks the believed-coordinate post-condition against
-``wall_coord 154`` over node y ``139``.)
+tests resolve only the nodes they need BY NAME, with zero assumptions about node
+indices, the total count, or which other nodes exist. The original four anchors
+were ``Wall1`` (RESET), ``Inter1`` (LINE), ``Start`` (BLIND spawn), and ``final``
+(BLIND), used by ``reanchor_at_wall[_strict]``, ``path_tracker_reset_arrival``,
+``return_to_node_dispatch``, and the ``ctps_dump`` self-test.
+
+Issue #106 added five PathTracker mirror tests that host-link the real
+``PathTracker.cpp`` + ``Drive.cpp`` and consolidate onto this fixture, resolving
+ten nodes BY NAME:
+
+  * ``passthrough`` -- ``Inter2``, ``Inter3``, ``Inter4`` (line-line-line);
+  * ``pass_through_projection`` -- ``Inter1``, ``ProjL``, ``Inter2`` (line-proj-line),
+    plus ``ProjC`` / ``Cend`` (BLIND-flank decline) and ``ProjE`` / ``Efar``
+    (non-collinear-LINE-flank decline), #112;
+  * ``projection`` -- ``Inter1``, ``ProjL`` (LINE->proj), ``Corner``, ``ProjB``
+    (BLIND->proj auto-seek);
+  * ``stop_at_line`` -- ``Start``, ``Inter1`` (BLIND seek), ``Corner``, ``ProjB``,
+    ``Zed`` (the sensor-regime pivot);
+  * ``bidirectional`` -- ``Inter1``, ``Spur`` (rear-override LINE).
+
+So the full stable-name contract is sixteen names: ``Start``, ``Inter1``,
+``ProjL``, ``Inter2``, ``Inter3``, ``Inter4``, ``Corner``, ``Spur``, ``ProjB``,
+``Zed`` (the #106 set), the #112 decline-branch nodes ``ProjC`` / ``Cend`` /
+``ProjE`` / ``Efar``, plus the original ``Wall1`` (RESET) and ``final``
+(BLIND). Renaming any of these breaks a test that resolves it by name; everything
+else here (node count, the other nodes, coordinates that no test pins) may be
+freely edited/extended without touching a single test. (Keep ``Wall1`` at its
+coords + reset record: ``test_reanchor_at_wall`` checks the believed-coordinate
+post-condition against ``wall_coord 154`` over node y ``139``.)
 
 The output is committed and frozen. Re-run this ONLY when the ``routes.h`` SCHEMA
 changes (a new ``EdgeInfo`` field, an enum value, etc.) makes the committed fixture
@@ -100,6 +126,12 @@ _NODES = {
     "Wall2":     (60.0, 110.0),   # RESET, x-wall
     "ProjB":     (300.0, 100.0),  # PROJECTION reached by a BLIND edge (auto-seek)
     "Zed":       (300.0, 40.0),   # BLIND (outgoing leg of the sensor-regime pivot)
+    # LINE-reached projection nodes whose OUTBOUND flank makes the line-projection
+    # pass-through gate DECLINE -- the two branches no triple above exercises (#112):
+    "ProjC":     (140.0, 10.0),   # PROJECTION (LINE-reached) with a BLIND outbound flank (cond-3)
+    "Cend":      (180.0, 10.0),   # BLIND leaf goal past ProjC (forces proj != goal, isolates cond-3)
+    "ProjE":     (200.0, 10.0),   # PROJECTION (LINE-reached) with a non-collinear LINE flank (cond-5)
+    "Efar":      (240.0, 10.0),   # LINE leaf goal past ProjE (cond-4 passes; isolates cond-5)
 }
 
 _NODE_TYPES = {
@@ -109,6 +141,8 @@ _NODE_TYPES = {
     "final": "blind", "position1": "blind",
     "Wall1": "reset", "Wall2": "reset",
     "ProjB": "projection", "Zed": "blind",
+    "ProjC": "projection", "Cend": "blind",
+    "ProjE": "projection", "Efar": "line",
 }
 
 # LINE edges (line-follow). Never incident to a blind/reset node. The main line
@@ -119,6 +153,11 @@ _LINE_SEGMENTS = [
     ("Inter2", "Inter3"), ("Inter3", "Inter4"),  # line-line-line (Inter2->Inter3->Inter4)
     ("Inter4", "Corner"),                          # vertical (pivot outgoing leg)
     ("Inter1", "Spur"),                            # spur (rear-override edge)
+    # LINE hops INTO projection nodes whose outbound flank declines pass-through (#112).
+    # Both depart their main-line junction heading 270 (straight down, off the y=40 line)
+    # so a test can seat the chassis facing 270 and skip the pre-turn.
+    ("Inter2", "ProjC"),                           # LINE -> projection; ProjC's flank is BLIND (cond-3)
+    ("Inter3", "ProjE"), ("ProjE", "Efar"),        # LINE -> projection -> LINE, 90deg bend (cond-5)
 ]
 
 # BLIND edges (dead-reckon). Free to touch any node type.
@@ -131,6 +170,7 @@ _BLIND_EDGES = [
     ("position1", "Wall1"),    # reach the y-wall reset node
     ("Corner", "ProjB"),       # BLIND -> projection (auto-seek)
     ("ProjB", "Zed"),          # projection -> blind (sensor-pivot outgoing leg)
+    ("ProjC", "Cend"),         # projection -> blind: the non-LINE outbound flank (cond-3 decline)
 ]
 
 # Single-wheel pivots (u, v, w). One LINE-regime turn and one SENSOR-regime turn.
