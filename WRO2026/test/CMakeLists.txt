@@ -981,36 +981,41 @@ target_include_directories(test_return_to_node_policy PRIVATE ${COMMON_INCLUDES}
 add_test(NAME return_to_node_policy COMMAND test_return_to_node_policy)
 
 # =========================================================================================
-# Test executable #12 — return-to-node NODE-KIND dispatch slice (issue #36, PR1b, T8/T10).
+# Test executable #12 — RETURN_TO_NODE per-kind dispatch, real-linked (issue #36 / #113).
 #
-# Two layers (see the test file docblock):
-#   - TC4 / TC4c: the `_returnUsesLineSeek` decision (LINE-vs-BLIND node kind AND the
-#     return-distance vs axle-lead gate, #14) is tested DIRECTLY against the REAL
-#     `FieldMap::getNodeType` over the REAL `routes.cpp` graph data and the REAL
-#     `Config::LINE_SENSOR_AXLE_OFFSET_CM` (the toy fixture carries both kinds) — not a tautology.
-#   - TC4b: the per-kind RETURN_TO_NODE state-body routing is inline-MIRRORED (annotated
-#     `// MIRROR: PathTracker.cpp:<line>`), following the precedent of
-#     `test_path_tracker_stop_at_line` — the full `PathTracker.cpp` is NOT linked by ANY host
-#     target. The full FSM transition + the Drive builder chain + axle-on-node geometry are
-#     delegated to the Python sim parity test (T11) and the firmware compile.
+# DE-MIRRORED onto the real FSM (#113): this target was a PURE-DATA target (it linked NO
+# real SUT — only `routes_fixture.cpp` + `MOCK_SOURCES` — and inline-MIRRORED the per-kind
+# routing as `replica_returnTick`). It now host-links the REAL `PathTracker.cpp` +
+# `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` on the shared issue-#106 recipe and
+# drives the genuine RETURN_TO_NODE state body: LINE-seek-return success/no-line, the
+# short-LINE dead-reckon gate, and the BLIND dead-reckon return — all over the real frozen
+# resolver and the real `Localization` offset integrator.
 #
-# Links `routes.cpp` (the sole definer of the `Routes::NODES` / `N_NODES` data that
-# `FieldMap::getNodeType` odr-uses) + `MOCK_SOURCES` (for the `Serial` / `MiniR4` globals the
-# mock `<Arduino.h>` / `<MatrixMiniR4.h>` — pulled in transitively by `PathTracker.h` /
-# `FieldMap.h` — declare `extern`). The `mocks/`-first `COMMON_INCLUDES` resolves those two
-# angle-bracket headers. NO Drive force-include: none of the headers this TU includes
-# (FieldMap.h / routes.h / PathTracker.h) include the production `Drive.h`, so there is
-# nothing to shadow (the `PathTracker.cpp` that would is never linked).
+# The TC4 (real `FieldMap::getNodeType` LINE-vs-BLIND) and TC4c (real
+# `Config::LINE_SENSOR_AXLE_OFFSET_CM` distance gate) direct real-symbol vectors are NOT
+# mirrors — they stay as routing guards.
+#
+# Same shared recipe as the siblings — see the issue-#106 block comment above
+# `test_path_tracker_passthrough_on` for the full rationale: `${SKETCH_DIR}`-FIRST include
+# order (the inversion), `${MOCKS_DIR}` / `COMMON_INCLUDES` OMITTED entirely (`mocks/Drive.h`
+# shares guard `DRIVE_H` with the real `Drive.h`), link `path_mocks.cpp` (NOT `hal_mocks.cpp`
+# / `mocks/mocks.cpp`, which double-define `Drive` / `MiniR4`), fixture routes force-included
+# FIRST then `add_path_force_includes`. NO `add_mock_force_includes` (that mock-Drive shadow
+# is exactly what the inversion drops).
 # =========================================================================================
 add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
-    ${MOCK_SOURCES}
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_return_to_node_dispatch PRIVATE ${COMMON_INCLUDES})
-# Issue #91: links the stable fixture routes (LINE + BLIND + RESET nodes) instead of the
-# single-node production `routes.cpp`, which no longer carries the kinds TC4 discriminates.
-add_fixture_routes_force_include(test_return_to_node_dispatch)
+target_include_directories(test_return_to_node_dispatch PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_return_to_node_dispatch)   # FIRST (ROUTES_H)
+add_path_force_includes(test_return_to_node_dispatch)            # EventTrace + path_mocks peripherals
 add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)
 
 # =========================================================================================
@@ -1115,35 +1120,82 @@ target_include_directories(test_turn_imu_watchdog PRIVATE ${COMMON_INCLUDES})
 add_test(NAME turn_imu_watchdog COMMAND test_turn_imu_watchdog)
 
 # =========================================================================================
-# Test executable #16 — PathTracker reset-node arrival interlude WALL_STOP -> REANCHOR (PR2, T16).
-# TC10b (AC10 + AC11).
+# Test executable #16 — PathTracker reset-node arrival interlude, real-linked, strict OFF (#113).
+# TC-RA1..TC-RA3 (AC10 + AC11).
 #
-# `PathTracker.cpp` is NOT host-compiled, so this target INLINE-MIRRORS the reset-arrival decision
-# slice (annotated `// MIRROR: PathTracker.cpp:<line>`), the same precedent as
-# `test_return_to_node_dispatch`. The mirror routes to the REAL `PathTrackerClass::Fault` enum AND
-# links the REAL `Localization.cpp` so the REANCHOR step calls the genuine `reanchorAtWall(...)`
-# over the real `routes.cpp` reset record (node 5). Compiles against the shipped default (strict
-# OFF) so the success/advisory cases re-anchor for real; the strict-reject ROUTING is modelled on
-# the boolean outcome (its provenance is covered by `test_reanchor_at_wall_strict`).
+# DE-MIRRORED onto the real FSM (#113): this target previously INLINE-MIRRORED the
+# reset-arrival decision slice (`enum RState` / `struct ResetArrivalMirror`, annotated
+# `// MIRROR: PathTracker.cpp:<line>`) and linked only `Localization.cpp` + mock `Drive`. It
+# now host-links the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+# `YawSource.cpp` on the shared issue-#106 recipe and drives the genuine reset interlude
+# (`_maybeEnterReset` -> WALL_STOP -> REANCHOR -> WALL_DEPART -> PLAN_NEXT_HOP): the
+# advisory-timeout path, the clean stall-success path, and the one-shot latch — the REANCHOR
+# step calls the real `reanchorAtWall(...)` over the fixture `Wall1` reset record.
 #
-# Links `routes.cpp` (FieldMap::getNodeType / getResetInfo / getNode over real data + Localization's
-# odr-uses) + `MOCK_SOURCES` (Serial / MiniR4 / mmL). Mock `Drive.h` force-included (guard
-# `DRIVE_H`) to shadow the real one, as Localization.cpp `#include "Drive.h"`.
+# This is the strict-OFF half (shipped Config default); the strict-ON sibling
+# `test_path_tracker_reset_arrival_strict` below drives the real `WALL_NOT_SQUARE` reject —
+# the same OFF/ON split as `test_reanchor_at_wall` / `test_reanchor_at_wall_strict`.
+#
+# Same shared recipe as the siblings — see the issue-#106 block comment above
+# `test_path_tracker_passthrough_on` for the full rationale: `${SKETCH_DIR}`-FIRST include
+# order (the inversion), `${MOCKS_DIR}` / `COMMON_INCLUDES` OMITTED entirely (`mocks/Drive.h`
+# shares guard `DRIVE_H` with the real `Drive.h`), link `path_mocks.cpp` (NOT `hal_mocks.cpp`
+# / `mocks/mocks.cpp`), fixture routes force-included FIRST then `add_path_force_includes`.
+# NO `add_mock_force_includes`.
 # =========================================================================================
 add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
     ${SKETCH_DIR}/Localization.cpp
     ${SKETCH_DIR}/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
-    ${MOCK_SOURCES}
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
-target_include_directories(test_path_tracker_reset_arrival PRIVATE ${COMMON_INCLUDES})
-# Issue #91: links the stable fixture routes for the `Wall1` RESET record the interlude
-# re-anchors against (resolved by name); the single-node production field carries none.
-# Force-include FIRST so the fixture `ROUTES_H` wins before any header pulls in routes.h.
-add_fixture_routes_force_include(test_path_tracker_reset_arrival)
-add_mock_force_includes(test_path_tracker_reset_arrival)   # shadows the real Drive.h with the mock
+target_include_directories(test_path_tracker_reset_arrival PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_reset_arrival)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_reset_arrival)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
+
+# =========================================================================================
+# Test executable #16b — PathTracker reset-node arrival, real-linked, strict ON (#113).
+# TC-RA-strict (AC11).
+#
+# The strict-ON half of the reset-arrival split (the `test_reanchor_at_wall_strict`
+# precedent): same inbound-hop + wallStop drive as `test_path_tracker_reset_arrival`, but
+# compiled with `WALL_NORMAL_STRICT_ENABLED` flipped ON target-wide. With strict ON and the
+# mock IMU parked off-normal at the REANCHOR tick, the real `reanchorAtWall(...)` rejects, so
+# the real FSM enters `Fault::WALL_NOT_SQUARE` and issues NO depart drive.
+#
+# `Config::WALL_NORMAL_STRICT_ENABLED` (in `config/ConfigNav.h`) is guarded by an
+# `#ifndef WALL_NORMAL_STRICT_ENABLED_DEFAULT` override hook (shipped default `false`). The
+# `target_compile_definitions(... WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)` below flips it ON
+# for EVERY TU in this target (the separately-compiled `Localization.cpp` that runs the
+# strict check AND the test main that asserts the precondition) — the same target-wide `-D`
+# idiom as `test_reanchor_at_wall_strict`, sidestepping the cross-TU `constexpr` override trap.
+#
+# Otherwise identical to the strict-OFF target: same shared issue-#106 recipe
+# (`${SKETCH_DIR}`-FIRST, `path_mocks.cpp`, fixture routes force-included FIRST, NO
+# `add_mock_force_includes`).
+# =========================================================================================
+add_executable(test_path_tracker_reset_arrival_strict
+    ${TEST_DIR}/test_path_tracker_reset_arrival_strict.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+# Force the strict wall-normal flag ON for THIS target only (both `Localization.cpp` and the
+# test main see strict = true) — same target-wide `-D` as `test_reanchor_at_wall_strict`.
+target_compile_definitions(test_path_tracker_reset_arrival_strict PRIVATE WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)
+target_include_directories(test_path_tracker_reset_arrival_strict PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_reset_arrival_strict)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_reset_arrival_strict)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_reset_arrival_strict COMMAND test_path_tracker_reset_arrival_strict)
 
 # =========================================================================================
 # Test executable #17 — YawSource CW->CCW adapter, real-linked (ADR-045, TC3/TC4).

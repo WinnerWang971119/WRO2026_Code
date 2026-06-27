@@ -1,6 +1,6 @@
 # ADR-030: The host-compile harness links the real production symbols, CI-enforced
 
-**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), and real `PathTracker.cpp` / `Drive.cpp` (#106) are all linked from production. Two narrowly-scoped FSM mirror slices remain in `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch`, tracked as follow-up #113 — see How to apply.)
+**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), real `PathTracker.cpp` / `Drive.cpp` (#106), and the two former mirror slices `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` (#113) are all linked from production — zero mirrored PathTracker FSM logic remains. The sole remaining inline mirror is the Drive wall-stop watchdog slice in `test_wall_stop_watchdog`.)
 **Date decided:** 2026-06 (PR-35 trace-findings fix rollout)
 **Implemented:** 2026-06 (#106 — real `PathTracker.cpp` / `Drive.cpp` host-link)
 
@@ -54,13 +54,14 @@ push and PR turns the harness from documentation into an enforced contract.
   `LineFollower`) via `path_mocks/`, and link a dedicated `path_mocks/path_mocks.cpp`
   for facade globals (NOT `hal_mocks.cpp`, which defines a mock `Drive` that would
   collide with the real one).
-- **Remaining FSM mirrors (follow-up):** `test_path_tracker_reset_arrival` +
-  `test_return_to_node_dispatch` STILL carry narrowly-scoped PathTracker FSM
-  `// MIRROR:` slices (over real `Localization` + the fixture routes). They were
-  out of #106's named five; de-mirroring them is a tracked fast-follow now that
-  real `PathTracker.cpp` is host-linkable (#113). So the rule
-  is in force for all new and rewritten targets, with these two slices the last
-  known exception.
+- **De-mirrored FSM tests (#113):** `test_path_tracker_reset_arrival` (now split
+  into a strict-OFF case + a `test_path_tracker_reset_arrival_strict` sibling for
+  strict-ON) and `test_return_to_node_dispatch` have been rewritten to host-link
+  the real `PathTracker.cpp` and drive the real FSM — every `// MIRROR:` slice is
+  deleted. Zero mirrored PathTracker FSM logic remains. The only inline mirror
+  still in the host suite is the Drive wall-stop watchdog slice in
+  `test_wall_stop_watchdog` (its `stopAtLineProgressed` / `stopAtLineStalled`
+  primitives are shared with production via `WROMath.h`, not byte-copied).
 
 ## Trigger to revisit
 
@@ -70,6 +71,16 @@ push and PR turns the harness from documentation into an enforced contract.
 - A test genuinely needs to diverge from production (e.g. asserting a property
   the production symbol deliberately does not expose) — record why the divergence
   is intentional rather than letting a silent replica creep back in.
+- **Known, accepted host-unreachable branches (RETURN_TO_NODE state body):** three
+  fault-routing branches inside `PathTracker.cpp` are not reachable via the host
+  mock because the host-linked real `Drive` can only ever latch `Fault::LINE_NOT_FOUND`
+  (the seek's `_updateStopAtLine` carries no IMU watchdog, and a SYNC `driveDist`
+  cannot be faulted through mock observables): `PathTracker.cpp:611` (line-seek
+  non-`LINE_NOT_FOUND` → `DRIVE_FAULT` discriminator), `PathTracker.cpp:629-635`
+  (`BEST_EFFORT` `clearFault`+`clearOffset` accept branch), `PathTracker.cpp:654-659`
+  (blind `hasFault` → `DRIVE_FAULT`). These are documented in the rewritten
+  `test_return_to_node_dispatch.cpp` header. `resolveReturnAction`'s policy test
+  covers only the RETURN/NONE/OFF_MAP gate decision, not this state-body routing.
 
 ## See also
 
@@ -78,4 +89,4 @@ push and PR turns the harness from documentation into an enforced contract.
 - `WRO2026/DirectionPolicy.h` — the header-only `inline` shared-symbol pattern.
 - `WRO2026/test/CMakeLists.txt` — the ctest target list the job runs.
 - `WRO2026/test/test_mission_dispatch.cpp` — the Phase 2 target linking real `Mission.cpp`.
-- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources; `reset_arrival` + `return_to_node_dispatch` FSM slices tracked as #113).
+- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources); issue #113 (`reset_arrival` + `return_to_node_dispatch` de-mirrored, landed — zero mirrored PathTracker FSM logic remains; the Drive wall-stop watchdog mirror in `test_wall_stop_watchdog` is the last inline mirror).
