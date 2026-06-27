@@ -60,8 +60,9 @@
  * ladder, same `edgeOverride` / `autoRuleActive` inputs, same `{seek, motionMode}`
  * output. The fixture
  * `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv` is the
- * normative source both transcribe; the Python resolver (TC13) is verified
- * against the full domain, while the C++ tests cover representative rows.
+ * normative source both transcribe; both surfaces are verified against the
+ * full 936-row domain: Python TC13 (`test_runtime_sim.py`) and the C++
+ * harness `test_stop_at_line_truth_table.cpp`.
  */
 
 /**

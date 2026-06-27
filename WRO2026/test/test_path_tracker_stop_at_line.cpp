@@ -341,7 +341,10 @@ void test_TC_SL3_seek_overshoot_trim_on_sensor_pivot()
 // `resolveSensorOvershootTrim` (PivotTrimPolicy.h) — the SAME symbols production
 // links. A helper that *calls* the real resolver is explicitly not a mirror (plan
 // AC), so these vectors stay verbatim. Cross-language parity rows live in
-// `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv`.
+// `tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv`; the full
+// 936-row C++ parity sweep runs in the sibling `test_stop_at_line_truth_table`
+// target (`test_stop_at_line_truth_table.cpp`). These vectors are the kept
+// representative in-FSM subset.
 // ===========================================================================
 
 // ---- resolveStopAtLine: precedence ladder + board degrade + motion bundle ----
@@ -900,7 +903,8 @@ int main()
     test_TC_SL3_seek_overshoot_trim_on_sensor_pivot();
 
     // --- TC-SL4: frozen resolver truth table (KEPT — direct calls, not mirrors) ---
-    // resolveStopAtLine: TC1-TC7 representative vectors.
+    // resolveStopAtLine: TC1-TC7, the kept representative in-FSM subset (full
+    // domain -> the sibling test_stop_at_line_truth_table harness).
     test_TC1_auto_stop_at_line_edge_front_1board_seeks_sync_tshape();
     test_TC2_auto_stop_at_line_edge_rear_2board_seeks_sync_tshape();
     test_TC3_auto_stop_at_line_edge_rear_1board_degrades_to_pipeline_blind();
