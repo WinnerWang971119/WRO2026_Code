@@ -61,9 +61,7 @@ push and PR turns the harness from documentation into an enforced contract.
   deleted. Zero mirrored PathTracker FSM logic remains. The only inline mirror
   still in the host suite is the Drive wall-stop watchdog slice in
   `test_wall_stop_watchdog` (its `stopAtLineProgressed` / `stopAtLineStalled`
-  primitives are shared with production via `WROMath.h`, not byte-copied). Now that
-  `expectWallStop` drives the real `_updateWallStop` end-to-end through the
-  reset-arrival tests, retiring that last mirror is a possible follow-up.
+  primitives are shared with production via `WROMath.h`, not byte-copied).
 
 ## Trigger to revisit
 

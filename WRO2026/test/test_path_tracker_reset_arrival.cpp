@@ -50,6 +50,10 @@
  *     interlude fires EXACTLY ONCE (`_maybeEnterReset(Wall1)` returns false the second time, the
  *     `_resetNode == cur` latch holds). A single `goTo(Wall1)` would make this vacuous (the goal
  *     is reached, no second plan), so the goal MUST be beyond `Wall1`.
+ *   - TC-RA-nonreset (negative guard) — a BLIND arrival (`Inter3 -> position1`, position1 BLIND)
+ *     runs `_maybeEnterReset` on a non-reset node, which MUST return false: no wall-stop, no
+ *     re-anchor, the FSM completes straight to IDLE. Pins that the interlude is gated on the RESET
+ *     kind, not fired at every arrival (the negative case the rewrite had dropped).
  *
  * @note The `Drive.wallStop` push retire (`expectWallStop`) and the per-hop done-bit / encoder
  *       handshake (`expectBlindHop`) are encapsulated in the shared harness — this body reads as
@@ -97,14 +101,19 @@ float believedY(uint8_t node)
 }
 
 // ===========================================================================
-// Real-FSM inbound driver — shared by every reset case.
+// Real-FSM inbound driver — shared by every reset case. Delegates the generic
+// reset-world + frame-bind + goTo + dead-reckon walk to the harness
+// `driveInboundHop` (issue #113 cleanup — the de-duplicated inbound walk, also
+// reused by the strict-ON sibling and the non-reset case), then pins the
+// Wall1-specific facts the interlude relies on.
 //
-// Drive the real PathTracker from a clean world THROUGH the `position1 -> Wall1`
-// BLIND dead-reckon hop until the discrete node lands on `Wall1` (the genuine
-// arrival that makes the SECOND `_onPlanNextHop` fire the interlude). Returns
-// with the FSM in PLAN_NEXT_HOP, `_resetNode` un-latched (DEQUEUE re-armed it),
-// and `_planIsFirstAfterDequeue` already consumed by the first plan — so the
-// caller's next tick (inside `expectWallStop`) dispatches the wallStop push.
+// `driveInboundHop("position1","Wall1")` drives the real PathTracker from a clean
+// world THROUGH the `position1 -> Wall1` BLIND dead-reckon hop until the discrete
+// node lands on `Wall1` (the genuine arrival that makes the SECOND
+// `_onPlanNextHop` fire the interlude). It returns with the FSM in PLAN_NEXT_HOP,
+// `_resetNode` un-latched (DEQUEUE re-armed it), and `_planIsFirstAfterDequeue`
+// already consumed by the first plan — so the caller's next tick (inside
+// `expectWallStop`) dispatches the wallStop push.
 //
 // Sequence the real FSM runs to get here (PathTracker.cpp):
 //   IDLE -> DEQUEUE (pop Wall1, offset~0 return-gate -> PLAN_NEXT_HOP)
@@ -113,57 +122,18 @@ float believedY(uint8_t node)
 //        -> [TURNING settles] -> _dispatchEdgeAfterTurn (BLIND dead-reckon
 //           driveDist -> BLIND_FORWARD) -> [drive retires] ->
 //           onDeadReckonedAdvance(Wall1) -> PLAN_NEXT_HOP.
-//
-// Each tick parks `mmL.mockYawDeg` at the hardware-frame value of the inbound
-// edge heading so BOTH the pre-edge turn (custom TurnGyro profile, CONTRACT 2)
-// AND a GYRO-leaning blind hop settle, and advances `M2`/`M3` past the profile
-// total + holds the done-bit so the dead-reckon move (profiled SYNC_TSHAPE or a
-// flat regime) retires (CONTRACT 1). The loop is budgeted so a real-FSM
-// regression fails as a budget-exhausted assert, not a hang.
 // ===========================================================================
 void driveInboundToWall1()
 {
-    resetWorld();             // clears both Drive + PathTracker faults (order-independent cases)
-    seatAt("position1", 0);   // bind world frame @ app-yaw 0 + declare Localization at position1
+    driveInboundHop("position1", "Wall1");
 
+    // Wall1-specific routing pins (the shared helper is node-kind agnostic): the inbound hop is a
+    // BLIND dead-reckon (NOT a seek — a seek would re-anchor via onIntersection and change the
+    // believed-pose math) into a RESET node. A fixture re-weight that changed either fails here.
     const uint8_t position1 = nodeByName("position1");
     const uint8_t wall1      = nodeByName("Wall1");
-
-    // The fixture must resolve both names (the stable-name contract, issue #91).
-    ASSERT_TRUE(position1 != FieldMap::NODE_NONE);
-    ASSERT_TRUE(wall1 != FieldMap::NODE_NONE);
-
-    // Routing guard — pin the inbound hop so a fixture re-weight fails LOUDLY rather than
-    // silently routing `position1 -> Wall1` through a different (e.g. seek) path.
-    ASSERT_EQ(routedFirstHop(position1, wall1), wall1);
-    const Routes::EdgeInfo& edge = FieldMap::getEdge(position1, wall1);
-    ASSERT_TRUE(edge.type == Routes::EdgeType::BLIND);
+    ASSERT_TRUE(FieldMap::getEdge(position1, wall1).type == Routes::EdgeType::BLIND);
     ASSERT_TRUE(FieldMap::getNodeType(wall1) == Routes::NodeType::RESET);
-
-    // Park the corrected IMU read at the inbound edge's forward heading so the pre-edge turn
-    // settles on the body target each tick (the `driveToSeekInFlight` idiom, CONTRACT 2).
-    const int16_t hwHeading = hwYaw((int16_t) lroundf(edge.heading_deg));
-
-    // Enqueue the FINAL node only; PathTracker walks NEXT_HOP. `.async()` so the harness drives
-    // the cooperative tick loop instead of the builder's blocking drain.
-    PathTracker.goTo(wall1).async();
-
-    // Tick until the dead-reckon advance lands the discrete node on Wall1. Each tick re-parks the
-    // yaw (so the pre-turn cannot stall the loop) and over-advances the encoder + holds the
-    // done-bit (so the dead-reckon move retires under EITHER regime — CONTRACT 1).
-    for (int i = 0;
-         i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() != wall1;
-         ++i)
-    {
-        mmL.mockYawDeg = (double) hwHeading;
-        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
-        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
-        MiniR4.DriveDC.mockSetPrevTaskDone(true);
-        cooperativeTick();
-    }
-
-    ASSERT_EQ(Localization.getCurrentNode(), wall1);    // the inbound dead-reckon advance landed.
-    ASSERT_FALSE(PathTracker.hasFault());               // a clean arrival, the interlude is pending.
 }
 
 // ===========================================================================
@@ -326,25 +296,66 @@ void test_TC_RA3_interlude_fires_exactly_once()
     // hop and dispatches it (a pre-edge turn or the dead-reckon drive). Drive the next hop until
     // the chassis leaves Wall1; if the interlude had re-fired it would have re-entered WALL_STOP
     // and dispatched a fresh wallStop SQUARE turn back to facing 270 instead of departing Wall1.
-    const uint8_t position1 = nodeByName("position1");
-    for (int i = 0;
-         i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() == wall1;
-         ++i)
-    {
-        // Park the OUTBOUND edge heading (Wall1 -> position1, ~320.36 deg) so the second hop's
-        // pre-turn settles; advance the encoder + done-bit so its dead-reckon move retires.
-        const Routes::EdgeInfo& out = FieldMap::getEdge(wall1, position1);
-        mmL.mockYawDeg = (double) hwYaw((int16_t) lroundf(out.heading_deg));
-        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
-        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
-        MiniR4.DriveDC.mockSetPrevTaskDone(true);
-        cooperativeTick();
-    }
+    // Drive the outbound Wall1 -> position1 hop with the shared dead-reckon walk, parking the
+    // OUTBOUND edge heading (~320.36 deg) so the second hop's pre-turn settles. If the interlude had
+    // re-fired it would have re-entered WALL_STOP and dispatched a fresh wallStop SQUARE turn back to
+    // facing 270 instead of departing Wall1, so the chassis would never reach position1 and the walk
+    // would budget-exhaust at Wall1 — the one-shot latch failing loudly.
+    const uint8_t           position1 = nodeByName("position1");
+    const Routes::EdgeInfo& out       = FieldMap::getEdge(wall1, position1);
+    driveDeadReckonWalk(position1, hwYaw((int16_t) lroundf(out.heading_deg)));
 
     // The FSM advanced OFF Wall1 onto the next hop — the interlude did not re-fire (which would
     // have pinned the FSM at Wall1 in a fresh WALL_STOP). The reset latch held one-shot.
     ASSERT_EQ(Localization.getCurrentNode(), position1);
     ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================
+// TC-RA-nonreset — the interlude is SKIPPED at a non-RESET arrival (the negative
+// guard restored from the pre-rewrite mirror). Drive a real BLIND dead-reckon hop
+// into a non-RESET node (`Inter3 -> position1`; position1 is BLIND) where that node
+// IS the goal, so the post-arrival `_onPlanNextHop` runs `_maybeEnterReset(position1)`
+// — which must return false (BLIND, not RESET) and let the FSM complete to IDLE. A
+// guard-widening regression (the interlude firing at every node) would instead
+// dispatch a wall-stop + WALL_DEPART depart here; this case pins that NONE of that runs.
+// ===========================================================================
+void test_TC_RA_nonreset_skips_interlude()
+{
+    TEST_SCOPE("TC-RA-nonreset: a BLIND arrival (position1) does NOT enter the wall-stop interlude");
+
+    const uint8_t position1 = nodeByName("position1");
+    ASSERT_TRUE(position1 != FieldMap::NODE_NONE);
+    // Precondition: the arrival node is genuinely NON-reset (else this would not test the skip).
+    ASSERT_TRUE(FieldMap::getNodeType(position1) != Routes::NodeType::RESET);
+
+    // Real inbound BLIND dead-reckon hop into the non-reset node, which is the goal. The shared
+    // helper resets the world, so `moveGyroDegsCallCount` starts at 0 — and the ONLY emitter of a
+    // lower-MCU `MoveGyroDegs` in this flow is the WALL_DEPART depart, so a non-zero count after the
+    // arrival is the unambiguous signature of the interlude having run.
+    driveInboundHop("Inter3", "position1");
+    ASSERT_EQ(MiniR4.DriveDC.moveGyroDegsCallCount, 0u);    // inbound hop + pre-turn never emit GYRO.
+
+    // Let the post-arrival plan tick run: `_onPlanNextHop` (firstPlan already consumed) calls
+    // `_maybeEnterReset(position1)`, which returns false for a BLIND node, then completes the goal
+    // (cur == dest) straight to IDLE. Tick until idle; the budget guards a guard-widening regression
+    // that would instead park the FSM in WALL_STOP.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+
+    // NO interlude: the FSM reached the goal (IDLE), never faulted, and dispatched NO WALL_DEPART
+    // depart (the sole `MoveGyroDegs` emitter stayed at 0) — so neither a wall-stop nor a re-anchor ran.
+    ASSERT_TRUE(PathTracker.isIdle());
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_FALSE(Drive.hasFault());
+    ASSERT_EQ(MiniR4.DriveDC.moveGyroDegsCallCount, 0u);
+
+    // NO re-anchor deposited a wall standoff: the believed pose collapses to the node coordinate
+    // (the dead-reckon arrival cleared the offset to ~0), not node + standoff.
+    const Offset2D off = Localization.getOffsetFromNode();
+    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < 0.01f);
 }
 
 // ===========================================================================
@@ -377,6 +388,7 @@ int main()
     test_TC_RA1_advisory_timeout_continues_clears_offset();
     test_TC_RA2_clean_stall_success_clears_offset();
     test_TC_RA3_interlude_fires_exactly_once();
+    test_TC_RA_nonreset_skips_interlude();
 
     if (wro_test::failCounter() == 0)
     {

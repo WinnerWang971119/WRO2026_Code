@@ -44,12 +44,14 @@
  *     typo'd compile-def fails loudly instead of silently testing the OFF behaviour (the
  *     `test_reanchor_at_wall_strict.cpp` / `test_path_tracker_reset_arrival.cpp` precedent).
  *   - `PathTracker.getFault().kind == PathTrackerClass::Fault::WALL_NOT_SQUARE`.
- *   - The one-shot reset latch re-armed: `_enterFault` clears `_resetNode` to `NODE_NONE`
- *     (PathTracker.cpp:1128), so a fresh arrival could re-enter the interlude. Asserted via
- *     the observable `PathTracker.hasFault()` (the FSM is halted in FAULT) — the private
- *     `_resetNode` has no accessor; the latch re-arm is the documented `_enterFault`
- *     post-condition (the boolean reject provenance itself is independently proven by
- *     `test_reanchor_at_wall_strict.cpp`).
+ *   - The FSM is REUSABLE after the reject (the reset latch re-armed, end-to-end): after
+ *     `clearFault()`, a fresh arrival into Wall1 RE-FIRES the interlude — the post-arrival plan tick
+ *     dispatches a fresh wallStop (Drive leaves idle), the proof the interlude re-entered; a stuck
+ *     latch would instead let the goal complete straight to IDLE. This pins reusability, NOT the
+ *     provenance of the re-arm: `_enterFault` clears `_resetNode` at fault time, and every `DEQUEUE`
+ *     (including this fresh `goTo`) clears it again, so the re-arm is multiply-guaranteed and not
+ *     separately observable; the private `_resetNode` has no accessor, and the boolean reject
+ *     provenance is independently proven by `test_reanchor_at_wall_strict.cpp`.
  *   - NO depart drive was issued — a CONCRETE lower-MCU observable: the WALL_DEPART depart is
  *     `Drive.driveDist(departCm).setMode(DriveMode::GYRO)`, which dispatches via
  *     `_execDriveDistGyro -> MiniR4.DriveDC.MoveGyroDegs(...)` (Drive.cpp:266) — the ONLY
@@ -134,42 +136,18 @@ static void test_TC_RA_strict_off_normal_reanchor_faults_wall_not_square()
 {
     TEST_SCOPE("TC-RA-strict: off-normal REANCHOR -> real reanchorAtWall rejects -> WALL_NOT_SQUARE");
 
-    resetWorld();    // clears both Drive + PathTracker faults — order-independent per case.
-
     const uint8_t wall1     = nodeByName("Wall1");
     const uint8_t position1 = nodeByName("position1");
 
-    // Seat at the inbound origin, frame zeroed at app-yaw 0 (so `_yawOffsetDeg == 0` and the
-    // strict check's live heading == normalize(mockYawDeg * IMU_YAW_SIGN)).
-    seatAt("position1", 0);
+    // --- Drive the SAME real inbound BLIND hop into Wall1 as the strict-OFF sibling, via the shared
+    // `driveInboundHop` (issue #113 cleanup — the de-duplicated reset-world + frame-bind @ app-yaw 0
+    // + goTo + dead-reckon walk). app-yaw 0 keeps `_yawOffsetDeg == 0`, so the strict check's live
+    // heading == normalize(mockYawDeg * IMU_YAW_SIGN). The hop returns with the FSM in PLAN_NEXT_HOP
+    // and the interlude pending (firstPlan consumed); `expectWallStop` below drives it into WALL_STOP.
+    driveInboundHop("position1", "Wall1");
 
-    // The inbound hop's forward heading — park the corrected IMU read here every tick so the
-    // pre-edge turn settles (the `driveToSeekInFlight` / CONTRACT-2 idiom).
-    const Routes::EdgeInfo& edge      = FieldMap::getEdge(position1, wall1);
-    const int16_t           hwHeading = hwYaw((int16_t) lroundf(edge.heading_deg));
-
-    // Enqueue the FINAL node only; PathTracker walks NEXT_HOP. `.async()` so the harness
-    // drives the cooperative tick loop instead of the builder's blocking drain.
-    PathTracker.goTo(wall1).async();
-
-    // --- Drive the inbound BLIND hop. Settle the pre-edge turn by parking the edge heading
-    // each tick, then retire the dead-reckon advance. The hop completes when the FSM has
-    // dead-reckoned onto Wall1 and re-entered _onPlanNextHop (which fires the interlude:
-    // _maybeEnterReset dispatches the wallStop and enters WALL_STOP). Detect that transition
-    // by Localization landing on Wall1 — the dead-reckon advance sets the current node.
-    for (int i = 0;
-         i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() != wall1;
-         ++i)
-    {
-        mmL.mockYawDeg = (double) hwHeading;    // re-park EVERY tick so the pre-turn settles.
-        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);    // retire the
-        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);    // dead-reckon move.
-        MiniR4.DriveDC.mockSetPrevTaskDone(true);
-        cooperativeTick();
-    }
-    ASSERT_EQ(Localization.getCurrentNode(), wall1);
-    // No depart-shaped lower-MCU dispatch has happened yet — the inbound SYNC_TSHAPE hop and
-    // the pre-turn drive `Move`/`MoveSync`, never `MoveGyroDegs`.
+    // No depart-shaped lower-MCU dispatch has happened yet — the inbound SYNC_TSHAPE hop and the
+    // pre-turn drive `Move`/`MoveSync`, never `MoveGyroDegs`.
     ASSERT_EQ(MiniR4.DriveDC.moveGyroDegsCallCount, 0u);
 
     // --- Retire the wall-stop push to a clean stall-success (no advisory). The interlude is
@@ -206,14 +184,16 @@ static void test_TC_RA_strict_off_normal_reanchor_faults_wall_not_square()
     ASSERT_TRUE(PathTracker.hasFault());
     ASSERT_TRUE(PathTracker.getFault().kind == PathTrackerClass::Fault::WALL_NOT_SQUARE);
 
-    // The fault was raised AT Wall1 — `REANCHOR` calls `_enterFault(WALL_NOT_SQUARE, cur, ...)`
-    // with `cur == Localization.getCurrentNode() == Wall1` (PathTracker.cpp:1035), so this also
-    // pins that the reject happened on the reset node whose interlude was in flight (not some
-    // other halt). `_enterFault` then re-arms the one-shot reset latch by clearing `_resetNode`
-    // to NODE_NONE (PathTracker.cpp:1128) — the private latch has no accessor, but routing the
-    // fault through `_enterFault` (the FSM is halted in FAULT, fromNode == Wall1) is the
-    // observable proof the reject took the re-arming path, NOT the success tail (which would have
-    // dispatched a depart and left the latch set).
+    // The fault was raised AT Wall1 — `REANCHOR` calls `_enterFault(WALL_NOT_SQUARE, cur, ...)` with
+    // `cur == Localization.getCurrentNode() == Wall1`, so this pins that the reject happened on the
+    // reset node whose interlude was in flight (not some other halt), and not via the success tail
+    // (which would have dispatched a depart, asserted below). `_enterFault` also clears the one-shot
+    // reset latch (`_resetNode = NODE_NONE`), but that re-arm is NOT separately observable: the
+    // private latch has no accessor, AND every `DEQUEUE` clears `_resetNode` too (including the fresh
+    // `goTo` in the reusability guard below), so the re-arm is multiply-guaranteed regardless of
+    // `_enterFault`. We therefore assert the reject ROUTING here and pin the end-to-end RE-ARM
+    // behaviorally in the reusability guard below. The boolean reject provenance itself is
+    // independently proven by `test_reanchor_at_wall_strict.cpp`.
     ASSERT_EQ(PathTracker.getFault().fromNode, wall1);
 
     // --- NO depart drive was issued: the reject path faults BEFORE `Drive.driveDist(departCm)`.
@@ -221,6 +201,40 @@ static void test_TC_RA_strict_off_normal_reanchor_faults_wall_not_square()
     // concrete lower-MCU observable the spec pins). A regression that drove the depart before
     // (or instead of) faulting would bump this and fail here.
     ASSERT_EQ(MiniR4.DriveDC.moveGyroDegsCallCount, moveGyroDegsBeforeReanchor);
+
+    // --- REUSABILITY GUARD (re-arm, end-to-end): the FSM must be reusable after a strict reject.
+    // Recover from the FAULT with `clearFault()` (NOT a full `resetWorld`/`begin`, so this exercises
+    // the post-fault recovery path rather than a fresh boot), re-seat at the inbound origin, and
+    // drive the SAME real arrival into Wall1 a second time. The interlude must RE-FIRE: on the
+    // post-arrival plan tick `_maybeEnterReset(Wall1)` dispatches a fresh wallStop and Drive leaves
+    // idle — the observable proof the reset latch is not stuck-set from the first arrival. Had it
+    // been stuck-set, `_maybeEnterReset` would return false and the goal (Wall1) would complete
+    // straight to IDLE with Drive still idle, so `Drive.isIdle()` cleanly separates the two.
+    //
+    // NOTE: this does NOT isolate `_enterFault`'s `_resetNode` clear specifically — the fresh
+    // `goTo`'s `DEQUEUE` re-arms `_resetNode` independently (regardless of whether `_enterFault`
+    // cleared it at fault time), so the interlude would re-fire even if `_enterFault` had not. The
+    // property genuinely pinned is the FSM's end-to-end REUSABILITY after a strict reject, not the
+    // provenance of the re-arm. (`clearFault` itself only clears the fault + returns to IDLE; the
+    // queue and `_resetNode` were already cleared by `_enterFault` at fault time.)
+    PathTracker.clearFault();
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Re-seat at the inbound origin (the fault left the discrete node believed Wall1) and drive the
+    // fresh arrival with the shared dead-reckon walk.
+    seatAt("position1", 0);
+    const Routes::EdgeInfo& reentryEdge = FieldMap::getEdge(position1, wall1);
+    PathTracker.goTo(wall1).async();
+    driveDeadReckonWalk(wall1, hwYaw((int16_t) lroundf(reentryEdge.heading_deg)));
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // ONE tick runs `_onPlanNextHop` -> `_maybeEnterReset(Wall1)`, which re-fires the interlude (the
+    // fresh goal's DEQUEUE re-armed `_resetNode`) and dispatches a wallStop — so Drive leaves idle.
+    // Park the wall facing so the dispatched wallStop's SQUARE turn can settle.
+    mmL.mockYawDeg = (double) hwYaw(kWallFacingDeg);
+    cooperativeTick();
+    ASSERT_FALSE(Drive.isIdle());          // a wallStop was dispatched -> the interlude re-entered.
+    ASSERT_FALSE(PathTracker.hasFault());
 }
 
 // ===========================================================================

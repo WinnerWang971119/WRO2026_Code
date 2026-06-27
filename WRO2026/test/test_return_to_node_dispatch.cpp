@@ -95,6 +95,12 @@ namespace
 const uint8_t kLineNode  = FieldMap::findNodeByName("Inter1");    // LINE-backed
 const uint8_t kBlindNode = FieldMap::findNodeByName("Start");     // BLIND-only
 
+// Tolerance for the "offset cleared" postcondition. The re-anchor (onIntersection /
+// onDeadReckonedAdvance / clearOffset) sets `_offset = Offset2D{}` — EXACTLY zero — so assert
+// near-zero, not merely under the 3 cm return trigger. A partial-clear regression that left ~2 cm
+// of residual offset would still pass against the trigger threshold but fails this tight bound.
+constexpr float kClearedOffsetEpsCm = 0.01f;
+
 // ===========================================================================
 // Real-FSM return driver — shared by the four RETURN_TO_NODE cases.
 //
@@ -226,17 +232,21 @@ void test_TC4c_line_seek_distance_gate_uses_real_axle_offset()
     const bool lineAnchorIsLine = (FieldMap::getNodeType(kLineNode) == Routes::NodeType::LINE);
     ASSERT_TRUE(lineAnchorIsLine);
 
-    const bool shortUsesSeek = lineAnchorIsLine && ((axle - 1.0f) >= axle);     // short return
-    const bool atUsesSeek    = lineAnchorIsLine && (axle >= axle);              // exactly the lead
-    const bool longUsesSeek  = lineAnchorIsLine && ((axle + 10.0f) >= axle);    // comfortably long
-    ASSERT_FALSE(shortUsesSeek);    // below the lead -> dead-reckon (the #14 case)
-    ASSERT_TRUE(atUsesSeek);        // exactly at the lead -> seek (>=)
-    ASSERT_TRUE(longUsesSeek);      // above the lead -> seek
+    // The line-seek gate the FSM applies in `_dispatchReturnMove` is
+    // `nodeIsLine && (returnDistCm >= axle lead)`. The node-kind half is exercised against the REAL
+    // FieldMap::getNodeType (above + TC4); the distance half is driven END-TO-END against the REAL
+    // FSM in TC-RN-line-ok (20 cm push -> seek) and TC-RN4c (6 cm push -> dead-reckon). Rather than
+    // re-derive the comparison locally — a self-referential `(axle +/- x) >= axle` that never calls
+    // production and stays green if the gate flipped to `>` — pin that those two push distances
+    // straddle the REAL axle lead, so the routing those cases assert is genuine: if
+    // `LINE_SENSOR_AXLE_OFFSET_CM` shifted enough to put 20 below it or 6 above it, this fails here
+    // rather than letting the real-FSM cases silently test the wrong branch.
+    ASSERT_TRUE(20.0f >= axle);    // TC-RN-line-ok push reaches the lead -> seek branch
+    ASSERT_TRUE(6.0f < axle);      // TC-RN4c push is below the lead -> dead-reckon branch (#14)
 
-    // A non-LINE node (the BLIND anchor Start) never uses the seek regardless of distance.
-    const bool blindAnchorIsLine = (FieldMap::getNodeType(kBlindNode) == Routes::NodeType::LINE);
-    const bool blindLongUsesSeek = blindAnchorIsLine && ((axle + 10.0f) >= axle);
-    ASSERT_FALSE(blindLongUsesSeek);
+    // A non-LINE node (the BLIND anchor Start) never uses the seek regardless of distance — the
+    // node-kind half of the gate is false, so even a comfortably-long return dead-reckons.
+    ASSERT_TRUE(FieldMap::getNodeType(kBlindNode) != Routes::NodeType::LINE);
 }
 
 // ===========================================================================
@@ -287,7 +297,7 @@ void test_TC_RN_line_ok_seek_reanchors_via_on_intersection()
     ASSERT_EQ(Localization.getCurrentNode(), kLineNode);
     // ... the operator offset was cleared by the re-anchor (onIntersection clears it) ...
     const Offset2D off = Localization.getOffsetFromNode();
-    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < Config::RETURN_TRIGGER_THRESHOLD_CM);
+    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < kClearedOffsetEpsCm);
     // ... and the FSM settled without faulting (Inter1 IS the goal).
     ASSERT_FALSE(PathTracker.hasFault());
     ASSERT_TRUE(Drive.isLineFound());
@@ -382,7 +392,7 @@ void test_TC_RN4c_short_line_return_dead_reckons_via_clear_offset()
     // clearOffset re-anchor: node UNCHANGED (Inter1), offset cleared, no fault, no seek.
     ASSERT_EQ(Localization.getCurrentNode(), kLineNode);
     const Offset2D off = Localization.getOffsetFromNode();
-    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < Config::RETURN_TRIGGER_THRESHOLD_CM);
+    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < kClearedOffsetEpsCm);
     ASSERT_FALSE(PathTracker.hasFault());
     ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, 0u);    // re-affirm: never seeked
 }
@@ -425,7 +435,7 @@ void test_TC_RN_blind_ok_dead_reckon_reanchors_via_clear_offset()
     // clearOffset re-anchor: node UNCHANGED (Start), offset cleared, no fault.
     ASSERT_EQ(Localization.getCurrentNode(), kBlindNode);
     const Offset2D off = Localization.getOffsetFromNode();
-    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < Config::RETURN_TRIGGER_THRESHOLD_CM);
+    ASSERT_TRUE(sqrtf(off.x * off.x + off.y * off.y) < kClearedOffsetEpsCm);
     ASSERT_FALSE(PathTracker.hasFault());
 }
 

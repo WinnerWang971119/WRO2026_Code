@@ -626,17 +626,18 @@ namespace path_harness
 ///        `STOP_AT_LINE_STALL_TIMEOUT_MS` = 1500). The STALL-success path advances the clock in a
 ///        SINGLE large `mockAdvanceMillis` jump (a frozen encoder IS a stall), so it idles in a
 ///        handful of ticks. The ADVISORY path CANNOT single-jump: a frozen encoder past the outer
-///        timeout reads as a stall, and the stall gate is checked BEFORE the advisory gate
-///        (Drive.cpp:1473 vs :1487), so a single jump would retire as a (false) stall-success with
+///        timeout reads as a stall, and `_updateWallStop` checks the no-progress stall gate BEFORE
+///        the outer advisory gate, so a single jump would retire as a (false) stall-success with
 ///        `_wallStopTimedOut` left false. Instead the advisory path steps the encoder forward
 ///        EVERY tick (re-baselining the stall watchdog so it never trips) while stepping the clock
 ///        by `kWallAdvisoryStepMs` (< the 1500 ms stall window) until the OUTER `_wallStartMs`
 ///        timeout (3000 ms) elapses — that is ~`WALL_STOP_TIMEOUT_MS / kWallAdvisoryStepMs`
 ///        ≈ 3-4 iterations, plus the SQUARE-turn settle (a few `kMillisPerTick` steps) and the
-///        PUSH / BACK_OFF / DONE finalisation ticks. 256 clears that worst case with wide margin
-///        for any advisory step >= ~100 ms (the chosen `kWallAdvisoryStepMs` is 1000 ms). A
+///        PUSH / BACK_OFF / DONE finalisation ticks — ~10-15 ticks all told. 64 clears that worst
+///        case with wide margin for any advisory step >= ~100 ms (the chosen `kWallAdvisoryStepMs`
+///        is 1000 ms) while failing a never-idling regression ~4x sooner than the former 256. A
 ///        real-FSM regression that never idles still fails as a budget-exhausted assert, not a hang.
-constexpr int kMaxWallStopTicks = 256;
+constexpr int kMaxWallStopTicks = 64;
 
 /// @brief Number of extra progress ticks the STALL-SUCCESS path runs (after the wall-stop is
 ///        dispatched out of IDLE) to guarantee the FSM has advanced SQUARE -> PUSH and run at
@@ -652,8 +653,8 @@ constexpr int kWallPushSettleTicks = 4;
 ///        `Config::STOP_AT_LINE_STALL_TIMEOUT_MS` (= 1500) so the inner stall watchdog can never
 ///        trip between two progress ticks — the advisory branch re-baselines the watchdog every
 ///        tick by stepping the encoder forward, but the clock must not jump a full stall window in
-///        one go or the stall gate (checked first, Drive.cpp:1473) would fire ahead of the outer
-///        advisory gate (Drive.cpp:1487). 1000 ms reaches the 3000 ms outer timeout in ~3-4 ticks,
+///        one go or the no-progress stall gate (which `_updateWallStop` checks first) would fire
+///        ahead of the outer advisory gate. 1000 ms reaches the 3000 ms outer timeout in ~3-4 ticks,
 ///        well inside `kMaxWallStopTicks`. Do NOT shrink this toward `kMillisPerTick` — a tiny step
 ///        would need ~600 ticks to cross 3000 ms and blow the budget.
 constexpr uint32_t kWallAdvisoryStepMs = 1000;
@@ -667,10 +668,11 @@ constexpr float kOffsetPushStepCm = 2.0f;
 
 /// @brief Bound on the operator-offset accumulation loop. At `kOffsetPushStepCm` per deposit tick
 ///        plus the one-tick reopen-edge re-baseline, even the largest sane target (the
-///        `Config::RETURN_DISTANCE_CAP_CM` = 50 cap) converges in ~26 ticks — this budget clears
-///        that with margin, and a zero-accumulation regression (the two-tick gate broken) exhausts
-///        it and trips the self-assert below instead of hanging.
-constexpr int kMaxOffsetPushTicks = 256;
+///        `Config::RETURN_DISTANCE_CAP_CM` = 50 cap) converges in ~26 ticks — 64 clears that with
+///        ~2.4x margin (the current 6 / 20 cm call sites converge in ~3 / ~10), and a
+///        zero-accumulation regression (the two-tick gate broken) exhausts it and trips the
+///        self-assert below instead of hanging.
+constexpr int kMaxOffsetPushTicks = 64;
 }    // namespace path_harness
 
 /**
@@ -678,15 +680,14 @@ constexpr int kMaxOffsetPushTicks = 256;
  *
  * @details
  * Drives the REAL `Drive` wall-stop state machine (`_updateWallStop`: SQUARE -> PUSH -> BACK_OFF ->
- * DONE, Drive.cpp:1396) to idle, the way `_dispatchWallStop` (PathTracker.cpp:1385) issues it for a
- * RESET-node arrival: `.setReverse(true).setMode(RAW).setHeading(facing).setBackOff(0).async()`,
- * with NO `.setTimeout(...)` — so the dispatched `_wallTimeoutMs` inherits the builder default,
- * which is `Config::WALL_STOP_TIMEOUT_MS` (CONFIRMED read-only: `WallStopBuilder::_timeout =
- * Config::WALL_STOP_TIMEOUT_MS`, Drive.h:3202; the private `_wallTimeoutMs` has no public accessor).
+ * DONE) to idle, the way `PathTracker::_dispatchWallStop` issues it for a RESET-node arrival:
+ * `.setReverse(true).setMode(RAW).setHeading(facing).setBackOff(0).async()`, with NO
+ * `.setTimeout(...)` — so the dispatched `_wallTimeoutMs` inherits the builder default, which is
+ * `Config::WALL_STOP_TIMEOUT_MS` (CONFIRMED read-only: the `WallStopBuilder` seeds its `_timeout`
+ * member from `Config::WALL_STOP_TIMEOUT_MS`; the private `_wallTimeoutMs` has no public accessor).
  * That is why advancing the clock by `Config::WALL_STOP_TIMEOUT_MS` is exact — no magic literal, no
- * getter, no production change. The static_assert `WALL_STOP_TIMEOUT_MS (3000) >
- * STOP_AT_LINE_STALL_TIMEOUT_MS (1500)` (ConfigDrive.h:447) guarantees the two PUSH retire paths
- * never race.
+ * getter, no production change. The `ConfigChecks` static_assert that `WALL_STOP_TIMEOUT_MS` (3000)
+ * exceeds `STOP_AT_LINE_STALL_TIMEOUT_MS` (1500) guarantees the two PUSH retire paths never race.
  *
  * Two phases, in order:
  *   1. **Settle the internal SQUARE turn FIRST.** `wallStop` turns in place to @p wallFacingAppDeg
@@ -716,9 +717,9 @@ constexpr int kMaxOffsetPushTicks = 256;
  *          stall window within budget.) Back-off is 0 here (`_dispatchWallStop` `.setBackOff(0)`),
  *          so BACK_OFF falls straight through to DONE. `wallStopTimedOut()` stays false.
  *        - `timedOut == true` (advisory): the GENUINE "wheels turned freely, never reached the wall"
- *          scenario (Drive.cpp:1482). The stall gate (`now - _wallLastProgressMs >= 1500`) is checked
- *          BEFORE the advisory gate (`now - _wallStartMs >= 3000`), and BOTH watchdogs are seeded from
- *          `millis()` at the SQUARE -> PUSH transition (Drive.cpp:1429-1433). A frozen encoder is a
+ *          scenario. The stall gate (`now - _wallLastProgressMs >= 1500`) is checked BEFORE the
+ *          advisory gate (`now - _wallStartMs >= 3000`), and BOTH watchdogs are seeded from
+ *          `millis()` at the SQUARE -> PUSH transition. A frozen encoder is a
  *          STALL, so a single clock jump past the outer timeout would trip the stall gate FIRST and
  *          retire as a (false) stall-success with `_wallStopTimedOut` left false. Instead, LOOP: each
  *          iteration step `MiniR4.M2`/`M3` forward by > `Config::STOP_AT_LINE_PROGRESS_EPS_CM`
@@ -816,9 +817,9 @@ inline void expectWallStop(int16_t wallFacingAppDeg, bool timedOut)
     }
     else
     {
-        // Advisory: the "wheels turned freely, never reached the wall" path (Drive.cpp:1482). A frozen
-        // encoder reads as a STALL, and the stall gate is checked BEFORE the advisory gate
-        // (Drive.cpp:1473 vs :1487) with both watchdogs seeded together at SQUARE -> PUSH — so a single
+        // Advisory: the "wheels turned freely, never reached the wall" path. A frozen
+        // encoder reads as a STALL, and `_updateWallStop` checks the stall gate BEFORE the advisory
+        // gate, with both watchdogs seeded together at SQUARE -> PUSH — so a single
         // big clock jump would retire as a (false) stall-success and leave `_wallStopTimedOut` false.
         // Instead, KEEP MAKING PROGRESS every PUSH tick (re-baselining the stall watchdog so it never
         // trips) while stepping the clock in sub-stall-window increments, so only the OUTER
@@ -874,9 +875,12 @@ inline void expectWallStop(int16_t wallFacingAppDeg, bool timedOut)
  *      deposits along the heading, until `getOffsetFromNode()` magnitude >= @p targetCm.
  *
  * @param targetCm           Minimum operator-offset magnitude to manufacture (cm). Must be > 0.
- * @param alongAppHeadingDeg App-frame heading the push runs along (default 0). Must equal the
- *                           `startAppYawDeg` the caller passed to `seatAt`, so the parked frame and
- *                           the deposit heading agree.
+ * @param alongAppHeadingDeg App-frame heading the push runs along (REQUIRED — no default). Must
+ *                           equal the `startAppYawDeg` the caller passed to `seatAt`, so the parked
+ *                           frame and the deposit heading agree. The in-helper self-check is
+ *                           magnitude-only, so a wrong/omitted heading would deposit the offset on
+ *                           the wrong world axis yet still pass — the parameter is therefore
+ *                           mandatory rather than defaulting silently to 0.
  * @return The ACHIEVED offset magnitude (`sqrtf(x*x + y*y)` of `getOffsetFromNode()`), always
  *         >= @p targetCm on success.
  *
@@ -894,7 +898,7 @@ inline void expectWallStop(int16_t wallFacingAppDeg, bool timedOut)
  *          the cap could nudge the achieved magnitude over it into the OVER_CAP gate path. The
  *          current call sites (6 and 20 cm) sit well under the cap.
  */
-inline float pushOperatorOffset(float targetCm, int16_t alongAppHeadingDeg = 0)
+inline float pushOperatorOffset(float targetCm, int16_t alongAppHeadingDeg)
 {
     // (1) Belt-and-suspenders: ensure the integrator gate's nav term is open (the caller's IDLE-FSM
     // precondition already guarantees this, but a stray tick could have re-activated nav).
@@ -936,6 +940,99 @@ inline float pushOperatorOffset(float targetCm, int16_t alongAppHeadingDeg = 0)
     ASSERT_GE(mag, targetCm);
 
     return mag;
+}
+
+// ===========================================================================================
+// Inbound-hop drivers (issue #113 cleanup) — shared so the reset-arrival (strict OFF + ON) and
+// the negative non-reset case drive the SAME real BLIND dead-reckon walk instead of re-inlining it
+// three times. `driveDeadReckonWalk` is the per-tick retire loop; `driveInboundHop` wraps it with
+// the reset-world + frame-bind + goTo prologue.
+// ===========================================================================================
+
+/**
+ * @brief Tick the real FSM until a BLIND dead-reckon advance lands the discrete node on @p toNode.
+ *
+ * @details
+ * The per-tick retire walk shared by every dead-reckon hop in these tests: park the corrected IMU
+ * read at @p hwHeadingDeg (so the pre-edge custom-TurnGyro turn settles, CONTRACT 2) and over-advance
+ * `MiniR4.M2`/`M3` + hold the done-bit (so the move retires under EITHER regime — the profiled
+ * `SYNC_TSHAPE` encoder gate or the flat done-bit drain, CONTRACT 1) every tick until `Localization`
+ * reports @p toNode. Bounded by `kMaxHandshakeTicks` so a real-FSM regression that never arrives fails
+ * as a budget-exhausted assert, not a hang.
+ *
+ * @param toNode       The node id the dead-reckon advance must land on.
+ * @param hwHeadingDeg The inbound edge's forward heading in the HARDWARE frame (apply `hwYaw(...)` to
+ *                     the app-frame `edge.heading_deg`) — parked every tick so the pre-turn settles.
+ * @note Asserts arrival on @p toNode.
+ */
+inline void driveDeadReckonWalk(uint8_t toNode, int16_t hwHeadingDeg)
+{
+    for (int i = 0;
+         i < path_harness::kMaxHandshakeTicks && Localization.getCurrentNode() != toNode;
+         ++i)
+    {
+        mmL.mockYawDeg = (double) hwHeadingDeg;
+        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.DriveDC.mockSetPrevTaskDone(true);
+        cooperativeTick();
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), toNode);    // the dead-reckon advance landed.
+}
+
+/**
+ * @brief Reset the world, seat at @p fromName, and drive the real BLIND dead-reckon hop onto @p toName.
+ *
+ * @details
+ * The shared inbound prologue for the reset-arrival (strict OFF + ON) and non-reset cases: from a
+ * clean world, bind the frame at app-yaw 0 and seat `Localization` at @p fromName, pin that
+ * `fromName -> toName` is a DIRECT routed hop (so a fixture re-weight fails loudly rather than silently
+ * routing elsewhere), `goTo(toName).async()`, then `driveDeadReckonWalk` onto @p toName. Node-kind
+ * specifics (RESET vs BLIND, edge type) are asserted by the CALLER — this helper is node-kind agnostic
+ * so it serves both the reset arrivals and the non-reset case.
+ *
+ * @param fromName Origin node (resolved by name, issue #91).
+ * @param toName   Destination node the single BLIND hop lands on (resolved by name).
+ * @note FATAL preconditions (#5): if either name fails to resolve, or the hop is not a direct route,
+ *       this RETURNS right after recording the assert — the rest of the body (and the caller's arrival
+ *       asserts) would otherwise cascade against an un-armed FSM.
+ */
+inline void driveInboundHop(const char* fromName, const char* toName)
+{
+    resetWorld();    // clears both Drive + PathTracker faults (order-independent cases).
+
+    const uint8_t from = nodeByName(fromName);
+    const uint8_t to   = nodeByName(toName);
+
+    // FATAL precondition: a hop whose endpoints do not resolve cannot be driven — return so the
+    // caller's downstream asserts do not cascade against an un-seated FSM (#5).
+    ASSERT_TRUE(from != FieldMap::NODE_NONE);
+    ASSERT_TRUE(to != FieldMap::NODE_NONE);
+    if (from == FieldMap::NODE_NONE || to == FieldMap::NODE_NONE)
+    {
+        return;
+    }
+
+    seatAt(fromName, 0);    // bind world frame @ app-yaw 0 + declare Localization at `fromName`.
+
+    // FATAL precondition: pin the hop as a DIRECT routed step (a fixture re-weight that re-routes it
+    // would make the walk never arrive) — return on miss so the failure is the routing assert here,
+    // not a budget-exhausted arrival assert downstream (#5).
+    ASSERT_EQ(routedFirstHop(from, to), to);
+    if (routedFirstHop(from, to) != to)
+    {
+        return;
+    }
+
+    const Routes::EdgeInfo& edge      = FieldMap::getEdge(from, to);
+    const int16_t           hwHeading = hwYaw((int16_t) lroundf(edge.heading_deg));
+
+    // Enqueue the destination only; PathTracker walks NEXT_HOP. `.async()` so the harness drives the
+    // cooperative tick loop instead of the builder's blocking drain.
+    PathTracker.goTo(to).async();
+
+    driveDeadReckonWalk(to, hwHeading);
+    ASSERT_FALSE(PathTracker.hasFault());    // a clean arrival (any post-arrival interlude is pending).
 }
 
 #endif    // TEST_PATH_TRACKER_HARNESS_H
