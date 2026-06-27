@@ -177,6 +177,28 @@ static bool toBool(const std::string& s)
 }
 
 /**
+ * @brief Parse a `lineBoardCount` cell (`"1"` / `"2"`). Aborts on anything else.
+ *
+ * @note Mirrors the enum mappers' loud-on-unknown contract (a friendly
+ *       "which value" diagnostic) instead of `std::stoi`, whose uncaught throw
+ *       would abort without naming the offending cell. The fixture only ever
+ *       carries 1 or 2 (Config::LINE_BOARD_COUNT), so anything else aborts.
+ */
+static uint8_t toLineBoardCount(const std::string& s)
+{
+    if (s == "1")
+    {
+        return 1;
+    }
+    if (s == "2")
+    {
+        return 2;
+    }
+    std::fprintf(stderr, "FATAL: unmapped lineBoardCount token '%s' (expected 1/2)\n", s.c_str());
+    std::abort();
+}
+
+/**
  * @brief Reverse map a `Routes::BlindMode` to its member name for readable
  *        `got` / `expected` mismatch reporting.
  */
@@ -270,8 +292,7 @@ int main()
             q.edgeMode      = toBlindMode(wro_csv::field(table, i, cEdgeMode));
             q.pipelineBlind = toBlindMode(wro_csv::field(table, i, cPipelineBlind));
             q.direction     = toDirection(wro_csv::field(table, i, cDirection));
-            q.lineBoardCount =
-                static_cast<uint8_t>(std::stoi(wro_csv::field(table, i, cLineBoardCount)));
+            q.lineBoardCount = toLineBoardCount(wro_csv::field(table, i, cLineBoardCount));
             q.autoRuleActive = toBool(wro_csv::field(table, i, cAutoRuleActive));
 
             const bool              expectSeek   = toBool(wro_csv::field(table, i, cExpectSeek));
@@ -322,7 +343,7 @@ int main()
     }
 
     // --- Single verdict assert (NOT a per-row ASSERT, to honor the cap). ----
-    TEST_SCOPE("all 936 rows match the production resolver");
+    TEST_SCOPE("all rows match the production resolver");
     ASSERT_TRUE(mismatchCount == 0);
 
     TEST_REPORT();

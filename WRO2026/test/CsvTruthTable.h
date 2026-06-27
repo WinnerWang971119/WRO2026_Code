@@ -191,8 +191,9 @@ struct Table
  *             compile-definition path with forward slashes.
  * @param out  Output table; cleared on entry and populated on success.
  * @param err  Set to a diagnostic message on failure; unchanged on success.
- * @return `true` on success; `false` if the file cannot be opened or if it
- *         contains no non-empty lines (i.e. no header row).
+ * @return `true` on success; `false` if the file cannot be opened, contains no
+ *         non-empty lines (no header row), or has a data row whose cell count
+ *         differs from the header (a ragged row fails loudly via @p err).
  *
  * @note `out` may be in a partial state if the file opens but is empty.
  *       Discard `out` on any `false` return.
@@ -230,7 +231,22 @@ inline bool load(const char* path, Table& out, std::string& err)
         }
         else
         {
-            out.rows.push_back(detail::splitLine(line));
+            std::vector<std::string> cells = detail::splitLine(line);
+            // Reject a ragged row (fewer / more cells than the header) loudly
+            // rather than letting `field()` index out of range later. The current
+            // parity fixtures are rectangular so this never trips, but the helper
+            // is lifted unchanged by issue #108's harnesses, where a hand-edited
+            // fixture could be ragged — so the guard upholds the helper's own
+            // "fail loudly, never silently" contract.
+            if (cells.size() != out.header.size())
+            {
+                err = std::string("wro_csv::load: data row ") +
+                      std::to_string(out.rows.size()) + " has " + std::to_string(cells.size()) +
+                      " cells but the header has " + std::to_string(out.header.size()) +
+                      " columns, in '" + path + "'";
+                return false;
+            }
+            out.rows.push_back(cells);
         }
     }
 
@@ -260,7 +276,9 @@ inline bool load(const char* path, Table& out, std::string& err)
  *
  * @note No bounds-check is performed on @p row — out-of-range access is
  *       the caller's responsibility.  Verify the row count before entering
- *       the loop (e.g. `ASSERT_EQ(t.rows.size(), kExpectedRowCount)`).
+ *       the loop (e.g. `ASSERT_EQ(t.rows.size(), kExpectedRowCount)`).  The
+ *       column index needs no per-row guard: `load()` rejects a ragged table,
+ *       so any valid `colIndex` result is in range for every row.
  */
 inline const std::string& field(const Table& t, std::size_t row, int col)
 {
