@@ -21,7 +21,8 @@
 #ifndef CSV_TRUTH_TABLE_H
 #define CSV_TRUTH_TABLE_H
 
-#include <cassert>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -150,9 +151,9 @@ struct Table
      * @param name Column name to search for (exact match, case-sensitive).
      * @return Index of the column in `header`, or `-1` if absent.
      *
-     * @note Callers that require the column to be present should assert the
+     * @note Callers that require the column to be present should check the
      *       return value before passing it to `wro_csv::field`.  `field`
-     *       will abort via `assert` on a `-1` argument rather than silently
+     *       aborts unconditionally on a `-1` argument rather than silently
      *       indexing with -1, which is undefined behaviour.
      */
     int colIndex(const std::string& name) const
@@ -197,6 +198,14 @@ struct Table
  *
  * @note `out` may be in a partial state if the file opens but is empty.
  *       Discard `out` on any `false` return.
+ *
+ * @note A file with a header row but zero data rows loads successfully
+ *       (returns `true` with an empty `out.rows`).  This helper is
+ *       CSV-mechanics-only and has no notion of an expected row count, so a
+ *       caller that needs at least one row MUST assert its own minimum (e.g.
+ *       `ASSERT_EQ(table.rows.size(), kExpectedRowCount)`).  Without that
+ *       guard a loop over `out.rows` iterates zero times and reports PASS over
+ *       zero comparisons — a vacuous pass.
  */
 inline bool load(const char* path, Table& out, std::string& err)
 {
@@ -264,14 +273,16 @@ inline bool load(const char* path, Table& out, std::string& err)
  *
  * @details
  * Convenience accessor combining a column index (from `Table::colIndex`)
- * with a row index.  Aborts via `assert` if @p col is negative, so a `-1`
+ * with a row index.  Aborts unconditionally if @p col is negative, so a `-1`
  * returned by `colIndex` for a missing column produces a loud diagnostic
- * instead of silently indexing with -1 (undefined behaviour).
+ * instead of silently indexing with -1 (undefined behaviour).  The check is a
+ * plain `if`, not `assert`, so the documented contract holds even in an
+ * `NDEBUG` build that lifts this header (issue #108).
  *
  * @param t   The parsed table populated by `wro_csv::load`.
  * @param row Zero-based row index into `t.rows`.
  * @param col Zero-based column index, as returned by `Table::colIndex`.
- *            Must be `>= 0`; asserts and aborts if negative.
+ *            Must be `>= 0`; aborts if negative.
  * @return Const reference to the trimmed cell string.
  *
  * @note No bounds-check is performed on @p row — out-of-range access is
@@ -282,7 +293,11 @@ inline bool load(const char* path, Table& out, std::string& err)
  */
 inline const std::string& field(const Table& t, std::size_t row, int col)
 {
-    assert(col >= 0 && "wro_csv::field: col is -1 — column missing from header");
+    if (col < 0)
+    {
+        std::fprintf(stderr, "wro_csv::field: col is -1 — column missing from header\n");
+        std::abort();
+    }
     return t.rows[row][static_cast<std::size_t>(col)];
 }
 

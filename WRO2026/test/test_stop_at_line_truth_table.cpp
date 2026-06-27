@@ -39,7 +39,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <string>
+#include <utility>
 
 // ===========================================================================
 // Row-count guard.
@@ -56,34 +58,70 @@
 static constexpr std::size_t kExpectedRowCount = 936;
 
 // ===========================================================================
-// String -> enum maps.
+// String -> value maps.
 //
-// Each function hand-mirrors the production enum member names EXACTLY (the CSV
-// uses those exact spellings). This deliberate independent transcription is how
-// the generator and both language ports stay decoupled — a typo here surfaces
-// as a parity failure, not a silent default. An unmapped token aborts loudly
-// (mirrors Python's `_MAP[key]` KeyError); it is NEVER silently defaulted.
+// Each column transcriber hand-mirrors the production member names EXACTLY (the
+// CSV uses those exact spellings) and delegates to mapToken(), which aborts
+// loudly on any token it does not list. This deliberate independent
+// transcription is how the generator and both language ports stay decoupled — a
+// typo here surfaces as a parity failure, not a silent default.
+//
+// Strictness vs Python TC13: the enum-mapped columns mirror Python's
+// `_MAP[key]` KeyError exactly — an unknown token aborts on both sides. The
+// boolean columns (autoRuleActive, expect_seek) and lineBoardCount are
+// deliberately STRICTER than Python: toBool accepts only "true"/"false" where
+// Python TC13 uses `.strip().lower() == "true"` (any other cell silently
+// becomes False), and toLineBoardCount accepts only "1"/"2" where Python uses
+// `int()` (any integer parses). The current fixture carries only these exact
+// tokens, so both surfaces agree on every row today; the stricter parse is
+// intentional — a malformed cell (a capitalized "True", a 3-board count, an
+// empty cell) fails this harness loudly instead of being silently coerced into
+// a wrong-but-quiet parity pass.
 // ===========================================================================
+
+/**
+ * @brief Map a CSV token @p s to its value via @p table, aborting on an unknown
+ *        token.
+ *
+ * @details
+ * The single loud-on-unknown mapper shared by the column transcribers below.
+ * Mirrors Python TC13's dict-literal lookups (`_CALL_FLAG_MAP[...]`, etc.): a
+ * token absent from @p table aborts with a named diagnostic rather than silently
+ * defaulting, so a CSV / enum drift surfaces as a hard failure, never a
+ * wrong-but-quiet pass.
+ *
+ * @tparam T    Mapped-to type (a Routes / policy enum, `bool`, or `uint8_t`).
+ * @param s     The trimmed CSV cell.
+ * @param table `{token, value}` pairs — the independent transcription of the
+ *              production member names that keeps both language ports decoupled.
+ * @param label Human-readable column / type name, used in the abort diagnostic.
+ * @return The value paired with @p s.
+ */
+template <class T>
+static T mapToken(const std::string&                               s,
+                  std::initializer_list<std::pair<const char*, T>> table,
+                  const char*                                      label)
+{
+    for (const auto& entry : table)
+    {
+        if (s == entry.first)
+        {
+            return entry.second;
+        }
+    }
+    std::fprintf(stderr, "FATAL: unmapped %s token '%s'\n", label, s.c_str());
+    std::abort();
+}
 
 /**
  * @brief Map a `callFlag` cell to `StopAtLine`. Aborts on an unknown token.
  */
 static StopAtLine toCallFlag(const std::string& s)
 {
-    if (s == "AUTO")
-    {
-        return StopAtLine::AUTO;
-    }
-    if (s == "ON")
-    {
-        return StopAtLine::ON;
-    }
-    if (s == "OFF")
-    {
-        return StopAtLine::OFF;
-    }
-    std::fprintf(stderr, "FATAL: unmapped StopAtLine token '%s'\n", s.c_str());
-    std::abort();
+    return mapToken<StopAtLine>(
+        s,
+        {{"AUTO", StopAtLine::AUTO}, {"ON", StopAtLine::ON}, {"OFF", StopAtLine::OFF}},
+        "StopAtLine");
 }
 
 /**
@@ -92,21 +130,39 @@ static StopAtLine toCallFlag(const std::string& s)
  */
 static Routes::StopAtLineMode toEdgeOverride(const std::string& s)
 {
-    if (s == "DEFAULT")
-    {
-        return Routes::StopAtLineMode::DEFAULT;
-    }
-    if (s == "ON")
-    {
-        return Routes::StopAtLineMode::ON;
-    }
-    if (s == "OFF")
-    {
-        return Routes::StopAtLineMode::OFF;
-    }
-    std::fprintf(stderr, "FATAL: unmapped Routes::StopAtLineMode token '%s'\n", s.c_str());
-    std::abort();
+    return mapToken<Routes::StopAtLineMode>(
+        s,
+        {{"DEFAULT", Routes::StopAtLineMode::DEFAULT},
+         {"ON", Routes::StopAtLineMode::ON},
+         {"OFF", Routes::StopAtLineMode::OFF}},
+        "Routes::StopAtLineMode");
 }
+
+// ---------------------------------------------------------------------------
+// Single bidirectional Routes::BlindMode <-> name table.
+//
+// toBlindMode() reads it forward (skipping DEFAULT, which never appears in the
+// edgeMode / pipelineBlind / expect_motionMode columns — mirrors Python's
+// `_BLIND_MODE_MAP`, which lists only the four concrete bundles). blindModeName()
+// reads it backward for mismatch diagnostics, with DEFAULT included so an
+// unexpected resolver result still prints a real member name, not `<unknown>`.
+// One table means a new Routes::BlindMode member is transcribed in exactly one
+// place, not kept in sync by hand across a forward and a reverse list.
+// ---------------------------------------------------------------------------
+
+struct BlindModeEntry
+{
+    const char*       name;
+    Routes::BlindMode mode;
+};
+
+static constexpr BlindModeEntry kBlindModes[] = {
+    {"DEFAULT", Routes::BlindMode::DEFAULT},
+    {"SYNC_TSHAPE", Routes::BlindMode::SYNC_TSHAPE},
+    {"GYRO_TSHAPE", Routes::BlindMode::GYRO_TSHAPE},
+    {"RAW_FLAT", Routes::BlindMode::RAW_FLAT},
+    {"STOP_AT_LINE", Routes::BlindMode::STOP_AT_LINE},
+};
 
 /**
  * @brief Map an `edgeMode` / `pipelineBlind` / `expect_motionMode` cell to
@@ -118,21 +174,12 @@ static Routes::StopAtLineMode toEdgeOverride(const std::string& s)
  */
 static Routes::BlindMode toBlindMode(const std::string& s)
 {
-    if (s == "SYNC_TSHAPE")
+    for (const auto& e : kBlindModes)
     {
-        return Routes::BlindMode::SYNC_TSHAPE;
-    }
-    if (s == "GYRO_TSHAPE")
-    {
-        return Routes::BlindMode::GYRO_TSHAPE;
-    }
-    if (s == "RAW_FLAT")
-    {
-        return Routes::BlindMode::RAW_FLAT;
-    }
-    if (s == "STOP_AT_LINE")
-    {
-        return Routes::BlindMode::STOP_AT_LINE;
+        if (e.mode != Routes::BlindMode::DEFAULT && s == e.name)
+        {
+            return e.mode;
+        }
     }
     std::fprintf(stderr, "FATAL: unmapped Routes::BlindMode token '%s'\n", s.c_str());
     std::abort();
@@ -147,55 +194,34 @@ static Routes::BlindMode toBlindMode(const std::string& s)
  */
 static Direction toDirection(const std::string& s)
 {
-    if (s == "FRONT")
-    {
-        return Direction::FRONT;
-    }
-    if (s == "REAR")
-    {
-        return Direction::REAR;
-    }
-    std::fprintf(stderr, "FATAL: unmapped Direction token '%s'\n", s.c_str());
-    std::abort();
+    return mapToken<Direction>(
+        s, {{"FRONT", Direction::FRONT}, {"REAR", Direction::REAR}}, "Direction");
 }
 
 /**
  * @brief Parse a boolean cell (`"true"` / `"false"`). Aborts on anything else.
+ *
+ * @note Deliberately stricter than Python TC13's `.strip().lower() == "true"`
+ *       (which silently coerces any other cell to False): a malformed cell
+ *       aborts loudly so fixture drift cannot pass quietly. See the section
+ *       header above.
  */
 static bool toBool(const std::string& s)
 {
-    if (s == "true")
-    {
-        return true;
-    }
-    if (s == "false")
-    {
-        return false;
-    }
-    std::fprintf(stderr, "FATAL: unmapped bool token '%s' (expected true/false)\n", s.c_str());
-    std::abort();
+    return mapToken<bool>(s, {{"true", true}, {"false", false}}, "bool");
 }
 
 /**
  * @brief Parse a `lineBoardCount` cell (`"1"` / `"2"`). Aborts on anything else.
  *
- * @note Mirrors the enum mappers' loud-on-unknown contract (a friendly
- *       "which value" diagnostic) instead of `std::stoi`, whose uncaught throw
- *       would abort without naming the offending cell. The fixture only ever
- *       carries 1 or 2 (Config::LINE_BOARD_COUNT), so anything else aborts.
+ * @note Deliberately stricter than Python TC13's `int()` (which parses any
+ *       integer): the fixture only ever carries 1 or 2 (Config::LINE_BOARD_COUNT),
+ *       so anything else aborts loudly with a named diagnostic. See the section
+ *       header above.
  */
 static uint8_t toLineBoardCount(const std::string& s)
 {
-    if (s == "1")
-    {
-        return 1;
-    }
-    if (s == "2")
-    {
-        return 2;
-    }
-    std::fprintf(stderr, "FATAL: unmapped lineBoardCount token '%s' (expected 1/2)\n", s.c_str());
-    std::abort();
+    return mapToken<uint8_t>(s, {{"1", uint8_t{1}}, {"2", uint8_t{2}}}, "lineBoardCount");
 }
 
 /**
@@ -204,18 +230,12 @@ static uint8_t toLineBoardCount(const std::string& s)
  */
 static const char* blindModeName(Routes::BlindMode m)
 {
-    switch (m)
+    for (const auto& e : kBlindModes)
     {
-        case Routes::BlindMode::DEFAULT:
-            return "DEFAULT";
-        case Routes::BlindMode::SYNC_TSHAPE:
-            return "SYNC_TSHAPE";
-        case Routes::BlindMode::GYRO_TSHAPE:
-            return "GYRO_TSHAPE";
-        case Routes::BlindMode::RAW_FLAT:
-            return "RAW_FLAT";
-        case Routes::BlindMode::STOP_AT_LINE:
-            return "STOP_AT_LINE";
+        if (e.mode == m)
+        {
+            return e.name;
+        }
     }
     return "<unknown>";
 }
@@ -246,29 +266,40 @@ int main()
     ASSERT_TRUE(loaded);
 
     // --- Column presence by name (order-independent, loud on a rename). -----
+    // One list: each required column is resolved, asserted present, and folded
+    // into allColumnsPresent in a single pass, so a column added or dropped by
+    // issue #108's harnesses cannot leave a stale third site behind.
     TEST_SCOPE("truth-table columns present by name");
-    const int cCallFlag       = table.colIndex("callFlag");
-    const int cEdgeOverride   = table.colIndex("edgeOverride");
-    const int cEdgeMode       = table.colIndex("edgeMode");
-    const int cPipelineBlind  = table.colIndex("pipelineBlind");
-    const int cDirection      = table.colIndex("direction");
-    const int cLineBoardCount = table.colIndex("lineBoardCount");
-    const int cAutoRuleActive = table.colIndex("autoRuleActive");
-    const int cExpectSeek     = table.colIndex("expect_seek");
-    const int cExpectMotion   = table.colIndex("expect_motionMode");
-    ASSERT_TRUE(cCallFlag >= 0);
-    ASSERT_TRUE(cEdgeOverride >= 0);
-    ASSERT_TRUE(cEdgeMode >= 0);
-    ASSERT_TRUE(cPipelineBlind >= 0);
-    ASSERT_TRUE(cDirection >= 0);
-    ASSERT_TRUE(cLineBoardCount >= 0);
-    ASSERT_TRUE(cAutoRuleActive >= 0);
-    ASSERT_TRUE(cExpectSeek >= 0);
-    ASSERT_TRUE(cExpectMotion >= 0);
+    int cCallFlag = -1, cEdgeOverride = -1, cEdgeMode = -1, cPipelineBlind = -1, cDirection = -1,
+        cLineBoardCount = -1, cAutoRuleActive = -1, cExpectSeek = -1, cExpectMotion = -1;
 
-    const bool allColumnsPresent = cCallFlag >= 0 && cEdgeOverride >= 0 && cEdgeMode >= 0 &&
-                                   cPipelineBlind >= 0 && cDirection >= 0 && cLineBoardCount >= 0 &&
-                                   cAutoRuleActive >= 0 && cExpectSeek >= 0 && cExpectMotion >= 0;
+    const struct
+    {
+        const char* name;
+        int*        out;
+    } required[] = {
+        {"callFlag", &cCallFlag},
+        {"edgeOverride", &cEdgeOverride},
+        {"edgeMode", &cEdgeMode},
+        {"pipelineBlind", &cPipelineBlind},
+        {"direction", &cDirection},
+        {"lineBoardCount", &cLineBoardCount},
+        {"autoRuleActive", &cAutoRuleActive},
+        {"expect_seek", &cExpectSeek},
+        {"expect_motionMode", &cExpectMotion},
+    };
+
+    bool allColumnsPresent = true;
+    for (const auto& rc : required)
+    {
+        *rc.out = table.colIndex(rc.name);
+        if (*rc.out < 0)
+        {
+            std::fprintf(stderr, "FAIL: required column '%s' missing from CSV header\n", rc.name);
+            allColumnsPresent = false;
+        }
+        ASSERT_TRUE(*rc.out >= 0);
+    }
 
     // --- Row-count guard: a truncated / empty CSV must fail loudly. ---------
     TEST_SCOPE("row count guards against a truncated CSV");

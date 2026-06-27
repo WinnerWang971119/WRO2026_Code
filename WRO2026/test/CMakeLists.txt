@@ -600,8 +600,8 @@ set(STOP_AT_LINE_CSV ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/stop_at_
 target_compile_definitions(test_stop_at_line_truth_table
     PRIVATE STOP_AT_LINE_TRUTH_TABLE_CSV="${STOP_AT_LINE_CSV}")
 
-add_test(NAME test_stop_at_line_truth_table COMMAND test_stop_at_line_truth_table)
-set_tests_properties(test_stop_at_line_truth_table PROPERTIES LABELS "parity")
+add_test(NAME stop_at_line_truth_table COMMAND test_stop_at_line_truth_table)
+set_tests_properties(stop_at_line_truth_table PROPERTIES LABELS "parity")
 
 # =========================================================================================
 # Test executable #4 — Tasks framework dispatch, real-linked (#46 Phase 1).

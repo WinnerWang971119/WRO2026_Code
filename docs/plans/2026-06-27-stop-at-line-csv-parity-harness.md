@@ -41,7 +41,7 @@
 - [ ] AC4: Columns are looked up **by name** from the parsed header (order-independent); an unknown column or an unmapped enum-name string fails loudly rather than silently defaulting.
 - [ ] AC5: Each field is trimmed of an **optional** trailing `\r`/whitespace so the test parses identically whether the checked-out file is CRLF (Windows working tree) or LF (normalized Linux CI checkout) — the parser tolerates a trailing `\r` but does not require one.
 - [ ] AC6: On mismatch the test prints the first ~20 mismatching rows in full (all 7 inputs + got vs expected) then fails with the total mismatch count. The per-row comparison is **manual** (not via the per-row `ASSERT_*` macros, so the ~20-row print cap is honored); a single final `ASSERT_TRUE(mismatchCount == 0)` records the verdict.
-- [ ] AC7: The target is in the default ctest suite (CI `host-tests` + "Run All" run it) and carries a `parity` label: `ctest -LE parity` skips it, `ctest -L parity` / `ctest -R test_stop_at_line_truth_table` runs only it. No `ci.yml` change.
+- [ ] AC7: The target is in the default ctest suite (CI `host-tests` + "Run All" run it) and carries a `parity` label: `ctest -LE parity` skips it, `ctest -L parity` / `ctest -R stop_at_line_truth_table` runs only it. No `ci.yml` change.
 - [ ] AC8: `CsvTruthTable.h` contains only CSV mechanics (load + header parse + name lookup + trim + row count) — zero resolver-specific logic — and lives in `WRO2026/test/` (not a `mocks/` dir).
 - [ ] AC9: The full-domain wording is restored in `StopAtLinePolicy.h`'s docblock; in `test_path_tracker_stop_at_line.cpp` the "representative" framing is narrowed and its **existing** CSV cross-reference (the TC-SL4 docblock, which already cites the fixture) is refined to point at the new harness. No resolver logic changes anywhere.
 - [ ] AC10: The new target links **no** real `PathTracker.cpp`/`Drive.cpp`/`routes.cpp`; full `ctest` passes locally with no regressions in the other targets.
@@ -147,7 +147,7 @@ No two tasks edit the same file.
 | TC4 | Trailing-`\r` tolerance — parses identically whether the checked-out line ending is CRLF or LF (the latter is the likely Linux CI checkout) | Integration | All 936 rows parse and pass under both endings; no trailing-`\r` mismatch on the last column |
 | TC5 | Unmapped enum string (AC4 neg-path): temporarily set one cell to an unknown token (e.g. `SYNC_TSHAPEX`) | Unit | The string→enum lookup aborts/fails loudly (no silent default); revert after |
 | TC6 | Unknown/renamed column (AC4 neg-path): temporarily rename a header column | Unit | The column-presence assertion fails loudly with the missing-column name; revert after |
-| TC7 | Label behavior: `ctest -LE parity` then `ctest -L parity` / `ctest -R test_stop_at_line_truth_table` | Integration | First run excludes the target; second runs only it |
+| TC7 | Label behavior: `ctest -LE parity` then `ctest -L parity` / `ctest -R stop_at_line_truth_table` | Integration | First run excludes the target; second runs only it |
 | TC8 | Full `ctest --test-dir build/test` | Integration | All existing targets still pass; new target passes |
 
 **Test data:** the committed `stop_at_line_truth_table.csv` (936 rows). No new fixtures.
