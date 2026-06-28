@@ -574,6 +574,36 @@ target_include_directories(test_stop_at_line_armmath PRIVATE ${COMMON_INCLUDES})
 add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 
 # =========================================================================================
+# Test executable — stop-at-line full-domain CSV parity (#63).
+#
+# Drives ALL 936 rows of tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv
+# through the header-only production resolveStopAtLine (StopAtLinePolicy.h) and asserts
+# (seek, motionMode) per row — the C++ mirror of Python TC13. The resolver is a pure
+# inline free function that reads nothing from the route tables, so this target links NO
+# real PathTracker/Drive/routes.cpp — only MOCK_SOURCES for the Serial/g_mockMillis externs
+# the mock Arduino.h declares (StopAtLinePolicy.h pulls Config.h -> <Arduino.h>, and
+# routes.h for enum TYPES only — no route-table symbol is ODR-used).
+#
+# The CSV path is baked as a compile definition (absolute, forward-slash CMake path, so the
+# string literal needs no backslash escaping and ifstream accepts it on both OSes), robust
+# regardless of ctest cwd/build-dir. Stays in the DEFAULT suite (CI host-tests + "Run All"
+# run it, so a resolver regression turns CI red) but carries a `parity` label so
+# `ctest -LE parity` skips it locally and `ctest -L parity` / `-R` runs only it.
+# =========================================================================================
+add_executable(test_stop_at_line_truth_table
+    ${TEST_DIR}/test_stop_at_line_truth_table.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_stop_at_line_truth_table PRIVATE ${COMMON_INCLUDES})
+
+set(STOP_AT_LINE_CSV ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv)
+target_compile_definitions(test_stop_at_line_truth_table
+    PRIVATE STOP_AT_LINE_TRUTH_TABLE_CSV="${STOP_AT_LINE_CSV}")
+
+add_test(NAME stop_at_line_truth_table COMMAND test_stop_at_line_truth_table)
+set_tests_properties(stop_at_line_truth_table PROPERTIES LABELS "parity")
+
+# =========================================================================================
 # Test executable #4 — Tasks framework dispatch, real-linked (#46 Phase 1).
 #
 # Links the REAL `Tasks.cpp` and asserts its registry/dispatch behaviour through
