@@ -553,6 +553,43 @@ add_path_force_includes(test_path_tracker_pass_through_projection)            # 
 add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pass_through_projection)
 
 # =========================================================================================
+# Test executable #3g — sim<->firmware parity DUMP target (issue #108, T6 / AC4).
+#
+# Drives the REAL `PathTracker` + `Drive` + `Localization` + `YawSource` FSM over the
+# feature-complete `fixtures/routes_fixture.cpp` (all-pairs + curated specials/offset cases)
+# and prints the normalized per-hop semantic trace as VERSIONED NDJSON on stdout. Same shared
+# recipe as the sibling path_tracker targets — real sources + `path_mocks.cpp` globals, fixture
+# routes force-included FIRST, then the `path_mocks` peripherals; SKETCH_DIR leads the include
+# dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
+#
+# It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=1`. It does NOT
+# define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
+# with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
+# and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
+# exactly like the bidirectional targets, which set no board-count def).
+#
+# Deliberately NO `add_test(...)`: this is a DUMP binary the dedicated `parity` CI job and the
+# parity pytest (`test_pathtracker_parity.py`) build + invoke — it is NOT a ctest. It still gets
+# a compile check from `cmake --build` (the `host-tests` job builds the whole tree).
+# =========================================================================================
+add_executable(test_path_tracker_parity_dump
+    ${TEST_DIR}/test_path_tracker_parity_dump.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_parity_dump PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
+target_compile_definitions(test_path_tracker_parity_dump
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=1)
+
+# =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
 #
 # Tests the pure `WROMath.h` free functions `stopAtLineArmed` and `debounceStep`
