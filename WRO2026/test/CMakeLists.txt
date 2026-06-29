@@ -1512,3 +1512,41 @@ add_fixture_routes_force_include(test_mission_dispatch)   # FIRST — routes_fix
 add_hal_force_includes(test_mission_dispatch)             # REUSE as-is — hal_mocks/Drive.h (DRIVE_H) + EventTrace.h (EVENTTRACE_H)
 add_mission_mock_force_includes(test_mission_dispatch)    # the 4 mission mocks only
 add_test(NAME mission_dispatch COMMAND test_mission_dispatch)
+
+# =========================================================================================
+# Test executable — edge-dispatch full-domain CSV parity (#108, T-CSV / TC1 / AC9).
+#
+# Drives ALL 864 rows of tools/path_planner/tests/fixtures/edge_dispatch_truth_table.csv
+# through the header-only production resolveEdgeDispatch (EdgeDispatchPolicy.h) and asserts
+# the seven decision fields {primitive, reverse, driveMode, commandedDistanceCm, overshootCm,
+# reanchor, brakeOnGate} per row — the C++ mirror of Python TC1
+# (test_runtime_sim.py::test_tc1_resolve_edge_dispatch_matches_fixture). The generator
+# gen_edge_dispatch_truth_table.py is an INDEPENDENT transcription (never calls either
+# resolver), so a drift in the table OR in either resolver turns CI red.
+#
+# Same shape as test_stop_at_line_truth_table: resolveEdgeDispatch is a pure inline free
+# function that COMPOSES resolvePivotTrim / resolveSensorOvershootTrim (PivotTrimPolicy.h)
+# and reads only enum TYPES from routes.h — no route-table symbol is ODR-used — so this
+# target links NO real PathTracker/Drive/routes.cpp, only MOCK_SOURCES for the
+# Serial/g_mockMillis externs the mock Arduino.h declares (EdgeDispatchPolicy.h pulls
+# StopAtLinePolicy.h -> Config.h -> <Arduino.h>).
+#
+# The CSV path is baked as a compile definition (absolute, forward-slash CMake path, so the
+# string literal needs no backslash escaping and ifstream accepts it on both OSes), robust
+# regardless of ctest cwd/build-dir. Stays in the DEFAULT host-tests suite (NOT the dedicated
+# `parity` CI job, which is only for the trace-diff dump) — it is a pure-resolver test with
+# no binary handoff, exactly like test_stop_at_line_truth_table — but carries a `parity`
+# label so `ctest -LE parity` skips it locally and `ctest -L parity` runs only it.
+# =========================================================================================
+add_executable(test_edge_dispatch_truth_table
+    ${TEST_DIR}/test_edge_dispatch_truth_table.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_edge_dispatch_truth_table PRIVATE ${COMMON_INCLUDES})
+
+set(EDGE_DISPATCH_CSV ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/edge_dispatch_truth_table.csv)
+target_compile_definitions(test_edge_dispatch_truth_table
+    PRIVATE EDGE_DISPATCH_TRUTH_TABLE_CSV="${EDGE_DISPATCH_CSV}")
+
+add_test(NAME edge_dispatch_truth_table COMMAND test_edge_dispatch_truth_table)
+set_tests_properties(edge_dispatch_truth_table PROPERTIES LABELS "parity")
