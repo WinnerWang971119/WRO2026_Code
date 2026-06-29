@@ -56,16 +56,19 @@
  * captures into an in-process buffer, never stdout), so T8's parser sees only NDJSON.
  *
  * ===========================================================================================
- * OFFSET-EXACTNESS NOTE (flagged for T7/T8)
+ * REALIZED-OFFSET EMISSION (finding 1, issue #116)
  * ===========================================================================================
  * The two offset cases manufacture a real operator offset through the harness
  * `pushOperatorOffset(...)`, which deposits via the real `Localization` encoder integrator in
  * `path_harness::kOffsetPushStepCm` (= 2 cm) increments. The achieved magnitude is therefore a
- * multiple of 2 cm along an axis-aligned heading — chosen so it lands as close to the Python
- * `operator_move` value as the encoder->cm round-trip allows. If T8 finds a sub-tolerance
- * mismatch on the `return_move.dist_cm` field for these cases, it is the C++ encoder-integrator
- * offset vs the sim's exact `operator_move`; the fix is a T7 allowlist entry scoped to
- * `(return_move, dist_cm)` on the offset cases — NOT a change here.
+ * multiple of 2 cm along an axis-aligned heading and passes through a cm->encoder-degrees->cm
+ * round-trip, so it differs slightly from the Python `operator_move` value. The firmware's
+ * commanded `return_move.dist_cm` is a direct function of THIS realized offset, so to compare it
+ * honestly `runCuratedCase` captures the magnitude `pushOperatorOffset` RETURNS and emits it as
+ * the `realized_offset_cm` field on every `goal_start` record. The Python parity test seeds its
+ * sim with that realized value (not the nominal table magnitude), which collapses the
+ * `return_move.dist_cm` divergence to within `DIST_TOL` — so NO allowlist entry is needed and the
+ * former `return-move-offset-encoder-quantization` entry has been removed.
  */
 
 #include "test_path_tracker_harness.h"    // real singletons + per-hop expect* helpers + cooperativeTick
@@ -85,7 +88,7 @@ namespace
 using State = PathTrackerClass::State;
 
 #ifndef PARITY_SCHEMA_VERSION
-#define PARITY_SCHEMA_VERSION 1    // defensive default; the CMake target defines it to 1.
+#define PARITY_SCHEMA_VERSION 2    // defensive default; the CMake target defines it to 2.
 #endif
 
 // ===========================================================================================
@@ -145,9 +148,10 @@ constexpr float kSeekStepCm = 5.0f;
 // offset along world +x regardless of the parked raw yaw. A non-zero push heading would either
 // land on the wrong axis (if it disagreed with the seat yaw) or introduce a yaw offset that
 // breaks the generic park-at-resolved-heading retire — so heading 0 is the one clean choice here.
-// Magnitudes are multiples of 2.0 cm (the integrator deposit step) to keep the achieved offset as
-// close to the sim's exact operator_move as possible — see the OFFSET-EXACTNESS NOTE in the file
-// docblock.
+// Magnitudes are multiples of 2.0 cm (the integrator deposit step). The ACHIEVED (realized)
+// magnitude `pushOperatorOffset` returns is emitted as `realized_offset_cm` on the goal_start
+// record so the sim is seeded with it (not the nominal magnitude) — see the REALIZED-OFFSET
+// EMISSION note in the file docblock.
 // ===========================================================================================
 struct CuratedCase
 {
@@ -175,17 +179,27 @@ constexpr size_t kNumCuratedCases = sizeof(CURATED_PARITY_CASES) / sizeof(CURATE
 
 // ===========================================================================================
 // Framing-record emit (the only records THIS file emits; the per-hop records come from T1's
-// in-FSM hook). Floats are not present in the framing records; node names are emitted verbatim.
+// in-FSM hook). The goal_start record carries one float (the realized operator-offset magnitude,
+// %.6f); node names are emitted verbatim.
 // ===========================================================================================
 
-/// @brief Emit the per-case `goal_start` framing record (carries the schema version).
-void emitGoalStart(const char* caseId, const char* startName, const char* goalName)
+/// @brief Emit the per-case `goal_start` framing record (carries the schema version + the realized
+///        operator-offset magnitude).
+///
+/// @param realizedOffsetCm The ACHIEVED (encoder-quantized) operator-offset magnitude for this
+///        case (`pushOperatorOffset`'s return value), or `0.0f` for clean / non-offset cases. The
+///        Python parity test seeds its sim with this so `return_move.dist_cm` is compared honestly
+///        rather than masked by an allowlist entry (finding 1, issue #116).
+void emitGoalStart(const char* caseId, const char* startName, const char* goalName,
+                   float realizedOffsetCm)
 {
-    char line[256];
+    char line[320];
     std::snprintf(line, sizeof(line),
                   "{\"schema_version\":%d,\"kind\":\"goal_start\",\"case_id\":\"%s\","
-                  "\"start\":\"%s\",\"goal\":\"%s\",\"route_dir\":\"AUTO\",\"arrival_dir\":\"AUTO\"}",
-                  (int) (PARITY_SCHEMA_VERSION), caseId, startName, goalName);
+                  "\"start\":\"%s\",\"goal\":\"%s\",\"route_dir\":\"AUTO\",\"arrival_dir\":\"AUTO\","
+                  "\"realized_offset_cm\":%.6f}",
+                  (int) (PARITY_SCHEMA_VERSION), caseId, startName, goalName,
+                  (double) realizedOffsetCm);
     pt_parity::emit(line);
 }
 
@@ -430,7 +444,7 @@ void runCleanCase(uint8_t start, uint8_t goal)
     resetWorld();
     seatAt(startName);    // app-yaw 0 — declarePosition clears the offset, so no return prologue.
 
-    emitGoalStart(caseId, startName, goalName);
+    emitGoalStart(caseId, startName, goalName, 0.0f);    // clean case: no operator offset.
     PathTracker.goTo(goal).async();
     driveGoalToCompletion();
     emitGoalDone(FieldMap::getNode(Localization.getCurrentNode()).name);
@@ -459,19 +473,22 @@ void runCuratedCase(const CuratedCase& c)
     }
 
     resetWorld();
+    float realized = 0.0f;    // realized (encoder-quantized) offset magnitude; 0 for a non-offset case.
     if (c.hasOffset)
     {
         // Bind the frame at the push heading, then manufacture a REAL operator offset through the
         // Localization integrator so DEQUEUE's return-gate sees a genuine offset (NOT a test hook).
+        // `pushOperatorOffset` RETURNS the achieved magnitude — emitted as `realized_offset_cm` so
+        // the sim seeds with it and `return_move.dist_cm` is compared honestly (finding 1, #116).
         seatAt(c.start, c.offsetHeadingDeg);
-        pushOperatorOffset(c.offsetMagCm, c.offsetHeadingDeg);
+        realized = pushOperatorOffset(c.offsetMagCm, c.offsetHeadingDeg);
     }
     else
     {
         seatAt(c.start);    // app-yaw 0.
     }
 
-    emitGoalStart(caseId, c.start, c.goal);
+    emitGoalStart(caseId, c.start, c.goal, realized);
     PathTracker.goTo(goal).async();
     driveGoalToCompletion();
     emitGoalDone(FieldMap::getNode(Localization.getCurrentNode()).name);

@@ -563,7 +563,7 @@ add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pas
 # dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
 #
 # It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
-# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=1`. It does NOT
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=2`. It does NOT
 # define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
 # with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
 # and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
@@ -587,7 +587,7 @@ target_include_directories(test_path_tracker_parity_dump PRIVATE
 add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
 target_compile_definitions(test_path_tracker_parity_dump
-    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=1)
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=2)
 
 # =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).

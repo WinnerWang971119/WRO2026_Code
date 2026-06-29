@@ -30,7 +30,7 @@ Public surface (the contract T7 + T8 consume)::
     ParitySchemaError / ParityAllowlistError      # loud-failure exception types
 
     normalize_sim_stream(sim, case) -> list[TraceRecord]
-    load_cpp_ndjson(text) -> dict[case_id, list[TraceRecord]]
+    load_cpp_ndjson(text) -> dict[case_id, CppCase]
     integrate_pose(records, field, node_sequence, *, start_node=None,
                    start_heading_deg=None) -> list[Pose]
     load_allowlist(path) -> Allowlist
@@ -111,9 +111,9 @@ from tools.path_planner.sim.runtime import (
 )
 
 #: Expected ``schema_version`` on every ``goal_start`` framing record. The C++
-#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=1``; any mismatch on load
+#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=2``; any mismatch on load
 #: is a hard, loud failure (a desynced emitter vs loader).
-PARITY_SCHEMA_VERSION: int = 1
+PARITY_SCHEMA_VERSION: int = 2
 
 
 __all__ = [
@@ -123,6 +123,7 @@ __all__ = [
     "TraceRecord",
     "Pose",
     "ParityCase",
+    "CppCase",
     "Allowlist",
     "AllowlistEntry",
     "ParitySchemaError",
@@ -178,6 +179,7 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
         "goal": str,
         "route_dir": str,
         "arrival_dir": str,
+        "realized_offset_cm": float,
     },
     "turn": {"body_heading_deg": float, "wheel": str},
     "line_follow": {"reverse": bool, "line_mode": str},
@@ -296,6 +298,25 @@ class ParityCase:
     route_dir: Direction = Direction.AUTO
     arrival_dir: Direction = Direction.AUTO
     offset: Optional[Tuple[float, float, float]] = None
+
+
+@dataclass(frozen=True)
+class CppCase:
+    """One loaded C++ parity case: its per-hop body + the realized operator offset.
+
+    :ivar records: the case's ordered per-hop :class:`TraceRecord` body (the
+        ``goal_start`` / ``goal_done`` framing stripped) — exactly what the
+        :func:`load_cpp_ndjson` dict values carried before finding 1's
+        realized-offset plumbing landed.
+    :ivar realized_offset_cm: the realized (encoder-quantized) operator-offset
+        magnitude parsed from this case's ``goal_start.realized_offset_cm``
+        (``0.0`` for clean / non-offset cases). The parity test seeds the sim
+        with this value so ``return_move.dist_cm`` is compared honestly instead
+        of being masked by an allowlist entry (finding 1, issue #116).
+    """
+
+    records: List[TraceRecord]
+    realized_offset_cm: float
 
 
 # ---------------------------------------------------------------------------
@@ -427,15 +448,16 @@ def _record_from_obj(obj: Any) -> TraceRecord:
     return TraceRecord(kind=kind, fields=fields)
 
 
-def load_cpp_ndjson(text: str) -> Dict[str, List[TraceRecord]]:
-    """Parse the C++ parity-dump NDJSON into per-case per-hop record lists.
+def load_cpp_ndjson(text: str) -> Dict[str, CppCase]:
+    """Parse the C++ parity-dump NDJSON into per-case :class:`CppCase` values.
 
     Each line is one JSON object. A ``goal_start`` opens a case (keyed by its
-    ``case_id``); a ``goal_done`` closes it; the records in between are the
-    case's per-hop body. The returned lists contain ONLY the per-hop records
-    (the ``goal_start`` / ``goal_done`` framing is consumed for grouping +
-    validation, matching what :func:`normalize_sim_stream` returns for the sim
-    side).
+    ``case_id`` and carrying the realized operator offset); a ``goal_done``
+    closes it; the records in between are the case's per-hop body. Each returned
+    :class:`CppCase` holds ONLY the per-hop records (the ``goal_start`` /
+    ``goal_done`` framing is consumed for grouping + validation, matching what
+    :func:`normalize_sim_stream` returns for the sim side) plus the
+    ``realized_offset_cm`` read off the opening ``goal_start``.
 
     Every record is strictly validated (:func:`_record_from_obj`): an unknown
     ``kind``, an unknown / missing field, a wrong type, a bad ``schema_version``,
@@ -443,13 +465,13 @@ def load_cpp_ndjson(text: str) -> Dict[str, List[TraceRecord]]:
     skip (the 3-place contract guard).
 
     :param text: the full NDJSON dump text (one JSON object per non-blank line).
-    :return: a dict mapping ``case_id`` to its ordered per-hop
-        :class:`TraceRecord` list.
+    :return: a dict mapping ``case_id`` to its :class:`CppCase` (ordered per-hop
+        record list + the case's realized operator-offset magnitude).
     :raises ParitySchemaError: on any malformed line, schema desync, or framing
         error (nested cases, duplicate case_id, an orphan record, an
         unterminated case).
     """
-    cases: Dict[str, List[TraceRecord]] = {}
+    cases: Dict[str, CppCase] = {}
     current_id: Optional[str] = None
     current_list: Optional[List[TraceRecord]] = None
 
@@ -476,8 +498,14 @@ def load_cpp_ndjson(text: str) -> Dict[str, List[TraceRecord]]:
                 raise ParitySchemaError(
                     f"line {lineno}: duplicate case_id {current_id!r}"
                 )
+            # Wrap the (still-empty) per-hop list in its CppCase now, stamping the
+            # realized offset off this goal_start. The list is appended to below
+            # (the CppCase holds the SAME list object), so the body fills in place.
             current_list = []
-            cases[current_id] = current_list
+            cases[current_id] = CppCase(
+                records=current_list,
+                realized_offset_cm=record.fields["realized_offset_cm"],
+            )
         elif record.kind == "goal_done":
             if current_id is None:
                 raise ParitySchemaError(

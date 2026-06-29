@@ -39,24 +39,18 @@ the data file.
 
 ## Seeded entries
 
-### `return-move-offset-encoder-quantization`
+The allowlist is currently **empty** (`parity_allowlist.json` is `[]`).
 
-- **Scope:** `case_selector="*__off_*"` (the offset-tagged curated cases only),
-  `event_kind="return_move"`, `field_path="dist_cm"`, `side="cpp"`.
-- **Why:** The return-to-node prologue fires only on a non-trivial accumulated
-  operator offset, which the curated `__off_*` cases pre-load identically on both
-  sides. The firmware manufactures that offset through the **encoder
-  integrator** — fixed 2 cm incremental deposits, each leg round-tripped through
-  cm→encoder-degrees→cm — so the commanded return distance is **quantized** and
-  can differ from the sim by more than `DIST_TOL`. The sim applies the offset
-  analytically via `operator_move`, so its `dist_cm` is exact. Only the C++
-  commanded `dist_cm` of the `return_move` record diverges; the pose still
-  re-anchors onto the same node.
-- **Status / caveat:** This is the one concrete a-priori divergence the design
-  predicts, but its exact magnitude depends on the encoder round-trip. T8 is
-  where it is validated against the **live** diff. If the round-trip turns out
-  exact (no mismatch beyond `DIST_TOL`), this entry is **stale** and must be
-  removed — the stale-entry guard will force that.
+The one historical entry, `return-move-offset-encoder-quantization`, was removed
+once the parity test began seeding the sim with the firmware's **realized**
+(encoder-quantized) operator-offset magnitude. The C++ dump now emits that
+magnitude as `realized_offset_cm` on every `goal_start` record (issue #116), and
+the sim is driven from it instead of the nominal table value. With both sides
+starting from the same realized offset, the `return_move.dist_cm` of the two
+`*__off_*` cases matches within `DIST_TOL`, so the divergence collapsed and the
+entry would have been stale. Add a new entry only for a known, unavoidable,
+tightly-scoped divergence — and only after confirming it genuinely cannot be
+aligned at the input (see the discipline above).
 
 ## Deliberately NOT allowlisted (structural exclusions — no entry needed)
 

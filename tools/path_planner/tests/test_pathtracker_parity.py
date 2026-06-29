@@ -46,6 +46,7 @@ CI — CI is detected via the ``CI`` env var). Build it locally with::
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -81,13 +82,17 @@ from tools.path_planner.planner import (  # noqa: E402
 )
 from tools.path_planner.sim.chassis import VirtualChassis, _normalize  # noqa: E402
 from tools.path_planner.sim.parity import (  # noqa: E402
+    PARITY_SCHEMA_VERSION,
     PER_HOP_RECORD_KINDS,
     TRACE_RECORD_FIELDS,
     Allowlist,
     AllowlistEntry,
-    Pose,
+    CppCase,
     ParityCase,
+    ParitySchemaError,
+    Pose,
     TraceRecord,
+    _record_from_obj,
     integrate_pose,
     load_allowlist,
     load_cpp_ndjson,
@@ -335,21 +340,34 @@ def _enumerate_cases(field: Any, next_hop: Any) -> List[ParityCase]:
     return cases
 
 
-def _run_sim_case(field: Any, graph: Any, next_hop: Any, case: ParityCase) -> List[TraceRecord]:
+def _run_sim_case(
+    field: Any,
+    graph: Any,
+    next_hop: Any,
+    case: ParityCase,
+    realized_offset_cm: float = 0.0,
+) -> List[TraceRecord]:
     """Seat + drive the sim for one case and return its normalized record stream.
 
     Seats a fresh sim EXACTLY as the dump's ``seatAt`` does: localization on the
     case start, world frame bound at ``START_HEADING_DEG`` (app-yaw 0), and the
     chassis at the start node coordinates. For an offset case it then deposits
-    the pinned operator offset along world heading 0 (the sim counterpart of the
-    C++ ``pushOperatorOffset(mag, 0)``), so the return-to-node prologue fires.
-    Reaching into the documented-private localization node setter mirrors the
-    established ``sim._field_data`` / ``sim._graph`` access pattern in parity.py.
+    the operator offset along world heading 0 (the sim counterpart of the C++
+    ``pushOperatorOffset(mag, 0)``), so the return-to-node prologue fires. The
+    deposited magnitude is the C++-REALIZED (encoder-quantized) value parsed from
+    the dump's ``goal_start.realized_offset_cm`` — NOT the nominal table
+    magnitude — so ``return_move.dist_cm`` is compared honestly (finding 1) rather
+    than masked by an allowlist entry. Reaching into the documented-private
+    localization node setter mirrors the established ``sim._field_data`` /
+    ``sim._graph`` access pattern in parity.py.
 
     :param field: the fixture field-data namespace.
     :param graph: the fixture graph.
     :param next_hop: the all-pairs next-hop table.
     :param case: the case to run.
+    :param realized_offset_cm: the C++-realized operator-offset magnitude to seed
+        an offset case with (``0.0`` for clean cases, where ``case.offset`` is
+        ``None`` and no offset is deposited).
     :return: the per-hop :class:`TraceRecord` list (no goal_start/goal_done).
     """
     chassis = VirtualChassis.from_field_data(field)
@@ -363,16 +381,19 @@ def _run_sim_case(field: Any, graph: Any, next_hop: Any, case: ParityCase) -> Li
     chassis.y_cm = float(start_y)
     chassis.heading_deg = _normalize(float(field.START_HEADING_DEG))
 
-    # Offset cases: deposit the pinned operator offset along world heading 0.
+    # Offset cases: deposit the C++-realized operator offset along world heading 0.
     # The believed heading stays 0 (a translation push), so operator_move
     # decomposes the magnitude purely onto +x, matching pushOperatorOffset(mag, 0).
+    # The nominal `case.offset` still asserts it is a pure +x push; the MAGNITUDE
+    # deposited is the realized (encoder-quantized) value from the C++ stream, so
+    # the return distance collapses to a match instead of being allowlisted.
     if case.offset is not None:
         dx, dy, dtheta = case.offset
         assert dy == 0.0 and dtheta == 0.0, (
             "the pinned parity offsets are pure +x pushes at world heading 0; "
             f"got dy={dy} dtheta={dtheta} for {case.case_id!r}"
         )
-        sim.operator_move(dx)
+        sim.operator_move(realized_offset_cm)
 
     return normalize_sim_stream(sim, case)
 
@@ -558,8 +579,12 @@ def parity_run() -> _ParityRun:
     for case in cases:
         if case.case_id not in shared_ids:
             continue  # a one-sided case is reported by the case-count guard
-        cpp_recs = cpp_cases[case.case_id]
-        sim_recs = _run_sim_case(field, graph, next_hop, case)
+        cpp_case = cpp_cases[case.case_id]
+        cpp_recs = cpp_case.records
+        sim_recs = _run_sim_case(
+            field, graph, next_hop, case,
+            realized_offset_cm=cpp_case.realized_offset_cm,
+        )
         run.cpp_kinds_seen.update(r.kind for r in cpp_recs)
         run.sim_kinds_seen.update(r.kind for r in sim_recs)
         run.n_cases_diffed += 1
@@ -643,33 +668,56 @@ def test_decision_streams_match_modulo_allowlist(parity_run: _ParityRun) -> None
     )
 
 
-def test_allowlisted_divergence_is_the_known_return_offset(parity_run: _ParityRun) -> None:
-    """The only allowlisted divergence is the known return-offset encoder quantization.
+def test_return_offset_divergence_is_collapsed_not_allowlisted(
+    parity_run: _ParityRun,
+) -> None:
+    """The return-offset divergence is collapsed by the realized seed, not allowlisted.
 
-    Proves the allowlist actually MATCHED a live mismatch (not a silent pass):
-    every allowlisted divergence must be ``return_move.dist_cm`` on an
-    ``*__off_*`` case, matched by T7's seeded entry. The exact diff is asserted
-    in the message so the report shows cpp (encoder-quantized) vs sim (exact).
+    Finding 1 (issue #116) seeds the sim with the C++-REALIZED (encoder-quantized)
+    operator offset emitted on each ``goal_start``, so ``return_move.dist_cm`` now
+    matches within ``DIST_TOL`` instead of being masked by the deleted
+    ``return-move-offset-encoder-quantization`` allowlist entry. This guard
+    preserves the original test's anti-vacuous intent — it proves the ``off_*``
+    comparison actually RAN — while asserting the divergence is genuinely gone,
+    not silently re-hidden:
+
+    * (a) ``return_move`` appears in BOTH the C++ and sim record streams (the
+      return-to-node prologue fired and was normalized on both sides);
+    * (b) no allowlisted divergence carries the deleted entry's id; and
+    * (c) no unmatched ``return_move.dist_cm`` mismatch remains.
     """
-    assert parity_run.allowlisted, (
-        "no allowlisted divergence was matched — the known return-offset "
-        "encoder-quantization divergence should fire on the two off_* cases. "
-        "If the encoder round-trip is now exact, REMOVE the stale allowlist "
-        "entry (the stale-entry guard would otherwise fail)."
+    # (a) Anti-vacuous: the off_* return-to-node prologue actually ran on both sides.
+    assert "return_move" in parity_run.cpp_kinds_seen, (
+        "the C++ sweep never emitted a return_move record — the off_* "
+        "return-to-node cases did not run (a vacuous pass)."
     )
-    bad = [
+    assert "return_move" in parity_run.sim_kinds_seen, (
+        "the sim sweep never emitted a return_move record — the off_* "
+        "return-to-node cases did not run (a vacuous pass)."
+    )
+
+    # (b) The deleted entry must not fire (it is gone from the allowlist file).
+    revived = [
         m.describe()
         for (m, entry) in parity_run.allowlisted
-        if not (
-            m.event_kind == "return_move"
-            and m.field_path == "dist_cm"
-            and "__off_" in m.case_id
-            and entry.id == "return-move-offset-encoder-quantization"
-        )
+        if entry.id == "return-move-offset-encoder-quantization"
     ]
-    assert not bad, (
-        "an allowlisted divergence is outside the expected return-offset scope:\n"
-        + "\n".join(bad)
+    assert not revived, (
+        "the return-move-offset-encoder-quantization allowlist entry matched a "
+        "divergence — it should be deleted now the realized-offset seed collapses "
+        "the return distance:\n" + "\n".join(revived)
+    )
+
+    # (c) No residual return_move.dist_cm divergence (it collapsed within DIST_TOL).
+    residual = [
+        m.describe()
+        for m in parity_run.unmatched_mismatches
+        if m.event_kind == "return_move" and m.field_path == "dist_cm"
+    ]
+    assert not residual, (
+        "return_move.dist_cm still diverges after seeding the realized offset "
+        "(expected collapse within DIST_TOL — do NOT re-add an allowlist entry; "
+        "see the plan's Error Handling):\n" + "\n".join(residual)
     )
 
 
@@ -741,3 +789,87 @@ def test_allowlist_match_is_case_sensitive_glob() -> None:
         mismatched_allowlist.match("Inter2__Inter3__clean", "return_move", "dist_cm")
         is None
     ), "a case-mismatched selector must not match (case-sensitive on every OS)"
+
+
+def _goal_start_obj(
+    case_id: str,
+    start: str,
+    goal: str,
+    realized_offset_cm: float,
+) -> Dict[str, Any]:
+    """Build a complete, schema-v2 ``goal_start`` JSON object (dict) for a test."""
+    return {
+        "schema_version": PARITY_SCHEMA_VERSION,
+        "kind": "goal_start",
+        "case_id": case_id,
+        "start": start,
+        "goal": goal,
+        "route_dir": "AUTO",
+        "arrival_dir": "AUTO",
+        "realized_offset_cm": realized_offset_cm,
+    }
+
+
+def test_goal_start_requires_realized_offset_cm() -> None:
+    """A ``goal_start`` record must carry ``realized_offset_cm`` (TC6, schema v2).
+
+    Pure unit test (no dump binary): :func:`_record_from_obj` validates the
+    ``goal_start`` field set for EXACT equality, so the realized-offset field
+    finding 1 added is REQUIRED, not optional. A ``goal_start`` missing it raises
+    :class:`ParitySchemaError`; one carrying it (with ``schema_version == 2`` and
+    every other ``goal_start`` field) parses into a :class:`TraceRecord`.
+    """
+    assert PARITY_SCHEMA_VERSION == 2, "finding 1 bumps the parity schema to v2"
+
+    full = _goal_start_obj("Inter2__Inter3__off_n14_h0", "Inter2", "Inter3", 14.0)
+
+    # Missing realized_offset_cm -> strict field-set mismatch -> loud failure.
+    without_field = {k: v for k, v in full.items() if k != "realized_offset_cm"}
+    with pytest.raises(ParitySchemaError):
+        _record_from_obj(without_field)
+
+    # With the field (+ schema_version 2 + every other goal_start field) -> parses.
+    record = _record_from_obj(full)
+    assert record.kind == "goal_start"
+    assert record.fields["realized_offset_cm"] == pytest.approx(14.0)
+
+
+def test_load_cpp_ndjson_surfaces_realized_offset() -> None:
+    """``load_cpp_ndjson`` returns a :class:`CppCase` carrying the realized offset (TC6).
+
+    Pure unit test: a minimal NDJSON stream (one offset case with a per-hop body,
+    one clean case) parses into :class:`CppCase` values whose ``records`` is the
+    per-hop body and whose ``realized_offset_cm`` is the value read off each
+    case's ``goal_start`` — the return-shape finding 1 introduced.
+    """
+    blind = json.dumps(
+        {
+            "kind": "blind_dead_reckon",
+            "reverse": False,
+            "drive_mode": "GYRO_TSHAPE",
+            "dist_cm": 13.999999,
+            "reanchor": "ON_DEAD_RECKONED_ADVANCE",
+        }
+    )
+    goal_done = json.dumps({"kind": "goal_done", "final": "ProjB"})
+    text = "\n".join(
+        [
+            json.dumps(_goal_start_obj("Zed__ProjB__off_n6_h0", "Zed", "ProjB", 5.999998)),
+            blind,
+            goal_done,
+            json.dumps(_goal_start_obj("Zed__ProjB__clean", "Zed", "ProjB", 0.0)),
+            goal_done,
+        ]
+    )
+
+    cases = load_cpp_ndjson(text)
+    assert set(cases) == {"Zed__ProjB__off_n6_h0", "Zed__ProjB__clean"}
+
+    offset_case = cases["Zed__ProjB__off_n6_h0"]
+    assert isinstance(offset_case, CppCase)
+    assert offset_case.realized_offset_cm == pytest.approx(5.999998)
+    assert [r.kind for r in offset_case.records] == ["blind_dead_reckon"]
+
+    clean_case = cases["Zed__ProjB__clean"]
+    assert clean_case.realized_offset_cm == 0.0
+    assert clean_case.records == []

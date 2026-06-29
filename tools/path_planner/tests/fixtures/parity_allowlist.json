@@ -1,11 +1,1 @@
-[
-  {
-    "id": "return-move-offset-encoder-quantization",
-    "case_selector": "*__off_*",
-    "event_kind": "return_move",
-    "field_path": "dist_cm",
-    "side": "cpp",
-    "reason": "On offset-tagged return-to-node cases the firmware manufactures the accumulated operator offset through the encoder integrator: the offset is laid down in fixed 2 cm incremental deposits and each leg passes through a cm->encoder-degrees->cm round-trip, so the commanded return distance is quantized and can differ from the sim's value by more than DIST_TOL. The sim applies the same offset analytically via operator_move (no deposit granularity, no encoder round-trip), so its return dist_cm is exact. Only the commanded dist_cm of the C++ return_move record is affected; the resulting pose still re-anchors onto the same node.",
-    "tracking_issue": "#108"
-  }
-]
+[]
