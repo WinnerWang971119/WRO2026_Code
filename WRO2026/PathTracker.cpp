@@ -2143,7 +2143,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // and returns the SAME value as `decision.commandedDistanceCm` (both
             // delegate to `resolvePivotTrim` with identical inputs), so dispatching its
             // return is behavior-identical to the pre-refactor code while keeping the
-            // trace; the classifier's value is what the parity stream records.
+            // trace; the dispatched `effectiveDistCm` is what the parity stream records.
             (void) Intersection.isAtIntersection();
             const Config::SpeedPreset preset = _lineModeToPreset(q.lineMode);
             _projPassThrough            = q.projPassThrough;
@@ -2155,7 +2155,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         .setBrakeOnGate(decision.brakeOnGate)
                         .setDistanceTarget(effectiveDistCm);
 #ifdef PT_PARITY_TRACE
-            _ptEmitProjectionFollow(decision.reverse, q.lineMode, decision.commandedDistanceCm,
+            _ptEmitProjectionFollow(decision.reverse, q.lineMode, effectiveDistCm,
                                     _projPassThrough);
 #endif
             _state       = State::PROJECTION_FOLLOW;
@@ -2255,7 +2255,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // `resolvePivotTrim` with identical inputs: edge.distance_cm minus the two
             // latched pivot trims, clamped to the floor). Dispatching its return is
             // behavior-identical to the pre-refactor code while keeping the trace;
-            // `decision.commandedDistanceCm` is the value the parity stream records.
+            // the dispatched `effectiveDistCm` is the value the parity stream records.
             const float effectiveDistCm = _pivotTrimDistance(edge);
 
             // The resolved motion bundle (`decision.driveMode`) maps onto one of three
@@ -2319,7 +2319,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             }
 #ifdef PT_PARITY_TRACE
             _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode,
-                                   decision.commandedDistanceCm);
+                                   effectiveDistCm);
 #endif
             _state       = State::BLIND_FORWARD;
             _passThrough = false;    // consumed
