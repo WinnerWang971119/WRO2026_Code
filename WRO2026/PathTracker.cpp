@@ -11,10 +11,12 @@
 
 #include "DirectionPolicy.h"
 #include "Drive.h"
+#include "EdgeDispatchPolicy.h"
 #include "EventTrace.h"
 #include "Intersection.h"
 #include "LineFollower.h"
 #include "Localization.h"
+#include "PathTrackerParityTrace.h"
 #include "PivotTrimPolicy.h"
 #include "ReturnToNodePolicy.h"
 #include "StopAtLinePolicy.h"
@@ -183,6 +185,157 @@ namespace
         Serial.print(F("); "));
     }
 }    // namespace
+
+// =========================================================================================
+// Parity trace helpers (issue #108) — compiled in ONLY when PT_PARITY_TRACE is defined.
+//
+// Each builder serializes one normalized NDJSON record (the cross-language wire schema
+// in the parity plan) and emits it via `pt_parity::emit`. Floats are fixed 6-decimal
+// (`%.6f`) to match the comparator. Node names (not ids) and the enum string spellings
+// the `resolveStopAtLine` CSV already uses keep the C++ and Python streams aligned.
+// The whole block — and every call site — vanishes from the firmware build, so the
+// trace can never affect timing or behavior on the robot.
+// =========================================================================================
+
+#ifdef PT_PARITY_TRACE
+namespace
+{
+    const char* _ptWheelName(Routes::TurnMode m)
+    {
+        switch (m)
+        {
+            case Routes::TurnMode::COUNTER_ROT: return "COUNTER_ROT";
+            case Routes::TurnMode::PIVOT_LEFT:  return "PIVOT_LEFT";
+            case Routes::TurnMode::PIVOT_RIGHT: return "PIVOT_RIGHT";
+            case Routes::TurnMode::DEFAULT:
+            default:                            return "COUNTER_ROT";    // byte 0, see _turnModeToByte
+        }
+    }
+
+    const char* _ptDriveModeName(Routes::BlindMode m)
+    {
+        switch (m)
+        {
+            case Routes::BlindMode::SYNC_TSHAPE: return "SYNC_TSHAPE";
+            case Routes::BlindMode::GYRO_TSHAPE: return "GYRO_TSHAPE";
+            case Routes::BlindMode::RAW_FLAT:    return "RAW_FLAT";
+            default:                             return "SYNC_TSHAPE";    // resolver guarantees concrete
+        }
+    }
+
+    const char* _ptLineModeName(Routes::LineMode m)
+    {
+        switch (m)
+        {
+            case Routes::LineMode::NORMAL: return "NORMAL";
+            case Routes::LineMode::SLOW:   return "SLOW";
+            case Routes::LineMode::FAST:   return "FAST";
+            case Routes::LineMode::DEFAULT:
+            default:                       return "NORMAL";    // resolved before reaching here
+        }
+    }
+
+    const char* _ptBool(bool b) { return b ? "true" : "false"; }
+
+    const char* _ptNodeName(uint8_t id) { return FieldMap::getNode(id).name; }
+
+    /// `turn` / `return_turn` — {body_heading_deg, wheel}.
+    void _ptEmitTurn(const char* kind, float bodyHeadingDeg, Routes::TurnMode wheel)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"%s\",\"body_heading_deg\":%.6f,\"wheel\":\"%s\"}", kind,
+                      (double) bodyHeadingDeg, _ptWheelName(wheel));
+        pt_parity::emit(line);
+    }
+
+    /// `line_follow` — {reverse, line_mode}.
+    void _ptEmitLineFollow(bool reverse, Routes::LineMode lineMode)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"line_follow\",\"reverse\":%s,\"line_mode\":\"%s\"}",
+                      _ptBool(reverse), _ptLineModeName(lineMode));
+        pt_parity::emit(line);
+    }
+
+    /// `line_overshoot` — {advance_cm, pass_through, reanchor:"ON_INTERSECTION"}.
+    void _ptEmitLineOvershoot(float advanceCm, bool passThrough)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"line_overshoot\",\"advance_cm\":%.6f,\"pass_through\":%s,"
+                      "\"reanchor\":\"ON_INTERSECTION\"}",
+                      (double) advanceCm, _ptBool(passThrough));
+        pt_parity::emit(line);
+    }
+
+    /// `projection_follow` — {reverse, line_mode, dist_cm, pass_through,
+    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}.
+    void _ptEmitProjectionFollow(bool reverse, Routes::LineMode lineMode, float distCm,
+                                 bool passThrough)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"projection_follow\",\"reverse\":%s,\"line_mode\":\"%s\","
+                      "\"dist_cm\":%.6f,\"pass_through\":%s,"
+                      "\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
+                      _ptBool(reverse), _ptLineModeName(lineMode), (double) distCm,
+                      _ptBool(passThrough));
+        pt_parity::emit(line);
+    }
+
+    /// `stop_at_line_seek` — {reverse, drive_mode, dist_cm, overshoot_cm,
+    /// reanchor:"ON_INTERSECTION"}.
+    void _ptEmitStopAtLineSeek(bool reverse, Routes::BlindMode driveMode, float distCm,
+                               float overshootCm)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"stop_at_line_seek\",\"reverse\":%s,\"drive_mode\":\"%s\","
+                      "\"dist_cm\":%.6f,\"overshoot_cm\":%.6f,\"reanchor\":\"ON_INTERSECTION\"}",
+                      _ptBool(reverse), _ptDriveModeName(driveMode), (double) distCm,
+                      (double) overshootCm);
+        pt_parity::emit(line);
+    }
+
+    /// `blind_dead_reckon` — {reverse, drive_mode, dist_cm,
+    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}.
+    void _ptEmitBlindDeadReckon(bool reverse, Routes::BlindMode driveMode, float distCm)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"blind_dead_reckon\",\"reverse\":%s,\"drive_mode\":\"%s\","
+                      "\"dist_cm\":%.6f,\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
+                      _ptBool(reverse), _ptDriveModeName(driveMode), (double) distCm);
+        pt_parity::emit(line);
+    }
+
+    /// `return_move` — {mode:"seek"|"forward", node, dist_cm, heading_world_deg}.
+    void _ptEmitReturnMove(const char* mode, uint8_t node, float distCm, float headingWorldDeg)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"return_move\",\"mode\":\"%s\",\"node\":\"%s\","
+                      "\"dist_cm\":%.6f,\"heading_world_deg\":%.6f}",
+                      mode, _ptNodeName(node), (double) distCm, (double) headingWorldDeg);
+        pt_parity::emit(line);
+    }
+
+    /// `wall_stop` / `wall_reanchor` / `wall_depart` — {node, axis_idx, <coordKey>}.
+    /// `axis_idx`: 0 = x, 1 = y. `coordKey` is "wall_coord" (stop/reanchor) or
+    /// "node_coord" (depart).
+    void _ptEmitWall(const char* kind, uint8_t node, uint8_t axisIdx, const char* coordKey,
+                     float coord)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"%s\",\"node\":\"%s\",\"axis_idx\":%u,\"%s\":%.6f}", kind,
+                      _ptNodeName(node), (unsigned) axisIdx, coordKey, (double) coord);
+        pt_parity::emit(line);
+    }
+}    // namespace
+#endif    // PT_PARITY_TRACE
 
 // =========================================================================================
 // PathTrackerGoToBuilder
@@ -826,6 +979,9 @@ void PathTrackerClass::_stepFsm()
                             .setReverse(overshootReverse)
                             .setBrakeOnGate(!_passThrough)
                             .setDistanceTarget(overshootTargetCm);
+#ifdef PT_PARITY_TRACE
+                _ptEmitLineOvershoot(overshootTargetCm, _passThrough);
+#endif
                 _state = State::LINE_OVERSHOOT;
             }
             return;
@@ -1036,6 +1192,10 @@ void PathTrackerClass::_stepFsm()
                 return;
             }
 
+#ifdef PT_PARITY_TRACE
+            _ptEmitWall("wall_reanchor", cur, info->axis, "wall_coord", info->wall_coord);
+#endif
+
             // Success: re-anchored. The chassis is still pressed against the wall (belief is the
             // axle, WALL_CONTACT_OFFSET_CM short of the wall surface), so BEFORE any planning —
             // which could dispatch a pivot that would clip the wall — drive FORWARD off the wall
@@ -1050,6 +1210,9 @@ void PathTrackerClass::_stepFsm()
             const float departCm  = standoff - Config::WALL_CONTACT_OFFSET_CM;
             if (departCm > 0.0f)
             {
+#ifdef PT_PARITY_TRACE
+                _ptEmitWall("wall_depart", cur, info->axis, "node_coord", nodeCoord);
+#endif
                 Drive.driveDist(departCm).setMode(DriveMode::GYRO).async();
                 _state = State::WALL_DEPART;
                 return;
@@ -1248,6 +1411,9 @@ void PathTrackerClass::_dispatchReturnMove(const Offset2D& off, float mag)
     // completes; if the chassis is already aligned the move dispatches immediately.
     if (_dispatchTurnIfNeeded(returnHeadingDeg, _turnModeToByte(Routes::PIPELINE_CONFIG.turn)))
     {
+#ifdef PT_PARITY_TRACE
+        _ptEmitTurn("return_turn", returnHeadingDeg, Routes::PIPELINE_CONFIG.turn);
+#endif
         _state = State::TURNING;
     }
     else
@@ -1258,6 +1424,10 @@ void PathTrackerClass::_dispatchReturnMove(const Offset2D& off, float mag)
 
 void PathTrackerClass::_dispatchReturnMoveAfterTurn()
 {
+#ifdef PT_PARITY_TRACE
+    _ptEmitReturnMove(_returnUsesLineSeek ? "seek" : "forward", Localization.getCurrentNode(),
+                      _returnDistCm, _resolvedBodyHeading);
+#endif
     if (_returnUsesLineSeek)
     {
         // Line-seek return (LINE anchor, return distance >= the sensor lead). Re-acquire the
@@ -1388,6 +1558,9 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
         .setHeading(imuTarget)
         .setBackOff(0.0f)
         .async();
+#ifdef PT_PARITY_TRACE
+    _ptEmitWall("wall_stop", node, info->axis, "wall_coord", info->wall_coord);
+#endif
     _state = State::WALL_STOP;
 }
 
@@ -1608,6 +1781,9 @@ void PathTrackerClass::_onPlanNextHop()
             Serial.print(F(" trim="));
             Serial.println(_departingPivot.trim_cm);
         }
+#ifdef PT_PARITY_TRACE
+        _ptEmitTurn("turn", bodyTarget, resolvedTurnMode);
+#endif
         _state = State::TURNING;
     }
     else
@@ -1846,273 +2022,217 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
         return;
     }
 
+    // NONE / unknown edge type → unreachable. This replaces the old switch's
+    // `case NONE: default:` arm: `resolveEdgeDispatch` only classifies LINE/BLIND
+    // (its `else` is BLIND), so a non-routed edge must fault BEFORE the resolver.
+    if (edge.type != Routes::EdgeType::LINE && edge.type != Routes::EdgeType::BLIND)
+    {
+        _enterFault(Fault::UNREACHABLE, cur, _nextHop);
+        return;
+    }
+
     const bool reverse = (_resolvedDirection == Direction::REAR);
 
-    switch (edge.type)
+    // -----------------------------------------------------------------------
+    // Build the resolved query for the terminal one-hop classifier
+    // (`EdgeDispatchPolicy.h::resolveEdgeDispatch`, issue #108). Every input is
+    // already resolved here — the classifier composes the existing pure policies
+    // (`resolveStopAtLine` / `resolvePivotTrim` / `resolveSensorOvershootTrim`)
+    // and owns the trim-clamp arithmetic, but introduces no new cross-hop state.
+    // -----------------------------------------------------------------------
+
+    // Direction-aware axle offset (the seek's overshoot channel), exactly as the
+    // pre-refactor `seekAxleOffsetCm`: a REAR seek rolls the rear board's own offset.
+    const float axleOffsetCm =
+        reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM : Config::LINE_SENSOR_AXLE_OFFSET_CM;
+    const float departingTrimCm   = _departingPivot.active ? _departingPivot.trim_cm : 0.0f;
+    const float approachingTrimCm = _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
+
+    // Hoist the (side-effect-free, `const`) projection pass-through lookahead so it is
+    // a resolved query input. It is only MEANINGFUL on a LINE→projection hop (the
+    // classifier reads it nowhere else); computing it unconditionally is harmless
+    // (pure reads of NEXT_HOP + edge geometry) and keeps the FSM the single owner of
+    // the lookahead. The original assignment to `_projPassThrough` happens in the
+    // PROJECTION_FOLLOW branch below, unchanged.
+    const bool projPassThrough = _evaluateProjectionPassThrough();
+
+    EdgeDispatchQuery q{};
+    q.edgeType          = edge.type;
+    q.destNodeType      = FieldMap::getNodeType(_nextHop);
+    q.direction         = _resolvedDirection;
+    q.rawDistanceCm     = edge.distance_cm;
+    q.lineMode          = _resolveLineMode(edge);
+    q.projPassThrough   = projPassThrough;
+    q.departingTrimCm   = departingTrimCm;
+    q.approachingTrimCm = approachingTrimCm;
+    q.axleOffsetCm      = axleOffsetCm;
+    q.minDriveCm        = Config::PIVOT_TRIM_MIN_DRIVE_CM;
+
+    if (edge.type == Routes::EdgeType::BLIND)
     {
-        case Routes::EdgeType::LINE:
+        // -----------------------------------------------------------------
+        // Effective stop-at-line resolution (ADR-027 / issue #27) — unchanged.
+        //
+        // `resolveStopAtLine(...)` folds the call-site flag, the per-edge BlindMode,
+        // the pipeline blind default, the resolved direction, and the board count
+        // into `{seek, motionMode}`. Issue #64 auto-rule (LOCAL): a BLIND edge whose
+        // DESTINATION is a projection node seeks a line first to re-anchor; the
+        // toggle leads the `&&` so `isProjectionNode` is skipped when compiled out.
+        // -----------------------------------------------------------------
+        const bool autoRuleActive =
+            Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(_nextHop);
+        const StopAtLineQuery sq{
+            _activeStopAtLine,
+            edge.stop_at_line_override,
+            _resolveBlindMode(edge),
+            Routes::PIPELINE_CONFIG.blind,
+            _resolvedDirection,
+            Config::LINE_BOARD_COUNT,
+            autoRuleActive};
+        q.stopAtLine = resolveStopAtLine(sq);
+    }
+    else
+    {
+        // LINE edge: `stopAtLine` is unused by the classifier — default-construct it.
+        q.stopAtLine = StopAtLineResolution{};
+    }
+
+    const EdgeDispatchDecision decision = resolveEdgeDispatch(q);
+
+    switch (decision.primitive)
+    {
+        case DispatchPrimitive::LINE_FOLLOW_INTERSECTION:
         {
-            // Issue #64: a LINE edge is line-followed, but the DESTINATION node
-            // type decides how the follow terminates (the per-hop primitive falls
-            // out of `(edge_type, dest_node_type)` — mirrors compiler/sim T4/T5):
-            //   - line dest       → follow to the next physical intersection, then
-            //                        the LINE_OVERSHOOT roll + `onIntersection`
-            //                        re-anchor (today's behavior).
-            //   - projection dest → DISTANCE-gated follow (no junction wait): the
-            //                        projection node sits on the line but at NO
-            //                        junction marker, so the follow is terminated by
-            //                        the encoder distance gate and the node advances
-            //                        by dead-reckoning (`onDeadReckonedAdvance`), the
-            //                        retired `EDGE_PROJECTION` behavior moved onto the
-            //                        node. This is the silent-failure trap: a LINE
-            //                        edge into a projection node is DISTANCE-, not
-            //                        junction-terminated, so a pivot approaching it
-            //                        trims δ from the FOLLOW distance, not an overshoot
-            //                        budget (`_pivotTrimDistance`, the `distance`
-            //                        regime).
+            // LINE → line (junction) node: follow to the next intersection. ADR-036:
+            // a LINE outgoing edge applies no dead-reckon trim — it is sensor-
+            // terminated and re-anchors on the junction line. The approach trim for a
+            // LINE-incoming pivot is the overshoot-advance reduction in the LINE_FOLLOW
+            // state; the outgoing carry is owned by the `_pendingPivot` latch.
             //
-            // Both branches take the motion profile from the LINE edge's own
-            // `line_mode_override` (`ProjectionMode` deleted in issue #64).
-
-            // Drain any stale Intersection edge so the first follow tick does not
-            // skip the segment (junction dest) / latch a phantom edge (projection
-            // dest, which never reads Intersection).
+            // Drain any stale Intersection edge so the first follow tick does not skip
+            // the segment. `.setReverse(...)` selects forward-vs-rear board + error
+            // sign; `.setOvershootMode(false)` flips back to normal P+D after any
+            // LINE_OVERSHOOT window. For a pass-through into this edge `setEnabled(true)`
+            // hits the already-enabled fast-path (no ramp-up reseed); see ADR-023.
             (void) Intersection.isAtIntersection();
-
-            // Resolve the per-edge cruise-mode override (DEFAULT → pipeline
-            // default) and chain it onto the enable transition. `.setReverse(reverse)`
-            // selects forward-vs-rear board + error sign (T7 / issue #19); REAR is
-            // only reachable on a 2-board chassis (the guard above rejects REAR LINE
-            // on a 1-board chassis, projection dest included). `.setOvershootMode(false)`
-            // flips the controller back to normal P+D after any LINE_OVERSHOOT window.
-            //
-            // For a pass-through into this edge the controller is already enabled —
-            // `setEnabled(true)` hits the already-enabled fast-path in
-            // `_applyEnableBuilder`, so no ramp-up reseed fires and cruise PWM is
-            // preserved across the intersection (preset may snap if the new edge has a
-            // different LineMode override; see ADR-023 trade-off). For non-pass-through
-            // the controller is freshly enabled with ramp-up.
-            const Routes::LineMode    resolvedLineMode = _resolveLineMode(edge);
-            const Config::SpeedPreset preset           = _lineModeToPreset(resolvedLineMode);
-
-            if (FieldMap::isProjectionNode(_nextHop))
-            {
-                // LINE → projection node: DISTANCE-gated follow. The gate uses the
-                // pivot-trimmed edge length — a DISTANCE-terminated hop takes BOTH
-                // the departing trim (`_departingPivot`, the pivot we just left) and
-                // the approach trim (`_approachingPivot`, the pivot at `_nextHop`),
-                // both folded into a LOCAL effective distance by `_pivotTrimDistance`.
-                // `distance_cm` itself is never mutated. The PROJECTION_FOLLOW state
-                // advances the node via `onDeadReckonedAdvance` when the gate trips.
-                //
-                // T19 (issue #64) — `line(A)–projection(B)–line(C)` PASS-THROUGH.
-                // Evaluate the routing lookahead gate NOW, at arm time, so the
-                // distance gate can be armed correctly: when the triple qualifies
-                // (B is a non-goal projection node, B→C is a LINE edge into a LINE
-                // junction node, A→B→C collinear + same direction), arm the gate
-                // with `brakeOnGate == false` so its trip latches `isDistanceReached`
-                // WITHOUT self-disabling or braking the follower — the A→C follow
-                // stays continuous across the marker-less node B. The
-                // `PROJECTION_FOLLOW` state reads `_projPassThrough` on the trip to
-                // stamp `onDeadReckonedAdvance(B)` mid-follow and continue to C,
-                // where `Intersection.isAtIntersection()` fires and re-anchors. The
-                // gate evaluation is the SAME ADR-023 heading check the intersection-
-                // gated pass-through uses; the TRIGGER differs — it is THIS distance
-                // gate, not `isAtIntersection()`, which never fires at B.
-                _projPassThrough = _evaluateProjectionPassThrough();
-                const float effectiveDistCm = _pivotTrimDistance(edge);
-                LineFollower.setEnabled(true)
-                            .setPreset(preset)
-                            .setReverse(reverse)
-                            .setOvershootMode(false)
-                            .setBrakeOnGate(!_projPassThrough)
-                            .setDistanceTarget(effectiveDistCm);
-                _state = State::PROJECTION_FOLLOW;
-            }
-            else
-            {
-                // LINE → line (junction) node: follow to the next intersection.
-                // ADR-036: a LINE outgoing edge applies no dead-reckon trim — it is
-                // sensor-terminated and re-anchors on the junction line. The departing
-                // trim is irrelevant (the line corrects it); the approach trim for a
-                // LINE-incoming pivot is the overshoot-advance reduction in the
-                // LINE_FOLLOW state; the outgoing carry for the next hop is already
-                // owned by the `_pendingPivot` latch. Nothing to trim here.
-                LineFollower.setEnabled(true)
-                            .setPreset(preset)
-                            .setReverse(reverse)
-                            .setOvershootMode(false);
-                _state = State::LINE_FOLLOW;
-            }
+            const Config::SpeedPreset preset = _lineModeToPreset(q.lineMode);
+            LineFollower.setEnabled(true)
+                        .setPreset(preset)
+                        .setReverse(decision.reverse)
+                        .setOvershootMode(false);
+#ifdef PT_PARITY_TRACE
+            _ptEmitLineFollow(decision.reverse, q.lineMode);
+#endif
+            _state       = State::LINE_FOLLOW;
             _passThrough = false;    // consumed
             break;
         }
 
-        case Routes::EdgeType::BLIND:
+        case DispatchPrimitive::PROJECTION_FOLLOW:
         {
-            // -----------------------------------------------------------------
-            // Effective stop-at-line resolution (ADR-027 / issue #27).
+            // LINE → projection node: DISTANCE-gated follow. The gate uses the pivot-
+            // trimmed edge length (`_pivotTrimDistance`, the `distance` regime); the
+            // PROJECTION_FOLLOW state advances the node via `onDeadReckonedAdvance`
+            // when it trips. T19 (issue #64) `line–projection–line` PASS-THROUGH: the
+            // lookahead was hoisted above into `q.projPassThrough`; latch it now (the
+            // original `_projPassThrough = _evaluateProjectionPassThrough()` point) so
+            // the gate is armed with `brakeOnGate == false` and the A→C follow stays
+            // continuous across the marker-less node B.
             //
-            // One canonical decision — `resolveStopAtLine(...)` in
-            // `StopAtLinePolicy.h` (mirrored by `sim/runtime.py`) — folds the
-            // call-site `_activeStopAtLine` flag, the per-edge BlindMode, the
-            // pipeline blind default, the resolved travel direction, and the
-            // board count into `{seek, motionMode}`:
-            //   - seek == true  → run a `Drive.stopAtLine` seek in
-            //                      `motionMode`'s DriveMode (FRONT always; REAR
-            //                      only on a 2-board chassis).
-            //   - seek == false → dead-reckon the hop in `motionMode` (OFF, or a
-            //                      forced-REAR degrade on a 1-board chassis).
-            //
-            // `_resolveBlindMode(edge)` already maps DEFAULT → pipeline blind, so
-            // the resolver's `edgeMode` input is never DEFAULT (no double-resolve).
-            // `motionMode` is guaranteed concrete — never STOP_AT_LINE/DEFAULT.
-            //
-            // Issue #64 auto-rule (LOCAL): a BLIND edge whose DESTINATION node is a
-            // projection node seeks a line first to re-anchor before the marker-less
-            // projection. This is a purely LOCAL read of THIS hop's destination
-            // `_nextHop` — `isProjectionNode(_nextHop)` — NOT a goal-relative
-            // `NEXT_HOP[next][goal]` / next-next peek (that retired transcription is
-            // gone). It fires only when the edge is BLIND, the destination is a
-            // projection node, and the field-wide `BLIND_PROJECTION_AUTO_SEEK` toggle
-            // is on. The toggle leads the `&&` so the `isProjectionNode` lookup is
-            // skipped entirely on a build that compiles the feature out. The same
-            // local bool flows unchanged into the FROZEN `resolveStopAtLine` resolver
-            // (its body + the 936-row CSV are untouched — only this caller input is
-            // computed differently). Mirrors `compile_path` (T4) and `sim/runtime`
-            // (T5) cell-for-cell.
-            //
-            // We are in the `EdgeType::BLIND` case, so the `(edge is BLIND)` clause
-            // of the contract is satisfied by construction; the explicit predicate
-            // here is the destination read gated by the toggle.
-            // -----------------------------------------------------------------
-            const bool autoRuleActive =
-                Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(_nextHop);
+            // `_pivotTrimDistance(edge)` fires the dead-reckon clamp underflow trace
+            // and returns the SAME value as `decision.commandedDistanceCm` (both
+            // delegate to `resolvePivotTrim` with identical inputs), so dispatching its
+            // return is behavior-identical to the pre-refactor code while keeping the
+            // trace; the dispatched `effectiveDistCm` is what the parity stream records.
+            (void) Intersection.isAtIntersection();
+            const Config::SpeedPreset preset = _lineModeToPreset(q.lineMode);
+            _projPassThrough            = q.projPassThrough;
+            const float effectiveDistCm = _pivotTrimDistance(edge);
+            LineFollower.setEnabled(true)
+                        .setPreset(preset)
+                        .setReverse(decision.reverse)
+                        .setOvershootMode(false)
+                        .setBrakeOnGate(decision.brakeOnGate)
+                        .setDistanceTarget(effectiveDistCm);
+#ifdef PT_PARITY_TRACE
+            _ptEmitProjectionFollow(decision.reverse, q.lineMode, effectiveDistCm,
+                                    _projPassThrough);
+#endif
+            _state       = State::PROJECTION_FOLLOW;
+            _passThrough = false;    // consumed
+            break;
+        }
 
-            const StopAtLineQuery q{
-                _activeStopAtLine,
-                edge.stop_at_line_override,
-                _resolveBlindMode(edge),
-                Routes::PIPELINE_CONFIG.blind,
-                _resolvedDirection,
-                Config::LINE_BOARD_COUNT,
-                autoRuleActive};
-            const StopAtLineResolution sal = resolveStopAtLine(q);
-
-            if (sal.seek)
+        case DispatchPrimitive::STOP_AT_LINE_SEEK:
+        {
+            // BLIND + seek (ADR-027). A pass-through LINE->BLIND handoff leaves the
+            // LineFollower enabled (T5's brake-on-gate=false path); release it WITHOUT
+            // braking before handing the wheels to the Drive seek so the two writers
+            // never fight over the motors.
+            if (_passThrough)
             {
-                // ADR-036: a STOP_AT_LINE seek is sensor-terminated — it self-
-                // corrects on the physical line, so it takes NO incoming/outgoing
-                // distance trim. The seek drives the FULL `edge.distance_cm` (max
-                // seek distance — the crossing, not the distance, terminates it).
-                // The outgoing carry for the next hop is already owned by the
-                // `_pendingPivot` latch, so there is nothing to do here — a pivot
-                // reached via a seek still over-travels on its OUTGOING side, and
-                // the next hop's `_departingPivot` (snapshot of `_pendingPivot`)
-                // applies that trim.
-
-                // A pass-through LINE→BLIND handoff leaves the LineFollower
-                // enabled (T5's brake-on-gate=false path). Release it WITHOUT
-                // braking before handing the wheels to the Drive seek so the
-                // two writers never fight over the motors — same ordering the
-                // dead-reckoned blind branch below uses.
-                if (_passThrough)
-                {
-                    LineFollower.setEnabled(false).setBrake(false);
-                }
-
-                // Drain any stale Intersection edge so the seek's own physical
-                // crossing cannot leak a phantom nav edge into the next LINE hop
-                // (AC7 — the forward seek drives over its target T_OR_CROSS while
-                // Intersection.update() independently counts it).
-                (void) Intersection.isAtIntersection();
-
-                // Honor the edge's resolved motion bundle. SYNC by default; GYRO
-                // additionally pins the held heading (body heading already accounts
-                // for REAR via `_resolvedBodyHeading`). Reverse is selected per the
-                // resolved hop direction. `.async()` keeps the FSM non-blocking —
-                // the STOP_AT_LINE state below polls `Drive.isIdle()` /
-                // `Drive.hasFault()` for the outcome.
-                const DriveMode mode = blindModeToDriveMode(sal.motionMode);
-
-                // ADR-038: a missed seek is always a hard fault — the seek uses the
-                // Drive default max search distance (`expected +
-                // Config::STOP_AT_LINE_MAX_MARGIN_CM`); no `.setMaxDistance(...)`
-                // zero-margin override and no soft-fallback recovery. The Drive
-                // builder is move-only (deleted copy ctor + early enqueue), so the
-                // whole chain MUST be one discarded-temporary RAII statement.
-                // ADR-044: a seek into an approaching pivot must land the axle δ
-                // short of the node (like every other approach mechanism), so
-                // reduce the post-detect overshoot by the approaching trim. A
-                // seek is sensor-terminated, so the DEPARTING trim is auto-
-                // absorbed and never subtracted here (D1). With no approaching
-                // pivot the trim is 0 ⇒ overshoot stays the full direction-
-                // resolved offset, so a departing-into-seek / plain seek hop is
-                // unchanged (AC2).
-                //
-                // The offset is direction-resolved (FRONT/REAR) exactly like the
-                // LINE overshoot above, so a REAR 2-board seek rolls the rear
-                // board's own offset. Pivots are FRONT-only in v1 (#54):
-                // `_onPlanNextHop` force-FRONTs every pivot-adjacent hop, so for a
-                // pivot seek `reverse` is always false and this resolves to the
-                // FRONT offset the validator's δ-budget assumes. When #54 lifts
-                // force-FRONT, a REAR pivot seek will need a REAR δ-budget here
-                // (ADR-044 trigger).
-                const float seekAxleOffsetCm =
-                    reverse ? Config::LINE_SENSOR_AXLE_OFFSET_REAR_CM
-                            : Config::LINE_SENSOR_AXLE_OFFSET_CM;
-                const float seekApproachTrim =
-                    _approachingPivot.active ? _approachingPivot.trim_cm : 0.0f;
-                const SensorOvershootResolution seekOvershoot =
-                    resolveSensorOvershootTrim(
-                        seekAxleOffsetCm,
-                        seekApproachTrim,
-                        Config::PIVOT_TRIM_MIN_DRIVE_CM);
-                if (seekOvershoot.clamped)
-                {
-                    // δ > offset: a forward-only seek has no positive overshoot
-                    // left to shorten, so it cannot land the axle δ-short. The
-                    // validator rejects this for every seek rung EXCEPT a pure
-                    // call-site setStopAtLine(ON) it cannot see (ADR-044 D4).
-                    // Rather than clamp to the floor and silently fire the pivot
-                    // from an off-target origin, hard-fault — consistent with
-                    // ADR-039's "no silent degradation on a seek". Issue #75
-                    // tracks the reverse re-seat that would compensate δ>offset.
-                    _printOvershootTrimUnderflow(F("ADR-044"), seekAxleOffsetCm,
-                                                 seekApproachTrim);
-                    Serial.println(F("delta exceeds offset; faulting (see #75)."));
-                    _enterFault(Fault::PIVOT_TRIM_UNDERFLOW, cur, _nextHop);
-                    return;
-                }
-
-                Drive.stopAtLine(edge.distance_cm)
-                    .setReverse(reverse)
-                    .setMode(mode)
-                    .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
-                    .setOvershoot(seekOvershoot.overshootCm)
-                    .async();
-                _state       = State::STOP_AT_LINE;
-                _passThrough = false;    // consumed
-                break;
+                LineFollower.setEnabled(false).setBrake(false);
             }
 
-            // Pass-through LINE→BLIND handoff: when _passThrough is set, the
-            // LineFollower is still enabled (T5's brake-on-gate=false path), so
-            // we need to:
-            //   1. Capture the current cruise PWM BEFORE disabling LineFollower
-            //      (so we know what speed to hand off to Drive.driveDist).
+            // Drain any stale Intersection edge so the seek's own physical crossing
+            // cannot leak a phantom nav edge into the next LINE hop (AC7 — the forward
+            // seek drives over its target T_OR_CROSS while Intersection.update()
+            // independently counts it).
+            (void) Intersection.isAtIntersection();
+
+            // PIVOT_TRIM_UNDERFLOW fault (ADR-044). The decision struct intentionally
+            // carries no clamp flag, so re-derive the clamp at the dispatch site from
+            // the SAME resolveSensorOvershootTrim inputs the classifier used for
+            // `decision.overshootCm`. A seek into an approaching pivot must land the
+            // axle delta short of the node; a forward-only seek with delta > offset has
+            // no positive overshoot left to shorten, so it hard-faults rather than
+            // firing the pivot off-target (ADR-039; #75). With no approaching pivot the
+            // trim is 0 ⇒ overshoot stays the full direction-resolved offset and a
+            // plain seek is unchanged (AC2).
+            const SensorOvershootResolution seekOvershoot = resolveSensorOvershootTrim(
+                axleOffsetCm, approachingTrimCm, Config::PIVOT_TRIM_MIN_DRIVE_CM);
+            if (seekOvershoot.clamped)
+            {
+                _printOvershootTrimUnderflow(F("ADR-044"), axleOffsetCm, approachingTrimCm);
+                Serial.println(F("delta exceeds offset; faulting (see #75)."));
+                _enterFault(Fault::PIVOT_TRIM_UNDERFLOW, cur, _nextHop);
+                return;
+            }
+
+            // ADR-038: a missed seek is always a hard fault (Drive's default max search
+            // distance; no zero-margin override, no soft fallback). The seek drives the
+            // FULL commanded distance (== edge.distance_cm — the crossing, not the
+            // distance, terminates it) and rolls `decision.overshootCm` to land the axle
+            // on the node. GYRO/SYNC come from the resolved bundle; the body heading
+            // already accounts for REAR. The Drive builder is move-only, so the whole
+            // chain is ONE discarded-temporary RAII `.async()` statement; the
+            // STOP_AT_LINE state polls Drive.isIdle()/hasFault() for the outcome.
+            Drive.stopAtLine(decision.commandedDistanceCm)
+                .setReverse(decision.reverse)
+                .setMode(blindModeToDriveMode(decision.driveMode))
+                .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                .setOvershoot(decision.overshootCm)
+                .async();
+#ifdef PT_PARITY_TRACE
+            _ptEmitStopAtLineSeek(decision.reverse, decision.driveMode,
+                                  decision.commandedDistanceCm, decision.overshootCm);
+#endif
+            _state       = State::STOP_AT_LINE;
+            _passThrough = false;    // consumed
+            break;
+        }
+
+        case DispatchPrimitive::BLIND_DEAD_RECKON:
+        {
+            // Pass-through LINE->BLIND handoff: when _passThrough is set the
+            // LineFollower is still enabled (T5's brake-on-gate=false path), so:
+            //   1. Capture the current cruise PWM BEFORE disabling LineFollower.
             //   2. Disable LineFollower WITHOUT braking — it releases the motors
-            //      cleanly; whatever speeds Drive last latched stay until the
-            //      next move's setStartSpeed kicks in.
-            //   3. Pass the captured cruise as .setStartSpeed(...) to Drive
-            //      builders that otherwise default to Config::TSHAPE_START_SPEED
-            //      (PWM_MIN_MAGNITUDE), which would dip the chassis to the
-            //      deadband floor first.
-            //
-            // For non-pass-through, LineFollower was already disabled by T5's
-            // path and startSpeed defaults to the existing TSHAPE_START_SPEED.
-            //
-            // See ADR-023.
+            //      cleanly; the last latched speeds stay until the next setStartSpeed.
+            //   3. Pass the captured cruise as the start speed so the chassis does not
+            //      dip to the deadband floor first.
+            // For non-pass-through, LineFollower was already disabled by T5's path and
+            // startSpeed defaults to the existing TSHAPE_START_SPEED. See ADR-023.
             int16_t startSpeed = Config::TSHAPE_START_SPEED;
             if (_passThrough)
             {
@@ -2125,54 +2245,41 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // signed PWM). Negate the cruise + start/end speeds when REAR so the
             // trapezoid ramps from a negative-direction PWM straight away
             // (Drive.h:1288-1296 documents the matching sign-by-cruise rule).
-            const int16_t cruisePwm = reverse ? (int16_t) -Config::SPEED_NORMAL
-                                              : (int16_t)  Config::SPEED_NORMAL;
-            const int16_t signedStartSpeed = reverse ? (int16_t) -startSpeed : startSpeed;
+            const int16_t cruisePwm = decision.reverse ? (int16_t) -Config::SPEED_NORMAL
+                                                        : (int16_t)  Config::SPEED_NORMAL;
+            const int16_t signedStartSpeed =
+                decision.reverse ? (int16_t) -startSpeed : startSpeed;
 
-            // ADR-036: a dead-reckon BLIND hop (plain `driveDist`, sal.seek ==
-            // false) is distance-terminated, so it takes both the departing trim
-            // (`_departingPivot`) and the approach trim (`_approachingPivot`) —
-            // both folded into a LOCAL effective distance. The seek path above
-            // returned early and never reaches this; `edge.distance_cm` stays
-            // untouched in the table.
+            // `_pivotTrimDistance(edge)` fires the dead-reckon clamp underflow trace and
+            // returns the SAME value as `decision.commandedDistanceCm` (both delegate to
+            // `resolvePivotTrim` with identical inputs: edge.distance_cm minus the two
+            // latched pivot trims, clamped to the floor). Dispatching its return is
+            // behavior-identical to the pre-refactor code while keeping the trace;
+            // the dispatched `effectiveDistCm` is the value the parity stream records.
             const float effectiveDistCm = _pivotTrimDistance(edge);
 
-            // Per-edge motion-profile override (DEFAULT → pipeline default).
-            // Three concrete BlindMode values map onto the Drive builder chain:
-            //   - SYNC_TSHAPE : Drive.driveDist(cm).setMode(SYNC).tShape().async()
-            //                   (today's behaviour — encoder-rate sync PID + trapezoidal
-            //                   velocity profile)
-            //   - GYRO_TSHAPE : Drive.driveDist(cm).setMode(GYRO).tShape().async()
-            //                   (straight-line yaw lock + trapezoidal profile; heading
-            //                   sourced from edge.heading_deg, converted into the IMU
-            //                   frame via Localization.toImuYaw — body heading already
-            //                   accounts for REAR via `_resolvedBodyHeading`, so passing
-            //                   `edge.heading_deg` keeps the yaw target correct only when
-            //                   FRONT; REAR uses `_resolvedBodyHeading`).
-            //   - RAW_FLAT    : Drive.driveDist(cm).setMode(RAW)
-            //                       .setStartSpeed(cruise).setEndSpeed(cruise).async()
-            //                   (open-loop PWM, no ramp — start/end speeds pinned to the
-            //                   cruise PWM short-circuits the trapezoidal profile)
-            //
-            // DEFAULT and STOP_AT_LINE cannot reach this switch: `sal.motionMode`
-            // from `resolveStopAtLine(...)` is guaranteed to be one of the three
-            // concrete velocity bundles (SYNC_TSHAPE / GYRO_TSHAPE / RAW_FLAT). The
-            // resolver already folded the OFF-on-a-STOP_AT_LINE-edge case into the
-            // pipeline blind default, and the forced-REAR 1-board degrade keeps the
-            // edge's own mode — so the substitution that used to live here is gone.
-            // The defensive SYNC_TSHAPE default below remains as belt-and-braces.
-            switch (sal.motionMode)
+            // The resolved motion bundle (`decision.driveMode`) maps onto one of three
+            // Drive builder chains:
+            //   - SYNC_TSHAPE : driveDist(cm).setMode(SYNC).tShape() (encoder-rate sync
+            //                   PID + trapezoidal velocity profile)
+            //   - GYRO_TSHAPE : driveDist(cm).setMode(GYRO).tShape() (straight-line yaw
+            //                   lock; heading is the BODY heading, already REAR-rotated)
+            //   - RAW_FLAT    : driveDist(cm).setMode(RAW).setStartSpeed(cruise)
+            //                   .setEndSpeed(cruise) (open-loop PWM, no ramp)
+            // DEFAULT/STOP_AT_LINE cannot reach this switch — the resolver guarantees a
+            // concrete bundle; the SYNC_TSHAPE default below is belt-and-braces.
+            switch (decision.driveMode)
             {
                 case Routes::BlindMode::GYRO_TSHAPE:
                 {
                     // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
-                    // rotated 180° for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
+                    // rotated 180 deg for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
                     const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
                     Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
                          .setMode(DriveMode::GYRO)
                          .setHeading(imuTarget)
                          .setPower(cruisePwm)
-                         .setStartSpeed(signedStartSpeed)    // pass-through: cruise; otherwise: ±PWM_MIN_MAGNITUDE
+                         .setStartSpeed(signedStartSpeed)    // pass-through: cruise; else +/-PWM_MIN_MAGNITUDE
                          .tShape()
                          .async();
                     break;
@@ -2210,15 +2317,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     break;
                 }
             }
-            _state = State::BLIND_FORWARD;
+#ifdef PT_PARITY_TRACE
+            _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode,
+                                   effectiveDistCm);
+#endif
+            _state       = State::BLIND_FORWARD;
             _passThrough = false;    // consumed
-            break;
-        }
-
-        case Routes::EdgeType::NONE:
-        default:
-        {
-            _enterFault(Fault::UNREACHABLE, cur, _nextHop);
             break;
         }
     }

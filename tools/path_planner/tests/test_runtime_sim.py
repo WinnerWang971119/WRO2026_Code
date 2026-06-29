@@ -78,6 +78,8 @@ from tools.path_planner.sim.runtime import (
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
     Direction,
+    DispatchPrimitive,
+    EdgeDispatchQuery,
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     OFF_MAP_GATE,
@@ -88,11 +90,13 @@ from tools.path_planner.sim.runtime import (
     OffMapGate,
     RETURN_DISTANCE_CAP_CM,
     RETURN_TRIGGER_THRESHOLD_CM,
+    ReanchorKind,
     ReturnAction,
     StopAtLine,
     WALL_STOP_BACK_OFF_CM,
     resolve_blind_mode,
     resolve_direction,
+    resolve_edge_dispatch,
     resolve_line_mode,
     resolve_return_action,
     resolve_stop_at_line,
@@ -1931,6 +1935,199 @@ def test_tc13_resolve_stop_at_line_matches_fixture():
             f"autoRuleActive={row['autoRuleActive']}: "
             f"got (seek={actual_seek}, motionMode={actual_motion!r}) "
             f"but fixture expects (seek={expect_seek}, motionMode={expect_motion!r})"
+        )
+
+
+# ===========================================================================
+# TC1 -- resolveEdgeDispatch resolver-vs-fixture parity (Python side)
+#
+# Verifies AC9 (#108): the Python ``resolve_edge_dispatch`` in runtime.py is a
+# faithful transcription of the canonical edge-dispatch truth table frozen at
+# ``tools/path_planner/tests/fixtures/edge_dispatch_truth_table.csv``. Every row
+# is driven through the resolver and all SEVEN decision fields are compared to the
+# fixture's ``expect_*`` columns -- enums and bools exactly, the commanded /
+# overshoot floats within a tiny tolerance (the C++ resolver computes in float32
+# and the CSV carries fixed 6-decimal text, so they are compared numerically,
+# never as strings). A row-count assertion guards against a truncated or empty
+# CSV vacuously passing.
+#
+# This is the Python half of the standalone cross-language CSV parity test for
+# ``resolveEdgeDispatch`` (the C++ half is
+# ``WRO2026/test/test_edge_dispatch_truth_table.cpp``), mirroring the #115
+# ``resolveStopAtLine`` pattern (TC13 above). The generator
+# ``tools/path_planner/tests/fixtures/gen_edge_dispatch_truth_table.py`` is an
+# INDEPENDENT transcription -- it never calls either resolver -- so a drift in
+# the table OR in either resolver surfaces as a hard failure, not a quiet
+# tautological pass. Column names (not positional index) drive the lookup, so a
+# future column reorder cannot silently desync the test from the fixture.
+# ===========================================================================
+
+_EDGE_DISPATCH_FIXTURE_PATH = (
+    pathlib.Path(__file__).parent / "fixtures" / "edge_dispatch_truth_table.csv"
+)
+
+# 864 rows = LINE block 432 (2 destNodeType × 2 direction × 3 rawDistanceCm
+#            × 3 lineMode × 2 projPassThrough × 2 departingTrimCm
+#            × 3 approachingTrimCm)
+#          + BLIND block 432 (2 direction × 2 seek × 3 motionMode
+#            × 3 rawDistanceCm × 2 departingTrimCm × 3 approachingTrimCm
+#            × 2 axleOffsetCm).
+# The generator (tools/path_planner/tests/fixtures/gen_edge_dispatch_truth_table.py)
+# is the single source of truth; this constant is a guard against a truncated or
+# empty CSV vacuously passing, not a magic number.
+_EDGE_DISPATCH_EXPECTED_ROW_COUNT = 864
+
+# Float comparison tolerance (the plan's DIST_TOL): commanded-distance and
+# overshoot are continuous, so they are compared numerically within 1e-4 cm.
+_EDGE_DISPATCH_DIST_TOL = 1e-4
+
+_EDGE_TYPE_MAP = {
+    "LINE":  EDGE_LINE,
+    "BLIND": EDGE_BLIND,
+}
+
+_LINE_MODE_MAP = {
+    "NORMAL": LineMode.NORMAL,
+    "SLOW":   LineMode.SLOW,
+    "FAST":   LineMode.FAST,
+}
+
+# Drive-mode column spans the DEFAULT sentinel (line primitives) plus the three
+# concrete blind bundles (STOP_AT_LINE / DEFAULT never appear as a resolved
+# motion bundle, so they are intentionally absent -- a stray token aborts).
+_DRIVE_MODE_MAP = {
+    "DEFAULT":     BlindMode.DEFAULT,
+    "SYNC_TSHAPE": BlindMode.SYNC_TSHAPE,
+    "GYRO_TSHAPE": BlindMode.GYRO_TSHAPE,
+    "RAW_FLAT":    BlindMode.RAW_FLAT,
+}
+
+_PRIMITIVE_MAP = {
+    "LINE_FOLLOW_INTERSECTION": DispatchPrimitive.LINE_FOLLOW_INTERSECTION,
+    "PROJECTION_FOLLOW":        DispatchPrimitive.PROJECTION_FOLLOW,
+    "STOP_AT_LINE_SEEK":        DispatchPrimitive.STOP_AT_LINE_SEEK,
+    "BLIND_DEAD_RECKON":        DispatchPrimitive.BLIND_DEAD_RECKON,
+}
+
+_REANCHOR_MAP = {
+    "ON_INTERSECTION":          ReanchorKind.ON_INTERSECTION,
+    "ON_DEAD_RECKONED_ADVANCE": ReanchorKind.ON_DEAD_RECKONED_ADVANCE,
+}
+
+
+def _edge_dispatch_bool(token: str) -> bool:
+    """Parse a strict ``true`` / ``false`` CSV token, raising on anything else.
+
+    Deliberately stricter than TC13's ``.lower() == "true"`` (which silently
+    coerces a malformed cell to False): a bad token raises so fixture drift
+    fails loudly, matching the C++ harness's ``toBool``.
+    """
+    if token == "true":
+        return True
+    if token == "false":
+        return False
+    raise ValueError(
+        f"expected 'true' or 'false' edge-dispatch bool token, got {token!r}"
+    )
+
+
+def test_tc1_resolve_edge_dispatch_matches_fixture():
+    """TC1 (Python): resolve_edge_dispatch agrees with the truth table for every row.
+
+    Reads ``edge_dispatch_truth_table.csv`` by column name (DictReader, so column
+    order is irrelevant) and calls ``resolve_edge_dispatch`` for each of the 864
+    input combinations, asserting every one of the seven decision fields matches
+    the fixture's ``expect_*`` columns -- ``primitive`` / ``drive_mode`` /
+    ``reanchor`` enums and the three bools exactly, ``commanded_distance_cm`` /
+    ``overshoot_cm`` within ``_EDGE_DISPATCH_DIST_TOL``.
+
+    Satisfies AC9 / TC1 (#108): the Python transcription cannot silently drift
+    from the canonical single-source truth table, and (with the C++ mirror) the
+    two resolvers cannot drift from each other.
+    """
+    assert _EDGE_DISPATCH_FIXTURE_PATH.exists(), (
+        f"Edge-dispatch truth-table fixture not found at "
+        f"{_EDGE_DISPATCH_FIXTURE_PATH}. Run gen_edge_dispatch_truth_table.py "
+        "to generate it before running TC1."
+    )
+
+    rows = []
+    with _EDGE_DISPATCH_FIXTURE_PATH.open(newline="") as fh:
+        reader = csv.DictReader(fh)
+        for row in reader:
+            rows.append(row)
+
+    assert len(rows) == _EDGE_DISPATCH_EXPECTED_ROW_COUNT, (
+        f"Expected {_EDGE_DISPATCH_EXPECTED_ROW_COUNT} data rows in the "
+        f"edge-dispatch truth-table fixture but found {len(rows)}. A truncated "
+        "or empty CSV would produce vacuous passing without this guard."
+    )
+
+    for row in rows:
+        query = EdgeDispatchQuery(
+            edge_type=_EDGE_TYPE_MAP[row["edgeType"]],
+            dest_is_projection=(row["destNodeType"] == "PROJECTION"),
+            direction=_DIRECTION_MAP[row["direction"]],
+            raw_distance_cm=float(row["rawDistanceCm"]),
+            line_mode=_LINE_MODE_MAP[row["lineMode"]],
+            stop_at_line=(
+                _edge_dispatch_bool(row["seek"]),
+                _DRIVE_MODE_MAP[row["motionMode"]],
+            ),
+            proj_pass_through=_edge_dispatch_bool(row["projPassThrough"]),
+            departing_trim_cm=float(row["departingTrimCm"]),
+            approaching_trim_cm=float(row["approachingTrimCm"]),
+            axle_offset_cm=float(row["axleOffsetCm"]),
+            min_drive_cm=float(row["minDriveCm"]),
+        )
+
+        decision = resolve_edge_dispatch(query)
+
+        expect_primitive = _PRIMITIVE_MAP[row["expect_primitive"]]
+        expect_reverse = _edge_dispatch_bool(row["expect_reverse"])
+        expect_drive_mode = _DRIVE_MODE_MAP[row["expect_driveMode"]]
+        expect_commanded = float(row["expect_commandedDistanceCm"])
+        expect_overshoot = float(row["expect_overshootCm"])
+        expect_reanchor = _REANCHOR_MAP[row["expect_reanchor"]]
+        expect_brake = _edge_dispatch_bool(row["expect_brakeOnGate"])
+
+        ctx = (
+            f"edgeType={row['edgeType']} destNodeType={row['destNodeType']} "
+            f"direction={row['direction']} rawDistanceCm={row['rawDistanceCm']} "
+            f"lineMode={row['lineMode']} seek={row['seek']} "
+            f"motionMode={row['motionMode']} projPassThrough={row['projPassThrough']} "
+            f"departingTrimCm={row['departingTrimCm']} "
+            f"approachingTrimCm={row['approachingTrimCm']} "
+            f"axleOffsetCm={row['axleOffsetCm']} minDriveCm={row['minDriveCm']}"
+        )
+
+        assert decision.primitive == expect_primitive, (
+            f"primitive mismatch for {ctx}: got {decision.primitive!r}, "
+            f"expected {expect_primitive!r}"
+        )
+        assert decision.reverse == expect_reverse, (
+            f"reverse mismatch for {ctx}: got {decision.reverse}, "
+            f"expected {expect_reverse}"
+        )
+        assert decision.drive_mode == expect_drive_mode, (
+            f"drive_mode mismatch for {ctx}: got {decision.drive_mode!r}, "
+            f"expected {expect_drive_mode!r}"
+        )
+        assert abs(decision.commanded_distance_cm - expect_commanded) < _EDGE_DISPATCH_DIST_TOL, (
+            f"commanded_distance_cm mismatch for {ctx}: got "
+            f"{decision.commanded_distance_cm}, expected {expect_commanded}"
+        )
+        assert abs(decision.overshoot_cm - expect_overshoot) < _EDGE_DISPATCH_DIST_TOL, (
+            f"overshoot_cm mismatch for {ctx}: got {decision.overshoot_cm}, "
+            f"expected {expect_overshoot}"
+        )
+        assert decision.reanchor == expect_reanchor, (
+            f"reanchor mismatch for {ctx}: got {decision.reanchor!r}, "
+            f"expected {expect_reanchor!r}"
+        )
+        assert decision.brake_on_gate == expect_brake, (
+            f"brake_on_gate mismatch for {ctx}: got {decision.brake_on_gate}, "
+            f"expected {expect_brake}"
         )
 
 

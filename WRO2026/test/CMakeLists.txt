@@ -553,6 +553,43 @@ add_path_force_includes(test_path_tracker_pass_through_projection)            # 
 add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pass_through_projection)
 
 # =========================================================================================
+# Test executable #3g — sim<->firmware parity DUMP target (issue #108, T6 / AC4).
+#
+# Drives the REAL `PathTracker` + `Drive` + `Localization` + `YawSource` FSM over the
+# feature-complete `fixtures/routes_fixture.cpp` (all-pairs + curated specials/offset cases)
+# and prints the normalized per-hop semantic trace as VERSIONED NDJSON on stdout. Same shared
+# recipe as the sibling path_tracker targets — real sources + `path_mocks.cpp` globals, fixture
+# routes force-included FIRST, then the `path_mocks` peripherals; SKETCH_DIR leads the include
+# dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
+#
+# It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=2`. It does NOT
+# define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
+# with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
+# and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
+# exactly like the bidirectional targets, which set no board-count def).
+#
+# Deliberately NO `add_test(...)`: this is a DUMP binary the dedicated `parity` CI job and the
+# parity pytest (`test_pathtracker_parity.py`) build + invoke — it is NOT a ctest. It still gets
+# a compile check from `cmake --build` (the `host-tests` job builds the whole tree).
+# =========================================================================================
+add_executable(test_path_tracker_parity_dump
+    ${TEST_DIR}/test_path_tracker_parity_dump.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_parity_dump PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
+target_compile_definitions(test_path_tracker_parity_dump
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=2)
+
+# =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
 #
 # Tests the pure `WROMath.h` free functions `stopAtLineArmed` and `debounceStep`
@@ -1475,3 +1512,41 @@ add_fixture_routes_force_include(test_mission_dispatch)   # FIRST — routes_fix
 add_hal_force_includes(test_mission_dispatch)             # REUSE as-is — hal_mocks/Drive.h (DRIVE_H) + EventTrace.h (EVENTTRACE_H)
 add_mission_mock_force_includes(test_mission_dispatch)    # the 4 mission mocks only
 add_test(NAME mission_dispatch COMMAND test_mission_dispatch)
+
+# =========================================================================================
+# Test executable — edge-dispatch full-domain CSV parity (#108, T-CSV / TC1 / AC9).
+#
+# Drives ALL 864 rows of tools/path_planner/tests/fixtures/edge_dispatch_truth_table.csv
+# through the header-only production resolveEdgeDispatch (EdgeDispatchPolicy.h) and asserts
+# the seven decision fields {primitive, reverse, driveMode, commandedDistanceCm, overshootCm,
+# reanchor, brakeOnGate} per row — the C++ mirror of Python TC1
+# (test_runtime_sim.py::test_tc1_resolve_edge_dispatch_matches_fixture). The generator
+# gen_edge_dispatch_truth_table.py is an INDEPENDENT transcription (never calls either
+# resolver), so a drift in the table OR in either resolver turns CI red.
+#
+# Same shape as test_stop_at_line_truth_table: resolveEdgeDispatch is a pure inline free
+# function that COMPOSES resolvePivotTrim / resolveSensorOvershootTrim (PivotTrimPolicy.h)
+# and reads only enum TYPES from routes.h — no route-table symbol is ODR-used — so this
+# target links NO real PathTracker/Drive/routes.cpp, only MOCK_SOURCES for the
+# Serial/g_mockMillis externs the mock Arduino.h declares (EdgeDispatchPolicy.h pulls
+# StopAtLinePolicy.h -> Config.h -> <Arduino.h>).
+#
+# The CSV path is baked as a compile definition (absolute, forward-slash CMake path, so the
+# string literal needs no backslash escaping and ifstream accepts it on both OSes), robust
+# regardless of ctest cwd/build-dir. Stays in the DEFAULT host-tests suite (NOT the dedicated
+# `parity` CI job, which is only for the trace-diff dump) — it is a pure-resolver test with
+# no binary handoff, exactly like test_stop_at_line_truth_table — but carries a `parity`
+# label so `ctest -LE parity` skips it locally and `ctest -L parity` runs only it.
+# =========================================================================================
+add_executable(test_edge_dispatch_truth_table
+    ${TEST_DIR}/test_edge_dispatch_truth_table.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_edge_dispatch_truth_table PRIVATE ${COMMON_INCLUDES})
+
+set(EDGE_DISPATCH_CSV ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/edge_dispatch_truth_table.csv)
+target_compile_definitions(test_edge_dispatch_truth_table
+    PRIVATE EDGE_DISPATCH_TRUTH_TABLE_CSV="${EDGE_DISPATCH_CSV}")
+
+add_test(NAME edge_dispatch_truth_table COMMAND test_edge_dispatch_truth_table)
+set_tests_properties(edge_dispatch_truth_table PROPERTIES LABELS "parity")

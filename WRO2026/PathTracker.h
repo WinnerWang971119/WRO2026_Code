@@ -236,6 +236,32 @@ class PathTrackerClass
     friend class PathTrackerGoToBuilder;
 
 public:
+    /**
+     * @brief Per-edge FSM state. See class doxygen for the full lifecycle.
+     *
+     * @note Public (issue #108, AC12) so the parity driver can dispatch each tick
+     *       off the observable state the FSM is actually waiting on (read via
+     *       `state()`). It is a read-only introspection surface — there is no
+     *       setter and no behavioral accessor; the FSM remains the sole writer.
+     */
+    enum class State : uint8_t
+    {
+        IDLE,
+        DEQUEUE,
+        RETURN_TO_NODE,
+        PLAN_NEXT_HOP,
+        TURNING,
+        LINE_FOLLOW,
+        LINE_OVERSHOOT,
+        PROJECTION_FOLLOW,
+        BLIND_FORWARD,
+        STOP_AT_LINE,
+        WALL_STOP,
+        REANCHOR,
+        WALL_DEPART,
+        FAULT
+    };
+
     enum class Fault : uint8_t
     {
         NONE                 = 0,
@@ -270,6 +296,30 @@ public:
 
     bool isIdle() const;
 
+    /**
+     * @brief Read the current per-edge FSM state (issue #108, AC12).
+     *
+     * @return The live `State` the FSM is in this tick.
+     * @note Read-only introspection for the parity driver — no mutation. The
+     *       driver dispatches each tick off the observable the FSM is actually
+     *       waiting on; it never re-derives the hop type from the graph.
+     */
+    State state() const { return _state; }
+
+    /**
+     * @brief Read the resolved body-target heading (world frame, degrees) for the
+     *        current hop / return prologue (issue #108, AC12).
+     *
+     * @return `_resolvedBodyHeading` — the heading the chassis BODY must face for
+     *         the in-flight hop (the `Drive.turnToYaw` target). For a REAR hop this
+     *         is already rotated 180 deg from the edge heading.
+     * @note Read-only introspection: this is the only public surface exposing the
+     *       pre-edge turn target (`Drive`'s turn target is private), so the parity
+     *       driver can park yaw at it and assert it against the sim's per-hop body
+     *       heading. No mutation.
+     */
+    float resolvedBodyHeadingDeg() const { return _resolvedBodyHeading; }
+
     [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId);
     [[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName);
 
@@ -295,27 +345,6 @@ public:
     static const char* faultMnemonic(Fault kind);
 
 private:
-    /**
-     * @brief Per-edge FSM state. See class doxygen for the full lifecycle.
-     */
-    enum class State : uint8_t
-    {
-        IDLE,
-        DEQUEUE,
-        RETURN_TO_NODE,
-        PLAN_NEXT_HOP,
-        TURNING,
-        LINE_FOLLOW,
-        LINE_OVERSHOOT,
-        PROJECTION_FOLLOW,
-        BLIND_FORWARD,
-        STOP_AT_LINE,
-        WALL_STOP,
-        REANCHOR,
-        WALL_DEPART,
-        FAULT
-    };
-
     /**
      * @brief One pending entry on PathTracker's FIFO.
      *

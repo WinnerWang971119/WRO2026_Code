@@ -33,12 +33,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: Run path planner tests
-        run: xvfb-run -a uv run --no-sync pytest tools/path_planner/tests/ -v
+        run: xvfb-run -a uv run --no-sync pytest tools/path_planner/tests/ --ignore=tools/path_planner/tests/test_pathtracker_parity.py -v
 
       - name: Verify generated routes are current
         run: |
           uv run --no-sync python tools/path_planner/build_routes.py --no-viz
           git diff --exit-code -- WRO2026/routes.h WRO2026/routes.cpp
+
+      - name: Verify host-test routes fixture is current
+        run: |
+          uv run --no-sync python WRO2026/test/fixtures/regenerate_routes_fixture.py
+          git diff --exit-code -- WRO2026/test/fixtures/routes_fixture.h WRO2026/test/fixtures/routes_fixture.cpp
 
   arduino-compile:
     name: Arduino compile
@@ -77,3 +82,48 @@ jobs:
 
       - name: Run host tests
         run: ctest --test-dir build/test --output-on-failure
+
+  parity:
+    name: Parity
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Python dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Configure parity dump target
+        run: cmake -S WRO2026/test -B build/parity
+
+      - name: Build parity dump target
+        run: cmake --build build/parity --target test_path_tracker_parity_dump
+
+      - name: Capture C++ parity trace
+        run: ./build/parity/test_path_tracker_parity_dump > build/parity/cpp_parity_trace.ndjson || true
+
+      - name: Run parity pytest
+        env:
+          PARITY_DUMP_EXE: ${{ github.workspace }}/build/parity/test_path_tracker_parity_dump
+        run: |
+          uv run --no-sync pytest tools/path_planner/tests/test_pathtracker_parity.py -v 2>&1 \
+            | tee build/parity/parity_pytest.log
+
+      - name: Upload parity traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-traces
+          path: |
+            build/parity/cpp_parity_trace.ndjson
+            build/parity/parity_pytest.log
+          if-no-files-found: warn

@@ -572,6 +572,28 @@ ACT_WALL_DEPART: str = "wall_depart"
 _RESET_AXIS_TO_IDX: dict = {"x": 0, "y": 1}
 
 
+def _wall_axle_coord(wall_coord: float, node_coord: float) -> float:
+    """Pull the believed on-axis coordinate back from the wall to the wheel axle.
+
+    Mirror of the firmware's ``reanchorAtWall`` axle re-anchor: the chassis
+    presses its REAR contact face against the wall surface (``wall_coord``), but
+    the tracked reference is the wheel AXLE, which sits
+    :data:`WALL_CONTACT_OFFSET_CM` short of that surface on the NODE side.
+    ``sign(gap)`` (``gap = wall_coord - node_coord``) selects the node-side
+    direction so the pull-back is toward the node regardless of which side of the
+    node the wall is on. Shared by :meth:`PathTrackerSim._dispatch_wall_reset`
+    (phase 2) and :func:`tools.path_planner.sim.parity._apply_wall` so the two
+    surfaces compute one identical axle coordinate.
+
+    :param wall_coord: the wall-surface on-axis coordinate the chassis pressed to.
+    :param node_coord: the reset node's own on-axis coordinate.
+    :return: the axle on-axis coordinate (:data:`WALL_CONTACT_OFFSET_CM` short of
+        the wall, on the node side).
+    """
+    sign = 1.0 if (wall_coord - node_coord) >= 0.0 else -1.0
+    return wall_coord - sign * WALL_CONTACT_OFFSET_CM
+
+
 class Direction(IntEnum):
     """Travel direction the chassis takes through an edge.
 
@@ -643,16 +665,21 @@ __all__ = [
     "WALL_CONTACT_OFFSET_CM",
     "WALL_STOP_BACK_OFF_CM",
     "Direction",
+    "DispatchPrimitive",
+    "EdgeDispatchDecision",
+    "EdgeDispatchQuery",
     "LocalizationSim",
     "Offset2D",
     "OffMapFaultError",
     "OffMapGate",
     "PathTrackerSim",
+    "ReanchorKind",
     "ReturnAction",
     "StopAtLine",
     "UnreachableGoalError",
     "resolve_blind_mode",
     "resolve_direction",
+    "resolve_edge_dispatch",
     "resolve_line_mode",
     "resolve_return_action",
     "resolve_sensor_overshoot_trim",
@@ -1214,6 +1241,242 @@ def resolve_direction(
     if abs(delta) > BIDIRECTIONAL_TURN_THRESHOLD_DEG:
         return Direction.REAR
     return Direction.FRONT
+
+
+# ---------------------------------------------------------------------------
+# Terminal one-hop edge-dispatch classifier (mirror of EdgeDispatchPolicy.h)
+# ---------------------------------------------------------------------------
+
+
+class DispatchPrimitive(IntEnum):
+    """The terminal one-hop motion primitive a resolved edge dispatches to.
+
+    Mirror of the C++ ``enum class DispatchPrimitive : uint8_t`` in
+    ``WRO2026/EdgeDispatchPolicy.h``; the integer values are byte-identical so a
+    cross-language CSV truth-table can compare the two surfaces row-for-row.
+
+    * ``LINE_FOLLOW_INTERSECTION`` -- LINE edge into a junction (line) node:
+      follow to the crossing marker, then roll the LINE_OVERSHOOT.
+    * ``PROJECTION_FOLLOW`` -- LINE edge into a projection node: distance-gated
+      line follow (no marker beneath the strip).
+    * ``STOP_AT_LINE_SEEK`` -- BLIND edge resolved to a ``Drive.stopAtLine`` seek.
+    * ``BLIND_DEAD_RECKON`` -- BLIND edge with no seek: dead-reckoned drive.
+    """
+
+    LINE_FOLLOW_INTERSECTION = 0
+    PROJECTION_FOLLOW        = 1
+    STOP_AT_LINE_SEEK        = 2
+    BLIND_DEAD_RECKON        = 3
+
+
+class ReanchorKind(IntEnum):
+    """How localization re-anchors after the hop's motion completes.
+
+    Mirror of the C++ ``enum class ReanchorKind : uint8_t`` in
+    ``WRO2026/EdgeDispatchPolicy.h``.
+
+    * ``ON_INTERSECTION`` -- the chassis stops on a physical crossing marker, so
+      localization snaps to the destination node
+      (:meth:`LocalizationSim.on_intersection`).
+    * ``ON_DEAD_RECKONED_ADVANCE`` -- the chassis dead-reckons into the node via
+      the encoder gate (:meth:`LocalizationSim.on_dead_reckoned_advance`).
+    """
+
+    ON_INTERSECTION          = 0
+    ON_DEAD_RECKONED_ADVANCE = 1
+
+
+@dataclass
+class EdgeDispatchQuery:
+    """Already-resolved inputs to the terminal one-hop dispatch classifier.
+
+    Function-identical Python mirror of the C++ ``struct EdgeDispatchQuery`` in
+    ``WRO2026/EdgeDispatchPolicy.h``. Every field is resolved by the FSM
+    (:meth:`PathTrackerSim._walk_hops`) BEFORE the call -- the classifier owns NO
+    cross-hop state (no pivot latch, no direction resolution, no pass-through
+    lookahead); it only composes the existing pure policies
+    (:func:`resolve_pivot_trim`, :func:`resolve_sensor_overshoot_trim`) and the
+    trim-clamp arithmetic.
+
+    :ivar edge_type: :data:`EDGE_LINE` or :data:`EDGE_BLIND`.
+    :ivar dest_is_projection: True iff the destination node is a projection node
+        (the 2-state flag mirroring the C++ ``NodeType`` LINE|PROJECTION split;
+        only those two node types are edge-routed).
+    :ivar direction: the resolved travel direction (``FRONT``/``REAR``; never
+        ``AUTO``).
+    :ivar raw_distance_cm: the directed edge length (``edge.distance_cm``).
+    :ivar line_mode: the resolved :class:`LineMode` for the edge (carried to
+        mirror the C++ struct; the decision logic does not read it).
+    :ivar stop_at_line: the ``(seek, motion_mode)`` from
+        :func:`resolve_stop_at_line` -- read only for BLIND edges.
+    :ivar proj_pass_through: FSM pass-through lookahead flag (LINE->proj->line
+        collapse); only meaningful on a LINE-into-projection hop.
+    :ivar departing_trim_cm: outgoing trim of the pivot being LEFT, or ``0.0``.
+    :ivar approaching_trim_cm: approach trim of the pivot being ENTERED, or
+        ``0.0``.
+    :ivar axle_offset_cm: direction-aware sensor-to-axle offset
+        (``REAR`` -> :data:`LINE_SENSOR_AXLE_OFFSET_REAR_CM`, ``FRONT`` ->
+        :data:`LINE_SENSOR_AXLE_OFFSET_CM`).
+    :ivar min_drive_cm: :data:`PIVOT_TRIM_MIN_DRIVE_CM` underflow floor.
+    """
+
+    edge_type: str
+    dest_is_projection: bool
+    direction: "Direction"
+    raw_distance_cm: float
+    line_mode: LineMode
+    stop_at_line: Tuple[bool, BlindMode]
+    proj_pass_through: bool
+    departing_trim_cm: float
+    approaching_trim_cm: float
+    axle_offset_cm: float
+    min_drive_cm: float
+
+
+@dataclass
+class EdgeDispatchDecision:
+    """Terminal one-hop dispatch classification (the classifier output).
+
+    Function-identical Python mirror of the C++ ``struct EdgeDispatchDecision``
+    in ``WRO2026/EdgeDispatchPolicy.h``. Exactly seven fields -- the classifier
+    returns a CLASSIFICATION, not a full descriptor.
+
+    :ivar primitive: the :class:`DispatchPrimitive` this hop dispatches to.
+    :ivar reverse: ``direction == Direction.REAR``.
+    :ivar drive_mode: motion bundle for the blind primitives
+        (``stop_at_line``'s ``motion_mode``); :attr:`BlindMode.DEFAULT` (unused)
+        for the line primitives.
+    :ivar commanded_distance_cm: the POST-clamp COMMANDED value, NOT the physical
+        displacement -- the full ``raw_distance_cm`` for a sensor-terminated seek,
+        the trimmed distance for a dead-reckon/projection hop. The physical trim
+        lives in the pose integration only (memory:
+        ``gotcha-sim-primitive-payload-is-command-not-displacement``).
+    :ivar overshoot_cm: the post-detect axle roll for the seek overshoot channel
+        (``0.0`` for the non-seek primitives).
+    :ivar reanchor: the :class:`ReanchorKind` localization applies after motion.
+    :ivar brake_on_gate: ``False`` only on a projection pass-through; ``True``
+        otherwise.
+    """
+
+    primitive: DispatchPrimitive
+    reverse: bool
+    drive_mode: BlindMode
+    commanded_distance_cm: float
+    overshoot_cm: float
+    reanchor: ReanchorKind
+    brake_on_gate: bool
+
+
+def resolve_edge_dispatch(q: EdgeDispatchQuery) -> EdgeDispatchDecision:
+    """Classify one already-resolved edge into its terminal dispatch decision.
+
+    Function-identical Python twin of the C++
+    ``EdgeDispatchPolicy.h::resolveEdgeDispatch``. Both implementations consume
+    the SAME frozen field set (the :class:`EdgeDispatchQuery` / the C++
+    ``EdgeDispatchQuery``) and emit the SAME seven-field decision, so the offline
+    sim and the robot agree on every hop's primitive, direction, commanded
+    distance, overshoot, re-anchor kind and gate-brake flag. The two surfaces
+    conform to the spec contract -- not to each other -- and a standalone
+    cross-language CSV truth-table is the drift guard (mirroring how
+    :func:`resolve_stop_at_line` / :func:`resolve_pivot_trim` mirror their C++
+    policy headers).
+
+    Cross-language parity: keep step-for-step identical with
+    ``WRO2026/EdgeDispatchPolicy.h::resolveEdgeDispatch``.
+
+    The classifier owns NO cross-hop state: direction resolution, the pivot
+    3-latch carry, the pass-through lookahead, the GYRO heading target and the
+    velocity-profile split all stay FSM-side and arrive pre-resolved on @p q. It
+    COMPOSES the existing pure policies and owns only the trim-clamp arithmetic:
+    a dead-reckon / projection hop's ``commanded_distance_cm`` is
+    ``raw_distance_cm - departing_trim_cm - approaching_trim_cm`` clamped to
+    ``min_drive_cm`` (the post-clamp value is carried). The
+    ``PIVOT_TRIM_UNDERFLOW`` fault is intentionally NOT a decision field -- the
+    sim does not model the fault FSM (ADR-033), so the resolver just clamps and
+    the firmware raises the fault.
+
+    Payload rule (memory-critical,
+    ``gotcha-sim-primitive-payload-is-command-not-displacement``):
+    ``commanded_distance_cm`` is the COMMANDED value (full ``raw_distance_cm``
+    for a sensor-terminated seek -- the crossing terminates it), never the
+    trimmed physical displacement.
+
+    :param q: the already-resolved :class:`EdgeDispatchQuery` for this hop.
+    :return: the :class:`EdgeDispatchDecision` per the frozen contract.
+    """
+    reverse = q.direction == Direction.REAR
+
+    if q.edge_type == EDGE_LINE:
+        if q.dest_is_projection:
+            # LINE -> projection node: distance-gated line follow. The commanded
+            # distance is the two-trim subtract-and-clamp (no junction marker, so
+            # the encoder gate lands the chassis). brakeOnGate is suppressed only
+            # when the FSM collapses a line-proj-line pass-through.
+            primitive = DispatchPrimitive.PROJECTION_FOLLOW
+            commanded_distance_cm = resolve_pivot_trim(
+                q.raw_distance_cm,
+                q.departing_trim_cm,
+                q.approaching_trim_cm,
+                q.min_drive_cm,
+            )[0]
+            overshoot_cm = 0.0
+            reanchor = ReanchorKind.ON_DEAD_RECKONED_ADVANCE
+            brake_on_gate = not q.proj_pass_through
+            drive_mode = BlindMode.DEFAULT
+        else:
+            # LINE -> junction (line) node: sensor-terminated follow to the
+            # crossing marker. The LINE_OVERSHOOT advance is NOT owned here -- it
+            # stays an FSM concern (resolve_sensor_overshoot_trim in _walk_hops),
+            # so this classifier reports a zero overshoot and a zero commanded
+            # distance (the crossing, not a distance, terminates the follow).
+            primitive = DispatchPrimitive.LINE_FOLLOW_INTERSECTION
+            commanded_distance_cm = 0.0
+            overshoot_cm = 0.0
+            reanchor = ReanchorKind.ON_INTERSECTION
+            brake_on_gate = True
+            drive_mode = BlindMode.DEFAULT
+    else:    # EDGE_BLIND
+        seek, motion_mode = q.stop_at_line
+        if seek:
+            # BLIND seek: the crossing terminates the drive, so the commanded
+            # distance stays the FULL raw command (NOT the trimmed displacement);
+            # the approaching-pivot trim folds into the separate overshoot
+            # channel via the shared sensor-overshoot twin.
+            primitive = DispatchPrimitive.STOP_AT_LINE_SEEK
+            commanded_distance_cm = q.raw_distance_cm
+            overshoot_cm = resolve_sensor_overshoot_trim(
+                q.axle_offset_cm,
+                q.approaching_trim_cm,
+                q.min_drive_cm,
+            )[0]
+            reanchor = ReanchorKind.ON_INTERSECTION
+            brake_on_gate = True
+            drive_mode = motion_mode
+        else:
+            # BLIND dead-reckon: distance-terminated, so the commanded distance is
+            # the two-trim subtract-and-clamp (the same core the projection hop
+            # uses).
+            primitive = DispatchPrimitive.BLIND_DEAD_RECKON
+            commanded_distance_cm = resolve_pivot_trim(
+                q.raw_distance_cm,
+                q.departing_trim_cm,
+                q.approaching_trim_cm,
+                q.min_drive_cm,
+            )[0]
+            overshoot_cm = 0.0
+            reanchor = ReanchorKind.ON_DEAD_RECKONED_ADVANCE
+            brake_on_gate = True
+            drive_mode = motion_mode
+
+    return EdgeDispatchDecision(
+        primitive=primitive,
+        reverse=reverse,
+        drive_mode=drive_mode,
+        commanded_distance_cm=commanded_distance_cm,
+        overshoot_cm=overshoot_cm,
+        reanchor=reanchor,
+        brake_on_gate=brake_on_gate,
+    )
 
 
 def _read_edge_override(edge, attr: str, enum_cls):
@@ -2114,8 +2377,6 @@ class PathTrackerSim:
         # `VirtualChassis.from_field_data` reads (`field_data.NODES[node]` ->
         # (x, y)), mirroring the firmware's `Localization::coordOnAxis(node, axis)`.
         node_coord = float(self._field_data.NODES[node][axis_idx])
-        gap = wall_coord - node_coord             # signed: which side the wall is on
-        sign = 1.0 if gap >= 0.0 else -1.0
 
         # -- Phase 1: square + press to the wall surface ---------------------
         # The firmware squares to `facing`, presses to the wall, then backs off
@@ -2137,7 +2398,7 @@ class PathTrackerSim:
         # reference). The sim's chassis IS that believed pose, so snap it to the
         # axle. `reanchor_at_wall` keeps LocalizationSim's offset frame consistent
         # with a node arrival (cleared).
-        axle_coord = wall_coord - sign * WALL_CONTACT_OFFSET_CM
+        axle_coord = _wall_axle_coord(wall_coord, node_coord)
         if axis_idx == 0:
             self._chassis.x_cm = axle_coord
         else:
@@ -2425,7 +2686,120 @@ class PathTrackerSim:
             # while a LINE edge into a junction (line) node re-anchors on the
             # crossing marker. Mirrors ``compile_path`` (T4) cell-for-cell.
             dest_is_projection = is_projection_node(self._graph, nxt)
-            if edge_type == EDGE_LINE and dest_is_projection:
+
+            if edge_type not in (EDGE_LINE, EDGE_BLIND):    # pragma: no cover -- defensive only
+                raise ValueError(
+                    f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
+                )
+
+            # -----------------------------------------------------------------
+            # Resolve every dispatch input HERE, then classify the hop through the
+            # terminal one-hop classifier ``resolve_edge_dispatch`` (the Python
+            # twin of ``EdgeDispatchPolicy.h::resolveEdgeDispatch``). The
+            # classifier owns NO cross-hop state -- direction, the pivot 3-latch
+            # carry, the pass-through lookahead and the stop-at-line seek are all
+            # resolved here and arrive on the query pre-resolved; the classifier
+            # only composes the existing pure trim policies and reports the
+            # primitive + reverse + commanded distance + overshoot + re-anchor
+            # kind. The ACT_* tuples and chassis/localization mutations below stay
+            # byte-identical to the pre-classifier dispatch.
+            # -----------------------------------------------------------------
+            # The two pivot trims latched at the top of this loop:
+            # ``_departing_pivot`` is the pivot just LEFT, ``_approaching_pivot``
+            # the pivot being ENTERED. ``distance_cm`` (the shared table cell) is
+            # never mutated -- the trims fold into a LOCAL commanded distance.
+            departing_trim_cm = (
+                self._departing_pivot.trim_cm
+                if self._departing_pivot is not None
+                else 0.0
+            )
+            approaching_trim_cm = (
+                self._approaching_pivot.trim_cm
+                if self._approaching_pivot is not None
+                else 0.0
+            )
+            # Sensor-to-axle offset of the board that LEADS this hop; a REAR hop
+            # uses the rear board's own offset (mirrors PathTracker). Feeds the
+            # classifier's seek overshoot channel.
+            axle_offset_cm = (
+                LINE_SENSOR_AXLE_OFFSET_REAR_CM
+                if direction == Direction.REAR
+                else LINE_SENSOR_AXLE_OFFSET_CM
+            )
+
+            # `line(A)-projection(B)-line(C)` pass-through lookahead (issue #64),
+            # resolved here so it is a clean classifier input (the C++ FSM hoists
+            # the side-effect-free ``_evaluateProjectionPassThrough`` the same
+            # way). Only meaningful on a LINE-into-projection hop; this same local
+            # also selects the pass-variant emission tag in the PROJECTION_FOLLOW
+            # branch below (where the detailed T20 note lives). Evaluating it here
+            # is byte-identical to the old in-branch call -- the predicate is pure.
+            proj_pass_through = (
+                _should_projection_pass_through(
+                    self._graph,
+                    self._next_hop,
+                    nxt,
+                    goal_name,
+                    inbound_body_heading=body_heading,
+                    inbound_direction=direction,
+                    pipeline_default=cfg.direction,
+                    builder_route=route_direction,
+                    builder_arrival=arrival_direction,
+                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                    line_board_count=LINE_BOARD_COUNT,
+                )
+                if (edge_type == EDGE_LINE and dest_is_projection)
+                else False
+            )
+
+            # BLIND stop-at-line seek decision (resolved only for BLIND edges; a
+            # LINE edge passes a neutral default the classifier never reads). The
+            # offline streams carry no call-site verb, so resolve with
+            # ``StopAtLine.AUTO`` (the firmware's per-edge AUTO default) and let
+            # the precedence ladder decide. REAR seek needs a 2-board chassis --
+            # ``resolve_stop_at_line`` returns ``seek=False`` for REAR on 1-board,
+            # degrading to the dead-reckon reverse. Auto-rule (issue #64): a BLIND
+            # edge whose DESTINATION is a projection node seeks that node's own
+            # line first to re-anchor -- a purely LOCAL read off ``nxt``, mirroring
+            # the firmware ``getNodeType(_nextHop) == PROJECTION``.
+            if edge_type == EDGE_BLIND:
+                auto_rule_active = (
+                    getattr(self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+                    and dest_is_projection
+                )
+                stop_at_line = resolve_stop_at_line(
+                    StopAtLine.AUTO,
+                    _read_edge_stop_at_line_override(edge),
+                    resolve_blind_mode(edge, cfg),
+                    cfg.blind,
+                    direction,
+                    LINE_BOARD_COUNT,
+                    auto_rule_active,
+                )
+            else:
+                stop_at_line = (False, BlindMode.DEFAULT)
+
+            decision = resolve_edge_dispatch(
+                EdgeDispatchQuery(
+                    edge_type=edge_type,
+                    dest_is_projection=dest_is_projection,
+                    direction=direction,
+                    raw_distance_cm=distance_cm,
+                    line_mode=(
+                        resolve_line_mode(edge, cfg)
+                        if edge_type == EDGE_LINE
+                        else cfg.line
+                    ),
+                    stop_at_line=stop_at_line,
+                    proj_pass_through=proj_pass_through,
+                    departing_trim_cm=departing_trim_cm,
+                    approaching_trim_cm=approaching_trim_cm,
+                    axle_offset_cm=axle_offset_cm,
+                    min_drive_cm=PIVOT_TRIM_MIN_DRIVE_CM,
+                )
+            )
+
+            if decision.primitive == DispatchPrimitive.PROJECTION_FOLLOW:
                 # LINE -> projection node: line-follow stopped by the encoder
                 # distance gate (no junction marker beneath the strip), so the
                 # chassis dead-reckons into the node via
@@ -2441,7 +2815,7 @@ class PathTrackerSim:
                 # ``_pivot_trim_distance``. ``distance_cm`` (the shared table
                 # cell) is never mutated. No LINE_OVERSHOOT step follows -- the
                 # encoder gate already lands the chassis on the node.
-                effective_dist_cm = self._pivot_trim_distance(edge)
+                effective_dist_cm = decision.commanded_distance_cm
 
                 # T20 (issue #64): `line(A)–projection(B)–line(C)` PASS-THROUGH.
                 # The TRIGGER is THIS A→B DISTANCE gate, not an intersection -- a
@@ -2462,20 +2836,7 @@ class PathTrackerSim:
                 # then re-anchors at C's junction on the next loop iteration. The
                 # gate's own `inbound_direction == next_dir` check means a REAR
                 # pass-through only fires on a fully-reverse collinear triple.
-                proj_pass_through = _should_projection_pass_through(
-                    self._graph,
-                    self._next_hop,
-                    nxt,
-                    goal_name,
-                    inbound_body_heading=body_heading,
-                    inbound_direction=direction,
-                    pipeline_default=cfg.direction,
-                    builder_route=route_direction,
-                    builder_arrival=arrival_direction,
-                    bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
-                    line_board_count=LINE_BOARD_COUNT,
-                )
-                if direction == Direction.REAR:
+                if decision.reverse:
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (
@@ -2493,9 +2854,13 @@ class PathTrackerSim:
                         ACT_FOLLOW_DIST_PASS if proj_pass_through else ACT_FOLLOW_DIST,
                         effective_dist_cm,
                     )
-            elif edge_type == EDGE_LINE:
+            elif decision.primitive == DispatchPrimitive.LINE_FOLLOW_INTERSECTION:
                 # LINE -> junction (line) node: line-follow terminated by the
                 # physical intersection marker, then a LINE_OVERSHOOT roll.
+                # The classifier intentionally does NOT own the LINE_OVERSHOOT
+                # advance (it returns overshoot_cm == 0 here) -- that FSM
+                # transition stays a ``_walk_hops`` concern, computed below via the
+                # shared sensor-overshoot twin EXACTLY as before.
                 #
                 # ADR-036: a LINE outgoing edge is SENSOR-terminated -- it
                 # re-anchors on the junction line, so it takes NO dead-reckon
@@ -2561,7 +2926,7 @@ class PathTrackerSim:
                     PIVOT_TRIM_MIN_DRIVE_CM,
                 )
 
-                if direction == Direction.REAR:
+                if decision.reverse:
                     self._chassis.reverse(follow_cm)
                     yield (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge, cfg))
                 else:
@@ -2596,7 +2961,7 @@ class PathTrackerSim:
                 # the chassis center is AXLE_OFFSET cm behind v in the travel
                 # direction. Advancing AXLE_OFFSET in the travel direction = reverse
                 # in body coordinates (body heading points opposite to travel).
-                if direction == Direction.REAR:
+                if decision.reverse:
                     self._chassis.reverse(overshoot_advance_cm)
                 else:
                     self._chassis.forward(overshoot_advance_cm)
@@ -2605,43 +2970,13 @@ class PathTrackerSim:
                     ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
                     overshoot_advance_cm,
                 )
-            elif edge_type == EDGE_BLIND:
-                # Mode-sensitive blind dispatch (mirrors the blind branch of
-                # ``compile_path`` -- T7 must stay byte-identical,
-                # ``test_property_random_walks`` / TC12). The offline streams
-                # carry no call-site stop-at-line verb, so resolve with
-                # ``StopAtLine.AUTO`` (the firmware's per-edge AUTO default):
-                # the resolver's precedence ladder decides whether to seek.
-                # REAR seek requires a 2-board chassis --
-                # ``resolve_stop_at_line`` returns ``seek=False`` for REAR on
-                # 1-board, degrading to the dead-reckon reverse below.
-                #
-                # Auto-rule (issue #64): a BLIND edge whose DESTINATION node is a
-                # projection node seeks that node's own line first to re-anchor
-                # via full advance. This is a purely LOCAL read off ``nxt``
-                # (``dest_is_projection`` resolved at the top of the dispatch
-                # block via ``is_projection_node``) -- it replaces the old
-                # goal-relative ``next_hop_is_projection(graph, nxt,
-                # next_hop[nxt][goal])`` peek. Mirrors the ``auto_rule_active``
-                # contract in ``compile_path`` (T4) and the firmware
-                # (``getNodeType(_nextHop) == PROJECTION``); the resolver body +
-                # the 936-row CSV are frozen -- only this caller input changes.
-                auto_rule_active = (
-                    getattr(
-                        self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True
-                    )
-                    and dest_is_projection
-                )
-                seek, _motion_mode = resolve_stop_at_line(
-                    StopAtLine.AUTO,
-                    _read_edge_stop_at_line_override(edge),
-                    resolve_blind_mode(edge, cfg),
-                    cfg.blind,
-                    direction,
-                    LINE_BOARD_COUNT,
-                    auto_rule_active,
-                )
-                if seek and direction == Direction.FRONT:
+            elif decision.primitive == DispatchPrimitive.STOP_AT_LINE_SEEK:
+                # BLIND stop-at-line seek (the seek + motion bundle were resolved
+                # into the query above; the classifier returned STOP_AT_LINE_SEEK,
+                # so this hop seeks regardless of FRONT/REAR). The board stops on
+                # the physical crossing line, so both directions re-anchor via
+                # ``on_intersection``.
+                if not decision.reverse:
                     # Front board stops on the physical crossing line; the
                     # chassis re-anchors via ``on_intersection`` (the "better
                     # localization") instead of dead-reckoning. The seek drives
@@ -2685,17 +3020,13 @@ class PathTrackerSim:
                     # the LINE follow's degenerate-geometry guard; the firmware instead
                     # hard-faults on ``delta > offset`` (PIVOT_TRIM_UNDERFLOW), which
                     # the validator's delta-budget precludes for any legal sensor-regime
-                    # pivot.
-                    approach_trim_cm = (
-                        self._approaching_pivot.trim_cm
-                        if self._approaching_pivot is not None
-                        else 0.0
-                    )
+                    # pivot. The approaching-pivot trim was already folded into
+                    # ``decision.overshoot_cm`` by the classifier (the shared
+                    # sensor-overshoot twin, clamped to the floor).
                     offset = LINE_SENSOR_AXLE_OFFSET_CM
-                    overshoot_cm, _clamped = resolve_sensor_overshoot_trim(
-                        offset, approach_trim_cm, PIVOT_TRIM_MIN_DRIVE_CM
+                    seek_advance_cm = max(
+                        0.0, distance_cm - (offset - decision.overshoot_cm)
                     )
-                    seek_advance_cm = max(0.0, distance_cm - (offset - overshoot_cm))
                     self._chassis.forward(seek_advance_cm)
                     self._localization.on_intersection(nxt)
                     # The emitted primitive carries the COMMAND distance
@@ -2712,7 +3043,7 @@ class PathTrackerSim:
                     # (applied above) -- it lands the axle delta-short without
                     # changing what the robot is commanded to do.
                     yield (ACT_STOP_AT_LINE, distance_cm)
-                elif seek and direction == Direction.REAR:
+                else:
                     # Pivots are FRONT-only in v1 (ADR-036 / #54): the force-FRONT
                     # above sets ``direction = FRONT`` whenever a pivot is active,
                     # so a REAR seek can NEVER carry an approaching pivot and this
@@ -2733,33 +3064,24 @@ class PathTrackerSim:
                     self._chassis.reverse(distance_cm)
                     self._localization.on_intersection(nxt)
                     yield (ACT_STOP_AT_LINE_REVERSE, nxt, distance_cm, resolve_blind_mode(edge, cfg))
-                elif direction == Direction.FRONT:
-                    # Dead-reckoned forward blind move (byte-identical to the
-                    # pre-resolver FRONT non-STOP_AT_LINE output when no pivot
-                    # trim applies). ADR-036: DISTANCE-terminated -- the departing
-                    # trim (``_departing_pivot``) + the approach trim
-                    # (``_approaching_pivot``), folded into a LOCAL effective
-                    # distance; the table cell is untouched and the emitted value
-                    # matches what the firmware commands into Drive.driveDist.
-                    effective_dist_cm = self._pivot_trim_distance(edge)
+            else:    # DispatchPrimitive.BLIND_DEAD_RECKON
+                # Dead-reckoned blind move (byte-identical to the pre-resolver
+                # output when no pivot trim applies): a non-STOP_AT_LINE edge, or a
+                # forced-REAR STOP_AT_LINE hop on a 1-board chassis with no rear
+                # board to seek with (AC2). ADR-036: DISTANCE-terminated -- the
+                # departing + approach trims are folded into the classifier's
+                # ``commanded_distance_cm`` (the ``_pivot_trim_distance``
+                # equivalent); the table cell is untouched and the value matches
+                # what the firmware commands into Drive.driveDist.
+                effective_dist_cm = decision.commanded_distance_cm
+                if not decision.reverse:
                     self._chassis.forward(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (ACT_FORWARD, effective_dist_cm)
                 else:
-                    # Dead-reckoned reverse blind move (byte-identical to the
-                    # pre-resolver REAR output when no pivot trim applies): a
-                    # non-STOP_AT_LINE REAR edge, or a forced-REAR STOP_AT_LINE
-                    # hop on a 1-board chassis with no rear board to seek with
-                    # (AC2). ADR-036: DISTANCE-terminated -- same departing +
-                    # approach trim as the FRONT dead-reckon branch above.
-                    effective_dist_cm = self._pivot_trim_distance(edge)
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
                     yield (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge, cfg))
-            else:    # pragma: no cover -- defensive only
-                raise ValueError(
-                    f"unknown edge type {edge_type!r} on edge ({current!r}, {nxt!r})"
-                )
 
             # Wall-zero reset interlude (PR2, AC17 pillar 2). The hop above just
             # re-anchored localization onto `nxt`. If `nxt` is a reset node, run
