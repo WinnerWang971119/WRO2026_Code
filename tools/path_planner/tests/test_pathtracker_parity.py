@@ -700,3 +700,44 @@ def test_no_stale_allowlist_entries(parity_run: _ParityRun) -> None:
         "stale allowlist entr(y/ies) matched nothing this run (remove them): "
         f"{[e.id for e in parity_run.stale_entries]}"
     )
+
+
+def test_allowlist_match_is_case_sensitive_glob() -> None:
+    """`Allowlist.match` globs the case id case-sensitively on every OS (TC5).
+
+    Pure unit test (no dump binary): build a small allowlist directly and assert
+    that a same-case selector matches while a case-mismatched selector does NOT.
+    This proves `Allowlist.match` uses `fnmatchcase` rather than `fnmatch` —
+    `fnmatch` normcases the path, so it is case-insensitive on Windows and the
+    lowercase selector below would wrongly match there. `fnmatchcase` keeps the
+    behavior identical (case-sensitive) on Windows and POSIX alike.
+    """
+    matching_entry = AllowlistEntry(
+        id="case-sensitive-match-probe",
+        case_selector="Inter2__*",
+        event_kind="return_move",
+        field_path="dist_cm",
+        side="cpp",
+        reason="unit-test fixture: same-case selector should match",
+        tracking_issue="#116",
+    )
+    matching_allowlist = Allowlist([matching_entry])
+    assert (
+        matching_allowlist.match("Inter2__Inter3__clean", "return_move", "dist_cm")
+        is matching_entry
+    ), "a same-case selector should match its case id"
+
+    mismatched_entry = AllowlistEntry(
+        id="case-mismatch-no-match-probe",
+        case_selector="inter2__*",
+        event_kind="return_move",
+        field_path="dist_cm",
+        side="cpp",
+        reason="unit-test fixture: lowercase selector should NOT match",
+        tracking_issue="#116",
+    )
+    mismatched_allowlist = Allowlist([mismatched_entry])
+    assert (
+        mismatched_allowlist.match("Inter2__Inter3__clean", "return_move", "dist_cm")
+        is None
+    ), "a case-mismatched selector must not match (case-sensitive on every OS)"

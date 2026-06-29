@@ -59,7 +59,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -97,12 +97,12 @@ from tools.path_planner.sim.runtime import (
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     PIVOT_TRIM_MIN_DRIVE_CM,
-    WALL_CONTACT_OFFSET_CM,
     Direction,
     EdgeDispatchQuery,
     PathTrackerSim,
     StopAtLine,
     _read_edge_stop_at_line_override,
+    _wall_axle_coord,
     resolve_blind_mode,
     resolve_edge_dispatch,
     resolve_line_mode,
@@ -932,9 +932,7 @@ def _apply_wall(chassis: VirtualChassis, field, record: TraceRecord) -> None:
         # Phase 2: re-anchor the on-axis belief to the wheel axle (node side).
         wall_coord = record.fields["wall_coord"]
         node_coord = float(field.NODES[node][axis_idx])
-        gap = wall_coord - node_coord
-        sign = 1.0 if gap >= 0.0 else -1.0
-        axle_coord = wall_coord - sign * WALL_CONTACT_OFFSET_CM
+        axle_coord = _wall_axle_coord(wall_coord, node_coord)
         _set_axis(chassis, axis_idx, axle_coord)
     else:    # wall_depart
         # Phase 3: depart forward off the wall, on-axis belief back to the node.
@@ -1079,11 +1077,16 @@ class AllowlistEntry:
     """One intentional-divergence allowlist entry.
 
     :ivar id: a unique entry id (the staleness report keys on it).
-    :ivar case_selector: a glob over ``case_id`` (``fnmatch``); scope an entry,
-        never ``"*"`` combined with a wildcard kind + field to mute everything.
+    :ivar case_selector: a glob over ``case_id`` (``fnmatchcase`` — case-sensitive
+        on every OS); scope an entry, never ``"*"`` combined with a wildcard kind
+        + field to mute everything.
     :ivar event_kind: the record ``kind`` the divergence is on.
     :ivar field_path: the field name within that record.
-    :ivar side: which side is expected to differ (``"python"`` / ``"cpp"``).
+    :ivar side: descriptive-only metadata noting which side is expected to differ
+        (``"python"`` / ``"cpp"``). NOT consulted by :meth:`Allowlist.match` (nor
+        at load time): the parity diff is symmetric — ``cpp_value`` and
+        ``sim_value`` are peers with no oracle for which side is "wrong" — so
+        ``side`` cannot be a match key.
     :ivar reason: a human-readable justification.
     :ivar tracking_issue: the tracking-issue reference.
     """
@@ -1129,7 +1132,7 @@ class Allowlist:
         """Return the single entry covering a mismatch, marking it used.
 
         :param case_id: the mismatch's case id (matched against
-            ``case_selector`` via ``fnmatch``).
+            ``case_selector`` via ``fnmatchcase`` — case-sensitive on every OS).
         :param event_kind: the mismatch's record kind (exact match).
         :param field_path: the mismatch's field name (exact match).
         :return: the matching :class:`AllowlistEntry`, or ``None`` if none
@@ -1137,12 +1140,18 @@ class Allowlist:
         :raises ParityAllowlistError: if more than one entry matches (an
             ambiguous, over-broad allowlist).
         """
+        # `side` is descriptive-only metadata and is intentionally NOT a filter
+        # here: the parity diff is symmetric — `cpp_value` and `sim_value` are
+        # peers with no oracle for which side is "wrong" — so `side` cannot be a
+        # match key. `fnmatchcase` (not `fnmatch`) keeps globbing case-sensitive
+        # on every OS (`fnmatch` normcases the path, so it is case-insensitive on
+        # Windows).
         matched = [
             entry
             for entry in self._entries
             if entry.event_kind == event_kind
             and entry.field_path == field_path
-            and fnmatch(case_id, entry.case_selector)
+            and fnmatchcase(case_id, entry.case_selector)
         ]
         if len(matched) > 1:
             raise ParityAllowlistError(

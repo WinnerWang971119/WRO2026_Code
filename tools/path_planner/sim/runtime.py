@@ -572,6 +572,28 @@ ACT_WALL_DEPART: str = "wall_depart"
 _RESET_AXIS_TO_IDX: dict = {"x": 0, "y": 1}
 
 
+def _wall_axle_coord(wall_coord: float, node_coord: float) -> float:
+    """Pull the believed on-axis coordinate back from the wall to the wheel axle.
+
+    Mirror of the firmware's ``reanchorAtWall`` axle re-anchor: the chassis
+    presses its REAR contact face against the wall surface (``wall_coord``), but
+    the tracked reference is the wheel AXLE, which sits
+    :data:`WALL_CONTACT_OFFSET_CM` short of that surface on the NODE side.
+    ``sign(gap)`` (``gap = wall_coord - node_coord``) selects the node-side
+    direction so the pull-back is toward the node regardless of which side of the
+    node the wall is on. Shared by :meth:`PathTrackerSim._dispatch_wall_reset`
+    (phase 2) and :func:`tools.path_planner.sim.parity._apply_wall` so the two
+    surfaces compute one identical axle coordinate.
+
+    :param wall_coord: the wall-surface on-axis coordinate the chassis pressed to.
+    :param node_coord: the reset node's own on-axis coordinate.
+    :return: the axle on-axis coordinate (:data:`WALL_CONTACT_OFFSET_CM` short of
+        the wall, on the node side).
+    """
+    sign = 1.0 if (wall_coord - node_coord) >= 0.0 else -1.0
+    return wall_coord - sign * WALL_CONTACT_OFFSET_CM
+
+
 class Direction(IntEnum):
     """Travel direction the chassis takes through an edge.
 
@@ -2355,8 +2377,6 @@ class PathTrackerSim:
         # `VirtualChassis.from_field_data` reads (`field_data.NODES[node]` ->
         # (x, y)), mirroring the firmware's `Localization::coordOnAxis(node, axis)`.
         node_coord = float(self._field_data.NODES[node][axis_idx])
-        gap = wall_coord - node_coord             # signed: which side the wall is on
-        sign = 1.0 if gap >= 0.0 else -1.0
 
         # -- Phase 1: square + press to the wall surface ---------------------
         # The firmware squares to `facing`, presses to the wall, then backs off
@@ -2378,7 +2398,7 @@ class PathTrackerSim:
         # reference). The sim's chassis IS that believed pose, so snap it to the
         # axle. `reanchor_at_wall` keeps LocalizationSim's offset frame consistent
         # with a node arrival (cleared).
-        axle_coord = wall_coord - sign * WALL_CONTACT_OFFSET_CM
+        axle_coord = _wall_axle_coord(wall_coord, node_coord)
         if axis_idx == 0:
             self._chassis.x_cm = axle_coord
         else:
