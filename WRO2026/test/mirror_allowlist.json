@@ -1,0 +1,16 @@
+{
+  "entries": [
+    {
+      "file": "test_wall_stop_watchdog.cpp",
+      "count": 9,
+      "reason": "Drive wall-stop watchdog STATE wiring; pure primitives (stopAtLineProgressed/Stalled) shared via WROMath.h, not byte-copied. De-mirror tracked under epic #107.",
+      "issue": "#107"
+    },
+    {
+      "file": "test_tasks_dispatch_overflow.cpp",
+      "count": 1,
+      "reason": "compile-time queue-overflow static_assert mirror of Mission.h:307-312. De-mirror tracked under epic #107.",
+      "issue": "#107"
+    }
+  ]
+}

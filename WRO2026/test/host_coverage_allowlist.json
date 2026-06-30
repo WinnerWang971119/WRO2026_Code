@@ -1,0 +1,19 @@
+{
+  "entries": [
+    {
+      "file": "EventTrace.cpp",
+      "reason": "OLED/serial peripheral, mocked; no real EventTrace.cpp linked (test/CMakeLists.txt:299)",
+      "issue": null
+    },
+    {
+      "file": "Intersection.cpp",
+      "reason": "mocked as an upper peripheral in PathTracker tests; no dedicated host test yet",
+      "issue": null
+    },
+    {
+      "file": "WROLineArray.cpp",
+      "reason": "hardware I2C line-array leaf, replaced by a test-controlled mock",
+      "issue": null
+    }
+  ]
+}
