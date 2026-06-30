@@ -31,6 +31,19 @@ Case map (Testing Strategy table TC1-TC16):
 * TC15 -- schema-invalid allowlists each raise ``AllowlistError``.
 * TC16 -- the two checks run independently (one's bad input never suppresses
   the other's diagnostics).
+
+PR #117 review-fix regressions (one per finding):
+
+* TC17 -- a ref-less mirror with an unrelated ``<Foo>`` template type is NOT
+  whitelisted by the prose rule, while the literal ``<line>`` placeholder still is.
+* TC18 -- a citation placed BEFORE the ``MIRROR:`` tag counts and is not flagged.
+* TC19 -- two annotations on one physical line count as two.
+* TC20 -- a bare ``/* */`` continuation line carrying ``MIRROR:`` is counted /
+  flagged just like a marker line.
+* TC21 -- ``add_library`` and ``list(APPEND ...)`` count as host linkage.
+* TC22 -- a non-UTF-8 byte in a scanned file does not crash the scan.
+* TC23 -- a ``#`` inside a quoted CMake argument does not truncate a following
+  ``${SKETCH_DIR}/X.cpp`` on the same line.
 """
 
 from __future__ import annotations
@@ -440,3 +453,117 @@ def test_tc16_checks_run_independently(tmp_path):
     coverage_b = guard.check_coverage(prod_dir, cmake, bad_coverage)
     assert coverage_b, "malformed coverage allowlist must yield a violation"
     assert any("cannot use" in v for v in coverage_b), coverage_b
+
+
+# ---------------------------------------------------------------------------
+# TC17 -- #1: the angle-bracket prose clause no longer hides a new mirror.
+# ---------------------------------------------------------------------------
+
+
+def test_tc17_angle_bracket_refless_mirror_is_not_whitelisted(tmp_path):
+    """TC17: a ref-less replica with a ``<Foo>`` type is flagged + uncounted.
+
+    The genuine ``<line>`` convention placeholder stays whitelisted, so the
+    tightening closes the evasion without tripping the documentation lines.
+    """
+    (tmp_path / "test_evade.cpp").write_text(
+        "// MIRROR: copied wall-stop watchdog into test<Foo>\n", encoding="utf-8"
+    )
+    (tmp_path / "test_doc.cpp").write_text(
+        "// MIRROR: Drive.cpp:<line> placeholder\n", encoding="utf-8"
+    )
+    assert guard.count_mirrors(tmp_path) == {}, "neither line cites a concrete ref"
+    violations = guard.find_refless_mirrors(tmp_path)
+    assert any("test_evade.cpp" in v for v in violations), violations
+    assert not any("test_doc.cpp" in v for v in violations), violations
+
+
+# ---------------------------------------------------------------------------
+# TC18 -- #5: a citation placed before the MIRROR: tag is accepted.
+# ---------------------------------------------------------------------------
+
+
+def test_tc18_reference_before_mirror_tag(tmp_path):
+    """TC18: ``// from Foo.cpp:42, see MIRROR: note`` counts and is not flagged."""
+    (tmp_path / "test_before.cpp").write_text(
+        "// re-derived from Drive.cpp:42, see MIRROR: note\n", encoding="utf-8"
+    )
+    assert guard.count_mirrors(tmp_path) == {"test_before.cpp": 1}
+    assert guard.find_refless_mirrors(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# TC19 -- #4: two annotations on one line count as two.
+# ---------------------------------------------------------------------------
+
+
+def test_tc19_two_annotations_one_line(tmp_path):
+    """TC19: a line carrying two cited ``MIRROR:`` tags counts both."""
+    (tmp_path / "test_two.cpp").write_text(
+        "// MIRROR: Foo.cpp:1 // MIRROR: Bar.cpp:2\n", encoding="utf-8"
+    )
+    assert guard.count_mirrors(tmp_path) == {"test_two.cpp": 2}
+
+
+# ---------------------------------------------------------------------------
+# TC20 -- #7: an unmarked /* */ continuation line is counted / flagged.
+# ---------------------------------------------------------------------------
+
+
+def test_tc20_bare_block_comment_continuation(tmp_path):
+    """TC20: a bare ``MIRROR:`` block-comment line is no longer invisible."""
+    (tmp_path / "test_block.cpp").write_text(
+        "/*\n"
+        "   MIRROR: copied loop\n"  # no ref -> flagged, uncounted
+        "   MIRROR: Foo.cpp:9 ported\n"  # cited -> counted, not flagged
+        "*/\n",
+        encoding="utf-8",
+    )
+    assert guard.count_mirrors(tmp_path) == {"test_block.cpp": 1}
+    violations = guard.find_refless_mirrors(tmp_path)
+    assert len(violations) == 1, violations
+    assert "test_block.cpp:2" in violations[0], violations
+
+
+# ---------------------------------------------------------------------------
+# TC21 -- #3: add_library / list(APPEND ...) count as host linkage.
+# ---------------------------------------------------------------------------
+
+
+def test_tc21_linked_sources_add_library_and_list(tmp_path):
+    """TC21: linkage via ``add_library`` and ``list(APPEND ...)`` is recognized."""
+    cmake = tmp_path / "CMakeLists.txt"
+    cmake.write_text(
+        "add_library(lib ${SKETCH_DIR}/Delta.cpp)\n"
+        "list(APPEND SRCS ${SKETCH_DIR}/Epsilon.cpp)\n",
+        encoding="utf-8",
+    )
+    assert guard.linked_sources(cmake) == {"Delta.cpp", "Epsilon.cpp"}
+
+
+# ---------------------------------------------------------------------------
+# TC22 -- #9: a non-UTF-8 byte in a scanned file does not crash the scan.
+# ---------------------------------------------------------------------------
+
+
+def test_tc22_non_utf8_byte_does_not_crash(tmp_path):
+    """TC22: a stray ``0xff`` byte degrades to U+FFFD; the cited mirror counts."""
+    (tmp_path / "test_bin.cpp").write_bytes(
+        b"// MIRROR: Foo.cpp:1 \xff trailing\n"
+    )
+    assert guard.count_mirrors(tmp_path) == {"test_bin.cpp": 1}
+    assert guard.find_refless_mirrors(tmp_path) == []
+
+
+# ---------------------------------------------------------------------------
+# TC23 -- #10: a '#' inside a quoted CMake argument is not a comment.
+# ---------------------------------------------------------------------------
+
+
+def test_tc23_hash_inside_quotes_not_treated_as_comment(tmp_path):
+    """TC23: a quoted ``#`` does not truncate a following source on the line."""
+    cmake = tmp_path / "CMakeLists.txt"
+    cmake.write_text(
+        'add_executable(t "-DTAG=#1" ${SKETCH_DIR}/Zeta.cpp)\n', encoding="utf-8"
+    )
+    assert guard.linked_sources(cmake) == {"Zeta.cpp"}

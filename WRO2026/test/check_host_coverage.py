@@ -39,25 +39,42 @@ from pathlib import Path
 # Constants -- the load-bearing patterns. See the plan's "Contracts & Interfaces".
 # ---------------------------------------------------------------------------
 
-#: A genuine mirror annotation: a ``//``/``///`` line comment or ``*``/``/*``
-#: block-comment marker carrying a ``MIRROR:`` tag followed -- anywhere on the
-#: line -- by a concrete reference (``.cpp``/``.h``:digit citation or a
-#: ``Class::member``). Applied PER LINE so ``.`` never crosses a newline. The
-#: concrete-ref requirement excludes convention prose that uses a ``<line>``
-#: placeholder or a backtick-quoted example with no real citation.
-MIRROR_RE = re.compile(r"(?://+|\*).*?\bMIRROR:.*?(?:\.(?:cpp|h):\d|\w::\w)")
+#: A concrete reference token: a ``file.cpp``/``file.h``:digit citation or a
+#: ``Class::member`` qualified name. Marks a ``MIRROR:`` comment as genuinely
+#: cited; also spares a bare continuation line that names its source from the
+#: ref-less hardening.
+_REF = r"(?:\.(?:cpp|h):\d|\w::\w)"
+REF_RE = re.compile(_REF)
+
+#: A genuine mirror annotation on ONE line: a ``//``/``///`` line comment or
+#: ``*``/``/*`` block-comment marker, a ``MIRROR:`` tag, and a concrete
+#: reference -- in EITHER order (the citation may sit before or after the tag).
+#: Applied PER LINE so ``.`` never crosses a newline, and matched per occurrence
+#: (``findall``) so two annotations on one line count as two. The concrete-ref
+#: requirement excludes convention prose that uses a ``<line>`` placeholder or a
+#: backtick-quoted example with no real citation.
+MIRROR_RE = re.compile(
+    r"(?://+|\*).*?(?:\bMIRROR:.*?" + _REF + r"|" + _REF + r".*?\bMIRROR:)"
+)
 
 #: Known-prose signature: a backtick-quoted comment marker immediately before
-#: ``MIRROR:``, or a ``<...>`` placeholder after it. Used to whitelist the
-#: documentation lines so they do not trip the ref-less hardening.
-PROSE_RE = re.compile(r"`\s*//+\s*MIRROR:|MIRROR:[^\n]*<[^>]+>")
+#: ``MIRROR:``, or the literal ``<line>`` placeholder after it. Whitelists the
+#: convention-doc lines so they do not trip the ref-less hardening. The
+#: placeholder is the LITERAL token ``<line>`` (not any ``<...>``), so a real
+#: replica annotated with an unrelated template type (e.g. ``test<Foo>``) is NOT
+#: whitelisted -- that evasion is the regression this tightening closes.
+PROSE_RE = re.compile(r"`\s*//+\s*MIRROR:|MIRROR:[^\n]*<line>")
 
 #: A host-linked production source as it appears in CMake: ``${SKETCH_DIR}/<name>.cpp``.
 #: Captures the bare ``<name>`` (the ``.cpp`` suffix is re-appended by the caller).
 LINK_RE = re.compile(r"\$\{SKETCH_DIR\}/([A-Za-z_][A-Za-z0-9_]*)\.cpp")
 
 #: CMake commands whose argument bodies may legitimately list ``${SKETCH_DIR}/*.cpp``.
-SOURCE_COMMANDS = ("add_executable", "target_sources", "set")
+#: ``set``/``list`` capture ``set(VAR ...)`` / ``list(APPEND VAR ...)`` source
+#: declarations; ``add_executable``/``add_library``/``target_sources`` the direct
+#: wiring. As with any pure-text match, a source named only inside an unexpanded
+#: ``set``/``list`` variable still reads as linked (accepted residual limit).
+SOURCE_COMMANDS = ("add_executable", "add_library", "target_sources", "set", "list")
 
 
 class AllowlistError(Exception):
@@ -94,11 +111,46 @@ def _iter_source_files(test_dir: Path):
             yield path
 
 
+def _is_mirror_comment_line(line: str) -> bool:
+    """True if ``line`` carries a ``MIRROR:`` tag in a comment context.
+
+    A comment context is a ``//`` or ``*`` marker anywhere on the line, OR the
+    line's first non-space token being ``MIRROR:`` -- a bare ``/* ... */``
+    continuation line (e.g. ``   MIRROR: copied loop``) that carries no marker of
+    its own. Catching the bare form closes the evasion where a new replica is
+    written on an unmarked block-comment line.
+    """
+    if "MIRROR:" not in line:
+        return False
+    return "//" in line or "*" in line or re.match(r"\s*MIRROR:", line) is not None
+
+
+def _count_mirrors_on_line(line: str) -> int:
+    """Count genuine, cited mirror annotations on a single ``line``.
+
+    Marker-led annotations are counted per occurrence (a line may legitimately
+    carry more than one). A bare block-comment continuation line (no ``//``/``*``)
+    that begins with ``MIRROR:`` and cites a concrete reference counts as one.
+    """
+    count = len(MIRROR_RE.findall(line))
+    if (
+        count == 0
+        and "//" not in line
+        and "*" not in line
+        and re.match(r"\s*MIRROR:", line) is not None
+        and REF_RE.search(line) is not None
+    ):
+        count = 1
+    return count
+
+
 def count_mirrors(test_dir: Path) -> dict[str, int]:
     """Count genuine ``MIRROR:`` annotations per source file under ``test_dir``.
 
-    Scans ``*.cpp``/``*.h`` recursively, applying :data:`MIRROR_RE` LINE BY LINE
-    so the position-independent regex never matches across a newline.
+    Scans ``*.cpp``/``*.h`` recursively, counting PER ANNOTATION on each line (so
+    two citations on one line count as two) via :func:`_count_mirrors_on_line`.
+    Files are read with ``errors="replace"`` so a stray non-UTF-8 byte degrades to
+    U+FFFD rather than crashing the scan.
 
     :param test_dir: The ``WRO2026/test`` directory to scan.
     :return: ``{test_relative_posix_path: match_count}`` for files with >=1
@@ -106,8 +158,8 @@ def count_mirrors(test_dir: Path) -> dict[str, int]:
     """
     counts: dict[str, int] = {}
     for path in _iter_source_files(test_dir):
-        text = path.read_text(encoding="utf-8")
-        count = sum(1 for line in text.splitlines() if MIRROR_RE.search(line))
+        text = path.read_text(encoding="utf-8", errors="replace")
+        count = sum(_count_mirrors_on_line(line) for line in text.splitlines())
         if count:
             counts[path.relative_to(test_dir).as_posix()] = count
     return counts
@@ -116,11 +168,14 @@ def count_mirrors(test_dir: Path) -> dict[str, int]:
 def find_refless_mirrors(test_dir: Path) -> list[str]:
     """Find ``MIRROR:`` comment lines that cite no concrete reference.
 
-    A "comment line carrying a ``MIRROR:`` tag" is one that contains ``MIRROR:``
-    and a ``//`` or ``*`` comment marker. Such a line fails when it matches
-    NEITHER :data:`MIRROR_RE` (a concrete ref) NOR :data:`PROSE_RE` (a known
-    documentation signature) -- closing the evasion where a new replica is tagged
-    ``// MIRROR: copied logic`` with no ``file:line`` citation.
+    A "comment line carrying a ``MIRROR:`` tag" is recognised by
+    :func:`_is_mirror_comment_line` (a ``//``/``*`` marker, or a bare block-comment
+    continuation that starts with ``MIRROR:``). Such a line fails when it matches
+    NONE of :data:`MIRROR_RE` (a cited annotation), :data:`PROSE_RE` (a known
+    documentation signature), or :data:`REF_RE` (any concrete citation elsewhere
+    on the line) -- closing the evasion where a new replica is tagged
+    ``// MIRROR: copied logic`` with no ``file:line`` citation, while sparing a
+    line that cites its source before the tag or on an unmarked continuation line.
 
     :param test_dir: The ``WRO2026/test`` directory to scan.
     :return: One violation message per offending line (empty == none).
@@ -128,13 +183,11 @@ def find_refless_mirrors(test_dir: Path) -> list[str]:
     violations: list[str] = []
     for path in _iter_source_files(test_dir):
         rel = path.relative_to(test_dir).as_posix()
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
         for lineno, line in enumerate(text.splitlines(), start=1):
-            if "MIRROR:" not in line:
+            if not _is_mirror_comment_line(line):
                 continue
-            if "//" not in line and "*" not in line:
-                continue
-            if MIRROR_RE.search(line) or PROSE_RE.search(line):
+            if MIRROR_RE.search(line) or PROSE_RE.search(line) or REF_RE.search(line):
                 continue
             violations.append(
                 f"{rel}:{lineno}: mirror annotation missing concrete reference "
@@ -280,20 +333,28 @@ def check_mirrors(test_dir: Path, allowlist_path: Path) -> list[str]:
 
 
 def _strip_cmake_comments(text: str) -> str:
-    """Drop everything from the first ``#`` to end-of-line, per line.
+    """Drop each line's first UNQUOTED ``#`` comment to end-of-line.
 
-    Handles whole-line and inline ``#`` comments so a ``${SKETCH_DIR}/X.cpp``
-    mentioned only in a comment is not mistaken for a linked source.
+    Tracks double-quote state per line before cutting, so a ``#`` inside a quoted
+    argument (a ``"-DTAG=#1"`` define, a path) is not mistaken for a comment and a
+    following ``${SKETCH_DIR}/X.cpp`` on the same line survives. Bracket comments
+    (``#[[ ]]``) and escaped quotes are out of scope -- no CMakeLists line in this
+    repo uses them.
 
     :param text: Raw ``CMakeLists.txt`` contents.
     :return: The text with comments removed, lines rejoined with ``\\n``.
     """
     stripped_lines = []
     for line in text.splitlines():
-        hash_index = line.find("#")
-        if hash_index != -1:
-            line = line[:hash_index]
-        stripped_lines.append(line)
+        in_quote = False
+        cut = len(line)
+        for index, char in enumerate(line):
+            if char == '"':
+                in_quote = not in_quote
+            elif char == "#" and not in_quote:
+                cut = index
+                break
+        stripped_lines.append(line[:cut])
     return "\n".join(stripped_lines)
 
 
@@ -342,7 +403,7 @@ def linked_sources(cmakelists_path: Path) -> set[str]:
     :param cmakelists_path: Path to ``WRO2026/test/CMakeLists.txt``.
     :return: The set of linked ``<name>.cpp`` basenames (with the ``.cpp`` suffix).
     """
-    text = cmakelists_path.read_text(encoding="utf-8")
+    text = cmakelists_path.read_text(encoding="utf-8", errors="replace")
     bodies = _command_bodies(_strip_cmake_comments(text), SOURCE_COMMANDS)
     return {f"{name}.cpp" for name in LINK_RE.findall(bodies)}
 
@@ -389,7 +450,7 @@ def check_coverage(
             continue
         violations.append(
             f"{name}: production .cpp is neither host-linked nor in the coverage "
-            f"allowlist"
+            f"allowlist (recognized link commands: {', '.join(SOURCE_COMMANDS)})"
         )
 
     for entry in entries:
