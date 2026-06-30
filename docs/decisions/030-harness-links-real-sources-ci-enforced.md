@@ -1,6 +1,6 @@
 # ADR-030: The host-compile harness links the real production symbols, CI-enforced
 
-**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), real `PathTracker.cpp` / `Drive.cpp` (#106), and the two former mirror slices `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` (#113) are all linked from production — zero mirrored PathTracker FSM logic remains. The sole remaining inline mirror is the Drive wall-stop watchdog slice in `test_wall_stop_watchdog`.)
+**Status:** Implemented (CI gate is live; `LineFollower`, `DirectionPolicy.resolveDirection`, the reverse-availability guard, real `Tasks.cpp` (#46 Phase 1), real `Mission.cpp` (#46 Phase 2), real `PathTracker.cpp` / `Drive.cpp` (#106), and the two former mirror slices `test_path_tracker_reset_arrival` + `test_return_to_node_dispatch` (#113) are all linked from production — zero mirrored PathTracker FSM logic remains. Two inline mirrors remain, both allowlisted in `mirror_allowlist.json`: the Drive wall-stop watchdog slice in `test_wall_stop_watchdog` and the compile-time `static_assert` mirror in `test_tasks_dispatch_overflow`.)
 **Date decided:** 2026-06 (PR-35 trace-findings fix rollout)
 **Implemented:** 2026-06 (#106 — real `PathTracker.cpp` / `Drive.cpp` host-link)
 
@@ -58,10 +58,24 @@ push and PR turns the harness from documentation into an enforced contract.
   into a strict-OFF case + a `test_path_tracker_reset_arrival_strict` sibling for
   strict-ON) and `test_return_to_node_dispatch` have been rewritten to host-link
   the real `PathTracker.cpp` and drive the real FSM — every `// MIRROR:` slice is
-  deleted. Zero mirrored PathTracker FSM logic remains. The only inline mirror
-  still in the host suite is the Drive wall-stop watchdog slice in
-  `test_wall_stop_watchdog` (its `stopAtLineProgressed` / `stopAtLineStalled`
-  primitives are shared with production via `WROMath.h`, not byte-copied).
+  deleted. Zero mirrored PathTracker FSM logic remains. Two inline mirrors remain
+  in the host suite and are tracked in `mirror_allowlist.json`: the Drive wall-stop
+  watchdog slice in `test_wall_stop_watchdog` (its `stopAtLineProgressed` /
+  `stopAtLineStalled` primitives are shared with production via `WROMath.h`, not
+  byte-copied) and the compile-time `static_assert` mirror of `Mission.h` in
+  `test_tasks_dispatch_overflow`.
+- **CI coverage guards:** `WRO2026/test/check_host_coverage.py` runs two pure-text
+  checks as the `Host-coverage + mirror guards` step in the `path-planner` CI job:
+  a no-new-MIRROR-replica check (scans `*.cpp`/`*.h` under `WRO2026/test/` for
+  `// MIRROR:` annotations against `WRO2026/test/mirror_allowlist.json`) and a
+  host-coverage check (every production `WRO2026/*.cpp` must be host-linked in a
+  source-bearing CMake command or listed in `WRO2026/test/host_coverage_allowlist.json`).
+  Both allowlists use the ADR-050-style per-entry shape (`file → count → reason → issue`),
+  with a non-empty `reason` required and the tracking `issue` optional (`null` allowed).
+  This is a deliberate relaxation of ADR-050, which requires both fields. The
+  guard is a ratchet: it fails on any drift from the baseline, including a count
+  drop, so de-mirroring a test requires editing the allowlist `count` down (or
+  removing the entry) in the same change.
 
 ## Trigger to revisit
 
@@ -89,4 +103,7 @@ push and PR turns the harness from documentation into an enforced contract.
 - `WRO2026/DirectionPolicy.h` — the header-only `inline` shared-symbol pattern.
 - `WRO2026/test/CMakeLists.txt` — the ctest target list the job runs.
 - `WRO2026/test/test_mission_dispatch.cpp` — the Phase 2 target linking real `Mission.cpp`.
-- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources); issue #113 (`reset_arrival` + `return_to_node_dispatch` de-mirrored, landed — zero mirrored PathTracker FSM logic remains; the Drive wall-stop watchdog mirror in `test_wall_stop_watchdog` is the last inline mirror).
+- Findings #75 (CI gate), #77 (`reverseUnavailable` promoted), #78 (real `Tasks`/`Mission` linking, landed #46); issue #106 (`PathTracker`/`Drive` host-link, landed — the five named mirror tests now link real sources); issue #113 (`reset_arrival` + `return_to_node_dispatch` de-mirrored, landed — zero mirrored PathTracker FSM logic remains; two mirrors remain: `test_wall_stop_watchdog` (9 annotations) + `test_tasks_dispatch_overflow` (1 annotation), both in `mirror_allowlist.json`).
+- `WRO2026/test/check_host_coverage.py` — the CI guard script (no-new-mirror + host-coverage checks).
+- `WRO2026/test/mirror_allowlist.json` / `host_coverage_allowlist.json` — ratchet baselines; entries follow `file → count → reason → issue` (ADR-050-style, `issue` optional).
+- [ADR-050 — PathTracker sim parity](./050-pathtracker-sim-parity.md) — the self-auditing allowlist pattern these guards are modeled on.
