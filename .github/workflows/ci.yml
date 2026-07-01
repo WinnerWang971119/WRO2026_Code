@@ -33,7 +33,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
 
       - name: Run path planner tests
-        run: xvfb-run -a uv run --no-sync pytest tools/path_planner/tests/ --ignore=tools/path_planner/tests/test_pathtracker_parity.py -v
+        run: xvfb-run -a uv run --no-sync pytest tools/path_planner/tests/ --ignore=tools/path_planner/tests/test_pathtracker_parity.py --ignore=tools/path_planner/tests/test_ctps_end_to_end.py -v
 
       - name: Verify generated routes are current
         run: |
@@ -130,3 +130,33 @@ jobs:
             build/parity/cpp_parity_trace.ndjson
             build/parity/parity_pytest.log
           if-no-files-found: warn
+
+  ctps-e2e:
+    name: CTPS end-to-end
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install Python dependencies
+        run: uv sync --extra dev --frozen
+
+      - name: Configure ctps_dump target
+        run: cmake -S WRO2026/test -B build/ctps
+
+      - name: Build ctps_dump target
+        run: cmake --build build/ctps --target ctps_dump
+
+      - name: Run CTPS end-to-end pytest
+        env:
+          CTPS_DUMP_EXE: ${{ github.workspace }}/build/ctps/ctps_dump
+        run: uv run --no-sync pytest tools/path_planner/tests/test_ctps_end_to_end.py -v
