@@ -25,7 +25,12 @@
  *     small `#ifdef CTPS_RECORD` hook inside `Mission.cpp`.
  *   - `goto` is recorded by the recording `PathTracker.goTo` mock (single seam;
  *     Mission.cpp must NOT also record it or it would double-count).
- *   - Raw `drive` moves are recorded by the recording `Drive` builder mocks.
+ *   - Raw `drive` moves (`driveDist` / `stopAtLine` / `wallStop` /
+ *     `lineFollowDist`) are recorded by the recording `Drive` and
+ *     `LineFollower` builder mocks through the unified
+ *     `recordDriveMove(method, DriveMoveParams)` producer, which also carries
+ *     the optional `mode` / `heading` / `reverse` payload for GYRO / reverse
+ *     moves.
  *   - `manip` calls are recorded by the recording `Manipulator` mock.
  *
  * Every recorder appends exactly one `Record` to `g_ctpsLog` and stamps it with
@@ -57,7 +62,7 @@ namespace ctps
         TASK_START,    ///< Task dispatch begin. Fields: `name`, `args` (16 raw bytes).
         TASK_END,      ///< Task dispatch end. Fields: `name`, `result`.
         MANIP,         ///< Manipulator command. Fields: `method`, `arg`.
-        DRIVE,         ///< Raw drive primitive. Fields: `method`, plus `cm`/`deg` per method.
+        DRIVE,         ///< Raw drive move: `method`, `cm`/`deg`, `mode`/`heading`/`reverse`.
         WAIT,          ///< Mission wait. Field: `ms`.
         PRINT,         ///< Mission print. Field: `text`.
         BEEP,          ///< Mission beep. Fields: `freq_hz`, `ms`.
@@ -92,9 +97,16 @@ namespace ctps
         uint8_t     g       = 0;             ///< LED: green channel.
         uint8_t     b       = 0;             ///< LED: blue channel.
         bool        result  = false;         ///< TASK_END: task body return value (true == ok).
-        float       cm      = 0.0f;          ///< DRIVE: distance for driveDist / stopAtLine.
+        float       cm      = 0.0f;          ///< DRIVE: distance for the linear drive moves.
         float       deg     = 0.0f;          ///< DRIVE: angle for turnDeg / turnToYaw.
         uint8_t     arg     = 0;             ///< MANIP: command argument (servo angle / level).
+
+        // DRIVE detail — carried by recordDriveMove; each key is emitted only
+        // when its builder setter fired (see commandStreamToJson).
+        std::string mode;                    ///< DRIVE: "raw"|"sync"|"gyro"; empty = unset.
+        float       heading    = 0.0f;       ///< DRIVE: held heading in degrees (gyro moves).
+        bool        hasHeading = false;      ///< DRIVE: true iff setHeading() was called.
+        bool        reverse    = false;      ///< DRIVE: reverse-direction flag (linear moves).
 
         // TASK_START: the raw 16-byte packed TaskArgs blob, captured verbatim
         // so the loader can decode per-task structs later. Always exactly
@@ -188,10 +200,36 @@ namespace ctps
     void recordManip(const char* method, uint8_t arg);
 
     /**
-     * @brief Record a `Drive.driveDist(cm)` raw move (recorded by the Drive mock).
-     * @param cm Requested distance in centimetres.
+     * @brief Captured fluent-builder state for one linear DRIVE move.
+     *
+     * Filled by the recording Drive / LineFollower builder mocks at their
+     * destructor emission point and handed to @ref recordDriveMove. Only the
+     * members relevant to the move's method are meaningful; an unset member
+     * stays at the caller-supplied default and is suppressed by the serializer.
      */
-    void recordDriveDist(float cm);
+    struct DriveMoveParams
+    {
+        float       cm;         ///< Commanded distance in centimetres.
+        const char* mode;       ///< "raw"|"sync"|"gyro"; nullptr/"" if setMode() unset.
+        bool        hasHeading; ///< true iff setHeading() was called on the builder.
+        float       heading;    ///< Held heading in degrees (honored only under mode "gyro").
+        bool        reverse;    ///< true iff setReverse(true) was called (reverse-direction move).
+    };
+
+    /**
+     * @brief Record one linear DRIVE move (the producer for `driveDist` /
+     *        `stopAtLine` / `wallStop` / `lineFollowDist`).
+     *
+     * Appends a single `Op::DRIVE` Record carrying @p method plus the captured
+     * @p p fields. `mode` / `heading` / `reverse` are serialized only when set
+     * (non-empty mode, `hasHeading`, `reverse == true`); a bare distance move
+     * with none of them set stays byte-identical to the legacy output.
+     *
+     * @param method Drive method name (`driveDist` / `stopAtLine` / `wallStop` /
+     *               `lineFollowDist`). `nullptr` is stored as an empty string.
+     * @param p      Captured builder state (distance + optional mode/heading/reverse).
+     */
+    void recordDriveMove(const char* method, const DriveMoveParams& p);
 
     /**
      * @brief Record a `Drive.turnDeg(deg)` relative turn (recorded by the Drive mock).
@@ -212,18 +250,6 @@ namespace ctps
      * treats it as a non-geometry drive primitive.
      */
     void recordDriveStop();
-
-    /**
-     * @brief Record a `Drive.stopAtLine(cm)` seek (recorded by the Drive mock).
-     * @param cm Nominal expected distance to the crossing line, in centimetres.
-     */
-    void recordStopAtLine(float cm);
-
-    /**
-     * @brief Record a `Drive.wallStop(cm)` push (recorded by the Drive mock).
-     * @param cm Nominal expected push distance to the wall, in centimetres.
-     */
-    void recordWallStop(float cm);
 
     /**
      * @brief Set the sticky build-error flag (Mission.cpp hook, `start()` branch).

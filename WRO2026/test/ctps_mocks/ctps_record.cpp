@@ -250,12 +250,16 @@ namespace ctps
         push(std::move(rec));
     }
 
-    void recordDriveDist(float cm)
+    void recordDriveMove(const char* method, const DriveMoveParams& p)
     {
         Record rec;
-        rec.op     = Op::DRIVE;
-        rec.method = "driveDist";
-        rec.cm     = cm;
+        rec.op         = Op::DRIVE;
+        rec.method     = (method != nullptr) ? method : "";
+        rec.cm         = p.cm;
+        rec.mode       = (p.mode != nullptr) ? p.mode : "";
+        rec.hasHeading = p.hasHeading;
+        rec.heading    = p.heading;
+        rec.reverse    = p.reverse;
         push(std::move(rec));
     }
 
@@ -282,24 +286,6 @@ namespace ctps
         Record rec;
         rec.op     = Op::DRIVE;
         rec.method = "stop";
-        push(std::move(rec));
-    }
-
-    void recordStopAtLine(float cm)
-    {
-        Record rec;
-        rec.op     = Op::DRIVE;
-        rec.method = "stopAtLine";
-        rec.cm     = cm;
-        push(std::move(rec));
-    }
-
-    void recordWallStop(float cm)
-    {
-        Record rec;
-        rec.op     = Op::DRIVE;
-        rec.method = "wallStop";
-        rec.cm     = cm;
         push(std::move(rec));
     }
 
@@ -408,8 +394,10 @@ namespace ctps
                 case Op::DRIVE:
                     out += "\"op\": \"drive\", ";
                     appendStrMember(out, "method", rec.method);
-                    // Geometry-affecting methods carry their argument; stop carries none.
-                    if (rec.method == "driveDist" || rec.method == "stopAtLine")
+                    // Linear moves carry a distance; turns carry an angle; stop
+                    // (and driveTime) carry neither.
+                    if (rec.method == "driveDist" || rec.method == "stopAtLine"
+                        || rec.method == "wallStop" || rec.method == "lineFollowDist")
                     {
                         out += ", \"cm\": ";
                         out += floatToJson(rec.cm);
@@ -418,6 +406,22 @@ namespace ctps
                     {
                         out += ", \"deg\": ";
                         out += floatToJson(rec.deg);
+                    }
+                    // Optional drive-detail keys — each emitted only when its
+                    // builder setter fired (see recordDriveMove).
+                    if (!rec.mode.empty())
+                    {
+                        out += ", ";
+                        appendStrMember(out, "mode", rec.mode);
+                    }
+                    if (rec.hasHeading)
+                    {
+                        out += ", \"heading\": ";
+                        out += floatToJson(rec.heading);
+                    }
+                    if (rec.reverse)
+                    {
+                        out += ", \"reverse\": true";
                     }
                     break;
             }
