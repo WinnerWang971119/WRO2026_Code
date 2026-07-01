@@ -62,7 +62,10 @@ _KNOWN_OPS: frozenset[str] = frozenset(
 #: which :mod:`track_builder` replays as a forward push estimate. ``stop``
 #: carries no geometry — the recorder emits it (``recordDriveStop``) to
 #: preserve execution order, and :mod:`track_builder` renders it as a
-#: non-geometry timeline event.
+#: non-geometry timeline event. ``lineFollowDist`` is a distance-gated
+#: LineFollower follow that also moves the chassis (a forward/reverse
+#: advance), same geometry family as ``driveDist`` / ``stopAtLine`` /
+#: ``wallStop``.
 _KNOWN_DRIVE_METHODS: frozenset[str] = frozenset(
     {
         "driveDist",
@@ -71,6 +74,19 @@ _KNOWN_DRIVE_METHODS: frozenset[str] = frozenset(
         "stop",
         "stopAtLine",
         "wallStop",
+        "lineFollowDist",
+    }
+)
+
+#: Recognised ``drive.mode`` strings.  A ``drive`` command whose ``mode`` is a
+#: string NOT in this set — or is not a string at all — is warned about and
+#: treated as unset (:mod:`track_builder` then renders along the current
+#: facing rather than silently applying GYRO).
+_KNOWN_DRIVE_MODES: frozenset[str] = frozenset(
+    {
+        "raw",
+        "sync",
+        "gyro",
     }
 )
 
@@ -97,9 +113,16 @@ class Command:
         commands.
     :param arg: Uint8 argument; set for ``manip`` commands.
     :param cm: Distance in centimetres; set for ``drive`` ``driveDist``,
-        ``stopAtLine``, and ``wallStop`` commands.
+        ``stopAtLine``, ``wallStop``, and ``lineFollowDist`` commands.
     :param deg: Angle in degrees; set for ``drive`` ``turnDeg`` /
         ``turnToYaw`` commands.
+    :param mode: Drive velocity mode (``"raw"`` / ``"sync"`` / ``"gyro"``);
+        set for ``drive`` commands when ``setMode`` was called. ``None`` when
+        unset — the renderer then uses the current facing.
+    :param heading: Held heading in degrees; set for ``drive`` commands when
+        ``setHeading`` was called (honoured only under ``mode == "gyro"``).
+    :param reverse: Reverse-direction flag; set for ``drive`` commands when
+        ``setReverse`` was called. ``None`` when the key is absent.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.
     :param r: Red channel (0–255); set for ``led`` commands.
     :param g: Green channel (0–255); set for ``led`` commands.
@@ -108,8 +131,9 @@ class Command:
         ``task_end`` commands.
     :param fields: Forward-compatible catch-all for any key present in the
         raw JSON entry that is not captured by the named fields above.
-        Also populated with ``{"method": ..., "raw_args": ...}`` when a
-        ``drive`` command has an unrecognised method.
+        Unknown ops and unrecognised ``drive.method`` commands are dropped
+        entirely (``_parse_command`` returns ``None``), so they never reach
+        ``fields``.
     """
 
     seq: int
@@ -125,6 +149,9 @@ class Command:
     arg:      Optional[int]   = None   # manip
     cm:       Optional[float] = None   # drive driveDist
     deg:      Optional[float] = None   # drive turnDeg / turnToYaw
+    mode:     Optional[str]   = None   # drive: "raw"|"sync"|"gyro"
+    heading:  Optional[float] = None   # drive: held heading (gyro)
+    reverse:  Optional[bool]  = None   # drive: reverse-direction flag
     freq_hz:  Optional[int]   = None   # beep
     r:        Optional[int]   = None   # led
     g:        Optional[int]   = None   # led
@@ -212,6 +239,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "seq", "op",
         "target", "ms", "text", "name", "args_hex",
         "method", "arg", "cm", "deg",
+        "mode", "heading", "reverse",
         "freq_hz", "r", "g", "b", "result",
     }
     extra_fields: dict = {k: v for k, v in raw.items() if k not in named_keys}
@@ -236,7 +264,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         fields=extra_fields,
     )
 
-    # ----- drive: validate method -------------------------------------------
+    # ----- drive: validate method + mode/heading/reverse --------------------
     if op == "drive":
         method = raw.get("method", "")
         if method not in _KNOWN_DRIVE_METHODS:
@@ -245,9 +273,59 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                 UserWarning,
                 stacklevel=4,
             )
-            # Capture for forward-compatibility inspection but exclude from
-            # the geometry-affecting command list by returning None.
+            # Drop unrecognised drive methods entirely (forward-compat): the
+            # renderer has no geometry for them, so exclude from the command
+            # list by returning None.
             return None
+
+        # mode: must be a string AND in the known set. Type-check that it is a
+        # string BEFORE the set-membership test so a non-string (e.g. a list)
+        # warns rather than raising. An invalid mode is treated as unset — the
+        # renderer uses the current facing rather than silently applying GYRO.
+        if "mode" in raw:
+            raw_mode = raw["mode"]
+            if isinstance(raw_mode, str) and raw_mode in _KNOWN_DRIVE_MODES:
+                cmd.mode = raw_mode
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: malformed drive.mode {raw_mode!r} at "
+                    f"seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.mode = None
+
+        # heading: accept only int/float; a non-numeric value warns and is
+        # dropped. Absent → leave None.
+        if "heading" in raw:
+            raw_heading = raw["heading"]
+            if isinstance(raw_heading, (int, float)):
+                cmd.heading = raw_heading
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.heading "
+                    f"{raw_heading!r} at seq={seq} — dropped.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.heading = None
+
+        # reverse: accept ONLY a JSON boolean. Never bool(raw.get("reverse")) —
+        # the string "false" is truthy under Python bool(), which would invert
+        # intent. Any non-bool value warns and is treated as False. Absent →
+        # leave None.
+        if "reverse" in raw:
+            raw_reverse = raw["reverse"]
+            if isinstance(raw_reverse, bool):
+                cmd.reverse = raw_reverse
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-boolean drive.reverse "
+                    f"{raw_reverse!r} at seq={seq} — treated as False.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.reverse = False
 
     return cmd
 
