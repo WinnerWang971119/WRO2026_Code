@@ -1584,3 +1584,67 @@ target_compile_definitions(test_edge_dispatch_truth_table
 
 add_test(NAME edge_dispatch_truth_table COMMAND test_edge_dispatch_truth_table)
 set_tests_properties(edge_dispatch_truth_table PROPERTIES LABELS "parity")
+
+# =========================================================================================
+# Test executable #22 — heading-only line-arrival re-anchor (Localization::reanchorHeading),
+# strict ON (ADR-052, T3). TC1/TC2/TC3/TC4/TC5/TC6 (AC1-AC5).
+#
+# Links the REAL production `Localization.cpp` — same link recipe as `test_reanchor_at_wall`
+# (mock `Drive.h` force-included to shadow the real one; `<MatrixMiniR4.h>` / `<Arduino.h>`
+# resolved by the `mocks/`-first include path; the issue #91 fixture `routes_fixture.cpp`
+# linked for the `Routes::START_NODE / START_HEADING_DEG` symbols `Localization.cpp`
+# odr-uses, even though `reanchorHeading` itself never reads a node).
+#
+# STRICT ON/OFF split (see the file docblock in `test_reanchor_heading.cpp`): unlike
+# `WALL_NORMAL_STRICT_ENABLED` (shipped OFF), `LINE_HEADING_RESET_STRICT_ENABLED` ships ON —
+# so THIS target explicitly forces `LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT=true` /
+# `_TOLERANCE_DEG_DEFAULT=10.0f` target-wide (reaches both `Localization.cpp` and the test
+# main) rather than relying on the shipped default alone, so the test's own precondition
+# check is a real trip-wire against a future accidental default flip — the
+# `test_reanchor_at_wall_strict` `-D` idiom, `gotcha-cross-tu-config-override-compile-def`.
+# Runs TC1/TC2/TC5/TC6 (guard + accept + failed-read + offset-untouched, flag-independent)
+# PLUS TC3 (strict reject) and TC4 (inclusive boundary), which only apply with strict ON.
+# =========================================================================================
+add_executable(test_reanchor_heading
+    ${TEST_DIR}/test_reanchor_heading.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_reanchor_heading PRIVATE ${COMMON_INCLUDES})
+# Force strict ON + the 10-deg tolerance target-wide (see the block comment above).
+target_compile_definitions(test_reanchor_heading PRIVATE
+    LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT=true
+    LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT=10.0f)
+# Issue #91: fixture routes for the START_NODE / START_HEADING_DEG symbols Localization.cpp
+# odr-uses. Force-include FIRST so the fixture `ROUTES_H` wins before any header pulls routes.h.
+add_fixture_routes_force_include(test_reanchor_heading)
+add_mock_force_includes(test_reanchor_heading)   # shadows the real Drive.h with the mock
+add_test(NAME reanchor_heading COMMAND test_reanchor_heading)
+
+# =========================================================================================
+# Test executable #22b — heading-only line-arrival re-anchor, strict OFF (ADR-052, T3).
+# Non-vacuity proof for TC3/TC4's ON-boundary: a delta (15 deg) that the strict-ON target
+# above REJECTS must be ACCEPTED here, proving the `-D` actually reached the
+# separately-compiled `Localization.cpp` TU (not just this test main).
+#
+# Same `test_reanchor_heading.cpp` SOURCE FILE, compiled into a SECOND executable with
+# `LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT=false` forced target-wide. `main()` branches at
+# runtime on the compiled-in `Config::LINE_HEADING_RESET_STRICT_ENABLED` value, so this build
+# runs TC1/TC2/TC5/TC6 (flag-independent) plus the non-vacuity case instead of TC3/TC4.
+# Otherwise identical recipe to `test_reanchor_heading` (fixture routes + mock Drive.h).
+# =========================================================================================
+add_executable(test_reanchor_heading_strict_off
+    ${TEST_DIR}/test_reanchor_heading.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_reanchor_heading_strict_off PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_reanchor_heading_strict_off PRIVATE
+    LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT=false)
+add_fixture_routes_force_include(test_reanchor_heading_strict_off)
+add_mock_force_includes(test_reanchor_heading_strict_off)
+add_test(NAME reanchor_heading_strict_off COMMAND test_reanchor_heading_strict_off)
