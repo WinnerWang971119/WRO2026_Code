@@ -277,6 +277,29 @@ function(add_fixture_routes_force_include target)
 endfunction()
 
 # -----------------------------------------------------------------------------------------
+# Force-include the ADR-052 / T6 forced-reset routes table
+# (`fixtures/routes_reset_passthrough_forced.h`) BEFORE any source-file parsing — the same
+# shadow trick as `add_fixture_routes_force_include`, pointed at a DELIBERATELY invalid,
+# hand-written 3-node table (see that header's docblock for why: TC11 / AC9 needs a LINE edge
+# incident to a RESET node, a topology ADR-048 guarantees the real
+# `field_data.json` -> validator -> graph_builder -> build_routes.py` pipeline can never emit).
+# NOT single-sourced from `field_fixture.py`, NOT governed by ADR-050. Used by exactly ONE
+# target: `test_path_tracker_heading_reset_forced_reset`.
+# -----------------------------------------------------------------------------------------
+function(add_forced_reset_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
 # Force-include the issue-#106 PathTracker+Drive real-link peripheral mocks BEFORE any
 # source-file parsing — the same load-bearing shadow trick as `add_hal_force_includes` /
 # `add_mission_mock_force_includes`, pointed at `hal_mocks/EventTrace.h` + the three
@@ -1648,3 +1671,99 @@ target_compile_definitions(test_reanchor_heading_strict_off PRIVATE
 add_fixture_routes_force_include(test_reanchor_heading_strict_off)
 add_mock_force_includes(test_reanchor_heading_strict_off)
 add_test(NAME reanchor_heading_strict_off COMMAND test_reanchor_heading_strict_off)
+
+# =========================================================================================
+# Test executables #23a-d — PathTracker FSM gating for the line-arrival heading reset
+# (ADR-052, T6). Covers TC8-TC14 (AC7-AC11) — see the file docblock in
+# `test_path_tracker_heading_reset.cpp` for the full four-target breakdown.
+#
+# All four link the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+# `YawSource.cpp` + `path_mocks.cpp` — the SAME shared recipe as the other PathTracker+Drive
+# real-link targets above (SKETCH_DIR-first include order, `add_path_force_includes` for the
+# EventTrace/WROLineArray/Intersection/LineFollower peripheral mocks). #23a/b/d link the issue
+# #91 `routes_fixture.cpp`; #23c links the DELIBERATELY invalid, hand-written
+# `routes_reset_passthrough_forced.cpp` instead (see that file's docblock).
+# =========================================================================================
+
+# --- Test executable #23a — default knobs (proj ON, junction OFF, strict ON, tol 10 deg). ---
+# Runs TC8, TC9, TC10 (OFF half), TC12, TC13.
+add_executable(test_path_tracker_heading_reset
+    ${TEST_DIR}/test_path_tracker_heading_reset.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_heading_reset PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_heading_reset)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_heading_reset)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_heading_reset COMMAND test_path_tracker_heading_reset)
+
+# --- Test executable #23b — junction knob ON. Runs TC10's ON half only. ---
+add_executable(test_path_tracker_heading_reset_junction_on
+    ${TEST_DIR}/test_path_tracker_heading_reset.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_heading_reset_junction_on
+    PRIVATE LINE_HEADING_RESET_ON_JUNCTION_DEFAULT=true)
+target_include_directories(test_path_tracker_heading_reset_junction_on PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_heading_reset_junction_on)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_heading_reset_junction_on)
+add_test(NAME path_tracker_heading_reset_junction_on
+    COMMAND test_path_tracker_heading_reset_junction_on)
+
+# --- Test executable #23c — forced-state RESET/BLIND no-op (TC11, AC9). ---
+# Links the DELIBERATELY invalid `routes_reset_passthrough_forced.cpp` INSTEAD of
+# `routes_fixture.cpp` — see that file's docblock for why AC9's forced-state case needs its
+# own topology (a LINE edge into a RESET node, unreachable on any validator-passed field).
+add_executable(test_path_tracker_heading_reset_forced_reset
+    ${TEST_DIR}/test_path_tracker_heading_reset.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_heading_reset_forced_reset
+    PRIVATE HEADING_RESET_FORCED_RESET_FIXTURE)
+target_include_directories(test_path_tracker_heading_reset_forced_reset PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_forced_reset_routes_force_include(test_path_tracker_heading_reset_forced_reset)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_heading_reset_forced_reset)
+add_test(NAME path_tracker_heading_reset_forced_reset
+    COMMAND test_path_tracker_heading_reset_forced_reset)
+
+# --- Test executable #23d — PT_PARITY_TRACE build (TC14, AC11: parity record only on a bind). ---
+# The capture path is baked as an absolute compile definition (CMake forward-slash path, so the
+# string literal needs no backslash escaping and ifstream/fopen accept it on both OSes) into
+# THIS target's own binary dir, mirroring `STOP_AT_LINE_TRUTH_TABLE_CSV`'s idiom. A normal
+# ctest (unlike `test_path_tracker_parity_dump`, which is a dump-only binary with no
+# `add_test`) — it asserts pass/fail itself via TestAssert, it does not print NDJSON for an
+# external harness to diff.
+add_executable(test_path_tracker_heading_reset_parity
+    ${TEST_DIR}/test_path_tracker_heading_reset.cpp
+    ${SKETCH_DIR}/PathTracker.cpp
+    ${SKETCH_DIR}/Drive.cpp
+    ${SKETCH_DIR}/Localization.cpp
+    ${SKETCH_DIR}/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_heading_reset_parity
+    PRIVATE PT_PARITY_TRACE
+    HEADING_RESET_PARITY_CAPTURE_PATH="${CMAKE_CURRENT_BINARY_DIR}/heading_reset_parity_capture.ndjson")
+target_include_directories(test_path_tracker_heading_reset_parity PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_heading_reset_parity)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_heading_reset_parity)
+add_test(NAME path_tracker_heading_reset_parity COMMAND test_path_tracker_heading_reset_parity)
