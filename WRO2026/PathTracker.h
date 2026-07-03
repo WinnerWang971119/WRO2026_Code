@@ -560,7 +560,7 @@ private:
      * @param incomingBodyHeadingDeg The world-frame body heading the chassis JUST arrived on,
      *                               captured from `_resolvedBodyHeading` at the TOP of
      *                               `_onPlanNextHop()` before the next hop overwrites it
-     *                               (`:1757`). Passed explicitly so the bind target never
+     *                               (`:1887`). Passed explicitly so the bind target never
      *                               depends on member-write ordering. Already body-corrected
      *                               (a REAR arrival is edge heading + 180).
      */
