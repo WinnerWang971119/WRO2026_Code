@@ -719,7 +719,11 @@ def test_tc12_projection_node_distance_gated_pass_through():
 
     prims = sim.go_to("C")
 
-    act_tags = [tag for tag, _ in prims]
+    # Index by tag only (`p[0]`), not a 2-tuple unpack: the stream may also carry
+    # a variable-length ADR-052 `(ACT_HEADING_RESET, node, pass_kind, heading_deg)`
+    # record on this exact PROJECTION pass-through (the knob defaults ON), so a
+    # blind `for tag, _ in prims` 2-tuple unpack would raise.
+    act_tags = [p[0] for p in prims]
     # No LINE_PASS anywhere — arrival at B was DISTANCE-terminated (projection),
     # so the collapse surfaces as ACT_FOLLOW_DIST_PASS, not the junction-gated
     # ACT_LINE_PASS.

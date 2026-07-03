@@ -132,6 +132,8 @@ _EXACT_FIELDS: frozenset = frozenset(
         "wheel",
         "mode",
         "reanchor",
+        # ADR-052 line-arrival heading reset pass-kind tag ("proj" / "junction")
+        "pass_kind",
         # bools
         "reverse",
         "pass_through",

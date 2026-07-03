@@ -298,6 +298,34 @@ NAV_TURN_TOLERANCE_DEG: float = 0.5
 # behavioral disable, not the constant-value parity check.
 PATH_PASS_THROUGH_ENABLED: bool = True
 
+# MUST mirror ``Config::LINE_HEADING_RESET_ON_PROJECTION`` in
+# WRO2026/config/ConfigNav.h (ADR-052). Enables the line-arrival heading
+# reset on a collinear PROJECTION pass-through (the line-follow PID never
+# freezes across a projection node, so the heading is clean). Firmware
+# default is ON.
+LINE_HEADING_RESET_ON_PROJECTION: bool = True
+
+# MUST mirror ``Config::LINE_HEADING_RESET_ON_JUNCTION`` in
+# WRO2026/config/ConfigNav.h (ADR-052). Enables the line-arrival heading
+# reset on a collinear physical-junction (LINE node) pass-through (the
+# junction PID-freeze can inject a small wiggle into the bind). Firmware
+# default is OFF for v1.
+LINE_HEADING_RESET_ON_JUNCTION: bool = False
+
+# MUST mirror ``Config::LINE_HEADING_RESET_STRICT_ENABLED`` in
+# WRO2026/config/ConfigNav.h (ADR-052). The sim has no IMU/drift model and
+# never strict-rejects a bind -- this constant is mirrored only for
+# completeness/parity of the config surface, it is not read anywhere in
+# this module.
+LINE_HEADING_RESET_STRICT_ENABLED: bool = True
+
+# MUST mirror ``Config::LINE_HEADING_RESET_TOLERANCE_DEG`` in
+# WRO2026/config/ConfigNav.h (ADR-052). Gross-wrong-state strict-gate
+# tolerance (deg). The sim never evaluates it (see
+# ``LINE_HEADING_RESET_STRICT_ENABLED`` above) -- mirrored for config
+# surface parity only.
+LINE_HEADING_RESET_TOLERANCE_DEG: float = 10.0
+
 # Sim-only primitive tag for the LINE_OVERSHOOT FSM transition. The C++
 # runtime models this as an FSM state (not as a compiled primitive), so
 # it is intentionally NOT added to
@@ -550,6 +578,21 @@ ACT_WALL_STOP: str = "wall_stop"
 # 4-tuple shape: ``(ACT_REANCHOR, node, axis, wall_coord)``.
 ACT_REANCHOR: str = "reanchor"
 
+# Sim-only primitive tag for the line-arrival heading reset (ADR-052).
+# Mirrors the firmware's ``Localization.reanchorHeading(...)`` call in
+# ``PathTracker::_maybeHeadingReset``: on a collinear pass-through arrival at
+# node B (a PROJECTION or LINE node, gated by the matching
+# ``LINE_HEADING_RESET_ON_*`` knob), the IMU-yaw offset is re-bound to the
+# incoming edge's already-known body heading -- heading-only, no motion, no
+# pose change. Emitted ONLY on a successful bind (mirroring the firmware's
+# accept-only parity record; the sim never strict-rejects since it has no
+# drift model). 4-tuple shape: ``(ACT_HEADING_RESET, node, pass_kind,
+# heading_deg)`` -- ``pass_kind`` is ``"proj"`` (PROJECTION pass-through) or
+# ``"junction"`` (LINE pass-through), ``heading_deg`` is the body-corrected
+# incoming heading the chassis arrives on at ``node`` (the REAR ``+180`` is
+# already applied when the pass-through hop is reversed).
+ACT_HEADING_RESET: str = "heading_reset"
+
 # Sim-only primitive tag for the return-to-node depart (phase 3 of the reset
 # interlude). Mirrors the firmware's WALL_DEPART move in
 # ``PathTracker::_stepFsm`` -- ``Drive.driveDist(standoff -
@@ -637,6 +680,7 @@ def wrap_pm180(delta_deg: float) -> float:
 __all__ = [
     "ACT_BLIND_REVERSE",
     "ACT_FOLLOW_DIST_PASS",
+    "ACT_HEADING_RESET",
     "ACT_LINE_OVERSHOOT",
     "ACT_LINE_PASS",
     "ACT_LINE_REVERSE",
@@ -651,6 +695,10 @@ __all__ = [
     "BIDIRECTIONAL_AUTO_ENABLED",
     "BIDIRECTIONAL_TURN_THRESHOLD_DEG",
     "LINE_BOARD_COUNT",
+    "LINE_HEADING_RESET_ON_JUNCTION",
+    "LINE_HEADING_RESET_ON_PROJECTION",
+    "LINE_HEADING_RESET_STRICT_ENABLED",
+    "LINE_HEADING_RESET_TOLERANCE_DEG",
     "LINE_SENSOR_AXLE_OFFSET_CM",
     "LINE_SENSOR_AXLE_OFFSET_REAR_CM",
     "NAV_TURN_TOLERANCE_DEG",
@@ -2799,6 +2847,18 @@ class PathTrackerSim:
                 )
             )
 
+            # Line-arrival heading reset (ADR-052) eligibility, latched by the
+            # pass-through branches below. `None` unless THIS hop's arrival at
+            # `nxt` is a collinear pass-through: `"proj"` for a PROJECTION-node
+            # pass-through (`proj_pass_through`, PROJECTION_FOLLOW branch),
+            # `"junction"` for a LINE-node pass-through (`pass_through`,
+            # LINE_FOLLOW_INTERSECTION branch). Mirrors the firmware's
+            # `_passThrough` flag + `FieldMap::getNodeType(cur)` switch in
+            # `PathTracker::_maybeHeadingReset` -- BLIND/STOP_AT_LINE/dead-reckon
+            # arrivals never set it, exactly as `_passThrough` is latched only on
+            # a genuine LINE-edge pass-through arrival.
+            heading_reset_kind: Optional[str] = None
+
             if decision.primitive == DispatchPrimitive.PROJECTION_FOLLOW:
                 # LINE -> projection node: line-follow stopped by the encoder
                 # distance gate (no junction marker beneath the strip), so the
@@ -2854,6 +2914,8 @@ class PathTrackerSim:
                         ACT_FOLLOW_DIST_PASS if proj_pass_through else ACT_FOLLOW_DIST,
                         effective_dist_cm,
                     )
+                if proj_pass_through:
+                    heading_reset_kind = "proj"
             elif decision.primitive == DispatchPrimitive.LINE_FOLLOW_INTERSECTION:
                 # LINE -> junction (line) node: line-follow terminated by the
                 # physical intersection marker, then a LINE_OVERSHOOT roll.
@@ -2970,6 +3032,8 @@ class PathTrackerSim:
                     ACT_LINE_PASS if pass_through else ACT_LINE_OVERSHOOT,
                     overshoot_advance_cm,
                 )
+                if pass_through:
+                    heading_reset_kind = "junction"
             elif decision.primitive == DispatchPrimitive.STOP_AT_LINE_SEEK:
                 # BLIND stop-at-line seek (the seek + motion bundle were resolved
                 # into the query above; the classifier returned STOP_AT_LINE_SEEK,
@@ -3093,6 +3157,30 @@ class PathTrackerSim:
             if self._localization.is_reset_node(nxt):
                 for primitive in self._dispatch_wall_reset(nxt):
                     yield primitive
+
+            # Line-arrival heading reset (ADR-052). Mirror of the firmware's
+            # `_maybeHeadingReset`, fired at the same logical instant as
+            # `PathTracker::_onPlanNextHop` -- AFTER the wall-reset interlude,
+            # once per hop's arrival at `nxt`. Fires only on the accept path:
+            # the sim has no IMU/drift model, so it never strict-rejects (the
+            # firmware's strict-gate reject is host-C++-only, not mirrored
+            # here) -- whenever the pass-through + knob condition holds, a
+            # driftless bench firmware would accept, so the sim always emits.
+            # `heading_reset_kind` is `None` unless THIS hop's arrival was a
+            # collinear pass-through (latched above); a reset/blind/stop-and-go
+            # arrival leaves it `None`, matching the firmware's BLIND/RESET
+            # no-op branch and non-pass-through no-op. `body_heading` is this
+            # hop's already-REAR-corrected body heading -- the sim's
+            # equivalent of `_resolvedBodyHeading` / `incomingBodyHeadingDeg`,
+            # the heading the chassis arrives at `nxt` on. No pose mutation:
+            # the sim's heading is already ground truth, there is nothing to
+            # correct.
+            if heading_reset_kind == "proj":
+                if LINE_HEADING_RESET_ON_PROJECTION:
+                    yield (ACT_HEADING_RESET, nxt, "proj", body_heading)
+            elif heading_reset_kind == "junction":
+                if LINE_HEADING_RESET_ON_JUNCTION:
+                    yield (ACT_HEADING_RESET, nxt, "junction", body_heading)
 
             current = nxt
 
