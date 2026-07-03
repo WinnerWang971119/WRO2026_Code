@@ -4350,41 +4350,20 @@ def test_adr052_tc15e_projection_goal_not_pass_through_no_heading_reset():
     so no ``ACT_HEADING_RESET`` fires even though the knob defaults ON and the
     geometry would otherwise qualify (mirrors
     ``test_pass_through_projection.py``'s TC12 fixture).
+
+    Reuses :func:`_make_projection_pass_through_sim` (the SAME collinear
+    ``Inter1 --LINE--> ProjL[projection] --LINE--> Inter2`` triple TC15a fires
+    the reset on) so this AC10 regression cannot drift onto a stale topology --
+    only the goal differs (``ProjL`` itself, not ``Inter2``), which is exactly
+    the not-final guard under test.
     """
-    nodes = {
-        "Inter1": (0.0, 0.0),
-        "ProjL": (50.0, 0.0),
-        "Inter2": (120.0, 0.0),
-    }
-    graph = nx.DiGraph()
-    for name, (x, y) in nodes.items():
-        graph.add_node(
-            name,
-            x_cm=float(x),
-            y_cm=float(y),
-            type="projection" if name == "ProjL" else "line",
-        )
-    for u, v, dist, hdg in (
-        ("Inter1", "ProjL", 50.0, 0.0),
-        ("ProjL", "Inter2", 70.0, 0.0),
-    ):
-        graph.add_edge(u, v, type=EDGE_LINE, distance_cm=dist, heading_deg=hdg)
-        graph.add_edge(
-            v, u, type=EDGE_LINE, distance_cm=dist, heading_deg=(hdg + 180.0) % 360.0
-        )
-    next_hop = {
-        "Inter1": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "ProjL"},
-        "ProjL": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "Inter2"},
-        "Inter2": {"Inter1": "ProjL", "ProjL": "ProjL", "Inter2": "Inter2"},
-    }
-    fd = _minimal_field(nodes, "Inter1", 0.0)
-    chassis = VirtualChassis.from_field_data(fd)
-    sim = PathTrackerSim(fd, graph, next_hop, chassis)
-    sim.localization.zero_heading_from_current()
+    sim, _fd = _make_projection_pass_through_sim()
 
     prims = sim.go_to("ProjL")
 
-    assert prims == [(ACT_FOLLOW_DIST, 50.0)]
+    # 40.0 == the helper's Inter1->ProjL edge distance (immaterial to the
+    # assertion's intent: the hop is a plain DISTANCE stop, not a pass-through).
+    assert prims == [(ACT_FOLLOW_DIST, 40.0)]
     assert ACT_HEADING_RESET not in [p[0] for p in prims]
     assert sim.localization.current_node() == "ProjL"
 
