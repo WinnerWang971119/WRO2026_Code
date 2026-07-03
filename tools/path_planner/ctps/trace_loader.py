@@ -295,11 +295,14 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                 )
                 cmd.mode = None
 
-        # heading: accept only int/float; a non-numeric value warns and is
-        # dropped. Absent → leave None.
+        # heading: accept only a real int/float; a non-numeric value warns and is
+        # dropped. A JSON boolean is excluded explicitly — `bool` subclasses
+        # `int`, so `isinstance(True, (int, float))` is truthy and would silently
+        # store a heading of 1.0 (this mirrors the strict `reverse` guard below).
+        # Absent → leave None.
         if "heading" in raw:
             raw_heading = raw["heading"]
-            if isinstance(raw_heading, (int, float)):
+            if isinstance(raw_heading, (int, float)) and not isinstance(raw_heading, bool):
                 cmd.heading = raw_heading
             else:
                 warnings.warn(

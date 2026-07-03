@@ -256,6 +256,7 @@ namespace ctps
         rec.op         = Op::DRIVE;
         rec.method     = (method != nullptr) ? method : "";
         rec.cm         = p.cm;
+        rec.hasCm      = true;
         rec.mode       = (p.mode != nullptr) ? p.mode : "";
         rec.hasHeading = p.hasHeading;
         rec.heading    = p.heading;
@@ -395,9 +396,12 @@ namespace ctps
                     out += "\"op\": \"drive\", ";
                     appendStrMember(out, "method", rec.method);
                     // Linear moves carry a distance; turns carry an angle; stop
-                    // (and driveTime) carry neither.
-                    if (rec.method == "driveDist" || rec.method == "stopAtLine"
-                        || rec.method == "wallStop" || rec.method == "lineFollowDist")
+                    // (and driveTime) carry neither. Gate cm emission on the
+                    // record's own `hasCm` flag (set by the sole producer,
+                    // recordDriveMove) rather than a method-name list — a new
+                    // linear method must not be able to silently drop cm by being
+                    // forgotten here (the original wallStop bug).
+                    if (rec.hasCm)
                     {
                         out += ", \"cm\": ";
                         out += floatToJson(rec.cm);
