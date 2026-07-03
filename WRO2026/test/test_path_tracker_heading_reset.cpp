@@ -81,68 +81,10 @@
 #if !defined(HEADING_RESET_FORCED_RESET_FIXTURE)
 namespace
 {
-/// @brief Drive the real FSM from a clean world, seated at @p startName (app-yaw 0), through
-///        the shared LINE-follow entry point for the FIRST hop of `goTo(goalName)` — the state
-///        every collinear pass-through case in this file needs BEFORE tripping the
-///        junction/distance gate: LineFollower enabled, non-overshoot, still at @p startName.
-///        Covers BOTH a LINE-junction first hop (LINE_FOLLOW) and a LINE->projection first hop
-///        (PROJECTION_FOLLOW) — the entry condition is identical for both. Adapted from
-///        `test_path_tracker_pass_through_projection.cpp`'s `driveToProjectionFollowHop`
-///        (that helper lives in an anonymous namespace there and is not reusable here),
-///        generalized with an optional route-direction override for TC9's forced-REAR case.
-///        Also clears the `Serial` / `EventTrace` mock capture surfaces so every caller starts
-///        clean.
-///
-/// @param startName      Node to seat Localization at (the first hop's origin).
-/// @param goalName       The active `goTo` destination.
-/// @param routeDirection Forwarded to `.setRouteDirection(...)` when not `Direction::AUTO`
-///                       (TC9); a bare `goTo(...)` otherwise.
-void driveToLineFollowEntry(const char* startName, const char* goalName,
-                            Direction routeDirection = Direction::AUTO)
-{
-    resetWorld();
-    Serial.clearCapture();
-    EventTrace.mockReset();
-    seatAt(startName);
-
-    const uint8_t start     = nodeByName(startName);
-    const uint8_t goal      = nodeByName(goalName);
-    const uint8_t firstHop  = routedFirstHop(start, goal);
-    const Routes::EdgeInfo& firstEdge = FieldMap::getEdge(start, firstHop);
-
-    // Body-target heading for the first hop: edge heading, +180 for a forced REAR route.
-    float bodyHeading = firstEdge.heading_deg;
-    if (routeDirection == Direction::REAR)
-    {
-        bodyHeading = fmodf(bodyHeading + 180.0f, 360.0f);
-        if (bodyHeading < 0.0f)
-        {
-            bodyHeading += 360.0f;
-        }
-    }
-    const int16_t hwHeading = hwYaw((int16_t) lroundf(bodyHeading));
-
-    if (routeDirection == Direction::AUTO)
-    {
-        PathTracker.goTo(goal).async();
-    }
-    else
-    {
-        PathTracker.goTo(goal).setRouteDirection(routeDirection).async();
-    }
-
-    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
-    {
-        mmL.mockYawDeg = (double) hwHeading;
-        cooperativeTick();
-        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
-            && Localization.getCurrentNode() == start)
-        {
-            return;
-        }
-    }
-    ASSERT_TRUE(false);    // budget exhausted: the FSM never reached the LINE-follow entry.
-}
+// `driveToLineFollowEntry(start, goal, routeDirection=AUTO)` — the shared LINE-follow entry
+// driver — now lives in `test_path_tracker_harness.h` (hoisted so the sibling
+// `test_path_tracker_pass_through_projection.cpp` can reuse the SAME entry-drive handshake
+// instead of maintaining a divergent copy). Called unqualified below.
 
 /// @brief Drain whatever is left of the in-flight `goTo` to `IDLE` (or a fault), parking the
 ///        mock IMU yaw at the FSM's own `resolvedBodyHeadingDeg()` target every tick (settles
