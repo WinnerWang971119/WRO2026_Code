@@ -955,6 +955,40 @@ set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
 
 # =========================================================================================
+# CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
+#
+# The COMPILE-TIME half of the anti-drift guard. This always-built TU chains every
+# CURRENT real fluent-builder setter — with its real argument type — on a discarded
+# temporary of each recording mock builder (`ctps_mocks/Drive.h` + `LineFollower.h`).
+# A removed / renamed / signature-incompatible mock setter breaks THIS target's build,
+# which ctest surfaces (`ctps_mock_conformance`). The Python name-superset check (T12)
+# is the complementary "real-grew" half. Known TU limit: it verifies call-site
+# ASSIGNABILITY, not exact param types (a convertible type can pass) — see the file
+# docstring.
+#
+# Wiring MIRRORS `ctps_dump` (the independent CTPS include + force-include surface):
+# `${CTPS_MOCKS_DIR}` FIRST on the include path so the recording `Drive.h` /
+# `LineFollower.h` (and the transitively force-included `PathTracker.h` etc.) shadow the
+# production headers; `${MOCKS_DIR}` is DELIBERATELY OMITTED (pulling it in would let the
+# `mocks/` MatrixMiniR4 shadow the recording one). The mock builder destructors call
+# `ctps::recordDriveMove`, so the target links `ctps_record.cpp` (mock `Drive` /
+# `LineFollower` globals + the recorder) and the issue #91 `routes_fixture.cpp` (the
+# force-included mock `PathTracker.h` transitively pulls `routes.h`). The fixture routes
+# are force-included FIRST so their `ROUTES_H` wins before the mocks request the sketch
+# `routes.h`. No `EXCLUDE_FROM_ALL` — the guard must build on every `cmake --build`.
+# =========================================================================================
+add_executable(test_ctps_mock_conformance
+    ${CTPS_MOCKS_DIR}/test_ctps_mock_conformance.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${CTPS_MOCKS_DIR}/ctps_record.cpp
+)
+target_include_directories(test_ctps_mock_conformance PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+target_compile_definitions(test_ctps_mock_conformance PRIVATE CTPS_RECORD)
+add_fixture_routes_force_include(test_ctps_mock_conformance)   # FIRST — its ROUTES_H must win
+add_ctps_mock_force_includes(test_ctps_mock_conformance)
+add_test(NAME ctps_mock_conformance COMMAND test_ctps_mock_conformance)
+
+# =========================================================================================
 # Test executable #10 — Localization operator-offset integrator (PR1a, TC1/TC2/TC2b/TC3).
 #
 # FIRST host target to compile the real production `Localization.cpp`. It drives the

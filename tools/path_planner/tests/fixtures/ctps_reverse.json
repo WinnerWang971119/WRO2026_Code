@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "start_node": "A",
+  "start_heading_deg": 0.0,
+  "build_error": false,
+  "commands": [
+    { "seq": 0, "op": "drive", "method": "lineFollowDist", "cm": 40.0, "reverse": true },
+    { "seq": 1, "op": "drive", "method": "stopAtLine",    "cm": 15.0, "reverse": true },
+    { "seq": 2, "op": "drive", "method": "wallStop",      "cm": 10.0, "reverse": true },
+    { "seq": 3, "op": "drive", "method": "driveDist",     "cm": 20.0 }
+  ]
+}

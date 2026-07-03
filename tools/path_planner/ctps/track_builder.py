@@ -68,6 +68,28 @@ __all__ = ["Track", "build"]
 
 
 # ---------------------------------------------------------------------------
+# Drive-method families (shared by ``build`` and ``_drive_label``)
+# ---------------------------------------------------------------------------
+
+#: ``drive`` methods that carry a forward distance in ``cm`` and advance the
+#: shared chassis along its heading. ``lineFollowDist`` joins the original
+#: ``driveDist`` / ``stopAtLine`` / ``wallStop`` trio (T7): all four render a
+#: forward advance (``chassis.forward``) — or a backward one
+#: (``chassis.reverse``) when ``reverse`` is set.
+_FORWARD_GEOMETRY_METHODS: frozenset[str] = frozenset(
+    {"driveDist", "stopAtLine", "wallStop", "lineFollowDist"}
+)
+
+#: The subset of :data:`_FORWARD_GEOMETRY_METHODS` that honours a GYRO held
+#: heading via the two-phase (rotate-in-place then advance) render.
+#: ``lineFollowDist`` is excluded — the line follower regulates its own
+#: heading, so a recorded heading never turns it in place.
+_GYRO_HEADING_METHODS: frozenset[str] = frozenset(
+    {"driveDist", "stopAtLine", "wallStop"}
+)
+
+
+# ---------------------------------------------------------------------------
 # Output data model (Data Model B — Track)
 # ---------------------------------------------------------------------------
 
@@ -205,16 +227,31 @@ def _drive_label(cmd: Command) -> str:
     The argument shown matches the method's geometry parameter so the side
     panel reads naturally:
 
-    * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``wallStop(<cm>)`` / ``turnDeg(<deg>)`` /
-      ``turnToYaw(<deg>)``.
+    * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``wallStop(<cm>)`` /
+      ``lineFollowDist(<cm>)`` / ``turnDeg(<deg>)`` / ``turnToYaw(<deg>)``.
     * any other method (``stop``, unknown) renders as ``<method>()``.
+
+    For the forward-geometry methods, the captured ``mode`` / ``heading`` /
+    ``reverse`` are **appended** only when present (e.g.
+    ``driveDist(35) mode=gyro heading=0 reverse``). A plain move — with none of
+    those set — keeps its exact base label (``driveDist(35)``), so existing
+    label-based expectations stay byte-identical.
 
     :param cmd: the ``drive`` command.
     :return: the side-panel label string.
     """
     method = cmd.method
-    if method == "driveDist" or method == "stopAtLine" or method == "wallStop":
-        return f"{method}({cmd.cm})"
+    if method in _FORWARD_GEOMETRY_METHODS:
+        label = f"{method}({cmd.cm})"
+        # Append captured drive state ONLY when set, so plain moves keep their
+        # exact base label (no trailing tokens).
+        if cmd.mode is not None:
+            label += f" mode={cmd.mode}"
+        if cmd.heading is not None:
+            label += f" heading={cmd.heading}"
+        if cmd.reverse:
+            label += " reverse"
+        return label
     if method == "turnDeg":
         return f"turnDeg({cmd.deg})"
     if method == "turnToYaw":
@@ -242,8 +279,16 @@ def build(trace: Trace, field_data) -> Track:
       :class:`UnreachableGoalError` emits an informational ``goto`` event and
       ends the track.
     * ``drive`` — applied DIRECTLY to the shared chassis without advancing the
-      logical node (``driveDist`` -> forward, ``turnDeg`` -> turn_relative,
-      ``turnToYaw`` -> turn_to_heading); other methods narrate only.
+      logical node. The forward-geometry methods (``driveDist`` /
+      ``stopAtLine`` / ``wallStop`` / ``lineFollowDist``) advance along the
+      current heading — ``chassis.reverse`` when ``reverse`` is set, else
+      ``chassis.forward`` — and narrate-only (no geometry) when ``cm`` is
+      absent (legacy/partial trace). A ``mode == "gyro"`` move with an explicit
+      ``heading`` (``driveDist`` / ``stopAtLine`` / ``wallStop``, NOT
+      ``lineFollowDist``) renders two-phase: ``turn_to_heading(H)`` +
+      a same-position keyframe, then the advance keyframe — "align to H, then
+      advance along H". ``turnDeg`` -> turn_relative, ``turnToYaw`` ->
+      turn_to_heading; other methods narrate only.
     * ``manip`` / ``wait`` — emit an event then dwell the clock (same-pose
       keyframe so playback visibly pauses).
     * ``print`` / ``beep`` / ``led`` / ``task_start`` / ``task_end`` —
@@ -313,6 +358,21 @@ def build(trace: Trace, field_data) -> Track:
         t += max(0.0, dwell_s)
         keyframes.append({"t": t, "x": prev["x"], "y": prev["y"], "h": prev["h"]})
 
+    def append_advance_keyframe(distance_cm: float, reverse: bool) -> None:
+        """Translate the chassis along its heading, then append a keyframe.
+
+        Advances the shared chassis by ``distance_cm`` — backward
+        (``chassis.reverse``) when ``reverse`` is truthy, forward
+        (``chassis.forward``) otherwise — then appends the resulting pose. Kept
+        as one helper so the reverse ternary is written once and reused by both
+        the plain and the GYRO two-phase drive paths.
+        """
+        if reverse:
+            chassis.reverse(distance_cm)
+        else:
+            chassis.forward(distance_cm)
+        append_geometry_keyframe(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
+
     # 4. Iterate the commands in order on the single shared sim/chassis.
     for cmd in trace.commands:
         if cmd.op == "goto":
@@ -365,16 +425,42 @@ def build(trace: Trace, field_data) -> Track:
             # (before any geometry advance).
             event_t = t
             method = cmd.method
-            if method == "driveDist" or method == "stopAtLine" or method == "wallStop":
-                # These all carry a forward distance in ``cm``. For
-                # ``stopAtLine`` and ``wallStop`` that value is only nominal —
-                # the real robot stops on a sensor/physical wall rather than on
-                # exact odometry — but replaying the requested advance is still
-                # the best lightweight host estimate.
-                chassis.forward(float(cmd.cm))
-                append_geometry_keyframe(
-                    chassis.x_cm, chassis.y_cm, chassis.heading_deg
-                )
+            if method in _FORWARD_GEOMETRY_METHODS:
+                # driveDist / stopAtLine / wallStop / lineFollowDist all carry a
+                # forward distance in ``cm``. For stopAtLine / wallStop /
+                # lineFollowDist that value is only nominal — the real robot
+                # stops on a sensor / physical wall / line-follow distance gate
+                # rather than exact odometry — but replaying the requested
+                # advance is still the best lightweight host estimate.
+                if cmd.cm is None:
+                    # Legacy / partial trace (e.g. a cm-less wallStop or
+                    # lineFollowDist): no distance to replay. Narrate only —
+                    # never ``float(None)``. Kept even though the recorder now
+                    # emits ``cm`` for every forward-geometry method, to defend
+                    # partial/legacy traces.
+                    pass
+                elif (
+                    method in _GYRO_HEADING_METHODS
+                    and cmd.mode == "gyro"
+                    and cmd.heading is not None
+                ):
+                    # GYRO + explicit heading → two-phase render: first rotate
+                    # in place to the held heading (a keyframe at the unchanged
+                    # position), THEN advance / back up along it (the
+                    # translation keyframe). Heading is honoured ONLY under
+                    # ``mode == "gyro"`` — firmware consults setHeading only in
+                    # GYRO, so a heading recorded without GYRO must render along
+                    # the current facing (the plain branch below).
+                    chassis.turn_to_heading(float(cmd.heading))
+                    append_geometry_keyframe(
+                        chassis.x_cm, chassis.y_cm, chassis.heading_deg
+                    )
+                    append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
+                else:
+                    # Plain advance along the CURRENT facing (non-gyro, or no
+                    # heading, or lineFollowDist). Byte-identical to the pre-T7
+                    # forward render for the non-reverse case.
+                    append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
             elif method == "turnDeg":
                 chassis.turn_relative(float(cmd.deg))
                 append_geometry_keyframe(

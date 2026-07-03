@@ -153,18 +153,42 @@ namespace
      *
      * No registered task body issues `manip` / `drive` ops, so the self-test
      * synthesises a bracketed segment directly against the recording sink +
-     * mocks: a `task_start` (args begin `072a`), `setGripper` / `setLift`
-     * manip ops, `driveDist` / `turnDeg` drive ops, then `task_end`. The Drive
-     * builders record at construction (discarded-temporary call sites).
+     * mocks: a `task_start` (args begin `072a`), `setGripper` / `setLift` manip
+     * ops, and a family of `drive` ops — a plain `driveDist` (records neither
+     * `mode` nor `heading`), a `driveDist` under GYRO with an explicit `heading`,
+     * both `lineFollowDist` producers (`followDistance` and
+     * `setEnabled(true).setDistanceTarget()`) plus the two follows that record
+     * NOTHING (`setEnabled(false)` and a target-less `setEnabled(true)`), a
+     * reversed `lineFollowDist`, a `turnDeg`, and a reversed `wallStop` — then
+     * `task_end`.
+     *
+     * The Drive / LineFollower builders record once from their `_executed`-guarded
+     * DESTRUCTOR (at the statement's `;`, so the one-verb-per-statement authored
+     * order is preserved), which is what lets the chained `.setMode(GYRO)` /
+     * `.setHeading(...)` / `.setReverse(true)` setters run before the single emit.
      */
     void recordManipDriveSegment()
     {
         uint8_t fxArgs[Config::MAX_TASK_ARG_BYTES] = {0x07, 0x2a, 0};
         ctps::recordTaskStart("fixtureManip", fxArgs, sizeof(fxArgs));
         Manipulator.setGripper(180);
-        Drive.driveDist(15);
+        Drive.driveDist(15);    // plain driveDist — records neither mode nor heading (NC3).
         Drive.turnDeg(-90);
         Manipulator.setLift(120);
+
+        // GYRO / lineFollowDist / reverse capture (NC1-NC3; AC2 / AC5 / AC6). Each is a
+        // one-verb-per-statement discarded temporary: the builder destructs at the `;`,
+        // emitting one record with the fully-resolved mode / heading / reverse. Do NOT
+        // author two Drive verbs in one full-expression (temporaries destruct in reverse
+        // construction order, which would reorder the emitted records).
+        Drive.driveDist(35).setMode(DriveMode::GYRO).setHeading(0);    // gyro + heading (AC2)
+        LineFollower.followDistance(90);                       // lineFollowDist #1 (forward)
+        LineFollower.setEnabled(true).setDistanceTarget(60);   // lineFollowDist #2 (forward)
+        LineFollower.setEnabled(false);                        // silence: records nothing
+        LineFollower.setEnabled(true);            // silence: target-less, records nothing
+        LineFollower.setEnabled(true).setDistanceTarget(45).setReverse(true);    // reversed (AC6)
+        Drive.wallStop(10).setReverse(true);                  // reversed wallStop, cm=10 (NC3)
+
         ctps::recordTaskEnd("fixtureManip", true);
     }
 
@@ -220,6 +244,13 @@ namespace
     /**
      * @brief Run the full self-test: assert the expected op stream is present and
      *        ordered, and that the mission drained within the tick budget.
+     *
+     * Also asserts the T2/T3 drive-detail capture appended by
+     * `recordManipDriveSegment`: the GYRO `mode` + held `heading`, exactly three
+     * `lineFollowDist` records (both producers plus the reversed one; the two
+     * silence cases record nothing), a `reverse` flag, and the `wallStop` `cm` —
+     * verified both at the in-memory `Record` level (NC1, NC2) and in the
+     * serialized command-stream JSON (NC3, AC12).
      *
      * @return 0 on success (after printing `CTPS DUMP SELFTEST OK`); 1 on the
      *         first failed assertion (after printing a diagnostic to stderr).
@@ -322,6 +353,106 @@ namespace
         {
             std::cerr << "ctps_dump self-test: missing drive op (driveDist/turnDeg)\n";
             return 1;
+        }
+
+        // NC1 — the GYRO+heading driveDist captures mode + held heading (AC2).
+        const size_t gyroDrive =
+            findFrom(0, [](const ctps::Record& r) {
+                return r.op == ctps::Op::DRIVE && r.method == "driveDist" && r.mode == "gyro"
+                       && r.hasHeading && r.heading == 0.0f;
+            });
+        if (gyroDrive >= log.size())
+        {
+            std::cerr << "ctps_dump self-test: missing GYRO driveDist "
+                         "(method==driveDist, mode==gyro, hasHeading, heading==0)\n";
+            return 1;
+        }
+
+        // NC3 (record level) — the plain driveDist(15) records NEITHER mode nor
+        // heading. This half of NC3 is asserted here, not in the serialized-JSON
+        // substring below: the gyro driveDist is also present and carries
+        // mode/heading, so a whole-document substring can't isolate the plain one.
+        const size_t plainDrive =
+            findFrom(0, [](const ctps::Record& r) {
+                return r.op == ctps::Op::DRIVE && r.method == "driveDist" && r.cm == 15.0f;
+            });
+        if (plainDrive >= log.size() || !log[plainDrive].mode.empty()
+            || log[plainDrive].hasHeading)
+        {
+            std::cerr << "ctps_dump self-test: plain driveDist(15) must record "
+                         "neither mode nor heading\n";
+            return 1;
+        }
+
+        // NC2 — exactly three lineFollowDist records: followDistance(90) + the
+        // setEnabled(true).setDistanceTarget(60) builder + the reversed target
+        // builder. setEnabled(false) and the target-less setEnabled(true) record
+        // nothing, so any count != 3 means a silence case leaked or a producer
+        // dropped its emit. (buildMissionFixture's demoEcho produces no follows.)
+        size_t lineFollowCount = 0;
+        for (const ctps::Record& r : log)
+        {
+            if (r.op == ctps::Op::DRIVE && r.method == "lineFollowDist")
+            {
+                ++lineFollowCount;
+            }
+        }
+        if (lineFollowCount != 3)
+        {
+            std::cerr << "ctps_dump self-test: expected exactly 3 lineFollowDist records, got "
+                      << lineFollowCount << "\n";
+            return 1;
+        }
+
+        // NC2 / AC6 — at least one reversed drive move (the reversed lineFollowDist
+        // or the reversed wallStop).
+        const size_t reversed =
+            findFrom(0, [](const ctps::Record& r)
+                     { return r.op == ctps::Op::DRIVE && r.reverse; });
+        if (reversed >= log.size())
+        {
+            std::cerr << "ctps_dump self-test: missing a reverse==true drive record\n";
+            return 1;
+        }
+
+        // NC3 — a wallStop record carrying its cm (the wallStop cm-serialization fix).
+        const size_t wallStop =
+            findFrom(0, [](const ctps::Record& r) {
+                return r.op == ctps::Op::DRIVE && r.method == "wallStop" && r.cm == 10.0f;
+            });
+        if (wallStop >= log.size())
+        {
+            std::cerr << "ctps_dump self-test: missing wallStop record with cm==10\n";
+            return 1;
+        }
+
+        // NC3 / AC12 — the SERIALIZED command-stream JSON carries the new
+        // drive-detail keys. Substring assertions over the whole document: the
+        // gyro driveDist's `mode`/`heading`, a reversed move's `reverse`, and the
+        // `cm` emitted for both `wallStop` and `lineFollowDist`.
+        const std::string json =
+            ctps::commandStreamToJson(Routes::NODES[Routes::START_NODE].name,
+                                      Routes::START_HEADING_DEG);
+        struct JsonProbe
+        {
+            const char* needle;
+            const char* label;
+        };
+        const JsonProbe kJsonProbes[] = {
+            {"\"mode\": \"gyro\"", "mode: gyro"},
+            {"\"heading\"", "heading key"},
+            {"\"reverse\": true", "reverse: true"},
+            {"\"method\": \"wallStop\", \"cm\": 10", "wallStop cm"},
+            {"\"method\": \"lineFollowDist\", \"cm\":", "lineFollowDist cm"},
+        };
+        for (const JsonProbe& probe : kJsonProbes)
+        {
+            if (json.find(probe.needle) == std::string::npos)
+            {
+                std::cerr << "ctps_dump self-test: serialized JSON missing " << probe.label
+                          << " (needle: " << probe.needle << ")\n";
+                return 1;
+            }
         }
 
         std::cout << "CTPS DUMP SELFTEST OK\n";
