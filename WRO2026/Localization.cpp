@@ -200,6 +200,20 @@ void LocalizationClass::declarePosition(uint8_t nodeId)
     clearOffset();
 }
 
+void LocalizationClass::_bindHeadingFromYaw(float imuYaw, float headingDeg)
+{
+    // Single source of truth for the offset-bind invariant, shared by reanchorAtWall step (1) and
+    // the heading-only reanchorHeading. Bind the offset so world == normalize(imu - offset) ==
+    // headingDeg, then refresh the heading cache + stamp. The cache refresh is REQUIRED (not
+    // cosmetic): a no-I/O getLastHeadingDeg() and the next _consumeOffset() — which baselines
+    // _lastYawDeg off the cached heading — must see the POST-bind heading, never the stale pre-bind
+    // value. Writes _yawOffsetDeg + the heading cache ONLY; never _offset or the integrator
+    // baselines (the caller owns any offset re-anchor).
+    _yawOffsetDeg       = imuYaw - headingDeg;
+    _lastGoodHeadingDeg = _normalize(imuYaw - _yawOffsetDeg);
+    _lastGoodHeadingMs  = millis();
+}
+
 bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float headingDeg)
 {
     // --- Read the IMU ONCE up front (pre-mutation) --------------------------------------------
@@ -236,11 +250,11 @@ bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float head
 
     // (1) Square heading: bind the offset so getHeadingDeg() == headingDeg. Same definition as
     //     zeroHeadingFromCurrent (world = normalize(imu - offset)), but targeting the wall normal
-    //     instead of the start heading. Also seed the heading cache so a no-I/O getLastHeadingDeg()
-    //     immediately reflects the squared heading instead of the pre-square value.
-    _yawOffsetDeg       = imuYaw - headingDeg;
-    _lastGoodHeadingDeg = _normalize(imuYaw - _yawOffsetDeg);
-    _lastGoodHeadingMs  = millis();
+    //     instead of the start heading. Also seeds the heading cache so a no-I/O getLastHeadingDeg()
+    //     immediately reflects the squared heading instead of the pre-square value. The offset-bind
+    //     + cache-refresh invariant lives in ONE place (_bindHeadingFromYaw), shared with the
+    //     heading-only reanchorHeading; this call is behaviour-identical to the former inline lines.
+    _bindHeadingFromYaw(imuYaw, headingDeg);
 
     // (2) Re-anchor the operator-offset frame to zero AND re-snapshot all three integrator
     //     baselines to the CURRENT readings (kills the arrival-tick phantom — same discipline as
@@ -276,6 +290,68 @@ bool LocalizationClass::reanchorAtWall(uint8_t axis, float wallCoord, float head
     // squared (the wall normal is axis-independent). The caller passes a validated info->axis, so
     // this branch is defence-in-depth, not an expected path.
 
+    return true;
+}
+
+bool LocalizationClass::reanchorHeading(float headingDeg, float* outPreBindDeltaDeg)
+{
+    // Heading-only re-anchor (ADR-052). Full contract in the header. Every guard below returns
+    // false having mutated NOTHING; the bind at the end is the only state write, and it touches
+    // _yawOffsetDeg + the heading cache ONLY — never _offset / the integrator baselines.
+
+    // (1) Closed-gate invariant: only ever run while PathTracker is executing a hop
+    //     (_navActive == true), so the operator-offset integrate gate is CLOSED and the later
+    //     closed->open edge re-baselines from a live read in the NEW frame. Rebinding the world
+    //     frame while the gate is OPEN (idle) would leave _gateWasOpen true, skip the reopen edge,
+    //     and deposit the yaw discontinuity into the reported offset on the next update()
+    //     (gotcha-localization-rezero-reopen-edge). Hard reject, not a warning — and this is why we
+    //     must never clear _offset / _gateWasOpen here (that would MASK a future call-order bug).
+    if (!_navActive)
+    {
+        return false;
+    }
+
+    // (2) World frame not yet bound: nothing to re-anchor against.
+    if (!_zeroed)
+    {
+        return false;
+    }
+
+    // (3) Read the IMU ONCE. A failed read aborts with NO mutation and leaves outPreBindDeltaDeg
+    //     UNTOUCHED (no read = no delta) — binding against a stale yaw would skew every later
+    //     getHeadingDeg().
+    float imuYaw = 0.0f;
+    if (!_readImuYaw(imuYaw))
+    {
+        return false;
+    }
+
+    // (4) Pre-bind belief and wrap-correct delta. Reuse wrapDeltaDeg for the 0/360-seam-safe signed
+    //     difference (a naive abs(a - b) breaks across the seam) — the SAME pattern reanchorAtWall
+    //     uses for its strict check.
+    const float belief = _normalize(imuYaw - _yawOffsetDeg);
+    const float delta  = fabsf(wrapDeltaDeg(headingDeg - belief));
+
+    // (5) Report the delta on read success — BEFORE the strict decision — so a strict-rejected call
+    //     still surfaces its delta (PathTracker's skip log wants it). Only a FAILED read leaves the
+    //     out-param untouched, which was handled by the early return above.
+    if (outPreBindDeltaDeg != nullptr)
+    {
+        *outPreBindDeltaDeg = delta;
+    }
+
+    // (6) Strict gate (LINE-reset-specific knobs, NOT the wall ones): reject a gross-wrong-state
+    //     sample. Boundary is inclusive — `> tolerance` rejects, a delta exactly equal to the
+    //     tolerance still binds (matches reanchorAtWall). A rejection mutates NOTHING.
+    if (Config::LINE_HEADING_RESET_STRICT_ENABLED &&
+        delta > Config::LINE_HEADING_RESET_TOLERANCE_DEG)
+    {
+        return false;
+    }
+
+    // (7) Bind heading only via the shared core. No _offset / baseline touch — the arrival hook
+    //     already zeroed _offset one call earlier, and this is a heading-only verb.
+    _bindHeadingFromYaw(imuYaw, headingDeg);
     return true;
 }
 

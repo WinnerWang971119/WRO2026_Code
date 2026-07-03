@@ -317,6 +317,55 @@ public:
     bool reanchorAtWall(uint8_t axis, float wallCoord, float headingDeg);
 
     /**
+     * @brief Heading-only re-anchor: re-bind the world-frame yaw offset to a known heading.
+     *
+     * Instantaneous, motion-free heading re-zero used at a collinear line-follow pass-through to
+     * bound IMU-yaw drift for free (PathTracker calls it with the incoming edge's known
+     * `heading_deg`, body-corrected — ADR-052). One IMU read + offset math; no Drive motion, no
+     * fault. Unlike `reanchorAtWall`, this is HEADING-ONLY: it re-binds `_yawOffsetDeg` and
+     * refreshes the heading cache/stamp, and touches NOTHING else — not `_offset`, not the
+     * integrator baselines (`_lastEncL`/`_lastEncR`/`_lastYawDeg`), not `_currentNode`. The arrival
+     * hook already zeroed `_offset` one call earlier; a heading-only verb that also cleared it would
+     * MASK a future call-order bug (`gotcha-localization-rezero-reopen-edge`).
+     *
+     * Frame-rebind / integrate-gate invariant: this MUST be called only while the operator-offset
+     * integrate gate is CLOSED (`_navActive == true`), which the `!_navActive` reject ENFORCES.
+     * Rebinding the world frame while the gate is OPEN (idle) would leave `_gateWasOpen == true`,
+     * skip the closed->open re-baseline edge, and deposit the yaw discontinuity into the reported
+     * offset on the next `update()`. Because it only ever runs under `_navActive`, the later
+     * closed->open edge re-baselines correctly from a live read in the new frame. This is why
+     * `!_navActive` is a hard reject, not a warning, and why this method must NEVER clear `_offset`
+     * / `_gateWasOpen` (that would mask a future call-order bug).
+     *
+     * Strict gate is LINE-RESET-SPECIFIC: it reads `Config::LINE_HEADING_RESET_STRICT_ENABLED` /
+     * `Config::LINE_HEADING_RESET_TOLERANCE_DEG` — the line-arrival knobs, NOT the wall-reset ones.
+     * A future NON-line caller must NOT be wired through this method and silently inherit the line
+     * tolerance; give it its own re-anchor surface + gate instead.
+     *
+     * Sequence (order matters; every guard returns `false` having mutated NOTHING):
+     *   1. `!_navActive`   -> `false` (closed-gate invariant above).
+     *   2. `!_zeroed`      -> `false` (world frame not yet bound).
+     *   3. failed IMU read -> `false`, and @p outPreBindDeltaDeg left UNTOUCHED (no read = no delta).
+     *   4. On a successful read: if @p outPreBindDeltaDeg is non-null, set it to the wrap-correct
+     *      pre-bind `|normalize(imuYaw - _yawOffsetDeg) - headingDeg|` NOW — BEFORE the strict
+     *      decision, so a strict-rejected call still reports its delta.
+     *   5. strict reject (`STRICT_ENABLED && delta > TOLERANCE_DEG`) -> `false`, no mutation. The
+     *      boundary is inclusive: a delta exactly equal to the tolerance still binds (matches
+     *      `reanchorAtWall`).
+     *   6. Bind via `_bindHeadingFromYaw(imuYaw, headingDeg)` and return `true`.
+     *
+     * @param headingDeg         World-frame heading to re-bind to (degrees, `[0, 360)`).
+     * @param outPreBindDeltaDeg Optional out-param. On a successful IMU read it is set to the
+     *                           wrap-correct pre-bind `|belief - headingDeg|` (degrees) even when the
+     *                           strict gate then rejects; on a FAILED read it is left UNTOUCHED.
+     * @return `true` if the heading was re-bound; `false` (mutating nothing) on `!_navActive`,
+     *         `!_zeroed`, a failed IMU read, or a strict-gate rejection.
+     * @note Performs I/O (one live IMU read). PathTracker maps a `false` to a loud soft-skip (log +
+     *       continue), never a fault — the run proceeds on the last good heading.
+     */
+    bool reanchorHeading(float headingDeg, float* outPreBindDeltaDeg = nullptr);
+
+    /**
      * @brief Per-tick entry point for the operator-offset integrator (read-only telemetry).
      *
      * Reads the `Drive` encoders and the live IMU world heading, computes per-tick deltas, and
@@ -407,6 +456,27 @@ private:
      * @return `true` if the underlying lower-MCU read returned `MMLower::RESULT::OK`; `false` otherwise.
      */
     static bool _readImuYaw(float& yawOut);
+
+    /**
+     * @brief Bind the yaw offset so `getHeadingDeg() == headingDeg`, then refresh the heading cache.
+     *
+     * The single source of truth for the offset-bind invariant, shared by `reanchorAtWall` step (1)
+     * and the public `reanchorHeading`. Both callers do their OWN single IMU read and their OWN
+     * gate check, then hand the already-read raw yaw here so the bind math lives in exactly ONE
+     * place — the single-writer class exists to protect this invariant, and two copies would drift.
+     *
+     * Sets `_yawOffsetDeg = imuYaw - headingDeg` (so world == `normalize(imu - offset)` ==
+     * `headingDeg`), then refreshes `_lastGoodHeadingDeg = _normalize(imuYaw - _yawOffsetDeg)` and
+     * stamps `_lastGoodHeadingMs = millis()`. The cache refresh is REQUIRED, not cosmetic: a no-I/O
+     * `getLastHeadingDeg()` and the next `_consumeOffset()` (which baselines `_lastYawDeg` off the
+     * cached heading) must see the POST-bind heading, never the stale pre-bind value.
+     *
+     * @param imuYaw     The corrected app-frame IMU yaw the caller already read (degrees).
+     * @param headingDeg The world-frame heading to bind to (degrees).
+     * @note Writes `_yawOffsetDeg` plus the heading cache/stamp ONLY. Touches neither `_offset` nor
+     *       the integrator baselines — the caller owns any offset re-anchor.
+     */
+    void _bindHeadingFromYaw(float imuYaw, float headingDeg);
 
     /**
      * @brief Per-tick accumulation math for the offset integrator (both channels).
