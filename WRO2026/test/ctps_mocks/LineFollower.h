@@ -53,7 +53,10 @@ class LineFollowerClass;
  * returning `*this`; `setDistanceTarget` / `setReverse` capture the state the
  * `lineFollowDist` record needs. The captured state is emitted exactly once
  * from the `_executed`-guarded destructor, and only when the transition both
- * enables the follower and arms a distance gate.
+ * enables the follower and arms a distance gate. When `setReverse` is not
+ * chained, the record's direction falls back to the facade's persistent
+ * `_reverse` — mirrors the real `_hasReverseOverride` seam (LineFollower.cpp:610),
+ * which preserves a prior `LineFollower.setReverse(true)`.
  */
 class [[nodiscard]] LineFollowerEnableBuilder
 {
@@ -63,8 +66,8 @@ public:
      * @param targetEnabled `true` for an enable transition, `false` for disable.
      *                      Recorded as `_enabled`; a disable never emits a record.
      */
-    LineFollowerEnableBuilder(LineFollowerClass& /*owner*/, bool targetEnabled)
-        : _enabled(targetEnabled)
+    LineFollowerEnableBuilder(LineFollowerClass& owner, bool targetEnabled)
+        : _owner(owner), _enabled(targetEnabled)
     {
     }
 
@@ -79,23 +82,12 @@ public:
      *
      * `_executed`-guarded so a (defensive) second destructor invocation is a
      * no-op. `setEnabled(false)` (`_enabled` false) and a target-less
-     * `setEnabled(true)` (`_hasTarget` false) each record nothing.
+     * `setEnabled(true)` (`_hasTarget` false) each record nothing. Defined
+     * out-of-line below `LineFollowerClass` because it reads the facade's
+     * persistent `_reverse` (via `getReverse()`) when this builder did not chain
+     * `setReverse` — the facade type is incomplete at this point.
      */
-    ~LineFollowerEnableBuilder()
-    {
-        if (_executed)
-        {
-            return;
-        }
-        _executed = true;
-        if (_enabled && _hasTarget)
-        {
-            ctps::recordDriveMove(
-                "lineFollowDist",
-                {_distanceTarget, /*mode*/ nullptr, /*hasHeading*/ false, /*heading*/ 0.0f,
-                 _reverse});
-        }
-    }
+    ~LineFollowerEnableBuilder();
 
     LineFollowerEnableBuilder& setBrake(bool) { return *this; }
     LineFollowerEnableBuilder& setPreset(Config::SpeedPreset) { return *this; }
@@ -108,10 +100,17 @@ public:
 
     LineFollowerEnableBuilder& setAccel(float) { return *this; }
 
-    /** @brief Capture the reverse-direction flag for this follow's record. */
+    /**
+     * @brief Capture the reverse-direction flag for this follow's record.
+     *
+     * Marks `_hasReverseOverride` so the destructor uses this value instead of
+     * the facade's persistent `_reverse` — mirrors the real builder's
+     * override-pair gating (LineFollower.cpp:610).
+     */
     LineFollowerEnableBuilder& setReverse(bool reverse)
     {
-        _reverse = reverse;
+        _reverse            = reverse;
+        _hasReverseOverride = true;
         return *this;
     }
 
@@ -127,10 +126,12 @@ public:
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }
 
 private:
+    LineFollowerClass& _owner;      ///< Facade that spawned this builder; source of the fallback reverse.
     bool  _enabled;                 ///< From the ctor's targetEnabled; a disable never records.
     float _distanceTarget = 0.0f;   ///< Commanded distance from setDistanceTarget(cm).
     bool  _hasTarget      = false;  ///< True iff setDistanceTarget() was called.
-    bool  _reverse        = false;  ///< From the builder's setReverse(bool).
+    bool  _reverse        = false;  ///< From setReverse(bool); valid iff _hasReverseOverride.
+    bool  _hasReverseOverride = false;  ///< True iff setReverse() was chained on THIS builder.
     bool  _executed       = false;  ///< Guards the destructor emit against a double-record.
 };
 
@@ -147,8 +148,8 @@ static_assert(!std::is_copy_constructible<LineFollowerEnableBuilder>::value
  * `followDistance(cm)` records a `lineFollowDist` move directly, and the enable
  * builder (via `setEnabled`) records one from its destructor. `setReverse` /
  * `getReverse` keep a persistent facade-level `_reverse` so `followDistance`
- * captures the follow direction (the builder path uses the builder's own
- * `setReverse` instead).
+ * captures the follow direction (the enable-builder path uses its own chained
+ * `setReverse` when present, else falls back to this facade `_reverse`).
  */
 class LineFollowerClass
 {
@@ -209,6 +210,31 @@ private:
     ///        `followDistance`. Separate from the enable-builder's own `_reverse`.
     bool _reverse = false;
 };
+
+/**
+ * @brief Emit the enable-builder's `lineFollowDist` record (out-of-line so it
+ *        may read the now-complete facade's persistent `_reverse`).
+ *
+ * Direction precedence mirrors the real `_applyEnableBuilder`: a chained
+ * `setReverse` on this builder wins; otherwise fall back to the facade's
+ * persistent `_reverse` (a prior `LineFollower.setReverse(true)`), which the
+ * real builder preserves when `_hasReverseOverride` is false.
+ */
+inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
+{
+    if (_executed)
+    {
+        return;
+    }
+    _executed = true;
+    if (_enabled && _hasTarget)
+    {
+        const bool reverse = _hasReverseOverride ? _reverse : _owner.getReverse();
+        ctps::recordDriveMove(
+            "lineFollowDist",
+            {_distanceTarget, /*mode*/ nullptr, /*hasHeading*/ false, /*heading*/ 0.0f, reverse});
+    }
+}
 
 /** @brief Single global instance — defined in ctps_record.cpp. */
 extern LineFollowerClass LineFollower;

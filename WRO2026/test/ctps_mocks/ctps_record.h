@@ -98,6 +98,7 @@ namespace ctps
         uint8_t     b       = 0;             ///< LED: blue channel.
         bool        result  = false;         ///< TASK_END: task body return value (true == ok).
         float       cm      = 0.0f;          ///< DRIVE: distance for the linear drive moves.
+        bool        hasCm   = false;         ///< DRIVE: true iff a linear move carries `cm` (gates cm emission).
         float       deg     = 0.0f;          ///< DRIVE: angle for turnDeg / turnToYaw.
         uint8_t     arg     = 0;             ///< MANIP: command argument (servo angle / level).
 

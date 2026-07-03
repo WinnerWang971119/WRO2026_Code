@@ -89,6 +89,26 @@ _GYRO_HEADING_METHODS: frozenset[str] = frozenset(
 )
 
 
+def _honors_gyro_heading(cmd) -> bool:
+    """Whether the render turns in place to ``cmd.heading`` before advancing.
+
+    The two-phase (rotate-in-place, then advance) render fires only for a
+    forward-geometry method in :data:`_GYRO_HEADING_METHODS`, under an explicit
+    ``mode == "gyro"``, carrying a recorded ``heading``. The renderer and the
+    side-panel label both gate on this single predicate so the ``heading=``
+    token never advertises a heading the drawn trajectory does not follow — a
+    SYNC move ignores ``setHeading`` on the real robot.
+
+    :param cmd: the ``drive`` command.
+    :return: ``True`` iff the heading is honoured (and rendered) two-phase.
+    """
+    return (
+        cmd.method in _GYRO_HEADING_METHODS
+        and cmd.mode == "gyro"
+        and cmd.heading is not None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Output data model (Data Model B — Track)
 # ---------------------------------------------------------------------------
@@ -229,25 +249,33 @@ def _drive_label(cmd: Command) -> str:
 
     * ``driveDist(<cm>)`` / ``stopAtLine(<cm>)`` / ``wallStop(<cm>)`` /
       ``lineFollowDist(<cm>)`` / ``turnDeg(<deg>)`` / ``turnToYaw(<deg>)``.
-    * any other method (``stop``, unknown) renders as ``<method>()``.
+    * a cm-less forward-geometry move (legacy/partial trace) drops the argument
+      (``wallStop()``); any other method (``stop``, unknown) renders as
+      ``<method>()``.
 
-    For the forward-geometry methods, the captured ``mode`` / ``heading`` /
-    ``reverse`` are **appended** only when present (e.g.
+    For the forward-geometry methods, the captured ``mode`` / ``reverse`` are
+    **appended** only when set, and ``heading`` only when the render actually
+    honours it (the two-phase gyro gate — see :func:`_honors_gyro_heading`), so
+    the label never advertises a heading the drawn path does not follow (e.g.
     ``driveDist(35) mode=gyro heading=0 reverse``). A plain move — with none of
-    those set — keeps its exact base label (``driveDist(35)``), so existing
-    label-based expectations stay byte-identical.
+    those set — keeps its exact base label (``driveDist(35)``).
 
     :param cmd: the ``drive`` command.
     :return: the side-panel label string.
     """
     method = cmd.method
     if method in _FORWARD_GEOMETRY_METHODS:
-        label = f"{method}({cmd.cm})"
-        # Append captured drive state ONLY when set, so plain moves keep their
-        # exact base label (no trailing tokens).
+        # Omit the argument on the cm-less path (legacy/partial trace) so it reads
+        # `wallStop()` rather than the literal `wallStop(None)`.
+        label = f"{method}({cmd.cm})" if cmd.cm is not None else f"{method}()"
+        # Append captured drive state ONLY when it matches the drawn path, so the
+        # narration never contradicts the trajectory. `mode` / `reverse` are
+        # shown when set; `heading` only when the render actually honours it (the
+        # two-phase gyro gate) — a heading recorded without it (e.g. a SYNC move)
+        # is ignored by both the render and the robot, so it must not appear.
         if cmd.mode is not None:
             label += f" mode={cmd.mode}"
-        if cmd.heading is not None:
+        if _honors_gyro_heading(cmd):
             label += f" heading={cmd.heading}"
         if cmd.reverse:
             label += " reverse"
@@ -439,11 +467,7 @@ def build(trace: Trace, field_data) -> Track:
                     # emits ``cm`` for every forward-geometry method, to defend
                     # partial/legacy traces.
                     pass
-                elif (
-                    method in _GYRO_HEADING_METHODS
-                    and cmd.mode == "gyro"
-                    and cmd.heading is not None
-                ):
+                elif _honors_gyro_heading(cmd):
                     # GYRO + explicit heading → two-phase render: first rotate
                     # in place to the held heading (a keyframe at the unchanged
                     # position), THEN advance / back up along it (the
