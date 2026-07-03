@@ -66,6 +66,8 @@ from tools.path_planner.sim import (
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_REVERSE,
+    ACT_FOLLOW_DIST_PASS,
+    ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
     ACT_LINE_REVERSE,
@@ -80,6 +82,8 @@ from tools.path_planner.sim.runtime import (
     Direction,
     DispatchPrimitive,
     EdgeDispatchQuery,
+    LINE_HEADING_RESET_ON_JUNCTION,
+    LINE_HEADING_RESET_ON_PROJECTION,
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     OFF_MAP_GATE,
@@ -101,7 +105,15 @@ from tools.path_planner.sim.runtime import (
     resolve_return_action,
     resolve_stop_at_line,
 )
+from tools.path_planner.sim.parity import (
+    ParityCase,
+    ParitySchemaError,
+    TraceRecord,
+    integrate_pose,
+    normalize_sim_stream,
+)
 from tools.path_planner.tests.fixtures import bidirectional_field_data
+from tools.path_planner.tests.fixtures import collinear_4node
 from tools.path_planner.tests.fixtures import pivot_field_data
 
 _POSITION_TOL_CM: float = 0.1
@@ -4170,3 +4182,284 @@ def test_tc18c_k_zero_sim_matches_planner_plain_length_route():
     assert sim.localization.current_node() == "Gl"
     gx, gy = fd.NODES["Gl"]
     assert math.hypot(chassis.x_cm - gx, chassis.y_cm - gy) < _POSITION_TOL_CM
+
+
+# ===========================================================================
+# ADR-052 line-arrival heading reset -- TC15 sim<->firmware ACCEPT-path parity
+# (T8, docs/plans/2026-07-03-line-arrival-heading-reset.md). T7 wired the sim
+# mirror -- this module's ``ACT_HEADING_RESET`` emission inside ``_walk_hops``,
+# gated by the ``LINE_HEADING_RESET_ON_PROJECTION`` / ``_ON_JUNCTION`` knobs --
+# and the parity three-place contract (``sim/parity.py``'s
+# ``TRACE_RECORD_FIELDS["heading_reset"]`` entry, the ``normalize_sim_stream``
+# tag arm, and the no-op ``integrate_pose`` branch). These tests cover the
+# sim's ACCEPT-path decision only: the sim has no IMU/drift model and never
+# strict-rejects (AC12), so the reject path is host-C++-only
+# (``WRO2026/test/test_reanchor_heading.cpp``, T3) and out of scope here.
+# ===========================================================================
+
+
+def _make_projection_pass_through_sim():
+    """``Inter1`` --LINE--> ``ProjL`` [projection] --LINE--> ``Inter2``, collinear.
+
+    The node names echo the shared ``WRO2026/test/fixtures/field_fixture.py``
+    collinear-projection anchor the plan's Testing Strategy cites (its own
+    ``Inter1-ProjL-Inter2`` triple on y=40), but the fixture itself is built
+    inline -- the same ad-hoc minimal-field style
+    ``test_pass_through_projection.py`` already uses (T7 adapted that exact
+    file for the ``ACT_HEADING_RESET`` tag) -- rather than pulling in the
+    cross-tree C++ fixture module the #116 parity harness links. No direct
+    ``Inter1``->``Inter2`` edge exists, so the route is forced through
+    ``ProjL`` (mirroring ``test_pass_through_projection.py``'s TC11 layout).
+
+    :return: a fresh, zeroed ``(sim, field_data)`` pair seated on ``Inter1``.
+    """
+    nodes = {
+        "Inter1": (60.0, 40.0),
+        "ProjL": (100.0, 40.0),
+        "Inter2": (140.0, 40.0),
+    }
+    graph = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        graph.add_node(
+            name,
+            x_cm=float(x),
+            y_cm=float(y),
+            type="projection" if name == "ProjL" else "line",
+        )
+    for u, v, dist, hdg in (
+        ("Inter1", "ProjL", 40.0, 0.0),
+        ("ProjL", "Inter2", 40.0, 0.0),
+    ):
+        graph.add_edge(u, v, type=EDGE_LINE, distance_cm=dist, heading_deg=hdg)
+        graph.add_edge(
+            v, u, type=EDGE_LINE, distance_cm=dist, heading_deg=(hdg + 180.0) % 360.0
+        )
+    next_hop = {
+        "Inter1": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "ProjL"},
+        "ProjL": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "Inter2"},
+        "Inter2": {"Inter1": "ProjL", "ProjL": "ProjL", "Inter2": "Inter2"},
+    }
+    fd = _minimal_field(nodes, "Inter1", 0.0)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, fd
+
+
+def test_adr052_tc15a_projection_pass_through_fires_heading_reset_and_matches_record():
+    """TC15 / AC12: a collinear PROJECTION pass-through fires ``ACT_HEADING_RESET``
+    immediately after the pass-through arrival, bound to the incoming edge's
+    body-corrected heading -- and a fresh sim's normalized stream carries the
+    matching ``heading_reset`` :class:`TraceRecord`.
+    """
+    sim, _fd = _make_projection_pass_through_sim()
+    prims = sim.go_to("Inter2")
+
+    # (1) The distance-gated pass-through actually fired at ProjL (not a stop) --
+    #     a test that silently bypassed ProjL would be vacuous.
+    assert prims[0] == (ACT_FOLLOW_DIST_PASS, 40.0)
+    # (2) The heading reset fired at ProjL, "proj" kind, bound to the
+    #     Inter1->ProjL FRONT body heading (0.0 deg).
+    reset_prim = (ACT_HEADING_RESET, "ProjL", "proj", 0.0)
+    assert reset_prim in prims
+    # (3) It fires immediately after the pass-through arrival -- before the
+    #     onward ProjL->Inter2 hop is planned.
+    assert prims[prims.index(reset_prim) - 1] == (ACT_FOLLOW_DIST_PASS, 40.0)
+
+    # (4) A FRESH sim (normalize_sim_stream drives it to completion, so it is
+    #     single-use per case) produces a matching heading_reset TraceRecord.
+    sim2, _fd2 = _make_projection_pass_through_sim()
+    case = ParityCase(case_id="Inter1__Inter2__clean", start="Inter1", goal="Inter2")
+    records = normalize_sim_stream(sim2, case)
+    heading_reset_records = [r for r in records if r.kind == "heading_reset"]
+    assert len(heading_reset_records) == 1
+    assert heading_reset_records[0].fields == {
+        "node": "ProjL",
+        "pass_kind": "proj",
+        "heading_deg": 0.0,
+    }
+
+
+def test_adr052_tc15b_junction_pass_through_silent_by_default():
+    """TC15 / AC8: a collinear LINE (physical junction) pass-through does NOT
+    fire ``ACT_HEADING_RESET`` while ``LINE_HEADING_RESET_ON_JUNCTION`` sits at
+    its firmware-matching default (``False``) -- even though the pass-through
+    itself (``ACT_LINE_PASS``) still fires at both intermediate nodes.
+    """
+    fd = collinear_4node.make_field_data()
+    graph = collinear_4node.build_graph()
+    next_hop = collinear_4node.build_next_hop()
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("D")
+    act_tags = [p[0] for p in prims]
+
+    # Sanity: the junction pass-through DID fire at both B and C -- a test that
+    # never reached a pass-through node would be vacuous.
+    assert act_tags.count(ACT_LINE_PASS) == 2
+    assert ACT_HEADING_RESET not in act_tags
+
+
+def test_adr052_tc15c_junction_pass_through_fires_when_knob_enabled(monkeypatch):
+    """TC15 / AC8: with ``LINE_HEADING_RESET_ON_JUNCTION`` monkeypatched ``True``
+    (mirroring how TC8/TC9 patch ``PATH_PASS_THROUGH_ENABLED`` on ``_runtime``),
+    the SAME collinear LINE junction pass-through fires ``ACT_HEADING_RESET`` at
+    both B and C -- proving the knob, not the pass-through eligibility, gates
+    the junction-kind emission.
+    """
+    monkeypatch.setattr(_runtime, "LINE_HEADING_RESET_ON_JUNCTION", True)
+
+    fd = collinear_4node.make_field_data()
+    graph = collinear_4node.build_graph()
+    next_hop = collinear_4node.build_next_hop()
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("D")
+
+    assert (ACT_HEADING_RESET, "B", "junction", 0.0) in prims
+    assert (ACT_HEADING_RESET, "C", "junction", 0.0) in prims
+    # D is the goal (LINE_OVERSHOOT, never a pass-through) -- no reset there.
+    assert not any(p[0] == ACT_HEADING_RESET and p[1] == "D" for p in prims)
+
+
+def test_adr052_tc15d_projection_knob_off_suppresses_heading_reset(monkeypatch):
+    """TC15 / AC7+knob: monkeypatching ``LINE_HEADING_RESET_ON_PROJECTION`` to
+    ``False`` suppresses the reset on the SAME projection pass-through that
+    fires it by default (TC15a) -- proving the knob, not pass-through
+    eligibility, gates the emission (mirrors the sim exactly as the firmware's
+    knob gates ``_maybeHeadingReset``).
+    """
+    monkeypatch.setattr(_runtime, "LINE_HEADING_RESET_ON_PROJECTION", False)
+
+    sim, _fd = _make_projection_pass_through_sim()
+    prims = sim.go_to("Inter2")
+    act_tags = [p[0] for p in prims]
+
+    # The pass-through itself is unaffected by the knob -- only the reset is gated.
+    assert prims[0] == (ACT_FOLLOW_DIST_PASS, 40.0)
+    assert ACT_HEADING_RESET not in act_tags
+
+
+def test_adr052_tc15e_projection_goal_not_pass_through_no_heading_reset():
+    """TC15 / AC10 (structural): when the projection node IS the goal, the
+    not-final guard makes it a plain DISTANCE stop -- never a pass-through --
+    so no ``ACT_HEADING_RESET`` fires even though the knob defaults ON and the
+    geometry would otherwise qualify (mirrors
+    ``test_pass_through_projection.py``'s TC12 fixture).
+    """
+    nodes = {
+        "Inter1": (0.0, 0.0),
+        "ProjL": (50.0, 0.0),
+        "Inter2": (120.0, 0.0),
+    }
+    graph = nx.DiGraph()
+    for name, (x, y) in nodes.items():
+        graph.add_node(
+            name,
+            x_cm=float(x),
+            y_cm=float(y),
+            type="projection" if name == "ProjL" else "line",
+        )
+    for u, v, dist, hdg in (
+        ("Inter1", "ProjL", 50.0, 0.0),
+        ("ProjL", "Inter2", 70.0, 0.0),
+    ):
+        graph.add_edge(u, v, type=EDGE_LINE, distance_cm=dist, heading_deg=hdg)
+        graph.add_edge(
+            v, u, type=EDGE_LINE, distance_cm=dist, heading_deg=(hdg + 180.0) % 360.0
+        )
+    next_hop = {
+        "Inter1": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "ProjL"},
+        "ProjL": {"Inter1": "Inter1", "ProjL": "ProjL", "Inter2": "Inter2"},
+        "Inter2": {"Inter1": "ProjL", "ProjL": "ProjL", "Inter2": "Inter2"},
+    }
+    fd = _minimal_field(nodes, "Inter1", 0.0)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("ProjL")
+
+    assert prims == [(ACT_FOLLOW_DIST, 50.0)]
+    assert ACT_HEADING_RESET not in [p[0] for p in prims]
+    assert sim.localization.current_node() == "ProjL"
+
+
+def test_adr052_tc15f_ordinary_toy_route_no_heading_reset(fresh_sim):
+    """TC15 / AC10 (structural, regression): an ordinary toy-field route with no
+    collinear pass-through anywhere never emits ``ACT_HEADING_RESET``, under
+    the default (projection ON / junction OFF) knob settings.
+    """
+    prims = fresh_sim.go_to("B")
+    assert ACT_HEADING_RESET not in [p[0] for p in prims]
+
+
+def test_adr052_tc15g_heading_reset_record_is_noop_on_pose():
+    """TC15 / AC12: applying a ``heading_reset`` record through
+    :func:`integrate_pose` leaves the virtual chassis pose UNCHANGED -- the
+    reset is belief-only (the sim's heading is already ground truth, so there
+    is no drift for it to correct), unlike ``wall_reanchor``'s real coordinate
+    correction.
+    """
+    field = SimpleNamespace(
+        NODES={"ProjL": (100.0, 40.0)},
+        START_NODE="ProjL",
+        START_HEADING_DEG=0.0,
+    )
+    record = TraceRecord(
+        "heading_reset",
+        {"node": "ProjL", "pass_kind": "proj", "heading_deg": 37.5},
+    )
+
+    poses = integrate_pose(
+        [record],
+        field,
+        node_sequence=[],
+        start_node="ProjL",
+        start_heading_deg=12.3,
+    )
+
+    assert len(poses) == 1
+    pose = poses[0]
+    assert pose.x == pytest.approx(100.0, abs=1e-9)
+    assert pose.y == pytest.approx(40.0, abs=1e-9)
+    assert pose.heading == pytest.approx(12.3, abs=1e-9)
+
+
+def test_adr052_tc15h_normalize_sim_stream_unknown_act_tag_loud_fails():
+    """TC15 (three-place parity contract): :func:`normalize_sim_stream` loud-fails
+    with :class:`ParitySchemaError` on an ACT tag it does not recognize --
+    documenting that a sim-side tag added without a matching normalizer arm (or
+    a genuine schema desync) is a hard failure, never a silent skip
+    (``parity.py``'s ``else: raise`` guard, ~line 940).
+    """
+    fd = _minimal_field(
+        nodes={"A": (0.0, 0.0), "B": (30.0, 0.0)},
+        start_node="A",
+        start_heading_deg=0.0,
+    )
+    graph = _single_edge_graph("A", "B", EDGE_LINE, 30.0, 0.0)
+    next_hop = _next_hop_two_node("A", "B")
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    class _FakeSnapshot:
+        heading_deg = 0.0
+
+    def _bogus_stream(*_args, **_kwargs):
+        yield (("__adr052_test_bogus_tag__", "A", "junction", 0.0), _FakeSnapshot())
+
+    # Instance-level shadow (a plain function attribute, not a bound method) of
+    # step_through -- normalize_sim_stream drives off whatever stream this
+    # returns, so this is the narrowest way to inject an unrecognized tag
+    # without hand-building a full FSM desync.
+    sim.step_through = _bogus_stream
+
+    case = ParityCase(case_id="A__B__clean", start="A", goal="B")
+    with pytest.raises(ParitySchemaError, match="unknown sim ACT tag"):
+        normalize_sim_stream(sim, case)
