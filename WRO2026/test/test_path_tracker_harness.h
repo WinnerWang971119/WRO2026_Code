@@ -365,6 +365,85 @@ inline void seatAt(const char* startNode, int16_t startAppYawDeg = 0)
 }
 
 // ===========================================================================================
+// FSM entry-state drivers
+// ===========================================================================================
+
+/**
+ * @brief Drive the real FSM from a clean world, seated at @p startName (app-yaw 0), through the
+ *        shared LINE-follow entry point for the FIRST hop of `goTo(goalName)`.
+ *
+ * @details
+ * Leaves the FSM in the state every collinear pass-through case needs BEFORE tripping the
+ * junction/distance gate: the LineFollower enabled, non-overshoot, still seated at @p startName.
+ * Covers BOTH a LINE-junction first hop (LINE_FOLLOW) and a LINE->projection first hop
+ * (PROJECTION_FOLLOW) — the entry condition is identical for both. An optional route-direction
+ * override drives a forced-REAR first hop (the body target becomes edge heading + 180). Clears
+ * the `Serial` / `EventTrace` mock capture surfaces so every caller starts clean.
+ *
+ * Sequence the real FSM runs to get here (PathTracker.cpp): IDLE -> DEQUEUE (offset~0 return-gate
+ * -> PLAN_NEXT_HOP) -> PLAN_NEXT_HOP (LINE first hop; if the edge heading == the seated facing,
+ * `_dispatchTurnIfNeeded` skips the pre-turn) -> `_dispatchEdgeAfterTurn` -> arm the LineFollower
+ * -> LINE_FOLLOW / PROJECTION_FOLLOW. The mock IMU yaw is parked at the (body-corrected) first-hop
+ * edge heading each tick so any non-zero pre-turn settles immediately (the driveToSeekInFlight
+ * idiom).
+ *
+ * @param startName      Node to seat `Localization` at (the first hop's origin).
+ * @param goalName       The active `goTo` destination.
+ * @param routeDirection Forwarded to `.setRouteDirection(...)` when not `Direction::AUTO`; a bare
+ *                       `goTo(...)` otherwise. `Direction::REAR` also +180's the parked body target.
+ * @note Asserts the FSM reached the LINE-follow entry within `path_harness::kMaxHandshakeTicks`
+ *       (a real-FSM regression that never arms fails as a budget-exhausted assert, not a hang).
+ *       `Serial` / `EventTrace` are the capturing mocks force-included target-wide by CMake
+ *       (`add_path_force_includes`), so they are complete types here with no extra `#include`.
+ */
+inline void driveToLineFollowEntry(const char* startName, const char* goalName,
+                                   Direction routeDirection = Direction::AUTO)
+{
+    resetWorld();
+    Serial.clearCapture();
+    EventTrace.mockReset();
+    seatAt(startName);
+
+    const uint8_t          start     = nodeByName(startName);
+    const uint8_t          goal      = nodeByName(goalName);
+    const uint8_t          firstHop  = routedFirstHop(start, goal);
+    const Routes::EdgeInfo& firstEdge = FieldMap::getEdge(start, firstHop);
+
+    // Body-target heading for the first hop: edge heading, +180 for a forced REAR route.
+    float bodyHeading = firstEdge.heading_deg;
+    if (routeDirection == Direction::REAR)
+    {
+        bodyHeading = fmodf(bodyHeading + 180.0f, 360.0f);
+        if (bodyHeading < 0.0f)
+        {
+            bodyHeading += 360.0f;
+        }
+    }
+    const int16_t hwHeading = hwYaw((int16_t) lroundf(bodyHeading));
+
+    if (routeDirection == Direction::AUTO)
+    {
+        PathTracker.goTo(goal).async();
+    }
+    else
+    {
+        PathTracker.goTo(goal).setRouteDirection(routeDirection).async();
+    }
+
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
+    {
+        mmL.mockYawDeg = (double) hwHeading;
+        cooperativeTick();
+        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
+            && Localization.getCurrentNode() == start)
+        {
+            return;
+        }
+    }
+    ASSERT_TRUE(false);    // budget exhausted: the FSM never reached the LINE-follow entry.
+}
+
+// ===========================================================================================
 // Per-phase done-bit / sensor handshake helpers
 // ===========================================================================================
 

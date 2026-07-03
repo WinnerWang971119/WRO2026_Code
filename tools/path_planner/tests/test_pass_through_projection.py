@@ -195,7 +195,11 @@ def test_tc11_line_projection_line_routed_past_b_passes_through():
     assert sim.walked_path("C") == ["A", "B", "C"]
 
     prims = sim.go_to("C")
-    act_tags = [tag for tag, _ in prims]
+    # Index by tag only (`p[0]`), not a 2-tuple unpack: this exact PROJECTION
+    # pass-through also emits a variable-length ADR-052
+    # `(ACT_HEADING_RESET, node, pass_kind, heading_deg)` record (the knob
+    # defaults ON), so a blind `for tag, _ in prims` 2-tuple unpack would raise.
+    act_tags = [p[0] for p in prims]
 
     # (1) The A->B leg PASSED THROUGH B: the distance-gated pass-through tag fired,
     #     NOT the plain FOLLOW_DIST stop. This is the load-bearing assertion -- it
@@ -249,7 +253,12 @@ def test_tc11_dead_reckon_advance_stamped_mid_follow_at_b():
 
     saw_pass_at_b = False
     node_after_pass = None
-    for (tag, _payload), _snap in sim.step_through("C"):
+    # Unpack the primitive by tag only (`prim[0]`), not a 2-tuple destructure:
+    # this exact PROJECTION pass-through also emits a variable-length ADR-052
+    # `(ACT_HEADING_RESET, node, pass_kind, heading_deg)` record (the knob
+    # defaults ON), so a blind `(tag, _payload)` unpack would raise.
+    for prim, _snap in sim.step_through("C"):
+        tag = prim[0]
         if tag == ACT_FOLLOW_DIST_PASS:
             saw_pass_at_b = True
             # The pass-through stamps on_dead_reckoned_advance(B) BEFORE yielding,

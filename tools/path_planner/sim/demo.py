@@ -59,13 +59,25 @@ from tools.path_planner.sim.runtime import (
 
 
 def _format_primitive(p: Primitive) -> str:
-    """Render a primitive as a readable one-line string."""
-    action, value = p
-    if value is None:
-        return f"{action}()"
-    if action == ACT_TURN_REL:
-        return f"{action}({value:+.3f} deg)"
-    return f"{action}({value:.3f} cm)"
+    """Render a primitive as a readable one-line string.
+
+    Most primitives are ``(action, value)`` 2-tuples, but a few carry a wider
+    payload: the reverse twins are ``(action, node, distance, blind_mode)`` and
+    ADR-052's heading reset is ``(action, node, pass_kind, heading_deg)``. Render
+    the common 2-tuple shapes as a ``cm`` / ``deg`` value and fall back to a
+    generic ``action(arg, arg, ...)`` dump for the wider tuples, so a sim-only
+    tag never crashes the demo on ``too many values to unpack``.
+    """
+    action = p[0]
+    rest = p[1:]
+    if len(rest) == 1:
+        (value,) = rest
+        if value is None:
+            return f"{action}()"
+        if action == ACT_TURN_REL:
+            return f"{action}({value:+.3f} deg)"
+        return f"{action}({value:.3f} cm)"
+    return f"{action}({', '.join(str(arg) for arg in rest)})"
 
 
 def _print_step(idx: int, primitive: Primitive, chassis: VirtualChassis) -> None:

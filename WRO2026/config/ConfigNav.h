@@ -368,6 +368,116 @@ namespace Config
      */
     constexpr float WALL_PIVOT_CLEARANCE_CM = 14.0f;   // TODO bench-tune (12.5 pivot radius + safety)
 
+    // ---------------------------------------------------------------------------------------
+    // Line-arrival heading reset (wall-free) — ADR-052. Consumed by
+    // `Localization::reanchorHeading` and `PathTracker::_maybeHeadingReset`; mirrored in
+    // `tools/path_planner/sim/runtime.py` (T7) for sim parity.
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master enable for the wall-free heading reset on a collinear PROJECTION
+     *        pass-through.
+     *
+     * When `true` (default), `PathTracker::_maybeHeadingReset` fires
+     * `Localization::reanchorHeading` whenever the just-completed arrival was a collinear
+     * pass-through through a `NodeType::PROJECTION` node — a clean heading sample, since the
+     * line-follow PID never freezes at a projection pass-through (no junction dwell). The reset
+     * re-anchors the IMU-yaw offset to the incoming LINE edge's already-known `heading_deg`,
+     * body-corrected, bounding IMU-yaw drift for free with no wall maneuver and no motion.
+     *
+     * @note Default `true`: projection pass-throughs are the low-risk case (clean heading), so
+     *       the reset is expected to be safe and beneficial out of the box.
+     * @note Consumer: `PathTracker::_maybeHeadingReset` (ADR-052). Mirrored in
+     *       `tools/path_planner/sim/runtime.py` for parity.
+     * @note **Compile-time override:** guarded by `#ifndef LINE_HEADING_RESET_ON_PROJECTION_DEFAULT`
+     *       so a host test can flip it target-wide via
+     *       `-DLINE_HEADING_RESET_ON_PROJECTION_DEFAULT=false` without editing this file — same
+     *       idiom as `WALL_NORMAL_STRICT_ENABLED_DEFAULT` above.
+     */
+#ifndef LINE_HEADING_RESET_ON_PROJECTION_DEFAULT
+#define LINE_HEADING_RESET_ON_PROJECTION_DEFAULT true
+#endif
+    constexpr bool LINE_HEADING_RESET_ON_PROJECTION = LINE_HEADING_RESET_ON_PROJECTION_DEFAULT;
+
+    /**
+     * @brief Enable for the wall-free heading reset on a collinear physical-junction (LINE)
+     *        pass-through.
+     *
+     * When `true`, `PathTracker::_maybeHeadingReset` also fires `Localization::reanchorHeading`
+     * on a collinear pass-through through a `NodeType::LINE` node (a physical intersection).
+     * Unlike a projection pass-through, the junction PID-freeze window (see
+     * `project-junction-pid-freeze`) can inject a small heading wiggle while the chassis
+     * traverses the dwell, so this knob ships OFF for v1 until bench data characterises the
+     * freeze-window envelope.
+     *
+     * @note Default `false`: the junction freeze-window envelope is unmeasured; ships OFF for
+     *       v1. Flip ON once bench data (gathered via the Serial skip/fire log while this knob
+     *       is ON) shows the wiggle is small enough that frequent slightly-noisy binds strictly
+     *       dominate rare clean ones on a long run.
+     * @note Consumer: `PathTracker::_maybeHeadingReset` (ADR-052). Mirrored in
+     *       `tools/path_planner/sim/runtime.py` for parity.
+     * @note **Compile-time override:** guarded by `#ifndef LINE_HEADING_RESET_ON_JUNCTION_DEFAULT`
+     *       so a host test can flip it target-wide via
+     *       `-DLINE_HEADING_RESET_ON_JUNCTION_DEFAULT=true` without editing this file — same
+     *       idiom as `WALL_NORMAL_STRICT_ENABLED_DEFAULT` above.
+     */
+#ifndef LINE_HEADING_RESET_ON_JUNCTION_DEFAULT
+#define LINE_HEADING_RESET_ON_JUNCTION_DEFAULT false
+#endif
+    constexpr bool LINE_HEADING_RESET_ON_JUNCTION = LINE_HEADING_RESET_ON_JUNCTION_DEFAULT;
+
+    /**
+     * @brief Master switch for the strict sanity gate in `Localization::reanchorHeading`.
+     *
+     * When `true` (default), `reanchorHeading` compares the live IMU heading against the
+     * pre-bind belief and REFUSES to bind (no mutation, returns `false`) when the wrap-correct
+     * absolute difference EXCEEDS `LINE_HEADING_RESET_TOLERANCE_DEG`. This is a gross-wrong-state
+     * detector (perpendicular / kidnapped / stale-flag cases at ~90-180 deg) — at the ~10 deg
+     * default it does NOT discriminate line-follow wiggle (+/-1-3 deg) from IMU drift
+     * (+/-1-3 deg/min), and it (by design) passes a parallel wrong line where the bind is
+     * coincidentally still correct.
+     *
+     * @note Default `true`: unlike the wall-normal strict check (which defaults OFF pending
+     *       bench characterisation of `wallStop` squaring), this gate defaults ON — a
+     *       heading-reset bind runs unattended mid-mission with no operator confirmation, so
+     *       guarding against a gross misread is the safer default.
+     * @note Consumer: `Localization::reanchorHeading` (ADR-052).
+     * @note **Compile-time override:** guarded by
+     *       `#ifndef LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT` so a host test can flip it
+     *       target-wide via `-DLINE_HEADING_RESET_STRICT_ENABLED_DEFAULT=false` without editing
+     *       this file — same idiom as `WALL_NORMAL_STRICT_ENABLED_DEFAULT` above.
+     */
+#ifndef LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT
+#define LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT true
+#endif
+    constexpr bool LINE_HEADING_RESET_STRICT_ENABLED = LINE_HEADING_RESET_STRICT_ENABLED_DEFAULT;
+
+    /**
+     * @brief Tolerance (degrees) for the strict sanity gate in `Localization::reanchorHeading`,
+     *        when enabled.
+     *
+     * The maximum absolute angular difference, computed wrap-around-correct over `[0, 360)`,
+     * between the pre-bind heading belief and the incoming edge's heading that still lets
+     * `reanchorHeading` proceed. The comparison is `> tolerance` REJECTS: a difference exactly
+     * EQUAL to the tolerance still binds (the tolerance value is inclusive / "just inside"), and
+     * only a strictly greater difference rejects — matching the `WALL_NORMAL_TOLERANCE_DEG`
+     * boundary convention. Inert while `LINE_HEADING_RESET_STRICT_ENABLED == false`.
+     *
+     * @note TODO: bench-tune. Ships as a documented default (10 deg) to be bench-calibrated
+     *       later (see ADR-052's trigger-to-revisit).
+     * @note Consumer: `Localization::reanchorHeading` (ADR-052).
+     * @note **Compile-time override:** guarded by
+     *       `#ifndef LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT` so a host test can flip it
+     *       target-wide via `-DLINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT=5.0f` without editing
+     *       this file — same idiom as the other `_DEFAULT` hooks in this file. Range is enforced
+     *       by a `static_assert` in `ConfigChecks.h` (included last, alongside the other
+     *       value-range tripwires).
+     */
+#ifndef LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT
+#define LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT 10.0f
+#endif
+    constexpr float LINE_HEADING_RESET_TOLERANCE_DEG = LINE_HEADING_RESET_TOLERANCE_DEG_DEFAULT;
+
     // Sanity static_asserts (intra-Localization; keep them here next to the constants,
     // NOT in ConfigChecks.h — they reference only the operator-offset symbols above).
 

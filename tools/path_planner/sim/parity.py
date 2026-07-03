@@ -80,6 +80,7 @@ from tools.path_planner.sim.runtime import (
     ACT_FOLLOW_DIST_PASS,
     ACT_FOLLOW_INT,
     ACT_FORWARD,
+    ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
     ACT_LINE_REVERSE,
@@ -214,6 +215,13 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
     "wall_stop": {"node": str, "axis_idx": int, "wall_coord": float},
     "wall_reanchor": {"node": str, "axis_idx": int, "wall_coord": float},
     "wall_depart": {"node": str, "axis_idx": int, "node_coord": float},
+    # ADR-052: line-arrival heading reset. Emitted ONLY on a successful bind
+    # (no `bound`/`result` field — the record's mere presence means it bound).
+    # `pass_kind` carries "proj" (PROJECTION pass-through) or "junction" (LINE
+    # pass-through) — deliberately NOT named `kind`, which is the record-type
+    # discriminator this dict is keyed on (a duplicate `"kind"` wire key would
+    # be invalid JSON). See ``WRO2026/PathTracker.cpp``'s ``_ptEmitHeadingReset``.
+    "heading_reset": {"node": str, "pass_kind": str, "heading_deg": float},
     "goal_done": {"final": str},
 }
 
@@ -743,6 +751,19 @@ def _make_wall(
     )
 
 
+def _make_heading_reset(node: str, pass_kind: str, heading_deg: float) -> TraceRecord:
+    """Build a ``heading_reset`` record (ADR-052). Model on :func:`_make_wall`.
+
+    Emitted only for a successful bind (:func:`normalize_sim_stream` only calls
+    this from the :data:`~tools.path_planner.sim.runtime.ACT_HEADING_RESET` arm,
+    which the sim yields only on the accept path).
+    """
+    return TraceRecord(
+        "heading_reset",
+        {"node": str(node), "pass_kind": str(pass_kind), "heading_deg": float(heading_deg)},
+    )
+
+
 def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRecord]:
     """Normalize the sim's real per-hop stream for one case into TraceRecords.
 
@@ -908,6 +929,14 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
                 _make_wall("wall_depart", prim[1], prim[2], "node_coord", prim[3])
             )
 
+        elif tag == ACT_HEADING_RESET:
+            # (tag, node, pass_kind, heading_deg) — ADR-052 line-arrival heading
+            # reset, emitted only on a successful bind (the sim never
+            # strict-rejects). Does NOT advance `hop_idx`: it belongs to the hop
+            # whose own primitive (line_overshoot / projection_follow) already
+            # advanced it a moment earlier in this same stream.
+            records.append(_make_heading_reset(prim[1], prim[2], prim[3]))
+
         else:
             raise ParitySchemaError(
                 f"normalize_sim_stream: unknown sim ACT tag {tag!r} "
@@ -1072,6 +1101,15 @@ def integrate_pose(
             _snap_to_node(chassis, field, fields["node"])
         elif kind in ("wall_stop", "wall_reanchor", "wall_depart"):
             _apply_wall(chassis, field, record)
+        elif kind == "heading_reset":
+            # ADR-052: heading-only re-anchor, NO-OP on pose. Unlike
+            # `wall_reanchor` (which corrects a real on-axis coordinate against
+            # a physical wall), the sim's heading is already ground truth — there
+            # is no drift to correct, so applying a heading reset changes
+            # nothing in (x, y, heading). Do NOT route through `_apply_wall`
+            # (it reads `field.RESET_NODES[node]`, which KeyErrors on a
+            # non-reset pass-through node).
+            pass
         else:
             raise ParitySchemaError(
                 f"integrate_pose: unhandled record kind {kind!r}"

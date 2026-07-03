@@ -334,6 +334,21 @@ namespace
                       _ptNodeName(node), (unsigned) axisIdx, coordKey, (double) coord);
         pt_parity::emit(line);
     }
+
+    /// `heading_reset` — {node, pass_kind, heading_deg}. Emitted ONLY on a successful bind, so
+    /// its mere presence means the reset bound — there is NO `bound`/`result` field. NOTE the
+    /// proj/junction tag is carried in `pass_kind`, NOT `kind`: `kind` is the record-type
+    /// discriminator ("heading_reset") the parity loader keys on, and reusing it here would emit
+    /// a duplicate `"kind"` key (invalid JSON). @p kind is the proj/junction pass tag string.
+    void _ptEmitHeadingReset(uint8_t node, const char* kind, float headingDeg)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "{\"kind\":\"heading_reset\",\"node\":\"%s\",\"pass_kind\":\"%s\","
+                      "\"heading_deg\":%.6f}",
+                      _ptNodeName(node), kind, (double) headingDeg);
+        pt_parity::emit(line);
+    }
 }    // namespace
 #endif    // PT_PARITY_TRACE
 
@@ -1564,9 +1579,116 @@ void PathTrackerClass::_dispatchWallStop(uint8_t node)
     _state = State::WALL_STOP;
 }
 
+void PathTrackerClass::_maybeHeadingReset(uint8_t cur, bool firstPlan,
+                                          float incomingBodyHeadingDeg)
+{
+    // Line-arrival heading reset (ADR-052). Fires only on a collinear pass-through arrival and
+    // re-binds the IMU-yaw offset to the incoming LINE edge's already-known body heading, for
+    // free — no wall, no maneuver. Heading-only, no motion, no fault, NO `_state` change: a
+    // rejected sample or a failed IMU read soft-skips and the run continues. Full contract +
+    // gating rationale in the header doxygen.
+
+    // Mirror the wall hook's `!firstPlan` gate. `_passThrough` provably cannot be true on a
+    // first plan (it is latched only on a real LINE-edge arrival), so this documents the
+    // invariant rather than trusting the distant consume/clear sites forever.
+    if (firstPlan)
+    {
+        return;
+    }
+
+    // Only a collinear pass-through arrival is eligible. A stop-and-go arrival already re-anchors
+    // at the junction marker (or dead-reckons at a projection stop) through the existing hooks.
+    if (!_passThrough)
+    {
+        return;
+    }
+
+    // Select the enabling knob + parity `pass_kind` tag by node category. Enumerate ALL FOUR
+    // `Routes::NodeType`s with NO `default` so a future enum member trips `-Wswitch`. BLIND /
+    // RESET are a defensive SILENT no-op: per ADR-048 no LINE edge is incident to a RESET node
+    // and `_passThrough` is latched only on a LINE-edge arrival, so a pass-through into
+    // BLIND/RESET is unreachable on any validator-passed field (exercised only under forced
+    // state, TC11).
+    bool        knob = false;
+    const char* kind = nullptr;
+    switch (FieldMap::getNodeType(cur))
+    {
+        case Routes::NodeType::PROJECTION:
+            knob = Config::LINE_HEADING_RESET_ON_PROJECTION;
+            kind = "proj";
+            break;
+        case Routes::NodeType::LINE:
+            knob = Config::LINE_HEADING_RESET_ON_JUNCTION;
+            kind = "junction";
+            break;
+        case Routes::NodeType::BLIND:
+        case Routes::NodeType::RESET:
+            return;    // defensive silent no-op (unreachable on a validator-passed field, ADR-048)
+    }
+
+    // Knob OFF => no IMU read, no log — this is what makes "off means off, no cost".
+    if (!knob)
+    {
+        return;
+    }
+
+    // Seed the delta to a negative sentinel so a knob-ON skip can tell a FAILED IMU read (which
+    // leaves the out-param UNTOUCHED) from a strict-gate reject (which SETS the out-param): a
+    // real pre-bind delta is `fabsf(...)` and thus never negative. `reanchorHeading` returns
+    // false for BOTH and does not say which — the sentinel is how we distinguish them below.
+    float      delta = -1.0f;
+    const bool bound = Localization.reanchorHeading(incomingBodyHeadingDeg, &delta);
+
+    if (bound)
+    {
+        // FIRE: one Serial line (node / kind / bound heading / pre-bind delta) + one fixed OLED
+        // push. The push is a FIXED string literal (static storage) per the wall precedent —
+        // EventTrace may store the pointer, so never hand it a stack buffer.
+        Serial.print(F("[PathTracker] heading reset: node "));
+        Serial.print(FieldMap::getNode(cur).name);
+        Serial.print(F(" ("));
+        Serial.print(kind);
+        Serial.print(F(") bound heading="));
+        Serial.print(incomingBodyHeadingDeg);
+        Serial.print(F(" preBindDelta="));
+        Serial.println(delta);
+        EventTrace.pushEvent("HDG reset");
+#ifdef PT_PARITY_TRACE
+        _ptEmitHeadingReset(cur, kind, incomingBodyHeadingDeg);    // record ONLY on a successful bind
+#endif
+    }
+    else
+    {
+        // SKIP (knob was ON — knob-OFF returned above without a read): one loud Serial line so a
+        // rejected/failed reset — the case the reset was most needed — is never silent. The
+        // untouched-sentinel `delta < 0.0f` means the IMU read failed (no delta to report);
+        // otherwise the strict gate rejected the sample and `delta` holds the offending value.
+        Serial.print(F("[PathTracker] heading reset SKIP: node "));
+        Serial.print(FieldMap::getNode(cur).name);
+        Serial.print(F(" ("));
+        Serial.print(kind);
+        Serial.print(F(") "));
+        if (delta < 0.0f)
+        {
+            Serial.println(F("IMU read failed; delta=n/a"));
+        }
+        else
+        {
+            Serial.print(F("strict-rejected (|belief - heading| > tolerance); delta="));
+            Serial.println(delta);
+        }
+    }
+}
+
 void PathTrackerClass::_onPlanNextHop()
 {
     const uint8_t cur = Localization.getCurrentNode();
+
+    // Capture the body heading the chassis JUST arrived on for the line-arrival heading reset
+    // (ADR-052), BEFORE anything below can overwrite `_resolvedBodyHeading` (the next hop
+    // overwrites it at `_resolvedBodyHeading = bodyTarget;` further down). Passed explicitly
+    // into `_maybeHeadingReset` so the bind target never depends on member-write ordering.
+    const float incomingBody = _resolvedBodyHeading;
 
     // (#3) Capture-and-clear the "first plan of this goal" flag. The interlude below fires only
     // on a genuine post-hop arrival, never on the first plan (when `cur` is still the start node
@@ -1585,6 +1707,14 @@ void PathTrackerClass::_onPlanNextHop()
     {
         return;    // _state is now WALL_STOP; the interlude will route back here
     }
+
+    // Line-arrival heading reset hook (ADR-052): on a collinear pass-through arrival, re-bind
+    // heading for free to the incoming edge's known heading, bounding IMU-yaw drift. Fired here
+    // — after the wall hook, before the destination check and the next hop's direction
+    // resolution — so the next hop plans against the freshly-corrected heading. It is void and
+    // never changes `_state`, so the FSM continues exactly as before. `incomingBody` was
+    // captured at the top before any dispatch overwrites `_resolvedBodyHeading`.
+    _maybeHeadingReset(cur, firstPlan, incomingBody);
 
     // Already at the destination — done.
     if (cur == _destinationNode)

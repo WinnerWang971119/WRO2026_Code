@@ -96,36 +96,15 @@ namespace
 // ---------------------------------------------------------------------------
 void driveToProjectionFollowHop(const char* startName, const char* goalName)
 {
-    resetWorld();
-    seatAt(startName);    // bind world frame @ app-yaw 0 + declare Localization at the hop origin
-
-    const uint8_t start    = nodeByName(startName);
-    const uint8_t firstHop = routedFirstHop(start, nodeByName(goalName));
-    // `seatAt` always binds the facing to START_HEADING_DEG (0). If the inbound edge departs at a
-    // non-zero heading the FSM dispatches a FRONT pre-edge turn first (BIDIRECTIONAL_AUTO ties go
-    // FRONT, so a 90 deg bend stays FRONT). Park the corrected IMU read at the edge heading each
-    // tick so that pre-turn settles immediately on its body target — the driveToSeekInFlight idiom.
-    const int16_t hwHeading = hwYaw((int16_t) lroundf(FieldMap::getEdge(start, firstHop).heading_deg));
-
-    // Enqueue the goal; PathTracker walks NEXT_HOP hop-by-hop. `.async()` so the
-    // harness drives the cooperative tick loop instead of the builder's blocking drain.
-    PathTracker.goTo(nodeByName(goalName)).async();
-
-    // Tick until the FSM dispatches the LINE -> projection hop and arms the follower
-    // for the distance-gated projection follow (overshootMode=false, enabled). That
-    // arm is the PROJECTION_FOLLOW entry; the follower is enabled and no Drive move is
-    // pending, so the projection distance gate can be tripped next.
-    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
-    {
-        mmL.mockYawDeg = (double) hwHeading;
-        cooperativeTick();
-        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
-            && Localization.getCurrentNode() == start)
-        {
-            return;    // PROJECTION_FOLLOW reached, follower armed for the projection follow
-        }
-    }
-    ASSERT_TRUE(false);    // budget exhausted: the FSM never reached PROJECTION_FOLLOW
+    // Delegates to the shared `driveToLineFollowEntry` in `test_path_tracker_harness.h`: a
+    // LINE->projection first hop reaches PROJECTION_FOLLOW through the SAME
+    // resetWorld -> seatAt -> goTo -> tick-until-armed handshake a LINE-junction first hop uses
+    // to reach LINE_FOLLOW — both settle on the identical "follower enabled, non-overshoot, still
+    // seated at start" entry observable, and the harness helper parks the (body-corrected) edge
+    // heading every tick so a non-zero pre-turn (e.g. Inter2->ProjC at 270) settles just as this
+    // copy did. AUTO route direction (this file has no forced-REAR entry). The helper also clears
+    // the Serial / EventTrace capture surfaces, harmless here (no assertion straddles the setup).
+    driveToLineFollowEntry(startName, goalName);
 }
 
 // Inter1 -> ProjL convenience wrapper for the collinear triple (TC-PP1 / TC-PP2):

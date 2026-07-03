@@ -107,7 +107,9 @@ from tools.path_planner.sim.runtime import (  # noqa: E402
 # Comparison tolerances (the three-bucket constants — owned here in T8, not in
 # parity.py). Distance/coord in cm; angular fields compared circularly (wrap-
 # aware) in deg; pose position looser than commanded distance because pose is
-# accumulated.
+# accumulated. A later task can still extend `_EXACT_FIELDS` directly (as
+# ADR-052's runtime/parity task did for `pass_kind`, ahead of ADR-052's own
+# dedicated sim-test task) without moving ownership out of this file.
 # ---------------------------------------------------------------------------
 DIST_TOL: float = 1e-4       # cm — TOLERANT-NUMERIC (distance) bucket
 HEAD_TOL: float = 1e-4       # deg — TOLERANT-NUMERIC (angular) bucket, circular
@@ -132,6 +134,8 @@ _EXACT_FIELDS: frozenset = frozenset(
         "wheel",
         "mode",
         "reanchor",
+        # ADR-052 line-arrival heading reset pass-kind tag ("proj" / "junction")
+        "pass_kind",
         # bools
         "reverse",
         "pass_through",
