@@ -523,6 +523,49 @@ private:
      */
     void _dispatchWallStop(uint8_t node);
 
+    /**
+     * @brief Line-arrival heading reset hook (ADR-052): re-bind heading for free on a
+     *        collinear pass-through arrival — no wall, no maneuver.
+     *
+     * Called from `_onPlanNextHop()` immediately after the wall `_maybeEnterReset` block and
+     * before the destination check — the one chokepoint every LINE arrival funnels through.
+     * Firing here (before the next hop's direction is resolved via `getHeadingDeg()`) is
+     * intentional: the next hop is planned against the freshly-corrected heading. Fires ONLY
+     * when the just-completed arrival was a collinear pass-through (`_passThrough`), gated by
+     * two independent global knobs:
+     *   - a `NodeType::PROJECTION` pass-through binds under
+     *     `Config::LINE_HEADING_RESET_ON_PROJECTION` (default ON — a clean sample, the
+     *     line-follow PID never freezes at a marker-less projection node),
+     *   - a `NodeType::LINE` (physical junction) pass-through binds under
+     *     `Config::LINE_HEADING_RESET_ON_JUNCTION` (default OFF — the junction PID-freeze
+     *     window can inject a small heading wiggle).
+     * `NodeType::BLIND` / `NodeType::RESET` are a defensive SILENT no-op: per ADR-048 no LINE
+     * edge is incident to a RESET node and `_passThrough` is latched only on a LINE-edge
+     * arrival, so a pass-through into BLIND/RESET is unreachable on any validator-passed field.
+     * The node-type switch enumerates all four `Routes::NodeType`s with NO `default`, so a
+     * future enum member trips `-Wswitch`.
+     *
+     * On a knob-ON eligible node it calls `Localization.reanchorHeading(incomingBodyHeadingDeg,
+     * &delta)`: on a successful bind it emits a Serial fire log, one fixed
+     * `EventTrace.pushEvent(...)` (wall-path style), and — under `PT_PARITY_TRACE` — a
+     * `heading_reset` parity record; on a soft-skip (failed IMU read or strict-gate rejection)
+     * it emits a loud Serial skip log and the run continues (no fault). NEVER changes `_state`
+     * and NEVER touches `Localization::_offset`. Knob-OFF and the BLIND/RESET branch are
+     * entirely SILENT — no IMU read, no log, no parity record.
+     *
+     * @param cur                    The just-arrived node id (`Localization.getCurrentNode()`).
+     * @param firstPlan              The captured `_planIsFirstAfterDequeue`; a first plan is
+     *                               skipped (mirrors the wall hook's `!firstPlan` gate —
+     *                               `_passThrough` cannot be true on a first plan anyway).
+     * @param incomingBodyHeadingDeg The world-frame body heading the chassis JUST arrived on,
+     *                               captured from `_resolvedBodyHeading` at the TOP of
+     *                               `_onPlanNextHop()` before the next hop overwrites it
+     *                               (`:1757`). Passed explicitly so the bind target never
+     *                               depends on member-write ordering. Already body-corrected
+     *                               (a REAR arrival is edge heading + 180).
+     */
+    void _maybeHeadingReset(uint8_t cur, bool firstPlan, float incomingBodyHeadingDeg);
+
     void _onPlanNextHop();
 
     /**
