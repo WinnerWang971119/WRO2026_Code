@@ -194,6 +194,17 @@ namespace Config
                   "CW-to-CCW sign applied by YawSource::readYawDeg and YawSource::toHwHeading, "
                   "not a scale factor. See config/ConfigNav.h.");
 
+    // -----------------------------------------------------------------------------------------
+    // Line-arrival heading reset checks (ConfigNav.h, ADR-052)
+    // -----------------------------------------------------------------------------------------
+    static_assert(LINE_HEADING_RESET_TOLERANCE_DEG > 0.0f && LINE_HEADING_RESET_TOLERANCE_DEG < 180.0f,
+                  "Config::LINE_HEADING_RESET_TOLERANCE_DEG must be in (0, 180) -- a zero or "
+                  "negative tolerance would reject EVERY bind when the strict check is enabled "
+                  "(no live IMU read lands bit-exact on the pre-bind belief), and the wrap-around "
+                  "angular difference is bounded by 180 deg, so a tolerance >= 180 can never be "
+                  "exceeded and the strict check would accept any heading, defeating it. See "
+                  "config/ConfigNav.h.");
+
 }    // namespace Config
 
 #endif    // CONFIG_CHECKS_H
