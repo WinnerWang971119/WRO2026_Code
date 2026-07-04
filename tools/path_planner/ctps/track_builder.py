@@ -137,7 +137,9 @@ class Track:
     :param events: Narration / warning markers, each
         ``{"t": float, "type": str, "label": str}``, in emission order. Event
         timestamps are non-decreasing (they share the same running clock as the
-        keyframes).
+        keyframes). A successful ``goto`` additionally carries ``"t_end":
+        float`` (>= ``"t"``), spanning the whole multi-hop move; the
+        UNREACHABLE fault ``goto`` event has no ``"t_end"``.
     """
 
     schema_version: int
@@ -406,6 +408,7 @@ def build(trace: Trace, field_data) -> Track:
         if cmd.op == "goto":
             from_node = sim.localization.current_node()
             target = cmd.target
+            t_start = t
             try:
                 for _primitive, snap in sim.step_through(target):
                     append_geometry_keyframe(snap.x_cm, snap.y_cm, snap.heading_deg)
@@ -423,12 +426,21 @@ def build(trace: Trace, field_data) -> Track:
                 # Stop processing further commands and end the track.
                 break
 
-            # A successful goto intentionally emits NO discrete command event:
-            # the per-hop keyframes appended above ARE its narration — the player
-            # animates the chassis driving the route. The event list is reserved
-            # for what the motion alone cannot convey: the UNREACHABLE fault above
-            # and the drift warning below. (The player's `goto` event renderer
-            # serves that fault banner, not a per-hop caption for healthy moves.)
+            # A successful goto emits a `goto` SPAN event covering the whole
+            # multi-hop move (`t_start` -> `t`, the running clock before/after
+            # `step_through`): the per-hop keyframes appended above remain its
+            # motion narration, and this span lets the GOTO timeline lane (and
+            # the Log / Current-command panels) caption the healthy move too.
+            # `t_start` is `t` before any hop, so it is >= every prior event's
+            # `t`, keeping `events` sorted; `t` here is >= `t_start`.
+            events.append(
+                {
+                    "t": t_start,
+                    "type": "goto",
+                    "t_end": t,
+                    "label": f"{from_node}->{target}",
+                }
+            )
             # Drift check after the final hop: a clean goto lands ON the node
             # (drift ~ 0); a preceding raw drive injects an offset that goto
             # does not correct.
@@ -443,9 +455,6 @@ def build(trace: Trace, field_data) -> Track:
                         "label": f"chassis {drift:.1f} cm off node {node}",
                     }
                 )
-            # ``from_node`` is captured for symmetry with the UNREACHABLE label
-            # path; a clean goto needs no banner.
-            _ = from_node
 
         elif cmd.op == "drive":
             # Raw move applied DIRECTLY to the shared chassis; never advance the
