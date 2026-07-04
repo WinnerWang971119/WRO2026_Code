@@ -278,7 +278,7 @@ is undefined) so boot/modules always find the namespace; `engine` re-exposes
 - **renderer surface** (T4): `CTPS.renderer = { resize(), worldToPixel(x,y)->{px,py}, hitTest(px,py)->{kind:"node"|"robot", id?}|null }` — boot wires `window "resize" → CTPS.renderer.resize()`; T8 uses `hitTest`/`worldToPixel`.
 - **timelineLane** (T6): `{ id, label, kind: "span"|"point", color, build(track)->[{t0,t1?,label,cls}] }` — `task`,`goto`,`drift` live (`goto` = spans `t`→`t_end` + UNREACHABLE pin); `holding` reserved (empty build)
 - **panelTab** (T7): `{ id, label, render(el, state) }` — `log`, `inspector`; telemetry reserved (#23)
-- **inspectorField** (T8): `{ id, label, value(state)->str, color?(state)->hex }` — pose/heading/nearest/drift-check
+- **inspectorField** (T8): `{ id, label, value(state)->str, tone?(state)->"drift"|null }` — pose/heading/nearest/drift-check. (Panels can only set CSS classes, so the descriptor returns a semantic **tone** hint, NOT a hex — `"drift"` maps to `.ctps-inspector-value--drift`; avoids a 3-place color-literal coupling.)
 
 ### Event-cursor service (owner: **T3**, in `store.js`)
 `CTPS.cursor()` (NO arg — uses `engine.findEventIndex`, which closes over the module
