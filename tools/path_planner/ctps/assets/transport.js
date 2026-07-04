@@ -1,8 +1,8 @@
 /* CTPS — Clear Trajectory Prediction Simulator: transport bar + keymap.
  *
  * Wires the transport bar (play/pause, seek, time readout, speed, home/end,
- * drift jumps) and the global keymap to `CTPS.store` (T3). This file owns two
- * things and nothing else:
+ * drift jumps) and the global keymap to `CTPS.store` (T3). This file owns
+ * three things and nothing else:
  *
  *   1. The playback clock: a requestAnimationFrame loop that advances
  *      `store.t` by real elapsed time times `store.speed` while
@@ -14,12 +14,18 @@
  *      segmented control / `#ctps-home` / `#ctps-end` / the drift-jump
  *      buttons, plus the window-level keymap (Space, `[`/`]`, Shift+Left/
  *      Right, Home/End, `D`, `F`, `?`).
+ *   3. The seek bar's red drift ticks: one `.ctps-seek-tick` per `drift_warn`
+ *      event, appended into the already-templated `#ctps-seek-ticks` overlay
+ *      and positioned by `left` percent-of-duration (same convention as the
+ *      timeline dock's spans/pins in `timeline.js`). Built once at init —
+ *      drift events are static for the life of the page.
  *
  * Pure transport: no canvas, no timeline, no panels — those live in the
- * sibling render/timeline/panel assets. The only dynamic style write in this
- * file is `document.documentElement.style.setProperty('--ctps-frac', ...)`
- * (the ADR-053 carve-out); every other visual state change goes through a
- * DOM property (`.value`, `.textContent`) or `classList`, never `.style.*`.
+ * sibling render/timeline/panel assets. The only dynamic style writes in this
+ * file are `document.documentElement.style.setProperty('--ctps-frac', ...)`
+ * and each drift tick's `el.style.setProperty('left', ...)` (the ADR-053
+ * carve-out); every other visual state change goes through a DOM property
+ * (`.value`, `.textContent`) or `classList`, never `.style.<prop> =`.
  * Concatenated into its own <script> AFTER player.js + store.js (so
  * `window.CTPS`, `CTPS.engine` and `CTPS.store` already exist) and BEFORE
  * boot.js, which runs this file's `init(ctx)` on DOMContentLoaded. Vanilla JS
@@ -42,6 +48,7 @@
     var seekInput = null;
     var timeEl = null;
     var speedContainer = null;
+    var seekTicksEl = null;
 
     // ----- playback clock ---------------------------------------------------
     var rafHandle = null;
@@ -203,6 +210,45 @@
             }
         }
         return times;
+    }
+
+    /** Percent position of time `t` along a track of length `duration`,
+     * clamped into [0, 100]. Mirrors timeline.js's own private helper of the
+     * same name — each asset module is self-contained (its own `<script>`),
+     * so there is no shared util file to import it from. */
+    function pctOf(t, duration) {
+        if (!duration || duration <= 0) {
+            return 0;
+        }
+        var pct = (t / duration) * 100;
+        if (pct < 0) {
+            pct = 0;
+        } else if (pct > 100) {
+            pct = 100;
+        }
+        return pct;
+    }
+
+    /**
+     * Populate `#ctps-seek-ticks` with one `.ctps-seek-tick` marker per
+     * `drift_warn` event, positioned by `left` percent-of-duration (the same
+     * convention the timeline dock's spans/pins use) — components.css already
+     * renders each as a thin red mark over the seek fill. Built once at init:
+     * drift events are static for the life of the page, the same posture the
+     * timeline dock takes for its own static spans/pins.
+     */
+    function buildDriftTicks(ticksEl) {
+        if (!ticksEl) {
+            return;
+        }
+        var duration = trackDuration();
+        var times = driftTimes();
+        for (var i = 0; i < times.length; i++) {
+            var tickEl = document.createElement("div");
+            tickEl.className = "ctps-seek-tick";
+            tickEl.style.setProperty("left", pctOf(times[i], duration) + "%");
+            ticksEl.appendChild(tickEl);
+        }
     }
 
     /** Bounded binary search: the smallest time in the sorted `times` that is
@@ -434,6 +480,9 @@
         seekInput = document.getElementById("ctps-seek");
         timeEl = document.getElementById("ctps-time");
         speedContainer = document.querySelector(".ctps-speed");
+        seekTicksEl = document.getElementById("ctps-seek-ticks");
+
+        buildDriftTicks(seekTicksEl);
 
         if (playBtn) {
             playBtn.addEventListener("click", function () {
