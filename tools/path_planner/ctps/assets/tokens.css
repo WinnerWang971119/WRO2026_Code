@@ -1,0 +1,60 @@
+/* CTPS — Clear Trajectory Prediction Simulator: design tokens (single source).
+ *
+ * Defines the "Instrument" dark console palette + typography + spacing/radii
+ * scale as :root custom properties. Every other stylesheet (layout.css,
+ * components.css) and the Canvas-2D renderer (renderer.js, via
+ * getComputedStyle(document.documentElement).getPropertyValue(...)) reads
+ * color/metric values from here — no hard-coded hex or px elsewhere.
+ *
+ * The one exception is --ctps-frac, which is a dynamic playhead axis: JS
+ * writes it on document.documentElement via setProperty() every tick. The
+ * default below is only the pre-hydration fallback.
+ *
+ * No webfonts, no @import, no url(...) — this file is inlined verbatim into
+ * a single <style> block by player_html.py for fully offline / file:// use.
+ */
+
+:root {
+    /* ----- color: surfaces -------------------------------------------- */
+    --ctps-bg: #161614;
+    --ctps-panel: #1e1d1a;
+    --ctps-raised: #26251f;
+
+    /* ----- color: borders ----------------------------------------------- */
+    --ctps-border: #31302a;
+    --ctps-border-strong: #3f3d35;
+
+    /* ----- color: text ---------------------------------------------------- */
+    --ctps-text: #e8e5db;
+    --ctps-text-2: #a5a193;
+    --ctps-muted: #918d7f;
+    --ctps-faint: #565349;
+
+    /* ----- color: semantic -------------------------------------------- */
+    --ctps-accent: #ffd24a;
+    --ctps-hold: #4fd6a3;
+    --ctps-drift: #ff6b4a;
+    --ctps-warn-border: #4a2e26;
+
+    /* ----- color: map scrim ------------------------------------------- */
+    --ctps-map-dim: 0.48;
+
+    /* ----- dynamic playhead axis (JS-written via setProperty only) ---- */
+    --ctps-frac: 0;
+
+    /* ----- typography --------------------------------------------------- */
+    --ctps-font-ui: ui-sans-serif, system-ui, "Segoe UI", Arial, sans-serif;
+    --ctps-font-mono: ui-monospace, "Cascadia Code", Consolas, monospace;
+
+    /* ----- spacing scale ------------------------------------------------ */
+    --ctps-space-1: 2px;
+    --ctps-space-2: 4px;
+    --ctps-space-3: 8px;
+    --ctps-space-4: 10px;
+    --ctps-space-5: 14px;
+    --ctps-space-6: 18px;
+
+    /* ----- radii --------------------------------------------------------- */
+    --ctps-radius-panel: 6px;
+    --ctps-radius-chip: 3px;
+}
