@@ -37,7 +37,9 @@
 // none in this harness). Overloads match EXACTLY what `TickProfiler::report()`
 // calls: `print(const char*)`, `print(uint32_t)`, `println(const char*)`, and
 // `println(uint32_t)` (the per-segment line ends with `println(segMaxUs(i))`,
-// a `uint32_t`, not a string).
+// a `uint32_t`, not a string). `println` terminates with `\r\n` to mirror the
+// real Arduino `Print::println()` wire bytes, so the byte-for-byte grammar
+// asserted by TC4/TC7 matches what the R4 actually emits over Serial.
 // ===========================================================================
 
 struct CaptureStream
@@ -57,13 +59,13 @@ struct CaptureStream
     void println(const char* s)
     {
         buf += s;
-        buf += "\n";
+        buf += "\r\n";    // match Arduino Print::println() wire bytes (CR LF), not a bare LF
     }
 
     void println(uint32_t v)
     {
         buf += std::to_string(v);
-        buf += "\n";
+        buf += "\r\n";    // match Arduino Print::println() wire bytes (CR LF), not a bare LF
     }
 };
 
@@ -171,10 +173,10 @@ static void test_TC4_zero_tick_window()
     prof.report(cap, 30u, 45u);    // must not crash / divide by zero
 
     // Exact grammar on an empty window: every min/avg/max prints 0, hz prints 0.
-    const std::string expected = "-- tick bench: 0 ticks --\n"
-                                  "  SEG SegA us min=0 avg=0 max=0\n"
-                                  "  SEG SegB us min=0 avg=0 max=0\n"
-                                  "TICK us min=0 avg=0 max=0 | ~0 Hz | TOO_LONG\n";
+    const std::string expected = "-- tick bench: 0 ticks --\r\n"
+                                  "  SEG SegA us min=0 avg=0 max=0\r\n"
+                                  "  SEG SegB us min=0 avg=0 max=0\r\n"
+                                  "TICK us min=0 avg=0 max=0 | ~0 Hz | TOO_LONG\r\n";
     ASSERT_TRUE(cap.buf == expected);
     ASSERT_TRUE(cap.buf.find("min=0") != std::string::npos);
     ASSERT_TRUE(cap.buf.find("max=0") != std::string::npos);
@@ -293,10 +295,10 @@ static void test_TC7_report_grammar_exact()
     CaptureStream cap;
     prof.report(cap, 30u, 45u);
 
-    const std::string expected = "-- tick bench: 2 ticks --\n"
-                                  "  SEG LineArray us min=3000 avg=4000 max=5000\n"
-                                  "  SEG Drive us min=500 avg=600 max=700\n"
-                                  "TICK us min=4000 avg=5000 max=6000 | ~200 Hz | GOOD\n";
+    const std::string expected = "-- tick bench: 2 ticks --\r\n"
+                                  "  SEG LineArray us min=3000 avg=4000 max=5000\r\n"
+                                  "  SEG Drive us min=500 avg=600 max=700\r\n"
+                                  "TICK us min=4000 avg=5000 max=6000 | ~200 Hz | GOOD\r\n";
     ASSERT_TRUE(cap.buf == expected);
 
     // Belt-and-suspenders: assert the ordering explicitly too (LineArray, the
