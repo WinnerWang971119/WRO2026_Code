@@ -1,0 +1,239 @@
+/* CTPS — Clear Trajectory Prediction Simulator: layout stylesheet.
+ *
+ * Structure ONLY — flex/grid, position, size, gap, margin, padding. No colors,
+ * borders, radii, or type treatment here (that is components.css, T13); the
+ * one exception is the html/body base rule below, which must set the app
+ * background/text/font so an unstyled flash never shows before components.css
+ * paints. Every value is a token var from tokens.css (T11) — no hard-coded
+ * hex/px magic numbers.
+ *
+ * Matches the DOM emitted by player_html.py (T2):
+ *
+ *   .ctps-app
+ *     header.ctps-header            (wordmark / filename / badge / spacer /
+ *                                     drift chip / help — auto height)
+ *     div.ctps-main                  (the 3a "stage row": flex 1)
+ *       section.ctps-stage           (canvas stage: flex 1, relative)
+ *         div.ctps-canvas-stack        (fills stage; 3 absolute canvases)
+ *         div.ctps-layer-chips         (top-right overlay)
+ *         div.ctps-scale-bar           (bottom-left overlay)
+ *         button.ctps-fullview-btn     (bottom-right overlay)
+ *         div.ctps-hud                 (top-left overlay, full-view only)
+ *       aside.ctps-rail               (right rail: flex 0 0 288px, column)
+ *         section.ctps-panel(--command|--holding|--tabs)
+ *     div.ctps-transport              (auto height)
+ *     div.ctps-timeline               (auto height)
+ *
+ * .ctps-main plays the role the plan calls "the stage row" (flex 1 between
+ * header and transport); .ctps-stage is the canvas-only child inside it that
+ * sits alongside .ctps-rail. Full-view (.ctps-app.is-fullview, set by chrome.js
+ * T9) collapses the rail + timeline so the stage fills the width.
+ *
+ * No webfonts, no @import, no url(...) — inlined verbatim into the single
+ * <style> block by player_html.py for fully offline / file:// use.
+ */
+
+/* ===================================================================== */
+/* Viewport root                                                          */
+/* ===================================================================== */
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--ctps-bg);
+    color: var(--ctps-text);
+    font-family: var(--ctps-font-ui);
+    overflow: hidden;
+}
+
+.ctps-app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ===================================================================== */
+/* Header (auto height)                                                   */
+/* ===================================================================== */
+
+.ctps-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-3);
+    padding: var(--ctps-space-4) var(--ctps-space-5);
+}
+
+.ctps-header-spacer {
+    flex: 1 1 auto;
+}
+
+/* ===================================================================== */
+/* Stage row — .ctps-main (flex 1): canvas stage + right rail             */
+/* ===================================================================== */
+
+.ctps-main {
+    flex: 1 1 auto;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    gap: var(--ctps-space-3);
+    padding: var(--ctps-space-3);
+}
+
+/* ----- canvas stage (flex 1) ------------------------------------------- */
+
+.ctps-stage {
+    flex: 1 1 auto;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+}
+
+.ctps-canvas-stack {
+    position: absolute;
+    inset: 0;
+}
+
+.ctps-canvas-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.ctps-layer-chips {
+    position: absolute;
+    top: var(--ctps-space-3);
+    right: var(--ctps-space-3);
+    display: flex;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-scale-bar {
+    position: absolute;
+    bottom: var(--ctps-space-3);
+    left: var(--ctps-space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-fullview-btn {
+    position: absolute;
+    bottom: var(--ctps-space-3);
+    right: var(--ctps-space-3);
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-1);
+}
+
+.ctps-hud {
+    position: absolute;
+    top: var(--ctps-space-3);
+    left: var(--ctps-space-3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-2);
+}
+
+/* ----- right rail (flex 0 0 288px, column) ------------------------------ */
+
+.ctps-rail {
+    flex: 0 0 288px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+    min-width: 0;
+    min-height: 0;
+}
+
+.ctps-panel {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+/* The Log/Inspector tabbed panel is the one rail section flagged flex 1 in
+ * the design (it absorbs the remaining rail height; Current command and
+ * Holding stay content-sized above it). */
+.ctps-panel--tabs {
+    flex: 1 1 auto;
+    min-height: 0;
+}
+
+.ctps-tab-row {
+    flex: 0 0 auto;
+    display: flex;
+}
+
+.ctps-log,
+.ctps-inspector {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+/* Log renders newest-at-bottom: a column flex with content pinned to the
+ * end, per the design's explicit justify-content:flex-end. */
+.ctps-log {
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+}
+
+/* ===================================================================== */
+/* Transport bar (auto height, margins 0 8px)                             */
+/* ===================================================================== */
+
+.ctps-transport {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-4);
+    margin: 0 var(--ctps-space-3);
+    min-width: 0;
+}
+
+/* Seek slider is the one transport child flagged flex 1 in the design — it
+ * absorbs the remaining bar width between the fixed-size buttons/readout. */
+.ctps-seek-wrap {
+    flex: 1 1 auto;
+    position: relative;
+    min-width: 0;
+}
+
+.ctps-seek {
+    display: block;
+    width: 100%;
+}
+
+.ctps-seek-ticks {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+}
+
+/* ===================================================================== */
+/* Timeline dock (auto height, margin 8)                                  */
+/* ===================================================================== */
+
+.ctps-timeline {
+    flex: 0 0 auto;
+    position: relative;
+    margin: var(--ctps-space-3);
+    min-width: 0;
+}
+
+/* ===================================================================== */
+/* Full-view collapse — .ctps-app.is-fullview (set by chrome.js, T9)      */
+/* ===================================================================== */
+
+.ctps-app.is-fullview .ctps-rail,
+.ctps-app.is-fullview .ctps-timeline {
+    display: none;
+}
