@@ -1,0 +1,1013 @@
+/* CTPS — Clear Trajectory Prediction Simulator: component visuals (design 3a).
+ *
+ * Every visual rule for the concrete widgets the sibling files already build:
+ * header badges/chips, panels and cards, the tabbed rail, the log/inspector,
+ * the transport bar (including the styled native seek range), the timeline
+ * dock's lanes/spans/pins/playhead, the full-view HUD, and the help modal.
+ * Every color/radius/font/spacing value is a token custom property from
+ * tokens.css (T11) — never a bare hex or literal px font stack (the one
+ * documented exception is the HUD's translucent background below, which the
+ * design calls out as a literal, non-token rgba value).
+ *
+ * Ownership split with layout.css (T12): that file owns flex/grid/position/
+ * size/gap/margin/padding for the five page-level containers (.ctps-app /
+ * .ctps-header / .ctps-main / .ctps-stage / .ctps-rail / .ctps-transport /
+ * .ctps-timeline) and the stacked-canvas box. This file adds the PANEL LOOK
+ * (background/border/radius) those same containers need per the design's own
+ * token table — "panel bg #1e1d1a" is explicitly used by "canvas stage, rail
+ * panels, transport, dock" — without repeating any flex/position/size rule
+ * layout.css already set. It never restates a property another file owns for
+ * the same selector (that already caused one real bug caught while writing
+ * this file: an earlier draft's `overflow: hidden` on `.ctps-log` would have
+ * silently clobbered layout.css's `overflow-y: auto`).
+ *
+ * No inline element styles anywhere in this file (classes only). The dynamic
+ * per-instance values written by the JS modules are NOT custom properties
+ * this file reads back through calc() — cross-checked against the actual
+ * sibling implementations:
+ *   - `--ctps-frac` (playhead 0..1) IS a root-level custom property
+ *     (transport.js writes it via `documentElement.style.setProperty`); the
+ *     seek fill gradient and the timeline playhead both read it with calc().
+ *   - Every per-item timeline position (`.ctps-span` / `.ctps-pin` / a future
+ *     `.ctps-ruler-tick`) is instead a literal `left` / `width` PERCENT the
+ *     owning module sets directly via `el.style.setProperty("left", ...)` —
+ *     still a `setProperty` call (TC-NOINLINE only bans `.style.<prop> =`
+ *     assignment), just not a `--custom` property. This file therefore never
+ *     declares `left`/`width` for those classes — only their static look
+ *     (position: absolute as the fixed anchor mode, color, border, shape).
+ * New shared constants this file introduces on `.ctps-timeline` (additive —
+ * no property layout.css already set): `--ctps-lane-gutter` / `--ctps-lane-
+ * gap`, the same 52px label-column width + gap the lane/ruler grids use, so
+ * the playhead's own left offset can be computed in the same coordinate space
+ * as every lane item and ruler tick (the track column only, excluding the
+ * label gutter) — see the Timeline section below.
+ *
+ * One deliberate style-suppression: the static `.ctps-scale-bar` markup in
+ * the template is superseded by the renderer's own canvas-drawn scale bar
+ * (which scales live with zoom, unlike a static DOM label) — see the Stage
+ * overlays section for why it is hidden here rather than left to look like an
+ * unstyled, duplicate, non-scaling label.
+ *
+ * No embedded picture backgrounds, no external references, no font imports —
+ * every shape (seek thumb ring, timeline pins) is drawn with plain borders/
+ * gradients so the page stays fully self-contained.
+ */
+
+/* ===================================================================== */
+/* Base                                                                   */
+/* ===================================================================== */
+
+/* Elements toggled via the `hidden` attribute (the drift chip, the help
+ * modal, the full-view HUD, the Inspector panel while Log is active) must
+ * stay hidden regardless of any `display` a more specific rule below sets —
+ * an attribute selector and a class selector share the same specificity, so
+ * without `!important` a later same-specificity rule could win the cascade
+ * and defeat the attribute. */
+[hidden] {
+    display: none !important;
+}
+
+/* ===================================================================== */
+/* Header                                                                 */
+/* ===================================================================== */
+
+/* layout.css already makes .ctps-header a flex row with padding/gap; this is
+ * its only visual (the drawing's "border #31302a" separator). */
+.ctps-header {
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-wordmark {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    color: var(--ctps-text);
+}
+
+.ctps-filename {
+    font-family: var(--ctps-font-mono);
+    font-size: 12px;
+    color: var(--ctps-muted);
+}
+
+.ctps-badge {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border: 1px solid var(--ctps-border-strong);
+    border-radius: var(--ctps-radius-chip);
+    color: var(--ctps-muted);
+    background: transparent;
+}
+
+.ctps-drift-chip {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid var(--ctps-warn-border);
+    border-radius: var(--ctps-radius-chip);
+    background: transparent;
+    color: var(--ctps-drift);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-drift-glyph {
+    font-size: 10px;
+    line-height: 1;
+}
+
+.ctps-help-btn {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    padding: 3px 8px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: transparent;
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* ===================================================================== */
+/* Chips (generic .ctps-chip + --active — layer toggles today)           */
+/* ===================================================================== */
+
+.ctps-chip {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-chip--active {
+    background: var(--ctps-text);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-text);
+}
+
+/* ===================================================================== */
+/* Stage panel look + overlays                                           */
+/* ===================================================================== */
+
+/* layout.css sizes/positions .ctps-stage (flex 1, relative); the design's
+ * token table lists it alongside the rail/transport/dock as using panel bg —
+ * so its card look lives here. overflow: hidden clips the stacked canvases'
+ * square corners to the panel radius. */
+.ctps-stage {
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    overflow: hidden;
+}
+
+/* The template ships a static "50 cm" scale-bar overlay, but the renderer
+ * (renderer.js _drawScaleBar) already paints a live, zoom-correct scale bar
+ * directly on the actors canvas. Left visible, this DOM copy would show a
+ * second, non-scaling "50 cm" label stacked on top of the real one — so it
+ * stays hidden; the canvas-drawn version is the actual implementation. */
+.ctps-scale-bar {
+    display: none;
+}
+
+.ctps-fullview-btn {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border);
+    background: var(--ctps-raised);
+    /* The mockup's inactive label color (#c9c5b8) has no dedicated token;
+     * --ctps-text-2 is the closest defined stand-in. */
+    color: var(--ctps-text-2);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* chrome.js toggles `aria-pressed` (not a class) to reflect full-view state —
+ * style off the attribute it actually sets. */
+.ctps-fullview-btn[aria-pressed="true"] {
+    background: var(--ctps-text);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-text);
+}
+
+/* ===================================================================== */
+/* Panels / cards                                                        */
+/* ===================================================================== */
+
+.ctps-panel {
+    box-sizing: border-box;
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    padding: var(--ctps-space-4) var(--ctps-space-5);
+}
+
+.ctps-panel-title {
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+.ctps-panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+/* ----- current command --------------------------------------------- */
+
+.ctps-command {
+    font-family: var(--ctps-font-mono);
+    font-size: 15px;
+    color: var(--ctps-text);
+    margin-top: var(--ctps-space-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ctps-command--drift {
+    color: var(--ctps-drift);
+}
+
+.ctps-command-detail {
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+    margin-top: var(--ctps-space-1);
+}
+
+/* ----- holding (reserved shell) -------------------------------------- */
+
+.ctps-hold-count {
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+}
+
+.ctps-hold-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-2);
+    margin-top: var(--ctps-space-3);
+}
+
+.ctps-hold-card {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ctps-space-3);
+    padding: 8px 10px;
+    border-radius: 5px;
+    border: 1px solid color-mix(in srgb, var(--ctps-hold) 60%, transparent);
+    background: color-mix(in srgb, var(--ctps-hold) 14%, transparent);
+}
+
+.ctps-hold-card-name {
+    font-family: var(--ctps-font-mono);
+    font-size: 12.5px;
+    color: var(--ctps-hold);
+}
+
+.ctps-hold-card-meta {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    color: var(--ctps-muted);
+    text-align: right;
+}
+
+.ctps-hold-empty {
+    box-sizing: border-box;
+    height: 28px;
+    border: 1px dashed var(--ctps-border);
+    border-radius: 5px;
+}
+
+/* ----- log / inspector tabs ------------------------------------------- */
+
+.ctps-tab-row {
+    gap: var(--ctps-space-5);
+    border-bottom: 1px solid var(--ctps-border);
+    margin-bottom: var(--ctps-space-3);
+}
+
+.ctps-tab {
+    box-sizing: border-box;
+    position: relative;
+    background: transparent;
+    border: none;
+    padding: var(--ctps-space-2) 0 var(--ctps-space-3);
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-tab--active {
+    color: var(--ctps-text);
+}
+
+.ctps-tab--active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: var(--ctps-accent);
+}
+
+/* ===================================================================== */
+/* Log                                                                    */
+/* ===================================================================== */
+
+/* layout.css already gives #ctps-log its flex/column/justify-end/overflow —
+ * only the typography + line spacing live here. */
+.ctps-log {
+    gap: 1px;
+    font-family: var(--ctps-font-mono);
+    font-size: 11.5px;
+    line-height: 1.65;
+}
+
+.ctps-log-line {
+    box-sizing: border-box;
+    padding: 1px var(--ctps-space-2);
+    border-radius: var(--ctps-radius-chip);
+    color: var(--ctps-text-2);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.ctps-log-line--current {
+    background: var(--ctps-raised);
+    color: var(--ctps-text);
+}
+
+.ctps-log-line--drift {
+    color: var(--ctps-drift);
+}
+
+/* ----- inspector tab --------------------------------------------------- */
+
+.ctps-inspector-header {
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+    margin-bottom: var(--ctps-space-3);
+}
+
+.ctps-inspector-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--ctps-space-2) var(--ctps-space-4);
+    font-family: var(--ctps-font-mono);
+    font-size: 12px;
+}
+
+.ctps-inspector-label {
+    color: var(--ctps-muted);
+}
+
+.ctps-inspector-value {
+    color: var(--ctps-text);
+    text-align: right;
+}
+
+/* panels.js's inspectorValueClassName() appends this modifier when a field's
+ * color() resolves to the drift hex — matches its literal class name. */
+.ctps-inspector-value--drift {
+    color: var(--ctps-drift);
+}
+
+/* panels.js's placeholder before any inspectorField (T8) has registered. */
+.ctps-inspector-empty {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-style: italic;
+    color: var(--ctps-muted);
+}
+
+/* ===================================================================== */
+/* Transport                                                              */
+/* ===================================================================== */
+
+/* layout.css sizes/positions .ctps-transport (flex row, gap, margin); the
+ * token table lists it as a panel-bg surface too. */
+.ctps-transport {
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    padding: var(--ctps-space-3) var(--ctps-space-4);
+}
+
+.ctps-transport-btn {
+    box-sizing: border-box;
+    height: 28px;
+    min-width: 28px;
+    padding: 0 var(--ctps-space-3);
+    background: var(--ctps-raised);
+    color: var(--ctps-text);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    font-size: 13px;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-transport-btn--play {
+    min-width: 64px;
+    font-weight: 700;
+    background: var(--ctps-accent);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-accent);
+}
+
+.ctps-transport-divider {
+    display: inline-block;
+    width: 1px;
+    height: 20px;
+    background: var(--ctps-border);
+}
+
+.ctps-drift-jump {
+    box-sizing: border-box;
+    height: 28px;
+    padding: 0 var(--ctps-space-3);
+    background: transparent;
+    color: var(--ctps-drift);
+    border: 1px solid var(--ctps-warn-border);
+    border-radius: var(--ctps-radius-chip);
+    font-size: 12px;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-time {
+    font-family: var(--ctps-font-mono);
+    font-size: 13px;
+    color: var(--ctps-text-2);
+    white-space: nowrap;
+}
+
+.ctps-speed {
+    box-sizing: border-box;
+    display: flex;
+    gap: 2px;
+    padding: 2px;
+    background: var(--ctps-bg);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+}
+
+.ctps-speed-btn {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    padding: 3px 8px;
+    background: transparent;
+    color: var(--ctps-muted);
+    border: none;
+    border-radius: var(--ctps-radius-chip);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-speed-btn--active {
+    background: var(--ctps-text);
+    color: var(--ctps-bg);
+}
+
+/* ----- styled native seek range (#ctps-seek) -------------------------- */
+/*
+ * .ctps-seek-wrap (layout.css already makes it flex:1, position:relative)
+ * stacks three layers, back to front:
+ *   1. ::before  — a single two-tone gradient standing in for BOTH the
+ *                  unfilled track (--ctps-border) and the accent fill up to
+ *                  the playhead, split at a hard color stop positioned by
+ *                  --ctps-frac (the same root-level custom property the
+ *                  timeline playhead reads).
+ *   2. #ctps-seek-ticks — drift-tick overlay (layout.css already positions
+ *                  it inset:0); each future tick child is positioned by a
+ *                  literal `left` percent, same convention as the timeline.
+ *   3. the <input> itself — its native track backgrounds are made
+ *                  transparent so layers 1-2 show through; only the custom
+ *                  thumb (a plain circle + ring, no bitmap) is visible.
+ */
+
+.ctps-seek-wrap {
+    display: flex;
+    align-items: center;
+    height: 20px;
+}
+
+.ctps-seek-wrap::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 4px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: linear-gradient(
+        to right,
+        var(--ctps-accent) 0%,
+        var(--ctps-accent) calc(var(--ctps-frac, 0) * 100%),
+        var(--ctps-border) calc(var(--ctps-frac, 0) * 100%),
+        var(--ctps-border) 100%
+    );
+    pointer-events: none;
+    z-index: 0;
+}
+
+.ctps-seek-ticks {
+    z-index: 1;
+}
+
+.ctps-seek-tick {
+    position: absolute;
+    top: 50%;
+    width: 2px;
+    height: 8px;
+    transform: translate(-50%, -50%);
+    border-radius: 1px;
+    background: var(--ctps-drift);
+}
+
+.ctps-seek {
+    position: relative;
+    z-index: 2;
+    height: 100%;
+    margin: 0;
+    background: transparent;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    cursor: pointer;
+}
+
+.ctps-seek:focus-visible {
+    outline: none;
+}
+
+.ctps-seek::-webkit-slider-runnable-track {
+    background: transparent;
+    height: 4px;
+    border-radius: 2px;
+}
+
+.ctps-seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 13px;
+    height: 13px;
+    margin-top: -4.5px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-seek:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
+}
+
+.ctps-seek::-moz-range-track {
+    background: transparent;
+    height: 4px;
+    border-radius: 2px;
+    border: none;
+}
+
+.ctps-seek::-moz-range-thumb {
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-seek:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
+}
+
+.ctps-seek::-moz-focus-outer {
+    border: 0;
+}
+
+/* ===================================================================== */
+/* Timeline dock: lanes, spans, pins, playhead, ruler                     */
+/* ===================================================================== */
+/*
+ * timeline.js appends #ctps-ruler's two children (a bare .ctps-lane-label
+ * gutter + a .ctps-ruler-track) and #ctps-lanes' children as FLAT, ALTERNATING
+ * siblings — one .ctps-lane-label then one .ctps-lane per registered lane,
+ * NOT a label nested inside its lane. A 2-column CSS Grid on both containers
+ * (52px label column + 1fr track column) auto-places that alternating
+ * sequence into label/track pairs, one pair per row, without any JS-side
+ * markup change. --ctps-lane-gutter / --ctps-lane-gap (declared once here on
+ * the shared .ctps-timeline ancestor, additive alongside layout.css's
+ * flex/position/margin rule for the same selector) keep the grid template AND
+ * the playhead's offset calc below in exact agreement, so the playhead lines
+ * up with lane items and ruler ticks that share the same track column instead
+ * of the dock's full width.
+ */
+
+.ctps-timeline {
+    --ctps-lane-gutter: 52px;
+    --ctps-lane-gap: var(--ctps-space-3);
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    padding: var(--ctps-space-3);
+}
+
+.ctps-ruler {
+    display: grid;
+    grid-template-columns: var(--ctps-lane-gutter) 1fr;
+    column-gap: var(--ctps-lane-gap);
+    height: 14px;
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    color: var(--ctps-faint);
+}
+
+/* New addition (T13): timeline.js's own tick-track element, sized to exactly
+ * the ruler's track column so each tick's literal `left` percent lines up
+ * with the lanes below. */
+.ctps-ruler-track {
+    position: relative;
+    height: 100%;
+}
+
+.ctps-ruler-tick {
+    position: absolute;
+    top: 0;
+    white-space: nowrap;
+}
+
+.ctps-lanes {
+    display: grid;
+    grid-template-columns: var(--ctps-lane-gutter) 1fr;
+    column-gap: var(--ctps-lane-gap);
+    row-gap: 4px;
+}
+
+.ctps-lane-label {
+    display: flex;
+    align-items: center;
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--ctps-text-2);
+}
+
+.ctps-lane-label--holding {
+    color: var(--ctps-hold);
+}
+
+.ctps-lane-label--drift {
+    color: var(--ctps-drift);
+}
+
+/* timeline.js appends .ctps-span / .ctps-pin children directly into the lane
+ * element itself (no separate track sub-div), so .ctps-lane is the
+ * positioning container. */
+.ctps-lane {
+    position: relative;
+    min-height: 18px;
+}
+
+.ctps-lane--holding {
+    min-height: 34px;
+}
+
+/* Bare .ctps-span (no modifier) is exactly what the TASK lane's items render
+ * as today (buildTaskLane's items carry no `cls`) — so the default look here
+ * IS the design's TASK-lane appearance. `left`/`width` are NOT set here:
+ * timeline.js writes both as literal percent strings via `setProperty` per
+ * item (see the section header note above). */
+.ctps-span {
+    box-sizing: border-box;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 14px;
+    display: flex;
+    align-items: center;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    color: var(--ctps-text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    cursor: pointer;
+    background: var(--ctps-raised);
+    border: 1px solid var(--ctps-border-strong);
+}
+
+/* buildGotoLane's success items carry cls "ctps-span--goto" — a solid muted
+ * fill ("#4a483f-ish via ... --ctps-border-strong" per spec) rather than the
+ * task look's bordered box. */
+.ctps-span--goto {
+    background: var(--ctps-border-strong);
+    border-color: var(--ctps-border-strong);
+}
+
+/* Not yet produced by buildHoldingLane (always empty today, issue #57) —
+ * defined ahead of time since HOLDING is a pinned contract class. */
+.ctps-span--holding {
+    height: 12px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--ctps-hold) 60%, transparent);
+    background: color-mix(in srgb, var(--ctps-hold) 14%, transparent);
+    color: var(--ctps-hold);
+}
+
+/* buildDriftLane's uncorrected-span item carries cls "ctps-span--drift". */
+.ctps-span--drift {
+    border: 1px solid color-mix(in srgb, var(--ctps-drift) 55%, transparent);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+    color: var(--ctps-drift);
+}
+
+/* Pins are drawn as a plain CSS triangle (border trick) — a small filled
+ * downward-pointing marker, never a bitmap. Only `left` varies per item (set
+ * inline by timeline.js); everything else is this static look. */
+.ctps-pin {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 0;
+    height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 7px solid var(--ctps-text-2);
+    cursor: pointer;
+}
+
+/* buildGotoLane's UNREACHABLE item carries cls "ctps-pin--fault" — the drift/
+ * warn color reads as "something went wrong" (distinct from a routine
+ * success span), matching the only fault-style color the palette defines. */
+.ctps-pin--fault {
+    border-bottom-color: var(--ctps-drift);
+}
+
+/* buildDriftLane's point item carries cls "ctps-pin--drift". */
+.ctps-pin--drift {
+    border-bottom-color: var(--ctps-drift);
+}
+
+/* Anchored to .ctps-timeline (position: relative via layout.css). Its
+ * containing block is the timeline's PADDING box, but the lane/ruler grids live
+ * in the CONTENT box (inset by the panel padding), so the calc adds the
+ * padding-left offset at the start and removes 2x padding from the 100% basis —
+ * then 0%..100% of --ctps-frac maps onto exactly the track column every lane
+ * item and ruler tick shares (aligned at both ends, not just the midpoint). */
+.ctps-playhead {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: calc(
+        var(--ctps-space-3) + var(--ctps-lane-gutter) + var(--ctps-lane-gap) +
+        var(--ctps-frac, 0) *
+        (100% - 2 * var(--ctps-space-3) - var(--ctps-lane-gutter) - var(--ctps-lane-gap))
+    );
+    width: 1.5px;
+    background: var(--ctps-text);
+    box-shadow: 0 0 4px 0 var(--ctps-text);
+    pointer-events: none;
+    z-index: 3;
+}
+
+/* ===================================================================== */
+/* Full-view HUD                                                          */
+/* ===================================================================== */
+
+/* .ctps-hud itself needs no visual (layout.css already positions/stacks its
+ * two children) — only the two chip-like children carry a look. */
+
+.ctps-hud-command,
+.ctps-hud-holding {
+    box-sizing: border-box;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--ctps-border);
+    /* Literal translucent black (not a token) — the design calls this value
+     * out by itself, distinct from the opaque panel surfaces. */
+    background: rgba(22, 22, 20, .88);
+}
+
+.ctps-hud-command {
+    font-family: var(--ctps-font-mono);
+    font-size: 13px;
+    color: var(--ctps-text);
+}
+
+.ctps-hud-holding {
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-hold);
+}
+
+/* ===================================================================== */
+/* Help modal                                                             */
+/* ===================================================================== */
+/*
+ * chrome.js's buildHelpModal() names the OUTER (fixed, toggled via `hidden`)
+ * element ".ctps-modal" itself — matching the class inventory's single pinned
+ * name — and the visible card inside it ".ctps-modal-panel". Every class below
+ * matches that builder's literal `className` assignments.
+ */
+
+.ctps-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(10, 10, 9, .6);
+}
+
+.ctps-modal-panel {
+    box-sizing: border-box;
+    width: min(480px, 90vw);
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: var(--ctps-space-5);
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border-strong);
+    border-radius: var(--ctps-radius-panel);
+    color: var(--ctps-text);
+}
+
+.ctps-modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: var(--ctps-space-4);
+}
+
+.ctps-modal-title {
+    font-family: var(--ctps-font-ui);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--ctps-text);
+}
+
+.ctps-modal-close {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    line-height: 1;
+    padding: 4px 8px;
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-modal-section {
+    margin-bottom: var(--ctps-space-5);
+}
+
+.ctps-modal-section:last-child {
+    margin-bottom: 0;
+}
+
+.ctps-modal-section-title {
+    margin-bottom: var(--ctps-space-3);
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+.ctps-modal-keys,
+.ctps-modal-legend {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.ctps-modal-key-row,
+.ctps-modal-legend-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-4);
+    padding: var(--ctps-space-2) 0;
+    border-bottom: 1px solid var(--ctps-border);
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+}
+
+.ctps-modal-key-row:last-child,
+.ctps-modal-legend-row:last-child {
+    border-bottom: none;
+}
+
+.ctps-modal-key {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    padding: 2px 6px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-raised);
+    color: var(--ctps-text);
+}
+
+.ctps-modal-key-desc,
+.ctps-modal-legend-desc {
+    color: var(--ctps-text-2);
+}
+
+.ctps-modal-swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+}
+
+.ctps-modal-swatch--accent {
+    background: var(--ctps-accent);
+}
+
+.ctps-modal-swatch--hold {
+    background: var(--ctps-hold);
+}
+
+.ctps-modal-swatch--drift {
+    background: var(--ctps-drift);
+}
+
+/* ===================================================================== */
+/* Focus visibility (keyboard navigation)                                 */
+/* ===================================================================== */
+
+.ctps-chip:focus-visible,
+.ctps-tab:focus-visible,
+.ctps-transport-btn:focus-visible,
+.ctps-drift-jump:focus-visible,
+.ctps-speed-btn:focus-visible,
+.ctps-help-btn:focus-visible,
+.ctps-drift-chip:focus-visible,
+.ctps-fullview-btn:focus-visible,
+.ctps-modal-close:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
