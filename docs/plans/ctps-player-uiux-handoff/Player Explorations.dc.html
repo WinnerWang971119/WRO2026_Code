@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><style>body{margin:0;background:#e8e6e1;font-family:ui-sans-serif,system-ui,"Segoe UI",Arial,sans-serif}.dv-turn{padding:40px 44px 32px;border-bottom:1px solid rgba(0,0,0,.08);scroll-margin-top:16px}.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 20px}.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none}.dv-tname{font:600 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#1a1a1a}.dv-opts{display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start}.dv-opt{flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none}.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 ui-sans-serif,system-ui,sans-serif;color:rgba(0,0,0,.55)}.dv-card{max-width:100%;background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden}.dv-opt:target .dv-oid{background:#2a78d6;color:#fff}.dv-next{margin:22px 0 0;font:12px/1.5 ui-sans-serif,system-ui,sans-serif;color:rgba(0,0,0,.5)}</style></helmet>
+
+<section class="dv-turn" id="t3">
+<div class="dv-thd"><a class="dv-tid" href="#t3">3</a><span class="dv-tname">Dark, tweakable — <a class="dv-oid" href="#2a">2a</a> with comments applied</span>
+<span style="font:400 11px/1.5 ui-sans-serif,system-ui,sans-serif;color:rgba(0,0,0,.5);max-width:700px">Keymap footer removed · Inspector restored (live pose, heading, nearest node) · dark only. Open the Tweaks panel: scrub the playhead and the robot drives, trail grows, log fills, cargo slots grab/release. Also tweakable: accent color, map dim, trail/node layers.</span></div>
+<div class="dv-opts">
+
+<!-- ============================ 3a Instrument Live ============================ -->
+<div class="dv-opt" id="3a"><div class="dv-olabel"><a class="dv-oid" href="#3a">3a</a>Instrument — tweak me (playhead · accent · map dim · layers)</div>
+<div class="dv-card" style="width:1180px;background:#161614">
+<div style="display:flex;flex-direction:column;height:756px;color:#e8e5db">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 14px;border-bottom:1px solid #31302a">
+    <div style="font-size:12px;font-weight:700;letter-spacing:.12em;color:#e8e5db">CTPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#918d7f">mission_04.trace</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:.08em;padding:3px 8px;border:1px solid #3f3d35;border-radius:3px;color:#918d7f">PREDICTED</div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:7px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#ff6b4a;border:1px solid #4a2e26;border-radius:3px;padding:3px 9px;cursor:pointer"><div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:7px solid #ff6b4a"></div>drift 12.4 cm @ 46.5 s</div>
+    <div style="font-size:11px;color:#918d7f;border:1px solid #31302a;border-radius:3px;padding:3px 8px;cursor:pointer">? Help</div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;gap:8px;padding:8px;min-height:0">
+    <div style="flex:1 1 auto;position:relative;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;overflow:hidden">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="{{ scrimFill }}"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#3f3d35" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#e8e5db" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.6"></polyline>
+        <polyline points="{{ traveledPoints }}" fill="none" stroke="{{ accent }}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        <g opacity="{{ nodesOpacity }}" font-family="ui-monospace,monospace" font-size="11" fill="#e8e5db" paint-order="stroke" stroke="#161614" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#e8e5db"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#e8e5db"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#e8e5db"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#e8e5db"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#e8e5db"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#e8e5db"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="4" fill="#e8e5db"></circle><text x="507" y="214">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#e8e5db"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#e8e5db"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <polygon points="16,0 -10,-9 -10,9" transform="{{ robotTransform }}" fill="{{ accent }}" stroke="#161614" stroke-width="1.5"></polygon>
+        <line x1="40" y1="372" x2="140" y2="372" stroke="#918d7f" stroke-width="1"></line>
+        <line x1="40" y1="368" x2="40" y2="376" stroke="#918d7f" stroke-width="1"></line>
+        <line x1="140" y1="368" x2="140" y2="376" stroke="#918d7f" stroke-width="1"></line>
+        <text x="90" y="366" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#918d7f">50 cm</text>
+      </svg>
+      <div style="position:absolute;right:10px;top:10px;display:flex;gap:6px">
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#e8e5db;color:#161614;font-weight:600">MAP</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:{{ trailChipBg }};color:{{ trailChipColor }};border:1px solid #31302a;font-weight:600">TRAIL</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:{{ nodeChipBg }};color:{{ nodeChipColor }};border:1px solid #31302a;font-weight:600">NODES</div>
+      </div>
+      <div onClick="{{ toggleFullView }}" style="position:absolute;right:10px;bottom:10px;display:flex;align-items:center;gap:7px;background:{{ fullViewBg }};border:1px solid #31302a;border-radius:4px;padding:5px 10px;font-size:11px;color:{{ fullViewColor }};cursor:pointer">{{ fullViewLabel }}</div>
+      <sc-if value="{{ fullView }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;left:10px;top:10px;display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+          <div style="display:flex;align-items:center;gap:9px;background:rgba(22,22,20,.88);border:1px solid #31302a;border-radius:4px;padding:6px 11px;font-family:ui-monospace,Consolas,monospace;font-size:13px;color:{{ cmdColor }}">{{ currentCmd }}</div>
+          <div style="display:flex;align-items:center;gap:9px;background:rgba(22,22,20,.88);border:1px solid #31302a;border-radius:4px;padding:5px 11px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:{{ holdColor }}">holding {{ heldCount }}</div>
+        </div>
+      </sc-if>
+    </div>
+
+    <!-- right rail -->
+    <sc-if value="{{ panelsVisible }}" hint-placeholder-val="{{ true }}">
+    <div style="flex:0 0 288px;display:flex;flex-direction:column;gap:8px;min-height:0">
+      <div style="background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Current command</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:15px;color:{{ cmdColor }}">{{ currentCmd }}</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#918d7f">{{ cmdDetail }}</div>
+      </div>
+      <div style="background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;align-items:baseline"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Holding</div><div style="flex:1"></div><div style="font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#918d7f">{{ heldCount }}</div></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <sc-for list="{{ heldItems }}" as="it" hint-placeholder-count="2">
+            <div style="border:1px solid {{ accentBorder }};background:{{ accentSoft }};border-radius:5px;padding:8px 10px;display:flex;align-items:baseline;gap:8px">
+              <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:{{ holdColor }}">{{ it.name }}</div>
+              <div style="flex:1"></div><div style="font-size:10px;color:#918d7f">{{ it.meta }}</div>
+            </div>
+          </sc-for>
+          <sc-for list="{{ emptySlots }}" as="e" hint-placeholder-count="1">
+            <div style="border:1px dashed #31302a;border-radius:5px;padding:8px 10px;text-align:center;font-size:10px;color:#565349">empty</div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="flex:1 1 auto;min-height:0;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;display:flex;flex-direction:column;overflow:hidden">
+        <div style="display:flex;border-bottom:1px solid #31302a">
+          <div onClick="{{ showLogTab }}" style="padding:8px 14px;font-size:11px;font-weight:600;color:{{ logTabColor }};border-bottom:2px solid {{ logTabBorder }};cursor:pointer">Log</div>
+          <div onClick="{{ showInspectorTab }}" style="padding:8px 14px;font-size:11px;font-weight:600;color:{{ inspTabColor }};border-bottom:2px solid {{ inspTabBorder }};cursor:pointer">Inspector</div>
+        </div>
+        <sc-if value="{{ logActive }}" hint-placeholder-val="{{ true }}">
+          <div style="flex:1;overflow:hidden;padding:10px 12px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.65;display:flex;flex-direction:column;justify-content:flex-end">
+            <sc-for list="{{ logLines }}" as="line" hint-placeholder-count="6">
+              <div style="color:{{ line.color }};background:{{ line.bg }};padding:0 6px;margin:0 -6px;border-radius:3px">{{ line.text }}</div>
+            </sc-for>
+          </div>
+        </sc-if>
+        <sc-if value="{{ inspectorActive }}" hint-placeholder-val="{{ false }}">
+          <div style="flex:1;padding:12px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Selected</div><div style="font-size:10px;color:{{ accent }}">robot</div></div>
+            <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-family:ui-monospace,Consolas,monospace;font-size:12px;align-content:start">
+              <div style="color:#918d7f">pose</div><div style="color:#e8e5db">{{ poseStr }}</div>
+              <div style="color:#918d7f">heading</div><div style="color:#e8e5db">{{ headingStr }}</div>
+              <div style="color:#918d7f">nearest</div><div style="color:#e8e5db">{{ nearestStr }}</div>
+              <div style="color:#918d7f">drift chk</div><div style="color:{{ driftColor }}">{{ driftStr }}</div>
+            </div>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+    </sc-if>
+  </div>
+
+  <!-- transport -->
+  <div style="display:flex;align-items:center;gap:10px;margin:0 8px;padding:8px 12px;background:#1e1d1a;border:1px solid #31302a;border-radius:6px">
+    <div style="display:flex;gap:4px">
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#26251f;border:1px solid #31302a;border-radius:4px;font-size:11px;color:#a5a193;cursor:pointer">⏮</div>
+      <div style="min-width:64px;height:28px;display:grid;place-items:center;background:{{ accent }};border-radius:4px;font-size:12px;color:#161614;cursor:pointer;font-weight:700">❚❚</div>
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#26251f;border:1px solid #31302a;border-radius:4px;font-size:11px;color:#a5a193;cursor:pointer">⏭</div>
+    </div>
+    <div style="width:1px;height:20px;background:#31302a"></div>
+    <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace">
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#26251f;border:1px solid #4a2e26;border-radius:4px;font-size:11px;color:#ff6b4a;cursor:pointer">⚑‹</div>
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#26251f;border:1px solid #4a2e26;border-radius:4px;font-size:11px;color:#ff6b4a;cursor:pointer">⚑›</div>
+    </div>
+    <div style="flex:1;position:relative;height:14px;display:flex;align-items:center;cursor:pointer">
+      <div style="width:100%;height:4px;border-radius:2px;background:#31302a"></div>
+      <div style="position:absolute;left:0;width:{{ pctStr }};height:4px;border-radius:2px;background:{{ accent }}"></div>
+      <div style="position:absolute;left:{{ pctStr }};top:0;width:13px;height:13px;margin-left:-6px;border-radius:50%;background:#e8e5db;border:2px solid {{ accent }}"></div>
+      <div style="position:absolute;left:48.2%;top:4px;width:2px;height:8px;background:#ff6b4a"></div>
+    </div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#a5a193;min-width:130px;text-align:right">{{ timeStr }} / 96.40 s</div>
+    <div style="display:flex;gap:2px;background:#161614;border:1px solid #31302a;border-radius:4px;padding:2px">
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">0.5×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;background:#e8e5db;color:#161614;font-weight:600">1×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">2×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">4×</div>
+    </div>
+  </div>
+
+  <!-- timeline dock -->
+  <sc-if value="{{ panelsVisible }}" hint-placeholder-val="{{ true }}">
+  <div style="margin:8px;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:10px 12px 12px;position:relative">
+    <div style="display:grid;grid-template-columns:52px 1fr;gap:4px 10px;align-items:center">
+      <div></div>
+      <div style="position:relative;height:14px;font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#565349">
+        <div style="position:absolute;left:0">0s</div><div style="position:absolute;left:10.4%">10</div><div style="position:absolute;left:20.7%">20</div><div style="position:absolute;left:31.1%">30</div><div style="position:absolute;left:41.5%">40</div><div style="position:absolute;left:51.9%">50</div><div style="position:absolute;left:62.2%">60</div><div style="position:absolute;left:72.6%">70</div><div style="position:absolute;left:83%">80</div><div style="position:absolute;left:93.4%">90</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#918d7f;text-align:right">TASK</div>
+      <div style="position:relative;height:18px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:0;width:31.1%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T1 collect</div>
+        <div style="position:absolute;left:31.4%;width:34.8%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T2 deliver</div>
+        <div style="position:absolute;left:66.6%;width:33.4%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T3 return</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#918d7f;text-align:right">GOTO</div>
+      <div style="position:relative;height:18px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:2.2%;width:12.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:16.8%;width:13%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:34.7%;width:13.1%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:51.9%;width:12.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:68.5%;width:14.5%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:87.1%;width:10.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:{{ holdColor }};text-align:right">HOLDING</div>
+      <div style="position:relative;height:34px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:15.1%;width:34.2%;top:3px;height:12px;background:{{ accentSoft }};border:1px solid {{ accentBorder }};border-radius:6px;font-size:9px;color:{{ holdColor }};display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_A</div>
+        <div style="position:absolute;left:29.8%;width:47.9%;top:18px;height:12px;background:{{ accentSoft }};border:1px solid {{ accentBorder }};border-radius:6px;font-size:9px;color:{{ holdColor }};display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_B</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#ff6b4a;text-align:right">DRIFT</div>
+      <div style="position:relative;height:18px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:48.2%;right:0;top:2px;bottom:2px;background:rgba(255,107,74,.14);border:1px solid rgba(255,107,74,.55);border-radius:2px 0 0 2px;font-size:9px;color:#ff6b4a;display:flex;align-items:center;padding:0 7px;overflow:hidden">12.4 cm off node · uncorrected</div>
+        <div style="position:absolute;left:48.2%;top:-3px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid #ff6b4a;margin-left:-5px"></div>
+      </div>
+    </div>
+    <div style="position:absolute;left:{{ playheadLeft }};top:8px;bottom:10px;width:1.5px;background:#e8e5db;box-shadow:0 0 6px rgba(232,229,219,.4)"></div>
+  </div>
+  </sc-if>
+</div>
+</div></div>
+
+</div>
+<p class="dv-next">Try next: "lock in this palette" · "add a second drift and a wait command" · "make the whole player a real working prototype"</p>
+</section>
+
+<section class="dv-turn" id="t2">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Merged shell — comments applied to <a class="dv-oid" href="#1a">1a</a> + <a class="dv-oid" href="#1b">1b</a>'s HOLDING (multi-item)</span>
+<span style="font:400 11px/1.5 ui-sans-serif,system-ui,sans-serif;color:rgba(0,0,0,.5);max-width:700px">Changes: MANIP lane → HOLDING lane (overlapping spans) · cargo rail kept · zoom +/−/1:1 → single full-view switch · frame-step arrows dropped · header stat now shows drift severity. Two de-AI'd palettes: warm mono + signal yellow, and technical paper + ink.</span></div>
+<div class="dv-opts">
+
+<!-- ============================ 2a Instrument ============================ -->
+<div class="dv-opt" id="2a"><div class="dv-olabel"><a class="dv-oid" href="#2a">2a</a>Instrument — warm near-black, monochrome UI, one signal-yellow accent</div>
+<div class="dv-card" style="width:1180px;background:#161614">
+<div style="display:flex;flex-direction:column;height:790px;color:#e8e5db">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 14px;border-bottom:1px solid #31302a">
+    <div style="font-size:12px;font-weight:700;letter-spacing:.12em;color:#e8e5db">CTPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#918d7f">mission_04.trace</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:.08em;padding:3px 8px;border:1px solid #3f3d35;border-radius:3px;color:#918d7f">PREDICTED</div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:7px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#ff6b4a;border:1px solid #4a2e26;border-radius:3px;padding:3px 9px;cursor:pointer"><div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:7px solid #ff6b4a"></div>drift 12.4 cm @ 58.2 s</div>
+    <div style="font-size:11px;color:#918d7f;border:1px solid #31302a;border-radius:3px;padding:3px 8px;cursor:pointer">? Help</div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;gap:8px;padding:8px;min-height:0">
+    <div style="flex:1 1 auto;position:relative;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;overflow:hidden">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="rgba(22,22,20,0.48)"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#3f3d35" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#e8e5db" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.75"></polyline>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,155" fill="none" stroke="#ffd24a" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        <g font-family="ui-monospace,monospace" font-size="11" fill="#e8e5db" paint-order="stroke" stroke="#161614" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#e8e5db"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#e8e5db"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#e8e5db"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#e8e5db"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#e8e5db"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#e8e5db"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="4" fill="#e8e5db"></circle><text x="507" y="214">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#e8e5db"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#e8e5db"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <polygon points="340,171 331,143 349,143" fill="#ffd24a" stroke="#161614" stroke-width="1.5"></polygon>
+        <line x1="40" y1="372" x2="140" y2="372" stroke="#918d7f" stroke-width="1"></line>
+        <line x1="40" y1="368" x2="40" y2="376" stroke="#918d7f" stroke-width="1"></line>
+        <line x1="140" y1="368" x2="140" y2="376" stroke="#918d7f" stroke-width="1"></line>
+        <text x="90" y="366" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#918d7f">50 cm</text>
+      </svg>
+      <div style="position:absolute;right:10px;top:10px;display:flex;gap:6px">
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#e8e5db;color:#161614;font-weight:600">MAP</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#e8e5db;color:#161614;font-weight:600">TRAIL</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#26251f;color:#918d7f;border:1px solid #31302a">NODES</div>
+      </div>
+      <div style="position:absolute;right:10px;bottom:10px;display:flex;align-items:center;gap:7px;background:#26251f;border:1px solid #31302a;border-radius:4px;padding:5px 10px;font-size:11px;color:#c9c5b8;cursor:pointer">⛶ Full view</div>
+    </div>
+
+    <!-- right rail -->
+    <div style="flex:0 0 288px;display:flex;flex-direction:column;gap:8px;min-height:0">
+      <div style="background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Current command</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:15px;color:#e8e5db">goTo: J4 → J6</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#918d7f">hop 2/3 · LINE edge · est 46.1 s</div>
+      </div>
+      <div style="background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;align-items:baseline"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Holding</div><div style="flex:1"></div><div style="font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#918d7f">2 / 3</div></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="border:1px solid rgba(255,210,74,.55);background:rgba(255,210,74,.07);border-radius:5px;padding:8px 10px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#ffd24a">sample_A</div>
+            <div style="flex:1"></div><div style="font-size:10px;color:#918d7f">grab 14.6 s @ J2</div>
+          </div>
+          <div style="border:1px solid rgba(255,210,74,.55);background:rgba(255,210,74,.07);border-radius:5px;padding:8px 10px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#ffd24a">sample_B</div>
+            <div style="flex:1"></div><div style="font-size:10px;color:#918d7f">grab 28.7 s @ J4</div>
+          </div>
+          <div style="border:1px dashed #31302a;border-radius:5px;padding:8px 10px;text-align:center;font-size:10px;color:#565349">empty</div>
+        </div>
+      </div>
+      <div style="flex:1 1 auto;min-height:0;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#918d7f">Log</div>
+        <div style="flex:1;overflow:hidden;border-top:1px solid #31302a;padding-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.65;color:#a5a193">
+          <div>[02.10s] goTo: HOME → J2</div>
+          <div>[14.60s] grab sample_A</div>
+          <div>[16.20s] goTo: J2 → J4</div>
+          <div>[28.70s] grab sample_B</div>
+          <div>[30.00s] Task: T2 deliver</div>
+          <div style="background:#26251f;margin:0 -6px;padding:0 6px;border-radius:3px;color:#e8e5db">[33.40s] goTo: J4 → J6&nbsp;&nbsp;◀</div>
+          <div style="color:#565349">[47.50s] put sample_A</div>
+          <div style="color:#7a4438">[58.20s] DRIFT: 12.4 cm at J6</div>
+          <div style="color:#565349">[64.00s] Task: T3 return</div>
+          <div style="color:#565349">[74.90s] put sample_B</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- transport -->
+  <div style="display:flex;align-items:center;gap:10px;margin:0 8px;padding:8px 12px;background:#1e1d1a;border:1px solid #31302a;border-radius:6px">
+    <div style="display:flex;gap:4px">
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#26251f;border:1px solid #31302a;border-radius:4px;font-size:11px;color:#a5a193;cursor:pointer">⏮</div>
+      <div style="min-width:64px;height:28px;display:grid;place-items:center;background:#ffd24a;border-radius:4px;font-size:12px;color:#161614;cursor:pointer;font-weight:700">❚❚</div>
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#26251f;border:1px solid #31302a;border-radius:4px;font-size:11px;color:#a5a193;cursor:pointer">⏭</div>
+    </div>
+    <div style="width:1px;height:20px;background:#31302a"></div>
+    <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace">
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#26251f;border:1px solid #4a2e26;border-radius:4px;font-size:11px;color:#ff6b4a;cursor:pointer">⚑‹</div>
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#26251f;border:1px solid #4a2e26;border-radius:4px;font-size:11px;color:#ff6b4a;cursor:pointer">⚑›</div>
+    </div>
+    <div style="flex:1;position:relative;height:14px;display:flex;align-items:center;cursor:pointer">
+      <div style="width:100%;height:4px;border-radius:2px;background:#31302a"></div>
+      <div style="position:absolute;left:0;width:43.8%;height:4px;border-radius:2px;background:#ffd24a"></div>
+      <div style="position:absolute;left:43.8%;top:0;width:13px;height:13px;margin-left:-6px;border-radius:50%;background:#e8e5db;border:2px solid #ffd24a"></div>
+      <div style="position:absolute;left:60.3%;top:4px;width:2px;height:8px;background:#ff6b4a"></div>
+    </div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#a5a193;min-width:130px;text-align:right">42.18 / 96.40 s</div>
+    <div style="display:flex;gap:2px;background:#161614;border:1px solid #31302a;border-radius:4px;padding:2px">
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">0.5×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;background:#e8e5db;color:#161614;font-weight:600">1×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">2×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#918d7f;cursor:pointer">4×</div>
+    </div>
+  </div>
+
+  <!-- timeline dock -->
+  <div style="margin:8px;background:#1e1d1a;border:1px solid #31302a;border-radius:6px;padding:10px 12px 12px;position:relative">
+    <div style="display:grid;grid-template-columns:52px 1fr;gap:4px 10px;align-items:center">
+      <div></div>
+      <div style="position:relative;height:14px;font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#565349">
+        <div style="position:absolute;left:0">0s</div><div style="position:absolute;left:10.4%">10</div><div style="position:absolute;left:20.7%">20</div><div style="position:absolute;left:31.1%">30</div><div style="position:absolute;left:41.5%">40</div><div style="position:absolute;left:51.9%">50</div><div style="position:absolute;left:62.2%">60</div><div style="position:absolute;left:72.6%">70</div><div style="position:absolute;left:83%">80</div><div style="position:absolute;left:93.4%">90</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#918d7f;text-align:right">TASK</div>
+      <div style="position:relative;height:18px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:0;width:31.1%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T1 collect</div>
+        <div style="position:absolute;left:31.4%;width:34.8%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T2 deliver</div>
+        <div style="position:absolute;left:66.6%;width:33.4%;top:2px;bottom:2px;background:#26251f;border:1px solid #3f3d35;border-radius:2px;font-size:9.5px;color:#a5a193;display:flex;align-items:center;padding:0 6px;overflow:hidden">T3 return</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#918d7f;text-align:right">GOTO</div>
+      <div style="position:relative;height:18px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:2.2%;width:12.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:16.8%;width:13%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:34.7%;width:13.1%;top:2px;bottom:2px;background:#e8e5db;border-radius:2px"></div>
+        <div style="position:absolute;left:51.9%;width:12.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:68.5%;width:14.5%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+        <div style="position:absolute;left:87.1%;width:10.4%;top:2px;bottom:2px;background:#4a483f;border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#ffd24a;text-align:right">HOLDING</div>
+      <div style="position:relative;height:34px;background:#161614;border-radius:3px">
+        <div style="position:absolute;left:15.1%;width:34.2%;top:3px;height:12px;background:rgba(255,210,74,.18);border:1px solid rgba(255,210,74,.6);border-radius:6px;font-size:9px;color:#ffd24a;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_A</div>
+        <div style="position:absolute;left:29.8%;width:47.9%;top:18px;height:12px;background:rgba(255,210,74,.18);border:1px solid rgba(255,210,74,.6);border-radius:6px;font-size:9px;color:#ffd24a;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_B</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#ff6b4a;text-align:right">DRIFT</div>
+      <div style="position:relative;height:14px">
+        <div style="position:absolute;left:60.3%;top:1px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:9px solid #ff6b4a;margin-left:-5px"></div>
+      </div>
+    </div>
+    <div style="position:absolute;left:calc(62px + (100% - 74px) * 0.438);top:8px;bottom:10px;width:1.5px;background:#e8e5db;box-shadow:0 0 6px rgba(232,229,219,.4)"></div>
+  </div>
+
+  <div style="display:flex;gap:16px;padding:5px 14px 9px;font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#565349">
+    <div>Space play</div><div>⇧←/→ event</div><div>D drift</div><div>[ ] speed</div><div>Home/End</div><div>F full view</div><div>? help</div>
+  </div>
+</div>
+</div></div>
+
+<!-- ============================ 2b Fieldbook ============================ -->
+<div class="dv-opt" id="2b"><div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a>Fieldbook — technical paper, ink UI, deep-green accent, map at full color</div>
+<div class="dv-card" style="width:1180px;background:#f4f2ec">
+<div style="display:flex;flex-direction:column;height:790px;color:#23211c">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 16px;background:#f4f2ec;border-bottom:1.5px solid #23211c">
+    <div style="font-size:12px;font-weight:700;letter-spacing:.12em">CTPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#7c786c">mission_04.trace</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:.08em;padding:3px 8px;border:1px solid #23211c;border-radius:3px">PREDICTED</div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:7px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#c9401f;border:1px solid #c9401f;border-radius:3px;padding:3px 9px;cursor:pointer"><div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:7px solid #c9401f"></div>drift 12.4 cm @ 58.2 s</div>
+    <div style="font-size:11px;color:#7c786c;border:1px solid #dcd8cc;border-radius:3px;padding:3px 8px;cursor:pointer">? Help</div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;gap:10px;padding:10px;min-height:0">
+    <div style="flex:1 1 auto;position:relative;background:#fff;border:1px solid #dcd8cc;border-radius:4px;overflow:hidden">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="rgba(255,255,255,0.22)"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#23211c" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#23211c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="7 4" opacity="0.8"></polyline>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,155" fill="none" stroke="#1e6b4e" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        <g font-family="ui-monospace,monospace" font-size="11" fill="#23211c" paint-order="stroke" stroke="#ffffff" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#23211c"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#23211c"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#23211c"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#23211c"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#23211c"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#23211c"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="4" fill="#23211c"></circle><text x="507" y="214">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#23211c"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#23211c"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <polygon points="340,171 331,143 349,143" fill="#e3a51a" stroke="#23211c" stroke-width="1.5"></polygon>
+        <line x1="40" y1="372" x2="140" y2="372" stroke="#7c786c" stroke-width="1"></line>
+        <line x1="40" y1="368" x2="40" y2="376" stroke="#7c786c" stroke-width="1"></line>
+        <line x1="140" y1="368" x2="140" y2="376" stroke="#7c786c" stroke-width="1"></line>
+        <text x="90" y="366" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#7c786c">50 cm</text>
+      </svg>
+      <div style="position:absolute;right:10px;top:10px;display:flex;gap:6px">
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#23211c;color:#f4f2ec;font-weight:600">MAP</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#23211c;color:#f4f2ec;font-weight:600">TRAIL</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#fff;color:#7c786c;border:1px solid #dcd8cc">NODES</div>
+      </div>
+      <div style="position:absolute;right:10px;bottom:10px;display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #dcd8cc;border-radius:4px;padding:5px 10px;font-size:11px;color:#23211c;cursor:pointer">⛶ Full view</div>
+    </div>
+
+    <!-- right rail -->
+    <div style="flex:0 0 288px;display:flex;flex-direction:column;gap:10px;min-height:0">
+      <div style="background:#fff;border:1px solid #dcd8cc;border-radius:4px;padding:12px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#7c786c">Current command</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:15px">goTo: J4 → J6</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#7c786c">hop 2/3 · LINE edge · est 46.1 s</div>
+      </div>
+      <div style="background:#fff;border:1px solid #dcd8cc;border-radius:4px;padding:12px;display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;align-items:baseline"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#7c786c">Holding</div><div style="flex:1"></div><div style="font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#7c786c">2 / 3</div></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <div style="border:1.5px solid #1e6b4e;background:rgba(30,107,78,.05);border-radius:4px;padding:8px 10px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#1e6b4e;font-weight:600">sample_A</div>
+            <div style="flex:1"></div><div style="font-size:10px;color:#7c786c">grab 14.6 s @ J2</div>
+          </div>
+          <div style="border:1.5px solid #1e6b4e;background:rgba(30,107,78,.05);border-radius:4px;padding:8px 10px;display:flex;align-items:baseline;gap:8px">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#1e6b4e;font-weight:600">sample_B</div>
+            <div style="flex:1"></div><div style="font-size:10px;color:#7c786c">grab 28.7 s @ J4</div>
+          </div>
+          <div style="border:1px dashed #cdc9bc;border-radius:4px;padding:8px 10px;text-align:center;font-size:10px;color:#aba695">empty</div>
+        </div>
+      </div>
+      <div style="flex:1 1 auto;min-height:0;background:#fff;border:1px solid #dcd8cc;border-radius:4px;padding:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#7c786c">Log</div>
+        <div style="flex:1;overflow:hidden;border-top:1px solid #ece8dc;padding-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.65;color:#55524a">
+          <div>[02.10s] goTo: HOME → J2</div>
+          <div>[14.60s] grab sample_A</div>
+          <div>[16.20s] goTo: J2 → J4</div>
+          <div>[28.70s] grab sample_B</div>
+          <div>[30.00s] Task: T2 deliver</div>
+          <div style="background:#ece8dc;margin:0 -6px;padding:0 6px;border-radius:3px;color:#23211c;font-weight:600">[33.40s] goTo: J4 → J6&nbsp;&nbsp;◀</div>
+          <div style="color:#aba695">[47.50s] put sample_A</div>
+          <div style="color:#c9401f">[58.20s] DRIFT: 12.4 cm at J6</div>
+          <div style="color:#aba695">[64.00s] Task: T3 return</div>
+          <div style="color:#aba695">[74.90s] put sample_B</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- transport -->
+  <div style="display:flex;align-items:center;gap:10px;margin:0 10px;padding:8px 12px;background:#fff;border:1px solid #dcd8cc;border-radius:4px">
+    <div style="display:flex;gap:4px">
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#f4f2ec;border:1px solid #dcd8cc;border-radius:4px;font-size:11px;color:#55524a;cursor:pointer">⏮</div>
+      <div style="min-width:64px;height:28px;display:grid;place-items:center;background:#1e6b4e;border-radius:4px;font-size:12px;color:#fff;cursor:pointer;font-weight:700">❚❚</div>
+      <div style="width:32px;height:28px;display:grid;place-items:center;background:#f4f2ec;border:1px solid #dcd8cc;border-radius:4px;font-size:11px;color:#55524a;cursor:pointer">⏭</div>
+    </div>
+    <div style="width:1px;height:20px;background:#dcd8cc"></div>
+    <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace">
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#fff;border:1px solid #c9401f;border-radius:4px;font-size:11px;color:#c9401f;cursor:pointer">⚑‹</div>
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#fff;border:1px solid #c9401f;border-radius:4px;font-size:11px;color:#c9401f;cursor:pointer">⚑›</div>
+    </div>
+    <div style="flex:1;position:relative;height:14px;display:flex;align-items:center;cursor:pointer">
+      <div style="width:100%;height:4px;border-radius:2px;background:#e3dfd2"></div>
+      <div style="position:absolute;left:0;width:43.8%;height:4px;border-radius:2px;background:#1e6b4e"></div>
+      <div style="position:absolute;left:43.8%;top:0;width:13px;height:13px;margin-left:-6px;border-radius:50%;background:#fff;border:2.5px solid #1e6b4e"></div>
+      <div style="position:absolute;left:60.3%;top:4px;width:2px;height:8px;background:#c9401f"></div>
+    </div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#23211c;min-width:130px;text-align:right">42.18 <span style="color:#aba695">/ 96.40 s</span></div>
+    <div style="display:flex;gap:2px;background:#f4f2ec;border:1px solid #dcd8cc;border-radius:4px;padding:2px">
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#7c786c;cursor:pointer">0.5×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;background:#23211c;color:#f4f2ec;font-weight:600">1×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#7c786c;cursor:pointer">2×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#7c786c;cursor:pointer">4×</div>
+    </div>
+  </div>
+
+  <!-- timeline dock -->
+  <div style="margin:10px;background:#fff;border:1px solid #dcd8cc;border-radius:4px;padding:10px 12px 12px;position:relative">
+    <div style="display:grid;grid-template-columns:52px 1fr;gap:4px 10px;align-items:center">
+      <div></div>
+      <div style="position:relative;height:14px;font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#aba695">
+        <div style="position:absolute;left:0">0s</div><div style="position:absolute;left:10.4%">10</div><div style="position:absolute;left:20.7%">20</div><div style="position:absolute;left:31.1%">30</div><div style="position:absolute;left:41.5%">40</div><div style="position:absolute;left:51.9%">50</div><div style="position:absolute;left:62.2%">60</div><div style="position:absolute;left:72.6%">70</div><div style="position:absolute;left:83%">80</div><div style="position:absolute;left:93.4%">90</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#7c786c;text-align:right">TASK</div>
+      <div style="position:relative;height:18px;background:#f4f2ec;border-radius:2px">
+        <div style="position:absolute;left:0;width:31.1%;top:2px;bottom:2px;background:#fff;border:1px solid #cdc9bc;border-radius:2px;font-size:9.5px;color:#55524a;display:flex;align-items:center;padding:0 6px;overflow:hidden">T1 collect</div>
+        <div style="position:absolute;left:31.4%;width:34.8%;top:2px;bottom:2px;background:#fff;border:1px solid #cdc9bc;border-radius:2px;font-size:9.5px;color:#55524a;display:flex;align-items:center;padding:0 6px;overflow:hidden">T2 deliver</div>
+        <div style="position:absolute;left:66.6%;width:33.4%;top:2px;bottom:2px;background:#fff;border:1px solid #cdc9bc;border-radius:2px;font-size:9.5px;color:#55524a;display:flex;align-items:center;padding:0 6px;overflow:hidden">T3 return</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#7c786c;text-align:right">GOTO</div>
+      <div style="position:relative;height:18px;background:#f4f2ec;border-radius:2px">
+        <div style="position:absolute;left:2.2%;width:12.4%;top:2px;bottom:2px;background:#cdc9bc;border-radius:2px"></div>
+        <div style="position:absolute;left:16.8%;width:13%;top:2px;bottom:2px;background:#cdc9bc;border-radius:2px"></div>
+        <div style="position:absolute;left:34.7%;width:13.1%;top:2px;bottom:2px;background:#23211c;border-radius:2px"></div>
+        <div style="position:absolute;left:51.9%;width:12.4%;top:2px;bottom:2px;background:#cdc9bc;border-radius:2px"></div>
+        <div style="position:absolute;left:68.5%;width:14.5%;top:2px;bottom:2px;background:#cdc9bc;border-radius:2px"></div>
+        <div style="position:absolute;left:87.1%;width:10.4%;top:2px;bottom:2px;background:#cdc9bc;border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#1e6b4e;text-align:right">HOLDING</div>
+      <div style="position:relative;height:34px;background:#f4f2ec;border-radius:2px">
+        <div style="position:absolute;left:15.1%;width:34.2%;top:3px;height:12px;background:rgba(30,107,78,.1);border:1px solid #1e6b4e;border-radius:6px;font-size:9px;color:#1e6b4e;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_A</div>
+        <div style="position:absolute;left:29.8%;width:47.9%;top:18px;height:12px;background:rgba(30,107,78,.1);border:1px solid #1e6b4e;border-radius:6px;font-size:9px;color:#1e6b4e;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_B</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#c9401f;text-align:right">DRIFT</div>
+      <div style="position:relative;height:14px">
+        <div style="position:absolute;left:60.3%;top:1px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:9px solid #c9401f;margin-left:-5px"></div>
+      </div>
+    </div>
+    <div style="position:absolute;left:calc(62px + (100% - 74px) * 0.438);top:8px;bottom:10px;width:1.5px;background:#23211c"></div>
+  </div>
+
+  <div style="display:flex;gap:16px;padding:0 16px 10px;font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#aba695">
+    <div>Space play</div><div>⇧←/→ event</div><div>D drift</div><div>[ ] speed</div><div>Home/End</div><div>F full view</div><div>? help</div>
+  </div>
+</div>
+</div></div>
+
+</div>
+<p class="dv-next">Try next: "<a class="dv-oid" href="#2a">2a</a> but with 2b's full-color map" · "try a third palette" · "make the winner a working prototype"</p>
+</section>
+
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">CTPS Player — 3 shell variations</span>
+<span style="font:400 11px/1.5 ui-sans-serif,system-ui,sans-serif;color:rgba(0,0,0,.5);max-width:760px">Assumptions: Track schema from <span style="font-family:ui-monospace,monospace">track_builder.py</span> (keyframes t/x/y/h · events t/type/label · field bounds/obstacles/nodes). System fonts only (offline, file://). Reserved 🔵 seams invisible — no UI. Synthetic 96.4 s mission over your WRO 2026 mat (uploads/map.png); trajectory is still synthetic — send a real track export to render true geometry.</span></div>
+<div class="dv-opts">
+
+<!-- ============================ 1a Slate Console ============================ -->
+<div class="dv-opt" id="1a"><div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Slate Console — existing DNA, classic NLE: multi-lane timeline dock, right rail</div>
+<div class="dv-card" style="width:1180px;background:#0b0e13">
+<div style="display:flex;flex-direction:column;height:772px;color:#cdd6e0">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 14px;border-bottom:1px solid #232a36">
+    <div style="font-size:12px;font-weight:600;letter-spacing:.1em;color:#e8edf3">CTPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#97a2b3">mission_04.trace</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:.08em;padding:3px 8px;border:1px solid #2a64c8;border-radius:3px;color:#4f9dff">PREDICTED</div>
+    <div style="flex:1"></div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#6b7686">28 nodes · 6 gotos · 1 drift</div>
+    <div style="font-size:11px;color:#6b7686;border:1px solid #232a36;border-radius:3px;padding:3px 8px;cursor:pointer">? Help</div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;gap:8px;padding:8px;min-height:0">
+    <!-- canvas -->
+    <div style="flex:1 1 auto;position:relative;background:#11151c;border:1px solid #232a36;border-radius:6px;overflow:hidden">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="rgba(11,14,19,0.45)"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#3a4253" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#4f9dff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        <g fill="#2a64c8" opacity="0.7">
+          <circle cx="80" cy="300" r="1.8"></circle><circle cx="80" cy="270" r="1.8"></circle><circle cx="80" cy="240" r="1.8"></circle>
+          <circle cx="110" cy="210" r="1.8"></circle><circle cx="145" cy="210" r="1.8"></circle><circle cx="180" cy="210" r="1.8"></circle>
+          <circle cx="210" cy="180" r="1.8"></circle><circle cx="210" cy="150" r="1.8"></circle>
+          <circle cx="245" cy="120" r="1.8"></circle><circle cx="280" cy="120" r="1.8"></circle><circle cx="315" cy="120" r="1.8"></circle>
+        </g>
+        <g font-family="ui-monospace,monospace" font-size="11" fill="#cdd6e0" paint-order="stroke" stroke="#0b0e13" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#cdd6e0"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#cdd6e0"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#cdd6e0"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#cdd6e0"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#cdd6e0"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#cdd6e0"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="4" fill="#cdd6e0"></circle><text x="507" y="214">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#cdd6e0"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#cdd6e0"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <polygon points="340,166 331,138 349,138" fill="#ffd24a" stroke="#11151c" stroke-width="1.5"></polygon>
+        <line x1="40" y1="368" x2="140" y2="368" stroke="#6b7686" stroke-width="1"></line>
+        <line x1="40" y1="364" x2="40" y2="372" stroke="#6b7686" stroke-width="1"></line>
+        <line x1="140" y1="364" x2="140" y2="372" stroke="#6b7686" stroke-width="1"></line>
+        <text x="90" y="362" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#6b7686">50 cm</text>
+      </svg>
+      <!-- hover tooltip -->
+      <div style="position:absolute;left:47%;top:26%;background:#1a2130;border:1px solid #2f3948;border-radius:4px;padding:6px 9px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#cdd6e0;box-shadow:0 4px 14px rgba(0,0,0,.5)">J4 · (168, 96) cm</div>
+      <!-- layer toggles -->
+      <div style="position:absolute;right:10px;top:10px;display:flex;gap:6px">
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#2a64c8;color:#fff">MAP</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#2a64c8;color:#fff">TRAIL</div>
+        <div style="font-size:10px;letter-spacing:.05em;padding:3px 8px;border-radius:3px;background:#1a2130;color:#6b7686;border:1px solid #232a36">NODES</div>
+      </div>
+      <!-- zoom -->
+      <div style="position:absolute;right:10px;bottom:10px;display:flex;flex-direction:column;gap:4px;font-size:13px;color:#97a2b3">
+        <div style="width:24px;height:24px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:3px;cursor:pointer">+</div>
+        <div style="width:24px;height:24px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:3px;cursor:pointer">−</div>
+        <div style="width:24px;height:24px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:3px;cursor:pointer;font-size:10px">1:1</div>
+      </div>
+    </div>
+
+    <!-- right rail -->
+    <div style="flex:0 0 288px;display:flex;flex-direction:column;gap:8px;min-height:0">
+      <!-- now -->
+      <div style="background:#11151c;border:1px solid #232a36;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7686">Current command</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:15px;color:#e8edf3">goTo: J4 → J6</div>
+        <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#6b7686">hop 2/3 · LINE edge · est 46.1 s</div>
+      </div>
+      <!-- inspector -->
+      <div style="background:#11151c;border:1px solid #232a36;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;align-items:baseline;gap:8px"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7686">Inspector</div><div style="font-size:10px;color:#4f9dff">robot</div></div>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-family:ui-monospace,Consolas,monospace;font-size:12px">
+          <div style="color:#6b7686">pose</div><div style="color:#cdd6e0">(151.2, 82.6) cm</div>
+          <div style="color:#6b7686">heading</div><div style="color:#cdd6e0">270.0°</div>
+          <div style="color:#6b7686">node</div><div style="color:#cdd6e0">J4 → J5</div>
+          <div style="color:#6b7686">drift</div><div style="color:#cdd6e0">0.8 cm</div>
+          <div style="color:#6b7686">seg speed</div><div style="color:#cdd6e0">30 cm/s</div>
+        </div>
+      </div>
+      <!-- log -->
+      <div style="flex:1 1 auto;min-height:0;background:#11151c;border:1px solid #232a36;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:8px">
+        <div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6b7686">Log</div>
+        <div style="flex:1;overflow:hidden;border-top:1px solid #232a36;padding-top:8px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.65;color:#97a2b3">
+          <div>[00.00s] Task: T1 collect</div>
+          <div>[02.10s] goTo: HOME → J2</div>
+          <div>[14.60s] Manipulator: grab sample_A</div>
+          <div>[16.20s] goTo: J2 → J4</div>
+          <div>[28.70s] Manipulator: grab sample_B</div>
+          <div>[30.00s] Task: T2 deliver</div>
+          <div style="background:#18202c;margin:0 -6px;padding:0 6px;border-radius:3px;color:#cdd6e0">[33.40s] goTo: J4 → J6&nbsp;&nbsp;◀</div>
+          <div style="color:#3f4a5a">[47.50s] Manipulator: put sample_A</div>
+          <div style="color:#3f4a5a">[58.20s] DRIFT: 12.4 cm at J6</div>
+          <div style="color:#3f4a5a">[64.00s] Task: T3 return</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- transport -->
+  <div style="display:flex;align-items:center;gap:10px;margin:0 8px;padding:8px 12px;background:#11151c;border:1px solid #232a36;border-radius:6px">
+    <div style="display:flex;gap:4px">
+      <div style="width:30px;height:28px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:4px;font-size:11px;color:#97a2b3;cursor:pointer">⏮</div>
+      <div style="width:30px;height:28px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:4px;font-size:11px;color:#97a2b3;cursor:pointer">‹</div>
+      <div style="min-width:64px;height:28px;display:grid;place-items:center;background:#2a64c8;border-radius:4px;font-size:12px;color:#fff;cursor:pointer;font-weight:600">❚❚</div>
+      <div style="width:30px;height:28px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:4px;font-size:11px;color:#97a2b3;cursor:pointer">›</div>
+      <div style="width:30px;height:28px;display:grid;place-items:center;background:#1a2130;border:1px solid #232a36;border-radius:4px;font-size:11px;color:#97a2b3;cursor:pointer">⏭</div>
+    </div>
+    <div style="width:1px;height:20px;background:#232a36"></div>
+    <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace">
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#1a2130;border:1px solid #3a2f22;border-radius:4px;font-size:11px;color:#ffb454;cursor:pointer">⚑‹</div>
+      <div style="height:28px;padding:0 9px;display:grid;place-items:center;background:#1a2130;border:1px solid #3a2f22;border-radius:4px;font-size:11px;color:#ffb454;cursor:pointer">⚑›</div>
+    </div>
+    <!-- seek -->
+    <div style="flex:1;position:relative;height:14px;display:flex;align-items:center;cursor:pointer">
+      <div style="width:100%;height:4px;border-radius:2px;background:#232a36"></div>
+      <div style="position:absolute;left:0;width:43.8%;height:4px;border-radius:2px;background:#2a64c8"></div>
+      <div style="position:absolute;left:43.8%;top:0;width:13px;height:13px;margin-left:-6px;border-radius:50%;background:#e8edf3;border:2px solid #2a64c8"></div>
+      <div style="position:absolute;left:60.3%;top:4px;width:2px;height:8px;background:#ffb454"></div>
+    </div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#97a2b3;min-width:130px;text-align:right">42.18 / 96.40 s</div>
+    <div style="display:flex;gap:2px;background:#0b0e13;border:1px solid #232a36;border-radius:4px;padding:2px">
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#6b7686;cursor:pointer">0.5×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;background:#2a64c8;color:#fff">1×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#6b7686;cursor:pointer">2×</div>
+      <div style="padding:3px 8px;font-size:11px;border-radius:3px;color:#6b7686;cursor:pointer">4×</div>
+    </div>
+  </div>
+
+  <!-- timeline dock -->
+  <div style="margin:8px;background:#11151c;border:1px solid #232a36;border-radius:6px;padding:10px 12px 12px;position:relative">
+    <div style="display:grid;grid-template-columns:52px 1fr;gap:4px 10px;align-items:center">
+      <div></div>
+      <div style="position:relative;height:14px;font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#3f4a5a">
+        <div style="position:absolute;left:0">0s</div><div style="position:absolute;left:10.4%">10</div><div style="position:absolute;left:20.7%">20</div><div style="position:absolute;left:31.1%">30</div><div style="position:absolute;left:41.5%">40</div><div style="position:absolute;left:51.9%">50</div><div style="position:absolute;left:62.2%">60</div><div style="position:absolute;left:72.6%">70</div><div style="position:absolute;left:83%">80</div><div style="position:absolute;left:93.4%">90</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#6b7686;text-align:right">TASK</div>
+      <div style="position:relative;height:18px;background:#0d1118;border-radius:3px">
+        <div style="position:absolute;left:0;width:31.1%;top:2px;bottom:2px;background:#1c2740;border:1px solid #2a3a5e;border-radius:2px;font-size:9.5px;color:#8fa8d8;display:flex;align-items:center;padding:0 6px;overflow:hidden">T1 collect</div>
+        <div style="position:absolute;left:31.4%;width:34.8%;top:2px;bottom:2px;background:#1c2740;border:1px solid #2a3a5e;border-radius:2px;font-size:9.5px;color:#8fa8d8;display:flex;align-items:center;padding:0 6px;overflow:hidden">T2 deliver</div>
+        <div style="position:absolute;left:66.6%;width:33.4%;top:2px;bottom:2px;background:#1c2740;border:1px solid #2a3a5e;border-radius:2px;font-size:9.5px;color:#8fa8d8;display:flex;align-items:center;padding:0 6px;overflow:hidden">T3 return</div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#6b7686;text-align:right">GOTO</div>
+      <div style="position:relative;height:18px;background:#0d1118;border-radius:3px">
+        <div style="position:absolute;left:2.2%;width:12.4%;top:2px;bottom:2px;background:#2a64c8;border-radius:2px;opacity:.85"></div>
+        <div style="position:absolute;left:16.8%;width:13%;top:2px;bottom:2px;background:#2a64c8;border-radius:2px;opacity:.85"></div>
+        <div style="position:absolute;left:34.7%;width:13.1%;top:2px;bottom:2px;background:#4f9dff;border-radius:2px"></div>
+        <div style="position:absolute;left:51.9%;width:12.4%;top:2px;bottom:2px;background:#2a64c8;border-radius:2px;opacity:.85"></div>
+        <div style="position:absolute;left:68.5%;width:14.5%;top:2px;bottom:2px;background:#2a64c8;border-radius:2px;opacity:.85"></div>
+        <div style="position:absolute;left:87.1%;width:10.4%;top:2px;bottom:2px;background:#2a64c8;border-radius:2px;opacity:.85"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#6b7686;text-align:right">MANIP</div>
+      <div style="position:relative;height:18px;background:#0d1118;border-radius:3px">
+        <div style="position:absolute;left:15.1%;width:1.2%;top:2px;bottom:2px;background:#3fbf9f;border-radius:2px"></div>
+        <div style="position:absolute;left:29.8%;width:1.2%;top:2px;bottom:2px;background:#3fbf9f;border-radius:2px"></div>
+        <div style="position:absolute;left:49.3%;width:1.2%;top:2px;bottom:2px;background:#3fbf9f;border-radius:2px"></div>
+        <div style="position:absolute;left:65.3%;width:1.2%;top:2px;bottom:2px;background:#3fbf9f;border-radius:2px"></div>
+        <div style="position:absolute;left:84%;width:1.2%;top:2px;bottom:2px;background:#3fbf9f;border-radius:2px"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#ffb454;text-align:right">DRIFT</div>
+      <div style="position:relative;height:14px">
+        <div style="position:absolute;left:60.3%;top:1px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:9px solid #ffb454;margin-left:-5px"></div>
+      </div>
+    </div>
+    <!-- playhead -->
+    <div style="position:absolute;left:calc(62px + (100% - 74px) * 0.438);top:8px;bottom:10px;width:1.5px;background:#e8edf3;box-shadow:0 0 6px rgba(232,237,243,.4)"></div>
+  </div>
+
+  <!-- keymap footer -->
+  <div style="display:flex;gap:16px;padding:5px 14px 9px;font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#3f4a5a">
+    <div>Space play</div><div>←/→ frame</div><div>⇧←/→ event</div><div>D drift</div><div>[ ] speed</div><div>Home/End</div><div>+/− zoom</div><div>? help</div>
+  </div>
+</div>
+</div></div>
+
+<!-- ============================ 1b Ops Deck ============================ -->
+<div class="dv-opt" id="1b"><div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Ops Deck — your dual-strip idea: DOING + HOLDING lanes, cargo rail, tabbed panel</div>
+<div class="dv-card" style="width:1180px;background:#131110">
+<div style="display:flex;flex-direction:column;height:772px;color:#d8d2c8">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 14px;border-bottom:1px solid #2e2823">
+    <div style="width:8px;height:8px;border-radius:50%;background:#e0a43c"></div>
+    <div style="font-size:12px;font-weight:600;letter-spacing:.1em;color:#f0ebe2">CTPS · OPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#8a8174">mission_04.trace · 96.4 s</div>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:6px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#e06c4f"><div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:7px solid #e06c4f"></div>1 drift @ 58.2 s</div>
+    <div style="font-size:11px;color:#8a8174;border:1px solid #2e2823;border-radius:3px;padding:3px 8px;cursor:pointer">? Keymap</div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;gap:8px;padding:8px;min-height:0">
+    <!-- canvas -->
+    <div style="flex:1 1 auto;position:relative;background:#1b1815;border:1px solid #2e2823;border-radius:6px;overflow:hidden">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="rgba(19,17,16,0.5)"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#463e33" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#5b8fc4" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></polyline>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220" fill="none" stroke="#e0a43c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"></polyline>
+        <g font-family="ui-monospace,monospace" font-size="11" fill="#d8d2c8" paint-order="stroke" stroke="#131110" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#d8d2c8"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#d8d2c8"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#d8d2c8"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#d8d2c8"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#d8d2c8"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#d8d2c8"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="4" fill="#d8d2c8"></circle><text x="507" y="214">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#d8d2c8"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#d8d2c8"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <circle cx="500" cy="220" r="10" fill="none" stroke="#e06c4f" stroke-width="1.5" stroke-dasharray="3 3"></circle>
+        <polygon points="516,220 488,211 488,229" fill="#e0a43c" stroke="#1b1815" stroke-width="1.5"></polygon>
+      </svg>
+      <div style="position:absolute;left:10px;top:10px;display:flex;gap:6px;font-family:ui-monospace,Consolas,monospace">
+        <div style="font-size:10px;padding:3px 8px;border-radius:3px;background:rgba(224,164,60,.15);border:1px solid rgba(224,164,60,.4);color:#e0a43c">t = 61.40 s</div>
+        <div style="font-size:10px;padding:3px 8px;border-radius:3px;background:#241f19;border:1px solid #2e2823;color:#8a8174">zoom 1.0×</div>
+      </div>
+    </div>
+
+    <!-- right rail: cargo + tabs -->
+    <div style="flex:0 0 288px;display:flex;flex-direction:column;gap:8px;min-height:0">
+      <!-- cargo rail -->
+      <div style="background:#1b1815;border:1px solid #2e2823;border-radius:6px;padding:12px;display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;align-items:baseline"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#8a8174">Holding</div><div style="flex:1"></div><div style="font-family:ui-monospace,Consolas,monospace;font-size:10px;color:#8a8174">1 / 2</div></div>
+        <div style="display:flex;gap:8px">
+          <div style="flex:1;border:1px solid rgba(224,164,60,.5);background:rgba(224,164,60,.08);border-radius:5px;padding:9px 10px;display:flex;flex-direction:column;gap:3px">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#e0a43c">sample_B</div>
+            <div style="font-size:10px;color:#8a8174">grabbed 28.7 s @ J4</div>
+          </div>
+          <div style="flex:1;border:1px dashed #2e2823;border-radius:5px;padding:9px 10px;display:grid;place-items:center;font-size:10px;color:#544c40">empty</div>
+        </div>
+        <div style="font-size:10px;color:#544c40">sample_A put down 47.5 s @ J6</div>
+      </div>
+      <!-- tabbed panel -->
+      <div style="flex:1 1 auto;min-height:0;background:#1b1815;border:1px solid #2e2823;border-radius:6px;display:flex;flex-direction:column;overflow:hidden">
+        <div style="display:flex;border-bottom:1px solid #2e2823">
+          <div style="padding:8px 14px;font-size:11px;font-weight:600;color:#f0ebe2;border-bottom:2px solid #e0a43c">Log</div>
+          <div style="padding:8px 14px;font-size:11px;color:#8a8174;cursor:pointer">Inspector</div>
+        </div>
+        <div style="flex:1;overflow:hidden;padding:10px 12px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:1.65;color:#9a9184">
+          <div>[14.60s] Manipulator: grab sample_A</div>
+          <div>[16.20s] goTo: J2 → J4</div>
+          <div>[28.70s] Manipulator: grab sample_B</div>
+          <div>[30.00s] Task: T2 deliver</div>
+          <div>[33.40s] goTo: J4 → J6</div>
+          <div>[47.50s] Manipulator: put sample_A</div>
+          <div style="color:#e06c4f">[58.20s] DRIFT: 12.4 cm at J6</div>
+          <div style="background:#241f19;margin:0 -6px;padding:0 6px;border-radius:3px;color:#f0ebe2">[60.10s] goTo: J6 → J7&nbsp;&nbsp;◀</div>
+          <div style="color:#544c40">[74.90s] Manipulator: put sample_B</div>
+          <div style="color:#544c40">[84.00s] goTo: J7 → GOAL</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- timeline dock w/ integrated transport -->
+  <div style="margin:0 8px 8px;background:#1b1815;border:1px solid #2e2823;border-radius:6px;padding:10px 12px;position:relative">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <div style="min-width:58px;height:30px;display:grid;place-items:center;background:#e0a43c;border-radius:4px;font-size:12px;color:#131110;font-weight:700;cursor:pointer">▶</div>
+      <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#9a9184">
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#241f19;border:1px solid #2e2823;border-radius:4px;cursor:pointer">⏮</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#241f19;border:1px solid #2e2823;border-radius:4px;cursor:pointer">‹ evt</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#241f19;border:1px solid #2e2823;border-radius:4px;cursor:pointer">evt ›</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#241f19;border:1px solid #3d2c22;border-radius:4px;color:#e06c4f;cursor:pointer">drift ›</div>
+      </div>
+      <div style="flex:1"></div>
+      <div style="font-family:ui-monospace,Consolas,monospace;font-size:14px;color:#f0ebe2">61.40 <span style="color:#544c40">/ 96.40 s</span></div>
+      <div style="display:flex;gap:2px;background:#131110;border:1px solid #2e2823;border-radius:4px;padding:2px;font-size:11px">
+        <div style="padding:3px 8px;border-radius:3px;color:#8a8174;cursor:pointer">0.5×</div>
+        <div style="padding:3px 8px;border-radius:3px;background:#e0a43c;color:#131110;font-weight:600">1×</div>
+        <div style="padding:3px 8px;border-radius:3px;color:#8a8174;cursor:pointer">2×</div>
+        <div style="padding:3px 8px;border-radius:3px;color:#8a8174;cursor:pointer">4×</div>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:64px 1fr;gap:5px 10px;align-items:center">
+      <div style="font-size:9px;letter-spacing:.06em;color:#8a8174;text-align:right">DOING</div>
+      <div style="position:relative;height:26px;background:#131110;border-radius:3px">
+        <div style="position:absolute;left:2.2%;width:12.4%;top:3px;bottom:3px;background:#3a5a80;border-radius:2px;font-size:9.5px;color:#c8daf0;display:flex;align-items:center;padding:0 5px;overflow:hidden">goTo J2</div>
+        <div style="position:absolute;left:15.1%;width:1.4%;top:3px;bottom:3px;background:#4ba58c;border-radius:2px"></div>
+        <div style="position:absolute;left:16.8%;width:13%;top:3px;bottom:3px;background:#3a5a80;border-radius:2px;font-size:9.5px;color:#c8daf0;display:flex;align-items:center;padding:0 5px;overflow:hidden">goTo J4</div>
+        <div style="position:absolute;left:29.8%;width:1.4%;top:3px;bottom:3px;background:#4ba58c;border-radius:2px"></div>
+        <div style="position:absolute;left:34.7%;width:13.1%;top:3px;bottom:3px;background:#3a5a80;border-radius:2px;font-size:9.5px;color:#c8daf0;display:flex;align-items:center;padding:0 5px;overflow:hidden">goTo J6</div>
+        <div style="position:absolute;left:49.3%;width:1.4%;top:3px;bottom:3px;background:#4ba58c;border-radius:2px"></div>
+        <div style="position:absolute;left:62.3%;width:14.1%;top:3px;bottom:3px;background:#5b8fc4;border-radius:2px;font-size:9.5px;color:#131110;font-weight:600;display:flex;align-items:center;padding:0 5px;overflow:hidden">goTo J7</div>
+        <div style="position:absolute;left:77.7%;width:1.4%;top:3px;bottom:3px;background:#4ba58c;border-radius:2px"></div>
+        <div style="position:absolute;left:87.1%;width:10.4%;top:3px;bottom:3px;background:#3a5a80;border-radius:2px;font-size:9.5px;color:#c8daf0;display:flex;align-items:center;padding:0 5px;overflow:hidden">goTo GOAL</div>
+        <div style="position:absolute;left:60.3%;top:-3px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid #e06c4f;margin-left:-5px"></div>
+      </div>
+      <div style="font-size:9px;letter-spacing:.06em;color:#e0a43c;text-align:right">HOLDING</div>
+      <div style="position:relative;height:34px;background:#131110;border-radius:3px">
+        <div style="position:absolute;left:15.1%;width:34.2%;top:3px;height:12px;background:rgba(224,164,60,.25);border:1px solid rgba(224,164,60,.6);border-radius:6px;font-size:9px;color:#e0a43c;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_A · grab 14.6 → put 47.5</div>
+        <div style="position:absolute;left:29.8%;width:47.9%;top:18px;height:12px;background:rgba(224,164,60,.25);border:1px solid rgba(224,164,60,.6);border-radius:6px;font-size:9px;color:#e0a43c;display:flex;align-items:center;padding:0 7px;overflow:hidden">sample_B · grab 28.7 → put 74.9</div>
+      </div>
+    </div>
+    <!-- playhead -->
+    <div style="position:absolute;left:calc(74px + (100% - 86px) * 0.637);top:52px;bottom:8px;width:1.5px;background:#f0ebe2;box-shadow:0 0 6px rgba(240,235,226,.4)"></div>
+    <div style="position:absolute;left:calc(74px + (100% - 86px) * 0.637);top:44px;transform:translateX(-50%);font-family:ui-monospace,Consolas,monospace;font-size:9px;color:#f0ebe2;background:#131110;padding:0 4px;border-radius:2px">61.4</div>
+  </div>
+</div>
+</div></div>
+
+<!-- ============================ 1c Light Lab ============================ -->
+<div class="dv-opt" id="1c"><div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>Light Lab — review-first: log rail on the left, compact tick strip, legend footer</div>
+<div class="dv-card" style="width:1180px;background:#eef0f2">
+<div style="display:flex;flex-direction:column;height:772px;color:#1f242c">
+
+  <!-- header -->
+  <div style="display:flex;align-items:center;gap:14px;padding:10px 16px;background:#fff;border-bottom:1px solid #d8dde3">
+    <div style="font-size:12px;font-weight:700;letter-spacing:.1em;color:#1f242c">CTPS</div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:12px;color:#6a7482">mission_04.trace</div>
+    <div style="font-size:10px;font-weight:600;letter-spacing:.08em;padding:3px 8px;border-radius:3px;background:#e8eefb;color:#2a64c8">PREDICTED</div>
+    <div style="flex:1"></div>
+    <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#6a7482">96.4 s · 6 gotos · 5 manips · <span style="color:#c96a2a;font-weight:600">1 drift</span></div>
+  </div>
+
+  <!-- stage row -->
+  <div style="display:flex;flex:1 1 auto;min-height:0">
+    <!-- log rail (review-first) -->
+    <div style="flex:0 0 300px;display:flex;flex-direction:column;background:#fff;border-right:1px solid #d8dde3">
+      <div style="padding:12px 16px 8px;font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6a7482">Mission log — click to seek</div>
+      <div style="flex:1;overflow:hidden;padding:0 8px 8px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px;line-height:2.05;color:#4a5462">
+        <div style="padding:0 8px">[00.00s] Task: T1 collect</div>
+        <div style="padding:0 8px">[02.10s] goTo: HOME → J2</div>
+        <div style="padding:0 8px">[14.60s] grab sample_A</div>
+        <div style="padding:0 8px">[16.20s] goTo: J2 → J4</div>
+        <div style="padding:0 8px">[28.70s] grab sample_B</div>
+        <div style="padding:0 8px">[30.00s] Task: T2 deliver</div>
+        <div style="padding:0 8px;background:#e8eefb;border-radius:4px;color:#1f242c;font-weight:600">[33.40s] goTo: J4 → J6 ◀</div>
+        <div style="padding:0 8px;color:#a7b0bc">[47.50s] put sample_A</div>
+        <div style="padding:0 8px;color:#c96a2a">[58.20s] ⚑ DRIFT 12.4 cm at J6</div>
+        <div style="padding:0 8px;color:#a7b0bc">[60.10s] goTo: J6 → J7</div>
+        <div style="padding:0 8px;color:#a7b0bc">[74.90s] put sample_B</div>
+        <div style="padding:0 8px;color:#a7b0bc">[84.00s] goTo: J7 → GOAL</div>
+      </div>
+      <!-- inspector card pinned bottom of rail -->
+      <div style="border-top:1px solid #d8dde3;padding:12px 16px;display:flex;flex-direction:column;gap:6px">
+        <div style="display:flex;gap:8px;align-items:baseline"><div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6a7482">Selected</div><div style="font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#2a64c8">node J6</div></div>
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:3px 14px;font-family:ui-monospace,Consolas,monospace;font-size:11.5px">
+          <div style="color:#a7b0bc">pos</div><div>(236, 96) cm</div>
+          <div style="color:#a7b0bc">degree</div><div>3 edges</div>
+          <div style="color:#a7b0bc">visits</div><div>2 (33.4 s, 58.0 s)</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- canvas -->
+    <div style="flex:1 1 auto;position:relative;margin:12px;background:#fff;border:1px solid #d8dde3;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(20,30,50,.05)">
+      <svg viewBox="0 0 720 400" style="display:block;width:100%;height:100%">
+        <image href="uploads/map.png" x="28" y="40" width="664" height="321" preserveAspectRatio="none"></image>
+        <rect x="28" y="40" width="664" height="321" fill="rgba(255,255,255,0.3)"></rect>
+        <rect x="28" y="40" width="664" height="321" fill="none" stroke="#c3ccd6" stroke-width="1.5"></rect>
+        <polyline points="80,330 80,210 210,210 210,120 340,120 340,220 500,220 500,320 620,320" fill="none" stroke="#2a64c8" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"></polyline>
+        <g font-family="ui-monospace,monospace" font-size="11" fill="#1f242c" paint-order="stroke" stroke="#ffffff" stroke-width="3" stroke-linejoin="round">
+          <circle cx="80" cy="330" r="4" fill="#1f242c"></circle><text x="87" y="334">HOME</text>
+          <circle cx="80" cy="210" r="4" fill="#1f242c"></circle><text x="87" y="214">J1</text>
+          <circle cx="210" cy="210" r="4" fill="#1f242c"></circle><text x="217" y="224">J2</text>
+          <circle cx="210" cy="120" r="4" fill="#1f242c"></circle><text x="217" y="114">J3</text>
+          <circle cx="340" cy="120" r="4" fill="#1f242c"></circle><text x="347" y="114">J4</text>
+          <circle cx="340" cy="220" r="4" fill="#1f242c"></circle><text x="347" y="234">J5</text>
+          <circle cx="500" cy="220" r="6" fill="#fff" stroke="#2a64c8" stroke-width="2"></circle><text x="509" y="214" fill="#2a64c8" font-weight="600">J6</text>
+          <circle cx="500" cy="320" r="4" fill="#1f242c"></circle><text x="507" y="334">J7</text>
+          <circle cx="620" cy="320" r="4" fill="#1f242c"></circle><text x="627" y="334">GOAL</text>
+        </g>
+        <polygon points="340,166 331,138 349,138" fill="#d99a00" stroke="#fff" stroke-width="1.5"></polygon>
+        <line x1="40" y1="368" x2="140" y2="368" stroke="#a7b0bc" stroke-width="1"></line>
+        <text x="90" y="362" text-anchor="middle" font-family="ui-monospace,monospace" font-size="10" fill="#a7b0bc">50 cm</text>
+      </svg>
+      <!-- floating command banner -->
+      <div style="position:absolute;left:50%;top:12px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;background:#1f242c;color:#fff;border-radius:6px;padding:7px 14px;font-family:ui-monospace,Consolas,monospace;font-size:13px;box-shadow:0 4px 14px rgba(20,30,50,.18)">goTo: J4 → J6<span style="font-size:10px;color:#8f99a8">hop 2/3</span></div>
+    </div>
+  </div>
+
+  <!-- transport + tick strip -->
+  <div style="background:#fff;border-top:1px solid #d8dde3;padding:10px 16px 12px;display:flex;flex-direction:column;gap:9px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <div style="min-width:60px;height:30px;display:grid;place-items:center;background:#2a64c8;border-radius:5px;font-size:12px;color:#fff;font-weight:600;cursor:pointer">❚❚</div>
+      <div style="display:flex;gap:4px;font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#4a5462">
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px;cursor:pointer">⏮</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px;cursor:pointer">‹ f</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px;cursor:pointer">f ›</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px;cursor:pointer">⏭</div>
+        <div style="height:30px;padding:0 10px;display:grid;place-items:center;background:#fdf1e8;border:1px solid #ecd2bc;border-radius:5px;color:#c96a2a;cursor:pointer">⚑ next drift</div>
+      </div>
+      <div style="flex:1"></div>
+      <div style="font-family:ui-monospace,Consolas,monospace;font-size:13px;color:#1f242c">42.18 <span style="color:#a7b0bc">/ 96.40 s</span></div>
+      <div style="display:flex;gap:2px;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px;padding:2px;font-size:11px">
+        <div style="padding:3px 8px;border-radius:3px;color:#6a7482;cursor:pointer">0.5×</div>
+        <div style="padding:3px 8px;border-radius:3px;background:#fff;color:#1f242c;font-weight:600;box-shadow:0 1px 2px rgba(20,30,50,.12)">1×</div>
+        <div style="padding:3px 8px;border-radius:3px;color:#6a7482;cursor:pointer">2×</div>
+        <div style="padding:3px 8px;border-radius:3px;color:#6a7482;cursor:pointer">4×</div>
+      </div>
+    </div>
+    <!-- tick strip -->
+    <div style="position:relative;height:26px;background:#f2f4f7;border:1px solid #d8dde3;border-radius:5px">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:43.8%;background:#e8eefb;border-radius:5px 0 0 5px"></div>
+      <div style="position:absolute;left:2.2%;top:8px;bottom:8px;width:12.4%;background:#2a64c8;opacity:.35;border-radius:2px"></div>
+      <div style="position:absolute;left:16.8%;top:8px;bottom:8px;width:13%;background:#2a64c8;opacity:.35;border-radius:2px"></div>
+      <div style="position:absolute;left:34.7%;top:8px;bottom:8px;width:13.1%;background:#2a64c8;opacity:.55;border-radius:2px"></div>
+      <div style="position:absolute;left:51.9%;top:8px;bottom:8px;width:12.4%;background:#2a64c8;opacity:.35;border-radius:2px"></div>
+      <div style="position:absolute;left:68.5%;top:8px;bottom:8px;width:14.5%;background:#2a64c8;opacity:.35;border-radius:2px"></div>
+      <div style="position:absolute;left:87.1%;top:8px;bottom:8px;width:10.4%;background:#2a64c8;opacity:.35;border-radius:2px"></div>
+      <div style="position:absolute;left:15.1%;top:4px;bottom:4px;width:3px;background:#3f9c82;border-radius:1px"></div>
+      <div style="position:absolute;left:29.8%;top:4px;bottom:4px;width:3px;background:#3f9c82;border-radius:1px"></div>
+      <div style="position:absolute;left:49.3%;top:4px;bottom:4px;width:3px;background:#3f9c82;border-radius:1px"></div>
+      <div style="position:absolute;left:65.3%;top:4px;bottom:4px;width:3px;background:#3f9c82;border-radius:1px"></div>
+      <div style="position:absolute;left:84%;top:4px;bottom:4px;width:3px;background:#3f9c82;border-radius:1px"></div>
+      <div style="position:absolute;left:60.3%;top:-4px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-top:8px solid #c96a2a;margin-left:-5px"></div>
+      <div style="position:absolute;left:43.8%;top:-3px;bottom:-3px;width:2px;background:#1f242c;border-radius:1px"></div>
+    </div>
+    <!-- legend -->
+    <div style="display:flex;gap:18px;align-items:center;font-size:10.5px;color:#6a7482">
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:14px;height:2px;background:#2a64c8"></div>trajectory</div>
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:7px;height:7px;border-radius:50%;background:#1f242c"></div>node</div>
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:10px;height:8px;background:rgba(201,80,66,.15);border:1px solid rgba(201,80,66,.55)"></div>obstacle</div>
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:8px solid #d99a00"></div>robot</div>
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:3px;height:9px;background:#3f9c82;border-radius:1px"></div>manip</div>
+      <div style="display:flex;gap:6px;align-items:center"><div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-top:7px solid #c96a2a"></div>drift</div>
+      <div style="flex:1"></div>
+      <div style="font-family:ui-monospace,Consolas,monospace;color:#a7b0bc">Space · ←/→ · ⇧←/→ evt · D drift · ? help</div>
+    </div>
+  </div>
+</div>
+</div></div>
+
+</div>
+<p class="dv-next">Try next: "merge <a class="dv-oid" href="#1b">1b</a>'s HOLDING strip into <a class="dv-oid" href="#1a">1a</a>" · "make <a class="dv-oid" href="#1a">1a</a> a working prototype" · "show the Help overlay + drift-moment state"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;playheadS&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:39.7,&quot;min&quot;:0,&quot;max&quot;:96.4,&quot;step&quot;:0.1,&quot;unit&quot;:&quot;s&quot;,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Playback — scrub me&quot;},&quot;accent&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#e0a43c&quot;,&quot;options&quot;:[&quot;#ffd24a&quot;,&quot;#e0a43c&quot;,&quot;#4fd6a3&quot;,&quot;#ff8a5b&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Style&quot;},&quot;holdColor&quot;:{&quot;editor&quot;:&quot;color&quot;,&quot;default&quot;:&quot;#5bc8e0&quot;,&quot;options&quot;:[&quot;#4fd6a3&quot;,&quot;#5bc8e0&quot;,&quot;#ffd24a&quot;,&quot;#ff8a5b&quot;],&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Style&quot;},&quot;mapDim&quot;:{&quot;editor&quot;:&quot;range&quot;,&quot;default&quot;:0.25,&quot;min&quot;:0,&quot;max&quot;:0.85,&quot;step&quot;:0.05,&quot;tsType&quot;:&quot;number&quot;,&quot;section&quot;:&quot;Style&quot;},&quot;showTrail&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Layers&quot;},&quot;showNodes&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Layers&quot;}}">
+class Component extends DCLogic {
+  state = { tab: "log", fullView: false };
+  renderVals() {
+    var self = this;
+    var logActive = this.state.tab === "log";
+    var fullView = this.state.fullView;
+    var DUR = 96.4;
+    var t = Math.max(0, Math.min(DUR, this.props.playheadS ?? 42.2));
+    var accent = this.props.accent ?? "#ffd24a";
+    var holdColor = this.props.holdColor ?? "#4fd6a3";
+    var dim = this.props.mapDim ?? 0.48;
+    var showTrail = this.props.showTrail ?? true;
+    var showNodes = this.props.showNodes ?? true;
+
+    // Synthetic keyframes in SVG px (mirror of Track keyframes)
+    var KF = [
+      { t: 0.0, x: 80, y: 330 }, { t: 2.1, x: 80, y: 330 },
+      { t: 7.5, x: 80, y: 210 }, { t: 14.0, x: 210, y: 210 },
+      { t: 16.2, x: 210, y: 210 }, { t: 21.5, x: 210, y: 120 },
+      { t: 28.0, x: 340, y: 120 }, { t: 33.4, x: 340, y: 120 },
+      { t: 39.5, x: 340, y: 220 }, { t: 46.5, x: 500, y: 220 },
+      { t: 60.1, x: 500, y: 220 }, { t: 71.5, x: 500, y: 320 },
+      { t: 84.0, x: 500, y: 320 }, { t: 94.0, x: 620, y: 320 },
+      { t: 96.4, x: 620, y: 320 }
+    ];
+    // bounded bisect (same pattern as player.js findKeyframeIndex)
+    var lo = 0;
+    if (t >= KF[KF.length - 1].t) { lo = KF.length - 1; }
+    else if (t > KF[0].t) {
+      var l = 0, h = KF.length - 1;
+      while (h - l > 1) { var m = (l + h) >> 1; if (KF[m].t <= t) { l = m; } else { h = m; } }
+      lo = l;
+    }
+    var a = KF[lo], b = KF[Math.min(lo + 1, KF.length - 1)];
+    var span = b.t - a.t;
+    var u = span > 0 ? Math.min(1, Math.max(0, (t - a.t) / span)) : 0;
+    var x = a.x + (b.x - a.x) * u;
+    var y = a.y + (b.y - a.y) * u;
+    // heading = direction of last moving segment
+    var hdg = -90;
+    for (var i = lo; i >= 0; i--) {
+      var p = KF[i], q = KF[i + 1] || p;
+      if (q.x !== p.x || q.y !== p.y) { hdg = Math.atan2(q.y - p.y, q.x - p.x) * 180 / Math.PI; break; }
+    }
+    // traveled polyline
+    var pts = [];
+    for (var k = 0; k < KF.length; k++) { if (KF[k].t <= t) { pts.push(KF[k].x + "," + KF[k].y); } }
+    pts.push(x.toFixed(1) + "," + y.toFixed(1));
+    var traveledPoints = showTrail ? pts.join(" ") : "";
+
+    // events (mirror of Track events)
+    var EV = [
+      { t: 0.0, label: "Task: T1 collect", type: "task" },
+      { t: 2.1, label: "goTo: HOME → J2", type: "goto" },
+      { t: 14.6, label: "grab sample_A", type: "manip", grab: "sample_A", node: "J2" },
+      { t: 16.2, label: "goTo: J2 → J4", type: "goto" },
+      { t: 28.7, label: "grab sample_B", type: "manip", grab: "sample_B", node: "J4" },
+      { t: 30.0, label: "Task: T2 deliver", type: "task" },
+      { t: 33.4, label: "goTo: J4 → J6", type: "goto" },
+      { t: 46.5, label: "DRIFT: chassis 12.4 cm off node J6", type: "drift", cm: 12.4, node: "J6" },
+      { t: 47.5, label: "put sample_A", type: "manip", put: "sample_A" },
+      { t: 60.1, label: "goTo: J6 → J7", type: "goto" },
+      { t: 64.0, label: "Task: T3 return", type: "task" },
+      { t: 74.9, label: "put sample_B", type: "manip", put: "sample_B" },
+      { t: 84.0, label: "goTo: J7 → GOAL", type: "goto" },
+      { t: 96.4, label: "Task end: T3 return", type: "task" }
+    ];
+    var past = EV.filter(function (e) { return e.t <= t; });
+    var cur = past.length ? past[past.length - 1] : null;
+    var currentCmd = cur ? cur.label : "—";
+    var cmdColor = cur && cur.type === "drift" ? "#ff6b4a" : "#e8e5db";
+    var detailByType = {
+      goto: "path-tracker · bounded lerp seek",
+      manip: "manipulator dwell · 0.5 s nominal",
+      task: "task boundary",
+      drift: "post-goto check · threshold 10 cm"
+    };
+    var cmdDetail = cur ? (detailByType[cur.type] || "") : "";
+    // log = last 10 past events, newest at bottom, current highlighted
+    var logLines = past.slice(-10).map(function (e, idx, arr) {
+      var isLast = idx === arr.length - 1;
+      return {
+        text: "[" + e.t.toFixed(2).padStart(5, "0") + "s] " + e.label,
+        color: e.type === "drift" ? "#ff6b4a" : (isLast ? "#e8e5db" : "#a5a193"),
+        bg: isLast ? "#26251f" : "transparent"
+      };
+    });
+    // holding (grab/put replay)
+    var held = [];
+    past.forEach(function (e) {
+      if (e.grab) { held.push({ name: e.grab, meta: "grab " + e.t.toFixed(1) + " s @ " + e.node }); }
+      if (e.put) { held = held.filter(function (it) { return it.name !== e.put; }); }
+    });
+    var emptySlots = [];
+    for (var s = held.length; s < 3; s++) { emptySlots.push(s); }
+
+    // accent derivatives
+    var v = holdColor.replace("#", "");
+    var r = parseInt(v.slice(0, 2), 16), g = parseInt(v.slice(2, 4), 16), bl = parseInt(v.slice(4, 6), 16);
+    var holdSoft = "rgba(" + r + "," + g + "," + bl + ",0.14)";
+    var holdBorder = "rgba(" + r + "," + g + "," + bl + ",0.6)";
+
+    // inspector: px -> cm (WRO mat 236 x 114 cm over 664 x 321 px)
+    var xcm = (x - 28) * 236 / 664;
+    var ycm = (361 - y) * 114 / 321;
+    var worldHdg = ((-hdg) % 360 + 360) % 360;
+    var NODES = [["HOME", 80, 330], ["J1", 80, 210], ["J2", 210, 210], ["J3", 210, 120], ["J4", 340, 120], ["J5", 340, 220], ["J6", 500, 220], ["J7", 500, 320], ["GOAL", 620, 320]];
+    var bestName = "—", bestD = Infinity;
+    NODES.forEach(function (n) {
+      var d = Math.hypot(n[1] - x, n[2] - y);
+      if (d < bestD) { bestD = d; bestName = n[0]; }
+    });
+    var drifts = past.filter(function (e) { return e.type === "drift"; });
+    var lastDrift = drifts.length ? drifts[drifts.length - 1] : null;
+    var driftStr = lastDrift ? lastDrift.cm.toFixed(1) + " cm off " + lastDrift.node : "OK · < 10 cm";
+    var driftColor = lastDrift ? "#ff6b4a" : "#e8e5db";
+    var frac = t / DUR;
+
+    return {
+      fullView: fullView,
+      panelsVisible: !fullView,
+      toggleFullView: function () { self.setState(function (s) { return { fullView: !s.fullView }; }); },
+      fullViewLabel: fullView ? "🗗 Exit full view" : "⛶ Full view",
+      fullViewBg: fullView ? "#e8e5db" : "#26251f",
+      fullViewColor: fullView ? "#161614" : "#c9c5b8",
+      logActive: logActive,
+      inspectorActive: !logActive,
+      showLogTab: function () { self.setState({ tab: "log" }); },
+      showInspectorTab: function () { self.setState({ tab: "inspector" }); },
+      logTabColor: logActive ? "#e8e5db" : "#918d7f",
+      logTabBorder: logActive ? accent : "transparent",
+      inspTabColor: logActive ? "#918d7f" : "#e8e5db",
+      inspTabBorder: logActive ? "transparent" : accent,
+      accent: accent,
+      holdColor: holdColor,
+      accentSoft: holdSoft,
+      accentBorder: holdBorder,
+      scrimFill: "rgba(22,22,20," + dim + ")",
+      nodesOpacity: showNodes ? 1 : 0,
+      trailChipBg: showTrail ? "#e8e5db" : "#26251f",
+      trailChipColor: showTrail ? "#161614" : "#918d7f",
+      nodeChipBg: showNodes ? "#e8e5db" : "#26251f",
+      nodeChipColor: showNodes ? "#161614" : "#918d7f",
+      traveledPoints: traveledPoints,
+      robotTransform: "translate(" + x.toFixed(1) + "," + y.toFixed(1) + ") rotate(" + hdg.toFixed(1) + ")",
+      currentCmd: currentCmd,
+      cmdColor: cmdColor,
+      cmdDetail: cmdDetail,
+      logLines: logLines,
+      heldItems: held,
+      emptySlots: emptySlots,
+      heldCount: held.length + " / 3",
+      poseStr: "(" + xcm.toFixed(1) + ", " + ycm.toFixed(1) + ") cm",
+      headingStr: worldHdg.toFixed(1) + "°",
+      nearestStr: bestName + " · " + (bestD * 236 / 664).toFixed(1) + " cm",
+      driftStr: driftStr,
+      driftColor: driftColor,
+      timeStr: t.toFixed(2),
+      pctStr: (frac * 100).toFixed(2) + "%",
+      playheadLeft: "calc(62px + (100% - 74px) * " + frac.toFixed(4) + ")"
+    };
+  }
+}
+</script>
+</body>
+</html>
