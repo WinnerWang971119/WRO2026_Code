@@ -43,6 +43,11 @@
     var TRAJ_ALPHA = 0.6;        // full trajectory opacity (--ctps-text @ 60%)
     var TRAIL_WIDTH = 2.5;       // traveled overlay stroke width
     var BOUNDS_WIDTH = 1.5;      // field bounds frame width
+    // Obstacle rects have no --ctps-* token; these translucent literals match the
+    // pre-rework player's vector fallback (a muted red, clearly a keep-out).
+    var OBSTACLE_FILL = "rgba(214, 96, 84, 0.30)";   // translucent obstacle fill
+    var OBSTACLE_STROKE = "rgba(214, 96, 84, 0.85)"; // stronger obstacle outline
+    var OBSTACLE_WIDTH = 1;      // obstacle outline stroke width
     var NODE_DOT_R = 4;          // node dot radius
     var NODE_LABEL_DX = 7;       // node label x-offset from its dot
     var NODE_HALO_WIDTH = 3;     // dark paint-order halo behind a node label
@@ -315,6 +320,39 @@
         ctx.strokeStyle = _colors.borderStrong;
         ctx.lineWidth = BOUNDS_WIDTH;
         ctx.strokeRect(r.x, r.y, r.w, r.h);
+        ctx.restore();
+    }
+
+    /**
+     * obstacles layer (static): the field's keep-out rects, drawn only as the
+     * no-map VECTOR fallback (when no printed map covers the field). Each
+     * obstacle is a world rect [x0,y0,x1,y1, kind?] (LOWERCASE `field.obstacles`);
+     * non-arrays / length<4 are skipped, mirroring the pre-rework player. The two
+     * opposite corners project through the same Y-flipped world->pixel transform
+     * as the bounds frame, then a translucent fill + a stronger stroke mark each
+     * rect. When the map IS showing the rects are baked into the image, so this
+     * layer hides itself (see its visible()).
+     */
+    function _drawObstacles(ctx, view, state) {
+        var f = _field();
+        var obstacles = (f && f.obstacles) || [];
+        if (obstacles.length === 0) {
+            return;
+        }
+        ctx.save();
+        ctx.fillStyle = OBSTACLE_FILL;
+        ctx.strokeStyle = OBSTACLE_STROKE;
+        ctx.lineWidth = OBSTACLE_WIDTH;
+        for (var i = 0; i < obstacles.length; i++) {
+            var o = obstacles[i];
+            if (!Array.isArray(o) || o.length < 4) {
+                continue;
+            }
+            var tl = _project(view, Math.min(o[0], o[2]), Math.max(o[1], o[3]));
+            var br = _project(view, Math.max(o[0], o[2]), Math.min(o[1], o[3]));
+            ctx.fillRect(tl.px, tl.py, br.px - tl.px, br.py - tl.py);
+            ctx.strokeRect(tl.px, tl.py, br.px - tl.px, br.py - tl.py);
+        }
         ctx.restore();
     }
 
@@ -637,6 +675,20 @@
         canvasId: "static",
         visible: function () { return true; },
         draw: _drawBounds,
+        invalidateOn: ["layers"],
+    });
+    // obstacles ride the static canvas as the NO-MAP vector fallback: shown only
+    // when no printed map covers the field (no loaded map image OR the MAP chip is
+    // toggled off); hidden when the map is showing since the rects are baked into
+    // the image. `_mapImg && _mapLoaded` is the same map-ready flag _drawMap gates
+    // on. invalidateOn:["layers"] so toggling MAP re-renders this too.
+    CTPS.layers.register({
+        id: "obstacles",
+        canvasId: "static",
+        visible: function (state) {
+            return !_mapImg || !_mapLoaded || !state.layers.map;
+        },
+        draw: _drawObstacles,
         invalidateOn: ["layers"],
     });
     CTPS.layers.register({

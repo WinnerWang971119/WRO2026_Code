@@ -1,6 +1,6 @@
 # ADR-053: CTPS player is modular concatenated assets + extension registries + `PLAYER_META`; CSS custom properties via `setProperty` are not an inline-style violation
 
-**Status:** Pending implementation
+**Status:** Implemented
 **Date decided:** 2026-07 (issue #125)
 
 ## Rule

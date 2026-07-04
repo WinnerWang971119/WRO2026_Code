@@ -407,6 +407,11 @@
      * browser shortcuts (Cmd+F, Ctrl+Space, ...) keep working.
      */
     function onKeyDown(evt) {
+        // A focused widget (e.g. a log line handling Enter/Space) may have
+        // already consumed this key; don't also fire a transport shortcut.
+        if (evt.defaultPrevented) {
+            return;
+        }
         if (isTextInputFocused()) {
             return;
         }

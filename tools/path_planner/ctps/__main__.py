@@ -406,7 +406,9 @@ def _resolve_map_png() -> Optional[Path]:
     return p
 
 
-def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int:
+def _render_and_open(
+    trace_json: str, out_path: Path, open_browser: bool, filename: str = ""
+) -> int:
     """Load -> build -> render the trace JSON, then optionally open the page.
 
     :param trace_json: a Data-Model-A command-stream JSON document (string).
@@ -456,7 +458,9 @@ def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int
         )
         return 1
 
-    out = player_html.render(track, out_path, map_png=_resolve_map_png())
+    out = player_html.render(
+        track, out_path, map_png=_resolve_map_png(), filename=filename
+    )
 
     if open_browser:
         _open_in_browser(out)
@@ -551,13 +555,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 1
         trace_json = trace_path.read_text(encoding="utf-8")
-        return _render_and_open(trace_json, args.out, open_browser)
+        return _render_and_open(
+            trace_json, args.out, open_browser, filename=trace_path.name
+        )
 
     # --- default / --fixture flow: locate toolchain, build, dump -------------
     trace_json = _produce_trace_json(args.fixture)
     if trace_json is None:
         return 1
-    return _render_and_open(trace_json, args.out, open_browser)
+    return _render_and_open(
+        trace_json,
+        args.out,
+        open_browser,
+        filename=("fixture mission" if args.fixture else "mission"),
+    )
 
 
 if __name__ == "__main__":
