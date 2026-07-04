@@ -38,10 +38,15 @@
  * @note KEEP IN SYNC WITH cooperativeTick(): the 10 segments below (`LineArray, Drive, LineFollower,
  *       Intersection, Manipulator, Tasks, PathTracker, Localization, Mission, EventTrace`) and their
  *       order mirror `WRO2026.ino::cooperativeTick()` by hand. If a module is added to or removed
- *       from that function, mirror the change here (both the `addSegment()` registration list and
- *       the `benchTick()` call list) or this benchmark silently drifts from what actually ships.
- *       `Vision` is NOT a segment — it is capture-once via a task, not ticked in `cooperativeTick()`
- *       — but its `begin()` still runs below so the wiring order matches `setup()` exactly.
+ *       from that function, mirror the change here in THREE places — the `addSegment()` registration
+ *       list, the `benchTick()` call list, AND the `SEGMENT_COUNT` constant — or this benchmark
+ *       silently drifts from what actually ships. `SEGMENT_COUNT` is the one edit with no compile
+ *       error to catch a miss: if it is left too small, the extra `addSegment()` returns
+ *       `TICK_INVALID_SEGMENT` and that module vanishes from every report with no warning — so
+ *       `setup()` below hard-checks every returned index against the sentinel and prints a FATAL
+ *       line if any comes back invalid. `Vision` is NOT a segment — it is capture-once via a task,
+ *       not ticked in `cooperativeTick()` — but its `begin()` still runs below so the wiring order
+ *       matches `setup()` exactly.
  */
 
 #include <MatrixMiniR4.h>
@@ -222,6 +227,21 @@ void setup()
     segLocalization = prof.addSegment("Localization");
     segMission      = prof.addSegment("Mission");
     segEventTrace   = prof.addSegment("EventTrace");
+
+    // Fail LOUD on SEGMENT_COUNT drift: if a module was added above but SEGMENT_COUNT was left too
+    // small, its addSegment() overflowed and returned TICK_INVALID_SEGMENT, silently dropping that
+    // module from every report window. Catch it at boot instead (see the KEEP-IN-SYNC note above).
+    const uint8_t regd[] = { segLineArray, segDrive, segLineFollower, segIntersection, segManipulator,
+                             segTasks, segPathTracker, segLocalization, segMission, segEventTrace };
+    for (uint8_t i = 0; i < sizeof(regd) / sizeof(regd[0]); ++i)
+    {
+        if (regd[i] == TICK_INVALID_SEGMENT)
+        {
+            Serial.println(
+                F("[bench] FATAL: SEGMENT_COUNT too small -- a module was dropped from the benchmark!"));
+            Serial.println(F("[bench]        bump SEGMENT_COUNT to match the addSegment() list above."));
+        }
+    }
 
     Serial.println(F("\n############################################################"));
     Serial.println(F("#  WRO2026 cooperativeTick() bench (inoTest/tick_bench)     #"));

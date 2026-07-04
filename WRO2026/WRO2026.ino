@@ -136,7 +136,8 @@ void renderCalMenu()
 void cooperativeTick()
 {
     // NOTE: if you add/remove a module tick here, mirror it in
-    // inoTest/tick_bench/tick_bench.ino so the loop-time benchmark stays
+    // inoTest/tick_bench/tick_bench.ino (the addSegment() + benchTick() lists
+    // AND the SEGMENT_COUNT constant) so the loop-time benchmark stays
     // representative (issue #123).
 
     // LineArray.update() refreshes the sensor cache for the rest of the tick
