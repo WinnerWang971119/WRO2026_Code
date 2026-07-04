@@ -229,7 +229,7 @@ def test_tc9_trace_flow_skips_compiler(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ctps_main,
         "_render_and_open",
-        lambda trace_json, out_path, open_browser: 0,
+        lambda trace_json, out_path, open_browser, filename="": 0,
     )
 
     trace_file = tmp_path / "run.json"
