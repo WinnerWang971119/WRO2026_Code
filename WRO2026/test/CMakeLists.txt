@@ -634,6 +634,15 @@ target_include_directories(test_stop_at_line_armmath PRIVATE ${COMMON_INCLUDES})
 add_test(NAME stop_at_line_armmath COMMAND test_stop_at_line_armmath)
 
 # =========================================================================================
+# Test executable — TickProfiler min/avg/max accumulation math (#123, T4).
+# TickProfiler.h is <stdint.h>-only, so no production .cpp / MOCK_SOURCES needed; a local
+# duck-typed CaptureStream (no Print base) exercises report().
+# =========================================================================================
+add_executable(test_tick_profiler ${TEST_DIR}/test_tick_profiler.cpp)
+target_include_directories(test_tick_profiler PRIVATE ${COMMON_INCLUDES})
+add_test(NAME tick_profiler COMMAND test_tick_profiler)
+
+# =========================================================================================
 # Test executable — stop-at-line full-domain CSV parity (#63).
 #
 # Drives ALL 936 rows of tools/path_planner/tests/fixtures/stop_at_line_truth_table.csv

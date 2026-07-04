@@ -131,10 +131,15 @@ void renderCalMenu()
  * is flipped on, instead of freezing to whatever was cached on entry.
  *
  * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
- *     -> PathTracker -> Localization -> Mission -> EventTrace.
+ *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace.
  */
 void cooperativeTick()
 {
+    // NOTE: if you add/remove a module tick here, mirror it in
+    // inoTest/tick_bench/tick_bench.ino (the addSegment() + benchTick() lists
+    // AND the SEGMENT_COUNT constant) so the loop-time benchmark stays
+    // representative (issue #123).
+
     // LineArray.update() refreshes the sensor cache for the rest of the tick
     // WHEN Config::LINE_ARRAY_TICK_CACHE_ENABLED is true. When false, this is
     // a no-op and the getters refresh independently (current PR #20 behaviour).
