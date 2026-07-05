@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Static include-resolvability checker for the WRO2026 sketch tree (issue #66 / T3).
 
-The sketch-src reorg (docs/plans/2026-07-05-sketch-src-reorg.md) moves 38 framework
+The sketch-src reorg (docs/plans/2026-07-05-sketch-src-reorg.md) moves 39 framework
 modules from the flat `WRO2026/` root into `WRO2026/src/<domain>/` subfolders while
 keeping the operator-editable files at the root. Arduino resolves a quote-form
 `#include "..."` ONLY relative to the including file's own directory -- no `-I`
