@@ -59,6 +59,11 @@ Pivot-arc additions (CTPS issue #55, T5 — TC1-TC7, TC11, TC12):
 * **TC12** — a LINE-departing pivot (sensor-terminated departure) lands on the
   destination node via the along-edge re-anchor (ADR-044 D1), using the new
   ``make_line_departing_pivot_field`` fixture.
+* **TC13** — chained pivots joined by a LINE (sensor) middle leg land on the
+  final node: the sensor-departure landing subtracts the DEPARTING trim along
+  the departure-edge ray instead of snapping onto the node, so the destination
+  pivot's approach trim survives (an unconditional node-snap translated the
+  whole tail 9 cm off, silently — under the drift threshold).
 
 These reuse the existing per-turn pivot fixtures in
 ``tests/fixtures/pivot_field_data.py`` (ADR-036) via a synthetic single-``goto``
@@ -770,14 +775,15 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
 
 
 # ===========================================================================
-# Pivot-arc tests (CTPS issue #55, T5 — TC1-TC7, TC11, TC12)
+# Pivot-arc tests (CTPS issue #55, T5 — TC1-TC7, TC11, TC12, TC13)
 #
 # These pin the single-wheel pivot-arc rendering + chassis-nudge (T2): dense
 # arc keyframes tracing the rigid rotation about the planted wheel, the
 # emitted ``pivots`` Track segment, the on-node landing for BOTH a
 # distance-terminated pivot departure (TC1/TC4/TC5) and a sensor-terminated
-# one (TC12), the pivot-free no-``pivots``-key guard (AC6, TC6), and the
-# primitive-stream-unchanged parity tripwire (AC7, TC7).
+# one (TC12, plus the chained-sensor TC13), the pivot-free no-``pivots``-key
+# guard (AC6, TC6), and the primitive-stream-unchanged parity tripwire
+# (AC7, TC7).
 #
 # Test data: the existing per-turn pivot fixtures in
 # ``tests/fixtures/pivot_field_data.py`` (ADR-036), replayed through a
@@ -785,6 +791,9 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
 # JSON, no C++ dump). TC12 uses a NEW fixture, ``make_line_departing_pivot_field``
 # (added to that module by this task): a pivot whose DEPARTURE is a LINE edge
 # into a line node — the mirror image of the existing LINE-incoming fixture.
+# TC13 uses ``make_chained_sensor_departure_pivot_field``: two pivots whose
+# SHARED middle leg is that same LINE edge, so the sensor departure lands on a
+# node that itself carries an approaching-pivot trim.
 # ===========================================================================
 
 
@@ -1158,8 +1167,9 @@ def test_tc12_line_departing_pivot_lands_on_destination_node_no_drift_warn():
     departing trim on that hop (a LINE-outgoing edge always drives its full
     commanded distance and re-anchors via the LINE_OVERSHOOT step), so it
     would otherwise dead-reckon ``delta`` PAST the node along the departure
-    edge; ``track_builder`` instead snaps the departure keyframe onto the
-    destination node (the real robot's along-edge line re-anchor, ADR-044 D1).
+    edge; ``track_builder`` pulls the landing back by the departing pivot's
+    ``trim_cm`` along that edge ray, which lands exactly ON the node here (the
+    real robot's along-edge line re-anchor, ADR-044 D1).
     """
     from tools.path_planner.validator import validate
 
@@ -1177,3 +1187,42 @@ def test_tc12_line_departing_pivot_lands_on_destination_node_no_drift_warn():
 
     assert len(track.pivots) == 1
     assert track.pivots[0]["wheel"] == "right"
+
+
+# ---------------------------------------------------------------------------
+# TC13 — chained pivots over a LINE (sensor) middle leg land on the final node
+# ---------------------------------------------------------------------------
+
+
+def test_tc13_chained_sensor_departure_pivots_land_on_final_node():
+    """TC13 (AC3 sensor middle leg): chained pivots over a LINE leg land on X.
+
+    ``make_chained_sensor_departure_pivot_field`` chains two 90 deg pivots
+    whose SHARED middle leg ``P -> Q`` is a LINE edge: pivot 1's departure AND
+    pivot 2's approach are both sensor-terminated. The sim already shortens
+    that leg's landing by pivot 2's approach trim, so the robot physically
+    lands ``delta_Q`` SHORT of Q — the true arc-start pose for pivot 2. The
+    sensor-departure correction must therefore subtract the DEPARTING trim
+    along the departure-edge ray (landing ``delta_Q`` short of Q here) rather
+    than snap absolutely onto Q's coordinates: the unconditional snap started
+    pivot 2's arc ``delta_Q`` ahead of the true pivot point and translated the
+    whole tail 9 cm off X, silently (under the 10 cm drift threshold).
+    """
+    from tools.path_planner.validator import validate
+
+    field = pivot_field_data.make_chained_sensor_departure_pivot_field()
+    validate(field)   # must pass -- this task owns the fixture's legality
+
+    track = _build_quiet(_goto_trace(field, "X"), field)
+
+    xx, xy = field.NODES["X"]
+    last = track.keyframes[-1]
+    drift = hypot(last["x"] - xx, last["y"] - xy)
+    assert drift < _POSE_TOL
+
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 2
+    t0s = [segment["t0"] for segment in track.pivots]
+    assert t0s == sorted(t0s)   # emitted in chronological order
+    assert all(segment["wheel"] == "right" for segment in track.pivots)

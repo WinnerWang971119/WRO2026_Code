@@ -127,15 +127,19 @@ def _honors_gyro_heading(cmd) -> bool:
 # ---------------------------------------------------------------------------
 
 #: Departure-hop LANDING primitive tags that re-anchor via a SENSOR
-#: (``on_intersection``) rather than dead-reckoning onto the node. A pivot
-#: departure over one of these lands ``delta`` PAST the destination node (the
-#: sim takes no departing trim on a sensor hop); the real robot re-anchors on
-#: the destination line (ADR-044 D1), so the departure keyframe is snapped onto
-#: the node. Any OTHER landing tag is distance-terminated and lands on-node
-#: natively via the sim's delta-trimmed leg, so it needs no snap. (Pivots are
-#: FRONT-only in v1 (#54), so the REAR reverse tags never actually fire on a
-#: pivot departure; they are listed for a complete on_intersection-landing set.)
-_SENSOR_LANDING_TAGS: frozenset = frozenset(
+#: (``on_intersection``) rather than dead-reckoning onto the node. The sim
+#: takes no departing trim on a sensor hop, so a pivot departure over one of
+#: these dead-reckons the departing ``trim_cm`` PAST its true landing along
+#: the departure-edge ray; the real robot re-anchors on the destination line
+#: (ADR-044 D1), so the departure landing is pulled BACK by exactly that trim
+#: along the ray — onto the node in the plain case, and the destination's own
+#: approach trim SHORT of it when the destination is itself a chained pivot
+#: the route turns at. Any OTHER landing tag is distance-terminated and lands
+#: on-node natively via the sim's delta-trimmed leg, so it needs no
+#: correction. (Pivots are FRONT-only in v1 (#54), so the REAR reverse tags
+#: never actually fire on a pivot departure; they are listed for a complete
+#: on_intersection-landing set.)
+_SENSOR_LANDING_TAGS: frozenset[str] = frozenset(
     {
         ACT_LINE_OVERSHOOT,
         ACT_LINE_PASS,
@@ -148,7 +152,7 @@ _SENSOR_LANDING_TAGS: frozenset = frozenset(
 #: node between the approach and the departing turn, the reset has already
 #: snapped the pose (destroying the ``c0`` arc-start premise), so the arc is
 #: skipped and the plain in-place turn is rendered instead.
-_WALL_RESET_TAGS: frozenset = frozenset(
+_WALL_RESET_TAGS: frozenset[str] = frozenset(
     {ACT_WALL_STOP, ACT_REANCHOR, ACT_WALL_DEPART}
 )
 
@@ -529,7 +533,11 @@ def build(trace: Trace, field_data) -> Track:
     # (issue #44 fail-loud parse), preserving the byte-identical guarantee.
     track_cm: Optional[float] = None
 
-    # -- clock-advancing closures (single owner of ``t``) -------------------
+    # -- clock-advancing closures (primary writers of ``t``) ----------------
+    # The pivot-arc branch below is the one OTHER writer of ``t``: it assigns
+    # the ``_build_pivot_arc`` end time directly (same function scope, same
+    # monotonic clock — the arc replaces the in-place turn keyframe these
+    # closures would otherwise have timed).
 
     def append_geometry_keyframe(x_new: float, y_new: float, h_new: float) -> None:
         """Advance the clock by the pose-delta duration; append a keyframe.
@@ -587,7 +595,10 @@ def build(trace: Trace, field_data) -> Track:
             cur_node = from_node
             prev_node: Optional[str] = None        # predecessor of `cur_node`
             wall_reset_at_node = False             # an ACT_WALL_* fired at cur_node
-            pending_pivot_w: Optional[str] = None  # pivot departure awaiting a land
+            # Pivot departure awaiting a landing: ``(w, trim_cm, ux, uy)`` —
+            # the departure hop's destination, the DEPARTING pivot's trim, and
+            # the departure-edge heading unit ray (u-hat-1).
+            pending_pivot_land: Optional[Tuple[str, float, float, float]] = None
             try:
                 for primitive, snap in sim.step_through(target):
                     tag = primitive[0]
@@ -669,27 +680,59 @@ def build(trace: Trace, field_data) -> Track:
                             # TC7 is the primitive-stream-unchanged tripwire.
                             chassis.x_cm = cx_end
                             chassis.y_cm = cy_end
-                            pending_pivot_w = w
+                            # Arm the sensor-departure landing correction: the
+                            # arc-end heading IS the departure-edge heading
+                            # (the pre-edge turn faces the edge exactly), so
+                            # its unit vector is the ray any sensor-landing
+                            # residual lies along.
+                            depart_rad = radians(arc[-1]["h"])
+                            pending_pivot_land = (
+                                w,
+                                record.trim_cm,
+                                cos(depart_rad),
+                                sin(depart_rad),
+                            )
 
                     if not arced:
                         append_geometry_keyframe(snap.x_cm, snap.y_cm, snap.heading_deg)
-                        if pending_pivot_w is not None and node_now == pending_pivot_w:
+                        if (
+                            pending_pivot_land is not None
+                            and node_now == pending_pivot_land[0]
+                        ):
                             # The pivot's departure hop just landed on `w`.
                             if tag in _SENSOR_LANDING_TAGS:
                                 # Sensor-terminated departure (LINE-out / seek):
-                                # the sim takes no departing trim, so it
-                                # dead-reckons exactly `delta` PAST `w` along the
-                                # departure edge (purely along-edge, no lateral).
-                                # The real robot re-anchors on `w`'s line
-                                # (ADR-044 D1), so snap the departure keyframe —
-                                # and the shared chassis — onto `w`. The arc still
-                                # ends at `c_end`; only the landing moves.
-                                nx_w, ny_w = field_data.NODES[node_now]
-                                keyframes[-1]["x"] = float(nx_w)
-                                keyframes[-1]["y"] = float(ny_w)
-                                chassis.x_cm = float(nx_w)
-                                chassis.y_cm = float(ny_w)
-                            pending_pivot_w = None
+                                # the sim takes no departing trim, so this leg
+                                # dead-reckons from `c_end` — the departing
+                                # `trim_cm` PAST its true landing along the
+                                # departure-edge ray (purely along-edge, no
+                                # lateral). The real robot re-anchors on `w`'s
+                                # line (ADR-044 D1), so pull the departure
+                                # keyframe — and the shared chassis — BACK by
+                                # exactly that trim along the ray. Plain case:
+                                # the sim netted the full edge, so this lands
+                                # exactly ON `w`. Chained case (`w` is ITSELF a
+                                # pivot the route turns at): the sim already
+                                # shortened the landing by `w`'s approach trim,
+                                # so this lands that much SHORT of `w` — the
+                                # true physical pose the next arc must start
+                                # from. Never snap to `w`'s coordinates: an
+                                # absolute snap erases the approach trim and
+                                # translates the whole tail by it. The arc
+                                # still ends at `c_end`; only the landing moves.
+                                # Accepted cosmetic: on a chained-sensor leg the
+                                # mid-hop follow keyframe keeps the un-pulled
+                                # dead-reckon, so the box plays a small backward
+                                # hitch onto the corrected landing. Playback
+                                # timing is visual-only, so this is left as-is.
+                                _w, trim_cm, ux, uy = pending_pivot_land
+                                land_x = keyframes[-1]["x"] - trim_cm * ux
+                                land_y = keyframes[-1]["y"] - trim_cm * uy
+                                keyframes[-1]["x"] = land_x
+                                keyframes[-1]["y"] = land_y
+                                chassis.x_cm = land_x
+                                chassis.y_cm = land_y
+                            pending_pivot_land = None
             except UnreachableGoalError:
                 # The fault point is the node the sim is parked at after any
                 # intermediate hops it managed before the dead end.
