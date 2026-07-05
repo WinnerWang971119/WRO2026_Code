@@ -64,6 +64,19 @@ Fields
     forward), so the FRONT-only force-override is load-bearing and observable:
     the hop must emit FRONT primitives + the trim, never ``ACT_BLIND_REVERSE``.
 
+``make_line_departing_pivot_field()`` -- CTPS issue #55 TC12
+    ``Z -> P`` is BLIND (dead-reckon); ``P -> Q`` is LINE, into the junction
+    line node ``Q``.  The declared pivot ``(Z, P, Q)`` (90 deg right turn,
+    ``delta = 9.0`` cm) departs over a LINE edge -- the mirror image of
+    ``make_line_incoming_pivot_field``, whose pivot instead ARRIVES over a
+    LINE edge.  The sim takes NO departing trim on a LINE-outgoing hop (it
+    re-anchors on the destination line), so the along-edge residual is exactly
+    ``delta`` -- the CTPS ``track_builder`` sensor-departure re-anchor
+    (ADR-044 D1) this fixture exists to exercise.  PASSES ``validate``.
+    Deliberately EXCLUDED from ``all_fields()``: that list feeds the sim's
+    per-turn legality sweep, which pins ``len(fields) == 6``; this fixture is
+    validated directly by its own CTPS test instead.
+
 ``make_sensor_autorule_pivot_field()`` -- TC10 / TC11 / TC12 (validator), TC6-TC9 (sim)
 
     ::
@@ -441,6 +454,66 @@ def make_auto_rear_pivot_field() -> SimpleNamespace:
         pivot_turns=[("P", "Q", "R")],
         start_node="P",
         start_heading_deg=0.0,    # facing along P->Q
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 5 -- LINE-departing pivot (CTPS issue #55, TC12)
+# ---------------------------------------------------------------------------
+#
+#   Z(0,0) --BLIND,heading 90--> P(0,60) --LINE,heading 0--> Q(80,60)
+#
+#   Pivot (Z, P, Q): BLIND-incoming (distance-terminated) + LINE-outgoing
+#   (sensor-terminated) -- the mirror image of ``make_line_incoming_pivot_field``.
+#   A 90 deg right turn gives delta = 9.0 cm. The outgoing LINE edge takes NO
+#   departing trim in the sim (a LINE hop always drives its full commanded
+#   distance and re-anchors via LINE_OVERSHOOT at Q), so the chassis dead-
+#   reckons `delta` PAST Q along the departure edge before the destination's
+#   line re-anchor corrects it -- exactly the CTPS `track_builder`
+#   sensor-departure case (ADR-044 D1), unlike every other fixture above
+#   (whose declared pivot's SENSOR leg, if any, is always the INCOMING one).
+
+_LD_Z: Tuple[float, float] = (0.0, 0.0)
+_LD_P: Tuple[float, float] = (0.0, 60.0)
+_LD_OUT_CM: float = 80.0
+_LD_Q: Tuple[float, float] = (_LD_P[0] + _LD_OUT_CM, _LD_P[1])
+
+_LD_NODES: Dict[str, Tuple[float, float]] = {
+    "Z": _LD_Z,
+    "P": _LD_P,
+    "Q": _LD_Q,
+}
+
+# Z is the blind dead-reckon spawn; P and Q are both junction line nodes (the
+# endpoints of the outgoing P->Q LINE edge).
+_LD_NODE_TYPES: Dict[str, str] = {
+    "Z": "blind",
+    "P": "line",
+    "Q": "line",
+}
+
+
+def make_line_departing_pivot_field() -> SimpleNamespace:
+    """Return the LINE-departing pivot chain (CTPS issue #55, TC12).
+
+    ``Z -> P`` is a BLIND dead-reckon approach from the spawn (the validator
+    requires a blind START node); ``P -> Q`` is a LINE edge (heading 0 deg)
+    into the junction line node ``Q``. The declared pivot ``(Z, P, Q)`` is a
+    90 deg right turn (``delta = 9.0`` cm). Unlike every other fixture in this
+    module, the SENSOR-terminated leg here is the DEPARTURE (``P -> Q``), not
+    the approach: the sim drives the full ``P -> Q`` distance with no trim and
+    re-anchors on ``Q``'s line, so the along-edge residual the CTPS
+    ``track_builder`` must re-anchor onto the destination node is exactly
+    ``delta``, purely along the departure edge ray (no lateral component).
+    """
+    return _make_field(
+        nodes=_LD_NODES,
+        node_types=_LD_NODE_TYPES,
+        line_segments=[("P", "Q")],
+        blind_edges=[("Z", "P")],
+        pivot_turns=[("Z", "P", "Q")],
+        start_node="Z",            # blind spawn (validator rejects an on-line start)
+        start_heading_deg=90.0,    # facing along Z->P (straight up)
     )
 
 

@@ -39,23 +39,53 @@ Drive-recording additions (CTPS plan, T9 — NC9-NC14, NC16):
 
 The toy chassis seeds facing ``START_HEADING_DEG == 90`` (node ``S``), so
 "forward along the current facing" is ``+y`` in these tests, not ``+x``.
+
+Pivot-arc additions (CTPS issue #55, T5 — TC1-TC7, TC11, TC12):
+
+* **TC1** — a goto over a 90 deg dead-reckon pivot lands on the node with NO
+  ``drift_warn`` (today it drifts 12.7 cm and warns).
+* **TC2** — the pivot's arc sub-keyframes trace the rigid rotation about the
+  planted wheel, evenly timed, replacing the single in-place turn keyframe.
+* **TC3** — the emitted ``pivots`` segment has the right shape (wheel side,
+  centre, angle, time bracket).
+* **TC4** — chained pivots (two turns in one goto) each animate and the whole
+  move lands on the final node with no ``drift_warn``.
+* **TC5** — a 70 deg LINE-incoming pivot lands on its node.
+* **TC6** — a pivot-free goto keeps the pre-#55 keyframe shape and omits the
+  ``pivots`` key entirely (AC6).
+* **TC7** — the chassis-nudge never perturbs the sim's primitive stream (the
+  parity tripwire), verified by driving ``step_through`` directly.
+* **TC11** — ``ctps/config.py`` exposes ``ARC_STEP_DEG > 0``.
+* **TC12** — a LINE-departing pivot (sensor-terminated departure) lands on the
+  destination node via the along-edge re-anchor (ADR-044 D1), using the new
+  ``make_line_departing_pivot_field`` fixture.
+
+These reuse the existing per-turn pivot fixtures in
+``tests/fixtures/pivot_field_data.py`` (ADR-036) via a synthetic single-``goto``
+``Trace`` built directly (no JSON, no C++ dump) — see ``_goto_trace`` below.
 """
 
 from __future__ import annotations
 
 import warnings
+from math import ceil, hypot
 from pathlib import Path
 
 import pytest
 
-from tools.path_planner.ctps.config import DRIFT_THRESHOLD_CM
+from tools.path_planner.compiler import ACT_TURN_REL
+from tools.path_planner.ctps.config import ARC_STEP_DEG, DRIFT_THRESHOLD_CM, SIM_TURN_DEG_S
 from tools.path_planner.ctps.track_builder import build
-from tools.path_planner.ctps.trace_loader import load
+from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
+from tools.path_planner.planner import (
+    BlindDecayParams,
+    compute_all_pairs_next_hop,
+    parse_track_cm_from_config,
+)
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import PathTrackerSim
-from tools.path_planner.tests.fixtures import toy_field_data
+from tools.path_planner.tests.fixtures import pivot_field_data, toy_field_data
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -737,3 +767,413 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
     # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
     reported_cm = float(warn["label"].split("cm")[0].split()[-1])
     assert reported_cm > DRIFT_THRESHOLD_CM
+
+
+# ===========================================================================
+# Pivot-arc tests (CTPS issue #55, T5 — TC1-TC7, TC11, TC12)
+#
+# These pin the single-wheel pivot-arc rendering + chassis-nudge (T2): dense
+# arc keyframes tracing the rigid rotation about the planted wheel, the
+# emitted ``pivots`` Track segment, the on-node landing for BOTH a
+# distance-terminated pivot departure (TC1/TC4/TC5) and a sensor-terminated
+# one (TC12), the pivot-free no-``pivots``-key guard (AC6, TC6), and the
+# primitive-stream-unchanged parity tripwire (AC7, TC7).
+#
+# Test data: the existing per-turn pivot fixtures in
+# ``tests/fixtures/pivot_field_data.py`` (ADR-036), replayed through a
+# synthetic single-``goto`` Trace built directly via ``_goto_trace`` below (no
+# JSON, no C++ dump). TC12 uses a NEW fixture, ``make_line_departing_pivot_field``
+# (added to that module by this task): a pivot whose DEPARTURE is a LINE edge
+# into a line node — the mirror image of the existing LINE-incoming fixture.
+# ===========================================================================
+
+
+def _goto_trace(field_data, target: str) -> Trace:
+    """Build a synthetic single-``goto`` Trace targeting ``target``.
+
+    The pivot fixtures are hand-built ``SimpleNamespace`` field-data (ADR-036),
+    not real trace JSON, so this constructs the Data Model A ``Trace`` /
+    ``Command`` dataclasses directly rather than routing through
+    :func:`tools.path_planner.ctps.trace_loader.load`. ``start_node`` /
+    ``start_heading_deg`` are informational only — :func:`build` always seeds
+    the chassis from ``field_data``, never from the ``Trace``.
+
+    :param field_data: a pivot fixture field (or any field-data namespace).
+    :param target: the single goto's destination node name.
+    :return: a one-command :class:`Trace`.
+    """
+    return Trace(
+        schema_version=1,
+        start_node=field_data.START_NODE,
+        start_heading_deg=field_data.START_HEADING_DEG,
+        build_error=False,
+        commands=[Command(seq=0, op="goto", target=target)],
+    )
+
+
+def _rotate_vector(dx: float, dy: float, ang_rad: float) -> tuple[float, float]:
+    """Rotate the 2D vector ``(dx, dy)`` by ``ang_rad`` (radians, CCW positive)."""
+    from math import cos, sin
+
+    return (
+        dx * cos(ang_rad) - dy * sin(ang_rad),
+        dx * sin(ang_rad) + dy * cos(ang_rad),
+    )
+
+
+def _expected_arc_centers(
+    x0: float,
+    y0: float,
+    h0_deg: float,
+    theta_deg: float,
+    wheel_sign: int,
+    radius_cm: float,
+    n: int,
+):
+    """Independently recompute the pivot-arc centres from the Contracts formula.
+
+    Deliberately REIMPLEMENTS the geometry here rather than importing
+    ``track_builder._build_pivot_arc`` — this pins the DOCUMENTED contract
+    (the CTPS-55 plan's "Arc geometry" section:
+    ``center_k = W + Rot(tau*theta) * (c0 - W)``) rather than tautologically
+    re-checking the same private helper it exists to verify.
+
+    :param x0: arc-start chassis-centre x (cm).
+    :param y0: arc-start chassis-centre y (cm).
+    :param h0_deg: incoming heading (deg).
+    :param theta_deg: signed swing angle (deg, CCW positive).
+    :param wheel_sign: ``+1`` left-wheel pivot, ``-1`` right-wheel pivot.
+    :param radius_cm: pivot radius (``track_cm / 2``).
+    :param n: number of arc sub-keyframes.
+    :return: ``((wx, wy), [(cx_1, cy_1), ..., (cx_n, cy_n)])`` — the planted
+        wheel centre and the N expected chassis-centre samples, ``k = 1..n``.
+    """
+    from math import cos, radians, sin
+
+    wx = x0 + radius_cm * cos(radians(h0_deg + wheel_sign * 90.0))
+    wy = y0 + radius_cm * sin(radians(h0_deg + wheel_sign * 90.0))
+    rx, ry = x0 - wx, y0 - wy
+
+    centers = []
+    for k in range(1, n + 1):
+        tau = k / n
+        drx, dry = _rotate_vector(rx, ry, radians(tau * theta_deg))
+        centers.append((wx + drx, wy + dry))
+    return (wx, wy), centers
+
+
+def _dead_reckon_pivot_track():
+    """Build the Track for a single ``goto("W")`` over the 90 deg dead-reckon pivot.
+
+    Shared by TC1-TC3, which all assert on the SAME goto (on-node landing, the
+    arc sub-keyframes, and the emitted ``pivots`` segment, respectively).
+
+    :return: ``(field, track)``.
+    """
+    field = pivot_field_data.make_dead_reckon_pivot_field()
+    track = _build_quiet(_goto_trace(field, "W"), field)
+    return field, track
+
+
+# ---------------------------------------------------------------------------
+# TC1 — 90 deg dead-reckon pivot: lands on W, no drift_warn
+# ---------------------------------------------------------------------------
+
+
+def test_tc1_dead_reckon_pivot_lands_on_node_no_drift_warn():
+    """TC1 (AC2): the 90 deg dead-reckon pivot goto lands on W with NO drift_warn.
+
+    Regression guard for the pre-#55 in-place-turn drift (12.7 cm + a spurious
+    ``drift_warn``): the chassis-nudge (T2) lands the chassis natively on the
+    node for a DISTANCE-terminated pivot departure.
+    """
+    field, track = _dead_reckon_pivot_track()
+
+    wx, wy = field.NODES["W"]
+    last = track.keyframes[-1]
+    drift = hypot(last["x"] - wx, last["y"] - wy)
+    assert drift < _POSE_TOL
+
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+    assert len(track.pivots) == 1
+
+
+# ---------------------------------------------------------------------------
+# TC2 — the arc sub-keyframes trace the rotation about the planted wheel
+# ---------------------------------------------------------------------------
+
+
+def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
+    """TC2 (AC1, AC4): the pivot's arc sub-keyframes trace the rigid rotation.
+
+    ``N = ceil(90 / ARC_STEP_DEG)`` sub-keyframes REPLACE the single in-place
+    turn keyframe (``N - 1`` intermediate keyframes plus the arc-end); each
+    sample is within tolerance of the documented Contracts formula (rotation
+    about the planted wheel); heading rotates through the full 90 deg; the
+    whole arc spans exactly ``90 / SIM_TURN_DEG_S`` seconds, split evenly
+    across the N steps; the running clock stays strictly monotonic across the
+    replacement span.
+    """
+    field, track = _dead_reckon_pivot_track()
+
+    n = ceil(90.0 / ARC_STEP_DEG)
+    # seed + the trimmed U->V approach + N arc keyframes + the trimmed V->W
+    # departure — the arc REPLACES the single in-place turn keyframe.
+    assert len(track.keyframes) == n + 3
+
+    approach_end = track.keyframes[1]
+    arc = track.keyframes[2 : 2 + n]
+    assert len(arc) == n
+
+    radius_cm = parse_track_cm_from_config() / 2.0
+    _wheel_center, expected_centers = _expected_arc_centers(
+        approach_end["x"],
+        approach_end["y"],
+        approach_end["h"],
+        theta_deg=-90.0,
+        wheel_sign=-1,   # a right turn (theta < 0) pivots about the RIGHT wheel
+        radius_cm=radius_cm,
+        n=n,
+    )
+    for kf, (ex, ey) in zip(arc, expected_centers):
+        assert kf["x"] == pytest.approx(ex, abs=1e-6)
+        assert kf["y"] == pytest.approx(ey, abs=1e-6)
+
+    # Heading rotates through the full 90 deg (a right turn: 90 -> 0).
+    assert approach_end["h"] == pytest.approx(90.0, abs=_POSE_TOL)
+    assert arc[-1]["h"] == pytest.approx(0.0, abs=_POSE_TOL)
+
+    # Even timing across the N replacement sub-keyframes.
+    times = [approach_end["t"]] + [kf["t"] for kf in arc]
+    steps = [b - a for a, b in zip(times, times[1:])]
+    for step in steps:
+        assert step == pytest.approx(steps[0], abs=1e-9)
+
+    # Total arc duration: exactly the in-place turn's old visual duration.
+    assert arc[-1]["t"] - approach_end["t"] == pytest.approx(
+        90.0 / SIM_TURN_DEG_S, abs=1e-9
+    )
+
+    # The running clock stays strictly monotonic across the whole keyframe
+    # list (the arc replacement plus the trailing departure keyframe).
+    all_times = [kf["t"] for kf in track.keyframes]
+    assert all(b > a for a, b in zip(all_times, all_times[1:]))
+
+
+# ---------------------------------------------------------------------------
+# TC3 — the emitted pivots segment has the right shape
+# ---------------------------------------------------------------------------
+
+
+def test_tc3_pivots_segment_shape_wheel_right_for_negative_90deg():
+    """TC3 (AC4): one ``pivots`` segment; ``wheel == "right"`` for the -90 deg turn.
+
+    ``theta_deg`` matches the ``ACT_TURN_REL`` delta (a RIGHT turn is
+    negative); ``(cx, cy)`` is the planted wheel (the SAME centre TC2 already
+    pinned); ``t0 < t1`` brackets the arc span.
+    """
+    field, track = _dead_reckon_pivot_track()
+
+    assert len(track.pivots) == 1
+    segment = track.pivots[0]
+
+    assert segment["wheel"] == "right"
+    assert segment["theta_deg"] == pytest.approx(-90.0, abs=1e-9)
+    assert segment["t0"] < segment["t1"]
+
+    approach_end = track.keyframes[1]
+    radius_cm = parse_track_cm_from_config() / 2.0
+    (wx, wy), _centers = _expected_arc_centers(
+        approach_end["x"],
+        approach_end["y"],
+        approach_end["h"],
+        theta_deg=-90.0,
+        wheel_sign=-1,
+        radius_cm=radius_cm,
+        n=1,
+    )
+    assert segment["cx"] == pytest.approx(wx, abs=1e-6)
+    assert segment["cy"] == pytest.approx(wy, abs=1e-6)
+    assert segment["t0"] == pytest.approx(approach_end["t"], abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# TC4 — chained pivots (two turns in one goto) each animate; land on X
+# ---------------------------------------------------------------------------
+
+
+def test_tc4_chained_pivots_land_on_node_no_drift_warn():
+    """TC4 (AC3): chained pivots U->V->W->X animate both arcs and land on X.
+
+    Regression guard for the pre-#55 18 cm drift + ``drift_warn`` on the
+    chained route (two 90 deg right turns, at V and at W).
+    """
+    field = pivot_field_data.make_chained_pivot_field()
+    track = _build_quiet(_goto_trace(field, "X"), field)
+
+    xx, xy = field.NODES["X"]
+    last = track.keyframes[-1]
+    drift = hypot(last["x"] - xx, last["y"] - xy)
+    assert drift < _POSE_TOL
+
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 2
+    t0s = [segment["t0"] for segment in track.pivots]
+    assert t0s == sorted(t0s)   # emitted in chronological order
+    assert all(segment["wheel"] == "right" for segment in track.pivots)
+    assert all(segment["t0"] < segment["t1"] for segment in track.pivots)
+
+
+# ---------------------------------------------------------------------------
+# TC5 — a 70 deg LINE-incoming pivot lands on its node
+# ---------------------------------------------------------------------------
+
+
+def test_tc5_line_incoming_70deg_pivot_lands_on_node():
+    """TC5 (AC2): the 70 deg LINE-incoming pivot lands on L2; one left-wheel segment.
+
+    ``make_line_incoming_pivot_field`` arrives at the pivot node L1 over a
+    LINE edge (re-anchoring) and departs over a distance-terminated BLIND
+    edge, so the chassis-nudge lands it on L2 exactly like TC1's dead-reckon
+    case — the arc-start pose is simply whatever the LINE approach's keyframe
+    holds.
+    """
+    field = pivot_field_data.make_line_incoming_pivot_field()
+    track = _build_quiet(_goto_trace(field, "L2"), field)
+
+    lx, ly = field.NODES["L2"]
+    last = track.keyframes[-1]
+    drift = hypot(last["x"] - lx, last["y"] - ly)
+    assert drift < _POSE_TOL
+
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 1
+    segment = track.pivots[0]
+    assert segment["wheel"] == "left"
+    assert segment["theta_deg"] == pytest.approx(70.0, abs=1e-6)
+    # An arc is present -- N >= 1 always (the Contracts N = max(1, ceil(...))).
+    assert segment["t0"] < segment["t1"]
+
+
+# ---------------------------------------------------------------------------
+# TC6 — a pivot-free goto keeps the pre-#55 shape and omits "pivots" (AC6)
+# ---------------------------------------------------------------------------
+
+
+def test_tc6_pivot_free_goto_has_no_pivots_key():
+    """TC6 (AC6): a pivot-free goto keeps the pre-#55 keyframe shape, no "pivots".
+
+    Reuses the existing two-goto toy-field topology (TC1 above): keyframes
+    still equal an independent ``step_through`` reference run, and neither
+    ``Track.pivots`` nor ``to_dict()["pivots"]`` appear — the toy field's
+    ``PIVOT_TURNS`` is empty (absent, even), so every pivot-detection lookup
+    misses by construction.
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    goto_targets = [cmd.target for cmd in trace.commands if cmd.op == "goto"]
+    reference = _reference_snapshots(toy_field_data, goto_targets)
+
+    geometry_keyframes = track.keyframes[1:]
+    assert len(geometry_keyframes) == len(reference)
+    for kf, (rx, ry, rh) in zip(geometry_keyframes, reference):
+        assert kf["x"] == pytest.approx(rx, abs=_POSE_TOL)
+        assert kf["y"] == pytest.approx(ry, abs=_POSE_TOL)
+        assert kf["h"] == pytest.approx(rh, abs=_POSE_TOL)
+
+    assert track.pivots == []
+    assert "pivots" not in track.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# TC7 — the chassis-nudge does not perturb the sim's primitive stream (AC7)
+# ---------------------------------------------------------------------------
+
+
+def test_tc7_chassis_nudge_does_not_perturb_primitive_stream():
+    """TC7 (AC7 tripwire): mutating chassis.x/y mid-goto never perturbs dispatch.
+
+    ``Track.build()`` discards primitives, so this drives
+    :meth:`PathTrackerSim.step_through` DIRECTLY on the dead-reckon pivot
+    fixture — the only way to inspect the primitive stream. Applies the SAME
+    kind of mutation ``track_builder``'s chassis-nudge performs (a raw
+    ``chassis.x_cm`` / ``chassis.y_cm`` write, never routed through
+    ``LocalizationSim``) right after the pivot's ``ACT_TURN_REL`` primitive,
+    well off the true pose so any dispatch dependence on position would
+    visibly diverge the stream. Asserts the resulting primitive sequence is
+    IDENTICAL to an unperturbed reference run — the Contracts claim that
+    ``_walk_hops`` dispatches on ``heading_deg`` only (runtime.py:2693), never
+    chassis x/y.
+    """
+    field = pivot_field_data.make_dead_reckon_pivot_field()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        graph, next_hop = pivot_field_data.build_graph_and_next_hop(field)
+
+    def _run(mutate: bool):
+        chassis = VirtualChassis.from_field_data(field)
+        sim = PathTrackerSim(field, graph, next_hop, chassis)
+        sim.localization.zero_heading_from_current()
+        primitives = []
+        for primitive, _snap in sim.step_through("W"):
+            primitives.append(primitive)
+            if mutate and primitive[0] == ACT_TURN_REL:
+                # Mirror the nudge: a raw x_cm/y_cm write, well off the true
+                # pose, so any dispatch dependence on position would visibly
+                # diverge the primitive stream.
+                chassis.x_cm += 37.0
+                chassis.y_cm -= 23.0
+        return primitives
+
+    reference = _run(mutate=False)
+    perturbed = _run(mutate=True)
+
+    assert len(reference) == 3   # sanity: the fixture's known 3-primitive shape
+    assert perturbed == reference
+
+
+# ---------------------------------------------------------------------------
+# TC11 — ARC_STEP_DEG is present and positive
+# ---------------------------------------------------------------------------
+
+
+def test_tc11_arc_step_deg_present_and_positive():
+    """TC11: ``ctps/config.py`` exposes ``ARC_STEP_DEG > 0``."""
+    assert ARC_STEP_DEG > 0
+
+
+# ---------------------------------------------------------------------------
+# TC12 — a LINE-departing pivot (sensor-terminated departure) lands on node
+# ---------------------------------------------------------------------------
+
+
+def test_tc12_line_departing_pivot_lands_on_destination_node_no_drift_warn():
+    """TC12 (AC2 sensor-departure): a LINE-departing pivot lands on the node.
+
+    ``make_line_departing_pivot_field`` declares a pivot whose DEPARTURE leg
+    is a LINE edge into a line node — sensor-terminated. The sim takes NO
+    departing trim on that hop (a LINE-outgoing edge always drives its full
+    commanded distance and re-anchors via the LINE_OVERSHOOT step), so it
+    would otherwise dead-reckon ``delta`` PAST the node along the departure
+    edge; ``track_builder`` instead snaps the departure keyframe onto the
+    destination node (the real robot's along-edge line re-anchor, ADR-044 D1).
+    """
+    from tools.path_planner.validator import validate
+
+    field = pivot_field_data.make_line_departing_pivot_field()
+    validate(field)   # must pass -- this task owns the fixture's legality
+
+    track = _build_quiet(_goto_trace(field, "Q"), field)
+
+    qx, qy = field.NODES["Q"]
+    last = track.keyframes[-1]
+    drift = hypot(last["x"] - qx, last["y"] - qy)
+    assert drift < _POSE_TOL
+
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+    assert len(track.pivots) == 1
+    assert track.pivots[0]["wheel"] == "right"
