@@ -186,6 +186,15 @@ body {
     justify-content: flex-end;
 }
 
+/* HOLDING card list: bounded so a long cargo list (issue #57) scrolls inside
+ * the panel rather than growing the rail and squeezing the Log below. Same
+ * scroll treatment as the Log; the cap is ~4 cards, tune it against the final
+ * card size. Inert today — the reserved shell's few dashed slots fit under it. */
+.ctps-hold-list {
+    max-height: 180px;
+    overflow-y: auto;
+}
+
 /* ===================================================================== */
 /* Transport bar (auto height, margins 0 8px)                             */
 /* ===================================================================== */
@@ -227,6 +236,18 @@ body {
     position: relative;
     margin: var(--ctps-space-3);
     min-width: 0;
+}
+
+/* HOLDING lane: bounded like the panel, so once issue #57 stacks many cargo
+ * spans the lane scrolls internally instead of growing the dock. Its resting
+ * height (min-height 34px) lives in components.css; only the cap + scroll are
+ * layout's. The lane is `position: relative` (components.css), so absolutely
+ * placed sub-row spans that extend past the cap become scrollable content.
+ * Inert today — buildHoldingLane returns [], so there is nothing to overflow
+ * until #57 emits spans. */
+.ctps-lane--holding {
+    max-height: 68px;
+    overflow-y: auto;
 }
 
 /* ===================================================================== */
