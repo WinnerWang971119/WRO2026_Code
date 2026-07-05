@@ -680,7 +680,7 @@
 
     // ----- layer + renderMode registration ---------------------------------
     // map / bounds / trajectory / nodes are SEPARATE layers sharing the static
-    // canvas, each with its own visible() so the MAP / NODES chips toggle
+    // canvas, each with its own visible() so the MAP / PATH / NODES chips toggle
     // independently; the trail + actors get their own canvases.
     CTPS.layers.register({
         id: "map",
@@ -713,7 +713,7 @@
     CTPS.layers.register({
         id: "trajectory",
         canvasId: "static",
-        visible: function () { return true; },
+        visible: function (state) { return !!state.layers.path; },
         draw: _drawTrajectory,
         invalidateOn: ["layers"],
     });

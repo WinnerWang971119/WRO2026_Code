@@ -135,6 +135,8 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="map">MAP</button>
                 <button id="ctps-layer-trail" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="trail">TRAIL</button>
+                <button id="ctps-layer-path" class="ctps-chip ctps-chip--active"
+                        type="button" data-layer="path">PATH</button>
                 <button id="ctps-layer-nodes" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="nodes">NODES</button>
             </div>

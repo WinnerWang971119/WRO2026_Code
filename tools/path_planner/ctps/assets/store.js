@@ -40,7 +40,7 @@
         speed: 1,
         activeTab: "log",
         fullView: false,
-        layers: { map: true, trail: true, nodes: true },
+        layers: { map: true, trail: true, path: true, nodes: true },
         selection: { kind: "robot", id: null },
     };
 
