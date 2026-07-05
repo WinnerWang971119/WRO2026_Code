@@ -40,3 +40,17 @@ MANIP_NOMINAL_S: float = 0.5
 #: dead-reckon residual while still catching a raw-move desync; revisit once the
 #: live field lands.
 DRIFT_THRESHOLD_CM: float = 10.0
+
+# ---------------------------------------------------------------------------
+# Pivot-turn arc rendering
+# ---------------------------------------------------------------------------
+
+#: Degrees of rotation per sub-keyframe when the pivot-turn arc (a single-wheel
+#: pivot rendered as a rigid rotation about the planted/braked wheel) is
+#: expanded into dense keyframes for playback.
+#:
+#: Rationale: at the pivot radius used on this chassis (``track_cm / 2`` ≈ 9 cm),
+#: a 10° sub-step has a sagitta (chord-to-arc deviation) of only
+#: ``R · (1 − cos(step / 2))`` ≈ 0.14 px at typical playback scale — sub-pixel —
+#: so the arc reads as smooth without emitting an excessive number of keyframes.
+ARC_STEP_DEG: float = 10.0
