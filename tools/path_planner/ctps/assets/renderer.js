@@ -17,8 +17,9 @@
  *      no hard-coded hex here, so the token stylesheet stays the single source.
  *   3. Registers the layers (map / bounds / trajectory / nodes / trail / actors)
  *      as separate draw-units mapped onto their backing canvas via canvasId, plus
- *      the `box` renderMode (rotated chassis rectangle + heading nose). `wheel-arc`
- *      is intentionally left unregistered — the reserved #55 seam.
+ *      two renderModes: `box` (rotated chassis rectangle + heading nose) and
+ *      `wheel-arc` (#55 — the same box plus a transient planted-wheel pin +
+ *      faint arc guide while the playhead is inside a `TRACK.pivots[i]` span).
  *   4. Exposes CTPS.renderer = { resize, hitTest } — `hitTest` for T8 (canvas
  *      selection); `resize` as the public re-measure entry (the renderer also
  *      self-wires resize via its own ResizeObserver + window listener).
@@ -72,6 +73,9 @@
     var SCALE_FONT = "10px ui-monospace, Consolas, monospace";
     var HIT_NODE_RADIUS = 14;    // px: a click within this of a node hits it
     var HIT_ROBOT_RADIUS = 16;   // px: else a click within this of the robot
+    var PIVOT_PIN_RADIUS = 3;    // wheel-arc mode: planted-wheel pin dot radius
+    var PIVOT_GUIDE_WIDTH = 1;   // wheel-arc mode: arc-guide circle stroke width
+    var PIVOT_GUIDE_ALPHA = 0.35;// wheel-arc mode: arc-guide circle opacity
 
     // ----- module state ----------------------------------------------------
     // The three canvas elements + their 2D contexts, keyed by the layer
@@ -544,6 +548,7 @@
                 fill: _colors.accent,
                 outline: _colors.bg,
                 sidePx: sidePx,
+                t: state.t,
             });
         }
         _drawScaleBar(ctx, view);
@@ -756,9 +761,9 @@
      * outline only, so it never fills over the map — with a small centred arrow
      * pointing along the heading. No nose, no surrounding circle. World heading
      * is CCW-from-+x with Y up; the canvas Y is flipped, so the drawing angle is
-     * the negated heading and the arrow tip lands along the heading. `wheel-arc`
-     * is deliberately NOT registered — the reserved #55 pivot seam; the registry
-     * simply stays able to accept it.
+     * the negated heading and the arrow tip lands along the heading. Reused
+     * verbatim by the `wheel-arc` mode below (registered via
+     * `CTPS.renderModes.get("box")`).
      */
     CTPS.renderModes.register({
         id: "box",
@@ -786,6 +791,95 @@
             ctx.lineTo(-half * ROBOT_ARROW_BACK, -half * ROBOT_ARROW_HALF);
             ctx.lineTo(-half * ROBOT_ARROW_BACK, half * ROBOT_ARROW_HALF);
             ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+        },
+    });
+
+    /**
+     * Find the `TRACK.pivots` entry whose `[t0, t1]` span contains `t`, or
+     * null when there is no active span. Bounded binary search over `pivots`
+     * (sorted by `t0` — the Data Model guarantee — same bisect idiom as
+     * `findEventIndex`): find the last entry whose `t0 <= t`, then confirm
+     * `t` is also `<= t1` (`t` may land in the gap between two pivots, which
+     * this confirmation step catches). Degrades to null — never throws — when
+     * there is no `pivots` list, `t` isn't a number, or the matched segment is
+     * missing `t0`/`t1`/`cx`/`cy`; the caller then skips the overlay and
+     * draws only the plain box (the registry's non-fatal contract).
+     */
+    function _activePivotSegment(t) {
+        if (typeof t !== "number") {
+            return null;
+        }
+        var track = CTPS.engine.track;
+        var pivots = track && track.pivots;
+        var n = pivots ? pivots.length : 0;
+        if (n === 0 || typeof pivots[0].t0 !== "number" || t < pivots[0].t0) {
+            return null;
+        }
+        var lo = 0;
+        var hi = n - 1;
+        // Invariant: pivots[lo].t0 <= t. Each step halves the window via the
+        // ceil-ed midpoint (bisecting for the RIGHTMOST t0 <= t), bounded by
+        // log2(n).
+        while (hi > lo) {
+            var mid = lo + Math.ceil((hi - lo) / 2);
+            if (typeof pivots[mid].t0 === "number" && pivots[mid].t0 <= t) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        var seg = pivots[lo];
+        if (!seg || typeof seg.t0 !== "number" || typeof seg.t1 !== "number" ||
+            typeof seg.cx !== "number" || typeof seg.cy !== "number") {
+            return null;
+        }
+        return (t >= seg.t0 && t <= seg.t1) ? seg : null;
+    }
+
+    /**
+     * `wheel-arc` render mode (#55): draws the exact same marker as `box` at
+     * the lerped pose (reusing its draw function verbatim), then — only
+     * while the frame time `chassis.t` falls inside an active
+     * `TRACK.pivots[i]` span — overlays a transient planted-wheel PIN
+     * (`--ctps-accent`, the marker's own colour token) plus a faint ARC GUIDE
+     * (`--ctps-muted`): a circle through the box's current position, centred
+     * on the planted wheel, at the marker's own live turning radius. That
+     * radius needs no extra schema field — the dense arc keyframes already
+     * put `pose` exactly on the circle of radius R around the planted wheel,
+     * so `hypot(pose - center)` recovers it directly. Both tokens are already
+     * resolved by `_resolveColors()` — no new CSS token, no CSS-asset edit
+     * (ADR-053 carve-out). A missing/out-of-span/malformed pivot segment
+     * degrades to the plain box draw: the overlay is simply skipped, never
+     * thrown (registry non-fatal contract).
+     */
+    CTPS.renderModes.register({
+        id: "wheel-arc",
+        draw: function (ctx, pose, view, chassis) {
+            var boxMode = CTPS.renderModes.get("box");
+            if (boxMode && typeof boxMode.draw === "function") {
+                boxMode.draw(ctx, pose, view, chassis);
+            }
+            var seg = _activePivotSegment(chassis && chassis.t);
+            if (!seg) {
+                return;
+            }
+            var p = _project(view, pose.x, pose.y);
+            var c = _project(view, seg.cx, seg.cy);
+            var radiusPx = Math.hypot(p.px - c.px, p.py - c.py);
+            ctx.save();
+            ctx.strokeStyle = _colors.muted;
+            ctx.globalAlpha = PIVOT_GUIDE_ALPHA;
+            ctx.lineWidth = PIVOT_GUIDE_WIDTH;
+            ctx.beginPath();
+            ctx.arc(c.px, c.py, radiusPx, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.restore();
+            ctx.save();
+            ctx.fillStyle = _colors.accent;
+            ctx.beginPath();
+            ctx.arc(c.px, c.py, PIVOT_PIN_RADIUS, 0, Math.PI * 2);
             ctx.fill();
             ctx.restore();
         },
