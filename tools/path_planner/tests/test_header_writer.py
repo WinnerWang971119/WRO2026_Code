@@ -171,7 +171,12 @@ def _emit_toy(
 
 @pytest.fixture
 def emit_targets(tmp_path: Path) -> tuple[Path, Path]:
-    return tmp_path / "routes.h", tmp_path / "routes.cpp"
+    # Use the SAME basename the golden files carry (routes_toy.{h,cpp}). The
+    # emitter now derives the .cpp's #include from the output header's
+    # basename, so a mismatched basename here (e.g. "routes.h") would emit a
+    # divergent include line and fail test_routes_cpp_matches_golden against
+    # the routes_toy-named golden regenerate_goldens() writes.
+    return tmp_path / "routes_toy.h", tmp_path / "routes_toy.cpp"
 
 
 def _emit_with_toy_field(emit_targets: tuple[Path, Path]) -> tuple[Path, Path]:
@@ -459,8 +464,8 @@ def test_compute_source_hash_normalizes_crlf_to_lf(tmp_path):
 
 
 def test_default_paths_are_under_repo():
-    assert DEFAULT_HEADER_PATH == Path("WRO2026/routes.h")
-    assert DEFAULT_SOURCE_PATH == Path("WRO2026/routes.cpp")
+    assert DEFAULT_HEADER_PATH == Path("WRO2026/src/nav/routes.h")
+    assert DEFAULT_SOURCE_PATH == Path("WRO2026/src/nav/routes.cpp")
     assert FIELD_DATA_PATH == Path("tools/path_planner/field_data.py")
     assert FIELD_DATA_JSON_PATH == Path("tools/path_planner/field_data.json")
 
@@ -1057,7 +1062,7 @@ def test_no_legacy_edge_type_suffix_anywhere():
 
     Scope here is ``tools/`` only. The plan's full sweep also covers
     ``WRO2026/`` -- those files are owned by sibling tasks T14 (regen of
-    ``WRO2026/routes.{h,cpp}``) and T17 (PathTracker rename), which run
+    ``WRO2026/src/nav/routes.{h,cpp}``) and T17 (PathTracker rename), which run
     AFTER T11 in the task graph. Once T14 and T17 land, this test should
     be widened by adding ``"WRO2026"`` to the ``sub`` tuple below;
     leaving it narrow here keeps T11 self-contained and lets the test
@@ -1091,7 +1096,7 @@ def test_no_legacy_edge_type_suffix_anywhere():
 def test_blind_projection_auto_seek_source_parity():
     """TC-TOGGLE-PARITY: emitted BLIND_PROJECTION_AUTO_SEEK matches field_data.
 
-    Reads the committed ``WRO2026/routes.h`` (without regenerating) and
+    Reads the committed ``WRO2026/src/nav/routes.h`` (without regenerating) and
     asserts that the ``constexpr bool BLIND_PROJECTION_AUTO_SEEK`` value
     inside ``namespace Routes`` equals ``field_data.BLIND_PROJECTION_AUTO_SEEK``.
 

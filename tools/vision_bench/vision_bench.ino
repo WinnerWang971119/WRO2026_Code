@@ -76,17 +76,34 @@
  *
  * The frame contract lives in the sibling `WRO2026/` sketch dir. Per ADR-030
  * we do NOT copy `VisionFrame.h` / `ConfigVision.h` into this folder — the
- * bench links the real sources. Reach them with an include-path build flag:
+ * bench links the real sources. Since the sketch-src reorg (issue #66),
+ * `VisionFrame.h` lives under `WRO2026/src/perception/` while `ConfigVision.h`
+ * stays at the operator-editable `WRO2026/config/` (it never moved), so the
+ * two includes below are now path-qualified relative to the `WRO2026/` root
+ * rather than bare. Reach them with a single include-path build flag:
  *
  *   arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi \
  *     --build-property "compiler.cpp.extra_flags=-I<abs path>/WRO2026" \
  *     tools/vision_bench/
  *
  * Replace `<abs path>` with the absolute path to the repo's `WRO2026` sketch
- * directory (the one holding `VisionFrame.h` and `ConfigVision.h`). The Arduino
- * IDE requires the sketch folder name to match the `.ino` basename, so this
- * file MUST stay `tools/vision_bench/vision_bench.ino`. To flash, swap
- * `compile` for `upload` and add `--port <COMx>`.
+ * directory (the one holding `config/ConfigVision.h` and
+ * `src/perception/VisionFrame.h`). NOTE: this bench deliberately keeps the
+ * raw `-I` extra-flags mechanic instead of arduino-cli's `--library` flag —
+ * `--library` pre-scans a sketch's quoted `#include`s to decide which
+ * declared libraries are actually "used" before adding their folder to the
+ * include path, and that scan does not recognize path-qualified includes
+ * like `"config/ConfigVision.h"` (only bare basenames), so `--library
+ * WRO2026` silently drops the `-I` for this sketch. The raw `-I` flag adds
+ * the path unconditionally and has none of that resolution logic (this is
+ * the one diagnostic sketch that needs a root-relative subpath rather than a
+ * single per-domain folder, since it reaches both an unmoved `config/`
+ * header and a moved `src/perception/` header — see `inoTest/tick_bench/`
+ * for the more common per-domain `--library` pattern, used when every
+ * production include a bench needs lives directly inside a domain folder).
+ * The Arduino IDE requires the sketch folder name to match the `.ino`
+ * basename, so this file MUST stay `tools/vision_bench/vision_bench.ino`. To
+ * flash, swap `compile` for `upload` and add `--port <COMx>`.
  *
  * @note This is a diagnostic tool, not flight code, so it skips the full
  *       strict-OOP module treatment. It still sources every frame-contract
@@ -104,12 +121,15 @@
 #include <Arduino.h>
 
 // Reached via the arduino-cli `-I<abs>/WRO2026` build flag (see HOW TO COMPILE
-// above) — never copied into this folder (ADR-030). VisionFrame.h transitively
+// above) — never copied into this folder (ADR-030). ConfigVision.h still lives
+// at the operator-editable WRO2026/config/, so it is reached root-relative;
+// VisionFrame.h moved to WRO2026/src/perception/ (issue #66), so it is now
+// reached root-relative too instead of bare. VisionFrame.h transitively
 // includes ConfigVision.h, but we include it explicitly because we reference
 // Config:: constants directly. We do NOT include the heavy Config.h: every
 // constant this bench needs lives in the self-contained ConfigVision.h.
-#include "ConfigVision.h"
-#include "VisionFrame.h"
+#include "config/ConfigVision.h"
+#include "src/perception/VisionFrame.h"
 
 namespace
 {

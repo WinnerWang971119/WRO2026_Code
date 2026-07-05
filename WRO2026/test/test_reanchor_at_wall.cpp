@@ -45,15 +45,15 @@
 #include <cmath>
 #include <cstdio>
 
-#include "Localization.h"
+#include "src/nav/Localization.h"
 
 // Mock surfaces — the same singletons `Localization.cpp` was compiled against.
 #include "Drive.h"            // mock: settable encoders (mockAdvanceEncoders / mockReset).
 #include "MatrixMiniR4.h"     // mock: mmL.GetIMUEuler + mmL.mockYawDeg / mockResult.
-#include "WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
+#include "src/util/WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
 #include "Config.h"           // Config::WALL_NORMAL_STRICT_ENABLED / WALL_NORMAL_TOLERANCE_DEG.
-#include "FieldMap.h"         // FieldMap::getNode — the real node-coordinate source under test.
-#include "routes.h"           // Routes::NODES / N_NODES (data in routes.cpp).
+#include "src/nav/FieldMap.h"         // FieldMap::getNode — the real node-coordinate source under test.
+#include "src/nav/routes.h"           // Routes::NODES / N_NODES (data in routes.cpp).
 
 static int g_failures = 0;
 

@@ -22,7 +22,7 @@
 
 #include "Arduino.h"    // Mock — supplies PI / millis / Serial that WROMath.h's include of <Arduino.h> resolves.
 #include "Config.h"
-#include "WROMath.h"
+#include "src/util/WROMath.h"
 
 #include <stdint.h>
 #include <cstdio>

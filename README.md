@@ -122,7 +122,7 @@ there is exactly one place to look.
 
 `tools/path_planner/` is a Python pipeline that turns the field data
 (`field_data.json` geometry + the `EDGES` table in `field_data.py`) into
-`WRO2026/routes.h` + `WRO2026/routes.cpp`. The robot never runs Dijkstra
+`WRO2026/src/nav/routes.h` + `WRO2026/src/nav/routes.cpp`. The robot never runs Dijkstra
 at runtime — it walks a pre-computed next-hop table that the planner emits.
 The `routes.h` banner embeds a SHA256 over the field-data sources so
 reviewers can spot a stale header at a glance.
@@ -189,23 +189,17 @@ WRO2026_code/
 │   ├── WRO2026.ino           setup() + loop() + cooperativeTick() + cal menu.
 │   ├── MissionScript.{h,cpp} buildMission() — the hand-typed mission.
 │   ├── Config.h              umbrella over config/ (pins, gains, speeds).
-│   ├── Drive.{h,cpp}         fluent builders, queue, tShape, stopAtLine, wallStop.
-│   ├── *Policy.h             header-only resolvers (StopAtLine / Direction / ...).
-│   ├── LineFollower.{h,cpp}  PID + distance-gated stop with tShape.
-│   ├── Intersection.{h,cpp}  intersection detection from the sensor array.
-│   ├── WROLineArray.{h,cpp}  8-channel reflectance array over MXColor boards.
-│   ├── YawSource.{h,cpp}     sole owner of raw IMU-yaw I/O (IMU_YAW_SIGN).
-│   ├── Localization.{h,cpp}  currentNode + heading, single source of truth.
-│   ├── PathTracker.{h,cpp}   walks the routes table node-by-node.
-│   ├── FieldMap.h            field graph helpers over routes.h.
-│   ├── routes.{h,cpp}        GENERATED — do not hand-edit.
-│   ├── Mission.{h,cpp}       fluent DSL: goTo / wait / print / beep / led / task.
 │   ├── Tasks.{h,cpp}         composite routines dispatched by name.
-│   ├── Manipulator.{h,cpp}   3 servos + belt: grab / sortTo / dump / reset.
-│   ├── Vision.{h,cpp}        HUE12 mosaic read + on-device hue classification.
-│   ├── EventTrace.{h,cpp}    OLED + serial event log.
-│   ├── StateMachine.h        header-only state-machine helper (unused).
-│   ├── WROMath.h             angle wrap, clamp, etc.
+│   ├── TasksTypes.h          TaskArgs POD + registry entry type.
+│   ├── config/               per-domain tunables (ConfigGlobal/Drive/Line/Nav/...).
+│   ├── src/                  framework modules — operator does not hand-edit.
+│   │   ├── drive/            Drive, LineFollower, Intersection, TurnSignPolicy.
+│   │   ├── perception/       WROLineArray, Vision, VisionFrame.
+│   │   ├── nav/              routes (GENERATED), FieldMap, NavTypes, Localization,
+│   │   │                     YawSource, the five nav-owned resolver policies.
+│   │   ├── mission/          Mission (engine), PathTracker, PathTrackerParityTrace.
+│   │   ├── manip/            Manipulator, ManipServo, ManipBelt.
+│   │   └── util/             WROMath, StateMachine, EventTrace, TickProfiler.
 │   └── test/                 host C++ ctest harness (CI-enforced).
 │
 ├── tools/path_planner/       offline Python pipeline.
@@ -263,7 +257,7 @@ text such as `��������`.
 uv run python tools/path_planner/build_routes.py
 ```
 
-That regenerates `WRO2026/routes.{h,cpp}` and a sanity-check
+That regenerates `WRO2026/src/nav/routes.{h,cpp}` and a sanity-check
 `tools/path_planner/output/map.png`. Workflow when you edit the field:
 
 1. Edit the geometry in `tools/path_planner/field_data.json` (use the

@@ -5,10 +5,10 @@
  */
 
 #include "Tasks.h"
-#include "Manipulator.h"
-#include "PathTracker.h"
-#include "Drive.h"
-#include "LineFollower.h"
+#include "src/manip/Manipulator.h"
+#include "src/mission/PathTracker.h"
+#include "src/drive/Drive.h"
+#include "src/drive/LineFollower.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp

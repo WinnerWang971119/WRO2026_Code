@@ -114,7 +114,7 @@ void setup() {
 
 ### Python pipeline (offline path planner)
 
-Regenerate `WRO2026/routes.h` + `WRO2026/routes.cpp` whenever the field changes (`tools/path_planner/field_data.json`, or the `EDGES` table in `field_data.py`):
+Regenerate `WRO2026/src/nav/routes.h` + `WRO2026/src/nav/routes.cpp` whenever the field changes (`tools/path_planner/field_data.json`, or the `EDGES` table in `field_data.py`):
 
 ```
 uv run python tools/path_planner/build_routes.py
@@ -164,24 +164,18 @@ WRO2026_Code/
 │   ├── MissionScript.h / .cpp# buildMission() — the hand-typed competition mission
 │   ├── Config.h              # umbrella include — per-domain tunables live in config/
 │   ├── config/               # ConfigGlobal/Drive/Line/Nav/Mission/Manipulator/Vision/Checks.h
-│   ├── Drive.h / .cpp        # facade + fluent builders + queue + T-shape + stopAtLine + wallStop
-│   ├── *Policy.h             # header-only resolvers: StopAtLine/Direction/PivotTrim/TurnSign/ReturnToNode
-│   ├── LineFollower.h / .cpp # P+D over WROLineArray + distance gate + sync helpers
-│   ├── Intersection.h / .cpp # rising-edge detector + JunctionType + edge counter
-│   ├── WROLineArray.h / .cpp # 8-ch reflectance array over MXColor boards
-│   ├── YawSource.h / .cpp    # sole owner of raw IMU-yaw I/O + IMU_YAW_SIGN
-│   ├── Localization.h / .cpp # single-writer node + IMU-yaw offset + operator offset
-│   ├── FieldMap.h            # header-only namespace over Routes::*
-│   ├── routes.h / .cpp       # AUTO-GENERATED graph data — do not hand-edit
-│   ├── PathTracker.h / .cpp  # FSM consuming NEXT_HOP + fluent goTo() builder
-│   ├── Mission.h / .cpp      # operator DSL (goTo/wait/print/beep/led/task)
 │   ├── Tasks.h / .cpp        # composite routines by name; Mission.task() dispatch
-│   ├── Manipulator.h / .cpp  # 3 RC servos + belt DC motor; grab/sortTo/dump/reset
-│   ├── ManipServo.h / ManipBelt.h  # actuator classes behind Manipulator
-│   ├── Vision.h / .cpp       # HUE12 mosaic read over Serial1 + hue classification
-│   ├── EventTrace.h / .cpp   # OLED ring + Serial heartbeat
-│   ├── WROMath.h             # free helpers (cmToEncDeg, presetToPwm, ...)
-│   ├── StateMachine.h        # generic FSM template (header-only, currently unused)
+│   ├── TasksTypes.h          # TaskArgs POD + registry entry type
+│   │
+│   ├── src/                  # framework modules — operator does not hand-edit; six domains
+│   │   ├── drive/            # Drive.h/.cpp, *Policy.h (TurnSignPolicy), LineFollower.h/.cpp, Intersection.h/.cpp
+│   │   ├── perception/       # WROLineArray.h/.cpp, Vision.h/.cpp, VisionFrame.h
+│   │   ├── nav/               # routes.h/.cpp (GENERATED), FieldMap.h, NavTypes.h, Localization.h/.cpp,
+│   │   │                      # YawSource.h/.cpp, *Policy.h (StopAtLine/Direction/EdgeDispatch/PivotTrim/ReturnToNode)
+│   │   ├── mission/          # Mission.h/.cpp (engine), PathTracker.h/.cpp, PathTrackerParityTrace.h
+│   │   ├── manip/            # Manipulator.h/.cpp, ManipServo.h, ManipBelt.h
+│   │   └── util/             # WROMath.h, StateMachine.h, EventTrace.h/.cpp, TickProfiler.h
+│   │
 │   └── test/                 # host C++ CMake/ctest harness (CI-enforced)
 │
 ├── tools/path_planner/       # offline Python pipeline (host machine, not on R4)

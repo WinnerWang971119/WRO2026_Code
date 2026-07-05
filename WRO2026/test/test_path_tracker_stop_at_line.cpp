@@ -53,8 +53,8 @@
 
 #include "test_path_tracker_harness.h"
 
-#include "StopAtLinePolicy.h"  // resolveStopAtLine + StopAtLineResolution (real frozen resolver).
-#include "PivotTrimPolicy.h"   // resolveSensorOvershootTrim + SensorOvershootResolution (real frozen helper).
+#include "src/nav/StopAtLinePolicy.h"  // resolveStopAtLine + StopAtLineResolution (real frozen resolver).
+#include "src/nav/PivotTrimPolicy.h"   // resolveSensorOvershootTrim + SensorOvershootResolution (real frozen helper).
 
 #include <cmath>
 #include <cstdio>

@@ -57,24 +57,24 @@ import pytest
 
 
 def _repo_root() -> Path:
-    """Walk up from this file to the repo root (the dir holding ``WRO2026/Drive.h``).
+    """Walk up from this file to the repo root (the dir holding ``WRO2026/src/drive/Drive.h``).
 
     Robust to the test-tree depth rather than a hard-coded ``parents[N]`` index
     or an absolute ``C:\\...`` path, so the scan works on Linux CI too.
     """
     here = Path(__file__).resolve()
     for parent in here.parents:
-        if (parent / "WRO2026" / "Drive.h").is_file():
+        if (parent / "WRO2026" / "src" / "drive" / "Drive.h").is_file():
             return parent
     raise AssertionError(
-        f"repo root (a directory containing WRO2026/Drive.h) not found above {here}"
+        f"repo root (a directory containing WRO2026/src/drive/Drive.h) not found above {here}"
     )
 
 
 _ROOT = _repo_root()
 
-_REAL_DRIVE = _ROOT / "WRO2026" / "Drive.h"
-_REAL_LINE = _ROOT / "WRO2026" / "LineFollower.h"
+_REAL_DRIVE = _ROOT / "WRO2026" / "src" / "drive" / "Drive.h"
+_REAL_LINE = _ROOT / "WRO2026" / "src" / "drive" / "LineFollower.h"
 _MOCK_DRIVE = _ROOT / "WRO2026" / "test" / "ctps_mocks" / "Drive.h"
 _MOCK_LINE = _ROOT / "WRO2026" / "test" / "ctps_mocks" / "LineFollower.h"
 

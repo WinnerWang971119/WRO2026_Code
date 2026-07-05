@@ -33,7 +33,7 @@
 
 #include "Arduino.h"    // Mock — supplies Serial/millis that Config.h's <Arduino.h> include resolves.
 #include "CsvTruthTable.h"
-#include "StopAtLinePolicy.h"
+#include "src/nav/StopAtLinePolicy.h"
 
 #include <cstddef>
 #include <cstdint>

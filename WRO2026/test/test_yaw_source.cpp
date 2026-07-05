@@ -33,7 +33,7 @@
 
 #include <cstdio>
 
-#include "YawSource.h"
+#include "src/nav/YawSource.h"
 #include "MatrixMiniR4.h"    // mock: mmL.GetIMUEuler + mmL.mockYawDeg / mockResult / getImuEulerCallCount.
 
 static int g_failures = 0;

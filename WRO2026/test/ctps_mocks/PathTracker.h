@@ -25,10 +25,10 @@
 
 #include <stdint.h>
 
-#include "FieldMap.h"     // real — resolve goal index → node name
-#include "NavTypes.h"     // real — Direction / StopAtLine enums for the chain setters
+#include "src/nav/FieldMap.h"     // real — resolve goal index → node name
+#include "src/nav/NavTypes.h"     // real — Direction / StopAtLine enums for the chain setters
 #include "ctps_record.h"
-#include "routes.h"       // real — Routes::NODES / N_NODES
+#include "src/nav/routes.h"       // real — Routes::NODES / N_NODES
 
 class PathTrackerClass;
 

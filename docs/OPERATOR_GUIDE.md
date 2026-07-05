@@ -745,7 +745,7 @@ generated `routes.h/.cpp`, or CI fails.
   Required: library ≥ v1.1.8, STM32 firmware ≥ v6.0.
 
 ### Python path planner (offline)
-Regenerate `WRO2026/routes.h` + `routes.cpp` whenever the field changes:
+Regenerate `WRO2026/src/nav/routes.h` + `routes.cpp` whenever the field changes:
 ```
 uv run python tools/path_planner/build_routes.py
 ```
@@ -765,11 +765,11 @@ checks that the generated `routes.*` are fresh.
 | You want to… | File |
 |---|---|
 | Write the competition mission | `WRO2026/MissionScript.cpp` → `buildMission()` |
-| See the Mission verbs | `WRO2026/Mission.h` |
+| See the Mission verbs | `WRO2026/src/mission/Mission.h` |
 | Add / edit a Task | `WRO2026/Tasks.h` + `WRO2026/Tasks.cpp` (`_registry[]`) |
-| Navigate to a node | `WRO2026/PathTracker.h` (`goTo`) |
-| Drive / turn the chassis | `WRO2026/Drive.h` |
-| Follow a line | `WRO2026/LineFollower.h` |
-| Actuate the mechanism | `WRO2026/Manipulator.h` (+ `ManipServo.h`, `ManipBelt.h`) |
+| Navigate to a node | `WRO2026/src/mission/PathTracker.h` (`goTo`) |
+| Drive / turn the chassis | `WRO2026/src/drive/Drive.h` |
+| Follow a line | `WRO2026/src/drive/LineFollower.h` |
+| Actuate the mechanism | `WRO2026/src/manip/Manipulator.h` (+ `ManipServo.h`, `ManipBelt.h`) |
 | Tune a constant | `WRO2026/config/Config*.h` |
 | Boot / arm flow | `WRO2026/WRO2026.ino` |

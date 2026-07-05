@@ -34,7 +34,7 @@
 
 #include <cstdio>
 
-#include "ReturnToNodePolicy.h"
+#include "src/nav/ReturnToNodePolicy.h"
 
 static int g_failures = 0;
 

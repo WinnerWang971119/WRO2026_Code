@@ -1,11 +1,11 @@
-"""Header writer: emit ``WRO2026/routes.h`` and ``WRO2026/routes.cpp`` (PR3).
+"""Header writer: emit ``WRO2026/src/nav/routes.h`` and ``WRO2026/src/nav/routes.cpp`` (PR3).
 
 Serialises the validated graph and next-hop table into a pair of C++
 files the runtime ``PathTracker`` consumes:
 
-* :data:`DEFAULT_HEADER_PATH` (``WRO2026/routes.h``) -- declarations
+* :data:`DEFAULT_HEADER_PATH` (``WRO2026/src/nav/routes.h``) -- declarations
   (``constexpr`` sizes, enums, struct definitions, ``extern`` arrays).
-* :data:`DEFAULT_SOURCE_PATH` (``WRO2026/routes.cpp``) -- definitions
+* :data:`DEFAULT_SOURCE_PATH` (``WRO2026/src/nav/routes.cpp``) -- definitions
   (``NODES``, ``NEXT_HOP``, ``EDGES``, ``PIPELINE_CONFIG``).
 
 PR3 simplification: drops ``GoalApproach`` struct, ``BlindAction`` enum,
@@ -87,8 +87,8 @@ if TYPE_CHECKING:
     # keeps the annotation precise without the runtime coupling.
     from tools.path_planner.planner import PivotTurnRecord
 
-DEFAULT_HEADER_PATH = Path("WRO2026/routes.h")
-DEFAULT_SOURCE_PATH = Path("WRO2026/routes.cpp")
+DEFAULT_HEADER_PATH = Path("WRO2026/src/nav/routes.h")
+DEFAULT_SOURCE_PATH = Path("WRO2026/src/nav/routes.cpp")
 FIELD_DATA_PATH = Path("tools/path_planner/field_data.py")
 FIELD_DATA_JSON_PATH = Path("tools/path_planner/field_data.json")
 
@@ -941,11 +941,17 @@ def _build_routes_cpp_lines(
     source_hash: str,
     pivot_rows: Sequence[Tuple[int, int, int, str, float]],
     reset_rows: Sequence[Tuple[int, int, float, int]],
+    header_include: str,
 ) -> List[str]:
     lines: List[str] = []
     lines.extend(_routes_cpp_banner(source_hash))
     lines.append("")
-    lines.append('#include "routes.h"')
+    # The generated .cpp includes its OWN sibling header by basename so it
+    # resolves same-directory regardless of where the pair is emitted:
+    # production routes.cpp -> "routes.h", each generated fixture/toy .cpp ->
+    # its own "routes_fixture.h" / "routes_toy.h". Derived from the output
+    # header path's basename in emit_routes, never hardcoded.
+    lines.append('#include "' + header_include + '"')
     lines.append("")
     lines.append("namespace Routes {")
 
@@ -1044,6 +1050,7 @@ def emit_routes(
         source_hash,
         pivot_rows,
         reset_rows,
+        header_path.name,
     )
 
     header_path.parent.mkdir(parents=True, exist_ok=True)

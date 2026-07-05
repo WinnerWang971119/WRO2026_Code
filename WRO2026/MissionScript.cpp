@@ -6,7 +6,7 @@
 
 #include "MissionScript.h"
 
-#include "Mission.h"
+#include "src/mission/Mission.h"
 
 void buildMission()
 {
