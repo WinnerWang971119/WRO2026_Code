@@ -52,10 +52,14 @@
     var NODE_LABEL_DX = 7;       // node label x-offset from its dot
     var NODE_HALO_WIDTH = 3;     // dark paint-order halo behind a node label
     var NODE_FONT = "11px ui-monospace, Consolas, monospace";
-    var BOX_LEN = 26;            // robot chassis length (px, along heading)
-    var BOX_WID = 18;            // robot chassis width (px)
-    var NOSE_LEN = 7;            // heading-nose projection past the front face
-    var NOSE_HALF = 5;           // heading-nose half-height at the front face
+    var ROBOT_FALLBACK_PX = 40;  // robot square side (px) used ONLY when the
+                                 // field omits robot_radius_cm; normally the
+                                 // side is world-sized (2 * ROBOT_RADIUS_CM *
+                                 // view.scale), so the marker is the true
+                                 // footprint and scales with the field.
+    var ROBOT_ARROW_TIP = 0.70;  // front-arrow tip, as a fraction of half-side
+    var ROBOT_ARROW_BACK = 0.15; // arrow base setback behind centre (frac half)
+    var ROBOT_ARROW_HALF = 0.42; // arrow base half-width (frac of half-side)
     var ROBOT_OUTLINE_WIDTH = 1.5;
     var HALO_RADIUS = 18;        // selection halo ring radius (px)
     var HALO_WIDTH = 2;          // selection halo ring width
@@ -175,6 +179,18 @@
             return [b[0], b[1], b[2], b[3]];
         }
         return [0, 0, 1, 1];
+    }
+
+    /**
+     * The robot marker's side length in world cm: `2 * field.robot_radius_cm`
+     * (the square footprint that bounds the planner's C-space radius). Returns
+     * 0 when the field omits a positive radius, so the caller falls back to a
+     * fixed pixel size.
+     */
+    function _robotSideCm() {
+        var f = _field();
+        var r = f && f.robot_radius_cm;
+        return (typeof r === "number" && r > 0) ? 2 * r : 0;
     }
 
     /**
@@ -452,8 +468,9 @@
     }
 
     /**
-     * A ring around the current selection (robot follows the live pose; a node
-     * sits at its fixed position). Drawn under the robot on the actors canvas.
+     * A ring around the current selection. Drawn ONLY for a selected node (at
+     * its fixed position) — the robot deliberately gets no halo: the square
+     * marker with its front arrow is the whole robot, no circle around it.
      */
     function _drawSelectionHalo(ctx, view, state, pose) {
         var sel = state.selection;
@@ -461,11 +478,7 @@
             return;
         }
         var cx, cy;
-        if (sel.kind === "robot") {
-            var rp = _project(view, pose.x, pose.y);
-            cx = rp.px;
-            cy = rp.py;
-        } else if (sel.kind === "node") {
+        if (sel.kind === "node") {
             var coord = _fieldNodes()[sel.id];
             if (!coord) {
                 return;
@@ -523,9 +536,12 @@
             mode = CTPS.renderModes.get("box");
         }
         if (mode && typeof mode.draw === "function") {
+            var sideCm = _robotSideCm();
+            var sidePx = (sideCm > 0) ? sideCm * view.scale : ROBOT_FALLBACK_PX;
             mode.draw(ctx, pose, view, {
                 fill: _colors.accent,
                 outline: _colors.bg,
+                sidePx: sidePx,
             });
         }
         _drawScaleBar(ctx, view);
@@ -721,35 +737,43 @@
     });
 
     /**
-     * `box` render mode: a rotated chassis rectangle (~BOX_LEN x BOX_WID) with a
-     * small heading nose at the front, accent fill + a 1.5px dark outline. World
-     * heading is CCW-from-+x with Y up; the canvas Y is flipped, so the drawing
-     * angle is the negated heading. `wheel-arc` is deliberately NOT registered —
-     * the reserved #55 pivot seam; the registry simply stays able to accept it.
+     * `box` render mode: a rotated SQUARE chassis (side `chassis.sidePx`, the
+     * true 2 x ROBOT_RADIUS_CM footprint in pixels) with a forward-pointing
+     * arrow marking the front — no nose, no surrounding circle. Accent fill,
+     * a 1.5px dark outline, and the arrow in the same dark tone so it reads on
+     * the fill. World heading is CCW-from-+x with Y up; the canvas Y is flipped,
+     * so the drawing angle is the negated heading and the arrow tip lands along
+     * the heading. `wheel-arc` is deliberately NOT registered — the reserved
+     * #55 pivot seam; the registry simply stays able to accept it.
      */
     CTPS.renderModes.register({
         id: "box",
         draw: function (ctx, pose, view, chassis) {
             var p = _project(view, pose.x, pose.y);
             var ang = -pose.h * Math.PI / 180;
+            var half = ((chassis && chassis.sidePx > 0)
+                ? chassis.sidePx : ROBOT_FALLBACK_PX) / 2;
             ctx.save();
             ctx.translate(p.px, p.py);
             ctx.rotate(ang);
+            // Square footprint.
             ctx.fillStyle = chassis.fill;
             ctx.strokeStyle = chassis.outline;
             ctx.lineWidth = ROBOT_OUTLINE_WIDTH;
             ctx.lineJoin = "round";
             ctx.beginPath();
-            ctx.rect(-BOX_LEN / 2, -BOX_WID / 2, BOX_LEN, BOX_WID);
+            ctx.rect(-half, -half, half * 2, half * 2);
             ctx.fill();
             ctx.stroke();
+            // Front arrow (points to +x local = heading), filled in the outline
+            // tone so it contrasts against the accent square.
+            ctx.fillStyle = chassis.outline;
             ctx.beginPath();
-            ctx.moveTo(BOX_LEN / 2, -NOSE_HALF);
-            ctx.lineTo(BOX_LEN / 2 + NOSE_LEN, 0);
-            ctx.lineTo(BOX_LEN / 2, NOSE_HALF);
+            ctx.moveTo(half * ROBOT_ARROW_TIP, 0);
+            ctx.lineTo(-half * ROBOT_ARROW_BACK, -half * ROBOT_ARROW_HALF);
+            ctx.lineTo(-half * ROBOT_ARROW_BACK, half * ROBOT_ARROW_HALF);
             ctx.closePath();
             ctx.fill();
-            ctx.stroke();
             ctx.restore();
         },
     });

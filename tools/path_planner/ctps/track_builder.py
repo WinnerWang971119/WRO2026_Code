@@ -125,8 +125,10 @@ class Track:
 
     :param schema_version: Track schema version. Always ``1`` for v1.
     :param field: Static field render data — ``nodes`` (name -> ``[x, y]``),
-        ``obstacles`` (``[[x0, y0, x1, y1, kind], ...]``), and ``bounds``
-        (``[x_min, y_min, x_max, y_max]`` in centimetres).
+        ``obstacles`` (``[[x0, y0, x1, y1, kind], ...]``), ``bounds``
+        (``[x_min, y_min, x_max, y_max]`` in centimetres), and
+        ``robot_radius_cm`` (the robot's C-space radius, for the world-sized
+        robot marker).
     :param duration_s: Total playback duration in seconds — the timestamp of
         the final keyframe (equivalently, the running clock at end of trace).
     :param keyframes: Sparse pose samples, one per primitive boundary / dwell
@@ -182,9 +184,13 @@ def _build_field_block(field_data) -> Dict[str, Any]:
     * ``bounds``: ``[0.0, 0.0, width_cm, height_cm]`` where
       ``width/height`` come from ``field_data.FIELD_MM`` (a ``(w_mm, h_mm)``
       pair) divided by 10 to convert millimetres to centimetres.
+    * ``robot_radius_cm``: ``field_data.ROBOT_RADIUS_CM`` (the planner's
+      C-space inflation radius), so the player can draw the robot marker at
+      its true world size (a square of side ``2 * radius``) instead of a
+      fixed pixel box. ``0.0`` when the field omits it.
 
     :param field_data: validated field-data namespace exposing ``NODES``,
-        ``OBSTACLES``, ``FIELD_MM``.
+        ``OBSTACLES``, ``FIELD_MM``, ``ROBOT_RADIUS_CM``.
     :return: the ``field`` dict for Data Model B.
     """
     nodes: Dict[str, List[float]] = {
@@ -203,7 +209,14 @@ def _build_field_block(field_data) -> Dict[str, Any]:
     height_cm = float(height_mm) / 10.0
     bounds: List[float] = [0.0, 0.0, width_cm, height_cm]
 
-    return {"nodes": nodes, "obstacles": obstacles, "bounds": bounds}
+    robot_radius_cm = float(getattr(field_data, "ROBOT_RADIUS_CM", 0.0) or 0.0)
+
+    return {
+        "nodes": nodes,
+        "obstacles": obstacles,
+        "bounds": bounds,
+        "robot_radius_cm": robot_radius_cm,
+    }
 
 
 def _pose_delta_duration(
