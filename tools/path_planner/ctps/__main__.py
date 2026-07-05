@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import webbrowser
@@ -210,17 +211,68 @@ def _find_vcvars() -> Optional[Path]:
 # ---------------------------------------------------------------------------
 
 
+def _cached_generator() -> Optional[str]:
+    """Return the ``CMAKE_GENERATOR`` recorded in ``_BUILD_DIR``'s cache, or None.
+
+    Reads the ``CMAKE_GENERATOR:INTERNAL=<name>`` line from
+    ``_BUILD_DIR/CMakeCache.txt``. Returns ``None`` when the build dir has no
+    cache (never configured), the file is unreadable, or the key is absent.
+
+    :return: the cached generator name (e.g. ``"Ninja"`` /
+        ``"Visual Studio 17 2022"``), or ``None``.
+    """
+    cache = _BUILD_DIR / "CMakeCache.txt"
+    try:
+        text = cache.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        # Missing (never configured) or unreadable — treat as "no generator".
+        return None
+    for line in text.splitlines():
+        if line.startswith("CMAKE_GENERATOR:"):
+            _key, _sep, value = line.partition("=")
+            return value.strip() or None
+    return None
+
+
+def _clear_build_dir_if_generator_differs(expected: str) -> None:
+    """Wipe ``_BUILD_DIR`` when its cached generator is not ``expected``.
+
+    CMake refuses to reconfigure an existing build tree with a different
+    generator (``Error: generator : Ninja Does not match the generator used
+    previously: Visual Studio 17 2022``). That collision happens when something
+    else — e.g. a VS Code CMake Tools configure — writes a non-Ninja cache into
+    the orchestrator's own ``build/ctps`` dir. Rather than hard-fail with that
+    opaque message, detect the mismatch and remove the dir so the fresh
+    configure that follows starts clean. A dir with no cache, or one already on
+    ``expected``, is left untouched.
+
+    :param expected: the generator the caller is about to request (``"Ninja"``).
+    """
+    cached = _cached_generator()
+    if cached is not None and cached != expected:
+        print(
+            f"ctps: {_BUILD_DIR} was configured with {cached!r}, not "
+            f"{expected!r}; wiping it for a clean reconfigure.",
+            file=sys.stderr,
+        )
+        shutil.rmtree(_BUILD_DIR, ignore_errors=True)
+
+
 def _build_dump_windows(vcvars: Path) -> int:
     """Configure and build ``ctps_dump`` via vcvars + cmake + ninja (Windows).
 
     Runs a single ``cmd /c`` that sources ``vcvars64.bat`` (to put the MSVC
     toolset, ninja, and cmake on PATH) and then chains the configure and build
     with ``&&`` so a configure failure short-circuits the build. Build output
-    streams to this process's stdout/stderr.
+    streams to this process's stdout/stderr. Before configuring, a stale build
+    tree left by a different generator (see
+    :func:`_clear_build_dir_if_generator_differs`) is wiped so the ``-G Ninja``
+    configure never hits CMake's generator-mismatch error.
 
     :param vcvars: resolved path to ``vcvars64.bat``.
     :return: the process exit code (``0`` on success).
     """
+    _clear_build_dir_if_generator_differs("Ninja")
     _BUILD_DIR.mkdir(parents=True, exist_ok=True)
 
     # Each path is quoted and ``&&`` chains the steps in one cmd line. This is
@@ -406,7 +458,9 @@ def _resolve_map_png() -> Optional[Path]:
     return p
 
 
-def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int:
+def _render_and_open(
+    trace_json: str, out_path: Path, open_browser: bool, filename: str = ""
+) -> int:
     """Load -> build -> render the trace JSON, then optionally open the page.
 
     :param trace_json: a Data-Model-A command-stream JSON document (string).
@@ -456,7 +510,9 @@ def _render_and_open(trace_json: str, out_path: Path, open_browser: bool) -> int
         )
         return 1
 
-    out = player_html.render(track, out_path, map_png=_resolve_map_png())
+    out = player_html.render(
+        track, out_path, map_png=_resolve_map_png(), filename=filename
+    )
 
     if open_browser:
         _open_in_browser(out)
@@ -551,13 +607,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 1
         trace_json = trace_path.read_text(encoding="utf-8")
-        return _render_and_open(trace_json, args.out, open_browser)
+        return _render_and_open(
+            trace_json, args.out, open_browser, filename=trace_path.name
+        )
 
     # --- default / --fixture flow: locate toolchain, build, dump -------------
     trace_json = _produce_trace_json(args.fixture)
     if trace_json is None:
         return 1
-    return _render_and_open(trace_json, args.out, open_browser)
+    return _render_and_open(
+        trace_json,
+        args.out,
+        open_browser,
+        filename=("fixture mission" if args.fixture else "mission"),
+    )
 
 
 if __name__ == "__main__":

@@ -17,7 +17,8 @@ via ``monkeypatch.setattr(sys, "platform", ...)`` and every build / dump helper
 is replaced with an in-test stub. All monkeypatches auto-undo, so the tests are
 deterministic and isolated regardless of the host OS.
 
-Covered cases (T8): TC1-TC9 and TC21.
+Covered cases (T8): TC1-TC9 and TC21; TC22-TC24 cover the build-dir self-heal
+on a CMake generator mismatch.
 """
 
 from __future__ import annotations
@@ -229,7 +230,7 @@ def test_tc9_trace_flow_skips_compiler(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ctps_main,
         "_render_and_open",
-        lambda trace_json, out_path, open_browser: 0,
+        lambda trace_json, out_path, open_browser, filename="": 0,
     )
 
     trace_file = tmp_path / "run.json"
@@ -267,6 +268,71 @@ def test_tc21_non_windows_build_failure_nonzero_exit(monkeypatch, capsys):
     assert result is None
     err = capsys.readouterr().err
     assert "failed" in err
+
+
+# ---------------------------------------------------------------------------
+# TC22-TC24 — build-dir self-heal on a CMake generator mismatch
+# ---------------------------------------------------------------------------
+
+
+def _write_cache(build_dir: Path, generator: str) -> None:
+    """Write a minimal CMakeCache.txt recording ``generator`` into ``build_dir``."""
+    build_dir.mkdir(parents=True, exist_ok=True)
+    (build_dir / "CMakeCache.txt").write_text(
+        "# This is the CMakeCache file.\n"
+        f"CMAKE_GENERATOR:INTERNAL={generator}\n",
+        encoding="utf-8",
+    )
+
+
+def test_tc22_cached_generator_reads_or_none(monkeypatch, tmp_path):
+    """TC22: ``_cached_generator`` returns the cached name, or None when absent.
+
+    No CMakeCache.txt -> None (never configured); a cache carrying the
+    ``CMAKE_GENERATOR:INTERNAL=`` line -> that value.
+    """
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", tmp_path)
+    assert ctps_main._cached_generator() is None
+
+    _write_cache(tmp_path, "Visual Studio 17 2022")
+    assert ctps_main._cached_generator() == "Visual Studio 17 2022"
+
+
+def test_tc23_clear_build_dir_wipes_on_mismatch(monkeypatch, tmp_path):
+    """TC23: a non-Ninja cache is wiped so the Ninja reconfigure starts clean.
+
+    Models the reported failure: ``build/ctps`` was configured with the Visual
+    Studio generator, but the orchestrator requests Ninja. The stale tree (cache
+    + a sentinel VS artifact) must be removed.
+    """
+    build_dir = tmp_path / "ctps"
+    _write_cache(build_dir, "Visual Studio 17 2022")
+    (build_dir / "ALL_BUILD.vcxproj").write_text("stale", encoding="utf-8")
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", build_dir)
+
+    ctps_main._clear_build_dir_if_generator_differs("Ninja")
+
+    assert not build_dir.exists()
+
+
+def test_tc24_clear_build_dir_keeps_matching_or_missing(monkeypatch, tmp_path):
+    """TC24: a matching cache (or no cache at all) is left untouched.
+
+    Ninja-on-Ninja must NOT wipe (that would throw away a good incremental
+    tree); an absent cache is a no-op (nothing to reconfigure against yet).
+    """
+    build_dir = tmp_path / "ctps"
+    _write_cache(build_dir, "Ninja")
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", build_dir)
+
+    ctps_main._clear_build_dir_if_generator_differs("Ninja")
+    assert (build_dir / "CMakeCache.txt").is_file()  # matching -> kept
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(ctps_main, "_BUILD_DIR", empty)
+    ctps_main._clear_build_dir_if_generator_differs("Ninja")  # no cache -> no-op
+    assert empty.exists()
 
 
 # ---------------------------------------------------------------------------
