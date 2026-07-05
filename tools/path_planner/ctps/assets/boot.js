@@ -21,13 +21,12 @@
  *      drive.method" 3-place-contract convention).
  *   4. Surface any accumulated `CTPS._errors` (the duplicate-registry-id
  *      channel) via `console.error`.
- *   5. Wire `window` "resize" -> `CTPS.renderer.resize()`, guarding that the
- *      renderer exists.
- *   6. Seek to 0 so every store-subscribed region paints its initial frame.
+ *   5. Seek to 0 so every store-subscribed region paints its initial frame.
  *
  * Boot does not know about individual modules or features — it only runs
- * `_inits`, validates manifests, wires resize, and seeks 0. Vanilla JS only —
- * no frameworks, no network, works offline.
+ * `_inits`, validates manifests, and seeks 0. Resize is owned entirely by the
+ * renderer (its own debounced ResizeObserver + window listener), so boot does
+ * not wire it. Vanilla JS only — no frameworks, no network, works offline.
  */
 
 "use strict";
@@ -95,12 +94,7 @@
             console.error("CTPS: " + errors[j]);
         }
 
-        // ----- 5: wire resize -> renderer -----------------------------------
-        if (CTPS.renderer && CTPS.renderer.resize) {
-            window.addEventListener("resize", CTPS.renderer.resize);
-        }
-
-        // ----- 6: seek to 0 so every subscribed region paints its initial
+        // ----- 5: seek to 0 so every subscribed region paints its initial
         // frame ---------------------------------------------------------
         if (CTPS.store && CTPS.store.seek) {
             CTPS.store.seek(0);

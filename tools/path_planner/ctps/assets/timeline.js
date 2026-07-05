@@ -298,13 +298,16 @@
     /**
      * Toggle `.ctps-span--current` on each recorded task/goto span so the one
      * the playhead time `t` sits inside gets the theme-accent highlight and the
-     * rest stay neutral gray. Inclusive on both ends, so a span reads as current
-     * from the instant its command starts through its end boundary.
+     * rest stay neutral gray. Half-open on the upper bound (`t0 <= t < t1`): when
+     * two same-lane spans share a boundary (goto A's end == goto B's start) only
+     * the later span is current at that instant, never both. A goto span nested
+     * inside its task span still lights both — they are independent spans in
+     * different lanes, not a shared-boundary tie.
      */
     function refreshCurrent(t) {
         for (var i = 0; i < _currentSpans.length; i++) {
             var s = _currentSpans[i];
-            if (t >= s.t0 && t <= s.t1) {
+            if (t >= s.t0 && t < s.t1) {
                 s.el.classList.add("ctps-span--current");
             } else {
                 s.el.classList.remove("ctps-span--current");
@@ -396,7 +399,9 @@
      * lane row rather than the ruler itself — `clientX` is compared against
      * `trackEl`'s own bounding rect regardless of which descendant received
      * the event. Pointer capture keeps `pointermove` firing while dragging
-     * outside the dock's bounds.
+     * outside the dock's bounds. The drag pauses playback (like the `#ctps-seek`
+     * slider) so the rAF clock cannot advance the playhead mid-scrub and fight
+     * the drag.
      */
     function wireScrub(timelineEl, trackEl, store, duration) {
         var dragging = false;
@@ -411,6 +416,9 @@
                 } else if (frac > 1) {
                     frac = 1;
                 }
+            }
+            if (store.playing) {
+                store.setPlaying(false);
             }
             store.seek(frac * duration);
         }

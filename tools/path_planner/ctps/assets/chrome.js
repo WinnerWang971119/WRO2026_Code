@@ -15,9 +15,10 @@
  *      visibility + current-command text. The HUD's holding chip is a
  *      reserved, statically-rendered shell (no cargo data yet, #57) — this
  *      file deliberately never touches it.
- *   4. `CTPS.help` — a `{ open, close }` pair backing the "? Help" button
- *      (and transport.js's `?` keymap handler) that shows a modal listing the
- *      keymap + the accent/hold/drift color legend.
+ *   4. `CTPS.help` — an `{ open, close, isOpen }` API backing the "? Help"
+ *      button (and transport.js's `?` keymap handler + its behind-the-modal
+ *      shortcut guard) that shows a modal listing the keymap + the
+ *      accent/hold/drift color legend.
  *
  * Like every sibling asset, this module only registers an `init(ctx)` onto
  * `CTPS._inits` at load time — boot.js invokes it (with `ctx = { store, dom,
@@ -110,7 +111,7 @@
      * backdrop click, the close button, or Escape.
      *
      * @param helpBtn the "? Help" button — focus returns to it on close.
-     * @return `{ open, close }` — the pair exposed as `CTPS.help`.
+     * @return `{ open, close, isOpen }` — the trio exposed as `CTPS.help`.
      */
     function buildHelpModal(helpBtn) {
         var backdrop = document.createElement("div");
@@ -232,6 +233,12 @@
             closeBtn.focus();
         }
 
+        /** True while the modal backdrop is visible — the transport keymap
+         * reads this to suppress player shortcuts behind the open dialog. */
+        function isOpen() {
+            return !backdrop.hidden;
+        }
+
         backdrop.addEventListener("click", function (ev) {
             // Only the backdrop itself counts as "outside the panel" — a
             // click that bubbled up from inside `panel` must not close it.
@@ -246,7 +253,7 @@
             }
         });
 
-        return { open: open, close: close };
+        return { open: open, close: close, isOpen: isOpen };
     }
 
     /**

@@ -418,6 +418,13 @@
         if (evt.ctrlKey || evt.metaKey || evt.altKey) {
             return;
         }
+        // While the Help modal (aria-modal) is up it owns the keyboard — don't
+        // fire transport shortcuts on the player hidden behind the overlay.
+        // chrome.js closes it on Escape / backdrop / the close button.
+        if (window.CTPS.help && typeof window.CTPS.help.isOpen === "function" &&
+                window.CTPS.help.isOpen()) {
+            return;
+        }
         var key = evt.key;
         if (key === "ArrowLeft" || key === "ArrowRight") {
             if (evt.shiftKey) {

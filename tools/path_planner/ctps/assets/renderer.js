@@ -19,8 +19,9 @@
  *      as separate draw-units mapped onto their backing canvas via canvasId, plus
  *      the `box` renderMode (rotated chassis rectangle + heading nose). `wheel-arc`
  *      is intentionally left unregistered — the reserved #55 seam.
- *   4. Exposes CTPS.renderer = { resize, worldToPixel, hitTest } for boot (window
- *      resize wiring) and T8 (canvas selection).
+ *   4. Exposes CTPS.renderer = { resize, hitTest } — `hitTest` for T8 (canvas
+ *      selection); `resize` as the public re-measure entry (the renderer also
+ *      self-wires resize via its own ResizeObserver + window listener).
  *
  * Styling note (ADR-053 carve-out): this file never touches element `.style`
  * properties — it paints to <canvas> and reads token vars only. Vanilla ES5 —
@@ -630,19 +631,21 @@
         _renderAll(CTPS.store);
     }
 
-    /** World (cm) -> canvas pixel `{px, py}` through the current transform. */
-    function worldToPixel(x, y) {
-        return _project(_view, x, y);
-    }
-
     /**
-     * Hit-test a canvas-pixel click: the nearest node within HIT_NODE_RADIUS
-     * wins ({kind:"node", id}); else the robot when the click is within
-     * HIT_ROBOT_RADIUS of its current pose ({kind:"robot"}); else null.
+     * Hit-test a canvas-pixel click: the robot wins when the click is within
+     * HIT_ROBOT_RADIUS of its current pose ({kind:"robot"}) — tested FIRST so a
+     * robot parked on a node (every goto lands axle-on-node) stays selectable
+     * and its heading readable; else the nearest node within HIT_NODE_RADIUS
+     * ({kind:"node", id}); else null.
      */
     function hitTest(px, py) {
         if (!_view) {
             return null;
+        }
+        var pose = CTPS.engine.poseAt(CTPS.store.t);
+        var rp = _project(_view, pose.x, pose.y);
+        if (Math.hypot(px - rp.px, py - rp.py) <= HIT_ROBOT_RADIUS) {
+            return { kind: "robot" };
         }
         var nodes = _fieldNodes();
         var bestId = null;
@@ -662,17 +665,11 @@
         if (bestId !== null) {
             return { kind: "node", id: bestId };
         }
-        var pose = CTPS.engine.poseAt(CTPS.store.t);
-        var rp = _project(_view, pose.x, pose.y);
-        if (Math.hypot(px - rp.px, py - rp.py) <= HIT_ROBOT_RADIUS) {
-            return { kind: "robot" };
-        }
         return null;
     }
 
     CTPS.renderer = {
         resize: resize,
-        worldToPixel: worldToPixel,
         hitTest: hitTest,
     };
 
