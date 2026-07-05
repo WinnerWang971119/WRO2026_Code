@@ -48,7 +48,7 @@ links here.
 | text faint | `#565349` | empty slots, ruler |
 | accent | `#ffd24a` | playhead, robot, trail, seek fill, active tab underline |
 | accent (alt) | `#e0a43c` · `#4fd6a3` · `#ff8a5b` | tweakable alternates (ship `#ffd24a`) |
-| hold color | `#4fd6a3` | all cargo/holding (reserved) — soft fill @14% α, border @60% α |
+| hold color | `#5bc8e0` | all cargo/holding (reserved) — soft fill @14% α, border @60% α |
 | drift / warn | `#ff6b4a` | drift chip/pins/ticks/lane; warn border `#4a2e26` |
 
 - **Fonts:** UI = `ui-sans-serif, system-ui`; data/readouts/log = `ui-monospace, Consolas, monospace`. No webfonts.
@@ -119,7 +119,7 @@ Fixed dark console, fills viewport. Column flex: header → stage row (flex 1) �
 - Border: `#31302a` (subtle) · `#3f3d35` (stronger)
 - Text primary: `#e8e5db` · secondary: `#a5a193` · muted: `#918d7f` · faint: `#565349`
 - Accent (playback, robot, trail, seek fill, active tab underline): `#ffd24a` (tweakable: `#e0a43c`, `#4fd6a3`, `#ff8a5b`)
-- Hold color (everything cargo-related): `#4fd6a3` (tweakable: `#5bc8e0`, `#ffd24a`, `#ff8a5b`)
+- Hold color (everything cargo-related): `#5bc8e0` (the design's blue default; alternates `#4fd6a3`, `#ffd24a`, `#ff8a5b`)
   - soft fill: hold color at 14% alpha · border: 60% alpha
 - Drift / warning: `#ff6b4a`, warning border `#4a2e26`
 - Fonts: UI = system sans (`ui-sans-serif, system-ui`); data/readouts/log = `ui-monospace, Consolas, monospace`. No webfonts (offline constraint).
@@ -160,8 +160,8 @@ Fixed dark console, fills viewport. Column flex: header → stage row (flex 1) �
 
 ### Timeline dock (panel, margins 8, relative)
 Grid: 52px label column + flex lane column, 4px row gap. Mono 9px time ruler (0–90 s) on top, faint `#565349`.
-- **TASK** lane (18px): spans `#26251f` bg, `#3f3d35` border, 9.5px `#a5a193` labels (T1 collect / T2 deliver / T3 return).
-- **GOTO** lane (18px): spans `#4a483f` on `#161614`.
+- **TASK** lane (18px): spans `#26251f` bg, `#3f3d35` border, 9.5px `#a5a193` labels (T1 collect / T2 deliver / T3 return). Spans stay gray at rest; the one the playhead is currently inside lights up in the accent (`#ffd24a` soft tint, 22% fill / 60% border).
+- **GOTO** lane (18px): spans `#4a483f` on `#161614`; same accent highlight as TASK for the span under the playhead. Lane labels stay muted `#a5a193` in both lanes.
 - **HOLDING** lane (34px, label in holdColor): one rounded span (12px tall, radius 6) per item from grab→put, holdColor border/fill/text, stacked in 2 sub-rows for overlaps. Mirrors the Holding panel.
 - **DRIFT** lane (18px, label `#ff6b4a`): drift is a **discrete post-goto check** — ▲ pin at each `drift_warn` t; from that pin a red span (`#ff6b4a` @14% fill, 55% border) runs to end-of-track labeled "12.4 cm off node · uncorrected" (a goto reveals drift but never corrects it; close the span if a future re-localization command exists).
 - Playhead: 1.5px `#e8e5db` vertical line across all lanes, subtle glow; dragging in the dock scrubs.

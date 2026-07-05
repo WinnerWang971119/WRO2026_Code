@@ -165,7 +165,7 @@ icons = unicode glyphs / inline SVG paths (no `href`); HOLDING reserved (GOTO li
 ├──────────────────────────────────────────────────────────────────────────┤
 │ TASK  │ ▭ T1 collect ▭ T2 deliver ▭ T3 return          │ ruler 0–90s      │  timeline dock
 │ GOTO  │ ▭ HOME->J1 ▭ J1->J2 … spans + UNREACHABLE ▲ pin │                  │
-│ HOLDING (reserved shell)                                │                  │  holdColor #4fd6a3
+│ HOLDING (reserved shell)                                │                  │  holdColor #5bc8e0
 │ DRIFT │ ▲──────red uncorrected span──────▶              │  playhead │      │  #ff6b4a
 └──────────────────────────────────────────────────────────────────────────┘
 ```
@@ -194,7 +194,7 @@ per-region prose, states, and the mockup's exact values.
 | border | `#31302a` / `#3f3d35` | subtle / strong |
 | text | `#e8e5db` / `#a5a193` / `#918d7f` / `#565349` | primary / secondary / muted / faint |
 | accent | `#ffd24a` | playhead, robot, trail, seek fill, active tab |
-| hold | `#4fd6a3` | cargo (reserved) |
+| hold | `#5bc8e0` | cargo (reserved) |
 | drift | `#ff6b4a` (warn border `#4a2e26`) | drift chip/pins/ticks/lane |
 
 ### Type & spacing tokens
@@ -311,7 +311,7 @@ Do not rename any without updating T14.
   single-source): `--ctps-bg` `#161614` · `--ctps-panel` `#1e1d1a` · `--ctps-raised`
   `#26251f` · `--ctps-border` `#31302a` · `--ctps-border-strong` `#3f3d35` · `--ctps-text`
   `#e8e5db` · `--ctps-text-2` `#a5a193` · `--ctps-muted` `#918d7f` · `--ctps-faint`
-  `#565349` · `--ctps-accent` `#ffd24a` · `--ctps-hold` `#4fd6a3` · `--ctps-drift`
+  `#565349` · `--ctps-accent` `#ffd24a` · `--ctps-hold` `#5bc8e0` · `--ctps-drift`
   `#ff6b4a` · `--ctps-warn-border` `#4a2e26` · `--ctps-map-dim` `0.48`.
 
 ### CSS class inventory (owner: **T2** markup + dynamic-DOM tasks; consumed by T12/T13)
