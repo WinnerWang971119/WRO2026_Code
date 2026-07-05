@@ -441,7 +441,7 @@ def render(
         "filename": _derive_filename(track_dict, filename),
         "lanes": ["task", "goto", "holding", "drift"],
         "tabs": ["log", "inspector"],
-        "render_mode": "box",
+        "render_mode": "wheel-arc" if track_dict.get("pivots") else "box",
     }
     meta_json = json.dumps(player_meta, ensure_ascii=False).replace("</", "<\\/")
 
