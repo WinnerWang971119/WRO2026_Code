@@ -48,6 +48,9 @@ jobs:
       - name: Host-coverage + mirror guards
         run: python WRO2026/test/check_host_coverage.py
 
+      - name: Include-resolvability + operator-root-set guard
+        run: python tools/reorg/check_includes.py
+
   arduino-compile:
     name: Arduino compile
     runs-on: ubuntu-latest
