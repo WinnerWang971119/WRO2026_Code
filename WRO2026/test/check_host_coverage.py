@@ -10,11 +10,20 @@ tree and exits non-zero on any violation:
    or a stale entry all fail. A ``MIRROR:`` comment that cites no concrete
    reference (and is not known documentation prose) fails as well.
 
-2. **Host-coverage guard** (``check_coverage``): every production
-   ``WRO2026/*.cpp`` must be host-linked in a source-bearing ``CMakeLists.txt``
-   command, or be listed in a committed allowlist
-   (``host_coverage_allowlist.json``). Allowlist entries that have since become
-   linked, or that no longer exist, also fail.
+2. **Host-coverage guard** (``check_coverage``): every production ``.cpp`` under
+   ``WRO2026/`` (discovered **recursively**, excluding ``test/``, so it finds
+   sources both at the flat sketch root and nested under ``src/<domain>/``) must
+   be host-linked in a source-bearing ``CMakeLists.txt`` command, or be listed
+   in a committed allowlist (``host_coverage_allowlist.json``). The production
+   set and the linked set are keyed by **sketch-relative path** (not basename),
+   so two same-named sources in different domains cannot collide and hide a gap;
+   a duplicate-basename guard fails loudly if that ever happens. The allowlist
+   stays **basename-keyed** (layout-independent) and is matched against the
+   basenames of the un-linked production set. Allowlist entries that have since
+   become linked, or that no longer exist, also fail. Anti-vacuous-pass sanity
+   floors reject a run where the production set OR the ``linked & production``
+   intersection is empty (a glob/``LINK_RE`` bug would otherwise pass silently
+   green).
 
 Both checks are pure text parsing -- no CMake or compiler is invoked. The two
 checks run independently: an input error (missing/malformed allowlist, missing
@@ -65,9 +74,15 @@ MIRROR_RE = re.compile(
 #: whitelisted -- that evasion is the regression this tightening closes.
 PROSE_RE = re.compile(r"`\s*//+\s*MIRROR:|MIRROR:[^\n]*<line>")
 
-#: A host-linked production source as it appears in CMake: ``${SKETCH_DIR}/<name>.cpp``.
-#: Captures the bare ``<name>`` (the ``.cpp`` suffix is re-appended by the caller).
-LINK_RE = re.compile(r"\$\{SKETCH_DIR\}/([A-Za-z_][A-Za-z0-9_]*)\.cpp")
+#: A host-linked production source as it appears in CMake:
+#: ``${SKETCH_DIR}/<path>.cpp`` where ``<path>`` is a bare name at the flat root
+#: (``${SKETCH_DIR}/Drive.cpp``) OR a nested ``src/<domain>/<name>`` after the
+#: reorg (``${SKETCH_DIR}/src/drive/Drive.cpp``). Captures the sketch-relative
+#: stem (``/``-separated identifier segments); the ``.cpp`` suffix is re-appended
+#: by the caller, yielding the sketch-relative path used as the comparison key.
+LINK_RE = re.compile(
+    r"\$\{SKETCH_DIR\}/((?:[A-Za-z_][A-Za-z0-9_]*/)*[A-Za-z_][A-Za-z0-9_]*)\.cpp"
+)
 
 #: CMake commands whose argument bodies may legitimately list ``${SKETCH_DIR}/*.cpp``.
 #: ``set``/``list`` capture ``set(VAR ...)`` / ``list(APPEND VAR ...)`` source
@@ -395,17 +410,45 @@ def _command_bodies(text: str, names: tuple[str, ...]) -> str:
 
 
 def linked_sources(cmakelists_path: Path) -> set[str]:
-    """Collect the production ``.cpp`` basenames host-linked in CMakeLists.
+    """Collect the production ``.cpp`` sketch-relative paths host-linked in CMake.
 
-    Comment-strips the file first, then captures :data:`LINK_RE` basenames found
-    only inside the bodies of source-bearing commands (:data:`SOURCE_COMMANDS`).
+    Comment-strips the file first, then captures :data:`LINK_RE` stems found only
+    inside the bodies of source-bearing commands (:data:`SOURCE_COMMANDS`) and
+    re-appends the ``.cpp`` suffix. A flat ``${SKETCH_DIR}/Drive.cpp`` yields
+    ``"Drive.cpp"``; a nested ``${SKETCH_DIR}/src/drive/Drive.cpp`` yields
+    ``"src/drive/Drive.cpp"`` -- the same sketch-relative key
+    :func:`production_sources` produces, so the two sets compare directly.
 
     :param cmakelists_path: Path to ``WRO2026/test/CMakeLists.txt``.
-    :return: The set of linked ``<name>.cpp`` basenames (with the ``.cpp`` suffix).
+    :return: The set of linked sketch-relative ``<path>.cpp`` POSIX paths.
     """
     text = cmakelists_path.read_text(encoding="utf-8", errors="replace")
     bodies = _command_bodies(_strip_cmake_comments(text), SOURCE_COMMANDS)
-    return {f"{name}.cpp" for name in LINK_RE.findall(bodies)}
+    return {f"{stem}.cpp" for stem in LINK_RE.findall(bodies)}
+
+
+def production_sources(prod_dir: Path) -> set[str]:
+    """Discover every production ``.cpp`` under ``prod_dir`` except those in ``test/``.
+
+    Walks ``prod_dir`` **recursively** (``rglob``) so a source is found whether
+    it sits at the flat sketch root (today) or nested under ``src/<domain>/``
+    (after the reorg). Anything under the ``test/`` harness subtree -- including
+    its ``build/`` artifacts -- is skipped. Paths are keyed relative to
+    ``prod_dir`` (the sketch dir, i.e. ``${SKETCH_DIR}``) as POSIX strings, so
+    they compare directly against :func:`linked_sources`.
+
+    :param prod_dir: The ``WRO2026`` sketch directory.
+    :return: Sketch-relative POSIX paths of every non-test production ``.cpp``.
+    """
+    sources: set[str] = set()
+    for path in prod_dir.rglob("*.cpp"):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(prod_dir)
+        if rel.parts and rel.parts[0] == "test":
+            continue
+        sources.add(rel.as_posix())
+    return sources
 
 
 def check_coverage(
@@ -413,10 +456,20 @@ def check_coverage(
 ) -> list[str]:
     """Verify every production ``.cpp`` is host-linked or allowlisted.
 
-    The production set is ``prod_dir.glob("*.cpp")`` (NON-recursive). A source is
-    OK when it is linked (see :func:`linked_sources`) or allowlisted. Fails on an
-    un-linked-and-un-allowlisted source, on a stale allowlist entry that is now
-    linked, and on a stale allowlist entry whose file no longer exists. The
+    The production set is :func:`production_sources` (recursive under ``prod_dir``,
+    excluding ``test/``) and the linked set is :func:`linked_sources`; both are
+    keyed by sketch-relative path, so the layout (flat root vs nested
+    ``src/<domain>/``) does not affect the comparison. A source is OK when its
+    path is linked, or when its basename is in the (basename-keyed) allowlist.
+
+    Fails on an un-linked-and-un-allowlisted source, on a stale allowlist entry
+    that is now linked, and on a stale allowlist entry whose file no longer
+    exists. Two hardening guards run first so the check can never pass vacuously:
+    a **duplicate-basename guard** (two production files sharing a basename would
+    make the basename-keyed allowlist match ambiguous), and **anti-vacuous-pass
+    sanity floors** (an empty production set, or an empty ``linked & production``
+    intersection, signals a broken glob / ``LINK_RE`` and must go red rather than
+    green). The
     allowlist :class:`AllowlistError` and a missing CMakeLists are each converted
     to a clear violation rather than raised out.
 
@@ -441,26 +494,63 @@ def check_coverage(
         return [f"cannot use {cmakelists_path}: cannot read file ({exc})"]
 
     allowed = {entry["file"] for entry in entries}
-    production = {path.name for path in prod_dir.glob("*.cpp")}
+    production = production_sources(prod_dir)
 
     violations: list[str] = []
 
-    for name in sorted(production):
-        if name in linked or name in allowed:
+    # --- Duplicate-basename guard --------------------------------------------
+    # The allowlist is basename-keyed (layout-independent), so two production
+    # files sharing a basename in different domains would make an allowlist match
+    # ambiguous and could hide a coverage gap. Fail loudly if that ever happens.
+    by_basename: dict[str, list[str]] = {}
+    for rel in production:
+        by_basename.setdefault(Path(rel).name, []).append(rel)
+    for basename, paths in sorted(by_basename.items()):
+        if len(paths) > 1:
+            violations.append(
+                f"{basename}: duplicate production basename across "
+                f"{', '.join(sorted(paths))} -- basename-keyed coverage cannot "
+                f"disambiguate; rename one or key that pair by path"
+            )
+
+    # --- Anti-vacuous-pass sanity floors -------------------------------------
+    # A bug in the recursive glob or in LINK_RE that empties either set would
+    # yield zero coverage violations -> a silent green. Force red instead.
+    if not production:
+        violations.append(
+            f"production set is empty -- recursive .cpp discovery under "
+            f"{prod_dir.name}/ (excluding test/) found nothing; a glob/exclusion "
+            f"bug must not pass vacuously"
+        )
+    if not (linked & production):
+        violations.append(
+            "linked/production intersection is empty -- no host-linked source "
+            "matches a discovered production path; a LINK_RE or CMake source-path "
+            "bug must not pass vacuously"
+        )
+
+    # --- Coverage: each production source is linked or basename-allowlisted ---
+    for rel in sorted(production):
+        if rel in linked:
+            continue
+        if Path(rel).name in allowed:
             continue
         violations.append(
-            f"{name}: production .cpp is neither host-linked nor in the coverage "
+            f"{rel}: production .cpp is neither host-linked nor in the coverage "
             f"allowlist (recognized link commands: {', '.join(SOURCE_COMMANDS)})"
         )
 
+    # --- Stale allowlist entries (basename-keyed) ----------------------------
+    linked_basenames = {Path(p).name for p in linked}
+    production_basenames = {Path(p).name for p in production}
     for entry in entries:
         name = entry["file"]
-        if name in linked:
+        if name in linked_basenames:
             violations.append(
                 f"{name}: stale coverage allowlist entry -- file is now "
                 f"host-linked; remove it from the allowlist"
             )
-        elif name not in production:
+        elif name not in production_basenames:
             violations.append(
                 f"{name}: stale coverage allowlist entry -- file no longer "
                 f"exists in {prod_dir.name}/"
@@ -524,12 +614,13 @@ def main(argv: list[str] | None = None) -> int:
 
     observed = count_mirrors(test_dir)
     baseline = sum(observed.values())
-    production = {path.name for path in prod_dir.glob("*.cpp")}
+    production = production_sources(prod_dir)
     linked_count = len(production & linked_sources(cmakelists_path))
     allowlisted_count = len(production) - linked_count
     print(
         f"OK: mirror baseline {baseline} across {len(observed)} files; "
-        f"{linked_count} production .cpp linked, {allowlisted_count} allowlisted"
+        f"{len(production)} production .cpp discovered, {linked_count} linked, "
+        f"{allowlisted_count} allowlisted"
     )
     return 0
 
