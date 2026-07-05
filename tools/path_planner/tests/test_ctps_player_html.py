@@ -1,6 +1,7 @@
 """Hermetic tests for the CTPS HTML player emitter (T10 + T14: TC5/TC6/TC12 +
 the design-3a rework's TC-META/TC-LINT/TC-STRUCT/TC-ASSETS/TC-SEEKINPUT/
-TC-TRAIL/TC-GOTOEND/TC-NOINLINE/TC-DUPREG).
+TC-TRAIL/TC-GOTOEND/TC-NOINLINE/TC-DUPREG) plus the pivot-wheel-arc issue's
+TC8/TC9 (``render_mode`` selection, issue #55 / T6).
 
 These tests exercise :func:`tools.path_planner.ctps.player_html.render` and
 the inlined ``assets/*.js`` runtime as **text** — no browser, no compiler, no
@@ -37,6 +38,13 @@ Covered cases (CTPS UI/UX rework plan):
   only ``.style.setProperty(...)`` is used (the ADR-053 carve-out).
 * **TC-DUPREG** — a duplicate registry id is non-fatal: ``register()`` never
   throws, and ``boot.js`` surfaces accumulated ``_errors``.
+* **TC8** — rendering a track whose dict carries a non-empty ``pivots`` list
+  emits ``PLAYER_META.render_mode == "wheel-arc"``, and the embedded
+  ``TRACK`` carries that exact ``pivots`` list unchanged (AC5).
+* **TC9** — rendering a pivot-free track keeps ``render_mode == "box"``, the
+  embedded ``TRACK`` has no ``"pivots"`` key, and ``PLAYER_META`` equals the
+  expected literal dict verbatim — structural equality stands in for a
+  byte-vs-pre-change diff, which a test cannot perform (AC6).
 """
 
 from __future__ import annotations
@@ -311,6 +319,81 @@ def test_tc_meta_embedded_and_round_trips(tmp_path):
     assert meta["lanes"] == ["task", "goto", "holding", "drift"]
     assert meta["tabs"] == ["log", "inspector"]
     assert meta["render_mode"] == "box"
+
+
+# ---------------------------------------------------------------------------
+# TC8 / TC9 — render_mode selection: wheel-arc when pivots, box otherwise
+# (issue #55 / T6, AC5 + AC6)
+# ---------------------------------------------------------------------------
+
+
+def test_tc8_render_mode_is_wheel_arc_when_pivots_present(tmp_path):
+    """TC8: a track carrying a non-empty ``pivots`` list renders wheel-arc.
+
+    Key assertion: a hand-built LRS-shaped track dict (source-agnostic, mirrors
+    TC6) that carries a ``"pivots"`` list emits
+    ``PLAYER_META.render_mode == "wheel-arc"``, and the embedded ``TRACK``
+    carries that exact ``pivots`` list unchanged (AC5).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    pivots = [
+        {
+            "t0": 3.0,
+            "t1": 3.9,
+            "cx": 69.0,
+            "cy": 0.0,
+            "theta_deg": -90.0,
+            "wheel": "right",
+        }
+    ]
+    track_dict["pivots"] = pivots
+
+    out_path = tmp_path / "wheel_arc.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    meta = _extract_player_meta(html)
+    embedded = _extract_embedded_track(html)
+
+    assert meta["render_mode"] == "wheel-arc"
+    assert embedded["pivots"] == pivots
+
+
+def test_tc9_render_mode_is_box_and_meta_is_expected_literal_when_pivot_free(
+    tmp_path,
+):
+    """TC9: a pivot-free track keeps render_mode "box" and an exact-literal meta.
+
+    Key assertion: the embedded ``TRACK`` carries no ``"pivots"`` key,
+    ``PLAYER_META.render_mode == "box"``, and ``PLAYER_META`` equals the
+    expected literal dict below — structural equality, since a test cannot
+    diff against pre-change code (AC6). (True byte-vs-today equivalence is
+    verified once by hand per the plan's Notes.)
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    assert "pivots" not in track_dict  # fixture precondition: pivot-free
+
+    out_path = tmp_path / "pivot_free.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    embedded = _extract_embedded_track(html)
+    meta = _extract_player_meta(html)
+
+    assert "pivots" not in embedded
+
+    expected_meta = {
+        "source": "PREDICTED",
+        "filename": "",
+        "lanes": ["task", "goto", "holding", "drift"],
+        "tabs": ["log", "inspector"],
+        "render_mode": "box",
+    }
+    assert meta == expected_meta
 
 
 # ---------------------------------------------------------------------------
