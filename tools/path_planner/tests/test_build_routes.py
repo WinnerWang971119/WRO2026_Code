@@ -11,6 +11,7 @@ import pytest
 
 from tools.path_planner import build_routes
 from tools.path_planner import field_data as real_field_data
+from tools.path_planner import header_writer
 from tools.path_planner.tests.fixtures import toy_field_data
 
 _FIELD_ATTRS = (
@@ -192,10 +193,10 @@ def test_tc19_committed_routes_match_a_fresh_regeneration(tmp_path) -> None:
     committed files are absent so the suite stays green on a partial checkout.
     """
     repo_root = Path(__file__).resolve().parents[3]
-    committed_h = repo_root / "WRO2026" / "routes.h"
-    committed_cpp = repo_root / "WRO2026" / "routes.cpp"
+    committed_h = repo_root / header_writer.DEFAULT_HEADER_PATH
+    committed_cpp = repo_root / header_writer.DEFAULT_SOURCE_PATH
     if not (committed_h.exists() and committed_cpp.exists()):
-        pytest.skip("committed WRO2026/routes.{h,cpp} not present")
+        pytest.skip(f"committed {committed_h} / {committed_cpp} not present")
 
     out_dir = tmp_path / "fresh"
     assert build_routes._run(out_dir=out_dir, no_viz=True) == 0
@@ -205,11 +206,11 @@ def test_tc19_committed_routes_match_a_fresh_regeneration(tmp_path) -> None:
     # Normalize CRLF -> LF so an autocrlf=true Windows checkout of the committed
     # files does not spuriously diverge from the LF-only emitter output.
     assert fresh_h == committed_h.read_bytes().replace(b"\r\n", b"\n"), (
-        "committed WRO2026/routes.h is stale -- regenerate with "
+        f"committed {committed_h} is stale -- regenerate with "
         "`uv run python tools/path_planner/build_routes.py` and commit"
     )
     assert fresh_cpp == committed_cpp.read_bytes().replace(b"\r\n", b"\n"), (
-        "committed WRO2026/routes.cpp is stale -- regenerate with "
+        f"committed {committed_cpp} is stale -- regenerate with "
         "`uv run python tools/path_planner/build_routes.py` and commit"
     )
 
