@@ -90,12 +90,22 @@
             } else if (ev.type === "task_end") {
                 var start = open.pop();
                 if (start) {
-                    out.push({ t0: start.t0, t1: ev.t, label: start.label });
+                    out.push({
+                        t0: start.t0,
+                        t1: ev.t,
+                        label: start.label,
+                        cls: "ctps-span--task",
+                    });
                 }
             }
         }
         for (var j = 0; j < open.length; j++) {
-            out.push({ t0: open[j].t0, t1: duration, label: open[j].label });
+            out.push({
+                t0: open[j].t0,
+                t1: duration,
+                label: open[j].label,
+                cls: "ctps-span--task",
+            });
         }
         return out;
     }
@@ -280,11 +290,34 @@
 
     // ----- lanes DOM ----------------------------------------------------------
 
+    // Task/goto spans (element + its [t0, t1] window) recorded at build time so
+    // the playhead subscription can light up whichever one the current time
+    // falls inside. Rebuilt each buildLanesDom(); other lane kinds are excluded.
+    var _currentSpans = [];
+
+    /**
+     * Toggle `.ctps-span--current` on each recorded task/goto span so the one
+     * the playhead time `t` sits inside gets the theme-accent highlight and the
+     * rest stay neutral gray. Inclusive on both ends, so a span reads as current
+     * from the instant its command starts through its end boundary.
+     */
+    function refreshCurrent(t) {
+        for (var i = 0; i < _currentSpans.length; i++) {
+            var s = _currentSpans[i];
+            if (t >= s.t0 && t <= s.t1) {
+                s.el.classList.add("ctps-span--current");
+            } else {
+                s.el.classList.remove("ctps-span--current");
+            }
+        }
+    }
+
     /**
      * Render one lane's built items into `laneEl` as absolutely-positioned
      * `.ctps-span` (has `t1`) / `.ctps-pin` (no `t1`) children, each sized in
      * percent of `duration` and carrying the item's own `cls` (if any) on top
-     * of the base class. Geometry is written only via `setProperty`.
+     * of the base class. Geometry is written only via `setProperty`. Task/goto
+     * spans are also recorded into `_currentSpans` for the playhead highlight.
      */
     function renderLaneItems(laneEl, items, duration) {
         for (var i = 0; i < items.length; i++) {
@@ -308,6 +341,10 @@
                 }
                 el.style.setProperty("width", widthPct + "%");
             }
+            if (isSpan &&
+                (item.cls === "ctps-span--task" || item.cls === "ctps-span--goto")) {
+                _currentSpans.push({ el: el, t0: item.t0, t1: item.t1 });
+            }
             laneEl.appendChild(el);
         }
     }
@@ -323,6 +360,7 @@
         while (lanesEl.firstChild) {
             lanesEl.removeChild(lanesEl.firstChild);
         }
+        _currentSpans.length = 0;
 
         for (var i = 0; i < lanes.length; i++) {
             var lane = lanes[i];
@@ -407,10 +445,11 @@
 
     /**
      * Build the dock DOM once from the registered lanes + the ingested track,
-     * then wire drag-to-scrub. No `store.subscribe` — lane content is static
-     * for the life of the page (events don't change during playback) and the
-     * playhead line is positioned purely by CSS reading `--ctps-frac`
-     * (written by T5), so nothing here needs to react per tick.
+     * then wire drag-to-scrub and a lightweight playhead subscription. Lane
+     * geometry is static for the life of the page (events don't change during
+     * playback) and the playhead LINE is positioned purely by CSS reading
+     * `--ctps-frac` (written by T5); the one thing that reacts per `t` is the
+     * `.ctps-span--current` highlight on the task/goto span under the playhead.
      */
     function init(ctx) {
         var timelineEl = document.querySelector(".ctps-timeline");
@@ -430,6 +469,15 @@
             buildLanesDom(lanesEl, CTPS.timelineLanes.all(), track, duration);
             if (store) {
                 wireScrub(timelineEl, rulerTrackEl, store, duration);
+                // React to the playhead: light up the task/goto span the current
+                // time sits inside. `seek`/`setT` notify with ["t"] on every drag
+                // and playback tick, so this stays in sync without its own clock.
+                store.subscribe(function (changed) {
+                    if (changed && changed.indexOf("t") !== -1) {
+                        refreshCurrent(store.t);
+                    }
+                });
+                refreshCurrent(store.t);
             }
         } catch (initError) {
             CTPS._errors.push(

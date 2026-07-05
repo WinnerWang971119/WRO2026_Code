@@ -754,10 +754,22 @@
 
 /* buildGotoLane's success items carry cls "ctps-span--goto" — a solid muted
  * fill ("#4a483f-ish via ... --ctps-border-strong" per spec) rather than the
- * task look's bordered box. */
+ * task look's bordered box. TASK spans (cls "ctps-span--task") keep the base
+ * .ctps-span neutral box. Both stay gray until the playhead is inside them. */
 .ctps-span--goto {
     background: var(--ctps-border-strong);
     border-color: var(--ctps-border-strong);
+}
+
+/* The single task/goto span the playhead currently sits inside — timeline.js
+ * toggles this on every `t` change (refreshCurrent). It lights up in the theme
+ * accent (soft tint) so the active step reads at a glance while every other
+ * task/goto span stays neutral gray. Declared AFTER the --goto rule so it wins
+ * the same-specificity tie for a span carrying both classes. */
+.ctps-span--current {
+    border-color: color-mix(in srgb, var(--ctps-accent) 60%, transparent);
+    background: color-mix(in srgb, var(--ctps-accent) 22%, transparent);
+    color: var(--ctps-accent);
 }
 
 /* Not yet produced by buildHoldingLane (always empty today, issue #57) —
