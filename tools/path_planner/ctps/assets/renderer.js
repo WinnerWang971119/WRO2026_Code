@@ -57,10 +57,11 @@
                                  // side is world-sized (2 * ROBOT_RADIUS_CM *
                                  // view.scale), so the marker is the true
                                  // footprint and scales with the field.
-    var ROBOT_ARROW_TIP = 0.70;  // front-arrow tip, as a fraction of half-side
-    var ROBOT_ARROW_BACK = 0.15; // arrow base setback behind centre (frac half)
-    var ROBOT_ARROW_HALF = 0.42; // arrow base half-width (frac of half-side)
-    var ROBOT_OUTLINE_WIDTH = 1.5;
+    var ROBOT_CORNER = 0.3;      // rounded-corner radius, as a fraction of half-side
+    var ROBOT_ARROW_TIP = 0.28;  // centred arrow tip x (frac half-side)
+    var ROBOT_ARROW_BACK = 0.18; // arrow base setback behind centre (frac half)
+    var ROBOT_ARROW_HALF = 0.2;  // arrow base half-width (frac of half-side)
+    var ROBOT_OUTLINE_WIDTH = 2; // hollow-square stroke width (px)
     var HALO_RADIUS = 18;        // selection halo ring radius (px)
     var HALO_WIDTH = 2;          // selection halo ring width
     var HALO_ALPHA = 0.55;       // selection halo opacity
@@ -737,14 +738,30 @@
     });
 
     /**
-     * `box` render mode: a rotated SQUARE chassis (side `chassis.sidePx`, the
-     * true 2 x ROBOT_RADIUS_CM footprint in pixels) with a forward-pointing
-     * arrow marking the front — no nose, no surrounding circle. Accent fill,
-     * a 1.5px dark outline, and the arrow in the same dark tone so it reads on
-     * the fill. World heading is CCW-from-+x with Y up; the canvas Y is flipped,
-     * so the drawing angle is the negated heading and the arrow tip lands along
-     * the heading. `wheel-arc` is deliberately NOT registered — the reserved
-     * #55 pivot seam; the registry simply stays able to accept it.
+     * Trace a rounded-rectangle path (arcTo corners — supported everywhere, no
+     * dependency on the newer ctx.roundRect). The radius is clamped to half the
+     * shorter side so it degrades to a full pill rather than overshooting.
+     */
+    function _roundRectPath(ctx, x, y, w, h, r) {
+        r = Math.min(r, w / 2, h / 2);
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+    }
+
+    /**
+     * `box` render mode: a rotated HOLLOW rounded-square chassis (side
+     * `chassis.sidePx`, the true 2 x ROBOT_RADIUS_CM footprint in pixels) —
+     * outline only, so it never fills over the map — with a small centred arrow
+     * pointing along the heading. No nose, no surrounding circle. World heading
+     * is CCW-from-+x with Y up; the canvas Y is flipped, so the drawing angle is
+     * the negated heading and the arrow tip lands along the heading. `wheel-arc`
+     * is deliberately NOT registered — the reserved #55 pivot seam; the registry
+     * simply stays able to accept it.
      */
     CTPS.renderModes.register({
         id: "box",
@@ -753,21 +770,20 @@
             var ang = -pose.h * Math.PI / 180;
             var half = ((chassis && chassis.sidePx > 0)
                 ? chassis.sidePx : ROBOT_FALLBACK_PX) / 2;
+            var color = (chassis && chassis.fill) || _colors.accent;
             ctx.save();
             ctx.translate(p.px, p.py);
             ctx.rotate(ang);
-            // Square footprint.
-            ctx.fillStyle = chassis.fill;
-            ctx.strokeStyle = chassis.outline;
+            // Hollow rounded square (stroke only — the map stays visible).
+            ctx.strokeStyle = color;
             ctx.lineWidth = ROBOT_OUTLINE_WIDTH;
             ctx.lineJoin = "round";
-            ctx.beginPath();
-            ctx.rect(-half, -half, half * 2, half * 2);
-            ctx.fill();
+            _roundRectPath(ctx, -half, -half, half * 2, half * 2,
+                half * ROBOT_CORNER);
             ctx.stroke();
-            // Front arrow (points to +x local = heading), filled in the outline
-            // tone so it contrasts against the accent square.
-            ctx.fillStyle = chassis.outline;
+            // Small centred arrow pointing +x local = heading: tip forward, base
+            // set back behind centre so the triangle sits in the middle.
+            ctx.fillStyle = color;
             ctx.beginPath();
             ctx.moveTo(half * ROBOT_ARROW_TIP, 0);
             ctx.lineTo(-half * ROBOT_ARROW_BACK, -half * ROBOT_ARROW_HALF);
@@ -826,11 +842,38 @@
         _resolveColors();
         _initMap();
         resize();
+
+        // Re-measure whenever the stage box changes. The single resize() above
+        // can run before the flex layout has settled (or the window is later
+        // resized), which would freeze the backing store at the wrong size and
+        // stretch every canvas-drawn shape non-uniformly (the robot square then
+        // reads as a wide rectangle while DOM overlays stay correct). A
+        // ResizeObserver on the canvas catches every box change — first layout
+        // settle, window resize, and the full-view collapse — coalesced onto one
+        // rAF; a window resize listener is the fallback where ResizeObserver is
+        // unavailable.
+        var _resizeQueued = false;
+        function _scheduleResize() {
+            if (_resizeQueued) {
+                return;
+            }
+            _resizeQueued = true;
+            window.requestAnimationFrame(function () {
+                _resizeQueued = false;
+                resize();
+            });
+        }
+        if (typeof ResizeObserver === "function") {
+            new ResizeObserver(_scheduleResize).observe(_canvases.actors);
+        }
+        window.addEventListener("resize", _scheduleResize);
+
         ctx.store.subscribe(function (changedKeys, state) {
             if (_includes(changedKeys, "fullView")) {
                 // The rail/dock collapse changes the stage's CSS box via a class
-                // toggle (no window resize fires); re-measure after layout settles.
-                window.requestAnimationFrame(resize);
+                // toggle; the ResizeObserver catches it, but schedule anyway for
+                // browsers without one (the rAF coalesces the two into one).
+                _scheduleResize();
                 return;
             }
             _renderForChange(changedKeys, state);
