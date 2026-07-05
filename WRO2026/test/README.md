@@ -1,8 +1,8 @@
 # WRO2026 Host-Compile Test Harness
 
 Cross-platform host-compile harness for C++ unit tests that exercise the
-production `WRO2026/LineFollower.{h,cpp}` state machine without an Arduino
-in the loop. Built for the **T10 acceptance criteria** of the
+production `WRO2026/src/drive/LineFollower.{h,cpp}` state machine without an
+Arduino in the loop. Built for the **T10 acceptance criteria** of the
 [pass-through collinear intersections plan](../../docs/plans/2026-05-23-pass-through-collinear-intersections.md):
 
 | ctest name                          | Executable                              | Acceptance criteria | What it covers                                                                                                               |
@@ -63,8 +63,8 @@ generator automatically.
 ## What's mocked, what's real
 
 **Real** production code under test (compiled unchanged, full assertion behavior):
-- `WRO2026/LineFollower.h` + `WRO2026/LineFollower.cpp`
-- `WRO2026/WROMath.h` (free helpers — pulled in via the mock `Drive.h`)
+- `WRO2026/src/drive/LineFollower.h` + `WRO2026/src/drive/LineFollower.cpp`
+- `WRO2026/src/util/WROMath.h` (free helpers — pulled in via the mock `Drive.h`)
 - `WRO2026/Config.h` (the actual Config namespace, including the
   `PATH_PASS_THROUGH_ENABLED_DEFAULT` `#ifndef`-guarded constant)
 
@@ -75,9 +75,9 @@ and `/FI` (MSVC) / `-include` (gcc/clang) force-include):
 |----------------------|-----------------------------|------------------------------------------------------------|
 | `mocks/Arduino.h`    | toolchain `<Arduino.h>`     | `millis`, `delay`, `yield`, `Serial`, `F()`, `PI`, `using std::abs;` |
 | `mocks/MatrixMiniR4.h` | vendor `<MatrixMiniR4.h>` | (empty — production deps reach into it through other headers we mock) |
-| `mocks/Drive.h`      | `WRO2026/Drive.h`           | `setSpeed`, `stop`, `getEncL`, `getEncR`, `isIdle` — every call records via `mockRecord()`; encoders settable via `mockAdvanceEncoders` |
-| `mocks/WROLineArray.h` | `WRO2026/WROLineArray.h`  | `getError`, `isOnline`, `getJunctionType`, `setReverseActive` — values settable via `mockSet*` |
-| `mocks/Intersection.h` | `WRO2026/Intersection.h`  | `update`, `isAtIntersection` (read-and-clear), `getEdgeCount`, `getLastType` |
+| `mocks/Drive.h`      | `WRO2026/src/drive/Drive.h` | `setSpeed`, `stop`, `getEncL`, `getEncR`, `isIdle` — every call records via `mockRecord()`; encoders settable via `mockAdvanceEncoders` |
+| `mocks/WROLineArray.h` | `WRO2026/src/perception/WROLineArray.h` | `getError`, `isOnline`, `getJunctionType`, `setReverseActive` — values settable via `mockSet*` |
+| `mocks/Intersection.h` | `WRO2026/src/drive/Intersection.h` | `update`, `isAtIntersection` (read-and-clear), `getEdgeCount`, `getLastType` |
 
 The include-shadow trick is the load-bearing mechanism: each mock header
 re-uses the SAME include guard as its production counterpart (e.g.

@@ -63,7 +63,7 @@
 
 #include "test_path_tracker_harness.h"
 
-#include "NavTypes.h"    // Direction enum (TC9's forced-REAR route override).
+#include "src/nav/NavTypes.h"    // Direction enum (TC9's forced-REAR route override).
 
 #include <cmath>
 #include <cstdio>
@@ -71,7 +71,7 @@
 #include <string>
 
 #if defined(PT_PARITY_TRACE)
-#include "PathTrackerParityTrace.h"    // pt_parity::emit (PT_PARITY_TRACE is defined for this target).
+#include "src/mission/PathTrackerParityTrace.h"    // pt_parity::emit (PT_PARITY_TRACE is defined for this target).
 #endif
 
 // ===========================================================================================

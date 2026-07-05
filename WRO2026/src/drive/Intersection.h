@@ -45,7 +45,7 @@
 
 #include <Arduino.h>
 #include <MatrixMiniR4.h>    // hardware facade — retained for MiniR4 globals used in Intersection.cpp.
-#include "WROLineArray.h"    // WROLineArrayClass (post-Issue #16 replacement for MatrixLineTracer*;
+#include "../perception/WROLineArray.h"    // WROLineArrayClass (post-Issue #16 replacement for MatrixLineTracer*;
                              // formerly `#include <MatrixMiniR4.h>` was the sole include and the
                              // type was `MatrixLineTracer*` — see code review F9 for the original
                              // rationale against including `<MiniR4_MXLineTracer.h>` directly).

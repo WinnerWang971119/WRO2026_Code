@@ -4,8 +4,8 @@
 # golden comparisons in test_routes_{h,cpp}_matches_golden.
 tools/path_planner/tests/golden/routes_toy.h   text eol=lf
 tools/path_planner/tests/golden/routes_toy.cpp text eol=lf
-WRO2026/routes.h                                text eol=lf
-WRO2026/routes.cpp                              text eol=lf
+WRO2026/src/nav/routes.h                        text eol=lf
+WRO2026/src/nav/routes.cpp                      text eol=lf
 
 # Cross-platform line-ending normalization. The project is developed on
 # Windows but also built on macOS/Linux; pin source and text files to LF so

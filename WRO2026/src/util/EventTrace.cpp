@@ -11,11 +11,11 @@
 #include <stdio.h>           // snprintf
 #include <string.h>          // strncpy, memset
 
-#include "Drive.h"
-#include "FieldMap.h"
-#include "LineFollower.h"
-#include "Localization.h"
-#include "routes.h"
+#include "../drive/Drive.h"
+#include "../nav/FieldMap.h"
+#include "../drive/LineFollower.h"
+#include "../nav/Localization.h"
+#include "../nav/routes.h"
 
 namespace
 {

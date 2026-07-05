@@ -23,7 +23,7 @@
 
 #include <cstdio>
 
-#include "TurnSignPolicy.h"
+#include "src/drive/TurnSignPolicy.h"
 
 static int g_failures = 0;
 

@@ -44,7 +44,7 @@
 
 #include "WROLineArray.h"
 
-#include "Config.h"
+#include "../../Config.h"
 
 /**
  * @brief Single global instance referenced by `LineFollower`, `Intersection`, and the

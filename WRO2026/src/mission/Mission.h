@@ -58,9 +58,9 @@
 #include <string.h>
 #include <type_traits>
 
-#include "Config.h"
-#include "NavTypes.h"
-#include "Tasks.h"
+#include "../../Config.h"
+#include "../nav/NavTypes.h"
+#include "../../Tasks.h"
 
 class MissionClass
 {

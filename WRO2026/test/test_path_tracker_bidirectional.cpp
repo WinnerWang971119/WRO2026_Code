@@ -57,10 +57,10 @@
 
 #include "test_path_tracker_harness.h"
 
-#include "DirectionPolicy.h"    // real frozen resolvers: resolveDirection + reverseUnavailable.
-#include "NavTypes.h"           // Direction enum.
-#include "PathTracker.h"        // PathTrackerClass::Fault + FaultInfo (the real enum the guard latches).
-#include "routes.h"             // Routes::DirectionMode / EdgeType / TurnMode.
+#include "src/nav/DirectionPolicy.h"    // real frozen resolvers: resolveDirection + reverseUnavailable.
+#include "src/nav/NavTypes.h"           // Direction enum.
+#include "src/mission/PathTracker.h"        // PathTrackerClass::Fault + FaultInfo (the real enum the guard latches).
+#include "src/nav/routes.h"             // Routes::DirectionMode / EdgeType / TurnMode.
 
 #include <cstdio>
 #include <stdint.h>

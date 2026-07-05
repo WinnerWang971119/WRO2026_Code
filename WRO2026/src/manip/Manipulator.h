@@ -48,7 +48,7 @@
 
 #include <MatrixMiniR4.h>
 
-#include "Config.h"
+#include "../../Config.h"
 #include "ManipServo.h"
 #include "ManipBelt.h"
 

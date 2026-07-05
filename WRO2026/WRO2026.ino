@@ -42,19 +42,19 @@
 #include <MatrixMiniR4.h>
 
 #include "Config.h"
-#include "Drive.h"
-#include "EventTrace.h"
-#include "FieldMap.h"
-#include "Intersection.h"
-#include "LineFollower.h"
-#include "Localization.h"
-#include "Manipulator.h"
-#include "Mission.h"
+#include "src/drive/Drive.h"
+#include "src/util/EventTrace.h"
+#include "src/nav/FieldMap.h"
+#include "src/drive/Intersection.h"
+#include "src/drive/LineFollower.h"
+#include "src/nav/Localization.h"
+#include "src/manip/Manipulator.h"
+#include "src/mission/Mission.h"
 #include "MissionScript.h"
-#include "PathTracker.h"
+#include "src/mission/PathTracker.h"
 #include "Tasks.h"
-#include "Vision.h"
-#include "WROLineArray.h"
+#include "src/perception/Vision.h"
+#include "src/perception/WROLineArray.h"
 
 namespace
 {

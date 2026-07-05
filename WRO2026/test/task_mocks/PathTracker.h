@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 
-#include "NavTypes.h"    // real, header-only — Direction / StopAtLine for the chain setters
+#include "src/nav/NavTypes.h"    // real, header-only — Direction / StopAtLine for the chain setters
 
 /**
  * @brief No-op mock of `PathTrackerGoToBuilder`.

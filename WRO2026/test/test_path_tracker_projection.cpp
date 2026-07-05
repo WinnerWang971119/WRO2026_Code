@@ -47,9 +47,9 @@
 
 #include "test_path_tracker_harness.h"    // real singletons + per-hop expect* helpers + node-by-name
 
-#include "FieldMap.h"          // real FieldMap::getNodeType / isProjectionNode / getEdgeType (KEPT reads).
-#include "StopAtLinePolicy.h"  // real frozen resolveStopAtLine (KEPT resolver test, TC-PJ4 — not a mirror).
-#include "NavTypes.h"          // Direction / StopAtLine for the TC-PJ4 resolver query.
+#include "src/nav/FieldMap.h"          // real FieldMap::getNodeType / isProjectionNode / getEdgeType (KEPT reads).
+#include "src/nav/StopAtLinePolicy.h"  // real frozen resolveStopAtLine (KEPT resolver test, TC-PJ4 — not a mirror).
+#include "src/nav/NavTypes.h"          // Direction / StopAtLine for the TC-PJ4 resolver query.
 
 #include <cstdio>
 #include <stdint.h>

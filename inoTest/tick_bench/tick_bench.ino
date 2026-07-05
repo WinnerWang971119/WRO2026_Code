@@ -12,17 +12,32 @@
  * — then resets the window. No mission is authored and no blocking Drive move is ever issued: the
  * bench stays idle so `loop()` never blocks, and `benchTick()` alone drives every module's `update()`.
  *
- * BUILD MECHANIC — `WRO2026/` as a legacy (1.0) Arduino library
- * -------------------------------------------------------------
- * `WRO2026/` has no `src/` subdir, so arduino-cli treats it as a legacy 1.0 library: it compiles the
- * root `.cpp` files (Drive.cpp, WROLineArray.cpp, ...) and adds ONLY the root to the include path —
- * so `#include "Config.h"` and the transitive `#include "config/ConfigGlobal.h"` resolve, and the
- * `test/` host-mock dirs are NOT on the include path (no header shadowing). The `.ino` files in
- * `WRO2026/` are ignored by the library compiler, so there is no `setup()`/`loop()` collision with
- * `WRO2026.ino`.
+ * BUILD MECHANIC — `WRO2026/` and each `WRO2026/src/<domain>/` as legacy (1.0) Arduino libraries
+ * -------------------------------------------------------------------------------------------------
+ * Since the sketch-src reorg (issue #66) `WRO2026/` DOES have a `src/` subdir, but it still has no
+ * `library.properties`, so arduino-cli does not treat it as a recursive 1.5-format library — a plain
+ * `--library WRO2026` still resolves as a legacy 1.0 library rooted at exactly `WRO2026/`, adding ONLY
+ * that folder (non-recursively) to the include path. That reaches the operator-editable root files
+ * (`Config.h`/`config/ConfigGlobal.h`, `Tasks.h`, `TasksTypes.h`) and compiles `Tasks.cpp` /
+ * `MissionScript.cpp`, but NOT the framework modules now nested under `src/<domain>/` (Drive.cpp,
+ * WROLineArray.cpp, ...). Each `src/<domain>/` folder is itself a flat legacy-1.0 library root (same
+ * rule: no `library.properties`, so passing it via `--library` adds exactly that folder, non-
+ * recursively), so this bench needs one additional `--library WRO2026/src/<domain>` flag per domain it
+ * touches. This bench uses all six: `drive` (Drive, LineFollower, Intersection), `perception`
+ * (WROLineArray, Vision), `nav` (Localization), `mission` (Mission, PathTracker), `manip`
+ * (Manipulator), `util` (EventTrace, TickProfiler). Every `#include` below stays a bare filename —
+ * each domain folder is added directly to the include path, so no path-qualified include is needed
+ * (contrast `tools/vision_bench/vision_bench.ino`, which needs a root-relative subpath instead because
+ * it reaches both an unmoved `config/` header and a moved `src/perception/` header from outside
+ * `WRO2026/` via a raw `-I` flag, not `--library`). The `test/` host-mock dirs are NOT on the include
+ * path (no header shadowing). The `.ino` files in `WRO2026/` are ignored by the library compiler, so
+ * there is no `setup()`/`loop()` collision with `WRO2026.ino`.
  *
  * @note BUILD: run from the repo root `C:/users/wangd/documents/wro2026/wro2026_code` —
- *       arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi inoTest/tick_bench --library WRO2026
+ *       arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi inoTest/tick_bench \
+ *         --library WRO2026 --library WRO2026/src/drive --library WRO2026/src/perception \
+ *         --library WRO2026/src/nav --library WRO2026/src/mission --library WRO2026/src/manip \
+ *         --library WRO2026/src/util
  *       (verified clean with arduino-cli 1.5.1, arduino:renesas_uno core 1.6.0, MatrixMiniR4 1.2.2.)
  *
  * @note Serial diagnostics run at 115200 baud (matches `WRO2026.ino`); `setup()` waits up to 3 s for

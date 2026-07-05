@@ -50,7 +50,7 @@
 
 #include <stdint.h>
 
-#include "NavTypes.h"    // real, header-only — Direction / StopAtLine for the chain setters
+#include "src/nav/NavTypes.h"    // real, header-only — Direction / StopAtLine for the chain setters
 
 // Forward declaration so the builder can hold a reference to its owner type.
 class PathTrackerClass;

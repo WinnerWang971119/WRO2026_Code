@@ -8,7 +8,7 @@
 
 #include <MatrixMiniR4.h>
 
-#include "Config.h"
+#include "../../Config.h"
 
 namespace
 {

@@ -9,15 +9,15 @@
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
 
-#include "Config.h"
-#include "Drive.h"
-#include "EventTrace.h"
-#include "FieldMap.h"
-#include "LineFollower.h"
-#include "Localization.h"
+#include "../../Config.h"
+#include "../drive/Drive.h"
+#include "../util/EventTrace.h"
+#include "../nav/FieldMap.h"
+#include "../drive/LineFollower.h"
+#include "../nav/Localization.h"
 #include "PathTracker.h"
-#include "Tasks.h"
-#include "routes.h"
+#include "../../Tasks.h"
+#include "../nav/routes.h"
 
 #ifdef CTPS_RECORD
 #include "ctps_record.h"

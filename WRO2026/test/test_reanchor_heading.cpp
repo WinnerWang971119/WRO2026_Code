@@ -35,15 +35,15 @@
 #include <cmath>
 #include <cstdio>
 
-#include "Localization.h"
+#include "src/nav/Localization.h"
 
 // Mock surfaces — the same singletons `Localization.cpp` was compiled against.
 #include "Drive.h"            // mock: settable encoders (mockAdvanceEncoders / mockReset).
 #include "MatrixMiniR4.h"     // mock: mmL.GetIMUEuler + mmL.mockYawDeg / mockResult.
 #include "Arduino.h"          // mock: g_mockMillis / mockResetMillis / mockAdvanceMillis.
-#include "WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
+#include "src/util/WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
 #include "Config.h"           // Config::LINE_HEADING_RESET_STRICT_ENABLED / _TOLERANCE_DEG.
-#include "routes.h"           // Routes::START_NODE / START_HEADING_DEG (data in routes_fixture.cpp).
+#include "src/nav/routes.h"           // Routes::START_NODE / START_HEADING_DEG (data in routes_fixture.cpp).
 
 static int g_failures = 0;
 

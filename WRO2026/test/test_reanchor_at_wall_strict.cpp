@@ -35,14 +35,14 @@
 #include <cmath>
 #include <cstdio>
 
-#include "Localization.h"
+#include "src/nav/Localization.h"
 
 #include "Drive.h"            // mock: settable encoders (mockReset / mockAdvanceEncoders).
 #include "MatrixMiniR4.h"     // mock: mmL.GetIMUEuler + mmL.mockYawDeg.
-#include "WROMath.h"          // cmToEncDeg.
+#include "src/util/WROMath.h"          // cmToEncDeg.
 #include "Config.h"           // Config::WALL_NORMAL_STRICT_ENABLED (forced ON via the shadow).
-#include "FieldMap.h"         // FieldMap::getNode — believed-coordinate post-condition.
-#include "routes.h"           // Routes::NODES / N_NODES (data in the issue #91 routes_fixture.cpp).
+#include "src/nav/FieldMap.h"         // FieldMap::getNode — believed-coordinate post-condition.
+#include "src/nav/routes.h"           // Routes::NODES / N_NODES (data in the issue #91 routes_fixture.cpp).
 
 static int g_failures = 0;
 

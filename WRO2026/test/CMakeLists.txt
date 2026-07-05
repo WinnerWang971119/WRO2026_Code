@@ -77,7 +77,7 @@ set(TOY_ROUTES_DIR ${SKETCH_DIR}/../tools/path_planner/tests/golden)
 # BLIND / RESET("Wall1") nodes BY NAME. The production `routes.cpp` carries none of
 # those once the real field collapses to a single spawn node (#64), so these
 # targets link this dedicated, STABLE 7-node fixture instead of
-# `${SKETCH_DIR}/routes.cpp`. `routes_fixture.h` shares the production `ROUTES_H`
+# `${SKETCH_DIR}/src/nav/routes.cpp`. `routes_fixture.h` shares the production `ROUTES_H`
 # guard, so force-including it ahead of the sketch `routes.h` shadows the
 # production data for those targets only. The fixture is frozen and is NOT part of
 # the CI routes-freshness gate; regenerate it only on a `routes.h` schema change
@@ -90,7 +90,7 @@ set(FIXTURE_ROUTES_DIR ${TEST_DIR}/fixtures)
 #     path, all of which resolve to mocks because `mocks/` comes first.
 # -----------------------------------------------------------------------------------------
 set(SUT_SOURCES
-    ${SKETCH_DIR}/LineFollower.cpp
+    ${SKETCH_DIR}/src/drive/LineFollower.cpp
 )
 
 # -----------------------------------------------------------------------------------------
@@ -421,10 +421,10 @@ add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 # --- Test executable #2a — PATH_PASS_THROUGH_ENABLED == true build. ---
 add_executable(test_path_tracker_passthrough_on
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -441,10 +441,10 @@ add_test(NAME path_tracker_passthrough_on COMMAND test_path_tracker_passthrough_
 # --- Test executable #2b — PATH_PASS_THROUGH_ENABLED == false build (legacy stop-and-go). ---
 add_executable(test_path_tracker_passthrough_off
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -464,10 +464,10 @@ add_test(NAME path_tracker_passthrough_off COMMAND test_path_tracker_passthrough
 # `reverseUnavailable` resolver level inside the test, not via a 1-board real-FSM build).
 add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -485,10 +485,10 @@ add_test(NAME path_tracker_bidirectional_on COMMAND test_path_tracker_bidirectio
 # resolution, not just compilation.
 add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -509,10 +509,10 @@ add_test(NAME path_tracker_bidirectional_off COMMAND test_path_tracker_bidirecti
 # TCs are NOT mirrors and stay.
 add_executable(test_path_tracker_stop_at_line
     ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -536,10 +536,10 @@ add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
 # `YawSource.cpp`, `path_mocks.cpp` globals, fixture routes force-included FIRST.
 add_executable(test_path_tracker_projection
     ${TEST_DIR}/test_path_tracker_projection.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -562,10 +562,10 @@ add_test(NAME path_tracker_projection COMMAND test_path_tracker_projection)
 # `path_mocks.cpp` globals, fixture routes force-included FIRST.
 add_executable(test_path_tracker_pass_through_projection
     ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -598,10 +598,10 @@ add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pas
 # =========================================================================================
 add_executable(test_path_tracker_parity_dump
     ${TEST_DIR}/test_path_tracker_parity_dump.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -771,7 +771,7 @@ set_tests_properties(tasks_overflow_compile_fail PROPERTIES
 # =========================================================================================
 add_executable(test_manipulator
     ${TEST_DIR}/test_manipulator.cpp
-    ${SKETCH_DIR}/Manipulator.cpp
+    ${SKETCH_DIR}/src/manip/Manipulator.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_manipulator PRIVATE ${COMMON_INCLUDES})
@@ -869,7 +869,7 @@ set_tests_properties(manipulator_servo_dup_compile_fail PROPERTIES
 # =========================================================================================
 add_executable(test_vision
     ${TEST_DIR}/test_vision.cpp
-    ${SKETCH_DIR}/Vision.cpp
+    ${SKETCH_DIR}/src/perception/Vision.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_vision PRIVATE ${COMMON_INCLUDES})
@@ -957,7 +957,7 @@ endfunction()
 
 add_executable(ctps_dump
     ${TEST_DIR}/ctps_dump.cpp
-    ${SKETCH_DIR}/Mission.cpp
+    ${SKETCH_DIR}/src/mission/Mission.cpp
     ${SKETCH_DIR}/Tasks.cpp
     ${SKETCH_DIR}/MissionScript.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1042,9 +1042,9 @@ add_test(NAME ctps_mock_conformance COMMAND test_ctps_mock_conformance)
 # =========================================================================================
 add_executable(test_localization_offset
     ${TEST_DIR}/test_localization_offset.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
-    ${SKETCH_DIR}/routes.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/routes.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_localization_offset PRIVATE ${COMMON_INCLUDES})
@@ -1138,10 +1138,10 @@ add_test(NAME return_to_node_policy COMMAND test_return_to_node_policy)
 # =========================================================================================
 add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1167,8 +1167,8 @@ add_test(NAME return_to_node_dispatch COMMAND test_return_to_node_dispatch)
 # =========================================================================================
 add_executable(test_reanchor_at_wall
     ${TEST_DIR}/test_reanchor_at_wall.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
@@ -1195,8 +1195,8 @@ add_test(NAME reanchor_at_wall COMMAND test_reanchor_at_wall)
 # =========================================================================================
 add_executable(test_reanchor_at_wall_strict
     ${TEST_DIR}/test_reanchor_at_wall_strict.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
@@ -1278,10 +1278,10 @@ add_test(NAME turn_imu_watchdog COMMAND test_turn_imu_watchdog)
 # =========================================================================================
 add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1314,10 +1314,10 @@ add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival
 # =========================================================================================
 add_executable(test_path_tracker_reset_arrival_strict
     ${TEST_DIR}/test_path_tracker_reset_arrival_strict.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1353,7 +1353,7 @@ add_test(NAME path_tracker_reset_arrival_strict COMMAND test_path_tracker_reset_
 # =========================================================================================
 add_executable(test_yaw_source
     ${TEST_DIR}/test_yaw_source.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_yaw_source PRIVATE ${COMMON_INCLUDES})
@@ -1562,7 +1562,7 @@ endfunction()
 
 add_executable(test_mission_dispatch
     ${TEST_DIR}/test_mission_dispatch.cpp
-    ${SKETCH_DIR}/Mission.cpp
+    ${SKETCH_DIR}/src/mission/Mission.cpp
     ${SKETCH_DIR}/Tasks.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${HAL_MOCKS_DIR}/hal_mocks.cpp)
@@ -1639,8 +1639,8 @@ set_tests_properties(edge_dispatch_truth_table PROPERTIES LABELS "parity")
 # =========================================================================================
 add_executable(test_reanchor_heading
     ${TEST_DIR}/test_reanchor_heading.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
@@ -1669,8 +1669,8 @@ add_test(NAME reanchor_heading COMMAND test_reanchor_heading)
 # =========================================================================================
 add_executable(test_reanchor_heading_strict_off
     ${TEST_DIR}/test_reanchor_heading.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${MOCK_SOURCES}
 )
@@ -1698,10 +1698,10 @@ add_test(NAME reanchor_heading_strict_off COMMAND test_reanchor_heading_strict_o
 # Runs TC8, TC9, TC10 (OFF half), TC12, TC13.
 add_executable(test_path_tracker_heading_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1714,10 +1714,10 @@ add_test(NAME path_tracker_heading_reset COMMAND test_path_tracker_heading_reset
 # --- Test executable #23b — junction knob ON. Runs TC10's ON half only. ---
 add_executable(test_path_tracker_heading_reset_junction_on
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1736,10 +1736,10 @@ add_test(NAME path_tracker_heading_reset_junction_on
 # own topology (a LINE edge into a RESET node, unreachable on any validator-passed field).
 add_executable(test_path_tracker_heading_reset_forced_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -1761,10 +1761,10 @@ add_test(NAME path_tracker_heading_reset_forced_reset
 # external harness to diff.
 add_executable(test_path_tracker_heading_reset_parity
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
-    ${SKETCH_DIR}/PathTracker.cpp
-    ${SKETCH_DIR}/Drive.cpp
-    ${SKETCH_DIR}/Localization.cpp
-    ${SKETCH_DIR}/YawSource.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )

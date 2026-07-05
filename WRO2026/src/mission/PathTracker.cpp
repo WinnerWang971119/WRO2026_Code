@@ -9,17 +9,17 @@
 #include <Arduino.h>
 #include <math.h>
 
-#include "DirectionPolicy.h"
-#include "Drive.h"
-#include "EdgeDispatchPolicy.h"
-#include "EventTrace.h"
-#include "Intersection.h"
-#include "LineFollower.h"
-#include "Localization.h"
+#include "../nav/DirectionPolicy.h"
+#include "../drive/Drive.h"
+#include "../nav/EdgeDispatchPolicy.h"
+#include "../util/EventTrace.h"
+#include "../drive/Intersection.h"
+#include "../drive/LineFollower.h"
+#include "../nav/Localization.h"
 #include "PathTrackerParityTrace.h"
-#include "PivotTrimPolicy.h"
-#include "ReturnToNodePolicy.h"
-#include "StopAtLinePolicy.h"
+#include "../nav/PivotTrimPolicy.h"
+#include "../nav/ReturnToNodePolicy.h"
+#include "../nav/StopAtLinePolicy.h"
 
 PathTrackerClass PathTracker;
 

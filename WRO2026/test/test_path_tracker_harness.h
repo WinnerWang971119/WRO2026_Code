@@ -113,11 +113,11 @@
 // point of use, avoiding the MSVC inline-incomplete-type trap (g++ is lenient; MSVC is not).
 // -------------------------------------------------------------------------------------------
 #include "Config.h"          // real — Config::IMU_YAW_SIGN / STOP_AT_LINE_* / START_NODE etc.
-#include "Drive.h"           // real — DriveClass + the global `Drive` (defined in real Drive.cpp)
-#include "FieldMap.h"        // real — getNextHop / getEdge / findNodeByName
-#include "Localization.h"    // real — declarePosition / onIntersection / zeroHeadingFromCurrent
-#include "PathTracker.h"     // real — PathTrackerClass + the global `PathTracker`
-#include "YawSource.h"       // real — YawSource.toHwHeading (static; call as YawSource.method())
+#include "src/drive/Drive.h"           // real — DriveClass + the global `Drive` (defined in real Drive.cpp)
+#include "src/nav/FieldMap.h"        // real — getNextHop / getEdge / findNodeByName
+#include "src/nav/Localization.h"    // real — declarePosition / onIntersection / zeroHeadingFromCurrent
+#include "src/mission/PathTracker.h"     // real — PathTrackerClass + the global `PathTracker`
+#include "src/nav/YawSource.h"       // real — YawSource.toHwHeading (static; call as YawSource.method())
 
 // -------------------------------------------------------------------------------------------
 // Mock surfaces (resolved by the hal_mocks/ + path_mocks/ -first include path). `<Arduino.h>`

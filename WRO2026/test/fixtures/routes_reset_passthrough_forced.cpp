@@ -8,7 +8,7 @@
 // sailing through `PassResetB` — a RESET-typed node, which is exactly the state ADR-048
 // guarantees can never happen on a validator-passed field.
 
-#include "routes.h"
+#include "routes_reset_passthrough_forced.h"
 
 namespace Routes {
     const PipelineConfig PIPELINE_CONFIG = {

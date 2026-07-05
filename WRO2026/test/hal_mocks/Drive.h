@@ -58,7 +58,7 @@
 // `WROMath.h` (which holds the free functions `deadbandSnap`, `presetToPwm`,
 // `encDegToCm`). We mirror that include order here so a controller TU that links
 // this mock finds those symbols.
-#include "WROMath.h"
+#include "src/util/WROMath.h"
 #include "Config.h"    // real — Config::SpeedPreset for the builder preset setters
 
 /**

@@ -19,7 +19,7 @@
 #include <cmath>
 #include <cstdio>
 
-#include "PivotTrimPolicy.h"
+#include "src/nav/PivotTrimPolicy.h"
 
 static int g_failures = 0;
 

@@ -8,7 +8,7 @@
 
 #include "Drive.h"
 #include "Intersection.h"
-#include "WROLineArray.h"    // Direct include for IWYU clarity — `LineFollower.h` already
+#include "../perception/WROLineArray.h"    // Direct include for IWYU clarity — `LineFollower.h` already
                              // transitively brings this in, but binding to `&LineArray` and
                              // dereferencing `WROLineArrayClass*` makes the dependency
                              // explicit at the use site.

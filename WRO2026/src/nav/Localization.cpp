@@ -9,9 +9,9 @@
 #include <MatrixMiniR4.h>
 #include <math.h>
 
-#include "Drive.h"
+#include "../drive/Drive.h"
 #include "NavTypes.h"
-#include "WROMath.h"
+#include "../util/WROMath.h"
 #include "YawSource.h"
 #include "routes.h"
 

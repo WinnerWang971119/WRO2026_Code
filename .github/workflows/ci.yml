@@ -38,7 +38,11 @@ jobs:
       - name: Verify generated routes are current
         run: |
           uv run --no-sync python tools/path_planner/build_routes.py --no-viz
-          git diff --exit-code -- WRO2026/routes.h WRO2026/routes.cpp
+          # Existence guard: git diff --exit-code exits 0 when the pathspec
+          # matches nothing, so a stale path would pass vacuously. Fail loudly
+          # if the emitted pair is missing before trusting the diff.
+          test -f WRO2026/src/nav/routes.h && test -f WRO2026/src/nav/routes.cpp
+          git diff --exit-code -- WRO2026/src/nav/routes.h WRO2026/src/nav/routes.cpp
 
       - name: Verify host-test routes fixture is current
         run: |

@@ -59,9 +59,9 @@
  * production defences; they are simply not triggerable through the real registry.
  */
 
-#include "Mission.h"        // real — the SUT (../Mission.h via the SKETCH_DIR include path)
+#include "src/mission/Mission.h"        // real — the SUT (../Mission.h via the SKETCH_DIR include path)
 #include "Tasks.h"          // real — the TASK-case dispatch target
-#include "FieldMap.h"       // real — findNodeByName / NODE_NONE (Mission.h does not pull it)
+#include "src/nav/FieldMap.h"       // real — findNodeByName / NODE_NONE (Mission.h does not pull it)
 #include "TestAssert.h"
 
 #include <Arduino.h>        // mock — Serial, millis, mockAdvanceMillis, mockResetMillis

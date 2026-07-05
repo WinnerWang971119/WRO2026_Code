@@ -45,7 +45,7 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-#include "Config.h"
+#include "../../Config.h"
 
 // =============================================================================================
 // PWM clamping

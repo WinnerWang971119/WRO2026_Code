@@ -97,7 +97,7 @@
                              // `MatrixColor _boards[2]` member below. (Mirrors the F9
                              // comment in `LineFollower.h`.)
 
-#include "Config.h"
+#include "../../Config.h"
 
 /**
  * @brief Singleton wrapper around 1 or 2 MXColor-protocol I2C boards exposing an

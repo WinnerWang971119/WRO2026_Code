@@ -32,9 +32,9 @@
 #include "Intersection.h"
 
 // Production code under test:
-#include "LineFollower.h"
+#include "src/drive/LineFollower.h"
 #include "Config.h"
-#include "WROMath.h"
+#include "src/util/WROMath.h"
 
 // ---------------------------------------------------------------------------
 // Shared helpers.

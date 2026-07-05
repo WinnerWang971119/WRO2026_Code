@@ -27,7 +27,7 @@
 // `WROMath.h` (which holds the free functions `deadbandSnap`, `presetToPwm`,
 // `encDegToCm`). We mirror that include order here so the controller TU finds
 // those symbols when the mock Drive.h shadows the real one.
-#include "WROMath.h"
+#include "src/util/WROMath.h"
 #include "Config.h"    // real — Config::SpeedPreset for the builder preset setters
 
 /**

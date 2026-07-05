@@ -47,8 +47,8 @@
 
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
-#include "Config.h"
-#include "WROLineArray.h"    // Brings in `WROLineArrayClass` and the `LineArray` singleton —
+#include "../../Config.h"
+#include "../perception/WROLineArray.h"    // Brings in `WROLineArrayClass` and the `LineArray` singleton —
                              // the WRO 2026 8-channel reflectance backend that replaces the
                              // vendor `MatrixLineTracer`. `LineFollower` and `Intersection`
                              // both hold a non-owning `WROLineArrayClass*` onto this

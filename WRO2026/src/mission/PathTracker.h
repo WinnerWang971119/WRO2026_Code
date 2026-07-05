@@ -154,10 +154,10 @@
 #include <Arduino.h>
 #include <stdint.h>
 
-#include "Config.h"
-#include "FieldMap.h"
-#include "NavTypes.h"
-#include "routes.h"
+#include "../../Config.h"
+#include "../nav/FieldMap.h"
+#include "../nav/NavTypes.h"
+#include "../nav/routes.h"
 
 /// @brief Operator-offset POD defined in `Localization.h`. Forward-declared here
 ///        because the return-to-node helpers (`_evaluateReturnGate` /

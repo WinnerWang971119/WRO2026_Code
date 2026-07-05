@@ -45,7 +45,7 @@
 
 #include <Arduino.h>
 
-#include "Config.h"
+#include "../../Config.h"
 
 /**
  * @brief Singleton OLED event log with a fixed-size ring buffer.

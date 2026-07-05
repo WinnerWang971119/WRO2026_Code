@@ -49,8 +49,8 @@
 #include <Arduino.h>
 #include <MatrixMiniR4.h>
 
-#include "Config.h"
-#include "WROMath.h"
+#include "../../Config.h"
+#include "../util/WROMath.h"
 
 // Forward declarations so DriveClass can name-friend the builders before they are defined.
 class DriveDistBuilder;

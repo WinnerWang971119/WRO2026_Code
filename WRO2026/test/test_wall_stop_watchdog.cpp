@@ -37,7 +37,7 @@
 #include <cstdlib>    // std::abs
 
 #include "Arduino.h"     // mock millis()/g_mockMillis (the watchdog clock source).
-#include "WROMath.h"     // the SAME stopAtLineProgressed / stopAtLineStalled the real code calls.
+#include "src/util/WROMath.h"     // the SAME stopAtLineProgressed / stopAtLineStalled the real code calls.
 #include "Config.h"      // STOP_AT_LINE_* + WALL_STOP_TIMEOUT_MS + PWM_MIN_MAGNITUDE.
 
 static int g_failures = 0;

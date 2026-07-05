@@ -35,7 +35,7 @@
 
 #include <stdint.h>
 
-#include "config/ConfigVision.h"
+#include "../../config/ConfigVision.h"
 
 /**
  * @brief Mosaic-colour-identification facade over the HUE12 UART camera.

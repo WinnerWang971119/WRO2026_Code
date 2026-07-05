@@ -60,7 +60,9 @@ def test_rewrite_test_tree_never_touches_generated_exclusions(test_root: Path) -
     assert touched_relpaths.isdisjoint(GENERATED_FILE_EXCLUSIONS)
 
 
-def test_rewrite_test_tree_finds_the_expected_real_rewrites(test_root: Path) -> None:
+def test_rewrite_test_tree_finds_the_expected_real_rewrites(sketch_root: Path, test_root: Path) -> None:
+    if (sketch_root / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     diffs = rw.rewrite_test_tree(test_root)
     changed_by_relpath = {
         d.path.relative_to(test_root).as_posix(): d.rewritten for d in diffs if d.changed

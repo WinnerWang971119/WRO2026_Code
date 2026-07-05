@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "config/ConfigVision.h"
+#include "../../config/ConfigVision.h"
 
 /**
  * @file VisionFrame.h

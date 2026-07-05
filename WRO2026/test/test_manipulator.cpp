@@ -43,7 +43,7 @@
 
 // Production code under test (pulls Config.h / ConfigManipulator.h / ManipServo.h /
 // ManipBelt.h transitively):
-#include "Manipulator.h"
+#include "src/manip/Manipulator.h"
 
 // ---------------------------------------------------------------------------
 // Shared helpers.

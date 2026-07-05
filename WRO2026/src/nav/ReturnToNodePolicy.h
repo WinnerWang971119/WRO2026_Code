@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "Config.h"
+#include "../../Config.h"
 
 /**
  * @file ReturnToNodePolicy.h

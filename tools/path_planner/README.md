@@ -12,7 +12,7 @@ field_data.py  ──►  validator  ──►  graph_builder (C-space inflation
                                 planner (Dijkstra all-pairs)
                                           │
                                           ▼
-                            header_writer ──► WRO2026/routes.{h,cpp}
+                            header_writer ──► WRO2026/src/nav/routes.{h,cpp}
                                           │
                                           └─► visualizer ──► output/map.png
 ```
@@ -78,8 +78,8 @@ once the venv is active).
 
 That writes:
 
-- `WRO2026/routes.h`
-- `WRO2026/routes.cpp`
+- `WRO2026/src/nav/routes.h`
+- `WRO2026/src/nav/routes.cpp`
 - `tools/path_planner/output/map.png`
 
 ### Generated `routes.h` schema (what the firmware consumes)
@@ -189,7 +189,7 @@ mirrors the old Python literal keys. Run `build_routes.py` afterwards to regener
 
 | Flag              | Purpose                                                                                  | Example                                                       |
 | ----------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `--out-dir DIR`   | Write `routes.h` + `routes.cpp` into `DIR` instead of `WRO2026/`.                        | `... build_routes.py --out-dir build/`                        |
+| `--out-dir DIR`   | Write `routes.h` + `routes.cpp` into `DIR` instead of `WRO2026/src/nav/`.                | `... build_routes.py --out-dir build/`                        |
 | `--map-out PATH`  | Override the visualization output path.                                                  | `... build_routes.py --map-out /tmp/map.png`                  |
 | `--no-viz`        | Skip rendering `map.png` entirely (useful in CI).                                        | `... build_routes.py --no-viz`                                |
 | `--verbose`, `-v` | Print per-step progress (`validating ...`, `building graph ...`, etc.) to stderr.        | `... build_routes.py -v`                                      |
@@ -254,7 +254,7 @@ After any edit:
 2. Open `tools/path_planner/output/map.png` and sanity-check the
    geometry (nodes in the right places, blind edges hop the right
    gaps, no edge clips an obstacle).
-3. Commit `field_data.json`, `WRO2026/routes.h`, and `WRO2026/routes.cpp`
+3. Commit `field_data.json`, `WRO2026/src/nav/routes.h`, and `WRO2026/src/nav/routes.cpp`
    **together** in the same commit. The `routes.h` banner SHA256 must equal the
    combined **LF-normalized** SHA256 of `field_data.py` + `field_data.json` — see
    the Determinism section above for the one-liner. If reviewers see a mismatch,
@@ -279,7 +279,7 @@ to 3 decimal places. Keybinds: `c` clears every marker, `u` undoes the
 most recent marker. Close the window to exit.
 
 `field_data.json` (loaded by `field_data.py`) is the single source of truth for both
-the on-robot routes (`WRO2026/routes.h` / `routes.cpp`) and the Python simulator
+the on-robot routes (`WRO2026/src/nav/routes.h` / `routes.cpp`) and the Python simulator
 (`tools/path_planner/sim/`). Once you have authored real NODES, regenerate with
 `uv run python tools/path_planner/build_routes.py`; both the robot's compiled
 next-hop table and the sim's map snap to the new coordinates automatically — there is

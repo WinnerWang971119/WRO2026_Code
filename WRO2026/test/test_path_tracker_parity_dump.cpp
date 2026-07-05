@@ -73,8 +73,8 @@
 
 #include "test_path_tracker_harness.h"    // real singletons + per-hop expect* helpers + cooperativeTick
 
-#include "PathTrackerParityTrace.h"       // pt_parity::emit (PT_PARITY_TRACE is defined for this target)
-#include "WROMath.h"                       // cmToEncDeg — sizes the generic seek/return encoder steps
+#include "src/mission/PathTrackerParityTrace.h"       // pt_parity::emit (PT_PARITY_TRACE is defined for this target)
+#include "src/util/WROMath.h"                       // cmToEncDeg — sizes the generic seek/return encoder steps
 
 #include <algorithm>    // std::sort — name-sorted all-pairs enumeration
 #include <cmath>        // lroundf

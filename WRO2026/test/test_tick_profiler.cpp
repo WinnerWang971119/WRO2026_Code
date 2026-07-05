@@ -27,7 +27,7 @@
 
 #include "TestAssert.h"
 
-#include "TickProfiler.h"
+#include "src/util/TickProfiler.h"
 
 #include <string>
 

@@ -36,11 +36,11 @@
 // where one exists, and to the real sketch header otherwise.
 #include "Manipulator.h"     // ctps_mocks — records manip ops
 #include "Drive.h"           // ctps_mocks — records raw drive ops
-#include "Mission.h"         // real — operator DSL (recording hooks under CTPS_RECORD)
+#include "src/mission/Mission.h"         // real — operator DSL (recording hooks under CTPS_RECORD)
 #include "MissionScript.h"   // real — buildMission()
 #include "Tasks.h"           // real — Tasks.begin()
-#include "FieldMap.h"        // real — node-name resolution
-#include "routes.h"          // real — Routes::NODES / START_NODE / START_HEADING_DEG
+#include "src/nav/FieldMap.h"        // real — node-name resolution
+#include "src/nav/routes.h"          // real — Routes::NODES / START_NODE / START_HEADING_DEG
 
 #include <MatrixMiniR4.h>    // ctps_mocks — MiniR4 facade (angle-include)
 #include <Arduino.h>         // ctps_mocks — mock clock millis() / mockAdvanceMillis()

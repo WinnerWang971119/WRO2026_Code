@@ -15,18 +15,24 @@ from tools.reorg import git_mv_plan, mapping
 
 def test_plan_moves_against_the_real_repo_returns_all_movers(repo_root: Path) -> None:
     """Every mapped source file exists at the flat root today, so this must succeed."""
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     assert len(ops) == 39
     assert {op.basename for op in ops} == mapping.FRAMEWORK_FILES
 
 
 def test_plan_is_sorted_alphabetically_by_basename(repo_root: Path) -> None:
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     basenames = [op.basename for op in ops]
     assert basenames == sorted(basenames)
 
 
 def test_each_op_src_and_dst_match_the_mapping(repo_root: Path) -> None:
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     by_name = {op.basename: op for op in ops}
     drive_op = by_name["Drive.cpp"]
@@ -40,6 +46,8 @@ def test_each_op_src_and_dst_match_the_mapping(repo_root: Path) -> None:
 
 
 def test_as_git_mv_args_uses_posix_separators_and_double_dash(repo_root: Path) -> None:
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     op = next(o for o in ops if o.basename == "Drive.cpp")
     args = op.as_git_mv_args()
@@ -51,12 +59,16 @@ def test_as_git_mv_args_uses_posix_separators_and_double_dash(repo_root: Path) -
 
 
 def test_str_matches_as_git_mv_args_joined(repo_root: Path) -> None:
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     op = ops[0]
     assert str(op) == " ".join(op.as_git_mv_args())
 
 
 def test_format_plan_is_one_command_per_line(repo_root: Path) -> None:
+    if (repo_root / "WRO2026" / "src").is_dir():
+        pytest.skip("pre-move only: this snapshots the flat pre-move tree; the reorg move has run")
     ops = git_mv_plan.plan_moves(repo_root)
     text = git_mv_plan.format_plan(ops)
     lines = text.splitlines()

@@ -42,8 +42,8 @@
 #include "Arduino.h"
 
 // Production code under test (pulls ConfigVision.h transitively):
-#include "VisionFrame.h"
-#include "Vision.h"
+#include "src/perception/VisionFrame.h"
+#include "src/perception/Vision.h"
 
 #include <cstddef>
 #include <cstdint>

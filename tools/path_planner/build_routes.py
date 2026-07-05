@@ -3,8 +3,8 @@
 
 Reads ``tools/path_planner/field_data.py``, validates it, builds the
 graph, runs Dijkstra all-pairs next-hop, emits ``routes.h`` +
-``routes.cpp`` into ``WRO2026/`` (or a user-chosen output directory),
-and renders the visual map.
+``routes.cpp`` into ``WRO2026/src/nav/`` (or a user-chosen output
+directory), and renders the visual map.
 
 This is the CLI orchestrator: every layer below is a pure-Python module
 (:mod:`tools.path_planner.validator`,
@@ -97,8 +97,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=None,
         help=(
             "Override the default output directory for routes.h / "
-            "routes.cpp (WRO2026/ in repo). The two files are written "
-            "as <out-dir>/routes.h and <out-dir>/routes.cpp."
+            "routes.cpp (WRO2026/src/nav/ in repo). The two files are "
+            "written as <out-dir>/routes.h and <out-dir>/routes.cpp."
         ),
     )
     parser.add_argument(

@@ -43,12 +43,12 @@
 #include <cmath>
 #include <cstdio>
 
-#include "Localization.h"
+#include "src/nav/Localization.h"
 
 // Mock surfaces — the same singletons `Localization.cpp` was compiled against.
 #include "Drive.h"            // mock: settable encoders (mockSetEncL/R, mockAdvanceEncoders).
 #include "MatrixMiniR4.h"     // mock: mmL.GetIMUEuler + mmL.mockYawDeg / mockResult.
-#include "WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
+#include "src/util/WROMath.h"          // cmToEncDeg — scripts "drive d cm" into encoder degrees.
 #include "Config.h"           // Config::OFFSET_*_DEADBAND_* for the deadband-aware tolerances.
 
 static int g_failures = 0;

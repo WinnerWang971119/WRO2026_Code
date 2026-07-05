@@ -11,7 +11,7 @@
  */
 
 #include "Intersection.h"
-#include "Config.h"          // INTERSECTION_DEBOUNCE_TICKS / INTERSECTION_RELEASE_TICKS
+#include "../../Config.h"          // INTERSECTION_DEBOUNCE_TICKS / INTERSECTION_RELEASE_TICKS
 #include "LineFollower.h"    // For LineFollower.getArray() — kept out of the header.
 
 /**

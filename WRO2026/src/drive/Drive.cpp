@@ -14,14 +14,14 @@
 #include "Drive.h"
 
 #include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
-#include "YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
+#include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
 
 #include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
                               // its tick loop does not write setSpeed concurrently with a
                               // queued bounded/profiled move. LineFollower.h does NOT pull
                               // Drive.h transitively, so the include is non-circular.
 
-#include "WROLineArray.h"    // ADR-027: _updateStopAtLine() reads `LineArray.getJunctionType()`
+#include "../perception/WROLineArray.h"    // ADR-027: _updateStopAtLine() reads `LineArray.getJunctionType()`
                               // directly (NOT `Intersection::isAtIntersection()`, which is
                               // read-and-clear and owned by PathTracker's nav consumer). The
                               // include lives in the .cpp ONLY — Drive.h needs none of
