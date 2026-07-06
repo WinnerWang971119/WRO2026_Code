@@ -67,6 +67,7 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
+    Direction,
     PathTrackerSim,
     UnreachableGoalError,
     wrap_pm180,
@@ -123,6 +124,19 @@ def _honors_gyro_heading(cmd) -> bool:
         and cmd.mode == "gyro"
         and cmd.heading is not None
     )
+
+
+#: goto direction tags -> the sim's :class:`Direction`. A ``goto`` carries an
+#: ``arrival`` / ``route`` tag ("front"/"rear") only when the operator called
+#: ``setArrivalDirection`` / ``setRouteDirection``; an absent tag (``None``) or
+#: any unrecognised value maps to ``AUTO`` (defer to the sim's bidirectional
+#: resolution), so a direction-free goto is unchanged.
+_DIRECTION_BY_TAG = {"front": Direction.FRONT, "rear": Direction.REAR}
+
+
+def _direction_from_tag(tag) -> "Direction":
+    """Map a goto ``arrival`` / ``route`` tag to a :class:`Direction`; AUTO otherwise."""
+    return _DIRECTION_BY_TAG.get(tag, Direction.AUTO)
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +637,11 @@ def build(trace: Trace, field_data) -> Track:
             # the departure-edge heading unit ray (u-hat-1).
             pending_pivot_land: Optional[Tuple[str, float, float, float]] = None
             try:
-                for primitive, snap in sim.step_through(target):
+                for primitive, snap in sim.step_through(
+                    target,
+                    route_direction=_direction_from_tag(cmd.route),
+                    arrival_direction=_direction_from_tag(cmd.arrival),
+                ):
                     tag = primitive[0]
                     node_now = sim.localization.current_node()
                     if node_now != cur_node:

@@ -878,6 +878,86 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
     assert reported_cm > DRIFT_THRESHOLD_CM
 
 
+# ---------------------------------------------------------------------------
+# goto forced-direction override reaches the sim (setArrivalDirection /
+# setRouteDirection carried end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def test_goto_direction_tags_forwarded_to_step_through(monkeypatch):
+    """A goto's ``arrival``/``route`` tags reach ``sim.step_through`` as kwargs.
+
+    The final Python stage of the CTPS direction-override pipeline: ``build``
+    must thread the loaded ``front``/``rear`` tags into ``step_through`` as
+    ``arrival_direction`` / ``route_direction``. Without this the sim falls back
+    to AUTO and silently ignores the operator's ``setArrivalDirection`` — the
+    original bug. Spying ``step_through`` isolates the forwarding from the sim's
+    own resolution (covered by the direction-parity suite).
+    """
+    from tools.path_planner.sim.runtime import Direction
+
+    captured: list = []
+
+    def _spy(
+        self,
+        goal_name,
+        *,
+        route_direction=Direction.AUTO,
+        arrival_direction=Direction.AUTO,
+    ):
+        captured.append((goal_name, route_direction, arrival_direction))
+        return iter(())  # no primitives — build still emits the goto span event
+
+    monkeypatch.setattr(PathTrackerSim, "step_through", _spy)
+
+    _build_quiet(
+        _inline_trace(
+            {
+                "seq": 0,
+                "op": "goto",
+                "target": "B",
+                "arrival": "front",
+                "route": "rear",
+            }
+        ),
+        toy_field_data,
+    )
+
+    # arrival "front" -> Direction.FRONT (final hop); route "rear" -> Direction.REAR.
+    assert captured == [("B", Direction.REAR, Direction.FRONT)]
+
+
+def test_goto_without_direction_tags_defaults_to_auto(monkeypatch):
+    """A direction-free goto forwards ``Direction.AUTO`` for both kwargs.
+
+    Backward-compat guard: an existing trace with no ``arrival``/``route`` keys
+    must reach ``step_through`` exactly as before the schema change (AUTO), so
+    direction-free traces render identically.
+    """
+    from tools.path_planner.sim.runtime import Direction
+
+    captured: list = []
+
+    def _spy(
+        self,
+        goal_name,
+        *,
+        route_direction=Direction.AUTO,
+        arrival_direction=Direction.AUTO,
+    ):
+        captured.append((goal_name, route_direction, arrival_direction))
+        return iter(())
+
+    monkeypatch.setattr(PathTrackerSim, "step_through", _spy)
+
+    _build_quiet(
+        _inline_trace({"seq": 0, "op": "goto", "target": "B"}),
+        toy_field_data,
+    )
+
+    assert captured == [("B", Direction.AUTO, Direction.AUTO)]
+
+
 # ===========================================================================
 # Pivot-arc tests (CTPS issue #55, T5 — TC1-TC7, TC11, TC12, TC13)
 #

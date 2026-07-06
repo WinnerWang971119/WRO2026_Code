@@ -172,11 +172,13 @@ namespace ctps
     std::vector<Record> g_ctpsLog;
     bool                g_ctpsBuildError = false;
 
-    void recordGoto(const char* target)
+    void recordGoto(const char* target, const char* arrival, const char* route)
     {
         Record rec;
-        rec.op     = Op::GOTO;
-        rec.target = (target != nullptr) ? target : "";
+        rec.op      = Op::GOTO;
+        rec.target  = (target != nullptr) ? target : "";
+        rec.arrival = (arrival != nullptr) ? arrival : "";
+        rec.route   = (route != nullptr) ? route : "";
         push(std::move(rec));
     }
 
@@ -340,6 +342,20 @@ namespace ctps
                 case Op::GOTO:
                     out += "\"op\": \"goto\", ";
                     appendStrMember(out, "target", rec.target);
+                    // Optional forced-direction keys — each emitted only when the
+                    // builder's setArrivalDirection / setRouteDirection fired (a
+                    // non-AUTO override). A direction-free goto stays byte-identical
+                    // to the legacy output (mirrors the DRIVE detail keys).
+                    if (!rec.arrival.empty())
+                    {
+                        out += ", ";
+                        appendStrMember(out, "arrival", rec.arrival);
+                    }
+                    if (!rec.route.empty())
+                    {
+                        out += ", ";
+                        appendStrMember(out, "route", rec.route);
+                    }
                     break;
 
                 case Op::WAIT:

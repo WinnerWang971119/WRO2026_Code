@@ -269,6 +269,15 @@ namespace
         // appended after the Mission drains.
         recordManipDriveSegment();
 
+        // Direction-override capture: a goto carrying setArrivalDirection /
+        // setRouteDirection must serialize the "arrival"/"route" tags. A
+        // one-statement discarded temporary, so the recording mock builder
+        // destructs at the `;` after BOTH setters run. ("Start" is a live
+        // production node; this asserts the recorded direction tags, not the hop.)
+        PathTracker.goTo("Start")
+            .setArrivalDirection(Direction::REAR)
+            .setRouteDirection(Direction::FRONT);
+
         const std::vector<ctps::Record>& log = ctps::g_ctpsLog;
         size_t cursor = 0;
 
@@ -443,6 +452,8 @@ namespace
             {"\"reverse\": true", "reverse: true"},
             {"\"method\": \"wallStop\", \"cm\": 10", "wallStop cm"},
             {"\"method\": \"lineFollowDist\", \"cm\":", "lineFollowDist cm"},
+            {"\"arrival\": \"rear\"", "goto arrival: rear"},
+            {"\"route\": \"front\"", "goto route: front"},
         };
         for (const JsonProbe& probe : kJsonProbes)
         {

@@ -35,23 +35,40 @@ class PathTrackerClass;
 /**
  * @brief Recording mock of `PathTrackerGoToBuilder`.
  *
- * Records the `goto` op on construction with the resolved node name, then
- * exposes the same move-only `[[nodiscard]]` chain surface as the real builder
- * (all chain setters are no-ops returning `*this`).
+ * Records the `goto` op from an `_executed`-guarded DESTRUCTOR (the same seam
+ * the Drive / LineFollower recording mocks use), NOT the constructor: recording
+ * at destruction is what lets the chained direction setters
+ * (`.setArrivalDirection(...)` / `.setRouteDirection(...)`) run and be captured
+ * before the single emit. `goto` is authored one-per-statement, so the discarded
+ * temporary destructs at the `;` in authored order. The `async` /
+ * `setStopAtLine` setters stay no-ops (the sim has no async / call-site
+ * stop-at-line surface); the direction setters store into the builder.
  */
 class [[nodiscard]] PathTrackerGoToBuilder
 {
 public:
     /**
-     * @brief Construct + record the hop immediately, resolving @p goalId to a name.
+     * @brief Capture the goal id; the `goto` op is recorded at destruction.
      *
-     * Out-of-range ids resolve to the empty string via `FieldMap::getNode`'s
-     * `noNode()` sentinel (whose `name` is `""`), so a bad goal never reads out
-     * of bounds.
+     * The name is resolved (and the record emitted) in the destructor. Out-of-range
+     * ids resolve to the empty string via `FieldMap::getNode`'s `noNode()` sentinel
+     * (whose `name` is `""`), so a bad goal never reads out of bounds.
      */
-    PathTrackerGoToBuilder(PathTrackerClass& /*owner*/, uint8_t goalId)
+    PathTrackerGoToBuilder(PathTrackerClass& /*owner*/, uint8_t goalId) : _goalId(goalId) {}
+
+    /**
+     * @brief Emit the single `goto` record, serializing any forced arrival/route
+     *        direction as a "front"/"rear" tag ("" == AUTO, suppressed by the
+     *        serializer). The `_executed` sentinel keeps the single-emit invariant.
+     */
+    ~PathTrackerGoToBuilder()
     {
-        ctps::recordGoto(FieldMap::getNode(goalId).name);
+        if (_executed)
+        {
+            return;
+        }
+        _executed = true;
+        ctps::recordGoto(FieldMap::getNode(_goalId).name, _dirTag(_arrival), _dirTag(_route));
     }
 
     PathTrackerGoToBuilder(const PathTrackerGoToBuilder&)            = delete;
@@ -59,11 +76,40 @@ public:
     PathTrackerGoToBuilder(PathTrackerGoToBuilder&&)                 = delete;
     PathTrackerGoToBuilder& operator=(PathTrackerGoToBuilder&&)      = delete;
 
-    // Chain setters — no-op, return *this so Mission's chain compiles.
+    // Chain setters — the direction knobs are captured (recorded at destruction);
+    // the rest stay no-ops returning *this so Mission's chain compiles.
     PathTrackerGoToBuilder& async() { return *this; }
-    PathTrackerGoToBuilder& setRouteDirection(Direction) { return *this; }
-    PathTrackerGoToBuilder& setArrivalDirection(Direction) { return *this; }
+    PathTrackerGoToBuilder& setRouteDirection(Direction d)
+    {
+        _route = d;
+        return *this;
+    }
+    PathTrackerGoToBuilder& setArrivalDirection(Direction d)
+    {
+        _arrival = d;
+        return *this;
+    }
     PathTrackerGoToBuilder& setStopAtLine(StopAtLine) { return *this; }
+
+private:
+    /** @brief "front"/"rear" for a forced direction; "" for AUTO (serializer omits it). */
+    static const char* _dirTag(Direction d)
+    {
+        if (d == Direction::FRONT)
+        {
+            return "front";
+        }
+        if (d == Direction::REAR)
+        {
+            return "rear";
+        }
+        return "";
+    }
+
+    uint8_t   _goalId;
+    Direction _arrival  = Direction::AUTO;
+    Direction _route    = Direction::AUTO;
+    bool      _executed = false;
 };
 
 /**

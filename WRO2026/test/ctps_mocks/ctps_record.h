@@ -58,7 +58,7 @@ namespace ctps
      */
     enum class Op : uint8_t
     {
-        GOTO,          ///< Navigation hop. Field: `target`.
+        GOTO,          ///< Navigation hop. Fields: `target`, forced `arrival`/`route` direction.
         TASK_START,    ///< Task dispatch begin. Fields: `name`, `args` (16 raw bytes).
         TASK_END,      ///< Task dispatch end. Fields: `name`, `result`.
         MANIP,         ///< Manipulator command. Fields: `method`, `arg`.
@@ -86,6 +86,8 @@ namespace ctps
         // stores step text/name by pointer into static storage, but copying is
         // the robust choice and costs nothing on the host).
         std::string target;                  ///< GOTO: destination node name.
+        std::string arrival;                 ///< GOTO: forced arrival direction "front"|"rear"; empty = AUTO.
+        std::string route;                   ///< GOTO: forced route direction "front"|"rear"; empty = AUTO.
         std::string text;                    ///< PRINT: message text.
         std::string name;                    ///< TASK_START / TASK_END: task name.
         std::string method;                  ///< MANIP / DRIVE: facade method name.
@@ -140,10 +142,14 @@ namespace ctps
 
     /**
      * @brief Record a navigation hop (recorded by the PathTracker.goTo mock only).
-     * @param target Destination node name (resolved from the goal index via FieldMap).
-     *               `nullptr` is stored as an empty string.
+     * @param target  Destination node name (resolved from the goal index via FieldMap).
+     *                `nullptr` is stored as an empty string.
+     * @param arrival Forced arrival-direction tag ("front"/"rear"), or `nullptr`/""
+     *                for AUTO (the setter was not called); serialized only when set.
+     * @param route   Forced route-direction tag ("front"/"rear"), or `nullptr`/""
+     *                for AUTO; serialized only when set.
      */
-    void recordGoto(const char* target);
+    void recordGoto(const char* target, const char* arrival, const char* route);
 
     /**
      * @brief Record a Mission `wait` step.

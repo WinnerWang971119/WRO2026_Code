@@ -103,6 +103,12 @@ class Command:
     :param seq: Zero-based sequence index from the JSON ``seq`` field.
     :param op: Operation name (e.g. ``"goto"``, ``"drive"``, ``"beep"``).
     :param target: Destination node name; set for ``goto`` commands.
+    :param arrival: Forced arrival direction (``"front"`` / ``"rear"``); set for
+        ``goto`` commands when ``setArrivalDirection`` was called. ``None`` when
+        the key is absent (AUTO — defer to the sim's direction resolution).
+    :param route: Forced route direction (``"front"`` / ``"rear"``); set for
+        ``goto`` commands when ``setRouteDirection`` was called. ``None`` when
+        the key is absent (AUTO).
     :param ms: Duration in milliseconds; set for ``wait``, ``beep``, and
         ``led`` commands.
     :param text: Human-readable string payload; set for ``print`` commands.
@@ -141,6 +147,8 @@ class Command:
 
     # -- op-specific optional fields ----------------------------------------
     target:   Optional[str]   = None   # goto
+    arrival:  Optional[str]   = None   # goto: forced arrival direction "front"|"rear"
+    route:    Optional[str]   = None   # goto: forced route direction "front"|"rear"
     ms:       Optional[int]   = None   # wait, beep, led
     text:     Optional[str]   = None   # print
     name:     Optional[str]   = None   # task_start, task_end
@@ -237,7 +245,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
     # ----- collect named fields ---------------------------------------------
     named_keys = {
         "seq", "op",
-        "target", "ms", "text", "name", "args_hex",
+        "target", "arrival", "route", "ms", "text", "name", "args_hex",
         "method", "arg", "cm", "deg",
         "mode", "heading", "reverse",
         "freq_hz", "r", "g", "b", "result",
@@ -248,6 +256,8 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         seq=seq,
         op=op,
         target=raw.get("target"),
+        arrival=raw.get("arrival"),
+        route=raw.get("route"),
         ms=raw.get("ms"),
         text=raw.get("text"),
         name=raw.get("name"),
