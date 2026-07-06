@@ -74,12 +74,6 @@ smuggle a behavior change into the sim, for two independent reasons:
   directly bypasses that call path entirely — it mutates the field the snapshot code and
   drift check read, and nothing else observes it.
 
-An earlier draft of this ADR mis-stated the safety argument as gating on `nav_active` —
-that reasoning was wrong and has been corrected here: the offset gate is irrelevant
-because a raw x/y write never feeds the integrator in the first place, gated or not.
-Reason (b) alone is sufficient; (a) is the independent reason the *primitive stream* also
-can't change.
-
 ## How to apply
 
 - **Detection — one-hop lookahead, mirroring firmware (ADR-036).** `track_builder`

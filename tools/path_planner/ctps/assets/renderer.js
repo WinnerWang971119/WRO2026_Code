@@ -814,7 +814,7 @@
         var track = CTPS.engine.track;
         var pivots = track && track.pivots;
         var n = pivots ? pivots.length : 0;
-        if (n === 0 || typeof pivots[0].t0 !== "number" || t < pivots[0].t0) {
+        if (n === 0 || !pivots[0] || typeof pivots[0].t0 !== "number" || t < pivots[0].t0) {
             return null;
         }
         var lo = 0;
@@ -824,7 +824,7 @@
         // log2(n).
         while (hi > lo) {
             var mid = lo + Math.ceil((hi - lo) / 2);
-            if (typeof pivots[mid].t0 === "number" && pivots[mid].t0 <= t) {
+            if (pivots[mid] && typeof pivots[mid].t0 === "number" && pivots[mid].t0 <= t) {
                 lo = mid;
             } else {
                 hi = mid - 1;
