@@ -330,6 +330,9 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
     Manipulator.sortTo(1);
     Manipulator.grab();
 
+    //Test Drift
+    Drive.driveDist(20);
+
     //Grab shovel
     PathTracker.goTo("shovel").setArrivalDirection(Direction::REAR);
     Manipulator.boxClose();
