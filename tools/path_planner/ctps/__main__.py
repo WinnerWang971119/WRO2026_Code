@@ -620,7 +620,9 @@ def _serve_editor(open_browser: bool) -> int:
 
     The ``--editor`` front door: renders the self-contained ``layout_editor.html``
     (field + robot tabs) against the LIVE :mod:`tools.path_planner.field_data`,
-    then hands it to :func:`edit_server.serve_editor`, which serves it on a
+    auto-loading the recently-saved layout (:func:`_find_default_layout`) so it
+    opens on the last layout rather than a fresh scene, then hands it to
+    :func:`edit_server.serve_editor`, which serves it on a
     localhost port and writes every Save straight into :data:`_DEFAULT_LAYOUT`
     (``layouts/layout.json``) — no download dialog. The server auto-closes when
     the editor tab goes away (heartbeat + watchdog, ADR-057), so it can never
@@ -631,9 +633,31 @@ def _serve_editor(open_browser: bool) -> int:
     :param open_browser: when ``True``, open the served URL after binding.
     :return: ``0`` on a clean shutdown; ``1`` if rendering fails.
     """
+    # Auto-load the recently-saved layout (newest layouts/layout*.json — the
+    # same file Save writes) so the editor opens on the last layout instead of a
+    # fresh scene. Degrade to an empty editor (never a hard fail) when it is
+    # missing or unreadable: the author must always be able to open the tool.
+    layout: Optional[Dict[str, Any]] = None
+    layout_path = _find_default_layout()
+    if layout_path is not None:
+        try:
+            loaded = json.loads(layout_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                layout = loaded
+                print(
+                    f"ctps: editor auto-loading {layout_path.name}",
+                    file=sys.stderr,
+                )
+        except (OSError, ValueError) as exc:
+            print(
+                f"ctps: could not read {layout_path.name} ({exc}); "
+                "opening the editor empty",
+                file=sys.stderr,
+            )
+
     try:
         out = layout_editor_html.render(
-            field_data, _EDITOR_OUT, map_png=_resolve_map_png()
+            field_data, _EDITOR_OUT, map_png=_resolve_map_png(), layout=layout
         )
     except (OSError, ValueError, AttributeError) as exc:
         print(f"ctps: could not render the layout editor: {exc}", file=sys.stderr)

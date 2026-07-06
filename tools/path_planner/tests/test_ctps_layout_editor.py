@@ -315,3 +315,59 @@ def test_editor_assets_have_no_static_inline_style_attribute():
             f"{path.name} carries a static inline style= attribute"
         )
     assert "style=" not in editor_module._BODY_MARKUP
+
+
+# ---------------------------------------------------------------------------
+# const LAYOUT — the editor auto-loads the recently-saved layout on open
+# ---------------------------------------------------------------------------
+
+#: Captures the JSON document assigned to ``const LAYOUT`` (own ``<script>``,
+#: same non-greedy-to-``</script>`` shape as the FIELD regex above).
+_LAYOUT_RE = re.compile(r"const LAYOUT = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+#: A minimal well-formed layout.json-shaped dict (one cargo rect + robot zones).
+_SAMPLE_LAYOUT = {
+    "schema_version": 1,
+    "objects": [
+        {
+            "id": "o1", "name": "block", "shape": "rect", "type": "cargo",
+            "color": "#5bc8e0", "x_cm": 12.0, "y_cm": -3.0,
+            "heading_deg": 0.0, "w_cm": 5.0, "h_cm": 5.0,
+        }
+    ],
+    "robot": {
+        "grab_zone": {"x_cm": -1.0, "y_cm": 8.0, "w_cm": 6.0, "h_cm": 14.0},
+        "box_zone": {"x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 16.0},
+        "drop_points": [{"x_cm": 4.0, "y_cm": -6.0}],
+    },
+}
+
+
+def test_layout_embeds_const_for_editor_autoload(tmp_path):
+    """render(layout=...) embeds a ``const LAYOUT`` that round-trips to the dict.
+
+    Key assertion: the passed layout is embedded verbatim (round-trips via
+    :func:`json.loads`) and the boot script ingests it BEFORE the save-state
+    baseline, so a fresh open shows the recently-saved scene, not a blank one.
+    """
+    out_path = tmp_path / "autoload.html"
+    render(toy_field_data, out_path, layout=_SAMPLE_LAYOUT)
+    html = out_path.read_text(encoding="utf-8")
+
+    match = _LAYOUT_RE.search(html)
+    assert match is not None, "could not locate the embedded const LAYOUT"
+    embedded = json.loads(match.group("json").replace("<\\/", "</"))
+    assert embedded == _SAMPLE_LAYOUT
+
+    # Boot ingests LAYOUT before seeding the clean save-state baseline.
+    assert "E.ingestLayout(LAYOUT)" in html
+    assert html.index("E.ingestLayout(LAYOUT)") < html.index("E.initSaveState()")
+
+
+def test_no_layout_embeds_null(tmp_path):
+    """Without ``layout`` the editor embeds ``const LAYOUT = null;`` (boots empty)."""
+    out_path = tmp_path / "no_layout.html"
+    render(toy_field_data, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const LAYOUT = null;" in html

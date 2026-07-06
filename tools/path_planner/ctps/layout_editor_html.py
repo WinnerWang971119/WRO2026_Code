@@ -132,6 +132,8 @@ _BODY_MARKUP: str = """\
         </div>
         <button id="ctps-editor-save" class="ctps-help-btn" type="button">
             &#8615; Save</button>
+        <span id="ctps-editor-save-state" class="ctps-editor-save-state"
+              role="status" aria-live="polite"></span>
         <button id="ctps-editor-load-btn" class="ctps-help-btn" type="button">
             &#8613; Load</button>
         <input type="file" id="ctps-editor-file" class="ctps-layout-file"
@@ -293,6 +295,7 @@ def render(
     field_data: Any,
     out_path: "str | Path",
     map_png: "str | Path | None" = None,
+    layout: "Dict[str, Any] | None" = None,
 ) -> Path:
     """Render the offline layout editor to one self-contained page at ``out_path``.
 
@@ -300,7 +303,8 @@ def render(
     concatenated CSS assets in one ``<style>``; a ``const FIELD`` field-backdrop
     constant derived from ``field_data`` (the same block the player draws -- see
     :func:`tools.path_planner.ctps.track_builder.build_field_block`); an
-    optional ``const MAP_IMAGE`` data URI; and every JS asset
+    optional ``const MAP_IMAGE`` data URI; a ``const LAYOUT`` the editor
+    auto-loads on open (``null`` when none); and every JS asset
     (:data:`_ASSET_JS`) in load order, each in its own ``<script>``
     (``objects_draw.js`` first so ``window.CTPS_OBJ`` exists for the editor
     canvas, then the editor modules, ``editor_boot.js`` last). The page has
@@ -324,6 +328,12 @@ def render(
         :class:`pathlib.Path`).
     :param map_png: optional path to the printed field map image to embed as the
         canvas background; ``None`` (default) renders the vector field only.
+    :param layout: optional ``layout.json``-shaped dict (field objects + robot
+        zones) to embed as ``const LAYOUT`` so the editor auto-loads it on open
+        (the recently-saved layout, not a fresh scene); ``None``/falsy emits
+        ``const LAYOUT = null;`` and the editor boots empty. Embedded as a JSON
+        VALUE (like ``FIELD``) and TOLERANTLY ingested at boot — never strictly
+        validated here, so a slightly-off saved layout still opens for editing.
     :return: the resolved :class:`pathlib.Path` that was written.
     :raises FileNotFoundError: if any required asset (e.g. ``editor_core.js``)
         is missing.
@@ -337,6 +347,14 @@ def render(
     # NOT passed through the self-containment lint.
     field_block: Dict[str, Any] = build_field_block(field_data)
     field_json = json.dumps(field_block, ensure_ascii=False).replace("</", "<\\/")
+
+    # The layout to auto-load (recently-saved objects + zones), or ``null``.
+    # Emitted as a JSON VALUE like FIELD -- ``</`` escaped so an author's object
+    # name can never break out of the inline <script>, and NOT linted.
+    if layout:
+        layout_json = json.dumps(layout, ensure_ascii=False).replace("</", "<\\/")
+    else:
+        layout_json = "null"
 
     # Optional field-map background as a self-contained data URI (or "null").
     map_image_js = _map_data_uri(map_png)
@@ -363,6 +381,7 @@ def render(
     script_blocks: List[str] = [
         _script(f"const FIELD = {field_json};"),
         _script(f"const MAP_IMAGE = {map_image_js};"),
+        _script(f"const LAYOUT = {layout_json};"),
     ]
     script_blocks.extend(_script(content) for content in js_contents)
     scripts = "\n".join(script_blocks)

@@ -210,6 +210,9 @@
         E.state.selection = null;
         refreshProps();
         E.redraw();
+        if (E.refreshSaveState) {
+            E.refreshSaveState();
+        }
     }
 
     /** Delete the currently-selected object (no-op for robot zones/points). */
@@ -349,15 +352,21 @@
 
     /** Commit a draft / end a drag on pointer-up. */
     function onPointerUp(ev) {
+        var changed = false;
         if (E.state.draft) {
             _commitDraft();
             E.state.draft = null;
             E.redraw();
+            changed = true;
         }
         if (E.state.drag) {
             E.state.drag = null;
+            changed = true;
         }
         _release(ev);
+        if (changed && E.refreshSaveState) {
+            E.refreshSaveState();
+        }
     }
 
     /** Delete/Backspace removes the selected object (unless a field is focused). */
@@ -512,6 +521,9 @@
             z.h_cm = _posNum(dom.h.value, z.h_cm);
         }
         E.redraw();
+        if (E.refreshSaveState) {
+            E.refreshSaveState();
+        }
     }
 
     // ----- public tools surface --------------------------------------------

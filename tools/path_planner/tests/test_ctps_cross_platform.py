@@ -23,6 +23,7 @@ on a CMake generator mismatch.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -409,11 +410,12 @@ def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
     ``edit_server.serve_editor`` (stubbed so the test binds no socket / never
     blocks).
     """
-    calls = {"render": 0, "serve": 0}
+    calls = {"render": 0, "serve": 0, "layout": "unset"}
     editor_file = tmp_path / "layout_editor.html"
 
-    def _stub_render(field_data, out_path, map_png=None):
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
         calls["render"] += 1
+        calls["layout"] = layout
         editor_file.write_bytes(b"<html>editor</html>")
         return editor_file
 
@@ -425,6 +427,8 @@ def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
     monkeypatch.setattr(ctps_main.edit_server, "serve_editor", _stub_serve)
+    # Isolate from the real layouts/ dir so this test is deterministic.
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: None)
     monkeypatch.setattr(
         ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
     )
@@ -435,4 +439,72 @@ def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
     rc = ctps_main.main(["--editor", "--no-open"])
 
     assert rc == 0
-    assert calls == {"render": 1, "serve": 1}
+    assert calls["render"] == 1 and calls["serve"] == 1
+    # No layout present -> render() is asked to open an empty editor.
+    assert calls["layout"] is None
+
+
+def test_editor_flow_autoloads_recent_layout(monkeypatch, tmp_path):
+    """``main(["--editor"])`` auto-loads the recently-saved layout into render().
+
+    The newest ``layouts/layout*.json`` (:func:`_find_default_layout`) is read
+    and passed to ``layout_editor_html.render(..., layout=...)`` so the editor
+    opens on the last layout rather than a fresh scene.
+    """
+    layout_dict = {
+        "schema_version": 1,
+        "objects": [
+            {
+                "id": "o1", "name": "block", "shape": "rect", "type": "cargo",
+                "color": "#5bc8e0", "x_cm": 1.0, "y_cm": 2.0,
+                "heading_deg": 0.0, "w_cm": 5.0, "h_cm": 5.0,
+            }
+        ],
+        "robot": {
+            "grab_zone": {"x_cm": 0.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 6.0},
+            "box_zone": {"x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 6.0},
+            "drop_points": [{"x_cm": 4.0, "y_cm": -6.0}],
+        },
+    }
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text(json.dumps(layout_dict), encoding="utf-8")
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: layout_path)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        captured["layout"] = layout
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", lambda *a, **k: 0)
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert captured["layout"] == layout_dict
+
+
+def test_editor_flow_unreadable_layout_opens_empty(monkeypatch, tmp_path):
+    """A corrupt recent layout degrades to an empty editor, never a hard fail."""
+    bad = tmp_path / "layout.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: bad)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        captured["layout"] = layout
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", lambda *a, **k: 0)
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert captured["layout"] is None

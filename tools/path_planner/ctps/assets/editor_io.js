@@ -32,6 +32,14 @@
     var E = (window.CTPS_EDITOR = window.CTPS_EDITOR || {});
     var HEX_RE = /^#[0-9A-Fa-f]{6}$/;
 
+    // ----- save-state tracking ---------------------------------------------
+    // The serialised layout text as of the last persist (Save or boot baseline)
+    // and whether a Save has happened this session. The header indicator reads
+    // clean vs "unsaved changes" by comparing the CURRENT serialisation to this
+    // snapshot -- content-based, so it can never desync from a missed mutation.
+    var _savedSnapshot = null;
+    var _savedOnce = false;
+
     // ----- save (serialise -> Blob download) -------------------------------
 
     /** A schema dict for one robot-local rect zone. */
@@ -84,6 +92,52 @@
         };
     }
 
+    /**
+     * Repaint the header save-state indicator from the current scene vs the
+     * last-persisted snapshot: empty at the boot baseline, "Saved ✓" once a
+     * Save has landed and nothing changed since, "unsaved changes" otherwise.
+     */
+    function refreshSaveState() {
+        var el = E.dom && E.dom.saveState;
+        if (!el) {
+            return;
+        }
+        var clean = _savedSnapshot !== null &&
+            JSON.stringify(_serialize()) === _savedSnapshot;
+        el.classList.remove(
+            "ctps-editor-save-state--saved", "ctps-editor-save-state--dirty"
+        );
+        if (clean) {
+            el.textContent = _savedOnce ? "Saved ✓" : "";
+            if (_savedOnce) {
+                el.classList.add("ctps-editor-save-state--saved");
+            }
+        } else {
+            el.textContent = "unsaved changes";
+            el.classList.add("ctps-editor-save-state--dirty");
+        }
+    }
+
+    /**
+     * Adopt `key` as the persisted snapshot (a Save landed) and repaint clean.
+     * `key` MUST be the COMPACT `JSON.stringify(_serialize())` — the exact form
+     * `refreshSaveState` / `initSaveState` compare against. Passing the pretty
+     * (indented) payload here would never match, so the indicator would never
+     * read "Saved ✓".
+     */
+    function _markSaved(key) {
+        _savedSnapshot = key;
+        _savedOnce = true;
+        refreshSaveState();
+    }
+
+    /** Seed the boot baseline (the empty scene is "clean, not yet saved"). */
+    function initSaveState() {
+        _savedSnapshot = JSON.stringify(_serialize());
+        _savedOnce = false;
+        refreshSaveState();
+    }
+
     /** True when the page is served (edit-server), false on a `file:` open. */
     function _serverMode() {
         return !!(window.location && window.location.protocol !== "file:");
@@ -112,24 +166,27 @@
      * ANY failure -- non-2xx, network error, no server -- falls back to the Blob
      * download so an edit is never lost.
      */
-    function _saveViaServer(text) {
+    function _saveViaServer(text, key) {
         fetch("/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: text,
         }).then(function (resp) {
             if (resp && resp.ok) {
+                _markSaved(key);
                 if (E.status) {
                     E.status("saved to layouts/layout.json");
                 }
             } else {
                 _download(text);
+                _markSaved(key);
                 if (E.status) {
                     E.status("server refused save; downloaded layout.json instead");
                 }
             }
         }).catch(function () {
             _download(text);
+            _markSaved(key);
             if (E.status) {
                 E.status("server offline; downloaded layout.json instead");
             }
@@ -141,11 +198,14 @@
      * `/save`; opened as a `file:` -> Blob download named `layout.json`.
      */
     function save() {
-        var text = JSON.stringify(_serialize(), null, 2);
+        var payload = _serialize();
+        var text = JSON.stringify(payload, null, 2);   // pretty: the saved file
+        var key = JSON.stringify(payload);             // compact: the state key
         if (_serverMode()) {
-            _saveViaServer(text);
+            _saveViaServer(text, key);
         } else {
             _download(text);
+            _markSaved(key);
             if (E.status) {
                 E.status("saved layout.json");
             }
@@ -315,6 +375,9 @@
         // Robot bounds may have shifted -> re-fit both views, then repaint.
         E.resize();
         E.refreshProps();
+        // A load replaces the scene with content not yet written to the canonical
+        // layout path -> reads as "unsaved changes" until the operator Saves.
+        refreshSaveState();
         if (E.status) {
             E.status("loaded " + objects.length + " object(s)");
         }
@@ -349,6 +412,13 @@
     // ----- public I/O surface ----------------------------------------------
     E.save = save;
     E.handleFile = handleFile;
+    // Ingest a layout dict directly (the boot-time `const LAYOUT` auto-load
+    // takes the SAME tolerant path as a user's "Load layout…"). Boot calls this
+    // BEFORE `initSaveState`, so the auto-loaded scene becomes the clean
+    // baseline (a fresh open reads as saved, not "unsaved changes").
+    E.ingestLayout = _ingest;
+    E.refreshSaveState = refreshSaveState;
+    E.initSaveState = initSaveState;
 
     // Start the edit-server heartbeat/close session (no-op on a file:// open).
     _startServerSession();

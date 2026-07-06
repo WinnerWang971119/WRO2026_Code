@@ -165,6 +165,26 @@ body {
     text-align: right;
 }
 
+/* Persistent save-state readout beside the Save button: empty at boot, then
+ * "unsaved changes" (--ctps-drift) after any edit and "Saved ✓" (--ctps-hold)
+ * after a save. It lives in the header, NOT the canvas status line, so a
+ * cursor-coordinate update can never clobber it. */
+.ctps-editor-save-state {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    letter-spacing: .03em;
+    white-space: nowrap;
+    color: var(--ctps-muted);
+}
+
+.ctps-editor-save-state--saved {
+    color: var(--ctps-hold);
+}
+
+.ctps-editor-save-state--dirty {
+    color: var(--ctps-drift);
+}
+
 /* The upload input is triggered via its sibling button; keep it out of flow. */
 .ctps-layout-file {
     display: none;

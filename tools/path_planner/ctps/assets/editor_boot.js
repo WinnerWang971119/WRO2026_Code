@@ -253,6 +253,7 @@
                 circle: $("ctps-tool-circle"),
             },
             save: $("ctps-editor-save"),
+            saveState: $("ctps-editor-save-state"),
             loadBtn: $("ctps-editor-load-btn"),
             file: $("ctps-editor-file"),
             propsEmpty: $("ctps-editor-props-empty"),
@@ -284,8 +285,17 @@
         _bindResize();
 
         E.initMap();
+        // Auto-load the embedded `const LAYOUT` (the recently-saved objects +
+        // zones) so the editor opens on the last layout, not a fresh scene.
+        // Runs BEFORE initSaveState so the loaded scene is the clean baseline.
+        if (typeof LAYOUT !== "undefined" && LAYOUT && E.ingestLayout) {
+            E.ingestLayout(LAYOUT);
+        }
         E.resize();
         E.refreshProps();
+        if (E.initSaveState) {
+            E.initSaveState();
+        }
         // Sync the zoom control to the core's default multiplier (it starts
         // hidden on the Field tab; the value/readout are ready for the Robot tab).
         _reflectZoom(E.state.robotZoom);
