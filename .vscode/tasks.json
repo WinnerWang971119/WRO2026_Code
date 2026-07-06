@@ -200,25 +200,14 @@
             "problemMatcher": []
         },
         {
-            "label": "CTPS: build & view",
-            "type": "shell",
-            "command": "uv",
-            "args": [
-                "run",
-                "python",
-                "-m",
-                "tools.path_planner.ctps"
-            ],
-            "group": "build",
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated",
-                "clear": true
-            },
-            "problemMatcher": []
-        },
-        {
-            "label": "CTPS: Edit Layout (open editor)",
+            // Background leg: build + serve the player over http on a fixed
+            // localhost port. VS Code's Simple Browser is a webview and cannot
+            // load file://, so the page must be served over http. The background
+            // problemMatcher's endsPattern flips this task "ready" when the
+            // "ctps: player at http://127.0.0.1:8770/" line prints, which gates
+            // the "build & view" open task below. To change the port, edit both
+            // the --port arg here and the openCtpsPlayer input URL.
+            "label": "CTPS: serve player",
             "type": "shell",
             "command": "uv",
             "args": [
@@ -226,14 +215,122 @@
                 "python",
                 "-m",
                 "tools.path_planner.ctps",
-                "--editor"
+                "--serve",
+                "--no-open",
+                "--port",
+                "8770"
             ],
+            "isBackground": true,
             "presentation": {
                 "reveal": "always",
                 "panel": "dedicated",
                 "clear": true
             },
+            "problemMatcher": {
+                "owner": "ctps",
+                "pattern": {
+                    "regexp": "^(ERROR):(\\d+):(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "message": 3
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^__ctps_never_begins__$",
+                    "endsPattern": "at http://127\\.0\\.0\\.1:"
+                }
+            }
+        },
+        {
+            // User-facing: waits for "CTPS: serve player" to report ready, then
+            // opens the served URL in VS Code's integrated Simple Browser via the
+            // openCtpsPlayer command input (the echo body just keeps the arg
+            // non-empty; the browser open is the input's side effect).
+            "label": "CTPS: build & view",
+            "type": "shell",
+            "command": "echo",
+            "args": [
+                "CTPS player -> ${input:openCtpsPlayer}"
+            ],
+            "dependsOn": "CTPS: serve player",
+            "group": "build",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "clear": true
+            },
             "problemMatcher": []
+        },
+        {
+            // Background leg for the layout editor (already an http save-server;
+            // here pinned to a fixed port so the Simple Browser input can target
+            // it). Change the port in both the --port arg and openCtpsEditor.
+            "label": "CTPS: serve editor",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "tools.path_planner.ctps",
+                "--editor",
+                "--no-open",
+                "--port",
+                "8771"
+            ],
+            "isBackground": true,
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": {
+                "owner": "ctps",
+                "pattern": {
+                    "regexp": "^(ERROR):(\\d+):(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "message": 3
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "^__ctps_never_begins__$",
+                    "endsPattern": "at http://127\\.0\\.0\\.1:"
+                }
+            }
+        },
+        {
+            "label": "CTPS: Edit Layout (open editor)",
+            "type": "shell",
+            "command": "echo",
+            "args": [
+                "CTPS editor -> ${input:openCtpsEditor}"
+            ],
+            "dependsOn": "CTPS: serve editor",
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            // Opens the served CTPS player in VS Code's integrated Simple
+            // Browser. Keep this port in sync with "CTPS: serve player" --port.
+            "id": "openCtpsPlayer",
+            "type": "command",
+            "command": "simpleBrowser.show",
+            "args": "http://127.0.0.1:8770/"
+        },
+        {
+            // Opens the served CTPS layout editor in the integrated Simple
+            // Browser. Keep this port in sync with "CTPS: serve editor" --port.
+            "id": "openCtpsEditor",
+            "type": "command",
+            "command": "simpleBrowser.show",
+            "args": "http://127.0.0.1:8771/"
         }
     ]
 }

@@ -34,7 +34,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict
 
-__all__ = ["serve_editor", "WATCHDOG_TIMEOUT_S"]
+__all__ = ["serve_editor", "serve_page", "WATCHDOG_TIMEOUT_S"]
 
 #: The editor heartbeats every ~3 s (assets/editor_io.js). If no request of any
 #: kind arrives for this long, the browser is gone (tab closed / quit / asleep /
@@ -48,12 +48,17 @@ _WATCHDOG_POLL_S: float = 1.0
 
 
 class _EditorServer(ThreadingHTTPServer):
-    """A localhost editor server carrying the page bytes + the save target."""
+    """A localhost page server carrying the page bytes + an optional save target.
+
+    ``layout_out`` is the destination a ``POST /save`` writes. It is optional:
+    ``None`` runs the server in read-only "static page" mode (the player's
+    ``--serve`` flow, which has nothing to save), and ``POST /save`` then 404s.
+    """
 
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, handler, html_bytes: bytes, layout_out: Path):
+    def __init__(self, address, handler, html_bytes: bytes, layout_out=None):
         super().__init__(address, handler)
         self.html_bytes = html_bytes
         self.layout_out = layout_out
@@ -121,6 +126,10 @@ class _EditorHandler(BaseHTTPRequestHandler):
             self._send(404, "text/plain; charset=utf-8", b"not found")
 
     def _handle_save(self) -> None:
+        if self.server.layout_out is None:
+            # Static-page mode (player --serve): there is no save target.
+            self._send_json(404, {"ok": False, "error": "save not supported"})
+            return
         raw = self._read_body()
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -162,44 +171,26 @@ def _watchdog(server: _EditorServer) -> None:
     server.shutdown()
 
 
-def serve_editor(
-    html_bytes: bytes,
-    layout_out: "str | Path",
-    open_browser: bool = True,
-    host: str = "127.0.0.1",
-) -> int:
-    """Serve ``html_bytes`` on a localhost port until the browser tab goes away.
+def _run_server(server: _EditorServer, url: str, note: str, open_browser: bool) -> int:
+    """Start the watchdog, optionally open ``url``, then block in ``serve_forever``.
 
-    Binds an ephemeral port on ``host`` (default ``127.0.0.1`` — never exposed
-    off the machine), starts the auto-close :func:`_watchdog`, optionally opens
-    the page in the browser, and blocks in ``serve_forever`` until the watchdog
-    (a /close beacon or heartbeat silence) or Ctrl-C stops it. The port is
-    ephemeral (bind ``:0``) so two editors never collide.
+    The shared serving leg behind :func:`serve_editor` and :func:`serve_page`:
+    it starts the auto-close :func:`_watchdog`, prints ``note`` (the ready line
+    a caller/tool watches for), optionally launches the browser from a side
+    thread (so a slow launch never delays the bind→serve handoff), and blocks
+    until the watchdog (a /close beacon or heartbeat silence) or Ctrl-C stops it.
 
-    :param html_bytes: the rendered ``layout_editor.html`` to serve at ``/``.
-    :param layout_out: destination path a ``POST /save`` writes (the layout).
-    :param open_browser: when ``True``, open the served URL after binding.
-    :param host: bind address; keep the localhost default.
+    :param server: an already-bound :class:`_EditorServer`.
+    :param url: the served URL, opened when ``open_browser`` is set.
+    :param note: the stderr "ready" message printed once serving begins.
+    :param open_browser: when ``True``, open ``url`` after binding.
     :return: ``0`` on a clean shutdown.
     """
-    server = _EditorServer(
-        (host, 0), _EditorHandler, html_bytes, Path(layout_out)
-    )
-    port = server.server_address[1]
-    url = f"http://{host}:{port}/"
-
     watchdog = threading.Thread(target=_watchdog, args=(server,), daemon=True)
     watchdog.start()
 
-    print(
-        f"ctps: layout editor at {url}\n"
-        f"  Save writes {Path(layout_out)} directly; the server auto-closes a "
-        f"few seconds after you close the tab.",
-        file=sys.stderr,
-    )
+    print(note, file=sys.stderr)
     if open_browser:
-        # Open from a side thread so a slow browser launch never delays the
-        # bind→serve handoff (the page must reach a listening socket).
         threading.Thread(target=webbrowser.open, args=(url,), daemon=True).start()
 
     try:
@@ -208,5 +199,99 @@ def serve_editor(
         pass
     finally:
         server.server_close()
-    print("ctps: layout editor closed.", file=sys.stderr)
     return 0
+
+
+def serve_editor(
+    html_bytes: bytes,
+    layout_out: "str | Path",
+    open_browser: bool = True,
+    host: str = "127.0.0.1",
+    port: int = 0,
+) -> int:
+    """Serve ``html_bytes`` on a localhost port until the browser tab goes away.
+
+    Binds ``host:port`` (default ``127.0.0.1:0`` — an ephemeral free port, never
+    exposed off the machine), starts the auto-close :func:`_watchdog`, optionally
+    opens the page, and blocks in ``serve_forever`` until the watchdog (a /close
+    beacon or heartbeat silence) or Ctrl-C stops it. Pass a fixed ``port`` when an
+    external viewer (e.g. VS Code's Simple Browser) must open a known URL;
+    ``port=0`` keeps the collision-free ephemeral default two editors can share.
+
+    :param html_bytes: the rendered ``layout_editor.html`` to serve at ``/``.
+    :param layout_out: destination path a ``POST /save`` writes (the layout).
+    :param open_browser: when ``True``, open the served URL after binding.
+    :param host: bind address; keep the localhost default.
+    :param port: bind port; ``0`` (default) picks a free ephemeral port.
+    :return: ``0`` on a clean shutdown; ``1`` if the port could not be bound.
+    """
+    try:
+        server = _EditorServer(
+            (host, port), _EditorHandler, html_bytes, Path(layout_out)
+        )
+    except OSError as exc:
+        print(
+            f"ctps: could not bind {host}:{port} for the layout editor ({exc}).\n"
+            "  Another server may be using that port — free it or pick another "
+            "with --port.",
+            file=sys.stderr,
+        )
+        return 1
+    bound = server.server_address[1]
+    url = f"http://{host}:{bound}/"
+
+    note = (
+        f"ctps: layout editor at {url}\n"
+        f"  Save writes {Path(layout_out)} directly; the server auto-closes a "
+        f"few seconds after you close the tab."
+    )
+    result = _run_server(server, url, note, open_browser)
+    print("ctps: layout editor closed.", file=sys.stderr)
+    return result
+
+
+def serve_page(
+    html_bytes: bytes,
+    open_browser: bool = True,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    label: str = "page",
+) -> int:
+    """Serve a static ``html_bytes`` page on a localhost port, self-closing.
+
+    The read-only sibling of :func:`serve_editor` for the player's ``--serve``
+    flow: it serves the page at ``/`` with the same heartbeat/watchdog auto-close
+    (ADR-057) but carries no save target, so ``POST /save`` 404s. The page must
+    heartbeat (``POST /ping`` + a ``/close`` beacon) for the watchdog to notice
+    the tab is gone; a page that never pings simply frees the port after
+    :data:`WATCHDOG_TIMEOUT_S`, so the server can still never dangle.
+
+    :param html_bytes: the rendered page to serve at ``/``.
+    :param open_browser: when ``True``, open the served URL after binding.
+    :param host: bind address; keep the localhost default.
+    :param port: bind port; ``0`` (default) picks a free ephemeral port. Pass a
+        fixed port when an external viewer must open a known URL.
+    :param label: a short noun for the log lines (e.g. ``"player"``); the ready
+        line ``ctps: <label> at http://...`` is what a launching tool watches for.
+    :return: ``0`` on a clean shutdown; ``1`` if the port could not be bound.
+    """
+    try:
+        server = _EditorServer((host, port), _EditorHandler, html_bytes, None)
+    except OSError as exc:
+        print(
+            f"ctps: could not bind {host}:{port} for the {label} ({exc}).\n"
+            "  Another server may be using that port — free it or pick another "
+            "with --port.",
+            file=sys.stderr,
+        )
+        return 1
+    bound = server.server_address[1]
+    url = f"http://{host}:{bound}/"
+
+    note = (
+        f"ctps: {label} at {url}\n"
+        f"  The server auto-closes a few seconds after you close the tab."
+    )
+    result = _run_server(server, url, note, open_browser)
+    print(f"ctps: {label} closed.", file=sys.stderr)
+    return result

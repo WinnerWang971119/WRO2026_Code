@@ -419,7 +419,9 @@ def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
         editor_file.write_bytes(b"<html>editor</html>")
         return editor_file
 
-    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1"):
+    def _stub_serve(
+        html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0
+    ):
         calls["serve"] += 1
         assert html_bytes == b"<html>editor</html>"
         assert Path(layout_out) == ctps_main._DEFAULT_LAYOUT
@@ -508,3 +510,95 @@ def test_editor_flow_unreadable_layout_opens_empty(monkeypatch, tmp_path):
 
     assert rc == 0
     assert captured["layout"] is None
+
+
+def test_editor_flow_threads_fixed_port(monkeypatch, tmp_path):
+    """``main(["--editor", "--port", N])`` threads the fixed port to ``serve_editor``.
+
+    The Simple-Browser task opens a hardcoded ``http://127.0.0.1:<port>/``, so the
+    port on the CLI must reach the server binder verbatim.
+    """
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: None)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0):
+        captured["port"] = port
+        return 0
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", _stub_serve)
+
+    rc = ctps_main.main(["--editor", "--no-open", "--port", "8771"])
+
+    assert rc == 0
+    assert captured["port"] == 8771
+
+
+# ---------------------------------------------------------------------------
+# --serve flow — render then serve over http instead of writing + opening
+# ---------------------------------------------------------------------------
+
+
+def test_inject_player_heartbeat_before_body_close():
+    """``_inject_player_heartbeat`` inserts the liveness script just before </body>."""
+    html = "<html><body><div>player</div></body></html>"
+    out = ctps_main._inject_player_heartbeat(html)
+
+    # The heartbeat rides inside the body, before its close.
+    assert "/ping" in out
+    assert "/close" in out
+    body_close = out.index("</body>")
+    assert out.index("/ping") < body_close
+    # Same-origin relative URLs only — never an absolute http(s) literal (so it
+    # would survive the player's self-containment lint if it ever moved on-page).
+    assert "http://" not in out
+    assert "https://" not in out
+    # The file:// guard keeps a plain double-clicked player untouched.
+    assert 'protocol === "file:"' in out
+
+
+def test_inject_player_heartbeat_appends_when_no_body():
+    """With no </body>, the script is appended rather than lost."""
+    out = ctps_main._inject_player_heartbeat("<html>bare</html>")
+    assert "/ping" in out
+    assert out.rstrip().endswith("</script>")
+
+
+def test_serve_flow_dispatches_to_serve(monkeypatch, tmp_path):
+    """``main(["--serve", "--trace", FILE])`` serves and never opens a file.
+
+    The ``--serve`` path must route through ``_render_and_serve`` (stubbed to
+    capture its port) and leave ``_render_and_open`` dormant — the opposite of
+    the default flow.
+    """
+    captured = {}
+
+    def _stub_serve(trace_json, out_path, open_browser, port, filename="", objects=None):
+        captured["port"] = port
+        captured["open_browser"] = open_browser
+        return 0
+
+    monkeypatch.setattr(ctps_main, "_render_and_serve", _stub_serve)
+    monkeypatch.setattr(
+        ctps_main, "_render_and_open", _never_called("_render_and_open")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
+    )
+
+    trace_file = tmp_path / "run.json"
+    trace_file.write_text('{"commands": []}', encoding="utf-8")
+
+    rc = ctps_main.main(
+        ["--serve", "--port", "8770", "--no-open", "--trace", str(trace_file)]
+    )
+
+    assert rc == 0
+    assert captured["port"] == 8770
+    assert captured["open_browser"] is False

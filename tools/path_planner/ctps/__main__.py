@@ -7,6 +7,7 @@ Run as a module from the repo root::
     python -m tools.path_planner.ctps --trace run.json --no-open
     python -m tools.path_planner.ctps --fixture --layout my_layout.json
     python -m tools.path_planner.ctps --editor   # open the layout editor
+    python -m tools.path_planner.ctps --serve --port 8770 --no-open  # http, no pop
 
 This is the single front door for the Clear Trajectory Prediction Simulator.
 It wires the three pure CTPS modules together end-to-end:
@@ -24,7 +25,11 @@ It wires the three pure CTPS modules together end-to-end:
    ``tools/path_planner/layout.json`` exists), it is embedded so the player
    auto-loads its objects/zones on open — no in-browser upload.
 #. Open the page in the default browser (unless ``--no-open``) and print the
-   output path.
+   output path. With ``--serve`` the page is instead served over
+   ``http://127.0.0.1`` from a self-closing localhost server (ADR-057) — the
+   integrated Simple Browser in VS Code is a webview that cannot load
+   ``file://``, so it needs an http URL; pair ``--serve --no-open`` and let the
+   editor task open the printed URL.
 
 Toolchain policy (CTPS plan, Error Handling): the Python side NEVER requires a
 C++ compiler when ``--trace`` is supplied. The compiler is located lazily, only
@@ -490,25 +495,27 @@ def _resolve_map_png() -> Optional[Path]:
     return p
 
 
-def _render_and_open(
+def _render_page(
     trace_json: str,
     out_path: Path,
-    open_browser: bool,
     filename: str = "",
     objects: "Optional[Dict[str, Any]]" = None,
-) -> int:
-    """Load -> build -> render the trace JSON, then optionally open the page.
+) -> Optional[Path]:
+    """Load -> build -> render the trace JSON to an HTML player file.
+
+    The shared render leg behind :func:`_render_and_open` (write + open a file)
+    and :func:`_render_and_serve` (serve the file's bytes over http). On any
+    failure it prints a clear message and returns ``None`` so the caller exits
+    non-zero without raising.
 
     :param trace_json: a Data-Model-A command-stream JSON document (string).
     :param out_path: destination ``.html`` path for the rendered player.
-    :param open_browser: when ``True``, open the rendered page in the default
-        browser (``os.startfile`` on Windows, else ``webbrowser.open``).
     :param filename: display filename embedded in the page header.
     :param objects: optional ``layout.json``-shaped dict embedded as
         ``const OBJECTS`` so the player auto-loads its cargo layout (no
         in-browser upload); ``None`` renders a layout-free page.
-    :return: ``0`` on success; ``1`` if the JSON is empty/invalid or rendering
-        fails.
+    :return: the resolved output :class:`Path` on success; ``None`` if the JSON
+        is empty/invalid, references an unknown node, or rendering fails.
     """
     if not trace_json.strip():
         print(
@@ -516,20 +523,20 @@ def _render_and_open(
             "render.",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     try:
         trace = trace_loader.load(trace_json)
     except ValueError as exc:
         # Schema mismatch / not-a-dict / bad commands list.
         print(f"ctps: invalid trace JSON: {exc}", file=sys.stderr)
-        return 1
+        return None
     except Exception as exc:  # noqa: BLE001 - json.JSONDecodeError + guards
         print(
             f"ctps: could not parse trace JSON ({type(exc).__name__}: {exc}).",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     try:
         track = track_builder.build(trace, field_data)
@@ -548,7 +555,7 @@ def _render_and_open(
             "exist in field_data.",
             file=sys.stderr,
         )
-        return 1
+        return None
 
     try:
         out = player_html.render(
@@ -563,6 +570,32 @@ def _render_and_open(
         # emit a player with no cargo — the layout is caller-supplied, not
         # field-day content.
         print(f"ctps: invalid layout: {exc}", file=sys.stderr)
+        return None
+
+    return out
+
+
+def _render_and_open(
+    trace_json: str,
+    out_path: Path,
+    open_browser: bool,
+    filename: str = "",
+    objects: "Optional[Dict[str, Any]]" = None,
+) -> int:
+    """Render the trace to a file, then optionally open it in the default browser.
+
+    :param trace_json: a Data-Model-A command-stream JSON document (string).
+    :param out_path: destination ``.html`` path for the rendered player.
+    :param open_browser: when ``True``, open the rendered page in the default
+        browser (``os.startfile`` on Windows, else ``webbrowser.open``).
+    :param filename: display filename embedded in the page header.
+    :param objects: optional ``layout.json``-shaped dict embedded as
+        ``const OBJECTS`` so the player auto-loads its cargo layout (no
+        in-browser upload); ``None`` renders a layout-free page.
+    :return: ``0`` on success; ``1`` if rendering failed.
+    """
+    out = _render_page(trace_json, out_path, filename=filename, objects=objects)
+    if out is None:
         return 1
 
     if open_browser:
@@ -570,6 +603,52 @@ def _render_and_open(
 
     print(str(out))
     return 0
+
+
+def _render_and_serve(
+    trace_json: str,
+    out_path: Path,
+    open_browser: bool,
+    port: int,
+    filename: str = "",
+    objects: "Optional[Dict[str, Any]]" = None,
+) -> int:
+    """Render the trace to a file, then serve it over http (self-closing).
+
+    The player is normally a ``file://`` page opened directly, but VS Code's
+    integrated Simple Browser (a webview) only loads ``http(s)://`` — never
+    ``file://``. This renders the page as usual, then serves its bytes on a
+    localhost port with the same auto-close server as the editor (ADR-057), with
+    a heartbeat/close beacon injected so the server self-terminates once the tab
+    goes away. Pair with ``--no-open`` so an external viewer opens the printed
+    URL; ``open_browser`` still works for a plain CLI ``--serve``.
+
+    :param trace_json: a Data-Model-A command-stream JSON document (string).
+    :param out_path: destination ``.html`` path for the rendered player (still
+        written to disk, then served).
+    :param open_browser: when ``True``, open the served URL in the default
+        browser after binding.
+    :param port: fixed localhost port to serve on (``0`` = ephemeral).
+    :param filename: display filename embedded in the page header.
+    :param objects: optional ``layout.json``-shaped dict (see :func:`_render_page`).
+    :return: ``0`` on a clean shutdown; ``1`` if rendering or binding failed.
+    """
+    out = _render_page(trace_json, out_path, filename=filename, objects=objects)
+    if out is None:
+        return 1
+
+    # The on-disk file stays a byte-clean self-contained page (tests render it
+    # directly); the heartbeat rides only on the SERVED copy so the localhost
+    # server can notice the tab is gone and self-close.
+    served_html = _inject_player_heartbeat(out.read_text(encoding="utf-8"))
+
+    print(str(out))
+    return edit_server.serve_page(
+        served_html.encode("utf-8"),
+        open_browser=open_browser,
+        port=port,
+        label="player",
+    )
 
 
 def _open_in_browser(path: Path) -> None:
@@ -594,6 +673,52 @@ def _open_in_browser(path: Path) -> None:
         )
 
 
+#: A tiny liveness script injected into the SERVED player page (``--serve``) so
+#: the localhost server self-closes when the tab goes away (ADR-057). It mirrors
+#: the editor's ``assets/editor_io.js`` session leg: a ``POST /ping`` every few
+#: seconds is the heartbeat (its silence trips the server's watchdog) and a
+#: ``/close`` beacon on unload is the clean-close fast path. Inert on a
+#: ``file:`` open (no server to talk to), so a plain double-clicked player file
+#: is unaffected. Uses only same-origin relative URLs — no ``http://`` literal —
+#: so it never trips the player's self-containment lint if it ever moved on-page.
+_PLAYER_HEARTBEAT_JS: str = """\
+(function () {
+    if (!window.location || window.location.protocol === "file:") { return; }
+    var HEARTBEAT_MS = 3000;
+    setInterval(function () {
+        try { fetch("/ping", { method: "POST" }).catch(function () {}); }
+        catch (e) { /* server already closed — fine */ }
+    }, HEARTBEAT_MS);
+    function closeBeacon() {
+        try {
+            if (navigator.sendBeacon) { navigator.sendBeacon("/close", ""); }
+            else { fetch("/close", { method: "POST", keepalive: true }); }
+        } catch (e) { /* no-op */ }
+    }
+    window.addEventListener("pagehide", closeBeacon);
+    window.addEventListener("beforeunload", closeBeacon);
+})();
+"""
+
+
+def _inject_player_heartbeat(html: str) -> str:
+    """Return ``html`` with the :data:`_PLAYER_HEARTBEAT_JS` liveness script added.
+
+    Inserts the heartbeat ``<script>`` immediately before the final ``</body>``
+    (or appends it when, defensively, no ``</body>`` is present). Only the served
+    copy is patched — the on-disk file is left byte-clean.
+
+    :param html: the rendered player page source.
+    :return: the page with the heartbeat script injected.
+    """
+    script = "<script>\n" + _PLAYER_HEARTBEAT_JS + "</script>\n"
+    marker = "</body>"
+    idx = html.rfind(marker)
+    if idx == -1:
+        return html + "\n" + script
+    return html[:idx] + script + html[idx:]
+
+
 def _find_default_layout() -> Optional[Path]:
     """Return the newest ``layout*.json`` in :data:`_LAYOUT_DIR`, or ``None``.
 
@@ -615,7 +740,7 @@ def _find_default_layout() -> Optional[Path]:
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
-def _serve_editor(open_browser: bool) -> int:
+def _serve_editor(open_browser: bool, port: int = 0) -> int:
     """Render the offline layout editor and serve it on a self-closing server.
 
     The ``--editor`` front door: renders the self-contained ``layout_editor.html``
@@ -631,6 +756,8 @@ def _serve_editor(open_browser: bool) -> int:
     :func:`_find_default_layout` and ``layouts/README.md``).
 
     :param open_browser: when ``True``, open the served URL after binding.
+    :param port: fixed localhost port to serve on (``0`` = ephemeral). Pass a
+        fixed port when an external viewer must open a known URL.
     :return: ``0`` on a clean shutdown; ``1`` if rendering fails.
     """
     # Auto-load the recently-saved layout (newest layouts/layout*.json — the
@@ -664,7 +791,7 @@ def _serve_editor(open_browser: bool) -> int:
         return 1
 
     return edit_server.serve_editor(
-        out.read_bytes(), _DEFAULT_LAYOUT, open_browser=open_browser
+        out.read_bytes(), _DEFAULT_LAYOUT, open_browser=open_browser, port=port
     )
 
 
@@ -739,13 +866,34 @@ def main(argv: Optional[List[str]] = None) -> int:
             "--trace/--fixture/--layout; needs no C++ toolchain."
         ),
     )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help=(
+            "Serve the rendered player over http://127.0.0.1 (a self-closing "
+            "localhost server) instead of writing a file and opening it "
+            "directly. Pair with --no-open so an external viewer (e.g. VS "
+            "Code's integrated Simple Browser, which cannot load file://) opens "
+            "the printed URL. Ignored with --editor (which always serves)."
+        ),
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=0,
+        help=(
+            "Fixed localhost port for --serve / --editor (default: 0 = a free "
+            "ephemeral port). Set this when an external viewer must open a "
+            "known URL."
+        ),
+    )
     args = parser.parse_args(argv)
 
     open_browser = not args.no_open
 
     # --- --editor flow: serve the authoring page, nothing else ---------------
     if args.editor:
-        return _serve_editor(open_browser)
+        return _serve_editor(open_browser, port=args.port)
 
     # Resolve the cargo layout to embed (object/cargo plan, issue #57): the
     # explicit --layout wins; otherwise the newest layouts/layout*.json is
@@ -785,6 +933,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             return 1
         trace_json = trace_path.read_text(encoding="utf-8")
+        if args.serve:
+            return _render_and_serve(
+                trace_json,
+                args.out,
+                open_browser,
+                args.port,
+                filename=trace_path.name,
+                objects=layout,
+            )
         return _render_and_open(
             trace_json,
             args.out,
@@ -797,11 +954,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     trace_json = _produce_trace_json(args.fixture)
     if trace_json is None:
         return 1
+    filename = "fixture mission" if args.fixture else "mission"
+    if args.serve:
+        return _render_and_serve(
+            trace_json,
+            args.out,
+            open_browser,
+            args.port,
+            filename=filename,
+            objects=layout,
+        )
     return _render_and_open(
         trace_json,
         args.out,
         open_browser,
-        filename=("fixture mission" if args.fixture else "mission"),
+        filename=filename,
         objects=layout,
     )
 

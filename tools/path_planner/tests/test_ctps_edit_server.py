@@ -151,6 +151,89 @@ def test_close_stops_server(tmp_path):
     assert not thread.is_alive()
 
 
+def test_static_page_mode_serves_but_refuses_save(tmp_path):
+    """A ``layout_out=None`` server (player ``--serve``) serves ``/`` but 404s /save.
+
+    The static-page sibling of the editor: ``GET /`` returns the page bytes, but
+    since there is no save target a ``POST /save`` is refused (404) and nothing
+    is written — the read-only guarantee the player serve relies on.
+    """
+    server = edit_server._EditorServer(
+        ("127.0.0.1", 0), edit_server._EditorHandler, b"<html>PLAYER</html>", None
+    )
+    port = server.server_address[1]
+    thread = _serve(server)
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/", timeout=2
+        ) as resp:
+            assert resp.status == 200
+            assert b"PLAYER" in resp.read()
+
+        code = None
+        try:
+            _post(port, "/save", json.dumps(_VALID_LAYOUT).encode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            exc.close()  # release the error response socket (no ResourceWarning)
+        assert code == 404
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def test_serve_page_binds_requested_fixed_port(tmp_path):
+    """``serve_page`` binds the exact port asked for so an external viewer's URL matches.
+
+    Runs the blocking ``serve_page`` in a daemon thread on a specific free port
+    (grabbed then released so it is almost certainly still free), then proves the
+    page is reachable at THAT port — the property the VS Code Simple Browser task
+    depends on (it opens a hardcoded ``http://127.0.0.1:<port>/``).
+    """
+    import socket
+    import threading as _threading
+
+    # Grab a free port, then release it so serve_page can bind the same number.
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    fixed_port = probe.getsockname()[1]
+    probe.close()
+
+    thread = _threading.Thread(
+        target=edit_server.serve_page,
+        args=(b"<html>FIXED</html>",),
+        kwargs={"open_browser": False, "port": fixed_port},
+        daemon=True,
+    )
+    thread.start()
+    try:
+        # Poll briefly for the bind→serve handoff.
+        last_exc = None
+        for _ in range(50):
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{fixed_port}/", timeout=2
+                ) as resp:
+                    assert resp.status == 200
+                    assert b"FIXED" in resp.read()
+                break
+            except urllib.error.URLError as exc:  # not yet listening
+                last_exc = exc
+                import time
+
+                time.sleep(0.02)
+        else:  # pragma: no cover - only if the server never came up
+            raise AssertionError(f"serve_page never bound {fixed_port}: {last_exc}")
+    finally:
+        # Stop the server via its /close beacon so the daemon thread unwinds.
+        try:
+            _post(fixed_port, "/close", b"")
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            pass
+        thread.join(timeout=3)
+
+
 def test_watchdog_auto_closes_on_heartbeat_silence(monkeypatch, tmp_path):
     """With no heartbeat, the watchdog shuts the server down on its own.
 
