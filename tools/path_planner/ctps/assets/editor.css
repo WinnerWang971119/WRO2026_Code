@@ -1,12 +1,337 @@
-/* CTPS — Layout Editor page styles (object/cargo plan, T7 -- issue #57).
+/* CTPS — Layout Editor page styles (object/cargo plan, T8 -- issue #57).
  *
- * PLACEHOLDER. This sheet's only job today is to reserve its slot in
- * layout_editor_html._ASSET_CSS so the editor emitter's asset pipeline and its
- * own self-containment lint exercise the final file layout now (P-TC7/P-TC8),
- * ahead of T8 landing the real editor styles (Field/Robot tab chrome, the
- * canvas stage, the Properties panel, the Rect/Circle tool row, Save/Load).
- *
- * It is concatenated AFTER tokens.css into the single inline <style> block, so
- * T8's rules here may reference the tokens.css custom properties. Fully offline:
- * no webfonts, no @import, no url(...), no external reference of any kind.
+ * The editor page (layout_editor.html) inlines ONLY tokens.css + this sheet (its
+ * own small asset tuple), so unlike the player's components/layout split this
+ * one file carries BOTH the page-level structure and the widget look for the
+ * two-tab editor's chrome: the Field/Robot tab row, the Select/Rect/Circle tool
+ * row, Save/Load, the canvas stage, and the Properties panel. It EXTENDS the
+ * ADR-053 "Instrument" dark theme -- every colour/metric is a tokens.css custom
+ * property, never a bare hex/px. Class selectors only: no inline element styles,
+ * and (for full offline / file:// use) no webfonts, no @import, no url(...), no
+ * external reference of any kind.
  */
+
+/* ===================================================================== */
+/* Viewport root                                                          */
+/* ===================================================================== */
+
+html,
+body {
+    margin: 0;
+    height: 100%;
+    background: var(--ctps-bg);
+    color: var(--ctps-text);
+    font-family: var(--ctps-font-ui);
+    overflow: hidden;
+}
+
+/* Elements toggled via the `hidden` property must stay hidden regardless of
+ * any `display` a more specific rule sets. */
+[hidden] {
+    display: none !important;
+}
+
+.ctps-app {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ===================================================================== */
+/* Header: wordmark, tabs, tools, Save/Load                               */
+/* ===================================================================== */
+
+.ctps-editor-header {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-3);
+    padding: var(--ctps-space-4) var(--ctps-space-5);
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-wordmark {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: .12em;
+    color: var(--ctps-text);
+}
+
+.ctps-editor-subtitle {
+    font-family: var(--ctps-font-mono);
+    font-size: 12px;
+    color: var(--ctps-muted);
+}
+
+.ctps-header-spacer {
+    flex: 1 1 auto;
+}
+
+.ctps-editor-tabs,
+.ctps-editor-tools {
+    display: flex;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-editor-tab {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .03em;
+    padding: 4px 12px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-editor-tab--active {
+    background: var(--ctps-text);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-text);
+}
+
+.ctps-editor-tool {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    padding: 3px 10px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-editor-tool--active {
+    background: var(--ctps-accent);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-accent);
+}
+
+.ctps-help-btn {
+    box-sizing: border-box;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    padding: 3px 10px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: transparent;
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* The upload input is triggered via its sibling button; keep it out of flow. */
+.ctps-layout-file {
+    display: none;
+}
+
+/* ===================================================================== */
+/* Main: canvas stage + Properties rail                                   */
+/* ===================================================================== */
+
+.ctps-editor-main {
+    flex: 1 1 auto;
+    display: flex;
+    min-width: 0;
+    min-height: 0;
+    gap: var(--ctps-space-3);
+    padding: var(--ctps-space-3);
+}
+
+.ctps-editor-stage {
+    flex: 1 1 auto;
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    overflow: hidden;
+}
+
+.ctps-canvas-stack {
+    position: absolute;
+    inset: 0;
+}
+
+.ctps-canvas-layer {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    cursor: default;
+    touch-action: none;
+}
+
+/* A draw tool is active -> the canvas invites a rubber-band drag. */
+.ctps-editor-stage.is-draw .ctps-canvas-layer {
+    cursor: crosshair;
+}
+
+/* The renderer draws its own fit-to-view scale bar on the canvas; the static
+ * DOM copy from the markup would stack a second, non-scaling label, so hide it. */
+.ctps-scale-bar {
+    display: none;
+}
+
+.ctps-editor-status {
+    position: absolute;
+    left: var(--ctps-space-3);
+    bottom: var(--ctps-space-3);
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+    pointer-events: none;
+}
+
+/* ===================================================================== */
+/* Properties rail                                                        */
+/* ===================================================================== */
+
+.ctps-editor-rail {
+    flex: 0 0 264px;
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+    min-width: 0;
+    min-height: 0;
+    overflow-y: auto;
+}
+
+.ctps-panel {
+    box-sizing: border-box;
+    background: var(--ctps-panel);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-panel);
+    padding: var(--ctps-space-4) var(--ctps-space-5);
+}
+
+.ctps-panel-title {
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+    margin-bottom: var(--ctps-space-3);
+}
+
+.ctps-editor-props-empty {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-style: italic;
+    color: var(--ctps-muted);
+}
+
+.ctps-editor-props-fields,
+.ctps-editor-rect-fields,
+.ctps-editor-circle-fields {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+}
+
+.ctps-editor-field {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: var(--ctps-space-1);
+    min-width: 0;
+}
+
+.ctps-editor-field-label {
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+.ctps-editor-field-row {
+    display: flex;
+    gap: var(--ctps-space-3);
+}
+
+.ctps-editor-input {
+    box-sizing: border-box;
+    width: 100%;
+    font-family: var(--ctps-font-mono);
+    font-size: 12px;
+    padding: 5px 7px;
+    background: var(--ctps-bg);
+    color: var(--ctps-text);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+}
+
+.ctps-editor-input--color {
+    height: 30px;
+    padding: 2px;
+    cursor: pointer;
+}
+
+.ctps-editor-delete {
+    box-sizing: border-box;
+    margin-top: var(--ctps-space-2);
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    padding: 6px 10px;
+    border: 1px solid var(--ctps-warn-border);
+    border-radius: var(--ctps-radius-chip);
+    background: transparent;
+    color: var(--ctps-drift);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* ===================================================================== */
+/* Focus visibility (keyboard navigation)                                 */
+/* ===================================================================== */
+
+.ctps-editor-tab:focus-visible,
+.ctps-editor-tool:focus-visible,
+.ctps-help-btn:focus-visible,
+.ctps-editor-input:focus-visible,
+.ctps-editor-delete:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
+
+.ctps-editor-input:focus {
+    border-color: var(--ctps-border-strong);
+    outline: none;
+}
+
+/* ===================================================================== */
+/* Responsive: rail drops under the stage on a narrow viewport            */
+/* ===================================================================== */
+
+@media (max-width: 760px) {
+    .ctps-editor-main {
+        flex-direction: column;
+    }
+
+    .ctps-editor-rail {
+        flex: 0 0 auto;
+        max-height: 42vh;
+    }
+
+    .ctps-editor-stage {
+        min-height: 300px;
+    }
+}
