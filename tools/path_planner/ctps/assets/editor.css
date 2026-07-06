@@ -1,0 +1,12 @@
+/* CTPS — Layout Editor page styles (object/cargo plan, T7 -- issue #57).
+ *
+ * PLACEHOLDER. This sheet's only job today is to reserve its slot in
+ * layout_editor_html._ASSET_CSS so the editor emitter's asset pipeline and its
+ * own self-containment lint exercise the final file layout now (P-TC7/P-TC8),
+ * ahead of T8 landing the real editor styles (Field/Robot tab chrome, the
+ * canvas stage, the Properties panel, the Rect/Circle tool row, Save/Load).
+ *
+ * It is concatenated AFTER tokens.css into the single inline <style> block, so
+ * T8's rules here may reference the tokens.css custom properties. Fully offline:
+ * no webfonts, no @import, no url(...), no external reference of any kind.
+ */
