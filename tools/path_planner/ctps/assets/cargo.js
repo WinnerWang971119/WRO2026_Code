@@ -20,9 +20,15 @@
  *     - The embedded-layout bootstrap: an init that, when an `OBJECTS` layout
  *       constant is embedded at emit time, hands it to `store.loadLayout`.
  *
- *   T6 (the second section, currently an empty labelled stub) — the two-tab
- *     cargo PANEL, the `#ctps-layout-file` upload wiring, the `#ctps-hud-holding`
- *     HUD line, and the Holding timeline lane. NOT implemented here.
+ *   T6 (the second section) — the two-tab cargo PANEL content (the Magazine
+ *     4x3 vertical-lane grid + the Inventory rear-box hold card), its live tab
+ *     counts, the `#ctps-layout-file` upload wiring (FileReader ->
+ *     `store.loadLayout`, tolerant per-object validation), and the
+ *     `#ctps-hud-holding` HUD line. All driven by `store.scene`/
+ *     `store.objects`/`store.activeCargoTab`; the tab-switching CHROME (which
+ *     panel is visible, which tab button is `--active`) lives in panels.js's
+ *     `renderHoldingShell` seam, the existing Log/Inspector tab idiom. The
+ *     Holding timeline lane itself is timeline.js's `buildHoldingLane` seam.
  *
  * Reads each event's structured `method`/`arg` (track_builder.py) — never the
  * display `label`. Consumes the pinned engine via `CTPS.engine` (poseAt) and the
@@ -478,12 +484,386 @@
     });
 
     // ===================================================================
-    // T6 — CARGO PANEL + UPLOAD + HUD + HOLDING LANE (Blocked By T5)
+    // T6 — CARGO PANEL + UPLOAD + HUD (Blocked By T5)
     //
-    // Intentionally empty. T6 fills the two-tab cargo panel (#ctps-cargo,
-    // .ctps-cargo-tab, #ctps-mag-grid, #ctps-inv-list) from store.scene /
-    // store.activeCargoTab, wires #ctps-layout-file (FileReader ->
-    // store.loadLayout) and #ctps-hud-holding, and rebuilds the Holding
-    // timeline lane on layout-load. Do NOT implement it here.
+    // Fills the two-tab cargo panel (#ctps-cargo, .ctps-mag-grid,
+    // #ctps-inv-list, the tab count badges) from `store.scene`/
+    // `store.objects`, wires `.ctps-cargo-tab` clicks to `store.setCargoTab`,
+    // wires `#ctps-layout-file` (FileReader -> tolerant validate ->
+    // `store.loadLayout`), and updates `#ctps-hud-holding`. The Holding
+    // timeline lane is timeline.js's seam; the tab-switch CHROME (which panel
+    // is visible / which tab button is active) is panels.js's
+    // `renderHoldingShell` seam, following the existing Log/Inspector idiom.
     // ===================================================================
+
+    // ----- magazine cell label + object lookup -----------------------------
+
+    /**
+     * The magazine cell's short label: the first two non-space characters of
+     * the object `name`, uppercased (Data Model: magazine cell label). Yields
+     * a shorter (or empty) string for a name with fewer than 2 non-space
+     * characters -- never throws.
+     */
+    function _shortLabel(name) {
+        var text = name || "";
+        var chars = [];
+        for (var i = 0; i < text.length && chars.length < 2; i++) {
+            var ch = text.charAt(i);
+            if (ch !== " ") {
+                chars.push(ch);
+            }
+        }
+        return chars.join("").toUpperCase();
+    }
+
+    /** Find an object by id in the current layout's `objects` array, or null. */
+    function _objectById(objects, id) {
+        for (var i = 0; i < objects.length; i++) {
+            if (objects[i] && objects[i].id === id) {
+                return objects[i];
+            }
+        }
+        return null;
+    }
+
+    // ----- counts (tabs + HUD share the same source) -----------------------
+
+    /**
+     * `{ magFilled, magCap, invFilled, invCap }` for one scene snapshot (or
+     * the pristine/no-layout state when `scene` is null) -- the single source
+     * both the tab badges and the HUD line read.
+     */
+    function _cargoCounts(scene) {
+        var magFilled = 0;
+        var magazine = (scene && scene.magazine) || [];
+        for (var lane = 0; lane < magazine.length; lane++) {
+            magFilled += magazine[lane].length;
+        }
+        return {
+            magFilled: magFilled,
+            magCap: MAGAZINE_LANES * MAGAZINE_DEPTH,
+            invFilled: (scene && scene.rearBox) ? 1 : 0,
+            invCap: REAR_BOX_CAP,
+        };
+    }
+
+    // ----- Magazine tab: 4 vertical lanes of 3, front tile at the BOTTOM ----
+
+    /**
+     * Rebuild `#ctps-mag-grid`: one column per lane (0..MAGAZINE_LANES-1),
+     * each a stack of MAGAZINE_DEPTH cells top-to-bottom. `sortTo`/`dump`
+     * push/pop the END of `scene.magazine[lane]` (T5), so the front (most
+     * recently sorted, next to dump) tile is the LAST array element -- and it
+     * belongs at the BOTTOM row. For row `r` (0 = top .. DEPTH-1 = bottom),
+     * the stack index is `stack.length - DEPTH + r`: negative (empty cell)
+     * until the stack is deep enough to reach that row, so a partially-filled
+     * lane fills from the bottom row upward, matching the sidecar diagram.
+     * A filled cell gets the authored colour (via `setProperty`, never a
+     * hard-coded literal) + the 2-char label; an empty cell gets the dashed
+     * `--ctps-cell--empty` modifier for CSS to style.
+     */
+    function _renderMagazineGrid(gridEl, scene, objects) {
+        if (!gridEl) {
+            return;
+        }
+        while (gridEl.firstChild) {
+            gridEl.removeChild(gridEl.firstChild);
+        }
+        var magazine = (scene && scene.magazine) || [];
+        for (var lane = 0; lane < MAGAZINE_LANES; lane++) {
+            var stack = magazine[lane] || [];
+            var laneEl = document.createElement("div");
+            laneEl.className = "ctps-mag-lane";
+
+            var headerEl = document.createElement("div");
+            headerEl.className = "ctps-mag-lane-header";
+            headerEl.textContent = String(lane);
+            laneEl.appendChild(headerEl);
+
+            for (var row = 0; row < MAGAZINE_DEPTH; row++) {
+                var stackIndex = stack.length - MAGAZINE_DEPTH + row;
+                var cellEl = document.createElement("div");
+                if (stackIndex >= 0 && stackIndex < stack.length) {
+                    var id = stack[stackIndex];
+                    var obj = _objectById(objects, id);
+                    cellEl.className = "ctps-mag-cell";
+                    if (obj && obj.color) {
+                        cellEl.style.setProperty("--ctps-mag-cell-color", obj.color);
+                    }
+                    cellEl.textContent = _shortLabel(obj && obj.name);
+                } else {
+                    cellEl.className = "ctps-mag-cell ctps-mag-cell--empty";
+                }
+                laneEl.appendChild(cellEl);
+            }
+
+            var arrowEl = document.createElement("div");
+            arrowEl.className = "ctps-mag-lane-arrow";
+            arrowEl.textContent = "↓"; // dump-eject side, per lane
+            laneEl.appendChild(arrowEl);
+
+            gridEl.appendChild(laneEl);
+        }
+    }
+
+    // ----- Inventory tab: rear-box hold card (capacity 1) -------------------
+
+    /**
+     * Rebuild `#ctps-inv-list`: the held Cargo's `.ctps-hold-card` (existing
+     * CSS, `--ctps-hold` left accent) -- a colour swatch, the full object
+     * name, and an `onrobot` pill -- or, when the rear box is empty/closed, a
+     * one-line hint (verbatim from the UI sidecar).
+     */
+    function _renderInventoryPanel(listEl, scene, objects) {
+        if (!listEl) {
+            return;
+        }
+        while (listEl.firstChild) {
+            listEl.removeChild(listEl.firstChild);
+        }
+        var id = scene && scene.rearBox;
+        if (!id) {
+            var hint = document.createElement("div");
+            hint.className = "ctps-inv-empty";
+            hint.textContent = "closed — captures Cargo in the rear-box zone";
+            listEl.appendChild(hint);
+            return;
+        }
+        var obj = _objectById(objects, id);
+        var card = document.createElement("div");
+        card.className = "ctps-hold-card";
+
+        var swatch = document.createElement("span");
+        swatch.className = "ctps-hold-card-swatch";
+        if (obj && obj.color) {
+            swatch.style.setProperty("--ctps-swatch-color", obj.color);
+        }
+        card.appendChild(swatch);
+
+        var name = document.createElement("span");
+        name.className = "ctps-hold-card-name";
+        name.textContent = (obj && obj.name) ? obj.name : id;
+        card.appendChild(name);
+
+        var pill = document.createElement("span");
+        pill.className = "ctps-hold-card-pill";
+        pill.textContent = "onrobot";
+        card.appendChild(pill);
+
+        listEl.appendChild(card);
+    }
+
+    // ----- tab counts + HUD --------------------------------------------------
+
+    /** "N/CAP" on each tab badge, matching the sidecar mockup's count form. */
+    function _renderCargoTabCounts(dom, scene) {
+        var counts = _cargoCounts(scene);
+        if (dom.countMag) {
+            dom.countMag.textContent = counts.magFilled + "/" + counts.magCap;
+        }
+        if (dom.countInv) {
+            dom.countInv.textContent = counts.invFilled + "/" + counts.invCap;
+        }
+    }
+
+    /** "magazine N/CAP  rear box N/CAP" on the stage HUD -- no tab spacing. */
+    function _renderCargoHud(dom, scene) {
+        if (!dom.hudHolding) {
+            return;
+        }
+        var counts = _cargoCounts(scene);
+        dom.hudHolding.textContent =
+            "magazine " + counts.magFilled + "/" + counts.magCap +
+            "  rear box " + counts.invFilled + "/" + counts.invCap;
+    }
+
+    // ----- content orchestration --------------------------------------------
+
+    /** Rebuild every scene-driven piece of the cargo panel + HUD in one pass. */
+    function _renderCargoContent(dom, state) {
+        var scene = state.scene;
+        var objects = state.objects || [];
+        _renderMagazineGrid(dom.magGrid, scene, objects);
+        _renderInventoryPanel(dom.invList, scene, objects);
+        _renderCargoTabCounts(dom, scene);
+        _renderCargoHud(dom, scene);
+    }
+
+    function _queryCargoDom() {
+        return {
+            magGrid: document.getElementById("ctps-mag-grid"),
+            invList: document.getElementById("ctps-inv-list"),
+            countMag: document.getElementById("ctps-cargo-count-mag"),
+            countInv: document.getElementById("ctps-cargo-count-inv"),
+            hudHolding: document.getElementById("ctps-hud-holding"),
+        };
+    }
+
+    // ----- tab clicks -> store.setCargoTab -----------------------------------
+
+    /**
+     * Wire every `.ctps-cargo-tab[data-cargo-tab]` button to
+     * `store.setCargoTab`. The resulting `notify(["activeCargoTab"])` is
+     * consumed by panels.js's `renderHoldingShell` (which panel/tab-button
+     * becomes active) -- this module only dispatches the action.
+     */
+    function _wireCargoTabs(store) {
+        var tabs = document.querySelectorAll(".ctps-cargo-tab[data-cargo-tab]");
+        for (var i = 0; i < tabs.length; i++) {
+            tabs[i].addEventListener("click", function (evt) {
+                store.setCargoTab(evt.currentTarget.getAttribute("data-cargo-tab"));
+            });
+        }
+    }
+
+    // ----- layout upload: FileReader -> tolerant validate -> store.loadLayout
+
+    /**
+     * Minimal tolerant shape check for one uploaded layout object: enough to
+     * keep `cargo_resolve`/`CTPS_OBJ.drawObject` from choking on a malformed
+     * entry. Mirrors the loader convention (skip + warn), NOT `layout.py`'s
+     * loud strict validation -- that lives at emit time, not here.
+     */
+    var _VALID_SHAPES = { rect: true, circle: true };
+    var _VALID_TYPES = { tile: true, cargo: true, fixed: true };
+
+    function _isValidLayoutObject(obj) {
+        if (!obj || typeof obj !== "object") {
+            return false;
+        }
+        if (typeof obj.id !== "string" || obj.id === "") {
+            return false;
+        }
+        if (typeof obj.shape !== "string" || !_VALID_SHAPES[obj.shape]) {
+            return false;
+        }
+        if (typeof obj.type !== "string" || !_VALID_TYPES[obj.type]) {
+            return false;
+        }
+        if (typeof obj.x_cm !== "number" || typeof obj.y_cm !== "number") {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Lazily create (once) the inline "couldn't read layout" note, inserted
+     * right after the upload button in the header. Not part of the T4 DOM
+     * contract (no reserved slot exists for it) -- created on first need
+     * rather than left as static markup that's usually hidden.
+     */
+    function _ensureLayoutErrorEl() {
+        var el = document.getElementById("ctps-layout-error");
+        if (el) {
+            return el;
+        }
+        el = document.createElement("span");
+        el.id = "ctps-layout-error";
+        el.className = "ctps-layout-error";
+        el.hidden = true;
+        var anchor = document.getElementById("ctps-layout-upload-btn");
+        if (anchor && anchor.parentNode) {
+            anchor.parentNode.insertBefore(el, anchor.nextSibling);
+        } else {
+            document.body.appendChild(el);
+        }
+        return el;
+    }
+
+    function _showLayoutError(message) {
+        var el = _ensureLayoutErrorEl();
+        el.textContent = message;
+        el.hidden = false;
+    }
+
+    function _clearLayoutError() {
+        var el = document.getElementById("ctps-layout-error");
+        if (el) {
+            el.hidden = true;
+            el.textContent = "";
+        }
+    }
+
+    /**
+     * Wire `#ctps-layout-file`'s `change` -> FileReader -> `store.loadLayout`
+     * (the in-browser upload leg of AC5). Error handling is 2-tier: a
+     * structurally invalid file (bad JSON, or no `objects` array) shows the
+     * inline note and leaves `store` untouched; a malformed INDIVIDUAL object
+     * inside an otherwise-valid file is skipped (`console.warn`) and every
+     * other object still loads. Never uses localStorage / the File System
+     * Access API (dead on `file://`).
+     */
+    function _wireLayoutUpload(store) {
+        var input = document.getElementById("ctps-layout-file");
+        if (!input) {
+            return;
+        }
+        input.addEventListener("change", function () {
+            var file = input.files && input.files[0];
+            input.value = ""; // allow re-choosing the same file to re-fire 'change'
+            if (!file) {
+                return;
+            }
+            var reader = new FileReader();
+            reader.onload = function () {
+                var parsed;
+                try {
+                    parsed = JSON.parse(String(reader.result));
+                } catch (parseError) {
+                    _showLayoutError("Couldn't read layout: invalid JSON.");
+                    return;
+                }
+                if (!parsed || typeof parsed !== "object" ||
+                    !Array.isArray(parsed.objects)) {
+                    _showLayoutError("Couldn't read layout: missing \"objects\" array.");
+                    return;
+                }
+                var validObjects = [];
+                for (var i = 0; i < parsed.objects.length; i++) {
+                    var obj = parsed.objects[i];
+                    if (_isValidLayoutObject(obj)) {
+                        validObjects.push(obj);
+                    } else {
+                        console.warn(
+                            "cargo: skipping malformed layout object at index " + i, obj);
+                    }
+                }
+                _clearLayoutError();
+                store.loadLayout({ objects: validObjects, robot: parsed.robot });
+            };
+            reader.onerror = function () {
+                _showLayoutError("Couldn't read layout: file read error.");
+            };
+            reader.readAsText(file);
+        });
+    }
+
+    // ----- boot ---------------------------------------------------------------
+
+    /**
+     * Wire the cargo panel's tab clicks + upload input, paint the panel once
+     * from whatever `store` already holds (the T5 embedded-layout bootstrap,
+     * pushed earlier in this same file, has already run by the time this
+     * fires -- so an embedded layout is already reflected), then subscribe so
+     * every later `scene`/`objects` change (an upload, or the t->scene
+     * bisect) repaints it.
+     */
+    function _initCargoPanel(ctx) {
+        var store = (ctx && ctx.store) || CTPS.store;
+        if (!store) {
+            return;
+        }
+        var dom = _queryCargoDom();
+        _wireCargoTabs(store);
+        _wireLayoutUpload(store);
+        _renderCargoContent(dom, store);
+        store.subscribe(function (changedKeys, state) {
+            if (changedKeys.indexOf("scene") !== -1 ||
+                changedKeys.indexOf("objects") !== -1) {
+                _renderCargoContent(dom, state);
+            }
+        });
+    }
+
+    CTPS._inits.push(_initCargoPanel);
 })();

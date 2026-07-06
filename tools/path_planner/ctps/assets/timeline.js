@@ -149,14 +149,72 @@
     }
 
     /**
-     * HOLDING lane (RESERVED — issue #57 seam): no cargo events exist yet, so
-     * this always returns an empty array. The lane is still registered (and
-     * still drawn as an empty row with its label) so the dock's layout and
-     * the lane-order contract (task, goto, holding, drift) hold today and a
-     * future cargo-episode implementation is purely additive here.
+     * Total objects staged in ANY store (in-hand, every magazine lane, the
+     * rear box) for one resolved cargo scene snapshot — used only to find the
+     * held / not-held transition points below, never per-object.
+     */
+    function _sceneHeldCount(scene) {
+        if (!scene) {
+            return 0;
+        }
+        var n = 0;
+        if (scene.inHand) {
+            n += 1;
+        }
+        if (scene.rearBox) {
+            n += 1;
+        }
+        var magazine = scene.magazine || [];
+        for (var lane = 0; lane < magazine.length; lane++) {
+            n += magazine[lane].length;
+        }
+        return n;
+    }
+
+    /**
+     * HOLDING lane (issue #57): one `--ctps-hold` span per contiguous period
+     * during which at least one object is staged in a store — mirroring the
+     * cargo panel/HUD counts (cargo.js). Recomputes the resolve-once scene
+     * timeline itself via `CTPS.cargo.resolve(track, store.objects,
+     * store.robotCfg)` rather than reaching into store.js's private
+     * `sceneTimeline` closure (not exposed) — cheap, since it runs once per
+     * manip event, not per frame. Returns `[]` before any layout is loaded (no
+     * objects => an empty resolve) or when nothing is ever held.
      */
     function buildHoldingLane(track) {
-        return [];
+        var store = CTPS.store;
+        var resolve = CTPS.cargo && CTPS.cargo.resolve;
+        if (!store || !resolve) {
+            return [];
+        }
+        var duration = (track && track.duration_s) || 0;
+        var timeline = resolve(track, store.objects, store.robotCfg);
+        var out = [];
+        var openT0 = null;
+        for (var i = 0; i < timeline.length; i++) {
+            var snap = timeline[i];
+            var held = _sceneHeldCount(snap) > 0;
+            if (held && openT0 === null) {
+                openT0 = snap.t;
+            } else if (!held && openT0 !== null) {
+                out.push({
+                    t0: openT0,
+                    t1: snap.t,
+                    label: "holding",
+                    cls: "ctps-span--holding",
+                });
+                openT0 = null;
+            }
+        }
+        if (openT0 !== null) {
+            out.push({
+                t0: openT0,
+                t1: duration,
+                label: "holding",
+                cls: "ctps-span--holding",
+            });
+        }
+        return out;
     }
 
     /**
@@ -390,6 +448,37 @@
         }
     }
 
+    /**
+     * Rebuild ONLY the HOLDING lane's DOM in place — never the whole dock via
+     * `buildLanesDom` (task/goto/drift don't depend on cargo state, and a full
+     * rebuild would also reset `_currentSpans`' task/goto bookkeeping). Called
+     * once from `init` (empty, before any layout) and again on every
+     * `["scene"]` store notify: `store.loadLayout` (embedded OR uploaded) and
+     * the t->scene bisect controller (store.js) both notify `"scene"`, and
+     * this is the ONLY path that keeps the lane in sync after boot — the dock
+     * otherwise builds its lanes once (see the file docstring), so without
+     * this rebuild the HOLDING lane stays permanently empty.
+     */
+    function rebuildHoldingLaneDom(track, duration) {
+        var laneEl = document.querySelector(".ctps-lane--holding");
+        if (!laneEl) {
+            return;
+        }
+        while (laneEl.firstChild) {
+            laneEl.removeChild(laneEl.firstChild);
+        }
+        var items = [];
+        try {
+            items = buildHoldingLane(track) || [];
+        } catch (buildError) {
+            CTPS._errors.push(
+                "timeline: lane 'holding' rebuild threw: " +
+                (buildError && buildError.message || String(buildError)));
+            items = [];
+        }
+        renderLaneItems(laneEl, items, duration);
+    }
+
     // ----- drag-to-scrub -------------------------------------------------------
 
     /**
@@ -480,9 +569,15 @@
                 // React to the playhead: light up the task/goto span the current
                 // time sits inside. `seek`/`setT` notify with ["t"] on every drag
                 // and playback tick, so this stays in sync without its own clock.
+                // `["scene"]` fires on layout-load (embedded or uploaded) and on
+                // every cargo event crossed while scrubbing — rebuild the HOLDING
+                // lane only, per rebuildHoldingLaneDom's docstring.
                 store.subscribe(function (changed) {
                     if (changed && changed.indexOf("t") !== -1) {
                         refreshCurrent(store.t);
+                    }
+                    if (changed && changed.indexOf("scene") !== -1) {
+                        rebuildHoldingLaneDom(track, duration);
                     }
                 });
                 refreshCurrent(store.t);
