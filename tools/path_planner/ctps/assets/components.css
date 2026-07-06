@@ -870,6 +870,23 @@
     color: var(--ctps-hold);
 }
 
+/* cargo.js's persistent sorter-error banner, appended inside the always-visible
+ * cargo panel. Shown whenever the loaded trace fired a grab with no sorter lane
+ * selected (a missing sortTo); the --ctps-drift tint reads as an error (matching
+ * the timeline drift pills) and it stays put at every playhead position so the
+ * operator can't scrub past it unseen. */
+.ctps-cargo-error {
+    margin-top: var(--ctps-space-2);
+    padding: 4px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid color-mix(in srgb, var(--ctps-drift) 55%, transparent);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--ctps-drift);
+}
+
 /* ===================================================================== */
 /* Help modal                                                             */
 /* ===================================================================== */
@@ -1188,6 +1205,24 @@
 .ctps-mag-cell--empty {
     background: transparent;
     border: 1px dashed var(--ctps-border-strong);
+}
+
+/* The sorter caret (▼) above the lane the sticky sortTo currently aims at.
+ * cargo.js emits an EMPTY caret row for every other lane so all lane headers
+ * stay vertically aligned; only the selected lane carries the glyph. */
+.ctps-mag-lane-caret {
+    height: 11px;
+    line-height: 11px;
+    font-size: 11px;
+    color: var(--ctps-accent);
+}
+
+/* The selected lane's index header: accent colour + bold, paired with the ▼
+ * caret above it so "the sorter points here" reads at a glance. Declared AFTER
+ * the base header rule so it wins the same-specificity tie. */
+.ctps-mag-lane-header--selected {
+    color: var(--ctps-accent);
+    font-weight: 700;
 }
 
 /* ----- Inventory tab: rear-box hold card (capacity 1) ----------------- */

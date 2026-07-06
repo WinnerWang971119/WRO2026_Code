@@ -57,6 +57,9 @@
         objects: [],
         robotCfg: null,
         scene: null,
+        // `sorterError` is set by `loadLayout` from the resolver: a message when
+        // the loaded trace fired a grab with no sorter lane selected, else null.
+        sorterError: null,
         activeCargoTab: "magazine",
     };
 
@@ -216,8 +219,9 @@
     /**
      * Ingest a layout dict (`{ objects, robot }` — the embedded `OBJECTS` global or an
      * uploaded file): stash `objects`/`robotCfg`, resolve the scene timeline once
-     * via cargo.js, seat the snapshot for the current playhead, and notify the
-     * three touched keys in one shot.
+     * via cargo.js, seat the snapshot for the current playhead, hoist the
+     * resolver's grab-before-sortTo flag onto `sorterError`, and notify the
+     * touched keys in one shot.
      */
     store.loadLayout = function (layoutDict) {
         layoutDict = layoutDict || {};
@@ -227,9 +231,10 @@
         sceneTimeline = resolve
             ? resolve(CTPS.engine.track, store.objects, store.robotCfg)
             : [];
+        store.sorterError = (sceneTimeline && sceneTimeline.sorterError) || null;
         sceneIdx = sceneIndexAt(store.t);
         store.scene = sceneAt(sceneIdx);
-        notify(["objects", "robotCfg", "scene"]);
+        notify(["objects", "robotCfg", "scene", "sorterError"]);
     };
 
     store.setCargoTab = function (name) {

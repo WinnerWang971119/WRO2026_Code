@@ -71,13 +71,17 @@
 
     // ----- working-state helpers -------------------------------------------
 
-    /** A fresh mutable working state (in-hand empty, all lanes empty, box empty). */
+    /**
+     * A fresh mutable working state: in-hand empty, sorter unaimed
+     * (`sorterLane: null`, so the first grab MUST be preceded by a `sortTo`),
+     * all lanes empty, box empty.
+     */
     function _emptyState() {
         var magazine = [];
         for (var lane = 0; lane < MAGAZINE_LANES; lane++) {
             magazine.push([]);
         }
-        return { inHand: null, magazine: magazine, rearBox: null, placed: {} };
+        return { inHand: null, sorterLane: null, magazine: magazine, rearBox: null, placed: {} };
     }
 
     /**
@@ -99,6 +103,7 @@
             eventIndex: eventIndex,
             t: t,
             inHand: state.inHand,
+            sorterLane: state.sorterLane,
             magazine: magazine,
             rearBox: state.rearBox,
             placed: placed,
@@ -236,23 +241,46 @@
         console.warn("cargo: " + message);
     }
 
-    /** grab: pick the nearest on-field Tile whose centre is in the grab zone. */
+    /**
+     * grab: capture the nearest on-field Tile whose centre is in the grab zone
+     * and deposit it straight into the sorter-selected magazine lane
+     * (`state.sorterLane`). Mirrors the real mechanism: `sortTo` pre-aims the
+     * sorter servo and the FOLLOWING grab feeds the tile into that lane
+     * (Manipulator.h -- sortTo swings the sorter, grab closes the grabber).
+     *
+     * A grab with NO lane selected is an OPERATOR ERROR, not a benign no-op: the
+     * tile is left on the field (unsorted, so the mistake is visible) and an
+     * error string is returned for the caller to surface loudly. A full selected
+     * lane or an empty grab zone stays a quiet no-op warning -- never an error,
+     * never a lost tile.
+     *
+     * @return an error message when grab fired with no sorter lane selected;
+     *         otherwise null.
+     */
     function _doGrab(state, pose, objects, robotCfg) {
-        if (state.inHand !== null) {
-            _noopWarn("grab ignored: manipulator already holding a tile");
-            return; // in-hand occupied
-        }
         var zone = robotCfg && robotCfg.grab_zone;
         if (!zone) {
-            return; // no robot zones (surfaced once by the HUD note)
+            return null; // no robot zones (surfaced once by the HUD note)
         }
         var tile = _nearestInZone(state, objects, TYPE_TILE, pose, zone);
         if (!tile) {
             _noopWarn("grab ignored: no tile in the grab zone");
-            return; // empty-zone grab
+            return null; // empty-zone grab
         }
-        state.inHand = tile.id;
+        if (state.sorterLane === null) {
+            // Sticky-sorter contract: you MUST sortTo (aim the sorter) before a
+            // grab. Leave the tile on the field so the un-sorted tile is visible
+            // and hand the caller a loud, persistent operator error.
+            return "grab before sortTo: no magazine lane selected";
+        }
+        var lane = state.magazine[state.sorterLane];
+        if (lane.length >= MAGAZINE_DEPTH) {
+            _noopWarn("grab ignored: sorter lane " + state.sorterLane + " is full");
+            return null; // full lane -> tile stays on the field (never lost)
+        }
+        lane.push(tile.id); // FIFO: newest lands last; dump shifts index 0
         _clearPlaced(state, tile.id);
+        return null;
     }
 
     /** release: drop the in-hand tile back at the grab-zone world centre. */
@@ -271,28 +299,20 @@
     }
 
     /**
-     * sortTo(n): append the in-hand tile to the END of magazine lane n. FIFO --
-     * index 0 stays the OLDEST tile (the front / dump side) and the newest tile
-     * lands last, at the top of the lane.
+     * sortTo(n): AIM the sorter at magazine lane n (sticky selection). Mirrors
+     * the real mechanism, where `sortTo` swings the sorter servo to pre-select
+     * the destination lane and the FOLLOWING `grab` feeds the tile into it. Moves
+     * no tile itself -- it only records `state.sorterLane`, which persists until
+     * the next `sortTo`, so several grabs can feed one lane. An out-of-range lane
+     * is a no-op warning and leaves the current selection unchanged.
      */
     function _doSortTo(state, arg) {
-        if (state.inHand === null) {
-            _noopWarn("sortTo ignored: nothing in hand");
-            return; // no in-hand
-        }
         var n = _laneIndex(arg);
         if (n < 0 || n >= MAGAZINE_LANES) {
             _noopWarn("sortTo ignored: lane " + n + " out of range");
-            return; // bad lane
+            return; // bad lane -> selection unchanged
         }
-        var lane = state.magazine[n];
-        if (lane.length >= MAGAZINE_DEPTH) {
-            _noopWarn("sortTo ignored: lane " + n + " is full");
-            return; // full lane
-        }
-        lane.push(state.inHand); // FIFO: newest lands last; index 0 stays oldest
-        _clearPlaced(state, state.inHand);
-        state.inHand = null;
+        state.sorterLane = n; // sticky: holds until the next sortTo
     }
 
     /**
@@ -358,10 +378,13 @@
     /**
      * Apply one manip verb to the working state at `pose`. Unknown methods (and
      * `reset`, which is log-only) leave the state unchanged.
+     *
+     * @return an operator-error message when the verb was an invalid grab (grab
+     *         with no sorter lane selected); otherwise null.
      */
     function _applyManip(state, method, arg, pose, objects, robotCfg) {
         if (method === METHOD_GRAB) {
-            _doGrab(state, pose, objects, robotCfg);
+            return _doGrab(state, pose, objects, robotCfg);
         } else if (method === METHOD_RELEASE) {
             _doRelease(state, pose, robotCfg);
         } else if (method === METHOD_SORT_TO) {
@@ -374,6 +397,7 @@
             _doBoxOpen(state, pose, robotCfg);
         }
         // METHOD reset / unknown: no cargo change (snapshot mirrors prior state).
+        return null;
     }
 
     /**
@@ -383,14 +407,21 @@
      * points to world. No-op verbs still emit a snapshot (mirroring the prior
      * state) so every manip event has a scene index for the store's bisect.
      * Each snapshot's `magazine[lane]` is ordered OLDEST-first (index 0 = oldest
-     * = front = dump side): `sortTo` appends the newest tile, `dump` shifts
-     * index 0, so lanes drain FIFO.
+     * = front = dump side): `sortTo` aims the sorter and `grab` appends the newest
+     * tile to the selected lane, `dump` shifts index 0, so lanes drain FIFO.
+     *
+     * A grab fired with no sorter lane selected (a missing `sortTo`) is an
+     * operator error: it is `console.error`-logged with its event index, and the
+     * FIRST such message is hoisted onto the returned array as `.sorterError`
+     * (store.js reads it into `store.sorterError` to drive the persistent HUD
+     * note).
      *
      * @param track the ingested Data-Model-B track (reads `track.events`).
      * @param objects the layout objects array (`store.objects`).
      * @param robotCfg the layout `robot` section, or null (grab/dump/box then
      *     become no-ops; objects still resolve statically).
-     * @return an array of scene snapshots, one per manip event.
+     * @return an array of scene snapshots, one per manip event, carrying a
+     *     `.sorterError` string (or null) for the grab-before-sortTo note.
      */
     function cargo_resolve(track, objects, robotCfg) {
         var events = (track && track.events) || [];
@@ -398,15 +429,23 @@
         var poseAt = (CTPS.engine && CTPS.engine.poseAt) || null;
         var state = _emptyState();
         var timeline = [];
+        var sorterError = null;
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
             if (!ev || ev.type !== "manip") {
                 continue;
             }
             var pose = poseAt ? poseAt(ev.t) : { x: 0, y: 0, h: 0 };
-            _applyManip(state, ev.method, ev.arg, pose, objects, robotCfg);
+            var err = _applyManip(state, ev.method, ev.arg, pose, objects, robotCfg);
+            if (err) {
+                console.error("cargo: " + err + " (event " + i + ")");
+                if (sorterError === null) {
+                    sorterError = err; // first offending grab drives the HUD note
+                }
+            }
             timeline.push(_snapshotState(state, i, ev.t));
         }
+        timeline.sorterError = sorterError;
         return timeline;
     }
 
@@ -587,16 +626,22 @@
     /**
      * Rebuild `#ctps-mag-grid`: one column per lane (0..MAGAZINE_LANES-1),
      * each a stack of MAGAZINE_DEPTH cells top-to-bottom. FIFO lane order:
-     * `sortTo` pushes the newest tile onto the END, `dump` shifts the oldest
-     * off index 0 (T5), so index 0 is the OLDEST tile (the front / dump side)
-     * and it belongs at the BOTTOM row. For row `r` (0 = top .. DEPTH-1 =
-     * bottom), the stack index is `MAGAZINE_DEPTH - 1 - r`: the bottom row
-     * shows index 0 (oldest), each row up shows the next index, and any row
-     * that maps past the stack top (index >= stack length) is an empty cell --
-     * so a partially-filled lane fills from the bottom row upward, matching the
-     * sidecar diagram. A filled cell gets the authored colour (via
+     * `grab` pushes the newest tile onto the END of the sorter-selected lane,
+     * `dump` shifts the oldest off index 0 (T5), so index 0 is the OLDEST tile
+     * (the front / dump side) and it belongs at the BOTTOM row. For row `r`
+     * (0 = top .. DEPTH-1 = bottom), the stack index is `MAGAZINE_DEPTH - 1 - r`:
+     * the bottom row shows index 0 (oldest), each row up shows the next index,
+     * and any row that maps past the stack top (index >= stack length) is an
+     * empty cell -- so a partially-filled lane fills from the bottom row upward,
+     * matching the sidecar diagram. A filled cell gets the authored colour (via
      * `setProperty`, never a hard-coded literal) + the 2-char label; an empty
      * cell gets the dashed `--ctps-cell--empty` modifier for CSS to style.
+     *
+     * The lane the sorter is currently aimed at (`scene.sorterLane`, set by the
+     * sticky `sortTo`) gets a ▼ caret above it and an accent-coloured header
+     * (`--selected` modifier). Every other lane emits an EMPTY caret row so all
+     * headers stay vertically aligned; before the first `sortTo`
+     * (`sorterLane` null) no lane is marked.
      */
     function _renderMagazineGrid(gridEl, scene, objects) {
         if (!gridEl) {
@@ -606,13 +651,25 @@
             gridEl.removeChild(gridEl.firstChild);
         }
         var magazine = (scene && scene.magazine) || [];
+        var selectedLane = (scene && typeof scene.sorterLane === "number")
+            ? scene.sorterLane : -1;
         for (var lane = 0; lane < MAGAZINE_LANES; lane++) {
             var stack = magazine[lane] || [];
             var laneEl = document.createElement("div");
             laneEl.className = "ctps-mag-lane";
 
+            // Sorter caret: ▼ over the aimed lane only; an empty row otherwise so
+            // every lane's header sits at the same height.
+            var caretEl = document.createElement("div");
+            caretEl.className = "ctps-mag-lane-caret";
+            caretEl.textContent = (lane === selectedLane) ? "▼" : "";
+            laneEl.appendChild(caretEl);
+
             var headerEl = document.createElement("div");
             headerEl.className = "ctps-mag-lane-header";
+            if (lane === selectedLane) {
+                headerEl.className += " ctps-mag-lane-header--selected";
+            }
             headerEl.textContent = String(lane);
             laneEl.appendChild(headerEl);
 
@@ -767,6 +824,55 @@
         }
     }
 
+    // ----- grab-before-sortTo error note -------------------------------------
+
+    /**
+     * Lazily create (once) the persistent sorter-error banner, appended inside
+     * the always-visible cargo panel (`#ctps-cargo`) below its two tab bodies --
+     * NOT the stage HUD, which this player hides by default. Surfaced whenever
+     * the loaded trace fired a `grab` with no sorter lane selected (a missing
+     * `sortTo`) -- `--ctps-drift` reads as an error. Appending to `#ctps-cargo`
+     * (not the magazine-only body) keeps it visible on either cargo tab. Returns
+     * null when the cargo panel is absent (a layout-free page) so callers no-op.
+     */
+    function _ensureSorterErrorEl() {
+        var el = document.getElementById("ctps-cargo-error");
+        if (el) {
+            return el;
+        }
+        var panel = document.getElementById("ctps-cargo");
+        if (!panel) {
+            return null;
+        }
+        el = document.createElement("div");
+        el.id = "ctps-cargo-error";
+        el.className = "ctps-cargo-error";
+        el.hidden = true;
+        panel.appendChild(el);
+        return el;
+    }
+
+    /**
+     * Show the sorter-error note when the resolver flagged a grab-before-sortTo
+     * in the loaded trace (`store.sorterError`), hide it otherwise. This note is
+     * PERSISTENT -- it stays visible at every playhead position while the loaded
+     * trace carries the error, so the operator cannot scrub past it unseen. Sets
+     * textContent + the `hidden` flag only -- never an inline style.
+     */
+    function _renderSorterErrorNote(state) {
+        var el = _ensureSorterErrorEl();
+        if (!el) {
+            return;
+        }
+        if (state.sorterError) {
+            el.textContent = "cargo error: " + state.sorterError;
+            el.hidden = false;
+        } else {
+            el.textContent = "";
+            el.hidden = true;
+        }
+    }
+
     // ----- content orchestration --------------------------------------------
 
     /** Rebuild every scene-driven piece of the cargo panel + HUD in one pass. */
@@ -778,6 +884,7 @@
         _renderCargoTabCounts(dom, scene);
         _renderCargoHud(dom, scene);
         _renderRobotZonesNote(state);
+        _renderSorterErrorNote(state);
     }
 
     function _queryCargoDom() {

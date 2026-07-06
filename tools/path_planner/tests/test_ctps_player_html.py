@@ -904,7 +904,6 @@ def test_ptc10_synthetic_cargo_trace_and_layout_render_end_to_end(tmp_path):
     manip_events = [e for e in embedded_track["events"] if e["type"] == "manip"]
     manip_calls = [(e["method"], e["arg"]) for e in manip_events]
     assert manip_calls == [
-        ("grab", 0),
         ("sortTo", 0),
         ("grab", 0),
         ("sortTo", 1),
@@ -912,6 +911,7 @@ def test_ptc10_synthetic_cargo_trace_and_layout_render_end_to_end(tmp_path):
         ("sortTo", 2),
         ("grab", 0),
         ("sortTo", 3),
+        ("grab", 0),
         ("dump", 0),
         ("boxClose", 0),
         ("boxOpen", 0),
