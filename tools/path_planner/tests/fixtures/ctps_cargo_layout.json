@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "objects": [
+    {
+      "id": "tile-a",
+      "name": "tile A",
+      "shape": "rect",
+      "type": "tile",
+      "color": "#57b36b",
+      "x_cm": 48.0,
+      "y_cm": 53.0,
+      "heading_deg": 0.0,
+      "w_cm": 4.0,
+      "h_cm": 4.0
+    },
+    {
+      "id": "tile-b",
+      "name": "tile B",
+      "shape": "rect",
+      "type": "tile",
+      "color": "#e0b354",
+      "x_cm": 49.0,
+      "y_cm": 56.0,
+      "heading_deg": 0.0,
+      "w_cm": 4.0,
+      "h_cm": 4.0
+    },
+    {
+      "id": "tile-c",
+      "name": "tile C",
+      "shape": "rect",
+      "type": "tile",
+      "color": "#5b8ee0",
+      "x_cm": 50.0,
+      "y_cm": 59.0,
+      "heading_deg": 0.0,
+      "w_cm": 4.0,
+      "h_cm": 4.0
+    },
+    {
+      "id": "tile-d",
+      "name": "tile D",
+      "shape": "rect",
+      "type": "tile",
+      "color": "#c0392b",
+      "x_cm": 51.0,
+      "y_cm": 62.0,
+      "heading_deg": 0.0,
+      "w_cm": 4.0,
+      "h_cm": 4.0
+    },
+    {
+      "id": "cargo-a",
+      "name": "cargo crate",
+      "shape": "circle",
+      "type": "cargo",
+      "color": "#5bc8e0",
+      "x_cm": 111.0,
+      "y_cm": 50.0,
+      "heading_deg": 0.0,
+      "radius_cm": 2.5
+    },
+    {
+      "id": "fixed-a",
+      "name": "field pillar",
+      "shape": "rect",
+      "type": "fixed",
+      "color": "#888888",
+      "x_cm": 20.0,
+      "y_cm": 100.0,
+      "heading_deg": 0.0,
+      "w_cm": 10.0,
+      "h_cm": 6.0
+    }
+  ],
+  "robot": {
+    "grab_zone": { "x_cm": -1.0, "y_cm": 8.0, "w_cm": 6.0, "h_cm": 14.0 },
+    "box_zone": { "x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 16.0 },
+    "drop_points": [
+      { "x_cm": 4.0, "y_cm": -6.0 },
+      { "x_cm": 4.0, "y_cm": -2.0 },
+      { "x_cm": 4.0, "y_cm": 2.0 },
+      { "x_cm": 4.0, "y_cm": 6.0 }
+    ]
+  }
+}
