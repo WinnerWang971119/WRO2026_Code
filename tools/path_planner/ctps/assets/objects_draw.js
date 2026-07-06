@@ -17,7 +17,7 @@
  *     `heading_deg`; circle). `opts.x`/`opts.y` optionally OVERRIDE the object's
  *     authored world centre (the player draws dropped/dumped objects at their
  *     resolved `placed` spot).
- *   - `drawZones(ctx, view, pose, robotCfg, project)` — the faint robot-local
+ *   - `drawZones(ctx, view, pose, robotCfg, project)` — the robot-local
  *     manipulator overlay (grab zone, rear-box zone, per-lane drop points),
  *     mapped to world through the robot pose (`world = pose + Rot(h)*local`).
  *
@@ -40,8 +40,8 @@
     // ----- paint constants (named, no magic literals inline) ---------------
     var OBJ_STROKE_W = 1.5;      // cargo/fixed outline stroke width (px)
     var OBJ_DASH = [4, 3];       // fixed-object dashed outline pattern (px)
-    var ZONE_ALPHA = 0.5;        // manipulator-zone overlay opacity
-    var ZONE_STROKE_W = 1;       // zone outline stroke width (px)
+    var ZONE_ALPHA = 0.9;        // manipulator-zone overlay opacity
+    var ZONE_STROKE_W = 2;       // zone outline stroke width (px)
     var ZONE_DASH = [3, 3];      // zone outline dashed pattern (px)
     var ZONE_DOT_R = 3;          // drop-point marker radius (px)
 
@@ -240,7 +240,7 @@
     /**
      * Draw the faint robot-local manipulator overlay at pose `{x, y, h}`: the
      * grab zone, the rear-box zone, and the per-lane drop points, all mapped to
-     * world and stroked in --ctps-faint. A missing `robotCfg`/`pose` degrades to
+     * world and stroked in --ctps-hold. A missing `robotCfg`/`pose` degrades to
      * drawing nothing (the resolver already treats those cases as no-ops).
      *
      * @param ctx the target 2D context.
@@ -258,7 +258,7 @@
         ctx.save();
         ctx.globalAlpha = ZONE_ALPHA;
         ctx.lineWidth = ZONE_STROKE_W;
-        ctx.strokeStyle = tokens.faint || "";
+        ctx.strokeStyle = tokens.hold || "";
         if (ctx.setLineDash) {
             ctx.setLineDash(ZONE_DASH);
         }
