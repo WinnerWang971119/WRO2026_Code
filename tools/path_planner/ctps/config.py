@@ -4,6 +4,11 @@ All values here are **visual-only** — they govern how long each command
 appears to take on screen during playback.  They are NOT physical-duration
 predictions and do NOT reflect real robot speed.  Do not use these to
 estimate actual competition run time.
+
+Also holds the fixed manipulator cargo-model player constants (object/cargo
+plan, issue #57) — magazine geometry and rear-box capacity are NOT authored
+per-layout (:mod:`tools.path_planner.ctps.layout`); they are single-sourced
+here and mirrored as JS constants in ``assets/cargo.js``.
 """
 
 # ---------------------------------------------------------------------------
@@ -54,3 +59,27 @@ DRIFT_THRESHOLD_CM: float = 10.0
 #: ``R · (1 − cos(step / 2))`` ≈ 0.14 px at typical playback scale — sub-pixel —
 #: so the arc reads as smooth without emitting an excessive number of keyframes.
 ARC_STEP_DEG: float = 10.0
+
+# ---------------------------------------------------------------------------
+# Manipulator cargo-model player constants (object/cargo plan, issue #57)
+# ---------------------------------------------------------------------------
+#
+# Fixed player constants, NOT authored per-layout: `layout.json` (T2) carries
+# only field objects and robot zone geometry, never magazine/rear-box
+# capacity, so a layout author can never desync the player's cargo-store
+# shape from what the panel renders. `ctps/layout.py`'s `validate()` reads
+# `MAGAZINE_LANES` to check `robot.drop_points` has exactly one entry per
+# lane; the resolver/panel (T5/T6) read all three.
+
+#: Number of vertical magazine lanes the manipulator files sorted tiles into
+#: (`sortTo(n)` for `n` in `[0, MAGAZINE_LANES)`). Matches the Robot tab's 4
+#: drop points — one per lane — and the player/editor magazine grid width.
+MAGAZINE_LANES: int = 4
+
+#: Maximum tiles stacked in a single magazine lane (front-to-back depth; the
+#: front tile sits at the bottom, the dump side).
+MAGAZINE_DEPTH: int = 3
+
+#: Rear-box (Inventory) capacity — how many Cargo objects a single
+#: `boxClose` can hold at once.
+REAR_BOX_CAP: int = 1
