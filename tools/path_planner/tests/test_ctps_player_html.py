@@ -45,6 +45,23 @@ Covered cases (CTPS UI/UX rework plan):
   embedded ``TRACK`` has no ``"pivots"`` key, and ``PLAYER_META`` equals the
   expected literal dict verbatim — structural equality stands in for a
   byte-vs-pre-change diff, which a test cannot perform (AC6).
+
+Also covers the object/cargo plan's emitter leg (T4 — issue #57):
+
+* **P-TC5** — ``render(objects=None)`` (the default) emits no
+  ``const OBJECTS`` at all; ``TRACK`` still round-trips and ``PLAYER_META``
+  equals the exact TC9 literal — proving the new cargo markup/assets never
+  perturb the pre-existing contract (AC11).
+* **P-TC6** — ``render(objects=<layout>)`` embeds ``const OBJECTS`` (round-
+  trips byte-for-byte), inlines ``objects_draw.js`` then ``cargo.js`` (in that
+  order, both before ``boot.js``), and ``PLAYER_META`` is STILL the unchanged
+  TC9 literal (AC5 embed leg).
+* **TC-CARGO-STRUCT** — the two-tab cargo panel DOM contract
+  (``#ctps-cargo``, ``.ctps-cargo-tab[data-cargo-tab]``, the count badges, the
+  magazine grid, the inventory list), the new ``OBJECTS``/``ZONES`` layer
+  chips, and the ``#ctps-layout-file`` upload input are present, and the
+  retired ``.ctps-panel--holding`` shell is gone (AC5 chips + the DOM contract
+  T6 queries).
 """
 
 from __future__ import annotations
@@ -58,6 +75,7 @@ from pathlib import Path
 import pytest
 
 from tools.path_planner.ctps import player_html as player_html_module
+from tools.path_planner.ctps.layout import LayoutError
 from tools.path_planner.ctps.player_html import (
     PLAYER_JS_PATH,
     _ASSET_CSS,
@@ -114,6 +132,80 @@ def _extract_player_meta(html: str) -> dict:
     assert match is not None, "could not locate the embedded const PLAYER_META assignment"
     raw_json = match.group("json").replace("<\\/", "</")
     return json.loads(raw_json)
+
+
+#: Captures the JSON document assigned to ``const OBJECTS`` in the emitted
+#: page (object/cargo plan, T4 — issue #57). ``const OBJECTS`` lives in its
+#: OWN ``<script>`` (same non-greedy-to-``</script>`` shape as
+#: :data:`_TRACK_RE`/:data:`_META_RE`) and is only emitted when a truthy
+#: ``objects`` layout was given to :func:`render`, so this regex legitimately
+#: has no match on a layout-free render (AC11).
+_OBJECTS_RE = re.compile(r"const OBJECTS = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+
+def _extract_embedded_objects(html: str) -> "dict | None":
+    """Pull the embedded ``const OBJECTS = {...}`` dict out of the page.
+
+    Mirrors :func:`_extract_embedded_track`. Returns ``None`` (rather than
+    asserting) when no ``const OBJECTS`` assignment is present at all — the
+    expected shape for a layout-free render (P-TC5).
+
+    :param html: the full rendered page text.
+    :return: the parsed OBJECTS dict, or ``None`` if absent.
+    """
+    match = _OBJECTS_RE.search(html)
+    if match is None:
+        return None
+    raw_json = match.group("json").replace("<\\/", "</")
+    return json.loads(raw_json)
+
+
+def _valid_layout_dict() -> dict:
+    """Return a fresh, schema-valid ``layout.json`` dict (schema_version 1).
+
+    A minimal but fully-populated layout (one rect Tile object + a complete
+    ``robot`` zone section) — mirrors the shared fixture in
+    ``test_ctps_layout.py`` (T2) without importing across test modules.
+    """
+    return {
+        "schema_version": 1,
+        "objects": [
+            {
+                "id": "o1",
+                "name": "green tile",
+                "shape": "rect",
+                "type": "tile",
+                "color": "#57b36b",
+                "x_cm": 40.0,
+                "y_cm": 120.0,
+                "heading_deg": 0.0,
+                "w_cm": 5.0,
+                "h_cm": 5.0,
+            },
+        ],
+        "robot": {
+            "grab_zone": {"x_cm": -1.0, "y_cm": 8.0, "w_cm": 6.0, "h_cm": 14.0},
+            "box_zone": {"x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 16.0},
+            "drop_points": [
+                {"x_cm": 4.0, "y_cm": -6.0},
+                {"x_cm": 4.0, "y_cm": -2.0},
+                {"x_cm": 4.0, "y_cm": 2.0},
+                {"x_cm": 4.0, "y_cm": 6.0},
+            ],
+        },
+    }
+
+
+#: The exact TC9 literal (player_html.py's Contracts -> Emitter): both P-TC5
+#: and P-TC6 assert PLAYER_META equals this verbatim, proving the object/
+#: cargo feature never perturbs it either with or without a layout.
+_EXPECTED_TC9_META = {
+    "source": "PREDICTED",
+    "filename": "",
+    "lanes": ["task", "goto", "holding", "drift"],
+    "tabs": ["log", "inspector"],
+    "render_mode": "box",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -655,3 +747,151 @@ def test_tc_dupreg_register_never_throws_and_boot_surfaces_errors():
     assert re.search(r"\bthrow\b", player_js) is None
     assert "_errors.push" in player_js
     assert "_errors" in boot_js
+
+
+# ---------------------------------------------------------------------------
+# P-TC5 — render(objects=None): no const OBJECTS; TRACK + PLAYER_META unchanged
+# (object/cargo plan, T4 — issue #57, AC11)
+# ---------------------------------------------------------------------------
+
+
+def test_p_tc5_render_objects_none_emits_no_objects_and_meta_unchanged(tmp_path):
+    """P-TC5: ``render(objects=None)`` emits no ``const OBJECTS`` at all (AC11).
+
+    Key assertion: with no ``objects`` argument (the default), the page has
+    no ``const OBJECTS`` assignment whatsoever — not even a ``null``
+    placeholder — the embedded ``TRACK`` still round-trips unchanged, and
+    ``PLAYER_META`` equals the exact TC9 literal verbatim, proving the new
+    cargo markup/asset additions never perturb the pre-existing contract.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "no_objects.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const OBJECTS" not in html
+    assert _extract_embedded_objects(html) is None
+    assert _extract_embedded_track(html) == track_dict
+    assert _extract_player_meta(html) == _EXPECTED_TC9_META
+
+
+def test_p_tc5_render_objects_empty_dict_emits_no_objects(tmp_path):
+    """P-TC5 (falsy edge case): ``objects={}`` is falsy — treated like ``None``."""
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "empty_objects.html"
+    render(track_dict, out_path, objects={})
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const OBJECTS" not in html
+
+
+# ---------------------------------------------------------------------------
+# P-TC6 — render(objects=<layout>): const OBJECTS embeds; new assets inline
+# (object/cargo plan, T4 — issue #57, AC5 embed leg)
+# ---------------------------------------------------------------------------
+
+
+def test_p_tc6_render_objects_embeds_and_inlines_cargo_assets_in_order(tmp_path):
+    """P-TC6: ``render(objects=<layout>)`` embeds ``const OBJECTS`` + inlines assets.
+
+    Key assertion: a truthy ``objects`` layout is validated then embedded
+    verbatim as its own ``const OBJECTS`` script (round-trips through
+    :func:`json.loads`); ``objects_draw.js`` then ``cargo.js`` are inlined —
+    in that exact order, both before ``boot.js`` — and ``PLAYER_META`` is
+    STILL the unchanged TC9 literal, alongside the still-unchanged ``TRACK``.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    layout_dict = _valid_layout_dict()
+
+    out_path = tmp_path / "with_objects.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert _extract_embedded_objects(html) == layout_dict
+    assert _extract_embedded_track(html) == track_dict
+    assert _extract_player_meta(html) == _EXPECTED_TC9_META
+
+    objects_draw_js = (PLAYER_JS_PATH.parent / "objects_draw.js").read_text(encoding="utf-8")
+    cargo_js = (PLAYER_JS_PATH.parent / "cargo.js").read_text(encoding="utf-8")
+    boot_js = (PLAYER_JS_PATH.parent / "boot.js").read_text(encoding="utf-8")
+
+    assert objects_draw_js in html
+    assert cargo_js in html
+    assert boot_js in html
+    # Pinned load order: objects_draw.js -> cargo.js -> boot.js.
+    assert html.index(objects_draw_js) < html.index(cargo_js) < html.index(boot_js)
+
+
+def test_p_tc6_render_objects_invalid_layout_raises_layout_error(tmp_path):
+    """P-TC6 (negative): an invalid ``objects`` layout raises, naming the field.
+
+    Key assertion: :func:`render` validates a truthy ``objects`` via
+    :mod:`tools.path_planner.ctps.layout` BEFORE writing anything — a
+    malformed layout raises :class:`LayoutError` and the output file is never
+    created (mirrors the field-data validator's LOUD-raise convention).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    bad_layout = _valid_layout_dict()
+    del bad_layout["objects"][0]["type"]
+
+    out_path = tmp_path / "should_not_exist.html"
+    with pytest.raises(LayoutError, match="objects\\[0\\]"):
+        render(track_dict, out_path, objects=bad_layout)
+    assert not out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# TC-CARGO-STRUCT — cargo panel + chips + upload markup present (AC5, DOM
+# contract T6 queries; object/cargo plan, T4 — issue #57)
+# ---------------------------------------------------------------------------
+
+
+def test_tc_cargo_struct_panel_chips_and_upload_markup_present(tmp_path):
+    """TC-CARGO-STRUCT: the cargo panel + OBJECTS/ZONES chips + upload input render.
+
+    Key assertion: the two-tab cargo panel DOM contract T6 queries
+    (``#ctps-cargo``, the ``.ctps-cargo-tab[data-cargo-tab]`` tabs, the count
+    badges, the magazine grid, the inventory list) is present; the new
+    ``OBJECTS``/``ZONES`` layer chips join the existing ``.ctps-layer-chips``
+    row; the ``#ctps-layout-file`` upload input is present; the pre-existing
+    ``#ctps-command``/``#ctps-log`` markers are unaffected; and the retired
+    ``.ctps-panel--holding`` shell (and its ``#ctps-hold-count``/
+    ``#ctps-hold-list`` ids) is gone.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "cargo_struct.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert 'id="ctps-cargo"' in html
+    assert 'data-cargo-tab="magazine"' in html
+    assert 'data-cargo-tab="inventory"' in html
+    assert "ctps-cargo-tab" in html
+    assert 'id="ctps-cargo-count-mag"' in html
+    assert 'id="ctps-cargo-count-inv"' in html
+    assert 'id="ctps-mag-grid"' in html
+    assert 'id="ctps-inv-list"' in html
+
+    assert 'data-layer="objects"' in html
+    assert 'data-layer="zones"' in html
+
+    assert '<input type="file" id="ctps-layout-file"' in html
+
+    # Pre-existing rail markers unaffected (TC-STRUCT stays green alongside).
+    assert 'id="ctps-command"' in html
+    assert 'id="ctps-log"' in html
+
+    # The retired Holding shell is fully gone.
+    assert "ctps-panel--holding" not in html
+    assert 'id="ctps-hold-count"' not in html
+    assert 'id="ctps-hold-list"' not in html
