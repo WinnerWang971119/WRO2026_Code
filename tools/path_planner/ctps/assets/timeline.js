@@ -231,10 +231,11 @@
     }
 
     /**
-     * DRIFT lane: each `drift_warn` event becomes a point pin AT its time,
-     * plus a span from that same time to end-of-track — the "uncorrected"
-     * span, since nothing in the mission corrects drift after the warning.
-     * Both items share the event's own label text.
+     * DRIFT lane: each `drift_warn` event becomes a point pin AT its time (the
+     * off-plan move that opened the drift) plus a span from that time to its
+     * `t_end` — the goto re-anchor that corrected it. An event with no `t_end`
+     * (an uncorrected drift that ran to the end, or a legacy/LRS-shaped point)
+     * spans to end-of-track. Both items share the event's own label text.
      */
     function buildDriftLane(track) {
         var events = (track && track.events) || [];
@@ -248,7 +249,7 @@
             out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--drift" });
             out.push({
                 t0: ev.t,
-                t1: duration,
+                t1: ev.t_end != null ? ev.t_end : duration,
                 label: ev.label,
                 cls: "ctps-span--drift",
             });

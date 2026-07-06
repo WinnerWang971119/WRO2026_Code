@@ -143,12 +143,13 @@
     }
 
     /**
-     * The most recent `drift_warn` event at-or-before `t`, parsed, or null
-     * when none exists yet. Binary-searches the cached `drift_warn`-only
-     * array (time-sorted, since `events` is) for the last entry with
-     * `t <= playhead` — O(log D) in the drift-event count and independent of
-     * how many non-drift events precede it, so the common clean mission (zero
-     * `drift_warn`) resolves in O(1). Mirrors `findEventIndex`'s bisect.
+     * The active `drift_warn` span at `t`, parsed, or null when the chassis is
+     * on-plan. Binary-searches the cached `drift_warn`-only array (time-sorted,
+     * since `events` is) for the last entry that OPENED at-or-before `t`, then
+     * reports it only while the playhead sits inside its span — i.e. before its
+     * `t_end` re-anchor (an event with no `t_end` ran to the end, so it stays
+     * drifting). O(log D) in the drift-event count, so the common clean mission
+     * (zero `drift_warn`) resolves in O(1). Mirrors `findEventIndex`'s bisect.
      */
     function _driftCheckAt(t) {
         if (t === _driftMemoT) {
@@ -174,7 +175,13 @@
                 }
                 idx = lo;
             }
-            result = _parseDriftLabel(driftEvents[idx].label);
+            // Report the drift only while the playhead is inside its span; a
+            // goto re-anchor at `t_end` corrects it. A missing `t_end` (an
+            // uncorrected drift, or a legacy point event) never clears.
+            var picked = driftEvents[idx];
+            if (picked.t_end == null || t < picked.t_end) {
+                result = _parseDriftLabel(picked.label);
+            }
         }
         _driftMemoT = t;
         _driftMemo = result;

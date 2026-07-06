@@ -18,8 +18,12 @@ Geometry comes from the **existing parity-locked** sim, never a re-implementatio
   the node (net advance == edge length), matching the firmware re-anchor. A clean
   ``goto`` therefore ends with the chassis on the node (drift ≈ 0).
 * Raw ``drive`` moves apply directly to the **shared** :class:`VirtualChassis`
-  without advancing the logical ``current_node`` — that desync is exactly what
-  the drift check surfaces.
+  without advancing the logical ``current_node``. A raw *translation* is
+  off-plan by construction, so it opens a ``drift_warn`` SPAN that stays open
+  until the next ``goto`` re-anchors (the only relocalization CTPS models today
+  — issue #102) or the track ends. The span carries the residual offset off the
+  re-anchor node; there is no magnitude threshold — any non-``goto`` motion is
+  drift.
 
 Key invariants (see the CTPS plan, T7):
 
@@ -70,7 +74,6 @@ from tools.path_planner.sim.runtime import (
 
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
-    DRIFT_THRESHOLD_CM,
     MANIP_NOMINAL_S,
     SIM_DRIVE_CM_S,
     SIM_TURN_DEG_S,
@@ -476,11 +479,11 @@ def build(trace: Trace, field_data) -> Track:
     sim/chassis:
 
     * ``goto`` — expanded through :meth:`PathTrackerSim.step_through`; keyframe
-      poses read from each yielded snapshot. After the final hop, a drift check
-      compares the chassis pose to ``NODES[current_node]`` and emits a
-      ``drift_warn`` event past :data:`DRIFT_THRESHOLD_CM`. An
-      :class:`UnreachableGoalError` emits an informational ``goto`` event and
-      ends the track.
+      poses read from each yielded snapshot. After the final hop it re-anchors
+      onto its node, so it CLOSES any open ``drift_warn`` span, stamping the
+      residual offset off ``NODES[current_node]`` as the span's ``t_end`` +
+      label. An :class:`UnreachableGoalError` emits an informational ``goto``
+      event and ends the track (an open span then runs to the end).
     * ``drive`` — applied DIRECTLY to the shared chassis without advancing the
       logical node. The forward-geometry methods (``driveDist`` /
       ``stopAtLine`` / ``wallStop`` / ``lineFollowDist``) advance along the
@@ -590,6 +593,14 @@ def build(trace: Trace, field_data) -> Track:
         else:
             chassis.forward(distance_cm)
         append_geometry_keyframe(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
+
+    # Open DRIFT span, or None when the chassis is on-plan. A raw non-goto
+    # translation opens it (the robot dead-reckons off its logical node with
+    # nothing to correct it); the next goto — the only relocalization CTPS
+    # models today (issue #102) — or the end of the track closes it and fills
+    # in its ``t_end`` + measured offset. Emitted at the OPENING move's time so
+    # ``events`` stays sorted; patched in place on close.
+    drift_open_ev: Optional[Dict[str, Any]] = None
 
     # 4. Iterate the commands in order on the single shared sim/chassis.
     for cmd in trace.commands:
@@ -774,20 +785,20 @@ def build(trace: Trace, field_data) -> Track:
                     "label": f"{from_node}->{target}",
                 }
             )
-            # Drift check after the final hop: a clean goto lands ON the node
-            # (drift ~ 0); a preceding raw drive injects an offset that goto
-            # does not correct.
-            node = sim.localization.current_node()
-            nx_, ny_ = field_data.NODES[node]
-            drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
-            if drift > DRIFT_THRESHOLD_CM:
-                events.append(
-                    {
-                        "t": t,
-                        "type": "drift_warn",
-                        "label": f"chassis {drift:.1f} cm off node {node}",
-                    }
-                )
+            # Close any open DRIFT span: this goto resumed plan control and
+            # re-anchored onto its node. The span's reported offset is how far
+            # the chassis still sat off the arrival node after the final hop —
+            # a clean goto lands the axle ON it (~0), while a preceding raw
+            # drive injects an offset the goto does not correct. Threshold-free:
+            # ANY off-plan raw move drifts, so the span simply spans from the
+            # move to this re-anchor (the DRIFT_THRESHOLD_CM gate is gone).
+            if drift_open_ev is not None:
+                node = sim.localization.current_node()
+                nx_, ny_ = field_data.NODES[node]
+                drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
+                drift_open_ev["t_end"] = t
+                drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
+                drift_open_ev = None
 
         elif cmd.op == "drive":
             # Raw move applied DIRECTLY to the shared chassis; never advance the
@@ -795,6 +806,7 @@ def build(trace: Trace, field_data) -> Track:
             # (before any geometry advance).
             event_t = t
             method = cmd.method
+            translated = False   # did this raw move DISPLACE the chassis?
             if method in _FORWARD_GEOMETRY_METHODS:
                 # driveDist / stopAtLine / wallStop / lineFollowDist all carry a
                 # forward distance in ``cm``. For stopAtLine / wallStop /
@@ -822,11 +834,13 @@ def build(trace: Trace, field_data) -> Track:
                         chassis.x_cm, chassis.y_cm, chassis.heading_deg
                     )
                     append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
+                    translated = True
                 else:
                     # Plain advance along the CURRENT facing (non-gyro, or no
                     # heading, or lineFollowDist). Byte-identical to the pre-T7
                     # forward render for the non-reverse case.
                     append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
+                    translated = True
             elif method == "turnDeg":
                 chassis.turn_relative(float(cmd.deg))
                 append_geometry_keyframe(
@@ -841,6 +855,20 @@ def build(trace: Trace, field_data) -> Track:
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )
+            # A raw translation off the logical node opens (or, if one is already
+            # open, silently extends) a DRIFT span: the chassis dead-reckons with
+            # no goto/re-anchor to correct it. Pure in-place turns never open one
+            # (they don't leave the node). Emitted here at the move's own time so
+            # ``events`` stays sorted; its ``t_end`` + offset are filled in when
+            # the next goto re-anchors (or at trace end).
+            if translated and drift_open_ev is None:
+                drift_open_ev = {
+                    "t": event_t,
+                    "type": "drift_warn",
+                    "label": "drift",
+                    "t_end": None,
+                }
+                events.append(drift_open_ev)
 
         elif cmd.op == "manip":
             # `method`/`arg` are structured (additive) alongside the existing
@@ -889,6 +917,18 @@ def build(trace: Trace, field_data) -> Track:
             )
 
         # Any other op cannot reach here — the loader excludes unknown ops.
+
+    # An open DRIFT span with no following goto (a raw off-plan move that ends
+    # the mission, or one before an UNREACHABLE goto that broke the loop) runs
+    # to the end of the track — nothing ever re-anchors it. Measure the residual
+    # offset off whatever logical node the sim is parked at.
+    if drift_open_ev is not None:
+        node = sim.localization.current_node()
+        nx_, ny_ = field_data.NODES[node]
+        drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
+        drift_open_ev["t_end"] = t
+        drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
+        drift_open_ev = None
 
     # 5. Build-error banner (informational). Emit at the end regardless of
     #    whether the track was truncated by an unreachable goal.

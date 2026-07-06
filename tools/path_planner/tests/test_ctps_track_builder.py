@@ -325,22 +325,57 @@ def test_tc3_drive_before_goto_emits_drift_warn():
 
 
 # ---------------------------------------------------------------------------
-# TC4 — a small raw drive stays under the threshold (no warning)
+# TC4 — even a small raw drive opens a drift span (threshold-free)
 # ---------------------------------------------------------------------------
 
 
-def test_tc4_small_drive_before_goto_no_drift_warn():
-    """TC4: a 2 cm raw drive before goto B stays under DRIFT_THRESHOLD_CM.
+def test_tc4_small_drive_before_goto_opens_span_closed_by_goto():
+    """TC4: even a *small* raw drive before goto B opens a DRIFT span.
 
-    Key assertion: NO ``drift_warn`` event is emitted. A clean goto lands the
-    axle ON the node (no overshoot baseline), so the 2 cm raw move alone is the
-    drift — below the 10 cm threshold — and the drift check stays silent.
+    The ``DRIFT_THRESHOLD_CM`` gate is gone: any non-``goto`` translation is
+    off-plan, so a 2 cm ``driveDist`` emits exactly one ``drift_warn`` — a SPAN
+    opened at the drive and CLOSED by the following goto re-anchor (a finite
+    ``t_end`` strictly after the open time). The reported offset is still small
+    (under the old threshold) but it is now surfaced, not hidden. The fixture
+    keeps its historical ``_no_drift`` name.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert drift_events == []
+    assert len(drift_events) == 1
+
+    warn = drift_events[0]
+    assert "B" in warn["label"]
+    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
+    assert reported_cm < DRIFT_THRESHOLD_CM     # small — but flagged now
+
+    # The span is CLOSED by the goto re-anchor: finite t_end, after the open t.
+    assert warn["t_end"] is not None
+    assert warn["t_end"] > warn["t"]
+
+
+def test_drive_without_following_goto_drifts_to_end():
+    """A raw drive that ends the mission drifts to the end of the track.
+
+    No ``goto`` follows the drive, so nothing re-anchors: the ``drift_warn``
+    span stays open and its ``t_end`` is the track's ``duration_s`` (runs to
+    end), with the offset measured off the logical node the chassis left.
+    """
+    trace = Trace(
+        schema_version=1,
+        start_node="A",
+        start_heading_deg=0.0,
+        build_error=False,
+        commands=[Command(seq=0, op="drive", method="driveDist", cm=20.0)],
+    )
+    track = _build_quiet(trace, toy_field_data)
+
+    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
+    assert len(drift_events) == 1
+    warn = drift_events[0]
+    assert warn["t_end"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
+    assert warn["t_end"] > warn["t"]
 
 
 # ---------------------------------------------------------------------------
