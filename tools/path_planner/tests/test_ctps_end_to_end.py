@@ -38,16 +38,35 @@ Build it locally with::
 
     cmake -S WRO2026/test -B build/ctps
     cmake --build build/ctps --target ctps_dump
+
+T7 addendum (issue #55 — CTPS pivot wheel-arc): this module also carries TC10,
+a **structural** (no JS execution harness) check that the pivot-wheel-arc
+overlay landed correctly on the renderer + emitter side: ``renderer.js``
+registers the ``"wheel-arc"`` render mode and its ``TRACK.pivots`` ``t0``/``t1``
+span guard (source-regex, both on the asset file and on the fully-assembled
+emitted page, since ``renderer.js`` is inlined into every page regardless of
+whether a given track carries pivots), and a track that DOES carry a
+``pivots`` segment produces a self-contained page that embeds that segment
+verbatim in ``TRACK`` and inlines the same wheel-arc overlay machinery, with a
+``PLAYER_META.render_mode`` the emitted ``renderer.js`` registers (so boot
+validation passes). The pivots-> ``"wheel-arc"`` render_mode *selection* itself
+is owned by :func:`tools.path_planner.ctps.player_html.render` (task T3, per the
+plan's Contracts) and is asserted by the ``test_ctps_player_html`` suite (TC8),
+not re-asserted here. These tests need neither
+the ``ctps_dump`` binary nor a browser/Node runtime — they exercise the
+Python emitter directly, so they always run (no ``CI`` / build-binary gating).
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import sys
 import warnings
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -82,7 +101,7 @@ except ImportError as exc:  # pragma: no cover - defensive import guard
         f"(Start/final) cannot be resolved for the replay. Original error: {exc}"
     ) from exc
 
-from tools.path_planner.ctps import track_builder, trace_loader  # noqa: E402
+from tools.path_planner.ctps import player_html, track_builder, trace_loader  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +292,222 @@ def test_trace_replays_without_crashing(
 
     assert track.keyframes, "the replayed track has no keyframes."
     assert track.events, "the replayed track has no events."
+
+
+# ---------------------------------------------------------------------------
+# TC10 (issue #55, T7) — renderer.js registers "wheel-arc" + its span guard,
+# and a pivot-carrying track selects that render mode end to end.
+#
+# These tests do NOT need the ctps_dump binary: they exercise renderer.js as
+# text (no JS execution harness exists — the interpreter here is Python, not
+# Node/a browser) and the real Python emitter (`player_html.render`), which is
+# the actual "end" this module's other tests read the C++ "end" from. They
+# always run, unlike the dump-gated fixtures above.
+# ---------------------------------------------------------------------------
+
+
+#: A hand-built Data Model B track dict carrying one ``pivots`` segment (the
+#: T2 schema — see the plan's Data Model). Shaped like the existing
+#: ``ctps_lrs_track.json`` fixture (poses + events only, no command stream) to
+#: prove `player_html.render` is source-agnostic even with the new optional
+#: key: a plain dict, never built via `Track`/`track_builder`, is enough to
+#: drive the `render_mode` selection this test exercises. The geometry here is
+#: illustrative only (T5 owns the geometry-correctness tests against the real
+#: `track_builder` output) — this dict exists purely to carry a well-formed
+#: ``pivots`` entry through the emitter.
+_PIVOT_TRACK_DICT: Dict[str, Any] = {
+    "schema_version": 1,
+    "field": {
+        "nodes": {"U": [0.0, 0.0], "V": [60.0, 0.0], "W": [69.0, -69.0]},
+        "obstacles": [],
+        "bounds": [0.0, -100.0, 100.0, 100.0],
+    },
+    "duration_s": 5.0,
+    "keyframes": [
+        {"t": 0.0, "x": 0.0, "y": 0.0, "h": 0.0},
+        {"t": 2.0, "x": 60.0, "y": 0.0, "h": 0.0},
+        {"t": 2.5, "x": 65.6, "y": -4.5, "h": -45.0},
+        {"t": 3.0, "x": 69.0, "y": -9.0, "h": -90.0},
+        {"t": 5.0, "x": 69.0, "y": -69.0, "h": -90.0},
+    ],
+    "events": [
+        {"t": 0.0, "type": "print", "label": "pivot replay start"},
+        {"t": 2.0, "type": "goto", "label": "U->V"},
+        {"t": 3.0, "type": "drive", "label": "turnDeg(-90.0)"},
+    ],
+    "pivots": [
+        {
+            "t0": 2.0,
+            "t1": 3.0,
+            "cx": 60.0,
+            "cy": -9.0,
+            "theta_deg": -90.0,
+            "wheel": "right",
+        },
+    ],
+}
+
+#: Same non-greedy-to-``</script>`` capture idiom as
+#: ``test_ctps_player_html.py``'s ``_TRACK_RE`` / ``_META_RE`` (each inline
+#: constant lives in its own ``<script>``, so this terminates at the intended
+#: assignment alone).
+_TC10_META_RE = re.compile(r"const PLAYER_META = (?P<json>.*?);\s*</script>", re.DOTALL)
+_TC10_TRACK_RE = re.compile(r"const TRACK = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+
+def test_tc10_renderer_registers_wheel_arc_mode() -> None:
+    """TC10: ``renderer.js`` registers the ``"wheel-arc"`` render mode (AC1/AC5).
+
+    Source-regex only (structural — no JS execution harness exists): asserts
+    a ``CTPS.renderModes.register({ id: "wheel-arc" ... })`` call is present,
+    so boot-time validation (``boot.js``) never logs the "unregistered render
+    mode" error once a page emits ``render_mode: "wheel-arc"``.
+    """
+    js = (player_html.PLAYER_JS_PATH.parent / "renderer.js").read_text(encoding="utf-8")
+    assert re.search(r'CTPS\.renderModes\.register\(\s*\{\s*id:\s*"wheel-arc"', js), (
+        'renderer.js must register a render mode via '
+        'CTPS.renderModes.register({ id: "wheel-arc", ... }); none was found.'
+    )
+
+
+def test_tc10_renderer_pivot_span_guard_present() -> None:
+    """TC10: the ``TRACK.pivots`` ``t0``/``t1`` span guard exists (AC1/AC5).
+
+    Source-regex checks for the span-lookup shape described in Contracts
+    (owner T4): a read of ``track.pivots``, a comparison bracketing the
+    playhead time between a segment's ``t0`` and ``t1``, and a ``return
+    null`` degrade path — so the "unknown / malformed pivots" Error Handling
+    rule (never throw; skip the overlay) is asserted present, not merely
+    assumed.
+    """
+    js = (player_html.PLAYER_JS_PATH.parent / "renderer.js").read_text(encoding="utf-8")
+
+    assert re.search(r"\btrack\.pivots\b", js), (
+        "renderer.js must read track.pivots to locate the active pivot span."
+    )
+    assert re.search(r"\bt0\b", js) and re.search(r"\bt1\b", js), (
+        "renderer.js must reference the pivots segment's t0/t1 span bounds."
+    )
+    assert re.search(r"t\s*>=\s*\w+\.t0\s*&&\s*t\s*<=\s*\w+\.t1", js), (
+        "renderer.js must guard the active pivot span with a "
+        "t0 <= t <= t1 comparison against the playhead time."
+    )
+    assert re.search(r"return\s+null", js), (
+        "the pivot span lookup must degrade to null (skip the overlay) "
+        "rather than throw on a missing/malformed segment."
+    )
+
+
+def test_tc10_wheel_arc_survives_html_inlining(tmp_path) -> None:
+    """TC10: the wheel-arc registration + span guard survive into the page.
+
+    ``renderer.js`` is inlined into EVERY emitted page verbatim (own
+    ``<script>``, no additional escaping beyond the JSON constants) regardless
+    of whether the rendered track carries pivots — the T3 blocker rationale
+    depends on exactly this: the mode must already be registered before any
+    page could ever set ``render_mode: "wheel-arc"``. This renders a
+    pivot-free track (the existing LRS fixture) and re-runs the same
+    source-regex checks against the fully assembled HTML, proving the pattern
+    is not merely true on disk but survives the emitter's asset-inlining
+    pipeline unchanged.
+    """
+    track_dict = json.loads(
+        (Path(__file__).resolve().parent / "fixtures" / "ctps_lrs_track.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    out_path = tmp_path / "no_pivots.html"
+    player_html.render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert re.search(r'CTPS\.renderModes\.register\(\s*\{\s*id:\s*"wheel-arc"', html), (
+        "the emitted page must embed the wheel-arc render-mode registration."
+    )
+    assert re.search(r"\btrack\.pivots\b", html), (
+        "the emitted page must embed the track.pivots span lookup."
+    )
+    assert re.search(r"t\s*>=\s*\w+\.t0\s*&&\s*t\s*<=\s*\w+\.t1", html), (
+        "the emitted page must embed the t0 <= t <= t1 span guard."
+    )
+    assert re.search(r"return\s+null", html), (
+        "the emitted page must embed the degrade-on-missing-segment path."
+    )
+
+
+def test_tc10_pivot_track_page_is_self_contained_with_overlay(tmp_path) -> None:
+    """TC10: a pivot-carrying track emits a self-contained page with the overlay.
+
+    T7's structural end (AC1/AC5), proven on a track whose dict has a non-empty
+    ``pivots`` list:
+
+    * the ``pivots`` segment rides along verbatim in the inline ``TRACK`` so the
+      ``wheel-arc`` mode can locate the active span,
+    * the ``wheel-arc`` registration and the ``t0``/``t1`` span guard (the same
+      overlay machinery asserted against ``renderer.js`` on disk above) survive
+      into THIS pivot page's fully assembled HTML,
+    * ``PLAYER_META.render_mode`` is a mode the emitted ``renderer.js`` actually
+      registers, so boot validation (``boot.js``) never logs an "unregistered
+      render mode" error, and
+    * the page stays offline/self-contained (TC5) with the new key present.
+
+    The pivots->``"wheel-arc"`` render_mode *selection* is owned by
+    :func:`tools.path_planner.ctps.player_html.render` (task T3, per the plan's
+    Contracts) and is asserted by the ``test_ctps_player_html`` suite (TC8). It
+    is deliberately NOT re-asserted here, so this e2e structural test stays green
+    independent of whether that emitter change has landed in the tree yet — the
+    boot-validation invariant below still holds for the current ``"box"`` default
+    and for ``"wheel-arc"`` once T3 lands.
+    """
+    out_path = tmp_path / "pivot.html"
+    returned = player_html.render(_PIVOT_TRACK_DICT, out_path)
+    assert returned == out_path
+
+    html = out_path.read_text(encoding="utf-8")
+
+    # The pivots segment rides along verbatim in the embedded TRACK.
+    track_match = _TC10_TRACK_RE.search(html)
+    assert track_match is not None, "could not locate the embedded const TRACK assignment"
+    embedded = json.loads(track_match.group("json").replace("<\\/", "</"))
+    assert embedded.get("pivots") == _PIVOT_TRACK_DICT["pivots"], (
+        "the embedded TRACK must carry the pivots segment unchanged so the "
+        "wheel-arc overlay can locate the active pivot span."
+    )
+
+    # The wheel-arc registration + span guard survive into THIS pivot page.
+    assert re.search(r'CTPS\.renderModes\.register\(\s*\{\s*id:\s*"wheel-arc"', html), (
+        "the emitted pivot page must embed the wheel-arc render-mode registration."
+    )
+    assert re.search(r"\btrack\.pivots\b", html), (
+        "the emitted pivot page must embed the track.pivots span lookup."
+    )
+    assert re.search(r"t\s*>=\s*\w+\.t0\s*&&\s*t\s*<=\s*\w+\.t1", html), (
+        "the emitted pivot page must embed the t0 <= t <= t1 span guard."
+    )
+    assert re.search(r"return\s+null", html), (
+        "the emitted pivot page must embed the degrade-on-missing-segment path."
+    )
+
+    # PLAYER_META.render_mode is present and is a mode the page registers, so
+    # boot validation passes (AC5's "registered so boot validation passes"). This
+    # is the T3-independent invariant: true for the current "box" default and for
+    # "wheel-arc" once the render_mode selection lands, so it never falsely fails.
+    meta_match = _TC10_META_RE.search(html)
+    assert meta_match is not None, "could not locate the embedded const PLAYER_META assignment"
+    meta = json.loads(meta_match.group("json").replace("<\\/", "</"))
+    render_mode = meta.get("render_mode")
+    assert isinstance(render_mode, str) and render_mode, (
+        f"PLAYER_META.render_mode must be a non-empty string, got {render_mode!r}."
+    )
+    assert re.search(
+        r'CTPS\.renderModes\.register\(\s*\{\s*id:\s*"%s"' % re.escape(render_mode),
+        html,
+    ), (
+        f"PLAYER_META.render_mode {render_mode!r} is not registered in the "
+        "emitted renderer.js; boot validation would log an unregistered-mode error."
+    )
+
+    # Still fully self-contained/offline (TC5) with the pivots key present.
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "src=" not in html
+    assert "href=" not in html

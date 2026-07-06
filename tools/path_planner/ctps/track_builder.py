@@ -43,20 +43,33 @@ through this builder.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from math import hypot
-from typing import Any, Dict, List
+from dataclasses import dataclass, field as dc_field
+from math import ceil, cos, hypot, radians, sin
+from typing import Any, Dict, List, Optional, Tuple
 
+from tools.path_planner.compiler import ACT_STOP_AT_LINE, ACT_TURN_REL
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
+from tools.path_planner.pipeline_config import TurnMode
+from tools.path_planner.planner import (
+    BlindDecayParams,
+    compute_all_pairs_next_hop,
+    parse_track_cm_from_config,
+)
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
+    ACT_LINE_OVERSHOOT,
+    ACT_LINE_PASS,
+    ACT_REANCHOR,
+    ACT_STOP_AT_LINE_REVERSE,
+    ACT_WALL_DEPART,
+    ACT_WALL_STOP,
     PathTrackerSim,
     UnreachableGoalError,
     wrap_pm180,
 )
 
 from tools.path_planner.ctps.config import (
+    ARC_STEP_DEG,
     DRIFT_THRESHOLD_CM,
     MANIP_NOMINAL_S,
     SIM_DRIVE_CM_S,
@@ -110,6 +123,41 @@ def _honors_gyro_heading(cmd) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Pivot-arc detection tag sets (issue #55)
+# ---------------------------------------------------------------------------
+
+#: Departure-hop LANDING primitive tags that re-anchor via a SENSOR
+#: (``on_intersection``) rather than dead-reckoning onto the node. The sim
+#: takes no departing trim on a sensor hop, so a pivot departure over one of
+#: these dead-reckons the departing ``trim_cm`` PAST its true landing along
+#: the departure-edge ray; the real robot re-anchors on the destination line
+#: (ADR-044 D1), so the departure landing is pulled BACK by exactly that trim
+#: along the ray — onto the node in the plain case, and the destination's own
+#: approach trim SHORT of it when the destination is itself a chained pivot
+#: the route turns at. Any OTHER landing tag is distance-terminated and lands
+#: on-node natively via the sim's delta-trimmed leg, so it needs no
+#: correction. (Pivots are FRONT-only in v1 (#54), so the REAR reverse tags
+#: never actually fire on a pivot departure; they are listed for a complete
+#: on_intersection-landing set.)
+_SENSOR_LANDING_TAGS: frozenset[str] = frozenset(
+    {
+        ACT_LINE_OVERSHOOT,
+        ACT_LINE_PASS,
+        ACT_STOP_AT_LINE,
+        ACT_STOP_AT_LINE_REVERSE,
+    }
+)
+
+#: Wall-zero reset interlude primitive tags. If any of these fired at the pivot
+#: node between the approach and the departing turn, the reset has already
+#: snapped the pose (destroying the ``c0`` arc-start premise), so the arc is
+#: skipped and the plain in-place turn is rendered instead.
+_WALL_RESET_TAGS: frozenset[str] = frozenset(
+    {ACT_WALL_STOP, ACT_REANCHOR, ACT_WALL_DEPART}
+)
+
+
+# ---------------------------------------------------------------------------
 # Output data model (Data Model B — Track)
 # ---------------------------------------------------------------------------
 
@@ -142,6 +190,17 @@ class Track:
         keyframes). A successful ``goto`` additionally carries ``"t_end":
         float`` (>= ``"t"``), spanning the whole multi-hop move; the
         UNREACHABLE fault ``goto`` event has no ``"t_end"``.
+    :param pivots: Optional single-wheel pivot-arc overlay segments (issue #55),
+        one per pivot the trace's routes actually take, sorted by ``t0``. Each
+        entry is ``{"t0": float, "t1": float, "cx": float, "cy": float,
+        "theta_deg": float, "wheel": "left"|"right"}`` — the arc-span
+        timestamps, the planted-wheel world centre (rotation centre), the signed
+        swing angle (CCW positive, the ``ACT_TURN_REL`` delta), and the pivot
+        wheel side. Empty (and omitted from :meth:`to_dict`) for every
+        pivot-free trace, so ``schema_version`` stays ``1`` (additive optional
+        field). The dense arc keyframes between ``t0`` and ``t1`` already trace
+        the swing through the player's lerp; this segment just tells the
+        ``wheel-arc`` render mode WHEN a pivot is active and WHERE its wheel is.
     """
 
     schema_version: int
@@ -149,6 +208,7 @@ class Track:
     duration_s: float
     keyframes: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
+    pivots: List[Dict[str, Any]] = dc_field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the JSON-serialisable Data Model B dict for this track.
@@ -157,16 +217,24 @@ class Track:
         mutated after construction), so the player can embed the result
         directly.
 
+        The ``"pivots"`` key is included **only when non-empty**: a pivot-free
+        trace emits exactly the pre-#55 dict (same keys, same order), so its
+        Track JSON is byte-identical to before this change (AC6).
+
         :return: ``{"schema_version", "field", "duration_s", "keyframes",
-            "events"}`` — exactly the shape the HTML player (T8) consumes.
+            "events"}`` — plus ``"pivots"`` when the trace took at least one
+            pivot — exactly the shape the HTML player consumes.
         """
-        return {
+        result: Dict[str, Any] = {
             "schema_version": self.schema_version,
             "field": self.field,
             "duration_s": self.duration_s,
             "keyframes": self.keyframes,
             "events": self.events,
         }
+        if self.pivots:
+            result["pivots"] = self.pivots
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +322,86 @@ def _pose_delta_duration(
     dist = hypot(x_new - x_prev, y_new - y_prev)
     dh = abs(wrap_pm180(h_new - h_prev))
     return dist / SIM_DRIVE_CM_S + dh / SIM_TURN_DEG_S
+
+
+def _build_pivot_arc(
+    x0: float,
+    y0: float,
+    h0_deg: float,
+    theta_deg: float,
+    t0: float,
+    radius_cm: float,
+    wheel_sign: int,
+) -> Tuple[List[Dict[str, Any]], Tuple[float, float], Tuple[float, float], float]:
+    """Sample a rigid single-wheel pivot rotation into dense arc keyframes.
+
+    The chassis centre ``(x0, y0)`` rotates rigidly about the planted (braked)
+    pivot wheel through ``theta_deg`` (signed, CCW positive). The planted wheel
+    — the rotation centre ``W`` — sits ``radius_cm`` off the chassis centre,
+    ``90 deg`` to the ``wheel_sign`` side of the incoming heading ``h0_deg``
+    (``+1`` = left wheel / ``PIVOT_LEFT``, ``-1`` = right wheel /
+    ``PIVOT_RIGHT``)::
+
+        W        = (x0, y0) + radius * (cos(h0 + sign*90), sin(h0 + sign*90))
+        N        = max(1, ceil(|theta| / ARC_STEP_DEG))
+        center_k = W + Rot(tau*theta) * ((x0, y0) - W)      tau = k / N, k = 1..N
+        heading_k= normalize(h0 + tau*theta)
+
+    where ``Rot(a)*(dx, dy) = (dx*cos a - dy*sin a, dx*sin a + dy*cos a)``.
+
+    Each sub-keyframe advances the clock by the SAME pure-rotation slice
+    ``(|theta| / N) / SIM_TURN_DEG_S`` (a turning box, not a driving one), so the
+    whole arc occupies ``|theta| / SIM_TURN_DEG_S`` — the exact visual duration
+    the single in-place turn keyframe had today. Timestamps are pinned to
+    ``t0 + k*dt`` (never accumulated) so the running clock stays strictly
+    monotonic and the total is exact.
+
+    The first sample is ``k = 1`` (NOT ``k = 0``): the arc-start pose is the
+    already-present previous keyframe at ``(x0, y0, h0)``, so these ``N`` samples
+    REPLACE the single in-place turn keyframe (``N - 1`` intermediate keyframes
+    plus the arc-end pose).
+
+    Pure and side-effect free — the caller decides where to append the samples,
+    where to place the wheel pin, and whether/where to nudge the chassis.
+
+    :param x0: arc-start chassis-centre x (cm) — the previous keyframe.
+    :param y0: arc-start chassis-centre y (cm).
+    :param h0_deg: incoming heading (deg) — the previous keyframe's heading.
+    :param theta_deg: signed swing angle (deg, CCW positive) — the
+        ``ACT_TURN_REL`` delta.
+    :param t0: timestamp of the arc-start keyframe (the running clock).
+    :param radius_cm: pivot radius ``track_cm / 2`` (cm).
+    :param wheel_sign: ``+1`` for a left-wheel pivot, ``-1`` for a right-wheel.
+    :return: ``(arc_keyframes, (wx, wy), (cx_end, cy_end), t_end)`` — the ``N``
+        replacement keyframes, the planted-wheel world centre, the arc-end
+        chassis centre, and the running clock after the arc.
+    """
+    wheel_ang_rad = radians(h0_deg + wheel_sign * 90.0)
+    wx = x0 + radius_cm * cos(wheel_ang_rad)
+    wy = y0 + radius_cm * sin(wheel_ang_rad)
+
+    abs_theta = abs(theta_deg)
+    n = max(1, ceil(abs_theta / ARC_STEP_DEG))
+    dt = (abs_theta / n) / SIM_TURN_DEG_S
+
+    # Offset of the chassis centre from the planted wheel, rotated by tau*theta.
+    rx = x0 - wx
+    ry = y0 - wy
+
+    arc: List[Dict[str, Any]] = []
+    cx_end, cy_end = x0, y0
+    for k in range(1, n + 1):
+        tau = k / n
+        ang_rad = radians(tau * theta_deg)
+        cos_a = cos(ang_rad)
+        sin_a = sin(ang_rad)
+        cx = wx + (rx * cos_a - ry * sin_a)
+        cy = wy + (rx * sin_a + ry * cos_a)
+        heading = (h0_deg + tau * theta_deg) % 360.0
+        arc.append({"t": t0 + k * dt, "x": cx, "y": cy, "h": heading})
+        cx_end, cy_end = cx, cy
+
+    return arc, (wx, wy), (cx_end, cy_end), t0 + n * dt
 
 
 def _drive_label(cmd: Command) -> str:
@@ -374,7 +522,22 @@ def build(trace: Trace, field_data) -> Track:
     events: List[Dict[str, Any]] = []
     t = 0.0
 
-    # -- clock-advancing closures (single owner of ``t``) -------------------
+    # Optional single-wheel pivot-arc overlay segments (issue #55). Appended in
+    # chronological (t0-increasing) order as each goto's route takes a declared
+    # pivot; stays empty — and the ``pivots`` key is omitted from the Track — for
+    # every pivot-free trace, so a ``PIVOT_TURNS``-empty field is byte-identical
+    # to before this change (AC6).
+    pivots: List[Dict[str, Any]] = []
+    # Chassis track width (cm), parsed LAZILY from ConfigDrive.h on the FIRST
+    # detected pivot only. A pivot-free build never reads the firmware header
+    # (issue #44 fail-loud parse), preserving the byte-identical guarantee.
+    track_cm: Optional[float] = None
+
+    # -- clock-advancing closures (primary writers of ``t``) ----------------
+    # The pivot-arc branch below is the one OTHER writer of ``t``: it assigns
+    # the ``_build_pivot_arc`` end time directly (same function scope, same
+    # monotonic clock — the arc replaces the in-place turn keyframe these
+    # closures would otherwise have timed).
 
     def append_geometry_keyframe(x_new: float, y_new: float, h_new: float) -> None:
         """Advance the clock by the pose-delta duration; append a keyframe.
@@ -422,9 +585,154 @@ def build(trace: Trace, field_data) -> Track:
             from_node = sim.localization.current_node()
             target = cmd.target
             t_start = t
+
+            # --- per-goto pivot-arc detection state ----------------------
+            # Reset per goto, mirroring the firmware's per-goal pivot-latch
+            # reset (`_reset_pivot_latch`): a pivot fires only when the
+            # approach `u->v` AND the departure `v->w` fall inside the SAME
+            # goto, so a goto that merely STARTS on a pivot node (no tracked
+            # predecessor) degrades to a plain turn, exactly as on the robot.
+            cur_node = from_node
+            prev_node: Optional[str] = None        # predecessor of `cur_node`
+            wall_reset_at_node = False             # an ACT_WALL_* fired at cur_node
+            # Pivot departure awaiting a landing: ``(w, trim_cm, ux, uy)`` —
+            # the departure hop's destination, the DEPARTING pivot's trim, and
+            # the departure-edge heading unit ray (u-hat-1).
+            pending_pivot_land: Optional[Tuple[str, float, float, float]] = None
             try:
-                for _primitive, snap in sim.step_through(target):
-                    append_geometry_keyframe(snap.x_cm, snap.y_cm, snap.heading_deg)
+                for primitive, snap in sim.step_through(target):
+                    tag = primitive[0]
+                    node_now = sim.localization.current_node()
+                    if node_now != cur_node:
+                        # A hop just re-anchored onto a new node: the OLD current
+                        # node is this one's predecessor, and any wall reset seen
+                        # at the old node no longer applies.
+                        prev_node = cur_node
+                        cur_node = node_now
+                        wall_reset_at_node = False
+                    if tag in _WALL_RESET_TAGS:
+                        wall_reset_at_node = True
+
+                    arced = False
+                    if tag == ACT_TURN_REL and not wall_reset_at_node:
+                        # One-hop lookahead, mirroring the firmware key
+                        # `findPivotTurn(cur, nxt, getNextHop(nxt, dest))`
+                        # (ADR-036). `w` is a SINGLE `None`-safe dict index —
+                        # NEVER `walk_next_hop`, which raises
+                        # `UnreachableGoalError` eagerly and would drop the
+                        # reachable-prefix keyframes + change the UNREACHABLE
+                        # label. A miss (no predecessor at the goto's first turn,
+                        # a non-pivot turn, `w is None` at the terminal node, or
+                        # an empty `PIVOT_TURNS`) renders the turn unchanged.
+                        w = next_hop[cur_node].get(target)
+                        record = sim.find_pivot_turn(prev_node, cur_node, w)
+                        if record is not None:
+                            arced = True
+                            # Parse the track width ONLY on the pivot path.
+                            if track_cm is None:
+                                track_cm = parse_track_cm_from_config()
+                            theta_deg = float(primitive[1])
+                            start_kf = keyframes[-1]
+                            wheel_sign = (
+                                1 if record.wheel == TurnMode.PIVOT_LEFT else -1
+                            )
+                            arc, (wx, wy), (cx_end, cy_end), t = _build_pivot_arc(
+                                start_kf["x"],
+                                start_kf["y"],
+                                start_kf["h"],
+                                theta_deg,
+                                start_kf["t"],
+                                track_cm / 2.0,
+                                wheel_sign,
+                            )
+                            # The N arc sub-keyframes REPLACE the single in-place
+                            # turn keyframe (which is never appended here).
+                            keyframes.extend(arc)
+                            # One overlay segment per taken pivot, appended in
+                            # chronological (t0-increasing) order — already sorted.
+                            pivots.append(
+                                {
+                                    "t0": start_kf["t"],
+                                    "t1": t,
+                                    "cx": wx,
+                                    "cy": wy,
+                                    "theta_deg": theta_deg,
+                                    "wheel": (
+                                        "left"
+                                        if record.wheel == TurnMode.PIVOT_LEFT
+                                        else "right"
+                                    ),
+                                }
+                            )
+                            # Chassis nudge: land the shared chassis on the arc
+                            # end so the sim's existing delta-trimmed departure
+                            # leg (dispatched on the NEXT yield) drives from the
+                            # true pivot exit and lands on-node — killing the
+                            # ~12.7 cm in-place-turn drift (AC2). Parity-safe for
+                            # two reasons: (a) `_walk_hops` reads chassis state
+                            # only via `heading_deg` for dispatch
+                            # (runtime.py:2693), so an x/y write cannot change the
+                            # primitive stream; and (b) a raw `chassis.x_cm/y_cm`
+                            # write never reaches `LocalizationSim` — its offset
+                            # grows ONLY through `accumulate_operator_move`, which
+                            # this does not call. (This is NOT a `nav_active`
+                            # gate: the write simply never feeds the integrator.)
+                            # TC7 is the primitive-stream-unchanged tripwire.
+                            chassis.x_cm = cx_end
+                            chassis.y_cm = cy_end
+                            # Arm the sensor-departure landing correction: the
+                            # arc-end heading IS the departure-edge heading
+                            # (the pre-edge turn faces the edge exactly), so
+                            # its unit vector is the ray any sensor-landing
+                            # residual lies along.
+                            depart_rad = radians(arc[-1]["h"])
+                            pending_pivot_land = (
+                                w,
+                                record.trim_cm,
+                                cos(depart_rad),
+                                sin(depart_rad),
+                            )
+
+                    if not arced:
+                        append_geometry_keyframe(snap.x_cm, snap.y_cm, snap.heading_deg)
+                        if (
+                            pending_pivot_land is not None
+                            and node_now == pending_pivot_land[0]
+                        ):
+                            # The pivot's departure hop just landed on `w`.
+                            if tag in _SENSOR_LANDING_TAGS:
+                                # Sensor-terminated departure (LINE-out / seek):
+                                # the sim takes no departing trim, so this leg
+                                # dead-reckons from `c_end` — the departing
+                                # `trim_cm` PAST its true landing along the
+                                # departure-edge ray (purely along-edge, no
+                                # lateral). The real robot re-anchors on `w`'s
+                                # line (ADR-044 D1), so pull the departure
+                                # keyframe — and the shared chassis — BACK by
+                                # exactly that trim along the ray. Plain case:
+                                # the sim netted the full edge, so this lands
+                                # exactly ON `w`. Chained case (`w` is ITSELF a
+                                # pivot the route turns at): the sim already
+                                # shortened the landing by `w`'s approach trim,
+                                # so this lands that much SHORT of `w` — the
+                                # true physical pose the next arc must start
+                                # from. Never snap to `w`'s coordinates: an
+                                # absolute snap erases the approach trim and
+                                # translates the whole tail by it. The arc
+                                # still ends at `c_end`; only the landing moves.
+                                # Accepted cosmetic: on a chained-sensor leg the
+                                # mid-hop follow keyframe keeps the un-pulled
+                                # dead-reckon, so the box plays a small backward
+                                # hitch onto the corrected landing. Playback
+                                # timing is visual-only, so this is left as-is.
+                                _w, trim_cm, ux, uy = pending_pivot_land
+                                land_x = keyframes[-1]["x"] - trim_cm * ux
+                                land_y = keyframes[-1]["y"] - trim_cm * uy
+                                keyframes[-1]["x"] = land_x
+                                keyframes[-1]["y"] = land_y
+                                chassis.x_cm = land_x
+                                chassis.y_cm = land_y
+                            pending_pivot_land = None
             except UnreachableGoalError:
                 # The fault point is the node the sim is parked at after any
                 # intermediate hops it managed before the dead end.
@@ -576,4 +884,5 @@ def build(trace: Trace, field_data) -> Track:
         duration_s=t,
         keyframes=keyframes,
         events=events,
+        pivots=pivots,
     )

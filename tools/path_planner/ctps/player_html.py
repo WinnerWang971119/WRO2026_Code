@@ -135,6 +135,8 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="map">MAP</button>
                 <button id="ctps-layer-trail" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="trail">TRAIL</button>
+                <button id="ctps-layer-path" class="ctps-chip ctps-chip--active"
+                        type="button" data-layer="path">PATH</button>
                 <button id="ctps-layer-nodes" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="nodes">NODES</button>
             </div>
@@ -441,7 +443,7 @@ def render(
         "filename": _derive_filename(track_dict, filename),
         "lanes": ["task", "goto", "holding", "drift"],
         "tabs": ["log", "inspector"],
-        "render_mode": "box",
+        "render_mode": "wheel-arc" if track_dict.get("pivots") else "box",
     }
     meta_json = json.dumps(player_meta, ensure_ascii=False).replace("</", "<\\/")
 

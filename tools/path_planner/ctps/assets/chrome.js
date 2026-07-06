@@ -6,7 +6,7 @@
  *   1. Header wiring — the trace filename + source badge (from PLAYER_META),
  *      and the drift chip (worst drift_warn across the whole trace; click
  *      seeks to it; hidden when the trace has no drift events).
- *   2. The MAP / TRAIL / NODES layer chips — click toggles CTPS.store.layers;
+ *   2. The MAP / TRAIL / PATH / NODES layer chips — click toggles CTPS.store.layers;
  *      the active class always mirrors the store, including on load.
  *   3. Full-view (the on-canvas HUD full-screen is done here) — click toggles
  *      CTPS.store.fullView; the toggle drives the label/glyph on the switch,

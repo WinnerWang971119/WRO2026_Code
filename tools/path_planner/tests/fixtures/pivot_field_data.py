@@ -64,6 +64,34 @@ Fields
     forward), so the FRONT-only force-override is load-bearing and observable:
     the hop must emit FRONT primitives + the trim, never ``ACT_BLIND_REVERSE``.
 
+``make_line_departing_pivot_field()`` -- CTPS issue #55 TC12
+    ``Z -> P`` is BLIND (dead-reckon); ``P -> Q`` is LINE, into the junction
+    line node ``Q``.  The declared pivot ``(Z, P, Q)`` (90 deg right turn,
+    ``delta = 9.0`` cm) departs over a LINE edge -- the mirror image of
+    ``make_line_incoming_pivot_field``, whose pivot instead ARRIVES over a
+    LINE edge.  The sim takes NO departing trim on a LINE-outgoing hop (it
+    re-anchors on the destination line), so the along-edge residual is exactly
+    ``delta`` -- the CTPS ``track_builder`` sensor-departure re-anchor
+    (ADR-044 D1) this fixture exists to exercise.  PASSES ``validate``.
+    Deliberately EXCLUDED from ``all_fields()``: that list feeds the sim's
+    per-turn legality sweep, which pins ``len(fields) == 6``; this fixture is
+    validated directly by its own CTPS test instead.
+
+``make_chained_sensor_departure_pivot_field()`` -- CTPS issue #55 TC13
+    ``Z -> P`` is BLIND; ``P -> Q`` is LINE; ``Q -> X`` is BLIND, with pivots
+    at BOTH ``P`` and ``Q`` (each a 90 deg right turn, ``delta = 9.0`` cm).
+    The shared LINE leg ``P -> Q`` is pivot 1's SENSOR-terminated departure
+    AND pivot 2's SENSOR-terminated approach at once: the sim takes no
+    departing trim on it but shortens the landing by pivot 2's approach trim,
+    so the robot physically lands ``delta`` SHORT of ``Q`` before pivot 2's
+    arc.  This is the chained topology where the CTPS ``track_builder``
+    sensor-departure landing must subtract the DEPARTING trim along the edge
+    ray rather than snap absolutely onto ``Q`` (an absolute snap erases the
+    approach trim and translates the whole tail ``delta`` off ``X``).  PASSES
+    ``validate``.  Deliberately EXCLUDED from ``all_fields()``: that list
+    feeds the sim's per-turn legality sweep, which pins ``len(fields) == 6``;
+    this fixture is validated directly by its own CTPS test instead.
+
 ``make_sensor_autorule_pivot_field()`` -- TC10 / TC11 / TC12 (validator), TC6-TC9 (sim)
 
     ::
@@ -441,6 +469,137 @@ def make_auto_rear_pivot_field() -> SimpleNamespace:
         pivot_turns=[("P", "Q", "R")],
         start_node="P",
         start_heading_deg=0.0,    # facing along P->Q
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 5 -- LINE-departing pivot (CTPS issue #55, TC12)
+# ---------------------------------------------------------------------------
+#
+#   Z(0,0) --BLIND,heading 90--> P(0,60) --LINE,heading 0--> Q(80,60)
+#
+#   Pivot (Z, P, Q): BLIND-incoming (distance-terminated) + LINE-outgoing
+#   (sensor-terminated) -- the mirror image of ``make_line_incoming_pivot_field``.
+#   A 90 deg right turn gives delta = 9.0 cm. The outgoing LINE edge takes NO
+#   departing trim in the sim (a LINE hop always drives its full commanded
+#   distance and re-anchors via LINE_OVERSHOOT at Q), so the chassis dead-
+#   reckons `delta` PAST Q along the departure edge before the destination's
+#   line re-anchor corrects it -- exactly the CTPS `track_builder`
+#   sensor-departure case (ADR-044 D1), unlike every other fixture above
+#   (whose declared pivot's SENSOR leg, if any, is always the INCOMING one).
+
+_LD_Z: Tuple[float, float] = (0.0, 0.0)
+_LD_P: Tuple[float, float] = (0.0, 60.0)
+_LD_OUT_CM: float = 80.0
+_LD_Q: Tuple[float, float] = (_LD_P[0] + _LD_OUT_CM, _LD_P[1])
+
+_LD_NODES: Dict[str, Tuple[float, float]] = {
+    "Z": _LD_Z,
+    "P": _LD_P,
+    "Q": _LD_Q,
+}
+
+# Z is the blind dead-reckon spawn; P and Q are both junction line nodes (the
+# endpoints of the outgoing P->Q LINE edge).
+_LD_NODE_TYPES: Dict[str, str] = {
+    "Z": "blind",
+    "P": "line",
+    "Q": "line",
+}
+
+
+def make_line_departing_pivot_field() -> SimpleNamespace:
+    """Return the LINE-departing pivot chain (CTPS issue #55, TC12).
+
+    ``Z -> P`` is a BLIND dead-reckon approach from the spawn (the validator
+    requires a blind START node); ``P -> Q`` is a LINE edge (heading 0 deg)
+    into the junction line node ``Q``. The declared pivot ``(Z, P, Q)`` is a
+    90 deg right turn (``delta = 9.0`` cm). Unlike every other fixture in this
+    module, the SENSOR-terminated leg here is the DEPARTURE (``P -> Q``), not
+    the approach: the sim drives the full ``P -> Q`` distance with no trim and
+    re-anchors on ``Q``'s line, so the along-edge residual the CTPS
+    ``track_builder`` must re-anchor onto the destination node is exactly
+    ``delta``, purely along the departure edge ray (no lateral component).
+    """
+    return _make_field(
+        nodes=_LD_NODES,
+        node_types=_LD_NODE_TYPES,
+        line_segments=[("P", "Q")],
+        blind_edges=[("Z", "P")],
+        pivot_turns=[("Z", "P", "Q")],
+        start_node="Z",            # blind spawn (validator rejects an on-line start)
+        start_heading_deg=90.0,    # facing along Z->P (straight up)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixture 6 -- chained pivots over a LINE (sensor) middle leg (CTPS #55, TC13)
+# ---------------------------------------------------------------------------
+#
+#   Z(0,0) --BLIND,heading 90--> P(0,60) --LINE,heading 0--> Q(80,60)
+#                                            --BLIND,heading 270--> X(80,-20)
+#
+#   Pivots (Z, P, Q) and (P, Q, X), each a 90 deg right turn (delta = 9.0 cm).
+#   The SHARED middle leg P->Q is a LINE edge, so it is pivot 1's
+#   sensor-terminated DEPARTURE and pivot 2's sensor-terminated APPROACH at
+#   once: the sim takes no departing trim on it but DOES shorten the landing
+#   by pivot 2's approach trim, so the chassis physically lands delta short of
+#   Q -- the true arc-start pose for pivot 2.  The validator's chained
+#   sum-check passes (9 + 9 = 18 < 80).  An ABSOLUTE snap-to-Q of the
+#   sensor-departure landing erases that approach trim and translates the
+#   whole tail delta off the final node X; the relative (trim-subtraction)
+#   landing this fixture exists to pin lands the tail exactly on X.
+
+_CS_Z: Tuple[float, float] = (0.0, 0.0)
+_CS_P: Tuple[float, float] = (0.0, 60.0)
+_CS_MID_CM: float = 80.0
+_CS_Q: Tuple[float, float] = (_CS_P[0] + _CS_MID_CM, _CS_P[1])
+_CS_OUT_CM: float = 80.0
+_CS_X: Tuple[float, float] = (_CS_Q[0], _CS_Q[1] - _CS_OUT_CM)
+
+_CS_NODES: Dict[str, Tuple[float, float]] = {
+    "Z": _CS_Z,
+    "P": _CS_P,
+    "Q": _CS_Q,
+    "X": _CS_X,
+}
+
+# Z is the blind dead-reckon spawn; P and Q are junction line nodes (the
+# endpoints of the middle P->Q LINE edge); X is the off-line blind exit.
+_CS_NODE_TYPES: Dict[str, str] = {
+    "Z": "blind",
+    "P": "line",
+    "Q": "line",
+    "X": "blind",
+}
+
+
+def make_chained_sensor_departure_pivot_field() -> SimpleNamespace:
+    """Return the chained pivots joined by a LINE middle leg (CTPS #55, TC13).
+
+    ``Z -> P`` is a BLIND dead-reckon approach from the spawn (the validator
+    requires a blind START node); ``P -> Q`` is a LINE edge (heading 0 deg)
+    between the junction line nodes ``P`` and ``Q``; ``Q -> X`` is BLIND
+    (heading 270 deg).  The declared pivots ``(Z, P, Q)`` and ``(P, Q, X)``
+    are each a 90 deg right turn (``delta = 9.0`` cm), so the shared LINE leg
+    is simultaneously pivot 1's SENSOR-terminated departure and pivot 2's
+    SENSOR-terminated approach: the sim shortens its landing by pivot 2's
+    approach trim, leaving the chassis ``delta`` SHORT of ``Q`` -- the true
+    arc-start pose for pivot 2.  A sensor-departure landing that snaps
+    absolutely onto ``Q`` erases that trim and translates the whole tail
+    ``delta`` off ``X``; the CTPS ``track_builder`` must instead subtract the
+    DEPARTING trim along the departure-edge ray.  PASSES ``validate``.
+    Deliberately EXCLUDED from ``all_fields()`` (that sweep pins
+    ``len(fields) == 6``); validated directly by its own CTPS test instead.
+    """
+    return _make_field(
+        nodes=_CS_NODES,
+        node_types=_CS_NODE_TYPES,
+        line_segments=[("P", "Q")],
+        blind_edges=[("Z", "P"), ("Q", "X")],
+        pivot_turns=[("Z", "P", "Q"), ("P", "Q", "X")],
+        start_node="Z",            # blind spawn (validator rejects an on-line start)
+        start_heading_deg=90.0,    # facing along Z->P (straight up)
     )
 
 
