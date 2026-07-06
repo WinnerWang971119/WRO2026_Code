@@ -1023,3 +1023,234 @@
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
 }
+
+/* ===================================================================== */
+/* Cargo panel (object / cargo plan — issue #57)                          */
+/* ===================================================================== */
+/*
+ * The two-tab CARGO rail section (#ctps-cargo). Markup is player_html.py's
+ * `_BODY_MARKUP`; the panel CONTENT is cargo.js (the Magazine 4-lane grid +
+ * the Inventory rear-box hold card); the tab-switch CHROME (which tab carries
+ * `.ctps-cargo-tab--active`, which `.ctps-cargo-panel` gets the `hidden`
+ * attribute) is panels.js's `renderHoldingShell`. This block is only the LOOK.
+ * layout.css owns none of these new classes, so the cargo panel's own layout
+ * (flex/grid/gap) lives here — it restates no property another file already set.
+ *
+ * Reproduces the #57 UI sidecar (docs/plans/2026-07-06-ctps-object-cargo.ui.md,
+ * Change 1 + States) in the existing tokens.css palette — no new hue, no bare
+ * hex. Two per-instance custom properties are CONSUMED here (cargo.js writes
+ * each via `setProperty`, the ADR-053 carve-out): a magazine cell's authored
+ * fill on `--ctps-mag-cell-color`, and an inventory swatch's on
+ * `--ctps-swatch-color`. Without the `var()` reads below those colours would be
+ * invisible.
+ */
+
+/* The cargo panel stacks its tab row above whichever panel body is visible; the
+ * hidden body ([hidden] display:none, top of file) drops out of the flow so the
+ * gap collapses to just tab-row -> active body. */
+.ctps-panel--cargo {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-4);
+}
+
+/* ----- tab row (Magazine / Inventory) + per-tab count badge ----------- */
+
+/* The same underline-on-a-shared-baseline idiom as the Log/Inspector
+ * .ctps-tab-row, but its own rail section (not a panelTabs registrant) and a
+ * --ctps-hold (cargo) underline rather than the accent. */
+.ctps-cargo-tab-row {
+    display: flex;
+    gap: var(--ctps-space-5);
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-cargo-tab {
+    box-sizing: border-box;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+    padding: var(--ctps-space-2) 0 var(--ctps-space-3);
+    background: transparent;
+    border: none;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* Active tab: --ctps-text label + a --ctps-hold underline flush with the row's
+ * bottom border (bottom: -1px covers the 1px border, matching .ctps-tab). */
+.ctps-cargo-tab--active {
+    color: var(--ctps-text);
+}
+
+.ctps-cargo-tab--active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: var(--ctps-hold);
+}
+
+/* The tab label is UI-font (uppercase-ish letter feel); its mono sibling count
+ * below is deliberately the other typeface — documents the UI/data split. */
+.ctps-cargo-tab-label {
+    font-family: var(--ctps-font-ui);
+}
+
+/* Count badge ("N / CAP"): mono with tabular-nums so the digits hold their
+ * column as the count changes on scrub. Stays a muted data readout in both
+ * tab states. */
+.ctps-cargo-tab-count {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ctps-muted);
+}
+
+/* ----- panel bodies (one visible, the other hidden) ------------------- */
+
+/* Wide content scrolls inside its own body, never the page (UI sidecar,
+ * Responsive) — a safety net; the 4-lane grid always fits the rail. */
+.ctps-cargo-panel {
+    overflow-x: auto;
+}
+
+/* ----- Magazine tab: 4 vertical lanes of 3, front tile at the BOTTOM --- */
+
+/* The lane row: four columns left-to-right, centered as a group and NOT
+ * stretched across the panel (each cell keeps its intrinsic ~24px size). */
+.ctps-mag-grid {
+    display: flex;
+    justify-content: center;
+    gap: var(--ctps-space-3);
+}
+
+/* One lane = a vertical stack: the index header, then DEPTH cells top->bottom
+ * (cargo.js fills the BOTTOM row first, so the front tile sits at the bottom),
+ * then the dump ↓ under that bottom (front) cell. */
+.ctps-mag-lane {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--ctps-space-1);
+}
+
+/* Lane index 0..3 — a muted, tabular label above the stack. */
+.ctps-mag-lane-header {
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ctps-muted);
+    margin-bottom: var(--ctps-space-1);
+}
+
+/* The dump-eject marker (↓) under each lane's bottom (front) cell. */
+.ctps-mag-lane-arrow {
+    font-size: 11px;
+    line-height: 1;
+    color: var(--ctps-faint);
+    margin-top: var(--ctps-space-1);
+}
+
+/* A filled cell: the object's authored colour (cargo.js sets
+ * --ctps-mag-cell-color via setProperty) + a 2-char mono label. Compact and
+ * fixed-size — flex: 0 0 auto so the lane never stretches it. The label sits in
+ * --ctps-bg (near-black): WRO game-piece fills are bright saturated hues, so a
+ * dark, bold glyph reads against them. */
+.ctps-mag-cell {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-mag-cell-color, var(--ctps-raised));
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    color: var(--ctps-bg);
+}
+
+/* An empty slot: no fill, just a thin dashed outline. Declared AFTER the base
+ * rule so it wins the same-specificity tie for a cell carrying both classes. */
+.ctps-mag-cell--empty {
+    background: transparent;
+    border: 1px dashed var(--ctps-border-strong);
+}
+
+/* ----- Inventory tab: rear-box hold card (capacity 1) ----------------- */
+
+.ctps-inv-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-2);
+}
+
+/* Empty/closed rear box: a one-line hint (verbatim text from cargo.js). */
+.ctps-inv-empty {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-style: italic;
+    color: var(--ctps-muted);
+}
+
+/* The card reuses the existing .ctps-hold-card shell (the --ctps-hold accent
+ * box under "Panels / cards"). Its three children are swatch, name, then the
+ * onrobot pill; margin-left:auto on the pill pushes it to the far edge so the
+ * swatch + name stay grouped at the left (overriding the shell's
+ * space-between). */
+.ctps-hold-card-swatch {
+    flex: 0 0 auto;
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-swatch-color, var(--ctps-hold));
+}
+
+.ctps-hold-card-pill {
+    box-sizing: border-box;
+    margin-left: auto;
+    padding: 2px 6px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid color-mix(in srgb, var(--ctps-hold) 45%, transparent);
+    background: color-mix(in srgb, var(--ctps-hold) 16%, transparent);
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    color: var(--ctps-hold);
+}
+
+/* ----- upload error note + hidden file input -------------------------- */
+
+/* cargo.js inserts this inline note (hidden by default, shown on a bad drop)
+ * right after the Load-layout button; --ctps-drift reads as an error. */
+.ctps-layout-error {
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-drift);
+    margin-left: var(--ctps-space-2);
+}
+
+/* The layout <input type=file> is driven programmatically (the Load-layout
+ * button proxies to it), so the raw file control must never render. */
+.ctps-layout-file {
+    display: none;
+}
+
+/* Keyboard focus — matches the shared focus-visible idiom above. */
+.ctps-cargo-tab:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
