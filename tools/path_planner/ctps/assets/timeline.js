@@ -452,12 +452,14 @@
      * Rebuild ONLY the HOLDING lane's DOM in place — never the whole dock via
      * `buildLanesDom` (task/goto/drift don't depend on cargo state, and a full
      * rebuild would also reset `_currentSpans`' task/goto bookkeeping). Called
-     * once from `init` (empty, before any layout) and again on every
-     * `["scene"]` store notify: `store.loadLayout` (embedded OR uploaded) and
-     * the t->scene bisect controller (store.js) both notify `"scene"`, and
-     * this is the ONLY path that keeps the lane in sync after boot — the dock
-     * otherwise builds its lanes once (see the file docstring), so without
-     * this rebuild the HOLDING lane stays permanently empty.
+     * on every `["scene"]` store notify: `store.loadLayout` (embedded OR
+     * uploaded) and the t->scene bisect controller (store.js) both notify
+     * `"scene"`. The initial (empty) holding lane is created by the normal
+     * dock build (`buildLanesDom`), NOT by this function; this is the ONLY
+     * path that keeps the lane in sync after boot — the dock otherwise builds
+     * its lanes once (see the file docstring), so without this rebuild the
+     * HOLDING lane stays permanently empty for embedded and uploaded layouts
+     * alike.
      */
     function rebuildHoldingLaneDom(track, duration) {
         var laneEl = document.querySelector(".ctps-lane--holding");

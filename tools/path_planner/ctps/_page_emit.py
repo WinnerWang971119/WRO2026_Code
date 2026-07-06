@@ -64,7 +64,8 @@ def read_asset(path: Path) -> str:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise FileNotFoundError(
-            f"ctps: required runtime asset not found at {path}."
+            f"ctps._page_emit.read_asset: required runtime asset not found "
+            f"at {path}."
         ) from exc
 
 
@@ -86,7 +87,7 @@ def assert_self_contained(sources: Dict[str, str]) -> None:
         for forbidden in FORBIDDEN_SUBSTRINGS:
             if forbidden in content:
                 raise ValueError(
-                    "ctps: self-containment lint failed — "
+                    "ctps._page_emit: self-containment lint failed — "
                     f"{name!r} contains the forbidden substring {forbidden!r}. "
                     "Assets and the HTML template must be fully offline: no "
                     "'src='/'href=' attributes, no 'http(s)://' URLs, no "
