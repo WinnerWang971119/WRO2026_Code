@@ -38,6 +38,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "testOne", &TasksClass::testOne },
     { "test1", &TasksClass::test1 },
     { "test0621", &TasksClass::test0621 },
+    { "ctpsExample1", &TasksClass::ctpsExample1 },
     //Add new tasks here
 };
 
@@ -317,5 +318,30 @@ bool TasksClass::test1(const TaskArgs& /*args*/)
 bool TasksClass::test0621(const TaskArgs& /*args*/)
 {
     Drive.driveDist(35).setStartSpeed(40).setPower(100).setEndSpeed(10).setMode(DriveMode::GYRO).setHeading(0);
+    return true;
+}
+
+bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("i5"); // Get Mosiac
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+
+    //Grab shovel
+    PathTracker.goTo("shovel").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    
+    //Go to shovel drop
+    PathTracker.goTo("shovel_drop");
+    Drive.turnToYaw(270);
+    Manipulator.boxOpen();
+
+    //Go to dump
+    PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
+    Manipulator.dump();
+
     return true;
 }

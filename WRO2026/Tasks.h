@@ -258,6 +258,14 @@ private:
     bool testOne(const TaskArgs& args);
     bool test0621(const TaskArgs& args);
 
+    /**
+     * @brief Bring-up CTPS demo.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool ctpsExample1(const TaskArgs& args);
+
     bool _inTask  = false;
     bool _aborted = false;
 

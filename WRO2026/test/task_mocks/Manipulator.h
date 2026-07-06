@@ -107,6 +107,8 @@ public:
     ManipAction dump() { return ManipAction{}; }
     ManipAction sortTo(uint8_t /*bin*/) { return ManipAction{}; }
     ManipAction reset() { return ManipAction{}; }
+    ManipAction boxOpen() { return ManipAction{}; }
+    ManipAction boxClose() { return ManipAction{}; }
 
     // --- public actuator handles (calibration / bring-up) ---
     ManipServo grabber;
