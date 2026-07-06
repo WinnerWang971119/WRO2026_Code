@@ -133,6 +133,38 @@ body {
     appearance: none;
 }
 
+/* Robot-tab render-size (zoom) control: a range slider + a live "%" readout.
+ * Render-only session state -- it never touches robot_radius_cm or layout.json.
+ * Shown only while the Robot tab is active (toggled via the `hidden` property). */
+.ctps-editor-zoom {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-editor-zoom-label {
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+.ctps-editor-zoom-range {
+    width: 96px;
+    cursor: pointer;
+    accent-color: var(--ctps-accent);
+}
+
+.ctps-editor-zoom-readout {
+    min-width: 34px;
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-text-2);
+    text-align: right;
+}
+
 /* The upload input is triggered via its sibling button; keep it out of flow. */
 .ctps-layout-file {
     display: none;
@@ -307,6 +339,7 @@ body {
 .ctps-editor-tool:focus-visible,
 .ctps-help-btn:focus-visible,
 .ctps-editor-input:focus-visible,
+.ctps-editor-zoom-range:focus-visible,
 .ctps-editor-delete:focus-visible {
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;

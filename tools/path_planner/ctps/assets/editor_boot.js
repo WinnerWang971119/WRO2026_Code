@@ -27,6 +27,8 @@
         return; // core failed to seed the namespace; nothing to wire
     }
 
+    var ZOOM_WHEEL_FACTOR = 1.1; // multiplicative Robot-tab zoom step per wheel notch
+
     /** document.getElementById shorthand. */
     function $(id) {
         return document.getElementById(id);
@@ -68,7 +70,43 @@
         var d = E.dom;
         _toggle(d.tabField, "ctps-editor-tab--active", name === "field");
         _toggle(d.tabRobot, "ctps-editor-tab--active", name === "robot");
+        // The render-size (zoom) control applies to the Robot tab only.
+        if (d.zoom) {
+            d.zoom.hidden = name !== "robot";
+        }
         E.refreshProps();
+    }
+
+    /** Reflect a zoom multiplier onto the slider position + the "%" readout. */
+    function _reflectZoom(zoom) {
+        var d = E.dom;
+        var pct = Math.round(zoom * 100);
+        if (d.zoomRange) {
+            d.zoomRange.value = String(pct);
+        }
+        if (d.zoomReadout) {
+            d.zoomReadout.textContent = pct + "%";
+        }
+    }
+
+    /** Slider input -> set the render zoom, then reflect the clamped value back. */
+    function _onZoomInput() {
+        var d = E.dom;
+        if (!d.zoomRange) {
+            return;
+        }
+        var pct = parseFloat(d.zoomRange.value);
+        _reflectZoom(E.setRobotZoom(pct / 100));
+    }
+
+    /** Mouse-wheel over the canvas zooms the Robot tab (up = larger, down = smaller). */
+    function _onCanvasWheel(ev) {
+        if (E.state.activeTab !== "robot" || ev.deltaY === 0) {
+            return;
+        }
+        ev.preventDefault(); // keep the page from scrolling while zooming
+        var factor = ev.deltaY < 0 ? ZOOM_WHEEL_FACTOR : 1 / ZOOM_WHEEL_FACTOR;
+        _reflectZoom(E.setRobotZoom(E.state.robotZoom * factor));
     }
 
     /** Set the active tool + reflect it in the tool buttons and canvas cursor. */
@@ -151,6 +189,16 @@
         window.addEventListener(move, E.onPointerMove);
         window.addEventListener(up, E.onPointerUp);
         window.addEventListener("keydown", E.onKeyDown);
+        // Non-passive so the Robot-tab wheel zoom can preventDefault the scroll.
+        c.addEventListener("wheel", _onCanvasWheel, { passive: false });
+    }
+
+    function _bindZoom() {
+        var d = E.dom;
+        if (d.zoomRange) {
+            d.zoomRange.addEventListener("input", _onZoomInput);
+            d.zoomRange.addEventListener("change", _onZoomInput);
+        }
     }
 
     function _bindResize() {
@@ -196,6 +244,9 @@
             status: $("ctps-editor-status"),
             tabField: $("ctps-editor-tab-field"),
             tabRobot: $("ctps-editor-tab-robot"),
+            zoom: $("ctps-editor-zoom"),
+            zoomRange: $("ctps-editor-zoom-range"),
+            zoomReadout: $("ctps-editor-zoom-readout"),
             tools: {
                 select: $("ctps-tool-select"),
                 rect: $("ctps-tool-rect"),
@@ -229,11 +280,15 @@
         _bindProps();
         _bindIO();
         _bindCanvas();
+        _bindZoom();
         _bindResize();
 
         E.initMap();
         E.resize();
         E.refreshProps();
+        // Sync the zoom control to the core's default multiplier (it starts
+        // hidden on the Field tab; the value/readout are ready for the Robot tab).
+        _reflectZoom(E.state.robotZoom);
     }
 
     if (document.readyState === "loading") {

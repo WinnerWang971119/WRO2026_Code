@@ -77,7 +77,7 @@ from tools.path_planner.ctps.config import (
 )
 from tools.path_planner.ctps.trace_loader import Command, Trace
 
-__all__ = ["Track", "build"]
+__all__ = ["Track", "build", "build_field_block"]
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ class Track:
 # ---------------------------------------------------------------------------
 
 
-def _build_field_block(field_data) -> Dict[str, Any]:
+def build_field_block(field_data) -> Dict[str, Any]:
     """Assemble the static ``field`` render block from ``field_data``.
 
     * ``nodes``: ``{name: [x_cm, y_cm]}`` — JSON lists, not tuples.
@@ -290,6 +290,13 @@ def _build_field_block(field_data) -> Dict[str, Any]:
         "bounds": bounds,
         "robot_radius_cm": robot_radius_cm,
     }
+
+
+#: Backward-compatible alias for the pre-rename private name; ``build_field_block``
+#: is the canonical public helper (used by :func:`build` and imported by the
+#: layout-editor emitter). Retained only for external callers still importing the
+#: old name.
+_build_field_block = build_field_block
 
 
 def _pose_delta_duration(
@@ -896,7 +903,7 @@ def build(trace: Trace, field_data) -> Track:
 
     return Track(
         schema_version=1,
-        field=_build_field_block(field_data),
+        field=build_field_block(field_data),
         duration_s=t,
         keyframes=keyframes,
         events=events,

@@ -55,7 +55,7 @@ from tools.path_planner.ctps._page_emit import script as _script
 # it is single-sourced from the track builder rather than re-derived here (which
 # would drift from the player's field render). This is an intra-package reuse of
 # a stable helper -- not a refactor of the frozen player/renderer core.
-from tools.path_planner.ctps.track_builder import _build_field_block
+from tools.path_planner.ctps.track_builder import build_field_block
 
 __all__ = ["render"]
 
@@ -87,9 +87,10 @@ _ASSET_JS: Tuple[Path, ...] = (
 )
 
 #: Static page body markup (the sidecar's Change 3 layout: a two-tab editor with
-#: a Field/Robot tab row, a Rect/Circle/Select tool row, Save/Load controls, one
-#: canvas stage, and a Properties panel authoring every ``layout.json`` schema
-#: field). Class-based only -- no inline element styles (per project frontend
+#: a Field/Robot tab row, a Rect/Circle/Select tool row, a Robot-tab render-size
+#: (zoom) control, Save/Load controls, one canvas stage, and a Properties panel
+#: authoring every ``layout.json`` schema field). Class-based only -- no inline
+#: element styles (per project frontend
 #: conventions); every dynamic value is set later by JS through a CSS custom
 #: property (the ADR-053 carve-out). Icons are unicode glyphs emitted as numeric
 #: HTML entities (never ``<use href>`` / ``<image href>``, which the
@@ -119,6 +120,15 @@ _BODY_MARKUP: str = """\
                     type="button" data-tool="rect">&#9645; Rect</button>
             <button id="ctps-tool-circle" class="ctps-editor-tool"
                     type="button" data-tool="circle">&#9711; Circle</button>
+        </div>
+        <div id="ctps-editor-zoom" class="ctps-editor-zoom" role="group"
+             aria-label="Robot render size" hidden>
+            <span class="ctps-editor-zoom-label">Zoom</span>
+            <input type="range" id="ctps-editor-zoom-range"
+                   class="ctps-editor-zoom-range" min="25" max="200" step="5"
+                   value="65" aria-label="Robot render size (percent)">
+            <span id="ctps-editor-zoom-readout"
+                  class="ctps-editor-zoom-readout">65%</span>
         </div>
         <button id="ctps-editor-save" class="ctps-help-btn" type="button">
             &#8615; Save</button>
@@ -289,7 +299,7 @@ def render(
     Emits a single ``layout_editor.html`` that embeds, all inline: the
     concatenated CSS assets in one ``<style>``; a ``const FIELD`` field-backdrop
     constant derived from ``field_data`` (the same block the player draws -- see
-    :func:`tools.path_planner.ctps.track_builder._build_field_block`); an
+    :func:`tools.path_planner.ctps.track_builder.build_field_block`); an
     optional ``const MAP_IMAGE`` data URI; and every JS asset
     (:data:`_ASSET_JS`) in load order, each in its own ``<script>``
     (``objects_draw.js`` first so ``window.CTPS_OBJ`` exists for the editor
@@ -325,7 +335,7 @@ def render(
     # JSON VALUE (like the player's TRACK): ``</`` is escaped so a node label
     # containing "</script>" cannot break out of the inline <script>, and it is
     # NOT passed through the self-containment lint.
-    field_block: Dict[str, Any] = _build_field_block(field_data)
+    field_block: Dict[str, Any] = build_field_block(field_data)
     field_json = json.dumps(field_block, ensure_ascii=False).replace("</", "<\\/")
 
     # Optional field-map background as a self-contained data URI (or "null").

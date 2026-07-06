@@ -33,6 +33,9 @@
     var PADDING = 24;            // px inset of the drawn field within the stage box
     var ROBOT_FALLBACK_CM = 9;   // robot half-side (cm) when the field omits a radius
     var ROBOT_MARGIN_CM = 5;     // extra world margin around the Robot-tab contents
+    var ROBOT_ZOOM_DEFAULT = 0.65; // render-only Robot-tab zoom (1.0 == fit-to-view)
+    var ROBOT_ZOOM_MIN = 0.25;   // Robot-tab zoom lower clamp (matches the slider)
+    var ROBOT_ZOOM_MAX = 2.0;    // Robot-tab zoom upper clamp (matches the slider)
     var ROBOT_OUTLINE_W = 2;     // robot-box outline stroke width (px)
     var ROBOT_CORNER = 0.3;      // robot-box rounded-corner radius (frac of half-side)
     var ROBOT_ARROW_TIP = 0.28;  // heading-arrow tip x (frac of half-side)
@@ -216,6 +219,33 @@
             dpr: dpr,
             bounds: bounds,
         };
+    }
+
+    /**
+     * Scale a freshly-fit Robot-tab view by the session `robotZoom` multiplier.
+     * This is RENDER-ONLY: it never touches `robot_radius_cm` or any robot-local
+     * cm coordinate, only the on-screen transform. The robot-bounds centre stays
+     * pinned to the stage centre, so BOTH the draw and the pixel->world
+     * `unproject` inverse read this one scaled transform -- dragging/selecting
+     * stays correct at any zoom. A multiplier of 1.0 reproduces the plain
+     * fit-to-view exactly. Mutates + returns the passed view.
+     *
+     * @param view a fit transform from `computeView(_robotBounds(), ...)`.
+     * @return the same `view`, its `scale` / `padX` / `padY` re-scaled + centred.
+     */
+    function _applyRobotZoom(view) {
+        var zoom = E.state.robotZoom;
+        if (!(zoom > 0) || zoom === 1) {
+            return view;
+        }
+        var scale = view.scale * zoom;
+        view.scale = scale;
+        // Re-centre so the robot-bounds midpoint holds the stage centre: at
+        // zoom 1 this reduces to computeView's own centred pad, and both project
+        // and unproject stay consistent because they share this same view.
+        view.padX = view.cssW / 2 - (view.worldW / 2) * scale;
+        view.padY = view.cssH / 2 - (view.worldH / 2) * scale;
+        return view;
     }
 
     /**
@@ -618,7 +648,9 @@
         canvas.width = Math.round(cssW * dpr);
         canvas.height = Math.round(cssH * dpr);
         E.state.fieldView = computeView(_fieldBounds(), cssW, cssH, dpr);
-        E.state.robotView = computeView(_robotBounds(), cssW, cssH, dpr);
+        E.state.robotView = _applyRobotZoom(
+            computeView(_robotBounds(), cssW, cssH, dpr)
+        );
         redraw();
     }
 
@@ -641,6 +673,42 @@
         if (name === "select" || name === "rect" || name === "circle") {
             E.state.tool = name;
         }
+    }
+
+    /** Clamp a render zoom multiplier into the supported Robot-tab range. */
+    function clampRobotZoom(zoom) {
+        if (typeof zoom !== "number" || !isFinite(zoom)) {
+            return E.state.robotZoom;
+        }
+        if (zoom < ROBOT_ZOOM_MIN) {
+            return ROBOT_ZOOM_MIN;
+        }
+        if (zoom > ROBOT_ZOOM_MAX) {
+            return ROBOT_ZOOM_MAX;
+        }
+        return zoom;
+    }
+
+    /**
+     * Set the render-only Robot-tab zoom (clamped), re-fit + re-scale the robot
+     * view around its centre, and repaint. This is EDITOR-SESSION render state
+     * ONLY -- it is never serialised into layout.json and never changes any
+     * robot-local cm. The robot view is re-derived from a FRESH fit before the
+     * multiplier is applied, so the zoom can never compound across calls.
+     *
+     * @param zoom the desired multiplier (1.0 == fit-to-view).
+     * @return the clamped multiplier actually applied.
+     */
+    function setRobotZoom(zoom) {
+        E.state.robotZoom = clampRobotZoom(zoom);
+        var v = E.state.robotView;
+        if (v) {
+            E.state.robotView = _applyRobotZoom(
+                computeView(_robotBounds(), v.cssW, v.cssH, v.dpr)
+            );
+        }
+        redraw();
+        return E.state.robotZoom;
     }
 
     /** The object with the given id, or null. */
@@ -697,6 +765,7 @@
         drag: null,        // {selection, offX, offY} in world cm
         fieldView: null,
         robotView: null,
+        robotZoom: ROBOT_ZOOM_DEFAULT, // render-only Robot-tab zoom (never serialised)
         idSeq: 0,
     };
 
@@ -708,6 +777,7 @@
     E.redraw = redraw;
     E.setTab = setTab;
     E.setTool = setTool;
+    E.setRobotZoom = setRobotZoom;
     E.initMap = initMap;
     E.objectById = objectById;
     E.nextId = nextId;
