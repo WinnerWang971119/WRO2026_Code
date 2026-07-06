@@ -2,8 +2,9 @@
  * @file Manipulator.cpp
  * @brief Out-of-line members of `ManipulatorClass` — the manipulator-subsystem facade.
  *
- * @note The semantic verbs (`grab`, `release`, `dump`, `sortTo`, `reset`), the `_action`
- *       factory, and the `ManipAction` builder are all defined inline in `Manipulator.h`.
+ * @note The semantic verbs (`grab`, `release`, `dump`, `sortTo`, `reset`, `boxOpen`,
+ *       `boxClose`), the `_action` factory, and the `ManipAction` builder are all defined
+ *       inline in `Manipulator.h`.
  *       Only the heavy lifecycle / blocking-spin members live here: the ctor (so the member
  *       initialiser list can name the `Config::*` tables in one place), `begin()`, `update()`,
  *       `isDone()`, `setTickCallback()`, and the `_drain` / `_maskDone` drain machinery.

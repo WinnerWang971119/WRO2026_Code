@@ -8,8 +8,9 @@
  * sorting / dumping mechanism. It owns the three `ManipServo` joints and the one `ManipBelt`
  * by value (constructed from `Config::*` in `Manipulator.cpp`) and presents two API layers:
  *
- *  - **Semantic verbs** (`grab`, `release`, `dump`, `sortTo`, `reset`) — the intended
- *    everyday surface. Each verb FIRES its actuator setpoint(s) immediately in the verb body
+ *  - **Semantic verbs** (`grab`, `release`, `dump`, `sortTo`, `reset`, `boxOpen`, `boxClose`)
+ *    — the intended everyday surface. Each verb FIRES its actuator setpoint(s) immediately
+ *    in the verb body
  *    (servo writes are fire-and-forget; firing now is correct) and returns a `ManipAction`
  *    fluent builder. The builder is **blocking-by-default**: at end-of-statement it WAITS
  *    (drains) on the actuators the verb touched until they report done. Chain `.async()` to
@@ -34,7 +35,10 @@
  * @note The semantic verbs are thin bring-up scaffolding: `grab()` is `grabber.close()`,
  *       `dump()` is `dumper.open()` (a placeholder dump pose), etc. The real multi-actuator
  *       choreography (e.g. lift-then-grip, belt-stage-then-dump) is a TODO to be authored once
- *       the mechanism is built and characterised.
+ *       the mechanism is built and characterised. `boxOpen()` / `boxClose()` go one step
+ *       further and fire NO actuator at all yet (empty mask) — the rear-box actuator itself is
+ *       TBD at bring-up; they exist only so task bodies that call them compile ahead of the
+ *       mechanism being built.
  *
  * @warning A function registered via `setTickCallback()` is invoked from inside `_drain()`'s
  *          blocking spin. It MUST NOT issue a blocking Manipulator verb (one without
@@ -313,6 +317,36 @@ public:
         dumper.home();
         belt.home();
         return _action(M_GRAB | M_SORT | M_DUMP | M_BELT);
+    }
+
+    /**
+     * @brief Open the rear-box actuator to release the held Cargo. Empty-mask scaffold.
+     *
+     * @return An empty-mask `ManipAction` — the drain is an immediate no-op (nothing was
+     *         fired, so there is nothing to wait on); `.async()` remains legal but has no
+     *         additional effect.
+     * @note The rear-box actuator is TBD at bring-up (ADR-032): this verb fires NO setpoint
+     *       yet. It exists purely so mission/task code that calls it compiles today; wire the
+     *       real actuator + mask bit once the mechanism is built and characterised.
+     */
+    ManipAction boxOpen()
+    {
+        return _action(0);    // empty mask — rear-box actuator TBD, nothing fired yet
+    }
+
+    /**
+     * @brief Close the rear-box actuator to capture Cargo. Empty-mask scaffold.
+     *
+     * @return An empty-mask `ManipAction` — the drain is an immediate no-op (nothing was
+     *         fired, so there is nothing to wait on); `.async()` remains legal but has no
+     *         additional effect.
+     * @note The rear-box actuator is TBD at bring-up (ADR-032): this verb fires NO setpoint
+     *       yet. It exists purely so mission/task code that calls it compiles today; wire the
+     *       real actuator + mask bit once the mechanism is built and characterised.
+     */
+    ManipAction boxClose()
+    {
+        return _action(0);    // empty mask — rear-box actuator TBD, nothing fired yet
     }
 
     // -------------------------------------------------------------------------------------
