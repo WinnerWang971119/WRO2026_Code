@@ -239,7 +239,7 @@
 
     // The scene controller: on every playhead move, bisect the timeline and
     // re-seat the snapshot ONLY when its index changed, so the cargo panel / HUD
-    // / holding lane refresh on cargo events, not on every frame. Subscribed to
+    // / cargo timeline lanes refresh on cargo events, not on every frame. Subscribed to
     // ["t"] only; setScene notifies ["scene"], which this controller ignores, so
     // there is no feedback loop.
     store.subscribe(function (changedKeys) {

@@ -28,7 +28,8 @@
  *     `store.objects`/`store.activeCargoTab`; the tab-switching CHROME (which
  *     panel is visible, which tab button is `--active`) lives in panels.js's
  *     `renderHoldingShell` seam, the existing Log/Inspector tab idiom. The
- *     Holding timeline lane itself is timeline.js's `buildHoldingLane` seam.
+ *     cargo timeline lanes (MAGAZINE / REAR BOX) are timeline.js's
+ *     `buildMagazineLane` / `buildRearBoxLane` seams.
  *
  * Reads each event's structured `method`/`arg` (track_builder.py) — never the
  * display `label`. Consumes the pinned engine via `CTPS.engine` (poseAt) and the

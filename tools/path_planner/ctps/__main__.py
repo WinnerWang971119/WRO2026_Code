@@ -5,6 +5,8 @@ Run as a module from the repo root::
     python -m tools.path_planner.ctps
     python -m tools.path_planner.ctps --fixture
     python -m tools.path_planner.ctps --trace run.json --no-open
+    python -m tools.path_planner.ctps --fixture --layout my_layout.json
+    python -m tools.path_planner.ctps --editor   # open the layout editor
 
 This is the single front door for the Clear Trajectory Prediction Simulator.
 It wires the three pure CTPS modules together end-to-end:
@@ -18,6 +20,9 @@ It wires the three pure CTPS modules together end-to-end:
 #. ``track_builder.build`` the trace against the LIVE
    :mod:`tools.path_planner.field_data` into a playback :class:`Track`.
 #. ``player_html.render`` the track into one self-contained ``.html`` page.
+   When a cargo layout is given via ``--layout FILE`` (or the conventional
+   ``tools/path_planner/layout.json`` exists), it is embedded so the player
+   auto-loads its objects/zones on open — no in-browser upload.
 #. Open the page in the default browser (unless ``--no-open``) and print the
    output path.
 
@@ -41,13 +46,14 @@ Stdlib only — no third-party dependencies.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import sys
 import webbrowser
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 # When invoked as ``python -m tools.path_planner.ctps`` the package is already
 # importable; the ``-m`` launcher puts the cwd (repo root) on ``sys.path``. We
@@ -68,7 +74,14 @@ if __name__ == "__main__" and __package__ in (None, ""):
         sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.path_planner import field_data  # noqa: E402
-from tools.path_planner.ctps import player_html, track_builder, trace_loader  # noqa: E402
+from tools.path_planner.ctps import (  # noqa: E402
+    edit_server,
+    layout_editor_html,
+    player_html,
+    track_builder,
+    trace_loader,
+)
+from tools.path_planner.ctps.layout import LayoutError  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Constants — paths and the C++ harness wiring.
@@ -77,10 +90,29 @@ from tools.path_planner.ctps import player_html, track_builder, trace_loader  # 
 #: Default output path for the rendered HTML player, relative to the repo root.
 _DEFAULT_OUT: Path = _REPO_ROOT / "tools" / "path_planner" / "output" / "ctps.html"
 
+#: Output path for the offline layout editor page (`--editor`), beside the player.
+_EDITOR_OUT: Path = _DEFAULT_OUT.parent / "layout_editor.html"
+
 #: path_planner root. ``field_data.MAP_PNG`` (e.g. "maps/map.png") resolves
 #: relative to this, matching the visualizer's map resolution so the player's
 #: embedded background and the static map render agree.
 _PLANNER_ROOT: Path = _REPO_ROOT / "tools" / "path_planner"
+
+#: Dedicated home for author-saved cargo layouts (its own folder, not loose in
+#: the pipeline dir; see ``layouts/README.md``). The offline editor's Save
+#: downloads a ``layout.json`` — point the browser's Save dialog here once and
+#: :func:`_find_default_layout` embeds the newest match on the next render, no
+#: ``--layout`` flag and no in-browser upload.
+_LAYOUT_DIR: Path = _PLANNER_ROOT / "layouts"
+
+#: Canonical name of the auto-embedded cargo layout (the editor's Save downloads
+#: exactly this name, into :data:`_LAYOUT_DIR`).
+_DEFAULT_LAYOUT: Path = _LAYOUT_DIR / "layout.json"
+
+#: Glob for the working layout(s): Chrome suffixes repeat downloads of the same
+#: name as ``layout (1).json`` etc., so the auto-detect matches all of them and
+#: picks the newest (see :func:`_find_default_layout`).
+_LAYOUT_GLOB: str = "layout*.json"
 
 #: CMake source dir for the host test harness (holds the ``ctps_dump`` target).
 _TEST_DIR: Path = _REPO_ROOT / "WRO2026" / "test"
@@ -459,7 +491,11 @@ def _resolve_map_png() -> Optional[Path]:
 
 
 def _render_and_open(
-    trace_json: str, out_path: Path, open_browser: bool, filename: str = ""
+    trace_json: str,
+    out_path: Path,
+    open_browser: bool,
+    filename: str = "",
+    objects: "Optional[Dict[str, Any]]" = None,
 ) -> int:
     """Load -> build -> render the trace JSON, then optionally open the page.
 
@@ -467,6 +503,10 @@ def _render_and_open(
     :param out_path: destination ``.html`` path for the rendered player.
     :param open_browser: when ``True``, open the rendered page in the default
         browser (``os.startfile`` on Windows, else ``webbrowser.open``).
+    :param filename: display filename embedded in the page header.
+    :param objects: optional ``layout.json``-shaped dict embedded as
+        ``const OBJECTS`` so the player auto-loads its cargo layout (no
+        in-browser upload); ``None`` renders a layout-free page.
     :return: ``0`` on success; ``1`` if the JSON is empty/invalid or rendering
         fails.
     """
@@ -510,9 +550,20 @@ def _render_and_open(
         )
         return 1
 
-    out = player_html.render(
-        track, out_path, map_png=_resolve_map_png(), filename=filename
-    )
+    try:
+        out = player_html.render(
+            track,
+            out_path,
+            map_png=_resolve_map_png(),
+            filename=filename,
+            objects=objects,
+        )
+    except LayoutError as exc:
+        # A malformed layout must fail the render loud rather than silently
+        # emit a player with no cargo — the layout is caller-supplied, not
+        # field-day content.
+        print(f"ctps: invalid layout: {exc}", file=sys.stderr)
+        return 1
 
     if open_browser:
         _open_in_browser(out)
@@ -541,6 +592,56 @@ def _open_in_browser(path: Path) -> None:
             f"ctps: could not open a browser ({exc}); the page is at {path}.",
             file=sys.stderr,
         )
+
+
+def _find_default_layout() -> Optional[Path]:
+    """Return the newest ``layout*.json`` in :data:`_LAYOUT_DIR`, or ``None``.
+
+    The offline editor's Save is a browser download named ``layout.json``
+    (:data:`_DEFAULT_LAYOUT`); Chrome suffixes repeat saves of the same name as
+    ``layout (1).json``, ``layout (2).json``, ... Picking the most-recently-
+    modified match keeps the "just click Save" flow frictionless — the latest
+    Save always wins — without the author renaming or deleting the older files.
+    An explicit ``--layout`` bypasses this entirely. A missing ``layouts/``
+    folder is treated as "no layout".
+
+    :return: the newest matching layout file, or ``None`` when none exists.
+    """
+    if not _LAYOUT_DIR.is_dir():
+        return None
+    matches = [p for p in _LAYOUT_DIR.glob(_LAYOUT_GLOB) if p.is_file()]
+    if not matches:
+        return None
+    return max(matches, key=lambda p: p.stat().st_mtime)
+
+
+def _serve_editor(open_browser: bool) -> int:
+    """Render the offline layout editor and serve it on a self-closing server.
+
+    The ``--editor`` front door: renders the self-contained ``layout_editor.html``
+    (field + robot tabs) against the LIVE :mod:`tools.path_planner.field_data`,
+    then hands it to :func:`edit_server.serve_editor`, which serves it on a
+    localhost port and writes every Save straight into :data:`_DEFAULT_LAYOUT`
+    (``layouts/layout.json``) — no download dialog. The server auto-closes when
+    the editor tab goes away (heartbeat + watchdog, ADR-057), so it can never
+    dangle. Needs no C++ toolchain and no trace. The next
+    ``python -m tools.path_planner.ctps`` auto-embeds the saved layout (see
+    :func:`_find_default_layout` and ``layouts/README.md``).
+
+    :param open_browser: when ``True``, open the served URL after binding.
+    :return: ``0`` on a clean shutdown; ``1`` if rendering fails.
+    """
+    try:
+        out = layout_editor_html.render(
+            field_data, _EDITOR_OUT, map_png=_resolve_map_png()
+        )
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"ctps: could not render the layout editor: {exc}", file=sys.stderr)
+        return 1
+
+    return edit_server.serve_editor(
+        out.read_bytes(), _DEFAULT_LAYOUT, open_browser=open_browser
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -594,9 +695,62 @@ def main(argv: Optional[List[str]] = None) -> int:
             "of the real buildMission. Ignored when --trace is given."
         ),
     )
+    parser.add_argument(
+        "--layout",
+        type=Path,
+        default=None,
+        help=(
+            "Embed this layout.json (field objects + robot zones, from the "
+            "offline layout editor) so the player auto-loads it — no in-browser "
+            "'Load layout…' upload. Defaults to the newest "
+            "tools/path_planner/layouts/layout*.json when one exists."
+        ),
+    )
+    parser.add_argument(
+        "--editor",
+        action="store_true",
+        help=(
+            "Open the offline layout editor (layout_editor.html) instead of the "
+            "player — author field objects + robot zones, then Save. Ignores "
+            "--trace/--fixture/--layout; needs no C++ toolchain."
+        ),
+    )
     args = parser.parse_args(argv)
 
     open_browser = not args.no_open
+
+    # --- --editor flow: serve the authoring page, nothing else ---------------
+    if args.editor:
+        return _serve_editor(open_browser)
+
+    # Resolve the cargo layout to embed (object/cargo plan, issue #57): the
+    # explicit --layout wins; otherwise the newest layouts/layout*.json is
+    # auto-embedded when one exists. The emitted player then auto-loads it on
+    # open — no in-browser upload. A layout-free run stays byte-clean (no
+    # const OBJECTS). Resolved once here so both the --trace and build paths
+    # embed it, and a bad --layout fails fast before any C++ build.
+    layout_path: Optional[Path] = args.layout
+    if layout_path is None:
+        layout_path = _find_default_layout()
+    layout: Optional[Dict[str, Any]] = None
+    if layout_path is not None:
+        if not layout_path.is_file():
+            print(
+                f"ctps: --layout file not found: {layout_path}", file=sys.stderr
+            )
+            return 1
+        try:
+            layout = json.loads(layout_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(
+                f"ctps: could not read layout {layout_path}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+        if layout:
+            print(
+                f"ctps: embedding layout {layout_path.name}", file=sys.stderr
+            )
 
     # --- --trace flow: no compiler ever required -----------------------------
     if args.trace is not None:
@@ -608,7 +762,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 1
         trace_json = trace_path.read_text(encoding="utf-8")
         return _render_and_open(
-            trace_json, args.out, open_browser, filename=trace_path.name
+            trace_json,
+            args.out,
+            open_browser,
+            filename=trace_path.name,
+            objects=layout,
         )
 
     # --- default / --fixture flow: locate toolchain, build, dump -------------
@@ -620,6 +778,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         args.out,
         open_browser,
         filename=("fixture mission" if args.fixture else "mission"),
+        objects=layout,
     )
 
 

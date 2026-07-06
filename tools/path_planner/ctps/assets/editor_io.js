@@ -2,7 +2,12 @@
  *
  * The persistence layer of the two-tab offline editor (object/cargo plan, T8 --
  * issue #57). On `file://`, localStorage and the File System Access API are both
- * dead, so the only viable round-trip is a Blob download + a FileReader upload:
+ * dead, so the round-trip is a Blob download + a FileReader upload. When instead
+ * the page is served by the local edit-server (ADR-057 -- any non-`file:`
+ * origin), Save POSTs straight to `/save` (written into `layouts/layout.json`)
+ * and a heartbeat + close-beacon let that server auto-close when the tab goes
+ * away. A server save that fails for any reason falls back to the download, so
+ * no edit is ever lost:
  *
  *   - Save: serialise the authored field objects + robot zones to a
  *     schema_version-1 `layout.json` dict (the exact shape ctps/layout.py
@@ -79,9 +84,13 @@
         };
     }
 
-    /** Serialise + download the current layout as `layout.json` (Blob anchor). */
-    function save() {
-        var text = JSON.stringify(_serialize(), null, 2);
+    /** True when the page is served (edit-server), false on a `file:` open. */
+    function _serverMode() {
+        return !!(window.location && window.location.protocol !== "file:");
+    }
+
+    /** Download `text` as `layout.json` via a Blob anchor (the file:// path). */
+    function _download(text) {
         var blob = new Blob([text], { type: "application/json" });
         var url = URL.createObjectURL(blob);
         var a = document.createElement("a");
@@ -96,9 +105,89 @@
         setTimeout(function () {
             URL.revokeObjectURL(url);
         }, 0);
-        if (E.status) {
-            E.status("saved layout.json");
+    }
+
+    /**
+     * POST `text` to the edit-server's `/save` (writes `layouts/layout.json`).
+     * ANY failure -- non-2xx, network error, no server -- falls back to the Blob
+     * download so an edit is never lost.
+     */
+    function _saveViaServer(text) {
+        fetch("/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: text,
+        }).then(function (resp) {
+            if (resp && resp.ok) {
+                if (E.status) {
+                    E.status("saved to layouts/layout.json");
+                }
+            } else {
+                _download(text);
+                if (E.status) {
+                    E.status("server refused save; downloaded layout.json instead");
+                }
+            }
+        }).catch(function () {
+            _download(text);
+            if (E.status) {
+                E.status("server offline; downloaded layout.json instead");
+            }
+        });
+    }
+
+    /**
+     * Serialise + persist the current layout. Served (edit-server) -> POST to
+     * `/save`; opened as a `file:` -> Blob download named `layout.json`.
+     */
+    function save() {
+        var text = JSON.stringify(_serialize(), null, 2);
+        if (_serverMode()) {
+            _saveViaServer(text);
+        } else {
+            _download(text);
+            if (E.status) {
+                E.status("saved layout.json");
+            }
         }
+    }
+
+    /**
+     * When served by the edit-server, keep it alive with a heartbeat and shut it
+     * down when this tab goes away -- so the server auto-closes and can never
+     * dangle. A `POST /ping` every few seconds is the liveness signal (its
+     * silence, on any un-clean exit, trips the server's watchdog); a
+     * `navigator.sendBeacon('/close')` on unload is the clean-close fast path.
+     * Inert on a `file:` open (no server to talk to).
+     */
+    function _startServerSession() {
+        if (!_serverMode()) {
+            return;
+        }
+        var HEARTBEAT_MS = 3000;
+        setInterval(function () {
+            // Fire-and-forget: a rejected ping just means the server already
+            // closed, which is fine.
+            try {
+                fetch("/ping", { method: "POST" }).catch(function () {});
+            } catch (e) {
+                /* no-op */
+            }
+        }, HEARTBEAT_MS);
+
+        function _closeBeacon() {
+            try {
+                if (navigator.sendBeacon) {
+                    navigator.sendBeacon("/close", "");
+                } else {
+                    fetch("/close", { method: "POST", keepalive: true });
+                }
+            } catch (e) {
+                /* no-op */
+            }
+        }
+        window.addEventListener("pagehide", _closeBeacon);
+        window.addEventListener("beforeunload", _closeBeacon);
     }
 
     // ----- load (FileReader -> tolerant parse) -----------------------------
@@ -260,4 +349,7 @@
     // ----- public I/O surface ----------------------------------------------
     E.save = save;
     E.handleFile = handleFile;
+
+    // Start the edit-server heartbeat/close session (no-op on a file:// open).
+    _startServerSession();
 })();

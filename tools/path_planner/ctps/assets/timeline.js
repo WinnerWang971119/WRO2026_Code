@@ -1,9 +1,9 @@
 /* CTPS — Clear Trajectory Prediction Simulator: timeline dock + lane registry.
  *
- * Owns the bottom TASK / GOTO / HOLDING / DRIFT dock: registers the four
- * `timelineLane` descriptors on `CTPS.timelineLanes` (module load time, so
- * PLAYER_META's lane manifest always finds an implementation) and, once at
- * boot, builds the dock DOM from those descriptors plus the ingested track:
+ * Owns the bottom TASK / GOTO / MAGAZINE / REAR BOX / DRIFT dock: registers
+ * the five `timelineLane` descriptors on `CTPS.timelineLanes` (module load
+ * time, so PLAYER_META's lane manifest always finds an implementation) and,
+ * once at boot, builds the dock DOM from those descriptors plus the track:
  *
  *   1. Lane registration — `build(track)` for each lane returns an array of
  *      `{t0, t1?, label, cls}` items. An item WITH `t1` renders as a
@@ -14,7 +14,7 @@
  *      separate per-item "kind" field.
  *   2. DOM: a 52px label column (`.ctps-lane-label`) and a lane column
  *      (`.ctps-lane`) per registered lane, in registration order (task, goto,
- *      holding, drift), plus a mono ruler computed from the track's actual
+ *      magazine, rearbox, drift), plus a mono ruler computed from the track's actual
  *      `duration_s` (nice tick steps, never a fixed 0-90 window). Spans/pins
  *      are absolutely-positioned children sized in percent of `duration_s`,
  *      written only through `el.style.setProperty('left', ...)` /
@@ -149,39 +149,41 @@
     }
 
     /**
-     * Total objects staged in ANY store (in-hand, every magazine lane, the
-     * rear box) for one resolved cargo scene snapshot — used only to find the
-     * held / not-held transition points below, never per-object.
+     * True when the magazine holds at least one tile in ANY lane for one
+     * resolved cargo scene snapshot — the predicate behind the MAGAZINE lane.
+     * A grabbed-but-unsorted tile (`inHand`) and a rear-box Cargo are
+     * deliberately excluded: the rear box has its own lane, and in-hand is a
+     * transient staging step neither cargo lane shows.
      */
-    function _sceneHeldCount(scene) {
+    function _magazineHeld(scene) {
         if (!scene) {
-            return 0;
-        }
-        var n = 0;
-        if (scene.inHand) {
-            n += 1;
-        }
-        if (scene.rearBox) {
-            n += 1;
+            return false;
         }
         var magazine = scene.magazine || [];
         for (var lane = 0; lane < magazine.length; lane++) {
-            n += magazine[lane].length;
+            if (magazine[lane].length > 0) {
+                return true;
+            }
         }
-        return n;
+        return false;
+    }
+
+    /** True when the rear box holds a Cargo this snapshot — the REAR BOX lane predicate. */
+    function _rearBoxHeld(scene) {
+        return !!(scene && scene.rearBox);
     }
 
     /**
-     * HOLDING lane (issue #57): one `--ctps-hold` span per contiguous period
-     * during which at least one object is staged in a store — mirroring the
-     * cargo panel/HUD counts (cargo.js). Recomputes the resolve-once scene
-     * timeline itself via `CTPS.cargo.resolve(track, store.objects,
-     * store.robotCfg)` rather than reaching into store.js's private
-     * `sceneTimeline` closure (not exposed) — cheap, since it runs once per
-     * manip event, not per frame. Returns `[]` before any layout is loaded (no
-     * objects => an empty resolve) or when nothing is ever held.
+     * Contiguous-span builder shared by both cargo lanes. Recomputes the
+     * resolve-once scene timeline via `CTPS.cargo.resolve(track,
+     * store.objects, store.robotCfg)` rather than reaching into store.js's
+     * private `sceneTimeline` closure (not exposed) — cheap, since it runs once
+     * per manip event, not per frame — then emits one span per contiguous
+     * period for which `predicate(snapshot)` holds. Returns `[]` before any
+     * layout is loaded (no objects => an empty resolve) or when the predicate
+     * never holds.
      */
-    function buildHoldingLane(track) {
+    function _cargoSpans(track, predicate, label, cls) {
         var store = CTPS.store;
         var resolve = CTPS.cargo && CTPS.cargo.resolve;
         if (!store || !resolve) {
@@ -193,28 +195,39 @@
         var openT0 = null;
         for (var i = 0; i < timeline.length; i++) {
             var snap = timeline[i];
-            var held = _sceneHeldCount(snap) > 0;
+            var held = predicate(snap);
             if (held && openT0 === null) {
                 openT0 = snap.t;
             } else if (!held && openT0 !== null) {
-                out.push({
-                    t0: openT0,
-                    t1: snap.t,
-                    label: "holding",
-                    cls: "ctps-span--holding",
-                });
+                out.push({ t0: openT0, t1: snap.t, label: label, cls: cls });
                 openT0 = null;
             }
         }
         if (openT0 !== null) {
-            out.push({
-                t0: openT0,
-                t1: duration,
-                label: "holding",
-                cls: "ctps-span--holding",
-            });
+            out.push({ t0: openT0, t1: duration, label: label, cls: cls });
         }
         return out;
+    }
+
+    /**
+     * MAGAZINE lane (issue #57): one `--ctps-hold` span per contiguous period
+     * during which the magazine holds at least one tile — mirroring the cargo
+     * panel's Magazine tab and the HUD's `magazine N/CAP` count (cargo.js). The
+     * spans carry an EMPTY label: the lane's own "MAGAZINE" gutter label already
+     * names it, so on-bar text would just repeat it.
+     */
+    function buildMagazineLane(track) {
+        return _cargoSpans(track, _magazineHeld, "", "ctps-span--magazine");
+    }
+
+    /**
+     * REAR BOX lane (issue #57): one `--ctps-hold` span per contiguous period
+     * during which the rear box holds a Cargo — mirroring the Inventory tab and
+     * the HUD's `rear box N/CAP` count (cargo.js). Empty span label, same reason
+     * as the magazine lane (the gutter label already reads "REAR BOX").
+     */
+    function buildRearBoxLane(track) {
+        return _cargoSpans(track, _rearBoxHeld, "", "ctps-span--rearbox");
     }
 
     /**
@@ -260,11 +273,18 @@
         build: buildGotoLane,
     });
     CTPS.timelineLanes.register({
-        id: "holding",
-        label: "HOLDING",
+        id: "magazine",
+        label: "MAGAZINE",
         kind: "span",
         color: "--ctps-hold",
-        build: buildHoldingLane,
+        build: buildMagazineLane,
+    });
+    CTPS.timelineLanes.register({
+        id: "rearbox",
+        label: "REAR BOX",
+        kind: "span",
+        color: "--ctps-hold",
+        build: buildRearBoxLane,
     });
     CTPS.timelineLanes.register({
         id: "drift",
@@ -412,7 +432,8 @@
 
     /**
      * Populate `#ctps-lanes` with one label + lane pair per registered
-     * `timelineLane`, in registration order (task, goto, holding, drift). A
+     * `timelineLane`, in registration order (task, goto, magazine, rearbox,
+     * drift). A
      * lane whose `build` throws is skipped (recorded into `CTPS._errors`)
      * rather than aborting the whole dock — the same "one bad module can't
      * take down the page" posture the registries themselves use.
@@ -449,20 +470,28 @@
     }
 
     /**
-     * Rebuild ONLY the HOLDING lane's DOM in place — never the whole dock via
-     * `buildLanesDom` (task/goto/drift don't depend on cargo state, and a full
-     * rebuild would also reset `_currentSpans`' task/goto bookkeeping). Called
-     * on every `["scene"]` store notify: `store.loadLayout` (embedded OR
-     * uploaded) and the t->scene bisect controller (store.js) both notify
-     * `"scene"`. The initial (empty) holding lane is created by the normal
-     * dock build (`buildLanesDom`), NOT by this function; this is the ONLY
-     * path that keeps the lane in sync after boot — the dock otherwise builds
-     * its lanes once (see the file docstring), so without this rebuild the
-     * HOLDING lane stays permanently empty for embedded and uploaded layouts
-     * alike.
+     * Rebuild ONLY the two cargo lanes' DOM in place (MAGAZINE + REAR BOX) —
+     * never the whole dock via `buildLanesDom` (task/goto/drift don't depend on
+     * cargo state, and a full rebuild would also reset `_currentSpans`'
+     * task/goto bookkeeping). Called on every `["scene"]` store notify:
+     * `store.loadLayout` (embedded OR uploaded) and the t->scene bisect
+     * controller (store.js) both notify `"scene"`. The initial (empty) cargo
+     * lanes are created by the normal dock build (`buildLanesDom`), NOT by this
+     * function; this is the ONLY path that keeps them in sync after boot — the
+     * dock otherwise builds its lanes once (see the file docstring), so without
+     * this rebuild the cargo lanes stay permanently empty for embedded and
+     * uploaded layouts alike.
      */
-    function rebuildHoldingLaneDom(track, duration) {
-        var laneEl = document.querySelector(".ctps-lane--holding");
+    function rebuildCargoLanesDom(track, duration) {
+        _rebuildOneCargoLane(
+            ".ctps-lane--magazine", buildMagazineLane, "magazine", track, duration);
+        _rebuildOneCargoLane(
+            ".ctps-lane--rearbox", buildRearBoxLane, "rearbox", track, duration);
+    }
+
+    /** Clear + repaint one cargo lane element from its builder, error-isolated. */
+    function _rebuildOneCargoLane(selector, builder, id, track, duration) {
+        var laneEl = document.querySelector(selector);
         if (!laneEl) {
             return;
         }
@@ -471,10 +500,10 @@
         }
         var items = [];
         try {
-            items = buildHoldingLane(track) || [];
+            items = builder(track) || [];
         } catch (buildError) {
             CTPS._errors.push(
-                "timeline: lane 'holding' rebuild threw: " +
+                "timeline: lane '" + id + "' rebuild threw: " +
                 (buildError && buildError.message || String(buildError)));
             items = [];
         }
@@ -572,14 +601,14 @@
                 // time sits inside. `seek`/`setT` notify with ["t"] on every drag
                 // and playback tick, so this stays in sync without its own clock.
                 // `["scene"]` fires on layout-load (embedded or uploaded) and on
-                // every cargo event crossed while scrubbing — rebuild the HOLDING
-                // lane only, per rebuildHoldingLaneDom's docstring.
+                // every cargo event crossed while scrubbing — rebuild the two
+                // cargo lanes only, per rebuildCargoLanesDom's docstring.
                 store.subscribe(function (changed) {
                     if (changed && changed.indexOf("t") !== -1) {
                         refreshCurrent(store.t);
                     }
                     if (changed && changed.indexOf("scene") !== -1) {
-                        rebuildHoldingLaneDom(track, duration);
+                        rebuildCargoLanesDom(track, duration);
                     }
                 });
                 refreshCurrent(store.t);

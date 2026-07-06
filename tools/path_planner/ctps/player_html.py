@@ -467,7 +467,7 @@ def render(
     player_meta: Dict[str, Any] = {
         "source": source,
         "filename": _derive_filename(track_dict, filename),
-        "lanes": ["task", "goto", "holding", "drift"],
+        "lanes": ["task", "goto", "magazine", "rearbox", "drift"],
         "tabs": ["log", "inspector"],
         "render_mode": "wheel-arc" if track_dict.get("pivots") else "box",
     }

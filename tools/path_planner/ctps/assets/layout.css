@@ -238,17 +238,9 @@ body {
     min-width: 0;
 }
 
-/* HOLDING lane: bounded like the panel, so once issue #57 stacks many cargo
- * spans the lane scrolls internally instead of growing the dock. Its resting
- * height (min-height 34px) lives in components.css; only the cap + scroll are
- * layout's. The lane is `position: relative` (components.css), so absolutely
- * placed sub-row spans that extend past the cap become scrollable content.
- * Inert today — buildHoldingLane returns [], so there is nothing to overflow
- * until #57 emits spans. */
-.ctps-lane--holding {
-    max-height: 68px;
-    overflow-y: auto;
-}
+/* The MAGAZINE + REAR BOX cargo lanes (issue #57) each render a single row of
+ * hold spans, so they need no internal scroll cap — they size like every other
+ * lane (components.css `.ctps-lane`). */
 
 /* ===================================================================== */
 /* Full-view collapse — .ctps-app.is-fullview (set by chrome.js, T9)      */

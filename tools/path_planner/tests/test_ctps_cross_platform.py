@@ -23,6 +23,7 @@ on a CMake generator mismatch.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -230,7 +231,7 @@ def test_tc9_trace_flow_skips_compiler(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ctps_main,
         "_render_and_open",
-        lambda trace_json, out_path, open_browser, filename="": 0,
+        lambda trace_json, out_path, open_browser, filename="", objects=None: 0,
     )
 
     trace_file = tmp_path / "run.json"
@@ -354,3 +355,84 @@ def _never_called(name: str):
         raise AssertionError(f"{name} must not be called on this path")
 
     return _stub
+
+
+# ---------------------------------------------------------------------------
+# Layout auto-detect — newest tools/path_planner/layout*.json wins
+# ---------------------------------------------------------------------------
+
+
+def test_find_default_layout_none_when_absent(monkeypatch, tmp_path):
+    """``_find_default_layout`` -> ``None`` for an empty OR missing layouts dir."""
+    # Empty but present dir.
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path)
+    assert ctps_main._find_default_layout() is None
+
+    # Missing dir (the is_dir() guard) — never raises.
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path / "nope")
+    assert ctps_main._find_default_layout() is None
+
+
+def test_find_default_layout_picks_newest(monkeypatch, tmp_path):
+    """``_find_default_layout`` returns the most-recently-modified ``layout*.json``.
+
+    Chrome suffixes repeat editor saves as ``layout (1).json`` etc., so the
+    newest file (by mtime) must win regardless of name — the latest Save is the
+    one embedded. Explicit mtimes avoid same-tick ties.
+    """
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path)
+    canonical = tmp_path / "layout.json"
+    suffixed = tmp_path / "layout (1).json"
+    canonical.write_text("{}", encoding="utf-8")
+    suffixed.write_text("{}", encoding="utf-8")
+
+    os.utime(canonical, (1_000_000, 1_000_000))
+    os.utime(suffixed, (2_000_000, 2_000_000))
+    assert ctps_main._find_default_layout() == suffixed
+
+    # A fresh Save of the canonical name (now newest) wins back.
+    os.utime(canonical, (3_000_000, 3_000_000))
+    assert ctps_main._find_default_layout() == canonical
+
+
+# ---------------------------------------------------------------------------
+# --editor flow — emit the authoring page, skip the build/render entirely
+# ---------------------------------------------------------------------------
+
+
+def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
+    """``main(["--editor"])`` renders + serves the editor, never the player.
+
+    The ``--editor`` front door must short-circuit before any trace build or
+    player render: ``_produce_trace_json`` and ``_render_and_open`` stay dormant.
+    ``layout_editor_html.render`` is called once and its bytes handed to
+    ``edit_server.serve_editor`` (stubbed so the test binds no socket / never
+    blocks).
+    """
+    calls = {"render": 0, "serve": 0}
+    editor_file = tmp_path / "layout_editor.html"
+
+    def _stub_render(field_data, out_path, map_png=None):
+        calls["render"] += 1
+        editor_file.write_bytes(b"<html>editor</html>")
+        return editor_file
+
+    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1"):
+        calls["serve"] += 1
+        assert html_bytes == b"<html>editor</html>"
+        assert Path(layout_out) == ctps_main._DEFAULT_LAYOUT
+        return 0
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", _stub_serve)
+    monkeypatch.setattr(
+        ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_render_and_open", _never_called("_render_and_open")
+    )
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert calls == {"render": 1, "serve": 1}

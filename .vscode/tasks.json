@@ -216,6 +216,24 @@
                 "clear": true
             },
             "problemMatcher": []
+        },
+        {
+            "label": "CTPS: Edit Layout (open editor)",
+            "type": "shell",
+            "command": "uv",
+            "args": [
+                "run",
+                "python",
+                "-m",
+                "tools.path_planner.ctps",
+                "--editor"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
+            "problemMatcher": []
         }
     ]
 }

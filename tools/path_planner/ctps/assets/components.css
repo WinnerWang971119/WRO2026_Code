@@ -707,7 +707,8 @@
     color: var(--ctps-text-2);
 }
 
-.ctps-lane-label--holding {
+.ctps-lane-label--magazine,
+.ctps-lane-label--rearbox {
     color: var(--ctps-hold);
 }
 
@@ -723,9 +724,8 @@
     min-height: 18px;
 }
 
-.ctps-lane--holding {
-    min-height: 34px;
-}
+/* The two cargo lanes (MAGAZINE / REAR BOX) each hold a single row of hold
+ * spans, so the default .ctps-lane height is enough — no extra min-height. */
 
 /* Bare .ctps-span (no modifier) is exactly what the TASK lane's items render
  * as today (buildTaskLane's items carry no `cls`) — so the default look here
@@ -772,9 +772,11 @@
     color: var(--ctps-accent);
 }
 
-/* Not yet produced by buildHoldingLane (always empty today, issue #57) —
- * defined ahead of time since HOLDING is a pinned contract class. */
-.ctps-span--holding {
+/* The MAGAZINE + REAR BOX cargo lanes (issue #57): buildMagazineLane /
+ * buildRearBoxLane emit `--ctps-hold` pills over each contiguous held period.
+ * Both share the same hold look — the lane label distinguishes them. */
+.ctps-span--magazine,
+.ctps-span--rearbox {
     height: 12px;
     border-radius: 6px;
     border: 1px solid color-mix(in srgb, var(--ctps-hold) 60%, transparent);
@@ -1117,11 +1119,9 @@
 
 /* ----- panel bodies (one visible, the other hidden) ------------------- */
 
-/* Wide content scrolls inside its own body, never the page (UI sidecar,
- * Responsive) — a safety net; the 4-lane grid always fits the rail. */
-.ctps-cargo-panel {
-    overflow-x: auto;
-}
+/* The 4-lane magazine grid + the single rear-box hold card always fit the
+ * rail, so the panel body never scrolls (no overflow rule) — a stray
+ * horizontal scrollbar here reads as a bug, not a feature. */
 
 /* ----- Magazine tab: 4 vertical lanes of 3, front tile at the BOTTOM --- */
 

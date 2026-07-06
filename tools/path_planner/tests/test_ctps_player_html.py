@@ -213,7 +213,7 @@ def _valid_layout_dict() -> dict:
 _EXPECTED_TC9_META = {
     "source": "PREDICTED",
     "filename": "",
-    "lanes": ["task", "goto", "holding", "drift"],
+    "lanes": ["task", "goto", "magazine", "rearbox", "drift"],
     "tabs": ["log", "inspector"],
     "render_mode": "box",
 }
@@ -401,8 +401,9 @@ def test_tc_meta_embedded_and_round_trips(tmp_path):
     Key assertion: PLAYER_META lives in its OWN ``<script>`` (never swallowed
     into the TRACK assignment — T2's Contracts -> Emitter), parses via
     :func:`json.loads` to a dict, and carries the source badge, trace
-    filename, the lane manifest (``task``/``goto``/``holding``/``drift``, in
-    dock order), the tab manifest (``log``/``inspector``), and the default
+    filename, the lane manifest
+    (``task``/``goto``/``magazine``/``rearbox``/``drift``, in dock order), the
+    tab manifest (``log``/``inspector``), and the default
     render mode (``"box"``) — while TRACK still round-trips unchanged
     alongside it.
     """
@@ -419,7 +420,7 @@ def test_tc_meta_embedded_and_round_trips(tmp_path):
     assert isinstance(meta, dict)
     assert meta["source"] == "PREDICTED"
     assert isinstance(meta["filename"], str)
-    assert meta["lanes"] == ["task", "goto", "holding", "drift"]
+    assert meta["lanes"] == ["task", "goto", "magazine", "rearbox", "drift"]
     assert meta["tabs"] == ["log", "inspector"]
     assert meta["render_mode"] == "box"
 
@@ -492,7 +493,7 @@ def test_tc9_render_mode_is_box_and_meta_is_expected_literal_when_pivot_free(
     expected_meta = {
         "source": "PREDICTED",
         "filename": "",
-        "lanes": ["task", "goto", "holding", "drift"],
+        "lanes": ["task", "goto", "magazine", "rearbox", "drift"],
         "tabs": ["log", "inspector"],
         "render_mode": "box",
     }
