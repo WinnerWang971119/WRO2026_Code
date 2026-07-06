@@ -18,10 +18,10 @@ namespace Routes {
         { 120.617646f, 36.889071f, NodeType::LINE, "i2"          },     // index 3
         { 159.909544f, 36.806396f, NodeType::LINE, "i3"          },     // index 4
         { 68.322674f, 61.447193f, NodeType::LINE, "i4"          },     // index 5
-        { 42.116526f, 61.729868f, NodeType::LINE, "i5"          },     // index 6
+        { 54.154249f, 61.729868f, NodeType::BLIND, "i5"          },     // index 6
         { 200.049468f, 36.806396f, NodeType::LINE, "i6"          },     // index 7
-        { 230.578425f, 36.771747f, NodeType::PROJECTION, "p1"          },     // index 8
-        { 121.182997f, 23.003321f, NodeType::BLIND, "shovel"      },     // index 9
+        { 230.778425f, 36.771747f, NodeType::PROJECTION, "p1"          },     // index 8
+        { 120.665673f, 27.520646f, NodeType::BLIND, "shovel"      },     // index 9
         { 230.861100f, 59.468464f, NodeType::BLIND, "shovel_drop" },     // index 10
     };
 
@@ -29,15 +29,15 @@ namespace Routes {
         // [from][to] = next-hop node index; 0xFF = unreachable
         {  0,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2 }, // from Start (index 0)
         {  4,  1,  4,  4,  4,  4,  4,  4,  4,  4,  4 }, // from dump1 (index 1)
-        {  0,  3,  2,  3,  3,  5,  6,  3,  3,  9,  3 }, // from i1 (index 2)
-        {  2,  4,  2,  3,  4,  5,  5,  4,  4,  9,  4 }, // from i2 (index 3)
-        {  3,  1,  3,  3,  4,  3,  3,  7,  7,  9,  7 }, // from i3 (index 4)
-        {  2,  3,  2,  3,  3,  5,  6,  3,  3,  3,  3 }, // from i4 (index 5)
-        {  2,  5,  2,  5,  5,  5,  6,  5,  5,  2,  5 }, // from i5 (index 6)
-        {  4,  4,  4,  4,  4,  4,  4,  7,  8,  4, 10 }, // from i6 (index 7)
+        {  0,  3,  2,  3,  3,  5,  5,  3,  3,  3,  3 }, // from i1 (index 2)
+        {  2,  4,  2,  3,  4,  2,  2,  4,  4,  9,  4 }, // from i2 (index 3)
+        {  3,  1,  3,  3,  4,  3,  3,  7,  7,  3,  7 }, // from i3 (index 4)
+        {  2,  2,  2,  2,  2,  5,  6,  2,  2,  2,  2 }, // from i4 (index 5)
+        {  5,  5,  5,  5,  5,  5,  6,  5,  5,  5,  5 }, // from i5 (index 6)
+        {  4,  4,  4,  4,  4,  4,  4,  7,  8,  4,  8 }, // from i6 (index 7)
         {  7,  7,  7,  7,  7,  7,  7,  7,  8,  7, 10 }, // from p1 (index 8)
-        {  2,  4,  2,  3,  4,  3,  2,  4,  4,  9,  4 }, // from shovel (index 9)
-        {  7,  7,  7,  7,  7,  7,  7,  7,  8,  7, 10 }, // from shovel_drop (index 10)
+        {  3,  3,  3,  3,  3,  3,  3,  3,  3,  9,  3 }, // from shovel (index 9)
+        {  8,  8,  8,  8,  8,  8,  8,  8,  8,  8, 10 }, // from shovel_drop (index 10)
     };
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
@@ -75,10 +75,10 @@ namespace Routes {
             { EdgeType::LINE, 52.013065f, 359.688613f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
             { EdgeType::LINE, 24.277092f, 90.667151f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
-            { EdgeType::LINE, 36.121450f, 137.166014f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
-            { EdgeType::BLIND, 54.453221f, 344.918400f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
         { // from i2 (index 3)
@@ -86,12 +86,12 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to dump1
             { EdgeType::LINE, 52.013065f, 179.688613f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
-            { EdgeType::LINE, 39.291985f, 359.879442f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
-            { EdgeType::LINE, 57.774263f, 154.844888f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
+            { EdgeType::LINE, 39.291985f, 359.879442f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::FORCE_FORWARD, StopAtLineMode::DEFAULT }, // to i3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
-            { EdgeType::BLIND, 13.897254f, 272.331480f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
+            { EdgeType::BLIND, 9.368548f, 270.293720f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
         { // from i3 (index 4)
@@ -104,17 +104,17 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::LINE, 40.139924f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
-            { EdgeType::BLIND, 41.112897f, 199.617292f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
         { // from i4 (index 5)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to dump1
             { EdgeType::LINE, 24.277092f, 270.667151f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
-            { EdgeType::LINE, 57.774263f, 334.844888f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
-            { EdgeType::LINE, 26.207673f, 179.381997f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
+            { EdgeType::BLIND, 14.171245f, 178.857038f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
@@ -123,10 +123,10 @@ namespace Routes {
         { // from i5 (index 6)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to dump1
-            { EdgeType::LINE, 36.121450f, 317.166014f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
-            { EdgeType::LINE, 26.207673f, 359.381997f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
+            { EdgeType::BLIND, 14.171245f, 358.857038f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
@@ -142,9 +142,9 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
-            { EdgeType::LINE, 30.528976f, 359.934972f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
+            { EdgeType::LINE, 30.728976f, 359.935395f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
-            { EdgeType::BLIND, 38.248216f, 36.334618f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
         { // from p1 (index 8)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
@@ -154,17 +154,17 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
-            { EdgeType::LINE, 30.528976f, 179.934972f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
+            { EdgeType::LINE, 30.728976f, 179.935395f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
-            { EdgeType::BLIND, 22.698478f, 89.286448f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
+            { EdgeType::BLIND, 22.696868f, 89.791294f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
         { // from shovel (index 9)
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Start
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to dump1
-            { EdgeType::BLIND, 54.453221f, 164.918400f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
-            { EdgeType::BLIND, 13.897254f, 92.331480f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
-            { EdgeType::BLIND, 41.112897f, 19.617292f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i1
+            { EdgeType::BLIND, 9.368548f, 90.293720f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i2
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
@@ -180,16 +180,17 @@ namespace Routes {
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i3
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i4
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i5
-            { EdgeType::BLIND, 38.248216f, 216.334618f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
-            { EdgeType::BLIND, 22.698478f, 269.286448f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
+            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to i6
+            { EdgeType::BLIND, 22.696868f, 269.791294f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to p1
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel
             { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to shovel_drop
         },
     };
 
-    const PivotTurn PIVOT_TURNS[1] = {
+    const PivotTurn PIVOT_TURNS[2] = {
         // sorted by (u, v, w) node index
-        { 7, 8, 10, TurnMode::PIVOT_LEFT, 8.898702f },
+        { 7, 8, 10, TurnMode::PIVOT_LEFT, 8.977393f },
+        { 10, 8, 7, TurnMode::PIVOT_RIGHT, 8.977393f },
     };
 
     const ResetNode RESET_NODES[1] = {

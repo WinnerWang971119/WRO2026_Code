@@ -86,8 +86,8 @@ namespace Routes {
     // Sparse, sorted single-wheel pivot table (ADR-036). Sorted by
     // (u, v, w) node-index tuple for a deterministic golden and a
     // short bounded linear scan in FieldMap::findPivotTurn.
-    constexpr uint8_t N_PIVOT_TURNS = 1;
-    extern const PivotTurn PIVOT_TURNS[1];
+    constexpr uint8_t N_PIVOT_TURNS = 2;
+    extern const PivotTurn PIVOT_TURNS[2];
 
     // Sparse, sorted wall-zero reset table (PR2). Sorted by node
     // index for a deterministic golden and a short bounded linear
