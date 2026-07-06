@@ -62,6 +62,17 @@ Also covers the object/cargo plan's emitter leg (T4 — issue #57):
   chips, and the ``#ctps-layout-file`` upload input are present, and the
   retired ``.ctps-panel--holding`` shell is gone (AC5 chips + the DOM contract
   T6 queries).
+* **P-TC10** — an end-to-end synthetic Data-Model-B cargo trace
+  (``ctps_cargo_trace.json``) rendered together with a real layout
+  (``ctps_cargo_layout.json``) round-trips both ``const TRACK`` and
+  ``const OBJECTS``, keeps the structured ``method``/``arg`` keys on the
+  fixture's grab/sortTo/dump/boxClose/boxOpen manip sequence, and never trips
+  the self-containment lint.
+* **P-TC13** — a track carrying both a non-empty ``pivots`` list and a truthy
+  ``objects`` layout renders both intact on the shared script-emit path,
+  ``PLAYER_META.render_mode`` stays driven by ``pivots`` alone
+  (``"wheel-arc"``), and the lint doesn't trip — pivots and objects don't
+  interfere.
 """
 
 from __future__ import annotations
@@ -846,6 +857,121 @@ def test_p_tc6_render_objects_invalid_layout_raises_layout_error(tmp_path):
     with pytest.raises(LayoutError, match="objects\\[0\\]"):
         render(track_dict, out_path, objects=bad_layout)
     assert not out_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# P-TC10 — end-to-end synthetic trace + layout render together (object/cargo
+# plan Testing Strategy, issue #57)
+# ---------------------------------------------------------------------------
+
+
+def test_ptc10_synthetic_cargo_trace_and_layout_render_end_to_end(tmp_path):
+    """P-TC10: a Data-Model-B cargo trace + a layout render together, cleanly.
+
+    Key assertion: ``ctps_cargo_trace.json`` (keyframes + events, no command
+    stream) goes straight into :func:`render` alongside
+    ``ctps_cargo_layout.json`` — no trace_loader/track_builder involved, the
+    same source-agnostic path as TC6. The embedded ``const OBJECTS``
+    round-trips to the layout dict; the embedded ``const TRACK`` round-trips
+    to the trace dict and its manip events keep the structured
+    ``method``/``arg`` keys across the fixture's grab/sortTo/dump/boxClose/
+    boxOpen sequence; and the render never trips the self-containment lint
+    (no :class:`ValueError`).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_cargo_trace.json").read_text(encoding="utf-8")
+    )
+    layout_dict = json.loads(
+        (_FIXTURES / "ctps_cargo_layout.json").read_text(encoding="utf-8")
+    )
+
+    out_path = tmp_path / "cargo_e2e.html"
+    returned = render(track_dict, out_path, objects=layout_dict)  # must not raise
+    assert returned == out_path
+
+    html = out_path.read_text(encoding="utf-8")
+
+    # (a) const OBJECTS is present and round-trips to the layout dict.
+    embedded_objects = _extract_embedded_objects(html)
+    assert embedded_objects is not None
+    assert embedded_objects == layout_dict
+
+    # (b) the embedded TRACK round-trips, manip events keep method/arg.
+    embedded_track = _extract_embedded_track(html)
+    assert embedded_track == track_dict
+
+    manip_events = [e for e in embedded_track["events"] if e["type"] == "manip"]
+    manip_calls = [(e["method"], e["arg"]) for e in manip_events]
+    assert manip_calls == [
+        ("grab", 0),
+        ("sortTo", 0),
+        ("grab", 0),
+        ("sortTo", 1),
+        ("grab", 0),
+        ("sortTo", 2),
+        ("grab", 0),
+        ("sortTo", 3),
+        ("dump", 0),
+        ("boxClose", 0),
+        ("boxOpen", 0),
+    ]
+
+    # (c) the render passed the emitter's self-containment lint (no raise
+    # above) and the page stays offline.
+    assert "http://" not in html
+    assert "https://" not in html
+
+
+# ---------------------------------------------------------------------------
+# P-TC13 — pivots + objects co-present render without interfering (object/
+# cargo plan Testing Strategy, issue #57)
+# ---------------------------------------------------------------------------
+
+
+def test_ptc13_pivots_and_objects_co_present_render_cleanly(tmp_path):
+    """P-TC13: a track with pivots AND an objects layout render together.
+
+    Key assertion: a non-empty ``pivots`` list and a truthy ``objects``
+    layout share the same script-emit path without interfering — both
+    ``const OBJECTS`` and the ``pivots`` list embed intact, the page renders
+    without tripping the self-containment lint, and (belt-and-suspenders)
+    ``PLAYER_META.render_mode`` is still driven by ``pivots`` alone
+    (``"wheel-arc"``), unaffected by the objects layout riding alongside it.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    pivots = [
+        {
+            "t0": 3.0,
+            "t1": 3.9,
+            "cx": 69.0,
+            "cy": 0.0,
+            "theta_deg": -90.0,
+            "wheel": "right",
+        }
+    ]
+    track_dict["pivots"] = pivots
+    layout_dict = _valid_layout_dict()
+
+    out_path = tmp_path / "pivots_and_objects.html"
+    render(track_dict, out_path, objects=layout_dict)  # must not raise
+    html = out_path.read_text(encoding="utf-8")
+
+    # const OBJECTS is present and round-trips.
+    assert _extract_embedded_objects(html) == layout_dict
+
+    # The pivots list survives in TRACK unchanged.
+    embedded_track = _extract_embedded_track(html)
+    assert embedded_track["pivots"] == pivots
+
+    # render_mode still reflects pivots alone — objects never interfere.
+    meta = _extract_player_meta(html)
+    assert meta["render_mode"] == "wheel-arc"
+
+    # Self-contained: the lint didn't trip and no network resource crept in.
+    assert "http://" not in html
+    assert "https://" not in html
 
 
 # ---------------------------------------------------------------------------
