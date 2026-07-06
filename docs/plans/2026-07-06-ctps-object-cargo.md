@@ -84,14 +84,22 @@ refined design agreed with the user.
   `trace_loader._KNOWN_OPS` already contains `manip`, and `manip.method` is NOT
   whitelisted, so `grab`/`release`/`dump`/`sortTo`/`boxOpen`/`boxClose` method
   strings flow through untouched. Four of the five existing verbs already record in
-  the mock. Net new C++ = `boxOpen`/`boxClose` only, which per ADR-051 must land on
-  the production `Manipulator` facade AND the mock together.
+  the mock. Net new C++ = `boxOpen`/`boxClose` only. They must land on **both** the
+  production `Manipulator` facade (so a task body calling them compiles on the robot
+  via arduino-cli) **and** the recording mock (so `ctps_dump`, which compiles the
+  whole `Tasks.cpp`, builds when a task body calls them). This is **not** ADR-051:
+  that guard covers the `Drive`/`LineFollower` fluent-builder surface, not
+  `Manipulator` verbs, and the mock already carries `setLift`/`setGripper`/`setArm`
+  that production lacks — the two are independent build requirements.
 - **`track_builder` adds structured `method`/`arg` to the `manip` event** — today
   it flattens to a display `label`; the player must never parse labels. Additive:
   manip-free traces stay byte-identical.
-- **Additive, conditional emission** — `const OBJECTS` and any new `PLAYER_META`
-  key appear only when a layout is present (the `pivots` precedent). Layout-free
-  traces emit byte-identically → TC9's exact-meta literal stays green.
+- **Conditional emission** — only `const OBJECTS` is conditional (emitted when a
+  layout is present; the `Track.to_dict` pivots-**omission** precedent). `PLAYER_META`
+  is NOT changed — the player detects a layout via `typeof OBJECTS`. The cargo assets +
+  panel markup ship on every page (the upload leg needs them), so a layout-free page is
+  not byte-identical; the invariant is: no `const OBJECTS`, TRACK round-trips, and the
+  `PLAYER_META` literal is unchanged (suite TC9 green).
 - **Player-first phasing** — schema+fixtures → player consume+animate → editor last
   (the player validates the schema before the editor is built against it).
 - **Codex approach consult skipped** — Codex runtime did not return
@@ -119,22 +127,34 @@ refined design agreed with the user.
 - [ ] AC7 — `sortTo(n)` moves the in-hand tile into magazine lane `n` (front-to-
   back); `dump` ejects the front (bottom) tile of each non-empty lane to that
   lane's world drop point, and the object reappears on the field there.
-- [ ] AC8 — `boxClose` captures the nearest Cargo overlapping the world-projected
-  rear-box zone (capacity 1; extra overlaps ignored + logged); `boxOpen` drops the
-  held Cargo back on the field at the rear-box zone.
+- [ ] AC8 — `boxClose` captures the nearest Cargo whose **center is inside** the
+  world-projected rear-box zone (capacity 1; extra in-zone Cargo ignored + logged);
+  `boxOpen` drops the held Cargo back on the field at the rear-box zone. (Both grab
+  and boxClose use the same center-in-zone predicate.)
 - [ ] AC9 — The right-rail cargo panel shows two tabs (Magazine 4×3 vertical lanes,
   Inventory rear box) with live counts; the HUD holding line and the Holding
   timeline lane reflect the same state.
 - [ ] AC10 — Scrubbing to any `t` (forward or backward, and after a jump) shows the
   exact cargo + object placement for that instant; no stale/incremental drift.
-- [ ] AC11 — A layout-free trace emits byte-identically to before this change
-  (no `const OBJECTS`; `PLAYER_META` literal unchanged → TC9 green).
-- [ ] AC12 — `boxOpen`/`boxClose` exist on the production `Manipulator` facade AND
-  the ctps recording mock (conformance guard passes; `ctps_dump` compiles); the
-  loader accepts them with no whitelist change; `manip` track events carry
-  structured `method`/`arg`.
+- [ ] AC11 — A layout-free render (`objects=None`) emits **no `const OBJECTS`**, the
+  TRACK JSON round-trips unchanged, and `PLAYER_META` is unchanged (suite TC9 stays
+  green). Note: the new inert assets (`cargo.js`/`objects_draw.js`) and the
+  cargo-panel markup DO change the page bytes for every render — the guarantee is
+  TRACK + `PLAYER_META`, not a byte-identical page.
+- [ ] AC12 — `boxOpen`/`boxClose` exist on the production `Manipulator` facade (compiles
+  under `arduino-cli`) AND the ctps recording mock (`ctps_dump` compiles); the loader
+  accepts them with no whitelist change; `manip` track events carry structured
+  `method`/`arg`. (No ADR-051 conformance claim — that guard is Drive/LineFollower only.)
 - [ ] AC13 — No JS asset uses a static inline `style=` or `el.style.prop =`
   (TC-NOINLINE), and no asset trips the self-containment lint.
+
+> **Verification split.** ACs 1, 4 (Python leg), 5 (embed), 11, 12, 13 are covered
+> by automated Python/host-C++ tests. The **runtime-behavior** ACs — 2, 3, 4 (draw +
+> Blob/FileReader legs), 6, 7, 8, 9, 10 — run only in the browser (the pytest harness
+> tests JS as text, and mirroring the resolver in Python is banned by ADR-033), so
+> they are **manual-verification** against the open-the-page checklist in Testing
+> Strategy. The scene resolver is kept a single pure function so it *could* later gain
+> a node smoke test (see Testing Strategy).
 
 ## UI/UX Specification
 
@@ -219,10 +239,16 @@ See the sidecar table. Cargo accent is `--ctps-hold #5bc8e0`; robot stays
 
 - `objects[]` is validated loud in Python (`ctps/layout.py`), tolerant in JS
   (skip+warn a malformed object, never throw — mirrors the loader convention).
-- Magazine geometry (4 lanes × 3) and rear-box capacity (1) are fixed player
-  constants in `ctps/config.py` mirrored as JS constants — NOT in `layout.json`.
+- Magazine geometry and rear-box capacity are fixed player constants in
+  `ctps/config.py` — `MAGAZINE_LANES = 4`, `MAGAZINE_DEPTH = 3`, `REAR_BOX_CAP = 1`
+  — mirrored as JS constants in `cargo.js`, NOT in `layout.json`.
 - Robot-local coordinate frame is defined once here and in Contracts; the editor
   Robot tab and the player resolver both use it.
+- The editor Properties panel edits every schema field: `w_cm`/`h_cm` for a rect,
+  `radius_cm` for a circle, and `heading_deg` via a rotation input (rect only;
+  hidden for circles). No schema field is unauthorable.
+- The magazine cell's short label is the first two non-space characters of the
+  object `name` (uppercased); the inventory hold card shows the full `name`.
 
 ### `manip` track event (additive keys)
 
@@ -277,59 +303,98 @@ Single source of truth for every cross-task seam.
   (player object/zone layers) and T8 (editor canvas). Exposed on a small global
   (`window.CTPS_OBJ`) so both pages' non-CTPS editor namespace can call it.
 
-### Player-side seams (ADR-053 registries — new module `assets/cargo.js`, added to `player_html._ASSET_JS` before `boot.js`)
+### Player-side seams (ADR-053 registries — new `assets/objects_draw.js` then `assets/cargo.js`, both added to `player_html._ASSET_JS` in that order, before `boot.js`)
 
-- Store (extends `store.js`, owner T6): new keys + actions, each `notify([...])`:
-  - `store.objects` (array, from `const OBJECTS`), `store.robotCfg` (robot section),
-    `store.scene` (current resolved snapshot), `store.layers.objects`/`layers.zones`
-    (booleans), `store.activeCargoTab` (`"magazine"|"inventory"`).
-  - `store.loadLayout(layoutDict)`, `store.setCargoTab(name)`,
-    `store.toggleLayer("objects"|"zones")` (reuse existing `setLayer`).
-  - A controller subscribes to `["t"]`, bisects the scene timeline, and only when
-    the scene index CHANGES calls an internal `setScene(snapshot)` → `notify(["scene"])`
-    (so the static objects layer repaints on cargo events, not every frame).
-- Layers (`CTPS.layers.register`, owner T5): descriptor shape is the existing
-  `{ id, canvasId, visible(state), draw(ctx,view,state), invalidateOn:[keys] }`.
-  - `{ id:"objects", canvasId:"static", visible: s=>s.layers.objects,
-      draw:<objects_draw>, invalidateOn:["scene","layers"] }`
-  - `{ id:"zones", canvasId:"actors", visible: s=>s.layers.zones,
-      draw:<zones from pose>, invalidateOn:["t","scene","layers"] }`
-- Render/inverse: the player reuses `renderer.js`'s `_project` for object world→px
-  (objects layer draws in the renderer's `draw(ctx,view,state)` callback, which
-  receives `view`). No pixel→world inverse is needed in the player (no dragging).
-- Cargo panel + HUD + timeline lane (owner T6): replaces the holding shell in
-  `panels.js` (`renderHoldingShell` #57 seam) with the two-tab cargo panel;
-  `timeline.js` `buildHoldingLane` (the reserved `[]` #57 seam) returns held-period
-  spans from the scene timeline; the `#ctps-hud-holding` line updates from
-  `store.scene`. `_BODY_MARKUP` in `player_html.py` swaps the `.ctps-panel--holding`
-  block for the cargo-panel markup (keeps `#ctps-command`/`#ctps-log` → TC-STRUCT
-  unaffected).
-- Emitter (`player_html.render`, owner T4): new kwarg `objects: dict|None=None`.
-  When truthy, emits `const OBJECTS = <json>` (own `<script>`, `</` escaped) and
-  the layout validates through `layout.py`. `PLAYER_META` gets a new key ONLY when
-  objects present (gate like `render_mode`), else byte-identical. `_ASSET_JS` gains
-  `cargo.js` + `objects_draw.js` (before `boot.js`).
+- **Asset load order (pinned):** `objects_draw.js` **before** `cargo.js` — `cargo.js`'s
+  layer descriptors reference `CTPS_OBJ.drawObject`/`drawZones` at IIFE time.
+- **Store (extends `store.js`, owner T5 — T5 owns EVERY store.js change here; T6 only
+  consumes):** new keys + actions, each `notify([...])`:
+  - `store.objects` (from `const OBJECTS`), `store.robotCfg` (robot section),
+    `store.scene` (current resolved snapshot + index), `store.layers.objects` (default
+    **on**) / `store.layers.zones` (default **off**), `store.activeCargoTab`
+    (`"magazine"` default | `"inventory"`).
+  - `store.loadLayout(layoutDict)` → set `objects`/`robotCfg`, resolve the scene
+    timeline, set the initial `scene`, `notify(["objects","robotCfg","scene"])`.
+  - `store.setCargoTab(name)` → `notify(["activeCargoTab"])`.
+  - Layer visibility reuses the EXISTING `store.toggleLayer`/`setLayer` (store.js:122-129)
+    — not redefined; `layers.objects`/`layers.zones` are just new keys in `store.layers`.
+  - A controller subscribes to `["t"]`, bisects the scene timeline, and only when the
+    scene **index changes** calls an internal `setScene(snapshot)` → `notify(["scene"])`,
+    so the panel/HUD/holding-lane update on cargo events, not every frame.
+- **Layers (`CTPS.layers.register`, owner T5):** existing descriptor shape
+  `{ id, canvasId, visible(state), draw(ctx,view,state), invalidateOn:[keys] }`. Both new
+  layers register on the **`trail`** canvas — it sits BELOW the `actors` (robot) canvas in
+  the stack, so objects/zones draw UNDER the robot without touching `renderer.js`'s
+  registration order (a module loading after renderer.js cannot register before the
+  `actors` layer):
+  - `{ id:"objects", canvasId:"trail", visible: s=>s.layers.objects, draw:<CTPS_OBJ.drawObject over scene>, invalidateOn:["scene","layers"] }`
+  - `{ id:"zones", canvasId:"trail", visible: s=>s.layers.zones, draw:<CTPS_OBJ.drawZones from pose(t)>, invalidateOn:["t","scene","layers"] }`
+  Both draw by clear+redraw each trail repaint (cheap for a small vector scene; dodges the
+  device-px `getImageData` ghost trap). The trail canvas already repaints on `["t","layers"]`.
+- **Projection (this is the load-bearing seam — do it here, once):** `objects_draw.js`
+  OWNS the world→pixel formula `project(view, x, y)` (transform-agnostic — applied to
+  whatever `view` it is handed). The player's registered layer `draw(ctx, view, state)`
+  receives the renderer's `view` and passes it straight to `CTPS_OBJ`; the editor computes
+  its OWN `view` (a duplicated `_computeView`, ~40 lines) and passes that. `renderer.js` is
+  NOT changed and gains no export — `CTPS.renderer` stays `{resize, hitTest}`. The
+  pixel→world inverse lives ONLY in the editor (T8); the player never drags.
+- **Cargo panel + chips + upload markup (owner T4, in `player_html._BODY_MARKUP`):** swaps
+  the `.ctps-panel--holding` block for the two-tab cargo-panel markup, adds `OBJECTS`/`ZONES`
+  chip buttons to the existing `.ctps-layer-chips` row, and adds a `<input type=file>`+button
+  for layout upload — keeping `#ctps-command`/`#ctps-log` so TC-STRUCT is unaffected.
+  `chrome.js` needs **no** change: it wires every `.ctps-layer-chips .ctps-chip` generically
+  via `data-layer` (chrome.js:285, 324-340), so the new chips work by markup alone.
+- **DOM contract for that markup (owner T4; queried by T6):** `#ctps-cargo` (panel),
+  `.ctps-cargo-tab[data-cargo-tab="magazine"|"inventory"]` (tabs), `#ctps-cargo-count-mag`
+  / `#ctps-cargo-count-inv` (badges), `#ctps-mag-grid` (magazine lanes), `#ctps-inv-list`
+  (rear-box card), `#ctps-layout-file` (`<input type=file>`), chips
+  `.ctps-chip[data-layer="objects"|"zones"]`.
+- **Cargo panel + upload + HUD + holding-lane BEHAVIOR (owner T6):**
+  - `panels.js` `renderHoldingShell` (#57 seam) → the two-tab cargo panel reading
+    `store.scene` + `store.activeCargoTab`; tab clicks call `store.setCargoTab`.
+  - `timeline.js` `buildHoldingLane` (the reserved `[]` #57 seam) → held-period spans, PLUS
+    a **rebuild path**: the dock builds lanes once at boot (timeline.js:459-489), so T6 adds
+    a lane rebuild on `notify(["scene"])`/layout-load, else the holding lane is permanently
+    empty for embedded and uploaded layouts alike.
+  - `#ctps-hud-holding` updates from `store.scene`.
+  - `#ctps-layout-file`'s `change` handler reads the file (FileReader) and calls
+    `store.loadLayout(JSON.parse(text))` — the in-browser upload leg of AC5.
+- **Emitter (`player_html.render`, owner T4):** new kwarg `objects: dict|None=None`. When
+  truthy, validates via `layout.py` and emits `const OBJECTS = <json>` (own `<script>`,
+  `</` escaped). **`PLAYER_META` is NOT changed** — the player detects a layout via
+  `typeof OBJECTS !== "undefined"`, so suite TC9's exact-literal assertion is untouched.
+  `const OBJECTS` is emitted only when objects are present (the `Track.to_dict` **pivots
+  omission** precedent — NOT the always-present `render_mode` key). `_ASSET_JS` gains
+  `objects_draw.js` then `cargo.js` (both before `boot.js`).
 
-### Op contract (3-place; loader leg already open)
+### Op contract (loader leg already open — NOT ADR-051)
 
-- Recorder mock (`WRO2026/test/ctps_mocks/Manipulator.h`, owner T10): add
-  `boxOpen()` / `boxClose()` → `ctps::recordManip("boxOpen"|"boxClose", 0)`. Verbs
-  `grab`/`release`/`dump`/`sortTo`/`reset` already record — unchanged.
-- Production facade (`WRO2026/src/manip/Manipulator.h/.cpp`, owner T10): add
-  `boxOpen()` / `boxClose()` verbs (thin `ManipAction` scaffolds, uncalibrated,
-  matching ADR-032) so the ADR-051 conformance guard (mock ⊆ real) holds.
-- Loader (`trace_loader.py`): **no change** — `manip` is a known op; `manip.method`
-  is not whitelisted, so all six verbs pass through.
-- Builder (`track_builder.py`, owner T9): add `method`/`arg` to the manip event.
-- Player method → cargo action mapping (owner T5, the resolver): `grab`→pick,
-  `sortTo(n)`→file lane n, `dump`→eject fronts, `boxClose`→capture, `boxOpen`→drop,
-  `release`/`reset`→log only (no cargo change).
+- Loader (`trace_loader.py`): **no change** — `manip` is a known op and `manip.method`
+  is not whitelisted, so all six verbs pass through untouched.
+- Recorder mock (`WRO2026/test/ctps_mocks/Manipulator.h`, owner T10): add `boxOpen()` /
+  `boxClose()` → `ctps::recordManip("boxOpen"|"boxClose", 0)`; the other five verbs
+  already record. Needed so `ctps_dump` (which compiles ALL of `Tasks.cpp`) builds when
+  a task body calls the new verbs.
+- Production facade (`WRO2026/src/manip/Manipulator.{h,cpp}`, owner T10): add `boxOpen()`
+  / `boxClose()` verbs — thin `ManipAction` scaffolds with an empty actuator mask
+  (uncalibrated, matching ADR-032's "verbs ship as scaffolds"; the rear-box actuator is
+  TBD at bring-up, so they fire nothing yet). Needed so a task body calling them compiles
+  on the robot (arduino-cli). Plain build requirement — **not** ADR-051 (that guard
+  covers `Drive`/`LineFollower` builders, not `Manipulator` verbs).
+- Builder (`track_builder.py`, owner T9): add `method`/`arg` to the manip event (additive).
+- Player method → cargo action (owner T5, the resolver): `grab`→pick nearest Tile whose
+  center is in the grab zone into the 1-tile in-hand slot; `sortTo(n)`→file the in-hand
+  tile into lane n; `dump`→eject the front tile of each non-empty lane; `boxClose`→capture
+  the nearest Cargo whose center is in the box zone; `boxOpen`→drop the held Cargo;
+  `release`→drop the in-hand tile back at the grab zone (evicts it, so grab/release leaves
+  nothing stranded); `reset`→log only, no cargo change.
 
 ### Robot-local frame (used by editor Robot tab + player resolver)
 
 Origin = robot center; `+x` = heading-forward; `+y` = robot-left. Zone/point world
 position at time `t`: `world = pose.xy + Rot(pose.heading)·local.xy`. The grab zone
-sits at `+y` (left). Defined once here.
+sits at `+y` (left). Defined once here. The editor Robot tab draws its default robot
+box at `2·robot_radius_cm` per side (the player's `_robotSideCm`, from `field_data`).
 
 ### Naming (must match across tasks)
 
@@ -348,15 +413,19 @@ sits at `+y` (left). Defined once here.
 | `ctps/config.py` (append magazine/rearbox consts) | T2 | T5, T6 |
 | `ctps/track_builder.py` (manip method/arg) | T9 | T5 |
 | `ctps/player_html.py` (objects arg, `_ASSET_JS`, `_BODY_MARKUP`) | T4 | T5, T6 |
-| `assets/objects_draw.js` | T5 | T5, T8 |
-| `assets/cargo.js` (new player module) | T5→T6 | — (T5 layers/resolver, T6 panel; split by function within the file, T6 blocked by T5) |
-| `assets/store.js` (new keys/actions) | T6 | T5, T6 |
-| `assets/panels.js`, `assets/timeline.js`, `assets/chrome.js` (chips) | T6 | — |
+| `assets/objects_draw.js` | T5 | T5 (player layers), T8 (editor) |
+| `assets/cargo.js` (new player module) | T5→T6 | — (T5 = resolver+layers+store-wiring; T6 = panel+upload+lane behavior, in a separate section of the file, Blocked By T5) |
+| `assets/store.js` (new keys/actions) | T5 | T6 |
+| `assets/panels.js`, `assets/timeline.js` (the #57 seams only) | T6 | — |
 | `ctps/layout_editor_html.py` + `assets/editor_*.js` + `editor.css` | T7, T8 | — |
 | `WRO2026/src/manip/Manipulator.{h,cpp}`, `test/ctps_mocks/Manipulator.h` | T10 | — |
 
-> `cargo.js` is touched by both T5 (layers + resolver) and T6 (panel wiring); T6 is
-> **Blocked By T5** so they never edit it in parallel.
+> `cargo.js` is touched by both T5 (resolver + layers + store wiring) and T6 (panel +
+> upload + lane behavior); T6 is **Blocked By T5** so they never edit it in parallel, and
+> each keeps to a clearly-labelled section of the file. `chrome.js` is NOT edited (the new
+> chips are generic `data-layer` buttons). T6's edits to `panels.js`/`timeline.js` are
+> confined to the reserved #57 seams whose docstrings already anticipate them (the
+> ADR-053-sanctioned exception to "don't edit another feature's file").
 
 ## Error Handling
 
@@ -367,8 +436,11 @@ sits at `+y` (left). Defined once here.
 - **Malformed layout at emit time** — `layout.py.validate()` raises loud
   (validator-style) so a bad authored file fails the render, not the field-day page.
 - **`grab` with no Tile in zone** — logged no-op; in-hand unchanged.
+- **`grab` with the in-hand slot already occupied** — logged no-op (only one tile in
+  hand at a time; `sortTo` or `release` must clear it first).
+- **`release` with an empty in-hand slot** — logged no-op (nothing to drop).
 - **`sortTo(n)` full lane / no in-hand / bad `n`** — logged no-op, cargo unchanged.
-- **`boxClose` with box full / no Cargo in zone** — logged no-op.
+- **`boxClose` with box full / no Cargo center in zone** — logged no-op.
 - **`dump` on empty magazine** — logged no-op (no ejection).
 - **Missing/partial `robot` config** — objects still render; grab/dump/box become
   logged no-ops (no zones) rather than throwing; a one-line HUD note flags "no robot
@@ -380,74 +452,95 @@ sits at `+y` (left). Defined once here.
 
 ## Testing Strategy
 
-**Levels:** Unit (Python: schema, resolver-adjacent builder, emitter), Integration
-(end-to-end render), Host C++ (facade+mock conformance), JS (text-level: asset
-inlining, no-inline-style, self-containment). The JS scene resolver has no
-pytest-level unit harness (JS is tested as text), so it is a single pure function
-exercised by a deterministic synthetic fixture whose expected transitions are
-asserted via the Python end-to-end text checks + manual verification; keep it
-inspectable.
+**Levels:** Unit (Python: schema, builder, emitter), Integration (Python: end-to-end
+render), Host C++ / compile (the two new verbs on both surfaces), JS (text-level: asset
+inlining, no-inline-style, self-containment), and a **manual browser checklist** for
+every runtime behavior. The pytest harness tests JS **as text**, and re-implementing the
+resolver in Python just to test it would fork render logic into a second drift-prone
+copy (the cargo resolver is a player-render concern, not a firmware-FSM mirror like the
+sanctioned `sim/`). So resolver / cargo / scrub behavior is NOT pytest-coverable. `cargo_resolve` is kept a single pure DOM-free function so it *could*
+gain a `node` smoke test later (a conscious future decision, not v1). Plan-local ids are
+prefixed **`P-TC`** to avoid colliding with the emitter suite's own `TC*` (whose `TC9` is
+the exact-`PLAYER_META`-literal assert this plan must keep green).
 
 | ID | Test Case | Type | Expected Behavior |
 |----|-----------|------|-------------------|
-| TC1 | `layout.py` loads a valid layout | Unit | round-trips via `to_dict`; fields typed |
-| TC2 | `layout.py` rejects bad object (missing type / bad shape / out-of-range) | Unit | raises with a specific message |
-| TC3 | `track_builder` emits `method`/`arg` on manip events | Unit | manip event dict has both keys; `label` unchanged |
-| TC4 | manip-free trace track is byte-identical to pre-change | Unit | golden unchanged (no new keys) |
-| TC5 | `player_html.render(objects=None)` — byte-identical, no `const OBJECTS`, TC9 meta literal intact | Unit | existing TC9 still passes |
-| TC6 | `player_html.render(objects=<layout>)` embeds `const OBJECTS`, adds the gated meta key, inlines `cargo.js`+`objects_draw.js` | Unit | OBJECTS round-trips; assets present |
-| TC7 | `layout_editor_html.render()` is self-contained + offline | Unit | passes lint; no forbidden substrings |
-| TC8 | every editor asset is inlined (TC-ASSETS analogue) | Unit | each `editor_*.js`/`editor.css` present verbatim |
-| TC9 | no inline `style=` / `el.style.prop=` in any new asset (player + editor) | Unit | TC-NOINLINE analogue passes |
-| TC10 | End-to-end: synthetic trace (grab→sortTo→dump→boxClose→boxOpen) + layout renders + inlines text | Integration | page emits; scene text present |
-| TC11 | Resolver scene fixture: known trace+layout → expected snapshot per manip event (front-to-back fill, dump ejects fronts, capacity limits) | Integration | asserted transitions match |
-| TC12 | `boxOpen`/`boxClose` on production facade ⊆ mock (conformance) + `ctps_dump` compiles | Host C++ | `test_ctps_mock_superset` passes; build clean |
-| TC13 | `pivots` + `objects` co-present render (self-containment with both overlays) | Integration | no lint trip; both inline |
+| P-TC1 | `layout.py` loads a valid layout | Unit | round-trips via `to_dict`; fields typed |
+| P-TC2 | `layout.py` rejects a bad object (missing type / bad shape / out-of-range) | Unit | raises with a specific message |
+| P-TC3 | `track_builder` emits `method`/`arg` on manip events | Unit | manip event dict has both keys; `label` unchanged |
+| P-TC4 | manip-free trace track unchanged | Unit | golden byte-identical (no new keys) |
+| P-TC5 | `render(objects=None)` — no `const OBJECTS`; TRACK round-trip + `PLAYER_META` literal unchanged | Unit | suite `TC9` still passes; no `OBJECTS` in output |
+| P-TC6 | `render(objects=<layout>)` embeds `const OBJECTS` (round-trips), inlines `objects_draw.js`+`cargo.js` in order; `PLAYER_META` STILL unchanged | Unit | `OBJECTS` extractable; assets present; meta literal identical |
+| P-TC7 | `layout_editor_html.render()` self-contained + offline | Unit | passes lint; no forbidden substrings |
+| P-TC8 | every editor asset inlined (TC-ASSETS analogue) | Unit | each `editor_*.js`/`editor.css` verbatim |
+| P-TC9 | no inline `style=` / `el.style.prop=` in any new player+editor asset | Unit | TC-NOINLINE analogue passes |
+| P-TC10 | End-to-end: synthetic trace (grab→sortTo→dump→boxClose→boxOpen) + layout renders | Integration | `const OBJECTS` round-trips; the embedded TRACK events carry `method`/`arg` for the fixture sequence; page passes the lint |
+| P-TC11 | Resolver scene fixture — documented expected snapshot per manip event (front-to-back fill, dump ejects fronts, capacity, scrub-back exactness) | **Manual** (browser) | expected transitions written in the fixture comment; verified via the checklist below |
+| P-TC12 | `boxOpen`/`boxClose` compile on the production facade (`arduino-cli`) and in the mock (`ctps_dump` build) | Host C++ / compile | both builds clean; a task body calling them records a `manip` op |
+| P-TC13 | `pivots` + `objects` co-present render | Integration | no lint trip; both inline |
 
-**Test data:** hand-written Data-Model-A fixtures under
-`tools/path_planner/tests/fixtures/` — `ctps_cargo_layout.json` (a layout),
-`ctps_cargo_trace.json` (grab/sortTo/dump/box sequence). Reuse the existing
-emitter-test regex extractors for `const OBJECTS`.
-**Run command:** `uv run --extra dev pytest tools/path_planner/tests/` and
-`ctest --test-dir build/test --output-on-failure`.
+**Manual browser checklist (covers ACs 2, 3, 6, 7, 8, 9, 10 — the runtime legs):** open
+the emitted page on `file://` and confirm — objects render by type; OBJECTS/ZONES chips
+toggle; `grab` pulls the nearest Tile in the zone off the field into the in-hand slot;
+`sortTo(n)` fills lane `n` bottom-up; `dump` drops the front of each lane at its drop
+point; `boxClose`/`boxOpen` capture/drop a Cargo at the rear box; the two-tab counts + HUD
++ holding lane track state; scrubbing backward to any `t` restores the exact placement.
+Editor: draw a Rect + Circle, set name/type/color/precise dims + rotation, Save →
+`layout.json` downloads, Load it back → identical.
+
+**Test data:** hand-written Data-Model-A fixtures under `tools/path_planner/tests/fixtures/`
+— `ctps_cargo_layout.json` (a layout with robot zones) and `ctps_cargo_trace.json`
+(grab/sortTo/dump/box sequence). Reuse the existing emitter-test regex extractors for
+`const OBJECTS`.
+**Run command:** `uv run --extra dev pytest tools/path_planner/tests/`,
+`ctest --test-dir build/test --output-on-failure`, and
+`arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026/` (P-TC12).
 
 ## Tasks
 
 | ID | Task | Blocked By | Risk | Files | Description |
 |----|------|-----------|------|-------|-------------|
 | T1 | Extract shared emit scaffold | — | med | `ctps/_page_emit.py`, `ctps/player_html.py` | Move `_read_asset`/`_assert_self_contained`/`_script`/`_FORBIDDEN_SUBSTRINGS` into `_page_emit.py`; rewire `player_html.py` to import them, behavior-identical. Satisfies the shared-scaffold contract. Run full `test_ctps_player_html.py` — must stay green. |
-| T2 | `layout.json` schema + validation | — | med | `ctps/layout.py`, `ctps/config.py`, `tests/test_ctps_layout.py` | Implement `Layout`/`load`/`validate`/`to_dict` per the Data Model; add magazine (4×3) + rear-box (1) constants to `config.py`. Satisfies AC4 (schema), TC1/TC2. |
-| T3 | Cargo fixtures | T2 | low | `tests/fixtures/ctps_cargo_layout.json`, `tests/fixtures/ctps_cargo_trace.json` | Author a valid layout (tiles/cargo/fixed + robot zones) and a Data-Model-A trace running grab→sortTo(0..)→dump→boxClose→boxOpen. Feeds TC10/TC11. |
-| T4 | Player emitter: `objects=` embed | T1, T2 | med | `ctps/player_html.py`, `tests/test_ctps_player_html.py` | Add `objects` kwarg → `const OBJECTS` (own script, `</` escaped), validate via `layout.py`; gate a new `PLAYER_META` key on presence; add `cargo.js`+`objects_draw.js` to `_ASSET_JS`; swap the holding markup for the cargo-panel markup keeping `#ctps-command`/`#ctps-log`. Satisfies AC5/AC11, TC5/TC6. |
-| T5 | Player object layer + zones + scene resolver | T4 | high | `assets/objects_draw.js`, `assets/cargo.js` (resolver+layers), `assets/store.js` | Implement `objects_draw.js` (draw object/zones, transform-agnostic); `cargo_resolve()` (resolve-once event-indexed scene timeline per the Data Model + method→action map); register `objects`/`zones` layers; add store keys (`objects`,`robotCfg`,`scene`,`layers.objects/zones`) + the t→scene controller. Satisfies AC5/AC6/AC7/AC8/AC10, TC11. |
-| T6 | Cargo panel + HUD + holding lane | T5 | med | `assets/cargo.js` (panel), `assets/panels.js`, `assets/timeline.js`, `assets/chrome.js`, `ctps/player_html.py` (markup) | Replace `renderHoldingShell` with the two-tab cargo panel (Magazine vertical lanes + Inventory rear box) reading `store.scene`; wire `store.setCargoTab`; fill `buildHoldingLane` from the scene; update `#ctps-hud-holding`; add OBJECTS/ZONES chips in `chrome.js`. Satisfies AC9, matches the UI sidecar. |
-| T7 | Editor page emitter | T1, T2 | high | `ctps/layout_editor_html.py`, `tests/test_ctps_layout_editor.py` | New emitter (uses `_page_emit.py`): inline `tokens.css`+`editor.css`, the editor JS assets, and `const FIELD` (field backdrop from `field_data`) + optional `const MAP_IMAGE`; own asset tuple + own lint. Satisfies AC1, TC7/TC8. |
-| T8 | Editor interactions (two tabs, draw, props, save/load) | T5, T7 | high | `assets/editor_core.js`, `assets/editor_tools.js`, `assets/editor_io.js`, `assets/editor_boot.js`, `assets/editor.css` | Duplicated transform + pixel→world inverse; field backdrop draw; Field/Robot tabs; Rect/Circle rubber-band + select/drag/delete; Properties panel (name/type/color/precise dims); Blob save + FileReader load of `layout.json`. Reuses `objects_draw.js` from T5. Satisfies AC2/AC3/AC4/AC13. |
-| T9 | `track_builder` structured manip keys | — | low | `ctps/track_builder.py`, `tests/test_ctps_track_builder.py` | Add `method`/`arg` to the manip event; keep `label`. Update `test_tc2_task_manip_events_in_order` for the additive keys; ensure manip-free golden unchanged. Satisfies AC12 (builder leg), TC3/TC4. |
-| T10 | Firmware `boxOpen`/`boxClose` + mock | — | med | `WRO2026/src/manip/Manipulator.h/.cpp`, `WRO2026/test/ctps_mocks/Manipulator.h` | Add `boxOpen()`/`boxClose()` verbs to the production facade (thin scaffolds per ADR-032) AND the recording mock (`recordManip`). Run host ctest (`test_ctps_mock_superset`) + confirm `ctps_dump` compiles. Satisfies AC12 (C++ leg), TC12. |
+| T2 | `layout.json` schema + validation | — | med | `ctps/layout.py`, `ctps/config.py`, `tests/test_ctps_layout.py` | Implement `Layout`/`load`/`validate`/`to_dict` per the Data Model; add magazine (4×3) + rear-box (1) constants to `config.py`. Satisfies AC4 (schema), P-TC1/P-TC2. |
+| T3 | Cargo fixtures | T2 | low | `tests/fixtures/ctps_cargo_layout.json`, `tests/fixtures/ctps_cargo_trace.json` | Author a valid layout (tiles/cargo/fixed + robot zones) and a Data-Model-A trace running grab→sortTo(0..)→dump→boxClose→boxOpen. Feeds P-TC10/P-TC11. |
+| T4 | Player emitter + markup: `objects=` embed, cargo-panel/chips/upload markup | T1, T2 | med | `ctps/player_html.py`, `tests/test_ctps_player_html.py` | Add `objects` kwarg → `const OBJECTS` (own script, `</` escaped), validate via `layout.py`; add `objects_draw.js` then `cargo.js` to `_ASSET_JS` (before `boot.js`); in `_BODY_MARKUP` swap the `.ctps-panel--holding` block for the two-tab cargo-panel markup (DOM ids per Contracts), add OBJECTS/ZONES `data-layer` chips to `.ctps-layer-chips`, and add the `#ctps-layout-file` upload input — keep `#ctps-command`/`#ctps-log`. **Do NOT touch `PLAYER_META`.** Satisfies AC5(embed)/AC11, P-TC5/P-TC6. |
+| T5 | Object layer + zones + scene resolver + store | T4, T9 | high | `assets/objects_draw.js`, `assets/cargo.js` (resolver+layers+store-wiring section), `assets/store.js` | `objects_draw.js` owns `project(view,x,y)` + `drawObject`/`drawZones` on `window.CTPS_OBJ` (transform-agnostic); `cargo_resolve()` = resolve-once event-indexed scene timeline (Data Model + method→action map, reads `method`/`arg`); register `objects`/`zones` layers on the **`trail`** canvas; add ALL store keys/actions (`objects`,`robotCfg`,`scene`,`layers.objects`(on)/`layers.zones`(off),`activeCargoTab`,`loadLayout`,`setCargoTab`) + the t→scene controller. Satisfies AC6/AC7/AC8/AC10 (manual), P-TC11. |
+| T6 | Cargo panel + upload + HUD + holding-lane behavior | T5 | med | `assets/cargo.js` (panel/upload/lane section), `assets/panels.js`, `assets/timeline.js` | In `cargo.js`'s panel section: fill the two-tab cargo panel (Magazine vertical lanes + Inventory rear box) from `store.scene`/`store.activeCargoTab`, wire tab clicks → `store.setCargoTab`, wire `#ctps-layout-file` → FileReader → `store.loadLayout`, update `#ctps-hud-holding`. `panels.js`: replace the `renderHoldingShell` #57 seam. `timeline.js`: fill `buildHoldingLane` from the scene AND add a lane rebuild on `notify(["scene"])`/layout-load (the dock builds once at boot). No `chrome.js` change. Satisfies AC9, matches the UI sidecar. |
+| T7 | Editor page emitter | T1, T2 | high | `ctps/layout_editor_html.py`, `tests/test_ctps_layout_editor.py` | New emitter (uses `_page_emit.py`): inline `tokens.css`+`editor.css`, the editor JS assets, and `const FIELD` (field backdrop from `field_data`) + optional `const MAP_IMAGE`; own asset tuple + own lint. **Reproduce sidecar Change 3; do not re-design.** Satisfies AC1, P-TC7/P-TC8. |
+| T8 | Editor interactions (two tabs, draw, props, save/load) | T5, T7 | high | `assets/editor_core.js`, `assets/editor_tools.js`, `assets/editor_io.js`, `assets/editor_boot.js`, `assets/editor.css` | Duplicated `_computeView` + pixel→world inverse; field backdrop draw; Field/Robot tabs; Rect/Circle rubber-band + select/drag/delete; Properties panel (name/type/color/`w`,`h` or `radius`/`heading` rotation/`x`,`y`); Blob save (`a.href = url` with spaces — the self-containment-lint trap) + FileReader load of `layout.json`. Reuses `CTPS_OBJ` from T5. **Reproduce sidecar Change 3; do not re-design.** Satisfies AC2/AC3/AC4/AC13. |
+| T9 | `track_builder` structured manip keys | — | low | `ctps/track_builder.py`, `tests/test_ctps_track_builder.py` | Add `method`/`arg` to the manip event; keep `label`. Update `test_tc2_task_manip_events_in_order` for the additive keys; ensure manip-free golden unchanged. Satisfies AC12 (builder leg), P-TC3/P-TC4. |
+| T10 | Firmware `boxOpen`/`boxClose` + mock | — | med | `WRO2026/src/manip/Manipulator.h/.cpp`, `WRO2026/test/ctps_mocks/Manipulator.h` | Add `boxOpen()`/`boxClose()` verbs to the production facade (thin empty-mask scaffolds per ADR-032; rear-box actuator TBD at bring-up) so task bodies compile on-robot, AND to the recording mock (`recordManip`) so `ctps_dump` compiles. Verify by `arduino-cli compile` (production) + the `ctps_dump` build (mock) — **not** `test_ctps_mock_superset` (that guard covers the Drive/LineFollower builders, not Manipulator verbs). Satisfies AC12 (C++ leg), P-TC12. |
 | T11 | ADR-056 + DECISIONS index | T5, T7 | low | `docs/decisions/056-ctps-object-cargo.md`, `DECISIONS.md` | Write ADR-056 (object/cargo model, two-page split, resolve-once scene timeline, additive emission, boxOpen/boxClose contract); add the index row + bump the status table. |
 
 Parallelizable: T1, T2, T9, T10 have no blockers (run first). T3 follows T2. T4
-follows T1+T2. T5 follows T4. T6 follows T5 (same file `cargo.js`). T7 follows
-T1+T2. T8 follows T5 (needs `objects_draw.js`) + T7. T11 follows T5+T7.
+follows T1+T2. T5 follows T4+T9 (needs the emitter seam + the `method`/`arg` keys).
+T6 follows T5 (same file `cargo.js`). T7 follows T1+T2. T8 follows T5 (needs
+`objects_draw.js`) + T7. T11 follows T5+T7.
 
 ## Notes for Implementer
 
 - **Never touch `player.js`'s pinned functions** (`findKeyframeIndex`/`poseAt`/
-  `findEventIndex`/`wrapDeltaDeg`) or reindent them — TC12 (the emitter's, distinct
-  from this plan's TC12) watches that file. Consume them via `CTPS.engine`.
-- **Do not refactor `renderer.js`.** Duplicate the ~40-line transform in the editor;
-  the player reuses `_project` via the `view` passed into a registered layer's
-  `draw`.
+  `findEventIndex`/`wrapDeltaDeg`) or reindent them — the emitter suite's `TC12`
+  (`test_tc12_player_js_seek…`) watches that file, distinct from this plan's `P-TC12`.
+  Consume them via `CTPS.engine`.
+- **Do not refactor `renderer.js`** (no export either). `objects_draw.js` owns a
+  transform-agnostic `project(view,x,y)` (a duplicate of the ~40-line formula); the
+  player's registered layer `draw(ctx,view,state)` gets `view` and passes it in; the
+  editor computes its own `view`. `CTPS.renderer` stays `{resize, hitTest}`.
 - **HiDPI:** draw the objects/zones layers by clear+redraw each repaint (the layer
   system already does per-layer redraws); never `getImageData`/`putImageData`
   snapshot in CSS px (device-px ghost trap).
 - **Per-frame styling** only via `el.style.setProperty('--foo', …)` against a
   `tokens.css`-declared custom property; object fill = authored hex set the same
   way. A static inline `style=` or `el.style.prop =` fails TC-NOINLINE.
-- **Additive-or-nothing emission:** with `objects=None` the emitted bytes must not
-  change at all (no `const OBJECTS`, meta literal intact) — verify against TC9
-  before/after.
+- **Conditional emission (not byte-identical page):** `cargo.js`/`objects_draw.js` and
+  the cargo-panel markup ship on EVERY page (the in-browser upload leg needs them), so
+  the page is not byte-identical to pre-change. What must stay invariant with
+  `objects=None`: no `const OBJECTS`, the TRACK JSON round-trips, and `PLAYER_META`
+  equals the pre-change literal (suite TC9) — verify TC9 before/after.
+- **Resolver automation:** `cargo_resolve` is pure and DOM-free; the ONLY path to
+  automating its correctness later is a `node` smoke test. It is not pytest/ctest-
+  coverable (JS-as-text harness), so v1 verifies it by the manual browser checklist.
 - **Loader needs no change** — resist adding `boxOpen`/`boxClose` to any whitelist;
   `manip.method` is unfiltered by design.
 - **`cargo.js` is shared by T5/T6** — T6 is blocked by T5; within the file keep the

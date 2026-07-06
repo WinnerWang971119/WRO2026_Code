@@ -109,8 +109,9 @@ A separate offline page in the same dark theme. No trace/transport/timeline.
 ```
 
 - **Field tab** — map/field backdrop; rubber-band-draw a Rect or Circle, then set
-  name, type (Tile/Cargo/Fixed), color, and precise numeric dims + x/y in the
-  Properties panel. Click to select, drag to move, delete key removes.
+  name, type (Tile/Cargo/Fixed), color, and precise numerics in the Properties panel:
+  `w`/`h` for a rect (plus a `rotation` input → `heading_deg`), `radius` for a circle,
+  and `x`/`y` for both. Click to select, drag to move, delete key removes.
 - **Robot tab** — no map; the default robot box centered; draw the grab zone,
   rear-box zone, and 4 drop points (robot-local rectangles/points).
 - **Save** → Blob `<a download>` of `layout.json`. **Load** → `<input type=file>`
@@ -122,8 +123,9 @@ A separate offline page in the same dark theme. No trace/transport/timeline.
   `--ctps-hold` underline; inactive: `--ctps-muted`.
 - **Magazine cell** — empty (dashed) / full (authored color + label).
 - **Hold card** — present (name + `onrobot`) / empty (closed hint).
-- **Object (canvas)** — on-field / grabbed (omitted) / selected (halo, editor
-  only) / drop (brief fade-in at the drop point).
+- **Object (canvas)** — on-field / grabbed (omitted from the field) / dropped (snaps
+  to the drop point — no fade; the objects layer repaints only on scene change) /
+  selected (halo, editor only).
 - **Zone chip / OBJECTS chip** — on (`--ctps-hold` / `--ctps-text`) / off
   (`--ctps-muted`).
 - **Editor tool** — Rect / Circle / Select; drawing (rubber-band) / idle.
