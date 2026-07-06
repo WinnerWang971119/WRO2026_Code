@@ -189,7 +189,12 @@ class Track:
         timestamps are non-decreasing (they share the same running clock as the
         keyframes). A successful ``goto`` additionally carries ``"t_end":
         float`` (>= ``"t"``), spanning the whole multi-hop move; the
-        UNREACHABLE fault ``goto`` event has no ``"t_end"``.
+        UNREACHABLE fault ``goto`` event has no ``"t_end"``. A ``manip`` event
+        additionally carries structured ``"method": str`` / ``"arg": int``
+        keys (additive to the unchanged ``"label"`` — CTPS object-cargo plan,
+        T9), so the player can dispatch on them directly instead of parsing
+        the label string. No other event type gains new keys, so a
+        manip-free trace's events stay byte-identical.
     :param pivots: Optional single-wheel pivot-arc overlay segments (issue #55),
         one per pivot the trace's routes actually take, sorted by ``t0``. Each
         entry is ``{"t0": float, "t1": float, "cx": float, "cy": float,
@@ -831,8 +836,19 @@ def build(trace: Trace, field_data) -> Track:
             )
 
         elif cmd.op == "manip":
+            # `method`/`arg` are structured (additive) alongside the existing
+            # `label`, so the player can dispatch on them directly instead of
+            # parsing the label string; `label` is kept for display/back-compat
+            # (T9, CTPS object-cargo plan). Purely additive: a manip-free trace
+            # never touches this branch, so its Track stays byte-identical.
             events.append(
-                {"t": t, "type": "manip", "label": f"{cmd.method}({cmd.arg})"}
+                {
+                    "t": t,
+                    "type": "manip",
+                    "method": cmd.method,
+                    "arg": cmd.arg,
+                    "label": f"{cmd.method}({cmd.arg})",
+                }
             )
             append_dwell_keyframe(MANIP_NOMINAL_S)
 

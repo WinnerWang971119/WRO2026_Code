@@ -68,6 +68,13 @@ Pivot-arc additions (CTPS issue #55, T5 — TC1-TC7, TC11, TC12):
 These reuse the existing per-turn pivot fixtures in
 ``tests/fixtures/pivot_field_data.py`` (ADR-036) via a synthetic single-``goto``
 ``Trace`` built directly (no JSON, no C++ dump) — see ``_goto_trace`` below.
+
+Structured manip-key additions (CTPS object-cargo plan, T9 — P-TC3, P-TC4):
+
+* **P-TC3** — a ``manip`` Track event carries structured ``method``/``arg``
+  keys, additive to the unchanged ``label``.
+* **P-TC4** — a manip-free trace's Track carries none of those new keys
+  anywhere (golden byte-identical).
 """
 
 from __future__ import annotations
@@ -199,6 +206,11 @@ def test_tc2_task_manip_events_in_order():
     the ``task_start`` banner, ``setGripper(180)``, the ``goto`` drift check
     slot, ``setLift(120)``, and the ``task_end`` banner — proving manip args
     and task names survive into the narration track.
+
+    P-TC3 (CTPS object-cargo plan, T9): each ``manip`` event ALSO carries
+    structured ``method``/``arg`` keys additive to the existing ``label`` —
+    proving the player can dispatch on ``method``/``arg`` directly without
+    parsing the label string, while ``label`` itself is unchanged.
     """
     trace = load(_FIXTURES / "ctps_task_events.json")
     track = _build_quiet(trace, toy_field_data)
@@ -225,6 +237,63 @@ def test_tc2_task_manip_events_in_order():
     # Event timestamps are non-decreasing (shared running clock).
     ev_times = [ev["t"] for ev in track.events]
     assert all(b >= a for a, b in zip(ev_times, ev_times[1:]))
+
+    # P-TC3: the manip events carry structured method/arg, additive to the
+    # unchanged label.
+    manip_events = [ev for ev in track.events if ev["type"] == "manip"]
+    assert len(manip_events) == 2
+    grip, lift = manip_events
+
+    assert grip["method"] == "setGripper"
+    assert grip["arg"] == 180
+    assert grip["label"] == "setGripper(180)"
+
+    assert lift["method"] == "setLift"
+    assert lift["arg"] == 120
+    assert lift["label"] == "setLift(120)"
+
+
+# ---------------------------------------------------------------------------
+# P-TC4 — a manip-free trace's Track stays byte-identical (no new keys)
+# ---------------------------------------------------------------------------
+
+
+def test_p_tc4_manip_free_trace_track_byte_identical():
+    """P-TC4: a manip-free trace's Track carries NO new keys anywhere.
+
+    ``ctps_two_goto.json`` has no ``manip`` command, so the new ``method``/
+    ``arg`` keys (additive to the ``manip`` event only) must never appear:
+    every event dict keeps EXACTLY its pre-T9 key set, and the whole
+    ``to_dict()`` output keeps EXACTLY its pre-T9 top-level key set (no
+    ``pivots`` — the toy field is pivot-free). Combined with TC1's independent
+    keyframe cross-check, this pins the additive change to the ``manip``
+    branch alone.
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    # No manip commands in this trace at all.
+    assert all(cmd.op != "manip" for cmd in trace.commands)
+
+    # Every event is a `goto` (this fixture has no other event-emitting op);
+    # each keeps exactly its pre-T9 key set -- no `method`/`arg` leakage.
+    for ev in track.events:
+        assert ev["type"] == "goto"
+        assert set(ev.keys()) == {"t", "type", "t_end", "label"}
+
+    # The top-level Track dict keeps exactly its pre-T9 key set (no "pivots"
+    # -- the toy field is pivot-free).
+    assert set(track.to_dict().keys()) == {
+        "schema_version",
+        "field",
+        "duration_s",
+        "keyframes",
+        "events",
+    }
+
+    # Every keyframe keeps exactly its pre-T9 key set too.
+    for kf in track.keyframes:
+        assert set(kf.keys()) == {"t", "x", "y", "h"}
 
 
 # ---------------------------------------------------------------------------
