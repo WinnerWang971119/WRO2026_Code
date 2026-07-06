@@ -272,7 +272,7 @@ Computed once on layout-load by `cargo_resolve(track, objects, robotCfg)`:
   "eventIndex": 12,          // index into track.events of the manip op
   "t": 12.7,
   "inHand": "o5" | null,     // object id staged at grabber
-  "magazine": [[ "o1","o2","o3" ], [ "o4" ], [], [ "o6","o7" ]],  // lane→[ids], front last
+  "magazine": [[ "o1","o2","o3" ], [ "o4" ], [], [ "o6","o7" ]],  // lane→[ids], FIFO: index 0 = oldest = front/dump side
   "rearBox": "o9" | null,    // Cargo id held (capacity 1)
   "placed": { "o8": { "x_cm": 55, "y_cm": 30 } }  // objects moved to a NEW field spot (dropped/dumped)
 }
@@ -283,6 +283,11 @@ Computed once on layout-load by `cargo_resolve(track, objects, robotCfg)`:
   `placed` render at the placed position.
 - Scrub: `findEventIndex(t)` → bisect the scene array → render that snapshot. Exact,
   since object state changes only at manip events.
+- **Magazine ordering is FIFO** (decided during execution, supersedes any earlier
+  "front last" wording here and in AC7): each lane array is ordered oldest-first, so
+  index 0 is the front / bottom / dump side. `sortTo(n)` appends (the newest tile
+  lands on top); `dump` ejects index 0 (the oldest) first. This matches a physical
+  gravity lane loaded from the top and emptied from the bottom. See ADR-056.
 
 ## Contracts & Interfaces
 

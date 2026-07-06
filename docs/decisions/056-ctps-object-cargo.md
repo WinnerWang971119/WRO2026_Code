@@ -13,7 +13,11 @@ in the CTPS player itself. The player only *consumes* a layout (emit-time embed 
 `grab` (nearest Tile whose **center** is inside the grab zone → in-hand), `sortTo(n)`
 (in-hand → magazine lane `n`), `dump` (front tile of each non-empty lane → its drop
 point), `boxClose`/`boxOpen` (capture/drop a Cargo at the rear-box zone, same
-center-in-zone predicate, capacity 1), and `reset` (no cargo change). All object
+center-in-zone predicate, capacity 1), and `reset` (no cargo change). Magazine
+lanes are **FIFO**: within a lane, `sortTo` appends the new tile on top and `dump`
+ejects the **oldest** tile (the front/bottom, array index 0) first — modelling a
+gravity lane loaded from the top and emptied from the bottom, so the animation
+predicts the same dump order the physical magazine would. All object
 placement over time is computed **once**, on layout-load, as an **event-indexed scene
 timeline**: one snapshot per manip event (`inHand`, `magazine[4]`, `rearBox`,
 `placed`), keyed by event index; scrubbing to any `t` is a pure bisect into that

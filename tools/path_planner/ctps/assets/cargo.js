@@ -224,18 +224,31 @@
 
     // ----- per-verb state transitions --------------------------------------
 
+    /**
+     * Surface a resolver no-op (a manip verb that changed no cargo state) on the
+     * console. Deliberately `console.warn`, NOT `CTPS._errors`: that array is a
+     * one-shot boot registration channel (surfaced once, boot step 4), whereas
+     * these no-ops fire per manip event on every `loadLayout` -- including
+     * uploads long after boot. Messages stay short and factual.
+     */
+    function _noopWarn(message) {
+        console.warn("cargo: " + message);
+    }
+
     /** grab: pick the nearest on-field Tile whose centre is in the grab zone. */
     function _doGrab(state, pose, objects, robotCfg) {
         if (state.inHand !== null) {
-            return; // in-hand occupied -> logged no-op
+            _noopWarn("grab ignored: manipulator already holding a tile");
+            return; // in-hand occupied
         }
         var zone = robotCfg && robotCfg.grab_zone;
         if (!zone) {
-            return; // no robot zones -> no-op
+            return; // no robot zones (surfaced once by the HUD note)
         }
         var tile = _nearestInZone(state, objects, TYPE_TILE, pose, zone);
         if (!tile) {
-            return; // empty-zone grab -> logged no-op
+            _noopWarn("grab ignored: no tile in the grab zone");
+            return; // empty-zone grab
         }
         state.inHand = tile.id;
         _clearPlaced(state, tile.id);
@@ -244,7 +257,8 @@
     /** release: drop the in-hand tile back at the grab-zone world centre. */
     function _doRelease(state, pose, robotCfg) {
         if (state.inHand === null) {
-            return; // nothing to drop -> no-op
+            _noopWarn("release ignored: nothing in hand");
+            return; // nothing to drop
         }
         var zone = robotCfg && robotCfg.grab_zone;
         if (!zone) {
@@ -255,55 +269,72 @@
         state.inHand = null;
     }
 
-    /** sortTo(n): file the in-hand tile into magazine lane n (front LAST). */
+    /**
+     * sortTo(n): append the in-hand tile to the END of magazine lane n. FIFO --
+     * index 0 stays the OLDEST tile (the front / dump side) and the newest tile
+     * lands last, at the top of the lane.
+     */
     function _doSortTo(state, arg) {
         if (state.inHand === null) {
-            return; // no in-hand -> no-op
+            _noopWarn("sortTo ignored: nothing in hand");
+            return; // no in-hand
         }
         var n = _laneIndex(arg);
         if (n < 0 || n >= MAGAZINE_LANES) {
-            return; // bad lane -> no-op
+            _noopWarn("sortTo ignored: lane " + n + " out of range");
+            return; // bad lane
         }
         var lane = state.magazine[n];
         if (lane.length >= MAGAZINE_DEPTH) {
-            return; // full lane -> no-op
+            _noopWarn("sortTo ignored: lane " + n + " is full");
+            return; // full lane
         }
-        lane.push(state.inHand); // front-to-back fill: front tile is the last
+        lane.push(state.inHand); // FIFO: newest lands last; index 0 stays oldest
         _clearPlaced(state, state.inHand);
         state.inHand = null;
     }
 
-    /** dump: eject the FRONT tile of each non-empty lane to its lane drop point. */
+    /**
+     * dump: eject the FRONT (oldest, index 0) tile of each non-empty lane to its
+     * lane drop point. FIFO -- the tile sorted FIRST leaves FIRST.
+     */
     function _doDump(state, pose, robotCfg) {
         var drops = (robotCfg && robotCfg.drop_points) || [];
         if (drops.length === 0) {
             return; // no drop points -> no-op (never lose a tile)
         }
+        var ejected = 0;
         for (var lane = 0; lane < state.magazine.length; lane++) {
             var stack = state.magazine[lane];
             if (stack.length === 0) {
                 continue; // empty lane -> nothing ejected
             }
-            var id = stack.pop(); // front = last element
+            var id = stack.shift(); // FIFO: front = oldest = index 0
             var dp = drops[lane];
             var w = dp ? _localToWorld(pose, dp.x_cm, dp.y_cm)
                 : { x: pose.x, y: pose.y };
             state.placed[id] = { x_cm: w.x, y_cm: w.y };
+            ejected++;
+        }
+        if (ejected === 0) {
+            _noopWarn("dump ignored: magazine is empty");
         }
     }
 
     /** boxClose: capture the nearest on-field Cargo whose centre is in the box zone. */
     function _doBoxClose(state, pose, objects, robotCfg) {
         if (state.rearBox !== null) {
-            return; // box full (REAR_BOX_CAP == 1, single slot) -> no-op
+            _noopWarn("boxClose ignored: rear box already full");
+            return; // box full (REAR_BOX_CAP == 1, single slot)
         }
         var zone = robotCfg && robotCfg.box_zone;
         if (!zone) {
-            return; // no zone -> no-op
+            return; // no zone (surfaced once by the HUD note)
         }
         var cargo = _nearestInZone(state, objects, TYPE_CARGO, pose, zone);
         if (!cargo) {
-            return; // no Cargo centre in zone -> logged no-op
+            _noopWarn("boxClose ignored: no cargo in the box zone");
+            return; // no Cargo centre in zone
         }
         state.rearBox = cargo.id;
         _clearPlaced(state, cargo.id);
@@ -350,6 +381,9 @@
      * own time (`CTPS.engine.poseAt`), which projects the grab/box zones and drop
      * points to world. No-op verbs still emit a snapshot (mirroring the prior
      * state) so every manip event has a scene index for the store's bisect.
+     * Each snapshot's `magazine[lane]` is ordered OLDEST-first (index 0 = oldest
+     * = front = dump side): `sortTo` appends the newest tile, `dump` shifts
+     * index 0, so lanes drain FIFO.
      *
      * @param track the ingested Data-Model-B track (reads `track.events`).
      * @param objects the layout objects array (`store.objects`).
@@ -551,16 +585,17 @@
 
     /**
      * Rebuild `#ctps-mag-grid`: one column per lane (0..MAGAZINE_LANES-1),
-     * each a stack of MAGAZINE_DEPTH cells top-to-bottom. `sortTo`/`dump`
-     * push/pop the END of `scene.magazine[lane]` (T5), so the front (most
-     * recently sorted, next to dump) tile is the LAST array element -- and it
-     * belongs at the BOTTOM row. For row `r` (0 = top .. DEPTH-1 = bottom),
-     * the stack index is `stack.length - DEPTH + r`: negative (empty cell)
-     * until the stack is deep enough to reach that row, so a partially-filled
-     * lane fills from the bottom row upward, matching the sidecar diagram.
-     * A filled cell gets the authored colour (via `setProperty`, never a
-     * hard-coded literal) + the 2-char label; an empty cell gets the dashed
-     * `--ctps-cell--empty` modifier for CSS to style.
+     * each a stack of MAGAZINE_DEPTH cells top-to-bottom. FIFO lane order:
+     * `sortTo` pushes the newest tile onto the END, `dump` shifts the oldest
+     * off index 0 (T5), so index 0 is the OLDEST tile (the front / dump side)
+     * and it belongs at the BOTTOM row. For row `r` (0 = top .. DEPTH-1 =
+     * bottom), the stack index is `MAGAZINE_DEPTH - 1 - r`: the bottom row
+     * shows index 0 (oldest), each row up shows the next index, and any row
+     * that maps past the stack top (index >= stack length) is an empty cell --
+     * so a partially-filled lane fills from the bottom row upward, matching the
+     * sidecar diagram. A filled cell gets the authored colour (via
+     * `setProperty`, never a hard-coded literal) + the 2-char label; an empty
+     * cell gets the dashed `--ctps-cell--empty` modifier for CSS to style.
      */
     function _renderMagazineGrid(gridEl, scene, objects) {
         if (!gridEl) {
@@ -581,7 +616,10 @@
             laneEl.appendChild(headerEl);
 
             for (var row = 0; row < MAGAZINE_DEPTH; row++) {
-                var stackIndex = stack.length - MAGAZINE_DEPTH + row;
+                // FIFO: bottom row (r = DEPTH-1) shows index 0 (oldest, dump
+                // side); each row up shows the next index; rows past the stack
+                // top stay empty.
+                var stackIndex = MAGAZINE_DEPTH - 1 - row;
                 var cellEl = document.createElement("div");
                 if (stackIndex >= 0 && stackIndex < stack.length) {
                     var id = stack[stackIndex];
@@ -677,6 +715,57 @@
             "  rear box " + counts.invFilled + "/" + counts.invCap;
     }
 
+    // ----- "no robot zones" HUD note -----------------------------------------
+
+    /** True when the layout's robot section defines at least one manipulator zone. */
+    function _hasRobotZones(robotCfg) {
+        return !!(robotCfg && (robotCfg.grab_zone || robotCfg.box_zone));
+    }
+
+    /**
+     * Lazily create (once) the one-line note that sits right after
+     * `#ctps-hud-holding`, flagging a loaded layout whose `robot` section
+     * carries no manipulator zones (grab/box/dump then all no-op). Returns null
+     * when the HUD line is absent (a layout-free page) so callers no-op safely.
+     */
+    function _ensureRobotNoteEl() {
+        var el = document.getElementById("ctps-hud-robotnote");
+        if (el) {
+            return el;
+        }
+        var anchor = document.getElementById("ctps-hud-holding");
+        if (!anchor || !anchor.parentNode) {
+            return null;
+        }
+        el = document.createElement("span");
+        el.id = "ctps-hud-robotnote";
+        el.className = "ctps-hud-robotnote";
+        el.hidden = true;
+        anchor.parentNode.insertBefore(el, anchor.nextSibling);
+        return el;
+    }
+
+    /**
+     * Show "no robot zones" beside the HUD when a layout is loaded but its robot
+     * config defines no zones; hide it otherwise. Gated on a non-empty `objects`
+     * array so the empty startup player (no layout at all) stays silent. Sets
+     * textContent + the `hidden` flag only -- never an inline style.
+     */
+    function _renderRobotZonesNote(state) {
+        var el = _ensureRobotNoteEl();
+        if (!el) {
+            return;
+        }
+        var objects = state.objects || [];
+        if (objects.length > 0 && !_hasRobotZones(state.robotCfg)) {
+            el.textContent = "no robot zones";
+            el.hidden = false;
+        } else {
+            el.textContent = "";
+            el.hidden = true;
+        }
+    }
+
     // ----- content orchestration --------------------------------------------
 
     /** Rebuild every scene-driven piece of the cargo panel + HUD in one pass. */
@@ -687,6 +776,7 @@
         _renderInventoryPanel(dom.invList, scene, objects);
         _renderCargoTabCounts(dom, scene);
         _renderCargoHud(dom, scene);
+        _renderRobotZonesNote(state);
     }
 
     function _queryCargoDom() {
@@ -797,6 +887,16 @@
         var input = document.getElementById("ctps-layout-file");
         if (!input) {
             return;
+        }
+        // The visible "Load layout…" button opens the dialog; the file input
+        // carries the `hidden` attribute, so nothing opens unless the button
+        // click forwards to `input.click()`. Both are guarded so a layout-free
+        // page (neither element present) never throws.
+        var uploadBtn = document.getElementById("ctps-layout-upload-btn");
+        if (uploadBtn) {
+            uploadBtn.addEventListener("click", function () {
+                input.click();
+            });
         }
         input.addEventListener("change", function () {
             var file = input.files && input.files[0];
