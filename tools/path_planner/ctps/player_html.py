@@ -34,6 +34,13 @@ Design constraints (CTPS UI/UX rework, T2 — issue #125):
 
 The interesting runtime logic (the bounded-search + lerp seek that satisfies
 TC12) lives in ``assets/player.js``; this module only inlines it.
+
+The emit-scaffold helpers (``read_asset`` / ``assert_self_contained`` /
+``script`` / ``FORBIDDEN_SUBSTRINGS``) are owned by
+:mod:`tools.path_planner.ctps._page_emit` (T1, issue #57) and imported here
+under their historical private names so a second page emitter
+(``layout_editor_html.py``, T7) can share them without duplicating this
+module's lint/asset-read/script-wrap logic.
 """
 
 from __future__ import annotations
@@ -43,6 +50,11 @@ import json
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+from tools.path_planner.ctps._page_emit import FORBIDDEN_SUBSTRINGS as _FORBIDDEN_SUBSTRINGS
+from tools.path_planner.ctps._page_emit import assert_self_contained as _assert_self_contained
+from tools.path_planner.ctps._page_emit import read_asset as _read_asset
+from tools.path_planner.ctps._page_emit import script as _script
 
 __all__ = ["render", "PLAYER_JS_PATH"]
 
@@ -78,25 +90,6 @@ _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "selection.js",
     _ASSETS_DIR / "chrome.js",
     _ASSETS_DIR / "boot.js",
-)
-
-#: Literal substrings that would break the page's offline self-containment if
-#: they appeared in an asset or the HTML template markup:
-#:
-#: * ``src=`` / ``href=`` — an attribute pointing at an external/local resource
-#:   (note the missing space is deliberate: ``img.src = MAP_IMAGE`` is fine).
-#: * ``http://`` / ``https://`` — a network URL.
-#: * ``data:image`` — an inline image background in an asset (the MAP_IMAGE
-#:   ``data:image/png`` *value* is exempt — it is a JSON value, not an asset).
-#: * ``</script>`` — would prematurely close the inline ``<script>`` wrapper an
-#:   asset is inlined into.
-_FORBIDDEN_SUBSTRINGS: Tuple[str, ...] = (
-    "src=",
-    "href=",
-    "http://",
-    "https://",
-    "data:image",
-    "</script>",
 )
 
 #: Static page body markup (design 3a "Instrument"). Class-based only — no inline
@@ -322,65 +315,6 @@ def _map_data_uri(map_png: "str | Path | None") -> str:
     mime = "jpeg" if suffix in ("jpg", "jpeg") else suffix
     b64 = base64.b64encode(path.read_bytes()).decode("ascii")
     return json.dumps(f"data:image/{mime};base64,{b64}")
-
-
-def _read_asset(path: Path) -> str:
-    """Read one runtime asset as UTF-8 text.
-
-    :param path: absolute path to a CSS / JS asset under :data:`_ASSETS_DIR`.
-    :return: the file's contents.
-    :raises FileNotFoundError: if the asset does not exist — re-raised with the
-        offending path so a missing sibling asset (created by a later task)
-        fails loud at emit time (TC-ASSETS).
-    """
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"ctps.player_html.render: required runtime asset not found at {path}."
-        ) from exc
-
-
-def _assert_self_contained(sources: Dict[str, str]) -> None:
-    """Lint each named source for offline self-containment (AC-lint).
-
-    Raises on the first source that contains any of
-    :data:`_FORBIDDEN_SUBSTRINGS` — an external reference, network URL, inline
-    image background, or a literal ``</script>`` that would break out of the
-    inline wrapper. Only the **assets and the HTML template markup** are passed
-    here; the embedded TRACK / PLAYER_META / MAP_IMAGE JSON *values* are NOT
-    linted (they carry arbitrary user text such as ``print`` labels, and the
-    MAP_IMAGE ``data:image/png`` value is a legitimate self-contained URI).
-
-    :param sources: mapping of a human-readable source name (asset file name or
-        ``"HTML template"``) to its content.
-    :raises ValueError: naming the source and the offending substring.
-    """
-    for name, content in sources.items():
-        for forbidden in _FORBIDDEN_SUBSTRINGS:
-            if forbidden in content:
-                raise ValueError(
-                    "ctps.player_html: self-containment lint failed — "
-                    f"{name!r} contains the forbidden substring {forbidden!r}. "
-                    "Assets and the HTML template must be fully offline: no "
-                    "'src='/'href=' attributes, no 'http(s)://' URLs, no "
-                    "'data:image' background, and no literal '</script>' "
-                    "(it would break out of the inline <script> wrapper)."
-                )
-
-
-def _script(inner: str) -> str:
-    """Wrap ``inner`` in its own ``<script>`` element.
-
-    Each inline constant and each JS asset gets a dedicated element so a
-    throwing top-level IIFE cannot abort the siblings, and so the emitter test's
-    ``const TRACK = ...;</script>`` regex terminates at TRACK alone.
-
-    :param inner: the raw script body (already ``</`` -escaped where it embeds
-        user text).
-    :return: a ``<script> ... </script>`` block.
-    """
-    return f"<script>\n{inner}\n</script>"
 
 
 def render(
