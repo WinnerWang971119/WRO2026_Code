@@ -184,12 +184,51 @@
     }
 
     /**
+     * Squared distance from a robot-local point to the robot body footprint.
+     *
+     * The footprint is treated as an axis-aligned square in robot-local space
+     * with half-side `robotHalfSideCm` (the current chassis heading is already
+     * factored out by `_worldToLocal`). When the point is inside/on the body,
+     * distance is 0.
+     */
+    function _distSqToRobotBody(local, robotHalfSideCm) {
+        var half = (typeof robotHalfSideCm === "number" && robotHalfSideCm > 0)
+            ? robotHalfSideCm : 0;
+        var dx = Math.max(Math.abs(local.x) - half, 0);
+        var dy = Math.max(Math.abs(local.y) - half, 0);
+        return dx * dx + dy * dy;
+    }
+
+    /**
+     * The robot footprint half-side in cm. Prefers `field.robot_frame_cm`
+     * (physical chassis square), falls back to `field.robot_radius_cm` (legacy
+     * traces), then 0 when missing.
+     */
+    function _robotHalfSideCm() {
+        var track = (CTPS.engine && CTPS.engine.track) || null;
+        var field = (track && track.field) || null;
+        var frame = field && field.robot_frame_cm;
+        if (typeof frame === "number" && frame > 0) {
+            return frame / 2;
+        }
+        var radius = field && field.robot_radius_cm;
+        if (typeof radius === "number" && radius > 0) {
+            return radius;
+        }
+        return 0;
+    }
+
+    /**
      * The nearest on-field object of `type` whose CURRENT centre falls inside
      * `zone` at `pose` — or null when none qualifies. "Nearest" is measured to
-     * the zone centre (a stand-in for the manipulator's reach point), computed in
-     * the robot-local frame (rotation preserves distance).
+     * the provided local-frame reference point (`refX`, `refY`) by default; when
+     * `robotHalfSideCm` is provided, nearest is measured to the robot body
+     * footprint (distance to the chassis rectangle, not distance to origin).
      */
-    function _nearestInZone(state, objects, type, pose, zone) {
+    function _nearestInZone(state, objects, type, pose, zone, refX, refY, robotHalfSideCm) {
+        var anchorX = (typeof refX === "number") ? refX : zone.x_cm;
+        var anchorY = (typeof refY === "number") ? refY : zone.y_cm;
+        var useRobotBody = (typeof robotHalfSideCm === "number");
         var best = null;
         var bestDist = Infinity;
         for (var i = 0; i < objects.length; i++) {
@@ -205,9 +244,14 @@
             if (!_pointInZone(local, zone)) {
                 continue;
             }
-            var ddx = local.x - zone.x_cm;
-            var ddy = local.y - zone.y_cm;
-            var dist = ddx * ddx + ddy * ddy;
+            var dist;
+            if (useRobotBody) {
+                dist = _distSqToRobotBody(local, robotHalfSideCm);
+            } else {
+                var ddx = local.x - anchorX;
+                var ddy = local.y - anchorY;
+                dist = ddx * ddx + ddy * ddy;
+            }
             if (dist < bestDist) {
                 bestDist = dist;
                 best = obj;
@@ -262,7 +306,18 @@
         if (!zone) {
             return null; // no robot zones (surfaced once by the HUD note)
         }
-        var tile = _nearestInZone(state, objects, TYPE_TILE, pose, zone);
+        // "Nearest" for grab is robot-body proximity, while still requiring
+        // the tile centre to lie inside the grab zone.
+        var tile = _nearestInZone(
+            state,
+            objects,
+            TYPE_TILE,
+            pose,
+            zone,
+            0,
+            0,
+            _robotHalfSideCm()
+        );
         if (!tile) {
             _noopWarn("grab ignored: no tile in the grab zone");
             return null; // empty-zone grab

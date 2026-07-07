@@ -860,6 +860,20 @@ def test_p_tc6_render_objects_invalid_layout_raises_layout_error(tmp_path):
     assert not out_path.exists()
 
 
+def test_p_tc6_cargo_grab_nearest_metric_is_robot_body():
+    """P-TC6 addendum: grab picks nearest-to-robot-body in-zone tile candidates.
+
+    The resolver's in-zone filter stays unchanged, but the tie-break metric for
+    ``grab`` must be distance to the chassis footprint (robot body), not
+    distance to the zone centre. This guards the direct call-site contract in
+    ``cargo.js`` so a future refactor cannot silently drift back.
+    """
+    cargo_js = (PLAYER_JS_PATH.parent / "cargo.js").read_text(encoding="utf-8")
+    assert "_distSqToRobotBody" in cargo_js
+    assert "_robotHalfSideCm()" in cargo_js
+    assert "_nearestInZone(" in cargo_js
+
+
 # ---------------------------------------------------------------------------
 # P-TC10 — end-to-end synthetic trace + layout render together (object/cargo
 # plan Testing Strategy, issue #57)

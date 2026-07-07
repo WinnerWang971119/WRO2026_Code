@@ -329,6 +329,14 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
     Manipulator.grab();
     Manipulator.sortTo(1);
     Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+
+    
 
     //Grab shovel
     PathTracker.goTo("shovel").setArrivalDirection(Direction::REAR);
