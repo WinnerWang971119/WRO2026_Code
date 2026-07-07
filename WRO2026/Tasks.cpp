@@ -34,6 +34,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "debugYield", &TasksClass::debugYield },
     { "servoTest", &TasksClass::servoTest },
     { "home", &TasksClass::home },
+    { "idleWait", &TasksClass::idleWait },
     { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
     { "test1", &TasksClass::test1 },
@@ -194,6 +195,52 @@ bool TasksClass::inTask() const
     return _inTask;
 }
 
+bool TasksClass::waitStationaryMs(uint32_t ms, const __FlashStringHelper* site)
+{
+    if (!Drive.isIdle() || !PathTracker.isIdle() || LineFollower.isEnabled())
+    {
+        Serial.print(F("[Tasks] "));
+        Serial.print(site);
+        Serial.println(F(": refusing idle wait while motion is active"));
+        return false;
+    }
+
+    const uint32_t startMs = millis();
+    static bool    noCallbackWarned = false;
+
+    while ((millis() - startMs) < ms)
+    {
+        if (_aborted)
+        {
+            Serial.print(F("[Tasks] "));
+            Serial.print(site);
+            Serial.println(F(": aborted during idle wait"));
+            return false;
+        }
+
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!noCallbackWarned)
+            {
+                Serial.print(F("[Tasks] "));
+                Serial.print(site);
+                Serial.println(F(": no tick callback set — only wall-clock time will "
+                                 "advance during the wait. Call Tasks.setTickCallback(...) "
+                                 "in setup()."));
+                noCallbackWarned = true;
+            }
+            delay(1);
+        }
+        yield();
+    }
+
+    return true;
+}
+
 // =============================================================================
 // Task bodies
 // =============================================================================
@@ -284,6 +331,11 @@ bool TasksClass::home(const TaskArgs& /*args*/)
     return true;
 }
 
+bool TasksClass::idleWait(const TaskArgs& args)
+{
+    return waitStationaryMs(args.u32[0], F("idleWait"));
+}
+
 bool TasksClass::testChassis(const TaskArgs& /*args*/)
 {
     LineFollower.setEnabled(true).setDistanceTarget(50);
@@ -303,7 +355,7 @@ bool TasksClass::test1(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("Inter1");
     (void)Manipulator.grab();
-    Manipulator.belt.toStation(Config::BeltStation::ABC);
+    Manipulator.belt.toStation(Config::BeltStation::MID);
     Drive.setSpeed(30, 60);
     PathTracker.goTo("Inter2");
     PathTracker.goTo("Inter3");

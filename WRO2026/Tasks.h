@@ -79,12 +79,13 @@ public:
     /**
      * @brief Register the cooperative-tick callback driven during blocking task waits.
      *
-     * Some task bodies (``servoTest``, ``home``) block until an actuator settles. While
-     * they spin they must keep every module ticking — otherwise EventTrace stops
-     * rendering, the belt's own ``update()`` stops advancing, etc. — so the wait invokes
-     * this callback each iteration (mirroring ``ManipulatorClass::setTickCallback`` and
-     * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes ``cooperativeTick``
-     * here in ``setup()`` after every module's ``begin()`` has run.
+    * Some task bodies (``servoTest``, ``home``, ``idleWait``) block until an actuator
+    * settles or a cooperative timeout elapses. While they spin they must keep every
+    * module ticking — otherwise EventTrace stops rendering, the belt's own ``update()``
+    * stops advancing, etc. — so the wait invokes this callback each iteration
+    * (mirroring ``ManipulatorClass::setTickCallback`` and
+    * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes
+    * ``cooperativeTick`` here in ``setup()`` after every module's ``begin()`` has run.
      *
      * @param cb Cooperative-tick function pointer, or ``nullptr`` to clear it (the
      *           blocking waits then degrade to ticking only ``Manipulator.update()`` and
@@ -234,6 +235,19 @@ private:
      */
     bool home(const TaskArgs& args);
 
+    /**
+     * @brief Stationary cooperative wait task.
+     *
+     * Spins for ``args.u32[0]`` milliseconds while driving the registered cooperative
+     * tick callback so the rest of the robot keeps updating. Refuses to start if the
+     * chassis is already moving (Drive / PathTracker busy or LineFollower enabled).
+     *
+     * @param args ``u32[0]`` = wait duration in milliseconds.
+     * @return ``true`` when the timeout elapses; ``false`` if motion is active at entry
+     *         or the task framework is aborted during the wait.
+     */
+    bool idleWait(const TaskArgs& args);
+
     bool test1(const TaskArgs& args);
 
     /**
@@ -265,6 +279,16 @@ private:
      * @return Always `true`.
      */
     bool ctpsExample1(const TaskArgs& args);
+
+    /**
+     * @brief Stationary cooperative delay helper for task bodies.
+     *
+     * @param ms    Timeout in milliseconds.
+     * @param site  Short caller tag for diagnostics.
+     * @return ``true`` when the timeout elapses; ``false`` if the chassis is moving at
+     *         entry or the task framework is aborted mid-wait.
+     */
+    bool waitStationaryMs(uint32_t ms, const __FlashStringHelper* site);
 
     bool _inTask  = false;
     bool _aborted = false;
