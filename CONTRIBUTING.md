@@ -22,6 +22,17 @@ short, anchor everything to the code.
 - If you touch the field or the emitter, regenerate `routes.h` / `routes.cpp`
   and commit them in the **same** commit — CI fails on a stale header.
 
+## Documentation-first rule
+
+- Before writing or changing code, read the Doxygen comments for the target
+  module and any related APIs.
+- Confirm the public contract first: preconditions, postconditions,
+  blocking/async behavior, and return/error conventions.
+- If the docs are missing or unclear, update the docs first (or in the same
+  PR) before implementation.
+- In the PR description, include one explicit line:
+  `Doxygen reviewed for affected APIs before implementation.`
+
 ## Pull requests
 
 ### Title
