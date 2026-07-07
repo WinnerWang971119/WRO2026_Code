@@ -128,6 +128,9 @@ _BUILD_DIR: Path = _REPO_ROOT / "build" / "ctps"
 #: CMake target built by the configure/build step.
 _DUMP_TARGET: str = "ctps_dump"
 
+#: Banner prefix emitted by ``header_writer`` into generated ``routes`` files.
+_SOURCE_HASH_PREFIX: str = "// Source SHA256: "
+
 #: Located via ``%ProgramFiles(x86)%`` so it works under any drive/install.
 _VSWHERE: Path = (
     Path(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"))
@@ -190,6 +193,93 @@ def _toolchain_hint() -> str:
         "Fall back to a pre-recorded dump with: "
         "python -m tools.path_planner.ctps --trace <existing_dump.json>"
     )
+
+
+def _read_embedded_source_hash(path: Path) -> Optional[str]:
+    """Return the generated-file ``Source SHA256`` banner value, if present.
+
+    The committed/generated ``routes.h`` and ``routes.cpp`` begin with a
+    three-line banner whose second line is ``// Source SHA256: <hex>``. CTPS
+    uses that stamp to tell whether the live ``field_data.py`` +
+    ``field_data.json`` inputs still match the generated C++ tables the host
+    ``ctps_dump`` build will link.
+
+    :param path: generated file to inspect.
+    :return: the embedded hash, or ``None`` when the file is missing,
+        unreadable, or lacks the banner.
+    """
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith(_SOURCE_HASH_PREFIX):
+                value = line[len(_SOURCE_HASH_PREFIX):].strip()
+                return value or None
+    except OSError:
+        return None
+    return None
+
+
+def _routes_match_live_field() -> bool:
+    """Whether generated ``routes`` files match the live field-data sources.
+
+    The host ``ctps_dump`` target links the generated production
+    ``WRO2026/src/nav/routes.cpp`` tables, while the Python replay expands the
+    resulting trace against the live ``tools.path_planner.field_data`` module.
+    If the operator edits ``field_data.json`` but does not regenerate routes,
+    those two views diverge and CTPS can fail with "goal X not in
+    field_data.NODES". Compare the generated files' embedded source hash
+    against the current field-data hash so the launcher can self-heal before it
+    builds the dump.
+
+    :return: ``True`` iff both generated files exist and carry the current
+        field-data source hash.
+    """
+    from tools.path_planner import header_writer  # noqa: PLC0415
+
+    want = header_writer.compute_source_hash(
+        _REPO_ROOT / header_writer.FIELD_DATA_PATH,
+        _REPO_ROOT / header_writer.FIELD_DATA_JSON_PATH,
+    )
+    header_hash = _read_embedded_source_hash(
+        _REPO_ROOT / header_writer.DEFAULT_HEADER_PATH
+    )
+    source_hash = _read_embedded_source_hash(
+        _REPO_ROOT / header_writer.DEFAULT_SOURCE_PATH
+    )
+    return header_hash == want and source_hash == want
+
+
+def _ensure_routes_fresh() -> bool:
+    """Regenerate ``routes.h/.cpp`` when live field data has changed.
+
+    CTPS's default/``--fixture`` path is only coherent when the host dump build
+    and the Python replay consume the SAME field. If the live field-data files
+    changed since the last ``build_routes.py`` run, regenerate the C++ tables
+    in-place before building ``ctps_dump``. ``--trace`` bypasses this helper
+    entirely because an external trace may intentionally target an older field.
+
+    :return: ``True`` when the routes are already fresh or regeneration
+        succeeds; ``False`` when regeneration fails.
+    """
+    if _routes_match_live_field():
+        return True
+
+    from tools.path_planner import build_routes  # noqa: PLC0415
+
+    print(
+        "ctps: live field_data and generated routes are out of sync; "
+        "regenerating routes.h/routes.cpp ...",
+        file=sys.stderr,
+    )
+    rc = build_routes._run(no_viz=True)
+    if rc != 0:
+        print(
+            "ctps: could not regenerate routes.h/routes.cpp from the live "
+            f"field (exit {rc}). Fix field_data and retry, or run "
+            "`uv run python tools/path_planner/build_routes.py` manually.",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def _find_vcvars() -> Optional[Path]:
@@ -425,6 +515,9 @@ def _produce_trace_json(fixture: bool) -> Optional[str]:
     :return: the dump JSON string, or ``None`` if the toolchain is missing or
         the build / dump failed.
     """
+    if not _ensure_routes_fresh():
+        return None
+
     print(f"ctps: building {_DUMP_TARGET} ...", file=sys.stderr)
 
     if sys.platform.startswith("win"):

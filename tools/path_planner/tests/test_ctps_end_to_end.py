@@ -17,11 +17,11 @@ builds and runs ``ctps_dump --fixture``, pipes its stdout through the real
   ``float(None)`` crash the AC7 regression guards against.
 
 Field-data note: ``ctps_dump`` links the PRODUCTION ``routes.cpp``, so the
-``--fixture`` mission navigates ``goto("Start")`` / ``goto("i5")`` — both live
+``--fixture`` mission navigates ``goto("Start")`` / ``goto("MY1")`` — both live
 :mod:`tools.path_planner.field_data` nodes. The replay therefore runs against the
 live field directly (the earlier ``routes_fixture`` Python mirror is no longer
-needed here). If a future field edit removes ``i5``, both the C++ self-test's
-``goto i5`` assertion and this replay would fault — the fixture mission is
+needed here). If a future field edit removes ``MY1``, both the C++ self-test's
+``goto MY1`` assertion and this replay would fault — the fixture mission is
 intentionally coupled to real node names.
 
 Toolchain gating (see [[gotcha-ci-gated-test-broad-pytest-collection]]): this
@@ -197,7 +197,7 @@ def trace(dump_stdout: str) -> trace_loader.Trace:
 @pytest.fixture(scope="module")
 def live_field_data():
     """The live production field — ``ctps_dump`` links the production ``routes.cpp``,
-    so the ``--fixture`` mission navigates production nodes (``Start`` + ``i5``)."""
+    so the ``--fixture`` mission navigates production nodes (``Start`` + ``MY1``)."""
     return field_data
 
 

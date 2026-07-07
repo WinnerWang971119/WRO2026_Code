@@ -338,6 +338,65 @@ def test_tc24_clear_build_dir_keeps_matching_or_missing(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TC25-TC27 — routes freshness self-heal before the dump build
+# ---------------------------------------------------------------------------
+
+
+def test_tc25_routes_match_live_field_uses_embedded_source_hash(monkeypatch, tmp_path):
+    """TC25: matching ``Source SHA256`` banners report fresh routes.
+
+    CTPS compares the live field-data hash against the generated
+    ``routes.h/routes.cpp`` banners rather than mtime heuristics. A matching
+    hash in both files returns ``True``.
+    """
+    from tools.path_planner import header_writer
+
+    routes_dir = tmp_path / "routes"
+    routes_dir.mkdir()
+    header = routes_dir / "routes.h"
+    source = routes_dir / "routes.cpp"
+    header.write_text("// routes.h\n// Source SHA256: abc123\n", encoding="utf-8")
+    source.write_text("// routes.cpp\n// Source SHA256: abc123\n", encoding="utf-8")
+
+    monkeypatch.setattr(header_writer, "DEFAULT_HEADER_PATH", header.relative_to(tmp_path))
+    monkeypatch.setattr(header_writer, "DEFAULT_SOURCE_PATH", source.relative_to(tmp_path))
+    monkeypatch.setattr(header_writer, "compute_source_hash", lambda *paths: "abc123")
+    monkeypatch.setattr(ctps_main, "_REPO_ROOT", tmp_path)
+
+    assert ctps_main._routes_match_live_field() is True
+
+
+def test_tc26_ensure_routes_fresh_regenerates_when_stale(monkeypatch, tmp_path):
+    """TC26: stale routes trigger ``build_routes._run(no_viz=True)`` once."""
+    from tools.path_planner import build_routes
+
+    calls = {"count": 0, "no_viz": None}
+
+    monkeypatch.setattr(ctps_main, "_routes_match_live_field", lambda: False)
+
+    def _stub_run(*, out_dir=None, map_out=None, no_viz=False, verbose=False):
+        calls["count"] += 1
+        calls["no_viz"] = no_viz
+        return 0
+
+    monkeypatch.setattr(build_routes, "_run", _stub_run)
+
+    assert ctps_main._ensure_routes_fresh() is True
+    assert calls["count"] == 1
+    assert calls["no_viz"] is True
+
+
+def test_tc27_produce_trace_json_aborts_when_routes_regen_fails(monkeypatch):
+    """TC27: a failed routes refresh stops before any compiler/dump work."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(ctps_main, "_ensure_routes_fresh", lambda: False)
+    monkeypatch.setattr(ctps_main, "_build_dump_posix", _never_called("_build_dump_posix"))
+    monkeypatch.setattr(ctps_main, "_run_dump", _never_called("_run_dump"))
+
+    assert ctps_main._produce_trace_json(fixture=False) is None
+
+
+# ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
 

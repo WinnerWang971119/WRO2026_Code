@@ -104,7 +104,7 @@ namespace
      */
     void buildMissionFixture()
     {
-        // Two valid PRODUCTION nodes (see routes.cpp NODES[]): "Start" and "i5".
+        // Two valid PRODUCTION nodes (see routes.cpp NODES[]): "Start" and "MY1".
         // Both resolve via FieldMap::findNodeByName so the GOTO hook fires and the
         // PathTracker mock records a `goto`.
         Mission.goTo("Start")
@@ -113,7 +113,7 @@ namespace
             .led(0, 255, 0, 300)
             .print("AT")
             .task("demoEcho", uint8_t(7), uint8_t(42))
-            .goTo("i5")
+            .goTo("MY1")
             .print("DONE");
         Mission.start();
     }
@@ -314,14 +314,14 @@ namespace
         }
 
         // The ordered walk above only proves the FIRST goTo fired. Assert the
-        // second goTo("i5") recorded too, so a bad second node faults the
+        // second goTo("MY1") recorded too, so a bad second node faults the
         // self-test instead of slipping past coverage.
         const size_t gotoSecond =
             findFrom(0, [](const ctps::Record& r)
-                     { return r.op == ctps::Op::GOTO && r.target == "i5"; });
+                     { return r.op == ctps::Op::GOTO && r.target == "MY1"; });
         if (gotoSecond >= log.size())
         {
-            std::cerr << "ctps_dump self-test: missing goto with target 'i5'\n";
+            std::cerr << "ctps_dump self-test: missing goto with target 'MY1'\n";
             return 1;
         }
 

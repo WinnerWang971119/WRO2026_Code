@@ -323,7 +323,7 @@ bool TasksClass::test0621(const TaskArgs& /*args*/)
 
 bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i5"); // Get Mosiac
+    PathTracker.goTo("MY1"); // Get mosaic
     Drive.turnToYaw(90);
     Manipulator.sortTo(1);
     Manipulator.grab();
