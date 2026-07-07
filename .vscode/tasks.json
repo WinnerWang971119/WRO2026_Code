@@ -205,8 +205,11 @@
             // load file://, so the page must be served over http. The background
             // problemMatcher's endsPattern flips this task "ready" when the
             // "ctps: player at http://127.0.0.1:8770/" line prints, which gates
-            // the "build & view" open task below. To change the port, edit both
-            // the --port arg here and the openCtpsPlayer input URL.
+            // the "build & view" open task below. Use --fixture here so this
+            // task doesn't hang behind a long-running or blocking real mission
+            // in ctps_dump; this viewer task is meant to be reliably openable.
+            // To change the port, edit both the --port arg here and the
+            // openCtpsPlayer input URL.
             "label": "CTPS: serve player",
             "type": "shell",
             "command": "uv",
@@ -215,6 +218,7 @@
                 "python",
                 "-m",
                 "tools.path_planner.ctps",
+                "--fixture",
                 "--serve",
                 "--no-open",
                 "--port",
