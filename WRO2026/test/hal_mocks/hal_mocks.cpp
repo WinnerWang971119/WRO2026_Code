@@ -18,12 +18,11 @@
  *       (a C++17 inline variable). It has a single definition across every TU that
  *       includes that header without any entry in this file — do NOT define it here.
  *
- * @note `MockHardwareSerial Serial1` and `uint32_t mockTickCount` are conditionally
- *       added below ONLY if a link error reports them undefined. The Vision mock
- *       infrastructure that odr-uses `Serial1` / `mockTickCount` lives in `mocks/`
- *       and is not linked by the initial `test_mock_hal` target; omitting them now
- *       keeps this file minimal and avoids a multiply-defined symbol if a future
- *       target merges both mock sets.
+ * @note `MockHardwareSerial Serial1` and `uint32_t mockTickCount` are defined here
+ *       because the shared mock `delay()` helper odr-uses them. Targets that link the
+ *       real `Tasks.cpp` may now call that helper even when they otherwise do not touch
+ *       the Vision surface, so these Arduino-core globals belong with the rest of the
+ *       shared mock runtime storage.
  *
  * Style: mirrors `mocks/mocks.cpp` exactly (section comment blocks, ordering:
  * Arduino globals first, then module singletons alphabetically).
@@ -42,6 +41,8 @@
 
 uint32_t  g_mockMillis = 0;
 MockSerial Serial;
+MockHardwareSerial Serial1;
+uint32_t mockTickCount = 0;
 
 // ---------------------------------------------------------------------------
 // Module singletons — match the `extern` declarations in each hal_mocks/ header.
