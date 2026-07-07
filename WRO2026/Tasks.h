@@ -166,6 +166,7 @@ public:
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
     bool inTask() const;
 
+private:
     /**
      * @brief Static registry of all known task names + their member-fn pointers.
      *
@@ -174,13 +175,18 @@ public:
      * and a file-scope ``static_assert`` rejects the build if the count
      * exceeds ``Config::MAX_TASKS``.
      *
-     * @note Public so the bounds ``static_assert`` and any future external
-     *       validators (e.g. a Mission queue-time pre-check) can read the
-     *       size without the entries needing to grow a friend declaration.
-     *       The members are ``const`` — privacy here gives no additional
-     *       safety, only friction.
+     * @note Kept private because the registry is an implementation detail of
+     *       ``TasksClass`` lookup and dispatch.
      */
     static const TaskRegistryEntry _registry[];
+
+public:
+    /**
+    * @brief Number of entries in ``_registry``.
+    *
+    * Exposed so file-scope validation in ``Tasks.cpp`` can enforce the
+    * ``Config::MAX_TASKS`` cap without exposing the array itself.
+    */
     static const size_t            _registry_count;
 
 private:
@@ -288,7 +294,8 @@ private:
      * @return ``true`` when the timeout elapses; ``false`` if the chassis is moving at
      *         entry or the task framework is aborted mid-wait.
      */
-    bool waitStationaryMs(uint32_t ms, const __FlashStringHelper* site);
+    bool waitStationaryMs(uint32_t ms,
+                          const __FlashStringHelper* site = F("waitStationaryMs"));
 
     bool _inTask  = false;
     bool _aborted = false;

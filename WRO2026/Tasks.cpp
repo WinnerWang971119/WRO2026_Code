@@ -46,8 +46,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
 const size_t TasksClass::_registry_count =
     sizeof(_registry) / sizeof(_registry[0]);
 
-static_assert(sizeof(TasksClass::_registry) / sizeof(TaskRegistryEntry)
-              <= Config::MAX_TASKS,
+static_assert(TasksClass::_registry_count <= Config::MAX_TASKS,
               "Registry exceeds MAX_TASKS");
 
 // =============================================================================
@@ -394,6 +393,8 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
     //Go to dump
     PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
     Manipulator.dump();
+
+    waitStationaryMs(500);
 
     return true;
 }
