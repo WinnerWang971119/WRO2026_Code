@@ -204,11 +204,13 @@
             // server on port 8770 so the next serve task always relaunches.
             "label": "CTPS: stop player server",
             "type": "shell",
-            "command": "pwsh",
+            "command": "uv",
             "args": [
-                "-NoProfile",
-                "-Command",
-                "try { Invoke-WebRequest -Uri 'http://127.0.0.1:8770/close' -Method Post -UseBasicParsing | Out-Null } catch { } ; exit 0"
+                "run",
+                "python",
+                "-c",
+                "from tools.path_planner.ctps.edit_server import _request_close; "
+                "_request_close('127.0.0.1', 8770)"
             ],
             "presentation": {
                 "reveal": "silent",
