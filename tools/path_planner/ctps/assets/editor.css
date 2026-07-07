@@ -336,6 +336,43 @@ body {
     cursor: pointer;
 }
 
+/* One-click preset fills below the colour picker. Each button's own fill rides
+ * on the per-instance `--ctps-swatch-color` custom property that editor_boot.js
+ * writes via setProperty (the ADR-053 carve-out, same channel cargo.js uses). */
+.ctps-editor-swatches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-2);
+    margin-top: var(--ctps-space-1);
+}
+
+.ctps-editor-swatch {
+    box-sizing: border-box;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid var(--ctps-border-strong);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-swatch-color, transparent);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-editor-swatch:hover {
+    border-color: var(--ctps-text-2);
+}
+
+.ctps-editor-swatch:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
+
+.ctps-editor-swatch--active {
+    border-color: var(--ctps-accent);
+    box-shadow: 0 0 0 1px var(--ctps-accent);
+}
+
 .ctps-editor-delete {
     box-sizing: border-box;
     margin-top: var(--ctps-space-2);

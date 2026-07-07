@@ -481,6 +481,9 @@
         } else {
             _fillRobotProps(s);
         }
+        if (E.syncSwatchActive) {
+            E.syncSwatchActive(); // re-light the preset matching the new selection
+        }
     }
 
     /** Apply a Properties-panel edit to the current selection, then repaint. */
@@ -523,6 +526,9 @@
         E.redraw();
         if (E.refreshSaveState) {
             E.refreshSaveState();
+        }
+        if (E.syncSwatchActive) {
+            E.syncSwatchActive(); // native-picker edits re-light a matching preset
         }
     }
 

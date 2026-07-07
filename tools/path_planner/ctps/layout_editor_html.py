@@ -173,11 +173,13 @@ _BODY_MARKUP: str = """\
                                 <option value="fixed">Fixed</option>
                             </select>
                         </label>
-                        <label class="ctps-editor-field">
+                        <div class="ctps-editor-field">
                             <span class="ctps-editor-field-label">Color</span>
                             <input type="color" id="ctps-editor-prop-color"
                                    class="ctps-editor-input ctps-editor-input--color">
-                        </label>
+                            <div id="ctps-editor-swatches"
+                                 class="ctps-editor-swatches"></div>
+                        </div>
                         <div class="ctps-editor-field-row">
                             <label class="ctps-editor-field">
                                 <span class="ctps-editor-field-label">X (cm)</span>

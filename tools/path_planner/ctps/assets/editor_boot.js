@@ -29,6 +29,22 @@
 
     var ZOOM_WHEEL_FACTOR = 1.1; // multiplicative Robot-tab zoom step per wheel notch
 
+    // One-click preset fills for the Properties Color field -- the WRO game-piece
+    // palette. Single source of truth for both the swatch hex and its label; the
+    // buttons are built from this list in _bindSwatches(). Hex is lower-case so
+    // the active-swatch match against the <input type=color> value (always
+    // lower-case) is a plain string compare.
+    var PRESET_COLORS = [
+        { hex: "#f2c200", label: "Yellow" },
+        { hex: "#3f7fe0", label: "Blue" },
+        { hex: "#ffffff", label: "White" },
+        { hex: "#57b36b", label: "Green" },
+        { hex: "#e23b3b", label: "Red" }
+    ];
+
+    // Built swatch <button>s, kept for _syncSwatchActive()'s highlight pass.
+    var _swatchButtons = [];
+
     /** document.getElementById shorthand. */
     function $(id) {
         return document.getElementById(id);
@@ -157,6 +173,54 @@
         }
     }
 
+    /** Apply a preset hex to the selection: mirror it into the native colour
+     *  input, run the shared prop-change path, and refresh the active ring. */
+    function _applyPreset(hex) {
+        var d = E.dom;
+        if (!d.color) {
+            return;
+        }
+        d.color.value = hex;
+        E.onPropChange(); // reads d.color.value -> writes the object + repaints
+        _syncSwatchActive();
+    }
+
+    /** Build the preset swatch buttons from PRESET_COLORS and wire their clicks.
+     *  Each fill rides on `--ctps-swatch-color` (setProperty, the ADR-053 carve-
+     *  out) so no bare hex or inline style attribute ever lands in the markup. */
+    function _bindSwatches() {
+        var host = $("ctps-editor-swatches");
+        if (!host) {
+            return;
+        }
+        _swatchButtons = [];
+        for (var i = 0; i < PRESET_COLORS.length; i++) {
+            (function (preset) {
+                var btn = document.createElement("button");
+                btn.type = "button";
+                btn.className = "ctps-editor-swatch";
+                btn.title = preset.label;
+                btn.setAttribute("aria-label", preset.label);
+                btn.dataset.color = preset.hex;
+                btn.style.setProperty("--ctps-swatch-color", preset.hex);
+                btn.addEventListener("click", function () {
+                    _applyPreset(preset.hex);
+                });
+                host.appendChild(btn);
+                _swatchButtons.push(btn);
+            })(PRESET_COLORS[i]);
+        }
+    }
+
+    /** Highlight the swatch whose hex matches the current colour, if any. */
+    function _syncSwatchActive() {
+        var cur = (E.dom && E.dom.color) ? String(E.dom.color.value).toLowerCase() : "";
+        for (var i = 0; i < _swatchButtons.length; i++) {
+            var btn = _swatchButtons[i];
+            _toggle(btn, "ctps-editor-swatch--active", btn.dataset.color === cur);
+        }
+    }
+
     function _bindIO() {
         var d = E.dom;
         if (d.save) {
@@ -279,10 +343,15 @@
         _bindTabs();
         _bindTools();
         _bindProps();
+        _bindSwatches();
         _bindIO();
         _bindCanvas();
         _bindZoom();
         _bindResize();
+
+        // Let refreshProps() (editor_tools.js) re-light the active swatch when the
+        // selection changes, without that file reaching into this closure.
+        E.syncSwatchActive = _syncSwatchActive;
 
         E.initMap();
         // Auto-load the embedded `const LAYOUT` (the recently-saved objects +
