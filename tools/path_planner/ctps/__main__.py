@@ -833,6 +833,25 @@ def _find_default_layout() -> Optional[Path]:
     return max(matches, key=lambda p: p.stat().st_mtime)
 
 
+def _load_default_layout_dict() -> Optional[Dict[str, Any]]:
+    """Read the newest ``layouts/layout*.json`` as a dict, or ``None`` (quiet).
+
+    The per-GET re-embed source for the served editor (:func:`_serve_editor`):
+    re-reads the same file :func:`_find_default_layout` points at so a reload
+    reflects the last Save. Unlike the startup auto-load it prints nothing (it
+    runs on every request) and swallows a missing/corrupt file to ``None`` — an
+    empty scene the caller re-embeds rather than a failed GET.
+    """
+    path = _find_default_layout()
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _serve_editor(open_browser: bool, port: int = 0) -> int:
     """Render the offline layout editor and serve it on a self-closing server.
 
@@ -883,8 +902,24 @@ def _serve_editor(open_browser: bool, port: int = 0) -> int:
         print(f"ctps: could not render the layout editor: {exc}", file=sys.stderr)
         return 1
 
+    # Re-embed the CURRENT on-disk layout into the page on every GET so a reload
+    # (refresh, or a reopen that lands on a still-alive old server) reflects the
+    # last Save — not the empty scene baked in at server start. Without this a
+    # fixed-port reopen serves the stale start-time embed and every just-saved
+    # field object disappears (the robot falls back to its default).
+    base_html = out.read_text(encoding="utf-8")
+
+    def _current_editor_html() -> bytes:
+        return layout_editor_html.reembed_layout(
+            base_html, _load_default_layout_dict()
+        ).encode("utf-8")
+
     return edit_server.serve_editor(
-        out.read_bytes(), _DEFAULT_LAYOUT, open_browser=open_browser, port=port
+        out.read_bytes(),
+        _DEFAULT_LAYOUT,
+        open_browser=open_browser,
+        port=port,
+        current_html=_current_editor_html,
     )
 
 

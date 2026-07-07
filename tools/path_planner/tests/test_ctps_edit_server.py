@@ -22,6 +22,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import pytest
+
 from tools.path_planner.ctps import edit_server
 
 _VALID_LAYOUT = {
@@ -58,6 +60,105 @@ def _serve(server: edit_server._EditorServer) -> threading.Thread:
     )
     thread.start()
     return thread
+
+
+def _serve_closing(server: edit_server._EditorServer) -> threading.Thread:
+    """Serve ``server`` in a daemon thread that closes its socket on exit.
+
+    Mirrors production's :func:`edit_server._run_server` (``server_close`` in a
+    ``finally``) so that when the server is shut down — by an eviction ``/close``
+    or an explicit ``shutdown()`` — its listening socket is released and the port
+    frees, which the fixed-port rebind depends on.
+    """
+    def _run() -> None:
+        try:
+            server.serve_forever(poll_interval=0.05)
+        finally:
+            server.server_close()
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    return thread
+
+
+def _wait_until_serving(port: int, timeout: float = 3.0) -> None:
+    """Poll ``GET /`` until the server answers, or fail after ``timeout``."""
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/", timeout=1
+            ) as resp:
+                resp.read()
+                return
+        except urllib.error.URLError:
+            _time.sleep(0.02)
+    raise AssertionError(f"server never came up on {port}")
+
+
+def _free_fixed_port() -> int:
+    """Grab a port then release it, so a server can bind that exact number."""
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def test_bind_server_reopens_occupied_fixed_port(tmp_path):
+    """A fixed-port reopen ends up with a live server on that SAME port.
+
+    Models the operator's reopen: an orphaned old editor server still holds the
+    fixed port when the VS Code task reopens. On macOS/Linux the new bind cannot
+    take an active listener, so :func:`edit_server._bind_server` evicts the
+    incumbent (``POST /close``) and rebinds — meaning a successful rebind PROVES
+    the old server was released. (On Windows ``SO_REUSEADDR`` co-binds, which is
+    why the original bug never reproduced there.) Either way the reopened server
+    owns the fixed port the Simple Browser task hardcodes.
+    """
+    fixed = _free_fixed_port()
+
+    old = edit_server._EditorServer(
+        ("127.0.0.1", fixed), edit_server._EditorHandler,
+        b"<html>OLD</html>", tmp_path / "old.json",
+    )
+    old_thread = _serve_closing(old)
+    old_watchdog = threading.Thread(
+        target=edit_server._watchdog, args=(old,), daemon=True
+    )
+    old_watchdog.start()
+    _wait_until_serving(fixed)
+
+    # Reopen onto the occupied fixed port: must come back bound to the same port.
+    new = edit_server._bind_server(
+        ("127.0.0.1", fixed), b"<html>NEW</html>", tmp_path / "new.json", None
+    )
+    try:
+        assert new.server_address[1] == fixed
+    finally:
+        new.server_close()
+        old.shutdown()  # no-op if eviction already stopped it (macOS/Linux)
+        old_thread.join(timeout=3)
+        old_watchdog.join(timeout=3)
+
+
+def test_bind_server_reraises_on_ephemeral_bind_failure(monkeypatch):
+    """An ephemeral (``port==0``) bind failure is never masked by eviction retries.
+
+    ``port==0`` can't collide, so a raised ``OSError`` there is a real fault and
+    must propagate immediately rather than spin the eviction retry loop.
+    """
+    class _Boom(edit_server._EditorServer):
+        def __init__(self, *_a, **_k):  # bypass the real bind, force a failure
+            raise OSError("simulated bind failure")
+
+    monkeypatch.setattr(edit_server, "_EditorServer", _Boom)
+    with pytest.raises(OSError, match="simulated bind failure"):
+        edit_server._bind_server(("127.0.0.1", 0), b"x", None, None)
 
 
 def _post(port: int, path: str, body: bytes):
@@ -105,6 +206,68 @@ def test_save_writes_layout(tmp_path):
         assert out.is_file()
         written = json.loads(out.read_text(encoding="utf-8"))
         assert written["objects"][0]["id"] == "o1"
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def test_get_reflects_current_html_after_change(tmp_path):
+    """``GET /`` serves the LIVE ``current_html`` callback, not the start-time bytes.
+
+    The fix for the fixed-port reopen bug: the page embed is regenerated on every
+    GET, so once a Save has changed the on-disk layout a reload/refresh — even one
+    that lands on the SAME still-alive server — shows the new layout instead of
+    the empty scene baked in at startup. Modelled here with a mutable holder the
+    callback reads: the first GET sees the start value, and after it changes the
+    next GET reflects it (no server restart).
+    """
+    holder = {"body": b"<html>LAYOUT=null</html>"}
+    server = edit_server._EditorServer(
+        ("127.0.0.1", 0),
+        edit_server._EditorHandler,
+        b"<html>STALE START BYTES</html>",   # the one-time embed must NOT win
+        tmp_path / "layout.json",
+        current_html=lambda: holder["body"],
+    )
+    port = server.server_address[1]
+    thread = _serve(server)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as resp:
+            first = resp.read()
+        assert first == holder["body"]
+        assert b"STALE START BYTES" not in first
+
+        # A Save changes the on-disk layout -> the callback now returns new bytes.
+        holder["body"] = b"<html>LAYOUT={objects:[o1]}</html>"
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as resp:
+            second = resp.read()
+        assert second == holder["body"]
+        assert b"o1" in second
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+
+def test_get_falls_back_to_html_bytes_when_callback_raises(tmp_path):
+    """A throwing ``current_html`` degrades to the start-time bytes, never a 500."""
+    def _boom():
+        raise RuntimeError("disk gone")
+
+    server = edit_server._EditorServer(
+        ("127.0.0.1", 0),
+        edit_server._EditorHandler,
+        b"<html>FALLBACK</html>",
+        tmp_path / "layout.json",
+        current_html=_boom,
+    )
+    port = server.server_address[1]
+    thread = _serve(server)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2) as resp:
+            assert resp.status == 200
+            assert b"FALLBACK" in resp.read()
     finally:
         server.shutdown()
         thread.join(timeout=2)

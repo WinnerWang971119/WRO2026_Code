@@ -371,3 +371,38 @@ def test_no_layout_embeds_null(tmp_path):
     html = out_path.read_text(encoding="utf-8")
 
     assert "const LAYOUT = null;" in html
+
+
+def test_reembed_layout_swaps_the_embedded_layout(tmp_path):
+    """``reembed_layout`` replaces a page's ``const LAYOUT`` in place.
+
+    The edit-server's per-GET hook: a page emitted with ``LAYOUT = null`` (a
+    fresh clone with no saved file) is re-embedded with the just-saved layout so
+    a reload shows it instead of the stale empty scene. The rest of the page —
+    the FIELD block, the boot ``E.ingestLayout(LAYOUT)`` call — is untouched.
+    """
+    out_path = tmp_path / "empty.html"
+    render(toy_field_data, out_path)  # LAYOUT = null
+    empty_html = out_path.read_text(encoding="utf-8")
+    assert "const LAYOUT = null;" in empty_html
+
+    reembedded = editor_module.reembed_layout(empty_html, _SAMPLE_LAYOUT)
+
+    match = _LAYOUT_RE.search(reembedded)
+    assert match is not None, "re-embedded page lost its const LAYOUT script"
+    assert json.loads(match.group("json").replace("<\\/", "</")) == _SAMPLE_LAYOUT
+    assert "const LAYOUT = null;" not in reembedded
+    # The swap is surgical: only the LAYOUT script changes.
+    assert "E.ingestLayout(LAYOUT)" in reembedded
+    assert "const FIELD = " in reembedded
+
+
+def test_reembed_layout_none_reverts_to_null(tmp_path):
+    """Re-embedding ``None`` restores ``const LAYOUT = null;`` (an empty scene)."""
+    out_path = tmp_path / "full.html"
+    render(toy_field_data, out_path, layout=_SAMPLE_LAYOUT)
+    full_html = out_path.read_text(encoding="utf-8")
+    assert "const LAYOUT = null;" not in full_html
+
+    reverted = editor_module.reembed_layout(full_html, None)
+    assert "const LAYOUT = null;" in reverted

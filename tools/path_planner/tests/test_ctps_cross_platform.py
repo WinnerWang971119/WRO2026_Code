@@ -479,7 +479,8 @@ def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
         return editor_file
 
     def _stub_serve(
-        html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0
+        html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0,
+        current_html=None,
     ):
         calls["serve"] += 1
         assert html_bytes == b"<html>editor</html>"
@@ -586,7 +587,8 @@ def test_editor_flow_threads_fixed_port(monkeypatch, tmp_path):
         out.write_bytes(b"<html>editor</html>")
         return out
 
-    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0):
+    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0,
+                    current_html=None):
         captured["port"] = port
         return 0
 

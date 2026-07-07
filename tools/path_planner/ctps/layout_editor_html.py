@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -57,7 +58,7 @@ from tools.path_planner.ctps._page_emit import script as _script
 # a stable helper -- not a refactor of the frozen player/renderer core.
 from tools.path_planner.ctps.track_builder import build_field_block
 
-__all__ = ["render"]
+__all__ = ["render", "reembed_layout"]
 
 #: Directory holding the modular runtime assets, resolved relative to this
 #: module so the emitter works regardless of the caller's cwd.
@@ -291,6 +292,69 @@ def _map_data_uri(map_png: "str | Path | None") -> str:
     return json.dumps(f"data:image/{mime};base64,{b64}")
 
 
+#: The ``id`` on the ``<script>`` that carries ``const LAYOUT``. The edit-server
+#: swaps this whole element on every GET (see :func:`reembed_layout`) so a reload
+#: reflects the CURRENT on-disk ``layout.json`` — not the stale one-time embed
+#: baked at server start, which a still-alive server would otherwise keep serving
+#: after a Save (the fixed-port reopen bug: every field object vanishes while the
+#: robot falls back to its default).
+_LAYOUT_SCRIPT_ID: str = "ctps-layout-embed"
+
+#: Matches the whole id'd LAYOUT ``<script>`` element for a per-GET swap. Its body
+#: is a single ``const LAYOUT = <json>;`` line whose ``</`` is escaped, so the
+#: non-greedy ``.*?`` can never terminate on an earlier ``</script>``.
+_LAYOUT_SCRIPT_RE = re.compile(
+    r'<script id="' + re.escape(_LAYOUT_SCRIPT_ID) + r'">.*?</script>',
+    re.DOTALL,
+)
+
+
+def _layout_literal(layout: "Dict[str, Any] | None") -> str:
+    """Return the JS literal for ``const LAYOUT`` — the layout JSON, or ``null``.
+
+    Emitted as a JSON VALUE (like ``FIELD``): ``</`` is escaped so an author's
+    object name can never break out of the inline ``<script>``. A falsy
+    ``layout`` yields ``"null"`` so the editor boots empty.
+    """
+    if layout:
+        return json.dumps(layout, ensure_ascii=False).replace("</", "<\\/")
+    return "null"
+
+
+def _layout_script(layout: "Dict[str, Any] | None") -> str:
+    """Build the id'd ``<script>`` element carrying ``const LAYOUT``.
+
+    The ``id`` lets the edit-server replace this element wholesale per GET
+    (:func:`reembed_layout`); the ``const LAYOUT = ...;`` line itself is kept
+    intact so the boot loader and the emitter tests read it unchanged.
+    """
+    return (
+        f'<script id="{_LAYOUT_SCRIPT_ID}">\n'
+        f"const LAYOUT = {_layout_literal(layout)};\n"
+        "</script>"
+    )
+
+
+def reembed_layout(html_text: str, layout: "Dict[str, Any] | None") -> str:
+    """Return ``html_text`` with its embedded ``const LAYOUT`` replaced by ``layout``.
+
+    The edit-server calls this on every ``GET`` so a reload/refresh shows the
+    CURRENT on-disk layout rather than the stale one-time embed captured at
+    server start. Without it, a fixed-port reopen where the old server never
+    rebinds keeps serving that start-time embed after a Save — on a fresh clone
+    (no ``layout.json`` yet) an empty scene, so every just-authored field object
+    disappears while the robot shows its :func:`~...editor_core.defaultRobot`
+    fallback. A falsy ``layout`` re-embeds ``const LAYOUT = null;``.
+
+    :param html_text: a page previously emitted by :func:`render`.
+    :param layout: the layout dict to embed, or ``None``/falsy for an empty scene.
+    :return: the page text with the LAYOUT ``<script>`` element swapped.
+    """
+    # A function replacement (not a template string) so a backslash in the
+    # embedded JSON is never interpreted as a ``re.sub`` group reference.
+    return _LAYOUT_SCRIPT_RE.sub(lambda _m: _layout_script(layout), html_text, count=1)
+
+
 def render(
     field_data: Any,
     out_path: "str | Path",
@@ -348,13 +412,8 @@ def render(
     field_block: Dict[str, Any] = build_field_block(field_data)
     field_json = json.dumps(field_block, ensure_ascii=False).replace("</", "<\\/")
 
-    # The layout to auto-load (recently-saved objects + zones), or ``null``.
-    # Emitted as a JSON VALUE like FIELD -- ``</`` escaped so an author's object
-    # name can never break out of the inline <script>, and NOT linted.
-    if layout:
-        layout_json = json.dumps(layout, ensure_ascii=False).replace("</", "<\\/")
-    else:
-        layout_json = "null"
+    # The layout to auto-load (recently-saved objects + zones) is emitted by
+    # `_layout_script` below as an id'd <script> the edit-server re-embeds per GET.
 
     # Optional field-map background as a self-contained data URI (or "null").
     map_image_js = _map_data_uri(map_png)
@@ -381,7 +440,7 @@ def render(
     script_blocks: List[str] = [
         _script(f"const FIELD = {field_json};"),
         _script(f"const MAP_IMAGE = {map_image_js};"),
-        _script(f"const LAYOUT = {layout_json};"),
+        _layout_script(layout),
     ]
     script_blocks.extend(_script(content) for content in js_contents)
     scripts = "\n".join(script_blocks)
