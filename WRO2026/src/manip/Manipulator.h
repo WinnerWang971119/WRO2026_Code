@@ -233,31 +233,31 @@ public:
     /**
      * @brief Close the grabber to capture an object.
      * @return A `ManipAction` (blocks on the grabber until settled; chain `.async()` to skip).
-     * @note Thin bring-up scaffold (`grabber.close()`); real grip choreography is a TODO once
-     *       the mechanism is built.
+     * @warning Need to `release()` before calling this again, or the grabber is already closed.
+     *      
      */
     ManipAction grab();
 
     /**
      * @brief Open the grabber to release an object.
      * @return A `ManipAction` (blocks on the grabber until settled; chain `.async()` to skip).
-     * @note Thin bring-up scaffold (`grabber.open()`); real release choreography is a TODO.
      */
     ManipAction release();
 
     /**
      * @brief Move the dumper to its dump pose to discharge the payload.
      * @return A `ManipAction` (blocks on the dumper until settled; chain `.async()` to skip).
-     * @note Bring-up scaffold: the dump pose is the dumper's `openDeg` placeholder
-     *       (`dumper.open()`); the real dump pose / sequencing is a TODO.
+     * @note Use `dumpReset()` to return the dumper to its home pose after dumping.
+     *
+     *      
      */
     ManipAction dump();
 
     /**
      * @brief Return the dumper from its dump pose to its home pose.
      * @return A `ManipAction` (blocks on the dumper until settled; chain `.async()` to skip).
-     * @note Thin bring-up scaffold (`dumper.home()`) so mission code can express the
-     *       post-dump reset explicitly without resetting the entire manipulator.
+     * @note Use `dump()` to move the dumper to its dump pose before calling this.
+     *       
      */
     ManipAction dumpReset();
 
@@ -270,8 +270,9 @@ public:
      *
      * @param bin Bin index in `[0, Config::SORTER_BIN_COUNT)`.
      * @return A `ManipAction` waiting on the sorter on success; an empty-mask (already-done)
-     *         action on an out-of-range index.
+     *         action on an out-of-range index. 
      * @note On a bad index this prints a Serial warning and performs NO servo write.
+     * @attention Use this before a `grab()` / `release()` sequence to sort the object into the correct bin.
      */
     ManipAction sortTo(uint8_t bin);
 
