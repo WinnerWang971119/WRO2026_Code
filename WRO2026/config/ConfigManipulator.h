@@ -155,15 +155,16 @@ namespace Config
      *       hard stop. `LEFT` is named for its physical side — it sits at the belt's HOME
      *       end, so its row drives toward HOME (`-BELT_STALL_SPEED`).
      */
-    enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , ABC = 3};  // TODO finalize
+    enum class BeltStation : uint8_t { LEFT = 0, MID = 1, FAR_END = 2 , REAR_BOX_OPEN = 3, REAR_BOX_CLOSE = 4};  // TODO finalize
     /** @brief Number of belt stations (length of `BELT_STATIONS`). */
-    constexpr uint8_t BELT_STATION_COUNT = 4;
+    constexpr uint8_t BELT_STATION_COUNT = 5;
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
         { BeltMode::POSITION, 100, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // FAR_END (stalls -> timed); TODO
-        { BeltMode::POSITION, 200, 0,             BELT_MOVE_SPEED },  // ABC   (absolute 200); TODO
+        { BeltMode::POSITION,    200,   0,          BELT_STALL_SPEED },  // REAR_BOX_OPEN (pos); TODO
+        { BeltMode::POSITION,    100,   0,          BELT_STALL_SPEED },  // REAR_BOX_CLOSE (pos); TODO
     };
 }    // namespace Config
 
