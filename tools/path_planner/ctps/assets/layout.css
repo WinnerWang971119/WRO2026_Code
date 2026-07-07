@@ -176,14 +176,19 @@ body {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* Log should always expose a scrollbar rail so operators can see at a glance
+ * when the panel is scrollable. */
+.ctps-log {
+    overflow-y: scroll;
 }
 
 /* Log renders newest-at-bottom: a column flex with content pinned to the
  * end, per the design's explicit justify-content:flex-end. */
 .ctps-log {
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
+    display: block;
 }
 
 /* HOLDING card list: bounded so a long cargo list (issue #57) scrolls inside

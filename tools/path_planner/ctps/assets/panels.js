@@ -7,10 +7,10 @@
  *      of the last event at-or-before the playhead, refreshed on `["t"]`.
  *   2. Log / Inspector tabs — registered on `CTPS.panelTabs` (`log`,
  *      `inspector`) so a future tab (#23 telemetry) is an additive
- *      registration. The Log tab keeps its ~10-line window bounded via
- *      `CTPS.cursor()`'s forward/rebuild dispatch (forward appends the newly
- *      crossed lines; a backward seek rebuilds only the window, never a full
- *      `events` scan); each line seeks on click. The Inspector tab renders
+ *      registration. The Log tab keeps full history for true scrollback;
+ *      forward seek appends newly crossed lines and backward seek rebuilds
+ *      the log up to the current cursor index; each line seeks on click.
+ *      The Inspector tab renders
  *      whatever `CTPS.inspectorFields` holds (populated by T8/selection.js) as
  *      a 2-column label/value grid, with a placeholder before T8 lands.
  *   3. Cargo (issue #57) — the two-tab Magazine/Inventory panel that replaced
@@ -109,11 +109,7 @@
         }
     }
 
-    // ----- 2a. Log tab: bounded ~10-line window via CTPS.cursor() ----------
-
-    //: The Log window never holds more than this many lines, on either a
-    //: forward-append or a backward-rebuild.
-    var LOG_WINDOW_SIZE = 10;
+    // ----- 2a. Log tab: full scrollback via CTPS.cursor() -------------------
 
     //: This module's own cursor position (see CTPS.cursor()'s step contract)
     //: plus the DOM elements currently in the window, oldest first (index 0)
@@ -151,18 +147,12 @@
     }
 
     /**
-     * Forward branch: append the newly-crossed events, then trim the front
-     * back down to the window size. A skipped-ahead slice (the Log wasn't
-     * live through a big jump) is capped to the last LOG_WINDOW_SIZE entries
-     * BEFORE touching the DOM, so this stays O(window) rather than
-     * O(events crossed) — never a full re-render of everything skipped.
+     * Forward branch: append every newly-crossed event so the operator keeps
+     * full scrollback history.
      */
     function appendLogLines(store, container, newEvents) {
         if (!container || newEvents.length === 0) {
             return;
-        }
-        if (newEvents.length > LOG_WINDOW_SIZE) {
-            newEvents = newEvents.slice(newEvents.length - LOG_WINDOW_SIZE);
         }
         setLogLineCurrent(lastLogLineEl(), false);
         for (var i = 0; i < newEvents.length; i++) {
@@ -170,19 +160,13 @@
             container.appendChild(el);
             logLineEls.push(el);
         }
-        while (logLineEls.length > LOG_WINDOW_SIZE) {
-            var stale = logLineEls.shift();
-            if (stale.parentNode === container) {
-                container.removeChild(stale);
-            }
-        }
         setLogLineCurrent(lastLogLineEl(), true);
         container.scrollTop = container.scrollHeight;
     }
 
     /**
-     * Rebuild branch (backward seek): replay only the bounded window ending
-     * at `idx`, never the full `events` array.
+     * Rebuild branch (backward seek): replay from the start through `idx` so
+     * scrollback remains complete at every cursor position.
      */
     function rebuildLogWindow(store, container, idx) {
         if (!container) {
@@ -194,7 +178,7 @@
             return;
         }
         var events = CTPS.engine.events;
-        var start = Math.max(0, idx - LOG_WINDOW_SIZE + 1);
+        var start = 0;
         for (var i = start; i <= idx; i++) {
             var el = makeLogLineEl(store, events[i]);
             container.appendChild(el);

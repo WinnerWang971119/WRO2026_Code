@@ -200,14 +200,33 @@
             "problemMatcher": []
         },
         {
+            // Fresh-start helper: best-effort close of any prior CTPS player
+            // server on port 8770 so the next serve task always relaunches.
+            "label": "CTPS: stop player server",
+            "type": "shell",
+            "command": "pwsh",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "try { Invoke-WebRequest -Uri 'http://127.0.0.1:8770/close' -Method Post -UseBasicParsing | Out-Null } catch { } ; exit 0"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared",
+                "clear": true
+            },
+            "problemMatcher": []
+        },
+        {
             // Background leg: build + serve the player over http on a fixed
             // localhost port. VS Code's Simple Browser is a webview and cannot
             // load file://, so the page must be served over http. The background
             // problemMatcher's endsPattern flips this task "ready" when the
             // "ctps: player at http://127.0.0.1:8770/" line prints, which gates
-            // the "build & view" open task below. Use --fixture here so this
-            // task doesn't hang behind a long-running or blocking real mission
-            // in ctps_dump; this viewer task is meant to be reliably openable.
+            // the "build & view" open task below.
+            // task now intentionally runs the real mission trace from
+            // buildMission (no fixture fallback) for day-to-day validation.
+            // NEVER switch this task to --fixture.
             // To change the port, edit both the --port arg here and the
             // openCtpsPlayer input URL.
             "label": "CTPS: serve player",
@@ -218,7 +237,6 @@
                 "python",
                 "-m",
                 "tools.path_planner.ctps",
-                "--fixture",
                 "--serve",
                 "--no-open",
                 "--port",
@@ -246,17 +264,19 @@
             }
         },
         {
-            // User-facing: waits for "CTPS: serve player" to report ready, then
-            // opens the served URL in VS Code's integrated Simple Browser via the
-            // openCtpsPlayer command input (the echo body just keeps the arg
-            // non-empty; the browser open is the input's side effect).
+            // User-facing: force-close any old player server, start a fresh
+            // serve/build pass, then open the served URL in VS Code browser.
             "label": "CTPS: build & view",
             "type": "shell",
             "command": "echo",
             "args": [
                 "CTPS player -> ${input:openCtpsPlayer}"
             ],
-            "dependsOn": "CTPS: serve player",
+            "dependsOn": [
+                "CTPS: stop player server",
+                "CTPS: serve player"
+            ],
+            "dependsOrder": "sequence",
             "group": "build",
             "presentation": {
                 "reveal": "silent",
