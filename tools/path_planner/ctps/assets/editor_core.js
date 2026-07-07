@@ -10,8 +10,9 @@
  *     pixel->world `unproject` INVERSE (editor-only -- the player never drags),
  *   - the Field-tab field backdrop (map image or the vector bounds / obstacles /
  *     nodes) drawn from `const FIELD`,
- *   - the Robot-tab backdrop: the default robot box at `2 * robot_radius_cm` per
- *     side, plus the manipulator zones via `window.CTPS_OBJ.drawZones`,
+ *   - the Robot-tab backdrop: the default robot box at `robot_frame_cm` per
+ *     side (the true physical chassis footprint), plus the manipulator zones
+ *     via `window.CTPS_OBJ.drawZones`,
  *   - object rendering via `window.CTPS_OBJ.drawObject`, the selection halo, the
  *     live rubber-band draft, and a fit-to-view scale bar,
  *   - Field/Robot tab state + the single clear+redraw repaint (never a
@@ -139,9 +140,18 @@
         return [0, 0, 1, 1];
     }
 
-    /** The robot half-side in world cm: `robot_radius_cm`, or a fixed fallback. */
+    /**
+     * The robot half-side in world cm. Prefers `robot_frame_cm / 2` (the TRUE
+     * physical chassis footprint, a 25 cm square), falls back to the C-space
+     * `robot_radius_cm` for legacy fields, then to a fixed fallback.
+     */
     function _robotHalfCm() {
-        var r = _field().robot_radius_cm;
+        var f = _field();
+        var frame = f && f.robot_frame_cm;
+        if (typeof frame === "number" && frame > 0) {
+            return frame / 2;
+        }
+        var r = f && f.robot_radius_cm;
         return (typeof r === "number" && r > 0) ? r : ROBOT_FALLBACK_CM;
     }
 

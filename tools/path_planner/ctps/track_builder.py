@@ -76,6 +76,7 @@ from tools.path_planner.sim.runtime import (
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
     MANIP_NOMINAL_S,
+    ROBOT_FRAME_CM,
     SIM_DRIVE_CM_S,
     SIM_TURN_DEG_S,
 )
@@ -275,9 +276,13 @@ def build_field_block(field_data) -> Dict[str, Any]:
       ``width/height`` come from ``field_data.FIELD_MM`` (a ``(w_mm, h_mm)``
       pair) divided by 10 to convert millimetres to centimetres.
     * ``robot_radius_cm``: ``field_data.ROBOT_RADIUS_CM`` (the planner's
-      C-space inflation radius), so the player can draw the robot marker at
-      its true world size (a square of side ``2 * radius``) instead of a
-      fixed pixel box. ``0.0`` when the field omits it.
+      C-space inflation radius). ``0.0`` when the field omits it. Retained for
+      a possible C-space overlay; the drawn robot marker uses
+      ``robot_frame_cm`` (below), NOT this radius.
+    * ``robot_frame_cm``: :data:`~tools.path_planner.ctps.config.ROBOT_FRAME_CM`
+      — the robot's TRUE physical chassis footprint (square side, cm). The
+      player and layout editor draw the robot marker at this size, decoupled
+      from the C-space radius above.
 
     :param field_data: validated field-data namespace exposing ``NODES``,
         ``OBSTACLES``, ``FIELD_MM``, ``ROBOT_RADIUS_CM``.
@@ -306,6 +311,7 @@ def build_field_block(field_data) -> Dict[str, Any]:
         "obstacles": obstacles,
         "bounds": bounds,
         "robot_radius_cm": robot_radius_cm,
+        "robot_frame_cm": float(ROBOT_FRAME_CM),
     }
 
 

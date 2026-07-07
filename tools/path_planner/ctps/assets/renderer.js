@@ -55,10 +55,11 @@
     var NODE_HALO_WIDTH = 3;     // dark paint-order halo behind a node label
     var NODE_FONT = "11px ui-monospace, Consolas, monospace";
     var ROBOT_FALLBACK_PX = 40;  // robot square side (px) used ONLY when the
-                                 // field omits robot_radius_cm; normally the
-                                 // side is world-sized (2 * ROBOT_RADIUS_CM *
-                                 // view.scale), so the marker is the true
-                                 // footprint and scales with the field.
+                                 // field omits both robot_frame_cm and
+                                 // robot_radius_cm; normally the side is
+                                 // world-sized (robot_frame_cm * view.scale),
+                                 // so the marker is the true physical footprint
+                                 // and scales with the field.
     var ROBOT_CORNER = 0.3;      // rounded-corner radius, as a fraction of half-side
     var ROBOT_ARROW_TIP = 0.28;  // centred arrow tip x (frac half-side)
     var ROBOT_ARROW_BACK = 0.18; // arrow base setback behind centre (frac half)
@@ -188,13 +189,18 @@
     }
 
     /**
-     * The robot marker's side length in world cm: `2 * field.robot_radius_cm`
-     * (the square footprint that bounds the planner's C-space radius). Returns
-     * 0 when the field omits a positive radius, so the caller falls back to a
-     * fixed pixel size.
+     * The robot marker's side length in world cm. Prefers `field.robot_frame_cm`
+     * (the robot's TRUE physical chassis footprint, a 25 cm square). Falls back
+     * to `2 * field.robot_radius_cm` (the C-space footprint) for legacy traces
+     * recorded before the frame field existed, then returns 0 when neither is
+     * present so the caller uses a fixed pixel size.
      */
     function _robotSideCm() {
         var f = _field();
+        var frame = f && f.robot_frame_cm;
+        if (typeof frame === "number" && frame > 0) {
+            return frame;
+        }
         var r = f && f.robot_radius_cm;
         return (typeof r === "number" && r > 0) ? 2 * r : 0;
     }

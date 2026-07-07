@@ -61,6 +61,23 @@ DRIFT_THRESHOLD_CM: float = 10.0
 ARC_STEP_DEG: float = 10.0
 
 # ---------------------------------------------------------------------------
+# Robot physical frame (rendering)
+# ---------------------------------------------------------------------------
+
+#: The competition robot's physical chassis footprint, drawn as the robot
+#: marker in the CTPS player and the layout editor (a square of this side, in
+#: centimetres).
+#:
+#: This is the TRUE physical frame and is deliberately DISTINCT from the
+#: planner's ``field_data.ROBOT_RADIUS_CM`` C-space inflation radius: the frame
+#: is what the operator eyeballs against the field, while the C-space radius is
+#: a planning artifact that over-represents the footprint (a 15 cm radius would
+#: otherwise draw a 30 cm box). Injected into the render ``field`` block by
+#: :func:`tools.path_planner.ctps.track_builder.build_field_block` and read by
+#: ``assets/renderer.js`` and ``assets/editor_core.js`` as ``robot_frame_cm``.
+ROBOT_FRAME_CM: float = 25.0
+
+# ---------------------------------------------------------------------------
 # Manipulator cargo-model player constants (object/cargo plan, issue #57)
 # ---------------------------------------------------------------------------
 #
