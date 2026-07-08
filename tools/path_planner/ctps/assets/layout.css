@@ -281,6 +281,17 @@ body {
     gap: var(--ctps-lane-gap);
 }
 
+/* The ruler row's only in-flow content is an empty sticky label and a
+ * track whose absolutely-positioned tick children contribute no height —
+ * so without an explicit height this row (and both its children, via the
+ * default flex `align-items: stretch`) computes to 0px even though
+ * #ctps-ruler itself has a definite height (14px, components.css). Fill
+ * that band so the label stretches to a real, opaque 14px cell instead of
+ * a 0-height sliver that lets panned tick text bleed through the gutter. */
+#ctps-ruler .ctps-tl-row {
+    height: 100%;
+}
+
 /* Vertical spacing between lane rows only — #ctps-ruler is a separate
  * container from #ctps-lanes, so this never touches the ruler row. Preserves
  * the previous 4px `row-gap` the old `.ctps-lanes` grid used. */
@@ -290,12 +301,14 @@ body {
 
 /* The track element for both a lane row and the ruler row: the positioning
  * context for percent-placed spans/pins/ticks (unchanged `pctOf` math), sized
- * to the zoomable track width. Falls back to 100% of the row so a
- * pre-hydration or failed-init state still renders a full-width dock instead
- * of collapsing to zero width. */
+ * to the zoomable track width. Falls back to the row's content width minus
+ * the label gutter and gap (not the row's full width, which already
+ * includes them) so a pre-hydration or failed-init state renders a
+ * full-width dock that fits exactly instead of overflowing by
+ * gutter + gap. */
 .ctps-lane,
 #ctps-ruler-track {
-    flex: 0 0 var(--ctps-content-w, 100%);
+    flex: 0 0 var(--ctps-content-w, calc(100% - var(--ctps-lane-gutter) - var(--ctps-lane-gap)));
 }
 
 /* Sticky label cell: because its row spans the full content width, the

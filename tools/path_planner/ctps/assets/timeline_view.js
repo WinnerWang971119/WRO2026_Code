@@ -107,6 +107,8 @@
     var followSuspended = false; // a manual pan turned auto-follow off
     var _prevPlaying = false; // for the playing false->true re-arm edge
     var _selfScroll = false; // this module initiated the pending scroll write
+    var _lastProgrammaticScrollLeft = 0; // post-clamp position of the last
+    // programmatic scroll/width write; a browser clamp scroll lands on it
     var _rulerQueued = false; // an rAF ruler rebuild is already scheduled
     var _resizeQueued = false; // an rAF resize recompute is already scheduled
 
@@ -194,6 +196,11 @@
     function setContentW(widthPx) {
         contentW = widthPx;
         timelineEl.style.setProperty("--ctps-content-w", widthPx + "px");
+        // A shrink can make the browser clamp scrollLeft during the forced
+        // reflow and queue a native `scroll` event that no `_selfScroll` write
+        // wraps. Reading scrollLeft flushes that layout; record the post-clamp
+        // position so `onScroll` classifies the clamp event as self, not a pan.
+        _lastProgrammaticScrollLeft = viewport.scrollLeft;
     }
 
     /** Max scrollLeft for the current (post-reflow) content width. */
@@ -229,11 +236,16 @@
     function setScrollLeft(x) {
         x = clampScroll(x);
         if (Math.abs(viewport.scrollLeft - x) < 0.5) {
+            // No scroll event fires, but this IS the module's intended
+            // position (it may equal a value a width-shrink already clamped
+            // to); record it so the pending clamp `scroll` reads as self.
+            _lastProgrammaticScrollLeft = viewport.scrollLeft;
             syncThumb();
             return;
         }
         _selfScroll = true;
         viewport.scrollLeft = x;
+        _lastProgrammaticScrollLeft = viewport.scrollLeft;
     }
 
     // ----- zoom anchoring ---------------------------------------------------
@@ -506,12 +518,23 @@
      * module did NOT initiate (native trackpad `deltaX`, keyboard) counts as a
      * manual pan and suspends follow while playing; a self-initiated scroll
      * (follow paging, zoom re-anchor) clears the guard and never suspends.
+     *
+     * The `_selfScroll` flag only covers a `scroll` that a `setScrollLeft`
+     * write triggered. A width shrink (`setContentW` via zoom-out / `fit()`)
+     * can make the browser clamp `scrollLeft` and fire a native `scroll` that
+     * no such write wraps — its position lands on `_lastProgrammaticScrollLeft`
+     * (recorded post-clamp). Treat that as self too, so it never falsely
+     * suspends follow; only a scroll that moved AWAY from the last programmatic
+     * position is a genuine user pan.
      */
     function onScroll() {
         syncThumb();
         scheduleRulerSync();
         if (_selfScroll) {
             _selfScroll = false;
+            return;
+        }
+        if (Math.abs(viewport.scrollLeft - _lastProgrammaticScrollLeft) < 1) {
             return;
         }
         if (store && store.playing) {
