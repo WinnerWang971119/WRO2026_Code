@@ -144,6 +144,13 @@ public:
         return ManipAction{};
     }
 
+    /** @brief Record a `dumpReset` manip op. */
+    ManipAction dumpReset()
+    {
+        ctps::recordManip("dumpReset", 0);
+        return ManipAction{};
+    }
+
     /** @brief Record a `sortTo` manip op carrying the bin index. */
     ManipAction sortTo(uint8_t bin)
     {
