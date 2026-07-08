@@ -60,7 +60,7 @@
     // Trace manip method values — exact strings (Contracts: Naming; recorder
     // <-> resolver). `reset` intentionally changes no cargo state.
     var METHOD_GRAB = "grab";
-    var METHOD_RELEASE = "release";
+    var METHOD_RELEASE = "release";  // recorded, but a no-op here (see `_applyManip`)
     var METHOD_SORT_TO = "sortTo";
     var METHOD_DUMP = "dump";
     var METHOD_BOX_CLOSE = "boxClose";
@@ -72,16 +72,15 @@
     // ----- working-state helpers -------------------------------------------
 
     /**
-     * A fresh mutable working state: in-hand empty, sorter unaimed
-     * (`sorterLane: null`, so the first grab MUST be preceded by a `sortTo`),
-     * all lanes empty, box empty.
+     * A fresh mutable working state: sorter unaimed (`sorterLane: null`, so the
+     * first grab MUST be preceded by a `sortTo`), all lanes empty, box empty.
      */
     function _emptyState() {
         var magazine = [];
         for (var lane = 0; lane < MAGAZINE_LANES; lane++) {
             magazine.push([]);
         }
-        return { inHand: null, sorterLane: null, magazine: magazine, rearBox: null, placed: {} };
+        return { sorterLane: null, magazine: magazine, rearBox: null, placed: {} };
     }
 
     /**
@@ -102,7 +101,6 @@
         return {
             eventIndex: eventIndex,
             t: t,
-            inHand: state.inHand,
             sorterLane: state.sorterLane,
             magazine: magazine,
             rearBox: state.rearBox,
@@ -135,13 +133,11 @@
         return { x: dx * c + dy * s, y: -dx * s + dy * c };
     }
 
-    /** Map a robot-local point (cm) to world (cm): `world = pose.xy + Rot(h).local`. */
-    function _localToWorld(pose, lx, ly) {
-        var rad = pose.h * Math.PI / 180;
-        var c = Math.cos(rad);
-        var s = Math.sin(rad);
-        return { x: pose.x + lx * c - ly * s, y: pose.y + lx * s + ly * c };
-    }
+    // Robot-local -> world reuses objects_draw.js's `CTPS_OBJ.localToWorld`
+    // (loaded before this file): ONE copy of the rotation math on the page, so a
+    // sign/handedness fix can never desync the cargo/zone placement here from the
+    // object drawing there.
+    var _localToWorld = OBJ.localToWorld;
 
     /** True when a robot-local point falls inside the axis-aligned local zone rect. */
     function _pointInZone(local, zone) {
@@ -151,9 +147,9 @@
 
     // ----- object-position helpers -----------------------------------------
 
-    /** True when object `id` is NOT staged in any store (in-hand / magazine / box). */
+    /** True when object `id` is NOT staged in any store (magazine / box). */
     function _isOnField(state, id) {
-        if (state.inHand === id || state.rearBox === id) {
+        if (state.rearBox === id) {
             return false;
         }
         for (var lane = 0; lane < state.magazine.length; lane++) {
@@ -281,7 +277,16 @@
      * these no-ops fire per manip event on every `loadLayout` -- including
      * uploads long after boot. Messages stay short and factual.
      */
+    // When true, `_noopWarn` and the grab-before-sortTo `console.error` stay
+    // silent. Set for the duration of a SILENT `cargo_resolve` (the timeline
+    // lane builders re-resolve on every scrub, and would otherwise re-emit the
+    // resolver's warnings/errors per builder, per boundary crossing).
+    var _suppressResolveLog = false;
+
     function _noopWarn(message) {
+        if (_suppressResolveLog) {
+            return;
+        }
         console.warn("cargo: " + message);
     }
 
@@ -336,21 +341,6 @@
         lane.push(tile.id); // FIFO: newest lands last; dump shifts index 0
         _clearPlaced(state, tile.id);
         return null;
-    }
-
-    /** release: drop the in-hand tile back at the grab-zone world centre. */
-    function _doRelease(state, pose, robotCfg) {
-        if (state.inHand === null) {
-            _noopWarn("release ignored: nothing in hand");
-            return; // nothing to drop
-        }
-        var zone = robotCfg && robotCfg.grab_zone;
-        if (!zone) {
-            return; // no zone -> cannot place -> no-op
-        }
-        var w = _localToWorld(pose, zone.x_cm, zone.y_cm);
-        state.placed[state.inHand] = { x_cm: w.x, y_cm: w.y };
-        state.inHand = null;
     }
 
     /**
@@ -431,8 +421,8 @@
     }
 
     /**
-     * Apply one manip verb to the working state at `pose`. Unknown methods (and
-     * `reset`, which is log-only) leave the state unchanged.
+     * Apply one manip verb to the working state at `pose`. `release`, `reset`,
+     * and unknown methods leave the state unchanged.
      *
      * @return an operator-error message when the verb was an invalid grab (grab
      *         with no sorter lane selected); otherwise null.
@@ -441,7 +431,12 @@
         if (method === METHOD_GRAB) {
             return _doGrab(state, pose, objects, robotCfg);
         } else if (method === METHOD_RELEASE) {
-            _doRelease(state, pose, robotCfg);
+            // No-op by design: in the fused grab+sort magazine model a grab feeds
+            // the tile straight into a lane, so there is never a loose in-hand
+            // tile for `release` to drop back -- `dump` is how tiles leave the
+            // magazine. Kept as an explicit branch so a recorded `release` reads
+            // as intentionally ignored, not as a forgotten/unknown method.
+            return null;
         } else if (method === METHOD_SORT_TO) {
             _doSortTo(state, arg);
         } else if (method === METHOD_DUMP) {
@@ -475,30 +470,44 @@
      * @param objects the layout objects array (`store.objects`).
      * @param robotCfg the layout `robot` section, or null (grab/dump/box then
      *     become no-ops; objects still resolve statically).
+     * @param silent when truthy, suppress the resolver's per-event `console.warn`
+     *     no-ops and the grab-before-sortTo `console.error`. `store.loadLayout`
+     *     resolves once NON-silently (so the operator sees each issue exactly
+     *     once); the timeline lane builders, which re-resolve on every scrub,
+     *     pass `silent: true` so a single underlying event is not logged again.
+     *     The `.sorterError` hoist is unaffected -- the HUD note still fires.
      * @return an array of scene snapshots, one per manip event, carrying a
      *     `.sorterError` string (or null) for the grab-before-sortTo note.
      */
-    function cargo_resolve(track, objects, robotCfg) {
+    function cargo_resolve(track, objects, robotCfg, silent) {
         var events = (track && track.events) || [];
         objects = objects || [];
         var poseAt = (CTPS.engine && CTPS.engine.poseAt) || null;
         var state = _emptyState();
         var timeline = [];
         var sorterError = null;
-        for (var i = 0; i < events.length; i++) {
-            var ev = events[i];
-            if (!ev || ev.type !== "manip") {
-                continue;
-            }
-            var pose = poseAt ? poseAt(ev.t) : { x: 0, y: 0, h: 0 };
-            var err = _applyManip(state, ev.method, ev.arg, pose, objects, robotCfg);
-            if (err) {
-                console.error("cargo: " + err + " (event " + i + ")");
-                if (sorterError === null) {
-                    sorterError = err; // first offending grab drives the HUD note
+        var prevSuppress = _suppressResolveLog;
+        _suppressResolveLog = !!silent;
+        try {
+            for (var i = 0; i < events.length; i++) {
+                var ev = events[i];
+                if (!ev || ev.type !== "manip") {
+                    continue;
                 }
+                var pose = poseAt ? poseAt(ev.t) : { x: 0, y: 0, h: 0 };
+                var err = _applyManip(state, ev.method, ev.arg, pose, objects, robotCfg);
+                if (err) {
+                    if (!silent) {
+                        console.error("cargo: " + err + " (event " + i + ")");
+                    }
+                    if (sorterError === null) {
+                        sorterError = err; // first offending grab drives the HUD note
+                    }
+                }
+                timeline.push(_snapshotState(state, i, ev.t));
             }
-            timeline.push(_snapshotState(state, i, ev.t));
+        } finally {
+            _suppressResolveLog = prevSuppress;
         }
         timeline.sorterError = sorterError;
         return timeline;
@@ -517,7 +526,7 @@
         if (!scene) {
             return false;
         }
-        if (scene.inHand === id || scene.rearBox === id) {
+        if (scene.rearBox === id) {
             return true;
         }
         var magazine = scene.magazine || [];
@@ -631,13 +640,18 @@
      * The magazine cell's short label: the first two non-space characters of
      * the object `name`, uppercased (Data Model: magazine cell label). Yields
      * a shorter (or empty) string for a name with fewer than 2 non-space
-     * characters -- never throws.
+     * characters -- never throws. Iterates by CODE POINT (walking surrogate
+     * pairs as one unit) so an emoji/astral name (e.g. a red-square emoji then
+     * "R") renders a whole glyph, not a lone-surrogate replacement box.
      */
     function _shortLabel(name) {
         var text = name || "";
         var chars = [];
-        for (var i = 0; i < text.length && chars.length < 2; i++) {
-            var ch = text.charAt(i);
+        for (var i = 0; i < text.length && chars.length < 2; ) {
+            var code = text.charCodeAt(i);
+            var size = (code >= 0xD800 && code <= 0xDBFF && i + 1 < text.length) ? 2 : 1;
+            var ch = text.substr(i, size);
+            i += size;
             if (ch !== " ") {
                 chars.push(ch);
             }
@@ -971,32 +985,118 @@
 
     // ----- layout upload: FileReader -> tolerant validate -> store.loadLayout
 
-    /**
-     * Minimal tolerant shape check for one uploaded layout object: enough to
-     * keep `cargo_resolve`/`CTPS_OBJ.drawObject` from choking on a malformed
-     * entry. Mirrors the loader convention (skip + warn), NOT `layout.py`'s
-     * loud strict validation -- that lives at emit time, not here.
-     */
-    var _VALID_SHAPES = { rect: true, circle: true };
+    // ----- tolerant per-object + robot coercion -----------------------------
+    // The upload leg mirrors the EDITOR's tolerant loader (editor_io.js
+    // `_parseObject` / `_parseRobot`), NOT `layout.py`'s loud strict validation
+    // (that lives at emit time). Both tolerant paths must AGREE so the same
+    // hand-edited layout.json loads identically in the editor and the player: a
+    // missing `type` defaults to `tile`, missing shape dimensions default to a
+    // visible size (never a 0x0 object that silently vanishes), and a non-finite
+    // robot zone dimension is DROPPED rather than fed to `_pointInZone` as NaN
+    // (which would make every `<=` test false and silently break all grabbing).
     var _VALID_TYPES = { tile: true, cargo: true, fixed: true };
+    var _HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
-    function _isValidLayoutObject(obj) {
-        if (!obj || typeof obj !== "object") {
-            return false;
+    /** True for a finite JS number (not NaN/Infinity, not a bool). */
+    function _finiteNum(v) {
+        return typeof v === "number" && isFinite(v);
+    }
+
+    /**
+     * Coerce one uploaded layout object into the normalized shape the resolver
+     * and `drawObject` expect, or null when it is unusable (not an object, an
+     * unknown shape, or a non-finite centre). Defaults a missing `type` to
+     * `tile`, a missing colour to grey, a missing id to `oN`, and missing shape
+     * dimensions to a visible fallback -- matching the editor's `_parseObject`
+     * policy so the two tolerant loaders never disagree on the same file.
+     */
+    function _coerceLayoutObject(o, i, seen) {
+        if (!o || typeof o !== "object") {
+            return null;
         }
-        if (typeof obj.id !== "string" || obj.id === "") {
-            return false;
+        if (o.shape !== "rect" && o.shape !== "circle") {
+            return null;
         }
-        if (typeof obj.shape !== "string" || !_VALID_SHAPES[obj.shape]) {
-            return false;
+        if (!_finiteNum(o.x_cm) || !_finiteNum(o.y_cm)) {
+            return null;
         }
-        if (typeof obj.type !== "string" || !_VALID_TYPES[obj.type]) {
-            return false;
+        var id = (typeof o.id === "string" && o.id) ? o.id : ("o" + (i + 1));
+        if (seen[id]) {
+            id = id + "_" + i;
         }
-        if (typeof obj.x_cm !== "number" || typeof obj.y_cm !== "number") {
-            return false;
+        seen[id] = true;
+        var type = _VALID_TYPES[o.type] ? o.type : "tile";
+        var color = (typeof o.color === "string" && _HEX_RE.test(o.color)) ? o.color : "#888888";
+        var obj = {
+            id: id,
+            name: (typeof o.name === "string") ? o.name : id,
+            shape: o.shape,
+            type: type,
+            color: color,
+            x_cm: +o.x_cm,
+            y_cm: +o.y_cm,
+            heading_deg: _finiteNum(o.heading_deg) ? +o.heading_deg : 0,
+        };
+        if (o.shape === "rect") {
+            obj.w_cm = (_finiteNum(o.w_cm) && o.w_cm > 0) ? +o.w_cm : 5;
+            obj.h_cm = (_finiteNum(o.h_cm) && o.h_cm > 0) ? +o.h_cm : 5;
+        } else {
+            obj.radius_cm = (_finiteNum(o.radius_cm) && o.radius_cm > 0) ? +o.radius_cm : 3;
         }
-        return true;
+        return obj;
+    }
+
+    /** Parse one robot-local rect zone (finite centre + positive extent), or null. */
+    function _coerceZone(z) {
+        if (!z || typeof z !== "object") {
+            return null;
+        }
+        if (!_finiteNum(z.x_cm) || !_finiteNum(z.y_cm) ||
+            !_finiteNum(z.w_cm) || !_finiteNum(z.h_cm) ||
+            z.w_cm <= 0 || z.h_cm <= 0) {
+            return null;
+        }
+        return { x_cm: +z.x_cm, y_cm: +z.y_cm, w_cm: +z.w_cm, h_cm: +z.h_cm };
+    }
+
+    /**
+     * Numerically sanitize an uploaded `robot` section: keep only zones whose
+     * dimensions are finite and positive, and drop-point entries with finite
+     * coordinates. A zone that fails validation is OMITTED (its verb then
+     * no-ops, flagged by the "no robot zones" note) rather than passed through
+     * with a NaN dimension that would make `_pointInZone` reject every candidate
+     * and silently break all grabbing. Returns null when the section is absent
+     * or carries nothing usable.
+     */
+    function _coerceRobotCfg(robot) {
+        if (!robot || typeof robot !== "object") {
+            return null;
+        }
+        var grab = _coerceZone(robot.grab_zone);
+        var box = _coerceZone(robot.box_zone);
+        var drops = [];
+        if (Array.isArray(robot.drop_points)) {
+            for (var i = 0; i < robot.drop_points.length; i++) {
+                var d = robot.drop_points[i];
+                if (d && typeof d === "object" && _finiteNum(d.x_cm) && _finiteNum(d.y_cm)) {
+                    drops.push({ x_cm: +d.x_cm, y_cm: +d.y_cm });
+                }
+            }
+        }
+        if (!grab && !box && drops.length === 0) {
+            return null;
+        }
+        var out = {};
+        if (grab) {
+            out.grab_zone = grab;
+        }
+        if (box) {
+            out.box_zone = box;
+        }
+        if (drops.length > 0) {
+            out.drop_points = drops;
+        }
+        return out;
     }
 
     /**
@@ -1082,17 +1182,22 @@
                     return;
                 }
                 var validObjects = [];
+                var seen = {};
                 for (var i = 0; i < parsed.objects.length; i++) {
-                    var obj = parsed.objects[i];
-                    if (_isValidLayoutObject(obj)) {
+                    var obj = _coerceLayoutObject(parsed.objects[i], i, seen);
+                    if (obj) {
                         validObjects.push(obj);
                     } else {
                         console.warn(
-                            "cargo: skipping malformed layout object at index " + i, obj);
+                            "cargo: skipping malformed layout object at index " + i,
+                            parsed.objects[i]);
                     }
                 }
                 _clearLayoutError();
-                store.loadLayout({ objects: validObjects, robot: parsed.robot });
+                store.loadLayout({
+                    objects: validObjects,
+                    robot: _coerceRobotCfg(parsed.robot),
+                });
             };
             reader.onerror = function () {
                 _showLayoutError("Couldn't read layout: file read error.");

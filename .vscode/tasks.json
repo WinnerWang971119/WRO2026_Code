@@ -209,8 +209,7 @@
                 "run",
                 "python",
                 "-c",
-                "from tools.path_planner.ctps.edit_server import _request_close; "
-                "_request_close('127.0.0.1', 8770)"
+                "from tools.path_planner.ctps.edit_server import _request_close; _request_close('127.0.0.1', 8770)"
             ],
             "presentation": {
                 "reveal": "silent",

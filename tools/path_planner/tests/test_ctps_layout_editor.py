@@ -41,7 +41,7 @@ from tools.path_planner.ctps.layout_editor_html import (
     _assert_self_contained,
     render,
 )
-from tools.path_planner.ctps.track_builder import _build_field_block
+from tools.path_planner.ctps.track_builder import build_field_block
 from tools.path_planner.tests.fixtures import toy_field_data
 
 #: Captures the JSON document assigned to ``const FIELD`` in the emitted page.
@@ -83,7 +83,7 @@ def test_p_tc7_render_is_self_contained(tmp_path):
 
     Key assertion: exactly one ``.html`` is written; the embedded
     ``const FIELD`` round-trips via :func:`json.loads` to the player's own
-    field block (:func:`_build_field_block`); the editor DOM scaffold (the
+    field block (:func:`build_field_block`); the editor DOM scaffold (the
     Field/Robot tab row, the Rect/Circle tools, the canvas, the Properties
     panel) is present; and the page references no external local file
     (no ``src=``/``href=``) and no ``http``/``https`` resource.
@@ -100,7 +100,7 @@ def test_p_tc7_render_is_self_contained(tmp_path):
 
     # The embedded field backdrop round-trips to the player's own field block.
     embedded = _extract_embedded_field(html)
-    assert embedded == _build_field_block(toy_field_data)
+    assert embedded == build_field_block(toy_field_data)
 
     # Editor DOM scaffold (sidecar Change 3) is present.
     assert 'data-editor-tab="field"' in html
@@ -155,6 +155,7 @@ def test_p_tc8_every_editor_asset_exists_and_is_inlined(tmp_path):
         "editor_core.js",
         "editor_tools.js",
         "editor_io.js",
+        "server_session.js",
         "editor_boot.js",
     ]
     assert [p.name for p in _ASSET_CSS] == ["tokens.css", "editor.css"]
@@ -267,7 +268,7 @@ def test_map_png_embeds_self_contained_data_uri(tmp_path):
     assert f'const MAP_IMAGE = "data:image/png;base64,{expected_b64}";' in html
     assert "http://" not in html
     assert "https://" not in html
-    assert _extract_embedded_field(html) == _build_field_block(toy_field_data)
+    assert _extract_embedded_field(html) == build_field_block(toy_field_data)
 
 
 def test_no_map_png_emits_null(tmp_path):

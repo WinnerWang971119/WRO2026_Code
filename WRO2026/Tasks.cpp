@@ -443,7 +443,8 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 
 
 
-    waitStationaryMs(500);
-
-    return true;
+    // Return the final settle's result: waitStationaryMs reports false when it
+    // refuses to start (motion still active) or is aborted mid-wait via
+    // Tasks.abort(), so an aborted final wait must not report success to Mission.
+    return waitStationaryMs(500);
 }

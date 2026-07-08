@@ -766,45 +766,29 @@ def _open_in_browser(path: Path) -> None:
         )
 
 
-#: A tiny liveness script injected into the SERVED player page (``--serve``) so
-#: the localhost server self-closes when the tab goes away (ADR-057). It mirrors
-#: the editor's ``assets/editor_io.js`` session leg: a ``POST /ping`` every few
-#: seconds is the heartbeat (its silence trips the server's watchdog) and a
-#: ``/close`` beacon on unload is the clean-close fast path. Inert on a
-#: ``file:`` open (no server to talk to), so a plain double-clicked player file
-#: is unaffected. Uses only same-origin relative URLs — no ``http://`` literal —
-#: so it never trips the player's self-containment lint if it ever moved on-page.
-_PLAYER_HEARTBEAT_JS: str = """\
-(function () {
-    if (!window.location || window.location.protocol === "file:") { return; }
-    var HEARTBEAT_MS = 3000;
-    setInterval(function () {
-        try { fetch("/ping", { method: "POST" }).catch(function () {}); }
-        catch (e) { /* server already closed — fine */ }
-    }, HEARTBEAT_MS);
-    function closeBeacon() {
-        try {
-            if (navigator.sendBeacon) { navigator.sendBeacon("/close", ""); }
-            else { fetch("/close", { method: "POST", keepalive: true }); }
-        } catch (e) { /* no-op */ }
-    }
-    window.addEventListener("pagehide", closeBeacon);
-    window.addEventListener("beforeunload", closeBeacon);
-})();
-"""
+#: The shared self-closing-server liveness script (``assets/server_session.js``),
+#: injected into the SERVED player page (``--serve``) so the localhost server
+#: self-closes when the tab goes away (ADR-057). Single-sourced with the served
+#: layout editor, which inlines the SAME asset (``layout_editor_html._ASSET_JS``),
+#: so the ``/ping`` interval + ``/close`` beacon protocol can never desync between
+#: the two pages. The script self-guards on ``file:`` and uses only same-origin
+#: relative URLs, so a double-clicked offline player is unaffected.
+_SERVER_SESSION_JS_PATH: Path = Path(__file__).resolve().parent / "assets" / "server_session.js"
 
 
 def _inject_player_heartbeat(html: str) -> str:
-    """Return ``html`` with the :data:`_PLAYER_HEARTBEAT_JS` liveness script added.
+    """Return ``html`` with the shared liveness ``<script>`` added before </body>.
 
-    Inserts the heartbeat ``<script>`` immediately before the final ``</body>``
-    (or appends it when, defensively, no ``</body>`` is present). Only the served
-    copy is patched — the on-disk file is left byte-clean.
+    Reads ``assets/server_session.js`` (the single source shared with the served
+    editor) and inserts it immediately before the final ``</body>`` (or appends
+    it when, defensively, no ``</body>`` is present). Only the served copy is
+    patched — the on-disk file is left byte-clean.
 
     :param html: the rendered player page source.
     :return: the page with the heartbeat script injected.
     """
-    script = "<script>\n" + _PLAYER_HEARTBEAT_JS + "</script>\n"
+    session_js = _SERVER_SESSION_JS_PATH.read_text(encoding="utf-8")
+    script = "<script>\n" + session_js + "</script>\n"
     marker = "</body>"
     idx = html.rfind(marker)
     if idx == -1:

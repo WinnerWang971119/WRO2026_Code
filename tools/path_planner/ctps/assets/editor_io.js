@@ -212,43 +212,11 @@
         }
     }
 
-    /**
-     * When served by the edit-server, keep it alive with a heartbeat and shut it
-     * down when this tab goes away -- so the server auto-closes and can never
-     * dangle. A `POST /ping` every few seconds is the liveness signal (its
-     * silence, on any un-clean exit, trips the server's watchdog); a
-     * `navigator.sendBeacon('/close')` on unload is the clean-close fast path.
-     * Inert on a `file:` open (no server to talk to).
-     */
-    function _startServerSession() {
-        if (!_serverMode()) {
-            return;
-        }
-        var HEARTBEAT_MS = 3000;
-        setInterval(function () {
-            // Fire-and-forget: a rejected ping just means the server already
-            // closed, which is fine.
-            try {
-                fetch("/ping", { method: "POST" }).catch(function () {});
-            } catch (e) {
-                /* no-op */
-            }
-        }, HEARTBEAT_MS);
-
-        function _closeBeacon() {
-            try {
-                if (navigator.sendBeacon) {
-                    navigator.sendBeacon("/close", "");
-                } else {
-                    fetch("/close", { method: "POST", keepalive: true });
-                }
-            } catch (e) {
-                /* no-op */
-            }
-        }
-        window.addEventListener("pagehide", _closeBeacon);
-        window.addEventListener("beforeunload", _closeBeacon);
-    }
+    // The edit-server heartbeat/close session (POST /ping + /close beacon,
+    // ADR-057) now lives in the shared `assets/server_session.js`, inlined into
+    // both the served editor and the served player so the liveness protocol has
+    // a single source. It self-guards on `file:` and auto-runs on load, so there
+    // is nothing to start from here.
 
     // ----- load (FileReader -> tolerant parse) -----------------------------
 
@@ -350,6 +318,21 @@
             return null;
         }
         var dflt = E.defaultRobot();
+        // The player's layout.py hard-requires exactly one drop point per magazine
+        // lane (`len(drop_points) != MAGAZINE_LANES` -> LayoutError), and Save
+        // writes whatever we keep here back verbatim. A loaded file with the wrong
+        // count would round-trip as "saved cleanly" yet be un-embeddable, so fall
+        // back to the default full set (and flag it) instead of emitting a layout
+        // the player will reject.
+        var requiredDrops = dflt.drop_points.length;
+        if (drops && drops.length !== requiredDrops) {
+            if (E.status) {
+                E.status(
+                    "drop_points needs exactly " + requiredDrops +
+                    " entries (one per lane); using defaults");
+            }
+            drops = null;
+        }
         return {
             grab_zone: grab || dflt.grab_zone,
             box_zone: box || dflt.box_zone,
@@ -419,7 +402,4 @@
     E.ingestLayout = _ingest;
     E.refreshSaveState = refreshSaveState;
     E.initSaveState = initSaveState;
-
-    // Start the edit-server heartbeat/close session (no-op on a file:// open).
-    _startServerSession();
 })();

@@ -174,9 +174,7 @@
     /**
      * True when the magazine holds at least one tile in ANY lane for one
      * resolved cargo scene snapshot — the predicate behind the MAGAZINE lane.
-     * A grabbed-but-unsorted tile (`inHand`) and a rear-box Cargo are
-     * deliberately excluded: the rear box has its own lane, and in-hand is a
-     * transient staging step neither cargo lane shows.
+     * A rear-box Cargo is deliberately excluded: the rear box has its own lane.
      */
     function _magazineHeld(scene) {
         if (!scene) {
@@ -213,7 +211,9 @@
             return [];
         }
         var duration = (track && track.duration_s) || 0;
-        var timeline = resolve(track, store.objects, store.robotCfg);
+        // Silent re-resolve: `store.loadLayout` already logged each no-op/error
+        // once; these lane builders re-run per scrub boundary and must not repeat it.
+        var timeline = resolve(track, store.objects, store.robotCfg, true);
         var out = [];
         var openT0 = null;
         for (var i = 0; i < timeline.length; i++) {

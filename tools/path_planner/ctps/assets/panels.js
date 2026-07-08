@@ -165,21 +165,27 @@
     }
 
     /**
-     * Rebuild branch (backward seek): replay from the start through `idx` so
-     * scrollback remains complete at every cursor position.
+     * Rebuild branch (backward seek): reconcile the existing line list down to
+     * `idx`, keeping full scrollback complete at every cursor position. Trims the
+     * surplus off the END rather than wiping and replaying the whole prefix, so a
+     * backward scrub over a long mission is O(lines removed), not O(prefix) per
+     * frame (which janked/froze the UI on hundreds of events).
      */
     function rebuildLogWindow(store, container, idx) {
         if (!container) {
             return;
         }
-        container.textContent = "";
-        logLineEls = [];
-        if (idx < 0) {
-            return;
+        var target = (idx < 0) ? 0 : idx + 1; // number of lines that should show
+        while (logLineEls.length > target) {
+            var removed = logLineEls.pop();
+            if (removed && removed.parentNode) {
+                removed.parentNode.removeChild(removed);
+            }
         }
+        // Backfill any missing tail so the window always covers 0..idx (defensive;
+        // forward crossings normally flow through `appendLogLines`).
         var events = CTPS.engine.events;
-        var start = 0;
-        for (var i = start; i <= idx; i++) {
+        for (var i = logLineEls.length; i < target; i++) {
             var el = makeLogLineEl(store, events[i]);
             container.appendChild(el);
             logLineEls.push(el);

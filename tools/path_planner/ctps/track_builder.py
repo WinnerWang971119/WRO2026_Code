@@ -315,13 +315,6 @@ def build_field_block(field_data) -> Dict[str, Any]:
     }
 
 
-#: Backward-compatible alias for the pre-rename private name; ``build_field_block``
-#: is the canonical public helper (used by :func:`build` and imported by the
-#: layout-editor emitter). Retained only for external callers still importing the
-#: old name.
-_build_field_block = build_field_block
-
-
 def _pose_delta_duration(
     x_prev: float,
     y_prev: float,

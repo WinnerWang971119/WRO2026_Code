@@ -287,4 +287,5 @@
     window.CTPS_OBJ.project = project;
     window.CTPS_OBJ.drawObject = drawObject;
     window.CTPS_OBJ.drawZones = drawZones;
+    window.CTPS_OBJ.localToWorld = _localToWorld;
 })();

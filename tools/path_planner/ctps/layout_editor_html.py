@@ -78,12 +78,16 @@ _ASSET_CSS: Tuple[Path, ...] = (
 #: modules; ``editor_core.js`` seeds ``window.CTPS_EDITOR`` + the duplicated
 #: world->pixel view transform, ``editor_tools.js`` / ``editor_io.js`` build on
 #: it, and ``editor_boot.js`` stays LAST so it runs the one-time init once every
-#: other module has registered.
+#: other module has registered. ``server_session.js`` (the shared self-closing-
+#: server heartbeat, ADR-057) is self-contained and order-independent -- it
+#: replaces the editor's former in-``editor_io.js`` session leg so the player and
+#: editor never desync on the liveness protocol.
 _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "objects_draw.js",
     _ASSETS_DIR / "editor_core.js",
     _ASSETS_DIR / "editor_tools.js",
     _ASSETS_DIR / "editor_io.js",
+    _ASSETS_DIR / "server_session.js",
     _ASSETS_DIR / "editor_boot.js",
 )
 
