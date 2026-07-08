@@ -497,22 +497,19 @@
     border-color: var(--ctps-accent);
 }
 
-.ctps-transport-divider {
-    display: inline-block;
-    width: 1px;
-    height: 20px;
-    background: var(--ctps-border);
-}
-
+/* Drift-jump + speed live in the dock toolbar (see `.ctps-tl-toolbar`), so
+ * they are sized to the toolbar's compact 20px scale, not the 28px transport
+ * buttons. */
 .ctps-drift-jump {
     box-sizing: border-box;
-    height: 28px;
-    padding: 0 var(--ctps-space-3);
+    height: 20px;
+    padding: 0 var(--ctps-space-2);
     background: transparent;
     color: var(--ctps-drift);
     border: 1px solid var(--ctps-warn-border);
     border-radius: var(--ctps-radius-chip);
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 1;
     cursor: pointer;
     -webkit-appearance: none;
     appearance: none;
@@ -528,8 +525,9 @@
 .ctps-speed {
     box-sizing: border-box;
     display: flex;
+    align-items: center;
     gap: 2px;
-    padding: 2px;
+    padding: 1px;
     background: var(--ctps-bg);
     border: 1px solid var(--ctps-border);
     border-radius: var(--ctps-radius-chip);
@@ -539,7 +537,8 @@
     box-sizing: border-box;
     font-family: var(--ctps-font-ui);
     font-size: 11px;
-    padding: 3px 8px;
+    line-height: 1;
+    padding: 3px 7px;
     background: transparent;
     color: var(--ctps-muted);
     border: none;
@@ -713,16 +712,27 @@
     padding: var(--ctps-space-3);
 }
 
-/* ----- zoom toolbar (top-right of the dock) --------------------------- */
-
+/* ----- dock toolbar: playback (left) + zoom (right) ------------------- */
+/* The toolbar row hosts two flex groups pushed to opposite ends: the
+ * transport group (drift-jumps + play speed, moved off the transport bar so
+ * the seek scrubber there gets the full bar width) on the left, and the zoom
+ * widget on the right. Only the zoom group dims on a `.ctps-tl--nozoom`
+ * trace — speed/drift stay live regardless of whether the dock can zoom. */
 .ctps-tl-toolbar {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
+    justify-content: space-between;
     gap: var(--ctps-space-2);
     padding-bottom: var(--ctps-space-2);
     margin-bottom: var(--ctps-space-2);
     border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-tl-transport-group,
+.ctps-tl-zoom-group {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
 }
 
 /* `-` / `+` (square) and `Fit` (text, auto width) share the same button look
@@ -1063,8 +1073,10 @@
 
 /* ----- degenerate / already-fits trace: disable the whole widget ------- */
 /* timeline_view.js adds this modifier to .ctps-timeline when dur <= 0 or
- * zoomMax <= 1 (a trace that already fits at 1x — zoom would be a no-op). */
-.ctps-timeline.ctps-tl--nozoom .ctps-tl-toolbar {
+ * zoomMax <= 1 (a trace that already fits at 1x — zoom would be a no-op).
+ * Scoped to the zoom group only: the sibling transport group (speed/drift)
+ * has nothing to do with zoom, so it stays interactive. */
+.ctps-timeline.ctps-tl--nozoom .ctps-tl-zoom-group {
     opacity: .5;
     pointer-events: none;
 }

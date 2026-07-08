@@ -134,6 +134,13 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: ``#ctps-cargo-count-inv``, ``#ctps-mag-grid``, ``#ctps-inv-list`` -- the DOM
 #: contract T6 queries). ``#ctps-command``/``#ctps-log`` are unchanged, so
 #: TC-STRUCT is unaffected.
+#:
+#: The drift-jump (``#ctps-drift-prev``/``#ctps-drift-next``) and play-speed
+#: (``.ctps-speed`` ``data-speed`` buttons) controls moved off the transport
+#: bar into the timeline dock's toolbar (``.ctps-tl-transport-group``,
+#: alongside the zoom widget in ``.ctps-tl-zoom-group``) so the transport bar's
+#: seek scrubber gets the full bar width. The wiring is id/class based and
+#: document-wide (``transport.js``), so the relocation needs no JS change.
 _BODY_MARKUP: str = """\
 <div class="ctps-app">
     <header class="ctps-header">
@@ -235,33 +242,36 @@ _BODY_MARKUP: str = """\
                 type="button" aria-label="Play / pause">&#9654;</button>
         <button id="ctps-end" class="ctps-transport-btn" type="button"
                 aria-label="Jump to end">&#9197;</button>
-        <span class="ctps-transport-divider"></span>
-        <button id="ctps-drift-prev" class="ctps-drift-jump" type="button"
-                aria-label="Previous drift">&#9873;&#8249;</button>
-        <button id="ctps-drift-next" class="ctps-drift-jump" type="button"
-                aria-label="Next drift">&#9873;&#8250;</button>
         <div class="ctps-seek-wrap">
             <input type="range" id="ctps-seek" class="ctps-seek"
                    min="0" max="1000" step="1" value="0" aria-label="Seek">
             <div id="ctps-seek-ticks" class="ctps-seek-ticks"></div>
         </div>
         <span id="ctps-time" class="ctps-time">0.00 / 0.00 s</span>
-        <div class="ctps-speed" role="group" aria-label="Playback speed">
-            <button class="ctps-speed-btn" type="button" data-speed="0.5">0.5&#215;</button>
-            <button class="ctps-speed-btn ctps-speed-btn--active" type="button"
-                    data-speed="1">1&#215;</button>
-            <button class="ctps-speed-btn" type="button" data-speed="2">2&#215;</button>
-            <button class="ctps-speed-btn" type="button" data-speed="4">4&#215;</button>
-        </div>
     </div>
     <div class="ctps-timeline">
         <div class="ctps-tl-toolbar">
-            <button id="ctps-zoom-out" class="ctps-zoom-btn" type="button" aria-label="Zoom out">&#8722;</button>
-            <input type="range" id="ctps-zoom" class="ctps-zoom-slider"
-                   min="0" max="1000" step="1" value="0" aria-label="Zoom">
-            <button id="ctps-zoom-in" class="ctps-zoom-btn" type="button" aria-label="Zoom in">+</button>
-            <button id="ctps-zoom-fit" class="ctps-zoom-fit" type="button">Fit</button>
-            <span id="ctps-zoom-level" class="ctps-zoom-level">1.0&#215;</span>
+            <div class="ctps-tl-transport-group">
+                <button id="ctps-drift-prev" class="ctps-drift-jump" type="button"
+                        aria-label="Previous drift">&#9873;&#8249;</button>
+                <button id="ctps-drift-next" class="ctps-drift-jump" type="button"
+                        aria-label="Next drift">&#9873;&#8250;</button>
+                <div class="ctps-speed" role="group" aria-label="Playback speed">
+                    <button class="ctps-speed-btn" type="button" data-speed="0.5">0.5&#215;</button>
+                    <button class="ctps-speed-btn ctps-speed-btn--active" type="button"
+                            data-speed="1">1&#215;</button>
+                    <button class="ctps-speed-btn" type="button" data-speed="2">2&#215;</button>
+                    <button class="ctps-speed-btn" type="button" data-speed="4">4&#215;</button>
+                </div>
+            </div>
+            <div class="ctps-tl-zoom-group">
+                <button id="ctps-zoom-out" class="ctps-zoom-btn" type="button" aria-label="Zoom out">&#8722;</button>
+                <input type="range" id="ctps-zoom" class="ctps-zoom-slider"
+                       min="0" max="1000" step="1" value="0" aria-label="Zoom">
+                <button id="ctps-zoom-in" class="ctps-zoom-btn" type="button" aria-label="Zoom in">+</button>
+                <button id="ctps-zoom-fit" class="ctps-zoom-fit" type="button">Fit</button>
+                <span id="ctps-zoom-level" class="ctps-zoom-level">1.0&#215;</span>
+            </div>
         </div>
         <div id="ctps-tl-viewport" class="ctps-tl-viewport">
             <div id="ctps-tl-content" class="ctps-tl-content">
