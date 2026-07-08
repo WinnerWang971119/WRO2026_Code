@@ -102,6 +102,7 @@ _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "renderer.js",
     _ASSETS_DIR / "transport.js",
     _ASSETS_DIR / "timeline.js",
+    _ASSETS_DIR / "timeline_view.js",
     _ASSETS_DIR / "panels.js",
     _ASSETS_DIR / "selection.js",
     _ASSETS_DIR / "chrome.js",
@@ -254,9 +255,24 @@ _BODY_MARKUP: str = """\
         </div>
     </div>
     <div class="ctps-timeline">
-        <div id="ctps-ruler" class="ctps-ruler"></div>
-        <div id="ctps-lanes" class="ctps-lanes"></div>
-        <div id="ctps-playhead" class="ctps-playhead"></div>
+        <div class="ctps-tl-toolbar">
+            <button id="ctps-zoom-out" class="ctps-zoom-btn" type="button" aria-label="Zoom out">&#8722;</button>
+            <input type="range" id="ctps-zoom" class="ctps-zoom-slider"
+                   min="0" max="1000" step="1" value="0" aria-label="Zoom">
+            <button id="ctps-zoom-in" class="ctps-zoom-btn" type="button" aria-label="Zoom in">+</button>
+            <button id="ctps-zoom-fit" class="ctps-zoom-fit" type="button">Fit</button>
+            <span id="ctps-zoom-level" class="ctps-zoom-level">1.0&#215;</span>
+        </div>
+        <div id="ctps-tl-viewport" class="ctps-tl-viewport">
+            <div id="ctps-tl-content" class="ctps-tl-content">
+                <div id="ctps-ruler" class="ctps-ruler"></div>
+                <div id="ctps-lanes" class="ctps-lanes"></div>
+                <div id="ctps-playhead" class="ctps-playhead"></div>
+            </div>
+        </div>
+        <div class="ctps-tl-scroll">
+            <div id="ctps-tl-thumb" class="ctps-tl-scroll-thumb"></div>
+        </div>
     </div>
 </div>"""
 
