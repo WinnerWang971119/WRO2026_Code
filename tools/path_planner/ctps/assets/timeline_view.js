@@ -134,12 +134,6 @@
         return value;
     }
 
-    /** Parse a px-valued computed-style string, or `fallback` when unparseable. */
-    function parsePx(str, fallback) {
-        var v = parseFloat(str);
-        return isFinite(v) ? v : fallback;
-    }
-
     // ----- metric compute (init + resize) ----------------------------------
 
     /**
@@ -600,10 +594,16 @@
 
     /**
      * Recompute fit-to-width and re-apply the current zoom (clamped to the
-     * unchanged zoomMax), re-clamp the scroll, and resync the widget + ruler
+     * unchanged zoomMax), re-ANCHOR the scroll so the playhead holds its
+     * on-screen x across the width change, and resync the widget + ruler
      * (AC15). On a degenerate dock, just re-fill the track at the new width.
      */
     function recompute() {
+        // Capture the pre-reflow geometry before computeFit rescales fit width
+        // and before setContentW's reflow re-clamps scrollLeft, so the anchor
+        // maps the OLD content-space playhead x to its new position.
+        var oldContentW = contentW;
+        var oldScrollLeft = viewport.scrollLeft;
         computeFit();
         if (nozoom) {
             setContentW(fitContentW);
@@ -613,8 +613,9 @@
             return;
         }
         z = clampZoom(z);
-        setContentW(fitContentW * z);
-        setScrollLeft(viewport.scrollLeft);
+        var newContentW = fitContentW * z;
+        setContentW(newContentW);
+        setScrollLeft(playheadAnchor(oldContentW, newContentW, oldScrollLeft));
         syncControls();
         scheduleRulerSync();
     }
