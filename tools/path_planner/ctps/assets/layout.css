@@ -235,12 +235,78 @@ body {
 /* ===================================================================== */
 /* Timeline dock (auto height, margin 8)                                  */
 /* ===================================================================== */
+/*
+ * .ctps-timeline is a vertical flex stack: the toolbar row, the scroll
+ * viewport, then the custom-scrollbar row (components.css owns the look of
+ * all three). #ctps-tl-content is the SOLE scrolled element inside
+ * .ctps-tl-viewport; its width is gutter + gap + the zoomable track width
+ * (--ctps-content-w, a CSS length written on .ctps-timeline by
+ * timeline_view.js via setProperty — every calc() below falls back to a
+ * full-width, non-zooming dock if that property is never set).
+ *
+ * Each lane/ruler row (.ctps-tl-row) spans that FULL content width — not just
+ * its own label column — so its sticky label (a flex child, not a grid item)
+ * gets real horizontal scroll travel: a grid item's containing block is its
+ * own grid area, so a 52px label in a 52px grid column has zero sticky
+ * travel and would scroll off with the track. This is why the dock is a
+ * per-row flex stack, not the old 2-column grid (removed from
+ * components.css's `.ctps-ruler` / `.ctps-lanes` rules).
+ */
 
 .ctps-timeline {
     flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
     position: relative;
+    height: auto;
     margin: var(--ctps-space-3);
     min-width: 0;
+}
+
+.ctps-tl-viewport {
+    overflow-x: auto;
+    overflow-y: hidden;
+    min-width: 0;
+}
+
+#ctps-tl-content {
+    position: relative;
+    width: calc(var(--ctps-lane-gutter) + var(--ctps-lane-gap) + var(--ctps-content-w, 0px));
+    min-width: 100%;
+}
+
+.ctps-tl-row {
+    display: flex;
+    width: 100%;
+    gap: var(--ctps-lane-gap);
+}
+
+/* Vertical spacing between lane rows only — #ctps-ruler is a separate
+ * container from #ctps-lanes, so this never touches the ruler row. Preserves
+ * the previous 4px `row-gap` the old `.ctps-lanes` grid used. */
+#ctps-lanes .ctps-tl-row + .ctps-tl-row {
+    margin-top: 4px;
+}
+
+/* The track element for both a lane row and the ruler row: the positioning
+ * context for percent-placed spans/pins/ticks (unchanged `pctOf` math), sized
+ * to the zoomable track width. Falls back to 100% of the row so a
+ * pre-hydration or failed-init state still renders a full-width dock instead
+ * of collapsing to zero width. */
+.ctps-lane,
+#ctps-ruler-track {
+    flex: 0 0 var(--ctps-content-w, 100%);
+}
+
+/* Sticky label cell: because its row spans the full content width, the
+ * label's containing block for `position: sticky` is that full-width row —
+ * not a cramped 52px grid cell — so it has real horizontal travel and stays
+ * pinned at the viewport's left edge while the track scrolls under it. */
+.ctps-lane-label {
+    flex: 0 0 var(--ctps-lane-gutter);
+    position: sticky;
+    left: 0;
+    z-index: 3;
 }
 
 /* The MAGAZINE + REAR BOX cargo lanes (issue #57) each render a single row of
