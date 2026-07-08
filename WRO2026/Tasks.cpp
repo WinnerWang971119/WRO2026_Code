@@ -323,33 +323,74 @@ bool TasksClass::test0621(const TaskArgs& /*args*/)
 
 bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("MY1"); // Get mosaic
+    PathTracker.goTo("MYU"); // Get mosaic
     Drive.turnToYaw(90);
-    Manipulator.sortTo(1);
+    Manipulator.sortTo(0);
     Manipulator.grab();
     Manipulator.sortTo(1);
     Manipulator.grab();
-    Manipulator.sortTo(1);
+    PathTracker.goTo("MYD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
     Manipulator.grab();
     Manipulator.sortTo(1);
     Manipulator.grab();
+    PathTracker.goTo("MBU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MBD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MGU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
     Manipulator.sortTo(1);
     Manipulator.grab();
-
-    
+    PathTracker.goTo("MGD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
 
     //Grab shovel
-    PathTracker.goTo("shovel").setArrivalDirection(Direction::REAR);
+    PathTracker.goTo("shovel1O");
+    Drive.turnToYaw(90);
     Manipulator.boxClose();
-    
+
     //Go to shovel drop
-    PathTracker.goTo("shovel_drop");
-    Drive.turnToYaw(270);
+    PathTracker.goTo("shovel1F");
+    Drive.turnToYaw(0);
     Manipulator.boxOpen();
 
     //Go to dump
     PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
     Manipulator.dump();
+    PathTracker.goTo("dump2").setArrivalDirection(Direction::REAR);
+    Manipulator.dump();
+    PathTracker.goTo("dump3").setArrivalDirection(Direction::REAR);
+
+    Manipulator.dump();
+
+    PathTracker.goTo("CG1").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    Drive.turnToYaw(0);
+    PathTracker.goTo("CG3");
+    Manipulator.boxOpen();
+    PathTracker.goTo("CY1");
+    Drive.turnToYaw(180);
+    Manipulator.boxClose();
+    PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
+
+
 
     return true;
 }
