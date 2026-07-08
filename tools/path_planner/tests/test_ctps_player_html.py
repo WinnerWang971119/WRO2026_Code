@@ -73,6 +73,20 @@ Also covers the object/cargo plan's emitter leg (T4 — issue #57):
   ``PLAYER_META.render_mode`` stays driven by ``pivots`` alone
   (``"wheel-arc"``), and the lint doesn't trip — pivots and objects don't
   interfere.
+
+Also covers the CTPS timeline zoom + pan plan's emitter leg (T6):
+
+* **TC1** — the new timeline dock markup (toolbar, scroll viewport/content,
+  custom scrollbar thumb, zoom widget) renders with the exact ids/classes
+  pinned by the DOM contract, alongside the still-present
+  ``class="ctps-timeline"`` dock (AC14).
+* **TC3** — ``#ctps-ruler``, ``#ctps-lanes``, ``#ctps-playhead`` are
+  preserved (moved inside the new scroll wrapper, never removed).
+* **TC5** — the contract markers ``--ctps-content-w``/``--ctps-tl-thumb-w``
+  (in both ``components.css`` and ``timeline_view.js``),
+  ``CTPS.timelineView`` (in ``timeline_view.js``), and ``rebuildRuler`` (in
+  both ``timeline.js`` and ``timeline_view.js``) are pinned by reading the
+  on-disk asset sources directly.
 """
 
 from __future__ import annotations
@@ -609,6 +623,95 @@ def test_tc_struct_container_classes_and_rail_ids_present(tmp_path):
 
     assert 'id="ctps-command"' in html
     assert 'id="ctps-log"' in html
+
+
+# ---------------------------------------------------------------------------
+# TC1 / TC3 / TC5 (CTPS Timeline Zoom + Pan plan) — new dock markup, preserved
+# ids, and asset contract markers
+# ---------------------------------------------------------------------------
+
+
+def test_tl_tc1_zoom_pan_timeline_markup_present(tmp_path):
+    """TC1: the timeline zoom/pan restructuring's new markup renders.
+
+    Key assertion: the zoom toolbar, the scroll viewport + content wrapper,
+    the custom scrollbar thumb, and the zoom widget (buttons/slider/readout)
+    are all present as the DOM contract's exact ids/classes, and the dock
+    itself is still the pinned ``class="ctps-timeline"`` container.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "tl_markup.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    for marker in (
+        'id="ctps-tl-viewport"',
+        'id="ctps-tl-content"',
+        'id="ctps-tl-thumb"',
+        'id="ctps-zoom"',
+        'id="ctps-zoom-in"',
+        'id="ctps-zoom-out"',
+        'id="ctps-zoom-fit"',
+        'id="ctps-zoom-level"',
+        'class="ctps-tl-toolbar"',
+        'class="ctps-tl-scroll"',
+        'class="ctps-timeline"',
+    ):
+        assert marker in html, f"missing timeline dock marker: {marker}"
+
+
+def test_tl_tc3_preserved_ruler_lanes_playhead_ids_present(tmp_path):
+    """TC3: the pre-existing ruler/lanes/playhead ids are preserved, not removed.
+
+    Key assertion: ``#ctps-ruler``, ``#ctps-lanes``, ``#ctps-playhead`` still
+    appear verbatim in the rendered page — the restructuring moves them
+    inside the new ``#ctps-tl-content`` scroll wrapper but keeps their ids so
+    ``timeline.js`` still finds and fills them.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "tl_preserved_ids.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert 'id="ctps-ruler"' in html
+    assert 'id="ctps-lanes"' in html
+    assert 'id="ctps-playhead"' in html
+
+
+def test_tl_tc5_contract_markers_present_in_assets():
+    """TC5: the zoom/pan contract markers are pinned at their asset SOURCES.
+
+    Key assertion: reads the on-disk asset files directly (via
+    :data:`player_html_module._ASSETS_DIR`), not the inlined page, so the
+    test pins the contract at its origin rather than merely re-checking the
+    inlining covered by TC-ASSETS. ``--ctps-content-w`` and
+    ``--ctps-tl-thumb-w`` each appear in both ``components.css`` and
+    ``timeline_view.js``; ``CTPS.timelineView`` is assigned in
+    ``timeline_view.js``; and ``rebuildRuler`` is defined in ``timeline.js``
+    and referenced from ``timeline_view.js`` (the T3/T4 seam in the
+    Contracts section).
+    """
+    components_css = (player_html_module._ASSETS_DIR / "components.css").read_text(
+        encoding="utf-8"
+    )
+    timeline_view_js = (
+        player_html_module._ASSETS_DIR / "timeline_view.js"
+    ).read_text(encoding="utf-8")
+    timeline_js = (player_html_module._ASSETS_DIR / "timeline.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--ctps-content-w" in components_css
+    assert "--ctps-content-w" in timeline_view_js
+    assert "--ctps-tl-thumb-w" in components_css
+    assert "--ctps-tl-thumb-w" in timeline_view_js
+    assert "CTPS.timelineView" in timeline_view_js
+    assert "rebuildRuler" in timeline_js
+    assert "rebuildRuler" in timeline_view_js
 
 
 # ---------------------------------------------------------------------------
