@@ -85,6 +85,18 @@ namespace
         PathTracker.setTickCallback(nullptr);
         LineFollower.setTickCallback(nullptr);
 
+        // Tasks is the exception. A blocking task wait like `waitStationaryMs`
+        // is gated on the WALL CLOCK (`while (millis() - start < ms)`), not on a
+        // mock's is-idle query, so a nullptr callback would spin forever: with no
+        // callback the wait falls to `delay(1)` + `yield()` (both host no-ops) and
+        // `millis()` stays frozen, because `drainMission` only advances the mock
+        // clock in its OUTER loop — which is blocked inside `Mission.update()`
+        // while the task body runs. Give Tasks a callback that advances the mock
+        // clock each iteration (the same lever `drainMission` uses per Mission
+        // tick), so every task-level wait trips its gate on the first iteration
+        // and the dump stays instant.
+        Tasks.setTickCallback([] { mockAdvanceMillis(CTPS_TICK_ADVANCE_MS); });
+
         ctps::reset();
         mockResetMillis();
     }
