@@ -250,6 +250,17 @@ private:
     bool testChassis(const TaskArgs& args);
 
     /**
+     * @brief Empty no-op test hook.
+     *
+     * Reserved for quick Mission/task plumbing tests. Does no motion, no manipulator actuation,
+     * and simply returns success.
+     *
+     * @param args Ignored.
+     * @return Always ``true``.
+     */
+    bool emptyTest(const TaskArgs& args);
+
+    /**
      * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
      *
      * @param args Ignored.
@@ -257,6 +268,58 @@ private:
      */
     bool testOne(const TaskArgs& args);
     bool test0621(const TaskArgs& args);
+
+    /**
+     * @brief Bench self-test: sweep every configured drivetrain/manipulator actuator.
+     *
+     * Exercises the drive pair in both directions, then sweeps the belt and all three servos
+     * across their configured poses / stations with waits between steps so the operator can
+     * visually confirm motion and direction.
+     *
+     * @param args Ignored.
+     * @return ``true`` if every phase completed within its timeout; ``false`` if a servo or
+     *         the belt failed to settle in time.
+     */
+    bool actuatorSweep(const TaskArgs& args);
+
+    /**
+     * @brief Single-step actuator jog for calibration.
+     *
+     * Uses the first four ``u8`` arg slots as a tiny command packet so the operator can jog one
+     * actuator at a time from ``Mission.task(...)`` without defining a custom struct:
+     *
+     *   ``u8[0]`` = target
+     *   ``u8[1]`` = value / pose / leg
+     *   ``u8[2]`` = aux (PWM / angle / unused)
+     *   ``u8[3]`` = dwell in 100 ms ticks (drive only)
+     *
+     * Targets:
+     *   - 0 = grabber pose      (value: 0 home / 1 open / 2 close)
+     *   - 1 = grabber abs angle (value: angle 0..180)
+     *   - 2 = sorter bin        (value: bin index)
+     *   - 3 = sorter abs angle  (value: angle 0..180)
+     *   - 4 = dumper pose       (value: 0 home / 1 open / 2 close)
+     *   - 5 = dumper abs angle  (value: angle 0..180)
+     *   - 6 = belt station      (value: 0 left / 1 mid / 2 far_end / 3 abc)
+     *   - 7 = drive leg         (value: 0 LF / 1 LR / 2 RF / 3 RR / 4 BF / 5 BR,
+     *                            aux: PWM 0..100, dwell: 100 ms ticks)
+     *
+     * @param args Packed command bytes as described above.
+     * @return ``true`` on a successful jog; ``false`` on an invalid selector or a timeout.
+     */
+    bool actuatorStep(const TaskArgs& args);
+
+    /**
+     * @brief Primitive-handle bench test for every manipulator actuator.
+     *
+     * Drives the three servos and the belt DIRECTLY through `Manipulator`'s public primitive
+     * handles (`grabber` / `sorter` / `dumper` / `belt`) so bring-up can verify each actuator
+     * without going through the semantic verbs.
+     *
+     * @param args Ignored.
+     * @return ``true`` when every primitive movement completed; ``false`` on a belt/servo timeout.
+     */
+    bool manipDirectTest(const TaskArgs& args);
 
     /**
      * @brief Bring-up CTPS demo.

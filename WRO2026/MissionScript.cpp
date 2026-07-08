@@ -11,6 +11,7 @@
 void buildMission()
 {
     Mission
-        .task("ctpsExample1");
+        .task("emptyTest");
     Mission.start();
 }
+
