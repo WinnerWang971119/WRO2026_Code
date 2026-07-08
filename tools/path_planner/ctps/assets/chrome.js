@@ -163,6 +163,8 @@
             ["D", "Jump to next drift"],
             ["F", "Toggle full view"],
             ["?", "Show this help"],
+            ["+ / -", "Zoom timeline in / out"],
+            ["0", "Fit timeline to width"],
         ];
         for (var i = 0; i < KEYMAP.length; i++) {
             var row = document.createElement("div");

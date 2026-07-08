@@ -13,7 +13,7 @@
  *   2. DOM wiring for `#ctps-play` / `#ctps-seek` / `#ctps-time` / the speed
  *      segmented control / `#ctps-home` / `#ctps-end` / the drift-jump
  *      buttons, plus the window-level keymap (Space, `[`/`]`, Shift+Left/
- *      Right, Home/End, `D`, `F`, `?`).
+ *      Right, Home/End, `D`, `F`, `?`, `+`/`-`/`0` for timeline zoom).
  *   3. The seek bar's red drift ticks: one `.ctps-seek-tick` per `drift_warn`
  *      event, appended into the already-templated `#ctps-seek-ticks` overlay
  *      and positioned by `left` percent-of-duration (same convention as the
@@ -371,6 +371,33 @@
         }
     }
 
+    // ----- timeline zoom (`+`/`-`/`0`) --------------------------------------
+
+    /** Dispatch to the timeline dock's zoom-in control if it has registered
+     * itself; else no-op — the keymap must not throw just because
+     * timeline.js has not loaded or does not expose zoom controls. */
+    function zoomTimelineIn() {
+        if (window.CTPS.timelineView && typeof window.CTPS.timelineView.zoomIn === "function") {
+            window.CTPS.timelineView.zoomIn();
+        }
+    }
+
+    /** Dispatch to the timeline dock's zoom-out control if it has
+     * registered itself; else no-op, mirroring `zoomTimelineIn`. */
+    function zoomTimelineOut() {
+        if (window.CTPS.timelineView && typeof window.CTPS.timelineView.zoomOut === "function") {
+            window.CTPS.timelineView.zoomOut();
+        }
+    }
+
+    /** Dispatch to the timeline dock's fit-to-width control if it has
+     * registered itself; else no-op, mirroring `zoomTimelineIn`. */
+    function fitTimeline() {
+        if (window.CTPS.timelineView && typeof window.CTPS.timelineView.fit === "function") {
+            window.CTPS.timelineView.fit();
+        }
+    }
+
     // ----- keymap ------------------------------------------------------
 
     /** True when the focused element is a free-text control the keymap must
@@ -458,6 +485,19 @@
             case "?":
                 evt.preventDefault();
                 openHelp();
+                break;
+            case "+":
+            case "=":
+                evt.preventDefault();
+                zoomTimelineIn();
+                break;
+            case "-":
+                evt.preventDefault();
+                zoomTimelineOut();
+                break;
+            case "0":
+                evt.preventDefault();
+                fitTimeline();
                 break;
             default:
                 var lower = (typeof key === "string") ? key.toLowerCase() : "";
