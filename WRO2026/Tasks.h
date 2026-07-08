@@ -55,6 +55,9 @@
 
 #include "TasksTypes.h"
 
+class ManipServo;    // fwd decl only — _waitForServo takes a reference; the full
+                     // type is pulled in by Tasks.cpp.
+
 class TasksClass
 {
 public:
@@ -329,6 +332,40 @@ private:
      */
     bool ctpsExample1(const TaskArgs& args);
 
+    // --- Cooperative-wait helpers -------------------------------------------
+    // Shared by the bring-up tasks (``emptyTest`` / ``actuatorSweep`` /
+    // ``actuatorStep`` / ``manipDirectTest``) that block until an actuator
+    // settles. Each keeps every module ticking during the wait via the
+    // registered cooperative-tick callback (falling back to Drive + Manipulator
+    // ``update()`` with a one-shot warning when none is set), mirroring
+    // ``Manipulator::_drain``.
+
+    /** @brief Drive one cooperative-tick iteration during a blocking wait. */
+    void _pumpTick();
+
+    /**
+     * @brief Spin ``_pumpTick()`` for @p durationMs, servicing every module.
+     * @param durationMs Wall-clock duration to wait, in milliseconds.
+     */
+    void _waitMs(uint32_t durationMs);
+
+    /**
+     * @brief Block until @p servo settles or @p timeoutMs elapses.
+     * @param servo     Servo joint to wait on.
+     * @param timeoutMs Give-up timeout in milliseconds.
+     * @param label     Short site label printed on timeout.
+     * @return ``true`` once the servo reports done; ``false`` on timeout.
+     */
+    bool _waitForServo(ManipServo& servo, uint32_t timeoutMs, const char* label);
+
+    /**
+     * @brief Block until the belt settles or @p timeoutMs elapses.
+     * @param timeoutMs Give-up timeout in milliseconds.
+     * @param label     Short site label printed on timeout.
+     * @return ``true`` once the belt reports done; ``false`` on timeout.
+     */
+    bool _waitForBelt(uint32_t timeoutMs, const char* label);
+
     bool _inTask  = false;
     bool _aborted = false;
 
@@ -338,6 +375,12 @@ private:
      *        ``setTickCallback`` in ``setup()``.
      */
     void (*_tickCallback)() = nullptr;
+
+    /**
+     * @brief One-shot latch so the "no tick callback set" warning printed by
+     *        ``_pumpTick`` fires at most once per run.
+     */
+    bool _noCallbackWarned = false;
 };
 
 extern TasksClass Tasks;

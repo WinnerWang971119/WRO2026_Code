@@ -294,66 +294,108 @@ bool TasksClass::testChassis(const TaskArgs& /*args*/)
     return LineFollower.waitUntilDistanceReached();
 }
 
+// =============================================================================
+// Cooperative-wait helpers.
+//
+// Shared by the bring-up tasks below (emptyTest / actuatorSweep / actuatorStep /
+// manipDirectTest). Each keeps every module ticking while a task blocks on an
+// actuator, driving the registered cooperative-tick callback per iteration and
+// falling back to Drive+Manipulator update() (with a one-shot warning) when no
+// callback is set. yield() services the R4 background; we never block on a fixed
+// delay(). See ADR-025/026 and Manipulator::_drain.
+// =============================================================================
+
+void TasksClass::_pumpTick()
+{
+    if (_tickCallback != nullptr)
+    {
+        _tickCallback();
+    }
+    else
+    {
+        if (!_noCallbackWarned)
+        {
+            Serial.println(F("[Tasks] no tick callback set — only Drive/Manipulator "
+                             "will tick during waits. Call Tasks.setTickCallback(...) "
+                             "in setup()."));
+            _noCallbackWarned = true;
+        }
+        Drive.update();
+        Manipulator.update();
+    }
+    yield();
+}
+
+void TasksClass::_waitMs(uint32_t durationMs)
+{
+    const uint32_t start = millis();
+    while ((uint32_t)(millis() - start) < durationMs)
+    {
+        _pumpTick();
+    }
+}
+
+bool TasksClass::_waitForServo(ManipServo& servo, uint32_t timeoutMs, const char* label)
+{
+    const uint32_t start = millis();
+    while (!servo.isDone())
+    {
+        if ((uint32_t)(millis() - start) >= timeoutMs)
+        {
+            Serial.print(F("[Tasks] servo timeout at "));
+            Serial.println(label);
+            return false;
+        }
+        _pumpTick();
+    }
+    return true;
+}
+
+bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
+{
+    const uint32_t start = millis();
+    while (!Manipulator.belt.isDone())
+    {
+        if ((uint32_t)(millis() - start) >= timeoutMs)
+        {
+            Serial.print(F("[Tasks] belt timeout at "));
+            Serial.println(label);
+            return false;
+        }
+        _pumpTick();
+    }
+    return true;
+}
+
 bool TasksClass::emptyTest(const TaskArgs& /*args*/)
 {
     Serial.println(F("[Tasks] emptyTest"));
 
-    auto pumpTick = [this]()
-    {
-        if (_tickCallback != nullptr)
-        {
-            _tickCallback();
-        }
-        else
-        {
-            Drive.update();
-            Manipulator.update();
-        }
-        yield();
-    };
-
-    auto waitMs = [&pumpTick](uint32_t durationMs)
-    {
-        const uint32_t start = millis();
-        while ((uint32_t)(millis() - start) < durationMs)
-        {
-            pumpTick();
-        }
-    };
-
-    auto waitForServo = [&pumpTick](ManipServo& servo)
-    {
-        while (!servo.isDone())
-        {
-            pumpTick();
-        }
-    };
-
     Manipulator.dumper.open();
-    waitForServo(Manipulator.dumper);
-    waitMs(200);
+    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open");
+    _waitMs(200);
 
     Manipulator.sortTo(2);
-    waitMs(200);
+    _waitMs(200);
 
     Manipulator.grabber.open();
-    waitForServo(Manipulator.grabber);
-    waitMs(3000);
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
+    _waitMs(3000);
 
     Manipulator.grabber.close();
-    waitForServo(Manipulator.grabber);
-    waitMs(1000);
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close");
+    _waitMs(1000);
 
     Manipulator.grabber.open();
-    waitForServo(Manipulator.grabber);
-    waitMs(1000);
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
+    _waitMs(1000);
 
     Manipulator.dumper.close();
-    waitForServo(Manipulator.dumper);
-    waitMs(500);
+    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close");
+    _waitMs(500);
 
     Manipulator.dumper.home();
-    waitForServo(Manipulator.dumper);
+    (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home");
 
     return true;
 }
@@ -396,78 +438,14 @@ bool TasksClass::actuatorSweep(const TaskArgs& /*args*/)
     static constexpr uint32_t TEST_SETTLE_MS      = 250;
     static constexpr uint32_t TEST_DRIVE_STOP_MS  = 150;
 
-    static bool noCallbackWarned = false;
-
-    auto pumpTick = [this]()
-    {
-        if (_tickCallback != nullptr)
-        {
-            _tickCallback();
-        }
-        else
-        {
-            if (!noCallbackWarned)
-            {
-                Serial.println(F("[Tasks] actuatorSweep: no tick callback set — only "
-                                 "Drive/Manipulator will tick during waits. Call "
-                                 "Tasks.setTickCallback(...) in setup()."));
-                noCallbackWarned = true;
-            }
-            Drive.update();
-            Manipulator.update();
-        }
-        yield();
-    };
-
-    auto waitMs = [&pumpTick](uint32_t durationMs)
-    {
-        const uint32_t start = millis();
-        while ((uint32_t)(millis() - start) < durationMs)
-        {
-            pumpTick();
-        }
-    };
-
-    auto waitForServo = [&pumpTick](ManipServo& servo, uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!servo.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] actuatorSweep: servo timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
-    auto waitForBelt = [&pumpTick](uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!Manipulator.belt.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] actuatorSweep: belt timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
-    auto runDriveLeg = [&waitMs](const char* label, int16_t left, int16_t right)
+    auto runDriveLeg = [this](const char* label, int16_t left, int16_t right)
     {
         Serial.print(F("[Tasks] actuatorSweep: "));
         Serial.println(label);
         Drive.setSpeed(left, right);
-        waitMs(TEST_DRIVE_MS);
+        _waitMs(TEST_DRIVE_MS);
         Drive.stop(true);
-        waitMs(TEST_DRIVE_STOP_MS);
+        _waitMs(TEST_DRIVE_STOP_MS);
     };
 
     Serial.println(F("[Tasks] actuatorSweep: start"));
@@ -484,107 +462,107 @@ bool TasksClass::actuatorSweep(const TaskArgs& /*args*/)
 
     Serial.println(F("[Tasks] actuatorSweep: belt stations"));
     Manipulator.belt.toStation(Config::BeltStation::LEFT);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.belt.toStation(Config::BeltStation::FAR_END);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far end"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far end"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] actuatorSweep: grabber"));
     Manipulator.grabber.open();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.grabber.close();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.grabber.home();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] actuatorSweep: sorter bins"));
     for (uint8_t bin = 0; bin < Config::SORTER_BIN_COUNT; ++bin)
     {
         Manipulator.sorter.setAngle(Config::SORTER_BIN_ANGLE[bin]);
-        if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter bin"))
+        if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter bin"))
         {
             Drive.stop(true);
             return false;
         }
-        waitMs(TEST_SETTLE_MS);
+        _waitMs(TEST_SETTLE_MS);
     }
     for (int8_t bin = (int8_t)Config::SORTER_BIN_COUNT - 1; bin >= 0; --bin)
     {
         Manipulator.sorter.setAngle(Config::SORTER_BIN_ANGLE[(uint8_t)bin]);
-        if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter return"))
+        if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter return"))
         {
             Drive.stop(true);
             return false;
         }
-        waitMs(TEST_SETTLE_MS);
+        _waitMs(TEST_SETTLE_MS);
     }
     Manipulator.sorter.home();
-    if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home"))
+    if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] actuatorSweep: dumper"));
     Manipulator.dumper.open();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.dumper.close();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.dumper.home();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     (void)Manipulator.reset();
     Drive.stop(true);
@@ -614,70 +592,6 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
     static constexpr uint8_t DRIVE_BOTH_FORWARD   = 4;
     static constexpr uint8_t DRIVE_BOTH_REVERSE   = 5;
 
-    static bool noCallbackWarned = false;
-
-    auto pumpTick = [this]()
-    {
-        if (_tickCallback != nullptr)
-        {
-            _tickCallback();
-        }
-        else
-        {
-            if (!noCallbackWarned)
-            {
-                Serial.println(F("[Tasks] actuatorStep: no tick callback set — only "
-                                 "Drive/Manipulator will tick during waits. Call "
-                                 "Tasks.setTickCallback(...) in setup()."));
-                noCallbackWarned = true;
-            }
-            Drive.update();
-            Manipulator.update();
-        }
-        yield();
-    };
-
-    auto waitMs = [&pumpTick](uint32_t durationMs)
-    {
-        const uint32_t start = millis();
-        while ((uint32_t)(millis() - start) < durationMs)
-        {
-            pumpTick();
-        }
-    };
-
-    auto waitForServo = [&pumpTick](ManipServo& servo, uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!servo.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] actuatorStep: servo timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
-    auto waitForBelt = [&pumpTick](uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!Manipulator.belt.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] actuatorStep: belt timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
     const uint8_t target = args.u8[0];
     const uint8_t value  = args.u8[1];
     const uint8_t aux    = args.u8[2];
@@ -695,11 +609,11 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
             Serial.println((int)value);
             return false;
         }
-        return waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber pose");
+        return _waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber pose");
 
     case TARGET_GRABBER_ABS:
         Manipulator.grabber.setAngle(value);
-        return waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber abs");
+        return _waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber abs");
 
     case TARGET_SORTER_BIN:
         if (value >= Config::SORTER_BIN_COUNT)
@@ -713,7 +627,7 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
 
     case TARGET_SORTER_ABS:
         Manipulator.sorter.setAngle(value);
-        return waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter abs");
+        return _waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter abs");
 
     case TARGET_DUMPER_POSE:
         if (value == POSE_HOME) { Manipulator.dumper.home(); }
@@ -725,11 +639,11 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
             Serial.println((int)value);
             return false;
         }
-        return waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper pose");
+        return _waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper pose");
 
     case TARGET_DUMPER_ABS:
         Manipulator.dumper.setAngle(value);
-        return waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper abs");
+        return _waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper abs");
 
     case TARGET_BELT_STATION:
         if (value >= Config::BELT_STATION_COUNT)
@@ -739,7 +653,7 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
             return false;
         }
         Manipulator.belt.toStation(static_cast<Config::BeltStation>(value));
-        return waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt station");
+        return _waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt station");
 
     case TARGET_DRIVE_LEG:
     {
@@ -762,9 +676,9 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
         }
 
         Drive.setSpeed(left, right);
-        waitMs(dwellMs);
+        _waitMs(dwellMs);
         Drive.stop(true);
-        waitMs(150);
+        _waitMs(150);
         return true;
     }
 
@@ -779,195 +693,131 @@ bool TasksClass::manipDirectTest(const TaskArgs& /*args*/)
 {
     static constexpr uint32_t TEST_SETTLE_MS = 250;
 
-    static bool noCallbackWarned = false;
-
-    auto pumpTick = [this]()
-    {
-        if (_tickCallback != nullptr)
-        {
-            _tickCallback();
-        }
-        else
-        {
-            if (!noCallbackWarned)
-            {
-                Serial.println(F("[Tasks] manipDirectTest: no tick callback set — only "
-                                 "Drive/Manipulator will tick during waits. Call "
-                                 "Tasks.setTickCallback(...) in setup()."));
-                noCallbackWarned = true;
-            }
-            Drive.update();
-            Manipulator.update();
-        }
-        yield();
-    };
-
-    auto waitMs = [&pumpTick](uint32_t durationMs)
-    {
-        const uint32_t start = millis();
-        while ((uint32_t)(millis() - start) < durationMs)
-        {
-            pumpTick();
-        }
-    };
-
-    auto waitForServo = [&pumpTick](ManipServo& servo, uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!servo.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] manipDirectTest: servo timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
-    auto waitForBelt = [&pumpTick](uint32_t timeoutMs, const char* label) -> bool
-    {
-        const uint32_t start = millis();
-        while (!Manipulator.belt.isDone())
-        {
-            if ((uint32_t)(millis() - start) >= timeoutMs)
-            {
-                Serial.print(F("[Tasks] manipDirectTest: belt timeout at "));
-                Serial.println(label);
-                return false;
-            }
-            pumpTick();
-        }
-        return true;
-    };
-
     Serial.println(F("[Tasks] manipDirectTest: start"));
 
     Drive.stop(true);
 
     Serial.println(F("[Tasks] manipDirectTest: grabber home/open/close/home"));
     Manipulator.grabber.home();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home 1"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home 1"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.grabber.open();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.grabber.close();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.grabber.home();
-    if (!waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home 2"))
+    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home 2"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] manipDirectTest: sorter bins"));
     Manipulator.sorter.home();
-    if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home 1"))
+    if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home 1"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     for (uint8_t bin = 0; bin < Config::SORTER_BIN_COUNT; ++bin)
     {
         Manipulator.sorter.setAngle(Config::SORTER_BIN_ANGLE[bin]);
-        if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter bin"))
+        if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter bin"))
         {
             Drive.stop(true);
             return false;
         }
-        waitMs(TEST_SETTLE_MS);
+        _waitMs(TEST_SETTLE_MS);
     }
 
     Manipulator.sorter.home();
-    if (!waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home 2"))
+    if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home 2"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] manipDirectTest: dumper home/open/close/home"));
     Manipulator.dumper.home();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home 1"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home 1"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.dumper.open();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.dumper.close();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.dumper.home();
-    if (!waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home 2"))
+    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home 2"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Serial.println(F("[Tasks] manipDirectTest: belt left/mid/far_end/mid"));
     Manipulator.belt.toStation(Config::BeltStation::LEFT);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.belt.toStation(Config::BeltStation::FAR_END);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
     {
         Drive.stop(true);
         return false;
     }
-    waitMs(TEST_SETTLE_MS);
+    _waitMs(TEST_SETTLE_MS);
 
     Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
     {
         Drive.stop(true);
         return false;
