@@ -44,6 +44,9 @@
     var ZONE_STROKE_W = 2;       // zone outline stroke width (px)
     var ZONE_DASH = [3, 3];      // zone outline dashed pattern (px)
     var ZONE_DOT_R = 3;          // drop-point marker radius (px)
+    var DEPLOY_FILL_ALPHA = 0.22; // translucent fill for a deployed area
+    var DEPLOY_STROKE_W = 2;      // deployed-area outline width (px) — matches ZONE_STROKE_W
+    var DEPLOY_DOT_R = 4;         // deployed drop-point marker radius (px)
 
     // Object types + shapes — exact strings (Contracts: Naming; mirror of
     // ctps/layout.py's SHAPE_*/OBJECT_TYPE_* constants).
@@ -72,6 +75,7 @@
         _tokens = {
             hold: _cssVar("--ctps-hold"),
             faint: _cssVar("--ctps-faint"),
+            accent: _cssVar("--ctps-accent"),
         };
     }
 
@@ -206,12 +210,14 @@
     // ----- zone overlay drawing --------------------------------------------
 
     /**
-     * Stroke one robot-local rect zone as a world polygon: its four local
-     * corners are mapped to world through the pose, then projected and joined.
-     * The zone is axis-aligned in robot-local coordinates, so it renders as a
-     * rotated rectangle that follows the robot heading.
+     * Build (but do not stroke/fill) one robot-local rect zone's path as a
+     * world polygon: its four local corners are mapped to world through the
+     * pose, then projected and joined. The zone is axis-aligned in
+     * robot-local coordinates, so it renders as a rotated rectangle that
+     * follows the robot heading. Callers apply their own fill/stroke after
+     * this returns — this helper ONLY builds the current ctx path.
      */
-    function _drawZoneRect(ctx, view, pose, zone, project) {
+    function _pathZoneRectWorld(ctx, view, pose, zone, project) {
         if (!zone) {
             return;
         }
@@ -234,6 +240,19 @@
             }
         }
         ctx.closePath();
+    }
+
+    /**
+     * Stroke one robot-local rect zone as a world polygon. Thin wrapper over
+     * `_pathZoneRectWorld` (path-building only) + `ctx.stroke()` — kept as a
+     * separate function so the static `zones` layer's stroked-only output
+     * stays byte-identical to before the extraction.
+     */
+    function _drawZoneRect(ctx, view, pose, zone, project) {
+        if (!zone) {
+            return;
+        }
+        _pathZoneRectWorld(ctx, view, pose, zone, project);
         ctx.stroke();
     }
 
@@ -282,10 +301,66 @@
         ctx.restore();
     }
 
+    /**
+     * Draw ONLY the manipulator areas whose `mask` flag is true, in the
+     * filled-accent "deployed" style (translucent --ctps-accent fill + solid
+     * --ctps-accent outline; drop-points as filled accent dots) — visually
+     * distinct from `drawZones`' always-on dashed --ctps-hold overlay. A
+     * missing `robotCfg`/`pose`/`mask`, or an absent zone for a true mask
+     * flag, degrades to drawing nothing for that area.
+     *
+     * @param ctx the target 2D context.
+     * @param view the world->pixel transform.
+     * @param pose the robot pose `{ x, y, h }` (cm, cm, deg).
+     * @param robotCfg the layout `robot` section (`grab_zone`/`box_zone`/
+     *     `drop_points`).
+     * @param project the projection fn (pass `CTPS_OBJ.project`).
+     * @param mask `{ grab, box, dump }` — which areas are currently deployed.
+     */
+    function drawDeployedZones(ctx, view, pose, robotCfg, project, mask) {
+        if (!robotCfg || !pose || !mask) {
+            return;
+        }
+        var tokens = _theTokens();
+        ctx.save();
+        ctx.strokeStyle = tokens.accent || "";
+        ctx.fillStyle = tokens.accent || "";
+        ctx.lineWidth = DEPLOY_STROKE_W;
+        if (mask.grab && robotCfg.grab_zone) {
+            _pathZoneRectWorld(ctx, view, pose, robotCfg.grab_zone, project);
+            ctx.globalAlpha = DEPLOY_FILL_ALPHA;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.stroke();
+        }
+        if (mask.box && robotCfg.box_zone) {
+            _pathZoneRectWorld(ctx, view, pose, robotCfg.box_zone, project);
+            ctx.globalAlpha = DEPLOY_FILL_ALPHA;
+            ctx.fill();
+            ctx.globalAlpha = 1;
+            ctx.stroke();
+        }
+        if (mask.dump) {
+            var drops = robotCfg.drop_points || [];
+            for (var i = 0; i < drops.length; i++) {
+                var dp = drops[i];
+                if (!dp) {
+                    continue;
+                }
+                var w = _localToWorld(pose, dp.x_cm, dp.y_cm);
+                var p = project(view, w.x, w.y);
+                _pathCircle(ctx, p.px, p.py, DEPLOY_DOT_R);
+                ctx.fill();
+            }
+        }
+        ctx.restore();
+    }
+
     // ----- public surface ---------------------------------------------------
     window.CTPS_OBJ = window.CTPS_OBJ || {};
     window.CTPS_OBJ.project = project;
     window.CTPS_OBJ.drawObject = drawObject;
     window.CTPS_OBJ.drawZones = drawZones;
+    window.CTPS_OBJ.drawDeployedZones = drawDeployedZones;
     window.CTPS_OBJ.localToWorld = _localToWorld;
 })();
