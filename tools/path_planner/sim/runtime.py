@@ -208,6 +208,7 @@ the chassis pose EXACTLY on the node (drift on ``axis`` = 0 by construction).
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -2080,6 +2081,52 @@ class LocalizationSim:
         self._current_node = advance_to
         # Same re-anchor as on_intersection (mirror of
         # LocalizationClass::onDeadReckonedAdvance -> clearOffset()).
+        self.clear_offset()
+
+    def declare_position(self, node_name: str) -> None:
+        """Operator-declared belief reset: set the current node, clear the offset.
+
+        Sim mirror of ``LocalizationClass::declarePosition`` (``Localization.cpp``):
+        the same unconditional low-level write ``onIntersection`` /
+        ``onDeadReckonedAdvance`` perform (set node + re-anchor the offset), but
+        operator-initiated rather than triggered by a sensed crossing. The
+        heading calibration (``_zeroed`` -- the sim's analogue of the firmware's
+        untouched ``_yawOffsetDeg``) is deliberately left alone: the operator is
+        only declaring graph position and zeroing the operator offset, not
+        re-zeroing heading.
+
+        This is a pure belief change -- unlike :meth:`on_intersection` /
+        :meth:`on_dead_reckoned_advance`, no chassis primitive precedes it and no
+        physical motion occurs, so callers must NOT pair this with any
+        :class:`~tools.path_planner.sim.chassis.VirtualChassis` mutation.
+
+        Contract for an unknown @p node_name (mirrors the loader's strict-field
+        pattern, ``ctps/trace_loader.py``): this method WARNS
+        (:class:`UserWarning`) and no-ops rather than raising -- the current
+        node and offset are left completely unchanged. This differs from
+        :meth:`PathTrackerSim.go_to` / :meth:`~PathTrackerSim.step_through`,
+        which raise ``KeyError`` on an unknown goal: those reject a caller
+        (API) mistake, whereas ``declare_position`` is driven off a recorded
+        CTPS trace op (untrusted external data) where the established
+        convention is warn-and-skip so one malformed op does not abort an
+        otherwise-valid trace.
+
+        :param node_name: node name to declare as the current position. Must be
+            a key of ``field_data.NODES``; an unknown name warns and no-ops.
+        """
+        if node_name not in self._field_data.NODES:
+            warnings.warn(
+                f"LocalizationSim.declare_position: unknown node {node_name!r} "
+                "-- not in field_data.NODES; declaration skipped, node and "
+                "offset left unchanged.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        self._current_node = node_name
+        # Re-anchor the operator-offset frame exactly like a sensed arrival,
+        # but the heading calibration flag (`_zeroed`) is untouched -- mirrors
+        # the firmware leaving `_yawOffsetDeg` alone in `declarePosition`.
         self.clear_offset()
 
 

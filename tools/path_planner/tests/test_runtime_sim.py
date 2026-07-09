@@ -367,6 +367,58 @@ def test_localization_starts_unzeroed(toy_field):
     assert loc.current_node() == toy_field.START_NODE
 
 
+def test_declare_position_sets_node_clears_offset_preserves_heading(toy_field):
+    """T7: a valid ``declare_position`` changes the node, clears the offset,
+    and preserves whatever heading calibration (``is_zeroed``) was in force --
+    mirrors ``LocalizationClass::declarePosition`` leaving ``_yawOffsetDeg``
+    untouched (Localization.cpp:190-201)."""
+    loc = LocalizationSim(toy_field)
+    loc.zero_heading_from_current()
+    assert loc.is_zeroed() is True
+
+    # Grow a non-zero offset via the same accumulate path other re-anchor
+    # tests use, so the assertion actually exercises the clear.
+    loc.set_nav_active(False)
+    loc.accumulate_operator_move(10.0, 0.0)
+    assert loc.get_offset_from_node().magnitude_cm() > 0.0
+
+    loc.declare_position("B")
+
+    assert loc.current_node() == "B"
+    offset = loc.get_offset_from_node()
+    assert offset.x == 0.0
+    assert offset.y == 0.0
+    assert offset.theta_deg == 0.0
+    # Heading calibration is a separate concern from the offset -- declarePosition
+    # must not touch it either way (verified true here; the negative-path test
+    # below re-confirms it is untouched when a node is unknown too).
+    assert loc.is_zeroed() is True
+
+
+def test_declare_position_unknown_node_warns_and_is_noop(toy_field):
+    """T7 / TC17 negative-path seed: an unknown node name warns (UserWarning,
+    mirroring the loader's strict-field warn-and-skip pattern -- see
+    ``ctps/trace_loader.py``) and leaves current_node + offset + heading
+    calibration completely unchanged -- not a hard crash."""
+    loc = LocalizationSim(toy_field)
+    loc.zero_heading_from_current()
+    loc.set_nav_active(False)
+    loc.accumulate_operator_move(10.0, 0.0)
+
+    node_before = loc.current_node()
+    offset_before = loc.get_offset_from_node()
+
+    with pytest.warns(UserWarning, match="unknown node"):
+        loc.declare_position("ZZZ")
+
+    assert loc.current_node() == node_before
+    offset_after = loc.get_offset_from_node()
+    assert offset_after.x == offset_before.x
+    assert offset_after.y == offset_before.y
+    assert offset_after.theta_deg == offset_before.theta_deg
+    assert loc.is_zeroed() is True
+
+
 def test_goto_before_zero_raises(toy_field, toy_graph_and_table):
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
