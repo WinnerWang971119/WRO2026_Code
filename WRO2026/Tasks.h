@@ -286,6 +286,18 @@ private:
     bool actuatorSweep(const TaskArgs& args);
 
     /**
+     * @brief Belt-only bring-up test.
+     *
+     * Moves the conveyor through the configured named stations so the operator can confirm
+     * direction, travel, and end positions without any grabber / sorter / dumper motion.
+     *
+     * @param args Ignored.
+     * @return ``true`` if the belt reached every commanded station within timeout; ``false``
+     *         on the first station timeout.
+     */
+    bool beltTest(const TaskArgs& args);
+
+    /**
      * @brief Single-step actuator jog for calibration.
      *
      * Uses the first four ``u8`` arg slots as a tiny command packet so the operator can jog one
