@@ -529,6 +529,111 @@ namespace Config
                   "of the rear contact face, so the margin subtracted in reanchorAtWall is "
                   "strictly positive; zero or negative would place belief on or past the wall.");
 
+    // ---------------------------------------------------------------------------------------
+    // Blind-chain continuous motion (ADR-059) — consumed by `PathTracker`'s walk-ahead +
+    // `ChainSpeedPolicy.h`; mirrored in `tools/path_planner/sim/runtime.py` for parity.
+    //
+    // COUPLED SITES (all three constants below):
+    //   - `PathTracker`'s walk-ahead chain builder (decides how many hops to fold into one
+    //     chained run and where the run buffer is sized).
+    //   - `ChainSpeedPolicy.h`'s forward/backward two-pass resolver (the `entryPwm` seed and
+    //     the per-hop `(startPwm, endPwm)` it emits assume the run stays inside these caps).
+    //   - `tools/path_planner/sim/runtime.py` (hand-mirrored copies of all three; a regex-grep
+    //     parity test verifies they match this header — same idiom as `PATH_PASS_THROUGH_ENABLED`
+    //     above).
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master kill-switch for blind-node continuous-motion chaining.
+     *
+     * When `true` (default), `PathTracker` walks ahead across consecutive collinear BLIND
+     * hops and dispatches them as one chained run — `setStartSpeed`/`setEndSpeed` +
+     * `setBrake(false)` on every hop but the last — instead of braking to rest at each
+     * intermediate node. When `false`, PathTracker reverts to today's behavior: every blind
+     * hop is its own braked stop-and-go move, regardless of collinearity.
+     *
+     * @note Rollback knob: flip to `false` if blind chaining regresses on hardware (e.g. the
+     *       inter-hop boundary-carry subtraction under-corrects and the chain drifts off-node
+     *       over N hops). This is the single flag that restores the pre-ADR-059 behavior.
+     * @note Consumer: `PathTracker`'s walk-ahead chain builder (ADR-059).
+     * @note The Python sim (`tools/path_planner/sim/runtime.py`) hand-mirrors this constant.
+     *       A pytest verifies parity via regex grep on this header (same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above).
+     * @note **Compile-time override:** guarded by `#ifndef PATH_BLIND_CHAIN_ENABLED_DEFAULT`
+     *       so a host test can flip it target-wide via
+     *       `-DPATH_BLIND_CHAIN_ENABLED_DEFAULT=false` without editing this file — same idiom
+     *       as `PATH_PASS_THROUGH_ENABLED_DEFAULT` above.
+     * @warning Changing the default here changes on-hardware behavior for every mission that
+     *          contains a collinear blind run. Re-verify AC7 (TC5: chaining disabled stops at
+     *          every node) before shipping a default flip.
+     */
+#ifndef PATH_BLIND_CHAIN_ENABLED_DEFAULT
+#define PATH_BLIND_CHAIN_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_BLIND_CHAIN_ENABLED = PATH_BLIND_CHAIN_ENABLED_DEFAULT;
+
+    /**
+     * @brief Maximum total run distance (cm) a blind chain may span before it is forced to
+     *        end (that hop brakes; a fresh chain re-forms after).
+     *
+     * Bounds how far the chassis dead-reckons without an intermediate braked correction. A
+     * chain immediately preceding a `Drive.stopAtLine()` seek ends before the seek (seek
+     * nodes are chain-ineligible — see ADR-059), so the residual dead-reckoning error
+     * accumulated over the chain must still land within the FOLLOWING seek's
+     * `STOP_AT_LINE_ARM_WINDOW_CM` arm window, or the seek's `T_OR_CROSS` detector can arm too
+     * late and miss the real line (→ runs to max → `LINE_NOT_FOUND`).
+     *
+     * @note Sizing rule (load-bearing): MUST be `<= STOP_AT_LINE_ARM_WINDOW_CM`
+     *       (`ConfigDrive.h`, currently 10.0f cm) — that is the full error budget the
+     *       following seek can absorb. Sized conservatively at 8.0f cm (a 2 cm margin under
+     *       the 10 cm window) so a chain's residual dead-reckon error, even near the
+     *       worst-case end of the seek's own tolerance, still leaves room for the seek's
+     *       normal under-travel slack. Do not raise this to equal the window exactly —
+     *       the margin is intentional headroom, not slack to reclaim.
+     * @note Consumer: `PathTracker`'s walk-ahead chain builder (caps the run BEFORE
+     *       dispatch) and `ChainSpeedPolicy.h` (the backward pass assumes the run fits this
+     *       cap). Mirrored in `tools/path_planner/sim/runtime.py` for parity.
+     * @note Overflow is not a fault: a run exceeding this cap ends AT the cap (that hop is
+     *       dispatched as an ordinary braked stop) and PathTracker logs the truncation over
+     *       Serial; a new chain may re-form on the far side.
+     * @warning Raising this value without re-checking `STOP_AT_LINE_ARM_WINDOW_CM` breaks the
+     *          seek arm-window budget invariant this constant exists to protect. A
+     *          `static_assert` in `ConfigChecks.h` enforces
+     *          `PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM` at compile time, but
+     *          that only catches the boundary case — it does NOT prove the chain's actual
+     *          dead-reckoning error stays under budget on hardware. Re-verify AC9 (bench) on
+     *          any change.
+     */
+    constexpr float PATH_BLIND_CHAIN_MAX_CM = 8.0f;
+
+    /**
+     * @brief Compile-time cap on the number of hops a single blind chain run may contain.
+     *
+     * Sizes the fixed-size firmware run buffer `PathTracker` uses to hold the walked-ahead
+     * `hopDistCm[]` and resolved `ChainSpeedPolicy` output — a plain stack/member array, no
+     * heap allocation, so this constant is the array dimension, not a runtime-checked limit.
+     *
+     * @note Sizing rule: 8 comfortably covers the toy-field longest collinear blind run
+     *       (bench-observed 3-4 hops) with headroom for a denser real-field layout, while
+     *       keeping the run buffer small (8 * sizeof(hop entry) is a few dozen bytes on an
+     *       Arduino Uno R4). Raise only if a real mission legitimately needs a longer
+     *       uninterrupted blind run AND `PATH_BLIND_CHAIN_MAX_CM` is raised in lockstep
+     *       (both caps gate the same run — whichever is hit first ends the chain).
+     * @note Consumer: `PathTracker`'s fixed-size chain run buffer (array dimension) and its
+     *       walk-ahead loop (loop bound). Mirrored in `tools/path_planner/sim/runtime.py` for
+     *       parity (the sim has no fixed-buffer constraint but honors the same cap so its
+     *       output matches firmware — ADR-050 parity).
+     * @note Overflow is not a fault: a run exceeding this hop count ends AT the cap (that hop
+     *       is dispatched as an ordinary braked stop) and PathTracker logs the truncation; a
+     *       new chain may re-form on the far side.
+     * @warning This is an ARRAY DIMENSION, not just a tuning knob — raising it grows
+     *          `PathTracker`'s per-instance RAM footprint by one run-buffer entry per unit.
+     *          A `static_assert` in `ConfigChecks.h` enforces a sane range
+     *          (`>= 2 && <= 32`); re-check available RAM before raising past the current
+     *          value on a memory-constrained target.
+     */
+    constexpr uint8_t MAX_CHAIN_HOPS = 8;
+
 }    // namespace Config
 
 #endif    // CONFIG_NAV_H
