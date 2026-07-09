@@ -51,7 +51,13 @@ from dataclasses import dataclass, field as dc_field
 from math import ceil, cos, hypot, radians, sin
 from typing import Any, Dict, List, Optional, Tuple
 
-from tools.path_planner.compiler import ACT_STOP_AT_LINE, ACT_TURN_REL
+from tools.path_planner.compiler import (
+    ACT_FOLLOW_DIST,
+    ACT_FOLLOW_INT,
+    ACT_FORWARD,
+    ACT_STOP_AT_LINE,
+    ACT_TURN_REL,
+)
 from tools.path_planner.graph_builder import build_graph
 from tools.path_planner.pipeline_config import TurnMode
 from tools.path_planner.planner import (
@@ -61,9 +67,17 @@ from tools.path_planner.planner import (
 )
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
+    ACT_BLIND_REVERSE,
+    ACT_FOLLOW_DIST_PASS,
+    ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
+    ACT_LINE_REVERSE,
+    ACT_PROJECTION_REVERSE,
+    ACT_PROJECTION_REVERSE_PASS,
     ACT_REANCHOR,
+    ACT_RETURN_FORWARD,
+    ACT_RETURN_STOP_AT_LINE,
     ACT_STOP_AT_LINE_REVERSE,
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
@@ -77,8 +91,14 @@ from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
     MANIP_NOMINAL_S,
     ROBOT_FRAME_CM,
-    SIM_DRIVE_CM_S,
-    SIM_TURN_DEG_S,
+)
+from tools.path_planner.ctps.profile import (
+    default_config,
+    resolve_drive_profile,
+    resolve_effective_speed,
+    resolve_turn_profile,
+    sample_drive,
+    sample_turn,
 )
 from tools.path_planner.ctps.trace_loader import Command, Trace
 
@@ -315,41 +335,206 @@ def build_field_block(field_data) -> Dict[str, Any]:
     }
 
 
-def _pose_delta_duration(
-    x_prev: float,
-    y_prev: float,
-    h_prev: float,
-    x_new: float,
-    y_new: float,
-    h_new: float,
-) -> float:
-    """Return the visual duration of a geometry step, from previous to new pose.
+#: A translation below this magnitude (cm) is treated as "no advance", so the
+#: geometry step is a pure in-place turn and is timed by the turn profile
+#: (:func:`tools.path_planner.ctps.profile.sample_turn`) rather than the drive
+#: profile. A genuine in-place turn leaves ``x``/``y`` byte-unchanged, so this
+#: only needs to swallow float noise, not a real (however short) advance — the
+#: sub-``TSHAPE_MIN_MOVE_CM`` flat-cruise regime already handles a real tiny
+#: drive inside :func:`resolve_drive_profile`.
+_TRANSLATION_EPS_CM: float = 1e-9
 
-    Robust pose-delta method (snapshot-only): a primitive is usually pure-turn
-    OR pure-move, so one term dominates, but summing the translation and
-    rotation durations handles a combined move cleanly too.
+#: Goto-hop primitive tags that render as a LINE-follow advance — cruise
+#: defaults to ``ConfigLine::CRUISE_SPEED`` (the follow-phase speed). Covers the
+#: forward follows, both pass-through variants, the REAR line/projection
+#: follows, and the line-backed return seek. (``ACT_LINE_OVERSHOOT`` /
+#: ``ACT_LINE_PASS`` are the roll-onto-node step handled with the distance-gated
+#: stop family below.)
+_LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
+    {
+        ACT_FOLLOW_INT,
+        ACT_FOLLOW_DIST,
+        ACT_FOLLOW_DIST_PASS,
+        ACT_LINE_REVERSE,
+        ACT_PROJECTION_REVERSE,
+        ACT_PROJECTION_REVERSE_PASS,
+        ACT_RETURN_STOP_AT_LINE,
+    }
+)
 
-    * Translation time: ``hypot(dx, dy) / SIM_DRIVE_CM_S``.
-    * Rotation time: ``|wrap_pm180(h_new - h_prev)| / SIM_TURN_DEG_S`` — the
-      heading delta wrapped into ``(-180, +180]`` so a turn never costs more
-      than the half-circle it actually traverses.
+#: Goto-hop primitive tags whose advance ramps cruise -> ``PWM_MIN_MAGNITUDE``
+#: then brakes to rest (the distance-gated stop / LINE_OVERSHOOT roll family).
+#: They cruise at the Drive preset (``SPEED_NORMAL``) with ``end == 0`` so the
+#: visible stop shape (ramp-down, floor-crawl, brake) renders (AC2).
+_STOP_GATED_TAGS: frozenset[str] = frozenset(
+    {
+        ACT_STOP_AT_LINE,
+        ACT_STOP_AT_LINE_REVERSE,
+        ACT_LINE_OVERSHOOT,
+        ACT_LINE_PASS,
+    }
+)
 
-    Both ``SIM_DRIVE_CM_S`` and ``SIM_TURN_DEG_S`` are strictly positive
-    constants (see :mod:`tools.path_planner.ctps.config`), so neither divisor
-    can be zero. The result is always non-negative, keeping the running clock
-    monotonic.
+#: Goto-hop primitive tags rendered as a blind / dead-reckon advance — cruise
+#: defaults to the Drive preset T-shape (``SPEED_NORMAL``).
+_BLIND_TAGS: frozenset[str] = frozenset(
+    {
+        ACT_FORWARD,
+        ACT_BLIND_REVERSE,
+        ACT_RETURN_FORWARD,
+        ACT_WALL_DEPART,
+    }
+)
 
-    :param x_prev: previous pose x (cm).
-    :param y_prev: previous pose y (cm).
-    :param h_prev: previous pose heading (deg).
-    :param x_new: new pose x (cm).
-    :param y_new: new pose y (cm).
-    :param h_new: new pose heading (deg).
-    :return: non-negative duration in seconds.
+#: Goto-hop primitive tags rendered as a pure in-place turn (no advance), timed
+#: by the turn profile. ``ACT_HEADING_RESET`` is a heading-only re-bind with no
+#: pose change (the sim snapshot heading equals the incoming), so it lands here
+#: for completeness; a zero-magnitude turn simply emits no interior sub-frames.
+_TURN_TAGS: frozenset[str] = frozenset({ACT_TURN_REL, ACT_HEADING_RESET})
+
+
+def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
+    """Resolve a goto-hop primitive's effective ``(cruise, start, end, profiled)``.
+
+    Goto-expanded hops carry no recorded speed, so each primitive KIND sources
+    its cruise from the parsed firmware Config (plan Decisions, the per-kind
+    cruise table):
+
+    * LINE follow (:data:`_LINE_FOLLOW_TAGS`) -> ``ConfigLine::CRUISE_SPEED``.
+    * distance-gated stop / LINE_OVERSHOOT roll (:data:`_STOP_GATED_TAGS`) ->
+      the Drive preset ``SPEED_NORMAL``, ramping cruise -> ``PWM_MIN_MAGNITUDE``
+      then braking (``end == 0``) so the stop is visible (AC2).
+    * ``wallStop`` (:data:`ACT_WALL_STOP`) -> a CONSTANT ``WALL_STOP_PUSH_PWM``
+      crawl (flat, no ramp), matching the firmware's constant-push seek.
+    * blind / dead-reckon (:data:`_BLIND_TAGS`) -> the Drive preset
+      ``SPEED_NORMAL`` T-shape.
+
+    ``start`` is the sign-by-direction ``TSHAPE_START_SPEED`` seed (the sign of
+    ``cruise`` carries the drive direction into the ramp); ``end`` is 0 (brake to
+    rest at the hop boundary — every goto hop terminates stationary in the sim's
+    step model). ``profiled`` is ``True`` for the ramped families and ``False``
+    for the constant ``wallStop`` crawl. A tag that reaches here unclassified
+    (never expected — the sim's advance tags are exhaustively covered) defaults
+    to the blind preset so timing stays finite rather than raising.
+
+    The reverse direction is NOT applied here: the geometry (and thus the drive
+    direction) already lives in the snapshot pose the caller passes as
+    ``end_pose``; the profile only supplies the timing curve, whose shape is
+    direction-agnostic (it depends on the |PWM| magnitudes). ``cruise`` is kept
+    POSITIVE so :func:`resolve_drive_profile`'s sign-by-cruise ``start`` seed is
+    forward — the visible ramp shape is identical either way.
+
+    :param tag: the primitive action tag (``primitive[0]``).
+    :return: ``(cruise, start, end, profiled)`` — signed PWM for the first
+        three (all non-negative here), bool for profiled.
     """
-    dist = hypot(x_new - x_prev, y_new - y_prev)
-    dh = abs(wrap_pm180(h_new - h_prev))
-    return dist / SIM_DRIVE_CM_S + dh / SIM_TURN_DEG_S
+    cfg = default_config()
+    start = int(cfg.start_speed)
+
+    if tag == ACT_WALL_STOP:
+        # Constant-push wall seek: a flat crawl at WALL_STOP_PUSH_PWM, no ramp.
+        return int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), False
+    if tag in _LINE_FOLLOW_TAGS:
+        return int(cfg.line_cruise), start, 0, True
+    # The stop-gated family and the blind/dead-reckon family BOTH cruise at the
+    # Drive preset SPEED_NORMAL and brake to rest (``end == 0``); they differ
+    # only in intent (a sensor/line gate vs. pure odometry), which the snapshot
+    # pose already captures, so the ramped-to-rest T-shape timing is identical.
+    # A tag outside every known set (never expected) also lands here — a finite
+    # blind-preset T-shape rather than raising.
+    if tag in _STOP_GATED_TAGS or tag in _BLIND_TAGS:
+        return int(cfg.speed_normal), start, 0, True
+    return int(cfg.speed_normal), start, 0, True
+
+
+def _densify_drive(
+    prev_kf: Dict[str, Any],
+    end_pose: Tuple[float, float, float],
+    cruise: int,
+    start: int,
+    end: int,
+    profiled: bool,
+) -> List[Dict[str, Any]]:
+    """Densify one drive/line geometry step into profile-timed sub-keyframes.
+
+    Builds a :class:`DriveProfile` for the straight-line advance from
+    ``prev_kf`` to ``end_pose`` (distance = the chord between the two poses),
+    then samples it into dense keyframes via
+    :func:`tools.path_planner.ctps.profile.sample_drive`, stitching the clock so
+    the FIRST sub-keyframe sits at ``prev_kf["t"]`` and equals ``prev_kf``'s
+    pose byte-for-byte. That duplicate first sub-keyframe is DROPPED (the caller
+    already holds it as the previous keyframe), so the returned list is the
+    REPLACEMENT for the single flat keyframe the pre-#130 builder appended:
+    ``N - 1`` interior samples plus the final sub-keyframe, whose pose is forced
+    byte-equal to ``end_pose`` (the sim snapshot) — the boundary-pose invariant
+    (TC7).
+
+    Timestamps are non-decreasing and start strictly after ``prev_kf["t"]``
+    (``sample_drive`` clocks each interior sample by the closed-form profile
+    duration). A zero-length advance (``end_pose`` equals ``prev_kf``'s pose)
+    yields an empty list (``sample_drive`` returns only the start keyframe, which
+    is the dropped duplicate) — no keyframe is appended and the clock does not
+    advance.
+
+    :param prev_kf: the already-appended previous keyframe
+        (``{"t", "x", "y", "h"}``); its pose is the profile's start pose and its
+        ``t`` is the arc-start clock.
+    :param end_pose: ``(x, y, heading_deg)`` at the end of the advance — the sim
+        snapshot pose, pinned byte-exact as the last sub-keyframe.
+    :param cruise: signed cruise PWM.
+    :param start: signed start PWM.
+    :param end: signed end PWM.
+    :param profiled: ``True`` for a ``.tShape()`` move, ``False`` for a flat one.
+    :return: the replacement sub-keyframes (may be empty for a zero-length step).
+    """
+    x0, y0, h0 = prev_kf["x"], prev_kf["y"], prev_kf["h"]
+    x1, y1, h1 = end_pose
+    dist = hypot(x1 - x0, y1 - y0)
+
+    profile = resolve_drive_profile(
+        dist,
+        cruise_pwm=cruise,
+        start_pwm=start,
+        end_pwm=end,
+        profiled=profiled,
+    )
+    sub = sample_drive(profile, (x0, y0, h0), (x1, y1, h1), prev_kf["t"])
+    # sub[0] duplicates prev_kf (byte-equal pose at the same t); drop it.
+    return sub[1:]
+
+
+def _densify_turn(
+    prev_kf: Dict[str, Any],
+    end_pose: Tuple[float, float, float],
+) -> List[Dict[str, Any]]:
+    """Densify one in-place turn geometry step into profile-timed sub-keyframes.
+
+    Times the pure rotation from ``prev_kf`` to ``end_pose`` with the turn
+    profile (:func:`resolve_turn_profile` + :func:`sample_turn`), which — with
+    the current Config (both turn stages snap to ``|PWM| = 50``) — renders a
+    CONSTANT-RATE arc (evenly-timed sub-keyframes) at the derived angular rate.
+    The swing angle is the shortest-arc heading delta ``prev -> end``.
+
+    As with :func:`_densify_drive`, the FIRST sub-keyframe (which
+    :func:`sample_turn` pins to ``prev_kf``'s pose at ``prev_kf["t"]``) is
+    DROPPED — the caller already holds it — so the returned list is the
+    replacement for the single flat turn keyframe: interior samples plus the
+    final sub-keyframe, whose pose is forced byte-equal to ``end_pose``. A
+    zero-magnitude turn yields an empty list (no visible rotation to animate).
+
+    :param prev_kf: the already-appended previous keyframe; its ``t`` is the
+        turn-start clock and its pose is the turn-start pose.
+    :param end_pose: ``(x, y, heading_deg)`` at the end of the turn — pinned
+        byte-exact as the last sub-keyframe.
+    :return: the replacement sub-keyframes (empty for a zero-magnitude turn).
+    """
+    x0, y0, h0 = prev_kf["x"], prev_kf["y"], prev_kf["h"]
+    x1, y1, h1 = end_pose
+    theta_deg = wrap_pm180(h1 - h0)
+
+    profile = resolve_turn_profile(theta_deg, is_pivot=False)
+    sub = sample_turn(profile, (x0, y0, h0), (x1, y1, h1), prev_kf["t"])
+    return sub[1:]
 
 
 def _build_pivot_arc(
@@ -377,12 +562,15 @@ def _build_pivot_arc(
 
     where ``Rot(a)*(dx, dy) = (dx*cos a - dy*sin a, dx*sin a + dy*cos a)``.
 
-    Each sub-keyframe advances the clock by the SAME pure-rotation slice
-    ``(|theta| / N) / SIM_TURN_DEG_S`` (a turning box, not a driving one), so the
-    whole arc occupies ``|theta| / SIM_TURN_DEG_S`` — the exact visual duration
-    the single in-place turn keyframe had today. Timestamps are pinned to
-    ``t0 + k*dt`` (never accumulated) so the running clock stays strictly
-    monotonic and the total is exact.
+    The arc GEOMETRY (``N`` sub-keyframe centres + headings) is unchanged from
+    the pre-#130 builder; only the TIMING now comes from the firmware turn
+    profile. The ``N`` samples are re-timed by
+    :func:`tools.path_planner.ctps.profile.sample_turn` (the ``arc_keyframes``
+    re-time path): the whole arc occupies ``resolve_turn_profile(theta).duration_s()``
+    at the snapped constant rate, its sub-keyframes pinned to ``t0 + k/N *
+    duration`` (uniform grid, never accumulated) so the running clock stays
+    exactly monotonic. With the current Config both turn stages snap to
+    ``|PWM| = 50`` -> a constant-rate arc (AC3).
 
     The first sample is ``k = 1`` (NOT ``k = 0``): the arc-start pose is the
     already-present previous keyframe at ``(x0, y0, h0)``, so these ``N`` samples
@@ -401,8 +589,8 @@ def _build_pivot_arc(
     :param radius_cm: pivot radius ``track_cm / 2`` (cm).
     :param wheel_sign: ``+1`` for a left-wheel pivot, ``-1`` for a right-wheel.
     :return: ``(arc_keyframes, (wx, wy), (cx_end, cy_end), t_end)`` — the ``N``
-        replacement keyframes, the planted-wheel world centre, the arc-end
-        chassis centre, and the running clock after the arc.
+        replacement keyframes (profile-timed), the planted-wheel world centre,
+        the arc-end chassis centre, and the running clock after the arc.
     """
     wheel_ang_rad = radians(h0_deg + wheel_sign * 90.0)
     wx = x0 + radius_cm * cos(wheel_ang_rad)
@@ -410,13 +598,14 @@ def _build_pivot_arc(
 
     abs_theta = abs(theta_deg)
     n = max(1, ceil(abs_theta / ARC_STEP_DEG))
-    dt = (abs_theta / n) / SIM_TURN_DEG_S
 
     # Offset of the chassis centre from the planted wheel, rotated by tau*theta.
     rx = x0 - wx
     ry = y0 - wy
 
-    arc: List[Dict[str, Any]] = []
+    # Build the arc GEOMETRY (poses only); timing is placeholder here and set by
+    # the turn profile below.
+    geom: List[Dict[str, Any]] = []
     cx_end, cy_end = x0, y0
     for k in range(1, n + 1):
         tau = k / n
@@ -426,10 +615,23 @@ def _build_pivot_arc(
         cx = wx + (rx * cos_a - ry * sin_a)
         cy = wy + (rx * sin_a + ry * cos_a)
         heading = (h0_deg + tau * theta_deg) % 360.0
-        arc.append({"t": t0 + k * dt, "x": cx, "y": cy, "h": heading})
+        geom.append({"t": t0, "x": cx, "y": cy, "h": heading})
         cx_end, cy_end = cx, cy
 
-    return arc, (wx, wy), (cx_end, cy_end), t0 + n * dt
+    # Re-time the arc geometry with the firmware turn profile: a pivot rotation.
+    # ``end_pose`` is the arc-end pose; the ``arc_keyframes`` path preserves each
+    # pose byte-for-byte and only assigns the profile-derived timestamps.
+    profile = resolve_turn_profile(theta_deg, is_pivot=True)
+    arc = sample_turn(
+        profile,
+        (x0, y0, h0_deg),
+        (cx_end, cy_end, geom[-1]["h"]),
+        t0,
+        arc_keyframes=geom,
+    )
+    t_end = arc[-1]["t"]
+
+    return arc, (wx, wy), (cx_end, cy_end), t_end
 
 
 def _drive_label(cmd: Command) -> str:
@@ -562,23 +764,63 @@ def build(trace: Trace, field_data) -> Track:
     track_cm: Optional[float] = None
 
     # -- clock-advancing closures (primary writers of ``t``) ----------------
+    # Every geometry step is DENSIFIED off the firmware motion profile
+    # (``ctps/profile.py``): the single flat keyframe the pre-#130 builder
+    # appended is replaced by a run of profile-timed sub-keyframes whose LAST
+    # sub-keyframe byte-equals the destination pose (the boundary-pose invariant,
+    # TC7). Each closure stitches the clock by pinning the new sub-keyframes'
+    # timestamps to the profile duration measured from ``keyframes[-1]["t"]``, so
+    # the running clock ``t`` becomes the last appended sub-keyframe's time.
+    #
     # The pivot-arc branch below is the one OTHER writer of ``t``: it assigns
-    # the ``_build_pivot_arc`` end time directly (same function scope, same
-    # monotonic clock — the arc replaces the in-place turn keyframe these
-    # closures would otherwise have timed).
+    # the ``_build_pivot_arc`` (profile-timed) end time directly (same function
+    # scope, same monotonic clock — the arc replaces the in-place turn keyframe
+    # these closures would otherwise have timed).
 
-    def append_geometry_keyframe(x_new: float, y_new: float, h_new: float) -> None:
-        """Advance the clock by the pose-delta duration; append a keyframe.
+    def _extend(sub_keyframes: List[Dict[str, Any]]) -> None:
+        """Append profile-timed sub-keyframes and advance ``t`` to the last one.
 
-        Uses the most recent keyframe as the previous pose so pure turns,
-        pure translations, and combined moves are all timed consistently.
+        ``sub_keyframes`` is a densification result (the first, duplicate
+        keyframe already dropped by :func:`_densify_drive` / :func:`_densify_turn`),
+        so it is the REPLACEMENT run for one geometry step. An empty run (a
+        zero-length advance / zero-magnitude turn) leaves the clock and keyframes
+        untouched.
         """
         nonlocal t
-        prev = keyframes[-1]
-        t += _pose_delta_duration(
-            prev["x"], prev["y"], prev["h"], x_new, y_new, h_new
+        if not sub_keyframes:
+            return
+        keyframes.extend(sub_keyframes)
+        t = keyframes[-1]["t"]
+
+    def append_drive_keyframes(
+        x_new: float,
+        y_new: float,
+        h_new: float,
+        speed: Tuple[int, int, int, bool],
+    ) -> None:
+        """Densify a drive/line advance to ``(x_new, y_new, h_new)`` and append it.
+
+        ``speed`` is the resolved ``(cruise, start, end, profiled)`` for this
+        step; the straight-line advance from the last keyframe is profiled and
+        sampled dense-near-ramps. The final sub-keyframe is pinned to the
+        destination pose byte-exact.
+        """
+        cruise, start, end, profiled = speed
+        _extend(
+            _densify_drive(
+                keyframes[-1], (x_new, y_new, h_new), cruise, start, end, profiled
+            )
         )
-        keyframes.append({"t": t, "x": x_new, "y": y_new, "h": h_new})
+
+    def append_turn_keyframes(x_new: float, y_new: float, h_new: float) -> None:
+        """Densify an in-place turn to ``(x_new, y_new, h_new)`` and append it.
+
+        Times the pure rotation with the turn profile (constant-rate at the
+        snapped floor for the default Config). The final sub-keyframe is pinned
+        to the destination pose byte-exact. A zero-magnitude turn appends
+        nothing.
+        """
+        _extend(_densify_turn(keyframes[-1], (x_new, y_new, h_new)))
 
     def append_dwell_keyframe(dwell_s: float) -> None:
         """Advance the clock by ``dwell_s``; append a same-pose keyframe.
@@ -592,20 +834,25 @@ def build(trace: Trace, field_data) -> Track:
         t += max(0.0, dwell_s)
         keyframes.append({"t": t, "x": prev["x"], "y": prev["y"], "h": prev["h"]})
 
-    def append_advance_keyframe(distance_cm: float, reverse: bool) -> None:
-        """Translate the chassis along its heading, then append a keyframe.
+    def append_advance_keyframe(
+        distance_cm: float, reverse: bool, speed: Tuple[int, int, int, bool]
+    ) -> None:
+        """Translate the chassis along its heading, then densify + append it.
 
         Advances the shared chassis by ``distance_cm`` — backward
         (``chassis.reverse``) when ``reverse`` is truthy, forward
-        (``chassis.forward``) otherwise — then appends the resulting pose. Kept
-        as one helper so the reverse ternary is written once and reused by both
-        the plain and the GYRO two-phase drive paths.
+        (``chassis.forward``) otherwise — then densifies the advance off
+        ``speed`` (the recorded move's resolved ``(cruise, start, end,
+        profiled)``). Kept as one helper so the reverse ternary is written once
+        and reused by both the plain and the GYRO two-phase drive paths.
         """
         if reverse:
             chassis.reverse(distance_cm)
         else:
             chassis.forward(distance_cm)
-        append_geometry_keyframe(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
+        append_drive_keyframes(
+            chassis.x_cm, chassis.y_cm, chassis.heading_deg, speed
+        )
 
     # Open DRIFT span, or None when the chassis is on-plan. A raw non-goto
     # translation opens it (the robot dead-reckons off its logical node with
@@ -734,7 +981,30 @@ def build(trace: Trace, field_data) -> Track:
                             )
 
                     if not arced:
-                        append_geometry_keyframe(snap.x_cm, snap.y_cm, snap.heading_deg)
+                        # Densify this hop's geometry step off the firmware
+                        # motion profile. Classify by the ACTUAL translation, not
+                        # the tag: a pure in-place turn (``ACT_TURN_REL`` /
+                        # heading-only re-anchor squares) leaves x/y unchanged and
+                        # is timed by the turn profile; any advance (LINE / BLIND /
+                        # STOP_AT_LINE / wall depart, and the rare combined move)
+                        # is timed by the drive profile with the per-primitive-kind
+                        # cruise. The LAST sub-keyframe is pinned to the snapshot
+                        # pose byte-exact (boundary-pose invariant).
+                        prev_kf = keyframes[-1]
+                        step_dist = hypot(
+                            snap.x_cm - prev_kf["x"], snap.y_cm - prev_kf["y"]
+                        )
+                        if step_dist <= _TRANSLATION_EPS_CM:
+                            append_turn_keyframes(
+                                snap.x_cm, snap.y_cm, snap.heading_deg
+                            )
+                        else:
+                            append_drive_keyframes(
+                                snap.x_cm,
+                                snap.y_cm,
+                                snap.heading_deg,
+                                _primitive_drive_speed(tag),
+                            )
                         if (
                             pending_pivot_land is not None
                             and node_now == pending_pivot_land[0]
@@ -838,34 +1108,43 @@ def build(trace: Trace, field_data) -> Track:
                     # emits ``cm`` for every forward-geometry method, to defend
                     # partial/legacy traces.
                     pass
-                elif _honors_gyro_heading(cmd):
-                    # GYRO + explicit heading → two-phase render: first rotate
-                    # in place to the held heading (a keyframe at the unchanged
-                    # position), THEN advance / back up along it (the
-                    # translation keyframe). Heading is honoured ONLY under
-                    # ``mode == "gyro"`` — firmware consults setHeading only in
-                    # GYRO, so a heading recorded without GYRO must render along
-                    # the current facing (the plain branch below).
-                    chassis.turn_to_heading(float(cmd.heading))
-                    append_geometry_keyframe(
-                        chassis.x_cm, chassis.y_cm, chassis.heading_deg
-                    )
-                    append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
-                    translated = True
                 else:
-                    # Plain advance along the CURRENT facing (non-gyro, or no
-                    # heading, or lineFollowDist). Byte-identical to the pre-T7
-                    # forward render for the non-reverse case.
-                    append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
-                    translated = True
+                    # Raw (recorded) move: resolve the effective (cruise, start,
+                    # end, profiled) from the recorded builder knobs + Config
+                    # defaults (sign-by-cruise start seed, no-brake -> endSpeed =
+                    # cruise), then densify the advance off that profile.
+                    speed = resolve_effective_speed(cmd, method)
+                    if _honors_gyro_heading(cmd):
+                        # GYRO + explicit heading → two-phase render: first
+                        # rotate in place to the held heading (a turn densified
+                        # by the turn profile), THEN advance / back up along it.
+                        # Heading is honoured ONLY under ``mode == "gyro"`` —
+                        # firmware consults setHeading only in GYRO, so a heading
+                        # recorded without GYRO renders along the current facing
+                        # (the plain branch below).
+                        chassis.turn_to_heading(float(cmd.heading))
+                        append_turn_keyframes(
+                            chassis.x_cm, chassis.y_cm, chassis.heading_deg
+                        )
+                        append_advance_keyframe(
+                            float(cmd.cm), bool(cmd.reverse), speed
+                        )
+                        translated = True
+                    else:
+                        # Plain advance along the CURRENT facing (non-gyro, or no
+                        # heading, or lineFollowDist).
+                        append_advance_keyframe(
+                            float(cmd.cm), bool(cmd.reverse), speed
+                        )
+                        translated = True
             elif method == "turnDeg":
                 chassis.turn_relative(float(cmd.deg))
-                append_geometry_keyframe(
+                append_turn_keyframes(
                     chassis.x_cm, chassis.y_cm, chassis.heading_deg
                 )
             elif method == "turnToYaw":
                 chassis.turn_to_heading(float(cmd.deg))
-                append_geometry_keyframe(
+                append_turn_keyframes(
                     chassis.x_cm, chassis.y_cm, chassis.heading_deg
                 )
             # else: stop / unknown -> no geometry change.

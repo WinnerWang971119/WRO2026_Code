@@ -14,25 +14,13 @@ here and mirrored as JS constants in ``assets/cargo.js``.
 # ---------------------------------------------------------------------------
 # Playback speed constants
 # ---------------------------------------------------------------------------
-
-#: Simulated drive speed used to compute how long a drive/line-follow
-#: primitive occupies on the playback timeline (cm per second).
-#:
-#: .. deprecated::
-#:    Superseded by the firmware-derived motion profile (``ctps/profile.py``,
-#:    issue #130). ``track_builder.py`` is still its last consumer through the
-#:    Wave-1/2 flat-timing path; T10 drops that consumer and retires this
-#:    constant. Do not add new consumers.
-SIM_DRIVE_CM_S: float = 30.0
-
-#: Simulated turn speed used to compute turn-primitive display durations
-#: (degrees per second).
-#:
-#: .. deprecated::
-#:    Superseded by the firmware-derived motion profile (``ctps/profile.py``,
-#:    issue #130); see :data:`SIM_DRIVE_CM_S`. T10 retires this constant once
-#:    ``track_builder.py`` stops importing it.
-SIM_TURN_DEG_S: float = 180.0
+#
+# The former ``SIM_DRIVE_CM_S`` / ``SIM_TURN_DEG_S`` flat-timing constants were
+# retired in issue #130 (T10): drive/turn primitive display durations are now
+# derived from the firmware T-shape motion profile (``ctps/profile.py``),
+# scaled onto the timeline by the single visual constant
+# :data:`SCALE_CM_S_PER_PWM` below. There is no longer a constant-velocity
+# playback speed.
 
 #: Narration dwell time applied to any ``manip`` command in the playback
 #: (seconds).  The Manipulator stub has no distance or angle telemetry so
@@ -59,7 +47,8 @@ MANIP_NOMINAL_S: float = 0.5
 #: constants changes playback duration with no CTPS-side edit needed.
 #:
 #: Chosen so a move at the default cruise preset (``ConfigDrive::SPEED_NORMAL
-#: = 85`` PWM) renders at the historical ``SIM_DRIVE_CM_S = 30`` cm/s feel:
+#: = 85`` PWM) renders at the historical ~30 cm/s playback feel (the flat
+#: ``SIM_DRIVE_CM_S`` this replaced):
 #:
 #:   30 cm/s at cruise PWM 85 -> 30 / 85 = 0.3529411...
 #:

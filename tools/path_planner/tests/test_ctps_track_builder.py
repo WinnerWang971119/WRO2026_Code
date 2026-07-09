@@ -86,7 +86,7 @@ from pathlib import Path
 import pytest
 
 from tools.path_planner.compiler import ACT_TURN_REL
-from tools.path_planner.ctps.config import ARC_STEP_DEG, DRIFT_THRESHOLD_CM, SIM_TURN_DEG_S
+from tools.path_planner.ctps.config import ARC_STEP_DEG, DRIFT_THRESHOLD_CM
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
@@ -103,6 +103,63 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 #: Position tolerance for keyframe-vs-reference pose equality (cm / deg).
 _POSE_TOL = 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Densification helpers (issue #130, T10)
+#
+# Since T10 the track builder DENSIFIES every geometry step off the firmware
+# motion profile: the single flat keyframe the pre-#130 builder appended per
+# primitive is replaced by a run of profile-timed sub-keyframes whose LAST
+# sub-keyframe byte-equals the destination (snapshot) pose. So a test can no
+# longer assert an exact keyframe COUNT or index a "the single advance"
+# keyframe. The invariant that survives is: every destination pose appears
+# byte-exact among the keyframes IN ORDER (the boundary-pose invariant), and
+# the clock is monotone non-decreasing. These helpers express that contract.
+# ---------------------------------------------------------------------------
+
+
+def _pose_matches(kf, pose, tol=_POSE_TOL) -> bool:
+    """Whether a keyframe's ``(x, y, h)`` matches ``pose`` within ``tol``."""
+    px, py, ph = pose
+    return (
+        abs(kf["x"] - px) <= tol
+        and abs(kf["y"] - py) <= tol
+        and abs(kf["h"] - ph) <= tol
+    )
+
+
+def _boundary_indices(keyframes, ref_poses, tol=_POSE_TOL):
+    """Return the keyframe indices at which ``ref_poses`` appear, in order.
+
+    Walks ``keyframes`` once and, for each pose in ``ref_poses`` (the ordered
+    list of primitive-boundary / snapshot poses), finds the NEXT keyframe that
+    matches it within ``tol``. Asserts every ref pose is found (so the
+    boundary-pose invariant holds: each densified step ends exactly on its
+    snapshot pose) and that the matches are strictly increasing (in order).
+
+    :return: the list of matched keyframe indices, one per ref pose.
+    """
+    indices = []
+    cursor = 0
+    for pose in ref_poses:
+        found = None
+        for i in range(cursor, len(keyframes)):
+            if _pose_matches(keyframes[i], pose, tol):
+                found = i
+                break
+        assert found is not None, f"boundary pose {pose} not found in keyframes"
+        indices.append(found)
+        cursor = found + 1
+    return indices
+
+
+def _assert_monotone(times, strict=False):
+    """Assert a timestamp sequence is (strictly) non-decreasing."""
+    if strict:
+        assert all(b > a for a, b in zip(times, times[1:]))
+    else:
+        assert all(b >= a for a, b in zip(times, times[1:]))
 
 
 def _build_quiet(trace, field_data):
@@ -153,12 +210,15 @@ def _reference_snapshots(field_data, goto_targets):
 
 
 def test_tc1_two_goto_keyframes_match_reference_run():
-    """TC1: keyframe poses equal an independent step_through run; clock monotonic.
+    """TC1: every step_through boundary pose appears in order; clock monotonic.
 
-    Key assertion: ``track.keyframes[1:]`` (every keyframe past the seeded
-    start pose) equals, pose-for-pose, the snapshots of an independently
-    constructed ``step_through`` reference replay of the same two goals.
-    Also asserts the running clock is monotonic non-decreasing and
+    Post-#130 the builder densifies each hop, so keyframes no longer map 1:1
+    onto ``step_through`` yields. The invariant that survives is the
+    boundary-pose one: every snapshot of an independently constructed
+    ``step_through`` reference replay appears BYTE-EXACT among the keyframes, in
+    order (the last sub-keyframe of each densified step). The densified track
+    therefore has MORE keyframes than the reference has snapshots. Also asserts
+    the running clock is monotonic non-decreasing and
     ``duration_s == keyframes[-1]["t"]``.
     """
     trace = load(_FIXTURES / "ctps_two_goto.json")
@@ -170,14 +230,10 @@ def test_tc1_two_goto_keyframes_match_reference_run():
 
     reference = _reference_snapshots(toy_field_data, goto_targets)
 
-    # Keyframe[0] is the seeded start pose at t = 0; every subsequent keyframe
-    # is one step_through yield, so keyframes[1:] maps 1:1 onto the reference.
-    geometry_keyframes = track.keyframes[1:]
-    assert len(geometry_keyframes) == len(reference)
-    for kf, (rx, ry, rh) in zip(geometry_keyframes, reference):
-        assert kf["x"] == pytest.approx(rx, abs=_POSE_TOL)
-        assert kf["y"] == pytest.approx(ry, abs=_POSE_TOL)
-        assert kf["h"] == pytest.approx(rh, abs=_POSE_TOL)
+    # Densification: strictly more keyframes than reference snapshots, and every
+    # snapshot pose appears in order as a densified step's final sub-keyframe.
+    assert len(track.keyframes) > len(reference) + 1
+    _boundary_indices(track.keyframes, reference)
 
     # Seed keyframe sits at the start pose at t = 0.
     sx, sy = toy_field_data.NODES[toy_field_data.START_NODE]
@@ -186,8 +242,7 @@ def test_tc1_two_goto_keyframes_match_reference_run():
     assert track.keyframes[0]["y"] == pytest.approx(sy, abs=_POSE_TOL)
 
     # Monotonic non-decreasing clock.
-    times = [kf["t"] for kf in track.keyframes]
-    assert all(b >= a for a, b in zip(times, times[1:]))
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
     # duration_s is the final keyframe timestamp.
     assert track.duration_s == pytest.approx(track.keyframes[-1]["t"], abs=_POSE_TOL)
@@ -396,9 +451,12 @@ def test_tc5_stop_at_line_advances_chassis_by_expected_cm():
     trace = load(_FIXTURES / "ctps_stop_at_line.json")
     track = _build_quiet(trace, toy_field_data)
 
-    # Seed pose + exactly one advanced geometry keyframe.
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes[0], track.keyframes[1]
+    # Densified: the single advance is now a run of profile-timed sub-keyframes
+    # (seed + N), so assert the FINAL keyframe lands 12 cm from the seed rather
+    # than a fixed count. Every interior sub-keyframe lies on the seed->final
+    # segment, so the straight-line advance still totals the nominal cm.
+    assert len(track.keyframes) >= 2
+    seed, moved = track.keyframes[0], track.keyframes[-1]
 
     advance = hypot(moved["x"] - seed["x"], moved["y"] - seed["y"])
     assert advance == pytest.approx(12.0, abs=_POSE_TOL)
@@ -471,19 +529,21 @@ def _planar_distance(prev, cur):
 # ---------------------------------------------------------------------------
 
 
-def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
-    """NC9 (AC3): a single GYRO+heading ``driveDist`` yields exactly 3 keyframes.
+def test_nc9_gyro_heading_drive_dist_renders_two_phase_rotate_then_advance():
+    """NC9 (AC3): a single GYRO+heading ``driveDist`` renders rotate then advance.
 
     ``driveDist(35).setMode(GYRO).setHeading(90)`` renders two-phase: seed ->
-    rotate-in-place to the held heading (a keyframe at the UNCHANGED position)
-    -> advance along that heading (the translation keyframe). A single-command
-    trace therefore produces EXACTLY three keyframes — the rotation keyframe is
-    what distinguishes it from the two-keyframe plain move (NC10).
+    rotate-in-place to the held heading (a marker keyframe at the UNCHANGED
+    position) -> a DENSIFIED advance along that heading. Post-#130 the advance
+    is a run of profile-timed sub-keyframes, so the count is no longer exactly
+    three — but the two-phase structure survives: the second keyframe is the
+    rotation marker at the seed position facing the held heading, and the FINAL
+    keyframe is the 35 cm advance.
 
     The toy chassis seeds facing ``START_HEADING_DEG == 90`` (node ``S``), so
-    the turn-to-90 is a no-op rotation here; it still emits its own keyframe, so
-    the count is three. The advance runs along heading 90 (``0deg = +x``,
-    ``90deg = +y``), displacing ``+y`` by 35 and ending facing 90.
+    the turn-to-90 is a no-op rotation here; it still emits its marker keyframe.
+    The advance runs along heading 90 (``0deg = +x``, ``90deg = +y``),
+    displacing ``+y`` by 35 and ending facing 90.
     """
     track = _build_quiet(
         _inline_trace(
@@ -499,19 +559,19 @@ def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
         toy_field_data,
     )
 
-    # EXACTLY three keyframes: seed, rotation, translation.
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    rotation = track.keyframes[1]
+    translation = track.keyframes[-1]
 
     # Seed sits at the start pose at t = 0.
     assert seed["t"] == 0.0
 
-    # Rotation phase: UNCHANGED position, heading turned to the held 90.
+    # Rotation-phase marker: UNCHANGED position, heading turned to the held 90.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
     assert rotation["y"] == pytest.approx(seed["y"], abs=_POSE_TOL)
     assert rotation["h"] == pytest.approx(90.0, abs=_POSE_TOL)
 
-    # Translation phase: displaced along +y (heading 90), still facing 90.
+    # Translation phase (final keyframe): displaced along +y by 35, facing 90.
     assert translation["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert translation["x"] == pytest.approx(rotation["x"], abs=_POSE_TOL)
     assert translation["y"] - rotation["y"] == pytest.approx(35.0, abs=_POSE_TOL)
@@ -520,8 +580,7 @@ def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
     )
 
     # Timestamps monotonic non-decreasing.
-    times = [kf["t"] for kf in track.keyframes]
-    assert all(b >= a for a, b in zip(times, times[1:]))
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
 
 def test_nc9_gyro_fixture_adds_one_rotation_keyframe_per_gyro_move():
@@ -597,12 +656,12 @@ def test_nc10_non_gyro_heading_is_ignored(extra, heading):
         toy_field_data,
     )
 
-    # Two keyframes only: seed + a single advance (NOT the gyro two-phase).
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes
-
-    # No rotation phase: heading is unchanged from the seed facing.
-    assert moved["h"] == pytest.approx(seed["h"], abs=_POSE_TOL)
+    # No rotation phase: every keyframe stays on the seed facing (a gyro
+    # two-phase would insert a rotation marker turning to the held heading).
+    seed, moved = track.keyframes[0], track.keyframes[-1]
+    assert all(
+        kf["h"] == pytest.approx(seed["h"], abs=_POSE_TOL) for kf in track.keyframes
+    )
 
     # Advance runs along the CURRENT facing (seed heading) by 35 cm, regardless
     # of the recorded (ignored) heading value.
@@ -610,8 +669,9 @@ def test_nc10_non_gyro_heading_is_ignored(extra, heading):
         35.0, abs=_POSE_TOL
     )
 
-    # Decisive firmware-parity check: identical geometry to a plain move with no
-    # heading at all -> the recorded heading changed nothing.
+    # Decisive firmware-parity check: identical densified geometry to a plain
+    # move with no heading at all -> the recorded heading changed nothing (same
+    # distance + same resolved speed -> byte-identical densification).
     plain = _build_quiet(
         _inline_trace(
             {"seq": 0, "op": "drive", "method": "driveDist", "cm": 35.0}
@@ -646,9 +706,9 @@ def test_nc11_line_follow_dist_renders_forward_advance():
         toy_field_data,
     )
 
-    # Seed + exactly one forward geometry keyframe.
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes
+    # Seed + a densified forward advance (final keyframe is the 90 cm landing).
+    assert len(track.keyframes) >= 2
+    seed, moved = track.keyframes[0], track.keyframes[-1]
 
     assert moved["h"] == pytest.approx(seed["h"], abs=_POSE_TOL)  # no turn
     assert _heading_projection(seed, moved, seed["h"]) == pytest.approx(
@@ -671,10 +731,14 @@ def test_nc11_line_follow_fixture_forward_leg_advances():
         load(_FIXTURES / "ctps_line_follow.json"), toy_field_data
     )
 
-    seed, forward_leg = track.keyframes[0], track.keyframes[1]
-    assert _heading_projection(seed, forward_leg, seed["h"]) == pytest.approx(
-        60.0, abs=_POSE_TOL
+    # Densified: the forward leg is a run of sub-keyframes; its landing is the
+    # peak forward projection (the reverse follow then walks it back), which
+    # equals the recorded 60 cm.
+    seed = track.keyframes[0]
+    peak = max(
+        _heading_projection(seed, kf, seed["h"]) for kf in track.keyframes[1:]
     )
+    assert peak == pytest.approx(60.0, abs=_POSE_TOL)
 
     drive_events = [ev for ev in track.events if ev["type"] == "drive"]
     assert len(drive_events) == 2
@@ -694,25 +758,37 @@ def test_nc12_reverse_moves_backward_forward_moves_forward():
     projection onto the facing — while the trailing ``driveDist`` displaces it
     FORWARD, for contrast. Magnitudes equal the recorded ``cm``.
     """
+    from math import cos, radians, sin
+
     track = _build_quiet(load(_FIXTURES / "ctps_reverse.json"), toy_field_data)
 
-    # Seed + one keyframe per command (no gyro two-phase in this fixture).
-    assert len(track.keyframes) == 5
     kfs = track.keyframes
-    heading = kfs[0]["h"]
+    seed = kfs[0]
+    heading = seed["h"]
 
     # Heading never changes — reverse translates, it never rotates.
     assert all(kf["h"] == pytest.approx(heading, abs=_POSE_TOL) for kf in kfs)
 
-    # Reversed lineFollowDist(40) / stopAtLine(15) / wallStop(10): backward.
-    for index, cm in enumerate((40.0, 15.0, 10.0), start=1):
-        projection = _heading_projection(kfs[index - 1], kfs[index], heading)
-        assert projection == pytest.approx(-cm, abs=_POSE_TOL)
+    # Each command's LANDING pose (densified: the last sub-keyframe of that
+    # move) sits at the cumulative signed projection from the seed. Signed
+    # per-move deltas: -40, -15, -10 (reversed), then +20 (forward). Build the
+    # ordered boundary poses off the seed and confirm each appears byte-exact.
+    ux, uy = cos(radians(heading)), sin(radians(heading))
+    cumulative = 0.0
+    boundary_poses = []
+    for delta in (-40.0, -15.0, -10.0, 20.0):
+        cumulative += delta
+        boundary_poses.append(
+            (seed["x"] + cumulative * ux, seed["y"] + cumulative * uy, heading)
+        )
+    landings = _boundary_indices(kfs, boundary_poses)
 
-    # Trailing plain driveDist(20): forward (positive projection), for contrast.
-    assert _heading_projection(kfs[3], kfs[4], heading) == pytest.approx(
-        20.0, abs=_POSE_TOL
-    )
+    # Per-move signed projection deltas between consecutive landings.
+    prev_idx = 0
+    for landing_idx, delta in zip(landings, (-40.0, -15.0, -10.0, 20.0)):
+        projection = _heading_projection(kfs[prev_idx], kfs[landing_idx], heading)
+        assert projection == pytest.approx(delta, abs=_POSE_TOL)
+        prev_idx = landing_idx
 
     # The three reversed drive events carry the "reverse" token; the last does not.
     drive_labels = [ev["label"] for ev in track.events if ev["type"] == "drive"]
@@ -751,8 +827,17 @@ def test_nc13_gyro_reverse_stop_at_line_rotates_then_backs_up():
         toy_field_data,
     )
 
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    translation = track.keyframes[-1]
+    # Rotation-end: the densified rotate-in-place keeps the seed position while
+    # sweeping heading to 45; the last keyframe still AT the seed position is
+    # the rotation endpoint (the advance then leaves that position).
+    rotation = seed
+    for kf in track.keyframes:
+        if _planar_distance(seed, kf) <= _POSE_TOL:
+            rotation = kf
+        else:
+            break
 
     # Rotation phase: UNCHANGED position, heading turned to the held 45.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
@@ -793,8 +878,15 @@ def test_nc13_gyro_heading_honoured_on_all_forward_geometry_methods(method):
         toy_field_data,
     )
 
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    translation = track.keyframes[-1]
+    # Rotation-end: last densified keyframe still at the seed position.
+    rotation = seed
+    for kf in track.keyframes:
+        if _planar_distance(seed, kf) <= _POSE_TOL:
+            rotation = kf
+        else:
+            break
 
     # Rotation to the held heading at the unchanged position.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
@@ -1099,24 +1191,34 @@ def test_tc1_dead_reckon_pivot_lands_on_node_no_drift_warn():
 def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     """TC2 (AC1, AC4): the pivot's arc sub-keyframes trace the rigid rotation.
 
-    ``N = ceil(90 / ARC_STEP_DEG)`` sub-keyframes REPLACE the single in-place
-    turn keyframe (``N - 1`` intermediate keyframes plus the arc-end); each
-    sample is within tolerance of the documented Contracts formula (rotation
-    about the planted wheel); heading rotates through the full 90 deg; the
-    whole arc spans exactly ``90 / SIM_TURN_DEG_S`` seconds, split evenly
-    across the N steps; the running clock stays strictly monotonic across the
-    replacement span.
+    The pivot arc's GEOMETRY is unchanged from pre-#130 (``N = ceil(90 /
+    ARC_STEP_DEG)`` sub-keyframes tracing the rigid rotation about the planted
+    wheel); only the TIMING now comes from the firmware turn profile. The
+    approach and departure legs are ALSO densified now, so the arc is no longer
+    at a fixed keyframe index — it is located via the emitted ``pivots``
+    segment's ``[t0, t1]`` bracket. Each arc sample matches the documented
+    Contracts formula; heading rotates through the full 90 deg; the arc spans
+    exactly ``resolve_turn_profile(theta, is_pivot=True).duration_s()`` seconds,
+    split EVENLY across the N steps (constant-rate at the snapped floor, AC3);
+    the running clock stays strictly monotonic.
     """
+    from tools.path_planner.ctps.profile import resolve_turn_profile
+
     field, track = _dead_reckon_pivot_track()
 
     n = ceil(90.0 / ARC_STEP_DEG)
-    # seed + the trimmed U->V approach + N arc keyframes + the trimmed V->W
-    # departure — the arc REPLACES the single in-place turn keyframe.
-    assert len(track.keyframes) == n + 3
+    segment = track.pivots[0]
 
-    approach_end = track.keyframes[1]
-    arc = track.keyframes[2 : 2 + n]
+    # Locate the arc via the pivots-segment time bracket: the arc keyframes are
+    # the N with t0 < t <= t1; the approach-end (arc start) is the keyframe
+    # immediately before the first arc keyframe.
+    arc_start_idx = next(
+        i for i, kf in enumerate(track.keyframes) if kf["t"] > segment["t0"]
+    )
+    approach_end = track.keyframes[arc_start_idx - 1]
+    arc = track.keyframes[arc_start_idx : arc_start_idx + n]
     assert len(arc) == n
+    assert approach_end["t"] == pytest.approx(segment["t0"], abs=1e-9)
 
     radius_cm = parse_track_cm_from_config() / 2.0
     _wheel_center, expected_centers = _expected_arc_centers(
@@ -1136,21 +1238,22 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     assert approach_end["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert arc[-1]["h"] == pytest.approx(0.0, abs=_POSE_TOL)
 
-    # Even timing across the N replacement sub-keyframes.
+    # Even timing across the N replacement sub-keyframes (the sample_turn arc
+    # path pins each to t0 + k/N * duration — a uniform grid).
     times = [approach_end["t"]] + [kf["t"] for kf in arc]
     steps = [b - a for a, b in zip(times, times[1:])]
     for step in steps:
         assert step == pytest.approx(steps[0], abs=1e-9)
 
-    # Total arc duration: exactly the in-place turn's old visual duration.
-    assert arc[-1]["t"] - approach_end["t"] == pytest.approx(
-        90.0 / SIM_TURN_DEG_S, abs=1e-9
-    )
+    # Total arc duration: the firmware pivot-turn profile duration.
+    expected_dur = resolve_turn_profile(-90.0, is_pivot=True).duration_s()
+    assert arc[-1]["t"] - approach_end["t"] == pytest.approx(expected_dur, abs=1e-9)
+    assert segment["t1"] == pytest.approx(arc[-1]["t"], abs=1e-9)
 
-    # The running clock stays strictly monotonic across the whole keyframe
-    # list (the arc replacement plus the trailing departure keyframe).
-    all_times = [kf["t"] for kf in track.keyframes]
-    assert all(b > a for a, b in zip(all_times, all_times[1:]))
+    # The running clock stays monotonic non-decreasing across the whole list
+    # (the terminal brake keyframe of a densified leg may equal its
+    # predecessor's t, so this is non-strict).
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
 
 # ---------------------------------------------------------------------------
@@ -1174,7 +1277,11 @@ def test_tc3_pivots_segment_shape_wheel_right_for_negative_90deg():
     assert segment["theta_deg"] == pytest.approx(-90.0, abs=1e-9)
     assert segment["t0"] < segment["t1"]
 
-    approach_end = track.keyframes[1]
+    # The approach-end (arc start) is the keyframe at the segment's t0; the
+    # approach leg densifies now, so it is no longer keyframes[1].
+    approach_end = next(
+        kf for kf in track.keyframes if kf["t"] == pytest.approx(segment["t0"], abs=1e-9)
+    )
     radius_cm = parse_track_cm_from_config() / 2.0
     (wx, wy), _centers = _expected_arc_centers(
         approach_end["x"],
@@ -1270,12 +1377,9 @@ def test_tc6_pivot_free_goto_has_no_pivots_key():
     goto_targets = [cmd.target for cmd in trace.commands if cmd.op == "goto"]
     reference = _reference_snapshots(toy_field_data, goto_targets)
 
-    geometry_keyframes = track.keyframes[1:]
-    assert len(geometry_keyframes) == len(reference)
-    for kf, (rx, ry, rh) in zip(geometry_keyframes, reference):
-        assert kf["x"] == pytest.approx(rx, abs=_POSE_TOL)
-        assert kf["y"] == pytest.approx(ry, abs=_POSE_TOL)
-        assert kf["h"] == pytest.approx(rh, abs=_POSE_TOL)
+    # Densified: every step_through boundary pose appears in order (the toy field
+    # is pivot-free, so this is a plain LINE/BLIND densification with no arc).
+    _boundary_indices(track.keyframes, reference)
 
     assert track.pivots == []
     assert "pivots" not in track.to_dict()
