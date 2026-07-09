@@ -1780,3 +1780,42 @@ target_include_directories(test_path_tracker_heading_reset_parity PRIVATE
 add_fixture_routes_force_include(test_path_tracker_heading_reset_parity)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_heading_reset_parity)
 add_test(NAME path_tracker_heading_reset_parity COMMAND test_path_tracker_heading_reset_parity)
+
+# =========================================================================================
+# Test executable #24 — `tshape_profile_dump` + freshness gate (issue #130, T3).
+#
+# Host golden-vector dump for the header-only, Arduino-free `TShapeProfilePolicy.h` (T2).
+# Includes ONLY the policy header plus the REAL `Config::TSHAPE_*` / `PWM_MIN_MAGNITUDE`
+# constants via `config/ConfigGlobal.h` + `config/ConfigDrive.h` directly — both are pure
+# `<stdint.h>`-only `constexpr` headers with ZERO Arduino/MatrixMiniR4 surface, so they are
+# host-includable as-is with no mock indirection (unlike the `Config.h` umbrella, which pulls
+# in `<Arduino.h>`). No SUT `.cpp`, no `MOCK_SOURCES`, no force-includes needed — the dump TU
+# is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just
+# prints JSON to stdout. The actual ctest is `tshape_profile_freshness` below, which drives
+# `tshape_profile_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file
+# and BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/tshape_profile_goldens.json` (the `routes.h`
+# regenerate-then-diff freshness-gate pattern, ctest-native so it also runs locally, not just
+# in a dedicated CI job). A firmware retune that changes `Config::TSHAPE_*` — or any change to
+# the policy's arithmetic — changes this binary's stdout and fails the ctest until the fixture
+# is regenerated and recommitted. Consumed by the Python parity test (T6 / TC1).
+# =========================================================================================
+set(TSHAPE_DUMP_DIR ${TEST_DIR}/tshape_profile_dump)
+
+add_executable(tshape_profile_dump
+    ${TSHAPE_DUMP_DIR}/tshape_profile_dump.cpp
+)
+target_include_directories(tshape_profile_dump PRIVATE ${SKETCH_DIR})
+
+set(TSHAPE_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/tshape_profile_goldens.json)
+
+add_test(NAME tshape_profile_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:tshape_profile_dump>
+            -DGOLDEN_FILE=${TSHAPE_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/tshape_profile_goldens.fresh.json
+            -P ${TSHAPE_DUMP_DIR}/tshape_profile_freshness.cmake
+)
