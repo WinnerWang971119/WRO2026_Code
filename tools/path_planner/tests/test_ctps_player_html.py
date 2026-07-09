@@ -1234,3 +1234,43 @@ def test_tc_cargo_struct_panel_chips_and_upload_markup_present(tmp_path):
     assert "ctps-panel--holding" not in html
     assert 'id="ctps-hold-count"' not in html
     assert 'id="ctps-hold-list"' not in html
+
+
+# ---------------------------------------------------------------------------
+# DEPLOY chip + layer markup/JS-presence assertions (manip-area deploy toggle
+# plan, T5 — AC1, AC2, AC6, AC7)
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_chip_and_layer_present(tmp_path):
+    """The DEPLOY chip, store default, and inlined draw/layer JS are present.
+
+    Covers TC1-TC3 of the manip-area deploy toggle plan: the chip markup
+    (``data-layer="deploy"``, ``>DEPLOY<``, ``id="ctps-layer-deploy"``) is
+    default-OFF (class exactly ``ctps-chip``, never ``ctps-chip--active``);
+    ``store.layers`` defaults ``deploy: false``; and the inlined JS carries
+    both the masked draw function (``drawDeployedZones``) and the ``deploy``
+    layer registration (``id: "deploy"``).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "deploy_chip.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # Chip markup present.
+    assert 'data-layer="deploy"' in html
+    assert ">DEPLOY<" in html
+    assert 'id="ctps-layer-deploy"' in html
+
+    # Chip is default-OFF: class exactly "ctps-chip", never "--active".
+    assert 'id="ctps-layer-deploy" class="ctps-chip"' in html
+    assert 'id="ctps-layer-deploy" class="ctps-chip ctps-chip--active"' not in html
+
+    # Store default.
+    assert "deploy: false" in html
+
+    # Inlined JS: the masked draw fn and the layer registration.
+    assert "drawDeployedZones" in html
+    assert 'id: "deploy"' in html
