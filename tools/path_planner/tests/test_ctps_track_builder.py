@@ -11,10 +11,12 @@ Covered cases (CTPS plan, T10):
   and ``duration_s == keyframes[-1].t``.
 * **TC2** — a ``task_start`` / ``manip`` / ``goto`` / ``manip`` / ``task_end``
   stream produces ordered Track events with the expected labels.
-* **TC3** — a raw ``drive driveDist 15`` before a ``goto`` injects a chassis
-  offset past :data:`DRIFT_THRESHOLD_CM`, so a ``drift_warn`` event is emitted.
-* **TC4** — the same shape with a 2 cm drive stays under the threshold, so NO
-  ``drift_warn`` is emitted.
+* **TC3** — a raw ``drive driveDist 15`` before a ``goto`` routes through
+  ``operator_move``; the following goto's return prologue drives the offset
+  back, so a ``return_to_node`` marker is emitted and NO residual ``drift_warn``
+  survives (issue #130, T11).
+* **TC4** — the same shape with a 2 cm drive sits under the return trigger, so
+  neither a ``return_to_node`` marker nor a ``drift_warn`` is emitted (T11).
 
 Fixtures are hand-authored Data Model A command streams under
 ``tests/fixtures/ctps_*.json``; every ``goto`` target is reachable from the
@@ -34,8 +36,9 @@ Drive-recording additions (CTPS plan, T9 — NC9-NC14, NC16):
   honoured on all three forward-geometry methods.
 * **NC14** — a cm-less ``wallStop`` / ``lineFollowDist`` narrates only, with NO
   geometry keyframe and no ``float(None)`` crash.
-* **NC16** — a ``lineFollowDist`` offset before a ``goto`` emits a
-  ``drift_warn``; TC1-TC5 are kept unchanged.
+* **NC16** — a ``lineFollowDist`` offset before a ``goto`` routes through the
+  operator-offset / return-to-node path (a ``return_to_node`` marker, no
+  residual ``drift_warn``), exactly like ``driveDist`` (issue #130, T11).
 
 The toy chassis seeds facing ``START_HEADING_DEG == 90`` (node ``S``), so
 "forward along the current facing" is ``+y`` in these tests, not ``+x``.
@@ -86,7 +89,7 @@ from pathlib import Path
 import pytest
 
 from tools.path_planner.compiler import ACT_TURN_REL
-from tools.path_planner.ctps.config import ARC_STEP_DEG, DRIFT_THRESHOLD_CM
+from tools.path_planner.ctps.config import ARC_STEP_DEG
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
@@ -352,70 +355,59 @@ def test_p_tc4_manip_free_trace_track_byte_identical():
 
 
 # ---------------------------------------------------------------------------
-# TC3 — raw drive past the threshold raises a drift warning
+# TC3 — a raw drive before a goto renders a return-to-node maneuver (issue #130)
 # ---------------------------------------------------------------------------
 
 
-def test_tc3_drive_before_goto_emits_drift_warn():
-    """TC3: a 15 cm raw drive before goto B injects > DRIFT_THRESHOLD_CM offset.
+def test_tc3_drive_before_goto_renders_return_no_residual_drift():
+    """TC3 (T11): a 15 cm raw drive before goto B routes through ``operator_move``.
 
-    Key assertion: a ``drift_warn`` event is present, its label names the node
-    the chassis drifted off ("B"), and the reported offset exceeds
-    :data:`DRIFT_THRESHOLD_CM`. A clean goto now lands the axle ON the node
-    (no overshoot baseline — drift ≈ 0 without a raw move), so the 15 cm raw
-    move alone is the drift and clears the 10 cm threshold.
+    Since issue #130 (T11) a raw off-node move integrates the operator offset on
+    the shared sim; the following goto's ``step_through`` return prologue then
+    physically drives that offset back onto the node. So the trace renders a
+    ``return_to_node`` marker and — because the goto re-anchors — leaves NO
+    residual ``drift_warn`` (the pre-#130 open/close drift span is gone). This
+    replaces the old drift-span assertion; T13 owns the comprehensive
+    track-level rebaseline.
     """
     trace = load(_FIXTURES / "ctps_drive_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
-    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert len(drift_events) == 1
-
-    warn = drift_events[0]
-    assert "B" in warn["label"]
-
-    # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm > DRIFT_THRESHOLD_CM
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    # A goto follows the raw move, so the return re-anchors it: no residual.
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
 
 # ---------------------------------------------------------------------------
-# TC4 — even a small raw drive opens a drift span (threshold-free)
+# TC4 — a sub-return-trigger raw drive before a goto neither returns nor drifts
 # ---------------------------------------------------------------------------
 
 
-def test_tc4_small_drive_before_goto_opens_span_closed_by_goto():
-    """TC4: even a *small* raw drive before goto B opens a DRIFT span.
+def test_tc4_small_drive_before_goto_no_return_no_residual():
+    """TC4 (T11): a 2 cm raw drive before goto B sits under the return trigger.
 
-    The ``DRIFT_THRESHOLD_CM`` gate is gone: any non-``goto`` translation is
-    off-plan, so a 2 cm ``driveDist`` emits exactly one ``drift_warn`` — a SPAN
-    opened at the drive and CLOSED by the following goto re-anchor (a finite
-    ``t_end`` strictly after the open time). The reported offset is still small
-    (under the old threshold) but it is now surfaced, not hidden. The fixture
-    keeps its historical ``_no_drift`` name.
+    The 2 cm offset is below ``RETURN_TRIGGER_THRESHOLD_CM`` (3 cm), so the
+    return gate resolves to NONE — no return maneuver is dispatched — and the
+    following goto re-anchors cleanly. The trace therefore carries neither a
+    ``return_to_node`` marker nor a residual ``drift_warn``. The fixture keeps
+    its historical ``_no_drift`` name.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
-    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert len(drift_events) == 1
-
-    warn = drift_events[0]
-    assert "B" in warn["label"]
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm < DRIFT_THRESHOLD_CM     # small — but flagged now
-
-    # The span is CLOSED by the goto re-anchor: finite t_end, after the open t.
-    assert warn["t_end"] is not None
-    assert warn["t_end"] > warn["t"]
+    assert [ev for ev in track.events if ev["type"] == "return_to_node"] == []
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
 
-def test_drive_without_following_goto_drifts_to_end():
-    """A raw drive that ends the mission drifts to the end of the track.
+def test_drive_without_following_goto_keeps_trace_end_residual():
+    """A raw drive that ends the mission keeps a trace-end residual ``drift_warn``.
 
-    No ``goto`` follows the drive, so nothing re-anchors: the ``drift_warn``
-    span stays open and its ``t_end`` is the track's ``duration_s`` (runs to
-    end), with the offset measured off the logical node the chassis left.
+    No ``goto`` follows the drive, so nothing re-anchors the accumulated offset
+    (issue #130, T11): the residual surfaces as a single POINT ``drift_warn`` at
+    the track end (``t == duration_s``), its label reporting the residual
+    magnitude off the parked node. It is no longer a span (there is no re-anchor
+    to close it), so it carries no ``t_end``.
     """
     trace = Trace(
         schema_version=1,
@@ -429,8 +421,9 @@ def test_drive_without_following_goto_drifts_to_end():
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
     assert len(drift_events) == 1
     warn = drift_events[0]
-    assert warn["t_end"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
-    assert warn["t_end"] > warn["t"]
+    assert warn["t"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
+    # A point event, not a span: no t_end key.
+    assert "t_end" not in warn
 
 
 # ---------------------------------------------------------------------------
@@ -934,22 +927,20 @@ def test_nc14_cm_less_forward_geometry_narrate_only_no_crash():
 
 
 # ---------------------------------------------------------------------------
-# NC16 — a lineFollowDist offset before a goto emits a drift warning
+# NC16 — a lineFollowDist offset before a goto renders a return maneuver
 # ---------------------------------------------------------------------------
 
 
-def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
-    """NC16 (AC4/AC11 regression): a ``lineFollowDist`` offset then goto drifts.
+def test_nc16_line_follow_dist_before_goto_renders_return():
+    """NC16 (T11): a ``lineFollowDist`` offset then goto routes through the return.
 
-    Mirrors TC3's structure but with ``lineFollowDist`` as the offending raw
-    move: a 15 cm distance-gated follow before ``goto B`` injects an offset the
-    goto does not correct — ``lineFollowDist`` advances the shared chassis
-    without advancing the logical node, exactly the desync the drift check
-    surfaces. A ``drift_warn`` naming node B is emitted with a reported offset
-    past :data:`DRIFT_THRESHOLD_CM`. This pins that authored line-follows now
-    contribute drift events where they were previously invisible.
-
-    (TC1-TC5 above are kept unchanged and continue to run as-is.)
+    Mirrors TC3's structure but with ``lineFollowDist`` as the raw move: a 15 cm
+    distance-gated follow before ``goto B`` integrates the operator offset on the
+    shared sim (issue #130, T11), and the following goto's return prologue drives
+    it back — so a ``return_to_node`` marker is emitted and, because the goto
+    re-anchors, NO residual ``drift_warn`` survives. Pins that a raw
+    ``lineFollowDist`` participates in the operator-offset / return-to-node path
+    exactly like ``driveDist``.
     """
     track = _build_quiet(
         _inline_trace(
@@ -959,15 +950,120 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
         toy_field_data,
     )
 
-    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert len(drift_events) == 1
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
-    warn = drift_events[0]
-    assert "B" in warn["label"]
 
-    # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm > DRIFT_THRESHOLD_CM
+# ---------------------------------------------------------------------------
+# T11 smoke — return_to_node / declare_position localization-lane markers
+# (issue #130). These prove this task's own change; T13 owns the comprehensive
+# TC9-TC11 track-level coverage + golden re-bless.
+# ---------------------------------------------------------------------------
+
+
+def test_t11_return_to_node_marker_shape_and_ordering():
+    """The ``return_to_node`` marker sits inside its goto's span and names the node.
+
+    A 15 cm raw drive then ``goto B`` renders the return prologue; the marker is
+    a POINT event stamped at the goto's start (so ``events`` stays sorted), its
+    ``type`` is exactly ``"return_to_node"`` (the string T12's ``buildDriftLane``
+    branches on), and its label names the node the return re-anchored (the toy
+    field's true start node ``S`` — ``build`` seeds from ``field_data.START_NODE``,
+    not the trace's informational ``start_node``).
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": 15.0},
+            {"seq": 1, "op": "goto", "target": "B"},
+        ),
+        toy_field_data,
+    )
+
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    marker = return_events[0]
+    assert "S" in marker["label"]
+
+    # The marker is stamped at (== ) the goto span's start and inside its bracket.
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert marker["t"] == pytest.approx(goto["t"], abs=_POSE_TOL)
+    assert goto["t"] <= marker["t"] <= goto["t_end"]
+
+    # Event timestamps remain non-decreasing overall.
+    ev_times = [ev["t"] for ev in track.events]
+    assert all(b >= a for a, b in zip(ev_times, ev_times[1:]))
+
+
+def test_t11_declare_position_marker_and_node_change():
+    """A ``declare_position`` op emits a declare marker and changes the sim node.
+
+    The op is a pure belief reset: it emits exactly one localization-lane event
+    of ``type == "declare_position"`` (the string T12 branches on) naming the
+    declared node, advances no keyframe / clock, and — because it re-anchored the
+    offset onto the (physically-unchanged) chassis — leaves no trace-end residual
+    ``drift_warn``. A downstream ``goto`` then plans FROM the declared node,
+    proving the belief actually moved.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "declare_position", "node": "C"},
+            {"seq": 1, "op": "goto", "target": "D"},
+        ),
+        toy_field_data,
+    )
+
+    declare_events = [
+        ev for ev in track.events if ev["type"] == "declare_position"
+    ]
+    assert len(declare_events) == 1
+    assert "C" in declare_events[0]["label"]
+
+    # The following goto plans FROM the declared node C (not the start A).
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert goto["label"].startswith("C->")
+
+    # No spurious residual: the declare cleared the offset.
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+
+def test_t11_declare_position_unknown_node_emits_no_marker():
+    """A ``declare_position`` to a node not in NODES emits NO marker (T7 no-op).
+
+    Per T7's contract the sim warns + no-ops on an unknown node (node + offset
+    unchanged), so the belief did not change and track_builder emits no
+    localization-lane marker. A following ``goto`` still plans from the ORIGINAL
+    start node ``S`` (the toy field's ``START_NODE``), proving the declare was
+    skipped.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "declare_position", "node": "NOPE"},
+            {"seq": 1, "op": "goto", "target": "B"},
+        ),
+        toy_field_data,
+    )
+
+    assert [
+        ev for ev in track.events if ev["type"] == "declare_position"
+    ] == []
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert goto["label"].startswith("S->")
+
+
+def test_t11_clean_two_goto_trace_has_no_localization_markers():
+    """A clean (raw-move-free / declare-free) trace carries none of T11's markers.
+
+    Byte-invariance guard: without a raw move or a declare op, the trace emits no
+    ``return_to_node`` / ``declare_position`` markers and no residual
+    ``drift_warn`` — its events are exactly the pre-#130 (T10) set. Locks that
+    T11 is purely additive on the affected ops.
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    for kind in ("return_to_node", "declare_position", "drift_warn"):
+        assert [ev for ev in track.events if ev["type"] == kind] == []
 
 
 # ---------------------------------------------------------------------------

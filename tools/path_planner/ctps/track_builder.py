@@ -17,24 +17,42 @@ Geometry comes from the **existing parity-locked** sim, never a re-implementatio
   phase stops the axle one sensor-offset short, then the overshoot rolls it onto
   the node (net advance == edge length), matching the firmware re-anchor. A clean
   ``goto`` therefore ends with the chassis on the node (drift ≈ 0).
-* Raw ``drive`` moves apply directly to the **shared** :class:`VirtualChassis`
-  without advancing the logical ``current_node``. A raw *translation* is
-  off-plan by construction, so it opens a ``drift_warn`` SPAN that stays open
-  until the next ``goto`` re-anchors (the only relocalization CTPS models today
-  — issue #102) or the track ends. The span carries the residual offset off the
-  re-anchor node; there is no magnitude threshold — any non-``goto`` motion is
-  drift.
+* Raw off-node ``drive`` moves route through
+  :meth:`~tools.path_planner.sim.runtime.PathTrackerSim.operator_move` (issue
+  #130, T11), so the operator offset integrates on the SHARED sim exactly as it
+  does on the robot — the raw move mutates the shared :class:`VirtualChassis`
+  AND grows the localization offset (subject to the sim's nav-active gate +
+  deadbands). The move renders its own physical excursion, then the NEXT
+  ``goto``'s :meth:`~tools.path_planner.sim.runtime.PathTrackerSim.step_through`
+  yields the firmware-faithful **return-to-node prologue** (a pre-edge
+  ``ACT_TURN_REL`` then ``ACT_RETURN_FORWARD`` dead-reckon or
+  ``ACT_RETURN_STOP_AT_LINE`` line-seek) BEFORE the planned walk. CTPS renders
+  that prologue (profile-timed like any other primitive) and emits a brief
+  ``return_to_node`` localization-lane marker; the goto re-anchors, so a raw
+  move FOLLOWED by a goto leaves NO residual drift indicator. A residual
+  ``drift_warn`` survives only for a raw move at trace end (nothing re-anchors
+  it) or an over-cap off-map excursion (``OffMapFaultError`` under the FAULT
+  gate ends the track; a ``BEST_EFFORT`` capped return renders with the marker).
+* ``declare_position`` ops apply a belief reset via
+  :meth:`~tools.path_planner.sim.runtime.LocalizationSim.declare_position`
+  (change node, clear offset, preserve heading calibration) and emit a
+  ``declare_position`` localization-lane marker — semantically distinct from
+  return-to-node (operator-declared belief reset vs. physical correction). An
+  unknown node warns + no-ops in the sim, so CTPS emits NO marker for it.
 
-Key invariants (see the CTPS plan, T7):
+Key invariants (see the CTPS plan, T7 / T11):
 
 * Exactly **one** :class:`VirtualChassis` and **one** :class:`PathTrackerSim`
   live for the whole track. They are never reconstructed per ``goto`` — a fresh
   sim would reset accumulated drift, defeating the drift check.
 * ``localization.zero_heading_from_current()`` is called **once**, before the
   first command.
-* Playback timing is **visual only** (constant velocity from
-  :mod:`tools.path_planner.ctps.config`); it is NOT a prediction of real robot
-  run time. The running clock is monotonic non-decreasing.
+* Playback timing is **profile-derived** (each geometry step is densified off
+  the firmware T-shape / turn profile in
+  :mod:`tools.path_planner.ctps.profile`, so the render accelerates, cruises,
+  decelerates, and stops as the robot would); it is NOT a prediction of
+  absolute real-robot run time (issue #130). The running clock is monotonic
+  non-decreasing.
 
 Coordinate / heading convention matches
 :mod:`tools.path_planner.sim.chassis`: centimetres, degrees in ``[0, 360)``,
@@ -82,6 +100,7 @@ from tools.path_planner.sim.runtime import (
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
     Direction,
+    OffMapFaultError,
     PathTrackerSim,
     UnreachableGoalError,
     wrap_pm180,
@@ -344,6 +363,13 @@ def build_field_block(field_data) -> Dict[str, Any]:
 #: drive inside :func:`resolve_drive_profile`.
 _TRANSLATION_EPS_CM: float = 1e-9
 
+#: Chassis-vs-node distance (cm) below which the trace-end residual is treated as
+#: float noise and NO ``drift_warn`` indicator is emitted (issue #130, T11). A
+#: clean mission lands the chassis on the node to sub-micron precision, so this
+#: only needs to swallow accumulated float error, not any real off-node residual
+#: (a raw move that ends the trace leaves the chassis well clear of this floor).
+_RESIDUAL_DRIFT_EPS_CM: float = 1e-6
+
 #: Goto-hop primitive tags that render as a LINE-follow advance — cruise
 #: defaults to ``ConfigLine::CRUISE_SPEED`` (the follow-phase speed). Covers the
 #: forward follows, both pass-through variants, the REAR line/projection
@@ -391,6 +417,17 @@ _BLIND_TAGS: frozenset[str] = frozenset(
 #: pose change (the sim snapshot heading equals the incoming), so it lands here
 #: for completeness; a zero-magnitude turn simply emits no interior sub-frames.
 _TURN_TAGS: frozenset[str] = frozenset({ACT_TURN_REL, ACT_HEADING_RESET})
+
+#: Return-to-node prologue DRIVE tags (issue #130, T11). These fire ONLY in the
+#: ``step_through`` return prologue (never in the planned walk), so the first one
+#: seen inside a goto marks a rendered physical return-to-node maneuver — the cue
+#: to emit the ``return_to_node`` localization-lane marker. The prologue's leading
+#: ``ACT_TURN_REL`` pre-edge turn renders as a plain turn (``find_pivot_turn`` with
+#: ``prev_node=None`` misses, so no spurious pivot arc); the marker on the drive
+#: step alone is the "brief return marker" the plan asks for.
+_RETURN_DRIVE_TAGS: frozenset[str] = frozenset(
+    {ACT_RETURN_FORWARD, ACT_RETURN_STOP_AT_LINE}
+)
 
 
 def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
@@ -834,35 +871,58 @@ def build(trace: Trace, field_data) -> Track:
         t += max(0.0, dwell_s)
         keyframes.append({"t": t, "x": prev["x"], "y": prev["y"], "h": prev["h"]})
 
-    def append_advance_keyframe(
+    def operator_advance_keyframe(
         distance_cm: float, reverse: bool, speed: Tuple[int, int, int, bool]
     ) -> None:
-        """Translate the chassis along its heading, then densify + append it.
+        """Route a raw translation through ``sim.operator_move``, then densify it.
 
-        Advances the shared chassis by ``distance_cm`` — backward
-        (``chassis.reverse``) when ``reverse`` is truthy, forward
-        (``chassis.forward``) otherwise — then densifies the advance off
-        ``speed`` (the recorded move's resolved ``(cruise, start, end,
-        profiled)``). Kept as one helper so the reverse ternary is written once
-        and reused by both the plain and the GYRO two-phase drive paths.
+        Issue #130 (T11): a raw off-node drive is a hand-drive off the anchored
+        node, so it goes through
+        :meth:`~tools.path_planner.sim.runtime.PathTrackerSim.operator_move` —
+        which BOTH moves the shared chassis AND integrates the operator offset
+        (subject to the sim's nav-active gate + deadbands) — never a bare
+        ``chassis.forward``/``chassis.reverse``. Passing a NEGATIVE distance for
+        a ``reverse`` move drives the chassis backward along its heading (the
+        offset then decomposes along that same heading with a negative
+        magnitude), matching the firmware integrating a reverse encoder delta.
+
+        The rendered geometry is read back from the (now-moved) shared chassis
+        and densified off ``speed`` (the recorded move's resolved
+        ``(cruise, start, end, profiled)``), so the raw excursion still animates;
+        the growing offset is what the NEXT goto's return prologue corrects.
         """
-        if reverse:
-            chassis.reverse(distance_cm)
-        else:
-            chassis.forward(distance_cm)
+        signed_cm = -distance_cm if reverse else distance_cm
+        sim.operator_move(signed_cm, turn_deg=0.0)
         append_drive_keyframes(
             chassis.x_cm, chassis.y_cm, chassis.heading_deg, speed
         )
 
-    # Open DRIFT span, or None when the chassis is on-plan. A raw non-goto
-    # translation opens it (the robot dead-reckons off its logical node with
-    # nothing to correct it); the next goto — the only relocalization CTPS
-    # models today (issue #102) — or the end of the track closes it and fills
-    # in its ``t_end`` + measured offset. Emitted at the OPENING move's time so
-    # ``events`` stays sorted; patched in place on close.
-    drift_open_ev: Optional[Dict[str, Any]] = None
+    def operator_turn_keyframe(turn_deg: float) -> None:
+        """Route a raw in-place turn through ``sim.operator_move``, then densify it.
+
+        Issue #130 (T11): a raw ``turnDeg`` / ``turnToYaw`` / the gyro pre-advance
+        alignment feeds the offset's rotation channel through
+        :meth:`~tools.path_planner.sim.runtime.PathTrackerSim.operator_move`
+        (``distance_cm = 0``, ``turn_deg`` the signed in-place rotation), so a
+        manual turn accumulates yaw offset exactly as the robot does. The chassis
+        heading is updated by ``operator_move``; the pure rotation is then timed by
+        the turn profile from the resulting pose. A zero-magnitude turn appends
+        nothing (``operator_move`` no-ops the sub-epsilon rotation and the turn
+        densifier emits no interior frames).
+        """
+        sim.operator_move(0.0, turn_deg=turn_deg)
+        append_turn_keyframes(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
 
     # 4. Iterate the commands in order on the single shared sim/chassis.
+    #
+    # Raw off-node drives (issue #130, T11) route through ``sim.operator_move``,
+    # which grows the localization offset; the NEXT goto's ``step_through``
+    # return prologue physically drives that offset back onto the node (rendered
+    # + marked ``return_to_node``) so no drift indicator survives a raw
+    # move-then-goto. The ONLY residual ``drift_warn`` is the trace-end check
+    # after the loop (a raw move with nothing to re-anchor it) or the FAULT-gate
+    # over-cap fault handled inline below — so there is no longer a per-move
+    # open-span variable to carry.
     for cmd in trace.commands:
         if cmd.op == "goto":
             from_node = sim.localization.current_node()
@@ -882,6 +942,11 @@ def build(trace: Trace, field_data) -> Track:
             # the departure hop's destination, the DEPARTING pivot's trim, and
             # the departure-edge heading unit ray (u-hat-1).
             pending_pivot_land: Optional[Tuple[str, float, float, float]] = None
+            # One ``return_to_node`` marker per goto whose ``step_through``
+            # yielded a physical return prologue (issue #130, T11). Latched the
+            # first time a return DRIVE tag appears so the pre-edge turn +
+            # (seek/dead-reckon) drive share a single brief marker.
+            return_marked = False
             try:
                 for primitive, snap in sim.step_through(
                     target,
@@ -899,6 +964,25 @@ def build(trace: Trace, field_data) -> Track:
                         wall_reset_at_node = False
                     if tag in _WALL_RESET_TAGS:
                         wall_reset_at_node = True
+
+                    # Emit the brief return-to-node marker the first time this
+                    # goto's return prologue reaches its DRIVE step (issue #130,
+                    # T11). The prologue is yielded BEFORE the planned walk, so
+                    # ``t_start`` (the clock before any hop) brackets it; the
+                    # marker is stamped there so ``events`` stays sorted while the
+                    # rendered return maneuver plays out over the sub-keyframes
+                    # appended below. Only the DRIVE tags are return-exclusive
+                    # (the pre-edge ``ACT_TURN_REL`` also appears in the walk), so
+                    # the marker latches on the drive, not the turn.
+                    if not return_marked and tag in _RETURN_DRIVE_TAGS:
+                        return_marked = True
+                        events.append(
+                            {
+                                "t": t_start,
+                                "type": "return_to_node",
+                                "label": f"return to {cur_node}",
+                            }
+                        )
 
                     arced = False
                     if tag == ACT_TURN_REL and not wall_reset_at_node:
@@ -1056,6 +1140,29 @@ def build(trace: Trace, field_data) -> Track:
                 )
                 # Stop processing further commands and end the track.
                 break
+            except OffMapFaultError as fault:
+                # Over-cap off-map excursion under the FAULT gate (issue #130,
+                # T11): the return gate refused to plan (mirror of
+                # ``Fault::OFF_NODE``) BEFORE any return primitive was yielded, so
+                # nothing rendered this goto. Surface it as a fault event that
+                # ends the track, exactly like the UNREACHABLE path — the sim
+                # only raises this under BEST_EFFORT-off (FAULT gate); a
+                # BEST_EFFORT gate would instead have yielded a capped return
+                # that renders + marks ``return_to_node`` above. The chassis was
+                # not moved, so its residual off the node is reported for context.
+                fault_from = sim.localization.current_node()
+                events.append(
+                    {
+                        "t": t,
+                        "type": "goto",
+                        "label": (
+                            f"OFF-MAP {fault_from}->{target} "
+                            f"({fault.offset_mag_cm:.1f} cm off node)"
+                        ),
+                    }
+                )
+                # Stop processing further commands and end the track.
+                break
 
             # A successful goto emits a `goto` SPAN event covering the whole
             # multi-hop move (`t_start` -> `t`, the running clock before/after
@@ -1072,28 +1179,23 @@ def build(trace: Trace, field_data) -> Track:
                     "label": f"{from_node}->{target}",
                 }
             )
-            # Close any open DRIFT span: this goto resumed plan control and
-            # re-anchored onto its node. The span's reported offset is how far
-            # the chassis still sat off the arrival node after the final hop —
-            # a clean goto lands the axle ON it (~0), while a preceding raw
-            # drive injects an offset the goto does not correct. Threshold-free:
-            # ANY off-plan raw move drifts, so the span simply spans from the
-            # move to this re-anchor (the DRIFT_THRESHOLD_CM gate is gone).
-            if drift_open_ev is not None:
-                node = sim.localization.current_node()
-                nx_, ny_ = field_data.NODES[node]
-                drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
-                drift_open_ev["t_end"] = t
-                drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
-                drift_open_ev = None
+            # No drift-span bookkeeping here (issue #130, T11): a preceding raw
+            # move already integrated its offset through ``sim.operator_move``,
+            # and this goto's ``step_through`` return prologue physically drove
+            # that offset back onto the node (rendered + marked
+            # ``return_to_node`` above), so nothing is left to close. A raw move
+            # with NO following goto is the only residual, handled once after the
+            # command loop.
 
         elif cmd.op == "drive":
-            # Raw move applied DIRECTLY to the shared chassis; never advance the
-            # logical node. Narration is timestamped at the command's start
-            # (before any geometry advance).
+            # Raw off-node move (issue #130, T11): route through
+            # ``sim.operator_move`` so the operator offset integrates on the
+            # SHARED sim exactly as the robot integrates raw encoder / IMU deltas
+            # while ``!navActive``. The logical node is never advanced; the next
+            # goto's return prologue drives the accumulated offset back. Narration
+            # is timestamped at the command's start (before any geometry advance).
             event_t = t
             method = cmd.method
-            translated = False   # did this raw move DISPLACE the chassis?
             if method in _FORWARD_GEOMETRY_METHODS:
                 # driveDist / stopAtLine / wallStop / lineFollowDist all carry a
                 # forward distance in ``cm``. For stopAtLine / wallStop /
@@ -1104,9 +1206,10 @@ def build(trace: Trace, field_data) -> Track:
                 if cmd.cm is None:
                     # Legacy / partial trace (e.g. a cm-less wallStop or
                     # lineFollowDist): no distance to replay. Narrate only —
-                    # never ``float(None)``. Kept even though the recorder now
-                    # emits ``cm`` for every forward-geometry method, to defend
-                    # partial/legacy traces.
+                    # never ``float(None)``. No chassis motion, so nothing
+                    # integrates into the offset. Kept even though the recorder
+                    # now emits ``cm`` for every forward-geometry method, to
+                    # defend partial/legacy traces.
                     pass
                 else:
                     # Raw (recorded) move: resolve the effective (cruise, start,
@@ -1116,55 +1219,72 @@ def build(trace: Trace, field_data) -> Track:
                     speed = resolve_effective_speed(cmd, method)
                     if _honors_gyro_heading(cmd):
                         # GYRO + explicit heading → two-phase render: first
-                        # rotate in place to the held heading (a turn densified
-                        # by the turn profile), THEN advance / back up along it.
-                        # Heading is honoured ONLY under ``mode == "gyro"`` —
-                        # firmware consults setHeading only in GYRO, so a heading
-                        # recorded without GYRO renders along the current facing
-                        # (the plain branch below).
-                        chassis.turn_to_heading(float(cmd.heading))
-                        append_turn_keyframes(
-                            chassis.x_cm, chassis.y_cm, chassis.heading_deg
+                        # rotate in place to the held heading (a raw turn through
+                        # ``operator_move``'s rotation channel), THEN advance /
+                        # back up along it (its translation channel). Heading is
+                        # honoured ONLY under ``mode == "gyro"`` — firmware
+                        # consults setHeading only in GYRO, so a heading recorded
+                        # without GYRO renders along the current facing (the plain
+                        # branch below). ``operator_turn_keyframe`` takes the
+                        # signed in-place delta so both the render and the offset
+                        # rotation match the chassis.
+                        operator_turn_keyframe(
+                            wrap_pm180(float(cmd.heading) - chassis.heading_deg)
                         )
-                        append_advance_keyframe(
+                        operator_advance_keyframe(
                             float(cmd.cm), bool(cmd.reverse), speed
                         )
-                        translated = True
                     else:
                         # Plain advance along the CURRENT facing (non-gyro, or no
                         # heading, or lineFollowDist).
-                        append_advance_keyframe(
+                        operator_advance_keyframe(
                             float(cmd.cm), bool(cmd.reverse), speed
                         )
-                        translated = True
             elif method == "turnDeg":
-                chassis.turn_relative(float(cmd.deg))
-                append_turn_keyframes(
-                    chassis.x_cm, chassis.y_cm, chassis.heading_deg
-                )
+                # Raw relative turn: the signed delta IS the ``turnDeg`` argument.
+                operator_turn_keyframe(float(cmd.deg))
             elif method == "turnToYaw":
-                chassis.turn_to_heading(float(cmd.deg))
-                append_turn_keyframes(
-                    chassis.x_cm, chassis.y_cm, chassis.heading_deg
+                # Raw absolute turn: route the shortest-arc delta to the target
+                # yaw through ``operator_move`` (``operator_move`` turns relative),
+                # so the render and the integrated yaw offset both land on the
+                # requested heading.
+                operator_turn_keyframe(
+                    wrap_pm180(float(cmd.deg) - chassis.heading_deg)
                 )
-            # else: stop / unknown -> no geometry change.
+            # else: stop / unknown -> no geometry change, nothing to integrate.
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )
-            # A raw translation off the logical node opens (or, if one is already
-            # open, silently extends) a DRIFT span: the chassis dead-reckons with
-            # no goto/re-anchor to correct it. Pure in-place turns never open one
-            # (they don't leave the node). Emitted here at the move's own time so
-            # ``events`` stays sorted; its ``t_end`` + offset are filled in when
-            # the next goto re-anchors (or at trace end).
-            if translated and drift_open_ev is None:
-                drift_open_ev = {
-                    "t": event_t,
-                    "type": "drift_warn",
-                    "label": "drift",
-                    "t_end": None,
-                }
-                events.append(drift_open_ev)
+            # No drift span is opened here (issue #130, T11): the offset now lives
+            # in the shared sim, and the NEXT goto's return prologue corrects it
+            # (rendered + marked ``return_to_node``). A raw move with NO following
+            # goto surfaces once as the trace-end residual after the loop.
+
+        elif cmd.op == "declare_position":
+            # Operator-declared belief reset (issue #130, T11): set the current
+            # node + clear the offset via the sim, and emit a ``declare_position``
+            # localization-lane marker. This is DISTINCT from return-to-node — no
+            # physical motion, no chassis mutation, no keyframe: only the belief
+            # changes (the clock does not advance). ``declare_position`` warns +
+            # no-ops on an unknown node (mirroring the loader's strict-field
+            # pattern), so pre-validate against ``NODES`` the same way and emit NO
+            # marker for an unknown node (the belief did not change). The loader
+            # already dropped a structurally-malformed declare, so ``cmd.node``
+            # is a well-formed name here; the NODES guard defends the unknown-name
+            # case the loader still forwards.
+            node = cmd.node
+            if node is not None and node in field_data.NODES:
+                sim.localization.declare_position(node)
+                events.append(
+                    {
+                        "t": t,
+                        "type": "declare_position",
+                        "label": f"declare {node}",
+                    }
+                )
+            # Unknown / absent node → no belief change, no marker (the sim would
+            # only warn + no-op; skipping the call avoids a spurious UserWarning
+            # in the render path).
 
         elif cmd.op == "manip":
             # `method`/`arg` are structured (additive) alongside the existing
@@ -1214,17 +1334,35 @@ def build(trace: Trace, field_data) -> Track:
 
         # Any other op cannot reach here — the loader excludes unknown ops.
 
-    # An open DRIFT span with no following goto (a raw off-plan move that ends
-    # the mission, or one before an UNREACHABLE goto that broke the loop) runs
-    # to the end of the track — nothing ever re-anchors it. Measure the residual
-    # offset off whatever logical node the sim is parked at.
-    if drift_open_ev is not None:
-        node = sim.localization.current_node()
-        nx_, ny_ = field_data.NODES[node]
-        drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
-        drift_open_ev["t_end"] = t
-        drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
-        drift_open_ev = None
+    # Trace-end residual drift indicator (issue #130, T11). A raw off-node move
+    # with NO following goto never re-anchors — nothing drives its offset back —
+    # so the sim ends the track believing the chassis sits off its logical node.
+    # The residual is the sim's accumulated operator offset (the SAME quantity
+    # the return gate reads, ``getOffsetFromNode().magnitude()``), so a raw move
+    # ≥ the deadband surfaces here while:
+    #
+    #   * a clean mission (all gotos) leaves offset 0 — each goto re-anchors, and
+    #     a preceding raw move's offset was already corrected by the return
+    #     prologue — so NO indicator is emitted (a ``drift_warn``-free /
+    #     raw-move-free trace renders byte-identically to T10);
+    #   * a ``declare_position`` belief reset also leaves offset 0 (it cleared the
+    #     offset without moving the chassis), so declaring position never fabricates
+    #     a residual off the physically-unchanged chassis pose;
+    #   * a sub-deadband raw move leaves offset 0 (firmware-faithful — the encoder
+    #     baseline stays unadvanced below the deadband), so it, too, warns nothing.
+    #
+    # The indicator is a POINT event at the track end (there is no span to open
+    # anymore); its label reports the residual magnitude off the parked node.
+    node = sim.localization.current_node()
+    residual_cm = sim.localization.get_offset_from_node().magnitude_cm()
+    if residual_cm > _RESIDUAL_DRIFT_EPS_CM:
+        events.append(
+            {
+                "t": t,
+                "type": "drift_warn",
+                "label": f"chassis {residual_cm:.1f} cm off node {node}",
+            }
+        )
 
     # 5. Build-error banner (informational). Emit at the end regardless of
     #    whether the track was truncated by an unreachable goal.
