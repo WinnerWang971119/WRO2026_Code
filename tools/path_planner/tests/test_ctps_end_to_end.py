@@ -548,11 +548,11 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 
 #: sha256 of the CURRENT (this-feature-unchanged) ``assets/player.js`` /
 #: ``assets/renderer.js`` — see :func:`test_t14_player_and_renderer_js_byte_unchanged`
-#: (AC10). Recomputed directly from the on-disk assets at authoring time; a
-#: future edit to either file must fail this test loudly rather than silently
-#: pass.
-_PLAYER_JS_SHA256: str = "f16403d88d6b097ce937331758eb9177b0ef578ed107a7d774986b28e6d60af1"
-_RENDERER_JS_SHA256: str = "35306708dc5aae6e914b780f125cac90e18a73ca4d84fb4a38a9d002d433290d"
+#: (AC10). Hashed over LF-normalized bytes so the pin is identical on Windows
+#: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
+#: content must fail this test loudly rather than silently pass.
+_PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
+_RENDERER_JS_SHA256: str = "e3652fc5b8beea5c5aeb48db214711e2fa7e6f9bd8c22941685b36549ada17e8"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:
@@ -712,8 +712,12 @@ def test_t14_player_and_renderer_js_byte_unchanged() -> None:
     exactly mirroring the review-enforced AC10 rule.
     """
     assets_dir = player_html.PLAYER_JS_PATH.parent
-    player_js = (assets_dir / "player.js").read_bytes()
-    renderer_js = (assets_dir / "renderer.js").read_bytes()
+    # Normalize CRLF -> LF before hashing: the assets are stored LF in git but a
+    # Windows checkout materializes them as CRLF, so a raw-byte pin would only
+    # match on one line-ending convention. Normalizing keeps the pin stable
+    # across Windows / macOS / Linux while still catching any real content edit.
+    player_js = (assets_dir / "player.js").read_bytes().replace(b"\r\n", b"\n")
+    renderer_js = (assets_dir / "renderer.js").read_bytes().replace(b"\r\n", b"\n")
 
     player_hash = hashlib.sha256(player_js).hexdigest()
     renderer_hash = hashlib.sha256(renderer_js).hexdigest()
