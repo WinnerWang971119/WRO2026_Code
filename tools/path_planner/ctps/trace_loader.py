@@ -51,6 +51,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "print",
         "beep",
         "led",
+        "declare_position",
     }
 )
 
@@ -87,6 +88,18 @@ _KNOWN_DRIVE_MODES: frozenset[str] = frozenset(
         "raw",
         "sync",
         "gyro",
+    }
+)
+
+#: Recognised ``drive.preset`` strings (mirrors ``Drive::setPreset``).  A
+#: ``drive`` command whose ``preset`` is a string NOT in this set — or is not
+#: a string at all — is warned about and treated as unset (the resolver then
+#: falls back to the NORMAL default).
+_KNOWN_DRIVE_PRESETS: frozenset[str] = frozenset(
+    {
+        "slow",
+        "normal",
+        "fast",
     }
 )
 
@@ -129,6 +142,23 @@ class Command:
         ``setHeading`` was called (honoured only under ``mode == "gyro"``).
     :param reverse: Reverse-direction flag; set for ``drive`` commands when
         ``setReverse`` was called. ``None`` when the key is absent.
+    :param power: ``.setPower`` override (PWM); set for ``drive`` commands.
+        ``None`` when unset — the resolver uses the preset/default cruise.
+    :param preset: Speed preset (``"slow"`` / ``"normal"`` / ``"fast"``); set
+        for ``drive`` commands when ``.setPreset`` was called. ``None`` when
+        unset — the resolver defaults to NORMAL.
+    :param start_speed: ``.setStartSpeed`` override (PWM); set for ``drive``
+        commands. ``None`` when unset — the resolver applies the
+        sign-by-cruise default.
+    :param end_speed: ``.setEndSpeed`` override (PWM); set for ``drive``
+        commands. ``None`` when unset — the resolver applies the default
+        brake rule.
+    :param profiled: ``True`` for ``.tShape()``, ``False`` for ``.flat()``;
+        set for ``drive`` commands. ``None`` when unset — the resolver uses
+        the builder default (tShape on for ``driveDist``).
+    :param brake: ``.setBrake`` flag; set for ``drive`` commands. ``None``
+        when unset — the resolver defaults to ``True``.
+    :param node: Node name; set for ``declare_position`` commands.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.
     :param r: Red channel (0–255); set for ``led`` commands.
     :param g: Green channel (0–255); set for ``led`` commands.
@@ -146,25 +176,32 @@ class Command:
     op: str
 
     # -- op-specific optional fields ----------------------------------------
-    target:   Optional[str]   = None   # goto
-    arrival:  Optional[str]   = None   # goto: forced arrival direction "front"|"rear"
-    route:    Optional[str]   = None   # goto: forced route direction "front"|"rear"
-    ms:       Optional[int]   = None   # wait, beep, led
-    text:     Optional[str]   = None   # print
-    name:     Optional[str]   = None   # task_start, task_end
-    args_hex: Optional[str]   = None   # task_start
-    method:   Optional[str]   = None   # manip, drive
-    arg:      Optional[int]   = None   # manip
-    cm:       Optional[float] = None   # drive driveDist
-    deg:      Optional[float] = None   # drive turnDeg / turnToYaw
-    mode:     Optional[str]   = None   # drive: "raw"|"sync"|"gyro"
-    heading:  Optional[float] = None   # drive: held heading (gyro)
-    reverse:  Optional[bool]  = None   # drive: reverse-direction flag
-    freq_hz:  Optional[int]   = None   # beep
-    r:        Optional[int]   = None   # led
-    g:        Optional[int]   = None   # led
-    b:        Optional[int]   = None   # led
-    result:   Optional[str]   = None   # task_end
+    target:      Optional[str]   = None   # goto
+    arrival:     Optional[str]   = None   # goto: forced arrival direction "front"|"rear"
+    route:       Optional[str]   = None   # goto: forced route direction "front"|"rear"
+    ms:          Optional[int]   = None   # wait, beep, led
+    text:        Optional[str]   = None   # print
+    name:        Optional[str]   = None   # task_start, task_end
+    args_hex:    Optional[str]   = None   # task_start
+    method:      Optional[str]   = None   # manip, drive
+    arg:         Optional[int]   = None   # manip
+    cm:          Optional[float] = None   # drive driveDist
+    deg:         Optional[float] = None   # drive turnDeg / turnToYaw
+    mode:        Optional[str]   = None   # drive: "raw"|"sync"|"gyro"
+    heading:     Optional[float] = None   # drive: held heading (gyro)
+    reverse:     Optional[bool]  = None   # drive: reverse-direction flag
+    power:       Optional[int]   = None   # drive: .setPower override (PWM)
+    preset:      Optional[str]   = None   # drive: "slow"|"normal"|"fast"
+    start_speed: Optional[int]   = None   # drive: .setStartSpeed override (PWM)
+    end_speed:   Optional[int]   = None   # drive: .setEndSpeed override (PWM)
+    profiled:    Optional[bool]  = None   # drive: true=.tShape, false=.flat
+    brake:       Optional[bool]  = None   # drive: .setBrake flag
+    node:        Optional[str]   = None   # declare_position
+    freq_hz:     Optional[int]   = None   # beep
+    r:           Optional[int]   = None   # led
+    g:           Optional[int]   = None   # led
+    b:           Optional[int]   = None   # led
+    result:      Optional[str]   = None   # task_end
 
     # -- forward-compatible extras -------------------------------------------
     fields: dict = field(default_factory=dict)
@@ -248,6 +285,8 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "target", "arrival", "route", "ms", "text", "name", "args_hex",
         "method", "arg", "cm", "deg",
         "mode", "heading", "reverse",
+        "power", "preset", "start_speed", "end_speed", "profiled", "brake",
+        "node",
         "freq_hz", "r", "g", "b", "result",
     }
     extra_fields: dict = {k: v for k, v in raw.items() if k not in named_keys}
@@ -339,6 +378,120 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                     stacklevel=4,
                 )
                 cmd.reverse = False
+
+        # power: accept only a real int (not a bool — `bool` subclasses `int`,
+        # so a stray `true`/`false` in this slot must NOT silently become
+        # 1/0). A non-int-or-bool-int value warns and is treated as unset.
+        # Absent → leave None.
+        if "power" in raw:
+            raw_power = raw["power"]
+            if isinstance(raw_power, int) and not isinstance(raw_power, bool):
+                cmd.power = raw_power
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.power "
+                    f"{raw_power!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.power = None
+
+        # preset: must be a string AND in the known set. Type-check that it is
+        # a string BEFORE the set-membership test so a non-string (e.g. a
+        # list) warns rather than raising. An invalid preset is treated as
+        # unset — the resolver defaults to NORMAL.
+        if "preset" in raw:
+            raw_preset = raw["preset"]
+            if isinstance(raw_preset, str) and raw_preset in _KNOWN_DRIVE_PRESETS:
+                cmd.preset = raw_preset
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: malformed drive.preset {raw_preset!r} at "
+                    f"seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.preset = None
+
+        # start_speed: accept only a real int (bool excluded — see `power`).
+        # Absent → leave None.
+        if "start_speed" in raw:
+            raw_start_speed = raw["start_speed"]
+            if isinstance(raw_start_speed, int) and not isinstance(raw_start_speed, bool):
+                cmd.start_speed = raw_start_speed
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.start_speed "
+                    f"{raw_start_speed!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.start_speed = None
+
+        # end_speed: accept only a real int (bool excluded — see `power`).
+        # Absent → leave None.
+        if "end_speed" in raw:
+            raw_end_speed = raw["end_speed"]
+            if isinstance(raw_end_speed, int) and not isinstance(raw_end_speed, bool):
+                cmd.end_speed = raw_end_speed
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.end_speed "
+                    f"{raw_end_speed!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.end_speed = None
+
+        # profiled: accept ONLY a JSON boolean (mirrors the `reverse` guard —
+        # never bool(raw.get(...)), a truthy non-bool must not silently
+        # coerce). Any non-bool value warns and is treated as unset (the
+        # builder default: tShape on for driveDist). Absent → leave None.
+        if "profiled" in raw:
+            raw_profiled = raw["profiled"]
+            if isinstance(raw_profiled, bool):
+                cmd.profiled = raw_profiled
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-boolean drive.profiled "
+                    f"{raw_profiled!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.profiled = None
+
+        # brake: accept ONLY a JSON boolean (mirrors `reverse`/`profiled`).
+        # Any non-bool value warns and is treated as unset (the resolver
+        # default: brake=True). Absent → leave None.
+        if "brake" in raw:
+            raw_brake = raw["brake"]
+            if isinstance(raw_brake, bool):
+                cmd.brake = raw_brake
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-boolean drive.brake "
+                    f"{raw_brake!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.brake = None
+
+    # ----- declare_position: validate node -----------------------------------
+    if op == "declare_position":
+        raw_node = raw.get("node")
+        if isinstance(raw_node, str) and raw_node:
+            cmd.node = raw_node
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed declare_position.node "
+                f"{raw_node!r} at seq={seq} — skipped.",
+                UserWarning,
+                stacklevel=4,
+            )
+            # A declare_position with no valid node name carries no usable
+            # payload for track_builder (nothing to declare) — drop it
+            # entirely, mirroring the unknown-drive-method skip above.
+            return None
 
     return cmd
 
