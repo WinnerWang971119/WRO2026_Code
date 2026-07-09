@@ -82,6 +82,28 @@ inline const char* driveModeToStr(DriveMode m)
 }
 
 /**
+ * @brief Map a `Config::SpeedPreset` to its command-stream `preset` string.
+ * @param p The resolved speed preset.
+ * @return `"slow"` / `"normal"` / `"fast"`.
+ * @note These three strings ARE the cross-language `drive.preset` contract
+ *       (recorder <-> `ctps/trace_loader.py`), not magic numbers; keep them
+ *       byte-identical to the loader's preset whitelist.
+ */
+inline const char* speedPresetToStr(Config::SpeedPreset p)
+{
+    switch (p)
+    {
+        case Config::SpeedPreset::SLOW:
+            return "slow";
+        case Config::SpeedPreset::NORMAL:
+            return "normal";
+        case Config::SpeedPreset::FAST:
+            return "fast";
+    }
+    return "";    // Unreachable: every SpeedPreset value is handled — satisfies -Wreturn-type.
+}
+
+/**
  * @brief Recording mock of `DriveDistBuilder`. Records `driveDist` on destruction.
  *
  * Captures the explicitly-set `mode` (via `setMode`) and `heading` (via
@@ -100,14 +122,28 @@ public:
     DriveDistBuilder& operator=(DriveDistBuilder&&)      = delete;
 
     // Chain setters — capture the CTPS-relevant knobs, no-op the rest; all return *this.
-    DriveDistBuilder& setPower(int16_t) { return *this; }
-    DriveDistBuilder& setPreset(Config::SpeedPreset) { return *this; }
+    DriveDistBuilder& setPower(int16_t p)
+    {
+        _power    = p;
+        _hasPower = true;
+        return *this;
+    }
+    DriveDistBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset = speedPresetToStr(p);
+        return *this;
+    }
     DriveDistBuilder& setMode(DriveMode m)
     {
         _mode = driveModeToStr(m);
         return *this;
     }
-    DriveDistBuilder& setBrake(bool) { return *this; }
+    DriveDistBuilder& setBrake(bool b)
+    {
+        _brake    = b;
+        _hasBrake = true;
+        return *this;
+    }
     DriveDistBuilder& setBlocking(bool) { return *this; }
     DriveDistBuilder& async() { return *this; }
     DriveDistBuilder& setHeading(int16_t yaw)
@@ -116,11 +152,31 @@ public:
         _hasHeading = true;
         return *this;
     }
-    DriveDistBuilder& tShape() { return *this; }
-    DriveDistBuilder& flat() { return *this; }
+    DriveDistBuilder& tShape()
+    {
+        _profiled    = true;
+        _hasProfiled = true;
+        return *this;
+    }
+    DriveDistBuilder& flat()
+    {
+        _profiled    = false;
+        _hasProfiled = true;
+        return *this;
+    }
     DriveDistBuilder& setAccel(float) { return *this; }
-    DriveDistBuilder& setStartSpeed(int16_t) { return *this; }
-    DriveDistBuilder& setEndSpeed(int16_t) { return *this; }
+    DriveDistBuilder& setStartSpeed(int16_t v)
+    {
+        _startSpeed    = v;
+        _hasStartSpeed = true;
+        return *this;
+    }
+    DriveDistBuilder& setEndSpeed(int16_t v)
+    {
+        _endSpeed    = v;
+        _hasEndSpeed = true;
+        return *this;
+    }
 
     /** @brief Emit the captured `driveDist` move exactly once (guarded by `_executed`). */
     ~DriveDistBuilder()
@@ -130,16 +186,44 @@ public:
             return;
         }
         _executed = true;
-        const ctps::DriveMoveParams params{_cm, _mode, _hasHeading, _heading, false};
+        const ctps::DriveMoveParams params{
+            _cm,             // cm
+            _mode,           // mode
+            _hasHeading,     // hasHeading
+            _heading,        // heading
+            false,           // reverse (DriveDistBuilder has no setReverse)
+            _power,          // power
+            _hasPower,       // hasPower
+            _preset,         // preset
+            _startSpeed,     // startSpeed
+            _hasStartSpeed,  // hasStartSpeed
+            _endSpeed,       // endSpeed
+            _hasEndSpeed,    // hasEndSpeed
+            _profiled,       // profiled
+            _hasProfiled,    // hasProfiled
+            _brake,          // brake
+            _hasBrake        // hasBrake
+        };
         ctps::recordDriveMove("driveDist", params);
     }
 
 private:
     float       _cm;
-    const char* _mode       = nullptr;    ///< Set by setMode(); nullptr = mode unset.
-    bool        _hasHeading = false;      ///< True iff setHeading() was called.
-    float       _heading    = 0.0f;       ///< Held heading (degrees); valid iff _hasHeading.
-    bool        _executed   = false;      ///< Single-emit guard (idempotent destructor).
+    const char* _mode          = nullptr;    ///< Set by setMode(); nullptr = mode unset.
+    bool        _hasHeading    = false;      ///< True iff setHeading() was called.
+    float       _heading       = 0.0f;       ///< Held heading (degrees); valid iff _hasHeading.
+    int16_t     _power         = 0;          ///< Set by setPower(); valid iff _hasPower.
+    bool        _hasPower      = false;      ///< True iff setPower() was called.
+    const char* _preset        = nullptr;    ///< Set by setPreset(); nullptr = preset unset.
+    int16_t     _startSpeed    = 0;          ///< Set by setStartSpeed(); valid iff _hasStartSpeed.
+    bool        _hasStartSpeed = false;      ///< True iff setStartSpeed() was called.
+    int16_t     _endSpeed      = 0;          ///< Set by setEndSpeed(); valid iff _hasEndSpeed.
+    bool        _hasEndSpeed   = false;      ///< True iff setEndSpeed() was called.
+    bool        _profiled      = false;      ///< true=.tShape(), false=.flat(); valid iff _hasProfiled.
+    bool        _hasProfiled   = false;      ///< True iff .tShape() or .flat() was called.
+    bool        _brake         = false;      ///< Set by setBrake(); valid iff _hasBrake.
+    bool        _hasBrake      = false;      ///< True iff setBrake() was called.
+    bool        _executed      = false;      ///< Single-emit guard (idempotent destructor).
 };
 static_assert(
     !std::is_copy_constructible<DriveDistBuilder>::value
@@ -299,8 +383,17 @@ public:
     StopAtLineBuilder& operator=(const StopAtLineBuilder&) = delete;
     StopAtLineBuilder& operator=(StopAtLineBuilder&&)      = delete;
 
-    StopAtLineBuilder& setPower(int16_t) { return *this; }
-    StopAtLineBuilder& setPreset(Config::SpeedPreset) { return *this; }
+    StopAtLineBuilder& setPower(int16_t p)
+    {
+        _power    = p;
+        _hasPower = true;
+        return *this;
+    }
+    StopAtLineBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset = speedPresetToStr(p);
+        return *this;
+    }
     StopAtLineBuilder& setMode(DriveMode m)
     {
         _mode = driveModeToStr(m);
@@ -320,7 +413,12 @@ public:
         _reverse = r;
         return *this;
     }
-    StopAtLineBuilder& setBrake(bool) { return *this; }
+    StopAtLineBuilder& setBrake(bool b)
+    {
+        _brake    = b;
+        _hasBrake = true;
+        return *this;
+    }
     StopAtLineBuilder& setBlocking(bool) { return *this; }
     StopAtLineBuilder& async() { return *this; }
 
@@ -332,7 +430,27 @@ public:
             return;
         }
         _executed = true;
-        const ctps::DriveMoveParams params{_expectedCm, _mode, _hasHeading, _heading, _reverse};
+        // StopAtLineBuilder has no setStartSpeed/setEndSpeed/tShape/flat on the real
+        // header (it is a seek primitive, not a profiled move) — startSpeed/endSpeed/
+        // profiled stay unset (0/false/false) for this method.
+        const ctps::DriveMoveParams params{
+            _expectedCm,   // cm
+            _mode,         // mode
+            _hasHeading,   // hasHeading
+            _heading,      // heading
+            _reverse,      // reverse
+            _power,        // power
+            _hasPower,     // hasPower
+            _preset,       // preset
+            0,             // startSpeed (no setStartSpeed on StopAtLineBuilder)
+            false,         // hasStartSpeed
+            0,             // endSpeed (no setEndSpeed on StopAtLineBuilder)
+            false,         // hasEndSpeed
+            false,         // profiled (no tShape/flat on StopAtLineBuilder)
+            false,         // hasProfiled
+            _brake,        // brake
+            _hasBrake      // hasBrake
+        };
         ctps::recordDriveMove("stopAtLine", params);
     }
 
@@ -342,6 +460,11 @@ private:
     bool        _hasHeading = false;      ///< True iff setHeading() was called.
     float       _heading    = 0.0f;       ///< Held heading (degrees); valid iff _hasHeading.
     bool        _reverse    = false;      ///< Set by setReverse(); reverse-direction flag.
+    int16_t     _power      = 0;          ///< Set by setPower(); valid iff _hasPower.
+    bool        _hasPower   = false;      ///< True iff setPower() was called.
+    const char* _preset     = nullptr;    ///< Set by setPreset(); nullptr = preset unset.
+    bool        _brake      = false;      ///< Set by setBrake(); valid iff _hasBrake.
+    bool        _hasBrake   = false;      ///< True iff setBrake() was called.
     bool        _executed   = false;      ///< Single-emit guard (idempotent destructor).
 };
 static_assert(
@@ -372,8 +495,17 @@ public:
     WallStopBuilder& operator=(const WallStopBuilder&) = delete;
     WallStopBuilder& operator=(WallStopBuilder&&)      = delete;
 
-    WallStopBuilder& setPower(int16_t) { return *this; }
-    WallStopBuilder& setPreset(Config::SpeedPreset) { return *this; }
+    WallStopBuilder& setPower(int16_t p)
+    {
+        _power    = p;
+        _hasPower = true;
+        return *this;
+    }
+    WallStopBuilder& setPreset(Config::SpeedPreset p)
+    {
+        _preset = speedPresetToStr(p);
+        return *this;
+    }
     WallStopBuilder& setMode(DriveMode m)
     {
         _mode = driveModeToStr(m);
@@ -392,7 +524,12 @@ public:
         _reverse = r;
         return *this;
     }
-    WallStopBuilder& setBrake(bool) { return *this; }
+    WallStopBuilder& setBrake(bool b)
+    {
+        _brake    = b;
+        _hasBrake = true;
+        return *this;
+    }
     WallStopBuilder& setBlocking(bool) { return *this; }
     WallStopBuilder& async() { return *this; }
 
@@ -404,7 +541,27 @@ public:
             return;
         }
         _executed = true;
-        const ctps::DriveMoveParams params{_expectedCm, _mode, _hasHeading, _heading, _reverse};
+        // WallStopBuilder has no setStartSpeed/setEndSpeed/tShape/flat on the real
+        // header (it is a stall-terminated push, not a profiled move) — startSpeed/
+        // endSpeed/profiled stay unset (0/false/false) for this method.
+        const ctps::DriveMoveParams params{
+            _expectedCm,   // cm
+            _mode,         // mode
+            _hasHeading,   // hasHeading
+            _heading,      // heading
+            _reverse,      // reverse
+            _power,        // power
+            _hasPower,     // hasPower
+            _preset,       // preset
+            0,             // startSpeed (no setStartSpeed on WallStopBuilder)
+            false,         // hasStartSpeed
+            0,             // endSpeed (no setEndSpeed on WallStopBuilder)
+            false,         // hasEndSpeed
+            false,         // profiled (no tShape/flat on WallStopBuilder)
+            false,         // hasProfiled
+            _brake,        // brake
+            _hasBrake      // hasBrake
+        };
         ctps::recordDriveMove("wallStop", params);
     }
 
@@ -414,6 +571,11 @@ private:
     bool        _hasHeading = false;      ///< True iff setHeading() was called.
     float       _heading    = 0.0f;       ///< Held heading (degrees); valid iff _hasHeading.
     bool        _reverse    = false;      ///< Set by setReverse(); reverse-direction flag.
+    int16_t     _power      = 0;          ///< Set by setPower(); valid iff _hasPower.
+    bool        _hasPower   = false;      ///< True iff setPower() was called.
+    const char* _preset     = nullptr;    ///< Set by setPreset(); nullptr = preset unset.
+    bool        _brake      = false;      ///< Set by setBrake(); valid iff _hasBrake.
+    bool        _hasBrake   = false;      ///< True iff setBrake() was called.
     bool        _executed   = false;      ///< Single-emit guard (idempotent destructor).
 };
 static_assert(
