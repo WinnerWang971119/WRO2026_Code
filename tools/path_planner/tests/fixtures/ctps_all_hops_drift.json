@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "start_node": "S",
+  "start_heading_deg": 90.0,
+  "build_error": false,
+  "commands": [
+    { "seq": 0, "op": "goto", "target": "P1" },
+    { "seq": 1, "op": "goto", "target": "B" },
+    { "seq": 2, "op": "goto", "target": "S" },
+    { "seq": 3, "op": "goto", "target": "A" },
+    { "seq": 4, "op": "goto", "target": "P1" },
+    { "seq": 5, "op": "goto", "target": "C" },
+    { "seq": 6, "op": "goto", "target": "G" },
+    { "seq": 7, "op": "goto", "target": "B" },
+    { "seq": 8, "op": "goto", "target": "S" }
+  ]
+}
