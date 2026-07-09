@@ -602,6 +602,48 @@ def test_editor_flow_threads_fixed_port(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# --stop-player flow — evict a prior localhost server, build/render nothing
+# ---------------------------------------------------------------------------
+
+
+def test_stop_player_flow_evicts_and_exits(monkeypatch):
+    """``main(["--stop-player", "--port", N])`` only POSTs /close, then exits 0.
+
+    The fresh-start task's front door must short-circuit before any build,
+    render, or serve: it evicts the incumbent server on the given port via
+    ``edit_server._request_close`` and returns 0. Every build/render/serve
+    helper stays dormant, so a quote-free ``--stop-player --port N`` argv is a
+    pure no-op except for the best-effort close beacon.
+    """
+    captured = {}
+
+    def _stub_request_close(host, port):
+        captured["host"] = host
+        captured["port"] = port
+
+    monkeypatch.setattr(
+        ctps_main.edit_server, "_request_close", _stub_request_close
+    )
+    monkeypatch.setattr(
+        ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_render_and_open", _never_called("_render_and_open")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_render_and_serve", _never_called("_render_and_serve")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_serve_editor", _never_called("_serve_editor")
+    )
+
+    rc = ctps_main.main(["--stop-player", "--port", "8770"])
+
+    assert rc == 0
+    assert captured == {"host": "127.0.0.1", "port": 8770}
+
+
+# ---------------------------------------------------------------------------
 # --serve flow — render then serve over http instead of writing + opening
 # ---------------------------------------------------------------------------
 

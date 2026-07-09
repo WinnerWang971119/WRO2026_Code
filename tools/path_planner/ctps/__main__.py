@@ -999,9 +999,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             "known URL."
         ),
     )
+    parser.add_argument(
+        "--stop-player",
+        action="store_true",
+        help=(
+            "Best-effort shut down a --serve / --editor localhost server on "
+            "--port (POST /close), then exit. The fresh-start task runs this so "
+            "the next serve always rebinds the fixed port. Builds and renders "
+            "nothing; silent when no server is listening."
+        ),
+    )
     args = parser.parse_args(argv)
 
     open_browser = not args.no_open
+
+    # --- --stop-player: evict a prior localhost server, then exit ------------
+    # A no-build shutdown front door for the fresh-start task. Replaces a
+    # fragile inline ``python -c "... _request_close('127.0.0.1', 8770)"`` shell
+    # string whose quotes/comma/parens broke under VS Code's Windows shell-task
+    # quoting; a plain ``--stop-player --port N`` argv is safe on every shell.
+    if args.stop_player:
+        edit_server._request_close("127.0.0.1", args.port)
+        return 0
 
     # --- --editor flow: serve the authoring page, nothing else ---------------
     if args.editor:
