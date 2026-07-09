@@ -24,6 +24,10 @@ Covered cases:
   floor-crawl tail at ``PWM_MIN_MAGNITUDE`` before the terminal brake (AC2).
 * **TC5** — ``resolve_effective_speed`` on a ``.setBrake(false)`` command
   defaults ``end`` to ``cruise``, not 0 (no phantom decel-to-zero).
+* **W1** — ``resolve_effective_speed`` on a raw ``driveDist`` with a NEGATIVE
+  ``.setPower`` keeps the sign: cruise resolves negative and the start seed
+  follows sign-by-cruise (a reverse ramp), NOT ``abs()``-ed to forward. A
+  positive power still resolves forward (no regression).
 """
 
 from __future__ import annotations
@@ -511,3 +515,90 @@ def test_brake_false_dict_style_command_also_resolves_end_to_cruise() -> None:
     assert cruise == cfg.speed_fast
     assert end == cruise
     assert profiled is True
+
+
+# ---------------------------------------------------------------------------
+# W1 — a negative `.setPower` keeps its sign (a reverse dead-reckon driveDist)
+# ---------------------------------------------------------------------------
+
+
+def test_negative_power_resolves_to_reverse_cruise_and_start() -> None:
+    """A raw ``driveDist(20).setPower(-70)`` resolves to a REVERSE profile.
+
+    ``DriveDistBuilder::setPower`` takes a signed ``[-100, 100]`` and has NO
+    ``setReverse`` — for a raw dead-reckon ``driveDist`` a negative power IS the
+    reverse mechanism (the firmware drives a negative cruise backward). So the
+    resolver must keep the sign: ``cruise = -70`` (NOT the old ``abs()``-ed
+    ``+70``), and the sign-by-cruise start seed then follows a REVERSE ramp
+    (``start = -TSHAPE_START_SPEED``). This is the regression the old
+    ``cruise_mag = abs(int(power))`` broke — it rendered the backup as a forward
+    move and integrated the operator offset the wrong way.
+    """
+    cmd = SimpleNamespace(
+        power=-70,
+        preset=None,
+        start_speed=None,
+        end_speed=None,
+        profiled=None,
+        brake=None,
+        reverse=False,
+    )
+    cruise, start, end, profiled = resolve_effective_speed(cmd, "driveDist")
+
+    cfg = load_profile_config()
+    # Signed cruise carries the power sign — NOT abs()-ed (the W1 bug).
+    assert cruise == -70
+    # Sign-by-cruise start seed follows the negative cruise into a reverse ramp.
+    assert start == -cfg.start_speed
+    assert start < 0
+    # brake unset -> stop at rest (unaffected by the sign fix).
+    assert end == 0
+    assert profiled is True
+
+
+def test_positive_power_still_resolves_forward_no_regression() -> None:
+    """Contrast: a positive ``.setPower(70)`` still renders FORWARD.
+
+    The signed-power fix must not regress the common forward case: a positive
+    power resolves to a positive cruise and a forward (positive) start seed.
+    """
+    cmd = SimpleNamespace(
+        power=70,
+        preset=None,
+        start_speed=None,
+        end_speed=None,
+        profiled=None,
+        brake=None,
+        reverse=False,
+    )
+    cruise, start, end, profiled = resolve_effective_speed(cmd, "driveDist")
+
+    cfg = load_profile_config()
+    assert cruise == 70
+    assert start == cfg.start_speed
+    assert start > 0
+    assert end == 0
+    assert profiled is True
+
+
+def test_negative_power_wins_over_reverse_flag_no_double_negate() -> None:
+    """When ``power`` is set, its sign is the direction — ``reverse`` doesn't double it.
+
+    Direction comes from exactly one channel. A negative power with the
+    ``reverse`` flag ALSO set must NOT flip back to forward (a double-negate);
+    ``sign(power)`` wins, so the resolved cruise stays negative (reverse).
+    """
+    cmd = SimpleNamespace(
+        power=-70,
+        preset=None,
+        start_speed=None,
+        end_speed=None,
+        profiled=None,
+        brake=None,
+        reverse=True,
+    )
+    cruise, start, _, _ = resolve_effective_speed(cmd, "driveDist")
+
+    cfg = load_profile_config()
+    assert cruise == -70
+    assert start == -cfg.start_speed

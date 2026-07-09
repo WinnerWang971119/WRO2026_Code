@@ -872,7 +872,7 @@ def build(trace: Trace, field_data) -> Track:
         keyframes.append({"t": t, "x": prev["x"], "y": prev["y"], "h": prev["h"]})
 
     def operator_advance_keyframe(
-        distance_cm: float, reverse: bool, speed: Tuple[int, int, int, bool]
+        distance_cm: float, speed: Tuple[int, int, int, bool]
     ) -> None:
         """Route a raw translation through ``sim.operator_move``, then densify it.
 
@@ -881,17 +881,28 @@ def build(trace: Trace, field_data) -> Track:
         :meth:`~tools.path_planner.sim.runtime.PathTrackerSim.operator_move` —
         which BOTH moves the shared chassis AND integrates the operator offset
         (subject to the sim's nav-active gate + deadbands) — never a bare
-        ``chassis.forward``/``chassis.reverse``. Passing a NEGATIVE distance for
-        a ``reverse`` move drives the chassis backward along its heading (the
-        offset then decomposes along that same heading with a negative
-        magnitude), matching the firmware integrating a reverse encoder delta.
+        ``chassis.forward``/``chassis.reverse``. Passing a NEGATIVE distance
+        drives the chassis backward along its heading (the offset then
+        decomposes along that same heading with a negative magnitude), matching
+        the firmware integrating a reverse encoder delta.
+
+        The advance DIRECTION is the resolved cruise sign, not the recorded
+        ``reverse`` flag: ``.setPower`` takes a signed ``[-100, 100]`` with no
+        ``setReverse``, so a negative power on a non-reverse ``driveDist`` is a
+        backward move. ``resolve_effective_speed`` folds BOTH the power sign and
+        the ``reverse`` flag into a single signed ``cruise`` (exactly one
+        direction channel), so a NEGATIVE resolved cruise drives backward and a
+        positive one forward. (goto-hop advances never reach here — they use
+        per-kind positive cruise + sim-snapshot geometry — so this only re-signs
+        the RAW recorded drive.)
 
         The rendered geometry is read back from the (now-moved) shared chassis
         and densified off ``speed`` (the recorded move's resolved
         ``(cruise, start, end, profiled)``), so the raw excursion still animates;
         the growing offset is what the NEXT goto's return prologue corrects.
         """
-        signed_cm = -distance_cm if reverse else distance_cm
+        cruise = speed[0]
+        signed_cm = distance_cm if cruise >= 0 else -distance_cm
         sim.operator_move(signed_cm, turn_deg=0.0)
         append_drive_keyframes(
             chassis.x_cm, chassis.y_cm, chassis.heading_deg, speed
@@ -1231,15 +1242,11 @@ def build(trace: Trace, field_data) -> Track:
                         operator_turn_keyframe(
                             wrap_pm180(float(cmd.heading) - chassis.heading_deg)
                         )
-                        operator_advance_keyframe(
-                            float(cmd.cm), bool(cmd.reverse), speed
-                        )
+                        operator_advance_keyframe(float(cmd.cm), speed)
                     else:
                         # Plain advance along the CURRENT facing (non-gyro, or no
                         # heading, or lineFollowDist).
-                        operator_advance_keyframe(
-                            float(cmd.cm), bool(cmd.reverse), speed
-                        )
+                        operator_advance_keyframe(float(cmd.cm), speed)
             elif method == "turnDeg":
                 # Raw relative turn: the signed delta IS the ``turnDeg`` argument.
                 operator_turn_keyframe(float(cmd.deg))

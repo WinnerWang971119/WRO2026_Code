@@ -1355,8 +1355,15 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
     - **cruise**: ``power`` overrides everything; else the ``preset`` maps
       (slow/normal/fast) — default NORMAL. For a LINE-follow method the default
       cruise is ``ConfigLine::CRUISE_SPEED`` instead of the Drive preset.
-    - **direction sign**: a ``reverse`` command negates the cruise magnitude so a
-      reverse hop drives a reverse profile.
+    - **direction sign**: ``.setPower`` takes a SIGNED ``[-100, 100]`` value and
+      has NO ``setReverse`` — for a raw dead-reckon ``driveDist`` a NEGATIVE
+      power IS the reverse mechanism (``Drive.cpp`` drives a negative cruise
+      backwards implicitly). So when ``power`` is set the effective direction is
+      ``sign(power)`` and the signed power is used directly as the cruise (it is
+      NOT ``abs``-ed, and the ``reverse`` flag does NOT double-negate it — a
+      caller supplies direction through exactly one channel). When ``power`` is
+      unset the direction comes from the ``reverse`` flag, which negates the
+      preset/Config cruise magnitude so a reverse hop drives a reverse profile.
     - **start**: default is SIGN-BY-CRUISE —
       ``cruise >= 0 ? +TSHAPE_START_SPEED : -TSHAPE_START_SPEED`` — so a reverse
       hop seeds a REVERSE ramp, not a forward one. An explicit ``start_speed``
@@ -1391,17 +1398,22 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
     # a loose "line" substring (which would wrongly catch `stopAtLine`).
     is_line = method.strip().lower() == "linefollowdist"
 
-    # --- cruise magnitude ---
+    # --- cruise (signed) ---
     if power is not None:
-        cruise_mag = abs(int(power))
-    elif preset is not None:
-        cruise_mag = _preset_to_pwm(str(preset), cfg)
-    elif is_line:
-        cruise_mag = int(cfg.line_cruise)
+        # `.setPower` carries the SIGNED direction itself ([-100, 100], no
+        # setReverse); a negative power is the reverse mechanism for a raw
+        # dead-reckon driveDist. Use it directly — do NOT abs() it and do NOT
+        # let `reverse` double-negate it (direction comes from exactly one
+        # channel; when power is set, that channel is its sign).
+        cruise = int(power)
     else:
-        cruise_mag = int(cfg.speed_normal)
-
-    cruise = -cruise_mag if reverse else cruise_mag
+        if preset is not None:
+            cruise_mag = _preset_to_pwm(str(preset), cfg)
+        elif is_line:
+            cruise_mag = int(cfg.line_cruise)
+        else:
+            cruise_mag = int(cfg.speed_normal)
+        cruise = -cruise_mag if reverse else cruise_mag
 
     # --- start speed: sign-by-cruise default ---
     if start_speed is not None:

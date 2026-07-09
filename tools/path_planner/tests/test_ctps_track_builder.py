@@ -827,6 +827,80 @@ def test_nc12_reverse_moves_backward_forward_moves_forward():
 
 
 # ---------------------------------------------------------------------------
+# W1 — a negative `.setPower` driveDist backs up (signed power = reverse)
+# ---------------------------------------------------------------------------
+
+
+def test_w1_negative_power_drive_dist_moves_backward_positive_moves_forward():
+    """A raw ``driveDist(20).setPower(-70)`` backs the chassis up along its facing.
+
+    ``DriveDistBuilder::setPower`` takes a signed ``[-100, 100]`` with NO
+    ``setReverse`` — for a raw dead-reckon ``driveDist`` a negative power is the
+    reverse mechanism (the firmware drives a negative cruise backward). So the
+    render must move the chassis BACKWARD (a NEGATIVE projection onto the
+    unchanged heading) with the SAME magnitude as the recorded ``cm``. The old
+    ``abs()`` resolver rendered this as a forward move and integrated the
+    operator offset the wrong way. A positive power still advances FORWARD (no
+    regression). Neither move rotates — the facing is unchanged throughout.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {
+                "seq": 0,
+                "op": "drive",
+                "method": "driveDist",
+                "cm": 20.0,
+                "power": -70,
+            },
+            {
+                "seq": 1,
+                "op": "drive",
+                "method": "driveDist",
+                "cm": 15.0,
+                "power": 70,
+            },
+        ),
+        toy_field_data,
+    )
+
+    kfs = track.keyframes
+    seed = kfs[0]
+    heading = seed["h"]
+
+    # Pure translation — a signed-power driveDist never rotates.
+    assert all(kf["h"] == pytest.approx(heading, abs=_POSE_TOL) for kf in kfs)
+
+    # Boundary poses off the seed: the -70 move backs up 20 cm (signed -20),
+    # then the +70 move advances 15 cm (signed +15), both along the facing.
+    from math import cos, radians, sin
+
+    ux, uy = cos(radians(heading)), sin(radians(heading))
+    cumulative = 0.0
+    boundary_poses = []
+    for delta in (-20.0, 15.0):
+        cumulative += delta
+        boundary_poses.append(
+            (seed["x"] + cumulative * ux, seed["y"] + cumulative * uy, heading)
+        )
+    landings = _boundary_indices(kfs, boundary_poses)
+
+    # Per-move signed projection: the -70 move is NEGATIVE (backward), the +70
+    # move is POSITIVE (forward). Magnitudes equal the recorded cm.
+    prev_idx = 0
+    for landing_idx, delta in zip(landings, (-20.0, 15.0)):
+        projection = _heading_projection(kfs[prev_idx], kfs[landing_idx], heading)
+        assert projection == pytest.approx(delta, abs=_POSE_TOL)
+        prev_idx = landing_idx
+
+    # The first move (negative power) moved backward — assert the sign directly
+    # so a re-introduced abs() (rendering it forward) fails loudly here.
+    first_landing_proj = _heading_projection(seed, kfs[landings[0]], heading)
+    assert first_landing_proj < 0.0
+
+    _assert_monotone([kf["t"] for kf in kfs])
+
+
+# ---------------------------------------------------------------------------
 # NC13 — GYRO composes with reverse; honoured on all forward-geometry methods
 # ---------------------------------------------------------------------------
 
