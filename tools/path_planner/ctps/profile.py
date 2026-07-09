@@ -1247,6 +1247,149 @@ def sample_drive(
     return _enforce_non_decreasing(keyframes)
 
 
+def sample_drive_run(
+    profile: DriveProfile,
+    segments: List[Tuple[Tuple[float, float, float], Tuple[float, float, float], float]],
+    t0: float,
+) -> List[List[Dict[str, Any]]]:
+    """Slice ONE run :class:`DriveProfile` into per-segment sub-keyframe lists.
+
+    The CTPS run-grouper (``track_builder``) merges a whole collinear
+    pass-through run (a chain of geometry primitives bounded by braked stops)
+    into a SINGLE velocity profile over the run's summed chord distance, so the
+    render is one ramp-up / cruise / ramp-down trapezoid instead of a per-node
+    dip-and-stop. This function is the slicer: it evaluates that single
+    ``profile`` at each segment's cumulative-distance window and returns, per
+    segment, the dense sub-keyframes whose timestamps follow the ONE run profile
+    (never re-ramping mid-run) and whose LAST sub-keyframe pins that segment's
+    end pose byte-exact (the TC7 pose-pin invariant — only the velocity curve
+    BETWEEN pose boundaries changes, never where the chassis is at each node).
+
+    Each ``segments`` entry is ``(start_pose, end_pose, seg_dist_cm)``:
+
+    * ``start_pose`` / ``end_pose`` — the ``(x, y, heading_deg)`` at the segment
+      boundaries (the previous keyframe's pose and this primitive's sim-snapshot
+      pose). Poses are interpolated along THIS segment's own chord
+      (``start_pose -> end_pose``), NOT the whole run's chord, so a run whose
+      segments are only near-collinear still pins every snapshot pose exactly.
+    * ``seg_dist_cm`` — the segment's own chord length; the cumulative sum over
+      the segments equals ``profile.dist_cm`` (the caller builds ``profile`` over
+      exactly that sum).
+
+    The returned list is parallel to ``segments`` (one sub-keyframe list each).
+    As with :func:`sample_drive`, the FIRST sub-keyframe of the FIRST segment
+    duplicates the caller's previous keyframe (same ``t0`` + pose) and is DROPPED
+    here, so each returned list is the REPLACEMENT run for its geometry step — an
+    empty list for a zero-length segment. Timestamps are non-decreasing and
+    profile-derived (dense near the single run's ramps).
+
+    :param profile: the resolved :class:`DriveProfile` for the WHOLE run (its
+        ``dist_cm`` equals the sum of the ``seg_dist_cm`` values).
+    :param segments: the ordered per-segment ``(start_pose, end_pose, seg_dist_cm)``
+        boundaries, summing to ``profile.dist_cm``.
+    :param t0: timestamp of the run-start keyframe (the running clock before the
+        first segment).
+    :return: a list parallel to ``segments``; entry ``k`` is the replacement
+        sub-keyframes for segment ``k`` (first-of-run duplicate dropped).
+    """
+    if not segments:
+        return []
+
+    total = profile.dist_cm
+    time_at = _cumulative_time_fn(profile)
+
+    out: List[List[Dict[str, Any]]] = []
+    s_lo = 0.0
+    for (start_pose, end_pose, seg_dist) in segments:
+        seg = max(0.0, float(seg_dist))
+        s_hi = s_lo + seg
+        # Clamp the top of the LAST segment to the profile's own distance so
+        # float accumulation cannot push the final window past dist_cm (which
+        # would clip its terminal brake keyframe).
+        if s_hi > total:
+            s_hi = total
+
+        sub = _sample_run_segment(
+            profile, start_pose, end_pose, s_lo, s_hi, t0, time_at
+        )
+        # Drop each segment's LEADING boundary keyframe: for the first segment it
+        # duplicates the caller's previous keyframe (same t0 + pose); for every
+        # subsequent segment it duplicates the PRIOR segment's last sub-keyframe
+        # (the shared node boundary is sampled once per adjacent window). Keeping
+        # it would leave a zero-length duplicate keyframe at each interior node —
+        # cosmetically a "stop"-looking pair even though velocity holds cruise.
+        # The segment's END pose (``sub[-1]``) is preserved, so every node pose
+        # still byte-pins (TC7).
+        out.append(sub[1:])
+        s_lo = s_hi
+
+    return out
+
+
+def _sample_run_segment(
+    profile: DriveProfile,
+    start_pose: Tuple[float, float, float],
+    end_pose: Tuple[float, float, float],
+    s_lo: float,
+    s_hi: float,
+    t0: float,
+    time_at,
+) -> List[Dict[str, Any]]:
+    """Sample ONE run segment's window ``[s_lo, s_hi]`` of a shared profile.
+
+    Mirrors :func:`sample_drive`'s densification, but over a sub-window of the
+    run profile: sample distances are the profile phase boundaries plus interior
+    ramp samples that fall inside ``[s_lo, s_hi]`` (so a segment that straddles a
+    ramp still tracks the curve), each mapped to its cumulative run time via
+    ``time_at`` and to a pose LERPed along this segment's own chord by the
+    fraction into the segment. The first sample is pinned to ``start_pose`` and
+    the last to ``end_pose`` byte-exact.
+
+    :param profile: the shared run :class:`DriveProfile`.
+    :param start_pose: ``(x, y, heading_deg)`` at ``s_lo`` (segment start).
+    :param end_pose: ``(x, y, heading_deg)`` at ``s_hi`` (segment end / snapshot).
+    :param s_lo: window start distance along the run (cm).
+    :param s_hi: window end distance along the run (cm).
+    :param t0: run-start clock (the profile times are relative to this).
+    :param time_at: the run profile's ``s -> cumulative time`` closure.
+    :return: an ordered keyframe list whose first pose is ``start_pose`` and last
+        pose is ``end_pose``; a zero-length window yields a single keyframe.
+    """
+    x0, y0, h0 = start_pose
+    x1, y1, h1 = end_pose
+    dh = _shortest_arc(h0, h1)
+
+    seg_len = s_hi - s_lo
+    if seg_len <= 0.0:
+        # Zero-length window: a single keyframe at the (equal) boundary pose.
+        return [_pose_kf(t0 + time_at(s_lo), x0, y0, h0)]
+
+    # Ordered run sample distances that fall inside this window, plus the window
+    # endpoints. Reuse the whole-run boundary/ramp sampler then filter — this
+    # keeps the interior spacing (RAMP_SAMPLE_STEP_CM / ceiling) identical to the
+    # per-primitive path a single-segment run would take.
+    run_distances = _drive_sample_distances(profile)
+    distances = {s_lo, s_hi}
+    for d in run_distances:
+        if s_lo < d < s_hi:
+            distances.add(d)
+    ordered = sorted(distances)
+
+    keyframes: List[Dict[str, Any]] = []
+    for s in ordered:
+        frac = (s - s_lo) / seg_len
+        x = x0 + (x1 - x0) * frac
+        y = y0 + (y1 - y0) * frac
+        h = (h0 + dh * frac) % 360.0
+        keyframes.append(_pose_kf(t0 + time_at(s), x, y, h))
+
+    # Pin the segment endpoints byte-exact so the run's per-node poses match the
+    # sim snapshots (TC7) even under float lerp drift at the window edges.
+    keyframes[0] = _pose_kf(keyframes[0]["t"], x0, y0, h0)
+    keyframes[-1] = _pose_kf(keyframes[-1]["t"], x1, y1, h1)
+    return _enforce_non_decreasing(keyframes)
+
+
 def _drive_sample_distances(profile: DriveProfile) -> List[float]:
     """Ordered, deduplicated sample distances for a drive move.
 
@@ -1713,6 +1856,7 @@ __all__ = [
     "resolve_drive_profile",
     "resolve_turn_profile",
     "sample_drive",
+    "sample_drive_run",
     "sample_turn",
     "resolve_effective_speed",
 ]
