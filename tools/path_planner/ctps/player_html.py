@@ -490,6 +490,9 @@ def render(
 
     # Render-time knowledge for the JS side. Round-trips like TRACK (own
     # <script>, same ``</`` escape) so a sibling regex can pull it back out.
+    # "drift" here is the lane ID, not its display label — the dock label was
+    # relabelled to "LOCALIZATION" in timeline.js (issue #130); the id itself
+    # is kept unchanged so this manifest and the registered lane stay wired.
     player_meta: Dict[str, Any] = {
         "source": source,
         "filename": _derive_filename(track_dict, filename),

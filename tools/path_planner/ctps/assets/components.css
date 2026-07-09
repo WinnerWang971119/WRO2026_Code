@@ -1017,6 +1017,25 @@
     border-bottom-color: var(--ctps-drift);
 }
 
+/* LOCALIZATION lane (id "drift"; issue #130) — the two markers added
+ * alongside drift_warn. Both reuse existing palette tokens rather than
+ * introducing new ones, but each gets its own modifier class so the three
+ * marker types read as visually distinct on the timeline. */
+
+/* buildDriftLane's return_to_node item carries cls "ctps-pin--return" — the
+ * physical return-to-node maneuver the firmware ran before the next goto;
+ * tinted with the theme accent so it reads as a corrective, not a fault. */
+.ctps-pin--return {
+    border-bottom-color: var(--ctps-accent);
+}
+
+/* buildDriftLane's declare_position item carries cls "ctps-pin--declare" —
+ * an operator-declared belief reset, semantically distinct from a physical
+ * correction; tinted with the hold color so it never reads as an error. */
+.ctps-pin--declare {
+    border-bottom-color: var(--ctps-hold);
+}
+
 /* Now a child of #ctps-tl-content (position: relative via layout.css) rather
  * than of .ctps-timeline itself, so it pans/zooms with the scrolled track
  * instead of staying fixed to the viewport. #ctps-tl-content has no padding
