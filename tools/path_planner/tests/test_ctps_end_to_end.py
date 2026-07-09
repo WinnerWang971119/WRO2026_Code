@@ -16,14 +16,13 @@ builds and runs ``ctps_dump --fixture``, pipes its stdout through the real
 * a ``wallStop`` command serializes its ``cm`` so the trace replays without the
   ``float(None)`` crash the AC7 regression guards against.
 
-Field-data note (load-bearing): the ``--fixture`` mission navigates
-``goto("Start")`` / ``goto("final")``, which are nodes of the C++
-``routes_fixture`` — NOT of the live :mod:`tools.path_planner.field_data`, which
-carries only ``Start``. Replaying against the live field would raise ``KeyError``
-on ``goto("final")`` before the drive commands are reached. So this test builds
-the trace against :func:`field_fixture.build_field_data` — the single-sourced
-Python mirror of ``routes_fixture`` — whose ``NODES`` contain both ``Start`` and
-``final`` (plus the full ``field_data`` surface ``track_builder.build`` needs).
+Field-data note: ``ctps_dump`` links the PRODUCTION ``routes.cpp``, so the
+``--fixture`` mission navigates ``goto("Start")`` / ``goto("MYU")`` — both live
+:mod:`tools.path_planner.field_data` nodes. The replay therefore runs against the
+live field directly (the earlier ``routes_fixture`` Python mirror is no longer
+needed here). If a future field edit removes ``MYU``, both the C++ self-test's
+``goto MYU`` assertion and this replay would fault — the fixture mission is
+intentionally coupled to real node names.
 
 Toolchain gating (see [[gotcha-ci-gated-test-broad-pytest-collection]]): this
 test hard-fails under CI when the ``ctps_dump`` binary is absent (the dedicated
@@ -71,13 +70,13 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 # ---------------------------------------------------------------------------
-# Cross-tree import shim (pinned). This test lives under
-# tools/path_planner/tests/ but must import ``field_fixture`` from
-# WRO2026/test/fixtures/ — the Python mirror of the C++ ``routes_fixture`` the
-# ``ctps_dump --fixture`` mission navigates. Insert the repo root (so the
-# ``tools.path_planner.*`` imports below resolve under any rootdir) AND the
-# fixtures dir (so the sibling ``field_fixture`` module is importable), both
-# BEFORE importing field_fixture — mirroring test_pathtracker_parity.py.
+# Repo-root import shim (pinned). This test lives under
+# tools/path_planner/tests/ but imports ``tools.path_planner.*`` — insert the
+# repo root so those resolve under any pytest rootdir (mirroring
+# test_pathtracker_parity.py). ``ctps_dump`` links the PRODUCTION ``routes.cpp``,
+# so both the default and ``--fixture`` missions navigate production node names;
+# the replay therefore runs against the live ``field_data`` (no routes_fixture
+# mirror needed).
 #
 # File layout: tools/path_planner/tests/test_ctps_end_to_end.py
 #   parents[0] = .../tools/path_planner/tests
@@ -86,21 +85,10 @@ import pytest
 #   parents[3] = repo (worktree) root
 # ---------------------------------------------------------------------------
 _REPO_ROOT: Path = Path(__file__).resolve().parents[3]
-_FIXTURES_DIR: Path = _REPO_ROOT / "WRO2026" / "test" / "fixtures"
-for _p in (str(_REPO_ROOT), str(_FIXTURES_DIR)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
 
-try:
-    from field_fixture import build_field_data  # noqa: E402  (cross-tree fixture module)
-except ImportError as exc:  # pragma: no cover - defensive import guard
-    raise ImportError(
-        "ctps end-to-end test could not import 'field_fixture' from "
-        f"{_FIXTURES_DIR}. It is the Python mirror of the C++ routes_fixture the "
-        "ctps_dump --fixture mission navigates; without it the fixture gotos "
-        f"(Start/final) cannot be resolved for the replay. Original error: {exc}"
-    ) from exc
-
+from tools.path_planner import field_data  # noqa: E402  (live production field)
 from tools.path_planner.ctps import player_html, track_builder, trace_loader  # noqa: E402
 
 
@@ -207,9 +195,10 @@ def trace(dump_stdout: str) -> trace_loader.Trace:
 
 
 @pytest.fixture(scope="module")
-def fixture_field_data():
-    """The Python mirror of the C++ ``routes_fixture`` (has ``Start`` + ``final``)."""
-    return build_field_data()
+def live_field_data():
+    """The live production field — ``ctps_dump`` links the production ``routes.cpp``,
+    so the ``--fixture`` mission navigates production nodes (``Start`` + ``MYU``)."""
+    return field_data
 
 
 # ---------------------------------------------------------------------------
@@ -270,25 +259,23 @@ def test_wallstop_serializes_cm(trace: trace_loader.Trace) -> None:
 
 
 def test_trace_replays_without_crashing(
-    trace: trace_loader.Trace, fixture_field_data
+    trace: trace_loader.Trace, live_field_data
 ) -> None:
     """The real dump replays through ``track_builder.build`` without crashing.
 
     This is the core AC13 assertion and the end-to-end wallStop-``float(None)``
     regression guard: feeding real serializer output through the renderer must
-    NOT raise, and must yield a non-empty track. Building against
-    :func:`field_fixture.build_field_data` (not the live field) is required — a
-    ``KeyError`` here would mean the wrong field_data, whose ``NODES`` lack the
-    fixture mission's ``final`` node.
+    NOT raise, and must yield a non-empty track. The replay runs against the live
+    production ``field_data`` — ``ctps_dump`` links the production ``routes.cpp``,
+    so the ``--fixture`` mission's gotos (``Start`` + ``i5``) resolve there.
 
-    The benign ``build_graph`` orphan-node ``UserWarning`` (the fixture field
-    carries intentionally-disconnected nodes) is suppressed so it does not
-    clutter the run; any real exception from ``build`` still propagates and fails
-    the test.
+    Any benign ``build_graph`` orphan-node ``UserWarning`` is suppressed so it
+    does not clutter the run; any real exception from ``build`` still propagates
+    and fails the test.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
-        track = track_builder.build(trace, fixture_field_data)
+        track = track_builder.build(trace, live_field_data)
 
     assert track.keyframes, "the replayed track has no keyframes."
     assert track.events, "the replayed track has no events."

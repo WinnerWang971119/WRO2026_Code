@@ -31,9 +31,26 @@ Design constraints (CTPS UI/UX rework, T2 — issue #125):
   ``<script>`` element so the emitter test's ``const TRACK = ...;</script>``
   regex terminates at TRACK alone (a same-script ``PLAYER_META`` would be
   swallowed and break the TRACK round-trip).
+* **Conditional ``const OBJECTS`` (object/cargo plan, T4 — issue #57).**
+  :func:`render` accepts an optional ``objects`` dict (a ``layout.json``-shaped
+  mapping, see :mod:`tools.path_planner.ctps.layout`). When truthy it is
+  strictly validated then embedded, byte-for-byte, as its OWN
+  ``const OBJECTS = {...};`` ``<script>`` (same ``</`` escape as TRACK) —
+  mirroring the ``Track.to_dict`` **pivots**-omission precedent: the key is
+  emitted only when present, never as a ``null`` placeholder. ``objects=None``
+  (the default) emits no ``const OBJECTS`` at all, and :data:`PLAYER_META` is
+  **not** touched by this feature; the player detects a layout via
+  ``typeof OBJECTS !== "undefined"`` (AC11, suite TC9 stays green).
 
 The interesting runtime logic (the bounded-search + lerp seek that satisfies
 TC12) lives in ``assets/player.js``; this module only inlines it.
+
+The emit-scaffold helpers (``read_asset`` / ``assert_self_contained`` /
+``script`` / ``FORBIDDEN_SUBSTRINGS``) are owned by
+:mod:`tools.path_planner.ctps._page_emit` (T1, issue #57) and imported here
+under their historical private names so a second page emitter
+(``layout_editor_html.py``, T7) can share them without duplicating this
+module's lint/asset-read/script-wrap logic.
 """
 
 from __future__ import annotations
@@ -43,6 +60,12 @@ import json
 import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+
+from tools.path_planner.ctps._page_emit import FORBIDDEN_SUBSTRINGS as _FORBIDDEN_SUBSTRINGS
+from tools.path_planner.ctps._page_emit import assert_self_contained as _assert_self_contained
+from tools.path_planner.ctps._page_emit import read_asset as _read_asset
+from tools.path_planner.ctps._page_emit import script as _script
+from tools.path_planner.ctps.layout import validate as _validate_layout
 
 __all__ = ["render", "PLAYER_JS_PATH"]
 
@@ -66,37 +89,26 @@ _ASSET_CSS: Tuple[Path, ...] = (
 
 #: Ordered JS assets, each emitted in its OWN ``<script>`` element. The order is
 #: the load contract: ``player.js`` (namespace + engine) first so every later
-#: module finds ``window.CTPS``; ``boot.js`` last so it runs the registered
-#: inits once all modules have registered.
+#: module finds ``window.CTPS``; ``objects_draw.js`` then ``cargo.js`` (object/
+#: cargo plan, T4 -- issue #57) come immediately before ``boot.js`` --
+#: ``objects_draw.js`` establishes ``window.CTPS_OBJ`` and ``cargo.js``'s layer
+#: descriptors reference ``CTPS_OBJ.drawObject``/``drawZones`` at IIFE time, so
+#: this order is a pinned contract, not incidental; ``boot.js`` stays last so
+#: it runs the registered inits once all modules (including these two) have
+#: registered.
 _ASSET_JS: Tuple[Path, ...] = (
     PLAYER_JS_PATH,
     _ASSETS_DIR / "store.js",
     _ASSETS_DIR / "renderer.js",
     _ASSETS_DIR / "transport.js",
     _ASSETS_DIR / "timeline.js",
+    _ASSETS_DIR / "timeline_view.js",
     _ASSETS_DIR / "panels.js",
     _ASSETS_DIR / "selection.js",
     _ASSETS_DIR / "chrome.js",
+    _ASSETS_DIR / "objects_draw.js",
+    _ASSETS_DIR / "cargo.js",
     _ASSETS_DIR / "boot.js",
-)
-
-#: Literal substrings that would break the page's offline self-containment if
-#: they appeared in an asset or the HTML template markup:
-#:
-#: * ``src=`` / ``href=`` — an attribute pointing at an external/local resource
-#:   (note the missing space is deliberate: ``img.src = MAP_IMAGE`` is fine).
-#: * ``http://`` / ``https://`` — a network URL.
-#: * ``data:image`` — an inline image background in an asset (the MAP_IMAGE
-#:   ``data:image/png`` *value* is exempt — it is a JSON value, not an asset).
-#: * ``</script>`` — would prematurely close the inline ``<script>`` wrapper an
-#:   asset is inlined into.
-_FORBIDDEN_SUBSTRINGS: Tuple[str, ...] = (
-    "src=",
-    "href=",
-    "http://",
-    "https://",
-    "data:image",
-    "</script>",
 )
 
 #: Static page body markup (design 3a "Instrument"). Class-based only — no inline
@@ -110,6 +122,25 @@ _FORBIDDEN_SUBSTRINGS: Tuple[str, ...] = (
 #: ``.ctps-stage`` / ``.ctps-rail`` / ``.ctps-transport`` / ``.ctps-timeline``
 #: are asserted by TC-STRUCT. This constant is linted by
 #: :func:`_assert_self_contained` (it carries no user data).
+#:
+#: Object/cargo plan additions (T4 -- issue #57), markup only (behavior is
+#: T5/T6): the ``.ctps-layer-chips`` row gains ``OBJECTS``/``ZONES``
+#: ``data-layer`` chips (``chrome.js`` wires every ``.ctps-layer-chips
+#: .ctps-chip`` generically, so it needs no change); the header gains an
+#: ``#ctps-layout-file`` upload input + its ``#ctps-layout-upload-btn`` button
+#: (in-browser layout upload leg of AC5); and the old ``.ctps-panel--holding``
+#: shell is replaced by the two-tab cargo panel (``#ctps-cargo``,
+#: ``.ctps-cargo-tab[data-cargo-tab]``, ``#ctps-cargo-count-mag`` /
+#: ``#ctps-cargo-count-inv``, ``#ctps-mag-grid``, ``#ctps-inv-list`` -- the DOM
+#: contract T6 queries). ``#ctps-command``/``#ctps-log`` are unchanged, so
+#: TC-STRUCT is unaffected.
+#:
+#: The drift-jump (``#ctps-drift-prev``/``#ctps-drift-next``) and play-speed
+#: (``.ctps-speed`` ``data-speed`` buttons) controls moved off the transport
+#: bar into the timeline dock's toolbar (``.ctps-tl-transport-group``,
+#: alongside the zoom widget in ``.ctps-tl-zoom-group``) so the transport bar's
+#: seek scrubber gets the full bar width. The wiring is id/class based and
+#: document-wide (``transport.js``), so the relocation needs no JS change.
 _BODY_MARKUP: str = """\
 <div class="ctps-app">
     <header class="ctps-header">
@@ -121,6 +152,9 @@ _BODY_MARKUP: str = """\
             <span class="ctps-drift-glyph">&#9650;</span>
             <span id="ctps-drift-chip-text" class="ctps-drift-chip-text">drift</span>
         </button>
+        <button id="ctps-layout-upload-btn" class="ctps-help-btn" type="button">Load layout&hellip;</button>
+        <input type="file" id="ctps-layout-file" class="ctps-layout-file"
+               accept="application/json,.json" hidden>
         <button id="ctps-help" class="ctps-help-btn" type="button">? Help</button>
     </header>
     <div class="ctps-main">
@@ -139,6 +173,10 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="path">PATH</button>
                 <button id="ctps-layer-nodes" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="nodes">NODES</button>
+                <button id="ctps-layer-objects" class="ctps-chip ctps-chip--active"
+                        type="button" data-layer="objects">OBJECTS</button>
+                <button id="ctps-layer-zones" class="ctps-chip"
+                        type="button" data-layer="zones">ZONES</button>
             </div>
             <div class="ctps-scale-bar">
                 <span class="ctps-scale-line"></span>
@@ -159,15 +197,29 @@ _BODY_MARKUP: str = """\
                 <div id="ctps-command" class="ctps-command">&mdash;</div>
                 <div id="ctps-command-detail" class="ctps-command-detail"></div>
             </section>
-            <section class="ctps-panel ctps-panel--holding">
-                <div class="ctps-panel-head">
-                    <span class="ctps-panel-title">Holding</span>
-                    <span id="ctps-hold-count" class="ctps-hold-count">0 / 3</span>
+            <section id="ctps-cargo" class="ctps-panel ctps-panel--cargo">
+                <div class="ctps-cargo-tab-row" role="tablist">
+                    <button id="ctps-cargo-tab-magazine"
+                            class="ctps-cargo-tab ctps-cargo-tab--active"
+                            type="button" role="tab" data-cargo-tab="magazine">
+                        <span class="ctps-cargo-tab-label">Magazine</span>
+                        <span id="ctps-cargo-count-mag"
+                              class="ctps-cargo-tab-count">0 / 12</span>
+                    </button>
+                    <button id="ctps-cargo-tab-inventory" class="ctps-cargo-tab"
+                            type="button" role="tab" data-cargo-tab="inventory">
+                        <span class="ctps-cargo-tab-label">Inventory</span>
+                        <span id="ctps-cargo-count-inv"
+                              class="ctps-cargo-tab-count">0 / 1</span>
+                    </button>
                 </div>
-                <div id="ctps-hold-list" class="ctps-hold-list">
-                    <div class="ctps-hold-empty"></div>
-                    <div class="ctps-hold-empty"></div>
-                    <div class="ctps-hold-empty"></div>
+                <div id="ctps-cargo-panel-magazine" class="ctps-cargo-panel"
+                     data-cargo-panel="magazine">
+                    <div id="ctps-mag-grid" class="ctps-mag-grid"></div>
+                </div>
+                <div id="ctps-cargo-panel-inventory" class="ctps-cargo-panel"
+                     data-cargo-panel="inventory" hidden>
+                    <div id="ctps-inv-list" class="ctps-inv-list"></div>
                 </div>
             </section>
             <section class="ctps-panel ctps-panel--tabs">
@@ -190,29 +242,47 @@ _BODY_MARKUP: str = """\
                 type="button" aria-label="Play / pause">&#9654;</button>
         <button id="ctps-end" class="ctps-transport-btn" type="button"
                 aria-label="Jump to end">&#9197;</button>
-        <span class="ctps-transport-divider"></span>
-        <button id="ctps-drift-prev" class="ctps-drift-jump" type="button"
-                aria-label="Previous drift">&#9873;&#8249;</button>
-        <button id="ctps-drift-next" class="ctps-drift-jump" type="button"
-                aria-label="Next drift">&#9873;&#8250;</button>
         <div class="ctps-seek-wrap">
             <input type="range" id="ctps-seek" class="ctps-seek"
                    min="0" max="1000" step="1" value="0" aria-label="Seek">
             <div id="ctps-seek-ticks" class="ctps-seek-ticks"></div>
         </div>
         <span id="ctps-time" class="ctps-time">0.00 / 0.00 s</span>
-        <div class="ctps-speed" role="group" aria-label="Playback speed">
-            <button class="ctps-speed-btn" type="button" data-speed="0.5">0.5&#215;</button>
-            <button class="ctps-speed-btn ctps-speed-btn--active" type="button"
-                    data-speed="1">1&#215;</button>
-            <button class="ctps-speed-btn" type="button" data-speed="2">2&#215;</button>
-            <button class="ctps-speed-btn" type="button" data-speed="4">4&#215;</button>
-        </div>
     </div>
     <div class="ctps-timeline">
-        <div id="ctps-ruler" class="ctps-ruler"></div>
-        <div id="ctps-lanes" class="ctps-lanes"></div>
-        <div id="ctps-playhead" class="ctps-playhead"></div>
+        <div class="ctps-tl-toolbar">
+            <div class="ctps-tl-transport-group">
+                <button id="ctps-drift-prev" class="ctps-drift-jump" type="button"
+                        aria-label="Previous drift">&#9873;&#8249;</button>
+                <button id="ctps-drift-next" class="ctps-drift-jump" type="button"
+                        aria-label="Next drift">&#9873;&#8250;</button>
+                <div class="ctps-speed" role="group" aria-label="Playback speed">
+                    <button class="ctps-speed-btn" type="button" data-speed="0.5">0.5&#215;</button>
+                    <button class="ctps-speed-btn ctps-speed-btn--active" type="button"
+                            data-speed="1">1&#215;</button>
+                    <button class="ctps-speed-btn" type="button" data-speed="2">2&#215;</button>
+                    <button class="ctps-speed-btn" type="button" data-speed="4">4&#215;</button>
+                </div>
+            </div>
+            <div class="ctps-tl-zoom-group">
+                <button id="ctps-zoom-out" class="ctps-zoom-btn" type="button" aria-label="Zoom out">&#8722;</button>
+                <input type="range" id="ctps-zoom" class="ctps-zoom-slider"
+                       min="0" max="1000" step="1" value="0" aria-label="Zoom">
+                <button id="ctps-zoom-in" class="ctps-zoom-btn" type="button" aria-label="Zoom in">+</button>
+                <button id="ctps-zoom-fit" class="ctps-zoom-fit" type="button">Fit</button>
+                <span id="ctps-zoom-level" class="ctps-zoom-level">1.0&#215;</span>
+            </div>
+        </div>
+        <div id="ctps-tl-viewport" class="ctps-tl-viewport">
+            <div id="ctps-tl-content" class="ctps-tl-content">
+                <div id="ctps-ruler" class="ctps-ruler"></div>
+                <div id="ctps-lanes" class="ctps-lanes"></div>
+                <div id="ctps-playhead" class="ctps-playhead"></div>
+            </div>
+        </div>
+        <div class="ctps-tl-scroll">
+            <div id="ctps-tl-thumb" class="ctps-tl-scroll-thumb"></div>
+        </div>
     </div>
 </div>"""
 
@@ -324,63 +394,32 @@ def _map_data_uri(map_png: "str | Path | None") -> str:
     return json.dumps(f"data:image/{mime};base64,{b64}")
 
 
-def _read_asset(path: Path) -> str:
-    """Read one runtime asset as UTF-8 text.
+def _objects_script(objects: "Dict[str, Any] | None") -> "str | None":
+    """Return the ``const OBJECTS`` ``<script>`` block, or ``None`` if absent.
 
-    :param path: absolute path to a CSS / JS asset under :data:`_ASSETS_DIR`.
-    :return: the file's contents.
-    :raises FileNotFoundError: if the asset does not exist — re-raised with the
-        offending path so a missing sibling asset (created by a later task)
-        fails loud at emit time (TC-ASSETS).
+    A truthy ``objects`` is strictly validated via
+    :func:`tools.path_planner.ctps.layout.validate` (raises
+    :class:`~tools.path_planner.ctps.layout.LayoutError` LOUD on the first
+    malformed field) then embedded byte-for-byte -- the same ``</`` -> ``<\\/``
+    escape as TRACK/PLAYER_META, so a layout carrying a literal
+    ``</script>``-shaped string cannot break out of the inline wrapper.
+
+    A falsy ``objects`` (``None`` or ``{}``) returns ``None`` so
+    :func:`render` emits **no** ``const OBJECTS`` at all -- the
+    ``Track.to_dict`` pivots-omission precedent, never a ``null`` placeholder
+    (AC11).
+
+    :param objects: a ``layout.json``-shaped dict, or ``None``.
+    :return: the ``<script>const OBJECTS = ...;</script>`` block, or ``None``
+        when ``objects`` is falsy.
+    :raises tools.path_planner.ctps.layout.LayoutError: if ``objects`` fails
+        strict schema validation.
     """
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"ctps.player_html.render: required runtime asset not found at {path}."
-        ) from exc
-
-
-def _assert_self_contained(sources: Dict[str, str]) -> None:
-    """Lint each named source for offline self-containment (AC-lint).
-
-    Raises on the first source that contains any of
-    :data:`_FORBIDDEN_SUBSTRINGS` — an external reference, network URL, inline
-    image background, or a literal ``</script>`` that would break out of the
-    inline wrapper. Only the **assets and the HTML template markup** are passed
-    here; the embedded TRACK / PLAYER_META / MAP_IMAGE JSON *values* are NOT
-    linted (they carry arbitrary user text such as ``print`` labels, and the
-    MAP_IMAGE ``data:image/png`` value is a legitimate self-contained URI).
-
-    :param sources: mapping of a human-readable source name (asset file name or
-        ``"HTML template"``) to its content.
-    :raises ValueError: naming the source and the offending substring.
-    """
-    for name, content in sources.items():
-        for forbidden in _FORBIDDEN_SUBSTRINGS:
-            if forbidden in content:
-                raise ValueError(
-                    "ctps.player_html: self-containment lint failed — "
-                    f"{name!r} contains the forbidden substring {forbidden!r}. "
-                    "Assets and the HTML template must be fully offline: no "
-                    "'src='/'href=' attributes, no 'http(s)://' URLs, no "
-                    "'data:image' background, and no literal '</script>' "
-                    "(it would break out of the inline <script> wrapper)."
-                )
-
-
-def _script(inner: str) -> str:
-    """Wrap ``inner`` in its own ``<script>`` element.
-
-    Each inline constant and each JS asset gets a dedicated element so a
-    throwing top-level IIFE cannot abort the siblings, and so the emitter test's
-    ``const TRACK = ...;</script>`` regex terminates at TRACK alone.
-
-    :param inner: the raw script body (already ``</`` -escaped where it embeds
-        user text).
-    :return: a ``<script> ... </script>`` block.
-    """
-    return f"<script>\n{inner}\n</script>"
+    if not objects:
+        return None
+    _validate_layout(objects)
+    objects_json = json.dumps(objects, ensure_ascii=False).replace("</", "<\\/")
+    return _script(f"const OBJECTS = {objects_json};")
 
 
 def render(
@@ -389,6 +428,7 @@ def render(
     map_png: "str | Path | None" = None,
     source: str = "PREDICTED",
     filename: "str | Path | None" = None,
+    objects: "Dict[str, Any] | None" = None,
 ) -> Path:
     """Render ``track`` into one self-contained HTML player at ``out_path``.
 
@@ -407,6 +447,13 @@ def render(
     falls back to its vector field render. A missing map file warns and is
     treated as no map.
 
+    When ``objects`` (a ``layout.json``-shaped dict, object/cargo plan, T4 --
+    issue #57) is truthy it is validated via
+    :func:`tools.path_planner.ctps.layout.validate` and embedded as its own
+    ``const OBJECTS = {...};`` ``<script>``; a falsy/omitted ``objects``
+    emits **no** ``const OBJECTS`` at all and leaves :data:`PLAYER_META`
+    untouched (AC11 -- see :func:`_objects_script`).
+
     :param track: a :class:`~tools.path_planner.ctps.track_builder.Track`
         object (``.to_dict()`` is called) or a plain dict already in Data
         Model B shape (used unchanged) — see :func:`_as_track_dict`.
@@ -419,11 +466,16 @@ def render(
     :param filename: optional trace file name shown in the header; when omitted
         it is taken from the track dict's ``"filename"`` key if present, else
         left empty (see :func:`_derive_filename`).
+    :param objects: optional ``layout.json``-shaped dict (field objects +
+        robot manipulator zones); ``None`` (default) renders with no
+        ``const OBJECTS`` at all (AC11).
     :return: the resolved :class:`pathlib.Path` that was written.
     :raises TypeError: if ``track`` is neither a ``to_dict`` object nor a dict.
     :raises FileNotFoundError: if any required asset (e.g. ``assets/player.js``)
         is missing.
     :raises ValueError: if an asset or the HTML template is not self-contained.
+    :raises tools.path_planner.ctps.layout.LayoutError: if a truthy ``objects``
+        fails strict schema validation.
     """
     track_dict = _as_track_dict(track)
 
@@ -441,11 +493,17 @@ def render(
     player_meta: Dict[str, Any] = {
         "source": source,
         "filename": _derive_filename(track_dict, filename),
-        "lanes": ["task", "goto", "holding", "drift"],
+        "lanes": ["task", "goto", "magazine", "rearbox", "drift"],
         "tabs": ["log", "inspector"],
         "render_mode": "wheel-arc" if track_dict.get("pivots") else "box",
     }
     meta_json = json.dumps(player_meta, ensure_ascii=False).replace("</", "<\\/")
+
+    # Conditional const OBJECTS -- None when no layout was given (AC11); a
+    # truthy layout is validated (raises LayoutError loud) before anything is
+    # written. Never touches player_meta -- the player detects a layout via
+    # `typeof OBJECTS !== "undefined"`.
+    objects_script = _objects_script(objects)
 
     # Read every asset (missing sibling -> FileNotFoundError with its path).
     css_contents: List[str] = [_read_asset(path) for path in _ASSET_CSS]
@@ -466,11 +524,15 @@ def render(
 
     # Inline constants first (player.js ingests TRACK; boot.js reads
     # PLAYER_META), then each JS asset in its own <script> in load order.
+    # const OBJECTS -- when present -- rides alongside the other inline
+    # constants, own <script>, emitted only when a layout was given (AC11).
     script_blocks: List[str] = [
         _script(f"const TRACK = {track_json};"),
         _script(f"const MAP_IMAGE = {map_image_js};"),
         _script(f"const PLAYER_META = {meta_json};"),
     ]
+    if objects_script is not None:
+        script_blocks.append(objects_script)
     script_blocks.extend(_script(content) for content in js_contents)
     scripts = "\n".join(script_blocks)
 

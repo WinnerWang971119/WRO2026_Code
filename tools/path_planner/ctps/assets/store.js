@@ -5,12 +5,17 @@
  *
  *   1. `CTPS.store` — a single FLAT plain object. The playhead (`t`), transport
  *      (`playing`, `speed`), UI mode (`activeTab`, `fullView`), layer visibility
- *      (`layers`) and current `selection` live directly as top-level properties
- *      ON the store, right next to its action methods. Consumers read them
- *      straight off it (`CTPS.store.t`, `CTPS.store.layers.map`, ...). A tiny
- *      pub/sub lets sibling modules subscribe; every action notifies with an
- *      array of the top-level store keys it touched. There is no computed state,
- *      no batching and no diffing — deliberately a store, not a framework.
+ *      (`layers`), current `selection`, and the cargo model (`objects`,
+ *      `robotCfg`, `scene`, `activeCargoTab`) live directly as top-level
+ *      properties ON the store, right next to its action methods. Consumers read
+ *      them straight off it (`CTPS.store.t`, `CTPS.store.layers.map`, ...). A
+ *      tiny pub/sub lets sibling modules subscribe; every action notifies with
+ *      an array of the top-level store keys it touched. There is no computed
+ *      state, no batching and no diffing — deliberately a store, not a framework.
+ *      The cargo scene is the one exception to "no computed state": a controller
+ *      subscribed to `["t"]` bisects the resolve-once scene timeline (built by
+ *      `loadLayout` via cargo.js) and re-seats `scene` only when its index
+ *      changes — a pure bisect, still no per-frame recomputation.
  *   2. `CTPS.cursor` — a zero-argument factory returning a memoized event-cursor
  *      service. `at(t)` bisects the event array through the pinned seek engine;
  *      `step(prevIdx, idx, callbacks)` turns a cursor move into forward/rebuild
@@ -40,8 +45,22 @@
         speed: 1,
         activeTab: "log",
         fullView: false,
-        layers: { map: true, trail: true, path: true, nodes: true },
+        layers: { map: true, trail: true, path: true, nodes: true,
+                  objects: true, zones: false },
         selection: { kind: "robot", id: null },
+        // ----- cargo model (object/cargo plan -- issue #57) ---------------
+        // `objects`/`robotCfg` come from a loaded layout (the `OBJECTS` global or an
+        // uploaded file); `scene` is the current resolved cargo snapshot (or
+        // null before a layout / before the first manip event); `activeCargoTab`
+        // is the right-rail cargo panel's active tab. Visibility for the new
+        // objects/zones layers reuses `layers` above (no new toggle action).
+        objects: [],
+        robotCfg: null,
+        scene: null,
+        // `sorterError` is set by `loadLayout` from the resolver: a message when
+        // the loaded trace fired a grab with no sorter lane selected, else null.
+        sorterError: null,
+        activeCargoTab: "magazine",
     };
 
     // ----- subscription ----------------------------------------------------
@@ -146,6 +165,99 @@
     store.toggleFull = function () {
         store.setFull(!store.fullView);
     };
+
+    // ----- cargo scene wiring (object/cargo plan -- issue #57) -------------
+    // The resolved scene timeline (one snapshot per manip event) and the index
+    // of the snapshot currently shown live as closure state; `store.scene` is
+    // the snapshot itself. `loadLayout` runs the resolver (owned by cargo.js,
+    // inlined AFTER this file, so it is reached via `CTPS.cargo` at call time);
+    // a controller subscribed to ["t"] re-derives the shown snapshot by a pure
+    // bisect and only re-notifies when the scene INDEX changes.
+    var sceneTimeline = [];
+    var sceneIdx = -1;
+
+    /**
+     * Index of the last scene snapshot whose time is <= `t`, or -1 if none
+     * (playhead before the first manip event). Bounded binary search over the
+     * non-decreasing timeline — the same bisect shape as engine.findEventIndex.
+     */
+    function sceneIndexAt(t) {
+        var n = sceneTimeline.length;
+        if (n === 0 || t < sceneTimeline[0].t) {
+            return -1;
+        }
+        if (t >= sceneTimeline[n - 1].t) {
+            return n - 1;
+        }
+        var lo = 0;
+        var hi = n - 1;
+        while (hi - lo > 1) {
+            var mid = lo + Math.floor((hi - lo) / 2);
+            if (sceneTimeline[mid].t <= t) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return lo;
+    }
+
+    /** The snapshot at timeline index `idx`, or the pristine scene when idx < 0. */
+    function sceneAt(idx) {
+        if (idx >= 0 && idx < sceneTimeline.length) {
+            return sceneTimeline[idx];
+        }
+        return (CTPS.cargo && CTPS.cargo.emptyScene) ? CTPS.cargo.emptyScene() : null;
+    }
+
+    /** Set the current cargo snapshot and notify ["scene"]. */
+    function setScene(snapshot) {
+        store.scene = snapshot;
+        notify(["scene"]);
+    }
+
+    /**
+     * Ingest a layout dict (`{ objects, robot }` — the embedded `OBJECTS` global or an
+     * uploaded file): stash `objects`/`robotCfg`, resolve the scene timeline once
+     * via cargo.js, seat the snapshot for the current playhead, hoist the
+     * resolver's grab-before-sortTo flag onto `sorterError`, and notify the
+     * touched keys in one shot.
+     */
+    store.loadLayout = function (layoutDict) {
+        layoutDict = layoutDict || {};
+        store.objects = layoutDict.objects || [];
+        store.robotCfg = (layoutDict.robot !== undefined) ? layoutDict.robot : null;
+        var resolve = (CTPS.cargo && CTPS.cargo.resolve) || null;
+        sceneTimeline = resolve
+            ? resolve(CTPS.engine.track, store.objects, store.robotCfg)
+            : [];
+        store.sorterError = (sceneTimeline && sceneTimeline.sorterError) || null;
+        sceneIdx = sceneIndexAt(store.t);
+        store.scene = sceneAt(sceneIdx);
+        notify(["objects", "robotCfg", "scene", "sorterError"]);
+    };
+
+    store.setCargoTab = function (name) {
+        store.activeCargoTab = name;
+        notify(["activeCargoTab"]);
+    };
+
+    // The scene controller: on every playhead move, bisect the timeline and
+    // re-seat the snapshot ONLY when its index changed, so the cargo panel / HUD
+    // / cargo timeline lanes refresh on cargo events, not on every frame. Subscribed to
+    // ["t"] only; setScene notifies ["scene"], which this controller ignores, so
+    // there is no feedback loop.
+    store.subscribe(function (changedKeys) {
+        if (changedKeys.indexOf("t") === -1) {
+            return;
+        }
+        var idx = sceneIndexAt(store.t);
+        if (idx === sceneIdx) {
+            return;
+        }
+        sceneIdx = idx;
+        setScene(sceneAt(idx));
+    });
 
     CTPS.store = store;
 

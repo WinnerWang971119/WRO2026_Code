@@ -2,20 +2,53 @@
  * @file Manipulator.cpp
  * @brief Out-of-line members of `ManipulatorClass` — the manipulator-subsystem facade.
  *
- * @note The semantic verbs (`grab`, `release`, `dump`, `sortTo`, `reset`), the `_action`
- *       factory, and the `ManipAction` builder are all defined inline in `Manipulator.h`.
- *       Only the heavy lifecycle / blocking-spin members live here: the ctor (so the member
- *       initialiser list can name the `Config::*` tables in one place), `begin()`, `update()`,
- *       `isDone()`, `setTickCallback()`, and the `_drain` / `_maskDone` drain machinery.
+ * @note This translation unit owns the manipulator implementation surface: the `ManipAction`
+ *       builder, the semantic verbs (`grab`, `release`, `dump`, `sortTo`, `reset`, `boxOpen`,
+ *       `boxClose`), the `_action` factory, and the lifecycle / blocking-spin members.
  *
  * @note `<Arduino.h>` (millis / delay / Serial) is pulled in transitively through
  *       `Manipulator.h` -> `ManipServo.h` / `ManipBelt.h`, so it is not re-included here.
  */
 
 #include "Manipulator.h"
+#include "ManipBelt.h"
+#include "ManipServo.h"
 
 /// @brief Single global instance declared `extern` in Manipulator.h.
 ManipulatorClass Manipulator;
+
+// -----------------------------------------------------------------------------------------
+// ManipAction builder
+// -----------------------------------------------------------------------------------------
+
+ManipAction::ManipAction(ManipulatorClass& m, uint8_t mask) : _m(m), _mask(mask)
+{
+}
+
+ManipAction::ManipAction(ManipAction&& other) noexcept
+    : _m(other._m), _mask(other._mask), _blocking(other._blocking), _executed(other._executed)
+{
+    other._executed = true;
+}
+
+ManipAction& ManipAction::async()
+{
+    _blocking = false;
+    return *this;
+}
+
+ManipAction::~ManipAction()
+{
+    if (_executed)
+    {
+        return;
+    }
+    _executed = true;
+    if (_blocking)
+    {
+        _m._drain(_mask);
+    }
+}
 
 // -----------------------------------------------------------------------------------------
 // Construction
@@ -33,6 +66,74 @@ ManipulatorClass::ManipulatorClass()
 {
     // No hardware work — the actuators only capture their config here. Hardware bring-up is
     // deferred to begin(), which must run after MiniR4.begin() has returned.
+}
+
+// -----------------------------------------------------------------------------------------
+// Semantic verbs
+// -----------------------------------------------------------------------------------------
+
+ManipAction ManipulatorClass::grab()
+{
+    grabber.close();
+    return _action(M_GRAB);
+}
+
+ManipAction ManipulatorClass::release()
+{
+    grabber.open();
+    return _action(M_GRAB);
+}
+
+ManipAction ManipulatorClass::dump()
+{
+    dumper.open();
+    return _action(M_DUMP);
+}
+
+ManipAction ManipulatorClass::dumpReset()
+{
+    dumper.home();
+    return _action(M_DUMP);
+}
+
+ManipAction ManipulatorClass::sortTo(uint8_t bin)
+{
+    if (bin >= Config::SORTER_BIN_COUNT)
+    {
+        Serial.print(F("[Manipulator] sortTo: bin out of range: "));
+        Serial.println((int)bin);
+        return _action(0);    // empty mask → drain is an immediate no-op
+    }
+    sorter.setAngle(Config::SORTER_BIN_ANGLE[bin]);
+    return _action(M_SORT);
+}
+
+ManipAction ManipulatorClass::reset()
+{
+    grabber.home();
+    sorter.home();
+    dumper.home();
+    belt.home();
+    return _action(M_GRAB | M_SORT | M_DUMP | M_BELT);
+}
+
+ManipAction ManipulatorClass::boxOpen()
+{
+    //Move belt to open the rear box
+    belt.toStation(Config::BeltStation::REAR_BOX_OPEN);
+    return _action(M_BELT);
+}
+
+ManipAction ManipulatorClass::boxClose()
+{
+    //Move belt to close the rear box
+    belt.toStation(Config::BeltStation::REAR_BOX_CLOSE);
+    return _action(M_BELT);
+}
+
+ManipAction ManipulatorClass::_action(uint8_t mask)
+{
+    return ManipAction(*this, mask);
 }
 
 // -----------------------------------------------------------------------------------------

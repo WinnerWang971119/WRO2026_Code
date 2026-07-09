@@ -34,18 +34,19 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "debugYield", &TasksClass::debugYield },
     { "servoTest", &TasksClass::servoTest },
     { "home", &TasksClass::home },
+    { "idleWait", &TasksClass::idleWait },
     { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
     { "test1", &TasksClass::test1 },
     { "test0621", &TasksClass::test0621 },
+    { "ctpsExample1", &TasksClass::ctpsExample1 },
     //Add new tasks here
 };
 
 const size_t TasksClass::_registry_count =
     sizeof(_registry) / sizeof(_registry[0]);
 
-static_assert(sizeof(TasksClass::_registry) / sizeof(TaskRegistryEntry)
-              <= Config::MAX_TASKS,
+static_assert(TasksClass::_registry_count <= Config::MAX_TASKS,
               "Registry exceeds MAX_TASKS");
 
 // =============================================================================
@@ -193,6 +194,52 @@ bool TasksClass::inTask() const
     return _inTask;
 }
 
+bool TasksClass::waitStationaryMs(uint32_t ms, const __FlashStringHelper* site)
+{
+    if (!Drive.isIdle() || !PathTracker.isIdle() || LineFollower.isEnabled())
+    {
+        Serial.print(F("[Tasks] "));
+        Serial.print(site);
+        Serial.println(F(": refusing idle wait while motion is active"));
+        return false;
+    }
+
+    const uint32_t startMs = millis();
+    static bool    noCallbackWarned = false;
+
+    while ((millis() - startMs) < ms)
+    {
+        if (_aborted)
+        {
+            Serial.print(F("[Tasks] "));
+            Serial.print(site);
+            Serial.println(F(": aborted during idle wait"));
+            return false;
+        }
+
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!noCallbackWarned)
+            {
+                Serial.print(F("[Tasks] "));
+                Serial.print(site);
+                Serial.println(F(": no tick callback set — only wall-clock time will "
+                                 "advance during the wait. Call Tasks.setTickCallback(...) "
+                                 "in setup()."));
+                noCallbackWarned = true;
+            }
+            delay(1);
+        }
+        yield();
+    }
+
+    return true;
+}
+
 // =============================================================================
 // Task bodies
 // =============================================================================
@@ -283,6 +330,11 @@ bool TasksClass::home(const TaskArgs& /*args*/)
     return true;
 }
 
+bool TasksClass::idleWait(const TaskArgs& args)
+{
+    return waitStationaryMs(args.u32[0], F("idleWait"));
+}
+
 bool TasksClass::testChassis(const TaskArgs& /*args*/)
 {
     LineFollower.setEnabled(true).setDistanceTarget(50);
@@ -302,7 +354,7 @@ bool TasksClass::test1(const TaskArgs& /*args*/)
 {
     PathTracker.goTo("Inter1");
     (void)Manipulator.grab();
-    Manipulator.belt.toStation(Config::BeltStation::ABC);
+    Manipulator.belt.toStation(Config::BeltStation::MID);
     Drive.setSpeed(30, 60);
     PathTracker.goTo("Inter2");
     PathTracker.goTo("Inter3");
@@ -318,4 +370,81 @@ bool TasksClass::test0621(const TaskArgs& /*args*/)
 {
     Drive.driveDist(35).setStartSpeed(40).setPower(100).setEndSpeed(10).setMode(DriveMode::GYRO).setHeading(0);
     return true;
+}
+
+bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("MYU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MYD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MBU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MBD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MGU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MGD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+
+    //Grab shovel
+    PathTracker.goTo("shovel1O");
+    Drive.turnToYaw(90);
+    Manipulator.boxClose();
+
+    //Go to shovel drop
+    PathTracker.goTo("shovel1F");
+    Drive.turnToYaw(0);
+    Manipulator.boxOpen();
+
+    //Go to dump
+    PathTracker.goTo("dump1").setArrivalDirection(Direction::FRONT);
+    Manipulator.dump();
+    PathTracker.goTo("dump2").setArrivalDirection(Direction::REAR);
+    Manipulator.dump();
+    PathTracker.goTo("dump3").setArrivalDirection(Direction::REAR);
+
+    Manipulator.dump();
+
+    PathTracker.goTo("CG1").setArrivalDirection(Direction::REAR);
+    Manipulator.boxClose();
+    Drive.turnToYaw(0);
+    PathTracker.goTo("CG3");
+    Manipulator.boxOpen();
+    PathTracker.goTo("CY1");
+    Drive.turnToYaw(180);
+    Manipulator.boxClose();
+    PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
+    Manipulator.boxOpen();
+
+
+
+    // Return the final settle's result: waitStationaryMs reports false when it
+    // refuses to start (motion still active) or is aborted mid-wait via
+    // Tasks.abort(), so an aborted final wait must not report success to Mission.
+    return waitStationaryMs(500);
 }

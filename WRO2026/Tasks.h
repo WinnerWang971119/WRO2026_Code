@@ -79,12 +79,13 @@ public:
     /**
      * @brief Register the cooperative-tick callback driven during blocking task waits.
      *
-     * Some task bodies (``servoTest``, ``home``) block until an actuator settles. While
-     * they spin they must keep every module ticking — otherwise EventTrace stops
-     * rendering, the belt's own ``update()`` stops advancing, etc. — so the wait invokes
-     * this callback each iteration (mirroring ``ManipulatorClass::setTickCallback`` and
-     * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes ``cooperativeTick``
-     * here in ``setup()`` after every module's ``begin()`` has run.
+    * Some task bodies (``servoTest``, ``home``, ``idleWait``) block until an actuator
+    * settles or a cooperative timeout elapses. While they spin they must keep every
+    * module ticking — otherwise EventTrace stops rendering, the belt's own ``update()``
+    * stops advancing, etc. — so the wait invokes this callback each iteration
+    * (mirroring ``ManipulatorClass::setTickCallback`` and
+    * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes
+    * ``cooperativeTick`` here in ``setup()`` after every module's ``begin()`` has run.
      *
      * @param cb Cooperative-tick function pointer, or ``nullptr`` to clear it (the
      *           blocking waits then degrade to ticking only ``Manipulator.update()`` and
@@ -165,6 +166,7 @@ public:
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
     bool inTask() const;
 
+private:
     /**
      * @brief Static registry of all known task names + their member-fn pointers.
      *
@@ -173,13 +175,18 @@ public:
      * and a file-scope ``static_assert`` rejects the build if the count
      * exceeds ``Config::MAX_TASKS``.
      *
-     * @note Public so the bounds ``static_assert`` and any future external
-     *       validators (e.g. a Mission queue-time pre-check) can read the
-     *       size without the entries needing to grow a friend declaration.
-     *       The members are ``const`` — privacy here gives no additional
-     *       safety, only friction.
+     * @note Kept private because the registry is an implementation detail of
+     *       ``TasksClass`` lookup and dispatch.
      */
     static const TaskRegistryEntry _registry[];
+
+public:
+    /**
+    * @brief Number of entries in ``_registry``.
+    *
+    * Exposed so file-scope validation in ``Tasks.cpp`` can enforce the
+    * ``Config::MAX_TASKS`` cap without exposing the array itself.
+    */
     static const size_t            _registry_count;
 
 private:
@@ -234,6 +241,19 @@ private:
      */
     bool home(const TaskArgs& args);
 
+    /**
+     * @brief Stationary cooperative wait task.
+     *
+     * Spins for ``args.u32[0]`` milliseconds while driving the registered cooperative
+     * tick callback so the rest of the robot keeps updating. Refuses to start if the
+     * chassis is already moving (Drive / PathTracker busy or LineFollower enabled).
+     *
+     * @param args ``u32[0]`` = wait duration in milliseconds.
+     * @return ``true`` when the timeout elapses; ``false`` if motion is active at entry
+     *         or the task framework is aborted during the wait.
+     */
+    bool idleWait(const TaskArgs& args);
+
     bool test1(const TaskArgs& args);
 
     /**
@@ -257,6 +277,25 @@ private:
      */
     bool testOne(const TaskArgs& args);
     bool test0621(const TaskArgs& args);
+
+    /**
+     * @brief Bring-up CTPS demo.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool ctpsExample1(const TaskArgs& args);
+
+    /**
+     * @brief Stationary cooperative delay helper for task bodies.
+     *
+     * @param ms    Timeout in milliseconds.
+     * @param site  Short caller tag for diagnostics.
+     * @return ``true`` when the timeout elapses; ``false`` if the chassis is moving at
+     *         entry or the task framework is aborted mid-wait.
+     */
+    bool waitStationaryMs(uint32_t ms,
+                          const __FlashStringHelper* site = F("waitStationaryMs"));
 
     bool _inTask  = false;
     bool _aborted = false;

@@ -18,8 +18,12 @@ Geometry comes from the **existing parity-locked** sim, never a re-implementatio
   the node (net advance == edge length), matching the firmware re-anchor. A clean
   ``goto`` therefore ends with the chassis on the node (drift ≈ 0).
 * Raw ``drive`` moves apply directly to the **shared** :class:`VirtualChassis`
-  without advancing the logical ``current_node`` — that desync is exactly what
-  the drift check surfaces.
+  without advancing the logical ``current_node``. A raw *translation* is
+  off-plan by construction, so it opens a ``drift_warn`` SPAN that stays open
+  until the next ``goto`` re-anchors (the only relocalization CTPS models today
+  — issue #102) or the track ends. The span carries the residual offset off the
+  re-anchor node; there is no magnitude threshold — any non-``goto`` motion is
+  drift.
 
 Key invariants (see the CTPS plan, T7):
 
@@ -63,6 +67,7 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
+    Direction,
     PathTrackerSim,
     UnreachableGoalError,
     wrap_pm180,
@@ -70,14 +75,14 @@ from tools.path_planner.sim.runtime import (
 
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
-    DRIFT_THRESHOLD_CM,
     MANIP_NOMINAL_S,
+    ROBOT_FRAME_CM,
     SIM_DRIVE_CM_S,
     SIM_TURN_DEG_S,
 )
 from tools.path_planner.ctps.trace_loader import Command, Trace
 
-__all__ = ["Track", "build"]
+__all__ = ["Track", "build", "build_field_block"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +125,19 @@ def _honors_gyro_heading(cmd) -> bool:
         and cmd.mode == "gyro"
         and cmd.heading is not None
     )
+
+
+#: goto direction tags -> the sim's :class:`Direction`. A ``goto`` carries an
+#: ``arrival`` / ``route`` tag ("front"/"rear") only when the operator called
+#: ``setArrivalDirection`` / ``setRouteDirection``; an absent tag (``None``) or
+#: any unrecognised value maps to ``AUTO`` (defer to the sim's bidirectional
+#: resolution), so a direction-free goto is unchanged.
+_DIRECTION_BY_TAG = {"front": Direction.FRONT, "rear": Direction.REAR}
+
+
+def _direction_from_tag(tag) -> "Direction":
+    """Map a goto ``arrival`` / ``route`` tag to a :class:`Direction`; AUTO otherwise."""
+    return _DIRECTION_BY_TAG.get(tag, Direction.AUTO)
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +207,12 @@ class Track:
         timestamps are non-decreasing (they share the same running clock as the
         keyframes). A successful ``goto`` additionally carries ``"t_end":
         float`` (>= ``"t"``), spanning the whole multi-hop move; the
-        UNREACHABLE fault ``goto`` event has no ``"t_end"``.
+        UNREACHABLE fault ``goto`` event has no ``"t_end"``. A ``manip`` event
+        additionally carries structured ``"method": str`` / ``"arg": int``
+        keys (additive to the unchanged ``"label"`` — CTPS object-cargo plan,
+        T9), so the player can dispatch on them directly instead of parsing
+        the label string. No other event type gains new keys, so a
+        manip-free trace's events stay byte-identical.
     :param pivots: Optional single-wheel pivot-arc overlay segments (issue #55),
         one per pivot the trace's routes actually take, sorted by ``t0``. Each
         entry is ``{"t0": float, "t1": float, "cx": float, "cy": float,
@@ -242,7 +265,7 @@ class Track:
 # ---------------------------------------------------------------------------
 
 
-def _build_field_block(field_data) -> Dict[str, Any]:
+def build_field_block(field_data) -> Dict[str, Any]:
     """Assemble the static ``field`` render block from ``field_data``.
 
     * ``nodes``: ``{name: [x_cm, y_cm]}`` — JSON lists, not tuples.
@@ -253,9 +276,13 @@ def _build_field_block(field_data) -> Dict[str, Any]:
       ``width/height`` come from ``field_data.FIELD_MM`` (a ``(w_mm, h_mm)``
       pair) divided by 10 to convert millimetres to centimetres.
     * ``robot_radius_cm``: ``field_data.ROBOT_RADIUS_CM`` (the planner's
-      C-space inflation radius), so the player can draw the robot marker at
-      its true world size (a square of side ``2 * radius``) instead of a
-      fixed pixel box. ``0.0`` when the field omits it.
+      C-space inflation radius). ``0.0`` when the field omits it. Retained for
+      a possible C-space overlay; the drawn robot marker uses
+      ``robot_frame_cm`` (below), NOT this radius.
+    * ``robot_frame_cm``: :data:`~tools.path_planner.ctps.config.ROBOT_FRAME_CM`
+      — the robot's TRUE physical chassis footprint (square side, cm). The
+      player and layout editor draw the robot marker at this size, decoupled
+      from the C-space radius above.
 
     :param field_data: validated field-data namespace exposing ``NODES``,
         ``OBSTACLES``, ``FIELD_MM``, ``ROBOT_RADIUS_CM``.
@@ -284,6 +311,7 @@ def _build_field_block(field_data) -> Dict[str, Any]:
         "obstacles": obstacles,
         "bounds": bounds,
         "robot_radius_cm": robot_radius_cm,
+        "robot_frame_cm": float(ROBOT_FRAME_CM),
     }
 
 
@@ -464,11 +492,11 @@ def build(trace: Trace, field_data) -> Track:
     sim/chassis:
 
     * ``goto`` — expanded through :meth:`PathTrackerSim.step_through`; keyframe
-      poses read from each yielded snapshot. After the final hop, a drift check
-      compares the chassis pose to ``NODES[current_node]`` and emits a
-      ``drift_warn`` event past :data:`DRIFT_THRESHOLD_CM`. An
-      :class:`UnreachableGoalError` emits an informational ``goto`` event and
-      ends the track.
+      poses read from each yielded snapshot. After the final hop it re-anchors
+      onto its node, so it CLOSES any open ``drift_warn`` span, stamping the
+      residual offset off ``NODES[current_node]`` as the span's ``t_end`` +
+      label. An :class:`UnreachableGoalError` emits an informational ``goto``
+      event and ends the track (an open span then runs to the end).
     * ``drive`` — applied DIRECTLY to the shared chassis without advancing the
       logical node. The forward-geometry methods (``driveDist`` /
       ``stopAtLine`` / ``wallStop`` / ``lineFollowDist``) advance along the
@@ -579,6 +607,14 @@ def build(trace: Trace, field_data) -> Track:
             chassis.forward(distance_cm)
         append_geometry_keyframe(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
 
+    # Open DRIFT span, or None when the chassis is on-plan. A raw non-goto
+    # translation opens it (the robot dead-reckons off its logical node with
+    # nothing to correct it); the next goto — the only relocalization CTPS
+    # models today (issue #102) — or the end of the track closes it and fills
+    # in its ``t_end`` + measured offset. Emitted at the OPENING move's time so
+    # ``events`` stays sorted; patched in place on close.
+    drift_open_ev: Optional[Dict[str, Any]] = None
+
     # 4. Iterate the commands in order on the single shared sim/chassis.
     for cmd in trace.commands:
         if cmd.op == "goto":
@@ -600,7 +636,11 @@ def build(trace: Trace, field_data) -> Track:
             # the departure-edge heading unit ray (u-hat-1).
             pending_pivot_land: Optional[Tuple[str, float, float, float]] = None
             try:
-                for primitive, snap in sim.step_through(target):
+                for primitive, snap in sim.step_through(
+                    target,
+                    route_direction=_direction_from_tag(cmd.route),
+                    arrival_direction=_direction_from_tag(cmd.arrival),
+                ):
                     tag = primitive[0]
                     node_now = sim.localization.current_node()
                     if node_now != cur_node:
@@ -762,20 +802,20 @@ def build(trace: Trace, field_data) -> Track:
                     "label": f"{from_node}->{target}",
                 }
             )
-            # Drift check after the final hop: a clean goto lands ON the node
-            # (drift ~ 0); a preceding raw drive injects an offset that goto
-            # does not correct.
-            node = sim.localization.current_node()
-            nx_, ny_ = field_data.NODES[node]
-            drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
-            if drift > DRIFT_THRESHOLD_CM:
-                events.append(
-                    {
-                        "t": t,
-                        "type": "drift_warn",
-                        "label": f"chassis {drift:.1f} cm off node {node}",
-                    }
-                )
+            # Close any open DRIFT span: this goto resumed plan control and
+            # re-anchored onto its node. The span's reported offset is how far
+            # the chassis still sat off the arrival node after the final hop —
+            # a clean goto lands the axle ON it (~0), while a preceding raw
+            # drive injects an offset the goto does not correct. Threshold-free:
+            # ANY off-plan raw move drifts, so the span simply spans from the
+            # move to this re-anchor (the DRIFT_THRESHOLD_CM gate is gone).
+            if drift_open_ev is not None:
+                node = sim.localization.current_node()
+                nx_, ny_ = field_data.NODES[node]
+                drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
+                drift_open_ev["t_end"] = t
+                drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
+                drift_open_ev = None
 
         elif cmd.op == "drive":
             # Raw move applied DIRECTLY to the shared chassis; never advance the
@@ -783,6 +823,7 @@ def build(trace: Trace, field_data) -> Track:
             # (before any geometry advance).
             event_t = t
             method = cmd.method
+            translated = False   # did this raw move DISPLACE the chassis?
             if method in _FORWARD_GEOMETRY_METHODS:
                 # driveDist / stopAtLine / wallStop / lineFollowDist all carry a
                 # forward distance in ``cm``. For stopAtLine / wallStop /
@@ -810,11 +851,13 @@ def build(trace: Trace, field_data) -> Track:
                         chassis.x_cm, chassis.y_cm, chassis.heading_deg
                     )
                     append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
+                    translated = True
                 else:
                     # Plain advance along the CURRENT facing (non-gyro, or no
                     # heading, or lineFollowDist). Byte-identical to the pre-T7
                     # forward render for the non-reverse case.
                     append_advance_keyframe(float(cmd.cm), bool(cmd.reverse))
+                    translated = True
             elif method == "turnDeg":
                 chassis.turn_relative(float(cmd.deg))
                 append_geometry_keyframe(
@@ -829,10 +872,35 @@ def build(trace: Trace, field_data) -> Track:
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )
+            # A raw translation off the logical node opens (or, if one is already
+            # open, silently extends) a DRIFT span: the chassis dead-reckons with
+            # no goto/re-anchor to correct it. Pure in-place turns never open one
+            # (they don't leave the node). Emitted here at the move's own time so
+            # ``events`` stays sorted; its ``t_end`` + offset are filled in when
+            # the next goto re-anchors (or at trace end).
+            if translated and drift_open_ev is None:
+                drift_open_ev = {
+                    "t": event_t,
+                    "type": "drift_warn",
+                    "label": "drift",
+                    "t_end": None,
+                }
+                events.append(drift_open_ev)
 
         elif cmd.op == "manip":
+            # `method`/`arg` are structured (additive) alongside the existing
+            # `label`, so the player can dispatch on them directly instead of
+            # parsing the label string; `label` is kept for display/back-compat
+            # (T9, CTPS object-cargo plan). Purely additive: a manip-free trace
+            # never touches this branch, so its Track stays byte-identical.
             events.append(
-                {"t": t, "type": "manip", "label": f"{cmd.method}({cmd.arg})"}
+                {
+                    "t": t,
+                    "type": "manip",
+                    "method": cmd.method,
+                    "arg": cmd.arg,
+                    "label": f"{cmd.method}({cmd.arg})",
+                }
             )
             append_dwell_keyframe(MANIP_NOMINAL_S)
 
@@ -867,6 +935,18 @@ def build(trace: Trace, field_data) -> Track:
 
         # Any other op cannot reach here — the loader excludes unknown ops.
 
+    # An open DRIFT span with no following goto (a raw off-plan move that ends
+    # the mission, or one before an UNREACHABLE goto that broke the loop) runs
+    # to the end of the track — nothing ever re-anchors it. Measure the residual
+    # offset off whatever logical node the sim is parked at.
+    if drift_open_ev is not None:
+        node = sim.localization.current_node()
+        nx_, ny_ = field_data.NODES[node]
+        drift = hypot(chassis.x_cm - nx_, chassis.y_cm - ny_)
+        drift_open_ev["t_end"] = t
+        drift_open_ev["label"] = f"chassis {drift:.1f} cm off node {node}"
+        drift_open_ev = None
+
     # 5. Build-error banner (informational). Emit at the end regardless of
     #    whether the track was truncated by an unreachable goal.
     if trace.build_error:
@@ -880,7 +960,7 @@ def build(trace: Trace, field_data) -> Track:
 
     return Track(
         schema_version=1,
-        field=_build_field_block(field_data),
+        field=build_field_block(field_data),
         duration_s=t,
         keyframes=keyframes,
         events=events,

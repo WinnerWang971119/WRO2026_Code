@@ -261,4 +261,8 @@ Load-bearing design decisions live as one file per decision under [`docs/decisio
 - Use the `code-writer` agent for implementation once a plan is agreed.
 - When planning something, always read `ARCHITECTURE.md` and `DECISIONS.md` and `Roadmap.md` first to understand the big picture.
 - After fixing PR review feedback (e.g., `pr-review-triage`), commit and `git push` to the PR branch without asking for confirmation. The user has pre-authorized this for any PR-review fix flow on a feature branch.
-- Before creating a issue and pr, you must read CONTRIBUTING.md.
+- Before creating a issue and pr, you must read `CONTRIBUTING.md`.
+
+# Notes
+
+- There are teamates using both windows and macOS so every function should support both OS.

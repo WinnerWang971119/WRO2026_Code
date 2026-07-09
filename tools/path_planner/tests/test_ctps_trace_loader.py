@@ -273,3 +273,39 @@ def test_nc8_pre_existing_fixtures_load_unchanged():
                 assert cmd.mode is None, f"{name} seq={cmd.seq}: mode should be None"
                 assert cmd.heading is None, f"{name} seq={cmd.seq}: heading should be None"
                 assert cmd.reverse is None, f"{name} seq={cmd.seq}: reverse should be None"
+
+
+# ---------------------------------------------------------------------------
+# goto forced-direction tags (setArrivalDirection / setRouteDirection)
+# ---------------------------------------------------------------------------
+
+
+def test_goto_forced_direction_tags_parse():
+    """A goto with forced arrival/route directions parses into ``Command``;
+    a direction-free goto leaves both ``None`` (AUTO).
+
+    Guards the loader stage of the CTPS direction-override pipeline: the C++
+    recorder emits ``"arrival"``/``"route"`` only for a non-AUTO override, and the
+    loader must surface them for ``track_builder`` to forward to the sim.
+    """
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": "A",
+            "start_heading_deg": 0.0,
+            "build_error": False,
+            "commands": [
+                {
+                    "seq": 0,
+                    "op": "goto",
+                    "target": "B",
+                    "arrival": "front",
+                    "route": "rear",
+                },
+                {"seq": 1, "op": "goto", "target": "C"},
+            ],
+        }
+    )
+    forced, bare = trace.commands
+    assert (forced.arrival, forced.route) == ("front", "rear")
+    assert (bare.arrival, bare.route) == (None, None)

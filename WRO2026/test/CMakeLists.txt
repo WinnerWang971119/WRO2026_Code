@@ -896,11 +896,14 @@ add_test(NAME test_vision COMMAND test_vision)
 # =========================================================================================
 # CTPS dump #8 — `ctps_dump` (Mechanism #4, task T4).
 #
-# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + the issue #91
-# fixture `routes_fixture.cpp` (the self-test's `Start` / `final` nodes are absent
-# from the single-node production field, #64) against the recording mocks under
-# `ctps_mocks/` (NOT the sibling `mocks/`
-# LineFollower harness). Running the executable executes a mission to completion
+# Links the REAL `Mission.cpp` + `Tasks.cpp` + `MissionScript.cpp` + the production
+# `routes.cpp` against the recording mocks under `ctps_mocks/` (NOT the sibling `mocks/`
+# LineFollower harness). The production field now carries a full multi-node graph, so
+# the default dump renders the REAL `buildMission` against the real field, and the
+# `--self-test` fixture mission resolves its node names (`Start` + `i5`) against that
+# same field. (The issue #91 `routes_fixture.cpp` is still linked by the FSM host tests
+# that assert RESET / projection nodes the production field lacks — just not here.)
+# Running the executable executes a mission to completion
 # and serializes the captured, ordered command stream to the Data-Model-A JSON.
 # `--self-test` asserts the op stream + the tick-budget hang-guard (TC8 / TC9 /
 # AC4 / AC6); the JSON modes (`--fixture` / default) feed the CTPS player loader.
@@ -960,18 +963,19 @@ add_executable(ctps_dump
     ${SKETCH_DIR}/src/mission/Mission.cpp
     ${SKETCH_DIR}/Tasks.cpp
     ${SKETCH_DIR}/MissionScript.cpp
-    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${SKETCH_DIR}/src/nav/routes.cpp
     ${CTPS_MOCKS_DIR}/ctps_record.cpp
 )
 # `${CTPS_MOCKS_DIR}` FIRST; `${MOCKS_DIR}` intentionally omitted (see the block comment).
 target_include_directories(ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
 target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
-# Issue #91: the `--self-test` fixture mission resolves `Start` / `final` by name, which the
-# single-node production field (#64) no longer carries. Link + force-include the stable
-# fixture routes so the self-test sees a multi-node graph. Force-include it FIRST so its
-# `ROUTES_H` wins before the recording mocks (`PathTracker.h` / `Localization.h`) pull in the
-# production `routes.h`.
-add_fixture_routes_force_include(ctps_dump)
+# The default dump runs the REAL `buildMission`, whose gotos reference PRODUCTION node
+# names (`i5`, `shovel`, ...), so the production `routes.cpp` MUST be the linked graph —
+# resolving names against the issue #91 fixture routes would record every goto as the
+# empty node. The production field is now multi-node, so the `--self-test` fixture mission
+# resolves its own names (`Start` + `i5`) against it too. No routes force-include: the
+# recording mocks (`PathTracker.h` / `Localization.h`) pull in the production `routes.h`
+# directly.
 add_ctps_mock_force_includes(ctps_dump)
 # Pin the dump binary to the build-tree root so the Python orchestrator
 # (tools/path_planner/ctps) locates it under any generator. Single-config

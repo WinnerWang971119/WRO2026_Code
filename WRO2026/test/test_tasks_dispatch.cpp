@@ -45,6 +45,14 @@
 
 #include <cstring>
 
+static uint32_t g_idleWaitTickCalls = 0;
+
+static void idleWaitTick()
+{
+    g_idleWaitTickCalls++;
+    mockAdvanceMillis(1);
+}
+
 // ===========================================================================
 // Test cases — all against the real global ``Tasks`` singleton, asserting via
 // the real global ``Serial`` (MockSerial) capture buffer. Each case resets the
@@ -149,6 +157,55 @@ static void test_run_task_debug_yield()
     ASSERT_FALSE(Tasks.inTask());
 }
 
+// ---------------------------------------------------------------------------
+// runTask("idleWait") → returns true after the requested timeout while the
+// cooperative tick callback keeps the mock clock advancing.
+// ---------------------------------------------------------------------------
+static void test_run_task_idle_wait()
+{
+    TEST_SCOPE("runTask(idleWait, 5ms) → true; cooperative tick advances mock clock; inTask false");
+    Tasks.begin();
+    Serial.clearCapture();
+    mockResetMillis();
+    Drive.mockReset();
+    g_idleWaitTickCalls = 0;
+    Tasks.setTickCallback(idleWaitTick);
+
+    TaskArgs args{};
+    args.u32[0] = 5;
+
+    const bool ok = Tasks.runTask("idleWait", args);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(millis() == 5);
+    ASSERT_TRUE(g_idleWaitTickCalls == 5);
+    ASSERT_FALSE(Tasks.inTask());
+}
+
+// ---------------------------------------------------------------------------
+// runTask("idleWait") refuses to start if motion is already active.
+// ---------------------------------------------------------------------------
+static void test_run_task_idle_wait_rejects_motion()
+{
+    TEST_SCOPE("runTask(idleWait) while Drive busy → false; warns; no time advance");
+    Tasks.begin();
+    Serial.clearCapture();
+    mockResetMillis();
+    Drive.mockReset();
+    Drive.mockSetIdle(false);
+    g_idleWaitTickCalls = 0;
+    Tasks.setTickCallback(idleWaitTick);
+
+    TaskArgs args{};
+    args.u32[0] = 5;
+
+    const bool ok = Tasks.runTask("idleWait", args);
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(Serial.captured().find("refusing idle wait while motion is active") != std::string::npos);
+    ASSERT_TRUE(millis() == 0);
+    ASSERT_TRUE(g_idleWaitTickCalls == 0);
+    ASSERT_FALSE(Tasks.inTask());
+}
+
 // ===========================================================================
 // Entry.
 //
@@ -182,6 +239,8 @@ int main()
     test_run_task_demo_echo();
     test_run_task_unknown_name();
     test_run_task_debug_yield();
+    test_run_task_idle_wait();
+    test_run_task_idle_wait_rejects_motion();
 
     TEST_REPORT();
 }

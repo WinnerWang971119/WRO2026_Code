@@ -1,9 +1,9 @@
 /* CTPS — Clear Trajectory Prediction Simulator: timeline dock + lane registry.
  *
- * Owns the bottom TASK / GOTO / HOLDING / DRIFT dock: registers the four
- * `timelineLane` descriptors on `CTPS.timelineLanes` (module load time, so
- * PLAYER_META's lane manifest always finds an implementation) and, once at
- * boot, builds the dock DOM from those descriptors plus the ingested track:
+ * Owns the bottom TASK / GOTO / MAGAZINE / REAR BOX / DRIFT dock: registers
+ * the five `timelineLane` descriptors on `CTPS.timelineLanes` (module load
+ * time, so PLAYER_META's lane manifest always finds an implementation) and,
+ * once at boot, builds the dock DOM from those descriptors plus the track:
  *
  *   1. Lane registration — `build(track)` for each lane returns an array of
  *      `{t0, t1?, label, cls}` items. An item WITH `t1` renders as a
@@ -12,20 +12,41 @@
  *      discriminator — it works for `goto` (spans AND fault pins in the same
  *      lane) and `drift` (a pin plus a span in the same lane) without a
  *      separate per-item "kind" field.
- *   2. DOM: a 52px label column (`.ctps-lane-label`) and a lane column
- *      (`.ctps-lane`) per registered lane, in registration order (task, goto,
- *      holding, drift), plus a mono ruler computed from the track's actual
- *      `duration_s` (nice tick steps, never a fixed 0-90 window). Spans/pins
- *      are absolutely-positioned children sized in percent of `duration_s`,
- *      written only through `el.style.setProperty('left', ...)` /
- *      `setProperty('width', ...)` — the ADR-053 carve-out; this file never
- *      writes `el.style.<prop> =` directly, and never touches `--ctps-frac`
- *      (T5 owns writing it; the playhead div already in the template is
- *      positioned purely by CSS reading that custom property, so this file
- *      does not touch it at all).
- *   3. Drag-to-scrub: a pointer-capture drag across the `.ctps-timeline` dock
- *      resolves a fraction from the ruler's own track width (excluding the
- *      label gutter) and calls `store.seek(frac * duration)`.
+ *   2. DOM: one `.ctps-tl-row` per registered lane, in registration order
+ *      (task, goto, magazine, rearbox, drift) — each row holds a
+ *      `.ctps-lane-label` gutter cell + a `.ctps-lane` track, as flex
+ *      siblings — plus one more `.ctps-tl-row` for the ruler, whose track
+ *      element is `#ctps-ruler-track`: built ONCE at init and stable for the
+ *      page life (see point 4). Spans/pins/ticks stay absolutely-positioned
+ *      children sized in percent of `duration_s` — unchanged by the
+ *      zoom/pan work, since the track element is just `--ctps-content-w`
+ *      wide now instead of the viewport width — written only through
+ *      `el.style.setProperty('left', ...)` / `setProperty('width', ...)` —
+ *      the ADR-053 carve-out; this file never writes `el.style.<prop> =`
+ *      directly, and never touches `--ctps-frac` (T5 owns writing it; the
+ *      playhead div already in the template is positioned purely by CSS
+ *      reading that custom property, so this file does not touch it at
+ *      all).
+ *   3. Drag-to-scrub: a pointer-capture drag over `#ctps-tl-viewport` (NOT
+ *      the toolbar, the sticky labels, or the custom scrollbar — those are
+ *      walked out via `closest()` from the pointerdown target and ignored)
+ *      resolves a fraction from the stable `#ctps-ruler-track` element's own
+ *      `getBoundingClientRect()` and calls `store.seek(frac * duration)`.
+ *      Reading the rect straight off the live element keeps the mapping
+ *      correct at any scroll offset or zoom level, since the rect reflects
+ *      rendered geometry — there is no cached width/offset to go stale.
+ *   4. Windowed ruler ticks: `CTPS.timeline.rebuildRuler(pxPerSec, viewT0,
+ *      viewT1)` repaints ONLY the tick children within `[viewT0, viewT1]`
+ *      (plus a one-screen margin on each side), at a step chosen from
+ *      `TICK_STEP_CANDIDATES` so on-screen spacing stays ~90-120px for the
+ *      given `pxPerSec` — `pxPerSec` is the SOLE density input; this file
+ *      never reads `--ctps-content-w` back via `getComputedStyle`. It never
+ *      recreates `#ctps-ruler-track` itself, only its tick children, so
+ *      drag-to-scrub's captured rect reference never goes stale.
+ *      `timeline_view.js` (T3) calls this after every committed zoom/pan;
+ *      `init()` below also paints an initial full-duration window up front,
+ *      so ticks are visible before any zoom/pan module has run — or if one
+ *      never successfully does (matching boot.js's per-module isolation).
  *
  * Coloring is class-only: lane containers/labels get a `--<id>` modifier
  * class, and `goto`/`drift` items get their own span/pin modifier classes
@@ -35,8 +56,10 @@
  *
  * Concatenated into its own <script> element AFTER player.js + store.js (so
  * `window.CTPS`, `CTPS.timelineLanes` and `CTPS.store` already exist) and
- * BEFORE boot.js (which runs the `init` this file pushes onto `CTPS._inits`).
- * Vanilla JS only — no frameworks, no network, works offline.
+ * BEFORE boot.js (which runs the `init` this file pushes onto `CTPS._inits`)
+ * — and BEFORE timeline_view.js (T3), which reads the rows this file builds
+ * and calls `CTPS.timeline.rebuildRuler`. Vanilla JS only — no frameworks,
+ * no network, works offline.
  */
 
 "use strict";
@@ -149,21 +172,93 @@
     }
 
     /**
-     * HOLDING lane (RESERVED — issue #57 seam): no cargo events exist yet, so
-     * this always returns an empty array. The lane is still registered (and
-     * still drawn as an empty row with its label) so the dock's layout and
-     * the lane-order contract (task, goto, holding, drift) hold today and a
-     * future cargo-episode implementation is purely additive here.
+     * True when the magazine holds at least one tile in ANY lane for one
+     * resolved cargo scene snapshot — the predicate behind the MAGAZINE lane.
+     * A rear-box Cargo is deliberately excluded: the rear box has its own lane.
      */
-    function buildHoldingLane(track) {
-        return [];
+    function _magazineHeld(scene) {
+        if (!scene) {
+            return false;
+        }
+        var magazine = scene.magazine || [];
+        for (var lane = 0; lane < magazine.length; lane++) {
+            if (magazine[lane].length > 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the rear box holds a Cargo this snapshot — the REAR BOX lane predicate. */
+    function _rearBoxHeld(scene) {
+        return !!(scene && scene.rearBox);
     }
 
     /**
-     * DRIFT lane: each `drift_warn` event becomes a point pin AT its time,
-     * plus a span from that same time to end-of-track — the "uncorrected"
-     * span, since nothing in the mission corrects drift after the warning.
-     * Both items share the event's own label text.
+     * Contiguous-span builder shared by both cargo lanes. Recomputes the
+     * resolve-once scene timeline via `CTPS.cargo.resolve(track,
+     * store.objects, store.robotCfg)` rather than reaching into store.js's
+     * private `sceneTimeline` closure (not exposed) — cheap, since it runs once
+     * per manip event, not per frame — then emits one span per contiguous
+     * period for which `predicate(snapshot)` holds. Returns `[]` before any
+     * layout is loaded (no objects => an empty resolve) or when the predicate
+     * never holds.
+     */
+    function _cargoSpans(track, predicate, label, cls) {
+        var store = CTPS.store;
+        var resolve = CTPS.cargo && CTPS.cargo.resolve;
+        if (!store || !resolve) {
+            return [];
+        }
+        var duration = (track && track.duration_s) || 0;
+        // Silent re-resolve: `store.loadLayout` already logged each no-op/error
+        // once; these lane builders re-run per scrub boundary and must not repeat it.
+        var timeline = resolve(track, store.objects, store.robotCfg, true);
+        var out = [];
+        var openT0 = null;
+        for (var i = 0; i < timeline.length; i++) {
+            var snap = timeline[i];
+            var held = predicate(snap);
+            if (held && openT0 === null) {
+                openT0 = snap.t;
+            } else if (!held && openT0 !== null) {
+                out.push({ t0: openT0, t1: snap.t, label: label, cls: cls });
+                openT0 = null;
+            }
+        }
+        if (openT0 !== null) {
+            out.push({ t0: openT0, t1: duration, label: label, cls: cls });
+        }
+        return out;
+    }
+
+    /**
+     * MAGAZINE lane (issue #57): one `--ctps-hold` span per contiguous period
+     * during which the magazine holds at least one tile — mirroring the cargo
+     * panel's Magazine tab and the HUD's `magazine N/CAP` count (cargo.js). The
+     * spans carry an EMPTY label: the lane's own "MAGAZINE" gutter label already
+     * names it, so on-bar text would just repeat it.
+     */
+    function buildMagazineLane(track) {
+        return _cargoSpans(track, _magazineHeld, "", "ctps-span--magazine");
+    }
+
+    /**
+     * REAR BOX lane (issue #57): one `--ctps-hold` span per contiguous period
+     * during which the rear box holds a Cargo — mirroring the Inventory tab and
+     * the HUD's `rear box N/CAP` count (cargo.js). Empty span label, same reason
+     * as the magazine lane (the gutter label already reads "REAR BOX").
+     */
+    function buildRearBoxLane(track) {
+        return _cargoSpans(track, _rearBoxHeld, "", "ctps-span--rearbox");
+    }
+
+    /**
+     * DRIFT lane: each `drift_warn` event becomes a point pin AT its time (the
+     * off-plan move that opened the drift) plus a span from that time to its
+     * `t_end` — the goto re-anchor that corrected it. An event with no `t_end`
+     * (an uncorrected drift that ran to the end, or a legacy/LRS-shaped point)
+     * spans to end-of-track. Both items share the event's own label text.
      */
     function buildDriftLane(track) {
         var events = (track && track.events) || [];
@@ -177,7 +272,7 @@
             out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--drift" });
             out.push({
                 t0: ev.t,
-                t1: duration,
+                t1: ev.t_end != null ? ev.t_end : duration,
                 label: ev.label,
                 cls: "ctps-span--drift",
             });
@@ -202,11 +297,18 @@
         build: buildGotoLane,
     });
     CTPS.timelineLanes.register({
-        id: "holding",
-        label: "HOLDING",
+        id: "magazine",
+        label: "MAGAZINE",
         kind: "span",
         color: "--ctps-hold",
-        build: buildHoldingLane,
+        build: buildMagazineLane,
+    });
+    CTPS.timelineLanes.register({
+        id: "rearbox",
+        label: "REAR BOX",
+        kind: "span",
+        color: "--ctps-hold",
+        build: buildRearBoxLane,
     });
     CTPS.timelineLanes.register({
         id: "drift",
@@ -216,15 +318,24 @@
         build: buildDriftLane,
     });
 
-    // ----- ruler: nice tick steps from the ACTUAL duration_s ----------------
+    // ----- ruler: nice tick steps + windowed density-based repaint ----------
 
-    // Candidate step sizes (seconds); the smallest candidate that keeps the
-    // tick count at or below TARGET_TICK_COUNT wins. Covers both very short
-    // traces (sub-4s) and long ones (tens of minutes) without a fixed window.
+    // Candidate step sizes (seconds). The initial full-duration paint (at
+    // init, before any zoom/pan module has run) picks the smallest candidate
+    // that keeps the tick count at or below TARGET_TICK_COUNT across the
+    // WHOLE track — covers both very short traces (sub-4s) and long ones
+    // (tens of minutes) without a fixed window. Once zoomed, `rebuildRuler`
+    // picks from this SAME list by on-screen pixel spacing instead (see
+    // `tickStepForDensity`) so both paths agree on "nice" step values.
     var TICK_STEP_CANDIDATES = [
         0.5, 1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600,
     ];
     var TARGET_TICK_COUNT = 8;
+
+    // Target on-screen spacing (px) between ticks once zoomed; the smallest
+    // candidate step whose pixel spacing at the given density reaches this
+    // threshold wins, landing ticks in the ~90-120px band the plan calls for.
+    var TARGET_TICK_PX = 100;
 
     /** Return a "nice" tick step (seconds) for a track of length `duration`. */
     function niceTickStep(duration) {
@@ -240,6 +351,27 @@
         return TICK_STEP_CANDIDATES[TICK_STEP_CANDIDATES.length - 1];
     }
 
+    /**
+     * Return a "nice" tick step (seconds) so ticks land ~`TARGET_TICK_PX`
+     * apart on screen at `pxPerSec` (pixels per second of track). This is the
+     * SOLE density input for windowed repaints — `rebuildRuler` never reads
+     * `--ctps-content-w` back via `getComputedStyle`. A non-positive
+     * `pxPerSec` (not yet known, or a degenerate track) falls back to the
+     * finest candidate.
+     */
+    function tickStepForDensity(pxPerSec) {
+        if (!pxPerSec || pxPerSec <= 0) {
+            return TICK_STEP_CANDIDATES[0];
+        }
+        for (var i = 0; i < TICK_STEP_CANDIDATES.length; i++) {
+            var candidate = TICK_STEP_CANDIDATES[i];
+            if (candidate * pxPerSec >= TARGET_TICK_PX) {
+                return candidate;
+            }
+        }
+        return TICK_STEP_CANDIDATES[TICK_STEP_CANDIDATES.length - 1];
+    }
+
     /** Format a ruler tick label: whole seconds bare, fractional steps to 1dp. */
     function formatTickLabel(t) {
         var rounded = Math.round(t * 100) / 100;
@@ -250,34 +382,65 @@
     }
 
     /**
-     * Populate `#ctps-ruler` with a 52px label gutter (reusing
-     * `.ctps-lane-label` so it lines up with the lane rows below) and a tick
-     * track. Returns the tick-track element — the drag-to-scrub geometry
-     * reference, since it spans exactly the time axis (no label gutter).
+     * Build the ruler's `.ctps-tl-row` DOM ONCE — a `.ctps-lane-label`
+     * gutter cell (so it lines up with the lane rows below) plus the
+     * `#ctps-ruler-track` track element. Returns the (stable) track element;
+     * no tick children are appended here — that is `paintRulerTicks`'s job,
+     * kept separate so `rebuildRuler` (T3's zoom/pan hook) can repaint ticks
+     * without ever recreating the track element itself. Recreating it would
+     * invalidate `wireScrub`'s captured rect reference — the recorded
+     * stable-ruler-track gotcha.
      */
-    function buildRulerDom(rulerEl, duration) {
+    function buildRulerDom(rulerEl) {
         while (rulerEl.firstChild) {
             rulerEl.removeChild(rulerEl.firstChild);
         }
 
+        var rowEl = document.createElement("div");
+        rowEl.className = "ctps-tl-row";
+        rulerEl.appendChild(rowEl);
+
         var gutterEl = document.createElement("div");
         gutterEl.className = "ctps-lane-label";
-        rulerEl.appendChild(gutterEl);
+        rowEl.appendChild(gutterEl);
 
         var trackEl = document.createElement("div");
         trackEl.className = "ctps-ruler-track";
-        rulerEl.appendChild(trackEl);
+        trackEl.id = "ctps-ruler-track";
+        rowEl.appendChild(trackEl);
 
-        var step = niceTickStep(duration);
-        if (duration > 0 && step > 0) {
-            var epsilon = step / 1000;
-            for (var t = 0; t <= duration + epsilon; t += step) {
+        return trackEl;
+    }
+
+    /**
+     * Clear and repaint ONLY `trackEl`'s tick children, at `step` seconds,
+     * for ticks whose time falls in `[rangeLo, rangeHi]` (both clamped into
+     * `[0, duration]`). Ticks stay positioned by `pctOf(t, duration)` — a
+     * percent of the (now `--ctps-content-w` wide) track — so this function
+     * never needs the track's pixel width. A non-positive `duration`/`step`
+     * falls back to a single tick at `t=0`, matching the prior degenerate-
+     * track behavior.
+     */
+    function paintRulerTicks(trackEl, duration, step, rangeLo, rangeHi) {
+        while (trackEl.firstChild) {
+            trackEl.removeChild(trackEl.firstChild);
+        }
+        if (!duration || duration <= 0 || !step || step <= 0) {
+            appendTick(trackEl, 0, duration);
+            return;
+        }
+        var lo = rangeLo < 0 ? 0 : rangeLo;
+        var hi = rangeHi > duration ? duration : rangeHi;
+        var epsilon = step / 1000;
+        var firstIndex = Math.floor(lo / step);
+        if (firstIndex < 0) {
+            firstIndex = 0;
+        }
+        for (var t = firstIndex * step; t <= hi + epsilon; t += step) {
+            if (t >= lo - epsilon) {
                 appendTick(trackEl, t, duration);
             }
-        } else {
-            appendTick(trackEl, 0, duration);
         }
-        return trackEl;
     }
 
     function appendTick(trackEl, t, duration) {
@@ -287,6 +450,44 @@
         tickEl.textContent = formatTickLabel(t);
         trackEl.appendChild(tickEl);
     }
+
+    // Stable ruler track element + its track's duration, captured once at
+    // init() so `rebuildRuler` (called by T3 well after init, on every
+    // committed zoom/pan) can repaint tick children without either being
+    // passed back in.
+    var _rulerTrackEl = null;
+    var _rulerDuration = 0;
+
+    /**
+     * `CTPS.timeline.rebuildRuler` — repaint ONLY the ruler's tick children
+     * within the visible window `[viewT0, viewT1]` plus a one-screen margin
+     * on each side (bounds tick node count on long traces while giving a
+     * smooth pan some slack before ticks pop in right at the edge), at a
+     * step chosen from `TICK_STEP_CANDIDATES` for ~90-120px on-screen
+     * spacing at `pxPerSec`. `pxPerSec` is the sole density input — never
+     * `--ctps-content-w` read back via `getComputedStyle`. Never recreates
+     * `#ctps-ruler-track`, only its tick children. A no-op before `init()`
+     * has run (no stable track element yet).
+     */
+    function rebuildRuler(pxPerSec, viewT0, viewT1) {
+        if (!_rulerTrackEl) {
+            return;
+        }
+        var step = tickStepForDensity(pxPerSec);
+        var span = viewT1 - viewT0;
+        if (span < 0) {
+            span = 0;
+        }
+        var margin = span;
+        paintRulerTicks(
+            _rulerTrackEl, _rulerDuration, step, viewT0 - margin, viewT1 + margin);
+    }
+
+    // Exposed at module load time (this file runs before timeline_view.js,
+    // per _ASSET_JS order) so `CTPS.timeline.rebuildRuler` always exists by
+    // the time T3 looks for it, even though repaints are inert until
+    // `init()` below sets `_rulerTrackEl`.
+    CTPS.timeline = { rebuildRuler: rebuildRuler };
 
     // ----- lanes DOM ----------------------------------------------------------
 
@@ -353,11 +554,12 @@
     }
 
     /**
-     * Populate `#ctps-lanes` with one label + lane pair per registered
-     * `timelineLane`, in registration order (task, goto, holding, drift). A
-     * lane whose `build` throws is skipped (recorded into `CTPS._errors`)
-     * rather than aborting the whole dock — the same "one bad module can't
-     * take down the page" posture the registries themselves use.
+     * Populate `#ctps-lanes` with one `.ctps-tl-row` (a label cell + lane
+     * track, as flex siblings) per registered `timelineLane`, in
+     * registration order (task, goto, magazine, rearbox, drift). A lane
+     * whose `build` throws is skipped (recorded into `CTPS._errors`) rather
+     * than aborting the whole dock — the same "one bad module can't take
+     * down the page" posture the registries themselves use.
      */
     function buildLanesDom(lanesEl, lanes, track, duration) {
         while (lanesEl.firstChild) {
@@ -368,14 +570,18 @@
         for (var i = 0; i < lanes.length; i++) {
             var lane = lanes[i];
 
+            var rowEl = document.createElement("div");
+            rowEl.className = "ctps-tl-row";
+            lanesEl.appendChild(rowEl);
+
             var labelEl = document.createElement("div");
             labelEl.className = "ctps-lane-label ctps-lane-label--" + lane.id;
             labelEl.textContent = lane.label;
-            lanesEl.appendChild(labelEl);
+            rowEl.appendChild(labelEl);
 
             var laneEl = document.createElement("div");
             laneEl.className = "ctps-lane ctps-lane--" + lane.id;
-            lanesEl.appendChild(laneEl);
+            rowEl.appendChild(laneEl);
 
             var items = [];
             try {
@@ -390,21 +596,76 @@
         }
     }
 
+    /**
+     * Rebuild ONLY the two cargo lanes' DOM in place (MAGAZINE + REAR BOX) —
+     * never the whole dock via `buildLanesDom` (task/goto/drift don't depend on
+     * cargo state, and a full rebuild would also reset `_currentSpans`'
+     * task/goto bookkeeping). Called on every `["scene"]` store notify:
+     * `store.loadLayout` (embedded OR uploaded) and the t->scene bisect
+     * controller (store.js) both notify `"scene"`. The initial (empty) cargo
+     * lanes are created by the normal dock build (`buildLanesDom`), NOT by this
+     * function; this is the ONLY path that keeps them in sync after boot — the
+     * dock otherwise builds its lanes once (see the file docstring), so without
+     * this rebuild the cargo lanes stay permanently empty for embedded and
+     * uploaded layouts alike.
+     */
+    function rebuildCargoLanesDom(track, duration) {
+        _rebuildOneCargoLane(
+            ".ctps-lane--magazine", buildMagazineLane, "magazine", track, duration);
+        _rebuildOneCargoLane(
+            ".ctps-lane--rearbox", buildRearBoxLane, "rearbox", track, duration);
+    }
+
+    /** Clear + repaint one cargo lane element from its builder, error-isolated. */
+    function _rebuildOneCargoLane(selector, builder, id, track, duration) {
+        var laneEl = document.querySelector(selector);
+        if (!laneEl) {
+            return;
+        }
+        while (laneEl.firstChild) {
+            laneEl.removeChild(laneEl.firstChild);
+        }
+        var items = [];
+        try {
+            items = builder(track) || [];
+        } catch (buildError) {
+            CTPS._errors.push(
+                "timeline: lane '" + id + "' rebuild threw: " +
+                (buildError && buildError.message || String(buildError)));
+            items = [];
+        }
+        renderLaneItems(laneEl, items, duration);
+    }
+
     // ----- drag-to-scrub -------------------------------------------------------
 
     /**
-     * Wire pointer drag-to-scrub over the whole `.ctps-timeline` dock. The
-     * fraction is resolved from `trackEl` (the ruler's tick track) so the
-     * label gutter never biases the mapping, even when the pointer is over a
-     * lane row rather than the ruler itself — `clientX` is compared against
-     * `trackEl`'s own bounding rect regardless of which descendant received
-     * the event. Pointer capture keeps `pointermove` firing while dragging
-     * outside the dock's bounds. The drag pauses playback (like the `#ctps-seek`
-     * slider) so the rAF clock cannot advance the playhead mid-scrub and fight
-     * the drag.
+     * Wire pointer drag-to-scrub over `#ctps-tl-viewport` (NOT the whole
+     * `.ctps-timeline` dock — the toolbar and the custom scrollbar strip
+     * live outside the viewport and so never reach this listener at all; the
+     * sticky `.ctps-lane-label` gutter DOES live inside the viewport, so its
+     * pointer-downs are explicitly ignored below via a `closest()` walk).
+     * The fraction is resolved from `trackEl` (the stable `#ctps-ruler-track`
+     * element) so the label gutter never biases the mapping and the mapping
+     * stays correct at any scroll offset/zoom level — `clientX` is compared
+     * against `trackEl`'s own live bounding rect regardless of which
+     * descendant received the event. Pointer capture keeps `pointermove`
+     * firing while dragging outside the viewport's bounds. The drag pauses
+     * playback (like the `#ctps-seek` slider) so the rAF clock cannot
+     * advance the playhead mid-scrub and fight the drag.
      */
-    function wireScrub(timelineEl, trackEl, store, duration) {
+    function wireScrub(viewportEl, trackEl, store, duration) {
         var dragging = false;
+
+        function isIgnoredTarget(target) {
+            if (!target || !target.closest) {
+                return false;
+            }
+            return !!(
+                target.closest(".ctps-lane-label") ||
+                target.closest(".ctps-tl-toolbar") ||
+                target.closest(".ctps-tl-scroll"));
+        }
 
         function seekFromClientX(clientX) {
             var rect = trackEl.getBoundingClientRect();
@@ -423,11 +684,14 @@
             store.seek(frac * duration);
         }
 
-        timelineEl.addEventListener("pointerdown", function (evt) {
+        viewportEl.addEventListener("pointerdown", function (evt) {
+            if (isIgnoredTarget(evt.target)) {
+                return;
+            }
             dragging = true;
-            if (timelineEl.setPointerCapture) {
+            if (viewportEl.setPointerCapture) {
                 try {
-                    timelineEl.setPointerCapture(evt.pointerId);
+                    viewportEl.setPointerCapture(evt.pointerId);
                 } catch (captureError) {
                     // Pointer capture is best-effort; dragging still works
                     // via plain pointermove if capture is unavailable.
@@ -436,7 +700,7 @@
             seekFromClientX(evt.clientX);
         });
 
-        timelineEl.addEventListener("pointermove", function (evt) {
+        viewportEl.addEventListener("pointermove", function (evt) {
             if (dragging) {
                 seekFromClientX(evt.clientX);
             }
@@ -445,8 +709,8 @@
         function stopDrag() {
             dragging = false;
         }
-        timelineEl.addEventListener("pointerup", stopDrag);
-        timelineEl.addEventListener("pointercancel", stopDrag);
+        viewportEl.addEventListener("pointerup", stopDrag);
+        viewportEl.addEventListener("pointercancel", stopDrag);
     }
 
     // ----- boot wiring ----------------------------------------------------------
@@ -457,13 +721,17 @@
      * geometry is static for the life of the page (events don't change during
      * playback) and the playhead LINE is positioned purely by CSS reading
      * `--ctps-frac` (written by T5); the one thing that reacts per `t` is the
-     * `.ctps-span--current` highlight on the task/goto span under the playhead.
+     * `.ctps-span--current` highlight on the task/goto span under the
+     * playhead. The ruler's track element (`#ctps-ruler-track`) is built
+     * once here and its tick children painted once for the full duration —
+     * `rebuildRuler` (T3's zoom/pan hook) repaints only those tick children
+     * afterwards, never the track element itself.
      */
     function init(ctx) {
-        var timelineEl = document.querySelector(".ctps-timeline");
+        var viewportEl = document.getElementById("ctps-tl-viewport");
         var rulerEl = document.getElementById("ctps-ruler");
         var lanesEl = document.getElementById("ctps-lanes");
-        if (!timelineEl || !rulerEl || !lanesEl) {
+        if (!viewportEl || !rulerEl || !lanesEl) {
             CTPS._errors.push("timeline: dock container not found in DOM");
             return;
         }
@@ -473,16 +741,26 @@
             var duration = (track && track.duration_s) || 0;
             var store = (ctx && ctx.store) || CTPS.store;
 
-            var rulerTrackEl = buildRulerDom(rulerEl, duration);
+            var rulerTrackEl = buildRulerDom(rulerEl);
+            _rulerTrackEl = rulerTrackEl;
+            _rulerDuration = duration;
+            paintRulerTicks(rulerTrackEl, duration, niceTickStep(duration), 0, duration);
+
             buildLanesDom(lanesEl, CTPS.timelineLanes.all(), track, duration);
             if (store) {
-                wireScrub(timelineEl, rulerTrackEl, store, duration);
+                wireScrub(viewportEl, rulerTrackEl, store, duration);
                 // React to the playhead: light up the task/goto span the current
                 // time sits inside. `seek`/`setT` notify with ["t"] on every drag
                 // and playback tick, so this stays in sync without its own clock.
+                // `["scene"]` fires on layout-load (embedded or uploaded) and on
+                // every cargo event crossed while scrubbing — rebuild the two
+                // cargo lanes only, per rebuildCargoLanesDom's docstring.
                 store.subscribe(function (changed) {
                     if (changed && changed.indexOf("t") !== -1) {
                         refreshCurrent(store.t);
+                    }
+                    if (changed && changed.indexOf("scene") !== -1) {
+                        rebuildCargoLanesDom(track, duration);
                     }
                 });
                 refreshCurrent(store.t);

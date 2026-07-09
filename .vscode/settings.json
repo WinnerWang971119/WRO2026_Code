@@ -14,5 +14,6 @@
     ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true,
-    "cmake.sourceDirectory": "${workspaceFolder}/WRO2026/test"
+    "cmake.sourceDirectory": "${workspaceFolder}/WRO2026/test",
+    "cmake.ctest.neverDebugTestsWithLaunchConfiguration": false
 }

@@ -7,17 +7,22 @@
  *      of the last event at-or-before the playhead, refreshed on `["t"]`.
  *   2. Log / Inspector tabs — registered on `CTPS.panelTabs` (`log`,
  *      `inspector`) so a future tab (#23 telemetry) is an additive
- *      registration. The Log tab keeps its ~10-line window bounded via
- *      `CTPS.cursor()`'s forward/rebuild dispatch (forward appends the newly
- *      crossed lines; a backward seek rebuilds only the window, never a full
- *      `events` scan); each line seeks on click. The Inspector tab renders
+ *      registration. The Log tab keeps full history for true scrollback;
+ *      forward seek appends newly crossed lines and backward seek rebuilds
+ *      the log up to the current cursor index; each line seeks on click.
+ *      The Inspector tab renders
  *      whatever `CTPS.inspectorFields` holds (populated by T8/selection.js) as
  *      a 2-column label/value grid, with a placeholder before T8 lands.
- *   3. Holding — the reserved #57 shell. Its dashed `.ctps-hold-empty` slots
- *      and the "0 / 3" count are already static markup in the HTML template
- *      (player_html.py); this file only asserts that static count explicitly
- *      and registers a no-op cursor consumer so the forward/rebuild seam
- *      exists end-to-end. No cargo data.
+ *   3. Cargo (issue #57) — the two-tab Magazine/Inventory panel that replaced
+ *      the reserved Holding shell. This file owns only the tab-switching
+ *      CHROME: which of the two tab buttons carries `.ctps-cargo-tab--active`
+ *      and which of the two `.ctps-cargo-panel` divs is visible, driven by
+ *      `store.activeCargoTab` -- the same idiom as the Log/Inspector tabs
+ *      above, but its own rail section (not registered via `panelTabs`). The
+ *      panel CONTENT (the magazine grid, the inventory hold card, the tab
+ *      count badges, the stage HUD line) and the tab-click wiring are
+ *      cargo.js's (`store.scene`/`store.objects` are its domain, not this
+ *      file's).
  *
  * Styling is class-driven only: this panel never touches `.style` (not even
  * `setProperty`) — every state it needs to convey (current/drift/active) is a
@@ -104,11 +109,7 @@
         }
     }
 
-    // ----- 2a. Log tab: bounded ~10-line window via CTPS.cursor() ----------
-
-    //: The Log window never holds more than this many lines, on either a
-    //: forward-append or a backward-rebuild.
-    var LOG_WINDOW_SIZE = 10;
+    // ----- 2a. Log tab: full scrollback via CTPS.cursor() -------------------
 
     //: This module's own cursor position (see CTPS.cursor()'s step contract)
     //: plus the DOM elements currently in the window, oldest first (index 0)
@@ -146,18 +147,12 @@
     }
 
     /**
-     * Forward branch: append the newly-crossed events, then trim the front
-     * back down to the window size. A skipped-ahead slice (the Log wasn't
-     * live through a big jump) is capped to the last LOG_WINDOW_SIZE entries
-     * BEFORE touching the DOM, so this stays O(window) rather than
-     * O(events crossed) — never a full re-render of everything skipped.
+     * Forward branch: append every newly-crossed event so the operator keeps
+     * full scrollback history.
      */
     function appendLogLines(store, container, newEvents) {
         if (!container || newEvents.length === 0) {
             return;
-        }
-        if (newEvents.length > LOG_WINDOW_SIZE) {
-            newEvents = newEvents.slice(newEvents.length - LOG_WINDOW_SIZE);
         }
         setLogLineCurrent(lastLogLineEl(), false);
         for (var i = 0; i < newEvents.length; i++) {
@@ -165,32 +160,32 @@
             container.appendChild(el);
             logLineEls.push(el);
         }
-        while (logLineEls.length > LOG_WINDOW_SIZE) {
-            var stale = logLineEls.shift();
-            if (stale.parentNode === container) {
-                container.removeChild(stale);
-            }
-        }
         setLogLineCurrent(lastLogLineEl(), true);
         container.scrollTop = container.scrollHeight;
     }
 
     /**
-     * Rebuild branch (backward seek): replay only the bounded window ending
-     * at `idx`, never the full `events` array.
+     * Rebuild branch (backward seek): reconcile the existing line list down to
+     * `idx`, keeping full scrollback complete at every cursor position. Trims the
+     * surplus off the END rather than wiping and replaying the whole prefix, so a
+     * backward scrub over a long mission is O(lines removed), not O(prefix) per
+     * frame (which janked/froze the UI on hundreds of events).
      */
     function rebuildLogWindow(store, container, idx) {
         if (!container) {
             return;
         }
-        container.textContent = "";
-        logLineEls = [];
-        if (idx < 0) {
-            return;
+        var target = (idx < 0) ? 0 : idx + 1; // number of lines that should show
+        while (logLineEls.length > target) {
+            var removed = logLineEls.pop();
+            if (removed && removed.parentNode) {
+                removed.parentNode.removeChild(removed);
+            }
         }
+        // Backfill any missing tail so the window always covers 0..idx (defensive;
+        // forward crossings normally flow through `appendLogLines`).
         var events = CTPS.engine.events;
-        var start = Math.max(0, idx - LOG_WINDOW_SIZE + 1);
-        for (var i = start; i <= idx; i++) {
+        for (var i = logLineEls.length; i < target; i++) {
             var el = makeLogLineEl(store, events[i]);
             container.appendChild(el);
             logLineEls.push(el);
@@ -277,30 +272,31 @@
         el.appendChild(grid);
     }
 
-    // ----- 3. Holding: reserved empty shell (#57 seam) ----------------------
-
-    //: This module's own cursor position for the no-op Holding consumer —
-    //: kept separate from `logPrevIdx` so the two windows step independently.
-    var holdingPrevIdx = -1;
-
-    /** Registered purely so the forward/rebuild seam exists end-to-end. */
-    function stepHoldingCursor(idx) {
-        CTPS.cursor().step(holdingPrevIdx, idx, {
-            forward: function () {},
-            rebuild: function () {},
-        });
-        holdingPrevIdx = idx;
-    }
+    // ----- 3. Cargo tab-switching shell (#57 seam) --------------------------
 
     /**
-     * The dashed `.ctps-hold-empty` slots are already static markup in the
-     * template (player_html.py) — nothing to build. This only asserts the
-     * reserved "0 / 3" count explicitly, rather than leaning on the
-     * template's default text staying in sync by accident. No cargo data.
+     * Toggle `.ctps-cargo-tab--active` on the two cargo tab buttons and
+     * `hidden` on the two `.ctps-cargo-panel` divs for `state.activeCargoTab`
+     * — the same active-class/hidden-attribute mechanic as
+     * `setTabActive`/`applyActiveTab` above, kept as its own function (rather
+     * than folded into that pair) because the cargo panel is its own rail
+     * section, not a `panelTabs` registrant. Content inside the panels is
+     * cargo.js's; this only decides which one is on screen.
      */
-    function renderHoldingShell(dom) {
-        if (dom.holdCount) {
-            dom.holdCount.textContent = "0 / 3";
+    function renderHoldingShell(dom, state) {
+        var activeTab = (state && state.activeCargoTab) || "magazine";
+        var isMagazine = (activeTab === "magazine");
+        if (dom.cargoTabMagazine) {
+            dom.cargoTabMagazine.classList.toggle("ctps-cargo-tab--active", isMagazine);
+        }
+        if (dom.cargoTabInventory) {
+            dom.cargoTabInventory.classList.toggle("ctps-cargo-tab--active", !isMagazine);
+        }
+        if (dom.cargoPanelMagazine) {
+            dom.cargoPanelMagazine.hidden = !isMagazine;
+        }
+        if (dom.cargoPanelInventory) {
+            dom.cargoPanelInventory.hidden = isMagazine;
         }
     }
 
@@ -357,19 +353,21 @@
             inspector: document.getElementById("ctps-inspector"),
             tabLog: document.getElementById("ctps-tab-log"),
             tabInspector: document.getElementById("ctps-tab-inspector"),
-            holdCount: document.getElementById("ctps-hold-count"),
+            cargoTabMagazine: document.getElementById("ctps-cargo-tab-magazine"),
+            cargoTabInventory: document.getElementById("ctps-cargo-tab-inventory"),
+            cargoPanelMagazine: document.getElementById("ctps-cargo-panel-magazine"),
+            cargoPanelInventory: document.getElementById("ctps-cargo-panel-inventory"),
         };
     }
 
     /**
      * Wires the rail: registers the `log`/`inspector` panelTabs (so the
      * registry is meaningful for a future #23 tab too), wires tab-button
-     * clicks + the Holding shell's static count, subscribes to the store
-     * (one `findEventIndex`-backed `CTPS.cursor().at(t)` per `"t"` notify,
-     * fed to the command panel, the Log cursor, AND the no-op Holding
-     * cursor — "one bisect per refresh feeds every stateful panel"), then
-     * runs an initial sync so the rail is populated before the first user
-     * action.
+     * clicks + the cargo tab-switching shell, subscribes to the store (one
+     * `findEventIndex`-backed `CTPS.cursor().at(t)` per `"t"` notify, fed to
+     * the command panel and the Log cursor; `activeCargoTab` re-runs the
+     * cargo shell), then runs an initial sync so the rail is populated
+     * before the first user action.
      */
     function init(ctx) {
         var store = ctx.store;
@@ -383,14 +381,13 @@
         });
 
         wireTabButtons(dom, store);
-        renderHoldingShell(dom);
+        renderHoldingShell(dom, store);
 
         store.subscribe(function (changedKeys, state) {
             if (changedKeys.indexOf("t") !== -1) {
                 var idx = CTPS.cursor().at(state.t);
                 renderCommandPanel(dom, idx);
                 stepLogCursor(state, dom.log, idx);
-                stepHoldingCursor(idx);
                 if (state.activeTab === "inspector") {
                     renderInspectorTab(dom.inspector, state);
                 }
@@ -401,6 +398,9 @@
             if (changedKeys.indexOf("activeTab") !== -1) {
                 applyActiveTab(dom, state);
             }
+            if (changedKeys.indexOf("activeCargoTab") !== -1) {
+                renderHoldingShell(dom, state);
+            }
         });
 
         // Initial sync: populate the rail for t=0 / the default active tab
@@ -408,7 +408,6 @@
         var idx0 = CTPS.cursor().at(store.t);
         renderCommandPanel(dom, idx0);
         stepLogCursor(store, dom.log, idx0);
-        stepHoldingCursor(idx0);
         applyActiveTab(dom, store);
     }
 

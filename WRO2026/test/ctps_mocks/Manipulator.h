@@ -10,11 +10,11 @@
  *
  * Mirrors the production verb surface so a real task body that actuates the
  * manipulator links and records against this mock unchanged:
- *   - Semantic verbs (`grab` / `release` / `dump` / `sortTo` / `reset`) return a
- *     no-op `ManipAction` builder (the recording happens in the verb body, so an
- *     `.async()` chain or a bare statement both record exactly once). Each is
- *     captured as a `manip` op (method name + arg; the arg-less verbs record `0`,
- *     `sortTo` records the bin) into the shared `g_ctpsLog`, preserving execution
+ *   - Semantic verbs (`grab` / `release` / `dump` / `sortTo` / `reset` / `boxOpen` /
+ *     `boxClose`) return a no-op `ManipAction` builder (the recording happens in the
+ *     verb body, so an `.async()` chain or a bare statement both record exactly once).
+ *     Each is captured as a `manip` op (method name + arg; the arg-less verbs record
+ *     `0`, `sortTo` records the bin) into the shared `g_ctpsLog`, preserving execution
  *     order relative to surrounding `task_start` / `drive` / `task_end` records.
  *   - The primitive actuator handles (`grabber` / `sorter` / `dumper` / `belt`)
  *     are exposed as no-op stubs — NOT recording seams. The competition mission
@@ -144,6 +144,13 @@ public:
         return ManipAction{};
     }
 
+    /** @brief Record a `dumpReset` manip op. */
+    ManipAction dumpReset()
+    {
+        ctps::recordManip("dumpReset", 0);
+        return ManipAction{};
+    }
+
     /** @brief Record a `sortTo` manip op carrying the bin index. */
     ManipAction sortTo(uint8_t bin)
     {
@@ -155,6 +162,20 @@ public:
     ManipAction reset()
     {
         ctps::recordManip("reset", 0);
+        return ManipAction{};
+    }
+
+    /** @brief Record a `boxOpen` manip op. */
+    ManipAction boxOpen()
+    {
+        ctps::recordManip("boxOpen", 0);
+        return ManipAction{};
+    }
+
+    /** @brief Record a `boxClose` manip op. */
+    ManipAction boxClose()
+    {
+        ctps::recordManip("boxClose", 0);
         return ManipAction{};
     }
 

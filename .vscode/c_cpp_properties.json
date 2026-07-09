@@ -15,6 +15,9 @@
             "includePath": [
                 "${workspaceFolder}/WRO2026",
                 "${workspaceFolder}/WRO2026/src/**",
+                "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes",
+                "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/src/bsp",
+                "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/inc",
                 "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/**",
                 "${env:LOCALAPPDATA}/Arduino15/packages/arduino/tools/**",
                 "${env:USERPROFILE}/Documents/Arduino/libraries/**"
@@ -23,6 +26,9 @@
                 "path": [
                     "${workspaceFolder}/WRO2026",
                     "${workspaceFolder}/WRO2026/src/**",
+                    "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes",
+                    "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/src/bsp",
+                    "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/inc",
                     "${env:LOCALAPPDATA}/Arduino15/packages/arduino/hardware/renesas_uno/**",
                     "${env:LOCALAPPDATA}/Arduino15/packages/arduino/tools/**",
                     "${env:USERPROFILE}/Documents/Arduino/libraries/**"
@@ -44,6 +50,9 @@
             "includePath": [
                 "${workspaceFolder}/WRO2026",
                 "${workspaceFolder}/WRO2026/src/**",
+                "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes",
+                "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/src/bsp",
+                "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/inc",
                 "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/**",
                 "${env:HOME}/Library/Arduino15/packages/arduino/tools/**",
                 "${env:HOME}/Documents/Arduino/libraries/**"
@@ -52,6 +61,9 @@
                 "path": [
                     "${workspaceFolder}/WRO2026",
                     "${workspaceFolder}/WRO2026/src/**",
+                    "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes",
+                    "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/src/bsp",
+                    "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/*/variants/UNOWIFIR4/includes/ra/fsp/inc",
                     "${env:HOME}/Library/Arduino15/packages/arduino/hardware/renesas_uno/**",
                     "${env:HOME}/Library/Arduino15/packages/arduino/tools/**",
                     "${env:HOME}/Documents/Arduino/libraries/**"

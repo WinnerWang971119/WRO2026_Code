@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "field": {
+    "nodes": {
+      "PICK": [50.0, 50.0],
+      "BOX": [120.0, 50.0]
+    },
+    "obstacles": [],
+    "bounds": [0.0, 0.0, 200.0, 150.0],
+    "robot_radius_cm": 8.0
+  },
+  "duration_s": 8.0,
+  "keyframes": [
+    { "t": 0.0, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 0.5, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 1.0, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 1.5, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 2.0, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 2.5, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 3.0, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 3.5, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 4.0, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 4.5, "x": 50.0, "y": 50.0, "h": 0.0 },
+    { "t": 7.0, "x": 120.0, "y": 50.0, "h": 0.0 },
+    { "t": 7.5, "x": 120.0, "y": 50.0, "h": 0.0 },
+    { "t": 8.0, "x": 120.0, "y": 50.0, "h": 0.0 }
+  ],
+  "events": [
+    { "t": 0.0, "type": "task_start", "label": "CargoDemo" },
+    { "t": 0.0, "type": "manip", "method": "sortTo", "arg": 0, "label": "sortTo(0)" },
+    { "t": 0.5, "type": "manip", "method": "grab", "arg": 0, "label": "grab(0)" },
+    { "t": 1.0, "type": "manip", "method": "sortTo", "arg": 1, "label": "sortTo(1)" },
+    { "t": 1.5, "type": "manip", "method": "grab", "arg": 0, "label": "grab(0)" },
+    { "t": 2.0, "type": "manip", "method": "sortTo", "arg": 2, "label": "sortTo(2)" },
+    { "t": 2.5, "type": "manip", "method": "grab", "arg": 0, "label": "grab(0)" },
+    { "t": 3.0, "type": "manip", "method": "sortTo", "arg": 3, "label": "sortTo(3)" },
+    { "t": 3.5, "type": "manip", "method": "grab", "arg": 0, "label": "grab(0)" },
+    { "t": 4.0, "type": "manip", "method": "dump", "arg": 0, "label": "dump(0)" },
+    { "t": 4.5, "type": "drive", "label": "driveDist(70.0)" },
+    { "t": 7.0, "type": "manip", "method": "boxClose", "arg": 0, "label": "boxClose(0)" },
+    { "t": 7.5, "type": "manip", "method": "boxOpen", "arg": 0, "label": "boxOpen(0)" },
+    { "t": 8.0, "type": "task_end", "label": "CargoDemo ok" }
+  ]
+}

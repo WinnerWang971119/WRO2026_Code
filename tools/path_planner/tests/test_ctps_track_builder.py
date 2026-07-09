@@ -68,6 +68,13 @@ Pivot-arc additions (CTPS issue #55, T5 — TC1-TC7, TC11, TC12):
 These reuse the existing per-turn pivot fixtures in
 ``tests/fixtures/pivot_field_data.py`` (ADR-036) via a synthetic single-``goto``
 ``Trace`` built directly (no JSON, no C++ dump) — see ``_goto_trace`` below.
+
+Structured manip-key additions (CTPS object-cargo plan, T9 — P-TC3, P-TC4):
+
+* **P-TC3** — a ``manip`` Track event carries structured ``method``/``arg``
+  keys, additive to the unchanged ``label``.
+* **P-TC4** — a manip-free trace's Track carries none of those new keys
+  anywhere (golden byte-identical).
 """
 
 from __future__ import annotations
@@ -199,6 +206,11 @@ def test_tc2_task_manip_events_in_order():
     the ``task_start`` banner, ``setGripper(180)``, the ``goto`` drift check
     slot, ``setLift(120)``, and the ``task_end`` banner — proving manip args
     and task names survive into the narration track.
+
+    P-TC3 (CTPS object-cargo plan, T9): each ``manip`` event ALSO carries
+    structured ``method``/``arg`` keys additive to the existing ``label`` —
+    proving the player can dispatch on ``method``/``arg`` directly without
+    parsing the label string, while ``label`` itself is unchanged.
     """
     trace = load(_FIXTURES / "ctps_task_events.json")
     track = _build_quiet(trace, toy_field_data)
@@ -225,6 +237,63 @@ def test_tc2_task_manip_events_in_order():
     # Event timestamps are non-decreasing (shared running clock).
     ev_times = [ev["t"] for ev in track.events]
     assert all(b >= a for a, b in zip(ev_times, ev_times[1:]))
+
+    # P-TC3: the manip events carry structured method/arg, additive to the
+    # unchanged label.
+    manip_events = [ev for ev in track.events if ev["type"] == "manip"]
+    assert len(manip_events) == 2
+    grip, lift = manip_events
+
+    assert grip["method"] == "setGripper"
+    assert grip["arg"] == 180
+    assert grip["label"] == "setGripper(180)"
+
+    assert lift["method"] == "setLift"
+    assert lift["arg"] == 120
+    assert lift["label"] == "setLift(120)"
+
+
+# ---------------------------------------------------------------------------
+# P-TC4 — a manip-free trace's Track stays byte-identical (no new keys)
+# ---------------------------------------------------------------------------
+
+
+def test_p_tc4_manip_free_trace_track_byte_identical():
+    """P-TC4: a manip-free trace's Track carries NO new keys anywhere.
+
+    ``ctps_two_goto.json`` has no ``manip`` command, so the new ``method``/
+    ``arg`` keys (additive to the ``manip`` event only) must never appear:
+    every event dict keeps EXACTLY its pre-T9 key set, and the whole
+    ``to_dict()`` output keeps EXACTLY its pre-T9 top-level key set (no
+    ``pivots`` — the toy field is pivot-free). Combined with TC1's independent
+    keyframe cross-check, this pins the additive change to the ``manip``
+    branch alone.
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    # No manip commands in this trace at all.
+    assert all(cmd.op != "manip" for cmd in trace.commands)
+
+    # Every event is a `goto` (this fixture has no other event-emitting op);
+    # each keeps exactly its pre-T9 key set -- no `method`/`arg` leakage.
+    for ev in track.events:
+        assert ev["type"] == "goto"
+        assert set(ev.keys()) == {"t", "type", "t_end", "label"}
+
+    # The top-level Track dict keeps exactly its pre-T9 key set (no "pivots"
+    # -- the toy field is pivot-free).
+    assert set(track.to_dict().keys()) == {
+        "schema_version",
+        "field",
+        "duration_s",
+        "keyframes",
+        "events",
+    }
+
+    # Every keyframe keeps exactly its pre-T9 key set too.
+    for kf in track.keyframes:
+        assert set(kf.keys()) == {"t", "x", "y", "h"}
 
 
 # ---------------------------------------------------------------------------
@@ -256,22 +325,57 @@ def test_tc3_drive_before_goto_emits_drift_warn():
 
 
 # ---------------------------------------------------------------------------
-# TC4 — a small raw drive stays under the threshold (no warning)
+# TC4 — even a small raw drive opens a drift span (threshold-free)
 # ---------------------------------------------------------------------------
 
 
-def test_tc4_small_drive_before_goto_no_drift_warn():
-    """TC4: a 2 cm raw drive before goto B stays under DRIFT_THRESHOLD_CM.
+def test_tc4_small_drive_before_goto_opens_span_closed_by_goto():
+    """TC4: even a *small* raw drive before goto B opens a DRIFT span.
 
-    Key assertion: NO ``drift_warn`` event is emitted. A clean goto lands the
-    axle ON the node (no overshoot baseline), so the 2 cm raw move alone is the
-    drift — below the 10 cm threshold — and the drift check stays silent.
+    The ``DRIFT_THRESHOLD_CM`` gate is gone: any non-``goto`` translation is
+    off-plan, so a 2 cm ``driveDist`` emits exactly one ``drift_warn`` — a SPAN
+    opened at the drive and CLOSED by the following goto re-anchor (a finite
+    ``t_end`` strictly after the open time). The reported offset is still small
+    (under the old threshold) but it is now surfaced, not hidden. The fixture
+    keeps its historical ``_no_drift`` name.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert drift_events == []
+    assert len(drift_events) == 1
+
+    warn = drift_events[0]
+    assert "B" in warn["label"]
+    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
+    assert reported_cm < DRIFT_THRESHOLD_CM     # small — but flagged now
+
+    # The span is CLOSED by the goto re-anchor: finite t_end, after the open t.
+    assert warn["t_end"] is not None
+    assert warn["t_end"] > warn["t"]
+
+
+def test_drive_without_following_goto_drifts_to_end():
+    """A raw drive that ends the mission drifts to the end of the track.
+
+    No ``goto`` follows the drive, so nothing re-anchors: the ``drift_warn``
+    span stays open and its ``t_end`` is the track's ``duration_s`` (runs to
+    end), with the offset measured off the logical node the chassis left.
+    """
+    trace = Trace(
+        schema_version=1,
+        start_node="A",
+        start_heading_deg=0.0,
+        build_error=False,
+        commands=[Command(seq=0, op="drive", method="driveDist", cm=20.0)],
+    )
+    track = _build_quiet(trace, toy_field_data)
+
+    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
+    assert len(drift_events) == 1
+    warn = drift_events[0]
+    assert warn["t_end"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
+    assert warn["t_end"] > warn["t"]
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +876,86 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
     # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
     reported_cm = float(warn["label"].split("cm")[0].split()[-1])
     assert reported_cm > DRIFT_THRESHOLD_CM
+
+
+# ---------------------------------------------------------------------------
+# goto forced-direction override reaches the sim (setArrivalDirection /
+# setRouteDirection carried end-to-end)
+# ---------------------------------------------------------------------------
+
+
+def test_goto_direction_tags_forwarded_to_step_through(monkeypatch):
+    """A goto's ``arrival``/``route`` tags reach ``sim.step_through`` as kwargs.
+
+    The final Python stage of the CTPS direction-override pipeline: ``build``
+    must thread the loaded ``front``/``rear`` tags into ``step_through`` as
+    ``arrival_direction`` / ``route_direction``. Without this the sim falls back
+    to AUTO and silently ignores the operator's ``setArrivalDirection`` — the
+    original bug. Spying ``step_through`` isolates the forwarding from the sim's
+    own resolution (covered by the direction-parity suite).
+    """
+    from tools.path_planner.sim.runtime import Direction
+
+    captured: list = []
+
+    def _spy(
+        self,
+        goal_name,
+        *,
+        route_direction=Direction.AUTO,
+        arrival_direction=Direction.AUTO,
+    ):
+        captured.append((goal_name, route_direction, arrival_direction))
+        return iter(())  # no primitives — build still emits the goto span event
+
+    monkeypatch.setattr(PathTrackerSim, "step_through", _spy)
+
+    _build_quiet(
+        _inline_trace(
+            {
+                "seq": 0,
+                "op": "goto",
+                "target": "B",
+                "arrival": "front",
+                "route": "rear",
+            }
+        ),
+        toy_field_data,
+    )
+
+    # arrival "front" -> Direction.FRONT (final hop); route "rear" -> Direction.REAR.
+    assert captured == [("B", Direction.REAR, Direction.FRONT)]
+
+
+def test_goto_without_direction_tags_defaults_to_auto(monkeypatch):
+    """A direction-free goto forwards ``Direction.AUTO`` for both kwargs.
+
+    Backward-compat guard: an existing trace with no ``arrival``/``route`` keys
+    must reach ``step_through`` exactly as before the schema change (AUTO), so
+    direction-free traces render identically.
+    """
+    from tools.path_planner.sim.runtime import Direction
+
+    captured: list = []
+
+    def _spy(
+        self,
+        goal_name,
+        *,
+        route_direction=Direction.AUTO,
+        arrival_direction=Direction.AUTO,
+    ):
+        captured.append((goal_name, route_direction, arrival_direction))
+        return iter(())
+
+    monkeypatch.setattr(PathTrackerSim, "step_through", _spy)
+
+    _build_quiet(
+        _inline_trace({"seq": 0, "op": "goto", "target": "B"}),
+        toy_field_data,
+    )
+
+    assert captured == [("B", Direction.AUTO, Direction.AUTO)]
 
 
 # ===========================================================================

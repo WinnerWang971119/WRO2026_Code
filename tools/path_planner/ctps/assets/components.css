@@ -361,6 +361,41 @@
     font-family: var(--ctps-font-mono);
     font-size: 11.5px;
     line-height: 1.65;
+    /* Keep layout width stable when the scrollbar appears/disappears. */
+    scrollbar-gutter: stable both-edges;
+    scrollbar-width: thin;
+    scrollbar-color: var(--ctps-border-strong) var(--ctps-bg);
+}
+
+.ctps-log::-webkit-scrollbar {
+    width: 10px;
+}
+
+.ctps-log::-webkit-scrollbar-track {
+    background: color-mix(in srgb, var(--ctps-bg) 82%, var(--ctps-panel));
+    border-radius: 999px;
+}
+
+.ctps-log::-webkit-scrollbar-thumb {
+    background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--ctps-border-strong) 86%, transparent),
+        color-mix(in srgb, var(--ctps-border) 88%, transparent)
+    );
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+}
+
+.ctps-log::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(
+        180deg,
+        color-mix(in srgb, var(--ctps-text-2) 75%, transparent),
+        color-mix(in srgb, var(--ctps-border-strong) 90%, transparent)
+    );
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
 }
 
 .ctps-log-line {
@@ -462,22 +497,19 @@
     border-color: var(--ctps-accent);
 }
 
-.ctps-transport-divider {
-    display: inline-block;
-    width: 1px;
-    height: 20px;
-    background: var(--ctps-border);
-}
-
+/* Drift-jump + speed live in the dock toolbar (see `.ctps-tl-toolbar`), so
+ * they are sized to the toolbar's compact 20px scale, not the 28px transport
+ * buttons. */
 .ctps-drift-jump {
     box-sizing: border-box;
-    height: 28px;
-    padding: 0 var(--ctps-space-3);
+    height: 20px;
+    padding: 0 var(--ctps-space-2);
     background: transparent;
     color: var(--ctps-drift);
     border: 1px solid var(--ctps-warn-border);
     border-radius: var(--ctps-radius-chip);
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 1;
     cursor: pointer;
     -webkit-appearance: none;
     appearance: none;
@@ -493,8 +525,9 @@
 .ctps-speed {
     box-sizing: border-box;
     display: flex;
+    align-items: center;
     gap: 2px;
-    padding: 2px;
+    padding: 1px;
     background: var(--ctps-bg);
     border: 1px solid var(--ctps-border);
     border-radius: var(--ctps-radius-chip);
@@ -504,7 +537,8 @@
     box-sizing: border-box;
     font-family: var(--ctps-font-ui);
     font-size: 11px;
-    padding: 3px 8px;
+    line-height: 1;
+    padding: 3px 7px;
     background: transparent;
     color: var(--ctps-muted);
     border: none;
@@ -639,21 +673,34 @@
 }
 
 /* ===================================================================== */
-/* Timeline dock: lanes, spans, pins, playhead, ruler                     */
+/* Timeline dock: toolbar, viewport, scrollbar, lanes, spans, pins, ruler  */
 /* ===================================================================== */
 /*
- * timeline.js appends #ctps-ruler's two children (a bare .ctps-lane-label
- * gutter + a .ctps-ruler-track) and #ctps-lanes' children as FLAT, ALTERNATING
- * siblings — one .ctps-lane-label then one .ctps-lane per registered lane,
- * NOT a label nested inside its lane. A 2-column CSS Grid on both containers
- * (52px label column + 1fr track column) auto-places that alternating
- * sequence into label/track pairs, one pair per row, without any JS-side
- * markup change. --ctps-lane-gutter / --ctps-lane-gap (declared once here on
- * the shared .ctps-timeline ancestor, additive alongside layout.css's
- * flex/position/margin rule for the same selector) keep the grid template AND
- * the playhead's offset calc below in exact agreement, so the playhead lines
- * up with lane items and ruler ticks that share the same track column instead
- * of the dock's full width.
+ * The dock body is ONE horizontal scroll viewport (#ctps-tl-viewport,
+ * layout.css) whose sole child #ctps-tl-content holds a vertical stack of
+ * full-content-width rows (.ctps-tl-row — the ruler row inside #ctps-ruler,
+ * one per lane inside #ctps-lanes) plus the playhead. Each row is
+ * `[.ctps-lane-label (sticky, opaque, z-index:3)] [track element
+ * (.ctps-lane / #ctps-ruler-track, flex-basis --ctps-content-w)]` — see
+ * layout.css's Timeline dock section for why the label needs a full-width
+ * row (not a grid cell) to get real sticky travel. This file owns the LOOK:
+ * panel bg on the sticky label (opaque — no span may bleed through), the
+ * hidden native scrollbar + its themed replacement (.ctps-tl-scroll /
+ * .ctps-tl-scroll-thumb), the zoom toolbar widget, and the .ctps-tl--nozoom
+ * disabled treatment for a degenerate/already-fits trace.
+ *
+ * --ctps-lane-gutter / --ctps-lane-gap (declared once here on the shared
+ * .ctps-timeline ancestor, additive alongside layout.css's flex/position/
+ * margin rule for the same selector) keep the row track's flex-basis, the
+ * #ctps-tl-content width calc, AND the playhead's offset calc below in exact
+ * agreement, so the playhead lines up with lane items and ruler ticks that
+ * share the same --ctps-content-w-wide track column.
+ *
+ * --ctps-content-w itself (a CSS length, e.g. "640px") is written on
+ * .ctps-timeline by timeline_view.js via setProperty — every read below
+ * supplies a fallback (100% for a track's flex-basis, 0px inside a calc) so
+ * a pre-hydration render or a thrown init degrades to a full-width,
+ * non-zooming dock instead of collapsing.
  */
 
 .ctps-timeline {
@@ -665,10 +712,162 @@
     padding: var(--ctps-space-3);
 }
 
+/* ----- dock toolbar: playback (left) + zoom (right) ------------------- */
+/* The toolbar row hosts two flex groups pushed to opposite ends: the
+ * transport group (drift-jumps + play speed, moved off the transport bar so
+ * the seek scrubber there gets the full bar width) on the left, and the zoom
+ * widget on the right. Only the zoom group dims on a `.ctps-tl--nozoom`
+ * trace — speed/drift stay live regardless of whether the dock can zoom. */
+.ctps-tl-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ctps-space-2);
+    padding-bottom: var(--ctps-space-2);
+    margin-bottom: var(--ctps-space-2);
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-tl-transport-group,
+.ctps-tl-zoom-group {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+}
+
+/* `-` / `+` (square) and `Fit` (text, auto width) share the same button look
+ * as `.ctps-transport-btn` / `.ctps-chip`, but sized/typed to match the lane
+ * labels (9.5px UI font) per the design's toolbar spec. */
+.ctps-zoom-btn,
+.ctps-zoom-fit {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    background: var(--ctps-raised);
+    color: var(--ctps-text-2);
+    border: 1px solid var(--ctps-border-strong);
+    border-radius: var(--ctps-radius-chip);
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    line-height: 1;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-zoom-btn {
+    width: 20px;
+    padding: 0;
+}
+
+.ctps-zoom-fit {
+    padding: 0 var(--ctps-space-2);
+}
+
+.ctps-zoom-btn:hover,
+.ctps-zoom-fit:hover {
+    background: var(--ctps-border-strong);
+    color: var(--ctps-text);
+}
+
+.ctps-zoom-btn:active,
+.ctps-zoom-fit:active {
+    background: var(--ctps-border);
+}
+
+.ctps-zoom-btn:disabled,
+.ctps-zoom-fit:disabled {
+    opacity: .4;
+    cursor: default;
+    pointer-events: none;
+}
+
+/* Native <input type="range"> styled minimally against the tokens — a thin
+ * track + a small accent-ringed thumb, matching `.ctps-seek`'s thumb without
+ * that control's two-layer fill-gradient trick (the zoom slider has no
+ * drift-tick overlay to sit above). */
+.ctps-zoom-slider {
+    box-sizing: border-box;
+    width: 90px;
+    height: 4px;
+    margin: 0 var(--ctps-space-1);
+    background: transparent;
+    cursor: pointer;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}
+
+.ctps-zoom-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    background: var(--ctps-border);
+    border-radius: 2px;
+}
+
+.ctps-zoom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 11px;
+    height: 11px;
+    margin-top: -3.5px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-zoom-slider::-moz-range-track {
+    height: 4px;
+    background: var(--ctps-border);
+    border-radius: 2px;
+    border: none;
+}
+
+.ctps-zoom-slider::-moz-range-thumb {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-zoom-slider:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+.ctps-zoom-slider:focus-visible {
+    outline: none;
+}
+
+/* The `N.N×` readout — mono/faint like the ruler ticks, per the color table. */
+.ctps-zoom-level {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    color: var(--ctps-faint);
+    min-width: 32px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ----- scroll viewport: native scrollbar hidden ----------------------- */
+/* layout.css owns the functional `overflow-x: auto; overflow-y: hidden`; this
+ * file only hides the native scrollbar chrome — the themed .ctps-tl-scroll-
+ * thumb below is the visible, draggable control instead. Native scroll
+ * gestures (trackpad, shift-wheel) still work; only the OS scrollbar chrome
+ * is invisible. */
+.ctps-tl-viewport {
+    scrollbar-width: none;
+}
+
+.ctps-tl-viewport::-webkit-scrollbar {
+    display: none;
+}
+
 .ctps-ruler {
-    display: grid;
-    grid-template-columns: var(--ctps-lane-gutter) 1fr;
-    column-gap: var(--ctps-lane-gap);
     height: 14px;
     font-family: var(--ctps-font-mono);
     font-size: 9px;
@@ -689,16 +888,16 @@
     white-space: nowrap;
 }
 
-.ctps-lanes {
-    display: grid;
-    grid-template-columns: var(--ctps-lane-gutter) 1fr;
-    column-gap: var(--ctps-lane-gap);
-    row-gap: 4px;
-}
+/* #ctps-lanes is now a plain wrapper — layout.css's `.ctps-tl-row` (one per
+ * lane) supplies the row structure, and its own `+`-selector rule supplies
+ * the 4px vertical gap the old 2-column grid's `row-gap` used to. */
 
 .ctps-lane-label {
     display: flex;
     align-items: center;
+    /* Opaque so a scrolled-under span/tick can never bleed through the
+     * sticky-pinned label — it must always read cleanly over the track. */
+    background: var(--ctps-panel);
     font-family: var(--ctps-font-ui);
     font-size: 9.5px;
     font-weight: 600;
@@ -707,7 +906,8 @@
     color: var(--ctps-text-2);
 }
 
-.ctps-lane-label--holding {
+.ctps-lane-label--magazine,
+.ctps-lane-label--rearbox {
     color: var(--ctps-hold);
 }
 
@@ -723,9 +923,8 @@
     min-height: 18px;
 }
 
-.ctps-lane--holding {
-    min-height: 34px;
-}
+/* The two cargo lanes (MAGAZINE / REAR BOX) each hold a single row of hold
+ * spans, so the default .ctps-lane height is enough — no extra min-height. */
 
 /* Bare .ctps-span (no modifier) is exactly what the TASK lane's items render
  * as today (buildTaskLane's items carry no `cls`) — so the default look here
@@ -772,9 +971,11 @@
     color: var(--ctps-accent);
 }
 
-/* Not yet produced by buildHoldingLane (always empty today, issue #57) —
- * defined ahead of time since HOLDING is a pinned contract class. */
-.ctps-span--holding {
+/* The MAGAZINE + REAR BOX cargo lanes (issue #57): buildMagazineLane /
+ * buildRearBoxLane emit `--ctps-hold` pills over each contiguous held period.
+ * Both share the same hold look — the lane label distinguishes them. */
+.ctps-span--magazine,
+.ctps-span--rearbox {
     height: 12px;
     border-radius: 6px;
     border: 1px solid color-mix(in srgb, var(--ctps-hold) 60%, transparent);
@@ -816,26 +1017,72 @@
     border-bottom-color: var(--ctps-drift);
 }
 
-/* Anchored to .ctps-timeline (position: relative via layout.css). Its
- * containing block is the timeline's PADDING box, but the lane/ruler grids live
- * in the CONTENT box (inset by the panel padding), so the calc adds the
- * padding-left offset at the start and removes 2x padding from the 100% basis —
- * then 0%..100% of --ctps-frac maps onto exactly the track column every lane
- * item and ruler tick shares (aligned at both ends, not just the midpoint). */
+/* Now a child of #ctps-tl-content (position: relative via layout.css) rather
+ * than of .ctps-timeline itself, so it pans/zooms with the scrolled track
+ * instead of staying fixed to the viewport. #ctps-tl-content has no padding
+ * of its own, so 0%..100% of --ctps-frac maps directly onto the
+ * --ctps-content-w-wide track column every lane item and ruler tick shares
+ * (aligned at both ends, not just the midpoint) once the gutter+gap offset is
+ * added. z-index:2 — BELOW the sticky labels (z-index:3) — so a playhead
+ * whose viewport-x falls under the pinned gutter while scrolled never paints
+ * over the label. */
 .ctps-playhead {
     position: absolute;
     top: 0;
     bottom: 0;
     left: calc(
-        var(--ctps-space-3) + var(--ctps-lane-gutter) + var(--ctps-lane-gap) +
-        var(--ctps-frac, 0) *
-        (100% - 2 * var(--ctps-space-3) - var(--ctps-lane-gutter) - var(--ctps-lane-gap))
+        var(--ctps-lane-gutter) + var(--ctps-lane-gap) +
+        var(--ctps-frac, 0) * var(--ctps-content-w, 0px)
     );
     width: 1.5px;
     background: var(--ctps-text);
     box-shadow: 0 0 4px 0 var(--ctps-text);
     pointer-events: none;
-    z-index: 3;
+    z-index: 2;
+}
+
+/* ----- custom themed horizontal scrollbar (panning) -------------------- */
+/* A track strip below the viewport; #ctps-tl-thumb's width/left are written
+ * by timeline_view.js via setProperty as scroll-ratio percentages
+ * (clientWidth/scrollWidth, scrollLeft/scrollWidth) — the fallbacks below
+ * (100% wide / 0% left) mirror the fit-to-width, no-scroll default so the
+ * strip degrades sanely before that JS runs. */
+.ctps-tl-scroll {
+    position: relative;
+    height: 6px;
+    margin-top: var(--ctps-space-2);
+    background: var(--ctps-raised);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.ctps-tl-scroll-thumb {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--ctps-tl-thumb-x, 0%);
+    width: var(--ctps-tl-thumb-w, 100%);
+    background: var(--ctps-border-strong);
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.ctps-tl-scroll-thumb:hover {
+    background: var(--ctps-text-2);
+}
+
+/* ----- degenerate / already-fits trace: disable the whole widget ------- */
+/* timeline_view.js adds this modifier to .ctps-timeline when dur <= 0 or
+ * zoomMax <= 1 (a trace that already fits at 1x — zoom would be a no-op).
+ * Scoped to the zoom group only: the sibling transport group (speed/drift)
+ * has nothing to do with zoom, so it stays interactive. */
+.ctps-timeline.ctps-tl--nozoom .ctps-tl-zoom-group {
+    opacity: .5;
+    pointer-events: none;
+}
+
+.ctps-timeline.ctps-tl--nozoom .ctps-tl-scroll-thumb {
+    display: none;
 }
 
 /* ===================================================================== */
@@ -866,6 +1113,23 @@
     font-family: var(--ctps-font-mono);
     font-size: 11px;
     color: var(--ctps-hold);
+}
+
+/* cargo.js's persistent sorter-error banner, appended inside the always-visible
+ * cargo panel. Shown whenever the loaded trace fired a grab with no sorter lane
+ * selected (a missing sortTo); the --ctps-drift tint reads as an error (matching
+ * the timeline drift pills) and it stays put at every playhead position so the
+ * operator can't scrub past it unseen. */
+.ctps-cargo-error {
+    margin-top: var(--ctps-space-2);
+    padding: 4px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid color-mix(in srgb, var(--ctps-drift) 55%, transparent);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--ctps-drift);
 }
 
 /* ===================================================================== */
@@ -1019,7 +1283,267 @@
 .ctps-help-btn:focus-visible,
 .ctps-drift-chip:focus-visible,
 .ctps-fullview-btn:focus-visible,
-.ctps-modal-close:focus-visible {
+.ctps-modal-close:focus-visible,
+.ctps-zoom-btn:focus-visible,
+.ctps-zoom-fit:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
+
+/* The zoom slider's own focus ring is drawn on its thumb (matching
+ * .ctps-seek's focus-visible thumb treatment) — see the Timeline dock
+ * section's `.ctps-zoom-slider:focus-visible::-webkit-slider-thumb` etc. */
+.ctps-zoom-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
+}
+
+.ctps-zoom-slider:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
+}
+
+/* ===================================================================== */
+/* Cargo panel (object / cargo plan — issue #57)                          */
+/* ===================================================================== */
+/*
+ * The two-tab CARGO rail section (#ctps-cargo). Markup is player_html.py's
+ * `_BODY_MARKUP`; the panel CONTENT is cargo.js (the Magazine 4-lane grid +
+ * the Inventory rear-box hold card); the tab-switch CHROME (which tab carries
+ * `.ctps-cargo-tab--active`, which `.ctps-cargo-panel` gets the `hidden`
+ * attribute) is panels.js's `renderHoldingShell`. This block is only the LOOK.
+ * layout.css owns none of these new classes, so the cargo panel's own layout
+ * (flex/grid/gap) lives here — it restates no property another file already set.
+ *
+ * Reproduces the #57 UI sidecar (docs/plans/2026-07-06-ctps-object-cargo.ui.md,
+ * Change 1 + States) in the existing tokens.css palette — no new hue, no bare
+ * hex. Two per-instance custom properties are CONSUMED here (cargo.js writes
+ * each via `setProperty`, the ADR-053 carve-out): a magazine cell's authored
+ * fill on `--ctps-mag-cell-color`, and an inventory swatch's on
+ * `--ctps-swatch-color`. Without the `var()` reads below those colours would be
+ * invisible.
+ */
+
+/* The cargo panel stacks its tab row above whichever panel body is visible; the
+ * hidden body ([hidden] display:none, top of file) drops out of the flow so the
+ * gap collapses to just tab-row -> active body. */
+.ctps-panel--cargo {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-4);
+}
+
+/* ----- tab row (Magazine / Inventory) + per-tab count badge ----------- */
+
+/* The same underline-on-a-shared-baseline idiom as the Log/Inspector
+ * .ctps-tab-row, but its own rail section (not a panelTabs registrant) and a
+ * --ctps-hold (cargo) underline rather than the accent. */
+.ctps-cargo-tab-row {
+    display: flex;
+    gap: var(--ctps-space-5);
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-cargo-tab {
+    box-sizing: border-box;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+    padding: var(--ctps-space-2) 0 var(--ctps-space-3);
+    background: transparent;
+    border: none;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* Active tab: --ctps-text label + a --ctps-hold underline flush with the row's
+ * bottom border (bottom: -1px covers the 1px border, matching .ctps-tab). */
+.ctps-cargo-tab--active {
+    color: var(--ctps-text);
+}
+
+.ctps-cargo-tab--active::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: var(--ctps-hold);
+}
+
+/* The tab label is UI-font (uppercase-ish letter feel); its mono sibling count
+ * below is deliberately the other typeface — documents the UI/data split. */
+.ctps-cargo-tab-label {
+    font-family: var(--ctps-font-ui);
+}
+
+/* Count badge ("N / CAP"): mono with tabular-nums so the digits hold their
+ * column as the count changes on scrub. Stays a muted data readout in both
+ * tab states. */
+.ctps-cargo-tab-count {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ctps-muted);
+}
+
+/* ----- panel bodies (one visible, the other hidden) ------------------- */
+
+/* The 4-lane magazine grid + the single rear-box hold card always fit the
+ * rail, so the panel body never scrolls (no overflow rule) — a stray
+ * horizontal scrollbar here reads as a bug, not a feature. */
+
+/* ----- Magazine tab: 4 vertical lanes of 3, front tile at the BOTTOM --- */
+
+/* The lane row: four columns left-to-right, centered as a group and NOT
+ * stretched across the panel (each cell keeps its intrinsic ~24px size). */
+.ctps-mag-grid {
+    display: flex;
+    justify-content: center;
+    gap: var(--ctps-space-3);
+}
+
+/* One lane = a vertical stack: the index header, then DEPTH cells top->bottom
+ * (cargo.js fills the BOTTOM row first, so the front tile sits at the bottom),
+ * then the dump ↓ under that bottom (front) cell. */
+.ctps-mag-lane {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--ctps-space-1);
+}
+
+/* Lane index 0..3 — a muted, tabular label above the stack. */
+.ctps-mag-lane-header {
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ctps-muted);
+    margin-bottom: var(--ctps-space-1);
+}
+
+/* The dump-eject marker (↓) under each lane's bottom (front) cell. */
+.ctps-mag-lane-arrow {
+    font-size: 11px;
+    line-height: 1;
+    color: var(--ctps-faint);
+    margin-top: var(--ctps-space-1);
+}
+
+/* A filled cell: the object's authored colour (cargo.js sets
+ * --ctps-mag-cell-color via setProperty) + a 2-char mono label. Compact and
+ * fixed-size — flex: 0 0 auto so the lane never stretches it. The label sits in
+ * --ctps-bg (near-black): WRO game-piece fills are bright saturated hues, so a
+ * dark, bold glyph reads against them. */
+.ctps-mag-cell {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid transparent;
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-mag-cell-color, var(--ctps-raised));
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: .02em;
+    color: var(--ctps-bg);
+}
+
+/* An empty slot: no fill, just a thin dashed outline. Declared AFTER the base
+ * rule so it wins the same-specificity tie for a cell carrying both classes. */
+.ctps-mag-cell--empty {
+    background: transparent;
+    border: 1px dashed var(--ctps-border-strong);
+}
+
+/* The sorter caret (▼) above the lane the sticky sortTo currently aims at.
+ * cargo.js emits an EMPTY caret row for every other lane so all lane headers
+ * stay vertically aligned; only the selected lane carries the glyph. */
+.ctps-mag-lane-caret {
+    height: 11px;
+    line-height: 11px;
+    font-size: 11px;
+    color: var(--ctps-accent);
+}
+
+/* The selected lane's index header: accent colour + bold, paired with the ▼
+ * caret above it so "the sorter points here" reads at a glance. Declared AFTER
+ * the base header rule so it wins the same-specificity tie. */
+.ctps-mag-lane-header--selected {
+    color: var(--ctps-accent);
+    font-weight: 700;
+}
+
+/* ----- Inventory tab: rear-box hold card (capacity 1) ----------------- */
+
+.ctps-inv-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-2);
+}
+
+/* Empty/closed rear box: a one-line hint (verbatim text from cargo.js). */
+.ctps-inv-empty {
+    font-family: var(--ctps-font-ui);
+    font-size: 12px;
+    font-style: italic;
+    color: var(--ctps-muted);
+}
+
+/* The card reuses the existing .ctps-hold-card shell (the --ctps-hold accent
+ * box under "Panels / cards"). Its three children are swatch, name, then the
+ * onrobot pill; margin-left:auto on the pill pushes it to the far edge so the
+ * swatch + name stay grouped at the left (overriding the shell's
+ * space-between). */
+.ctps-hold-card-swatch {
+    flex: 0 0 auto;
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-swatch-color, var(--ctps-hold));
+}
+
+.ctps-hold-card-pill {
+    box-sizing: border-box;
+    margin-left: auto;
+    padding: 2px 6px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid color-mix(in srgb, var(--ctps-hold) 45%, transparent);
+    background: color-mix(in srgb, var(--ctps-hold) 16%, transparent);
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    color: var(--ctps-hold);
+}
+
+/* ----- upload error note + hidden file input -------------------------- */
+
+/* cargo.js inserts this inline note (hidden by default, shown on a bad drop)
+ * right after the Load-layout button; --ctps-drift reads as an error. */
+.ctps-layout-error {
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-drift);
+    margin-left: var(--ctps-space-2);
+}
+
+/* The layout <input type=file> is driven programmatically (the Load-layout
+ * button proxies to it), so the raw file control must never render. */
+.ctps-layout-file {
+    display: none;
+}
+
+/* Keyboard focus — matches the shared focus-visible idiom above. */
+.ctps-cargo-tab:focus-visible {
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
 }

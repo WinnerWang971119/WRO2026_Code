@@ -23,6 +23,8 @@ on a CMake generator mismatch.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -230,7 +232,7 @@ def test_tc9_trace_flow_skips_compiler(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ctps_main,
         "_render_and_open",
-        lambda trace_json, out_path, open_browser, filename="": 0,
+        lambda trace_json, out_path, open_browser, filename="", objects=None: 0,
     )
 
     trace_file = tmp_path / "run.json"
@@ -336,6 +338,65 @@ def test_tc24_clear_build_dir_keeps_matching_or_missing(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TC25-TC27 — routes freshness self-heal before the dump build
+# ---------------------------------------------------------------------------
+
+
+def test_tc25_routes_match_live_field_uses_embedded_source_hash(monkeypatch, tmp_path):
+    """TC25: matching ``Source SHA256`` banners report fresh routes.
+
+    CTPS compares the live field-data hash against the generated
+    ``routes.h/routes.cpp`` banners rather than mtime heuristics. A matching
+    hash in both files returns ``True``.
+    """
+    from tools.path_planner import header_writer
+
+    routes_dir = tmp_path / "routes"
+    routes_dir.mkdir()
+    header = routes_dir / "routes.h"
+    source = routes_dir / "routes.cpp"
+    header.write_text("// routes.h\n// Source SHA256: abc123\n", encoding="utf-8")
+    source.write_text("// routes.cpp\n// Source SHA256: abc123\n", encoding="utf-8")
+
+    monkeypatch.setattr(header_writer, "DEFAULT_HEADER_PATH", header.relative_to(tmp_path))
+    monkeypatch.setattr(header_writer, "DEFAULT_SOURCE_PATH", source.relative_to(tmp_path))
+    monkeypatch.setattr(header_writer, "compute_source_hash", lambda *paths: "abc123")
+    monkeypatch.setattr(ctps_main, "_REPO_ROOT", tmp_path)
+
+    assert ctps_main._routes_match_live_field() is True
+
+
+def test_tc26_ensure_routes_fresh_regenerates_when_stale(monkeypatch, tmp_path):
+    """TC26: stale routes trigger ``build_routes._run(no_viz=True)`` once."""
+    from tools.path_planner import build_routes
+
+    calls = {"count": 0, "no_viz": None}
+
+    monkeypatch.setattr(ctps_main, "_routes_match_live_field", lambda: False)
+
+    def _stub_run(*, out_dir=None, map_out=None, no_viz=False, verbose=False):
+        calls["count"] += 1
+        calls["no_viz"] = no_viz
+        return 0
+
+    monkeypatch.setattr(build_routes, "_run", _stub_run)
+
+    assert ctps_main._ensure_routes_fresh() is True
+    assert calls["count"] == 1
+    assert calls["no_viz"] is True
+
+
+def test_tc27_produce_trace_json_aborts_when_routes_regen_fails(monkeypatch):
+    """TC27: a failed routes refresh stops before any compiler/dump work."""
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(ctps_main, "_ensure_routes_fresh", lambda: False)
+    monkeypatch.setattr(ctps_main, "_build_dump_posix", _never_called("_build_dump_posix"))
+    monkeypatch.setattr(ctps_main, "_run_dump", _never_called("_run_dump"))
+
+    assert ctps_main._produce_trace_json(fixture=False) is None
+
+
+# ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
 
@@ -354,3 +415,251 @@ def _never_called(name: str):
         raise AssertionError(f"{name} must not be called on this path")
 
     return _stub
+
+
+# ---------------------------------------------------------------------------
+# Layout auto-detect — newest tools/path_planner/layout*.json wins
+# ---------------------------------------------------------------------------
+
+
+def test_find_default_layout_none_when_absent(monkeypatch, tmp_path):
+    """``_find_default_layout`` -> ``None`` for an empty OR missing layouts dir."""
+    # Empty but present dir.
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path)
+    assert ctps_main._find_default_layout() is None
+
+    # Missing dir (the is_dir() guard) — never raises.
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path / "nope")
+    assert ctps_main._find_default_layout() is None
+
+
+def test_find_default_layout_picks_newest(monkeypatch, tmp_path):
+    """``_find_default_layout`` returns the most-recently-modified ``layout*.json``.
+
+    Chrome suffixes repeat editor saves as ``layout (1).json`` etc., so the
+    newest file (by mtime) must win regardless of name — the latest Save is the
+    one embedded. Explicit mtimes avoid same-tick ties.
+    """
+    monkeypatch.setattr(ctps_main, "_LAYOUT_DIR", tmp_path)
+    canonical = tmp_path / "layout.json"
+    suffixed = tmp_path / "layout (1).json"
+    canonical.write_text("{}", encoding="utf-8")
+    suffixed.write_text("{}", encoding="utf-8")
+
+    os.utime(canonical, (1_000_000, 1_000_000))
+    os.utime(suffixed, (2_000_000, 2_000_000))
+    assert ctps_main._find_default_layout() == suffixed
+
+    # A fresh Save of the canonical name (now newest) wins back.
+    os.utime(canonical, (3_000_000, 3_000_000))
+    assert ctps_main._find_default_layout() == canonical
+
+
+# ---------------------------------------------------------------------------
+# --editor flow — emit the authoring page, skip the build/render entirely
+# ---------------------------------------------------------------------------
+
+
+def test_editor_flow_serves_editor_not_player(monkeypatch, tmp_path):
+    """``main(["--editor"])`` renders + serves the editor, never the player.
+
+    The ``--editor`` front door must short-circuit before any trace build or
+    player render: ``_produce_trace_json`` and ``_render_and_open`` stay dormant.
+    ``layout_editor_html.render`` is called once and its bytes handed to
+    ``edit_server.serve_editor`` (stubbed so the test binds no socket / never
+    blocks).
+    """
+    calls = {"render": 0, "serve": 0, "layout": "unset"}
+    editor_file = tmp_path / "layout_editor.html"
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        calls["render"] += 1
+        calls["layout"] = layout
+        editor_file.write_bytes(b"<html>editor</html>")
+        return editor_file
+
+    def _stub_serve(
+        html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0,
+        current_html=None,
+    ):
+        calls["serve"] += 1
+        assert html_bytes == b"<html>editor</html>"
+        assert Path(layout_out) == ctps_main._DEFAULT_LAYOUT
+        return 0
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", _stub_serve)
+    # Isolate from the real layouts/ dir so this test is deterministic.
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: None)
+    monkeypatch.setattr(
+        ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_render_and_open", _never_called("_render_and_open")
+    )
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert calls["render"] == 1 and calls["serve"] == 1
+    # No layout present -> render() is asked to open an empty editor.
+    assert calls["layout"] is None
+
+
+def test_editor_flow_autoloads_recent_layout(monkeypatch, tmp_path):
+    """``main(["--editor"])`` auto-loads the recently-saved layout into render().
+
+    The newest ``layouts/layout*.json`` (:func:`_find_default_layout`) is read
+    and passed to ``layout_editor_html.render(..., layout=...)`` so the editor
+    opens on the last layout rather than a fresh scene.
+    """
+    layout_dict = {
+        "schema_version": 1,
+        "objects": [
+            {
+                "id": "o1", "name": "block", "shape": "rect", "type": "cargo",
+                "color": "#5bc8e0", "x_cm": 1.0, "y_cm": 2.0,
+                "heading_deg": 0.0, "w_cm": 5.0, "h_cm": 5.0,
+            }
+        ],
+        "robot": {
+            "grab_zone": {"x_cm": 0.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 6.0},
+            "box_zone": {"x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 6.0},
+            "drop_points": [{"x_cm": 4.0, "y_cm": -6.0}],
+        },
+    }
+    layout_path = tmp_path / "layout.json"
+    layout_path.write_text(json.dumps(layout_dict), encoding="utf-8")
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: layout_path)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        captured["layout"] = layout
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", lambda *a, **k: 0)
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert captured["layout"] == layout_dict
+
+
+def test_editor_flow_unreadable_layout_opens_empty(monkeypatch, tmp_path):
+    """A corrupt recent layout degrades to an empty editor, never a hard fail."""
+    bad = tmp_path / "layout.json"
+    bad.write_text("{ not valid json", encoding="utf-8")
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: bad)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        captured["layout"] = layout
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", lambda *a, **k: 0)
+
+    rc = ctps_main.main(["--editor", "--no-open"])
+
+    assert rc == 0
+    assert captured["layout"] is None
+
+
+def test_editor_flow_threads_fixed_port(monkeypatch, tmp_path):
+    """``main(["--editor", "--port", N])`` threads the fixed port to ``serve_editor``.
+
+    The Simple-Browser task opens a hardcoded ``http://127.0.0.1:<port>/``, so the
+    port on the CLI must reach the server binder verbatim.
+    """
+    monkeypatch.setattr(ctps_main, "_find_default_layout", lambda: None)
+
+    captured = {}
+
+    def _stub_render(field_data, out_path, map_png=None, layout=None):
+        out = tmp_path / "layout_editor.html"
+        out.write_bytes(b"<html>editor</html>")
+        return out
+
+    def _stub_serve(html_bytes, layout_out, open_browser=True, host="127.0.0.1", port=0,
+                    current_html=None):
+        captured["port"] = port
+        return 0
+
+    monkeypatch.setattr(ctps_main.layout_editor_html, "render", _stub_render)
+    monkeypatch.setattr(ctps_main.edit_server, "serve_editor", _stub_serve)
+
+    rc = ctps_main.main(["--editor", "--no-open", "--port", "8771"])
+
+    assert rc == 0
+    assert captured["port"] == 8771
+
+
+# ---------------------------------------------------------------------------
+# --serve flow — render then serve over http instead of writing + opening
+# ---------------------------------------------------------------------------
+
+
+def test_inject_player_heartbeat_before_body_close():
+    """``_inject_player_heartbeat`` inserts the liveness script just before </body>."""
+    html = "<html><body><div>player</div></body></html>"
+    out = ctps_main._inject_player_heartbeat(html)
+
+    # The heartbeat rides inside the body, before its close.
+    assert "/ping" in out
+    assert "/close" in out
+    body_close = out.index("</body>")
+    assert out.index("/ping") < body_close
+    # Same-origin relative URLs only — never an absolute http(s) literal (so it
+    # would survive the player's self-containment lint if it ever moved on-page).
+    assert "http://" not in out
+    assert "https://" not in out
+    # The file:// guard keeps a plain double-clicked player untouched.
+    assert 'protocol === "file:"' in out
+
+
+def test_inject_player_heartbeat_appends_when_no_body():
+    """With no </body>, the script is appended rather than lost."""
+    out = ctps_main._inject_player_heartbeat("<html>bare</html>")
+    assert "/ping" in out
+    assert out.rstrip().endswith("</script>")
+
+
+def test_serve_flow_dispatches_to_serve(monkeypatch, tmp_path):
+    """``main(["--serve", "--trace", FILE])`` serves and never opens a file.
+
+    The ``--serve`` path must route through ``_render_and_serve`` (stubbed to
+    capture its port) and leave ``_render_and_open`` dormant — the opposite of
+    the default flow.
+    """
+    captured = {}
+
+    def _stub_serve(trace_json, out_path, open_browser, port, filename="", objects=None):
+        captured["port"] = port
+        captured["open_browser"] = open_browser
+        return 0
+
+    monkeypatch.setattr(ctps_main, "_render_and_serve", _stub_serve)
+    monkeypatch.setattr(
+        ctps_main, "_render_and_open", _never_called("_render_and_open")
+    )
+    monkeypatch.setattr(
+        ctps_main, "_produce_trace_json", _never_called("_produce_trace_json")
+    )
+
+    trace_file = tmp_path / "run.json"
+    trace_file.write_text('{"commands": []}', encoding="utf-8")
+
+    rc = ctps_main.main(
+        ["--serve", "--port", "8770", "--no-open", "--trace", str(trace_file)]
+    )
+
+    assert rc == 0
+    assert captured["port"] == 8770
+    assert captured["open_browser"] is False

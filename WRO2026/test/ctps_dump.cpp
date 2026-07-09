@@ -13,17 +13,16 @@
  *
  * Three modes (selected by argv[1]):
  *   - `--self-test` : runs `buildMissionFixture()` — a synthetic mission that
- *                     exercises the ENTIRE op vocabulary on valid toy nodes —
- *                     then asserts the expected ops appear in order in
+ *                     exercises the ENTIRE op vocabulary on valid production
+ *                     nodes — then asserts the expected ops appear in order in
  *                     `g_ctpsLog` and that the run terminated within
  *                     `CTPS_MAX_TICKS`. Prints `CTPS DUMP SELFTEST OK` and
  *                     returns 0 on success; a diagnostic + return 1 on failure.
  *                     This is the CI-enforced ctest (TC8 / TC9 / AC4 / AC6).
  *   - `--fixture`   : runs `buildMissionFixture()` and prints its JSON.
- *   - (default)     : runs the REAL `buildMission()` and prints its JSON. On the
- *                     current 4-node toy `routes.*` the authored mission faults
- *                     (the drain loop exits on `Mission.hasFault()`); that is
- *                     expected for the toy graph.
+ *   - (default)     : runs the REAL `buildMission()` and prints its JSON,
+ *                     resolving its gotos against the linked production
+ *                     `routes.cpp` (the CTPS player then renders the trace).
  *
  * @note HOST-ONLY translation unit — compiled into `ctps_dump` only, never the
  *       Arduino sketch. It freely uses `<iostream>` / `<vector>` / `<string>`.
@@ -86,6 +85,18 @@ namespace
         PathTracker.setTickCallback(nullptr);
         LineFollower.setTickCallback(nullptr);
 
+        // Tasks is the exception. A blocking task wait like `waitStationaryMs`
+        // is gated on the WALL CLOCK (`while (millis() - start < ms)`), not on a
+        // mock's is-idle query, so a nullptr callback would spin forever: with no
+        // callback the wait falls to `delay(1)` + `yield()` (both host no-ops) and
+        // `millis()` stays frozen, because `drainMission` only advances the mock
+        // clock in its OUTER loop — which is blocked inside `Mission.update()`
+        // while the task body runs. Give Tasks a callback that advances the mock
+        // clock each iteration (the same lever `drainMission` uses per Mission
+        // tick), so every task-level wait trips its gate on the first iteration
+        // and the dump stays instant.
+        Tasks.setTickCallback([] { mockAdvanceMillis(CTPS_TICK_ADVANCE_MS); });
+
         ctps::reset();
         mockResetMillis();
     }
@@ -105,16 +116,16 @@ namespace
      */
     void buildMissionFixture()
     {
-        // Two valid toy nodes (see routes.cpp NODES[]): index 4 == "Start",
-        // index 5 == "final". Both resolve via FieldMap::findNodeByName so the
-        // GOTO hook fires and the PathTracker mock records a `goto`.
+        // Two valid PRODUCTION nodes (see routes.cpp NODES[]): "Start" and "MYU".
+        // Both resolve via FieldMap::findNodeByName so the GOTO hook fires and the
+        // PathTracker mock records a `goto`.
         Mission.goTo("Start")
             .wait(500)
             .beep(1000, 150)
             .led(0, 255, 0, 300)
             .print("AT")
             .task("demoEcho", uint8_t(7), uint8_t(42))
-            .goTo("final")
+            .goTo("MYU")
             .print("DONE");
         Mission.start();
     }
@@ -270,6 +281,15 @@ namespace
         // appended after the Mission drains.
         recordManipDriveSegment();
 
+        // Direction-override capture: a goto carrying setArrivalDirection /
+        // setRouteDirection must serialize the "arrival"/"route" tags. A
+        // one-statement discarded temporary, so the recording mock builder
+        // destructs at the `;` after BOTH setters run. ("Start" is a live
+        // production node; this asserts the recorded direction tags, not the hop.)
+        PathTracker.goTo("Start")
+            .setArrivalDirection(Direction::REAR)
+            .setRouteDirection(Direction::FRONT);
+
         const std::vector<ctps::Record>& log = ctps::g_ctpsLog;
         size_t cursor = 0;
 
@@ -306,14 +326,14 @@ namespace
         }
 
         // The ordered walk above only proves the FIRST goTo fired. Assert the
-        // second, renamed goTo("final") recorded too, so a bad second node
-        // faults the self-test instead of slipping past coverage.
-        const size_t gotoFinal =
+        // second goTo("MYU") recorded too, so a bad second node faults the
+        // self-test instead of slipping past coverage.
+        const size_t gotoSecond =
             findFrom(0, [](const ctps::Record& r)
-                     { return r.op == ctps::Op::GOTO && r.target == "final"; });
-        if (gotoFinal >= log.size())
+                     { return r.op == ctps::Op::GOTO && r.target == "MYU"; });
+        if (gotoSecond >= log.size())
         {
-            std::cerr << "ctps_dump self-test: missing goto with target 'final'\n";
+            std::cerr << "ctps_dump self-test: missing goto with target 'MYU'\n";
             return 1;
         }
 
@@ -444,6 +464,8 @@ namespace
             {"\"reverse\": true", "reverse: true"},
             {"\"method\": \"wallStop\", \"cm\": 10", "wallStop cm"},
             {"\"method\": \"lineFollowDist\", \"cm\":", "lineFollowDist cm"},
+            {"\"arrival\": \"rear\"", "goto arrival: rear"},
+            {"\"route\": \"front\"", "goto route: front"},
         };
         for (const JsonProbe& probe : kJsonProbes)
         {

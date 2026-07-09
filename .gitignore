@@ -18,5 +18,14 @@ build/
 # Claude Code local state — scheduler lock, git worktrees, per-machine settings.
 .claude/``
 
+# Playwright MCP debug artifacts (console logs / page snapshots) — per-machine
+# tooling output from local browser checks, not source.
+.playwright-mcp/
+
 # CTPS generated artifacts
 **/mission_trace.json
+# Author's working cargo layout(s) — saved from the offline layout editor into
+# tools/path_planner/layouts/ and auto-embedded by `python -m tools.path_planner.ctps`;
+# per-machine authoring state, not source. Chrome suffixes repeat saves as
+# `layout (1).json`, hence the glob. The folder's README.md stays tracked.
+tools/path_planner/layouts/layout*.json

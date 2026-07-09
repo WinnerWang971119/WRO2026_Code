@@ -8,8 +8,9 @@
  * sorting / dumping mechanism. It owns the three `ManipServo` joints and the one `ManipBelt`
  * by value (constructed from `Config::*` in `Manipulator.cpp`) and presents two API layers:
  *
- *  - **Semantic verbs** (`grab`, `release`, `dump`, `sortTo`, `reset`) — the intended
- *    everyday surface. Each verb FIRES its actuator setpoint(s) immediately in the verb body
+ *  - **Semantic verbs** (`grab`, `release`, `dump`, `dumpReset`, `sortTo`, `reset`, `boxOpen`, `boxClose`)
+ *    — the intended everyday surface. Each verb FIRES its actuator setpoint(s) immediately
+ *    in the verb body
  *    (servo writes are fire-and-forget; firing now is correct) and returns a `ManipAction`
  *    fluent builder. The builder is **blocking-by-default**: at end-of-statement it WAITS
  *    (drains) on the actuators the verb touched until they report done. Chain `.async()` to
@@ -32,9 +33,12 @@
  * verb (e.g. after a fault or before a run).
  *
  * @note The semantic verbs are thin bring-up scaffolding: `grab()` is `grabber.close()`,
- *       `dump()` is `dumper.open()` (a placeholder dump pose), etc. The real multi-actuator
- *       choreography (e.g. lift-then-grip, belt-stage-then-dump) is a TODO to be authored once
- *       the mechanism is built and characterised.
+ *       `dump()` is `dumper.open()` (a placeholder dump pose), `dumpReset()` is
+ *       `dumper.home()`, etc. The real multi-actuator choreography (e.g. lift-then-grip,
+ *       belt-stage-then-dump) is a TODO to be authored once the mechanism is built and
+ *       characterised. `boxOpen()` / `boxClose()` currently reuse the belt's configured
+ *       rear-box stations, so they block by default on the belt like the other semantic verbs
+ *       and can opt out with `.async()`.
  *
  * @warning A function registered via `setTickCallback()` is invoked from inside `_drain()`'s
  *          blocking spin. It MUST NOT issue a blocking Manipulator verb (one without
@@ -90,11 +94,7 @@ public:
      * mandatory copy elision (pre-C++17). Copies every member and marks the moved-from
      * instance `_executed` so its destructor becomes a no-op.
      */
-    ManipAction(ManipAction&& other) noexcept
-        : _m(other._m), _mask(other._mask), _blocking(other._blocking), _executed(other._executed)
-    {
-        other._executed = true;
-    }
+    ManipAction(ManipAction&& other) noexcept;
 
     /**
      * @brief Opt this action out of the default blocking wait.
@@ -107,11 +107,7 @@ public:
      * @note The default is blocking. Async is the opt-out for callers that tick the
      *       cooperative loop themselves and do not want each verb to block their tick.
      */
-    ManipAction& async()
-    {
-        _blocking = false;
-        return *this;
-    }
+    ManipAction& async();
 
     /**
      * @brief Destructor — RAII wait. Drains the involved actuators unless `.async()` was set.
@@ -123,11 +119,9 @@ public:
      *
      * @note Idempotent via the `_executed` guard: a moved-out-of builder's destructor is a
      *       no-op.
-     * @note Declared here but DEFINED out-of-line below (after `class ManipulatorClass` is
-     *       complete): the body calls `_m._drain(_mask)`, and `_m` is a `ManipulatorClass&` that
-     *       is only forward-declared at this point. Defining the body inline here would name a
-     *       member of an incomplete type, which MSVC rejects (C2027); the out-of-line definition
-     *       sees the full class.
+    * @note Defined in `Manipulator.cpp`: the body calls `_m._drain(_mask)`, and `_m` is a
+    *       `ManipulatorClass&` that is only forward-declared at this point. Keeping the
+    *       definition out of the header avoids naming a member of an incomplete type here.
      */
     ~ManipAction();
 
@@ -140,9 +134,7 @@ private:
      * @param mask Bitmask of involved actuators (`M_GRAB | M_SORT | M_DUMP | M_BELT`); `0`
      *             means "nothing to wait on" (the drain is an immediate no-op).
      */
-    ManipAction(ManipulatorClass& m, uint8_t mask) : _m(m), _mask(mask)
-    {
-    }
+    ManipAction(ManipulatorClass& m, uint8_t mask);
 
     ManipulatorClass& _m;                  ///< Owning facade; the `_drain` target.
     uint8_t           _mask;               ///< Involved-actuator bitmask to wait on.
@@ -241,37 +233,33 @@ public:
     /**
      * @brief Close the grabber to capture an object.
      * @return A `ManipAction` (blocks on the grabber until settled; chain `.async()` to skip).
-     * @note Thin bring-up scaffold (`grabber.close()`); real grip choreography is a TODO once
-     *       the mechanism is built.
+     * @warning Need to `release()` before calling this again, or the grabber is already closed.
+     *      
      */
-    ManipAction grab()
-    {
-        grabber.close();
-        return _action(M_GRAB);
-    }
+    ManipAction grab();
 
     /**
      * @brief Open the grabber to release an object.
      * @return A `ManipAction` (blocks on the grabber until settled; chain `.async()` to skip).
-     * @note Thin bring-up scaffold (`grabber.open()`); real release choreography is a TODO.
      */
-    ManipAction release()
-    {
-        grabber.open();
-        return _action(M_GRAB);
-    }
+    ManipAction release();
 
     /**
      * @brief Move the dumper to its dump pose to discharge the payload.
      * @return A `ManipAction` (blocks on the dumper until settled; chain `.async()` to skip).
-     * @note Bring-up scaffold: the dump pose is the dumper's `openDeg` placeholder
-     *       (`dumper.open()`); the real dump pose / sequencing is a TODO.
+     * @note Use `dumpReset()` to return the dumper to its home pose after dumping.
+     *
+     *      
      */
-    ManipAction dump()
-    {
-        dumper.open();
-        return _action(M_DUMP);
-    }
+    ManipAction dump();
+
+    /**
+     * @brief Return the dumper from its dump pose to its home pose.
+     * @return A `ManipAction` (blocks on the dumper until settled; chain `.async()` to skip).
+     * @note Use `dump()` to move the dumper to its dump pose before calling this.
+     *       
+     */
+    ManipAction dumpReset();
 
     /**
      * @brief Swing the sorter to the angle for logical bin @p bin.
@@ -282,20 +270,11 @@ public:
      *
      * @param bin Bin index in `[0, Config::SORTER_BIN_COUNT)`.
      * @return A `ManipAction` waiting on the sorter on success; an empty-mask (already-done)
-     *         action on an out-of-range index.
+     *         action on an out-of-range index. 
      * @note On a bad index this prints a Serial warning and performs NO servo write.
+     * @attention Use this before a `grab()` / `release()` sequence to sort the object into the correct bin.
      */
-    ManipAction sortTo(uint8_t bin)
-    {
-        if (bin >= Config::SORTER_BIN_COUNT)
-        {
-            Serial.print(F("[Manipulator] sortTo: bin out of range: "));
-            Serial.println((int)bin);
-            return _action(0);    // empty mask → drain is an immediate no-op
-        }
-        sorter.setAngle(Config::SORTER_BIN_ANGLE[bin]);
-        return _action(M_SORT);
-    }
+    ManipAction sortTo(uint8_t bin);
 
     /**
      * @brief Return every actuator to its safe rest pose.
@@ -306,14 +285,27 @@ public:
      *
      * @return A `ManipAction` waiting on all four actuators (chain `.async()` to skip the wait).
      */
-    ManipAction reset()
-    {
-        grabber.home();
-        sorter.home();
-        dumper.home();
-        belt.home();
-        return _action(M_GRAB | M_SORT | M_DUMP | M_BELT);
-    }
+    ManipAction reset();
+
+    /**
+     * @brief Open the rear box by driving the belt to its configured open station.
+     *
+     * @return A `ManipAction` waiting on the belt by default; chain `.async()` to skip the
+     *         wait.
+     * @note This reuses `Config::BeltStation::REAR_BOX_OPEN`, so the semantic verb inherits
+     *       the belt's existing completion/watchdog behavior.
+     */
+    ManipAction boxOpen();
+
+    /**
+     * @brief Close the rear box by driving the belt to its configured closed station.
+     *
+     * @return A `ManipAction` waiting on the belt by default; chain `.async()` to skip the
+     *         wait.
+     * @note This reuses `Config::BeltStation::REAR_BOX_CLOSE`, so the semantic verb inherits
+     *       the belt's existing completion/watchdog behavior.
+     */
+    ManipAction boxClose();
 
     // -------------------------------------------------------------------------------------
     // Primitive actuator handles (public for calibration / bring-up).
@@ -342,7 +334,7 @@ private:
      * @param mask Bitmask of actuators the verb fired (`0` = nothing to wait on).
      * @return A blocking-by-default action bound to this facade.
      */
-    ManipAction _action(uint8_t mask) { return ManipAction(*this, mask); }
+    ManipAction _action(uint8_t mask);
 
     /**
      * @brief Block (spin) until every actuator named in @p mask reports done, or the action
@@ -379,29 +371,6 @@ private:
 
     friend class ManipAction;
 };
-
-/**
- * @brief Out-of-line definition of the `ManipAction` RAII-wait destructor.
- *
- * Deferred to here (rather than inline in the class) because the body dereferences the
- * `ManipulatorClass&` member `_m` to call `_m._drain(_mask)`, and `ManipulatorClass` is only
- * forward-declared at the point of the class body — naming a member of an incomplete type there
- * is ill-formed (MSVC C2027). With the full class now visible the call type-checks. `inline`
- * keeps it legal to define in a header included by multiple translation units. Semantics are
- * unchanged: idempotent via `_executed`, drain only when blocking.
- */
-inline ManipAction::~ManipAction()
-{
-    if (_executed)
-    {
-        return;
-    }
-    _executed = true;
-    if (_blocking)
-    {
-        _m._drain(_mask);
-    }
-}
 
 /**
  * @brief Single global instance — defined in Manipulator.cpp.
