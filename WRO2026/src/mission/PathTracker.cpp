@@ -2282,6 +2282,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         .setPreset(preset)
                         .setReverse(decision.reverse)
                         .setOvershootMode(false)
+                        .setTShapeRampDown(!_projPassThrough)
                         .setBrakeOnGate(decision.brakeOnGate)
                         .setDistanceTarget(effectiveDistCm);
 #ifdef PT_PARITY_TRACE
