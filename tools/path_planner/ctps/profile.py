@@ -156,7 +156,6 @@ class ProfileConfig:
     turn_slow_pwm: int    # TURN_SLOW_SPEED_PWM
     turn_slow_zone_deg: float  # TURN_SLOW_ZONE_DEG (final-angle slow band)
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
-    wall_back_off_cm: float  # WALL_STOP_BACK_OFF_CM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
 
 
@@ -220,7 +219,6 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         turn_slow_pwm=parse_config_int("TURN_SLOW_SPEED_PWM", config_path, search),
         turn_slow_zone_deg=parse_config_float("TURN_SLOW_ZONE_DEG", config_path),
         wall_push_pwm=parse_config_int("WALL_STOP_PUSH_PWM", config_path, search),
-        wall_back_off_cm=parse_config_float("WALL_STOP_BACK_OFF_CM", config_path),
         track_cm=parse_track_cm_from_config(config_path),
     )
 
@@ -755,11 +753,19 @@ class DriveProfile:
         if self.cruise_cm > 0.0:
             mag = max(abs(self.peak_pwm), cfg.pwm_min)
             segments.append((a_end, c_end, self.cruise_cm / (scale * mag)))
-        # Ramp-down above the floor: peak -> floor over [c_end, floor_crossing_cm).
+        # Ramp-down above the floor: peak -> max(|end_pwm|, floor) over
+        # [c_end, floor_crossing_cm). Timing the descent to the TRUE end magnitude
+        # (not always the deadband floor) keeps duration_s() consistent with the
+        # interior keyframes, whose _pwm_mag_exact_at_s ramps to |end_pwm|. When the
+        # move ends at/above the floor (e.g. setEndSpeed(60)) floor_crossing_cm ==
+        # dist_cm (no crawl tail), so this spans the whole decel and lands on
+        # |end_pwm|; when it ends below the floor the ramp still bottoms at the floor
+        # and the floor-crawl tail below carries the rest. The end=0 stop is unchanged.
         above_len = self.floor_crossing_cm - c_end
         if above_len > 0.0:
+            decel_target = max(abs(self.end_pwm), floor)
             dur = _linear_ramp_duration(
-                above_len, abs(self.peak_pwm), floor, scale, floor
+                above_len, abs(self.peak_pwm), decel_target, scale, floor
             )
             segments.append((c_end, self.floor_crossing_cm, dur))
         # Floor-crawl tail: constant floor over [floor_crossing_cm, dist_cm).
@@ -991,8 +997,7 @@ class TurnProfile:
     Each stage has its own derived angular rate (``omega_cruise`` / ``omega_slow``):
     a wheel at PWM ``p`` moves ``v = SCALE * p`` cm/s, a counter-rotation spins
     both wheels so ``omega = (2*v / TRACK_CM) * 180/pi``; a pivot drives ONE
-    wheel about the other, HALVING the rate. ``omega_deg_s`` is retained as the
-    CRUISE-stage rate for backward compatibility / display.
+    wheel about the other, HALVING the rate.
 
     With the DEFAULT Config (``TURN_CRUISE_PWM = 50``, ``TURN_SLOW_SPEED_PWM =
     20``, ``PWM_MIN_MAGNITUDE = 50``) both stages snap to ``|PWM| = 50``, so
@@ -1015,7 +1020,6 @@ class TurnProfile:
     slow_deg: float
     omega_cruise_deg_s: float
     omega_slow_deg_s: float
-    omega_deg_s: float
     _cfg: ProfileConfig = dc_field(repr=False)
 
     def duration_s(self) -> float:
@@ -1134,7 +1138,6 @@ def resolve_turn_profile(
         slow_deg=slow_deg,
         omega_cruise_deg_s=omega_cruise,
         omega_slow_deg_s=omega_slow,
-        omega_deg_s=omega_cruise,
         _cfg=cfg,
     )
 
@@ -1154,6 +1157,12 @@ def _turn_omega(snapped_pwm: int, track_cm: float, is_pivot: bool) -> float:
     :param is_pivot: ``True`` to halve the rate for a single-wheel pivot.
     :return: non-negative angular rate in deg/s.
     """
+    if track_cm <= 0.0:
+        raise ValueError(
+            f"_turn_omega: track_cm must be positive, got {track_cm!r} — a zero or "
+            "negative chassis track width (Config::TRACK_MM) makes the turn rate "
+            "undefined. Check the ConfigDrive.h fed to resolve_turn_profile."
+        )
     wheel_cm_s = SCALE_CM_S_PER_PWM * abs(snapped_pwm)
     omega = degrees(2.0 * wheel_cm_s / track_cm)
     if is_pivot:
@@ -1380,6 +1389,7 @@ def sample_turn(
     end_pose: Tuple[float, float, float],
     t0: float,
     arc_keyframes: Optional[List[Dict[str, Any]]] = None,
+    signed_theta_deg: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Sample a turn / pivot into keyframes timed by the two-stage turn profile.
 
@@ -1415,6 +1425,11 @@ def sample_turn(
     :param t0: timestamp of the turn-start keyframe.
     :param arc_keyframes: pre-computed pivot-arc sub-keyframes to re-time, or
         ``None`` to synthesize an in-place turn.
+    :param signed_theta_deg: the signed commanded rotation, when the caller knows
+        it (a raw ``turnDeg`` argument). Used ONLY to disambiguate the exact ±180
+        in-place boundary, where the start/end headings alone cannot tell a
+        clockwise from a counter-clockwise half-turn. ``None`` keeps the
+        shortest-arc default.
     :return: an ordered keyframe list with non-decreasing, profile-derived
         timestamps.
     """
@@ -1436,6 +1451,14 @@ def sample_turn(
     x0, y0, h0 = start_pose
     x1, y1, h1 = end_pose
     dh = _shortest_arc(h0, h1)
+    # At an exact ±180 delta _shortest_arc canonicalizes to +180 (both directions
+    # share the same start/end headings), which would sweep a recorded
+    # turnDeg(-180) counter-clockwise. When the caller knows the signed commanded
+    # rotation, adopt its sign at the boundary so the interior heading animation
+    # turns the way the robot actually did. Only the ±180 boundary is touched —
+    # every other magnitude keeps the shortest-arc direction.
+    if signed_theta_deg is not None and abs(abs(dh) - 180.0) < 1e-9:
+        dh = 180.0 if signed_theta_deg >= 0.0 else -180.0
 
     sweep = abs_theta if profile.theta_deg else abs(dh)
     n = max(1, ceil(sweep / ARC_STEP_DEG))
@@ -1467,18 +1490,25 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
     object exposing those attributes (a loaded ``Command``, a namespace, a dict
     wrapped by :func:`_getattr`). Rules (plan Decisions):
 
-    - **cruise**: ``power`` overrides everything; else the ``preset`` maps
-      (slow/normal/fast) — default NORMAL. For a LINE-follow method the default
-      cruise is ``ConfigLine::CRUISE_SPEED`` instead of the Drive preset.
-    - **direction sign**: ``.setPower`` takes a SIGNED ``[-100, 100]`` value and
-      has NO ``setReverse`` — for a raw dead-reckon ``driveDist`` a NEGATIVE
-      power IS the reverse mechanism (``Drive.cpp`` drives a negative cruise
-      backwards implicitly). So when ``power`` is set the effective direction is
-      ``sign(power)`` and the signed power is used directly as the cruise (it is
-      NOT ``abs``-ed, and the ``reverse`` flag does NOT double-negate it — a
-      caller supplies direction through exactly one channel). When ``power`` is
-      unset the direction comes from the ``reverse`` flag, which negates the
-      preset/Config cruise magnitude so a reverse hop drives a reverse profile.
+    - **cruise**: ``power`` overrides everything (except on the seek verbs — see
+      direction sign); else the ``preset`` maps (slow/normal/fast) — default
+      NORMAL. For a LINE-follow method the default cruise is
+      ``ConfigLine::CRUISE_SPEED``; for ``wallStop`` it is a CONSTANT
+      ``WALL_STOP_PUSH_PWM`` push, while ``stopAtLine`` keeps the NORMAL default
+      (both match the goto-hop primitive model in ``_primitive_drive_speed``).
+    - **direction sign**: on ``driveDist`` ``.setPower`` takes a SIGNED
+      ``[-100, 100]`` value and has NO ``setReverse`` — a NEGATIVE power IS the
+      reverse mechanism (``Drive.cpp`` drives a negative cruise backwards
+      implicitly). So when ``power`` is set on ``driveDist`` the effective
+      direction is ``sign(power)`` and the signed power is used directly as the
+      cruise (it is NOT ``abs``-ed, and the ``reverse`` flag does NOT
+      double-negate it — direction comes through exactly one channel). The
+      REVERSIBLE seek verbs (``wallStop`` / ``stopAtLine``) instead store power as
+      a MAGNITUDE and carry direction on ``reverse`` separately (firmware
+      ``_resolvePower`` + ``cmd.reverse``), so their power is ``abs``-ed and
+      ``reverse`` supplies the sign. When ``power`` is unset the direction always
+      comes from the ``reverse`` flag, which negates the preset/Config cruise
+      magnitude so a reverse hop drives a reverse profile.
     - **start**: default is SIGN-BY-CRUISE —
       ``cruise >= 0 ? +TSHAPE_START_SPEED : -TSHAPE_START_SPEED`` — so a reverse
       hop seeds a REVERSE ramp, not a forward one. An explicit ``start_speed``
@@ -1488,7 +1518,8 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
       move renders no phantom decel-to-zero. An explicit ``end_speed`` overrides
       either default.
     - **profiled**: the recorded ``profiled`` flag (``.tShape()`` -> True,
-      ``.flat()`` -> False); absent -> True (the ``driveDist`` builder default).
+      ``.flat()`` -> False); absent -> True (the ``driveDist`` builder default),
+      EXCEPT ``wallStop`` absent -> False (a constant-push crawl, no ramp).
 
     :param cmd: the recorded drive command (duck-typed accessors, see above).
     :param method: the recorded method name (``"driveDist"``, ``"lineFollowDist"``,
@@ -1511,21 +1542,38 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
     # `stopAtLine` is a distance-gated SEEK, not a follow — it must NOT match here
     # (it defaults to the Drive preset), so this is an exact method-name check, not
     # a loose "line" substring (which would wrongly catch `stopAtLine`).
-    is_line = method.strip().lower() == "linefollowdist"
+    method_key = method.strip().lower()
+    is_line = method_key == "linefollowdist"
+    # Seek verbs (wallStop / stopAtLine) are REVERSIBLE: the firmware stores their
+    # power as a MAGNITUDE (`_resolvePower`) and applies the `reverse` flag
+    # separately — unlike driveDist, whose setPower carries the sign itself and has
+    # no setReverse. So a seek verb's power must NOT be treated as signed, and its
+    # `reverse` must fold into the cruise sign.
+    is_wall_stop = method_key == "wallstop"
+    is_seek = is_wall_stop or method_key == "stopatline"
 
     # --- cruise (signed) ---
-    if power is not None:
-        # `.setPower` carries the SIGNED direction itself ([-100, 100], no
-        # setReverse); a negative power is the reverse mechanism for a raw
-        # dead-reckon driveDist. Use it directly — do NOT abs() it and do NOT
-        # let `reverse` double-negate it (direction comes from exactly one
-        # channel; when power is set, that channel is its sign).
+    if power is not None and not is_seek:
+        # driveDist: `.setPower` carries the SIGNED direction itself ([-100, 100],
+        # no setReverse); a negative power is the reverse mechanism for a raw
+        # dead-reckon driveDist. Use it directly — do NOT abs() it and do NOT let
+        # `reverse` double-negate it (direction comes from exactly one channel;
+        # when power is set on a non-seek verb, that channel is its sign).
         cruise = int(power)
     else:
-        if preset is not None:
+        if power is not None:
+            # Reversible seek verb with an explicit setPower: power is a MAGNITUDE;
+            # the `reverse` flag below supplies the sign.
+            cruise_mag = abs(int(power))
+        elif preset is not None:
             cruise_mag = _preset_to_pwm(str(preset), cfg)
         elif is_line:
             cruise_mag = int(cfg.line_cruise)
+        elif is_wall_stop:
+            # wallStop is a CONSTANT push at WALL_STOP_PUSH_PWM (no ramp) — it does
+            # NOT default to the SPEED_NORMAL preset the way stopAtLine does. Matches
+            # the goto-hop primitive model (`_primitive_drive_speed`, ACT_WALL_STOP).
+            cruise_mag = int(cfg.wall_push_pwm)
         else:
             cruise_mag = int(cfg.speed_normal)
         cruise = -cruise_mag if reverse else cruise_mag
@@ -1547,7 +1595,14 @@ def resolve_effective_speed(cmd: Any, method: str) -> Tuple[int, int, int, bool]
         end = 0
 
     # --- profiled flag ---
-    profiled = True if profiled_flag is None else bool(profiled_flag)
+    if profiled_flag is not None:
+        profiled = bool(profiled_flag)
+    elif is_wall_stop:
+        # wallStop renders as a CONSTANT-push crawl (flat, no ramp), matching the
+        # firmware seek and the goto-hop primitive (ACT_WALL_STOP -> profiled=False).
+        profiled = False
+    else:
+        profiled = True
 
     return cruise, start, end, profiled
 

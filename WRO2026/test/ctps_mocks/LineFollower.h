@@ -334,11 +334,15 @@ private:
  * Direction precedence mirrors the real `_applyEnableBuilder`: a chained
  * `setReverse` on this builder wins; otherwise fall back to the facade's
  * persistent `_reverse` (a prior `LineFollower.setReverse(true)`), which the
- * real builder preserves when `_hasReverseOverride` is false. `preset` /
- * `brake` / `profiled` are this builder's OWN captured state (there is no
- * builder-vs-facade override pairing for those the way there is for
- * `reverse`) — power/startSpeed/endSpeed stay unset since
- * `LineFollowerEnableBuilder` has no such setters on the real header.
+ * real builder preserves when `_hasReverseOverride` is false. `preset` follows
+ * the SAME precedence: a chained `setPreset` on this builder wins, else fall
+ * back to the facade's persistent preset (`_owner.getPreset()`) — mirroring the
+ * real `_applyEnableBuilder` keeping `_preset` when `hasPresetOverride` is false
+ * (LineFollower.cpp:606-609), so a prior `LineFollower.setPreset(FAST)` survives
+ * an enable that does not re-chain it. `brake` / `profiled` are this builder's
+ * OWN captured state (no builder-vs-facade pairing) — power/startSpeed/endSpeed
+ * stay unset since `LineFollowerEnableBuilder` has no such setters on the real
+ * header.
  */
 inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
 {
@@ -350,6 +354,13 @@ inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
     if (_enabled && _hasTarget)
     {
         const bool reverse = _hasReverseOverride ? _reverse : _owner.getReverse();
+        // Chained setPreset on this builder wins; else fall back to the facade's
+        // persistent preset (mirrors the real `_applyEnableBuilder`, which keeps
+        // `_preset` when `hasPresetOverride` is false). `_preset` is a non-null
+        // "slow"/"normal"/"fast" string ONLY when setPreset was chained, so the
+        // null check IS the builder's override flag.
+        const char* const preset =
+            _preset != nullptr ? _preset : lineFollowerPresetToStr(_owner.getPreset());
         ctps::recordDriveMove(
             "lineFollowDist",
             {
@@ -360,7 +371,7 @@ inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                 reverse,                // reverse
                 /*power*/ 0,             // power (LineFollowerEnableBuilder has no setPower)
                 /*hasPower*/ false,      // hasPower
-                _preset,                 // preset
+                preset,                  // preset
                 /*startSpeed*/ 0,        // startSpeed (LineFollowerEnableBuilder has no setStartSpeed)
                 /*hasStartSpeed*/ false, // hasStartSpeed
                 /*endSpeed*/ 0,          // endSpeed (LineFollowerEnableBuilder has no setEndSpeed)

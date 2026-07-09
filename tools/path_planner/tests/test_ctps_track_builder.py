@@ -416,24 +416,35 @@ def test_tc3_drive_before_goto_renders_return_no_residual_drift():
 
 
 # ---------------------------------------------------------------------------
-# TC4 — a sub-return-trigger raw drive before a goto neither returns nor drifts
+# TC4 — a sub-return-trigger raw drive before a goto surfaces the drift
 # ---------------------------------------------------------------------------
 
 
-def test_tc4_small_drive_before_goto_no_return_no_residual():
-    """TC4 (T11): a 2 cm raw drive before goto B sits under the return trigger.
+def test_tc4_small_drive_before_goto_surfaces_subthreshold_drift():
+    """TC4: a 2 cm raw drive before goto B sits under the return trigger.
 
     The 2 cm offset is below ``RETURN_TRIGGER_THRESHOLD_CM`` (3 cm), so the
-    return gate resolves to NONE — no return maneuver is dispatched — and the
-    following goto re-anchors cleanly. The trace therefore carries neither a
-    ``return_to_node`` marker nor a residual ``drift_warn``. The fixture keeps
-    its historical ``_no_drift`` name.
+    return gate resolves to NONE — no physical return maneuver is dispatched (the
+    firmware does NOT drive back for a sub-3 cm offset either), and so no
+    ``return_to_node`` marker. But the following goto's arrival re-anchor clears
+    the offset before the trace-end residual check, so the excursion is a real,
+    uncorrected error that would otherwise vanish. It is surfaced as a POINT
+    ``drift_warn`` at the goto start reporting the offset off the parked node.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
+    # Sub-3 cm: no physical return maneuver, hence no return marker.
     assert [ev for ev in track.events if ev["type"] == "return_to_node"] == []
-    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+    # ... but the sub-threshold excursion is still flagged so it is not hidden.
+    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
+    assert len(drift_events) == 1
+    warn = drift_events[0]
+    assert "2.0 cm off node" in warn["label"]
+    # A point event stamped at the goto start (before the arrival re-anchor), not
+    # a span: no t_end key.
+    assert "t_end" not in warn
+    assert warn["t"] > 0.0
 
 
 def test_drive_without_following_goto_keeps_trace_end_residual():

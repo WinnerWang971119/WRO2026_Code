@@ -108,6 +108,7 @@ from tools.path_planner.sim.runtime import (
 
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
+    KEYFRAME_COUNT_CEILING,
     MANIP_NOMINAL_S,
     ROBOT_FRAME_CM,
 )
@@ -543,6 +544,7 @@ def _densify_drive(
 def _densify_turn(
     prev_kf: Dict[str, Any],
     end_pose: Tuple[float, float, float],
+    signed_turn_deg: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Densify one in-place turn geometry step into profile-timed sub-keyframes.
 
@@ -563,6 +565,10 @@ def _densify_turn(
         turn-start clock and its pose is the turn-start pose.
     :param end_pose: ``(x, y, heading_deg)`` at the end of the turn — pinned
         byte-exact as the last sub-keyframe.
+    :param signed_turn_deg: the signed commanded rotation when the caller knows it
+        (a raw ``turnDeg`` argument), threaded to :func:`sample_turn` only to
+        disambiguate the exact ±180 in-place boundary. ``None`` for pose-derived
+        turns (the goto walk), which keep the shortest-arc direction.
     :return: the replacement sub-keyframes (empty for a zero-magnitude turn).
     """
     x0, y0, h0 = prev_kf["x"], prev_kf["y"], prev_kf["h"]
@@ -570,7 +576,13 @@ def _densify_turn(
     theta_deg = wrap_pm180(h1 - h0)
 
     profile = resolve_turn_profile(theta_deg, is_pivot=False)
-    sub = sample_turn(profile, (x0, y0, h0), (x1, y1, h1), prev_kf["t"])
+    sub = sample_turn(
+        profile,
+        (x0, y0, h0),
+        (x1, y1, h1),
+        prev_kf["t"],
+        signed_theta_deg=signed_turn_deg,
+    )
     return sub[1:]
 
 
@@ -634,7 +646,12 @@ def _build_pivot_arc(
     wy = y0 + radius_cm * sin(wheel_ang_rad)
 
     abs_theta = abs(theta_deg)
+    # Cap the sub-keyframe count at KEYFRAME_COUNT_CEILING - 1 so a very large
+    # pivot (or a future lower ARC_STEP_DEG) cannot exceed the ceiling that bounds
+    # every primitive — matching sample_turn's in-place path, so the two turn
+    # paths agree.
     n = max(1, ceil(abs_theta / ARC_STEP_DEG))
+    n = min(n, KEYFRAME_COUNT_CEILING - 1)
 
     # Offset of the chassis centre from the planted wheel, rotated by tau*theta.
     rx = x0 - wx
@@ -849,15 +866,25 @@ def build(trace: Trace, field_data) -> Track:
             )
         )
 
-    def append_turn_keyframes(x_new: float, y_new: float, h_new: float) -> None:
+    def append_turn_keyframes(
+        x_new: float,
+        y_new: float,
+        h_new: float,
+        signed_turn_deg: Optional[float] = None,
+    ) -> None:
         """Densify an in-place turn to ``(x_new, y_new, h_new)`` and append it.
 
         Times the pure rotation with the turn profile (constant-rate at the
         snapped floor for the default Config). The final sub-keyframe is pinned
         to the destination pose byte-exact. A zero-magnitude turn appends
-        nothing.
+        nothing. ``signed_turn_deg`` (a raw ``turnDeg`` argument, when known) is
+        forwarded only to disambiguate the exact ±180 sweep direction.
         """
-        _extend(_densify_turn(keyframes[-1], (x_new, y_new, h_new)))
+        _extend(
+            _densify_turn(
+                keyframes[-1], (x_new, y_new, h_new), signed_turn_deg=signed_turn_deg
+            )
+        )
 
     def append_dwell_keyframe(dwell_s: float) -> None:
         """Advance the clock by ``dwell_s``; append a same-pose keyframe.
@@ -902,7 +929,14 @@ def build(trace: Trace, field_data) -> Track:
         the growing offset is what the NEXT goto's return prologue corrects.
         """
         cruise = speed[0]
-        signed_cm = distance_cm if cruise >= 0 else -distance_cm
+        # Direction comes from exactly ONE channel — the resolved cruise sign
+        # (which already folds setPower's sign and the reverse flag). Take the
+        # MAGNITUDE from abs(distance_cm) so a negative cm literal cannot
+        # double-negate a reverse move: driveDist(-10).setReverse(true) resolves
+        # cruise < 0 and would otherwise render -(-10) = +10 cm FORWARD. driveDist
+        # rejects a negative cm at the firmware boundary, so this only hardens a
+        # malformed / hand-authored trace.
+        signed_cm = abs(distance_cm) if cruise >= 0 else -abs(distance_cm)
         sim.operator_move(signed_cm, turn_deg=0.0)
         append_drive_keyframes(
             chassis.x_cm, chassis.y_cm, chassis.heading_deg, speed
@@ -922,7 +956,15 @@ def build(trace: Trace, field_data) -> Track:
         densifier emits no interior frames).
         """
         sim.operator_move(0.0, turn_deg=turn_deg)
-        append_turn_keyframes(chassis.x_cm, chassis.y_cm, chassis.heading_deg)
+        # Forward the SIGNED commanded rotation so an exact turnDeg(±180) animates
+        # the direction the robot turned (start/end headings alone are ambiguous
+        # at ±180). Non-boundary magnitudes ignore it and keep the shortest arc.
+        append_turn_keyframes(
+            chassis.x_cm,
+            chassis.y_cm,
+            chassis.heading_deg,
+            signed_turn_deg=turn_deg,
+        )
 
     # 4. Iterate the commands in order on the single shared sim/chassis.
     #
@@ -939,6 +981,12 @@ def build(trace: Trace, field_data) -> Track:
             from_node = sim.localization.current_node()
             target = cmd.target
             t_start = t
+
+            # Operator offset accumulated onto ``from_node`` by any preceding raw
+            # hand-drive, captured BEFORE ``step_through`` re-anchors (clears) it.
+            # Used to surface a sub-threshold off-node excursion this goto silently
+            # corrects — see the post-loop ``drift_warn`` below.
+            pre_goto_offset_cm = sim.localization.get_offset_from_node().magnitude_cm()
 
             # --- per-goto pivot-arc detection state ----------------------
             # Reset per goto, mirroring the firmware's per-goal pivot-latch
@@ -1190,13 +1238,28 @@ def build(trace: Trace, field_data) -> Track:
                     "label": f"{from_node}->{target}",
                 }
             )
-            # No drift-span bookkeeping here (issue #130, T11): a preceding raw
-            # move already integrated its offset through ``sim.operator_move``,
-            # and this goto's ``step_through`` return prologue physically drove
-            # that offset back onto the node (rendered + marked
-            # ``return_to_node`` above), so nothing is left to close. A raw move
-            # with NO following goto is the only residual, handled once after the
-            # command loop.
+            # Sub-threshold drift indicator: a preceding raw off-node hand-drive
+            # whose accumulated offset was BELOW RETURN_TRIGGER_THRESHOLD_CM (3 cm)
+            # gets no physical return prologue (``_evaluate_return_gate`` returns
+            # NONE) and thus no ``return_to_node`` marker, yet this goto's arrival
+            # re-anchor still cleared the offset before the trace-end residual check
+            # runs. The firmware does NOT physically return for a sub-3 cm offset
+            # either, so the excursion is a real, uncorrected error — surface it as a
+            # POINT ``drift_warn`` at the goto start (mirrors the trace-end residual
+            # label) instead of letting it vanish. The >= 3 cm case already renders +
+            # marks ``return_to_node`` (``return_marked``), so skip it there to avoid
+            # a double mark; the ``operator_move`` integrate deadband keeps a
+            # sub-0.2 cm nudge at offset 0, so it never trips this.
+            if not return_marked and pre_goto_offset_cm > _RESIDUAL_DRIFT_EPS_CM:
+                events.append(
+                    {
+                        "t": t_start,
+                        "type": "drift_warn",
+                        "label": (
+                            f"chassis {pre_goto_offset_cm:.1f} cm off node {from_node}"
+                        ),
+                    }
+                )
 
         elif cmd.op == "drive":
             # Raw off-node move (issue #130, T11): route through
@@ -1249,15 +1312,28 @@ def build(trace: Trace, field_data) -> Track:
                         operator_advance_keyframe(float(cmd.cm), speed)
             elif method == "turnDeg":
                 # Raw relative turn: the signed delta IS the ``turnDeg`` argument.
-                operator_turn_keyframe(float(cmd.deg))
+                if cmd.deg is None:
+                    # Legacy / partial trace (a deg-less turnDeg, or a deg dropped
+                    # by the loader's numeric guard): no rotation to replay.
+                    # Narrate only — never ``float(None)``, which raises TypeError
+                    # and would abort the ENTIRE build (no player HTML). Mirrors
+                    # the cm-less forward-geometry guard above.
+                    pass
+                else:
+                    operator_turn_keyframe(float(cmd.deg))
             elif method == "turnToYaw":
                 # Raw absolute turn: route the shortest-arc delta to the target
                 # yaw through ``operator_move`` (``operator_move`` turns relative),
                 # so the render and the integrated yaw offset both land on the
                 # requested heading.
-                operator_turn_keyframe(
-                    wrap_pm180(float(cmd.deg) - chassis.heading_deg)
-                )
+                if cmd.deg is None:
+                    # deg-less / dropped absolute turn: narrate only, no rotation
+                    # (same defense as the cm-less and turnDeg guards).
+                    pass
+                else:
+                    operator_turn_keyframe(
+                        wrap_pm180(float(cmd.deg) - chassis.heading_deg)
+                    )
             # else: stop / unknown -> no geometry change, nothing to integrate.
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}

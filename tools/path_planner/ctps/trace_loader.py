@@ -443,6 +443,39 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                 )
                 cmd.end_speed = None
 
+        # cm / deg: accept only a real int/float (bool excluded — see `heading`).
+        # `bool` subclasses `int`, so a JSON `true`/`false` in this slot would
+        # otherwise coerce to 1.0/0.0 and drive a phantom distance (`cm`) or a
+        # spurious 1° turn (`deg`). A non-numeric value warns and is dropped to
+        # None so a malformed field warns-and-skips downstream (the `cm`/`deg`
+        # None guards in track_builder) instead of silently moving. Absent → the
+        # constructor already left it None.
+        if "cm" in raw:
+            raw_cm = raw["cm"]
+            if isinstance(raw_cm, (int, float)) and not isinstance(raw_cm, bool):
+                cmd.cm = raw_cm
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.cm {raw_cm!r} at "
+                    f"seq={seq} — dropped.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.cm = None
+
+        if "deg" in raw:
+            raw_deg = raw["deg"]
+            if isinstance(raw_deg, (int, float)) and not isinstance(raw_deg, bool):
+                cmd.deg = raw_deg
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.deg {raw_deg!r} at "
+                    f"seq={seq} — dropped.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.deg = None
+
         # profiled: accept ONLY a JSON boolean (mirrors the `reverse` guard —
         # never bool(raw.get(...)), a truthy non-bool must not silently
         # coerce). Any non-bool value warns and is treated as unset (the
