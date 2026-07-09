@@ -17,16 +17,82 @@ here and mirrored as JS constants in ``assets/cargo.js``.
 
 #: Simulated drive speed used to compute how long a drive/line-follow
 #: primitive occupies on the playback timeline (cm per second).
+#:
+#: .. deprecated::
+#:    Superseded by the firmware-derived motion profile (``ctps/profile.py``,
+#:    issue #130). ``track_builder.py`` is still its last consumer through the
+#:    Wave-1/2 flat-timing path; T10 drops that consumer and retires this
+#:    constant. Do not add new consumers.
 SIM_DRIVE_CM_S: float = 30.0
 
 #: Simulated turn speed used to compute turn-primitive display durations
 #: (degrees per second).
+#:
+#: .. deprecated::
+#:    Superseded by the firmware-derived motion profile (``ctps/profile.py``,
+#:    issue #130); see :data:`SIM_DRIVE_CM_S`. T10 retires this constant once
+#:    ``track_builder.py`` stops importing it.
 SIM_TURN_DEG_S: float = 180.0
 
 #: Narration dwell time applied to any ``manip`` command in the playback
 #: (seconds).  The Manipulator stub has no distance or angle telemetry so
 #: a fixed nominal duration is used instead.
 MANIP_NOMINAL_S: float = 0.5
+
+# ---------------------------------------------------------------------------
+# Firmware-derived motion profile — visual scale (issue #130)
+# ---------------------------------------------------------------------------
+#
+# The playback motion profile (``ctps/profile.py``) samples dense keyframes
+# from the SAME T-shape ramp math the firmware runs (``TShapeProfilePolicy``),
+# driven off the real ``ConfigDrive.h`` constants. That gives a PWM-domain
+# speed at every point along a move; converting PWM to an on-screen cm/s rate
+# needs exactly one visual scale, below. There is deliberately no second
+# scale for turns: angular rate is derived from this same constant plus the
+# chassis track width (``planner.parse_track_cm_from_config()``, itself read
+# from ``Config::TRACK_MM``) inside ``profile.py`` — see
+# ``resolve_turn_profile``.
+
+#: CTPS-only visual scale: on-screen drive speed (cm/s) per commanded PWM
+#: unit. This is the SINGLE tunable that maps the firmware's PWM-domain
+#: T-shape profile onto the playback timeline; retuning firmware ramp/cruise
+#: constants changes playback duration with no CTPS-side edit needed.
+#:
+#: Chosen so a move at the default cruise preset (``ConfigDrive::SPEED_NORMAL
+#: = 85`` PWM) renders at the historical ``SIM_DRIVE_CM_S = 30`` cm/s feel:
+#:
+#:   30 cm/s at cruise PWM 85 -> 30 / 85 = 0.3529411...
+#:
+#: Not a physical calibration (no PWM-to-cm/s measurement) — purely a display
+#: constant preserving today's playback pace. Do NOT use to estimate real
+#: robot speed.
+SCALE_CM_S_PER_PWM: float = 30.0 / 85.0
+
+# ---------------------------------------------------------------------------
+# Firmware-derived motion profile — keyframe sampling knobs (issue #130)
+# ---------------------------------------------------------------------------
+#
+# `profile.py` (T5) emits dense-but-bounded keyframes along each ramp phase;
+# `track_builder.py` (T10) consumes the resulting phase-object profile when
+# densifying drive/line/turn primitives. These two knobs bound that
+# densification: a maximum spatial gap between interior ramp samples, and a
+# hard ceiling on how many keyframes a single primitive may emit (protects
+# the player from a pathological/degenerate profile flooding the timeline).
+
+#: Maximum distance (cm) between consecutive interior keyframes sampled along
+#: a ramp (accel/decel) phase. Smaller values track curvature in the T-shape
+#: speed-vs-distance curve more faithfully at the cost of more keyframes;
+#: cruise-phase and floor-crawl stretches are still sampled sparsely (only at
+#: phase boundaries) since PWM is constant there and a dense sample adds no
+#: visual information.
+RAMP_SAMPLE_STEP_CM: float = 2.0
+
+#: Hard ceiling on keyframes emitted per drive/turn primitive by
+#: `sample_drive` / `sample_turn`. Bounds pathological cases (e.g. a very
+#: long ramp at a tiny `RAMP_SAMPLE_STEP_CM`) so a single primitive can never
+#: flood the player timeline; sampling degrades to coarser spacing rather
+#: than exceeding this count.
+KEYFRAME_COUNT_CEILING: int = 200
 
 # ---------------------------------------------------------------------------
 # Drift detection threshold
