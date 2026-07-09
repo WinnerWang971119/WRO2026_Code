@@ -381,3 +381,218 @@ def test_guard_passes_when_mock_is_superset():
     Guards against a false-positive guard that would flag a perfectly good mock.
     """
     _assert_mock_superset("FakeBuilder", _SYNTH_REAL, _SYNTH_MOCK_SUPERSET)
+
+
+# ---------------------------------------------------------------------------
+# T14 (issue #130, TC12/AC11) — field-level name-superset: trace_loader.Command
+# vs the C++ recorder's serialized JSON field vocabulary.
+#
+# The builder-method superset above (NC5) guards the FIRST seam: does the mock
+# capture every real fluent setter? This section guards the SECOND seam,
+# introduced by T8's per-command speed knobs (`power`/`preset`/`start_speed`/
+# `end_speed`/`profiled`/`brake`) and the `declare_position` op (`node`): does
+# the Python `trace_loader.Command` dataclass carry a NAMED attribute for every
+# JSON field key `ctps_record.cpp`'s `commandStreamToJson` can actually emit?
+#
+# This is the precise ADR-051 name-superset direction that matters here: T5's
+# `profile.py::resolve_effective_speed` reads these fields via a plain
+# `getattr(cmd, "start_speed", None)`-style named-attribute lookup (never the
+# `Command.fields` catch-all dict), so a JSON key the C++ side can emit but
+# that never became a NAMED `Command` field would silently resolve to the
+# firmware default on EVERY move — a load-bearing default a human would have
+# to notice went wrong, not a hard crash. Extending the mock's fluent-setter
+# surface (NC5 above) is necessary but not sufficient: a setter can be
+# captured into the C++ `Record` / serialized to JSON and STILL be missing
+# from the Python dataclass if a human forgets that half of the two-language
+# change — exactly the "real-grew" drift class this whole module exists to
+# catch, one seam over.
+# ---------------------------------------------------------------------------
+
+_CTPS_RECORD_CPP = _ROOT / "WRO2026" / "test" / "ctps_mocks" / "ctps_record.cpp"
+
+#: Matches the string-valued member emitter ``appendStrMember(out, "key", ...)``.
+_APPEND_STR_MEMBER_RE = re.compile(r'appendStrMember\(\s*out\s*,\s*"([a-z_]+)"')
+
+#: Matches the numeric/bool member emitter ``out += ", \"key\": "`` (and the
+#: bare first-member form ``out += "\"key\": "`` used for ``op``/``ms`` etc.).
+#: Both forms open with an (optionally comma-prefixed) escaped-quote JSON key.
+_INLINE_MEMBER_RE = re.compile(r'out \+= ",? ?\\"([a-z_]+)\\":')
+
+
+#: Document-level (``Trace``, not per-command ``Command``) JSON fields emitted
+#: ONCE by ``commandStreamToJson`` outside the per-record ``switch`` — i.e.
+#: before the ``"commands": [`` array opens. These share the same
+#: ``appendStrMember`` / inline-literal emission idioms as the per-command
+#: fields, so the regex scan below recovers them too, but they belong to
+#: ``trace_loader.Trace`` (``start_node``, ``start_heading_deg``,
+#: ``build_error``), never to a single ``Command`` entry, and must be excluded
+#: from the per-command field-superset comparison.
+_TRACE_LEVEL_KEYS: frozenset[str] = frozenset(
+    {"start_node", "start_heading_deg", "build_error"}
+)
+
+
+def _extract_json_field_names(cpp_text: str) -> set[str]:
+    """Return every PER-COMMAND JSON field-name key the serializer can emit.
+
+    Scans BOTH member-emission idioms `commandStreamToJson` uses (see the
+    module docstring extraction rule): the string-value helper
+    `appendStrMember(out, "key", ...)` and the direct `out += ", \\"key\\": "`
+    literal used for numeric/bool members. Comments are stripped first so a
+    doxygen example JSON snippet can never be mistaken for a real emission
+    site, mirroring `_strip_comments`'s role for the builder-method scan.
+    Document-level keys (:data:`_TRACE_LEVEL_KEYS`, emitted once outside the
+    per-record switch) are excluded — they belong to `trace_loader.Trace`,
+    never to a single `Command` entry.
+
+    :param cpp_text: raw ``ctps_record.cpp`` source text.
+    :return: the set of per-command JSON field-name keys the serializer can
+        emit (does NOT include the two structural wrapper keys `seq`/`op`,
+        which are handled separately below since `op` is always a literal,
+        never a member-macro emission).
+    """
+    text = _strip_comments(cpp_text)
+    names: set[str] = set()
+    names.update(_APPEND_STR_MEMBER_RE.findall(text))
+    names.update(_INLINE_MEMBER_RE.findall(text))
+    return names - _TRACE_LEVEL_KEYS
+
+
+#: JSON field names emitted only as literal ``"op": "<value>"`` wrapper syntax
+#: (op-discriminator + universal seq), never through either member-emission
+#: idiom above, so they cannot be recovered by the regex scan. `Command`
+#: models both (`Command.seq`, `Command.op`), so they are asserted present by
+#: construction rather than scanned for — listed here purely for documentation.
+_STRUCTURAL_KEYS: frozenset[str] = frozenset({"seq", "op"})
+
+#: The T8 (issue #130) per-command speed knobs + the `declare_position` op's
+#: `node` field — the exact field set this task's Contracts section adds. A
+#: dedicated positive assertion (independent of the generic superset check)
+#: pins this list so a future accidental deletion of one entry cannot silently
+#: shrink coverage without a test noticing.
+_T8_NEW_FIELDS: frozenset[str] = frozenset(
+    {"power", "preset", "start_speed", "end_speed", "profiled", "brake", "node"}
+)
+
+
+def test_ctps_record_cpp_emits_expected_json_field_names():
+    """Sanity: the extractor recovers the KNOWN field vocabulary from the C++ source.
+
+    Guards against a silently-broken regex (which would make the superset
+    check below pass vacuously): asserts both the long-standing per-command
+    fields (`target`, `method`, `cm`, `mode`, `reverse`, ...) and the T8
+    additions are recovered from the real `ctps_record.cpp`, and that the
+    document-level `Trace` fields are correctly EXCLUDED from the per-command
+    set (they are recovered separately, straight off the raw text, to prove
+    the regex itself still sees them — only `_extract_json_field_names`'s
+    trailing subtraction filters them out).
+    """
+    emitted = _extract_json_field_names(_read(_CTPS_RECORD_CPP))
+    assert {
+        "target", "arrival", "route", "text", "name",
+        "method", "mode", "heading", "result",
+    } <= emitted, emitted
+    assert _T8_NEW_FIELDS <= emitted, (
+        f"extractor did not recover the T8 field set from ctps_record.cpp: "
+        f"missing {_T8_NEW_FIELDS - emitted}"
+    )
+    assert emitted.isdisjoint(_TRACE_LEVEL_KEYS), (
+        f"per-command extraction leaked document-level Trace field(s): "
+        f"{emitted & _TRACE_LEVEL_KEYS}"
+    )
+
+    raw_scan = set(
+        _APPEND_STR_MEMBER_RE.findall(_strip_comments(_read(_CTPS_RECORD_CPP)))
+    ) | set(_INLINE_MEMBER_RE.findall(_strip_comments(_read(_CTPS_RECORD_CPP))))
+    assert _TRACE_LEVEL_KEYS & raw_scan == {"start_node"}, (
+        "sanity: the raw (pre-filter) regex scan should still see start_node "
+        "(the only Trace-level key using the appendStrMember idiom); a miss "
+        "here means the extraction rule itself has drifted from the source."
+    )
+
+
+def test_trace_loader_command_is_field_superset_of_recorder():
+    """TC12/AC11: every JSON field the C++ recorder can emit has a NAMED ``Command`` field.
+
+    Extracts the JSON field-name vocabulary straight from the REAL
+    ``ctps_record.cpp`` (never a hand-copied literal list, so the check tracks
+    the actual C++ source) and asserts it is a subset of
+    ``trace_loader.Command``'s dataclass field names (via ``dataclasses.fields``,
+    so a future rename on either side is picked up automatically). A JSON key
+    the recorder can emit but the loader has no named attribute for would
+    silently resolve to ``None``/the firmware default through every
+    ``getattr(cmd, name, None)``-style consumer (``profile.py``'s
+    ``resolve_effective_speed`` foremost among them) — exactly the drift class
+    this whole module exists to catch, applied to the field seam instead of
+    the method seam.
+    """
+    from dataclasses import fields as dc_fields
+
+    from tools.path_planner.ctps.trace_loader import Command
+
+    emitted = _extract_json_field_names(_read(_CTPS_RECORD_CPP))
+    named_fields = {f.name for f in dc_fields(Command)}
+
+    missing = emitted - named_fields
+    assert not missing, (
+        f"trace_loader.Command is missing NAMED field(s) the real C++ recorder "
+        f"(ctps_record.cpp) can emit: {sorted(missing)}. A JSON key with no "
+        f"matching Command dataclass field silently falls back to the default "
+        f"through getattr(cmd, name, None)-style resolution (e.g. "
+        f"profile.py::resolve_effective_speed) instead of failing loud — add "
+        f"the field to Command (issue #130, ADR-051)."
+    )
+
+
+def test_trace_loader_command_names_the_t8_fields_explicitly():
+    """TC12/AC11 (positive, T8-scoped): the exact new field set is present.
+
+    Narrower than the generic superset check above — pins the precise T8
+    field list (the Contracts "Trace `drive` op fields" table +
+    `declare_position.node`) so this test documents exactly what T8 added and
+    fails with a precise diff if any single one regresses, independent of
+    whether the C++ source scan itself stays healthy.
+    """
+    from dataclasses import fields as dc_fields
+
+    from tools.path_planner.ctps.trace_loader import Command
+
+    named_fields = {f.name for f in dc_fields(Command)}
+    missing = _T8_NEW_FIELDS - named_fields
+    assert not missing, (
+        f"trace_loader.Command is missing the T8 field(s) {sorted(missing)} "
+        f"(issue #130, Contracts)."
+    )
+
+
+def test_guard_bites_when_loader_drops_a_recorder_field(monkeypatch):
+    """TC12/AC11 (negative): a loader missing a real recorder field must fail.
+
+    Proves the field-superset guard actually bites: simulates a
+    ``trace_loader`` that regressed by dropping ``start_speed`` (monkeypatching
+    ``dataclasses.fields`` for a throwaway stand-in dataclass carrying every
+    OTHER emitted field) and asserts the same subset-check logic used by
+    ``test_trace_loader_command_is_field_superset_of_recorder`` raises and
+    names the missing field — mirroring ``test_guard_bites_when_mock_drops_a_setter``
+    for the method-superset half of this module.
+    """
+    from dataclasses import fields as dc_fields, make_dataclass
+
+    emitted = _extract_json_field_names(_read(_CTPS_RECORD_CPP))
+    assert "start_speed" in emitted, (
+        "test setup assumption broken: ctps_record.cpp no longer emits "
+        "start_speed — update this test's dropped-field choice"
+    )
+
+    # A synthetic stand-in for a regressed Command: every currently-emitted
+    # field EXCEPT start_speed, each declared Optional so the dataclass
+    # constructs trivially (values are irrelevant — only names are scanned).
+    regressed_fields = sorted(emitted - {"start_speed"})
+    RegressedCommand = make_dataclass(
+        "RegressedCommand",
+        [(name, "object", None) for name in regressed_fields],
+    )
+
+    named_fields = {f.name for f in dc_fields(RegressedCommand)}
+    missing = emitted - named_fields
+    assert missing == {"start_speed"}, missing

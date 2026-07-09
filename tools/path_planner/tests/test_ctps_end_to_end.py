@@ -58,6 +58,7 @@ Python emitter directly, so they always run (no ``CI`` / build-binary gating).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -90,6 +91,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from tools.path_planner import field_data  # noqa: E402  (live production field)
 from tools.path_planner.ctps import player_html, track_builder, trace_loader  # noqa: E402
+from tools.path_planner.tests.fixtures import toy_field_data  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -498,3 +500,232 @@ def test_tc10_pivot_track_page_is_self_contained_with_overlay(tmp_path) -> None:
     assert "https://" not in html
     assert "src=" not in html
     assert "href=" not in html
+
+
+# ---------------------------------------------------------------------------
+# T14 (issue #130) — full-seam end to end: dump-JSON shape -> real loader ->
+# real track_builder -> real player_html, exercising T8's new drive fields,
+# a declare_position op, and a raw-drive-then-goto return maneuver together.
+#
+# The live ``ctps_dump --fixture`` mission (asserted above) does not yet
+# author any of `power`/`preset`/`start_speed`/`end_speed`/`profiled`/`brake`,
+# a `declare_position` op, or an off-node raw drive with enough offset to
+# trigger a return-to-node maneuver — so a hand-authored Data-Model-A trace
+# fixture (``ctps_full_seam_trace.json``, shaped exactly like the OTHER
+# committed ``ctps_*.json`` fixtures this suite's sibling files already use,
+# e.g. ``ctps_gyro_heading.json``) is the vehicle here, run through the SAME
+# real ``trace_loader.load`` -> ``track_builder.build`` -> ``player_html.render``
+# chain the dump-based tests above exercise. This needs neither the
+# ``ctps_dump`` binary nor a browser/Node runtime, so it always runs (no CI
+# gating) — keeping the "fixture-driven, CI-portable" property the plan asks
+# for, without introducing a hard host-build dependency into a test CI runs
+# without a compiler.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def full_seam_trace() -> trace_loader.Trace:
+    """Load the T14 full-seam fixture through the REAL ``trace_loader.load``."""
+    return trace_loader.load(_FIXTURES_DIR / "ctps_full_seam_trace.json")
+
+
+@pytest.fixture(scope="module")
+def full_seam_track(full_seam_trace: trace_loader.Trace):
+    """Build the T14 fixture through the REAL ``track_builder.build`` (T10/T11).
+
+    Runs against the stable toy field (the fixture's ``S``/``B`` node names are
+    toy-field nodes, mirroring every other hand-authored ``ctps_*.json`` fixture
+    in this suite) rather than the live production field the dump-based tests
+    above use — the two node universes are unrelated and this fixture's node
+    names are not guaranteed to exist in the live field.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return track_builder.build(full_seam_trace, toy_field_data)
+
+
+_FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
+
+#: sha256 of the CURRENT (this-feature-unchanged) ``assets/player.js`` /
+#: ``assets/renderer.js`` — see :func:`test_t14_player_and_renderer_js_byte_unchanged`
+#: (AC10). Recomputed directly from the on-disk assets at authoring time; a
+#: future edit to either file must fail this test loudly rather than silently
+#: pass.
+_PLAYER_JS_SHA256: str = "f16403d88d6b097ce937331758eb9177b0ef578ed107a7d774986b28e6d60af1"
+_RENDERER_JS_SHA256: str = "35306708dc5aae6e914b780f125cac90e18a73ca4d84fb4a38a9d002d433290d"
+
+
+def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:
+    """The T8 per-command speed knobs parse into ``Command`` via the REAL loader.
+
+    Asserts both drive commands in the fixture retain the exact fields their
+    JSON carries: ``power``/``profiled``/``brake`` on the first, and
+    ``preset``/``start_speed``/``end_speed``/``brake`` on the second — proving
+    the additive ``drive`` fields (Contracts, T8/T9) survive
+    ``trace_loader.load`` unmodified.
+    """
+    drive_cmds = [c for c in full_seam_trace.commands if c.op == "drive"]
+    assert len(drive_cmds) == 2, (
+        "expected exactly two drive commands in ctps_full_seam_trace.json"
+    )
+    first, second = drive_cmds
+
+    assert first.power == 90
+    assert first.profiled is True
+    assert first.brake is True
+    assert first.preset is None
+    assert first.start_speed is None
+    assert first.end_speed is None
+
+    assert second.preset == "fast"
+    assert second.start_speed == 60
+    assert second.end_speed == 60
+    assert second.brake is False
+    assert second.power is None
+
+
+def test_t14_declare_position_op_survives_loader(full_seam_trace: trace_loader.Trace) -> None:
+    """The ``declare_position`` op (T8/T9) parses with its target node."""
+    declares = [c for c in full_seam_trace.commands if c.op == "declare_position"]
+    assert len(declares) == 1, "expected exactly one declare_position command"
+    assert declares[0].node == "B"
+
+
+def test_t14_track_has_densified_keyframes(full_seam_track) -> None:
+    """T10 densification: far more than one keyframe per primitive boundary.
+
+    The fixture carries 2 raw drives + 2 gotos + 1 declare_position — a flat,
+    pre-#130 (one-keyframe-per-primitive-boundary) builder would emit on the
+    order of a handful of keyframes. The profile-driven densification (T10)
+    replaces each geometry step with many profile-timed sub-keyframes, so the
+    actual count is asserted to be at least an order of magnitude larger, and
+    the run has a strictly positive, monotonically non-decreasing duration.
+    """
+    keyframes = full_seam_track.keyframes
+    assert len(keyframes) > 40, (
+        f"expected densified keyframes (>40), got {len(keyframes)} — the "
+        "profile-driven sub-sampling (T10) may have regressed to flat timing."
+    )
+    times = [kf["t"] for kf in keyframes]
+    assert all(b >= a for a, b in zip(times, times[1:])), (
+        "keyframe timestamps must be non-decreasing (AC10)."
+    )
+    assert full_seam_track.duration_s == pytest.approx(times[-1])
+    assert full_seam_track.duration_s > 0.0
+
+
+def test_t14_localization_lane_events_present(full_seam_track) -> None:
+    """T11: the raw-drive-then-goto return and the declare both mark the lane.
+
+    The two small raw drives at the top of the fixture push the chassis just
+    past ``RETURN_TRIGGER_THRESHOLD_CM`` and well under
+    ``RETURN_DISTANCE_CAP_CM`` (sim/runtime.py), so the following ``goto B``'s
+    ``step_through`` yields a physical return-to-node prologue — rendered and
+    marked exactly once. The later ``declare_position`` op marks the lane a
+    second time, distinct from (never conflated with) the return marker. No
+    residual ``drift_warn`` survives anywhere: the return re-anchors the first
+    excursion, and ``declare_position`` clears the offset without moving the
+    chassis (T11 Decisions).
+    """
+    events = full_seam_track.events
+    types = [ev["type"] for ev in events]
+
+    return_events = [ev for ev in events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1, f"expected exactly one return_to_node marker, got {types}"
+    assert "S" in return_events[0]["label"]
+
+    declare_events = [ev for ev in events if ev["type"] == "declare_position"]
+    assert len(declare_events) == 1, f"expected exactly one declare_position marker, got {types}"
+    assert "B" in declare_events[0]["label"]
+
+    assert "drift_warn" not in types, (
+        f"no residual drift indicator should survive a return-then-declare "
+        f"trace, got events: {types}"
+    )
+
+    # Ordering: both drives narrate first, then the return marker precedes its
+    # own goto span, then the declare sits between the two gotos.
+    goto_events = [ev for ev in events if ev["type"] == "goto"]
+    assert len(goto_events) == 2
+    assert return_events[0]["t"] <= goto_events[0]["t_end"]
+    assert goto_events[0]["t_end"] <= declare_events[0]["t"] <= goto_events[1]["t"]
+
+
+def test_t14_rendered_player_embeds_full_seam_track(tmp_path) -> None:
+    """End to end: the REAL ``player_html.render`` embeds the full-seam track.
+
+    Loads the fixture (real loader), builds it (real track_builder), renders it
+    (real player_html) to a temp file, and re-parses the embedded ``const
+    TRACK`` out of the emitted HTML — proving the densified keyframes and the
+    localization-lane events (return-to-node + declare_position) round-trip
+    byte-for-byte through the self-contained page the same way TC7's
+    boundary-pose invariant is proven at the track level. Also confirms the
+    lane manifest still carries the ``"drift"`` id (T12 keeps the id, relabels
+    only the dock display text in ``timeline.js``) and the page stays
+    self-contained (TC5).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        trace = trace_loader.load(_FIXTURES_DIR / "ctps_full_seam_trace.json")
+        track = track_builder.build(trace, toy_field_data)
+
+    out_path = tmp_path / "full_seam.html"
+    returned = player_html.render(track, out_path, filename="ctps_full_seam_trace.json")
+    assert returned == out_path
+
+    html = out_path.read_text(encoding="utf-8")
+
+    track_match = _TC10_TRACK_RE.search(html)
+    assert track_match is not None, "could not locate the embedded const TRACK assignment"
+    embedded = json.loads(track_match.group("json").replace("<\\/", "</"))
+
+    assert embedded["keyframes"] == track.keyframes
+    assert embedded["events"] == track.events
+    assert len(embedded["keyframes"]) > 40
+
+    embedded_types = {ev["type"] for ev in embedded["events"]}
+    assert {"return_to_node", "declare_position"} <= embedded_types
+
+    meta_match = _TC10_META_RE.search(html)
+    assert meta_match is not None, "could not locate the embedded const PLAYER_META assignment"
+    meta = json.loads(meta_match.group("json").replace("<\\/", "</"))
+    assert "drift" in meta["lanes"], (
+        "PLAYER_META must still manifest the localization lane under its "
+        "original id 'drift' (T12 relabels only the dock display text)."
+    )
+
+    # Self-contained / offline (TC5).
+    assert "http://" not in html
+    assert "https://" not in html
+    assert "src=" not in html
+    assert "href=" not in html
+
+
+def test_t14_player_and_renderer_js_byte_unchanged() -> None:
+    """AC10: ``player.js`` / ``renderer.js`` are untouched by this feature.
+
+    The whole motion-profile feature (issue #130) is Python-side; the seek +
+    lerp engine in ``player.js`` and the render-mode dispatch in
+    ``renderer.js`` must stay byte-for-byte identical — dense keyframes need
+    zero player changes (Decisions). This hashes the CURRENT on-disk assets
+    and pins them so ANY future edit to either file fails this test loudly,
+    exactly mirroring the review-enforced AC10 rule.
+    """
+    assets_dir = player_html.PLAYER_JS_PATH.parent
+    player_js = (assets_dir / "player.js").read_bytes()
+    renderer_js = (assets_dir / "renderer.js").read_bytes()
+
+    player_hash = hashlib.sha256(player_js).hexdigest()
+    renderer_hash = hashlib.sha256(renderer_js).hexdigest()
+
+    # Pinned against the CURRENT (unchanged-by-this-feature) files at authoring
+    # time. A future edit to either asset changes its hash and must fail this
+    # test, forcing an explicit, reviewed decision to update the pin.
+    assert player_hash == _PLAYER_JS_SHA256, (
+        "player.js changed — the CTPS motion-profile feature (issue #130) "
+        "must NOT touch the seek/lerp engine (AC10)."
+    )
+    assert renderer_hash == _RENDERER_JS_SHA256, (
+        "renderer.js changed — the CTPS motion-profile feature (issue #130) "
+        "must NOT touch the render-mode dispatch engine (AC10)."
+    )

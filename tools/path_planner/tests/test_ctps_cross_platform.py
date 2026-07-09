@@ -663,3 +663,116 @@ def test_serve_flow_dispatches_to_serve(monkeypatch, tmp_path):
     assert rc == 0
     assert captured["port"] == 8770
     assert captured["open_browser"] is False
+
+
+# ---------------------------------------------------------------------------
+# T14 (issue #130) — the new T8 drive fields / declare_position op introduce
+# no NEW platform-sensitive surface.
+#
+# Rationale (documented here since there is no new branching to test): the
+# genuinely platform-sensitive seams this module guards are `sys.platform`
+# branching in `ctps/__main__.py` (TC1-TC9, TC21-TC27 above) and file-system
+# path handling (`_find_dump_exe`, `_find_default_layout`) — NONE of which T8
+# (recorder fields) / T9 (loader parsing) / T10 (densification) / T11
+# (return-to-node + declare_position) touch. The new C++-side JSON fields use
+# `std::to_string(static_cast<int>(...))` for `power`/`start_speed`/
+# `end_speed` (locale-independent, unlike the pre-existing `%g` float
+# formatting `cm`/`heading`/`deg` already use) and plain string/bool literals
+# for `preset`/`profiled`/`brake`/`node` — no new float-formatting surface.
+# `trace_loader.load` reads every fixture with explicit `encoding="utf-8"`
+# (Python's text-mode universal-newline translation already normalises
+# `\r\n`/`\n`/`\r` transparently), and `player_html.render` writes with the
+# existing `newline=""` + UTF-8 discipline (TC5's self-containment lint,
+# unchanged by this feature). This test is the explicit confirmation that
+# nothing about the new fields depends on the checked-out line-ending style —
+# the one plausible cross-platform vector a Windows-vs-POSIX checkout could
+# introduce for a hand-authored JSON fixture.
+# ---------------------------------------------------------------------------
+
+
+def test_t14_new_drive_fields_load_identically_regardless_of_line_endings(tmp_path):
+    """The T8 fields parse identically whether the fixture uses CRLF or LF.
+
+    Writes the SAME JSON body carrying every new field
+    (`power`/`preset`/`start_speed`/`end_speed`/`profiled`/`brake` plus a
+    `declare_position` op) twice — once with LF, once with CRLF line endings
+    (mirroring the two states a Windows vs. POSIX ``git`` checkout could
+    produce for a text fixture) — and asserts ``trace_loader.load`` parses
+    both into field-for-field identical :class:`~tools.path_planner.ctps.trace_loader.Command`
+    lists. Uses the module's own :mod:`tools.path_planner.ctps.trace_loader`
+    (never a hand-rolled parser), so this proves the actual seam, not a
+    reimplementation of it.
+    """
+    from tools.path_planner.ctps import trace_loader
+
+    body_lf = (
+        '{\n'
+        '  "schema_version": 1,\n'
+        '  "start_node": "A",\n'
+        '  "start_heading_deg": 0.0,\n'
+        '  "build_error": false,\n'
+        '  "commands": [\n'
+        '    { "seq": 0, "op": "drive", "method": "driveDist", "cm": 12.0,\n'
+        '      "power": 90, "preset": "fast", "start_speed": 40, "end_speed": 10,\n'
+        '      "profiled": true, "brake": false },\n'
+        '    { "seq": 1, "op": "declare_position", "node": "B" }\n'
+        '  ]\n'
+        '}\n'
+    )
+    body_crlf = body_lf.replace("\n", "\r\n")
+    assert body_lf != body_crlf  # the two fixtures are genuinely different bytes
+
+    path_lf = tmp_path / "lf.json"
+    path_crlf = tmp_path / "crlf.json"
+    path_lf.write_bytes(body_lf.encode("utf-8"))
+    path_crlf.write_bytes(body_crlf.encode("utf-8"))
+
+    trace_lf = trace_loader.load(path_lf)
+    trace_crlf = trace_loader.load(path_crlf)
+
+    assert len(trace_lf.commands) == len(trace_crlf.commands) == 2
+    for cmd_lf, cmd_crlf in zip(trace_lf.commands, trace_crlf.commands):
+        assert cmd_lf == cmd_crlf
+
+
+def test_t14_full_seam_fixture_renders_identically_regardless_of_line_endings(tmp_path):
+    """End to end: the T14 fixture builds + renders the same track under CRLF/LF.
+
+    Reads the COMMITTED ``ctps_full_seam_trace.json`` fixture, re-writes it
+    twice (LF-normalised and CRLF), and asserts ``track_builder.build`` (T10/
+    T11 densification + localization events) produces byte-identical
+    ``Track.to_dict()`` output for both — the same drift-free, event-bearing
+    trace this suite's other T14 tests exercise (see
+    ``test_ctps_end_to_end.py``), here specifically isolating line-ending
+    sensitivity end to end rather than just at the loader.
+    """
+    import json as json_mod
+    import warnings as warnings_mod
+
+    from tools.path_planner.ctps import trace_loader, track_builder
+    from tools.path_planner.tests.fixtures import toy_field_data
+
+    fixture_path = (
+        Path(__file__).resolve().parent / "fixtures" / "ctps_full_seam_trace.json"
+    )
+    raw = fixture_path.read_text(encoding="utf-8")
+    normalized_lf = raw.replace("\r\n", "\n")
+    normalized_crlf = normalized_lf.replace("\n", "\r\n")
+
+    path_lf = tmp_path / "seam_lf.json"
+    path_crlf = tmp_path / "seam_crlf.json"
+    path_lf.write_bytes(normalized_lf.encode("utf-8"))
+    path_crlf.write_bytes(normalized_crlf.encode("utf-8"))
+
+    def _build(path):
+        trace = trace_loader.load(path)
+        with warnings_mod.catch_warnings():
+            warnings_mod.simplefilter("ignore", UserWarning)
+            return track_builder.build(trace, toy_field_data)
+
+    track_lf = _build(path_lf)
+    track_crlf = _build(path_crlf)
+
+    assert json_mod.dumps(track_lf.to_dict(), sort_keys=True) == json_mod.dumps(
+        track_crlf.to_dict(), sort_keys=True
+    )
