@@ -26,10 +26,19 @@ firmware's actual return-to-node maneuver instead of a CTPS-only drift model.
 `LocalizationSim.declare_position` (node change + offset clear, heading
 calibration preserved). The existing `drift` timeline lane is repurposed
 (same lane id, relabelled "LOCALIZATION") to carry drift, return-to-node, and
-declarePosition markers together. Turns and pivots render at the firmware's
-**actual snapped PWM** — with current Config both turn stages deadband-snap
-to `|PWM|=50`, so default turns render constant-rate; per-turn `setPower`/
-`setPreset` override capture is deferred.
+declarePosition markers together. Turns and pivots render a **config-derived
+two-stage** profile (`resolve_turn_profile`): a fast CRUISE at `TURN_CRUISE_PWM`
+for all but the final `TURN_SLOW_ZONE_DEG` degrees, then a SLOW settle at
+`TURN_SLOW_SPEED_PWM` for that final band — both stage PWMs deadband-snapped,
+each stage's angular rate derived from the same visual scale + `TRACK_CM`, and
+the sub-keyframes timed by their cumulative swept angle through the two-stage
+integral. When both stages snap to the same PWM (the current Config —
+`TURN_CRUISE_PWM=50` and `TURN_SLOW_SPEED_PWM=20` both snap to `|PWM|=50`) the
+two rates are equal and the turn renders **constant-rate**, byte-identical to
+the prior render; when the Config makes them differ (e.g. `TURN_CRUISE_PWM`
+raised above the `50` floor) a genuine two-stage ramp renders. Only the per-turn
+*builder* override capture (`turnDeg.setPower`/`setPreset`) remains deferred —
+the two-stage uses the Config default cruise, which CTPS already parses.
 
 ## Why
 
@@ -66,8 +75,11 @@ desync fails CI instead of silently rendering the old shape forever.
 ## Trigger to revisit
 
 - Turn/pivot per-command speed overrides (`setPower`/`setPreset` on
-  `turnDeg`/`turnToYaw`) need capture — reopen the deferred-turn-override
-  decision and extend the recorder + `resolve_turn_profile`.
+  `turnDeg`/`turnToYaw`) need capture — the two-stage profile already renders a
+  config-derived cruise->slow ramp, but a per-turn builder override is still
+  dropped by the recorder; reopen the deferred-turn-override decision and thread
+  the captured override into `resolve_turn_profile`'s `cruise_pwm` argument (the
+  seam already exists).
 - Wheel slip, battery sag, or IMU noise fidelity is requested — this profile
   is kinematic-only by design (see ADR-033's stated non-goals).
 - The LRS (#23) supplies measured termination outcomes for `stopAtLine`/

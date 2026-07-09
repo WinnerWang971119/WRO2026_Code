@@ -154,6 +154,7 @@ class ProfileConfig:
     line_cruise: int      # ConfigLine::CRUISE_SPEED (line-follow cruise)
     turn_cruise_pwm: int  # TURN_CRUISE_PWM
     turn_slow_pwm: int    # TURN_SLOW_SPEED_PWM
+    turn_slow_zone_deg: float  # TURN_SLOW_ZONE_DEG (final-angle slow band)
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
     wall_back_off_cm: float  # WALL_STOP_BACK_OFF_CM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
@@ -217,6 +218,7 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         line_cruise=parse_config_int("CRUISE_SPEED", line_h, search),
         turn_cruise_pwm=parse_config_int("TURN_CRUISE_PWM", config_path, search),
         turn_slow_pwm=parse_config_int("TURN_SLOW_SPEED_PWM", config_path, search),
+        turn_slow_zone_deg=parse_config_float("TURN_SLOW_ZONE_DEG", config_path),
         wall_push_pwm=parse_config_int("WALL_STOP_PUSH_PWM", config_path, search),
         wall_back_off_cm=parse_config_float("WALL_STOP_BACK_OFF_CM", config_path),
         track_cm=parse_track_cm_from_config(config_path),
@@ -965,39 +967,105 @@ def _decel_floor_crossing(
 
 @dataclass(frozen=True)
 class TurnProfile:
-    """A resolved turn or pivot: snapped per-stage PWM + derived angular rate.
+    """A resolved turn or pivot: a config-derived TWO-STAGE (cruise -> slow) profile.
 
-    Produced by :func:`resolve_turn_profile`. ``theta_deg`` is the signed swing
-    (CCW positive). ``fast_pwm`` / ``slow_pwm`` are the deadband-SNAPPED per-stage
-    magnitudes the firmware actually commands (``TURN_SLOW_SPEED_PWM = 20`` snaps
-    to ``50``), so with the current Config both stages command ``|PWM| = 50`` and
-    the render is CONSTANT-RATE. ``omega_deg_s`` is the derived angular rate at
-    the snapped cruise stage (halved for a pivot — one wheel drives).
+    Produced by :func:`resolve_turn_profile`. Mirrors the firmware TurnGyro FSM
+    (``Drive.cpp::_updateTurnProfile``), which runs the swing in two stages:
 
-    A genuine two-stage ramp only appears when a cruise override exceeds the
-    snapped floor; turn-override capture is deferred, so v1 always renders
-    ``fast_pwm == slow_pwm == 50`` -> constant-rate.
+    - **CRUISE** at ``TURN_CRUISE_PWM`` while the REMAINING angle to target is
+      ``> TURN_SLOW_ZONE_DEG``.
+    - **SLOW** at ``TURN_SLOW_SPEED_PWM`` (not overridable) once the remaining
+      angle is ``<= TURN_SLOW_ZONE_DEG``, i.e. the FINAL ``TURN_SLOW_ZONE_DEG``
+      degrees of the swing.
+
+    Both stage PWMs go through ``deadbandSnap`` on emit (``Drive.cpp:1173-1174``),
+    so ``fast_pwm`` / ``slow_pwm`` are the SNAPPED per-stage magnitudes the
+    firmware actually commands. ``theta_deg`` is the signed swing (CCW positive).
+
+    The swept angle splits into two segments (both non-negative, summing to
+    ``|theta|``):
+
+    - ``slow_deg`` = ``min(|theta|, TURN_SLOW_ZONE_DEG)`` — the final settle band.
+    - ``cruise_deg`` = ``max(0, |theta| - TURN_SLOW_ZONE_DEG)`` — everything before.
+
+    Each stage has its own derived angular rate (``omega_cruise`` / ``omega_slow``):
+    a wheel at PWM ``p`` moves ``v = SCALE * p`` cm/s, a counter-rotation spins
+    both wheels so ``omega = (2*v / TRACK_CM) * 180/pi``; a pivot drives ONE
+    wheel about the other, HALVING the rate. ``omega_deg_s`` is retained as the
+    CRUISE-stage rate for backward compatibility / display.
+
+    With the DEFAULT Config (``TURN_CRUISE_PWM = 50``, ``TURN_SLOW_SPEED_PWM =
+    20``, ``PWM_MIN_MAGNITUDE = 50``) both stages snap to ``|PWM| = 50``, so
+    ``omega_cruise == omega_slow`` and the cumulative-time-over-angle function
+    collapses to the single uniform rate ``phi / omega`` — a CONSTANT-RATE arc,
+    byte-identical to the pre-two-stage constant-rate render. A genuine two-stage
+    ramp appears only when the Config makes the stages snap to different PWMs
+    (e.g. ``TURN_CRUISE_PWM`` raised above the ``50`` floor while the slow stage
+    stays at it) — then the final ``TURN_SLOW_ZONE_DEG`` degrees take
+    proportionally longer per degree than the cruise segment. Per-turn *builder*
+    overrides (``turnDeg.setPower``) remain deferred (the recorder never captures
+    them); the two-stage uses the Config default cruise, which CTPS parses.
     """
 
     theta_deg: float
     is_pivot: bool
     fast_pwm: int
     slow_pwm: int
+    cruise_deg: float
+    slow_deg: float
+    omega_cruise_deg_s: float
+    omega_slow_deg_s: float
     omega_deg_s: float
     _cfg: ProfileConfig = dc_field(repr=False)
 
     def duration_s(self) -> float:
-        """Total display duration of the turn (seconds).
+        """Total display duration of the turn (seconds), from the two-stage integral.
 
-        Constant-rate at ``omega_deg_s``: ``|theta| / omega``. A zero-angle turn
-        (or a degenerate zero rate) is 0 s (no divide-by-zero — the ``omega``
+        ``cruise_deg / omega_cruise + slow_deg / omega_slow``. Under the default
+        Config both omegas are equal, so this reduces to ``|theta| / omega`` — the
+        old constant-rate duration, unchanged. A zero-angle turn (or a degenerate
+        zero rate on a used stage) contributes 0 s to that stage (no
+        divide-by-zero — a stage with zero swept angle is skipped, and the omega
         guard is in :func:`resolve_turn_profile`).
 
         :return: non-negative turn duration in seconds.
         """
-        if self.omega_deg_s <= 0.0:
+        return self.time_at_angle(abs(self.theta_deg))
+
+    def time_at_angle(self, phi: float) -> float:
+        """Cumulative time (seconds) to sweep ``phi`` degrees from the turn start.
+
+        Two-stage: the CRUISE segment (the first ``cruise_deg`` degrees) runs at
+        ``omega_cruise``, then the SLOW segment (the final ``slow_deg`` degrees)
+        runs at ``omega_slow``. For ``phi`` in ``[0, |theta|]``:
+
+        - ``phi <= cruise_deg`` -> ``phi / omega_cruise``
+        - else -> ``cruise_deg / omega_cruise + (phi - cruise_deg) / omega_slow``
+
+        ``phi`` is clamped into ``[0, |theta|]``. Under the default Config
+        (equal omegas) this is exactly ``phi / omega`` for every ``phi`` — so a
+        keyframe re-timed by its cumulative angle lands on the SAME timestamp the
+        old uniform grid produced (the byte-identity invariant).
+
+        :param phi: swept angle so far (deg, non-negative, magnitude).
+        :return: non-negative cumulative time in seconds.
+        """
+        abs_theta = abs(self.theta_deg)
+        if abs_theta <= 0.0:
             return 0.0
-        return abs(self.theta_deg) / self.omega_deg_s
+        p = 0.0 if phi < 0.0 else (abs_theta if phi > abs_theta else phi)
+
+        if p <= self.cruise_deg:
+            if self.omega_cruise_deg_s <= 0.0:
+                return 0.0
+            return p / self.omega_cruise_deg_s
+
+        t = 0.0
+        if self.cruise_deg > 0.0 and self.omega_cruise_deg_s > 0.0:
+            t += self.cruise_deg / self.omega_cruise_deg_s
+        if self.omega_slow_deg_s > 0.0:
+            t += (p - self.cruise_deg) / self.omega_slow_deg_s
+        return t
 
 
 def resolve_turn_profile(
@@ -1008,24 +1076,32 @@ def resolve_turn_profile(
     slow_pwm: Optional[int] = None,
     cfg: Optional[ProfileConfig] = None,
 ) -> TurnProfile:
-    """Resolve a turn / pivot into a :class:`TurnProfile` with snapped PWM + rate.
+    """Resolve a turn / pivot into a config-derived two-stage :class:`TurnProfile`.
 
-    Per the plan Decisions (AC3), the per-stage PWM is the deadband-SNAPPED
-    command the firmware emits, NOT the raw ``TURN_*`` Config value. With the
-    default Config (``TURN_CRUISE_PWM = 50``, ``TURN_SLOW_SPEED_PWM = 20``,
-    ``PWM_MIN_MAGNITUDE = 50``) both stages snap to ``|PWM| = 50`` -> a
-    constant-rate arc. A two-stage ramp appears only if a cruise override > 50 is
-    supplied (deferred capture — v1 leaves ``cruise_pwm`` None).
+    Per the plan Decisions (AC3), each stage's PWM is the deadband-SNAPPED command
+    the firmware emits, NOT the raw ``TURN_*`` Config value. The swept angle is
+    split into a CRUISE segment (all but the final ``TURN_SLOW_ZONE_DEG`` degrees)
+    at ``TURN_CRUISE_PWM`` and a SLOW segment (the final ``TURN_SLOW_ZONE_DEG``)
+    at ``TURN_SLOW_SPEED_PWM``, mirroring ``Drive.cpp::_updateTurnProfile``.
 
-    The angular rate is DERIVED from the single visual scale + the chassis track
-    (no second scale constant): a wheel commanded at PWM ``p`` moves at
+    With the default Config (``TURN_CRUISE_PWM = 50``, ``TURN_SLOW_SPEED_PWM =
+    20``, ``PWM_MIN_MAGNITUDE = 50``) both stages snap to ``|PWM| = 50`` -> the
+    two stage omegas are EQUAL, so the two-stage integral reduces to the single
+    uniform rate and the render is byte-identical to the old constant-rate arc. A
+    genuine two-stage ramp appears only when the Config makes the snapped stage
+    PWMs differ (e.g. ``TURN_CRUISE_PWM`` raised above the floor).
+
+    Each stage's angular rate is DERIVED from the single visual scale + the
+    chassis track (no second scale constant): a wheel at PWM ``p`` moves at
     ``v = SCALE * p`` cm/s; a counter-rotation spins both wheels, so
     ``omega = (2 * v / TRACK_CM) * 180/pi``; a pivot drives ONE wheel about the
-    other, HALVING the rate.
+    other, HALVING the rate — consistent for BOTH stages.
 
     :param theta_deg: signed swing angle (deg, CCW positive).
     :param is_pivot: ``True`` for a single-wheel pivot (rate halved).
     :param cruise_pwm: fast-stage PWM override; ``None`` uses ``TURN_CRUISE_PWM``.
+        (Not wired to any recorded builder override — turn-override capture is
+        deferred; this arg exists for tests / a future follow-up.)
     :param slow_pwm: slow-stage PWM override; ``None`` uses ``TURN_SLOW_SPEED_PWM``.
     :param cfg: parsed Config; defaults to :func:`default_config`.
     :return: the resolved :class:`TurnProfile`.
@@ -1038,22 +1114,51 @@ def resolve_turn_profile(
     fast_pwm = deadband_snap(raw_fast, cfg.pwm_min, cfg.pwm_max)
     slow_pwm = deadband_snap(raw_slow, cfg.pwm_min, cfg.pwm_max)
 
-    # Angular rate at the (snapped) fast stage. The magnitude drives the arc; the
-    # sign of theta carries the direction separately.
-    wheel_cm_s = SCALE_CM_S_PER_PWM * abs(fast_pwm)
-    # omega = (2*v / track) rad/s -> deg/s; pivot drives one wheel -> half.
-    omega_deg_s = degrees(2.0 * wheel_cm_s / cfg.track_cm)
-    if is_pivot:
-        omega_deg_s *= 0.5
+    # Split the swept angle into the final slow-zone band and the cruise remainder.
+    abs_theta = abs(float(theta_deg))
+    slow_zone = cfg.turn_slow_zone_deg
+    if slow_zone < 0.0:
+        slow_zone = 0.0
+    slow_deg = min(abs_theta, slow_zone)
+    cruise_deg = abs_theta - slow_deg
+
+    omega_cruise = _turn_omega(fast_pwm, cfg.track_cm, is_pivot)
+    omega_slow = _turn_omega(slow_pwm, cfg.track_cm, is_pivot)
 
     return TurnProfile(
         theta_deg=float(theta_deg),
         is_pivot=is_pivot,
         fast_pwm=fast_pwm,
         slow_pwm=slow_pwm,
-        omega_deg_s=omega_deg_s,
+        cruise_deg=cruise_deg,
+        slow_deg=slow_deg,
+        omega_cruise_deg_s=omega_cruise,
+        omega_slow_deg_s=omega_slow,
+        omega_deg_s=omega_cruise,
         _cfg=cfg,
     )
+
+
+def _turn_omega(snapped_pwm: int, track_cm: float, is_pivot: bool) -> float:
+    """Derived angular rate (deg/s) for a turn stage at a snapped PWM magnitude.
+
+    A wheel commanded at ``|pwm|`` moves ``v = SCALE_CM_S_PER_PWM * |pwm|`` cm/s.
+    A counter-rotating turn spins both wheels, so the chassis angular rate is
+    ``omega = (2 * v / track_cm)`` rad/s, converted to deg/s. A pivot drives ONE
+    wheel about the planted other, HALVING the rate. A zero PWM (a stage the
+    firmware would not command) yields 0 — the caller's cumulative-time function
+    skips a zero-rate stage rather than dividing by it.
+
+    :param snapped_pwm: the deadband-snapped stage PWM (signed; magnitude used).
+    :param track_cm: chassis track width (cm).
+    :param is_pivot: ``True`` to halve the rate for a single-wheel pivot.
+    :return: non-negative angular rate in deg/s.
+    """
+    wheel_cm_s = SCALE_CM_S_PER_PWM * abs(snapped_pwm)
+    omega = degrees(2.0 * wheel_cm_s / track_cm)
+    if is_pivot:
+        omega *= 0.5
+    return omega
 
 
 # ==============================================================================
@@ -1276,25 +1381,33 @@ def sample_turn(
     t0: float,
     arc_keyframes: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Sample a turn / pivot into evenly-timed keyframes at the snapped rate.
+    """Sample a turn / pivot into keyframes timed by the two-stage turn profile.
 
     Two modes:
 
     1. ``arc_keyframes`` given (the pivot-arc path): T10 has already computed the
-       geometric arc sub-keyframes (via ``_build_pivot_arc``); this RE-TIMES them
-       so the whole arc occupies ``profile.duration_s()`` at the snapped
-       constant rate. Timestamps are pinned to ``t0 + k/N * duration`` (never
-       accumulated) so the clock is exactly monotonic and the arc poses are left
-       untouched. The final sub-keyframe's pose is preserved byte-for-byte.
-    2. ``arc_keyframes`` None (an in-place turn): emits evenly-spaced keyframes
-       interpolating ``start_pose -> end_pose`` (position lerp — usually a pure
-       heading change so x/y are equal — heading on the signed swing) with
-       constant-rate timestamps. Sample count tracks ``ARC``-style density but is
-       capped at ``KEYFRAME_COUNT_CEILING``.
+       geometric arc sub-keyframes (via ``_build_pivot_arc``), evenly spaced in
+       swept angle. This RE-TIMES them — poses are left byte-for-byte untouched —
+       by each keyframe's CUMULATIVE swept angle through the two-stage
+       cruise->slow function (:meth:`TurnProfile.time_at_angle`): sub-keyframe
+       ``k`` of ``N`` is at swept angle ``(k/N) * |theta|`` and gets timestamp
+       ``t0 + time_at_angle((k/N)*|theta|)``. The final sub-keyframe's pose is
+       preserved byte-for-byte.
+    2. ``arc_keyframes`` None (an in-place turn): emits keyframes interpolating
+       ``start_pose -> end_pose`` (position lerp — usually a pure heading change
+       so x/y are equal — heading on the signed swing), each timed by its
+       cumulative swept angle through the same two-stage function. Sample count
+       tracks ``ARC``-style density (denser than one keyframe per stage so the
+       cruise->slow rate change is visible), capped at ``KEYFRAME_COUNT_CEILING``.
 
-    Constant-rate (both Config stages snap to ``|PWM| = 50``) means EVENLY-timed
-    sub-keyframes — the tripwire TC6 asserts. The endpoints are forced exact so
-    T10 can pin the last sub-keyframe to the snapshot pose.
+    Under the default Config both stages snap to ``|PWM| = 50`` (equal omegas), so
+    :meth:`TurnProfile.time_at_angle` is exactly ``phi / omega`` and the
+    re-timing reproduces the OLD uniform ``t0 + duration * k/N`` grid
+    byte-for-byte — the constant-rate arc TC6 asserts for the default config.
+    When the Config makes the snapped stages differ, the final
+    ``TURN_SLOW_ZONE_DEG`` degrees sweep at a lower rate, so their sub-keyframes
+    are spaced further apart in time — a visible two-stage ramp. The endpoints
+    are forced exact so T10 can pin the last sub-keyframe to the snapshot pose.
 
     :param profile: the resolved :class:`TurnProfile`.
     :param start_pose: ``(x, y, heading_deg)`` at the turn start.
@@ -1302,9 +1415,10 @@ def sample_turn(
     :param t0: timestamp of the turn-start keyframe.
     :param arc_keyframes: pre-computed pivot-arc sub-keyframes to re-time, or
         ``None`` to synthesize an in-place turn.
-    :return: an ordered, evenly-timed keyframe list.
+    :return: an ordered keyframe list with non-decreasing, profile-derived
+        timestamps.
     """
-    duration = profile.duration_s()
+    abs_theta = abs(profile.theta_deg)
 
     if arc_keyframes is not None:
         n = len(arc_keyframes)
@@ -1312,28 +1426,29 @@ def sample_turn(
             return []
         retimed: List[Dict[str, Any]] = []
         for k, kf in enumerate(arc_keyframes, start=1):
-            t = t0 + (duration * k / n)
-            retimed.append(_pose_kf(t, kf["x"], kf["y"], kf["h"]))
+            phi = abs_theta * k / n
+            retimed.append(
+                _pose_kf(t0 + profile.time_at_angle(phi), kf["x"], kf["y"], kf["h"])
+            )
         return _enforce_non_decreasing(retimed)
 
-    # In-place turn: evenly-spaced constant-rate keyframes start -> end.
+    # In-place turn: keyframes timed by cumulative swept angle, start -> end.
     x0, y0, h0 = start_pose
     x1, y1, h1 = end_pose
     dh = _shortest_arc(h0, h1)
 
-    abs_theta = abs(profile.theta_deg) if profile.theta_deg else abs(dh)
-    n = max(1, ceil(abs_theta / ARC_STEP_DEG))
+    sweep = abs_theta if profile.theta_deg else abs(dh)
+    n = max(1, ceil(sweep / ARC_STEP_DEG))
     n = min(n, KEYFRAME_COUNT_CEILING - 1)
     n = max(1, n)
 
-    dt = duration / n if n > 0 else 0.0
     keyframes = [_pose_kf(t0, x0, y0, h0)]
     for k in range(1, n + 1):
         frac = k / n
         x = x0 + (x1 - x0) * frac
         y = y0 + (y1 - y0) * frac
         h = (h0 + dh * frac) % 360.0
-        keyframes.append(_pose_kf(t0 + dt * k, x, y, h))
+        keyframes.append(_pose_kf(t0 + profile.time_at_angle(sweep * frac), x, y, h))
     keyframes[-1] = _pose_kf(keyframes[-1]["t"], x1, y1, h1)
     return _enforce_non_decreasing(keyframes)
 
@@ -1573,11 +1688,15 @@ def _selfcheck() -> None:
     pivot = resolve_turn_profile(90.0, is_pivot=True)
     print(
         f"\nturn  fast={turn.fast_pwm} slow={turn.slow_pwm} "
-        f"omega={turn.omega_deg_s:.1f}deg/s dur={turn.duration_s():.3f}s"
+        f"cruiseDeg={turn.cruise_deg:.0f} slowDeg={turn.slow_deg:.0f} "
+        f"omegaC={turn.omega_cruise_deg_s:.1f} omegaS={turn.omega_slow_deg_s:.1f}deg/s "
+        f"dur={turn.duration_s():.3f}s"
     )
     print(
         f"pivot fast={pivot.fast_pwm} slow={pivot.slow_pwm} "
-        f"omega={pivot.omega_deg_s:.1f}deg/s dur={pivot.duration_s():.3f}s"
+        f"cruiseDeg={pivot.cruise_deg:.0f} slowDeg={pivot.slow_deg:.0f} "
+        f"omegaC={pivot.omega_cruise_deg_s:.1f} omegaS={pivot.omega_slow_deg_s:.1f}deg/s "
+        f"dur={pivot.duration_s():.3f}s"
     )
 
 

@@ -24,6 +24,15 @@ Covered cases:
   floor-crawl tail at ``PWM_MIN_MAGNITUDE`` before the terminal brake (AC2).
 * **TC5** — ``resolve_effective_speed`` on a ``.setBrake(false)`` command
   defaults ``end`` to ``cruise``, not 0 (no phantom decel-to-zero).
+* **TC6** — the config-derived TWO-STAGE turn profile. (a) Under the DEFAULT
+  Config both stages deadband-snap to ``|PWM| = 50`` (``TURN_CRUISE_PWM = 50``,
+  ``TURN_SLOW_SPEED_PWM = 20``), so a turn/pivot renders CONSTANT-RATE — the
+  cruise and slow segments have equal per-degree timing and ``sample_turn``
+  produces evenly-timed sub-keyframes (unchanged from the pre-two-stage render).
+  (b) A perturbed config (``TURN_CRUISE_PWM = 80`` via the ``config_path``
+  temp-header seam) makes the snapped cruise stage (80) outrun the snapped slow
+  stage (50), so the cruise segment sweeps more degrees per unit time than the
+  final ``TURN_SLOW_ZONE_DEG`` degrees — a genuine two-stage ramp (AC3).
 * **W1** — ``resolve_effective_speed`` on a raw ``driveDist`` with a NEGATIVE
   ``.setPower`` keeps the sign: cruise resolves negative and the start seed
   follows sign-by-cruise (a reverse ramp), NOT ``abs()``-ed to forward. A
@@ -47,6 +56,8 @@ from tools.path_planner.ctps.profile import (
     resolve_drive_profile,
     resolve_effective_speed,
     resolve_tshape_ramps,
+    resolve_turn_profile,
+    sample_turn,
     tshape_speed_at,
 )
 
@@ -602,3 +613,137 @@ def test_negative_power_wins_over_reverse_flag_no_double_negate() -> None:
     cfg = load_profile_config()
     assert cruise == -70
     assert start == -cfg.start_speed
+
+
+# ---------------------------------------------------------------------------
+# TC6 — config-derived two-stage turn / pivot re-timing (AC3)
+# ---------------------------------------------------------------------------
+#
+# A turn renders a two-stage cruise->slow profile: a CRUISE segment (all but the
+# final ``TURN_SLOW_ZONE_DEG`` degrees) at the snapped ``TURN_CRUISE_PWM`` and a
+# SLOW segment (the final ``TURN_SLOW_ZONE_DEG``) at the snapped
+# ``TURN_SLOW_SPEED_PWM``. Under the DEFAULT config both stages snap to
+# ``|PWM| = 50`` so the two rates are equal -> constant-rate (the pre-two-stage
+# render, byte-unchanged). A perturbed config that lifts the cruise stage above
+# the ``50`` floor produces two DISTINCT per-degree rates.
+
+# A representative pure-heading in-place turn pose pair (90 deg CCW at a point).
+_TURN_START_POSE = (10.0, 20.0, 0.0)
+_TURN_END_POSE = (10.0, 20.0, 90.0)
+
+
+def _sub_keyframe_rates(keyframes: list[dict]) -> list[float]:
+    """Per-step angular rate (deg/s) between consecutive turn sub-keyframes.
+
+    ``sample_turn`` emits keyframes evenly spaced in swept ANGLE, so the
+    per-step rate = (angle swept in the step) / (time elapsed in the step). A
+    constant-rate turn yields equal rates; a two-stage turn yields a fast group
+    (cruise) then a slower group (the final slow-zone band).
+
+    :param keyframes: an ordered turn keyframe list ``[{"t","x","y","h"}, ...]``.
+    :return: one rate per interval; empty if fewer than two keyframes.
+    """
+    rates: list[float] = []
+    for a, b in zip(keyframes, keyframes[1:]):
+        dt = b["t"] - a["t"]
+        d_ang = abs(((b["h"] - a["h"] + 180.0) % 360.0) - 180.0)
+        if dt > 0.0:
+            rates.append(d_ang / dt)
+    return rates
+
+
+@pytest.mark.parametrize("is_pivot", [False, True])
+def test_tc6_default_config_turn_renders_constant_rate(is_pivot: bool) -> None:
+    """TC6(a): with the default Config a turn/pivot renders CONSTANT-RATE.
+
+    ``TURN_CRUISE_PWM = 50`` and ``TURN_SLOW_SPEED_PWM = 20`` both deadband-snap
+    to ``|PWM| = 50``, so the cruise and slow stage angular rates are equal: the
+    cumulative-time-over-angle function collapses to the single uniform rate and
+    ``sample_turn`` emits evenly-timed sub-keyframes (per-degree timing is
+    identical across the whole swing — no visible two-stage ramp). This is the
+    invariant that keeps the default render byte-identical to the pre-two-stage
+    constant-rate arc.
+    """
+    profile = resolve_turn_profile(90.0, is_pivot=is_pivot)
+
+    # Both snapped stages are the floor -> equal rates.
+    assert profile.fast_pwm == 50
+    assert profile.slow_pwm == 50
+    assert profile.omega_cruise_deg_s == pytest.approx(profile.omega_slow_deg_s)
+
+    # The two-stage integral reduces to |theta| / omega for every partial angle:
+    # the per-degree timing is uniform, so time_at_angle is linear in angle.
+    half = profile.time_at_angle(45.0)
+    full = profile.time_at_angle(90.0)
+    assert half == pytest.approx(full / 2.0)
+    assert full == pytest.approx(profile.duration_s())
+
+    kfs = sample_turn(profile, _TURN_START_POSE, _TURN_END_POSE, t0=0.0)
+    rates = _sub_keyframe_rates(kfs)
+    assert len(rates) >= 2
+    # Constant-rate: every interval sweeps at the same deg/s.
+    for r in rates:
+        assert r == pytest.approx(rates[0], rel=1e-9)
+
+
+def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path) -> None:
+    """TC6(b): raising ``TURN_CRUISE_PWM`` above the floor yields TWO rates.
+
+    Via the ``config_path`` temp-header seam (the same seam TC2 uses), set
+    ``TURN_CRUISE_PWM = 80`` (> the ``PWM_MIN_MAGNITUDE = 50`` floor). Now the
+    snapped cruise stage (80) outruns the snapped slow stage (``TURN_SLOW_SPEED_PWM
+    = 20`` -> snaps to 50), so the CRUISE segment (all but the final
+    ``TURN_SLOW_ZONE_DEG`` degrees) sweeps more degrees per unit time than the
+    final slow band. This is the genuine two-stage ramp the plan's TC6 calls for,
+    now driven by Config instead of the deferred per-turn override.
+    """
+    perturbed_dir = tmp_path / "perturbed_turn_config"
+    perturbed_dir.mkdir()
+    perturbed_drive_h = _copy_config_headers(perturbed_dir)
+
+    original_text = perturbed_drive_h.read_text(encoding="utf-8")
+    lifted_text = original_text.replace(
+        "constexpr int16_t TURN_CRUISE_PWM = 50;",
+        "constexpr int16_t TURN_CRUISE_PWM = 80;",
+    )
+    assert lifted_text != original_text, (
+        "the literal TURN_CRUISE_PWM declaration text did not match; "
+        "ConfigDrive.h's declaration shape changed upstream"
+    )
+    perturbed_drive_h.write_text(lifted_text, encoding="utf-8")
+
+    cfg = load_profile_config(perturbed_drive_h)
+    assert cfg.turn_cruise_pwm == 80
+    assert cfg.turn_slow_pwm == 20
+    assert cfg.turn_slow_zone_deg == pytest.approx(30.0)
+
+    # Sweep 90 deg: 60 deg cruise (fast) then the final 30 deg slow (TURN_SLOW_ZONE_DEG).
+    profile = resolve_turn_profile(90.0, is_pivot=False, cfg=cfg)
+    assert profile.fast_pwm == 80          # 80 > floor -> stays 80
+    assert profile.slow_pwm == 50          # 20 snaps UP to the 50 floor
+    assert profile.cruise_deg == pytest.approx(60.0)
+    assert profile.slow_deg == pytest.approx(30.0)
+    # Distinct stage rates: the cruise stage is strictly faster than the slow one.
+    assert profile.omega_cruise_deg_s > profile.omega_slow_deg_s
+
+    # Per-degree timing: the final slow-zone degrees take proportionally LONGER
+    # than the cruise degrees (the two-stage signature).
+    t_cruise = profile.time_at_angle(profile.cruise_deg)
+    t_total = profile.time_at_angle(90.0)
+    cruise_sec_per_deg = t_cruise / profile.cruise_deg
+    slow_sec_per_deg = (t_total - t_cruise) / profile.slow_deg
+    assert slow_sec_per_deg > cruise_sec_per_deg
+    # The ratio of per-degree times equals the inverse ratio of the snapped PWMs
+    # (rate is linear in |PWM|): 80 / 50 = 1.6.
+    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(80.0 / 50.0)
+
+    # And the sampled sub-keyframes split into a fast group then a slow group:
+    # the last interval (deep in the slow band) is strictly slower than the first
+    # (in the cruise band).
+    kfs = sample_turn(profile, _TURN_START_POSE, _TURN_END_POSE, t0=0.0)
+    rates = _sub_keyframe_rates(kfs)
+    assert len(rates) >= 2
+    assert rates[0] > rates[-1]
+    fast_rate = max(rates)
+    slow_rate = min(rates)
+    assert fast_rate / slow_rate == pytest.approx(80.0 / 50.0, rel=1e-6)
