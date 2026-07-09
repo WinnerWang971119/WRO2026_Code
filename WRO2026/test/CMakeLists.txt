@@ -1819,3 +1819,41 @@ add_test(NAME tshape_profile_freshness
             -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/tshape_profile_goldens.fresh.json
             -P ${TSHAPE_DUMP_DIR}/tshape_profile_freshness.cmake
 )
+
+# =========================================================================================
+# Test executable #25 — `chain_speed_dump` + freshness gate (ADR-059, T4).
+#
+# Host golden-vector dump for the header-only, Arduino-free `ChainSpeedPolicy.h` (T4's two-pass
+# collinear-run velocity planner). Includes ONLY the policy header plus the REAL
+# `Config::PWM_MIN_MAGNITUDE` / `PWM_MAX` / `TSHAPE_ACCEL_PWM_PER_CM` / `TSHAPE_MIN_MOVE_CM` /
+# `TSHAPE_START_SPEED` / `SPEED_NORMAL` constants (all pure `<stdint.h>`-only `constexpr`), so it
+# needs NOTHING on the include path except `${SKETCH_DIR}` — the TU is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just prints
+# JSON to stdout. The actual ctest is `chain_speed_freshness` below, which drives
+# `chain_speed_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file and
+# BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/chain_speed_goldens.json` (the `routes.h` /
+# `tshape_profile` regenerate-then-diff freshness-gate pattern, ctest-native so it also runs
+# locally, not just in a dedicated CI job). A firmware retune that changes
+# `Config::TSHAPE_ACCEL_PWM_PER_CM` / `PWM_MIN_MAGNITUDE` — or any change to the policy's
+# arithmetic — changes this binary's stdout and fails the ctest until the fixture is regenerated
+# and recommitted. Consumed by the Python parity mirror `chain_speed.py` (T5 / AC6 / TC1).
+# =========================================================================================
+set(CHAIN_SPEED_DUMP_DIR ${TEST_DIR}/chain_speed_dump)
+
+add_executable(chain_speed_dump
+    ${CHAIN_SPEED_DUMP_DIR}/chain_speed_dump.cpp
+)
+target_include_directories(chain_speed_dump PRIVATE ${SKETCH_DIR})
+
+set(CHAIN_SPEED_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/chain_speed_goldens.json)
+
+add_test(NAME chain_speed_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:chain_speed_dump>
+            -DGOLDEN_FILE=${CHAIN_SPEED_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/chain_speed_goldens.fresh.json
+            -P ${CHAIN_SPEED_DUMP_DIR}/chain_speed_freshness.cmake
+)
