@@ -19,6 +19,19 @@ Public surface
                        chain topology (no Dijkstra dependency).
 ``make_field_data()`` : returns a ``SimpleNamespace`` usable as a ``field_data``
                         argument to ``PathTrackerSim`` and ``VirtualChassis``.
+``make_ctps_field_data()`` : returns a FULL field-data surface (adds a blind
+                        spawn ``S`` feeding ``A``, plus the ``OBSTACLES`` /
+                        ``FIELD_MM`` / ``BLIND_DECAY_*`` / ``PIVOT_TURNS`` /
+                        ``RESET_NODES`` attributes) so the SAME collinear
+                        A-B-C-D LINE geometry can be replayed through the CTPS
+                        :func:`tools.path_planner.ctps.track_builder.build`
+                        run-grouper (ADR-059, TC2 / AC1). The minimal
+                        :func:`make_field_data` surface above cannot feed
+                        ``build`` (it lacks those attributes AND its
+                        ``START_NODE`` is the on-line ``A``, which
+                        ``build_graph``'s ``validate`` rejects); this factory
+                        keeps ``make_field_data`` untouched so the existing
+                        sim-level pass-through tests stay byte-identical.
 """
 
 from __future__ import annotations
@@ -137,4 +150,70 @@ def make_field_data() -> SimpleNamespace:
         START_NODE=START_NODE,
         START_HEADING_DEG=START_HEADING_DEG,
         BLIND_PROJECTION_AUTO_SEEK=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# CTPS render factory (full field surface — ADR-059 run-grouper, TC2 / AC1)
+# ---------------------------------------------------------------------------
+
+# Blind dead-reckon spawn feeding node A. Placed one nominal hop WEST of A
+# (heading 0, +x) so a ``goto("A")`` re-anchors the chassis exactly onto the
+# line at A before the collinear A-B-C-D run begins.
+_CTPS_SPAWN_NODE: str = "S"
+_CTPS_SPAWN_XY: tuple = (-40.0, 0.0)
+
+
+def make_ctps_field_data() -> SimpleNamespace:
+    """Return a FULL field-data surface for the CTPS run-grouper render (TC2 / AC1).
+
+    :func:`tools.path_planner.ctps.track_builder.build` needs the complete
+    field-data attribute surface (``OBSTACLES`` / ``FIELD_MM`` /
+    ``ROBOT_RADIUS_CM`` / ``BLIND_DECAY_*`` / ``NODE_TYPES`` / ``LINE_SEGMENTS`` /
+    ``BLIND_EDGES`` / ``PIVOT_TURNS`` / ``RESET_NODES``) and calls
+    ``build_graph`` -> ``validate``, which REJECTS an on-line ``START_NODE``. The
+    minimal :func:`make_field_data` above exposes neither, so it cannot render
+    through ``build``.
+
+    This factory wraps the identical collinear A-B-C-D LINE geometry with a
+    blind dead-reckon spawn ``S`` one nominal hop WEST of ``A`` (a
+    ``BLIND_EDGES`` ``S -> A`` hop, matching the toy field's blind start). A
+    mission that ``goto("A")`` then ``goto("D")`` re-anchors onto the line at
+    ``A`` and then drives the whole B/C pass-through chain as ONE grouped run —
+    exactly the collinear LINE chain AC1 / TC2 pins.
+
+    The three A-B / B-C / C-D edges become ``LINE_SEGMENTS`` (all collinear on
+    ``y = 0`` at heading 0), so ``B`` and ``C`` are collinear pass-through
+    junctions. No pivots, no reset nodes, no obstacles — a clean straight line.
+
+    :return: a field-data namespace ready for ``build`` (and ``build_graph`` /
+        ``validate``), leaving :func:`make_field_data` byte-unchanged.
+    """
+    nodes = dict(NODES)
+    nodes[_CTPS_SPAWN_NODE] = _CTPS_SPAWN_XY
+
+    node_types = {name: "line" for name in NODES}
+    node_types[_CTPS_SPAWN_NODE] = "blind"
+
+    # The three collinear chain edges become LINE segments (undirected pairs).
+    line_segments = [(u, v) for (u, v, *_rest) in EDGES]
+
+    return SimpleNamespace(
+        FIELD_MM=(3000.0, 2000.0),
+        MAP_PNG="maps/map.png",
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        START_NODE=_CTPS_SPAWN_NODE,
+        START_HEADING_DEG=0.0,
+        NODES=nodes,
+        NODE_TYPES=node_types,
+        LINE_SEGMENTS=line_segments,
+        BLIND_EDGES=[(_CTPS_SPAWN_NODE, START_NODE)],
+        OBSTACLES=[],
+        PIVOT_TURNS=[],
+        RESET_NODES={},
     )
