@@ -60,6 +60,9 @@ from tools.path_planner.ctps.config import SCALE_CM_S_PER_PWM
 from tools.path_planner.ctps.profile import default_config
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
+from tools.path_planner.graph_builder import build_graph
+from tools.path_planner.planner import BlindDecayParams, compute_all_pairs_next_hop
+from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_PASS,
     ACT_FOLLOW_INT,
@@ -67,6 +70,8 @@ from tools.path_planner.sim.runtime import (
     ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
+    ACT_TURN_REL,
+    NAV_TURN_TOLERANCE_DEG,
     Direction,
     PathTrackerSim,
 )
@@ -283,6 +288,107 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
     interior = vels[: d_idx - 1]  # exclude the last span (the terminal brake)
     assert all(v > _VEL_TOL for v in interior), (
         "an intra-run stop keyframe (interior zero velocity) was emitted"
+    )
+
+
+# ===========================================================================
+# Regression — a SUB-TOLERANCE alignment turn mid-run keeps the run grouped
+# ===========================================================================
+
+
+def test_subtolerance_alignment_turn_keeps_collinear_run_grouped():
+    """A near-collinear pass-through's tiny alignment turn must NOT split the run.
+
+    Real field nodes are never perfectly axis-aligned, so the sim emits a small
+    ``turn_relative`` (a few hundredths of a degree) to align onto each next
+    edge's exact heading at a pass-through — a turn it already deemed a
+    pass-through (a ``line_pass``, NOT a braked stop) because the delta is below
+    ``NAV_TURN_TOLERANCE_DEG``. The CTPS run-grouper must gate its run-break on
+    the SAME tolerance; a hard ``1e-9`` threshold instead treated that alignment
+    turn as a real turn and split the whole-run trapezoid into two ramps with a
+    dip at the pass-through node (the ``C -> CG2`` two-ramp render on the real
+    field). The perfectly-collinear ``collinear_4node`` fixture cannot surface
+    this — the ``_skewed`` variant nudges node ``C`` off-axis so ``B`` and ``C``
+    emit genuine sub-tolerance alignment turns.
+    """
+    field_data = collinear_4node.make_ctps_field_data_skewed()
+
+    # Guard: the skewed fixture genuinely emits a NON-ZERO, sub-tolerance
+    # ``turn_relative`` at an intermediate node — otherwise this test would pass
+    # trivially (a perfectly-collinear chain has no turn to be transparent to)
+    # and stop guarding the regression.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        graph = build_graph(field_data)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(field_data)
+        )
+    chassis = VirtualChassis.from_field_data(field_data)
+    sim = PathTrackerSim(field_data, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    align_turns = []
+    for target in ("A", "D"):
+        for primitive, _snap in sim.step_through(target):
+            if primitive[0] == ACT_TURN_REL:
+                align_turns.append(abs(float(primitive[1])))
+    assert any(0.0 < t < NAV_TURN_TOLERANCE_DEG for t in align_turns), (
+        "skewed fixture emitted no sub-tolerance alignment turn — the regression "
+        f"is not exercised (turns seen: {align_turns})"
+    )
+
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": field_data.START_NODE,
+            "start_heading_deg": 0.0,
+            "build_error": False,
+            "commands": [
+                {"seq": 0, "op": "goto", "target": "A"},
+                {"seq": 1, "op": "goto", "target": "D"},
+            ],
+        }
+    )
+    track = _build_quiet(trace, field_data)
+
+    cfg = default_config()
+    cruise_speed = SCALE_CM_S_PER_PWM * cfg.line_cruise
+    floor_speed = SCALE_CM_S_PER_PWM * cfg.pwm_min
+    assert cruise_speed > floor_speed + 1.0
+
+    kfs = track.keyframes
+    b_xy = field_data.NODES["B"]
+    c_xy = field_data.NODES["C"]
+    d_xy = field_data.NODES["D"]
+
+    a_run_start = _last_index_at(kfs, *field_data.NODES["A"])
+    run = kfs[a_run_start:]
+    vels = _inbound_velocities(run)
+
+    # The anti-regression: cruise HELD through BOTH intermediate pass-throughs
+    # (never dipping toward the deadband floor, which is what a run-split would
+    # do — it re-seeds the second ramp from the start-speed floor).
+    tol = 1e-3
+    assert _velocity_into(run, vels, *b_xy) == pytest.approx(cruise_speed, abs=tol)
+    assert _velocity_into(run, vels, *c_xy) == pytest.approx(cruise_speed, abs=tol)
+
+    # ONE trapezoid: a single CONTIGUOUS cruise plateau spanning B and C, with no
+    # intra-run dip between them.
+    plateau = [i for i, v in enumerate(vels) if abs(v - cruise_speed) <= tol]
+    assert plateau, "no cruise plateau — the run never reached cruise"
+    assert plateau == list(range(plateau[0], plateau[-1] + 1)), (
+        "cruise plateau broken by an intra-run dip — the alignment turn split the run"
+    )
+    b_idx = _last_index_at(run, *b_xy)
+    c_idx = _last_index_at(run, *c_xy)
+    d_idx = _last_index_at(run, *d_xy)
+    assert plateau[0] < b_idx <= plateau[-1] + 1
+    assert plateau[0] < c_idx <= plateau[-1] + 1
+
+    # No interior stop keyframe up to the terminal brake into D.
+    interior = vels[: d_idx - 1]
+    assert all(v > floor_speed for v in interior), (
+        "an intra-run dip toward the floor was emitted — the run split at a "
+        "sub-tolerance alignment turn"
     )
 
 

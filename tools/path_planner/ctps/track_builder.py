@@ -101,6 +101,7 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
+    NAV_TURN_TOLERANCE_DEG,
     Direction,
     OffMapFaultError,
     PathTrackerSim,
@@ -1857,14 +1858,27 @@ def build(trace: Trace, field_data) -> Track:
                         tail_x, tail_y, tail_h = run_tail_pose()
                         step_dist = hypot(snap.x_cm - tail_x, snap.y_cm - tail_y)
                         if step_dist <= _TRANSLATION_EPS_CM:
-                            # Zero-motion primitive. A real heading change breaks
-                            # the run (it is not collinear across the turn); a
-                            # zero-magnitude heading-reset is TRANSPARENT. Decide
-                            # off the actual heading delta so a heading-reset mid
-                            # projection/line run does NOT break the grouping
-                            # (TC11 interleave).
+                            # Zero-motion primitive. A real (above-tolerance)
+                            # heading change breaks the run (it is not collinear
+                            # across the turn); a heading-reset OR a sub-tolerance
+                            # alignment turn is TRANSPARENT. Gate on the SAME
+                            # NAV_TURN_TOLERANCE_DEG the sim uses to decide a
+                            # pass-through (``_should_pass_through`` in
+                            # runtime.py): the sim emits a tiny ``turn_relative``
+                            # (a few hundredths of a degree) to align onto each
+                            # next edge's exact heading between two NEAR-collinear
+                            # pass-through edges — a real field's nodes are never
+                            # perfectly axis-aligned. That turn is BELOW tolerance,
+                            # so the sim already passed through (a ``line_pass``,
+                            # NOT a braked stop); the grouper must agree and keep
+                            # the run open, or the whole-run trapezoid splits into
+                            # two ramps with a spurious dip at the pass-through node
+                            # (the exact stop-at-every-node lie this grouper
+                            # repairs). A hard 1e-9 threshold here re-introduced it
+                            # on the real field, which the perfectly-collinear toy
+                            # fixtures could not surface.
                             turn_mag = abs(wrap_pm180(snap.heading_deg - tail_h))
-                            if turn_mag > _TRANSLATION_EPS_CM:
+                            if turn_mag > NAV_TURN_TOLERANCE_DEG:
                                 # A real in-place turn: flush the open run FIRST so
                                 # ``append_turn_keyframes`` renders the rotation
                                 # from the run's last emitted keyframe, then emit
@@ -1873,12 +1887,13 @@ def build(trace: Trace, field_data) -> Track:
                                 append_turn_keyframes(
                                     snap.x_cm, snap.y_cm, snap.heading_deg
                                 )
-                            # else: a zero-magnitude, zero-translation record
-                            # (heading-reset / no-op) is fully transparent — append
-                            # NOTHING and leave the run open. Rendering a turn here
-                            # would interpolate position from the STALE (pre-run)
-                            # ``keyframes[-1]`` and forge a spurious keyframe at the
-                            # run-tail pose.
+                            # else: a heading-reset / no-op OR a sub-tolerance
+                            # pass-through alignment turn is fully transparent —
+                            # append NOTHING and leave the run open. Rendering a
+                            # turn here would interpolate position from the STALE
+                            # (pre-run) ``keyframes[-1]`` and forge a spurious
+                            # keyframe at the run-tail pose; the next follow leg's
+                            # snapshot pins the corrected heading byte-exact anyway.
                         else:
                             # A CHAINED blind hop (ADR-059) rides its resolved
                             # per-hop (start_pwm, end_pwm, chain) on the primitive

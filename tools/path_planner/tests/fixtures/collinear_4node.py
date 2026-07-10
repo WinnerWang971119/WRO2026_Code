@@ -217,3 +217,43 @@ def make_ctps_field_data() -> SimpleNamespace:
         PIVOT_TURNS=[],
         RESET_NODES={},
     )
+
+
+# ---------------------------------------------------------------------------
+# CTPS render factory — SKEWED intermediate node (sub-tolerance alignment turn)
+# ---------------------------------------------------------------------------
+
+#: Lateral nudge (cm) applied to the intermediate node ``C`` so ``B->C`` and
+#: ``C->D`` acquire a slight slope off the ``y = 0`` axis. Over the 50 cm edges
+#: this yields per-node heading-alignment turns of a few hundredths of a degree —
+#: comfortably BELOW ``NAV_TURN_TOLERANCE_DEG`` (0.5°), so the sim still passes
+#: through ``B`` and ``C`` (a ``line_pass``, NOT a braked stop) and merely emits a
+#: tiny ``turn_relative`` to align onto each next edge's exact heading. Real
+#: fields are never perfectly axis-aligned, so this mirrors what
+#: ``field_data.json`` actually produces; the perfectly-collinear
+#: :func:`make_ctps_field_data` above cannot surface it.
+_CTPS_SKEW_CM: float = 0.05
+
+
+def make_ctps_field_data_skewed() -> SimpleNamespace:
+    """Like :func:`make_ctps_field_data`, but with node ``C`` nudged off-axis.
+
+    The nudge (:data:`_CTPS_SKEW_CM`) makes the two intermediate pass-throughs
+    ``B`` and ``C`` emit SUB-TOLERANCE heading-alignment ``turn_relative``
+    records — the exact stream a real field produces at a near-collinear
+    pass-through. It is the regression fixture for the CTPS run-grouper bug where
+    a hard ``1e-9`` heading threshold treated such an alignment turn as a real
+    turn and split the whole-run trapezoid into two ramps with a dip at the
+    pass-through node. The grouper must instead gate run-breaks on
+    ``NAV_TURN_TOLERANCE_DEG`` (matching the sim's own pass-through decision), so
+    this skewed chain still renders as ONE trapezoid.
+
+    :return: the :func:`make_ctps_field_data` surface with ``NODES["C"]`` moved
+        laterally by :data:`_CTPS_SKEW_CM`.
+    """
+    field_data = make_ctps_field_data()
+    nodes = dict(field_data.NODES)
+    cx, cy = nodes["C"]
+    nodes["C"] = (cx, cy + _CTPS_SKEW_CM)
+    field_data.NODES = nodes
+    return field_data
