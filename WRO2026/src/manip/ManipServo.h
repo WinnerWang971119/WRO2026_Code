@@ -6,8 +6,9 @@
  * @details
  * `ManipServo` is a thin, header-only wrapper over one `MiniR4.RCx` channel. It exists so the
  * `Manipulator` facade can own three identical joints by value and drive them through a uniform
- * pose API (`open()` / `close()` / `home()` / `setAngle()`) without repeating the per-channel
- * dispatch and the timer bookkeeping in three places.
+ * pose API (`open()` / `close()` / `home()` / `setAngle()`, plus the two-stop `moveThen()` /
+ * `homeThenClose()`) without repeating the per-channel dispatch and the timer bookkeeping in
+ * three places.
  *
  * **Fire-and-forget, timer-based completion.** The vendor RC API (`MiniR4RC`) exposes NO position
  * feedback — `setAngle()` commands the lower MCU and returns immediately; there is no way to read
@@ -16,6 +17,13 @@
  * commanded angle delta (`cfg.msPerDeg`) plus a fixed settle dwell (`cfg.settleMs`), stamps the
  * issue time, and `isDone()` reports completion once that budget has elapsed. Callers poll
  * `isDone()` cooperatively; nothing here blocks.
+ *
+ * **Optional two-stop sequence.** `moveThen(first, second)` (and its `homeThenClose()` sugar)
+ * commands `first` now and QUEUES `second` to fire automatically once `first` settles. Because the
+ * servo is fire-and-forget, two back-to-back `setAngle()` calls would skip the intermediate pose
+ * (the second write overrides the first before the servo moves), so the follow-up is deferred: the
+ * facade advances it by calling `update()` each cooperative tick, and `isDone()` stays `false`
+ * until the SECOND move settles. Any direct `setAngle()` (or pose verb) cancels a queued follow-up.
  *
  * **Hardware-owned direction.** A reversed servo is handled entirely in hardware: `begin()`
  * forwards `cfg.reverse` to `MiniR4RC::setHWDir()` exactly once. There is NO software angle
@@ -101,14 +109,66 @@ public:
      *       hardware flag applied in `begin()`.
      * @note The vendor `setAngle` returns `bool`; on a failed call this retries once after a 1 ms
      *       delay before giving up (transient-failure retry pattern).
+     * @note A direct command CANCELS any queued `moveThen()` follow-up — the new setpoint wins.
      */
     void setAngle(uint16_t deg)
     {
         const uint16_t clamped = (deg > 180) ? 180 : deg;
         _estMs = (uint32_t)(fabs((float)clamped - (float)_shadow) * _cfg.msPerDeg) + _cfg.settleMs;
         _writeAngle(clamped);
-        _shadow  = clamped;
-        _startMs = millis();
+        _shadow     = clamped;
+        _startMs    = millis();
+        _hasPending = false;    // a direct command overrides any queued two-stop follow-up
+    }
+
+    /**
+     * @brief Command @p first now, then automatically command @p second once @p first settles.
+     *
+     * A two-stop, fire-and-forget sequence. @p first is issued immediately (via `setAngle()`); the
+     * clamped @p second is QUEUED and fired by `update()` on the first tick after `first`'s
+     * slew-plus-settle timer elapses. `isDone()` stays `false` until the SECOND move settles, so a
+     * blocking drain on this servo waits for the whole sequence. Any direct `setAngle()` / pose verb
+     * issued before the follow-up fires cancels it.
+     *
+     * @param first  Absolute angle to command now (clamped to `[0, 180]` by `setAngle()`).
+     * @param second Absolute angle to command once @p first settles (clamped to `[0, 180]`).
+     * @note Advanced only by `update()` — the owner must tick this servo each cooperative loop for
+     *       the follow-up to fire.
+     */
+    void moveThen(uint16_t first, uint16_t second)
+    {
+        setAngle(first);    // fires `first` and clears any prior pending
+        _pendingDeg = (second > 180) ? 180 : second;
+        _hasPending = true;
+    }
+
+    /**
+     * @brief Open fully to the home pose, then close — a self-contained capture stroke.
+     *
+     * Convenience over `moveThen(cfg.homeDeg, cfg.closeDeg)`: drives the joint to its widest/home
+     * pose first, then clamps to close once home settles, so a capture always runs the full
+     * open→close stroke regardless of the joint's prior position.
+     *
+     * @note Fire-and-forget two-stop sequence — see `moveThen()`. `isDone()` reports `true` only
+     *       after the close settles; advanced by `update()`.
+     */
+    void homeThenClose() { moveThen(_cfg.homeDeg, _cfg.closeDeg); }
+
+    /**
+     * @brief Advance the optional two-stop sequence — fire the queued follow-up if the first
+     *        move has settled. A no-op when no follow-up is pending.
+     *
+     * Must be called each cooperative tick by the owning facade so a `moveThen()` / `homeThenClose()`
+     * sequence progresses. Pure servos with no queued follow-up do no work here.
+     */
+    void update()
+    {
+        if (_hasPending && _timerElapsed())
+        {
+            const uint16_t next = _pendingDeg;
+            _hasPending         = false;
+            setAngle(next);
+        }
     }
 
     /**
@@ -137,11 +197,13 @@ public:
      * the issuing `setAngle()`. This is an estimate, not a confirmation — a stalled or unpowered
      * servo will still report done on schedule.
      *
-     * @return `true` once the estimated slew-plus-settle budget has elapsed (rollover-safe).
+     * @return `true` once the estimated slew-plus-settle budget has elapsed (rollover-safe) AND no
+     *         `moveThen()` follow-up is still queued — a two-stop sequence is done only after its
+     *         SECOND move settles.
      * @note The `millis() - _startMs` subtraction is computed in `uint32_t`, so it stays correct
      *       across the ~49.7-day `millis()` rollover.
      */
-    bool isDone() const { return (uint32_t)(millis() - _startMs) >= _estMs; }
+    bool isDone() const { return !_hasPending && _timerElapsed(); }
 
     /**
      * @brief The last angle commanded to the servo (clamped shadow value).
@@ -213,10 +275,21 @@ private:
         }
     }
 
+    /**
+     * @brief Whether the last commanded move's slew-plus-settle timer has elapsed (ignores any
+     *        queued `moveThen()` follow-up). Rollover-safe `uint32_t` subtraction.
+     *
+     * `isDone()` layers the pending-follow-up check on top of this; `update()` uses it raw to know
+     * when to fire the queued second move.
+     */
+    bool _timerElapsed() const { return (uint32_t)(millis() - _startMs) >= _estMs; }
+
     const Config::ServoCfg& _cfg;       ///< Per-servo calibration (channel, poses, slew, direction).
     uint16_t                _shadow;    ///< Last commanded angle in `[0, 180]` (no vendor getter).
     uint32_t                _startMs;   ///< `millis()` at the last `setAngle()` issue.
     uint32_t                _estMs;     ///< Estimated slew-plus-settle budget for the last move (ms).
+    bool                    _hasPending = false;   ///< A `moveThen()` follow-up is queued.
+    uint16_t                _pendingDeg = 0;        ///< Clamped angle to fire when `_hasPending`.
 };
 
 #endif    // MANIPSERVO_H

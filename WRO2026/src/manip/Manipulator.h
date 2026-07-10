@@ -26,15 +26,17 @@
  * **Completion model.** The three servos have NO position feedback (`ManipServo` fakes
  * completion with a slew-plus-settle timer); the belt has REAL encoder feedback (`ManipBelt`
  * confirms POSITION moves from the rotate-done bit, or times out TIMED runs). `isDone()` is
- * the AND of all four actuators' `isDone()`. `update()` advances only the belt's state machine
- * (`belt.update()`) — the servos are pure timers and need no per-tick work.
+ * the AND of all four actuators' `isDone()`. `update()` advances each servo's optional two-stop
+ * sequence (`grab()`'s home->close) plus the belt's state machine (`belt.update()`); a servo with
+ * no queued follow-up costs only a timer compare.
  *
  * **`reset()`** homes all three servos AND stall-homes + zeroes the belt; it is the safe-pose
  * verb (e.g. after a fault or before a run).
  *
- * @note The semantic verbs are thin bring-up scaffolding: `grab()` is `grabber.close()`,
- *       `dump()` is `dumper.open()` (a placeholder dump pose), `dumpReset()` is
- *       `dumper.home()`, etc. The real multi-actuator choreography (e.g. lift-then-grip,
+ * @note The semantic verbs are thin bring-up scaffolding: `grab()` runs the grabber's
+ *       home->close capture stroke (`grabber.homeThenClose()`), `dump()` is `dumper.open()` (a
+ *       placeholder dump pose), `dumpReset()` is `dumper.home()`, etc. The real multi-actuator
+ *       choreography (e.g. lift-then-grip,
  *       belt-stage-then-dump) is a TODO to be authored once the mechanism is built and
  *       characterised. `boxOpen()` / `boxClose()` currently reuse the belt's configured
  *       rear-box stations, so they block by default on the belt like the other semantic verbs
@@ -183,9 +185,9 @@ public:
     /**
      * @brief Cooperative tick — must be called every iteration of the main `loop()`.
      *
-     * Advances the belt's non-blocking move state machine (`belt.update()`). The three servos
-     * are pure software timers with no per-tick work, so they are intentionally not ticked
-     * here — their `isDone()` reads the timer directly.
+     * Advances each servo's optional two-stop sequence (`grab()`'s home->close fires its queued
+     * close here once home settles) and the belt's non-blocking move state machine
+     * (`belt.update()`). A servo with no queued follow-up does only a timer compare.
      *
      * @note Contains NO `delay()`. Safe to call at any cadence.
      */
@@ -231,10 +233,15 @@ public:
     // -------------------------------------------------------------------------------------
 
     /**
-     * @brief Close the grabber to capture an object.
-     * @return A `ManipAction` (blocks on the grabber until settled; chain `.async()` to skip).
-     * @warning Need to `release()` before calling this again, or the grabber is already closed.
-     *      
+     * @brief Capture an object: open the grabber fully to home, then close.
+     *
+     * Runs the grabber's `homeThenClose()` two-stop stroke — the jaw opens to its home pose first,
+     * then clamps closed once home settles — so a grab always performs the full open->close
+     * regardless of the grabber's prior position (no preceding `release()` needed).
+     *
+     * @return A `ManipAction`. Blocking by default: waits for the WHOLE home->close stroke to
+     *         settle (the grabber's `isDone()` stays false until the close completes). Chain
+     *         `.async()` to return immediately — `update()` then advances the queued close.
      */
     ManipAction grab();
 

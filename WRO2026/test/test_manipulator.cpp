@@ -403,9 +403,11 @@ static void test_TC9_belt_position_watchdog_fires()
 // With a tick callback registered, _drain spins: callback() + yield() each iteration.
 // yield() is a host no-op (it does NOT advance the mock clock — production relies on
 // real millis() advancing while the callback ticks the modules), so the callback itself
-// must model wall-clock passing. We register a callback that advances the mock clock by
-// 2 ms each spin, so the grabber's slew+settle timer eventually elapses and the blocking
-// grab() statement returns only once grabber.isDone().
+// must model wall-clock passing AND tick the modules. grab() now runs a home->close two-stop
+// stroke: the queued close is fired by Manipulator.update() once home settles, so the callback
+// must advance the clock AND call update() (exactly what the sketch's cooperativeTick does) or
+// the sequence would never progress past home. We register such a callback so the blocking
+// grab() statement returns only once the WHOLE stroke settles (grabber.isDone()).
 // ===========================================================================
 
 static void test_TC10_blocking_grab_drains_until_done()
@@ -414,45 +416,65 @@ static void test_TC10_blocking_grab_drains_until_done()
 
     resetWorld();
 
-    // Register a tick callback that advances the mock clock so _drain's callback path makes
-    // wall-clock progress. _drain now calls yield() (a host no-op) instead of delay(2), so
-    // unlike before the spin no longer advances g_mockMillis on its own — the callback must.
-    // This models production, where real millis() advances during the drain while the callback
-    // ticks every module.
-    Manipulator.setTickCallback([]() { mockAdvanceMillis(2); });
+    // Register a tick callback that advances the mock clock AND ticks the manipulator, mirroring
+    // production's cooperativeTick. _drain calls yield() (a host no-op) each spin, so the callback
+    // is the sole source of both wall-clock progress and the update() that fires the queued close.
+    Manipulator.setTickCallback([]() { mockAdvanceMillis(2); Manipulator.update(); });
 
     // Blocking verb (no .async()) as a full statement — the temporary ManipAction's
     // destructor drains at end-of-statement.
     Manipulator.grab();
 
-    // After the blocking drain returns, the grabber must be done.
+    // After the blocking drain returns, the grabber must be done — the whole home->close stroke,
+    // including the queued close, has settled.
     ASSERT_TRUE(Manipulator.grabber.isDone());
+    // The final commanded pose is close (the second stop of the stroke).
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
 
     clearTickCallback();
 }
 
 // ===========================================================================
-// TC11 (AC7) — async verb returns immediately, mid-travel.
+// TC11 (AC7) — async grab() fires the home->close stroke and update() advances it.
 //
-// grab() closes the grabber (close pose GRABBER.closeDeg) from the home shadow
-// GRABBER.homeDeg: est = |closeDeg - homeDeg| * GRABBER.msPerDeg + GRABBER.settleMs (> 0),
-// so with no time advanced the grabber is still mid-travel right after the async returns.
+// grab() now runs the grabber's two-stop capture stroke: HOME fires immediately, and the close
+// follow-up is QUEUED (fired by update() once home settles). async() gates the wait, not the
+// firing, so right after the async returns the grabber channel holds the home pose and isDone()
+// is false (a follow-up is pending). Advancing the clock + update() fires the queued close; the
+// stroke is done only once THAT settles.
 // ===========================================================================
 
-static void test_TC11_async_grab_returns_mid_travel()
+static void test_TC11_async_grab_sequences_home_then_close()
 {
-    TEST_SCOPE("TC11: grab().async() returns immediately, grabber still mid-travel (AC7)");
+    TEST_SCOPE("TC11: grab().async() fires home first, then update() advances to close (AC7)");
 
     resetWorld();
     clearTickCallback();
 
-    Manipulator.grab().async();    // fires close (GRABBER.closeDeg), does NOT drain
+    Manipulator.grab().async();    // fires HOME now, queues close; does NOT drain
 
-    // No time advanced -> the close move's timer has not elapsed -> not done.
+    // Async gates the wait, not the firing: the FIRST stop (home) was issued immediately.
+    ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.homeDeg);
+    // Not done — a queued close follow-up is pending, so isDone() is false regardless of the timer.
     ASSERT_FALSE(Manipulator.grabber.isDone());
-    // The setpoint WAS issued (async gates the wait, not the firing): the grabber channel
-    // got the close pose.
+
+    // Advance past the home stop's slew+settle budget, then tick: update() fires the queued close.
+    // The grabber shadow == homeDeg after begin(), so the home move's delta is 0 and its budget is
+    // just settleMs.
+    mockAdvanceMillis(Config::GRABBER.settleMs);
+    Manipulator.update();
+
+    // The SECOND stop (close) is now commanded; still not done until it settles.
     ASSERT_EQ(rcFor(Config::GRABBER.rcId).lastAngle, (uint16_t) Config::GRABBER.closeDeg);
+    ASSERT_FALSE(Manipulator.grabber.isDone());
+
+    // Advance past the close stop's slew+settle budget; the whole stroke is now done.
+    const uint32_t closeEst =
+        (uint32_t) (fabs((float) Config::GRABBER.closeDeg - (float) Config::GRABBER.homeDeg)
+                    * Config::GRABBER.msPerDeg)
+        + Config::GRABBER.settleMs;
+    mockAdvanceMillis(closeEst);
+    ASSERT_TRUE(Manipulator.grabber.isDone());
 }
 
 // ===========================================================================
@@ -567,7 +589,7 @@ int main()
     test_TC8_belt_home_resets_settles_then_moves_to_mid();
     test_TC9_belt_position_watchdog_fires();
     test_TC10_blocking_grab_drains_until_done();
-    test_TC11_async_grab_returns_mid_travel();
+    test_TC11_async_grab_sequences_home_then_close();
     test_TC12_reset_homes_all_servos_and_belt();
     test_TC15_begin_homes_all_and_zeroes_belt_once();
     TEST_REPORT();
