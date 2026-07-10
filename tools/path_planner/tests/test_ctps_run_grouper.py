@@ -27,6 +27,11 @@ Covered cases
 * **TC11 (malformed fallback)** — (a) a pass tag with NO following braked stop
   and (b) a blind run MISSING its recorded per-hop speeds each REJECT the group
   and fall back to per-primitive rendering WITH a ``UserWarning``.
+* **TC7 (render) / review C1** — a LINE->BLIND SPANNING collinear run (a line
+  pass-through feeding straight into a recorded blind chain) is a VALID run,
+  not a malformed one: the leading LINE segments legitimately carry no chain
+  speeds, and the whole run renders as ONE trapezoid with cruise held across
+  the line->blind handoff (no ``UserWarning``, no mid-run dip to the floor).
 * **TC12 / AC12** — a non-chain single hop AND an existing (pre-feature) trace
   render byte-identical whether or not the chain/grouper logic is present: the
   grouper reduces a single-segment run to the same one-ramp/stop shape the
@@ -57,6 +62,7 @@ from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.sim.runtime import (
     ACT_BLIND_PASS,
+    ACT_FOLLOW_INT,
     ACT_FORWARD,
     ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
@@ -510,6 +516,128 @@ def test_tc11_zero_motion_record_is_not_malformed(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         build(trace, toy_field_data)  # must not raise
+
+
+# ===========================================================================
+# TC7 (render) / review C1 — LINE->BLIND spanning run renders as ONE trapezoid
+# ===========================================================================
+
+
+def test_tc7_line_to_blind_spanning_run_renders_one_trapezoid(monkeypatch):
+    """TC7 (render) / review C1: a LINE->BLIND spanning run is ONE trapezoid, no warning.
+
+    Replays the REAL primitive stream the parity sim emits for the
+    ``field_fixture`` TC7 topology ``LpIn -> LpJoin -> LpBlindA -> LpBlindB``
+    (a LINE pass-through ``LpIn -> LpJoin`` feeding straight into the 2-hop
+    blind chain ``LpJoin -> LpBlindA -> LpBlindB``), via the ``step_through``
+    spy. The leading LINE segments legitimately carry NO recorded chain speeds
+    (line-follow speed comes from the LineFollower preset, not per-hop
+    ``ChainSpeedPolicy``), so the grouper must treat this as a VALID spanning
+    run — the plan's Decision "a collinear run MAY span LINE/projection ->
+    BLIND" — never a malformed one:
+
+    * NO ``UserWarning`` (the broken grouper rejected the run as "blind run
+      missing recorded per-hop speeds" and fell back per-primitive, re-seeding
+      each speed-less segment from the start floor — the exact mid-run dip
+      this feature exists to remove, on its flagship route shape).
+    * ONE trapezoid: a single contiguous cruise plateau; velocity INTO and OUT
+      OF the LINE->BLIND handoff node both equal cruise (continuous across the
+      handoff — the ADR-023 cruise carry: the firmware passes through at
+      cruise and hands the captured cruise into the blind chain,
+      ``PathTracker.cpp:2674-2690``).
+    * one monotonic ramp-down into the final node only; no interior stop.
+    * TC7 pose pins: every node-boundary pose appears byte-exact, in order.
+    """
+    # The captured field_fixture stream (LpIn seat, goto LpBlindB): a LINE
+    # follow leg + pass-through roll (NO chain speeds), then the recorded blind
+    # chain — mid hop (85 -> 85, chain), zero-motion blind_pass boundary,
+    # braked final hop (85 -> 0, chain).
+    sequence = [
+        ((ACT_FOLLOW_INT, None), 12.98),            # LINE follow leg (no speeds)
+        ((ACT_LINE_PASS, 12.02), 12.02),            # pass roll onto the handoff node
+        ((ACT_FORWARD, 20.0, 85, 85, True), 20.0),  # chained blind mid hop
+        ((ACT_BLIND_PASS, "LpBlindA"), 0.0),        # zero-motion boundary (transparent)
+        ((ACT_FORWARD, 20.0, 85, 0, True), 20.0),   # chained braked final hop
+    ]
+    monkeypatch.setattr(
+        PathTrackerSim, "step_through", _make_step_through_spy(sequence)
+    )
+
+    field_data = collinear_4node.make_ctps_field_data()
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": field_data.START_NODE,
+            "start_heading_deg": field_data.START_HEADING_DEG,
+            "build_error": False,
+            "commands": [{"seq": 0, "op": "goto", "target": "D"}],
+        }
+    )
+    # NO UserWarning: a spanning run is valid, never a malformed fallback.
+    track = _build_quiet(trace, field_data)
+
+    # Node-boundary poses along the spy's straight +x advance from the spawn.
+    kfs = track.keyframes
+    x0, y0 = kfs[0]["x"], kfs[0]["y"]
+    follow_xy = (x0 + 12.98, y0)    # follow leg end (sensor short of the node)
+    handoff_xy = (x0 + 25.0, y0)    # LINE -> BLIND handoff node (LpJoin)
+    blind_mid_xy = (x0 + 45.0, y0)  # blind mid node (LpBlindA)
+    goal_xy = (x0 + 65.0, y0)       # braked goal (LpBlindB)
+
+    # The recorded chain cruise (85) is the run peak — after a pass-through it
+    # IS the captured line cruise (the same physical cruise, ADR-023).
+    cruise_speed = SCALE_CM_S_PER_PWM * 85
+    floor_speed = SCALE_CM_S_PER_PWM * default_config().pwm_min
+    assert cruise_speed > floor_speed + 1.0
+
+    vels = _inbound_velocities(kfs)
+
+    # Velocity continuous across the LINE -> BLIND handoff: cruise held both
+    # INTO and OUT OF the handoff node — no dip to the floor at the boundary.
+    handoff_idx = _last_index_at(kfs, *handoff_xy)
+    assert vels[handoff_idx - 1] == pytest.approx(cruise_speed, abs=_VEL_TOL), (
+        f"dip INTO the line->blind handoff: v={vels[handoff_idx - 1]} "
+        f"(cruise={cruise_speed}, floor={floor_speed})"
+    )
+    assert vels[handoff_idx] == pytest.approx(cruise_speed, abs=_VEL_TOL), (
+        f"dip OUT OF the line->blind handoff: v={vels[handoff_idx]}"
+    )
+    # And held through the blind mid node too.
+    assert _velocity_into(kfs, vels, *blind_mid_xy) == pytest.approx(
+        cruise_speed, abs=_VEL_TOL
+    )
+
+    # ONE trapezoid: a single contiguous cruise plateau — no intra-run dip
+    # anywhere (the per-primitive fallback would break it at each speed-less
+    # segment boundary by re-seeding from the start floor).
+    plateau = [i for i, v in enumerate(vels) if abs(v - cruise_speed) <= _VEL_TOL]
+    assert plateau, "no cruise plateau — the spanning run never reached cruise"
+    assert plateau == list(range(plateau[0], plateau[-1] + 1)), (
+        "cruise plateau broken — the run dipped mid-way (per-node dip lie)"
+    )
+
+    # TC7 pose pins: each boundary pose appears byte-exact, in order; the goal
+    # is the terminal keyframe.
+    follow_idx = _last_index_at(kfs, *follow_xy)
+    blind_mid_idx = _last_index_at(kfs, *blind_mid_xy)
+    goal_idx = _last_index_at(kfs, *goal_xy)
+    assert 0 < follow_idx < handoff_idx < blind_mid_idx < goal_idx
+    assert goal_idx == len(kfs) - 1
+
+    # The handoff and blind-mid boundaries sit INSIDE the single plateau span.
+    assert plateau[0] < handoff_idx <= plateau[-1] + 1
+    assert plateau[0] < blind_mid_idx <= plateau[-1] + 1
+
+    # One ramp-down only, into the final node: monotonic non-increasing after
+    # the plateau; no interior stop keyframe before the terminal brake.
+    ramp_down = vels[plateau[-1] + 1 : goal_idx]
+    assert all(b <= a for a, b in zip(ramp_down, ramp_down[1:])), (
+        "ramp-down not monotonic"
+    )
+    interior = vels[: goal_idx - 1]
+    assert all(v > _VEL_TOL for v in interior), (
+        "an intra-run stop keyframe (interior zero velocity) was emitted"
+    )
 
 
 # ===========================================================================

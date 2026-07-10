@@ -780,8 +780,11 @@ def _build_run_profile(
     )
 
 
-def _resolve_blind_run_profile(segs: List["_RunSegment"]):
-    """Build the whole-run :class:`DriveProfile` for a BLIND chain from RECORDED speeds.
+def _resolve_blind_run_profile(
+    segs: List["_RunSegment"],
+    run_speed: Optional[Tuple[int, int, int, bool]] = None,
+):
+    """Build the whole-run :class:`DriveProfile` for a BLIND-chain run from RECORDED speeds.
 
     ADR-059 / AC11: a collinear BLIND chain that the sim (or firmware recorder)
     drove as ONE continuous run rides the resolved per-hop ``(start_pwm,
@@ -789,53 +792,111 @@ def _resolve_blind_run_profile(segs: List["_RunSegment"]):
     endpoints to render the whole-run trapezoid — it NEVER re-derives a chain
     decision (does not call ``chain_speed.resolve_chain_speeds``). The chain
     planning already happened upstream; this only maps the recorded endpoints
-    onto a single :class:`DriveProfile` over the run's summed chord distance:
+    onto a single :class:`DriveProfile` over the run's summed chord distance.
 
-    * **start** — the FIRST hop's recorded ``start_pwm`` (the chain ``entryPwm``
-      the planner resolved: the captured cruise after a pass-through, else the
-      cold-start seed). Feeding this preserves the ADR-023 cruise carry — a
-      pass-through-seeded chain does not re-dip to the floor (AC5).
-    * **cruise (the run peak)** — the maximum recorded |PWM| across every hop
-      endpoint. The two-pass planner clamps every node speed to ``[pwmMin,
+    Two well-formed shapes reach here:
+
+    * **pure blind run** — EVERY segment carries recorded speeds.
+    * **LINE/projection → BLIND spanning run** (the plan's Decision "a collinear
+      run MAY span LINE/projection → BLIND") — LEADING speed-less line /
+      projection pass segments feed straight into the recorded blind chain.
+      Those leading segments legitimately carry NO chain speeds (line-follow
+      speed comes from the LineFollower preset, not per-hop ``ChainSpeedPolicy``),
+      so they are NOT malformed: they contribute their distance at the RUN
+      CRUISE — they ARE the line-follow-at-cruise portion. The firmware passes
+      through at cruise and hands the captured cruise into the first blind hop
+      (ADR-023, ``PathTracker.cpp:2674-2690``), so the physical motion is ONE
+      continuous trapezoid with velocity continuous across the handoff.
+
+    Profile endpoints:
+
+    * **start** — pure blind run: the FIRST hop's recorded ``start_pwm`` (the
+      chain ``entryPwm`` the planner resolved: the captured cruise after a
+      pass-through, else the cold-start seed — the ADR-023 cruise carry, AC5).
+      Spanning run: the run launched from rest on its leading line-follow leg,
+      so the start is the ordinary run start seed (``run_speed``'s start — the
+      same seed the line-only branch uses), signed by the run direction.
+    * **cruise (the run peak)** — the maximum recorded |PWM| across every chain
+      hop endpoint. The two-pass planner clamps every node speed to ``[pwmMin,
       |cruise|]``, so the largest recorded magnitude IS the peak the run reached
-      — read from the record, not recomputed.
+      — read from the record, not recomputed. After a pass-through the chain's
+      cruise equals the captured line cruise (the same physical cruise), so the
+      leading line segments ride this same peak.
     * **end** — the FINAL hop's recorded ``end_pwm`` (``0`` on a braked chain, so
       the single trapezoid ramps down to the ordinary cruise→floor→brake stop).
 
     The run direction (sign) comes from the recorded endpoints: a reverse chain
-    records negative PWMs, so the peak is signed by the first hop's start sign.
-    The single trapezoid's interior slice at each node boundary (via
+    records negative PWMs, so the peak is signed by the first chain hop's start
+    sign. The single trapezoid's interior slice at each node boundary (via
     :func:`sample_drive_run`) reproduces the pass-through-then-shed shape without
     a per-node dip.
 
-    Returns ``None`` when the run is MALFORMED — a chained hop missing its
-    recorded ``(start_pwm, end_pwm)`` (the caller then falls back to
-    per-primitive rendering + a ``UserWarning``, AC11 / TC11).
+    Returns ``None`` when the run is genuinely MALFORMED — a speed-less segment
+    AT OR AFTER the first recorded chain hop (a BLIND hop missing ITS OWN
+    recorded ``(start_pwm, end_pwm)``: the recorded chain is incomplete). The
+    caller then falls back to per-primitive rendering + a ``UserWarning``
+    (AC11 / TC11). Only LEADING speed-less segments are legitimate.
 
-    :param segs: the buffered blind-run segments (at least one carries recorded
-        chain speeds).
+    :param segs: the buffered run segments (at least one carries recorded chain
+        speeds — the caller's blind-run classification).
+    :param run_speed: the run's first-segment ``(cruise, start, end, profiled)``
+        seed; used ONLY to seed a spanning run's start. ``None`` falls back to
+        the parsed Config start seed.
     :return: the resolved run :class:`DriveProfile`, or ``None`` if malformed.
     """
-    # Malformed: a blind run must carry recorded speeds on EVERY segment. A gap
-    # (some hop lost its suffix) means the recorded chain is incomplete — reject
-    # rather than fabricate a cruise for the missing hop.
-    if any(seg.chain_start_pwm is None or seg.chain_end_pwm is None for seg in segs):
+    # The chain proper begins at the first segment carrying recorded speeds;
+    # everything before it is the run's leading line/projection pass portion
+    # (a legitimate spanning run, never malformed).
+    first_chain = next(
+        (i for i, seg in enumerate(segs) if seg.chain_start_pwm is not None),
+        None,
+    )
+    if first_chain is None:
+        # Unreachable via ``flush_run`` (the caller classified the run blind off
+        # a speed-carrying segment); defensively malformed.
+        return None
+    chain_segs = segs[first_chain:]
+
+    # Malformed: from the first recorded chain hop onward, EVERY segment must
+    # carry recorded speeds. A gap (a BLIND hop that lost its own suffix) means
+    # the recorded chain is incomplete — reject rather than fabricate a cruise
+    # for the missing hop.
+    if any(
+        seg.chain_start_pwm is None or seg.chain_end_pwm is None
+        for seg in chain_segs
+    ):
         return None
 
-    first = segs[0]
-    last = segs[-1]
-    start = int(first.chain_start_pwm)
+    first = chain_segs[0]
+    last = chain_segs[-1]
     end = int(last.chain_end_pwm)
 
-    # The run peak is the largest recorded |PWM| across all hop endpoints (the
-    # planner clamps to |cruise|, so the observed max IS the peak). Sign it by the
-    # run direction (the first hop's start sign; a cold-start floor seed and the
-    # cruise share a sign, so this is unambiguous).
+    # The run peak is the largest recorded |PWM| across all chain hop endpoints
+    # (the planner clamps to |cruise|, so the observed max IS the peak). Sign it
+    # by the run direction (the first chain hop's start sign; a cold-start floor
+    # seed and the cruise share a sign, so this is unambiguous).
     peak_mag = 0
-    for seg in segs:
-        peak_mag = max(peak_mag, abs(int(seg.chain_start_pwm)), abs(int(seg.chain_end_pwm)))
-    direction = -1 if start < 0 else 1
+    for seg in chain_segs:
+        peak_mag = max(
+            peak_mag, abs(int(seg.chain_start_pwm)), abs(int(seg.chain_end_pwm))
+        )
+    direction = -1 if int(first.chain_start_pwm) < 0 else 1
     cruise = direction * peak_mag
+
+    if first_chain == 0:
+        # Pure blind run: the chain's own recorded entry (the resolved entryPwm).
+        start = int(first.chain_start_pwm)
+    else:
+        # Spanning run: the run launched from rest on its leading line-follow
+        # leg, so it seeds the ordinary run start (the same seed the line-only
+        # branch uses), signed by the run direction — one ramp-up, then cruise
+        # held across the line → blind handoff (velocity continuous, no dip).
+        seed = (
+            int(run_speed[1])
+            if run_speed is not None
+            else int(default_config().start_speed)
+        )
+        start = direction * abs(seed)
 
     total_cm = sum(seg.dist_cm for seg in segs)
     return resolve_drive_profile(
@@ -843,8 +904,9 @@ def _resolve_blind_run_profile(segs: List["_RunSegment"]):
         cruise_pwm=cruise,
         start_pwm=start,
         end_pwm=end,
-        # A blind chain is always a profiled (.tShape) run — the whole-run
-        # trapezoid is exactly the ramped shape the recorded endpoints describe.
+        # A blind(-terminated) run is always a profiled (.tShape) run — the
+        # whole-run trapezoid is exactly the ramped shape the recorded
+        # endpoints describe.
         profiled=True,
     )
 
@@ -1321,8 +1383,13 @@ def build(trace: Trace, field_data) -> Track:
           trapezoid is built from those recorded endpoints (start = first hop's
           recorded start, cruise = the peak the run actually reached, end = the
           final hop's recorded end), NEVER by re-deriving a chain decision
-          (AC11). A blind run missing its recorded speeds is malformed and falls
-          back to per-primitive rendering.
+          (AC11). A run MAY span LINE/projection → BLIND: leading speed-less
+          line/projection pass segments are the run's line-follow-at-cruise
+          portion (the ADR-023 pass-through cruise carry), so they contribute
+          distance at the run cruise and the run start falls back to the
+          ordinary ``run_speed`` seed — one continuous trapezoid across the
+          handoff. A BLIND (chain) hop missing ITS OWN recorded speeds is
+          malformed and falls back to per-primitive rendering.
 
         :param strict: gate for the pass-without-braked-stop malformed check.
             Passed ``True`` ONLY at the GOTO-END flush, where a healthy goto
@@ -1341,10 +1408,11 @@ def build(trace: Trace, field_data) -> Track:
         if not run_segments:
             return
         segs = run_segments
-        # ``speed`` feeds only the line/projection branch below; a BLIND run
-        # ignores it by design (its profile is CONSUMED from the recorded
-        # per-hop endpoints, AC11) — the first-segment seed is still captured
-        # for buffer uniformity.
+        # ``speed`` feeds the line/projection branch below AND seeds a
+        # LINE/projection → BLIND spanning run's start (the run launches from
+        # rest on its leading line-follow leg); a PURE blind run ignores it by
+        # design (its profile is CONSUMED from the recorded per-hop endpoints,
+        # AC11).
         speed = run_speed
         # Reset the buffer BEFORE emitting so a re-entrant tick callback (the
         # sim never re-enters ``build``, but keep the invariant local) sees a
@@ -1359,12 +1427,14 @@ def build(trace: Trace, field_data) -> Track:
         is_blind_run = any(seg.chain_start_pwm is not None for seg in segs)
 
         if is_blind_run:
-            resolved = _resolve_blind_run_profile(segs)
+            resolved = _resolve_blind_run_profile(segs, speed)
             if resolved is None:
-                # Missing recorded speeds on a chained hop → malformed. Do not
-                # guess a cruise; fall back to per-primitive rendering + warn.
-                # Always rejected — a gap in the recorded chain is broken even on
-                # the fault-flush path.
+                # Missing recorded speeds on a BLIND (chain) hop → malformed. Do
+                # not guess a cruise; fall back to per-primitive rendering +
+                # warn. Always rejected — a gap in the recorded chain is broken
+                # even on the fault-flush path. (LEADING speed-less line /
+                # projection pass segments are a legitimate spanning run and
+                # never trip this.)
                 _fallback_per_primitive(
                     segs, "blind run missing recorded per-hop speeds"
                 )
