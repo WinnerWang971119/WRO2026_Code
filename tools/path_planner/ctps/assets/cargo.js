@@ -57,6 +57,10 @@
     var MAGAZINE_DEPTH = 3;
     var REAR_BOX_CAP = 1;
 
+    // Mirror of ctps/config.py::MANIP_NOMINAL_S — the on-screen dwell of a manip
+    // event; a deploy flash spans [ev.t, ev.t + MANIP_NOMINAL_S].
+    var MANIP_NOMINAL_S = 0.5;
+
     // Trace manip method values — exact strings (Contracts: Naming; recorder
     // <-> resolver). `reset` intentionally changes no cargo state.
     var METHOD_GRAB = "grab";
@@ -605,6 +609,156 @@
         canvasId: "trail",
         visible: function (state) { return !!(state.layers && state.layers.zones); },
         draw: _drawZonesLayer,
+        invalidateOn: ["t", "scene", "layers"],
+    });
+
+    // ----- deploy layer: live manipulator-area overlay ----------------------
+    // Per-actuator "deployed" semantics: the grab area flashes on RELEASE events
+    // (not `grab`), the dump area flashes on `dump` events, and the box area is
+    // shown across each rear-box hold — the `boxClose` EVENT shows it and the
+    // matching `boxOpen` EVENT clears it. All three are derived purely from the
+    // fixed track events (never the cargo-capture model), so they never change
+    // after ingest and are computed ONCE (cached) rather than rescanned every
+    // repaint — mirroring chrome.js's compute-once `findWorstDrift` idiom.
+    //
+    // NOTE: the box overlay is EVENT-driven, not cargo-driven. It shows whenever
+    // the rear box is closed, independent of whether a Cargo object happened to
+    // lie in the box zone at `boxClose` time (which the cargo model requires to
+    // set `scene.rearBox`). Keying it to the events makes the overlay reflect
+    // the actuator's deployment on any trace, regardless of layout alignment.
+
+    // { release: [[t0,t1],...], dump: [[t0,t1],...], box: [[close,open),...] },
+    // lazily built + cached on first `_deployMaskAt` call (CTPS.engine.events is
+    // not necessarily ready at IIFE-eval time, so this cannot be precomputed at
+    // module load).
+    var _deployWindows = null;
+
+    /**
+     * Build the release/dump flash-window lists and the box close->open spans
+     * from `CTPS.engine.events` in a single pass. Each `manip` event is
+     * `method`-gated (never the display `label`), so a legacy trace whose events
+     * carry only `label` yields empty lists and the deploy layer draws nothing.
+     * Every grab/dump window spans the manip event's on-screen dwell,
+     * `[ev.t, ev.t + MANIP_NOMINAL_S]`; every box span runs `[boxClose.t,
+     * boxOpen.t)` (close shows, open clears). A `boxClose` with no later
+     * `boxOpen` stays deployed to the trace end (`Infinity`); a redundant
+     * `boxClose` while already closed, or a `boxOpen` with nothing closed, is a
+     * no-op — mirroring the single-slot rear box.
+     */
+    function _buildDeployWindows() {
+        var events = (CTPS.engine && CTPS.engine.events) || [];
+        var release = [];
+        var dump = [];
+        var box = [];
+        var pendingClose = null; // time of an unmatched boxClose, or null
+        for (var i = 0; i < events.length; i++) {
+            var ev = events[i];
+            if (!ev || ev.type !== "manip") {
+                continue;
+            }
+            if (ev.method === METHOD_RELEASE) {
+                release.push([ev.t, ev.t + MANIP_NOMINAL_S]);
+            } else if (ev.method === METHOD_DUMP) {
+                dump.push([ev.t, ev.t + MANIP_NOMINAL_S]);
+            } else if (ev.method === METHOD_BOX_CLOSE) {
+                if (pendingClose === null) {
+                    pendingClose = ev.t; // first close of a hold; later closes no-op
+                }
+            } else if (ev.method === METHOD_BOX_OPEN) {
+                if (pendingClose !== null) {
+                    box.push([pendingClose, ev.t]);
+                    pendingClose = null;
+                }
+            }
+        }
+        if (pendingClose !== null) {
+            box.push([pendingClose, Infinity]); // closed, never opened -> to end
+        }
+        return { release: release, dump: dump, box: box };
+    }
+
+    /** The cached deploy-window lists, building them once on first use. */
+    function _deployWindowsCached() {
+        if (!_deployWindows) {
+            _deployWindows = _buildDeployWindows();
+        }
+        return _deployWindows;
+    }
+
+    /** True when `t` falls inside any `[t0, t1]` window (inclusive both ends). */
+    function _tInAnyWindow(t, windows) {
+        for (var i = 0; i < windows.length; i++) {
+            var w = windows[i];
+            if (t >= w[0] && t <= w[1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True when `t` falls inside any `[close, open)` box span — start-inclusive
+     * so the `boxClose` frame already shows the box, end-exclusive so the
+     * `boxOpen` frame clears it (an open with no later close runs to `Infinity`).
+     */
+    function _tInAnyBoxSpan(t, spans) {
+        for (var i = 0; i < spans.length; i++) {
+            var s = spans[i];
+            if (t >= s[0] && t < s[1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Resolve which manipulator areas are deployed at time `t`: `grab` flashes
+     * on a cached `release` window, `dump` flashes on a cached `dump` window,
+     * and `box` shows across a cached `boxClose`->`boxOpen` span (close shows,
+     * open clears). All three read only the cached, event-derived windows — the
+     * box is intentionally NOT gated on the cargo model's `scene.rearBox`, so it
+     * reflects the actuator on any trace regardless of layout alignment.
+     *
+     * @param t the current playhead time (s).
+     * @return `{ grab, box, dump }` booleans.
+     */
+    function _deployMaskAt(t) {
+        var windows = _deployWindowsCached();
+        return {
+            grab: _tInAnyWindow(t, windows.release),
+            box: _tInAnyBoxSpan(t, windows.box),
+            dump: _tInAnyWindow(t, windows.dump),
+        };
+    }
+
+    /**
+     * deploy layer (trail canvas): the filled-accent live manipulator overlay,
+     * drawn only for the areas deployed at the current playhead — see
+     * `_deployMaskAt`. No-ops with no loaded layout/robot section, or when
+     * every mask flag is false (AC5). Registered AFTER `zones` so its accent
+     * fill paints above the static dashed overlay.
+     */
+    function _drawDeployLayer(ctx, view, state) {
+        if (!OBJ || !OBJ.drawDeployedZones) {
+            return;
+        }
+        var robotCfg = state.robotCfg;
+        if (!robotCfg) {
+            return;
+        }
+        var mask = _deployMaskAt(state.t);
+        if (!mask.grab && !mask.box && !mask.dump) {
+            return;
+        }
+        var pose = CTPS.engine.poseAt(state.t);
+        OBJ.drawDeployedZones(ctx, view, pose, robotCfg, OBJ.project, mask);
+    }
+
+    CTPS.layers.register({
+        id: "deploy",
+        canvasId: "trail",
+        visible: function (state) { return !!(state.layers && state.layers.deploy); },
+        draw: _drawDeployLayer,
         invalidateOn: ["t", "scene", "layers"],
     });
 

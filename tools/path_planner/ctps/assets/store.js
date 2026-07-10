@@ -46,7 +46,7 @@
         activeTab: "log",
         fullView: false,
         layers: { map: true, trail: true, path: true, nodes: true,
-                  objects: true, zones: false },
+                  objects: true, zones: false, deploy: false },
         selection: { kind: "robot", id: null },
         // ----- cargo model (object/cargo plan -- issue #57) ---------------
         // `objects`/`robotCfg` come from a loaded layout (the `OBJECTS` global or an

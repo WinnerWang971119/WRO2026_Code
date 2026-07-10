@@ -124,7 +124,7 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: :func:`_assert_self_contained` (it carries no user data).
 #:
 #: Object/cargo plan additions (T4 -- issue #57), markup only (behavior is
-#: T5/T6): the ``.ctps-layer-chips`` row gains ``OBJECTS``/``ZONES``
+#: T5/T6): the ``.ctps-layer-chips`` row gains ``OBJECTS``/``ZONES``/``DEPLOY``
 #: ``data-layer`` chips (``chrome.js`` wires every ``.ctps-layer-chips
 #: .ctps-chip`` generically, so it needs no change); the header gains an
 #: ``#ctps-layout-file`` upload input + its ``#ctps-layout-upload-btn`` button
@@ -177,6 +177,8 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="objects">OBJECTS</button>
                 <button id="ctps-layer-zones" class="ctps-chip"
                         type="button" data-layer="zones">ZONES</button>
+                <button id="ctps-layer-deploy" class="ctps-chip"
+                        type="button" data-layer="deploy">DEPLOY</button>
             </div>
             <div class="ctps-scale-bar">
                 <span class="ctps-scale-line"></span>
