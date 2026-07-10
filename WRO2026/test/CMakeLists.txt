@@ -1857,3 +1857,115 @@ add_test(NAME chain_speed_freshness
             -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/chain_speed_goldens.fresh.json
             -P ${CHAIN_SPEED_DUMP_DIR}/chain_speed_freshness.cmake
 )
+
+# =========================================================================================
+# Test executables #26a-d — ADR-059 blind-chain FSM (T10; TC4-TC8; AC3/AC7/AC9).
+#
+# All four link the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+# `YawSource.cpp` + `path_mocks.cpp` — the SAME shared issue-#106 recipe as every other
+# PathTracker+Drive real-link target above (`${SKETCH_DIR}`-FIRST include order, fixture
+# routes force-included FIRST, then `add_path_force_includes` for the EventTrace /
+# WROLineArray / Intersection / LineFollower peripheral mocks). See the block comment
+# above `test_path_tracker_passthrough_on` for the full shared-recipe rationale.
+#
+# The blind-chain assertions reduce to lower-MCU observables read off the REAL `Drive.cpp`
+# through the shared `MiniR4.DriveDC` mock (`lastMoveSyncL/R`, `brakeCallCount`/`lastBrake`)
+# — there is no public accessor on `PathTrackerClass` for the private `_chain` run buffer,
+# and this test file does NOT add one (T7's `.h`/`.cpp` stay untouched). See the file
+# docblock in `test_path_tracker_blind_chain.cpp` for the full observable-mapping rationale.
+#
+# Four targets, one per override combination (mirrors the `test_path_tracker_heading_reset`
+# four-target split): the SAME source file compiled four ways, each with a DIFFERENT
+# `target_compile_definitions` override reaching BOTH this test main AND the separately-
+# compiled `PathTracker.cpp` TU (memory `gotcha-cross-tu-config-override-compile-def` — an
+# in-file `#define` would NOT reach `PathTracker.cpp`). `MAX_CHAIN_HOPS` is an ARRAY
+# DIMENSION in `PathTracker.h` (`Config::MAX_CHAIN_HOPS + 1`-sized run-buffer arrays), so
+# its override MUST be this target-wide `-D`, never an in-file `#define` (ODR: every TU in
+# the target must agree on the array size).
+#   - #26a (default):        chaining ON, no cap override -- TC4, TC6c (ineligible reasons),
+#                             TC7, TC8.
+#   - #26b (disabled build): `PATH_BLIND_CHAIN_ENABLED_DEFAULT=false` +
+#                             `BLIND_CHAIN_TEST_DISABLED` -- TC5 (AC12 byte-identity to
+#                             today's stop-at-every-node behavior). The extra define skips
+#                             TC6c/TC7/TC8 in `main()` (they assert genuine chain formation,
+#                             meaningless with chaining off).
+#   - #26c (hop cap):        `MAX_CHAIN_HOPS_DEFAULT=2` + `BLIND_CHAIN_TEST_HOP_CAP` --
+#                             TC6a (hop-cap truncation + log + reform).
+#   - #26d (distance cap):   `PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0` +
+#                             `BLIND_CHAIN_TEST_DISTANCE_CAP` -- TC6b (distance-cap
+#                             truncation + log).
+# The `BLIND_CHAIN_TEST_*` defines are TEST-MAIN-ONLY switches (read by this file's own
+# `#ifdef` in `main()`, never by production code) selecting which `main()` body runs under
+# the capped build — #26c/#26d must NOT also run the uncapped TC6c/TC7/TC8 bodies, which
+# assume the SHIPPED `MAX_CHAIN_HOPS`/`PATH_BLIND_CHAIN_MAX_CM` defaults.
+# =========================================================================================
+
+# --- Test executable #26a — default knobs (chaining ON). TC4, TC6c, TC7, TC8. ---
+add_executable(test_path_tracker_blind_chain
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_blind_chain PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_blind_chain COMMAND test_path_tracker_blind_chain)
+
+# --- Test executable #26b — PATH_BLIND_CHAIN_ENABLED == false build. TC5 (AC12). ---
+add_executable(test_path_tracker_blind_chain_disabled
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_disabled
+    PRIVATE PATH_BLIND_CHAIN_ENABLED_DEFAULT=false BLIND_CHAIN_TEST_DISABLED)
+target_include_directories(test_path_tracker_blind_chain_disabled PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_disabled)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_disabled)
+add_test(NAME path_tracker_blind_chain_disabled COMMAND test_path_tracker_blind_chain_disabled)
+
+# --- Test executable #26c — MAX_CHAIN_HOPS == 2 build. TC6a (hop-cap truncation). ---
+add_executable(test_path_tracker_blind_chain_hop_cap
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_hop_cap
+    PRIVATE MAX_CHAIN_HOPS_DEFAULT=2 BLIND_CHAIN_TEST_HOP_CAP)
+target_include_directories(test_path_tracker_blind_chain_hop_cap PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_hop_cap)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_hop_cap)
+add_test(NAME path_tracker_blind_chain_hop_cap COMMAND test_path_tracker_blind_chain_hop_cap)
+
+# --- Test executable #26d — PATH_BLIND_CHAIN_MAX_CM == 50 build. TC6b (distance-cap). ---
+add_executable(test_path_tracker_blind_chain_distance_cap
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_distance_cap
+    PRIVATE PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0f BLIND_CHAIN_TEST_DISTANCE_CAP)
+target_include_directories(test_path_tracker_blind_chain_distance_cap PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_distance_cap)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_distance_cap)
+add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_blind_chain_distance_cap)

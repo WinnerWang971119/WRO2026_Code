@@ -14,6 +14,21 @@
  *
  * Encoder values are settable so a test can simulate forward chassis motion by
  * incrementing the encoders manually between `LineFollower.update()` ticks.
+ *
+ * @note (ADR-059 / T10) `DriveDistBuilder` is the ONE builder among the six
+ *       promoted from a pure no-op to a RECORDING RAII builder: its destructor
+ *       writes the resolved `cm` / `setStartSpeed` / `setEndSpeed` / `setBrake` /
+ *       `tShape` knobs into `DriveClass::mockRecord()` (mirroring the REAL
+ *       `DriveDistBuilder`'s forward-declare-then-define-after-`DriveClass`
+ *       ordering below, so the destructor body sees a complete `DriveClass`).
+ *       This is a superset carry: nothing in this file's ONLY current consumer
+ *       (`test_line_follower_overshoot`, which never calls `driveDist(...)`)
+ *       observes the change, but a no-op setter here is a documented
+ *       false-green for any future test asserting on it (memory
+ *       `gotcha-ctps-mock-noop-setter-drops-builder-knob`, ADR-049). The other
+ *       five builders (`DriveTimeBuilder`/`TurnDegBuilder`/`TurnToYawBuilder`/
+ *       `StopAtLineBuilder`/`WallStopBuilder`) stay untouched no-ops — out of
+ *       scope for the blind-chain assertions this task adds.
  */
 
 // NOTE: This mock uses the SAME include guard (`DRIVE_H`) as the production
@@ -40,6 +55,13 @@ enum class DriveMode : uint8_t
     GYRO     ///< Yaw-lock.
 };
 
+// Forward declaration so `DriveDistBuilder` can name-friend / reference `DriveClass`
+// before it is defined below — the SAME ordering trick the real `Drive.h` uses
+// (forward-declare the builders, define the facade, define the builder bodies that
+// need a complete `DriveClass` AFTER it). Only `DriveDistBuilder` needs this; the
+// other five builders stay pure no-ops with no owner reference.
+class DriveClass;
+
 // ---------------------------------------------------------------------------
 // No-op move-only `[[nodiscard]]` builders mirroring the production fluent
 // verbs. Task bodies use them as discarded temporaries
@@ -47,10 +69,14 @@ enum class DriveMode : uint8_t
 // and every chain setter returns `*this`. The mock builders carry no owner
 // reference (the real ones do) because they perform no work — this also avoids
 // the facade/builder definition-order cycle.
+//
+// EXCEPTION: `DriveDistBuilder` (below) is a RECORDING builder — it DOES carry a
+// `DriveClass&` and its destructor writes into `DriveClass::mockRecord()`. See the
+// file-level ADR-059/T10 note above.
 // ---------------------------------------------------------------------------
 
 /// @brief Shared macro emitting a move-only `[[nodiscard]]` builder body with the
-///        given chain setters. Keeps the five near-identical mock builders terse.
+///        given chain setters. Keeps the five near-identical no-op mock builders terse.
 #define WRO_MOCK_BUILDER_BOILERPLATE(NAME)                                  \
     NAME() = default;                                                       \
     NAME(NAME&&) noexcept            = default;                             \
@@ -58,22 +84,77 @@ enum class DriveMode : uint8_t
     NAME& operator=(const NAME&)     = delete;                             \
     NAME& operator=(NAME&&)          = delete;
 
+/**
+ * @brief RECORDING `driveDist(...)` builder (ADR-059 / T10).
+ *
+ * Unlike its five no-op siblings, this builder is bound to the owning
+ * `DriveClass&` at construction (mirroring the REAL `DriveDistBuilder`) and its
+ * destructor writes the resolved knobs into `DriveClass::mockRecord()` — the
+ * blind-chain assertions reduce to "the builder recorded `setStartSpeed` /
+ * `setEndSpeed` / `setBrake(false)` and NOT a `Drive.stop()` between hops", so a
+ * no-op setter here would silently drop exactly the knobs under test (memory
+ * `gotcha-ctps-mock-noop-setter-drops-builder-knob`).
+ *
+ * Move-only RAII, single discarded-temporary usage (memory
+ * `gotcha_drive_builder_raii`): the destructor fires exactly once, when the
+ * chain statement ends, moving through zero or more `DriveDistBuilder&&` hops
+ * along the way (mandatory copy elision in C++17, or the move ctor pre-17).
+ */
 class [[nodiscard]] DriveDistBuilder
 {
 public:
-    WRO_MOCK_BUILDER_BOILERPLATE(DriveDistBuilder)
+    /// @brief Bind to the owning mock `Drive` and the requested distance.
+    DriveDistBuilder(DriveClass& drive, float cm) : _drive(drive), _cm(cm)
+    {
+    }
+
+    DriveDistBuilder(const DriveDistBuilder&)            = delete;
+    DriveDistBuilder& operator=(const DriveDistBuilder&) = delete;
+    DriveDistBuilder& operator=(DriveDistBuilder&&)      = delete;
+
+    /// @brief Move ctor — transfers recording responsibility; the moved-from
+    ///        instance is marked `_recorded` so its destructor is a no-op.
+    DriveDistBuilder(DriveDistBuilder&& other) noexcept
+        : _drive(other._drive),
+          _cm(other._cm),
+          _brake(other._brake),
+          _tShape(other._tShape),
+          _startSpeed(other._startSpeed),
+          _startSpeedSet(other._startSpeedSet),
+          _endSpeed(other._endSpeed),
+          _endSpeedSet(other._endSpeedSet),
+          _recorded(other._recorded)
+    {
+        other._recorded = true;
+    }
+
+    /// @brief Records into `DriveClass::mockRecord()` — defined AFTER `DriveClass`
+    ///        below (needs the complete type; see the file-level ordering note).
+    ~DriveDistBuilder();
+
     DriveDistBuilder& setPower(int16_t) { return *this; }
     DriveDistBuilder& setPreset(Config::SpeedPreset) { return *this; }
     DriveDistBuilder& setMode(DriveMode) { return *this; }
-    DriveDistBuilder& setBrake(bool) { return *this; }
+    DriveDistBuilder& setBrake(bool b) { _brake = b; return *this; }
     DriveDistBuilder& setBlocking(bool) { return *this; }
     DriveDistBuilder& async() { return *this; }
     DriveDistBuilder& setHeading(int16_t) { return *this; }
-    DriveDistBuilder& tShape() { return *this; }
-    DriveDistBuilder& flat() { return *this; }
+    DriveDistBuilder& tShape() { _tShape = true; return *this; }
+    DriveDistBuilder& flat() { _tShape = false; return *this; }
     DriveDistBuilder& setAccel(float) { return *this; }
-    DriveDistBuilder& setStartSpeed(int16_t) { return *this; }
-    DriveDistBuilder& setEndSpeed(int16_t) { return *this; }
+    DriveDistBuilder& setStartSpeed(int16_t s) { _startSpeed = s; _startSpeedSet = true; return *this; }
+    DriveDistBuilder& setEndSpeed(int16_t e) { _endSpeed = e; _endSpeedSet = true; return *this; }
+
+private:
+    DriveClass& _drive;
+    float       _cm            = 0.0f;
+    bool        _brake         = true;
+    bool        _tShape        = false;
+    int16_t     _startSpeed    = 0;
+    bool        _startSpeedSet = false;
+    int16_t     _endSpeed      = 0;
+    bool        _endSpeedSet   = false;
+    bool        _recorded      = false;    ///< Set on the moved-from instance so its dtor no-ops.
 };
 
 class [[nodiscard]] DriveTimeBuilder
@@ -168,10 +249,27 @@ struct DriveCallRecord
     bool     lastStopBrake       = false;
     uint32_t stopBrakeTrueCount  = 0;
     uint32_t stopBrakeFalseCount = 0;
+
+    // driveDist(...) builder-knob counters (ADR-059 / ADR-049 — the chain-speed
+    // dispatch reduces to "the builder recorded setStartSpeed/setEndSpeed/setBrake";
+    // memory `gotcha-ctps-mock-noop-setter-drops-builder-knob` warns a no-op setter
+    // here is a documented false-green for that assertion).
+    uint32_t driveDistCallCount   = 0;
+    float    lastDriveDistCm      = 0.0f;
+    int16_t  lastDriveDistStart   = 0;
+    bool     lastDriveDistStartSet = false;
+    int16_t  lastDriveDistEnd     = 0;
+    bool     lastDriveDistEndSet  = false;
+    bool     lastDriveDistBrake   = true;
+    bool     lastDriveDistTShape  = false;
 };
 
 class DriveClass
 {
+    // `DriveDistBuilder`'s destructor writes into `_record` (ADR-059 / T10 recording
+    // builder) — friend it the same way the real `DriveClass` friends its builders.
+    friend class DriveDistBuilder;
+
 public:
     // ------------------------------------------------------------------ ctor / reset
     DriveClass() = default;
@@ -250,7 +348,7 @@ public:
     uint8_t forwardGyro(int16_t /*power*/) { return 0; }
 
     // fluent verbs
-    [[nodiscard]] DriveDistBuilder  driveDist(float /*cm*/) { return DriveDistBuilder{}; }
+    [[nodiscard]] DriveDistBuilder  driveDist(float cm) { return DriveDistBuilder{*this, cm}; }
     [[nodiscard]] DriveTimeBuilder  driveTime(float /*sec*/) { return DriveTimeBuilder{}; }
     [[nodiscard]] TurnDegBuilder    turnDeg(int16_t /*deg*/) { return TurnDegBuilder{}; }
     [[nodiscard]] TurnToYawBuilder  turnToYaw(int16_t /*yaw*/) { return TurnToYawBuilder{}; }
@@ -280,6 +378,35 @@ private:
     bool            _isIdle   = true;
     bool            _hasFault = false;
 };
+
+// ---------------------------------------------------------------------------
+// `DriveDistBuilder::~DriveDistBuilder()` — defined here, AFTER `DriveClass`, the
+// SAME ordering the real `Drive.h`/`Drive.cpp` use (the destructor needs the
+// complete `DriveClass` type to reach the friended private `_record`; MSVC will
+// not accept an inline definition against an incomplete type — memory
+// `gotcha_msvc_inline_incomplete_type`). Records unconditionally into
+// `DriveClass::mockRecord()` — no queue/dispatch semantics, no multi-tick FSM
+// modeling (ADR-049 / memory `gotcha-host-mock-thin-not-behavioral`): this mock
+// is record-and-test-set only, exactly like every other mock in this file.
+// ---------------------------------------------------------------------------
+inline DriveDistBuilder::~DriveDistBuilder()
+{
+    if (_recorded)
+    {
+        return;    // moved-from instance — the new instance will record instead.
+    }
+    _recorded = true;
+
+    DriveCallRecord& rec        = _drive._record;
+    rec.driveDistCallCount++;
+    rec.lastDriveDistCm       = _cm;
+    rec.lastDriveDistStart    = _startSpeed;
+    rec.lastDriveDistStartSet = _startSpeedSet;
+    rec.lastDriveDistEnd      = _endSpeed;
+    rec.lastDriveDistEndSet   = _endSpeedSet;
+    rec.lastDriveDistBrake    = _brake;
+    rec.lastDriveDistTShape   = _tShape;
+}
 
 /// Single global instance — defined in `mocks/Drive.cpp`.
 extern DriveClass Drive;

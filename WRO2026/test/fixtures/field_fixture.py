@@ -67,14 +67,43 @@ ten nodes BY NAME:
     ``Zed`` (the sensor-regime pivot);
   * ``bidirectional`` -- ``Inter1``, ``Spur`` (rear-override LINE).
 
-So the full stable-name contract is sixteen names: ``Start``, ``Inter1``,
+ADR-059 (issue #106/T10-T11) added a collinear BLIND-chain dead-end spur off
+``final`` for the blind-chain host FSM test (``test_path_tracker_blind_chain``):
+``final -> ChainA -> ChainB -> ChainC -> ChainD``, all BLIND edges, all
+collinear at heading 0. It is a pure additive leaf (no edge back into the
+existing graph), so it cannot shorten any existing ``NEXT_HOP`` pair. The same
+test also uses an ISOLATED LINE->BLIND spanning collinear run (TC7, AC5's
+entryPwm=captured-cruise case): ``LpIn -> LpJoin -> LpBlindA -> LpBlindB``, a
+LINE pass-through junction (``LpJoin``) feeding directly into a 2-hop BLIND
+chain, all collinear at heading 0, isolated at y=130 so it cannot interact with
+any existing route.
+
+ADR-059 also added chain-INELIGIBILITY probes (TC6): ``ChainTiny`` (a
+sub-``TSHAPE_MIN_MOVE_CM`` hop off ``ChainC``), ``ChainPivPre`` (a collinear
+predecessor into the EXISTING ``(Corner, ProjB, Zed)`` pivot), ``ResetPre`` (a
+collinear predecessor into the EXISTING ``Wall2`` RESET node) with ``ResetBeyond``
+(a leaf goal PAST ``Wall2`` so the walk reaches the RESET break rather than the
+goal break), ``SeekPre`` (a collinear predecessor into the forced-seek
+``Start->Inter1`` edge so the SEEK break is exercised), and
+``DirFlipA``/``DirFlipB``/``DirFlipC`` (a direction-flip probe -- the
+``DirFlipB->DirFlipC`` EDGES override forces REAR against the preceding
+FRONT-resolved hop). ``ResetBeyond`` and ``SeekPre`` are pure additive leaves
+(each reached by exactly one BLIND edge, with no edge OUT of it), so neither can
+shorten an existing ``NEXT_HOP`` pair.
+
+So the full stable-name contract is thirty-five names: ``Start``, ``Inter1``,
 ``ProjL``, ``Inter2``, ``Inter3``, ``Inter4``, ``Corner``, ``Spur``, ``ProjB``,
 ``Zed`` (the #106 set), the #112 decline-branch nodes ``ProjC`` / ``Cend`` /
-``ProjE`` / ``Efar``, plus the original ``Wall1`` (RESET) and ``final``
-(BLIND). Renaming any of these breaks a test that resolves it by name; everything
-else here (node count, the other nodes, coordinates that no test pins) may be
-freely edited/extended without touching a single test. (Keep ``Wall1`` at its
-coords + reset record: ``test_reanchor_at_wall`` checks the believed-coordinate
+``ProjE`` / ``Efar``, the ADR-059 blind-chain nodes ``ChainA`` / ``ChainB`` /
+``ChainC`` / ``ChainD`` plus the spanning-run nodes ``LpIn`` / ``LpJoin`` /
+``LpBlindA`` / ``LpBlindB`` plus the ineligibility probes ``ChainTiny`` /
+``ChainPivPre`` / ``ResetPre`` / ``ResetBeyond`` / ``SeekPre`` / ``DirFlipA`` /
+``DirFlipB`` / ``DirFlipC``,
+plus the original ``Wall1`` (RESET) and ``final`` (BLIND). Renaming any of
+these breaks a test that resolves it by name; everything else here (node
+count, the other nodes, coordinates that no test pins) may be freely
+edited/extended without touching a single test. (Keep ``Wall1`` at its coords
++ reset record: ``test_reanchor_at_wall`` checks the believed-coordinate
 post-condition against ``wall_coord 154`` over node y ``139``.)
 """
 
@@ -119,6 +148,63 @@ _NODES = {
     "Cend":      (180.0, 10.0),   # BLIND leaf goal past ProjC (forces proj != goal, isolates cond-3)
     "ProjE":     (200.0, 10.0),   # PROJECTION (LINE-reached) with a non-collinear LINE flank (cond-5)
     "Efar":      (240.0, 10.0),   # LINE leaf goal past ProjE (cond-4 passes; isolates cond-5)
+    # ADR-059 (issue #106/T10-T11) collinear BLIND chain: a 3-hop dead-end spur off
+    # `final`, all BLIND, collinear heading 0 (east). Hop lengths 20/20/8 cm -- the
+    # short FINAL hop (8 cm, just over TSHAPE_MIN_MOVE_CM=5 and under the 7 cm
+    # shed-to-floor room from cruise 85 -> floor 50 at accel 5 pwm/cm) exercises the
+    # ChainSpeedPolicy backward pass pulling the shed into the PRIOR hop (AC4). A pure
+    # dead-end branch off an existing BLIND leaf: it cannot shorten any existing
+    # NEXT_HOP pair, so it is a purely additive fixture change (see field_fixture.py
+    # module docstring's stable-name contract).
+    "ChainA":    (120.0, 70.0),   # BLIND (chain hop 0 target: final->ChainA, 25 cm)
+    "ChainB":    (140.0, 70.0),   # BLIND (chain mid node: ChainA->ChainB, 20 cm)
+    "ChainC":    (160.0, 70.0),   # BLIND (chain mid node: ChainB->ChainC, 20 cm)
+    "ChainD":    (168.0, 70.0),   # BLIND (chain END: ChainC->ChainD, 8 cm -- short final hop)
+    # ADR-059 LINE->BLIND spanning collinear run (TC7): a SEPARATE, isolated
+    # line-junction pass-through feeding directly into a 2-hop BLIND chain, all
+    # collinear heading 0. `LpIn->LpJoin` is LINE; the intersection-gated
+    # pass-through at `LpJoin` peeks the collinear onward BLIND edge
+    # `LpJoin->LpBlindA` and fires (issue #106/T10-T11). Isolated at y=130 (clear
+    # of every other node) so it cannot interact with any existing route.
+    "LpIn":      (20.0, 130.0),   # LINE (pass-through predecessor)
+    "LpJoin":    (45.0, 130.0),   # LINE junction (the pass-through gate fires here)
+    "LpBlindA":  (65.0, 130.0),   # BLIND (chain hop 0 after the pass-through, 20 cm)
+    "LpBlindB":  (85.0, 130.0),   # BLIND (chain END, 20 cm)
+    # ADR-059 chain-ineligibility probes (TC6, issue #106/T10-T11):
+    "ChainTiny":   (163.0, 70.0),   # BLIND (off ChainC, 3 cm -- BELOW TSHAPE_MIN_MOVE_CM=5)
+    "ChainPivPre": (220.0, 100.0),  # BLIND (collinear predecessor into the EXISTING
+                                    #   (Corner, ProjB, Zed) sensor-regime pivot -- the
+                                    #   pivot-onto-b lookahead check ends the chain
+                                    #   before it can admit Corner->ProjB)
+    "ResetPre":    (73.17, 94.948), # BLIND (collinear predecessor into the EXISTING
+                                    #   Wall2 RESET node, heading 131.186 deg -- with a
+                                    #   goal BEYOND Wall2 (ResetBeyond), the chain walk
+                                    #   admits ResetPre->Wall2 then hits the RESET-node
+                                    #   check on Wall2 and ends there)
+    "ResetBeyond": (30.0, 110.0),   # BLIND leaf goal PAST the Wall2 RESET node. A pure
+                                    #   dead-end reached ONLY via Wall2->ResetBeyond, so
+                                    #   `goTo(ResetBeyond)` from ResetPre makes Wall2 an
+                                    #   INTERIOR walk node (not the goal) -- the walk then
+                                    #   reaches the RESET-node break (PathTracker.cpp:2287)
+                                    #   instead of the goal break. Additive leaf: no edge
+                                    #   OUT of it, so it cannot shorten any existing
+                                    #   NEXT_HOP pair (stable-name contract).
+    "SeekPre":     (6.0, 16.0),     # BLIND collinear predecessor into the EXISTING
+                                    #   forced-seek `Start->Inter1` edge (stop_at_line=on).
+                                    #   Exactly collinear with Start->Inter1 (Start-SeekPre
+                                    #   == 0.5*(Inter1-Start)), so `goTo(Inter1)` from
+                                    #   SeekPre admits SeekPre->Start then reaches the SEEK
+                                    #   break (PathTracker.cpp:2350) when Start->Inter1
+                                    #   resolves to a stopAtLine seek. Additive leaf into
+                                    #   Start (no edge OUT of SeekPre): cannot shorten any
+                                    #   existing NEXT_HOP pair (stable-name contract).
+    # Direction-flip probe (TC6): DirFlipA->DirFlipB resolves FRONT (AUTO); the
+    # EDGES override below forces DirFlipB->DirFlipC REAR -- collinear heading 0
+    # but a direction mismatch, so the chain walk ends at DirFlipB. Isolated at
+    # y=115 (clear of every other node).
+    "DirFlipA":  (20.0, 115.0),
+    "DirFlipB":  (40.0, 115.0),
+    "DirFlipC":  (60.0, 115.0),
 }
 
 _NODE_TYPES = {
@@ -130,6 +216,11 @@ _NODE_TYPES = {
     "ProjB": "projection", "Zed": "blind",
     "ProjC": "projection", "Cend": "blind",
     "ProjE": "projection", "Efar": "line",
+    "ChainA": "blind", "ChainB": "blind", "ChainC": "blind", "ChainD": "blind",
+    "LpIn": "line", "LpJoin": "line", "LpBlindA": "blind", "LpBlindB": "blind",
+    "ChainTiny": "blind", "ChainPivPre": "blind", "ResetPre": "blind",
+    "ResetBeyond": "blind", "SeekPre": "blind",
+    "DirFlipA": "blind", "DirFlipB": "blind", "DirFlipC": "blind",
 }
 
 # LINE edges (line-follow). Never incident to a blind/reset node. The main line
@@ -145,6 +236,9 @@ _LINE_SEGMENTS = [
     # so a test can seat the chassis facing 270 and skip the pre-turn.
     ("Inter2", "ProjC"),                           # LINE -> projection; ProjC's flank is BLIND (cond-3)
     ("Inter3", "ProjE"), ("ProjE", "Efar"),        # LINE -> projection -> LINE, 90deg bend (cond-5)
+    # ADR-059 LINE->BLIND spanning collinear run (TC7): LpIn->LpJoin is the LINE
+    # leg into the pass-through junction LpJoin (see _NODES comment above).
+    ("LpIn", "LpJoin"),
 ]
 
 # BLIND edges (dead-reckon). Free to touch any node type.
@@ -158,6 +252,25 @@ _BLIND_EDGES = [
     ("Corner", "ProjB"),       # BLIND -> projection (auto-seek)
     ("ProjB", "Zed"),          # projection -> blind (sensor-pivot outgoing leg)
     ("ProjC", "Cend"),         # projection -> blind: the non-LINE outbound flank (cond-3 decline)
+    # ADR-059 collinear BLIND chain (issue #106/T10-T11) -- a dead-end spur off
+    # `final`, all four hops collinear at heading 0 (see _NODES comment above).
+    ("final", "ChainA"),
+    ("ChainA", "ChainB"),
+    ("ChainB", "ChainC"),
+    ("ChainC", "ChainD"),
+    # ADR-059 LINE->BLIND spanning collinear run (TC7): LpJoin's pass-through peek
+    # continues onto this collinear BLIND leg, which then chains a further hop.
+    ("LpJoin", "LpBlindA"),
+    ("LpBlindA", "LpBlindB"),
+    # ADR-059 chain-ineligibility probes (TC6, issue #106/T10-T11) -- see _NODES
+    # comment above for the geometry rationale of each.
+    ("ChainC", "ChainTiny"),          # <TSHAPE_MIN_MOVE_CM hop -- chain-ineligible
+    ("ChainPivPre", "Corner"),        # collinear predecessor into the existing pivot
+    ("ResetPre", "Wall2"),            # collinear predecessor into the existing RESET node
+    ("Wall2", "ResetBeyond"),         # onward leaf PAST Wall2 -- makes Wall2 an interior
+                                      #   walk node so the RESET break is reached (see _NODES)
+    ("SeekPre", "Start"),             # collinear predecessor into the forced-seek Start->Inter1
+    ("DirFlipA", "DirFlipB"), ("DirFlipB", "DirFlipC"),  # direction-flip probe (see _EDGES)
 ]
 
 # Single-wheel pivots (u, v, w). One LINE-regime turn and one SENSOR-regime turn.
@@ -198,6 +311,13 @@ _EDGES = [
     _edge("final", "position1", EDGE_BLIND, primitive_mode=BlindMode.GYRO_TSHAPE),  # BlindMode override
     _edge("Inter1", "Spur", EDGE_LINE, direction="rear"),                     # asymmetric direction override
     _edge("Start", "Inter1", EDGE_BLIND, stop_at_line="on"),                  # forced seek override
+    # ADR-059 chain-ineligibility probe (TC6, issue #106/T10-T11): forces
+    # DirFlipB->DirFlipC REAR while the preceding hop resolves FRONT (AUTO on a
+    # 1-board default chassis), so the direction-flip guard in the blind-chain
+    # walk-ahead ends the chain BEFORE admitting this hop. A dedicated, isolated
+    # pair (NOT reusing ChainC->ChainD) so the override cannot perturb the main
+    # chain's TC4/TC8/TC9 dispatch.
+    _edge("DirFlipB", "DirFlipC", EDGE_BLIND, direction="rear"),
 ]
 
 
