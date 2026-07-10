@@ -65,6 +65,7 @@ from tools.path_planner.sim import (
 )
 from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.runtime import (
+    ACT_BLIND_PASS,
     ACT_BLIND_REVERSE,
     ACT_FOLLOW_DIST_PASS,
     ACT_HEADING_RESET,
@@ -2462,10 +2463,18 @@ def test_pivot_tc17_non_pivot_route_through_pivot_node_drives_full_distance():
     prims = sim.go_to("Y")
 
     # Full distance on BOTH hops -- no delta subtracted on a non-pivot route, and
-    # the collinear V->Y continuation needs no ACT_TURN_REL.
+    # the collinear V->Y continuation needs no ACT_TURN_REL. ADR-059: U->V->Y is a
+    # collinear BLIND run of 2 hops, so the sim chains it into ONE continuous
+    # motion -- hop 0 carries the resolved (start=TSHAPE_START_SPEED, end=cruise)
+    # + chain=True, a blind_pass marks the non-braking node V, and the final hop
+    # brakes (end 0). The DISTANCES stay the full 60 cm (the TC17 no-trim intent);
+    # only the velocity endpoints + the pass marker are added by the chain.
     assert prims == [
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
-        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9)),
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
+         _runtime.TSHAPE_START_SPEED, _runtime.SPEED_NORMAL, True),
+        (ACT_BLIND_PASS, "V"),
+        (ACT_FORWARD, pytest.approx(60.0, abs=1e-9),
+         _runtime.SPEED_NORMAL, 0, True),
     ]
     yx, yy = field.NODES["Y"]
     assert math.hypot(chassis.x_cm - yx, chassis.y_cm - yy) < _POSITION_TOL_CM
