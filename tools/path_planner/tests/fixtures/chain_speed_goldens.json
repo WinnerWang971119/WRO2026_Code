@@ -78,5 +78,17 @@
       {"startPwm": 85, "endPwm": 85, "brake": false},
       {"startPwm": 85, "endPwm": 0, "brake": true}
     ]
+  },
+  {
+    "label": "forward_limited_short_lead",
+    "hopDist": [3, 3, 20],
+    "hopCount": 3,
+    "cruise": 85,
+    "entry": 50,
+    "out": [
+      {"startPwm": 50, "endPwm": 65, "brake": false},
+      {"startPwm": 65, "endPwm": 80, "brake": false},
+      {"startPwm": 80, "endPwm": 0, "brake": true}
+    ]
   }
 ]

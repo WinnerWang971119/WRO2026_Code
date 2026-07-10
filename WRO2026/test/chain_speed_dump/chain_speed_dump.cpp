@@ -98,6 +98,13 @@ namespace
      *   - entry == cruise [10,10,10]            -> AC5: no re-dip to floor at the run start.
      *   - single-hop [10] (hopCount < 2)        -> TC1 rejection: policy leaves `out` untouched.
      *   - long even chain [40,40,40]            -> accel/decel both fully fit; interior cruise.
+     *   - forward-limited short lead [3,3,20]   -> the FORWARD accel pass BINDS two interior
+     *       nodes (v1=65, v2=80) because the two short lead hops cannot reach cruise from the
+     *       entry (50+5*3=65 < 85, 65+5*3=80 < 85); the long final hop then reaches cruise and
+     *       the backward pass sheds only its terminal to the floor. Deleting the forward pass
+     *       from either implementation would resolve the interior nodes to cruise (85) instead of
+     *       65/80, so this vector is the regression guard the decel-only-passes-goldens trap
+     *       named in the plan Notes ("Goldens must assert the forward constraint too", TC1).
      */
     std::vector<GoldenCase> buildGoldenCases()
     {
@@ -119,6 +126,7 @@ namespace
         cases.push_back({"even_chain_entry_cruise", {10.0f, 10.0f, 10.0f}, cruise, cruise});
         cases.push_back({"single_hop_rejected", {10.0f}, cruise, start});
         cases.push_back({"long_even_chain_entry_start", {40.0f, 40.0f, 40.0f}, cruise, start});
+        cases.push_back({"forward_limited_short_lead", {3.0f, 3.0f, 20.0f}, cruise, start});
 
         return cases;
     }
