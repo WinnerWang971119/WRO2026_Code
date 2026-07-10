@@ -157,6 +157,7 @@ class ProfileConfig:
     turn_slow_zone_deg: float  # TURN_SLOW_ZONE_DEG (final-angle slow band)
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
+    rear_axle_offset_cm: float  # LINE_SENSOR_AXLE_OFFSET_REAR_CM (REAR overshoot window)
 
 
 def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileConfig:
@@ -171,8 +172,9 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
     Constants are distributed across three headers:
 
     - ``ConfigDrive.h`` (``config_path``): the ``TSHAPE_*`` / ``TURN_*`` /
-      ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, plus the symbolic
-      ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
+      ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, the
+      ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` rear overshoot window (AC8 window-fit),
+      plus the symbolic ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
     - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` / ``PWM_MAX``.
     - ``ConfigLine.h``: ``CRUISE_SPEED = SPEED_NORMAL`` (symbolic).
 
@@ -220,6 +222,9 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         turn_slow_zone_deg=parse_config_float("TURN_SLOW_ZONE_DEG", config_path),
         wall_push_pwm=parse_config_int("WALL_STOP_PUSH_PWM", config_path, search),
         track_cm=parse_track_cm_from_config(config_path),
+        rear_axle_offset_cm=parse_config_float(
+            "LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path
+        ),
     )
 
 
@@ -787,6 +792,7 @@ def resolve_drive_profile(
     start_pwm: int,
     end_pwm: int,
     profiled: bool,
+    rear_window_cm: Optional[float] = None,
     cfg: Optional[ProfileConfig] = None,
 ) -> DriveProfile:
     """Resolve a Config-wired drive move into a :class:`DriveProfile`.
@@ -819,11 +825,34 @@ def resolve_drive_profile(
     the pre-snap PWM magnitude first drops to ``pwm_min``. From that point to
     ``dist_cm`` the chassis crawls at the floor, then brakes.
 
+    LineFollower window-fit (AC8 / TC9)
+    -----------------------------------
+    A braked stop sheds ``peak -> PWM_MIN_MAGNITUDE`` (the floor) then brakes; the
+    natural shed distance is ``(|peak| - floor) / accel`` (8 cm at FAST cruise 90).
+    A REAR-led final hop only has ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` (~7.68 cm) of
+    overshoot window, so the firmware FITS the ramp-down to the window
+    (``LineFollower.cpp:287-301``: ``rampDownCm = min(defaultRampCm, window)``) — a
+    STEEPER ramp that still reaches the floor before the brake, rather than an
+    unfitted 8 cm shed that would overrun. When ``rear_window_cm`` is given AND the
+    natural above-floor shed exceeds it, this reshapes the display decel to that
+    window-fitted shed: the ``peak -> floor`` descent occupies exactly
+    ``rear_window_cm`` ending AT the gate (``floor_crossing_cm == dist_cm``, no
+    floor-crawl tail), so the render shows the steeper-but-reaches-floor shed
+    (AC8). This is a RENDER-only reshape of the display phase boundaries — the
+    golden-pinned ``resolve_tshape_ramps`` kernel is untouched — and it fires only
+    for a braked stop (``end_pwm == 0``); it is NOT a build-failing assert (the
+    firmware degrades gracefully, so CTPS mirrors that degradation).
+
     :param dist_cm: total travel distance (cm).
     :param cruise_pwm: signed cruise PWM (sign = direction).
     :param start_pwm: signed PWM at move start.
     :param end_pwm: signed PWM at move end.
     :param profiled: ``True`` for a ``.tShape()`` move, ``False`` for ``.flat()``.
+    :param rear_window_cm: when set (a REAR-led braked final hop), the available
+        rear overshoot window (cm) the ``peak -> floor`` shed is FITTED to; the
+        shed is compressed to a steeper ramp reaching the floor at the gate when
+        the natural shed would exceed it. ``None`` (the default, a FRONT-led or
+        non-stop move) leaves the natural shed + floor-crawl tail.
     :param cfg: parsed Config; defaults to :func:`default_config`.
     :return: the resolved :class:`DriveProfile`.
     """
@@ -893,11 +922,37 @@ def resolve_drive_profile(
     if floor_tail_cm < 0.0:
         floor_tail_cm = 0.0
 
+    eff_end_pwm = int(end_pwm)
+
+    # LineFollower window-fit (AC8 / TC9). A REAR-led braked final hop only has
+    # ``rear_window_cm`` of overshoot room; when the natural ``peak -> floor`` shed
+    # would exceed it, the firmware fits the ramp-down to the window (steeper ramp,
+    # reaches floor AT the gate, no crawl tail). Reshape the DISPLAY decel to that
+    # window-fitted shed. Render-only: the golden kernel above is untouched.
+    if rear_window_cm is not None and int(end_pwm) == 0:
+        (
+            decel_cm,
+            cruise_cm,
+            floor_crossing_cm,
+            floor_tail_cm,
+            eff_end_pwm,
+        ) = _window_fit_stop(
+            dist,
+            accel_cm,
+            decel_cm,
+            cruise_cm,
+            peak_pwm,
+            floor_crossing_cm,
+            floor_tail_cm,
+            float(rear_window_cm),
+            cfg.pwm_min,
+        )
+
     return DriveProfile(
         dist_cm=dist,
         cruise_pwm=int(cruise_pwm),
         start_pwm=int(start_pwm),
-        end_pwm=int(end_pwm),
+        end_pwm=eff_end_pwm,
         profiled=True,
         accel_cm=accel_cm,
         cruise_cm=cruise_cm,
@@ -908,6 +963,74 @@ def resolve_drive_profile(
         triangular=triangular,
         _cfg=cfg,
     )
+
+
+def _window_fit_stop(
+    dist_cm: float,
+    accel_cm: float,
+    decel_cm: float,
+    cruise_cm: float,
+    peak_pwm: int,
+    floor_crossing_cm: float,
+    floor_tail_cm: float,
+    rear_window_cm: float,
+    pwm_min: int,
+) -> Tuple[float, float, float, float, int]:
+    """Reshape a braked stop's display decel to the LineFollower window-fit (AC8).
+
+    Mirrors ``LineFollower.cpp:287-301`` in the DISPLAY layer: a REAR-led braked
+    final hop sheds ``peak -> floor`` over the LAST ``rear_window_cm`` before the
+    distance gate, reaching the floor AT the gate then braking — no floor-crawl
+    tail. When the natural above-floor shed (the ``peak -> floor`` portion of the
+    resolved decel ramp) already fits inside ``rear_window_cm``, the passed-in
+    natural values are returned UNCHANGED (the firmware's ``min(defaultRampCm,
+    window)`` picks the smaller natural shed, and ``end_pwm`` stays the 0-brake).
+    When the natural shed OVERRUNS the window, the shed is compressed to
+    ``rear_window_cm`` (a steeper ramp), the floor-crossing is pinned to the gate,
+    the crawl tail is dropped, and the display ``end_pwm`` is set to the
+    sign-corrected floor so the decel display segment ramps ``peak -> floor`` (not
+    to 0) and lands at floor speed at the gate, matching the firmware ramp-down.
+
+    :param dist_cm: total move distance (cm).
+    :param accel_cm: the resolved ramp-up distance (unchanged by the fit).
+    :param decel_cm: the resolved natural decel-ramp distance (``peak -> 0``).
+    :param cruise_cm: the resolved natural cruise-plateau distance.
+    :param peak_pwm: signed peak PWM (its sign carries the run direction).
+    :param floor_crossing_cm: the resolved natural floor-crossing distance.
+    :param floor_tail_cm: the resolved natural floor-crawl tail length.
+    :param rear_window_cm: the available rear overshoot window (cm); non-positive
+        or larger-than-natural leaves the shed unchanged.
+    :param pwm_min: the deadband floor magnitude.
+    :return: ``(decel_cm, cruise_cm, floor_crossing_cm, floor_tail_cm,
+        eff_end_pwm)`` — the reshaped display fields; identical to the passed-in
+        natural values (with ``eff_end_pwm == 0``) when no fit is needed.
+    """
+    peak_mag = abs(int(peak_pwm))
+    floor = float(pwm_min)
+
+    # The natural above-floor shed (peak -> floor) of the resolved decel ramp: the
+    # fraction of the peak->0 ramp spent above the floor. A peak already at/below
+    # the floor has no shed to fit.
+    if decel_cm <= 0.0 or peak_mag <= floor:
+        natural_shed = 0.0
+    else:
+        natural_shed = decel_cm * (peak_mag - floor) / peak_mag
+
+    # Not binding: window >= natural shed, or degenerate. Return the natural values
+    # unchanged (a braked stop keeps end_pwm == 0 + its floor-crawl tail).
+    if rear_window_cm <= 0.0 or natural_shed <= rear_window_cm:
+        return decel_cm, cruise_cm, floor_crossing_cm, floor_tail_cm, 0
+
+    # Overrun: compress the shed to the window. The steeper ramp reaches the floor
+    # AT the gate; there is no crawl tail. The decel now spans exactly the window.
+    fitted_decel = rear_window_cm
+    fitted_cruise_cm = dist_cm - accel_cm - fitted_decel
+    if fitted_cruise_cm < 0.0:
+        fitted_cruise_cm = 0.0
+    # End at the floor (sign-corrected) so the display decel ramps peak -> floor
+    # and lands at floor speed at the gate, then brakes.
+    eff_end_pwm = -int(pwm_min) if peak_pwm < 0 else int(pwm_min)
+    return fitted_decel, fitted_cruise_cm, dist_cm, 0.0, eff_end_pwm
 
 
 def _decel_floor_crossing(
