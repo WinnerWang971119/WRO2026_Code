@@ -65,6 +65,7 @@ through this builder.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field as dc_field
 from math import ceil, cos, hypot, radians, sin
 from typing import Any, Dict, List, Optional, Tuple
@@ -85,6 +86,7 @@ from tools.path_planner.planner import (
 )
 from tools.path_planner.sim.chassis import VirtualChassis
 from tools.path_planner.sim.runtime import (
+    ACT_BLIND_PASS,
     ACT_BLIND_REVERSE,
     ACT_FOLLOW_DIST_PASS,
     ACT_HEADING_RESET,
@@ -99,6 +101,7 @@ from tools.path_planner.sim.runtime import (
     ACT_STOP_AT_LINE_REVERSE,
     ACT_WALL_DEPART,
     ACT_WALL_STOP,
+    NAV_TURN_TOLERANCE_DEG,
     Direction,
     OffMapFaultError,
     PathTrackerSim,
@@ -118,6 +121,7 @@ from tools.path_planner.ctps.profile import (
     resolve_effective_speed,
     resolve_turn_profile,
     sample_drive,
+    sample_drive_run,
     sample_turn,
 )
 from tools.path_planner.ctps.trace_loader import Command, Trace
@@ -393,12 +397,48 @@ _LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
 #: then brakes to rest (the distance-gated stop / LINE_OVERSHOOT roll family).
 #: They cruise at the Drive preset (``SPEED_NORMAL``) with ``end == 0`` so the
 #: visible stop shape (ramp-down, floor-crawl, brake) renders (AC2).
+#:
+#: NOTE: the collinear PASS tags (:data:`_PASS_TAGS`) are deliberately NOT in
+#: this set. A pass-through node is a NON-braking boundary — the follower holds
+#: cruise across it — so a pass tag must NOT force ``end == 0`` (that was the
+#: shipped stop-at-every-pass-node lie the run-grouper repairs). Only a genuine
+#: distance-gated stop that lands the chassis at rest belongs here.
 _STOP_GATED_TAGS: frozenset[str] = frozenset(
     {
         ACT_STOP_AT_LINE,
         ACT_STOP_AT_LINE_REVERSE,
         ACT_LINE_OVERSHOOT,
+    }
+)
+
+#: Mid-run geometry contributors — a follow leg that lands the sensor short of
+#: its node and is ALWAYS immediately followed by a pass or an overshoot (never
+#: braking on its own). It contributes distance to the open run but never ENDS
+#: it; the pass / overshoot that follows decides the boundary. ``ACT_FOLLOW_INT``
+#: is the sole member today (the LINE follow-to-intersection leg).
+_MID_RUN_CONTRIB_TAGS: frozenset[str] = frozenset({ACT_FOLLOW_INT})
+
+#: Collinear pass-through primitive tags — a NON-braking node boundary. The
+#: firmware holds cruise across these (ADR-023 line pass-through; the T2
+#: ``setTShapeRampDown(!projPassThrough)`` fix for projection pass-through; the
+#: ADR-059 blind-chain ``blind_pass`` mid-hop), so CTPS must render them WITHOUT a
+#: decel-to-rest: a pass tag's per-primitive cruise carries ``end == cruise`` (no
+#: ramp-down), and — when it sits inside a multi-node run — the run-grouper merges
+#: the whole run into ONE trapezoid so there is no intra-run dip at all.
+#:
+#: ``ACT_BLIND_PASS`` (T9) is a 2-tuple ZERO-MOTION marker
+#: (``(ACT_BLIND_PASS, node)``): the chained ``ACT_FORWARD`` / ``ACT_BLIND_REVERSE``
+#: hop already advanced onto the node and re-anchored, so the pass tag itself
+#: carries no translation. It is listed here so the run-grouper's ``braked``
+#: classification treats it as a non-braking boundary that CONTINUES the run,
+#: exactly as the line / projection pass tags do; the actual transparency comes
+#: from its zero-translation snapshot hitting the zero-motion branch in ``build``.
+_PASS_TAGS: frozenset[str] = frozenset(
+    {
         ACT_LINE_PASS,
+        ACT_FOLLOW_DIST_PASS,
+        ACT_PROJECTION_REVERSE_PASS,
+        ACT_BLIND_PASS,
     }
 )
 
@@ -430,6 +470,39 @@ _RETURN_DRIVE_TAGS: frozenset[str] = frozenset(
     {ACT_RETURN_FORWARD, ACT_RETURN_STOP_AT_LINE}
 )
 
+#: Goto-hop stop tags whose braked arrival is REAR-led: the rear sensor board
+#: leads the travel direction, so the firmware sheds cruise -> floor inside the
+#: REAR overshoot window (``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` — the
+#: ``LineFollower.cpp:287-301`` ramp-down window-fit; ``PathTracker`` picks the
+#: window with ``reverse ? REAR : FRONT``). A run ENDING on one of these renders
+#: the window-fitted shed (AC8): ``flush_run`` passes the rear window into the
+#: run profile so a shed that would overrun the window is compressed to it.
+#:
+#: The sole member is the REAR ``stopAtLine`` seek — the one rear-led arrival
+#: whose braked render segment spans the WHOLE hop (seek + overshoot roll in one
+#: primitive), so its natural shed can overrun the rear window. The other
+#: rear/reverse tags are excluded on purpose:
+#:
+#: * ``ACT_LINE_REVERSE`` — the reverse follow LEG only; it lands one rear
+#:   axle-offset SHORT of the node (the junction detect), and the roll the
+#:   window-fit models renders as the SEPARATE overshoot segment that follows.
+#: * that following overshoot segment (``ACT_LINE_OVERSHOOT`` after a reverse
+#:   follow) — its render distance IS the rear window (the sim's
+#:   ``overshoot_advance_cm``), so the T-shape kernel already fits the ramps
+#:   inside it; a window spanning the whole segment can never overrun.
+#: * ``ACT_PROJECTION_REVERSE`` — a distance-gated follow whose gate is the
+#:   COMMANDED edge distance (``stopAfterCm``), not the axle-offset roll; the
+#:   kernel's half-of-total ramp cap models that clamp.
+#: * every blind dead-reckon stop (``ACT_BLIND_REVERSE`` + the blind-chain
+#:   braked final hop) — a Drive ``PROFILE_DIST`` move fits its ramps to the
+#:   known distance upfront; no LineFollower gate exists.
+#:
+#: FRONT-led stops (``ACT_STOP_AT_LINE`` / ``ACT_LINE_OVERSHOOT`` / the return
+#: seek) keep ``rear_window_cm=None``: the fit is defined ONLY over the rear
+#: window, and the larger FRONT window (12.02 cm) does not bind the natural
+#: FAST shed (8 cm) anyway.
+_REAR_LED_STOP_TAGS: frozenset[str] = frozenset({ACT_STOP_AT_LINE_REVERSE})
+
 
 def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
     """Resolve a goto-hop primitive's effective ``(cruise, start, end, profiled)``.
@@ -438,6 +511,14 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
     its cruise from the parsed firmware Config (plan Decisions, the per-kind
     cruise table):
 
+    * collinear PASS (:data:`_PASS_TAGS`) -> the follow cruise
+      (``ConfigLine::CRUISE_SPEED``) held THROUGH the node: ``end == cruise``,
+      NO brake. A pass-through is a non-braking boundary (the firmware holds
+      cruise across it), so it must not decel to rest — the shipped ``end == 0``
+      here was the stop-at-every-pass-node lie. Inside a multi-node run the
+      grouper further merges the whole run into ONE trapezoid; a lone pass tag
+      (a degenerate single-hop run) still renders no dip via this ``end ==
+      cruise``.
     * LINE follow (:data:`_LINE_FOLLOW_TAGS`) -> ``ConfigLine::CRUISE_SPEED``.
     * distance-gated stop / LINE_OVERSHOOT roll (:data:`_STOP_GATED_TAGS`) ->
       the Drive preset ``SPEED_NORMAL``, ramping cruise -> ``PWM_MIN_MAGNITUDE``
@@ -449,11 +530,12 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
 
     ``start`` is the sign-by-direction ``TSHAPE_START_SPEED`` seed (the sign of
     ``cruise`` carries the drive direction into the ramp); ``end`` is 0 (brake to
-    rest at the hop boundary — every goto hop terminates stationary in the sim's
-    step model). ``profiled`` is ``True`` for the ramped families and ``False``
-    for the constant ``wallStop`` crawl. A tag that reaches here unclassified
-    (never expected — the sim's advance tags are exhaustively covered) defaults
-    to the blind preset so timing stays finite rather than raising.
+    rest at the hop boundary) for every BRAKED hop, and ``cruise`` for a PASS tag
+    (held through the node). ``profiled`` is ``True`` for the ramped families and
+    ``False`` for the constant ``wallStop`` crawl. A tag that reaches here
+    unclassified (never expected — the sim's advance tags are exhaustively
+    covered) defaults to the blind preset so timing stays finite rather than
+    raising.
 
     The reverse direction is NOT applied here: the geometry (and thus the drive
     direction) already lives in the snapshot pose the caller passes as
@@ -472,6 +554,12 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
     if tag == ACT_WALL_STOP:
         # Constant-push wall seek: a flat crawl at WALL_STOP_PUSH_PWM, no ramp.
         return int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), False
+    if tag in _PASS_TAGS:
+        # Non-braking collinear pass-through: hold the follow cruise THROUGH the
+        # node (end == cruise), never decel to rest. All existing pass tags are
+        # line-family follows, so the cruise is ConfigLine::CRUISE_SPEED.
+        cruise = int(cfg.line_cruise)
+        return cruise, start, cruise, True
     if tag in _LINE_FOLLOW_TAGS:
         return int(cfg.line_cruise), start, 0, True
     # The stop-gated family and the blind/dead-reckon family BOTH cruise at the
@@ -485,6 +573,51 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
     return int(cfg.speed_normal), start, 0, True
 
 
+def _blind_chain_suffix(
+    primitive: Tuple[Any, ...],
+) -> Optional[Tuple[int, int, bool]]:
+    """Extract a chained blind hop's recorded ``(start_pwm, end_pwm, chain)`` suffix.
+
+    A collinear BLIND chain that the sim (or firmware recorder) drove as ONE
+    continuous run rides the resolved per-hop velocity endpoints on the blind
+    advance primitive's TRAILING elements (ADR-059) — the recorded speeds CTPS
+    CONSUMES to render the whole-run trapezoid (AC11). CTPS never re-derives a
+    chain decision; it reads exactly what was recorded.
+
+    The suffix layout is tag-specific (mirroring ``sim/runtime.py``'s emit):
+
+    * ``ACT_FORWARD`` — ``(ACT_FORWARD, dist, start_pwm, end_pwm, chain)`` (len 5);
+      the plain cold-start form ``(ACT_FORWARD, dist)`` (len 2) carries NO suffix.
+    * ``ACT_BLIND_REVERSE`` —
+      ``(ACT_BLIND_REVERSE, target, dist, blind_mode, start_pwm, end_pwm, chain)``
+      (len 7); the plain form ``(ACT_BLIND_REVERSE, target, dist, blind_mode)``
+      (len 4) carries NO suffix.
+
+    A NON-chain hop (a lone pass-through-seeded blind hop the sim marks
+    ``chain == False``, or a plain cold-start hop with no suffix) returns
+    ``None`` — it takes the ordinary per-primitive drive path, NOT the blind
+    whole-run consume path (AC12: a non-chain single hop is unchanged).
+
+    :param primitive: the yielded sim primitive tuple.
+    :return: ``(start_pwm, end_pwm, chain)`` when the primitive is a CHAINED
+        blind hop (``chain is True``); ``None`` otherwise.
+    """
+    tag = primitive[0]
+    if tag == ACT_FORWARD and len(primitive) >= 5:
+        start_pwm, end_pwm, chain = primitive[2], primitive[3], primitive[4]
+    elif tag == ACT_BLIND_REVERSE and len(primitive) >= 7:
+        start_pwm, end_pwm, chain = primitive[4], primitive[5], primitive[6]
+    else:
+        return None
+    # Only a genuine chained hop (chain True) takes the whole-run consume path. A
+    # pass-through-seeded LONE blind hop rides the same suffix but marks
+    # chain == False (it is a single hop, not a run); it is rendered by the
+    # ordinary per-primitive path, so it is not a blind-run segment.
+    if not bool(chain):
+        return None
+    return int(start_pwm), int(end_pwm), bool(chain)
+
+
 def _densify_drive(
     prev_kf: Dict[str, Any],
     end_pose: Tuple[float, float, float],
@@ -492,6 +625,7 @@ def _densify_drive(
     start: int,
     end: int,
     profiled: bool,
+    rear_window_cm: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Densify one drive/line geometry step into profile-timed sub-keyframes.
 
@@ -523,6 +657,9 @@ def _densify_drive(
     :param start: signed start PWM.
     :param end: signed end PWM.
     :param profiled: ``True`` for a ``.tShape()`` move, ``False`` for a flat one.
+    :param rear_window_cm: the REAR overshoot window for a rear-led braked
+        distance-gated stop (the AC8 LineFollower window-fit); ``None`` (the
+        default) for every front-led / non-stop move.
     :return: the replacement sub-keyframes (may be empty for a zero-length step).
     """
     x0, y0, h0 = prev_kf["x"], prev_kf["y"], prev_kf["h"]
@@ -535,10 +672,314 @@ def _densify_drive(
         start_pwm=start,
         end_pwm=end,
         profiled=profiled,
+        rear_window_cm=rear_window_cm,
     )
     sub = sample_drive(profile, (x0, y0, h0), (x1, y1, h1), prev_kf["t"])
     # sub[0] duplicates prev_kf (byte-equal pose at the same t); drop it.
     return sub[1:]
+
+
+# ---------------------------------------------------------------------------
+# Collinear run-grouper (CTPS truth-fix, T3)
+# ---------------------------------------------------------------------------
+#
+# A collinear pass-through RUN is a chain of geometry primitives bounded by
+# braked stops: the follower ramps up once at the run start, holds cruise
+# THROUGH every intermediate (pass-through) node, and brakes to rest once at the
+# run end. Before this fix the CTPS builder densified each primitive on its own
+# with ``end == 0``, so it rendered a full stop (ramp-down + floor-crawl +
+# brake) at EVERY node — a per-node dip that the firmware does not actually
+# perform (ADR-023 line pass-through, plus the T2 projection ramp-down fix).
+#
+# The grouper (below, inside ``build``) buffers a run's geometry segments and
+# flushes the whole run as ONE velocity profile over the summed chord distance,
+# sliced back onto each segment's node boundary — so the render is one trapezoid
+# with no intra-run stop keyframes, while every segment's LAST sub-keyframe
+# still pins its sim-snapshot pose byte-exact (TC7). Zero-motion records
+# (heading resets, in-place turns) are transparent: they neither contribute
+# distance nor break a run. The structure is intentionally reusable — a later
+# task extends it to BLIND runs by feeding the recorded per-hop speeds instead
+# of the resolved run cruise.
+
+
+@dataclass
+class _RunSegment:
+    """One geometry primitive's contribution to a buffered collinear run.
+
+    :param start_pose: ``(x, y, heading_deg)`` at the segment start (the
+        previous keyframe's pose when the segment was buffered).
+    :param end_pose: ``(x, y, heading_deg)`` at the segment end — the sim
+        snapshot pose, pinned byte-exact as the segment's last sub-keyframe.
+    :param dist_cm: the segment's own chord length (cm); the run profile is
+        built over the sum of these.
+    :param braked: ``True`` iff this segment is a braked distance-gated stop
+        (the run's terminal segment). A pass / mid-run follow leg is ``False``.
+    :param chain_start_pwm: for a BLIND-chain hop (ADR-059), the RECORDED signed
+        start PWM the sim/firmware resolved for this hop; ``None`` for a
+        line/projection run (whose cruise is the shared follow cruise, resolved
+        from ``run_speed`` instead). A segment carrying this is a "blind-run"
+        segment — ``flush_run`` builds the whole-run trapezoid from the recorded
+        per-hop endpoints, never re-deriving the chain decision (AC11).
+    :param chain_end_pwm: the RECORDED signed end PWM for a blind-chain hop
+        (0 on the run's final braked hop; the mid-hop cruise otherwise);
+        ``None`` for a line/projection run.
+    :param rear_led: ``True`` iff this segment is a REAR-led braked
+        distance-gated stop (:data:`_REAR_LED_STOP_TAGS`). Meaningful only on a
+        run's braked terminal segment: ``flush_run`` then fits the run's
+        cruise -> floor shed into the REAR overshoot window (the AC8
+        LineFollower window-fit). Always ``False`` on a blind-chain segment —
+        a chained final hop is a Drive dead-reckon stop, not a LineFollower
+        distance-gated one.
+    """
+
+    start_pose: Tuple[float, float, float]
+    end_pose: Tuple[float, float, float]
+    dist_cm: float
+    braked: bool
+    chain_start_pwm: Optional[int] = None
+    chain_end_pwm: Optional[int] = None
+    rear_led: bool = False
+
+
+def _build_run_profile(
+    total_cm: float,
+    cruise: int,
+    start: int,
+    braked: bool,
+    profiled: bool,
+    rear_window_cm: Optional[float] = None,
+):
+    """Resolve the ONE :class:`DriveProfile` for a whole buffered run.
+
+    The run ramps up once (from ``start``), holds ``cruise`` through every
+    intermediate pass-through node, and — when the run ends on a braked stop —
+    ramps down to rest once at the very end. A run that ends WITHOUT a braked
+    stop (a degenerate all-pass run, e.g. a malformed trace whose final pass has
+    no following braked stop, or the reusable blind-pass path a later task adds)
+    holds ``cruise`` to the end (``end == cruise``) so it renders no phantom
+    terminal dip.
+
+    :param total_cm: the run's summed chord distance (cm).
+    :param cruise: signed run cruise PWM.
+    :param start: signed run start-seed PWM.
+    :param braked: ``True`` iff the run terminates in a braked stop (end == 0).
+    :param profiled: ``True`` for the ramped families, ``False`` for a flat run.
+    :param rear_window_cm: the REAR overshoot window when the run's braked
+        terminal stop is REAR-led (:data:`_REAR_LED_STOP_TAGS`) — the AC8
+        LineFollower window-fit compresses the cruise -> floor shed into it;
+        ``None`` (the default) for a front-led or unbraked run.
+    :return: the resolved :class:`~tools.path_planner.ctps.profile.DriveProfile`.
+    """
+    end = 0 if braked else cruise
+    return resolve_drive_profile(
+        total_cm,
+        cruise_pwm=cruise,
+        start_pwm=start,
+        end_pwm=end,
+        profiled=profiled,
+        rear_window_cm=rear_window_cm,
+    )
+
+
+def _resolve_blind_run_profile(
+    segs: List["_RunSegment"],
+    run_speed: Optional[Tuple[int, int, int, bool]] = None,
+):
+    """Build the whole-run :class:`DriveProfile` for a BLIND-chain run from RECORDED speeds.
+
+    ADR-059 / AC11: a collinear BLIND chain that the sim (or firmware recorder)
+    drove as ONE continuous run rides the resolved per-hop ``(start_pwm,
+    end_pwm)`` on each blind advance primitive. CTPS **consumes** those recorded
+    endpoints to render the whole-run trapezoid — it NEVER re-derives a chain
+    decision (does not call ``chain_speed.resolve_chain_speeds``). The chain
+    planning already happened upstream; this only maps the recorded endpoints
+    onto a single :class:`DriveProfile` over the run's summed chord distance.
+
+    Two well-formed shapes reach here:
+
+    * **pure blind run** — EVERY segment carries recorded speeds.
+    * **LINE/projection → BLIND spanning run** (the plan's Decision "a collinear
+      run MAY span LINE/projection → BLIND") — LEADING speed-less line /
+      projection pass segments feed straight into the recorded blind chain.
+      Those leading segments legitimately carry NO chain speeds (line-follow
+      speed comes from the LineFollower preset, not per-hop ``ChainSpeedPolicy``),
+      so they are NOT malformed: they contribute their distance at the RUN
+      CRUISE — they ARE the line-follow-at-cruise portion. The firmware passes
+      through at cruise and hands the captured cruise into the first blind hop
+      (ADR-023, ``PathTracker.cpp:2674-2690``), so the physical motion is ONE
+      continuous trapezoid with velocity continuous across the handoff.
+
+    Profile endpoints:
+
+    * **start** — pure blind run: the FIRST hop's recorded ``start_pwm`` (the
+      chain ``entryPwm`` the planner resolved: the captured cruise after a
+      pass-through, else the cold-start seed — the ADR-023 cruise carry, AC5).
+      Spanning run: the run launched from rest on its leading line-follow leg,
+      so the start is the ordinary run start seed (``run_speed``'s start — the
+      same seed the line-only branch uses), signed by the run direction.
+    * **cruise (the run peak)** — the maximum recorded |PWM| across every chain
+      hop endpoint. The two-pass planner clamps every node speed to ``[pwmMin,
+      |cruise|]``, so the largest recorded magnitude IS the peak the run reached
+      — read from the record, not recomputed. After a pass-through the chain's
+      cruise equals the captured line cruise (the same physical cruise), so the
+      leading line segments ride this same peak.
+    * **end** — the FINAL hop's recorded ``end_pwm`` (``0`` on a braked chain, so
+      the single trapezoid ramps down to the ordinary cruise→floor→brake stop).
+
+    The run direction (sign) comes from the recorded endpoints: a reverse chain
+    records negative PWMs, so the peak is signed by the first chain hop's start
+    sign. The single trapezoid's interior slice at each node boundary (via
+    :func:`sample_drive_run`) reproduces the pass-through-then-shed shape without
+    a per-node dip.
+
+    Returns ``None`` when the run is genuinely MALFORMED — a speed-less segment
+    AT OR AFTER the first recorded chain hop (a BLIND hop missing ITS OWN
+    recorded ``(start_pwm, end_pwm)``: the recorded chain is incomplete). The
+    caller then falls back to per-primitive rendering + a ``UserWarning``
+    (AC11 / TC11). Only LEADING speed-less segments are legitimate.
+
+    :param segs: the buffered run segments (at least one carries recorded chain
+        speeds — the caller's blind-run classification).
+    :param run_speed: the run's first-segment ``(cruise, start, end, profiled)``
+        seed; used ONLY to seed a spanning run's start. ``None`` falls back to
+        the parsed Config start seed.
+    :return: the resolved run :class:`DriveProfile`, or ``None`` if malformed.
+    """
+    # The chain proper begins at the first segment carrying recorded speeds;
+    # everything before it is the run's leading line/projection pass portion
+    # (a legitimate spanning run, never malformed).
+    first_chain = next(
+        (i for i, seg in enumerate(segs) if seg.chain_start_pwm is not None),
+        None,
+    )
+    if first_chain is None:
+        # Unreachable via ``flush_run`` (the caller classified the run blind off
+        # a speed-carrying segment); defensively malformed.
+        return None
+    chain_segs = segs[first_chain:]
+
+    # Malformed: from the first recorded chain hop onward, EVERY segment must
+    # carry recorded speeds. A gap (a BLIND hop that lost its own suffix) means
+    # the recorded chain is incomplete — reject rather than fabricate a cruise
+    # for the missing hop.
+    if any(
+        seg.chain_start_pwm is None or seg.chain_end_pwm is None
+        for seg in chain_segs
+    ):
+        return None
+
+    first = chain_segs[0]
+    last = chain_segs[-1]
+    end = int(last.chain_end_pwm)
+
+    # The run peak is the largest recorded |PWM| across all chain hop endpoints
+    # (the planner clamps to |cruise|, so the observed max IS the peak). Sign it
+    # by the run direction (the first chain hop's start sign; a cold-start floor
+    # seed and the cruise share a sign, so this is unambiguous).
+    peak_mag = 0
+    for seg in chain_segs:
+        peak_mag = max(
+            peak_mag, abs(int(seg.chain_start_pwm)), abs(int(seg.chain_end_pwm))
+        )
+    direction = -1 if int(first.chain_start_pwm) < 0 else 1
+    cruise = direction * peak_mag
+
+    if first_chain == 0:
+        # Pure blind run: the chain's own recorded entry (the resolved entryPwm).
+        start = int(first.chain_start_pwm)
+    else:
+        # Spanning run: the run launched from rest on its leading line-follow
+        # leg, so it seeds the ordinary run start (the same seed the line-only
+        # branch uses), signed by the run direction — one ramp-up, then cruise
+        # held across the line → blind handoff (velocity continuous, no dip).
+        seed = (
+            int(run_speed[1])
+            if run_speed is not None
+            else int(default_config().start_speed)
+        )
+        start = direction * abs(seed)
+
+    total_cm = sum(seg.dist_cm for seg in segs)
+    return resolve_drive_profile(
+        total_cm,
+        cruise_pwm=cruise,
+        start_pwm=start,
+        end_pwm=end,
+        # A blind(-terminated) run is always a profiled (.tShape) run — the
+        # whole-run trapezoid is exactly the ramped shape the recorded
+        # endpoints describe.
+        profiled=True,
+    )
+
+
+def _fallback_segment_speed(seg: "_RunSegment") -> Tuple[int, int, int, bool]:
+    """Resolve one rejected-run segment's ``(cruise, start, end, profiled)`` for fallback.
+
+    When the run-grouper rejects a malformed run and renders it per-primitive
+    (:func:`build`'s ``_fallback_per_primitive``), each segment needs its own
+    profile. A BLIND-chain segment (it carries recorded endpoints) renders with
+    its RECORDED ``(start_pwm, end_pwm)`` — the honest per-hop shape even though
+    the run as a whole was malformed — with the cruise held at the larger
+    magnitude of the two endpoints so the segment's own ramp is coherent. A
+    segment with no recorded speeds (a line/projection segment in a
+    pass-without-stop run) renders as a held-cruise pass (``end == cruise``,
+    no phantom decel), matching the per-primitive pass-tag render.
+
+    :param seg: the rejected run segment.
+    :return: ``(cruise, start, end, profiled)`` for :func:`_densify_drive`.
+    """
+    if seg.chain_start_pwm is not None and seg.chain_end_pwm is not None:
+        start = int(seg.chain_start_pwm)
+        end = int(seg.chain_end_pwm)
+        direction = -1 if start < 0 else 1
+        cruise = direction * max(abs(start), abs(end))
+        return cruise, start, end, True
+    # Line/projection segment with no recorded speed: a held-cruise pass (the
+    # per-primitive pass-tag shape — never a decel-to-rest).
+    cfg = default_config()
+    cruise = int(cfg.line_cruise)
+    start = int(cfg.start_speed)
+    return cruise, start, cruise, True
+
+
+def _recorded_drive_rear_window(
+    cmd: Command, speed: Tuple[int, int, int, bool]
+) -> Optional[float]:
+    """REAR overshoot window for a recorded rear-led ``stopAtLine``, else ``None``.
+
+    A recorded ``stopAtLine`` with ``reverse == True`` is a REAR-led
+    distance-gated stop: the rear board detects the crossing line, then the
+    firmware rolls the rear axle offset (``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` —
+    ``PathTracker``'s ``reverse ? REAR : FRONT`` pick) shedding cruise -> floor
+    inside that window (the ``LineFollower.cpp:287-301`` ramp-down window-fit).
+    The render fits the shed the same way (AC8): at the FAST preset the natural
+    shed (8 cm) overruns the 7.68 cm rear window, so an unfitted render would
+    show a floor-crawl tail the firmware never drives.
+
+    Every other recorded shape keeps ``None``:
+
+    * ``stopAtLine`` FORWARD — front-led; the fit is defined only over the rear
+      window (and the larger FRONT window does not bind the FAST shed anyway).
+    * ``driveDist`` — a dead-reckon Drive move; the T-shape kernel already fits
+      its ramps to the known distance, no LineFollower gate exists.
+    * ``lineFollowDist`` — its distance gate is the COMMANDED cm (the
+      ``stopAfterCm`` clamp the kernel's half-of-total cap models), not the
+      axle-offset roll — in either direction.
+    * ``wallStop`` — a flat constant-push crawl, no ramp to fit.
+    * a non-braked resolve (``.setBrake(false)`` / explicit ``end_speed``) or a
+      ``.flat()`` move — not a braked profiled stop, so no shed to fit.
+
+    :param cmd: the recorded drive command (carries the strict-bool ``reverse``).
+    :param speed: the move's resolved ``(cruise, start, end, profiled)``.
+    :return: the rear window (cm) for a rear-led braked ``stopAtLine``;
+        ``None`` otherwise.
+    """
+    if cmd.method != "stopAtLine" or not cmd.reverse:
+        return None
+    _cruise, _start, end, profiled = speed
+    if end != 0 or not profiled:
+        return None
+    return float(default_config().rear_axle_offset_cm)
 
 
 def _densify_turn(
@@ -851,20 +1292,270 @@ def build(trace: Trace, field_data) -> Track:
         y_new: float,
         h_new: float,
         speed: Tuple[int, int, int, bool],
+        rear_window_cm: Optional[float] = None,
     ) -> None:
         """Densify a drive/line advance to ``(x_new, y_new, h_new)`` and append it.
 
         ``speed`` is the resolved ``(cruise, start, end, profiled)`` for this
         step; the straight-line advance from the last keyframe is profiled and
         sampled dense-near-ramps. The final sub-keyframe is pinned to the
-        destination pose byte-exact.
+        destination pose byte-exact. ``rear_window_cm`` (a rear-led braked
+        distance-gated stop only) threads the AC8 LineFollower window-fit to
+        the profile.
         """
         cruise, start, end, profiled = speed
         _extend(
             _densify_drive(
-                keyframes[-1], (x_new, y_new, h_new), cruise, start, end, profiled
+                keyframes[-1],
+                (x_new, y_new, h_new),
+                cruise,
+                start,
+                end,
+                profiled,
+                rear_window_cm=rear_window_cm,
             )
         )
+
+    # -- collinear run buffer (T3) ------------------------------------------
+    # Geometry drive primitives inside a goto are buffered here instead of being
+    # densified one-at-a-time, so a whole collinear pass-through run renders as
+    # ONE trapezoid (see the ``_RunSegment`` / ``_build_run_profile`` note). The
+    # buffer holds the run's ordered segments; ``_run_speed`` is the run's
+    # resolved ``(cruise, start, end, profiled)`` seed, taken from the FIRST
+    # segment's primitive (every mid-run primitive in a line/projection run
+    # shares the follow cruise, so the run cruise is well-defined). ``flush_run``
+    # emits the accumulated run and clears the buffer; it is called at every run
+    # boundary — a braked stop, a turn / pivot / dwell, or the goto's end.
+    run_segments: List[_RunSegment] = []
+    run_speed: Optional[Tuple[int, int, int, bool]] = None
+
+    def _fallback_per_primitive(segs: List[_RunSegment], reason: str) -> None:
+        """Render a rejected run per-primitive (each its own profile) + warn.
+
+        The malformed-run escape hatch (AC11 / TC11): when the grouper cannot
+        build a coherent whole-run profile — a blind-chain run MISSING its
+        recorded per-hop speeds, or a pass tag with NO following braked stop —
+        it does NOT guess a run cruise. It falls back to the pre-grouper
+        behavior: densify EACH buffered segment on its own via
+        :func:`_densify_drive`, so every segment still renders (nothing is
+        dropped) and each pins its snapshot pose. A :class:`UserWarning` surfaces
+        the malformed structure so a trace bug is visible rather than silently
+        smoothed over. Zero-motion records never reach here (they were
+        transparent), so this only fires on a genuinely broken run.
+
+        :param segs: the buffered run segments (already popped from the buffer).
+        :param reason: a human-readable description of the malformation, for the
+            warning message.
+        """
+        warnings.warn(
+            f"ctps.track_builder: malformed collinear run rejected "
+            f"({reason}) — falling back to per-primitive rendering.",
+            UserWarning,
+            stacklevel=2,
+        )
+        for seg in segs:
+            cruise, start, end, profiled = _fallback_segment_speed(seg)
+            _extend(
+                _densify_drive(
+                    keyframes[-1], seg.end_pose, cruise, start, end, profiled
+                )
+            )
+
+    def flush_run(strict: bool = False) -> None:
+        """Emit the buffered collinear run as ONE profile, then clear the buffer.
+
+        Builds a single :class:`DriveProfile` over the run's summed chord
+        distance (ramp up once, hold cruise through the intermediate nodes, ramp
+        down once iff the run ends braked), slices it back onto each segment's
+        node boundary via
+        :func:`tools.path_planner.ctps.profile.sample_drive_run`, and appends the
+        per-segment sub-keyframes — each segment's last sub-keyframe still
+        byte-pins its snapshot pose (TC7). A single-segment run reduces to the
+        same shape the old per-primitive path produced (one ramp/stop), so a
+        non-chain hop is unchanged. An empty buffer is a no-op.
+
+        Two run shapes are grouped:
+
+        * **line / projection** — every segment shares the follow cruise, so the
+          run cruise is the ``run_speed`` seed (resolved from the first
+          segment's primitive kind).
+        * **blind chain** (ADR-059) — the segments carry the RECORDED per-hop
+          ``(start_pwm, end_pwm)`` the sim/firmware resolved; the whole-run
+          trapezoid is built from those recorded endpoints (start = first hop's
+          recorded start, cruise = the peak the run actually reached, end = the
+          final hop's recorded end), NEVER by re-deriving a chain decision
+          (AC11). A run MAY span LINE/projection → BLIND: leading speed-less
+          line/projection pass segments are the run's line-follow-at-cruise
+          portion (the ADR-023 pass-through cruise carry), so they contribute
+          distance at the run cruise and the run start falls back to the
+          ordinary ``run_speed`` seed — one continuous trapezoid across the
+          handoff. A BLIND (chain) hop missing ITS OWN recorded speeds is
+          malformed and falls back to per-primitive rendering.
+
+        :param strict: gate for the pass-without-braked-stop malformed check.
+            Passed ``True`` ONLY at the GOTO-END flush, where a healthy goto
+            always ends on a braked goal arrival — so a GROUPED (multi-segment)
+            unbraked run there is a genuinely malformed trace (a pass tag with NO
+            following braked stop) and falls back to per-primitive rendering + a
+            ``UserWarning`` (AC11 / TC11). Every OTHER flush is an INTERIOR run
+            boundary (a turn / pivot / dwell / pending-pivot landing) or a
+            fault-handler flush of a legitimate reachable prefix — where an
+            unbraked pass run is EXPECTED (the run ends because the route turns,
+            not because it braked) — so those flush non-strict (the default) and
+            never warn. The blind-missing-speeds malformation is ALWAYS rejected
+            (a gap in the recorded chain is broken regardless of the boundary).
+        """
+        nonlocal t, run_segments, run_speed
+        if not run_segments:
+            return
+        segs = run_segments
+        # ``speed`` feeds the line/projection branch below AND seeds a
+        # LINE/projection → BLIND spanning run's start (the run launches from
+        # rest on its leading line-follow leg); a PURE blind run ignores it by
+        # design (its profile is CONSUMED from the recorded per-hop endpoints,
+        # AC11).
+        speed = run_speed
+        # Reset the buffer BEFORE emitting so a re-entrant tick callback (the
+        # sim never re-enters ``build``, but keep the invariant local) sees a
+        # clean buffer.
+        run_segments = []
+        run_speed = None
+
+        braked = segs[-1].braked
+        # A run whose segments carry recorded chain endpoints is a BLIND run: its
+        # whole-run trapezoid is CONSUMED from the recorded speeds, never
+        # re-derived. Any segment carrying a recorded start/end marks the run.
+        is_blind_run = any(seg.chain_start_pwm is not None for seg in segs)
+
+        if is_blind_run:
+            resolved = _resolve_blind_run_profile(segs, speed)
+            if resolved is None:
+                # Missing recorded speeds on a BLIND (chain) hop → malformed. Do
+                # not guess a cruise; fall back to per-primitive rendering +
+                # warn. Always rejected — a gap in the recorded chain is broken
+                # even on the fault-flush path. (LEADING speed-less line /
+                # projection pass segments are a legitimate spanning run and
+                # never trip this.)
+                _fallback_per_primitive(
+                    segs, "blind run missing recorded per-hop speeds"
+                )
+                return
+            profile = resolved
+        else:
+            if strict and not braked and len(segs) > 1:
+                # A grouped (multi-segment) line/projection run that never braked
+                # is malformed: a pass tag opened a run with no following braked
+                # stop. A DEGENERATE single-segment lone-pass run is NOT malformed
+                # (it renders as its own held-cruise segment — the T3 contract),
+                # and a NON-strict fault-flush of a reachable prefix is a
+                # legitimate dead-end stop, so only reject a genuinely grouped run
+                # at a normal run boundary.
+                _fallback_per_primitive(
+                    segs, "pass tag with no following braked stop"
+                )
+                return
+            cruise, start, _end_seed, profiled = speed
+            total_cm = sum(seg.dist_cm for seg in segs)
+            # AC8 LineFollower window-fit: a run ending on a REAR-led braked
+            # distance-gated stop (_REAR_LED_STOP_TAGS) only has the REAR
+            # overshoot window (LINE_SENSOR_AXLE_OFFSET_REAR_CM) to shed
+            # cruise -> floor, so the run profile fits the shed into it. A
+            # front-led or unbraked run keeps None (the natural shed).
+            rear_window = (
+                default_config().rear_axle_offset_cm
+                if braked and segs[-1].rear_led
+                else None
+            )
+            profile = _build_run_profile(
+                total_cm, cruise, start, braked, profiled, rear_window_cm=rear_window
+            )
+
+        boundaries = [
+            (seg.start_pose, seg.end_pose, seg.dist_cm) for seg in segs
+        ]
+        sliced = sample_drive_run(profile, boundaries, keyframes[-1]["t"])
+        for sub in sliced:
+            _extend(sub)
+
+    def append_run_segment(
+        x_new: float,
+        y_new: float,
+        h_new: float,
+        speed: Tuple[int, int, int, bool],
+        braked: bool,
+        chain_speeds: Optional[Tuple[int, int]] = None,
+        rear_led: bool = False,
+    ) -> None:
+        """Buffer one geometry drive primitive into the open collinear run.
+
+        The segment spans from the CURRENT run tail pose (the last buffered
+        segment's end, or the last emitted keyframe when the buffer is empty) to
+        ``(x_new, y_new, h_new)`` — the primitive's sim-snapshot pose. ``speed``
+        seeds the run's ``(cruise, start, end, profiled)`` on the FIRST segment;
+        subsequent segments in a line/projection run share that cruise, so the
+        seed is not overwritten. A ``braked`` segment is the run's terminal
+        stop, so the run is flushed immediately after buffering it.
+
+        ``chain_speeds`` — when set, the RECORDED ``(start_pwm, end_pwm)`` for a
+        BLIND-chain hop (ADR-059). It rides ONTO the segment so ``flush_run``
+        builds the whole-run trapezoid from the recorded endpoints instead of the
+        ``run_speed`` seed; a line/projection segment leaves it ``None``.
+
+        ``rear_led`` — ``True`` for a REAR-led braked distance-gated stop
+        (:data:`_REAR_LED_STOP_TAGS`); it rides onto the segment so
+        ``flush_run`` applies the AC8 LineFollower window-fit when this segment
+        terminates the run.
+
+        A zero-length segment (the primitive did not translate) is dropped — it
+        contributes no distance and does not open/extend a run — but if it is
+        flagged ``braked`` (a distance-gated stop that happened to net zero
+        advance) the open run is still flushed so its terminal stop is not lost.
+        """
+        nonlocal run_speed
+        # The run tail is the previous segment's end, or the last emitted
+        # keyframe when the buffer is empty.
+        prev_pose = run_tail_pose()
+
+        dist = hypot(x_new - prev_pose[0], y_new - prev_pose[1])
+        if dist <= _TRANSLATION_EPS_CM:
+            # No advance: nothing to buffer. A braked zero-advance still closes an
+            # open run (its terminal stop already rendered on the prior segment).
+            if braked:
+                flush_run()
+            return
+
+        if not run_segments:
+            run_speed = speed
+        chain_start = chain_speeds[0] if chain_speeds is not None else None
+        chain_end = chain_speeds[1] if chain_speeds is not None else None
+        run_segments.append(
+            _RunSegment(
+                start_pose=prev_pose,
+                end_pose=(x_new, y_new, h_new),
+                dist_cm=dist,
+                braked=braked,
+                chain_start_pwm=chain_start,
+                chain_end_pwm=chain_end,
+                rear_led=rear_led,
+            )
+        )
+        if braked:
+            flush_run()
+
+    def run_tail_pose() -> Tuple[float, float, float]:
+        """The current run-tail pose: the buffered run's end, else last keyframe.
+
+        While a collinear run is being buffered, the emitted ``keyframes[-1]`` is
+        STALE (it is the pre-run keyframe — nothing has been appended for the
+        buffered segments yet). Any per-primitive classification that needs the
+        chassis's CURRENT logical pose (the translation / heading delta a new
+        primitive makes) must read it from the run tail, not ``keyframes[-1]``,
+        so a zero-motion record mid-run is not misread as a giant advance.
+        """
+        if run_segments:
+            return run_segments[-1].end_pose
+        last = keyframes[-1]
+        return (last["x"], last["y"], last["h"])
 
     def append_turn_keyframes(
         x_new: float,
@@ -899,7 +1590,9 @@ def build(trace: Trace, field_data) -> Track:
         keyframes.append({"t": t, "x": prev["x"], "y": prev["y"], "h": prev["h"]})
 
     def operator_advance_keyframe(
-        distance_cm: float, speed: Tuple[int, int, int, bool]
+        distance_cm: float,
+        speed: Tuple[int, int, int, bool],
+        rear_window_cm: Optional[float] = None,
     ) -> None:
         """Route a raw translation through ``sim.operator_move``, then densify it.
 
@@ -927,6 +1620,9 @@ def build(trace: Trace, field_data) -> Track:
         and densified off ``speed`` (the recorded move's resolved
         ``(cruise, start, end, profiled)``), so the raw excursion still animates;
         the growing offset is what the NEXT goto's return prologue corrects.
+        ``rear_window_cm`` (a recorded rear-led braked ``stopAtLine`` only —
+        :func:`_recorded_drive_rear_window`) threads the AC8 LineFollower
+        window-fit to the rendered profile.
         """
         cruise = speed[0]
         # Direction comes from exactly ONE channel — the resolved cruise sign
@@ -939,7 +1635,11 @@ def build(trace: Trace, field_data) -> Track:
         signed_cm = abs(distance_cm) if cruise >= 0 else -abs(distance_cm)
         sim.operator_move(signed_cm, turn_deg=0.0)
         append_drive_keyframes(
-            chassis.x_cm, chassis.y_cm, chassis.heading_deg, speed
+            chassis.x_cm,
+            chassis.y_cm,
+            chassis.heading_deg,
+            speed,
+            rear_window_cm=rear_window_cm,
         )
 
     def operator_turn_keyframe(turn_deg: float) -> None:
@@ -1058,6 +1758,11 @@ def build(trace: Trace, field_data) -> Track:
                         record = sim.find_pivot_turn(prev_node, cur_node, w)
                         if record is not None:
                             arced = True
+                            # A pivot is a run boundary: close any open collinear
+                            # run FIRST so the arc starts from the run's last
+                            # emitted keyframe (its snapshot pose), not a
+                            # still-buffered mid-run pose.
+                            flush_run()
                             # Parse the track width ONLY on the pivot path.
                             if track_cm is None:
                                 track_cm = parse_track_cm_from_config()
@@ -1133,25 +1838,115 @@ def build(trace: Trace, field_data) -> Track:
                         # is timed by the drive profile with the per-primitive-kind
                         # cruise. The LAST sub-keyframe is pinned to the snapshot
                         # pose byte-exact (boundary-pose invariant).
-                        prev_kf = keyframes[-1]
-                        step_dist = hypot(
-                            snap.x_cm - prev_kf["x"], snap.y_cm - prev_kf["y"]
-                        )
+                        #
+                        # A drive advance is BUFFERED into the open collinear run
+                        # (T3): a pass tag / follow leg CONTINUES the run, a braked
+                        # distance-gated stop ENDS it. The whole run is then
+                        # emitted as ONE trapezoid, so there is no intra-run dip.
+                        # A zero-motion record is transparent to the run: a
+                        # heading-only re-anchor (``ACT_HEADING_RESET``) has a
+                        # zero-magnitude turn that emits nothing and does NOT close
+                        # the run; a REAL in-place turn (a genuine heading change)
+                        # is a run boundary, so it flushes the run before its
+                        # rotation renders.
+                        # Classify against the RUN-TAIL pose (the buffered run's
+                        # end, or the last emitted keyframe when idle) — NOT the
+                        # stale ``keyframes[-1]`` — so a zero-motion record that
+                        # arrives mid-run (its snapshot equals the run tail) is
+                        # correctly seen as a no-op, not a giant advance back to
+                        # the pre-run keyframe.
+                        tail_x, tail_y, tail_h = run_tail_pose()
+                        step_dist = hypot(snap.x_cm - tail_x, snap.y_cm - tail_y)
                         if step_dist <= _TRANSLATION_EPS_CM:
-                            append_turn_keyframes(
-                                snap.x_cm, snap.y_cm, snap.heading_deg
-                            )
+                            # Zero-motion primitive. A real (above-tolerance)
+                            # heading change breaks the run (it is not collinear
+                            # across the turn); a heading-reset OR a sub-tolerance
+                            # alignment turn is TRANSPARENT. Gate on the SAME
+                            # NAV_TURN_TOLERANCE_DEG the sim uses to decide a
+                            # pass-through (``_should_pass_through`` in
+                            # runtime.py): the sim emits a tiny ``turn_relative``
+                            # (a few hundredths of a degree) to align onto each
+                            # next edge's exact heading between two NEAR-collinear
+                            # pass-through edges — a real field's nodes are never
+                            # perfectly axis-aligned. That turn is BELOW tolerance,
+                            # so the sim already passed through (a ``line_pass``,
+                            # NOT a braked stop); the grouper must agree and keep
+                            # the run open, or the whole-run trapezoid splits into
+                            # two ramps with a spurious dip at the pass-through node
+                            # (the exact stop-at-every-node lie this grouper
+                            # repairs). A hard 1e-9 threshold here re-introduced it
+                            # on the real field, which the perfectly-collinear toy
+                            # fixtures could not surface.
+                            turn_mag = abs(wrap_pm180(snap.heading_deg - tail_h))
+                            if turn_mag > NAV_TURN_TOLERANCE_DEG:
+                                # A real in-place turn: flush the open run FIRST so
+                                # ``append_turn_keyframes`` renders the rotation
+                                # from the run's last emitted keyframe, then emit
+                                # the turn.
+                                flush_run()
+                                append_turn_keyframes(
+                                    snap.x_cm, snap.y_cm, snap.heading_deg
+                                )
+                            # else: a heading-reset / no-op OR a sub-tolerance
+                            # pass-through alignment turn is fully transparent —
+                            # append NOTHING and leave the run open. Rendering a
+                            # turn here would interpolate position from the STALE
+                            # (pre-run) ``keyframes[-1]`` and forge a spurious
+                            # keyframe at the run-tail pose; the next follow leg's
+                            # snapshot pins the corrected heading byte-exact anyway.
                         else:
-                            append_drive_keyframes(
-                                snap.x_cm,
-                                snap.y_cm,
-                                snap.heading_deg,
-                                _primitive_drive_speed(tag),
-                            )
+                            # A CHAINED blind hop (ADR-059) rides its resolved
+                            # per-hop (start_pwm, end_pwm, chain) on the primitive
+                            # tuple — CTPS CONSUMES those recorded speeds for the
+                            # whole-run trapezoid, never re-deriving a chain
+                            # decision (AC11). A chained mid-hop passes the node
+                            # WITHOUT braking (end != 0); the run's FINAL chained
+                            # hop is the ordinary braked stop (end == 0), which
+                            # ends the run. A non-chain hop leaves ``chain_speeds``
+                            # None and takes the ordinary per-primitive-kind path
+                            # (AC12: a single hop is byte-unchanged).
+                            chain_suffix = _blind_chain_suffix(primitive)
+                            if chain_suffix is not None:
+                                start_pwm, end_pwm, _chain = chain_suffix
+                                braked = end_pwm == 0
+                                append_run_segment(
+                                    snap.x_cm,
+                                    snap.y_cm,
+                                    snap.heading_deg,
+                                    _primitive_drive_speed(tag),
+                                    braked,
+                                    chain_speeds=(start_pwm, end_pwm),
+                                )
+                            else:
+                                # A braked stop ends the run; a pass tag or a
+                                # mid-run follow leg (``ACT_FOLLOW_INT``) continues
+                                # it. A REAR-led stop tag additionally marks the
+                                # segment so ``flush_run`` fits the run's shed
+                                # into the rear overshoot window (AC8).
+                                braked = (
+                                    tag not in _PASS_TAGS
+                                    and tag not in _MID_RUN_CONTRIB_TAGS
+                                )
+                                append_run_segment(
+                                    snap.x_cm,
+                                    snap.y_cm,
+                                    snap.heading_deg,
+                                    _primitive_drive_speed(tag),
+                                    braked,
+                                    rear_led=tag in _REAR_LED_STOP_TAGS,
+                                )
                         if (
                             pending_pivot_land is not None
                             and node_now == pending_pivot_land[0]
                         ):
+                            # A pivot-departure landing correction rewrites this
+                            # primitive's landing keyframe, so the run must be
+                            # closed first (a pass-through landing would otherwise
+                            # still be buffered). Flushing here with the run's
+                            # accumulated cruise is safe: the departure edge is a
+                            # single hop, so the run holds exactly this one
+                            # segment.
+                            flush_run()
                             # The pivot's departure hop just landed on `w`.
                             if tag in _SENSOR_LANDING_TAGS:
                                 # Sensor-terminated departure (LINE-out / seek):
@@ -1187,6 +1982,12 @@ def build(trace: Trace, field_data) -> Track:
                                 chassis.y_cm = land_y
                             pending_pivot_land = None
             except UnreachableGoalError:
+                # Emit any buffered collinear run of the REACHABLE prefix before
+                # the fault so its keyframes are on the timeline (a partial run
+                # is a genuine braked stop at the dead end, NOT a malformed run).
+                # Non-strict (the default) so the unbraked reachable prefix does
+                # not trip the goto-end pass-without-braked-stop fallback warning.
+                flush_run()
                 # The fault point is the node the sim is parked at after any
                 # intermediate hops it managed before the dead end.
                 fault_from = sim.localization.current_node()
@@ -1209,6 +2010,9 @@ def build(trace: Trace, field_data) -> Track:
                 # BEST_EFFORT gate would instead have yielded a capped return
                 # that renders + marks ``return_to_node`` above. The chassis was
                 # not moved, so its residual off the node is reported for context.
+                # Non-strict (the default): a partial reachable prefix is
+                # legitimate, not a malformed run.
+                flush_run()
                 fault_from = sim.localization.current_node()
                 events.append(
                     {
@@ -1222,6 +2026,17 @@ def build(trace: Trace, field_data) -> Track:
                 )
                 # Stop processing further commands and end the track.
                 break
+
+            # The goto walk completed: flush the final open collinear run (its
+            # last hop is the goal's braked arrival, so any healthy goto leaves
+            # no run dangling across the goto boundary). This is also the
+            # boundary-safety net — no run ever spans two gotos. STRICT here: a
+            # healthy goto always ends braked, so a GROUPED unbraked run surviving
+            # to the goto boundary is a malformed trace (a pass tag with no
+            # following braked stop) → per-primitive fallback + UserWarning
+            # (AC11 / TC11). Interior boundary flushes above stay non-strict —
+            # an unbraked pass run ending at a turn/pivot is legitimate.
+            flush_run(strict=True)
 
             # A successful goto emits a `goto` SPAN event covering the whole
             # multi-hop move (`t_start` -> `t`, the running clock before/after
@@ -1289,8 +2104,12 @@ def build(trace: Trace, field_data) -> Track:
                     # Raw (recorded) move: resolve the effective (cruise, start,
                     # end, profiled) from the recorded builder knobs + Config
                     # defaults (sign-by-cruise start seed, no-brake -> endSpeed =
-                    # cruise), then densify the advance off that profile.
+                    # cruise), then densify the advance off that profile. A
+                    # rear-led braked stopAtLine additionally carries the REAR
+                    # overshoot window so the render fits its cruise -> floor
+                    # shed into it (AC8); every other recorded move keeps None.
                     speed = resolve_effective_speed(cmd, method)
+                    rear_window = _recorded_drive_rear_window(cmd, speed)
                     if _honors_gyro_heading(cmd):
                         # GYRO + explicit heading → two-phase render: first
                         # rotate in place to the held heading (a raw turn through
@@ -1305,11 +2124,15 @@ def build(trace: Trace, field_data) -> Track:
                         operator_turn_keyframe(
                             wrap_pm180(float(cmd.heading) - chassis.heading_deg)
                         )
-                        operator_advance_keyframe(float(cmd.cm), speed)
+                        operator_advance_keyframe(
+                            float(cmd.cm), speed, rear_window_cm=rear_window
+                        )
                     else:
                         # Plain advance along the CURRENT facing (non-gyro, or no
                         # heading, or lineFollowDist).
-                        operator_advance_keyframe(float(cmd.cm), speed)
+                        operator_advance_keyframe(
+                            float(cmd.cm), speed, rear_window_cm=rear_window
+                        )
             elif method == "turnDeg":
                 # Raw relative turn: the signed delta IS the ``turnDeg`` argument.
                 if cmd.deg is None:

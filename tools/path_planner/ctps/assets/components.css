@@ -861,6 +861,12 @@
  * is invisible. */
 .ctps-tl-viewport {
     scrollbar-width: none;
+    /* Drag-to-scrub (timeline.js wireScrub) sweeps the pointer across the lane
+     * spans, ruler ticks and gutter labels living in this viewport; without
+     * this a scrub drag would text-select those labels instead. -webkit- for
+     * Safari on the macOS teammates' machines. */
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 .ctps-tl-viewport::-webkit-scrollbar {

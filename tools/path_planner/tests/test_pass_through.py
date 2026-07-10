@@ -338,7 +338,16 @@ def test_tc6_collinear_line_to_blind():
     Expected sequence from A to C:
         (ACT_FOLLOW_INT, None)
         (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM)  ← B (collinear into BLIND)
-        (ACT_FORWARD, 50.0)
+        (ACT_FORWARD, 50.0, <captured cruise>, 0, False)
+
+    ADR-023/ADR-059: the LINE pass-through at B keeps the follower live at
+    cruise across the node (the ADR-023 LINE→BLIND cruise carry), so the B→C
+    blind hop is PASS-THROUGH-SEEDED — its velocity plan starts at the CAPTURED
+    cruise (SPEED_NORMAL), not the cold-start TSHAPE_START_SPEED floor. It is a
+    SINGLE blind hop (C is the goal), so it does NOT form a chain (chain=False),
+    but the pass-through seed rides the ACT tuple as the resolved
+    (start_pwm, end_pwm, chain) suffix — mirroring the firmware's
+    `_passThrough ? presetToPwm(getPreset()) : TSHAPE_START_SPEED` start.
     """
     nodes = {
         "A": (0.0, 0.0),
@@ -356,9 +365,11 @@ def test_tc6_collinear_line_to_blind():
     assert prims == [
         (ACT_FOLLOW_INT, None),
         (ACT_LINE_PASS, LINE_SENSOR_AXLE_OFFSET_CM),
-        (ACT_FORWARD, 50.0),
+        # Pass-through-seeded lone blind hop: start = captured cruise
+        # (SPEED_NORMAL), braked end 0, chain False.
+        (ACT_FORWARD, 50.0, _runtime.SPEED_NORMAL, 0, False),
     ]
-    act_tags = [tag for tag, _ in prims]
+    act_tags = [prim[0] for prim in prims]
     assert ACT_TURN_REL not in act_tags
     assert sim.localization.current_node() == "C"
 
@@ -569,6 +580,80 @@ def test_tc14c_line_board_count_config_parity():
     assert _runtime.LINE_BOARD_COUNT == config_value, (
         f"runtime.LINE_BOARD_COUNT ({_runtime.LINE_BOARD_COUNT}) "
         f"!= ConfigLine.h ({config_value})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ADR-059 — parity: the three blind-chain Config knobs in runtime.py match
+# ConfigNav.h via regex grep (same idiom as PATH_PASS_THROUGH_ENABLED / TC14).
+# Each knob is `#ifndef`-guarded so a host test can flip the default at compile
+# time; the `#define <KNOB>_DEFAULT <value>` line is the source of truth (the
+# `constexpr` just propagates it to the public symbol), so the regexes anchor on
+# the `#define` exactly as `test_tc9_path_pass_through_enabled_parity` does.
+# ---------------------------------------------------------------------------
+
+_BLIND_CHAIN_ENABLED_RE = re.compile(
+    r"#define\s+PATH_BLIND_CHAIN_ENABLED_DEFAULT\s+(true|false)",
+    re.MULTILINE,
+)
+_BLIND_CHAIN_MAX_CM_RE = re.compile(
+    r"#define\s+PATH_BLIND_CHAIN_MAX_CM_DEFAULT\s+([0-9]*\.?[0-9]+)f?",
+    re.MULTILINE,
+)
+_MAX_CHAIN_HOPS_RE = re.compile(
+    r"#define\s+MAX_CHAIN_HOPS_DEFAULT\s+([0-9]+)",
+    re.MULTILINE,
+)
+
+
+def test_adr059_path_blind_chain_enabled_parity():
+    """ADR-059: PATH_BLIND_CHAIN_ENABLED in runtime.py matches ConfigNav.h."""
+    assert _CONFIG_NAV_H.exists(), f"ConfigNav.h not found at {_CONFIG_NAV_H}."
+    text = _CONFIG_NAV_H.read_text(encoding="utf-8")
+    match = _BLIND_CHAIN_ENABLED_RE.search(text)
+    assert match is not None, (
+        "Could not find '#define PATH_BLIND_CHAIN_ENABLED_DEFAULT <bool>' in "
+        "ConfigNav.h"
+    )
+    config_value: bool = match.group(1) == "true"
+    assert _runtime.PATH_BLIND_CHAIN_ENABLED == config_value, (
+        f"runtime.PATH_BLIND_CHAIN_ENABLED ({_runtime.PATH_BLIND_CHAIN_ENABLED}) "
+        f"!= ConfigNav.h ({config_value})"
+    )
+
+
+def test_adr059_path_blind_chain_max_cm_parity():
+    """ADR-059: PATH_BLIND_CHAIN_MAX_CM in runtime.py matches ConfigNav.h.
+
+    The owner decision (2026-07) set this to a loose 1000.0 (10 m) runaway guard;
+    the sim mirror must track THAT value (not the old arm-window-derived one).
+    """
+    assert _CONFIG_NAV_H.exists(), f"ConfigNav.h not found at {_CONFIG_NAV_H}."
+    text = _CONFIG_NAV_H.read_text(encoding="utf-8")
+    match = _BLIND_CHAIN_MAX_CM_RE.search(text)
+    assert match is not None, (
+        "Could not find '#define PATH_BLIND_CHAIN_MAX_CM_DEFAULT <float>' in "
+        "ConfigNav.h"
+    )
+    config_value = float(match.group(1))
+    assert _runtime.PATH_BLIND_CHAIN_MAX_CM == pytest.approx(config_value, abs=1e-9), (
+        f"runtime.PATH_BLIND_CHAIN_MAX_CM ({_runtime.PATH_BLIND_CHAIN_MAX_CM}) "
+        f"!= ConfigNav.h ({config_value})"
+    )
+
+
+def test_adr059_max_chain_hops_parity():
+    """ADR-059: MAX_CHAIN_HOPS in runtime.py matches ConfigNav.h."""
+    assert _CONFIG_NAV_H.exists(), f"ConfigNav.h not found at {_CONFIG_NAV_H}."
+    text = _CONFIG_NAV_H.read_text(encoding="utf-8")
+    match = _MAX_CHAIN_HOPS_RE.search(text)
+    assert match is not None, (
+        "Could not find '#define MAX_CHAIN_HOPS_DEFAULT <uint>' in ConfigNav.h"
+    )
+    config_value = int(match.group(1))
+    assert _runtime.MAX_CHAIN_HOPS == config_value, (
+        f"runtime.MAX_CHAIN_HOPS ({_runtime.MAX_CHAIN_HOPS}) "
+        f"!= ConfigNav.h ({config_value})"
     )
 
 

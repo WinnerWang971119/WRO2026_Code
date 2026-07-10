@@ -157,6 +157,7 @@ class ProfileConfig:
     turn_slow_zone_deg: float  # TURN_SLOW_ZONE_DEG (final-angle slow band)
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
+    rear_axle_offset_cm: float  # LINE_SENSOR_AXLE_OFFSET_REAR_CM (REAR overshoot window)
 
 
 def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileConfig:
@@ -171,8 +172,9 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
     Constants are distributed across three headers:
 
     - ``ConfigDrive.h`` (``config_path``): the ``TSHAPE_*`` / ``TURN_*`` /
-      ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, plus the symbolic
-      ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
+      ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, the
+      ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` rear overshoot window (AC8 window-fit),
+      plus the symbolic ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
     - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` / ``PWM_MAX``.
     - ``ConfigLine.h``: ``CRUISE_SPEED = SPEED_NORMAL`` (symbolic).
 
@@ -220,6 +222,9 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         turn_slow_zone_deg=parse_config_float("TURN_SLOW_ZONE_DEG", config_path),
         wall_push_pwm=parse_config_int("WALL_STOP_PUSH_PWM", config_path, search),
         track_cm=parse_track_cm_from_config(config_path),
+        rear_axle_offset_cm=parse_config_float(
+            "LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path
+        ),
     )
 
 
@@ -787,6 +792,7 @@ def resolve_drive_profile(
     start_pwm: int,
     end_pwm: int,
     profiled: bool,
+    rear_window_cm: Optional[float] = None,
     cfg: Optional[ProfileConfig] = None,
 ) -> DriveProfile:
     """Resolve a Config-wired drive move into a :class:`DriveProfile`.
@@ -819,11 +825,34 @@ def resolve_drive_profile(
     the pre-snap PWM magnitude first drops to ``pwm_min``. From that point to
     ``dist_cm`` the chassis crawls at the floor, then brakes.
 
+    LineFollower window-fit (AC8 / TC9)
+    -----------------------------------
+    A braked stop sheds ``peak -> PWM_MIN_MAGNITUDE`` (the floor) then brakes; the
+    natural shed distance is ``(|peak| - floor) / accel`` (8 cm at FAST cruise 90).
+    A REAR-led final hop only has ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` (~7.68 cm) of
+    overshoot window, so the firmware FITS the ramp-down to the window
+    (``LineFollower.cpp:287-301``: ``rampDownCm = min(defaultRampCm, window)``) — a
+    STEEPER ramp that still reaches the floor before the brake, rather than an
+    unfitted 8 cm shed that would overrun. When ``rear_window_cm`` is given AND the
+    natural above-floor shed exceeds it, this reshapes the display decel to that
+    window-fitted shed: the ``peak -> floor`` descent occupies exactly
+    ``rear_window_cm`` ending AT the gate (``floor_crossing_cm == dist_cm``, no
+    floor-crawl tail), so the render shows the steeper-but-reaches-floor shed
+    (AC8). This is a RENDER-only reshape of the display phase boundaries — the
+    golden-pinned ``resolve_tshape_ramps`` kernel is untouched — and it fires only
+    for a braked stop (``end_pwm == 0``); it is NOT a build-failing assert (the
+    firmware degrades gracefully, so CTPS mirrors that degradation).
+
     :param dist_cm: total travel distance (cm).
     :param cruise_pwm: signed cruise PWM (sign = direction).
     :param start_pwm: signed PWM at move start.
     :param end_pwm: signed PWM at move end.
     :param profiled: ``True`` for a ``.tShape()`` move, ``False`` for ``.flat()``.
+    :param rear_window_cm: when set (a REAR-led braked final hop), the available
+        rear overshoot window (cm) the ``peak -> floor`` shed is FITTED to; the
+        shed is compressed to a steeper ramp reaching the floor at the gate when
+        the natural shed would exceed it. ``None`` (the default, a FRONT-led or
+        non-stop move) leaves the natural shed + floor-crawl tail.
     :param cfg: parsed Config; defaults to :func:`default_config`.
     :return: the resolved :class:`DriveProfile`.
     """
@@ -893,11 +922,37 @@ def resolve_drive_profile(
     if floor_tail_cm < 0.0:
         floor_tail_cm = 0.0
 
+    eff_end_pwm = int(end_pwm)
+
+    # LineFollower window-fit (AC8 / TC9). A REAR-led braked final hop only has
+    # ``rear_window_cm`` of overshoot room; when the natural ``peak -> floor`` shed
+    # would exceed it, the firmware fits the ramp-down to the window (steeper ramp,
+    # reaches floor AT the gate, no crawl tail). Reshape the DISPLAY decel to that
+    # window-fitted shed. Render-only: the golden kernel above is untouched.
+    if rear_window_cm is not None and int(end_pwm) == 0:
+        (
+            decel_cm,
+            cruise_cm,
+            floor_crossing_cm,
+            floor_tail_cm,
+            eff_end_pwm,
+        ) = _window_fit_stop(
+            dist,
+            accel_cm,
+            decel_cm,
+            cruise_cm,
+            peak_pwm,
+            floor_crossing_cm,
+            floor_tail_cm,
+            float(rear_window_cm),
+            cfg.pwm_min,
+        )
+
     return DriveProfile(
         dist_cm=dist,
         cruise_pwm=int(cruise_pwm),
         start_pwm=int(start_pwm),
-        end_pwm=int(end_pwm),
+        end_pwm=eff_end_pwm,
         profiled=True,
         accel_cm=accel_cm,
         cruise_cm=cruise_cm,
@@ -908,6 +963,74 @@ def resolve_drive_profile(
         triangular=triangular,
         _cfg=cfg,
     )
+
+
+def _window_fit_stop(
+    dist_cm: float,
+    accel_cm: float,
+    decel_cm: float,
+    cruise_cm: float,
+    peak_pwm: int,
+    floor_crossing_cm: float,
+    floor_tail_cm: float,
+    rear_window_cm: float,
+    pwm_min: int,
+) -> Tuple[float, float, float, float, int]:
+    """Reshape a braked stop's display decel to the LineFollower window-fit (AC8).
+
+    Mirrors ``LineFollower.cpp:287-301`` in the DISPLAY layer: a REAR-led braked
+    final hop sheds ``peak -> floor`` over the LAST ``rear_window_cm`` before the
+    distance gate, reaching the floor AT the gate then braking — no floor-crawl
+    tail. When the natural above-floor shed (the ``peak -> floor`` portion of the
+    resolved decel ramp) already fits inside ``rear_window_cm``, the passed-in
+    natural values are returned UNCHANGED (the firmware's ``min(defaultRampCm,
+    window)`` picks the smaller natural shed, and ``end_pwm`` stays the 0-brake).
+    When the natural shed OVERRUNS the window, the shed is compressed to
+    ``rear_window_cm`` (a steeper ramp), the floor-crossing is pinned to the gate,
+    the crawl tail is dropped, and the display ``end_pwm`` is set to the
+    sign-corrected floor so the decel display segment ramps ``peak -> floor`` (not
+    to 0) and lands at floor speed at the gate, matching the firmware ramp-down.
+
+    :param dist_cm: total move distance (cm).
+    :param accel_cm: the resolved ramp-up distance (unchanged by the fit).
+    :param decel_cm: the resolved natural decel-ramp distance (``peak -> 0``).
+    :param cruise_cm: the resolved natural cruise-plateau distance.
+    :param peak_pwm: signed peak PWM (its sign carries the run direction).
+    :param floor_crossing_cm: the resolved natural floor-crossing distance.
+    :param floor_tail_cm: the resolved natural floor-crawl tail length.
+    :param rear_window_cm: the available rear overshoot window (cm); non-positive
+        or larger-than-natural leaves the shed unchanged.
+    :param pwm_min: the deadband floor magnitude.
+    :return: ``(decel_cm, cruise_cm, floor_crossing_cm, floor_tail_cm,
+        eff_end_pwm)`` — the reshaped display fields; identical to the passed-in
+        natural values (with ``eff_end_pwm == 0``) when no fit is needed.
+    """
+    peak_mag = abs(int(peak_pwm))
+    floor = float(pwm_min)
+
+    # The natural above-floor shed (peak -> floor) of the resolved decel ramp: the
+    # fraction of the peak->0 ramp spent above the floor. A peak already at/below
+    # the floor has no shed to fit.
+    if decel_cm <= 0.0 or peak_mag <= floor:
+        natural_shed = 0.0
+    else:
+        natural_shed = decel_cm * (peak_mag - floor) / peak_mag
+
+    # Not binding: window >= natural shed, or degenerate. Return the natural values
+    # unchanged (a braked stop keeps end_pwm == 0 + its floor-crawl tail).
+    if rear_window_cm <= 0.0 or natural_shed <= rear_window_cm:
+        return decel_cm, cruise_cm, floor_crossing_cm, floor_tail_cm, 0
+
+    # Overrun: compress the shed to the window. The steeper ramp reaches the floor
+    # AT the gate; there is no crawl tail. The decel now spans exactly the window.
+    fitted_decel = rear_window_cm
+    fitted_cruise_cm = dist_cm - accel_cm - fitted_decel
+    if fitted_cruise_cm < 0.0:
+        fitted_cruise_cm = 0.0
+    # End at the floor (sign-corrected) so the display decel ramps peak -> floor
+    # and lands at floor speed at the gate, then brakes.
+    eff_end_pwm = -int(pwm_min) if peak_pwm < 0 else int(pwm_min)
+    return fitted_decel, fitted_cruise_cm, dist_cm, 0.0, eff_end_pwm
 
 
 def _decel_floor_crossing(
@@ -1244,6 +1367,149 @@ def sample_drive(
     # floor-crawl end == end_pose already at the total duration, so no extra
     # keyframe is needed — the pose keyframe at s == dist IS the brake point. The
     # non-decreasing-timestamp contract holds because time_at is monotonic.
+    return _enforce_non_decreasing(keyframes)
+
+
+def sample_drive_run(
+    profile: DriveProfile,
+    segments: List[Tuple[Tuple[float, float, float], Tuple[float, float, float], float]],
+    t0: float,
+) -> List[List[Dict[str, Any]]]:
+    """Slice ONE run :class:`DriveProfile` into per-segment sub-keyframe lists.
+
+    The CTPS run-grouper (``track_builder``) merges a whole collinear
+    pass-through run (a chain of geometry primitives bounded by braked stops)
+    into a SINGLE velocity profile over the run's summed chord distance, so the
+    render is one ramp-up / cruise / ramp-down trapezoid instead of a per-node
+    dip-and-stop. This function is the slicer: it evaluates that single
+    ``profile`` at each segment's cumulative-distance window and returns, per
+    segment, the dense sub-keyframes whose timestamps follow the ONE run profile
+    (never re-ramping mid-run) and whose LAST sub-keyframe pins that segment's
+    end pose byte-exact (the TC7 pose-pin invariant — only the velocity curve
+    BETWEEN pose boundaries changes, never where the chassis is at each node).
+
+    Each ``segments`` entry is ``(start_pose, end_pose, seg_dist_cm)``:
+
+    * ``start_pose`` / ``end_pose`` — the ``(x, y, heading_deg)`` at the segment
+      boundaries (the previous keyframe's pose and this primitive's sim-snapshot
+      pose). Poses are interpolated along THIS segment's own chord
+      (``start_pose -> end_pose``), NOT the whole run's chord, so a run whose
+      segments are only near-collinear still pins every snapshot pose exactly.
+    * ``seg_dist_cm`` — the segment's own chord length; the cumulative sum over
+      the segments equals ``profile.dist_cm`` (the caller builds ``profile`` over
+      exactly that sum).
+
+    The returned list is parallel to ``segments`` (one sub-keyframe list each).
+    As with :func:`sample_drive`, the FIRST sub-keyframe of the FIRST segment
+    duplicates the caller's previous keyframe (same ``t0`` + pose) and is DROPPED
+    here, so each returned list is the REPLACEMENT run for its geometry step — an
+    empty list for a zero-length segment. Timestamps are non-decreasing and
+    profile-derived (dense near the single run's ramps).
+
+    :param profile: the resolved :class:`DriveProfile` for the WHOLE run (its
+        ``dist_cm`` equals the sum of the ``seg_dist_cm`` values).
+    :param segments: the ordered per-segment ``(start_pose, end_pose, seg_dist_cm)``
+        boundaries, summing to ``profile.dist_cm``.
+    :param t0: timestamp of the run-start keyframe (the running clock before the
+        first segment).
+    :return: a list parallel to ``segments``; entry ``k`` is the replacement
+        sub-keyframes for segment ``k`` (first-of-run duplicate dropped).
+    """
+    if not segments:
+        return []
+
+    total = profile.dist_cm
+    time_at = _cumulative_time_fn(profile)
+
+    out: List[List[Dict[str, Any]]] = []
+    s_lo = 0.0
+    for (start_pose, end_pose, seg_dist) in segments:
+        seg = max(0.0, float(seg_dist))
+        s_hi = s_lo + seg
+        # Clamp the top of the LAST segment to the profile's own distance so
+        # float accumulation cannot push the final window past dist_cm (which
+        # would clip its terminal brake keyframe).
+        if s_hi > total:
+            s_hi = total
+
+        sub = _sample_run_segment(
+            profile, start_pose, end_pose, s_lo, s_hi, t0, time_at
+        )
+        # Drop each segment's LEADING boundary keyframe: for the first segment it
+        # duplicates the caller's previous keyframe (same t0 + pose); for every
+        # subsequent segment it duplicates the PRIOR segment's last sub-keyframe
+        # (the shared node boundary is sampled once per adjacent window). Keeping
+        # it would leave a zero-length duplicate keyframe at each interior node —
+        # cosmetically a "stop"-looking pair even though velocity holds cruise.
+        # The segment's END pose (``sub[-1]``) is preserved, so every node pose
+        # still byte-pins (TC7).
+        out.append(sub[1:])
+        s_lo = s_hi
+
+    return out
+
+
+def _sample_run_segment(
+    profile: DriveProfile,
+    start_pose: Tuple[float, float, float],
+    end_pose: Tuple[float, float, float],
+    s_lo: float,
+    s_hi: float,
+    t0: float,
+    time_at,
+) -> List[Dict[str, Any]]:
+    """Sample ONE run segment's window ``[s_lo, s_hi]`` of a shared profile.
+
+    Mirrors :func:`sample_drive`'s densification, but over a sub-window of the
+    run profile: sample distances are the profile phase boundaries plus interior
+    ramp samples that fall inside ``[s_lo, s_hi]`` (so a segment that straddles a
+    ramp still tracks the curve), each mapped to its cumulative run time via
+    ``time_at`` and to a pose LERPed along this segment's own chord by the
+    fraction into the segment. The first sample is pinned to ``start_pose`` and
+    the last to ``end_pose`` byte-exact.
+
+    :param profile: the shared run :class:`DriveProfile`.
+    :param start_pose: ``(x, y, heading_deg)`` at ``s_lo`` (segment start).
+    :param end_pose: ``(x, y, heading_deg)`` at ``s_hi`` (segment end / snapshot).
+    :param s_lo: window start distance along the run (cm).
+    :param s_hi: window end distance along the run (cm).
+    :param t0: run-start clock (the profile times are relative to this).
+    :param time_at: the run profile's ``s -> cumulative time`` closure.
+    :return: an ordered keyframe list whose first pose is ``start_pose`` and last
+        pose is ``end_pose``; a zero-length window yields a single keyframe.
+    """
+    x0, y0, h0 = start_pose
+    x1, y1, h1 = end_pose
+    dh = _shortest_arc(h0, h1)
+
+    seg_len = s_hi - s_lo
+    if seg_len <= 0.0:
+        # Zero-length window: a single keyframe at the (equal) boundary pose.
+        return [_pose_kf(t0 + time_at(s_lo), x0, y0, h0)]
+
+    # Ordered run sample distances that fall inside this window, plus the window
+    # endpoints. Reuse the whole-run boundary/ramp sampler then filter — this
+    # keeps the interior spacing (RAMP_SAMPLE_STEP_CM / ceiling) identical to the
+    # per-primitive path a single-segment run would take.
+    run_distances = _drive_sample_distances(profile)
+    distances = {s_lo, s_hi}
+    for d in run_distances:
+        if s_lo < d < s_hi:
+            distances.add(d)
+    ordered = sorted(distances)
+
+    keyframes: List[Dict[str, Any]] = []
+    for s in ordered:
+        frac = (s - s_lo) / seg_len
+        x = x0 + (x1 - x0) * frac
+        y = y0 + (y1 - y0) * frac
+        h = (h0 + dh * frac) % 360.0
+        keyframes.append(_pose_kf(t0 + time_at(s), x, y, h))
+
+    # Pin the segment endpoints byte-exact so the run's per-node poses match the
+    # sim snapshots (TC7) even under float lerp drift at the window edges.
+    keyframes[0] = _pose_kf(keyframes[0]["t"], x0, y0, h0)
+    keyframes[-1] = _pose_kf(keyframes[-1]["t"], x1, y1, h1)
     return _enforce_non_decreasing(keyframes)
 
 
@@ -1713,6 +1979,7 @@ __all__ = [
     "resolve_drive_profile",
     "resolve_turn_profile",
     "sample_drive",
+    "sample_drive_run",
     "sample_turn",
     "resolve_effective_speed",
 ]

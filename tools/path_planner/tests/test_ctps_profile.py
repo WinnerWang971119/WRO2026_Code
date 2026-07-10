@@ -37,6 +37,16 @@ Covered cases:
   ``.setPower`` keeps the sign: cruise resolves negative and the start seed
   follows sign-by-cruise (a reverse ramp), NOT ``abs()``-ed to forward. A
   positive power still resolves forward (no regression).
+* **TC9** (ADR-059 / collinear-run, AC8) — the LineFollower window-fit in the
+  stop kernel: a FAST (cruise 90) + REAR-led braked final hop whose natural
+  ``peak -> floor`` shed (8 cm) OVERRUNS the rear overshoot window
+  (``rear_axle_offset_cm`` ~= 7.68 cm) renders the WINDOW-FITTED shed — a
+  steeper decel that reaches the floor AT the gate (``decel_cm <= window``,
+  ``floor_crossing_cm == dist``, ``floor_tail_cm == 0``, ``|end_pwm| ==
+  PWM_MIN``). A FRONT-window control (12.02 cm) does NOT bind that 8 cm shed, so
+  the natural stop is unchanged (``floor_tail_cm > 0``, ``end_pwm == 0``). No
+  build-failing assert — a render requirement only (the firmware degrades
+  gracefully).
 """
 
 from __future__ import annotations
@@ -52,6 +62,7 @@ import pytest
 from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH
 from tools.path_planner.ctps.profile import (
     ProfileConfig,
+    default_config,
     load_profile_config,
     resolve_drive_profile,
     resolve_effective_speed,
@@ -747,3 +758,136 @@ def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path)
     fast_rate = max(rates)
     slow_rate = min(rates)
     assert fast_rate / slow_rate == pytest.approx(80.0 / 50.0, rel=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# TC9 (ADR-059 / collinear-run, AC8) — LineFollower window-fit in the stop kernel
+# ---------------------------------------------------------------------------
+#
+# The plan's AC8: a FAST (cruise 90) + REAR-led braked FINAL hop sheds
+# `peak -> PWM_MIN` (the floor) over `(90 - 50) / accel = 8 cm`, but a REAR-led
+# stop has only `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (~7.68 cm) of overshoot window.
+# The firmware fits the ramp-down to that window (`LineFollower.cpp:287-301`,
+# `rampDownCm = min(default, window)` — a STEEPER shed that still reaches the
+# floor before the brake), and `profile.py`'s stop kernel MODELS that fit rather
+# than rendering an unfitted 8 cm floor-crawl tail the robot never drives. This
+# is a RENDER requirement (AC8: "NOT a build-failing static_assert"), pinned here
+# so a future refactor of `resolve_drive_profile` cannot silently re-break it.
+#
+# The rear window / front window / accel are SOURCED from the parsed config
+# (`default_config().rear_axle_offset_cm`, not a literal — plan note), so a
+# firmware retune of the offset stays consistent with this test.
+
+
+#: A distance comfortably above `min_move_cm` and long enough for a full
+#: trapezoid (a genuine cruise plateau + both ramps) at FAST cruise, so the
+#: decel ramp is the natural `peak -> 0` shed the window-fit reshapes.
+_AC8_STOP_DIST_CM: float = 40.0
+
+
+def test_tc9_ac8_rear_window_fit_compresses_shed_to_window() -> None:
+    """TC9 / AC8: a FAST + REAR-led final hop renders the window-fitted shed.
+
+    ``resolve_drive_profile(dist, cruise=90 (FAST), start=50, end=0,
+    profiled=True, rear_window_cm=rear_axle_offset_cm)`` must model the
+    LineFollower window-fit: the natural ``peak -> floor`` shed (8 cm at cruise
+    90) OVERRUNS the ~7.68 cm rear window, so the display decel is compressed to
+    the window — a steeper ramp that reaches the floor AT the distance gate.
+
+    Pins the four AC8 post-conditions:
+
+    * ``decel_cm <= rear_window`` — the shed fits inside the window,
+    * ``floor_crossing_cm == dist`` — it reaches the floor exactly at the gate,
+    * ``floor_tail_cm == 0`` — no floor-crawl tail past the gate,
+    * ``abs(end_pwm) == PWM_MIN`` — the display decel lands at floor speed (not
+      0) at the gate, then brakes (the firmware ramp-down shape).
+    """
+    cfg = default_config()
+    fast = cfg.speed_fast
+    pwm_min = cfg.pwm_min
+    rear_window = float(cfg.rear_axle_offset_cm)
+
+    # Precondition: FAST is the AC8 preset and the natural shed genuinely
+    # overruns the rear window (else the fit would be a no-op and the test
+    # vacuous). Natural above-floor shed = (|peak| - floor) / accel.
+    assert fast == 90
+    natural_shed = (fast - pwm_min) / cfg.accel
+    assert natural_shed > rear_window, (
+        f"natural shed {natural_shed} cm must overrun the rear window "
+        f"{rear_window} cm for this test to bind"
+    )
+
+    profile = resolve_drive_profile(
+        _AC8_STOP_DIST_CM,
+        cruise_pwm=fast,
+        start_pwm=pwm_min,
+        end_pwm=0,
+        profiled=True,
+        rear_window_cm=rear_window,
+    )
+
+    # The shed is compressed to the rear window and reaches the floor AT the gate.
+    assert profile.decel_cm <= rear_window + 1e-6
+    assert profile.decel_cm == pytest.approx(rear_window, abs=1e-6)
+    assert profile.floor_crossing_cm == pytest.approx(profile.dist_cm, abs=1e-6)
+    assert profile.floor_tail_cm == pytest.approx(0.0, abs=1e-6)
+    # The display decel ramps peak -> floor (not to 0), so it lands at floor speed
+    # at the gate before the instantaneous brake.
+    assert abs(profile.end_pwm) == pwm_min
+
+
+def test_tc9_ac8_front_window_does_not_bind_natural_stop_unchanged() -> None:
+    """TC9 / AC8: the FRONT window (12.02) does NOT bind the FAST shed.
+
+    The FRONT overshoot window (``LINE_SENSOR_AXLE_OFFSET_CM`` ~= 12.02 cm) is
+    wider than the 8 cm natural FAST shed, so a front-led-window resolve leaves
+    the natural stop UNCHANGED — a floor-crawl tail survives
+    (``floor_tail_cm > 0``) and the display ``end_pwm`` stays the 0-brake. This
+    is the control proving the window-fit only fires when the window actually
+    binds (the AC8 requirement is a fit, not an unconditional reshape).
+    """
+    from tools.path_planner.config_parse import (
+        DEFAULT_CONFIG_H_PATH,
+        parse_config_float,
+    )
+
+    cfg = default_config()
+    fast = cfg.speed_fast
+    pwm_min = cfg.pwm_min
+    front_window = parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", DEFAULT_CONFIG_H_PATH)
+
+    # Precondition: the front window is WIDER than the natural FAST shed (so it
+    # cannot bind) — the mirror image of the rear-window precondition above.
+    natural_shed = (fast - pwm_min) / cfg.accel
+    assert front_window > natural_shed, (
+        f"front window {front_window} cm must exceed the natural shed "
+        f"{natural_shed} cm for this control to be meaningful"
+    )
+
+    profile = resolve_drive_profile(
+        _AC8_STOP_DIST_CM,
+        cruise_pwm=fast,
+        start_pwm=pwm_min,
+        end_pwm=0,
+        profiled=True,
+        rear_window_cm=front_window,
+    )
+
+    # Not binding: the natural stop is unchanged — a floor-crawl tail survives
+    # and the display end_pwm stays the 0-brake (no reshape to the floor).
+    assert profile.floor_tail_cm > 0.0
+    assert profile.end_pwm == 0
+
+    # Cross-check: an unfitted resolve (rear_window_cm=None) produces the SAME
+    # natural stop — the wide front window changed nothing.
+    natural = resolve_drive_profile(
+        _AC8_STOP_DIST_CM,
+        cruise_pwm=fast,
+        start_pwm=pwm_min,
+        end_pwm=0,
+        profiled=True,
+        rear_window_cm=None,
+    )
+    assert profile.decel_cm == pytest.approx(natural.decel_cm, abs=1e-6)
+    assert profile.floor_tail_cm == pytest.approx(natural.floor_tail_cm, abs=1e-6)
+    assert profile.end_pwm == natural.end_pwm

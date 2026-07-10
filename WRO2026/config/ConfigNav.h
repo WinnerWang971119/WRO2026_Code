@@ -529,6 +529,121 @@ namespace Config
                   "of the rear contact face, so the margin subtracted in reanchorAtWall is "
                   "strictly positive; zero or negative would place belief on or past the wall.");
 
+    // ---------------------------------------------------------------------------------------
+    // Blind-chain continuous motion (ADR-059) — consumed by `PathTracker`'s walk-ahead +
+    // `ChainSpeedPolicy.h`; mirrored in `tools/path_planner/sim/runtime.py` for parity.
+    //
+    // COUPLED SITES (all three constants below):
+    //   - `PathTracker`'s walk-ahead chain builder (decides how many hops to fold into one
+    //     chained run and where the run buffer is sized).
+    //   - `ChainSpeedPolicy.h`'s forward/backward two-pass resolver (the `entryPwm` seed and
+    //     the per-hop `(startPwm, endPwm)` it emits assume the run stays inside these caps).
+    //   - `tools/path_planner/sim/runtime.py` (hand-mirrored copies of all three; a regex-grep
+    //     parity test verifies they match this header — same idiom as `PATH_PASS_THROUGH_ENABLED`
+    //     above).
+    // ---------------------------------------------------------------------------------------
+
+    /**
+     * @brief Master kill-switch for blind-node continuous-motion chaining.
+     *
+     * When `true` (default), `PathTracker` walks ahead across consecutive collinear BLIND
+     * hops and dispatches them as one chained run — `setStartSpeed`/`setEndSpeed` +
+     * `setBrake(false)` on every hop but the last — instead of braking to rest at each
+     * intermediate node. When `false`, PathTracker reverts to today's behavior: every blind
+     * hop is its own braked stop-and-go move, regardless of collinearity.
+     *
+     * @note Rollback knob: flip to `false` if blind chaining regresses on hardware (e.g. the
+     *       inter-hop boundary-carry subtraction under-corrects and the chain drifts off-node
+     *       over N hops). This is the single flag that restores the pre-ADR-059 behavior.
+     * @note Consumer: `PathTracker`'s walk-ahead chain builder (ADR-059).
+     * @note The Python sim (`tools/path_planner/sim/runtime.py`) hand-mirrors this constant.
+     *       A pytest verifies parity via regex grep on this header (same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above).
+     * @note **Compile-time override:** guarded by `#ifndef PATH_BLIND_CHAIN_ENABLED_DEFAULT`
+     *       so a host test can flip it target-wide via
+     *       `-DPATH_BLIND_CHAIN_ENABLED_DEFAULT=false` without editing this file — same idiom
+     *       as `PATH_PASS_THROUGH_ENABLED_DEFAULT` above.
+     * @warning Changing the default here changes on-hardware behavior for every mission that
+     *          contains a collinear blind run. Re-verify AC7 (TC5: chaining disabled stops at
+     *          every node) before shipping a default flip.
+     */
+#ifndef PATH_BLIND_CHAIN_ENABLED_DEFAULT
+#define PATH_BLIND_CHAIN_ENABLED_DEFAULT true
+#endif
+    constexpr bool PATH_BLIND_CHAIN_ENABLED = PATH_BLIND_CHAIN_ENABLED_DEFAULT;
+
+    /**
+     * @brief Maximum total run distance (cm) a blind chain may span before it is forced to
+     *        end (that hop brakes; a fresh chain re-forms after).
+     *
+     * Bounds how far the chassis dead-reckons without an intermediate braked correction.
+     *
+     * @note Owner decision (2026-07): this cap is now a LOOSE runaway guard, not a tight
+     *       error budget. It is deliberately NOT tied to `STOP_AT_LINE_ARM_WINDOW_CM` or any
+     *       other seek-arm-window concern — the practical bound on how long a blind chain can
+     *       run is `MAX_CHAIN_HOPS`, not this distance cap. Set to 1000.0f (10 m, larger than
+     *       any physical collinear run on a WRO field) so the cap never binds in practice; if
+     *       bench testing later shows it needs to be tighter, lower it then.
+     * @note Consumer: `PathTracker`'s walk-ahead chain builder (caps the run BEFORE
+     *       dispatch) and `ChainSpeedPolicy.h` (the backward pass assumes the run fits this
+     *       cap). Mirrored in `tools/path_planner/sim/runtime.py` for parity.
+     * @note Overflow is not a fault: a run exceeding this cap ends AT the cap (that hop is
+     *       dispatched as an ordinary braked stop) and PathTracker logs the truncation over
+     *       Serial; a new chain may re-form on the far side. In practice `MAX_CHAIN_HOPS`
+     *       will end a chain long before this distance cap is ever reached.
+     * @warning If bench testing shows a blind chain that ends into a `Drive.stopAtLine()`
+     *          seek drifts past that seek's `STOP_AT_LINE_ARM_WINDOW_CM` arm window, do NOT
+     *          re-tie this general cap to the arm window again — add a SEPARATE, tighter
+     *          bound that applies only to a chain ending into a seek. A `static_assert` in
+     *          `ConfigChecks.h` enforces only a loose sanity range on this constant now (no
+     *          longer arm-window-derived).
+     * @note **Compile-time override:** guarded by `#ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT`
+     *       so a host test can override it target-wide via e.g.
+     *       `-DPATH_BLIND_CHAIN_MAX_CM_DEFAULT=8.0f` without editing this file (same idiom
+     *       as `PATH_BLIND_CHAIN_ENABLED_DEFAULT` above) — kept so existing host-test targets
+     *       that need a tighter cap to exercise truncation (TC5/TC6-style tests) still can.
+     */
+#ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT
+#define PATH_BLIND_CHAIN_MAX_CM_DEFAULT 1000.0f
+#endif
+    constexpr float PATH_BLIND_CHAIN_MAX_CM = PATH_BLIND_CHAIN_MAX_CM_DEFAULT;
+
+    /**
+     * @brief Compile-time cap on the number of hops a single blind chain run may contain.
+     *
+     * Sizes the fixed-size firmware run buffer `PathTracker` uses to hold the walked-ahead
+     * `hopDistCm[]` and resolved `ChainSpeedPolicy` output — a plain stack/member array, no
+     * heap allocation, so this constant is the array dimension, not a runtime-checked limit.
+     *
+     * @note Sizing rule: 8 comfortably covers the toy-field longest collinear blind run
+     *       (bench-observed 3-4 hops) with headroom for a denser real-field layout, while
+     *       keeping the run buffer small (8 * sizeof(hop entry) is a few dozen bytes on an
+     *       Arduino Uno R4). Raise only if a real mission legitimately needs a longer
+     *       uninterrupted blind run AND `PATH_BLIND_CHAIN_MAX_CM` is raised in lockstep
+     *       (both caps gate the same run — whichever is hit first ends the chain).
+     * @note Consumer: `PathTracker`'s fixed-size chain run buffer (array dimension) and its
+     *       walk-ahead loop (loop bound). Mirrored in `tools/path_planner/sim/runtime.py` for
+     *       parity (the sim has no fixed-buffer constraint but honors the same cap so its
+     *       output matches firmware — ADR-050 parity).
+     * @note Overflow is not a fault: a run exceeding this hop count ends AT the cap (that hop
+     *       is dispatched as an ordinary braked stop) and PathTracker logs the truncation; a
+     *       new chain may re-form on the far side.
+     * @warning This is an ARRAY DIMENSION, not just a tuning knob — raising it grows
+     *          `PathTracker`'s per-instance RAM footprint by one run-buffer entry per unit.
+     *          A `static_assert` in `ConfigChecks.h` enforces a sane range
+     *          (`>= 2 && <= 32`); re-check available RAM before raising past the current
+     *          value on a memory-constrained target.
+     * @note **Compile-time override:** guarded by `#ifndef MAX_CHAIN_HOPS_DEFAULT` so a host
+     *       test can pin it target-wide via `-DMAX_CHAIN_HOPS_DEFAULT=2` (e.g. to exercise
+     *       the hop-cap truncation, TC6) without editing this file — same idiom as
+     *       `PATH_BLIND_CHAIN_MAX_CM_DEFAULT` above. Being an array dimension, the override
+     *       must be applied target-wide (`target_compile_definitions`), never per-TU.
+     */
+#ifndef MAX_CHAIN_HOPS_DEFAULT
+#define MAX_CHAIN_HOPS_DEFAULT 8
+#endif
+    constexpr uint8_t MAX_CHAIN_HOPS = MAX_CHAIN_HOPS_DEFAULT;
+
 }    // namespace Config
 
 #endif    // CONFIG_NAV_H
