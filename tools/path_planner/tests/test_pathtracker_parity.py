@@ -140,6 +140,8 @@ _EXACT_FIELDS: frozenset = frozenset(
         "reverse",
         "pass_through",
         "brake_on_gate",
+        # ADR-059 blind-chain run-membership flag
+        "chain",
         # node names
         "node",
         "start",
@@ -147,6 +149,11 @@ _EXACT_FIELDS: frozenset = frozenset(
         "final",
         # integer index
         "axis_idx",
+        # ADR-059 resolved velocity-plan endpoints (signed int16 PWM, exact).
+        # NOT distance/angular — the `_pwm` suffix falls through to the default
+        # (unbucketed) rule, so they are pinned to the EXACT bucket here.
+        "start_pwm",
+        "end_pwm",
         # goal_start framing metadata
         "case_id",
         "route_dir",
@@ -852,6 +859,11 @@ def test_load_cpp_ndjson_surfaces_realized_offset() -> None:
             "reverse": False,
             "drive_mode": "GYRO_TSHAPE",
             "dist_cm": 13.999999,
+            # ADR-059 field-set bump: a plain (non-chained, cold-start) hop —
+            # start = TSHAPE_START_SPEED (50), braked end 0, chain false.
+            "start_pwm": 50,
+            "end_pwm": 0,
+            "chain": False,
             "reanchor": "ON_DEAD_RECKONED_ADVANCE",
         }
     )

@@ -20,6 +20,12 @@ Covered cases:
 * **NC8** — all 8 pre-existing v1 fixtures load without error and have
   ``mode``/``heading``/``reverse`` defaulting to ``None`` on every command
   (schema change is additive; no new required keys).
+* **T9 (this task)** — the additive ``drive`` fields (``power``, ``preset``,
+  ``start_speed``, ``end_speed``, ``profiled``, ``brake``) parse per the
+  Contracts JSON seam; absent → ``None``; a bad-type int field warns and
+  unsets; a JSON bool masquerading in an int slot is rejected (``bool``
+  subclasses ``int`` in Python); the new ``declare_position`` op parses its
+  ``node`` field and a malformed/missing ``node`` warns and is skipped.
 """
 
 from __future__ import annotations
@@ -309,3 +315,309 @@ def test_goto_forced_direction_tags_parse():
     forced, bare = trace.commands
     assert (forced.arrival, forced.route) == ("front", "rear")
     assert (bare.arrival, bare.route) == (None, None)
+
+
+# ---------------------------------------------------------------------------
+# T9 — new `drive` fields: power / preset / start_speed / end_speed /
+#      profiled / brake
+# ---------------------------------------------------------------------------
+
+
+def test_drive_new_fields_all_present_parse():
+    """All six new ``drive`` fields parse into their ``Command`` attributes.
+
+    Field names must match the Contracts table exactly: ``power``,
+    ``preset``, ``start_speed``, ``end_speed``, ``profiled``, ``brake``.
+    None of them leak into ``Command.fields`` (they are named fields, not
+    forward-compat extras).
+    """
+    trace = load(
+        _drive_trace(
+            {
+                "seq": 0,
+                "op": "drive",
+                "method": "driveDist",
+                "cm": 40.0,
+                "power": 180,
+                "preset": "fast",
+                "start_speed": 60,
+                "end_speed": 0,
+                "profiled": True,
+                "brake": False,
+            }
+        )
+    )
+    assert len(trace.commands) == 1
+    cmd = trace.commands[0]
+    assert cmd.power == 180
+    assert cmd.preset == "fast"
+    assert cmd.start_speed == 60
+    assert cmd.end_speed == 0
+    assert cmd.profiled is True
+    assert cmd.brake is False
+    assert cmd.fields == {}
+
+
+def test_drive_new_fields_absent_default_to_none():
+    """Absent new fields default to ``None`` — additive schema, byte-identical
+    to a pre-existing trace with none of them.
+    """
+    trace = load(
+        _drive_trace({"seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0})
+    )
+    assert len(trace.commands) == 1
+    cmd = trace.commands[0]
+    assert cmd.power is None
+    assert cmd.preset is None
+    assert cmd.start_speed is None
+    assert cmd.end_speed is None
+    assert cmd.profiled is None
+    assert cmd.brake is None
+
+
+def test_drive_new_int_fields_reject_bool_and_bad_type():
+    """``power``/``start_speed``/``end_speed`` reject non-int values AND a
+    JSON boolean in the slot (``bool`` subclasses ``int`` in Python — the
+    existing loader guards already special-case this so a stray
+    ``true``/``false`` does not silently become ``1``/``0``). Each bad value
+    warns and the field is treated as unset (``None``); the command survives.
+    """
+    # power: string value warns + unsets.
+    data = _drive_trace(
+        {"seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0, "power": "fast"}
+    )
+    with pytest.warns(UserWarning, match="drive.power"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].power is None
+
+    # power: bool-as-int is rejected, not coerced to 1/0.
+    data = _drive_trace(
+        {"seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0, "power": True}
+    )
+    with pytest.warns(UserWarning, match="drive.power"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].power is None
+
+    # start_speed: float value warns + unsets (must be int per Contracts).
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "start_speed": 12.5,
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.start_speed"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].start_speed is None
+
+    # start_speed: bool-as-int is rejected.
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "start_speed": False,
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.start_speed"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].start_speed is None
+
+    # end_speed: non-numeric value warns + unsets.
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "end_speed": None,
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.end_speed"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].end_speed is None
+
+    # end_speed: bool-as-int is rejected.
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "end_speed": True,
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.end_speed"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].end_speed is None
+
+
+def test_drive_preset_unknown_string_and_non_string_warn_and_unset():
+    """``preset`` must be one of ``"slow"``/``"normal"``/``"fast"``; an
+    unknown string or a non-string value warns and unsets (falls back to the
+    NORMAL default at the resolver stage), mirroring the existing ``mode``
+    guard.
+    """
+    # Unknown preset string.
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "preset": "turbo",
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.preset"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].preset is None
+
+    # Non-string preset (a number).
+    data = _drive_trace(
+        {"seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0, "preset": 3}
+    )
+    with pytest.warns(UserWarning, match="drive.preset"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].preset is None
+
+
+def test_drive_profiled_and_brake_reject_non_bool():
+    """``profiled``/``brake`` accept ONLY a JSON boolean (never
+    ``bool(raw.get(...))``, mirroring the ``reverse`` guard) — a truthy
+    non-bool (e.g. the string ``"true"``) must not silently coerce. Each
+    warns and the field is treated as unset (``None``), leaving the
+    resolver's builder-default rule in force.
+    """
+    data = _drive_trace(
+        {
+            "seq": 0,
+            "op": "drive",
+            "method": "driveDist",
+            "cm": 10.0,
+            "profiled": "true",
+        }
+    )
+    with pytest.warns(UserWarning, match="drive.profiled"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].profiled is None
+
+    data = _drive_trace(
+        {"seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0, "brake": 1}
+    )
+    with pytest.warns(UserWarning, match="drive.brake"):
+        trace = load(data)
+    assert len(trace.commands) == 1
+    assert trace.commands[0].brake is None
+
+
+def test_drive_new_fields_do_not_break_pre_existing_fixtures():
+    """A drive command with none of the new fields loads with all six
+    defaulting to ``None`` — confirms the pre-existing fixtures remain
+    byte-identical after the schema addition (spot check via
+    ``ctps_drive_no_drift.json``, one of the NC8 fixtures).
+    """
+    trace = load(_FIXTURES / "ctps_drive_no_drift.json")
+    for cmd in trace.commands:
+        if cmd.op == "drive":
+            assert cmd.power is None
+            assert cmd.preset is None
+            assert cmd.start_speed is None
+            assert cmd.end_speed is None
+            assert cmd.profiled is None
+            assert cmd.brake is None
+
+
+# ---------------------------------------------------------------------------
+# T9 — `declare_position` op
+# ---------------------------------------------------------------------------
+
+
+def test_declare_position_parses():
+    """``declare_position`` is a recognized op; its ``node`` field parses
+    into ``Command.node`` and the command is NOT dropped.
+    """
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": "A",
+            "start_heading_deg": 0.0,
+            "build_error": False,
+            "commands": [
+                {"seq": 0, "op": "declare_position", "node": "B"},
+            ],
+        }
+    )
+    assert len(trace.commands) == 1
+    cmd = trace.commands[0]
+    assert cmd.op == "declare_position"
+    assert cmd.node == "B"
+    assert cmd.fields == {}
+
+
+def test_declare_position_missing_node_warns_and_skips():
+    """A ``declare_position`` with no ``node`` key warns and is dropped
+    entirely — it carries no usable payload for ``track_builder``.
+    """
+    data = {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": [
+            {"seq": 0, "op": "declare_position"},
+            {"seq": 1, "op": "goto", "target": "B"},
+        ],
+    }
+    with pytest.warns(UserWarning, match="declare_position.node"):
+        trace = load(data)
+    # The malformed declare_position is skipped; the following goto survives.
+    assert len(trace.commands) == 1
+    assert trace.commands[0].op == "goto"
+
+
+def test_declare_position_non_string_node_warns_and_skips():
+    """A ``declare_position`` whose ``node`` is not a string (e.g. a number)
+    warns and is dropped, same as a missing ``node``.
+    """
+    data = {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": [
+            {"seq": 0, "op": "declare_position", "node": 42},
+        ],
+    }
+    with pytest.warns(UserWarning, match="declare_position.node"):
+        trace = load(data)
+    assert len(trace.commands) == 0
+
+
+def test_declare_position_empty_string_node_warns_and_skips():
+    """An empty-string ``node`` is treated as malformed (no node name to
+    declare against) — warns and is dropped.
+    """
+    data = {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": [
+            {"seq": 0, "op": "declare_position", "node": ""},
+        ],
+    }
+    with pytest.warns(UserWarning, match="declare_position.node"):
+        trace = load(data)
+    assert len(trace.commands) == 0

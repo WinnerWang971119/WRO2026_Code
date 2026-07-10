@@ -1,16 +1,18 @@
 /* CTPS — Clear Trajectory Prediction Simulator: timeline dock + lane registry.
  *
- * Owns the bottom TASK / GOTO / MAGAZINE / REAR BOX / DRIFT dock: registers
- * the five `timelineLane` descriptors on `CTPS.timelineLanes` (module load
- * time, so PLAYER_META's lane manifest always finds an implementation) and,
- * once at boot, builds the dock DOM from those descriptors plus the track:
+ * Owns the bottom TASK / GOTO / MAGAZINE / REAR BOX / LOCALIZATION dock:
+ * registers the five `timelineLane` descriptors on `CTPS.timelineLanes`
+ * (module load time, so PLAYER_META's lane manifest always finds an
+ * implementation) and, once at boot, builds the dock DOM from those
+ * descriptors plus the track:
  *
  *   1. Lane registration — `build(track)` for each lane returns an array of
  *      `{t0, t1?, label, cls}` items. An item WITH `t1` renders as a
  *      `.ctps-span` (a duration box); an item withOUT `t1` renders as a
  *      `.ctps-pin` (a point marker). This t1-presence check is the single
  *      discriminator — it works for `goto` (spans AND fault pins in the same
- *      lane) and `drift` (a pin plus a span in the same lane) without a
+ *      lane) and `drift`/LOCALIZATION (id kept as `drift` — see
+ *      buildDriftLane below — a pin plus a span in the same lane) without a
  *      separate per-item "kind" field.
  *   2. DOM: one `.ctps-tl-row` per registered lane, in registration order
  *      (task, goto, magazine, rearbox, drift) — each row holds a
@@ -254,11 +256,26 @@
     }
 
     /**
-     * DRIFT lane: each `drift_warn` event becomes a point pin AT its time (the
-     * off-plan move that opened the drift) plus a span from that time to its
-     * `t_end` — the goto re-anchor that corrected it. An event with no `t_end`
-     * (an uncorrected drift that ran to the end, or a legacy/LRS-shaped point)
-     * spans to end-of-track. Both items share the event's own label text.
+     * LOCALIZATION lane (lane id stays `drift` — only the dock label changed;
+     * see the Contracts "Localization-lane event types" seam, issue #130):
+     * renders all three localization-lane event types `track_builder` (T11)
+     * emits, keyed on `ev.type`:
+     *
+     *   - `drift_warn` (residual only): a point pin AT its time (the off-plan
+     *     move that opened the drift) plus a span from that time to its
+     *     `t_end` — the goto re-anchor that corrected it. An event with no
+     *     `t_end` (an uncorrected drift that ran to the end, or a legacy/
+     *     LRS-shaped point) spans to end-of-track. Both items share the
+     *     event's own label text and the pre-existing `ctps-pin--drift` /
+     *     `ctps-span--drift` classes (unchanged rendering).
+     *   - `return_to_node`: a point pin AT its time, styled
+     *     `ctps-pin--return` — the physical return-to-node maneuver the
+     *     firmware ran before the next `goto`.
+     *   - `declare_position`: a point pin AT its time, styled
+     *     `ctps-pin--declare` — an operator-declared belief reset, visually
+     *     distinct from a physical correction.
+     *
+     * Each item carries the event's own label text (set by track_builder).
      */
     function buildDriftLane(track) {
         var events = (track && track.events) || [];
@@ -266,16 +283,19 @@
         var out = [];
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
-            if (ev.type !== "drift_warn") {
-                continue;
+            if (ev.type === "drift_warn") {
+                out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--drift" });
+                out.push({
+                    t0: ev.t,
+                    t1: ev.t_end != null ? ev.t_end : duration,
+                    label: ev.label,
+                    cls: "ctps-span--drift",
+                });
+            } else if (ev.type === "return_to_node") {
+                out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--return" });
+            } else if (ev.type === "declare_position") {
+                out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--declare" });
             }
-            out.push({ t0: ev.t, label: ev.label, cls: "ctps-pin--drift" });
-            out.push({
-                t0: ev.t,
-                t1: ev.t_end != null ? ev.t_end : duration,
-                label: ev.label,
-                cls: "ctps-span--drift",
-            });
         }
         return out;
     }
@@ -310,9 +330,12 @@
         color: "--ctps-hold",
         build: buildRearBoxLane,
     });
+    // Lane id stays "drift" (do not rename — see the file docstring); only
+    // the dock label is relabelled to LOCALIZATION now that the lane renders
+    // drift_warn + return_to_node + declare_position markers (issue #130).
     CTPS.timelineLanes.register({
         id: "drift",
-        label: "DRIFT",
+        label: "LOCALIZATION",
         kind: "point+span",
         color: "--ctps-drift",
         build: buildDriftLane,

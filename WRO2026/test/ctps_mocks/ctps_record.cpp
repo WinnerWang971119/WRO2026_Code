@@ -182,6 +182,14 @@ namespace ctps
         push(std::move(rec));
     }
 
+    void recordDeclarePosition(const char* name)
+    {
+        Record rec;
+        rec.op     = Op::DECLARE_POSITION;
+        rec.target = (name != nullptr) ? name : "";
+        push(std::move(rec));
+    }
+
     void recordWait(uint32_t ms)
     {
         Record rec;
@@ -255,14 +263,25 @@ namespace ctps
     void recordDriveMove(const char* method, const DriveMoveParams& p)
     {
         Record rec;
-        rec.op         = Op::DRIVE;
-        rec.method     = (method != nullptr) ? method : "";
-        rec.cm         = p.cm;
-        rec.hasCm      = true;
-        rec.mode       = (p.mode != nullptr) ? p.mode : "";
-        rec.hasHeading = p.hasHeading;
-        rec.heading    = p.heading;
-        rec.reverse    = p.reverse;
+        rec.op            = Op::DRIVE;
+        rec.method        = (method != nullptr) ? method : "";
+        rec.cm            = p.cm;
+        rec.hasCm         = true;
+        rec.mode          = (p.mode != nullptr) ? p.mode : "";
+        rec.hasHeading    = p.hasHeading;
+        rec.heading       = p.heading;
+        rec.reverse       = p.reverse;
+        rec.power         = p.power;
+        rec.hasPower      = p.hasPower;
+        rec.preset        = (p.preset != nullptr) ? p.preset : "";
+        rec.startSpeed    = p.startSpeed;
+        rec.hasStartSpeed = p.hasStartSpeed;
+        rec.endSpeed      = p.endSpeed;
+        rec.hasEndSpeed   = p.hasEndSpeed;
+        rec.profiled      = p.profiled;
+        rec.hasProfiled   = p.hasProfiled;
+        rec.brake         = p.brake;
+        rec.hasBrake      = p.hasBrake;
         push(std::move(rec));
     }
 
@@ -408,6 +427,11 @@ namespace ctps
                     out += std::to_string(static_cast<unsigned>(rec.arg));
                     break;
 
+                case Op::DECLARE_POSITION:
+                    out += "\"op\": \"declare_position\", ";
+                    appendStrMember(out, "node", rec.target);
+                    break;
+
                 case Op::DRIVE:
                     out += "\"op\": \"drive\", ";
                     appendStrMember(out, "method", rec.method);
@@ -442,6 +466,41 @@ namespace ctps
                     if (rec.reverse)
                     {
                         out += ", \"reverse\": true";
+                    }
+                    // Per-command speed knobs (issue #130, task T8) — each emitted
+                    // only when its "was-set" sentinel fired (or, for `preset`,
+                    // when non-empty), so a move that chains none of them stays
+                    // byte-identical to the pre-T8 output. Field names/order match
+                    // the Contracts "Trace `drive` op fields" table exactly.
+                    if (rec.hasPower)
+                    {
+                        out += ", \"power\": ";
+                        out += std::to_string(static_cast<int>(rec.power));
+                    }
+                    if (!rec.preset.empty())
+                    {
+                        out += ", ";
+                        appendStrMember(out, "preset", rec.preset);
+                    }
+                    if (rec.hasStartSpeed)
+                    {
+                        out += ", \"start_speed\": ";
+                        out += std::to_string(static_cast<int>(rec.startSpeed));
+                    }
+                    if (rec.hasEndSpeed)
+                    {
+                        out += ", \"end_speed\": ";
+                        out += std::to_string(static_cast<int>(rec.endSpeed));
+                    }
+                    if (rec.hasProfiled)
+                    {
+                        out += ", \"profiled\": ";
+                        out += (rec.profiled ? "true" : "false");
+                    }
+                    if (rec.hasBrake)
+                    {
+                        out += ", \"brake\": ";
+                        out += (rec.brake ? "true" : "false");
                     }
                     break;
             }

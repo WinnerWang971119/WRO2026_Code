@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "start_node": "S",
+  "start_heading_deg": 90.0,
+  "build_error": false,
+  "commands": [
+    { "seq": 0, "op": "drive", "method": "driveDist", "cm": 10.0,
+      "power": 90, "profiled": true, "brake": true },
+    { "seq": 1, "op": "drive", "method": "driveDist", "cm": 8.0,
+      "preset": "fast", "start_speed": 60, "end_speed": 60, "brake": false },
+    { "seq": 2, "op": "goto", "target": "B" },
+    { "seq": 3, "op": "declare_position", "node": "B" },
+    { "seq": 4, "op": "goto", "target": "S" }
+  ]
+}

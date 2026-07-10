@@ -224,6 +224,10 @@ def _valid_layout_dict() -> dict:
 #: The exact TC9 literal (player_html.py's Contracts -> Emitter): both P-TC5
 #: and P-TC6 assert PLAYER_META equals this verbatim, proving the object/
 #: cargo feature never perturbs it either with or without a layout.
+#: NOTE (issue #130): the "drift" entry is the lane ID, not its display
+#: label — the dock label was relabelled to "LOCALIZATION" in timeline.js,
+#: but the id (and therefore this manifest) is unchanged by design, so the
+#: literal stays as-is.
 _EXPECTED_TC9_META = {
     "source": "PREDICTED",
     "filename": "",
@@ -416,7 +420,9 @@ def test_tc_meta_embedded_and_round_trips(tmp_path):
     into the TRACK assignment — T2's Contracts -> Emitter), parses via
     :func:`json.loads` to a dict, and carries the source badge, trace
     filename, the lane manifest
-    (``task``/``goto``/``magazine``/``rearbox``/``drift``, in dock order), the
+    (``task``/``goto``/``magazine``/``rearbox``/``drift``, in dock order —
+    the ``drift`` entry is the lane ID; its dock LABEL is "LOCALIZATION" as
+    of issue #130, but the id/manifest is unchanged by design), the
     tab manifest (``log``/``inspector``), and the default
     render mode (``"box"``) — while TRACK still round-trips unchanged
     alongside it.
@@ -504,6 +510,8 @@ def test_tc9_render_mode_is_box_and_meta_is_expected_literal_when_pivot_free(
 
     assert "pivots" not in embedded
 
+    # "drift" is the lane ID (unchanged, issue #130); its dock LABEL is
+    # relabelled to "LOCALIZATION" in timeline.js — see test_tl_localization_*.
     expected_meta = {
         "source": "PREDICTED",
         "filename": "",
@@ -813,6 +821,93 @@ def test_tc_gotoend_timeline_lane_reads_spans():
 
     assert "t_end" in js
     assert "UNREACHABLE" in js
+
+
+# ---------------------------------------------------------------------------
+# TC-LOCALIZATION — drift lane relabelled to LOCALIZATION; renders all three
+# localization-lane event types (issue #130, Contracts "Localization-lane
+# event types" seam: track_builder/T11 emits, timeline.js/T12 renders)
+# ---------------------------------------------------------------------------
+
+
+def test_tc_localization_lane_id_kept_drift_label_relabelled():
+    """TC-LOCALIZATION: the lane id stays `drift`; only the dock label changes.
+
+    Key assertion (text heuristic): ``timeline.js`` still registers the lane
+    under ``id: "drift"`` (PLAYER_META's manifest and the DOM class
+    ``ctps-lane--drift``/``ctps-lane-label--drift`` depend on the id staying
+    put) but its ``label`` is now the literal ``"LOCALIZATION"`` — matching
+    the existing dock's uppercase casing (TASK/GOTO/MAGAZINE/REAR BOX).
+    """
+    js = (PLAYER_JS_PATH.parent / "timeline.js").read_text(encoding="utf-8")
+
+    assert re.search(r'id:\s*"drift"', js)
+    assert re.search(r'label:\s*"LOCALIZATION"', js)
+    # The old "DRIFT" dock label is gone (not just co-present).
+    assert not re.search(r'label:\s*"DRIFT"', js)
+
+
+def test_tc_localization_lane_builder_handles_all_three_event_types():
+    """TC-LOCALIZATION: buildDriftLane renders drift_warn + the two new types.
+
+    Key assertion (text heuristic): ``timeline.js``'s lane builder still
+    branches on ``drift_warn`` (unchanged rendering — a pin + a span) and now
+    also branches on ``return_to_node`` and ``declare_position``, each
+    emitting a distinctly-classed pin (``ctps-pin--return`` /
+    ``ctps-pin--declare``) per the Contracts event-type seam T11 emits into.
+    """
+    js = (PLAYER_JS_PATH.parent / "timeline.js").read_text(encoding="utf-8")
+
+    assert '"drift_warn"' in js
+    assert '"return_to_node"' in js
+    assert '"declare_position"' in js
+    assert "ctps-pin--drift" in js
+    assert "ctps-pin--return" in js
+    assert "ctps-pin--declare" in js
+
+
+def test_tc_localization_lane_marker_classes_styled_in_css():
+    """TC-LOCALIZATION: the two new marker classes get their own CSS look.
+
+    Key assertion: ``components.css`` defines a rule for each of
+    ``ctps-pin--return`` and ``ctps-pin--declare`` (distinct visual classes,
+    alongside the pre-existing ``ctps-pin--drift``) so the three localization
+    marker types are visually distinguishable on the timeline.
+    """
+    css = (PLAYER_JS_PATH.parent / "components.css").read_text(encoding="utf-8")
+
+    assert ".ctps-pin--drift" in css
+    assert ".ctps-pin--return" in css
+    assert ".ctps-pin--declare" in css
+
+
+def test_tc_localization_lane_renders_return_and_declare_markers(tmp_path):
+    """TC-LOCALIZATION (integration): a track with the new events renders both.
+
+    Key assertion: a hand-built LRS-shaped track dict (source-agnostic, mirrors
+    TC6) carrying one ``return_to_node`` and one ``declare_position`` event
+    round-trips those events unchanged through the embedded ``const TRACK``,
+    and the page still inlines ``timeline.js`` with both new marker classes —
+    proving the render path never drops or chokes on the new event types.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    track_dict["events"] = list(track_dict["events"]) + [
+        {"t": 5.0, "type": "return_to_node", "label": "return to D"},
+        {"t": 6.5, "type": "declare_position", "label": "declared at E"},
+    ]
+
+    out_path = tmp_path / "localization_events.html"
+    render(track_dict, out_path)  # must not raise
+    html = out_path.read_text(encoding="utf-8")
+
+    embedded = _extract_embedded_track(html)
+    assert {"t": 5.0, "type": "return_to_node", "label": "return to D"} in embedded["events"]
+    assert {"t": 6.5, "type": "declare_position", "label": "declared at E"} in embedded["events"]
+
+    assert "ctps-pin--return" in html
+    assert "ctps-pin--declare" in html
 
 
 # ---------------------------------------------------------------------------

@@ -208,6 +208,7 @@ the chassis pose EXACTLY on the node (drift on ``axis`` = 0 by construction).
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Dict, Iterator, List, Optional, Tuple
@@ -222,6 +223,10 @@ from tools.path_planner.compiler import (
     ACT_TURN_REL,
     Primitive,
     normalize_turn,
+)
+from tools.path_planner.ctps.chain_speed import (
+    ChainHopSpeed,
+    resolve_chain_speeds,
 )
 from tools.path_planner import pipeline_config as _pipeline_config
 from tools.path_planner.graph_builder import (
@@ -297,6 +302,62 @@ NAV_TURN_TOLERANCE_DEG: float = 0.5
 # ``test_tc9_path_pass_through_enabled_parity``). TC8 covers the
 # behavioral disable, not the constant-value parity check.
 PATH_PASS_THROUGH_ENABLED: bool = True
+
+# MUST mirror ``Config::SPEED_NORMAL`` in WRO2026/config/ConfigDrive.h. The
+# blind-run cruise PWM (``CRUISE_SPEED`` is symbolically the same value). The sim
+# does not model speed presets or ramps for MOTION, but the ADR-059 blind-chain
+# plan emits the RESOLVED velocity endpoints into the parity trace, so the run
+# cruise + the captured pass-through cruise must match the firmware's
+# ``Config::SPEED_NORMAL`` byte-for-byte. Hand-mirrored (Python cannot import the
+# C++ header); no dedicated regex-parity test (it rides the golden-pinned
+# ``chain_speed.py`` config parse + the parity sweep).
+SPEED_NORMAL: int = 85
+
+# MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h
+# (``= PWM_MIN_MAGNITUDE`` = 50). The cold-start ramp seed a non-pass-through
+# blind hop's velocity plan begins at (ADR-023). ADR-059 emits it as the
+# ``start_pwm`` of every non-chained, non-pass-through ``blind_dead_reckon``
+# record, so it must match the firmware's ``Config::TSHAPE_START_SPEED``.
+# Hand-mirrored; keep in lockstep.
+TSHAPE_START_SPEED: int = 50
+
+# MUST mirror ``Config::TSHAPE_MIN_MOVE_CM`` in WRO2026/config/ConfigDrive.h
+# (5.0). The Drive-profile floor below which a hop silently degrades to a flat
+# move (its start/end speeds ignored). ADR-059: hop 0 and every candidate
+# mid-hop below this floor is chain-ineligible (a chained hop must be able to
+# carry its start/end speeds). Hand-mirrored; keep in lockstep with the firmware.
+TSHAPE_MIN_MOVE_CM: float = 5.0
+
+# ---------------------------------------------------------------------------
+# Blind-chain continuous motion (ADR-059) — mirrored from ConfigNav.h. Each is a
+# regex-grep parity test in ``tests/test_pass_through.py`` (same idiom as
+# ``PATH_PASS_THROUGH_ENABLED``). All three gate the blind-chain walk-ahead in
+# :meth:`PathTrackerSim._try_start_blind_chain`.
+# ---------------------------------------------------------------------------
+
+# MUST mirror ``Config::PATH_BLIND_CHAIN_ENABLED`` in WRO2026/config/ConfigNav.h.
+# Master kill-switch: when True (default), consecutive collinear BLIND hops are
+# folded into one chained run (setStartSpeed/setEndSpeed/setBrake(false) on every
+# hop but the last) instead of braking to rest at each node. When False, every
+# blind hop is its own braked stop-and-go move (today's / pre-ADR-059 behavior).
+# Pytest verifies parity via regex grep on ConfigNav.h.
+PATH_BLIND_CHAIN_ENABLED: bool = True
+
+# MUST mirror ``Config::PATH_BLIND_CHAIN_MAX_CM`` in WRO2026/config/ConfigNav.h.
+# LOOSE runaway guard on the total run distance (cm) a blind chain may span
+# before it is forced to end (that hop brakes; a fresh chain re-forms after). The
+# owner decision (2026-07) decoupled this from ``STOP_AT_LINE_ARM_WINDOW_CM`` and
+# set it to 1000.0 (10 m) so it never binds in practice — ``MAX_CHAIN_HOPS`` is
+# the practical bound. Mirror THIS value (1000.0). Pytest verifies parity via
+# regex grep on ConfigNav.h.
+PATH_BLIND_CHAIN_MAX_CM: float = 1000.0
+
+# MUST mirror ``Config::MAX_CHAIN_HOPS`` in WRO2026/config/ConfigNav.h. Cap on
+# the number of hops one blind chain run may contain (the firmware's fixed-size
+# run-buffer dimension). The sim has no fixed-buffer constraint but honors the
+# same cap so its output matches the firmware (ADR-050 parity). Pytest verifies
+# parity via regex grep on ConfigNav.h.
+MAX_CHAIN_HOPS: int = 8
 
 # MUST mirror ``Config::LINE_HEADING_RESET_ON_PROJECTION`` in
 # WRO2026/config/ConfigNav.h (ADR-052). Enables the line-arrival heading
@@ -408,6 +469,28 @@ ACT_PROJECTION_REVERSE_PASS: str = "projection_reverse_pass"
 # must stay byte-identical to the compiler's output (AC1 firmware<->offline
 # agreement).
 ACT_STOP_AT_LINE_REVERSE: str = "stop_at_line_reverse"  # (ACT_STOP_AT_LINE_REVERSE, target_node, distance_cm, blind_mode)
+
+# Sim-only primitive tag for an ADR-059 blind-chain NON-braking mid-hop node
+# boundary. Emitted at each intermediate node of a collinear BLIND chain that is
+# driven as ONE continuous run — the twin of the firmware's `_ptEmitBlindPass`
+# `blind_pass` parity record, and the blind counterpart of ``ACT_LINE_PASS`` /
+# ``ACT_FOLLOW_DIST_PASS``. It carries NO chassis motion of its own (the chained
+# ``ACT_FORWARD`` / ``ACT_BLIND_REVERSE`` hop already advanced onto the node and
+# re-anchored via ``on_dead_reckoned_advance``); it marks the boundary the run
+# passed WITHOUT braking so downstream consumers render one whole-run trapezoid
+# instead of a per-node dip. 2-tuple shape: ``(ACT_BLIND_PASS, node)`` (``node``
+# is the intermediate node just passed, mirroring the firmware record's
+# ``node`` field — deliberately NOT ``kind``, the record-type discriminator).
+#
+# THREE lock-step places (memory `gotcha-ctps-drive-method-contract`): (1) the
+# sim emit HERE + in ``_walk_hops``; (2) the CTPS render in
+# ``ctps/track_builder.py`` (a later task imports THIS constant); (3) the strict
+# parity schema in ``sim/parity.py`` (``TRACE_RECORD_FIELDS["blind_pass"]``). It
+# is intentionally NOT in ``ctps/trace_loader.py`` — that module whitelists
+# ``drive.method`` strings, not ``ACT_*`` tags. The final (braked) arrival of a
+# chain emits NO ``ACT_BLIND_PASS`` (the run retires at the final hop's dispatch,
+# exactly like the firmware's `_chain.active` gate on the pass emit).
+ACT_BLIND_PASS: str = "blind_pass"
 
 
 # MUST mirror ``Config::BIDIRECTIONAL_AUTO_ENABLED`` in WRO2026/Config.h.
@@ -678,6 +761,7 @@ def wrap_pm180(delta_deg: float) -> float:
 
 
 __all__ = [
+    "ACT_BLIND_PASS",
     "ACT_BLIND_REVERSE",
     "ACT_FOLLOW_DIST_PASS",
     "ACT_HEADING_RESET",
@@ -701,14 +785,20 @@ __all__ = [
     "LINE_HEADING_RESET_TOLERANCE_DEG",
     "LINE_SENSOR_AXLE_OFFSET_CM",
     "LINE_SENSOR_AXLE_OFFSET_REAR_CM",
+    "MAX_CHAIN_HOPS",
     "NAV_TURN_TOLERANCE_DEG",
     "OFFSET_ROTATION_DEADBAND_DEG",
     "OFFSET_TRANSLATION_DEADBAND_CM",
     "OFF_MAP_GATE",
+    "PATH_BLIND_CHAIN_ENABLED",
+    "PATH_BLIND_CHAIN_MAX_CM",
     "PATH_PASS_THROUGH_ENABLED",
     "PIVOT_TRIM_MIN_DRIVE_CM",
     "RETURN_DISTANCE_CAP_CM",
     "RETURN_TRIGGER_THRESHOLD_CM",
+    "SPEED_NORMAL",
+    "TSHAPE_MIN_MOVE_CM",
+    "TSHAPE_START_SPEED",
     "TURN_EPSILON_DEG",
     "WALL_CONTACT_OFFSET_CM",
     "WALL_STOP_BACK_OFF_CM",
@@ -1595,6 +1685,102 @@ def _body_heading_for(direction: "Direction", edge_heading: float) -> float:
     return _normalize(edge_heading)
 
 
+def _pass_through_heading_eligible(
+    outbound_edge,
+    outbound_is_last_hop: bool,
+    *,
+    inbound_body_heading: float,
+    inbound_direction: "Direction",
+    pipeline_default: DirectionMode = None,
+    builder_route: "Direction" = None,
+    builder_arrival: "Direction" = None,
+    bidirectional_enabled: bool = None,
+    line_board_count: int = None,
+) -> bool:
+    """Pure ADR-023/ADR-059 collinearity + same-direction eligibility predicate.
+
+    Function-identical Python mirror of the firmware
+    ``PathTracker::passThroughHeadingEligible`` (ADR-059). Every input is
+    EXPLICIT — no FSM/sim state is read — so the blind-chain walk-ahead
+    (:meth:`PathTrackerSim._try_start_blind_chain`) can call it repeatedly for
+    multi-hop lookahead with SYNTHESIZED inbound body headings, and the two
+    pass-through gates (:func:`_should_pass_through` for the line-line-line
+    collapse, :func:`_should_projection_pass_through` for the line-proj-line
+    one) share this one predicate so the heading math cannot drift between the
+    three call sites (mirrors the firmware's one-predicate / three-gates
+    structure).
+
+    Resolves the outbound direction with @p inbound_body_heading as the current
+    heading, rotates the outbound edge's forward heading +180° when the resolved
+    direction is REAR (the body heading the rear-led chassis assumes), wraps the
+    delta into ``(-180, +180]``, and is eligible iff
+    ``|delta| <= NAV_TURN_TOLERANCE_DEG`` AND the resolved outbound direction
+    equals @p inbound_direction (a FRONT↔REAR flip is never a continuation — it
+    would force a mid-flight board swap / blind-chain sign flip).
+
+    :param outbound_edge: the graph edge attribute mapping for the candidate
+        outbound hop (must carry ``heading_deg`` + optional ``direction_override``).
+    :param outbound_is_last_hop: True iff the outbound hop terminates at the
+        route's final destination (gates the builder arrival override).
+    :param inbound_body_heading: the body heading the chassis holds as it reaches
+        the joint (for FRONT the inbound edge heading; for REAR that +180°).
+    :param inbound_direction: the resolved travel direction of the inbound hop.
+    :param pipeline_default: optional pipeline-level direction default; ``None``
+        resolves to :data:`PIPELINE_CONFIG.direction`.
+    :param builder_route: optional builder route override; ``None`` -> AUTO.
+    :param builder_arrival: optional builder arrival override; ``None`` -> AUTO.
+    :param bidirectional_enabled: optional kill-switch override; ``None`` ->
+        :data:`BIDIRECTIONAL_AUTO_ENABLED`.
+    :param line_board_count: optional board count override; ``None`` ->
+        :data:`LINE_BOARD_COUNT`.
+    :return: True iff the outbound hop is collinear + same-direction with the
+        inbound one (a pass-through / chain continuation is eligible).
+    """
+    outbound_heading = float(outbound_edge["heading_deg"])
+
+    resolved_pipeline = (
+        pipeline_default
+        if pipeline_default is not None
+        else _pipeline_config.PIPELINE_CONFIG.direction
+    )
+    resolved_route = builder_route if builder_route is not None else Direction.AUTO
+    resolved_arrival = (
+        builder_arrival if builder_arrival is not None else Direction.AUTO
+    )
+    resolved_enabled = (
+        bidirectional_enabled if bidirectional_enabled is not None else BIDIRECTIONAL_AUTO_ENABLED
+    )
+    resolved_board_count = (
+        line_board_count if line_board_count is not None else LINE_BOARD_COUNT
+    )
+
+    # Resolve the outbound hop's direction using the inbound body heading as
+    # `current_heading` (the critical body-heading peek: a mixed REAR->FORWARD
+    # transition across anti-parallel forward edges has a raw-edge delta of 180°
+    # but a body-heading delta of ~0).
+    next_dir = resolve_direction(
+        edge_dir_override=_read_edge_dir_override(outbound_edge),
+        pipeline_default=resolved_pipeline,
+        builder_arrival=resolved_arrival,
+        builder_route=resolved_route,
+        current_heading=inbound_body_heading,
+        edge_heading=outbound_heading,
+        is_last_hop=outbound_is_last_hop,
+        bidirectional_enabled=resolved_enabled,
+        line_board_count=resolved_board_count,
+    )
+    next_body_heading = _body_heading_for(next_dir, outbound_heading)
+
+    heading_delta = wrap_pm180(next_body_heading - inbound_body_heading)
+    if abs(heading_delta) > NAV_TURN_TOLERANCE_DEG:
+        return False
+    # Pass-through requires matching direction across the joint. A REAR->FRONT
+    # or FRONT->REAR transition would force a mid-flight LineFollower.setReverse
+    # flip (or a blind-chain sign flip), never a clean continuation. Mirror of
+    # the firmware guard in `passThroughHeadingEligible`.
+    return next_dir == inbound_direction
+
+
 def _should_pass_through(
     graph,
     next_hop,
@@ -1660,51 +1846,23 @@ def _should_pass_through(
     if next_next is None or next_next == intersected_node:
         return False
     next_edge = graph.edges[intersected_node, next_next]
-    next_edge_heading = float(next_edge["heading_deg"])
 
-    # Resolve the next-next hop's direction using the inbound body heading
-    # as `current_heading`. This is the critical fix vs the old raw-edge
-    # peek: on a mixed REAR -> FORWARD transition with anti-parallel
-    # forward edges, the raw-edge delta would be 180° (and incorrectly
-    # block pass-through) but the resolved body-headings are collinear.
-    resolved_pipeline = (
-        pipeline_default
-        if pipeline_default is not None
-        else _pipeline_config.PIPELINE_CONFIG.direction
+    # Delegate the heading/direction MATH to the shared pure predicate (mirror
+    # of the firmware's `_passThroughHeadingOk` -> `passThroughHeadingEligible`
+    # adapter), so the intersection-gated line-line-line collapse, the
+    # distance-gated line-proj-line collapse, and the ADR-059 blind-chain walk
+    # all resolve collinearity through ONE function.
+    return _pass_through_heading_eligible(
+        next_edge,
+        outbound_is_last_hop=(next_next == goal_name),
+        inbound_body_heading=inbound_body_heading,
+        inbound_direction=inbound_direction,
+        pipeline_default=pipeline_default,
+        builder_route=builder_route,
+        builder_arrival=builder_arrival,
+        bidirectional_enabled=bidirectional_enabled,
+        line_board_count=line_board_count,
     )
-    resolved_route = builder_route if builder_route is not None else Direction.AUTO
-    resolved_arrival = (
-        builder_arrival if builder_arrival is not None else Direction.AUTO
-    )
-    resolved_enabled = (
-        bidirectional_enabled if bidirectional_enabled is not None else BIDIRECTIONAL_AUTO_ENABLED
-    )
-    resolved_board_count = (
-        line_board_count if line_board_count is not None else LINE_BOARD_COUNT
-    )
-
-    next_dir = resolve_direction(
-        edge_dir_override=_read_edge_dir_override(next_edge),
-        pipeline_default=resolved_pipeline,
-        builder_arrival=resolved_arrival,
-        builder_route=resolved_route,
-        current_heading=inbound_body_heading,
-        edge_heading=next_edge_heading,
-        is_last_hop=(next_next == goal_name),
-        bidirectional_enabled=resolved_enabled,
-        line_board_count=resolved_board_count,
-    )
-    next_body_heading = _body_heading_for(next_dir, next_edge_heading)
-
-    heading_delta = wrap_pm180(next_body_heading - inbound_body_heading)
-    if abs(heading_delta) > NAV_TURN_TOLERANCE_DEG:
-        return False
-    # Pass-through requires matching direction across the intersection. A
-    # REAR->FRONT or FRONT->REAR transition would force the dispatcher to
-    # flip LineFollower.setReverse(...) mid-flight, jolting the chassis.
-    # Mirror of the C++ guard in PathTracker.cpp's LINE_FOLLOW intersection
-    # branch (PR #34 review).
-    return next_dir == inbound_direction
 
 
 def _should_projection_pass_through(
@@ -2082,6 +2240,83 @@ class LocalizationSim:
         # LocalizationClass::onDeadReckonedAdvance -> clearOffset()).
         self.clear_offset()
 
+    def declare_position(self, node_name: str) -> None:
+        """Operator-declared belief reset: set the current node, clear the offset.
+
+        Sim mirror of ``LocalizationClass::declarePosition`` (``Localization.cpp``):
+        the same unconditional low-level write ``onIntersection`` /
+        ``onDeadReckonedAdvance`` perform (set node + re-anchor the offset), but
+        operator-initiated rather than triggered by a sensed crossing. The
+        heading calibration (``_zeroed`` -- the sim's analogue of the firmware's
+        untouched ``_yawOffsetDeg``) is deliberately left alone: the operator is
+        only declaring graph position and zeroing the operator offset, not
+        re-zeroing heading.
+
+        This is a pure belief change -- unlike :meth:`on_intersection` /
+        :meth:`on_dead_reckoned_advance`, no chassis primitive precedes it and no
+        physical motion occurs, so callers must NOT pair this with any
+        :class:`~tools.path_planner.sim.chassis.VirtualChassis` mutation.
+
+        Contract for an unknown @p node_name (mirrors the loader's strict-field
+        pattern, ``ctps/trace_loader.py``): this method WARNS
+        (:class:`UserWarning`) and no-ops rather than raising -- the current
+        node and offset are left completely unchanged. This differs from
+        :meth:`PathTrackerSim.go_to` / :meth:`~PathTrackerSim.step_through`,
+        which raise ``KeyError`` on an unknown goal: those reject a caller
+        (API) mistake, whereas ``declare_position`` is driven off a recorded
+        CTPS trace op (untrusted external data) where the established
+        convention is warn-and-skip so one malformed op does not abort an
+        otherwise-valid trace.
+
+        :param node_name: node name to declare as the current position. Must be
+            a key of ``field_data.NODES``; an unknown name warns and no-ops.
+        """
+        if node_name not in self._field_data.NODES:
+            warnings.warn(
+                f"LocalizationSim.declare_position: unknown node {node_name!r} "
+                "-- not in field_data.NODES; declaration skipped, node and "
+                "offset left unchanged.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return
+        self._current_node = node_name
+        # Re-anchor the operator-offset frame exactly like a sensed arrival,
+        # but the heading calibration flag (`_zeroed`) is untouched -- mirrors
+        # the firmware leaving `_yawOffsetDeg` alone in `declarePosition`.
+        self.clear_offset()
+
+
+@dataclass
+class _ChainRun:
+    """One walked-ahead ADR-059 blind-chain run (sim mirror of ``ChainRun``).
+
+    Function-identical to the firmware ``PathTrackerClass::ChainRun`` fixed-size
+    run buffer, minus the RAM-bound array dimension (the sim uses growable lists
+    honoring the same :data:`MAX_CHAIN_HOPS` cap). Built by
+    :meth:`PathTrackerSim._try_start_blind_chain` when a >=2-hop collinear BLIND
+    run forms, consumed hop-by-hop in :meth:`PathTrackerSim._walk_hops`.
+
+    :ivar active: True while a run is in flight (gates every read).
+    :ivar reverse: the run's uniform travel direction (a FRONT<->REAR flip ends
+        a run, so it is constant along the whole run).
+    :ivar nodes: the run's node names, in order (``hop_count + 1`` entries) —
+        ``nodes[k] -> nodes[k+1]`` is hop ``k``.
+    :ivar speeds: the resolved per-hop :class:`ChainHopSpeed`
+        (``hop_count`` entries) from :func:`resolve_chain_speeds`; ``speeds[k]``
+        carries hop ``k``'s signed ``(start_pwm, end_pwm, brake)``.
+    :ivar hop_count: the number of hops (``>= 2``).
+    :ivar hop_index: the index of the hop most recently dispatched (starts at
+        ``-1`` before hop 0; the walk consumes ``speeds[hop_index]``).
+    """
+
+    active: bool = False
+    reverse: bool = False
+    nodes: List[str] = None      # type: ignore[assignment]
+    speeds: List[ChainHopSpeed] = None    # type: ignore[assignment]
+    hop_count: int = 0
+    hop_index: int = -1
+
 
 class PathTrackerSim:
     """Mirror of ``PathTrackerClass`` (LINE + BLIND edges).
@@ -2165,6 +2400,12 @@ class PathTrackerSim:
         self._pending_pivot: Optional[PivotTurnRecord] = None
         self._departing_pivot: Optional[PivotTurnRecord] = None
         self._approaching_pivot: Optional[PivotTurnRecord] = None
+
+        # ADR-059 blind-chain run buffer (mirror of the firmware ``_chain``).
+        # Inactive until :meth:`_try_start_blind_chain` folds a >=2-hop collinear
+        # BLIND run; reset at each ``go_to`` / ``step_through`` start and when a
+        # run retires. ``active == False`` gates every read.
+        self._chain: _ChainRun = _ChainRun()
 
     @property
     def localization(self) -> LocalizationSim:
@@ -2655,6 +2896,13 @@ class PathTrackerSim:
         # fixtures are byte-identical to the prior behaviour.
         cfg = PipelineConfig.from_field_data(self._field_data)
 
+        # ADR-023 pass-through carry (mirror of the firmware `_passThrough` flag):
+        # set True when a hop emits a collinear pass tag (LINE/projection) and the
+        # follower stays live across the node, consumed by the NEXT hop's BLIND
+        # dispatch to seed the ADR-059 chain `entry_pwm` with the CAPTURED cruise
+        # (AC5) instead of the cold-start +/-TSHAPE_START_SPEED. Reset every hop.
+        pass_through_active = False
+
         current = self._localization.current_node()
         while current != goal_name:
             nxt = self._next_hop[current][goal_name]
@@ -3138,14 +3386,137 @@ class PathTrackerSim:
                 # equivalent); the table cell is untouched and the value matches
                 # what the firmware commands into Drive.driveDist.
                 effective_dist_cm = decision.commanded_distance_cm
+
+                # -----------------------------------------------------------------
+                # ADR-059 blind-chain resolution (mirror of the firmware dispatch
+                # site). Exactly one of three paths applies, matching
+                # `_dispatchEdgeAfterTurn`'s (a)/(b)/(c):
+                #   (a) a run is IN FLIGHT and this hop is its next hop — take the
+                #       resolved (start_pwm, end_pwm, brake) from the run buffer;
+                #   (b) no run + chaining enabled — try to START one via the
+                #       walk-ahead; on success this hop is the run's hop 0;
+                #   (c) chaining disabled / no eligible run — the ordinary per-hop
+                #       dispatch (AC12: byte-identical to the compiler / pre-ADR-059,
+                #       so NO speed suffix rides the tuple).
+                # The sim has no encoder-noise boundary carry (AC9: the measured
+                # carry is 0 wherever encoders are exact — the sim and the
+                # parked-encoder parity harness), so the dispatched distance is the
+                # planned `effective_dist_cm` on every hop.
+                # -----------------------------------------------------------------
+                # `entry_pwm`: captured cruise after a pass-through (ADR-023 carry,
+                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. The sim does
+                # not model line presets, so the captured cruise is the NORMAL-preset
+                # SPEED_NORMAL (== the firmware's `presetToPwm(getPreset())` default);
+                # `resolve_chain_speeds` clamps it into [pwm_min, |cruise|] anyway.
+                if pass_through_active:
+                    entry_mag = SPEED_NORMAL
+                else:
+                    entry_mag = TSHAPE_START_SPEED
+                entry_pwm = -entry_mag if decision.reverse else entry_mag
+
+                chain_hop = False        # this hop is part of a chained run
+                chain_final = False      # ... and it is the run's braked final hop
+                hop_start_pwm = entry_pwm
+                hop_end_pwm = 0
+
+                if self._chain.active:
+                    k = self._chain.hop_index + 1
+                    match = (
+                        k < self._chain.hop_count
+                        and current == self._chain.nodes[k]
+                        and nxt == self._chain.nodes[k + 1]
+                        and decision.reverse == self._chain.reverse
+                        and decision.drive_mode != BlindMode.RAW_FLAT
+                    )
+                    if match:
+                        self._chain.hop_index = k
+                        chain_hop = True
+                        hop_start_pwm = self._chain.speeds[k].start_pwm
+                        chain_final = self._chain.speeds[k].brake
+                        hop_end_pwm = 0 if chain_final else self._chain.speeds[k].end_pwm
+                    else:
+                        # Divergence from the walked plan — unreachable by
+                        # construction on a static NEXT_HOP table (a mid-run turn
+                        # already ends the run); reset defensively and dispatch this
+                        # hop as an ordinary per-hop move.
+                        self._chain = _ChainRun()
+                elif PATH_BLIND_CHAIN_ENABLED:
+                    self._try_start_blind_chain(
+                        current,
+                        nxt,
+                        goal_name,
+                        reverse=decision.reverse,
+                        hop0_mode=decision.drive_mode,
+                        hop0_dist_cm=effective_dist_cm,
+                        hop0_body_heading=body_heading,
+                        entry_pwm=entry_pwm,
+                        cfg=cfg,
+                        route_direction=route_direction,
+                        arrival_direction=arrival_direction,
+                    )
+                    if self._chain.active:
+                        # Hop 0 of a fresh run: speeds[0].start_pwm is entry_pwm
+                        # clamped into [pwm_min, |cruise|] by the planner. hop_count
+                        # >= 2, so hop 0 is always a non-braking mid-hop.
+                        self._chain.hop_index = 0
+                        chain_hop = True
+                        chain_final = self._chain.speeds[0].brake
+                        hop_start_pwm = self._chain.speeds[0].start_pwm
+                        hop_end_pwm = 0 if chain_final else self._chain.speeds[0].end_pwm
+
+                # A speed suffix rides the tuple whenever the sim resolved a
+                # NON-default plan (a chained hop, or a pass-through-seeded lone
+                # hop) — it carries (start_pwm, end_pwm, chain). A plain cold-start
+                # non-chain hop leaves the tuple PRISTINE (AC12: byte-identical to
+                # the compiler's `(ACT_FORWARD, dist)` / `(ACT_BLIND_REVERSE, ...)`),
+                # and downstream consumers compute the cold-start endpoints.
+                # RAW_FLAT never chains: it carries a suffix only when pass-through-
+                # seeded, and its end speed is the cruise (its flat open-loop end),
+                # so the endpoints are (rawStart, cruise) — matching the firmware.
+                emit_suffix = chain_hop or pass_through_active
+                if decision.drive_mode == BlindMode.RAW_FLAT:
+                    # RAW_FLAT plan endpoints: start = pass-through captured cruise
+                    # else cruise; end = cruise (the flat contract).
+                    raw_cruise = -SPEED_NORMAL if decision.reverse else SPEED_NORMAL
+                    hop_start_pwm = entry_pwm if pass_through_active else raw_cruise
+                    hop_end_pwm = raw_cruise
+
                 if not decision.reverse:
                     self._chassis.forward(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_FORWARD, effective_dist_cm)
+                    if emit_suffix:
+                        yield (
+                            ACT_FORWARD, effective_dist_cm,
+                            hop_start_pwm, hop_end_pwm, chain_hop,
+                        )
+                    else:
+                        yield (ACT_FORWARD, effective_dist_cm)
                 else:
                     self._chassis.reverse(effective_dist_cm)
                     self._localization.on_dead_reckoned_advance(nxt)
-                    yield (ACT_BLIND_REVERSE, nxt, effective_dist_cm, resolve_blind_mode(edge, cfg))
+                    if emit_suffix:
+                        yield (
+                            ACT_BLIND_REVERSE, nxt, effective_dist_cm,
+                            resolve_blind_mode(edge, cfg),
+                            hop_start_pwm, hop_end_pwm, chain_hop,
+                        )
+                    else:
+                        yield (
+                            ACT_BLIND_REVERSE, nxt, effective_dist_cm,
+                            resolve_blind_mode(edge, cfg),
+                        )
+
+                # ADR-059 `blind_pass` boundary marker: a chained NON-final hop
+                # passes the node WITHOUT braking, so emit the pass tag AFTER the
+                # hop's dead-reckon record and BEFORE moving on (the firmware emits
+                # `_ptEmitBlindPass(_nextHop)` in BLIND_FORWARD, between the two
+                # adjacent hops' `blind_dead_reckon` records). The run's FINAL
+                # (braked) hop emits NO pass tag, and the run retires here so a
+                # fresh chain may re-form on the far side.
+                if chain_hop and not chain_final:
+                    yield (ACT_BLIND_PASS, nxt)
+                if chain_hop and chain_final:
+                    self._chain = _ChainRun()
 
             # Wall-zero reset interlude (PR2, AC17 pillar 2). The hop above just
             # re-anchored localization onto `nxt`. If `nxt` is a reset node, run
@@ -3182,10 +3553,18 @@ class PathTrackerSim:
                 if LINE_HEADING_RESET_ON_JUNCTION:
                     yield (ACT_HEADING_RESET, nxt, "junction", body_heading)
 
+            # ADR-023 pass-through carry for the NEXT hop's BLIND `entry_pwm`
+            # (mirror of the firmware `_passThrough` flag): a LINE / projection
+            # collinear pass-through keeps the follower live at cruise across the
+            # node, so a blind hop departing this node seeds the captured cruise,
+            # not the cold-start floor. Set iff THIS hop emitted a pass tag; reset
+            # otherwise so a stop-and-go arrival correctly seeds the cold start.
+            pass_through_active = heading_reset_kind is not None
+
             current = nxt
 
     def _reset_pivot_latch(self) -> None:
-        """Clear the three pivot-latch members to their inactive state.
+        """Clear the three pivot-latch members (and the blind-chain run) to inactive.
 
         ADR-036: each goal starts with a clean pivot latch so a pivot whose
         FINAL hop was the previous goal's last hop (leaving ``_pending_pivot``
@@ -3194,10 +3573,198 @@ class PathTrackerSim:
         turn. Mirror of the firmware's ``_resetPivotLatch()``; factored out so
         the two public entry points (:meth:`go_to`, :meth:`step_through`) cannot
         drift if a fourth latch member is ever added (parity contract).
+
+        ADR-059: also resets the blind-chain run buffer here (the firmware
+        retires a chain at its final hop's dispatch, but a fresh goal must never
+        inherit a stale run). Bundled into this one goal-start reset so the two
+        entry points cannot diverge on which state is cleaned.
         """
         self._pending_pivot = None
         self._departing_pivot = None
         self._approaching_pivot = None
+        self._chain = _ChainRun()
+
+    def _try_start_blind_chain(
+        self,
+        cur: str,
+        nxt: str,
+        goal_name: str,
+        *,
+        reverse: bool,
+        hop0_mode: BlindMode,
+        hop0_dist_cm: float,
+        hop0_body_heading: float,
+        entry_pwm: int,
+        cfg: PipelineConfig,
+        route_direction: "Direction",
+        arrival_direction: "Direction",
+    ) -> None:
+        """Walk NEXT_HOP forward from a BLIND hop-0, folding a collinear run.
+
+        Function-identical Python mirror of the firmware
+        ``PathTrackerClass::_chainTryStart`` (ADR-059). On entry the hop being
+        dispatched (hop 0: ``cur -> nxt``) is already classified
+        BLIND_DEAD_RECKON by :meth:`_walk_hops`. This method decides whether hop
+        0 STARTS a chained run and, if so, how far it extends. It leaves
+        :attr:`_chain` INACTIVE unless a genuine ``>= 2``-hop run forms (AC12: a
+        non-chain hop takes the ordinary per-hop path untouched, byte-identical
+        to the compiler).
+
+        Every ``break`` ENDS the run BEFORE the hop under evaluation (Error
+        Handling): that hop dispatches later as a normal braked hop. The same
+        ineligibility reasons the firmware uses end the chain: a pivot-adjacent
+        joint, a seek (``stopAtLine``) hop, a RAW_FLAT motion bundle, a
+        ``< TSHAPE_MIN_MOVE_CM`` hop, a non-collinear bend / direction flip, a
+        goal / reset node, and the two run caps (:data:`MAX_CHAIN_HOPS` /
+        :data:`PATH_BLIND_CHAIN_MAX_CM`). The pairwise walk updates the inbound
+        BODY heading per admitted hop (the outbound edge heading, +180° wrapped
+        iff REAR), exactly as ``_onPlanNextHop`` computes ``bodyTarget``.
+
+        :param cur: hop 0's arrive-from node.
+        :param nxt: hop 0's destination (``cur -> nxt`` is hop 0).
+        :param goal_name: the active ``go_to`` destination.
+        :param reverse: hop 0's resolved travel direction (uniform along the run).
+        :param hop0_mode: hop 0's resolved :class:`BlindMode` motion bundle.
+        :param hop0_dist_cm: hop 0's COMMANDED (pivot-trimmed) distance — the run
+            total includes it (matches the firmware's ``totalCm = hop0DistCm``).
+        :param hop0_body_heading: hop 0's resolved body heading (seeds the walk).
+        :param entry_pwm: the signed PWM the chassis is physically at when the
+            run begins (the ADR-023 captured cruise after a pass-through, else the
+            +/-TSHAPE_START_SPEED cold-start seed) — the forward-pass seed (AC5).
+        :param cfg: the resolved pipeline config for this walk.
+        :param route_direction: the builder route override (every hop).
+        :param arrival_direction: the builder arrival override (final hop only).
+        """
+        # ---- Hop-0 eligibility (mirror of _chainTryStart's three early returns).
+        # RAW_FLAT has no ramps to chain; a sub-floor hop silently degrades the
+        # Drive profile; an active approaching pivot means the chassis must stop
+        # delta short of `nxt` and pivot there. All three make hop 0 ordinary.
+        if hop0_mode == BlindMode.RAW_FLAT:
+            return
+        if hop0_dist_cm < TSHAPE_MIN_MOVE_CM:
+            return
+        if self._approaching_pivot is not None:
+            return
+
+        nodes: List[str] = [cur, nxt]
+        hop_dist_cm: List[float] = [hop0_dist_cm]
+        count = 1                     # hops admitted so far (hop 0 is in)
+        total_cm = hop0_dist_cm       # summed COMMANDED run distance
+        inbound_body = hop0_body_heading    # hop 0's body heading seeds the walk
+
+        # ---- Walk NEXT_HOP forward, admitting one hop per iteration. -----------
+        while True:
+            a = nodes[count]          # node the run currently ends on
+
+            # Goal: a run may END on the goal but never continues past it. RESET:
+            # the wall-zero interlude needs a stopped chassis, so brake there too.
+            if a == goal_name:
+                break
+            if self._localization.is_reset_node(a):
+                break
+
+            b = self._next_hop[a][goal_name]
+            if b is None or b == a:
+                break    # no route / self-loop (same guards as _peek_next_next_hop)
+
+            edge = self._graph.edges[a, b]
+            if edge["type"] != EDGE_BLIND:
+                break    # a LINE hop is the line-follower's domain — run ends here
+
+            # Pivot guards (defensive: a validator-passed pivot is never
+            # collinear, so the heading predicate below would reject these
+            # joints anyway). A pivot AT the joint (prev, a, b) or a pivot ONTO b
+            # (a, b, c) both brake.
+            if self.find_pivot_turn(nodes[count - 1], a, b) is not None:
+                break
+            if b != goal_name:
+                c = self._next_hop[b][goal_name]
+                if c is not None and c != b and self.find_pivot_turn(a, b, c) is not None:
+                    break
+
+            # Collinear + same-direction — the PURE predicate (a bend or a
+            # FRONT<->REAR flip ends the run; the direction stays constant).
+            if not _pass_through_heading_eligible(
+                edge,
+                outbound_is_last_hop=(b == goal_name),
+                inbound_body_heading=inbound_body,
+                inbound_direction=(Direction.REAR if reverse else Direction.FRONT),
+                pipeline_default=cfg.direction,
+                builder_route=route_direction,
+                builder_arrival=arrival_direction,
+                bidirectional_enabled=BIDIRECTIONAL_AUTO_ENABLED,
+                line_board_count=LINE_BOARD_COUNT,
+            ):
+                break
+
+            # Seek / motion-bundle resolution — the SAME resolver inputs the
+            # dispatch site builds. A seek hop is chain-ineligible (the seek is a
+            # fresh braked hop); a RAW_FLAT bundle has no ramps to chain.
+            auto_rule_active = (
+                getattr(self._field_data, "BLIND_PROJECTION_AUTO_SEEK", True)
+                and is_projection_node(self._graph, b)
+            )
+            seek, motion_mode = resolve_stop_at_line(
+                StopAtLine.AUTO,
+                _read_edge_stop_at_line_override(edge),
+                resolve_blind_mode(edge, cfg),
+                cfg.blind,
+                Direction.REAR if reverse else Direction.FRONT,
+                LINE_BOARD_COUNT,
+                auto_rule_active,
+            )
+            if seek:
+                break
+            if motion_mode == BlindMode.RAW_FLAT:
+                break
+
+            # A hop below the profile floor cannot carry chained start/end speeds.
+            if float(edge["distance_cm"]) < TSHAPE_MIN_MOVE_CM:
+                break
+
+            # ---- Run caps (mirror of the firmware's LOGGED truncations). -------
+            # The sim has no fixed-size buffer, but honors the SAME caps so its
+            # output matches the firmware (ADR-050 parity). The truncation Serial
+            # log is firmware-only; the sim just ends the run at the cap.
+            if count >= MAX_CHAIN_HOPS:
+                break
+            if total_cm + float(edge["distance_cm"]) > PATH_BLIND_CHAIN_MAX_CM:
+                break
+
+            # ---- Admit the hop. Mid-run hops carry the raw edge length (no pivot
+            #      can trim them — the pivot guards above ended the run at any
+            #      pivot-adjacent joint, so the walk-time distance equals the
+            #      dispatch-time value exactly). -------------------------------
+            hop_dist_cm.append(float(edge["distance_cm"]))
+            nodes.append(b)
+            count += 1
+            total_cm += float(edge["distance_cm"])
+
+            # The next joint's inbound body heading is THIS hop's body heading
+            # (REAR rotates 180°, matching `_onPlanNextHop`'s bodyTarget math).
+            inbound_body = _body_heading_for(
+                Direction.REAR if reverse else Direction.FRONT,
+                float(edge["heading_deg"]),
+            )
+
+        if count < 2:
+            return    # not a chain — hop 0 dispatches on the ordinary per-hop path
+
+        # ---- Resolve the per-hop speed plan (pure two-pass planner). -----------
+        # `entry_pwm` seeds the forward pass (AC5); the final hop's plan is
+        # `{start_pwm, 0, brake=True}` by construction. cruise = +/-SPEED_NORMAL
+        # (sign carries the run direction, matching the firmware `cruisePwm`).
+        cruise_pwm = -SPEED_NORMAL if reverse else SPEED_NORMAL
+        speeds = resolve_chain_speeds(hop_dist_cm, count, cruise_pwm, entry_pwm)
+
+        self._chain = _ChainRun(
+            active=True,
+            reverse=reverse,
+            nodes=nodes,
+            speeds=speeds,
+            hop_count=count,
+            hop_index=-1,
+        )
 
     def go_to(
         self,
