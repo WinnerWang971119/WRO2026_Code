@@ -613,44 +613,68 @@
     });
 
     // ----- deploy layer: live manipulator-area overlay ----------------------
-    // Per-actuator "deployed" semantics (Decisions): the grab area flashes on
-    // RELEASE events (not `grab`), the dump area flashes on `dump` events, and
-    // the box area is shown persistently while the rear box holds cargo
-    // (`scene.rearBox !== null`, boxClose -> boxOpen). Grab/dump flash windows
-    // are derived from the fixed track events and never change after ingest,
-    // so they are computed ONCE (cached) rather than rescanned every repaint —
-    // mirroring chrome.js's compute-once `findWorstDrift` idiom.
+    // Per-actuator "deployed" semantics: the grab area flashes on RELEASE events
+    // (not `grab`), the dump area flashes on `dump` events, and the box area is
+    // shown across each rear-box hold — the `boxClose` EVENT shows it and the
+    // matching `boxOpen` EVENT clears it. All three are derived purely from the
+    // fixed track events (never the cargo-capture model), so they never change
+    // after ingest and are computed ONCE (cached) rather than rescanned every
+    // repaint — mirroring chrome.js's compute-once `findWorstDrift` idiom.
+    //
+    // NOTE: the box overlay is EVENT-driven, not cargo-driven. It shows whenever
+    // the rear box is closed, independent of whether a Cargo object happened to
+    // lie in the box zone at `boxClose` time (which the cargo model requires to
+    // set `scene.rearBox`). Keying it to the events makes the overlay reflect
+    // the actuator's deployment on any trace, regardless of layout alignment.
 
-    // { release: [[t0,t1],...], dump: [[t0,t1],...] }, lazily built + cached on
-    // first `_deployMaskAt` call (CTPS.engine.events is not necessarily ready
-    // at IIFE-eval time, so this cannot be precomputed at module load).
+    // { release: [[t0,t1],...], dump: [[t0,t1],...], box: [[close,open),...] },
+    // lazily built + cached on first `_deployMaskAt` call (CTPS.engine.events is
+    // not necessarily ready at IIFE-eval time, so this cannot be precomputed at
+    // module load).
     var _deployWindows = null;
 
     /**
-     * Build the release/dump flash-window lists from `CTPS.engine.events` in a
-     * single pass. Each `manip` event is `method`-gated (never the display
-     * `label`), so a legacy trace whose events carry only `label` yields two
-     * empty lists and the deploy layer flashes nothing for grab/dump — box
-     * still works via the resolved scene. Every window spans exactly the
-     * manip event's on-screen dwell, `[ev.t, ev.t + MANIP_NOMINAL_S]`.
+     * Build the release/dump flash-window lists and the box close->open spans
+     * from `CTPS.engine.events` in a single pass. Each `manip` event is
+     * `method`-gated (never the display `label`), so a legacy trace whose events
+     * carry only `label` yields empty lists and the deploy layer draws nothing.
+     * Every grab/dump window spans the manip event's on-screen dwell,
+     * `[ev.t, ev.t + MANIP_NOMINAL_S]`; every box span runs `[boxClose.t,
+     * boxOpen.t)` (close shows, open clears). A `boxClose` with no later
+     * `boxOpen` stays deployed to the trace end (`Infinity`); a redundant
+     * `boxClose` while already closed, or a `boxOpen` with nothing closed, is a
+     * no-op — mirroring the single-slot rear box.
      */
     function _buildDeployWindows() {
         var events = (CTPS.engine && CTPS.engine.events) || [];
         var release = [];
         var dump = [];
+        var box = [];
+        var pendingClose = null; // time of an unmatched boxClose, or null
         for (var i = 0; i < events.length; i++) {
             var ev = events[i];
             if (!ev || ev.type !== "manip") {
                 continue;
             }
-            var win = [ev.t, ev.t + MANIP_NOMINAL_S];
             if (ev.method === METHOD_RELEASE) {
-                release.push(win);
+                release.push([ev.t, ev.t + MANIP_NOMINAL_S]);
             } else if (ev.method === METHOD_DUMP) {
-                dump.push(win);
+                dump.push([ev.t, ev.t + MANIP_NOMINAL_S]);
+            } else if (ev.method === METHOD_BOX_CLOSE) {
+                if (pendingClose === null) {
+                    pendingClose = ev.t; // first close of a hold; later closes no-op
+                }
+            } else if (ev.method === METHOD_BOX_OPEN) {
+                if (pendingClose !== null) {
+                    box.push([pendingClose, ev.t]);
+                    pendingClose = null;
+                }
             }
         }
-        return { release: release, dump: dump };
+        if (pendingClose !== null) {
+            box.push([pendingClose, Infinity]); // closed, never opened -> to end
+        }
+        return { release: release, dump: dump, box: box };
     }
 
     /** The cached deploy-window lists, building them once on first use. */
@@ -673,20 +697,36 @@
     }
 
     /**
+     * True when `t` falls inside any `[close, open)` box span — start-inclusive
+     * so the `boxClose` frame already shows the box, end-exclusive so the
+     * `boxOpen` frame clears it (an open with no later close runs to `Infinity`).
+     */
+    function _tInAnyBoxSpan(t, spans) {
+        for (var i = 0; i < spans.length; i++) {
+            var s = spans[i];
+            if (t >= s[0] && t < s[1]) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Resolve which manipulator areas are deployed at time `t`: `grab` flashes
      * on a cached `release` window, `dump` flashes on a cached `dump` window,
-     * and `box` mirrors the store's already-resolved cargo scene
-     * (`state.scene.rearBox`) — no second resolver pass, no new store field.
+     * and `box` shows across a cached `boxClose`->`boxOpen` span (close shows,
+     * open clears). All three read only the cached, event-derived windows — the
+     * box is intentionally NOT gated on the cargo model's `scene.rearBox`, so it
+     * reflects the actuator on any trace regardless of layout alignment.
      *
      * @param t the current playhead time (s).
-     * @param state the store (reads `state.scene`).
      * @return `{ grab, box, dump }` booleans.
      */
-    function _deployMaskAt(t, state) {
+    function _deployMaskAt(t) {
         var windows = _deployWindowsCached();
         return {
             grab: _tInAnyWindow(t, windows.release),
-            box: !!(state.scene && state.scene.rearBox),
+            box: _tInAnyBoxSpan(t, windows.box),
             dump: _tInAnyWindow(t, windows.dump),
         };
     }
@@ -706,7 +746,7 @@
         if (!robotCfg) {
             return;
         }
-        var mask = _deployMaskAt(state.t, state);
+        var mask = _deployMaskAt(state.t);
         if (!mask.grab && !mask.box && !mask.dump) {
             return;
         }

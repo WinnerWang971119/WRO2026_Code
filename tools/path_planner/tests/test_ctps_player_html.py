@@ -1274,3 +1274,10 @@ def test_deploy_chip_and_layer_present(tmp_path):
     # Inlined JS: the masked draw fn and the layer registration.
     assert "drawDeployedZones" in html
     assert 'id: "deploy"' in html
+
+    # Box overlay is EVENT-driven (boxClose shows, boxOpen clears), NOT gated on
+    # the cargo model's captured-cargo `scene.rearBox` — so it reflects the rear
+    # box on any trace regardless of whether a Cargo object lay in the box zone.
+    assert "_tInAnyBoxSpan" in html
+    assert "windows.box" in html
+    assert "box: _tInAnyBoxSpan(t, windows.box)" in html
