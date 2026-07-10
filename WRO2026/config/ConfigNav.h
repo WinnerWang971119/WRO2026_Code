@@ -576,43 +576,35 @@ namespace Config
      * @brief Maximum total run distance (cm) a blind chain may span before it is forced to
      *        end (that hop brakes; a fresh chain re-forms after).
      *
-     * Bounds how far the chassis dead-reckons without an intermediate braked correction. A
-     * chain immediately preceding a `Drive.stopAtLine()` seek ends before the seek (seek
-     * nodes are chain-ineligible — see ADR-059), so the residual dead-reckoning error
-     * accumulated over the chain must still land within the FOLLOWING seek's
-     * `STOP_AT_LINE_ARM_WINDOW_CM` arm window, or the seek's `T_OR_CROSS` detector can arm too
-     * late and miss the real line (→ runs to max → `LINE_NOT_FOUND`).
+     * Bounds how far the chassis dead-reckons without an intermediate braked correction.
      *
-     * @note Sizing rule (load-bearing): MUST be `<= STOP_AT_LINE_ARM_WINDOW_CM`
-     *       (`ConfigDrive.h`, currently 10.0f cm) — that is the full error budget the
-     *       following seek can absorb. Sized conservatively at 8.0f cm (a 2 cm margin under
-     *       the 10 cm window) so a chain's residual dead-reckon error, even near the
-     *       worst-case end of the seek's own tolerance, still leaves room for the seek's
-     *       normal under-travel slack. Do not raise this to equal the window exactly —
-     *       the margin is intentional headroom, not slack to reclaim.
+     * @note Owner decision (2026-07): this cap is now a LOOSE runaway guard, not a tight
+     *       error budget. It is deliberately NOT tied to `STOP_AT_LINE_ARM_WINDOW_CM` or any
+     *       other seek-arm-window concern — the practical bound on how long a blind chain can
+     *       run is `MAX_CHAIN_HOPS`, not this distance cap. Set to 1000.0f (10 m, larger than
+     *       any physical collinear run on a WRO field) so the cap never binds in practice; if
+     *       bench testing later shows it needs to be tighter, lower it then.
      * @note Consumer: `PathTracker`'s walk-ahead chain builder (caps the run BEFORE
      *       dispatch) and `ChainSpeedPolicy.h` (the backward pass assumes the run fits this
      *       cap). Mirrored in `tools/path_planner/sim/runtime.py` for parity.
      * @note Overflow is not a fault: a run exceeding this cap ends AT the cap (that hop is
      *       dispatched as an ordinary braked stop) and PathTracker logs the truncation over
-     *       Serial; a new chain may re-form on the far side.
-     * @warning Raising this value without re-checking `STOP_AT_LINE_ARM_WINDOW_CM` breaks the
-     *          seek arm-window budget invariant this constant exists to protect. A
-     *          `static_assert` in `ConfigChecks.h` enforces
-     *          `PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM` at compile time, but
-     *          that only catches the boundary case — it does NOT prove the chain's actual
-     *          dead-reckoning error stays under budget on hardware. Re-verify AC9 (bench) on
-     *          any change.
+     *       Serial; a new chain may re-form on the far side. In practice `MAX_CHAIN_HOPS`
+     *       will end a chain long before this distance cap is ever reached.
+     * @warning If bench testing shows a blind chain that ends into a `Drive.stopAtLine()`
+     *          seek drifts past that seek's `STOP_AT_LINE_ARM_WINDOW_CM` arm window, do NOT
+     *          re-tie this general cap to the arm window again — add a SEPARATE, tighter
+     *          bound that applies only to a chain ending into a seek. A `static_assert` in
+     *          `ConfigChecks.h` enforces only a loose sanity range on this constant now (no
+     *          longer arm-window-derived).
      * @note **Compile-time override:** guarded by `#ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT`
-     *       so a host test can widen it target-wide via
-     *       `-DPATH_BLIND_CHAIN_MAX_CM_DEFAULT=10.0f` without editing this file (same idiom
-     *       as `PATH_BLIND_CHAIN_ENABLED_DEFAULT` above). Load-bearing for the blind-chain
-     *       host ctest: with the shipped 8.0f cap and `TSHAPE_MIN_MOVE_CM` (5.0f), two
-     *       eligible hops always sum past the cap, so a test target must widen it (within
-     *       the `ConfigChecks.h` arm-window ceiling) for a chain to form at all.
+     *       so a host test can override it target-wide via e.g.
+     *       `-DPATH_BLIND_CHAIN_MAX_CM_DEFAULT=8.0f` without editing this file (same idiom
+     *       as `PATH_BLIND_CHAIN_ENABLED_DEFAULT` above) — kept so existing host-test targets
+     *       that need a tighter cap to exercise truncation (TC5/TC6-style tests) still can.
      */
 #ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT
-#define PATH_BLIND_CHAIN_MAX_CM_DEFAULT 8.0f
+#define PATH_BLIND_CHAIN_MAX_CM_DEFAULT 1000.0f
 #endif
     constexpr float PATH_BLIND_CHAIN_MAX_CM = PATH_BLIND_CHAIN_MAX_CM_DEFAULT;
 

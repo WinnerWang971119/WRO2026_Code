@@ -2331,8 +2331,11 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMo
         // Seek / motion-bundle resolution — the SAME resolver inputs the dispatch site
         // builds, so walk-time and dispatch-time classification cannot diverge. A seek
         // (stopAtLine) hop is chain-ineligible (the run ends; the seek is a fresh braked
-        // hop whose arm window absorbs the run's residual dead-reckon error — the
-        // PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM budget, ConfigChecks.h).
+        // hop whose arm window must absorb the run's residual dead-reckon error). That is
+        // no longer a compile-enforced PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM
+        // budget: the distance cap was decoupled (owner decision, ConfigNav.h) and
+        // MAX_CHAIN_HOPS is now the practical bound. If a chain-into-seek drift shows up on
+        // the bench, add a SEPARATE bound scoped to that handoff (do NOT re-tie the cap).
         const bool autoRule =
             Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(b);
         const StopAtLineQuery sq{

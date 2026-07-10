@@ -91,9 +91,11 @@ pass through cleanly is to straighten the field, not add a second knob.
   firmware emitter and the sim together, in the same change — the strict
   schema faults loudly on either side landing alone.
 - Guard new blind chaining behind `Config::PATH_BLIND_CHAIN_ENABLED` (default
-  true), `PATH_BLIND_CHAIN_MAX_CM` (≤ the `STOP_AT_LINE_ARM_WINDOW_CM`
-  budget), and `MAX_CHAIN_HOPS`; disabling the first restores today's
-  stop-at-every-node behavior exactly.
+  true), `PATH_BLIND_CHAIN_MAX_CM`, and `MAX_CHAIN_HOPS`; disabling the first
+  restores today's stop-at-every-node behavior exactly. `PATH_BLIND_CHAIN_MAX_CM`
+  is set high (a loose runaway guard, not a physical constraint — owner
+  decision, 2026-07): `MAX_CHAIN_HOPS` is the practical bound on how far a
+  chain runs. See "Trigger to revisit" below.
 
 ## Trigger to revisit
 
@@ -107,6 +109,13 @@ pass through cleanly is to straighten the field, not add a second knob.
 - Run-coalescing's rejected tradeoff shifts — e.g. a mid-move distance
   observer becomes cheap for another reason — reopen the coalescing decision
   against the parity-granularity cost recorded here.
+- Bench testing shows a blind chain that ends directly into a
+  `Drive.stopAtLine()` seek drifts past that seek's `STOP_AT_LINE_ARM_WINDOW_CM`
+  arm window. `PATH_BLIND_CHAIN_MAX_CM` was deliberately decoupled from the
+  arm-window budget and set high (owner decision, 2026-07) because
+  `MAX_CHAIN_HOPS` is the intended practical bound; if hardware proves that
+  insufficient, add a SEPARATE, tighter bound scoped to a chain-into-seek
+  handoff rather than re-tying this general cap to the arm window.
 
 ## See also
 

@@ -210,9 +210,12 @@ namespace Config
     //
     // COUPLED SITES: PATH_BLIND_CHAIN_MAX_CM and MAX_CHAIN_HOPS both cap the same run seen by
     // PathTracker's walk-ahead chain builder and ChainSpeedPolicy.h's two-pass resolver; the
-    // Python sim (tools/path_planner/sim/runtime.py) hand-mirrors all three constants. Changing
-    // either cap without revisiting those sites can silently widen the seek arm-window budget
-    // (PATH_BLIND_CHAIN_MAX_CM) or overflow the fixed firmware run buffer (MAX_CHAIN_HOPS).
+    // Python sim (tools/path_planner/sim/runtime.py) hand-mirrors all three constants.
+    // PATH_BLIND_CHAIN_MAX_CM is a LOOSE runaway sanity guard only (owner decision, 2026-07) --
+    // it is no longer tied to STOP_AT_LINE_ARM_WINDOW_CM. MAX_CHAIN_HOPS is the practical bound
+    // on how long a chain can run; overflowing either cap ends the chain at an ordinary braked
+    // stop (not a fault), so raising MAX_CHAIN_HOPS still needs the RAM check its own docstring
+    // describes.
     // -----------------------------------------------------------------------------------------
 
     static_assert(PATH_BLIND_CHAIN_MAX_CM > 0.0f,
@@ -220,13 +223,12 @@ namespace Config
                   "would make every blind chain ineligible (or nonsensical), defeating the "
                   "ADR-059 continuous-motion feature entirely.");
 
-    static_assert(PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM,
-                  "Config::PATH_BLIND_CHAIN_MAX_CM must be <= STOP_AT_LINE_ARM_WINDOW_CM -- a "
-                  "blind chain immediately preceding a Drive.stopAtLine() seek must leave its "
-                  "residual dead-reckoning error inside the FOLLOWING seek's arm-window error "
-                  "budget, or the seek's T_OR_CROSS detector can arm too late and miss the real "
-                  "line (runs to max distance -> LINE_NOT_FOUND). See config/ConfigNav.h and "
-                  "config/ConfigDrive.h (STOP_AT_LINE_ARM_WINDOW_CM).");
+    static_assert(PATH_BLIND_CHAIN_MAX_CM <= 10000.0f,
+                  "Config::PATH_BLIND_CHAIN_MAX_CM must be <= 10000.0f cm -- this is a loose "
+                  "runaway sanity bound, not a physical or arm-window-derived constraint (that "
+                  "coupling was deliberately dropped; MAX_CHAIN_HOPS is the practical bound on "
+                  "how far a chain can run). A cap this large or larger indicates a config typo "
+                  "rather than an intentional value. See config/ConfigNav.h.");
 
     static_assert(MAX_CHAIN_HOPS >= 2 && MAX_CHAIN_HOPS <= 32,
                   "Config::MAX_CHAIN_HOPS must be in [2, 32] -- below 2 a \"chain\" can never "
