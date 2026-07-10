@@ -15,7 +15,13 @@ backward decel-to-floor, clamped to `[pwmMin, |cruise|]`); `LineFollower` and
 `Drive` gain **no new cross-hop controller state** — the terminal, per-hop
 scope ADR-050 relies on stays terminal. Ramp-down targets the floor
 (`(cruise − PWM_MIN)/accel`, shed-to-floor), not zero; the run's final hop is
-always an ordinary `cruise→floor→brake` stop. `entryPwm` preserves the
+always an ordinary `cruise→floor→brake` stop, and the blind-chain final hop's
+dispatched tShape end speed is pinned to the floor (`±PWM_MIN_MAGNITUDE`),
+not 0 — a cruise→0 shed (17 cm at 85/5) cannot fit a short final hop and
+triangle-collapses the profile, launching the hop below the cruise the
+chassis physically enters at; the cruise→floor shed (7 cm) fits, the launch
+holds the cruise entry, and the brake completes floor→rest. `entryPwm`
+preserves the
 ADR-023 cruise carry: a chain opening right after a pass-through seeds the
 captured cruise, never the cold-start floor. Inter-hop boundary carry (the
 ~1.5–3 cm the chassis travels holding the last PWM across a node boundary) is
@@ -83,7 +89,12 @@ pass through cleanly is to straighten the field, not add a second knob.
   before the unsafe hop, which then takes the ordinary braked path.
   `LineFollower`/`Drive` dispatch chained mid-hops via the existing builder
   surface (`setStartSpeed`/`setEndSpeed`/`setBrake(false)`); they hold no run
-  memory of their own.
+  memory of their own. The run's FINAL hop dispatches the braked statement
+  with `setEndSpeed(±PWM_MIN_MAGNITUDE)` — the floor, never the braked
+  default 0 — so a short final hop's cruise→floor shed fits (no
+  triangle-collapse, no re-dip below the run's cruise entry) and the brake
+  takes floor→rest. This is a dispatch detail only: the ADR-050 parity record
+  still carries the PLAN endpoint (`end_pwm = 0`) on every braked hop.
 - The CTPS run-grouper (`track_builder.py`) treats a run as bounded by braked
   stops and folds zero-motion records through transparently; it never
   re-derives a chain decision — it consumes the recorded/resolved speeds.
@@ -99,6 +110,9 @@ pass through cleanly is to straighten the field, not add a second knob.
 
 ## Trigger to revisit
 
+- If the chassis cannot brake to rest from the PWM floor due to inertia on a
+  short final hop (bench), revisit the final-hop end speed (owner: Diego,
+  2026-07).
 - Bench data shows the measured inter-hop boundary carry is noisier than the
   ~1.5–3 cm model (loop-rate dependent) — the subtraction may need a
   measured-with-margin or filtered form instead of a raw encoder delta.

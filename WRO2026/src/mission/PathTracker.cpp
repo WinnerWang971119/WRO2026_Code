@@ -2768,8 +2768,9 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         chainMid    = true;
                         chainEndPwm = _chain.speed[k].endPwm;
                     }
-                    // else: the run's FINAL hop — the ORDINARY braked cruise->floor->brake
-                    // dispatch below, only with the chained start speed (AC3).
+                    // else: the run's FINAL hop — the braked cruise->floor->brake stop
+                    // (AC3), dispatched below with the chained start speed AND the tShape
+                    // end target pinned to the FLOOR (see `chainFinalEndPwm`).
                 }
                 else
                 {
@@ -2810,6 +2811,27 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             }
 
             const bool chainHop = _chain.active;
+
+            // ADR-059 chain-FINAL hop (the run buffer's braked last hop; `chainHop` with
+            // `chainMid` false): pin the braked tShape's end target to the FLOOR
+            // (±PWM_MIN_MAGNITUDE), NOT 0. The braked-default endSpeed=0 asks the kernel
+            // to shed cruise->0 — (85−0)/5 = 17 cm of ramp-down — which cannot fit a
+            // short final hop, so the profile triangle-collapses
+            // (TShapeProfilePolicy.h: peak = (85+0+85)/3 = 56) and the hop LAUNCHES
+            // below the cruise the chassis physically enters at — the exact re-dip lurch
+            // ADR-059 removes. Ending at the floor sizes the shed at
+            // (cruise − PWM_MIN)/accel = 7 cm, which fits: the hop launches at the plan
+            // start, sheds cruise->floor, and the brake (still default-on) completes
+            // floor->rest — ADR-058's cruise->floor->brake stop shape. Non-chain braked
+            // hops deliberately keep the endSpeed=0 default (they start from rest / a
+            // low seed and do not triangle-collapse; changing them would alter existing
+            // motion and re-pin goldens — AC12).
+            // Revisit the final end speed if the robot cannot brake to rest from the
+            // floor due to inertia on a short final hop (owner decision, Diego 2026-07).
+            const bool    chainFinal = chainHop && !chainMid;
+            const int16_t chainFinalEndPwm =
+                decision.reverse ? (int16_t) -Config::PWM_MIN_MAGNITUDE
+                                 : (int16_t) Config::PWM_MIN_MAGNITUDE;
 
             // RAW_FLAT start resolution, hoisted so the RAW dispatch branch and the parity
             // emit below cannot drift: pass-through is the one case where the inbound
@@ -2870,11 +2892,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // node boundary without braking to rest (AC3) — Drive's empty-queue
                 // chained-end path then releases the brake and coasts for the short
                 // boundary window until the next chained hop re-drives the wheels at that
-                // same planned PWM. A chain FINAL hop takes the UNCHANGED braked statement
-                // (the ordinary cruise->floor->brake stop) with only its start speed
-                // seeded from the run plan; a non-chain hop is byte-identical to
-                // pre-ADR-059 (AC12). RAII rule throughout: each Drive chain is ONE
-                // discarded-temporary statement.
+                // same planned PWM. A chain FINAL hop (`chainFinal`) takes the braked
+                // statement with its start speed seeded from the run plan and its tShape
+                // end target pinned to the FLOOR (`chainFinalEndPwm` — see the block
+                // above for why 0 triangle-collapses a short final hop); a non-chain hop
+                // is byte-identical to pre-ADR-059 (AC12). RAII rule throughout: each
+                // Drive chain is ONE discarded-temporary statement.
                 switch (decision.driveMode)
                 {
                     case Routes::BlindMode::GYRO_TSHAPE:
@@ -2891,6 +2914,19 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                                  .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
                                  .setEndSpeed(chainEndPwm)           // ChainHopSpeed.endPwm
                                  .setBrake(false)                    // never brake mid-run (AC3)
+                                 .tShape()
+                                 .async();
+                        }
+                        else if (chainFinal)
+                        {
+                            // ADR-059 chain-FINAL: braked stop shedding cruise->FLOOR
+                            // (brake completes floor->rest) — see `chainFinalEndPwm`.
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::GYRO)
+                                 .setHeading(imuTarget)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainFinalEndPwm)      // floor, not 0
                                  .tShape()
                                  .async();
                         }
@@ -2940,6 +2976,18 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                                  .tShape()
                                  .async();
                         }
+                        else if (chainFinal)
+                        {
+                            // ADR-059 chain-FINAL: braked stop shedding cruise->FLOOR
+                            // (brake completes floor->rest) — see `chainFinalEndPwm`.
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::SYNC)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainFinalEndPwm)      // floor, not 0
+                                 .tShape()
+                                 .async();
+                        }
                         else
                         {
                             Drive.driveDist(dispatchCm)    // ADR-036 pivot-trimmed (LOCAL)
@@ -2960,7 +3008,10 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 // velocity-PLAN endpoints, so the sim (carry-free) emits identical
                 // values; dist_cm is the carry-adjusted COMMANDED distance (== the
                 // planned distance whenever the measured carry is 0, as in the parity
-                // harness).
+                // harness). A braked hop (incl. the chain FINAL) records end_pwm = 0 —
+                // the plan endpoint is rest; the chain-final dispatch pinning its tShape
+                // end target to the floor (`chainFinalEndPwm`) is a DISPATCH detail,
+                // deliberately NOT recorded here.
                 int16_t emitStartPwm = signedStartSpeed;
                 int16_t emitEndPwm   = chainMid ? chainEndPwm : (int16_t) 0;
                 if (decision.driveMode == Routes::BlindMode::RAW_FLAT)

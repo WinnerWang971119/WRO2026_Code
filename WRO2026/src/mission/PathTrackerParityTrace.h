@@ -11,7 +11,7 @@
  * this header is empty there and every trace call site in PathTracker.cpp compiles
  * to nothing — the binary is byte-for-byte behaviorally identical. Only the
  * dedicated parity-dump target defines `PT_PARITY_TRACE` (with
- * `PARITY_SCHEMA_VERSION=1`).
+ * `PARITY_SCHEMA_VERSION=2`).
  *
  * When enabled, `pt_parity::emit(line)` writes one NDJSON record line to stdout.
  * PathTracker.cpp builds the per-hop records and calls it at each FSM commit point;
