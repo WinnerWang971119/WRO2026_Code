@@ -603,8 +603,18 @@ namespace Config
      *          that only catches the boundary case — it does NOT prove the chain's actual
      *          dead-reckoning error stays under budget on hardware. Re-verify AC9 (bench) on
      *          any change.
+     * @note **Compile-time override:** guarded by `#ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT`
+     *       so a host test can widen it target-wide via
+     *       `-DPATH_BLIND_CHAIN_MAX_CM_DEFAULT=10.0f` without editing this file (same idiom
+     *       as `PATH_BLIND_CHAIN_ENABLED_DEFAULT` above). Load-bearing for the blind-chain
+     *       host ctest: with the shipped 8.0f cap and `TSHAPE_MIN_MOVE_CM` (5.0f), two
+     *       eligible hops always sum past the cap, so a test target must widen it (within
+     *       the `ConfigChecks.h` arm-window ceiling) for a chain to form at all.
      */
-    constexpr float PATH_BLIND_CHAIN_MAX_CM = 8.0f;
+#ifndef PATH_BLIND_CHAIN_MAX_CM_DEFAULT
+#define PATH_BLIND_CHAIN_MAX_CM_DEFAULT 8.0f
+#endif
+    constexpr float PATH_BLIND_CHAIN_MAX_CM = PATH_BLIND_CHAIN_MAX_CM_DEFAULT;
 
     /**
      * @brief Compile-time cap on the number of hops a single blind chain run may contain.
@@ -631,8 +641,16 @@ namespace Config
      *          A `static_assert` in `ConfigChecks.h` enforces a sane range
      *          (`>= 2 && <= 32`); re-check available RAM before raising past the current
      *          value on a memory-constrained target.
+     * @note **Compile-time override:** guarded by `#ifndef MAX_CHAIN_HOPS_DEFAULT` so a host
+     *       test can pin it target-wide via `-DMAX_CHAIN_HOPS_DEFAULT=2` (e.g. to exercise
+     *       the hop-cap truncation, TC6) without editing this file — same idiom as
+     *       `PATH_BLIND_CHAIN_MAX_CM_DEFAULT` above. Being an array dimension, the override
+     *       must be applied target-wide (`target_compile_definitions`), never per-TU.
      */
-    constexpr uint8_t MAX_CHAIN_HOPS = 8;
+#ifndef MAX_CHAIN_HOPS_DEFAULT
+#define MAX_CHAIN_HOPS_DEFAULT 8
+#endif
+    constexpr uint8_t MAX_CHAIN_HOPS = MAX_CHAIN_HOPS_DEFAULT;
 
 }    // namespace Config
 
