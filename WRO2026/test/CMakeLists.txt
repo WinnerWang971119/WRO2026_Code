@@ -1000,6 +1000,27 @@ add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
 set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
 
+# Exe-level argv ctests (TC12/TC13/TC16) — run the ctps_dump binary end-to-end now that
+# T6 has landed the mosaic argv. These complement the compiled test_ctps_dump target
+# (TC14/TC15). The mode word (--fixture) MUST come first — ctps_dump reads argv[1] as the mode.
+#
+# TC12 — mosaic echo: --mosaic injects and the top-level mosaic block is echoed. The
+# geom-hash value only appears inside the echoed mosaic block, so matching it proves the
+# echo emitted (spacing-independent).
+add_test(NAME ctps_dump_mosaic_echo
+         COMMAND ctps_dump --fixture --mosaic YBGWYBGWYBGW --mosaic-seed 7 --mosaic-geom-hash abc123)
+set_tests_properties(ctps_dump_mosaic_echo PROPERTIES
+    PASS_REGULAR_EXPRESSION "abc123")
+
+# TC13 — baseline: no --mosaic => no top-level mosaic block emitted (byte-identical to today).
+add_test(NAME ctps_dump_no_mosaic COMMAND ctps_dump --fixture)
+set_tests_properties(ctps_dump_no_mosaic PROPERTIES
+    FAIL_REGULAR_EXPRESSION "\"mosaic\":")
+
+# TC16 — malformed --mosaic exits non-zero (exit 2).
+add_test(NAME ctps_dump_bad_mosaic COMMAND ctps_dump --fixture --mosaic ZZZ)
+set_tests_properties(ctps_dump_bad_mosaic PROPERTIES WILL_FAIL TRUE)
+
 # =========================================================================================
 # CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
 #
