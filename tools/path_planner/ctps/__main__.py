@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
@@ -82,6 +83,7 @@ from tools.path_planner import field_data  # noqa: E402
 from tools.path_planner.ctps import (  # noqa: E402
     edit_server,
     layout_editor_html,
+    mosaic,
     player_html,
     track_builder,
     trace_loader,
@@ -127,6 +129,12 @@ _BUILD_DIR: Path = _REPO_ROOT / "build" / "ctps"
 
 #: CMake target built by the configure/build step.
 _DUMP_TARGET: str = "ctps_dump"
+
+#: Exclusive upper bound for a FRESH mosaic seed (``random.randrange(0, this)``)
+#: when neither ``--seed`` nor the layout's ``mosaic.seed`` pins one. ``2**31``
+#: keeps the resolved seed inside a signed-32-bit range so it round-trips cleanly
+#: through the ``ctps_dump --mosaic-seed <int>`` argv and the trace echo.
+_MOSAIC_SEED_BOUND: int = 2**31
 
 #: Banner prefix emitted by ``header_writer`` into generated ``routes`` files.
 _SOURCE_HASH_PREFIX: str = "// Source SHA256: "
@@ -458,7 +466,7 @@ def _build_dump_posix() -> int:
     return build.returncode
 
 
-def _run_dump(fixture: bool) -> str:
+def _run_dump(fixture: bool, mosaic_args: Optional[List[str]] = None) -> str:
     """Run the built ``ctps_dump`` executable and capture its JSON stdout.
 
     The binary is located with :func:`_find_dump_exe` so the lookup is
@@ -466,6 +474,11 @@ def _run_dump(fixture: bool) -> str:
 
     :param fixture: when ``True``, pass ``--fixture`` so the harness dumps the
         synthetic fixture mission instead of the real ``buildMission``.
+    :param mosaic_args: extra order-free dump flags for the injected mosaic
+        (``["--mosaic", <12 letters>, "--mosaic-seed", <int>,
+        "--mosaic-geom-hash", <hash>]``), or ``None`` / empty when the layout
+        has no ``mosaic`` block — in which case NONE of these flags are passed
+        and the dump JSON is byte-identical to today (opt-in DATA, AC12).
     :return: the captured stdout (the Data-Model-A command-stream JSON).
     :raises RuntimeError: if the executable is missing or exits non-zero; the
         message carries the exe's stderr so the caller can surface it verbatim.
@@ -480,6 +493,8 @@ def _run_dump(fixture: bool) -> str:
     argv: List[str] = [str(exe)]
     if fixture:
         argv.append("--fixture")
+    if mosaic_args:
+        argv.extend(mosaic_args)
 
     completed = subprocess.run(
         argv,
@@ -500,7 +515,80 @@ def _run_dump(fixture: bool) -> str:
     return completed.stdout
 
 
-def _produce_trace_json(fixture: bool) -> Optional[str]:
+def _resolve_mosaic_args(
+    layout: Optional[Dict[str, Any]], seed_override: Optional[int]
+) -> Optional[List[str]]:
+    """Roll the mosaic for ``layout`` and return the ``ctps_dump`` mosaic flags.
+
+    Opt-in DATA (plan Decisions -> "Opt-in DATA"): the mosaic is rolled and the
+    ``--mosaic`` / ``--mosaic-seed`` / ``--mosaic-geom-hash`` flags are produced
+    **only when the layout carries a top-level ``mosaic`` block**. With no block
+    (or no layout at all) this returns ``None`` so :func:`_run_dump` passes NONE
+    of the flags — the dump JSON and the emitted player DATA stay byte-identical
+    to today (AC12).
+
+    Seed resolution precedence (plan Part 1 / Decisions -> "Seed determinism"),
+    most specific first:
+
+    #. ``seed_override`` — the orchestrator's user-facing ``--seed`` flag (the
+       ONLY user-facing seed flag; ``--mosaic-seed`` is never exposed);
+    #. ``layout.mosaic.seed`` when non-``null``;
+    #. a FRESH random seed (``random.randrange(0, _MOSAIC_SEED_BOUND)``) —
+       different every invocation so re-opening CTPS re-rolls.
+
+    The resolved seed is echoed back through the dump into the trace's
+    ``mosaic.seed`` (which the player badge reads), so it always reaches the UI.
+
+    :param layout: the resolved ``layout.json`` dict to embed, or ``None``.
+    :param seed_override: the ``--seed`` CLI value, or ``None`` when unset.
+    :return: ``["--mosaic", <12 letters>, "--mosaic-seed", <int>,
+        "--mosaic-geom-hash", <hash>]`` when the layout has a mosaic block, else
+        ``None``.
+    :raises LayoutError: if the layout's ``mosaic`` block is malformed (a loud
+        fail-fast BEFORE any C++ build, mirroring the ``--layout`` guard).
+    """
+    if not layout or not isinstance(layout, dict):
+        return None
+    mosaic_block = layout.get("mosaic")
+    if mosaic_block is None:
+        return None
+
+    # Validate the mosaic block loud BEFORE rolling — a malformed mosaic must
+    # fail fast (with a key path) rather than roll garbage or crash later. The
+    # pure validator raises ValueError; re-frame it as a LayoutError so main()
+    # surfaces it through the same "invalid layout" path as player_html.
+    try:
+        mosaic.validate_mosaic_config(mosaic_block)
+    except ValueError as exc:
+        raise LayoutError(f"ctps.layout: {exc}") from exc
+
+    cfg = mosaic.MosaicConfig.from_dict(mosaic_block)
+
+    if seed_override is not None:
+        seed = seed_override
+    elif cfg.seed is not None:
+        seed = cfg.seed
+    else:
+        seed = random.randrange(0, _MOSAIC_SEED_BOUND)
+
+    rng = random.Random(seed)
+    colors = mosaic.roll_mosaic(cfg, rng)
+    letters = "".join(mosaic.COLOR_LETTER[name] for name in colors)
+    geom_h = mosaic.geom_hash(cfg)
+
+    return [
+        "--mosaic",
+        letters,
+        "--mosaic-seed",
+        str(seed),
+        "--mosaic-geom-hash",
+        geom_h,
+    ]
+
+
+def _produce_trace_json(
+    fixture: bool, mosaic_args: Optional[List[str]] = None
+) -> Optional[str]:
     """Build ``ctps_dump`` for this platform and return its JSON stdout.
 
     This is the default / ``--fixture`` path. On Windows the MSVC toolchain is
@@ -512,6 +600,8 @@ def _produce_trace_json(fixture: bool) -> Optional[str]:
     raising.
 
     :param fixture: forward the ``--fixture`` flag to the dump executable.
+    :param mosaic_args: extra mosaic dump flags (see :func:`_run_dump`), or
+        ``None`` when the layout has no ``mosaic`` block.
     :return: the dump JSON string, or ``None`` if the toolchain is missing or
         the build / dump failed.
     """
@@ -557,7 +647,7 @@ def _produce_trace_json(fixture: bool) -> Optional[str]:
     mission = "fixture mission" if fixture else "real buildMission"
     print(f"ctps: running {_dump_exe_name()} ({mission}) ...", file=sys.stderr)
     try:
-        return _run_dump(fixture)
+        return _run_dump(fixture, mosaic_args)
     except RuntimeError as exc:
         print(f"{exc}\n  {_toolchain_hint()}", file=sys.stderr)
         return None
@@ -979,6 +1069,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help=(
+            "Reproduce a specific randomized-vision mosaic roll (only meaningful "
+            "when the embedded layout has a 'mosaic' block). Takes precedence "
+            "over the layout's own mosaic.seed; when neither is set a fresh "
+            "random seed is drawn each run. The used seed is echoed into the "
+            "trace and shown in the player badge. Ignored with --editor and "
+            "with a mosaic-free layout."
+        ),
+    )
+    parser.add_argument(
         "--serve",
         action="store_true",
         help=(
@@ -1082,7 +1185,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     # --- default / --fixture flow: locate toolchain, build, dump -------------
-    trace_json = _produce_trace_json(args.fixture)
+    # Opt-in DATA: roll the mosaic and produce the --mosaic dump flags ONLY when
+    # the embedded layout has a 'mosaic' block. No block -> no flags -> the dump
+    # JSON stays byte-identical to today (AC12). A malformed mosaic fails fast
+    # (loud, with a key path) BEFORE any C++ build. --trace never rebuilds, so a
+    # trace's mosaic echo is already baked in and this roll does not apply there.
+    try:
+        mosaic_args = _resolve_mosaic_args(layout, args.seed)
+    except LayoutError as exc:
+        print(f"ctps: invalid layout: {exc}", file=sys.stderr)
+        return 1
+    trace_json = _produce_trace_json(args.fixture, mosaic_args)
     if trace_json is None:
         return 1
     filename = "fixture mission" if args.fixture else "mission"
