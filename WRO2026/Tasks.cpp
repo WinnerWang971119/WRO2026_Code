@@ -9,6 +9,7 @@
 #include "src/mission/PathTracker.h"
 #include "src/drive/Drive.h"
 #include "src/drive/LineFollower.h"
+#include "src/perception/Vision.h"
 
 #include <Arduino.h>
 #include <string.h>    // strcmp
@@ -447,6 +448,37 @@ bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
         _pumpTick();
     }
     return true;
+}
+
+bool TasksClass::_grabToBin(uint8_t bin)
+{
+    Manipulator.sortTo(bin).async();
+    Manipulator.release();
+    Manipulator.grab();
+    return true;
+}
+
+bool TasksClass::_visionRead()
+{
+    if (Vision.readMosaic())
+    {
+        return true;
+    }
+
+    // First attempt faulted. readMosaic() left the latch untouched (ADR-037); clear the
+    // fault and give it one more try before reporting failure up to the task.
+    Serial.print(F("[Tasks] vision read fault ("));
+    Serial.print((uint8_t) Vision.getFault().kind);
+    Serial.println(F("), retrying"));
+    Vision.clearFault();
+
+    if (Vision.readMosaic())
+    {
+        return true;
+    }
+
+    Serial.println(F("[Tasks] vision read failed"));
+    return false;
 }
 
 bool TasksClass::emptyTest(const TaskArgs& /*args*/)
