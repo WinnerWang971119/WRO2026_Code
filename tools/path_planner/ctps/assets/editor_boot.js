@@ -1,19 +1,25 @@
 /* CTPS — Layout Editor: boot (wire the DOM + kick the first render).
  *
- * The one-time init for the two-tab offline editor (object/cargo plan, T8 --
- * issue #57). Inlined LAST, after editor_core.js / editor_tools.js /
- * editor_io.js have registered onto `window.CTPS_EDITOR`, so every function it
- * binds already exists. It:
+ * The one-time init for the three-tab offline editor (object/cargo plan, T8 --
+ * issue #57; randomized-vision plan, T17 -- ADR-060). Inlined LAST, after
+ * editor_core.js / editor_tools.js / editor_io.js have registered onto
+ * `window.CTPS_EDITOR`, so every function it binds already exists. It:
  *
  *   - grabs the canvas + 2D context and every Properties-panel control into a
  *     shared `E.dom` map (the field/tab/tool/save/load ids from the emitter's
  *     body markup),
  *   - kicks off the optional inline field map (`E.initMap`),
- *   - binds the Field/Robot tabs, the Select/Rect/Circle tools, Save/Load + the
+ *   - binds the Field/Robot/Mosaic tabs (the Mosaic tab + the Robot-tab vision
+ *     cone group per T14/T15), the Select/Rect/Circle tools, Save/Load + the
  *     hidden file input, the canvas pointer + Delete-key interactions, and a
- *     coalesced resize, and
- *   - runs the first `E.resize()` (which measures the stage, computes both view
- *     transforms, and repaints) plus the initial `E.refreshProps()`.
+ *     coalesced resize,
+ *   - one-time binds every Mosaic-tab + vision-cone control via
+ *     `E.initMosaicPanel()` (T15), and
+ *   - runs the first `E.resize()` (which measures the stage, computes all three
+ *     view transforms, and repaints) plus the initial `E.refreshProps()` and
+ *     `E.refreshMosaicPanel()` (so the embedded-layout auto-load, which already
+ *     ingests `mosaic`/`robot.vision` via `E.ingestLayout`, is reflected in the
+ *     Mosaic-tab UI).
  *
  * Vanilla ES5. DOM show/hide + active state go through the `hidden` property and
  * classList only -- never an inline element style.
@@ -86,9 +92,17 @@
         var d = E.dom;
         _toggle(d.tabField, "ctps-editor-tab--active", name === "field");
         _toggle(d.tabRobot, "ctps-editor-tab--active", name === "robot");
-        // The render-size (zoom) control applies to the Robot tab only.
+        _toggle(d.tabMosaic, "ctps-editor-tab--active", name === "mosaic");
+        // The render-size (zoom) control and the vision-cone group apply to the
+        // Robot tab only; the Mosaic panel applies to the Mosaic tab only.
         if (d.zoom) {
             d.zoom.hidden = name !== "robot";
+        }
+        if (d.robotVision) {
+            d.robotVision.hidden = name !== "robot";
+        }
+        if (d.mosaicPanel) {
+            d.mosaicPanel.hidden = name !== "mosaic";
         }
         E.refreshProps();
     }
@@ -142,6 +156,9 @@
         }
         if (d.tabRobot) {
             d.tabRobot.addEventListener("click", function () { _selectTab("robot"); });
+        }
+        if (d.tabMosaic) {
+            d.tabMosaic.addEventListener("click", function () { _selectTab("mosaic"); });
         }
     }
 
@@ -308,6 +325,9 @@
             status: $("ctps-editor-status"),
             tabField: $("ctps-editor-tab-field"),
             tabRobot: $("ctps-editor-tab-robot"),
+            tabMosaic: $("ctps-editor-tab-mosaic"),
+            robotVision: $("ctps-editor-robot-vision"),
+            mosaicPanel: $("ctps-editor-mosaic-panel"),
             zoom: $("ctps-editor-zoom"),
             zoomRange: $("ctps-editor-zoom-range"),
             zoomReadout: $("ctps-editor-zoom-readout"),
@@ -353,15 +373,31 @@
         // selection changes, without that file reaching into this closure.
         E.syncSwatchActive = _syncSwatchActive;
 
+        // One-time binding of every Mosaic-tab + vision-cone control (T15). Safe
+        // to call before the embedded-layout ingest below: it binds listeners
+        // and does an initial (soon-to-be-stale) populate from the seeded
+        // defaults, which the refreshMosaicPanel() call after ingest corrects.
+        if (E.initMosaicPanel) {
+            E.initMosaicPanel();
+        }
+
         E.initMap();
         // Auto-load the embedded `const LAYOUT` (the recently-saved objects +
-        // zones) so the editor opens on the last layout, not a fresh scene.
-        // Runs BEFORE initSaveState so the loaded scene is the clean baseline.
+        // zones + T16's mosaic/robot.vision blocks) so the editor opens on the
+        // last layout, not a fresh scene. Runs BEFORE initSaveState so the
+        // loaded scene is the clean baseline.
         if (typeof LAYOUT !== "undefined" && LAYOUT && E.ingestLayout) {
             E.ingestLayout(LAYOUT);
         }
         E.resize();
         E.refreshProps();
+        // Re-populate the Mosaic-tab palette/grid/counts/cone fields from
+        // whatever E.state.mosaic/vision now holds post-ingest, so a loaded
+        // layout's mosaic/vision reflects in the UI rather than the pre-ingest
+        // defaults initMosaicPanel() populated it with above.
+        if (E.refreshMosaicPanel) {
+            E.refreshMosaicPanel();
+        }
         if (E.initSaveState) {
             E.initSaveState();
         }
