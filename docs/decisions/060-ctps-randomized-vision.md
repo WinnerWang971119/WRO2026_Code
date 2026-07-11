@@ -94,6 +94,15 @@ Phase-6 mission-consuming task is additive, not a scramble to unbreak `ctps
   set in `player_html.py`, alongside the ADR-056 cargo assets — a
   mosaic-free-emitted page still renders an uploaded `mosaic`/`robot.vision`
   layout fully.
+- The offline editor (`layout_editor_html.py` + `editor_*.js`) is a
+  mosaic-**authoring** surface: it seeds field-centre mosaic/cone defaults and
+  its Save emits both blocks unconditionally, so any layout saved from the
+  editor is mosaic-enabled (there is deliberately no editor affordance for a
+  mosaic-free layout — hand-edit the JSON to drop the blocks). The opt-in that
+  keeps the dump byte-identical lives at the **orchestrator** (no `mosaic` block
+  in the input `layout.json` ⇒ no `--mosaic`), not at the editor. Decided
+  2026-07 after the plan shipped; the alternative (an editor enable/disable
+  toggle) was considered and declined.
 - The `Vision` mock lives in `WRO2026/test/ctps_mocks/Vision.h`, force-included
   only for the `ctps_dump` target (never the shared
   `add_ctps_mock_force_includes`, which `test_ctps_mock_conformance` mirrors —
