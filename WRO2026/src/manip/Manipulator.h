@@ -8,7 +8,8 @@
  * sorting / dumping mechanism. It owns the three `ManipServo` joints and the one `ManipBelt`
  * by value (constructed from `Config::*` in `Manipulator.cpp`) and presents two API layers:
  *
- *  - **Semantic verbs** (`grab`, `release`, `dump`, `dumpReset`, `sortTo`, `reset`, `boxOpen`, `boxClose`)
+ *  - **Semantic verbs** (`grab`, `release`, `dump`, `dumpReset`, `sortTo`, `beltTo`, `reset`,
+ *    `boxOpen`, `boxClose`)
  *    — the intended everyday surface. Each verb FIRES its actuator setpoint(s) immediately
  *    in the verb body
  *    (servo writes are fire-and-forget; firing now is correct) and returns a `ManipAction`
@@ -293,6 +294,22 @@ public:
      * @return A `ManipAction` waiting on all four actuators (chain `.async()` to skip the wait).
      */
     ManipAction reset();
+
+    /**
+     * @brief Drive the conveyor belt to logical station @p station.
+     *
+     * The belt analogue of `sortTo(bin)`: fires `belt.toStation(station)` immediately and
+     * returns a belt-masked action. `ManipBelt::toStation` bounds-checks the station internally
+     * (an out-of-range value warns and commands nothing, so the drain is a near-immediate
+     * no-op). `boxOpen()` / `boxClose()` are thin specialisations of this over the rear-box
+     * stations.
+     *
+     * @param station Target belt station (`Config::BeltStation`).
+     * @return A `ManipAction` waiting on the belt by default; chain `.async()` to skip the wait.
+     * @note The belt has real encoder feedback, so the wait ends on the rotate-done bit (or the
+     *       belt's own watchdog), unlike the timer-estimated servos.
+     */
+    ManipAction beltTo(Config::BeltStation station);
 
     /**
      * @brief Open the rear box by driving the belt to its configured open station.

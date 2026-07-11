@@ -3,8 +3,9 @@
  * @brief Out-of-line members of `ManipulatorClass` — the manipulator-subsystem facade.
  *
  * @note This translation unit owns the manipulator implementation surface: the `ManipAction`
- *       builder, the semantic verbs (`grab`, `release`, `dump`, `sortTo`, `reset`, `boxOpen`,
- *       `boxClose`), the `_action` factory, and the lifecycle / blocking-spin members.
+ *       builder, the semantic verbs (`grab`, `release`, `dump`, `dumpReset`, `sortTo`, `beltTo`,
+ *       `reset`, `boxOpen`, `boxClose`), the `_action` factory, and the lifecycle /
+ *       blocking-spin members.
  *
  * @note `<Arduino.h>` (millis / delay / Serial) is pulled in transitively through
  *       `Manipulator.h` -> `ManipServo.h` / `ManipBelt.h`, so it is not re-included here.
@@ -121,6 +122,14 @@ ManipAction ManipulatorClass::reset()
     dumper.home();
     belt.home();
     return _action(M_GRAB | M_SORT | M_DUMP | M_BELT);
+}
+
+ManipAction ManipulatorClass::beltTo(Config::BeltStation station)
+{
+    // Belt analogue of sortTo: fire the station move now, wait on the belt unless .async().
+    // toStation() bounds-checks the station and warns on an out-of-range value.
+    belt.toStation(station);
+    return _action(M_BELT);
 }
 
 ManipAction ManipulatorClass::boxOpen()

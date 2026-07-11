@@ -307,6 +307,35 @@ static void test_TC7_belt_timed_move_to_far_end()
 }
 
 // ===========================================================================
+// TC16 — beltTo(station) verb delegates to the belt like belt.toStation().
+//
+// The facade verb is the belt analogue of sortTo(bin): it fires belt.toStation(station)
+// and returns a belt-masked, blocking-by-default action. Assert the .async() form issues
+// the same TIMED move as the primitive (FAR_END) and returns with the belt still in flight.
+// ===========================================================================
+
+static void test_TC16_beltto_verb_delegates_to_belt()
+{
+    TEST_SCOPE("TC16: beltTo(FAR_END).async() issues the belt's TIMED move, in flight");
+
+    resetWorld();
+    clearTickCallback();
+
+    Manipulator.beltTo(Config::BeltStation::FAR_END).async();    // TIMED, 1500 ms
+
+    // The verb drove the belt (M1) via toStation, so a setSpeed run was issued.
+    ASSERT_GE(MiniR4.M1.setSpeedCallCount, (uint32_t) 1);
+    // Blocking-by-default action was .async()'d, so control returned with the belt still moving.
+    ASSERT_FALSE(Manipulator.belt.isDone());
+
+    // Advance past the run duration; update() brakes + idles -> done.
+    const uint32_t runMs = Config::BELT_STATIONS[(uint8_t) Config::BeltStation::FAR_END].ms;
+    mockAdvanceMillis(runMs);
+    Manipulator.belt.update();
+    ASSERT_TRUE(Manipulator.belt.isDone());
+}
+
+// ===========================================================================
 // TC8 — belt home() is a three-phase sequence: reset() TIMED stall toward LEFT/HOME (braked
 //       + resetCounter zeroes the encoder) -> SETTLE dwell -> chained toStation(MID).
 //
@@ -592,5 +621,6 @@ int main()
     test_TC11_async_grab_sequences_home_then_close();
     test_TC12_reset_homes_all_servos_and_belt();
     test_TC15_begin_homes_all_and_zeroes_belt_once();
+    test_TC16_beltto_verb_delegates_to_belt();
     TEST_REPORT();
 }
