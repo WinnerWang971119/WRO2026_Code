@@ -45,6 +45,7 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "actuatorSweep", &TasksClass::actuatorSweep },
     { "actuatorStep", &TasksClass::actuatorStep },
     { "manipDirectTest", &TasksClass::manipDirectTest },
+    { "beltTest", &TasksClass::beltTest },
     //Add new tasks here
 };
 
@@ -650,6 +651,13 @@ bool TasksClass::actuatorSweep(const TaskArgs& /*args*/)
     (void)Manipulator.reset();
     Drive.stop(true);
     Serial.println(F("[Tasks] actuatorSweep: done"));
+    return true;
+}
+
+bool TasksClass::beltTest(const TaskArgs& /*args*/)
+{
+    Manipulator.belt.home();
+
     return true;
 }
 

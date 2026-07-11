@@ -336,6 +336,19 @@ private:
     bool actuatorSweep(const TaskArgs& args);
 
     /**
+     * @brief Belt-only bring-up: start the belt home sequence.
+     *
+     * Calls `Manipulator.belt.home()` (stall into the LEFT/HOME end-stop, re-zero the encoder,
+     * then drive to the MID rest position) so the operator can watch the belt seek home without
+     * any grabber / sorter / dumper motion. `belt.home()` is non-blocking, so the sequence
+     * continues via `Manipulator.update()` after this returns.
+     *
+     * @param args Ignored.
+     * @return Always ``true``.
+     */
+    bool beltTest(const TaskArgs& args);
+
+    /**
      * @brief Single-step actuator jog for calibration.
      *
      * Uses the first four ``u8`` arg slots as a tiny command packet so the operator can jog one
