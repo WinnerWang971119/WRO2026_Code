@@ -185,6 +185,16 @@
         return null;
     }
 
+    /** The mosaic under a world point on the Mosaic tab (its footprint), or null. */
+    function _hitMosaic(wx, wy) {
+        var bb = E.mosaicBBox ? E.mosaicBBox() : null;
+        if (!bb) {
+            return null;
+        }
+        return (wx >= bb.minX && wx <= bb.maxX && wy >= bb.minY && wy <= bb.maxY)
+            ? { kind: "mosaic" } : null;
+    }
+
     /** The world-cm centre of a selection (for a drag grab offset). */
     function _selectionCenter(hit) {
         if (hit.kind === "object") {
@@ -271,6 +281,13 @@
             var dp = E.state.robot.drop_points[s.index];
             dp.x_cm = _round(nx);
             dp.y_cm = _round(ny);
+        } else if (s.kind === "mosaic") {
+            var m = E.state.mosaic;
+            if (m) {
+                m.center_x_cm = _round(nx);
+                m.center_y_cm = _round(ny);
+                _reflectMosaicFields(); // keep the Center X/Y inputs live during drag
+            }
         } else {
             var z = E.state.robot[s.kind];
             z.x_cm = _round(nx);
@@ -335,7 +352,26 @@
         var tool = E.state.tool;
 
         if (tab === "mosaic") {
-            return; // the Mosaic tab has no rubber-band / drag interactions
+            // One interaction: grab the mosaic and drag it to place it on the
+            // field map. Geometry/pins/mode are authored in the side panel; there
+            // is no rubber-band draw here. The view is held fixed during the drag
+            // (re-fit on release) so the grab tracks the pointer 1:1.
+            var hitM = _hitMosaic(w.x, w.y);
+            E.state.selection = hitM;
+            if (hitM && E.state.mosaic) {
+                var m = E.state.mosaic;
+                E.state.drag = {
+                    selection: hitM,
+                    offX: w.x - m.center_x_cm,
+                    offY: w.y - m.center_y_cm,
+                };
+            } else {
+                E.state.drag = null;
+            }
+            refreshProps();
+            E.redraw();
+            _capture(ev);
+            return;
         }
 
         if (tool === "rect" || tool === "circle") {
@@ -389,6 +425,8 @@
     /** Commit a draft / end a drag on pointer-up. */
     function onPointerUp(ev) {
         var changed = false;
+        var wasMosaicDrag = !!(E.state.drag && E.state.drag.selection &&
+            E.state.drag.selection.kind === "mosaic");
         if (E.state.draft) {
             _commitDraft();
             E.state.draft = null;
@@ -400,6 +438,12 @@
             changed = true;
         }
         _release(ev);
+        if (wasMosaicDrag) {
+            // Re-fit the Mosaic-tab view now the mosaic settled at its new seat
+            // (the field bounds dominate the extent, so this reframes visibly only
+            // when the mosaic was dragged off the field -- exactly when wanted).
+            E.resize();
+        }
         if (changed && E.refreshSaveState) {
             E.refreshSaveState();
         }
@@ -514,6 +558,8 @@
         }
         if (s.kind === "object") {
             _fillObjectProps(E.objectById(s.id));
+        } else if (s.kind === "mosaic") {
+            _showEmpty(true); // the Mosaic tab authors via its own side panel
         } else {
             _fillRobotProps(s);
         }

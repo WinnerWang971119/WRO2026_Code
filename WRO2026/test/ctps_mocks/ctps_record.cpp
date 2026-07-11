@@ -65,6 +65,7 @@ namespace
             case Config::Color::BLUE:   return "BLUE";
             case Config::Color::GREEN:  return "GREEN";
             case Config::Color::WHITE:  return "WHITE";
+            case Config::Color::RED:    return "RED";
             case Config::Color::UNKNOWN:
             default:                    return "UNKNOWN";
         }

@@ -233,31 +233,50 @@
     }
 
     /**
+     * The mosaic's world-cm bounding box `{minX,minY,maxX,maxY}` -- the union of
+     * every resolved cell centre +/- half a cell -- or null when no mosaic is
+     * present or the vision helpers are unavailable. Single source shared by the
+     * Mosaic-tab bounds fit, the drag hit-test (editor_tools.js `_hitMosaic`),
+     * and the selection halo so all three agree on the mosaic's footprint.
+     */
+    function mosaicBBox() {
+        var mosaic = E.state.mosaic;
+        if (!mosaic || !VIS || !VIS.mosaicCellCenters) {
+            return null;
+        }
+        var centers = VIS.mosaicCellCenters(mosaic);
+        if (!centers.length) {
+            return null;
+        }
+        var halfW = mosaic.cell_w_cm / 2;
+        var halfH = mosaic.cell_h_cm / 2;
+        var bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+        for (var i = 0; i < centers.length; i++) {
+            var c = centers[i];
+            if (c.x_cm - halfW < bb.minX) { bb.minX = c.x_cm - halfW; }
+            if (c.x_cm + halfW > bb.maxX) { bb.maxX = c.x_cm + halfW; }
+            if (c.y_cm - halfH < bb.minY) { bb.minY = c.y_cm - halfH; }
+            if (c.y_cm + halfH > bb.maxY) { bb.maxY = c.y_cm + halfH; }
+        }
+        return bb;
+    }
+
+    /**
      * The Mosaic-tab world extent `[x0,y0,x1,y1]` (WORLD cm): the union of the
-     * field bounds (so the field frame stays visible for context) and the
-     * mosaic's own resolved-cell extent (so an off-centre or oversized mosaic
-     * still fits fully in view -- the task's "extend the editor bounds" step),
-     * plus a margin.
+     * field bounds (so the field map stays visible for placement context) and
+     * the mosaic's own resolved-cell extent (so an off-centre or oversized
+     * mosaic still fits fully in view -- the task's "extend the editor bounds"
+     * step), plus a margin.
      */
     function _mosaicBounds() {
         var b = _fieldBounds();
         var box = { minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] };
-        function ext(x, y) {
-            if (x < box.minX) { box.minX = x; }
-            if (x > box.maxX) { box.maxX = x; }
-            if (y < box.minY) { box.minY = y; }
-            if (y > box.maxY) { box.maxY = y; }
-        }
-        var mosaic = E.state.mosaic;
-        if (mosaic && VIS && VIS.mosaicCellCenters) {
-            var half_w = mosaic.cell_w_cm / 2;
-            var half_h = mosaic.cell_h_cm / 2;
-            var centers = VIS.mosaicCellCenters(mosaic);
-            for (var i = 0; i < centers.length; i++) {
-                var c = centers[i];
-                ext(c.x_cm - half_w, c.y_cm - half_h);
-                ext(c.x_cm + half_w, c.y_cm + half_h);
-            }
+        var bb = mosaicBBox();
+        if (bb) {
+            if (bb.minX < box.minX) { box.minX = bb.minX; }
+            if (bb.maxX > box.maxX) { box.maxX = bb.maxX; }
+            if (bb.minY < box.minY) { box.minY = bb.minY; }
+            if (bb.maxY > box.maxY) { box.maxY = bb.maxY; }
         }
         return [
             box.minX - MOSAIC_MARGIN_CM, box.minY - MOSAIC_MARGIN_CM,
@@ -385,12 +404,16 @@
 
     // ----- field-backdrop drawing (Field tab) ------------------------------
 
-    /** Field-bounds rect (top-left / size) in canvas pixels. */
-    function _boundsRect(view) {
-        var b = view.bounds;
+    /** Project a world extent `[x0,y0,x1,y1]` to a top-left/size canvas-pixel rect. */
+    function _projectBounds(view, b) {
         var tl = OBJ.project(view, b[0], b[3]); // (x0, y1) -> top-left
         var br = OBJ.project(view, b[2], b[1]); // (x1, y0) -> bottom-right
         return { x: tl.px, y: tl.py, w: br.px - tl.px, h: br.py - tl.py };
+    }
+
+    /** The current view's own extent (`view.bounds`) as a canvas-pixel rect. */
+    function _boundsRect(view) {
+        return _projectBounds(view, view.bounds);
     }
 
     /** Draw the printed map (if loaded + dimmed), else the vector obstacles. */
@@ -583,12 +606,21 @@
      */
     function drawMosaicBackdrop(ctx, view) {
         var C = _theColors();
-        var r = _boundsRect(view);
+        // The field map + nodes as a PLACEMENT backdrop so the mosaic seats
+        // against the real field (the "show the map and output the mosaic where I
+        // want it" requirement). The surface is drawn to the FIELD bounds
+        // (projected in the mosaic view), NOT `view.bounds` -- the mosaic view is
+        // the wider field-union-mosaic extent, so projecting `view.bounds` would
+        // stretch the map past the field it depicts. Nodes reuse the Field-tab
+        // draw (world coords, correct under any view).
+        var r = _projectBounds(view, _fieldBounds());
+        _drawFieldSurface(ctx, view, r);
         ctx.save();
         ctx.strokeStyle = C.borderStrong;
         ctx.lineWidth = BOUNDS_W;
         ctx.strokeRect(r.x, r.y, r.w, r.h);
         ctx.restore();
+        _drawNodes(ctx, view);
 
         var mosaic = E.state.mosaic;
         if (!mosaic || !VIS || !VIS.mosaicCellCenters || !VIS.drawMosaicCells) {
@@ -676,6 +708,16 @@
                 ctx.beginPath();
                 ctx.arc(pp.px, pp.py, DROP_DOT_R + SEL_PAD, 0, Math.PI * 2);
                 ctx.stroke();
+            }
+        } else if (s.kind === "mosaic") {
+            // A dashed halo around the whole mosaic footprint while it is the
+            // drag target -- the visual grab affordance for placing it on the map.
+            var mb = mosaicBBox();
+            if (mb) {
+                var mtl = OBJ.project(view, mb.minX, mb.maxY);
+                var mbr = OBJ.project(view, mb.maxX, mb.minY);
+                ctx.strokeRect(mtl.px - SEL_PAD, mtl.py - SEL_PAD,
+                    (mbr.px - mtl.px) + 2 * SEL_PAD, (mbr.py - mtl.py) + 2 * SEL_PAD);
             }
         }
         ctx.restore();
@@ -1024,4 +1066,7 @@
     E.defaultMosaic = defaultMosaic;
     E.defaultVisionCone = defaultVisionCone;
     E.mosaicPaletteNames = _paletteNames;
+    // The mosaic footprint (world cm), shared with editor_tools.js's drag
+    // hit-test so click-to-grab and the selection halo use one definition.
+    E.mosaicBBox = mosaicBBox;
 })();

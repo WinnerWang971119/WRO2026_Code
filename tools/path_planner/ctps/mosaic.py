@@ -20,9 +20,9 @@ downstream consumer reads from here and never re-hardcodes any of it:
   in name **and** order.
 
 Colour contract (must match ``Config::Color`` minus ``UNKNOWN``):
-``enum class Color : uint8_t { UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE };`` ⇒
-:data:`COLOR_NAMES` ``= ("YELLOW", "BLUE", "GREEN", "WHITE")`` in exactly that
-order. Drift fails CI via the T3 header-parse guard.
+``enum class Color : uint8_t { UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE, RED };`` ⇒
+:data:`COLOR_NAMES` ``= ("YELLOW", "BLUE", "GREEN", "WHITE", "RED")`` in exactly
+that order. Drift fails CI via the T3 header-parse guard.
 
 Cell ordering / geometry (authoritative — the same index ``i`` is the position
 in ``cells[]``, the ``counts``-fill order, the trace ``mosaic.cells[]``,
@@ -73,10 +73,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 #: Mosaic colour names, in ``Config::Color`` declaration order with ``UNKNOWN``
-#: stripped (``ConfigVision.h``: ``UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE``).
+#: stripped (``ConfigVision.h``: ``UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE, RED``).
 #: The T3 header-parse guard asserts this tuple equals the parsed enum body
 #: (name + order); drift fails CI.
-COLOR_NAMES: Tuple[str, ...] = ("YELLOW", "BLUE", "GREEN", "WHITE")
+COLOR_NAMES: Tuple[str, ...] = ("YELLOW", "BLUE", "GREEN", "WHITE", "RED")
 
 #: Single-letter code per colour — the ``ctps_dump --mosaic <12 letters>`` wire
 #: alphabet (the C++ mock parses letter -> ``Config::Color`` against the real
@@ -86,6 +86,7 @@ COLOR_LETTER: Dict[str, str] = {
     "BLUE": "B",
     "GREEN": "G",
     "WHITE": "W",
+    "RED": "R",
 }
 
 #: Display-only swatch hex per colour (emitted as ``MOSAIC_META.hex`` for the
@@ -95,6 +96,7 @@ COLOR_HEX: Dict[str, str] = {
     "BLUE": "#2563EB",
     "GREEN": "#16A34A",
     "WHITE": "#F5F5F5",
+    "RED": "#DC2626",
 }
 
 #: The set of valid colour names (for O(1) membership tests in validators).

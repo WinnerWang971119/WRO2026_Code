@@ -145,10 +145,11 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: .ctps-chip`` generically, so it needs no change); the header gains an
 #: ``#ctps-layout-file`` upload input + its ``#ctps-layout-upload-btn`` button
 #: (in-browser layout upload leg of AC5); and the old ``.ctps-panel--holding``
-#: shell is replaced by the two-tab cargo panel (``#ctps-cargo``,
+#: shell is replaced by the cargo panel (``#ctps-cargo``,
 #: ``.ctps-cargo-tab[data-cargo-tab]``, ``#ctps-cargo-count-mag`` /
 #: ``#ctps-cargo-count-inv``, ``#ctps-mag-grid``, ``#ctps-inv-list`` -- the DOM
-#: contract T6 queries). ``#ctps-command``/``#ctps-log`` are unchanged, so
+#: contract T6 queries), which also carries the ADR-060 Vision-read tab (below).
+#: ``#ctps-command``/``#ctps-log`` are unchanged, so
 #: TC-STRUCT is unaffected.
 #:
 #: The drift-jump (``#ctps-drift-prev``/``#ctps-drift-next``) and play-speed
@@ -162,12 +163,16 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: ``vision.js``): the ``.ctps-layer-chips`` row gains ``MOSAIC``/``CONE``
 #: (``data-layer="mosaic"`` / ``data-layer="vision-cone"``) chips (``chrome.js``
 #: wires every ``.ctps-layer-chips .ctps-chip`` generically, so no JS change);
-#: and a VISIBLE ``#ctps-vision`` rail panel (sibling to ``#ctps-cargo``, never
-#: inside ``#ctps-hud`` which is ``hidden``/0x0 -- the stage-hud-hidden gotcha)
-#: holds the per-frame read HUD (``#ctps-vision-hud-count`` /
-#: ``#ctps-vision-hud-detail``) and a ``#ctps-vision-badges`` slot for the
-#: no-roll / geom-mismatch badges. These ship on EVERY page (unconditional
-#: markup, ADR-056 upload leg) regardless of whether a mosaic was rolled;
+#: and the per-frame read HUD, which lives as a THIRD tab of the cargo panel
+#: (``#ctps-cargo-tab-vision`` / ``data-cargo-tab="vision"`` ->
+#: ``#ctps-cargo-panel-vision``, beside Magazine + Inventory) rather than its own
+#: rail section -- consolidating the rail to save vertical space. The tab body
+#: keeps the frozen ``#ctps-vision`` DOM ids (``#ctps-vision-hud-count`` /
+#: ``#ctps-vision-hud-detail`` + a ``#ctps-vision-badges`` slot for the no-roll /
+#: geom-mismatch badges) so ``vision.js`` binds unchanged; the tab's own count
+#: badge (``#ctps-cargo-count-vision``) mirrors the live ``k / 12`` read. These
+#: ship on EVERY page (unconditional markup, ADR-056 upload leg) regardless of
+#: whether a mosaic was rolled;
 #: ``#ctps-command``/``#ctps-log``/``PLAYER_META`` are untouched, so TC-STRUCT
 #: and the frozen ``PLAYER_META`` literal are unaffected.
 _BODY_MARKUP: str = """\
@@ -237,15 +242,21 @@ _BODY_MARKUP: str = """\
                     <button id="ctps-cargo-tab-magazine"
                             class="ctps-cargo-tab ctps-cargo-tab--active"
                             type="button" role="tab" data-cargo-tab="magazine">
-                        <span class="ctps-cargo-tab-label">Magazine</span>
+                        <span class="ctps-cargo-tab-label">MAG</span>
                         <span id="ctps-cargo-count-mag"
-                              class="ctps-cargo-tab-count">0 / 12</span>
+                              class="ctps-cargo-tab-count">0/12</span>
                     </button>
                     <button id="ctps-cargo-tab-inventory" class="ctps-cargo-tab"
                             type="button" role="tab" data-cargo-tab="inventory">
-                        <span class="ctps-cargo-tab-label">Inventory</span>
+                        <span class="ctps-cargo-tab-label">INV</span>
                         <span id="ctps-cargo-count-inv"
-                              class="ctps-cargo-tab-count">0 / 1</span>
+                              class="ctps-cargo-tab-count">0/1</span>
+                    </button>
+                    <button id="ctps-cargo-tab-vision" class="ctps-cargo-tab"
+                            type="button" role="tab" data-cargo-tab="vision">
+                        <span class="ctps-cargo-tab-label">READ</span>
+                        <span id="ctps-cargo-count-vision"
+                              class="ctps-cargo-tab-count">&mdash;/12</span>
                     </button>
                 </div>
                 <div id="ctps-cargo-panel-magazine" class="ctps-cargo-panel"
@@ -256,15 +267,17 @@ _BODY_MARKUP: str = """\
                      data-cargo-panel="inventory" hidden>
                     <div id="ctps-inv-list" class="ctps-inv-list"></div>
                 </div>
-            </section>
-            <section id="ctps-vision" class="ctps-panel ctps-panel--vision">
-                <div class="ctps-vision-head">
-                    <div class="ctps-panel-title">Vision read</div>
-                    <div id="ctps-vision-badges" class="ctps-vision-badges"></div>
-                </div>
-                <div id="ctps-vision-hud" class="ctps-vision-hud">
-                    <span id="ctps-vision-hud-count" class="ctps-vision-hud-count">&mdash;</span>
-                    <div id="ctps-vision-hud-detail" class="ctps-vision-hud-detail"></div>
+                <div id="ctps-cargo-panel-vision" class="ctps-cargo-panel"
+                     data-cargo-panel="vision" hidden>
+                    <div id="ctps-vision" class="ctps-vision">
+                        <div id="ctps-vision-badges" class="ctps-vision-badges"></div>
+                        <div id="ctps-vision-hud" class="ctps-vision-hud">
+                            <span id="ctps-vision-hud-count"
+                                  class="ctps-vision-hud-count">&mdash;</span>
+                            <div id="ctps-vision-hud-detail"
+                                 class="ctps-vision-hud-detail"></div>
+                        </div>
+                    </div>
                 </div>
             </section>
             <section class="ctps-panel ctps-panel--tabs">

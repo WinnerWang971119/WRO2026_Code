@@ -99,12 +99,12 @@ namespace
      *
      * The wire alphabet is the canonical `mosaic.COLOR_LETTER` map single-sourced
      * in `tools/path_planner/ctps/mosaic.py`: `Y→YELLOW`, `B→BLUE`, `G→GREEN`,
-     * `W→WHITE`. Any other character (including lowercase, digits, or the
-     * `UNKNOWN` sentinel's absence of a letter) is rejected.
+     * `W→WHITE`, `R→RED`. Any other character (including lowercase, digits, or
+     * the `UNKNOWN` sentinel's absence of a letter) is rejected.
      *
      * @param c   The wire letter to map.
      * @param out Set to the mapped color on success; left unmodified on failure.
-     * @return `true` iff @p c is one of the four valid uppercase letters.
+     * @return `true` iff @p c is one of the five valid uppercase letters.
      */
     bool letterToColor(char c, Config::Color& out)
     {
@@ -114,6 +114,7 @@ namespace
             case 'B': out = Config::Color::BLUE;   return true;
             case 'G': out = Config::Color::GREEN;  return true;
             case 'W': out = Config::Color::WHITE;  return true;
+            case 'R': out = Config::Color::RED;    return true;
             default:  return false;
         }
     }

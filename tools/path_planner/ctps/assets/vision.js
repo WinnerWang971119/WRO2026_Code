@@ -507,24 +507,33 @@
         drawVisionCone(ctx, view, pose, cone, OBJ.project);
     }
 
-    CTPS.layers.register({
-        id: "mosaic",
-        canvasId: "trail",
-        visible: function (state) {
-            return !!(state.layers && state.layers.mosaic);
-        },
-        draw: _drawMosaicLayer,
-        invalidateOn: ["mosaicCells", "mosaicMeta", "layers"],
-    });
-    CTPS.layers.register({
-        id: "vision-cone",
-        canvasId: "trail",
-        visible: function (state) {
-            return !!(state.layers && state.layers["vision-cone"]);
-        },
-        draw: _drawConeLayer,
-        invalidateOn: ["t", "visionCone", "layers"],
-    });
+    // The trail-canvas layers are PLAYER-only: they need the player runtime
+    // (`window.CTPS.layers` / `.engine` / `.store`), which the layout EDITOR page
+    // never loads (it seeds `window.CTPS_EDITOR` and inlines this file only for
+    // the pure geometry/draw helpers exported below). Guard the registration so
+    // this file is namespace-agnostic like objects_draw.js: on the player it
+    // registers both layers; on the editor it skips them and still reaches the
+    // `window.CTPS_VISION` exports the editor's cone/mosaic draw depends on.
+    if (CTPS && CTPS.layers) {
+        CTPS.layers.register({
+            id: "mosaic",
+            canvasId: "trail",
+            visible: function (state) {
+                return !!(state.layers && state.layers.mosaic);
+            },
+            draw: _drawMosaicLayer,
+            invalidateOn: ["mosaicCells", "mosaicMeta", "layers"],
+        });
+        CTPS.layers.register({
+            id: "vision-cone",
+            canvasId: "trail",
+            visible: function (state) {
+                return !!(state.layers && state.layers["vision-cone"]);
+            },
+            draw: _drawConeLayer,
+            invalidateOn: ["t", "visionCone", "layers"],
+        });
+    }
 
     // ----- 5. per-frame read HUD (#ctps-vision — the VISIBLE panel) --------
 
@@ -536,6 +545,9 @@
             count: document.getElementById("ctps-vision-hud-count"),
             detail: document.getElementById("ctps-vision-hud-detail"),
             badges: document.getElementById("ctps-vision-badges"),
+            // The Vision-read cargo TAB's own count badge (mirrors k/12 so the
+            // read status shows on the tab, like Magazine/Inventory counts).
+            tabCount: document.getElementById("ctps-cargo-count-vision"),
         };
     }
 
@@ -640,6 +652,9 @@
             if (countEl) {
                 countEl.textContent = "—"; // em dash — nothing to read
             }
+            if (dom.tabCount) {
+                dom.tabCount.textContent = "—/" + CELL_COUNT;
+            }
             if (dom.hud) {
                 dom.hud.classList.remove("ctps-vision-hud--success");
             }
@@ -656,6 +671,10 @@
 
         if (countEl) {
             countEl.textContent = k + "/" + total;
+        }
+        if (dom.tabCount) {
+            // "k/total" (no spaces) to match the sibling MAG/INV count badges.
+            dom.tabCount.textContent = k + "/" + total;
         }
         if (dom.hud) {
             // The success modifier lives on the #ctps-vision-hud CONTAINER so the
@@ -749,13 +768,19 @@
     window.CTPS_VISION.drawVisionCone = drawVisionCone;
     window.CTPS_VISION.drawMosaicCells = drawMosaicCells;
 
-    // Also exposed on CTPS.vision so store.js's upload-leg loadLayout reaches
-    // `embedFromLayout` at call time (store.js is inlined before this file).
-    CTPS.vision = CTPS.vision || {};
-    CTPS.vision.embedFromLayout = embedFromLayout;
-    CTPS.vision.visibleCells = visibleCells;
-    CTPS.vision.readMosaicWouldSucceed = readMosaicWouldSucceed;
-    CTPS.vision.mosaicCellCenters = mosaicCellCenters;
-
-    CTPS._inits.push(_initVision);
+    // The remaining wiring is PLAYER-only (the editor has no `window.CTPS`):
+    // `CTPS.vision` is store.js's upload-leg reach for `embedFromLayout`, and
+    // `CTPS._inits` runs the per-frame read HUD. Both are guarded so this file
+    // exports cleanly on the editor page (where `CTPS` is undefined) after the
+    // `window.CTPS_VISION` helpers above are already installed.
+    if (CTPS) {
+        CTPS.vision = CTPS.vision || {};
+        CTPS.vision.embedFromLayout = embedFromLayout;
+        CTPS.vision.visibleCells = visibleCells;
+        CTPS.vision.readMosaicWouldSucceed = readMosaicWouldSucceed;
+        CTPS.vision.mosaicCellCenters = mosaicCellCenters;
+        if (CTPS._inits) {
+            CTPS._inits.push(_initVision);
+        }
+    }
 })();

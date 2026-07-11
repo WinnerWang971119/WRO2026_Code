@@ -1405,6 +1405,7 @@
  * below is deliberately the other typeface — documents the UI/data split. */
 .ctps-cargo-tab-label {
     font-family: var(--ctps-font-ui);
+    white-space: nowrap;
 }
 
 /* Count badge ("N / CAP"): mono with tabular-nums so the digits hold their
@@ -1574,30 +1575,23 @@
 }
 
 /* ===================================================================== */
-/* Vision panel (randomized-vision mosaic + cone HUD, #ctps-vision)       */
+/* Vision read (randomized-vision mosaic + cone HUD, #ctps-vision)        */
 /* ===================================================================== */
 /*
- * A rail panel sibling to #ctps-cargo (Contracts & Interfaces: "Player
- * DOM/CSS seam" — never #ctps-hud, which is `hidden`/0x0 by default). Markup
- * is player_html.py's `_BODY_MARKUP` (T10); the per-frame read HUD + badges
- * are updated by vision.js (T11). This block is only the LOOK — it reuses
- * the shared `.ctps-panel` shell (background/border/radius) the same way
- * `.ctps-panel--cargo` does, and reuses `.ctps-chip` for the vision-cone /
- * mosaic layer toggles (chrome.js wires `.ctps-layer-chips .ctps-chip`
- * generically off `data-layer`, so those two chips need no new CSS beyond
- * the existing `.ctps-chip` / `.ctps-chip--active` rules already above).
+ * The read HUD lives INSIDE the cargo panel as its third tab
+ * (#ctps-cargo-panel-vision, beside Magazine + Inventory) to save vertical
+ * rail space — so `.ctps-vision` is just the badges+HUD stack within that
+ * tab body (the `.ctps-cargo-panel` shell already supplies padding/scroll).
+ * Markup is player_html.py's `_BODY_MARKUP`; the per-frame read HUD + badges
+ * + the tab's own `#ctps-cargo-count-vision` badge are updated by vision.js.
+ * The vision-cone / mosaic layer toggles reuse `.ctps-chip` (chrome.js wires
+ * `.ctps-layer-chips .ctps-chip` generically off `data-layer`, so those two
+ * chips need no new CSS beyond the existing `.ctps-chip` rules above).
  */
 
-.ctps-panel--vision {
+.ctps-vision {
     display: flex;
     flex-direction: column;
-    gap: var(--ctps-space-3);
-}
-
-.ctps-vision-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     gap: var(--ctps-space-3);
 }
 

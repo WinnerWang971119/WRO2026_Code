@@ -45,7 +45,7 @@
 #include <stdint.h>
 
 // The REAL colour enum, single-sourced. `Config::Color` is declared in
-// `WRO2026/config/ConfigVision.h` as `{ UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE }`,
+// `WRO2026/config/ConfigVision.h` as `{ UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE, RED }`,
 // wrapped in a `#pragma push_macro("WHITE") / #undef WHITE / … / #pragma pop_macro`
 // guard (MiniR4OLED.h `#define`s WHITE). Resolved via the `${SKETCH_DIR}` include path
 // the `ctps_dump` target puts on `-I` (same path that resolves the sibling Drive mock's
