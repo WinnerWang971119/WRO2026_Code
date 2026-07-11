@@ -124,7 +124,7 @@ from tools.path_planner.ctps.profile import (
     sample_drive_run,
     sample_turn,
 )
-from tools.path_planner.ctps.trace_loader import Command, Trace
+from tools.path_planner.ctps.trace_loader import Command, MosaicTrace, Trace
 
 __all__ = ["Track", "build", "build_field_block"]
 
@@ -254,9 +254,15 @@ class Track:
         UNREACHABLE fault ``goto`` event has no ``"t_end"``. A ``manip`` event
         additionally carries structured ``"method": str`` / ``"arg": int``
         keys (additive to the unchanged ``"label"`` — CTPS object-cargo plan,
-        T9), so the player can dispatch on them directly instead of parsing
-        the label string. No other event type gains new keys, so a
-        manip-free trace's events stay byte-identical.
+        T9). A ``read_mosaic`` event additionally carries an ``"success":
+        Optional[bool]`` key (the read outcome echoed from the trace's
+        ``read_mosaic`` op) — a non-geometry event, like ``drive``'s ``stop``
+        method, that dwells nothing and registers no new timeline lane (CTPS
+        randomized-vision plan, T9). Both are additive to the unchanged
+        ``"label"`` string, so the player can dispatch on the structured keys
+        directly instead of parsing the label. No other event type gains new
+        keys, so a manip-free / read_mosaic-free trace's events stay
+        byte-identical.
     :param pivots: Optional single-wheel pivot-arc overlay segments (issue #55),
         one per pivot the trace's routes actually take, sorted by ``t0``. Each
         entry is ``{"t0": float, "t1": float, "cx": float, "cy": float,
@@ -268,6 +274,16 @@ class Track:
         field). The dense arc keyframes between ``t0`` and ``t1`` already trace
         the swing through the player's lerp; this segment just tells the
         ``wheel-arc`` render mode WHEN a pivot is active and WHERE its wheel is.
+    :param mosaic: The trace's top-level ``mosaic`` echo
+        (:class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`), carried
+        through UNCHANGED from :attr:`Trace.mosaic` — a non-geometry,
+        document-level attribute (it does not move the chassis). ``None`` for
+        a trace with no ``mosaic`` block (no ``--mosaic`` on the dump, or an
+        old trace), which is the normal/unwarned case (CTPS randomized-vision
+        plan, T9). The player embed (T10) and ``vision.js`` (T11) read this to
+        resolve + draw the rolled cells; :meth:`to_dict` omits the key
+        entirely when ``None``, so a mosaic-free trace's Track JSON stays
+        byte-identical to before this change (AC12).
     """
 
     schema_version: int
@@ -276,6 +292,7 @@ class Track:
     keyframes: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
     pivots: List[Dict[str, Any]] = dc_field(default_factory=list)
+    mosaic: Optional[MosaicTrace] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the JSON-serialisable Data Model B dict for this track.
@@ -286,11 +303,19 @@ class Track:
 
         The ``"pivots"`` key is included **only when non-empty**: a pivot-free
         trace emits exactly the pre-#55 dict (same keys, same order), so its
-        Track JSON is byte-identical to before this change (AC6).
+        Track JSON is byte-identical to before this change (AC6). Likewise
+        ``"mosaic"`` is included **only when set**: a mosaic-free trace emits
+        exactly the pre-mosaic dict, so its Track JSON stays byte-identical
+        (AC12). When present, ``"mosaic"`` is the plain field-value dict
+        (``{"cells", "seed", "geom_hash", "injected"}``, ``seed`` omitted when
+        unset) — the same shape :class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`
+        carries, JSON-serialisable via ``dataclasses.asdict``-equivalent
+        field access.
 
         :return: ``{"schema_version", "field", "duration_s", "keyframes",
             "events"}`` — plus ``"pivots"`` when the trace took at least one
-            pivot — exactly the shape the HTML player consumes.
+            pivot, plus ``"mosaic"`` when the trace carried a mosaic roll —
+            exactly the shape the HTML player consumes.
         """
         result: Dict[str, Any] = {
             "schema_version": self.schema_version,
@@ -301,6 +326,15 @@ class Track:
         }
         if self.pivots:
             result["pivots"] = self.pivots
+        if self.mosaic is not None:
+            mosaic_dict: Dict[str, Any] = {
+                "cells": list(self.mosaic.cells),
+                "geom_hash": self.mosaic.geom_hash,
+                "injected": self.mosaic.injected,
+            }
+            if self.mosaic.seed is not None:
+                mosaic_dict["seed"] = self.mosaic.seed
+            result["mosaic"] = mosaic_dict
         return result
 
 
@@ -2238,6 +2272,27 @@ def build(trace: Trace, field_data) -> Track:
                 {"t": t, "type": "task_end", "label": f"{cmd.name} {cmd.result}"}
             )
 
+        elif cmd.op == "read_mosaic":
+            # Non-geometry event (CTPS randomized-vision plan, T9): a
+            # `readMosaic()` call never moves the chassis, so — like `stop` /
+            # `stopAtLine` before it — it dwells nothing and appends only an
+            # event, no keyframe. Carries `success` (the read outcome; `None`
+            # if the loader could not validate it) alongside the unchanged
+            # `label` string. Deliberately NOT registered as a new timeline
+            # lane: the dormant case (no vision-consuming mission yet) gets an
+            # event only, so it renders wherever the generic event/log views
+            # already read `track.events` — never touching `PLAYER_META`'s
+            # frozen `lanes` list or `timeline.js`'s lane registry (T10/T11
+            # own any future lane wiring, not this builder).
+            events.append(
+                {
+                    "t": t,
+                    "type": "read_mosaic",
+                    "label": f"read_mosaic success={cmd.success}",
+                    "success": cmd.success,
+                }
+            )
+
         # Any other op cannot reach here — the loader excludes unknown ops.
 
     # Trace-end residual drift indicator (issue #130, T11). A raw off-node move
@@ -2288,4 +2343,5 @@ def build(trace: Trace, field_data) -> Track:
         keyframes=keyframes,
         events=events,
         pivots=pivots,
+        mosaic=trace.mosaic,
     )

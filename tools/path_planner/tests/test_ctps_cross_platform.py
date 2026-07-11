@@ -134,7 +134,7 @@ def test_tc6_non_windows_branch_skips_vcvars(monkeypatch):
             AssertionError("_build_dump_windows must not run on non-Windows")
         ),
     )
-    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture: "JSON")
+    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture, mosaic_args=None: "JSON")
 
     result = ctps_main._produce_trace_json(fixture=True)
 
@@ -203,7 +203,7 @@ def test_tc8_windows_branch_uses_windows_builder(monkeypatch):
     monkeypatch.setattr(
         ctps_main, "_build_dump_posix", _never_called("_build_dump_posix")
     )
-    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture: "JSON")
+    monkeypatch.setattr(ctps_main, "_run_dump", lambda fixture, mosaic_args=None: "JSON")
 
     result = ctps_main._produce_trace_json(fixture=False)
 

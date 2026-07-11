@@ -35,6 +35,11 @@
     --ctps-hold: #5bc8e0;
     --ctps-drift: #ff6b4a;
     --ctps-warn-border: #4a2e26;
+    /* Read-success green (vision HUD "12/12" state, #136 mosaic feature) —
+     * distinct from --ctps-accent/--ctps-hold so "all 12 cells read" reads
+     * as an unambiguous pass, not just "selected"/"holding". */
+    --ctps-success: #3ecf6e;
+    --ctps-success-border: #1f4a30;
 
     /* ----- color: map scrim ------------------------------------------- */
     --ctps-map-dim: 0.48;
@@ -57,4 +62,9 @@
     /* ----- radii --------------------------------------------------------- */
     --ctps-radius-panel: 6px;
     --ctps-radius-chip: 3px;
+
+    /* ----- mosaic pin grid (editor Mosaic tab, #136) -------------------- */
+    /* Single-sourced cell size so the 4x3 pin grid's JS-computed rows/cols
+     * template and the CSS cell box never drift apart. */
+    --ctps-mosaic-cell-size: 32px;
 }

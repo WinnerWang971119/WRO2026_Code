@@ -36,6 +36,41 @@ namespace
     /// @brief Shared monotonic sequence counter — stamps every appended record.
     uint32_t g_ctpsSeq = 0;
 
+    /// @brief Number of mosaic cells carried by the top-level echo (4×3 grid).
+    constexpr size_t kMosaicCellCount = 12;
+
+    // Injected-mosaic echo state, armed by ctps::setInjectedMosaic. When
+    // `g_ctpsMosaicInjected` is false (dump ran without `--mosaic`),
+    // commandStreamToJson emits NO `mosaic` key and the document is byte-
+    // identical to the pre-mosaic output. Cleared by ctps::reset().
+    bool             g_ctpsMosaicInjected = false;
+    Config::Color    g_ctpsMosaicCells[kMosaicCellCount] = {};
+    bool             g_ctpsMosaicHasSeed  = false;
+    long             g_ctpsMosaicSeed     = 0;
+    std::string      g_ctpsMosaicGeomHash;
+
+    /**
+     * @brief Map a `Config::Color` enum value to its canonical uppercase name.
+     *
+     * The output string literals are unaffected by the `#define WHITE` macro
+     * from MiniR4OLED.h (a string literal is not an identifier), so `"WHITE"`
+     * is safe to emit even where the macro is live. The enum is switched by
+     * value; `UNKNOWN` and any out-of-range value fall through to `"UNKNOWN"`.
+     */
+    const char* colorName(Config::Color c)
+    {
+        switch (c)
+        {
+            case Config::Color::YELLOW: return "YELLOW";
+            case Config::Color::BLUE:   return "BLUE";
+            case Config::Color::GREEN:  return "GREEN";
+            case Config::Color::WHITE:  return "WHITE";
+            case Config::Color::RED:    return "RED";
+            case Config::Color::UNKNOWN:
+            default:                    return "UNKNOWN";
+        }
+    }
+
     /**
      * @brief Append a string to @p out with JSON string-escaping (no surrounding quotes).
      *
@@ -163,6 +198,19 @@ ManipulatorClass Manipulator;
 /// @brief No-op Localization mock singleton (Mission.declarePosition target).
 LocalizationClass Localization;
 
+/// @brief Recording Vision mock singleton — dump-only.
+///
+/// `Vision.h` is force-included into the `ctps_dump` target ONLY (task T7),
+/// never the shared `add_ctps_mock_force_includes` that `test_ctps_mock_conformance`
+/// also applies (ADR-049/051 scope). The `#ifdef VISION_H` guard therefore
+/// defines this global exactly where the mock header is present (dump build)
+/// and skips it in conformance, where `VisionClass` is neither visible nor
+/// referenced. Relies on the force-include like the sibling globals above —
+/// this TU does NOT #include "Vision.h" directly.
+#ifdef VISION_H
+VisionClass Vision;
+#endif
+
 // =============================================================================
 // ctps:: recording sink.
 // =============================================================================
@@ -260,6 +308,27 @@ namespace ctps
         push(std::move(rec));
     }
 
+    void recordReadMosaic(bool success)
+    {
+        Record rec;
+        rec.op      = Op::READ_MOSAIC;
+        rec.success = success;
+        push(std::move(rec));
+    }
+
+    void setInjectedMosaic(const Config::Color colors[12], bool hasSeed, long seed,
+                           const char* geomHash)
+    {
+        g_ctpsMosaicInjected = true;
+        for (size_t i = 0; i < kMosaicCellCount; ++i)
+        {
+            g_ctpsMosaicCells[i] = (colors != nullptr) ? colors[i] : Config::Color::UNKNOWN;
+        }
+        g_ctpsMosaicHasSeed  = hasSeed;
+        g_ctpsMosaicSeed     = seed;
+        g_ctpsMosaicGeomHash = (geomHash != nullptr) ? geomHash : "";
+    }
+
     void recordDriveMove(const char* method, const DriveMoveParams& p)
     {
         Record rec;
@@ -321,6 +390,15 @@ namespace ctps
         g_ctpsLog.clear();
         g_ctpsSeq        = 0;
         g_ctpsBuildError = false;
+
+        g_ctpsMosaicInjected = false;
+        for (size_t i = 0; i < kMosaicCellCount; ++i)
+        {
+            g_ctpsMosaicCells[i] = Config::Color::UNKNOWN;
+        }
+        g_ctpsMosaicHasSeed = false;
+        g_ctpsMosaicSeed    = 0;
+        g_ctpsMosaicGeomHash.clear();
     }
 
     std::string commandStreamToJson(const char* startNode, double startHeadingDeg)
@@ -432,6 +510,14 @@ namespace ctps
                     appendStrMember(out, "node", rec.target);
                     break;
 
+                case Op::READ_MOSAIC:
+                    // `"op": "read_mosaic"` is the record-type discriminator;
+                    // the op carries `success` only (the rolled colors are the
+                    // top-level `mosaic.cells` echo — no redundant per-op copy).
+                    out += "\"op\": \"read_mosaic\", \"success\": ";
+                    out += (rec.success ? "true" : "false");
+                    break;
+
                 case Op::DRIVE:
                     out += "\"op\": \"drive\", ";
                     appendStrMember(out, "method", rec.method);
@@ -507,8 +593,43 @@ namespace ctps
 
             out += " }";
         }
-        out += (g_ctpsLog.empty() ? "]\n" : "\n  ]\n");
-        out += "}\n";
+        out += (g_ctpsLog.empty() ? "]" : "\n  ]");
+
+        // Top-level `mosaic` echo — present ONLY when the dump ran with
+        // `--mosaic` (setInjectedMosaic armed it). When absent, no `mosaic`
+        // key is emitted and the document is byte-identical to the pre-mosaic
+        // output (AC6 / TC13). `cells` are the canonical color NAMES; `seed` is
+        // omitted entirely when no roll seed was supplied; `geom_hash` is
+        // echoed verbatim; `injected` is always `true` in this block.
+        if (g_ctpsMosaicInjected)
+        {
+            out += ",\n  \"mosaic\": {\n";
+
+            out += "    \"cells\": [";
+            for (size_t i = 0; i < kMosaicCellCount; ++i)
+            {
+                out += (i == 0) ? "\"" : ", \"";
+                out += colorName(g_ctpsMosaicCells[i]);
+                out += '"';
+            }
+            out += "],\n";
+
+            if (g_ctpsMosaicHasSeed)
+            {
+                out += "    \"seed\": ";
+                out += std::to_string(g_ctpsMosaicSeed);
+                out += ",\n";
+            }
+
+            out += "    ";
+            appendStrMember(out, "geom_hash", g_ctpsMosaicGeomHash);
+            out += ",\n";
+
+            out += "    \"injected\": true\n";
+            out += "  }";
+        }
+
+        out += "\n}\n";
 
         return out;
     }

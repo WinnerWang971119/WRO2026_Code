@@ -621,3 +621,240 @@ def test_declare_position_empty_string_node_warns_and_skips():
     with pytest.warns(UserWarning, match="declare_position.node"):
         trace = load(data)
     assert len(trace.commands) == 0
+
+
+# ---------------------------------------------------------------------------
+# T20 — top-level `mosaic` block + `read_mosaic` op (TC10 valid / TC11 malformed)
+# ---------------------------------------------------------------------------
+
+
+def _mosaic_trace(mosaic: dict, *cmds: dict) -> dict:
+    """Return a minimal v1 trace dict carrying a top-level ``mosaic`` block."""
+    return {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": list(cmds),
+        "mosaic": mosaic,
+    }
+
+
+_VALID_MOSAIC_CELLS = [
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+]
+
+
+def test_tc10_valid_mosaic_and_read_mosaic_op_load_no_warning():
+    """TC10: a well-formed top-level ``mosaic`` block + a ``read_mosaic`` op
+    load onto the ``Trace`` with NO warning.
+
+    Key assertions:
+    * ``trace.mosaic`` is populated: ``cells`` (12, in order), ``seed``,
+      ``geom_hash``, ``injected`` all match the input.
+    * the ``read_mosaic`` command survives in ``trace.commands`` with
+      ``success is True``.
+    * no :class:`UserWarning` is raised for a fully well-formed trace.
+    """
+    data = _mosaic_trace(
+        {
+            "cells": _VALID_MOSAIC_CELLS,
+            "seed": 12345,
+            "geom_hash": "ab12cd34",
+            "injected": True,
+        },
+        {"seq": 0, "op": "read_mosaic", "success": True},
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # promote any UserWarning to a failure
+        trace = load(data)
+
+    assert trace.mosaic is not None
+    assert trace.mosaic.cells == _VALID_MOSAIC_CELLS
+    assert trace.mosaic.seed == 12345
+    assert trace.mosaic.geom_hash == "ab12cd34"
+    assert trace.mosaic.injected is True
+
+    assert len(trace.commands) == 1
+    read_cmd = trace.commands[0]
+    assert read_cmd.op == "read_mosaic"
+    assert read_cmd.success is True
+
+
+def test_tc10_valid_mosaic_seed_absent_no_warning():
+    """TC10 (seed-absent variant): a ``mosaic`` block with no ``seed`` key
+    loads with ``trace.mosaic.seed is None`` and NO warning — an absent seed
+    is a normal case (the dump omits the key when ``--mosaic-seed`` wasn't
+    passed), not a malformed one.
+    """
+    data = _mosaic_trace(
+        {
+            "cells": _VALID_MOSAIC_CELLS,
+            "geom_hash": "ab12cd34",
+            "injected": True,
+        },
+        {"seq": 0, "op": "read_mosaic", "success": False},
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        trace = load(data)
+
+    assert trace.mosaic is not None
+    assert trace.mosaic.seed is None
+    assert trace.mosaic.cells == _VALID_MOSAIC_CELLS
+    assert trace.mosaic.geom_hash == "ab12cd34"
+    assert trace.mosaic.injected is True
+
+    assert len(trace.commands) == 1
+    assert trace.commands[0].success is False
+
+
+@pytest.mark.parametrize(
+    "bad_mosaic",
+    [
+        pytest.param("not-a-dict", id="mosaic-not-a-dict"),
+        pytest.param(["a", "list"], id="mosaic-is-a-list"),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS[:11],  # wrong length (11, not 12)
+                "geom_hash": "ab12cd34",
+                "injected": True,
+            },
+            id="cells-wrong-length",
+        ),
+        pytest.param(
+            {
+                "cells": [*_VALID_MOSAIC_CELLS[:11], 42],  # non-string entry
+                "geom_hash": "ab12cd34",
+                "injected": True,
+            },
+            id="cells-non-string-entry",
+        ),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS,
+                "geom_hash": "",  # empty string
+                "injected": True,
+            },
+            id="geom-hash-empty-string",
+        ),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS,
+                "geom_hash": 12345,  # non-string
+                "injected": True,
+            },
+            id="geom-hash-non-string",
+        ),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS,
+                "geom_hash": "ab12cd34",
+                "injected": "true",  # non-bool
+            },
+            id="injected-non-bool",
+        ),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS,
+                "geom_hash": "ab12cd34",
+                "injected": True,
+                "seed": 3.5,  # non-int
+            },
+            id="seed-non-int-float",
+        ),
+        pytest.param(
+            {
+                "cells": _VALID_MOSAIC_CELLS,
+                "geom_hash": "ab12cd34",
+                "injected": True,
+                "seed": True,  # JSON bool masquerading as int
+            },
+            id="seed-bool-as-int",
+        ),
+    ],
+)
+def test_tc11_malformed_mosaic_block_warns_and_skips_all_or_nothing(bad_mosaic):
+    """TC11: a malformed top-level ``mosaic`` block warns and is skipped
+    entirely — ``trace.mosaic is None`` (all-or-nothing, never half-parsed),
+    and the loader NEVER raises.
+    """
+    data = _mosaic_trace(bad_mosaic)
+
+    with pytest.warns(UserWarning):
+        trace = load(data)
+
+    assert trace.mosaic is None
+
+
+def test_tc11_read_mosaic_success_missing_kept_with_success_none():
+    """TC11: a ``read_mosaic`` op with a missing ``success`` key warns, but
+    the command is KEPT (not dropped) with ``success is None`` — only the
+    top-level ``mosaic`` block is all-or-nothing; individual ops degrade
+    field-by-field like every other op in this loader.
+    """
+    data = {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": [
+            {"seq": 0, "op": "read_mosaic"},
+        ],
+    }
+
+    with pytest.warns(UserWarning, match="read_mosaic.success"):
+        trace = load(data)
+
+    assert len(trace.commands) == 1
+    cmd = trace.commands[0]
+    assert cmd.op == "read_mosaic"
+    assert cmd.success is None
+
+
+def test_tc11_read_mosaic_success_non_bool_warns_and_kept_with_success_none():
+    """TC11: a ``read_mosaic`` op whose ``success`` is a non-bool (e.g. a
+    JSON int, mirroring the ``bool`` subclasses ``int`` guard used
+    throughout this loader) warns and is treated as unset — the command is
+    still kept.
+    """
+    data = {
+        "schema_version": 1,
+        "start_node": "A",
+        "start_heading_deg": 0.0,
+        "build_error": False,
+        "commands": [
+            {"seq": 0, "op": "read_mosaic", "success": 1},
+        ],
+    }
+
+    with pytest.warns(UserWarning, match="read_mosaic.success"):
+        trace = load(data)
+
+    assert len(trace.commands) == 1
+    cmd = trace.commands[0]
+    assert cmd.op == "read_mosaic"
+    assert cmd.success is None
+
+
+def test_tc11_loader_never_raises_on_any_malformed_mosaic_input():
+    """TC11 (never-raises guard): every malformed-mosaic case above — plus a
+    malformed ``read_mosaic`` op alongside it — is handled purely with
+    warnings; ``load`` never raises for any of them.
+    """
+    data = _mosaic_trace(
+        {"cells": "not-a-list", "geom_hash": 7, "injected": None, "seed": "nope"},
+        {"seq": 0, "op": "read_mosaic", "success": "yes"},
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        trace = load(data)  # must not raise
+
+    assert trace.mosaic is None
+    assert len(trace.commands) == 1
+    assert trace.commands[0].success is None

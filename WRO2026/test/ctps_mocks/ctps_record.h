@@ -47,6 +47,8 @@
 #include <string>
 #include <vector>
 
+#include "Config.h"   // Config::Color for the injected-mosaic echo (setInjectedMosaic).
+
 namespace ctps
 {
     /**
@@ -70,6 +72,7 @@ namespace ctps
         BEEP,              ///< Mission beep. Fields: `freq_hz`, `ms`.
         LED,               ///< Mission LED. Fields: `r`, `g`, `b`, `ms`.
         DECLARE_POSITION,  ///< Localization re-anchor. Field: `node` (reuses `target`; target node name).
+        READ_MOSAIC,       ///< Vision mosaic read. Field: `success` only (colors live in the top-level `mosaic` echo).
     };
 
     /**
@@ -102,6 +105,7 @@ namespace ctps
         uint8_t     g       = 0;             ///< LED: green channel.
         uint8_t     b       = 0;             ///< LED: blue channel.
         bool        result  = false;         ///< TASK_END: task body return value (true == ok).
+        bool        success = false;         ///< READ_MOSAIC: readMosaic() return value (true == read ok).
         float       cm      = 0.0f;          ///< DRIVE: distance for the linear drive moves.
         bool        hasCm   = false;         ///< DRIVE: true iff a linear move carries `cm` (gates cm emission).
         float       deg     = 0.0f;          ///< DRIVE: angle for turnDeg / turnToYaw.
@@ -233,6 +237,41 @@ namespace ctps
      *               arg-less verbs record `0`).
      */
     void recordManip(const char* method, uint8_t arg);
+
+    /**
+     * @brief Record a `Vision.readMosaic()` call (recorded by the Vision mock).
+     *
+     * Appends a single `Op::READ_MOSAIC` Record carrying @p success only — the
+     * rolled colors are echoed once at the top level via @ref setInjectedMosaic,
+     * so a per-op color copy would be redundant. `"op": "read_mosaic"` is the
+     * record-type discriminator in the serialized stream; the record never
+     * introduces a sub-field also named `op`/`kind`.
+     *
+     * @param success The `readMosaic()` return value (`true` == read ok).
+     */
+    void recordReadMosaic(bool success);
+
+    /**
+     * @brief Set the injected mosaic roll for the top-level `mosaic` trace echo.
+     *
+     * Called by `ctps_dump` when it runs with `--mosaic`. Stores the 12 injected
+     * cell colors (echoed as color NAMES), the optional roll seed, and the
+     * geometry fingerprint. Calling this arms the top-level `mosaic` block in
+     * @ref commandStreamToJson; when it is never called (dump ran without
+     * `--mosaic`), no `mosaic` key is emitted and the JSON is byte-identical to
+     * the pre-mosaic output.
+     *
+     * @param colors   The 12 injected cell colors, indexed `i = row*cols + col`.
+     * @param hasSeed  `true` iff a roll seed was supplied (`--mosaic-seed`
+     *                 present). When `false`, the `seed` key is OMITTED from the
+     *                 echo (@p seed is ignored).
+     * @param seed     The roll seed, echoed verbatim; meaningful only when
+     *                 @p hasSeed is `true`.
+     * @param geomHash The geometry fingerprint, echoed verbatim. `nullptr` is
+     *                 stored as an empty string.
+     */
+    void setInjectedMosaic(const Config::Color colors[12], bool hasSeed, long seed,
+                           const char* geomHash);
 
     /**
      * @brief Captured fluent-builder state for one linear DRIVE move.

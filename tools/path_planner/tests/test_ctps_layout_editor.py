@@ -35,6 +35,8 @@ import re
 import pytest
 
 from tools.path_planner.ctps import layout_editor_html as editor_module
+from tools.path_planner.ctps import mosaic as mosaic_module
+from tools.path_planner.ctps.layout import load as load_layout
 from tools.path_planner.ctps.layout_editor_html import (
     _ASSET_CSS,
     _ASSET_JS,
@@ -149,9 +151,14 @@ def test_p_tc8_every_editor_asset_exists_and_is_inlined(tmp_path):
         assert content in html, f"{path.name} was not inlined verbatim into the page"
 
     # The exact asset set the plan pins for this page is registered.
+    # `vision.js` (randomized-vision plan, T13) is inserted right after
+    # `objects_draw.js` -- it reuses CTPS_OBJ at IIFE time like the editor
+    # modules do, and ships UNCONDITIONALLY (ADR-060 unconditional-asset rule),
+    # so it belongs in the same fixed position every editor page loads.
     js_names = [p.name for p in _ASSET_JS]
     assert js_names == [
         "objects_draw.js",
+        "vision.js",
         "editor_core.js",
         "editor_tools.js",
         "editor_io.js",
@@ -407,3 +414,233 @@ def test_reembed_layout_none_reverts_to_null(tmp_path):
 
     reverted = editor_module.reembed_layout(full_html, None)
     assert "const LAYOUT = null;" in reverted
+
+
+# ---------------------------------------------------------------------------
+# TC20 -- editor Save round-trip of a mosaic + robot.vision layout, and the
+# editor page emits MOSAIC_META + the mosaic/vision layout embed
+# (randomized-vision plan, T21 -- ADR-060, AC11)
+# ---------------------------------------------------------------------------
+
+#: A round-trip-STABLE mosaic block: RANDOM mode WITH explicit ``counts``
+#: (every null cell has a quota, matching test_ctps_layout.py's
+#: ``_random_mosaic_block``). Avoids the ``MosaicConfig.to_dict`` ``counts:{}``
+#: normalization flake noted in T2/T19 review -- a directed-mode block must
+#: also pin an explicit ``counts: {}`` up front (never omit it) to round-trip
+#: byte-identically on the FIRST pass; this fixture sidesteps that entirely by
+#: using random mode with a fully-specified ``counts``.
+_TC20_MOSAIC_BLOCK: dict = {
+    "mode": "random",
+    "center_x_cm": 100.0,
+    "center_y_cm": 75.0,
+    "heading_deg": 0.0,
+    "rows": 4,
+    "cols": 3,
+    "cell_w_cm": 5.0,
+    "cell_h_cm": 5.0,
+    "row_gap_cm": 1.0,
+    "col_gap_cm": 1.0,
+    "palette": ["YELLOW", "BLUE", "GREEN", "WHITE"],
+    "cells": [None, "YELLOW", None, None, None, None, None, "BLUE", None, None, None, None],
+    "counts": {"YELLOW": 3, "BLUE": 3, "GREEN": 4},
+    "seed": 12345,
+}
+
+#: A ``robot.vision`` forward cone paired with :data:`_TC20_MOSAIC_BLOCK`.
+_TC20_VISION_BLOCK: dict = {
+    "origin_x_cm": 12.0,
+    "origin_y_cm": 0.0,
+    "half_angle_deg": 25.0,
+    "range_cm": 60.0,
+}
+
+
+#: A STRICT-schema-valid layout (one cargo rect + all 4 magazine drop points --
+#: ``layout.py.load`` requires exactly ``MAGAZINE_LANES`` (4) drop points,
+#: unlike this module's own tolerant :data:`_SAMPLE_LAYOUT` fixture, which
+#: carries only one). Mirrors ``test_ctps_layout.py``'s ``_valid_layout_dict``.
+_STRICT_VALID_LAYOUT: dict = {
+    "schema_version": 1,
+    "objects": [
+        {
+            "id": "o1", "name": "block", "shape": "rect", "type": "cargo",
+            "color": "#5bc8e0", "x_cm": 12.0, "y_cm": -3.0,
+            "heading_deg": 0.0, "w_cm": 5.0, "h_cm": 5.0,
+        }
+    ],
+    "robot": {
+        "grab_zone": {"x_cm": -1.0, "y_cm": 8.0, "w_cm": 6.0, "h_cm": 14.0},
+        "box_zone": {"x_cm": -9.0, "y_cm": 0.0, "w_cm": 6.0, "h_cm": 16.0},
+        "drop_points": [
+            {"x_cm": 4.0, "y_cm": -6.0},
+            {"x_cm": 4.0, "y_cm": -2.0},
+            {"x_cm": 4.0, "y_cm": 2.0},
+            {"x_cm": 4.0, "y_cm": 6.0},
+        ],
+    },
+}
+
+
+def _tc20_layout_with_mosaic_and_vision() -> dict:
+    """Return a fresh, STRICT-schema-valid layout dict carrying mosaic + robot.vision.
+
+    Built on :data:`_STRICT_VALID_LAYOUT` (all 4 magazine drop points --
+    required for the ``layout.py.load`` leg, unlike this module's own tolerant
+    :data:`_SAMPLE_LAYOUT`) plus the top-level ``mosaic`` block and the
+    ``robot.vision`` cone -- the two ADR-060 blocks a Save must carry through
+    unchanged.
+    """
+    layout = json.loads(json.dumps(_STRICT_VALID_LAYOUT))  # deep copy, safe to mutate
+    layout["mosaic"] = json.loads(json.dumps(_TC20_MOSAIC_BLOCK))
+    layout["robot"]["vision"] = json.loads(json.dumps(_TC20_VISION_BLOCK))
+    return layout
+
+
+def test_tc20_mosaic_and_vision_layout_round_trips_through_layout_py(tmp_path):
+    """TC20 (leg 1): a mosaic + robot.vision layout round-trips via layout.py.
+
+    Key assertion: ``load(layout) -> to_dict()`` equals the input dict exactly
+    -- the same ``layout.py`` boundary test_ctps_layout.py's mosaic round-trip
+    cases exercise, repeated here as the leg of AC11 owned by this render-
+    golden task. Uses a RANDOM-mode mosaic with fully-specified ``counts`` (see
+    :data:`_TC20_MOSAIC_BLOCK`'s docstring) to avoid the ``counts: {}``
+    normalization flake on the first pass.
+    """
+    data = _tc20_layout_with_mosaic_and_vision()
+
+    parsed = load_layout(json.loads(json.dumps(data)))
+
+    assert parsed.mosaic is not None
+    assert parsed.mosaic.mode == "random"
+    assert parsed.robot.vision is not None
+    assert parsed.robot.vision.half_angle_deg == 25.0
+
+    assert parsed.to_dict() == data
+
+
+def test_tc20_editor_page_emits_mosaic_meta_and_the_mosaic_vision_layout_embed(tmp_path):
+    """TC20 (leg 2): the editor page emits MOSAIC_META + the mosaic/vision embed.
+
+    Key assertion: rendering the editor with ``layout=<mosaic+vision dict>``
+    embeds ``const LAYOUT`` carrying the ``mosaic`` block and the
+    ``robot.vision`` cone verbatim (the SAME whole-dict embed path as every
+    other layout key, per :func:`tools.path_planner.ctps.layout_editor_html._layout_literal`'s
+    docstring), and the UNCONDITIONAL ``const MOSAIC_META`` colour vocabulary
+    is present and matches the single-sourced :mod:`tools.path_planner.ctps.mosaic`
+    contract -- the editor's Mosaic tab always needs swatch colours, with or
+    without a currently-loaded mosaic.
+    """
+    layout_dict = _tc20_layout_with_mosaic_and_vision()
+
+    out_path = tmp_path / "mosaic_vision_editor.html"
+    render(toy_field_data, out_path, layout=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    match = _LAYOUT_RE.search(html)
+    assert match is not None, "could not locate the embedded const LAYOUT"
+    embedded_layout = json.loads(match.group("json").replace("<\\/", "</"))
+    assert embedded_layout == layout_dict
+    assert embedded_layout["mosaic"] == _TC20_MOSAIC_BLOCK
+    assert embedded_layout["robot"]["vision"] == _TC20_VISION_BLOCK
+
+    meta_match = re.search(
+        r"const MOSAIC_META = (?P<json>.*?);\s*</script>", html, re.DOTALL
+    )
+    assert meta_match is not None, "could not locate the embedded const MOSAIC_META"
+    meta = json.loads(meta_match.group("json").replace("<\\/", "</"))
+    assert meta["names"] == list(mosaic_module.COLOR_NAMES)
+    assert meta["hex"] == {
+        name: mosaic_module.COLOR_HEX[name] for name in mosaic_module.COLOR_NAMES
+    }
+
+    # The Mosaic tab + pin-grid + cone markup is present for this layout to
+    # bind onto.
+    assert 'data-editor-tab="mosaic"' in html
+    assert 'id="ctps-editor-mosaic-panel"' in html
+    assert 'id="ctps-editor-robot-vision"' in html
+
+
+def test_tc20_mosaic_meta_is_emitted_even_with_no_layout_at_all(tmp_path):
+    """TC20 (companion): MOSAIC_META ships unconditionally, even ``layout=None``.
+
+    Key assertion: unlike the player's conditional ``MOSAIC_META`` (gated on a
+    renderable mosaic), the EDITOR always emits it -- the Mosaic tab's
+    palette/pin-grid swatches need the colour vocabulary regardless of whether
+    any layout is currently loaded.
+    """
+    out_path = tmp_path / "no_layout_meta.html"
+    render(toy_field_data, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert "const LAYOUT = null;" in html
+    assert "const MOSAIC_META = " in html
+
+
+# ---------------------------------------------------------------------------
+# TC21 -- upload-leg guard: a mosaic-free-EMITTED editor page still ships the
+# unconditional vision.js + #ctps-vision + layer chips (randomized-vision
+# plan, T21 -- ADR-060, AC11/AC12; ADR-056 upload-leg rule)
+# ---------------------------------------------------------------------------
+
+
+def test_tc21_mosaic_free_emitted_page_still_carries_unconditional_vision_assets(tmp_path):
+    """TC21: a mosaic-free-emitted editor page still ships vision.js unconditionally.
+
+    Key assertion (the ADR-056 upload-leg guard, mirrored from the player
+    suite's TC18): rendering the editor with NO ``layout`` at all (a bare
+    ``layout=None``, the emptiest possible page) still inlines ``vision.js``
+    verbatim and renders the Mosaic-tab / vision-cone markup -- so a
+    subsequently UPLOADED ``mosaic``/``robot.vision`` layout has somewhere to
+    bind. The editor ships these assets on every page regardless of the
+    currently-loaded layout, matching ``objects_draw.js``'s own always-on
+    placement.
+    """
+    out_path = tmp_path / "editor_upload_leg.html"
+    render(toy_field_data, out_path)  # layout=None -- the emptiest page
+    html = out_path.read_text(encoding="utf-8")
+
+    vision_js_paths = [p for p in _ASSET_JS if p.name == "vision.js"]
+    assert len(vision_js_paths) == 1, "vision.js must be registered exactly once in _ASSET_JS"
+    vision_js = vision_js_paths[0].read_text(encoding="utf-8")
+    assert vision_js in html
+
+    # The Mosaic tab + cone markup (the binding surface for an uploaded
+    # mosaic/vision layout) is present even with nothing loaded.
+    assert 'data-editor-tab="mosaic"' in html
+    assert 'id="ctps-editor-mosaic-panel"' in html
+    assert 'id="ctps-editor-robot-vision"' in html
+    assert 'data-mosaic-field="rows"' in html
+    assert 'data-mosaic-vision="half_angle_deg"' in html
+
+
+def test_tc21_uploaded_mosaic_layout_ingests_into_the_mosaic_free_emitted_page(tmp_path):
+    """TC21: an uploaded mosaic/vision layout ingests fine on a fresh (empty) page.
+
+    Key assertion: :func:`reembed_layout` -- the same per-GET swap the
+    edit-server drives after a browser upload/Save round-trip -- accepts a
+    ``mosaic``/``robot.vision``-bearing layout on a page that was originally
+    emitted with NO layout at all (``const LAYOUT = null;``), proving the
+    upload leg is not gated on the page having been emitted WITH a mosaic.
+    """
+    out_path = tmp_path / "editor_empty_then_upload.html"
+    render(toy_field_data, out_path)  # emitted mosaic-free (layout=None)
+    empty_html = out_path.read_text(encoding="utf-8")
+    assert "const LAYOUT = null;" in empty_html
+
+    uploaded = _tc20_layout_with_mosaic_and_vision()
+    reembedded = editor_module.reembed_layout(empty_html, uploaded)
+
+    match = _LAYOUT_RE.search(reembedded)
+    assert match is not None, "re-embedded page lost its const LAYOUT script"
+    embedded = json.loads(match.group("json").replace("<\\/", "</"))
+    assert embedded == uploaded
+    assert embedded["mosaic"] == _TC20_MOSAIC_BLOCK
+    assert embedded["robot"]["vision"] == _TC20_VISION_BLOCK
+
+    # vision.js + the Mosaic/cone markup were ALREADY present before the swap
+    # (unconditional), so the uploaded layout has somewhere to render.
+    vision_js = next(p for p in _ASSET_JS if p.name == "vision.js").read_text(
+        encoding="utf-8"
+    )
+    assert vision_js in reembedded
+    assert 'id="ctps-editor-mosaic-panel"' in reembedded

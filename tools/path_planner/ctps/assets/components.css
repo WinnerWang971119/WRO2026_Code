@@ -1405,6 +1405,7 @@
  * below is deliberately the other typeface — documents the UI/data split. */
 .ctps-cargo-tab-label {
     font-family: var(--ctps-font-ui);
+    white-space: nowrap;
 }
 
 /* Count badge ("N / CAP"): mono with tabular-nums so the digits hold their
@@ -1571,4 +1572,97 @@
 .ctps-cargo-tab:focus-visible {
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
+}
+
+/* ===================================================================== */
+/* Vision read (randomized-vision mosaic + cone HUD, #ctps-vision)        */
+/* ===================================================================== */
+/*
+ * The read HUD lives INSIDE the cargo panel as its third tab
+ * (#ctps-cargo-panel-vision, beside Magazine + Inventory) to save vertical
+ * rail space — so `.ctps-vision` is just the badges+HUD stack within that
+ * tab body (the `.ctps-cargo-panel` shell already supplies padding/scroll).
+ * Markup is player_html.py's `_BODY_MARKUP`; the per-frame read HUD + badges
+ * + the tab's own `#ctps-cargo-count-vision` badge are updated by vision.js.
+ * The vision-cone / mosaic layer toggles reuse `.ctps-chip` (chrome.js wires
+ * `.ctps-layer-chips .ctps-chip` generically off `data-layer`, so those two
+ * chips need no new CSS beyond the existing `.ctps-chip` rules above).
+ */
+
+.ctps-vision {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+}
+
+/* ----- read HUD line: "k/12 — cell j outside cone" --------------------- */
+
+/* Neutral/in-progress state (< 12/12): reads like any other mono data line
+ * in the rail (matches .ctps-command-detail's tone). */
+.ctps-vision-hud {
+    font-family: var(--ctps-font-mono);
+    font-size: 12.5px;
+    color: var(--ctps-text-2);
+}
+
+.ctps-vision-hud-count {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
+.ctps-vision-hud-detail {
+    margin-top: var(--ctps-space-1);
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+}
+
+/* 12/12 success state — vision.js toggles this modifier once every cell
+ * reads inside the cone. Distinct green so "the read would succeed" is
+ * unambiguous against the neutral in-progress tone above. */
+.ctps-vision-hud--success .ctps-vision-hud-count {
+    color: var(--ctps-success);
+}
+
+.ctps-vision-hud--success .ctps-vision-hud-detail {
+    color: var(--ctps-success);
+}
+
+/* ----- badges: "no roll recorded" / "geometry changed since recording" - */
+
+.ctps-vision-badge {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border-strong);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+}
+
+/* No mosaic roll present in the trace (old trace, or the dump ran without
+ * --mosaic) — a neutral informational badge, not an error. */
+.ctps-vision-badge--no-roll {
+    color: var(--ctps-muted);
+    border-color: var(--ctps-border-strong);
+}
+
+/* The trace's geom_hash no longer matches the loaded layout's geometry —
+ * warn-tinted like the header drift chip, since the rendered cell positions
+ * may no longer reflect what was actually recorded. */
+.ctps-vision-badge--geom-mismatch {
+    color: var(--ctps-drift);
+    border-color: var(--ctps-warn-border);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+}
+
+.ctps-vision-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-2);
 }

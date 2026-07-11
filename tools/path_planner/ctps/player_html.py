@@ -41,6 +41,17 @@ Design constraints (CTPS UI/UX rework, T2 — issue #125):
   (the default) emits no ``const OBJECTS`` at all, and :data:`PLAYER_META` is
   **not** touched by this feature; the player detects a layout via
   ``typeof OBJECTS !== "undefined"`` (AC11, suite TC9 stays green).
+* **Unconditional vision assets, conditional mosaic DATA (randomized-vision
+  plan, T10 — ADR-060).** ``assets/vision.js``, the ``#ctps-vision`` rail panel
+  markup, and the ``mosaic`` / ``vision-cone`` layer chips ship on EVERY player
+  page (ADR-056 upload-leg rule — an uploaded ``mosaic``/``robot.vision`` layout
+  must render in a page emitted mosaic-free). Only the DATA is conditional:
+  ``const MOSAIC_META`` + ``const MOSAIC`` are emitted (each in its own
+  ``<script>``, same ``</`` escape) **only when a mosaic is renderable** — the
+  layout carries a ``mosaic`` geometry block (the trace's echoed roll supplies
+  the colours; its absence draws the grid outline with a "no roll recorded"
+  badge). A mosaic-free render emits NEITHER block and leaves :data:`PLAYER_META`
+  byte-identical (AC12). See :func:`_mosaic_scripts`.
 
 The interesting runtime logic (the bounded-search + lerp seek that satisfies
 TC12) lives in ``assets/player.js``; this module only inlines it.
@@ -61,6 +72,7 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
+from tools.path_planner.ctps import mosaic as _mosaic
 from tools.path_planner.ctps._page_emit import FORBIDDEN_SUBSTRINGS as _FORBIDDEN_SUBSTRINGS
 from tools.path_planner.ctps._page_emit import assert_self_contained as _assert_self_contained
 from tools.path_planner.ctps._page_emit import read_asset as _read_asset
@@ -90,12 +102,15 @@ _ASSET_CSS: Tuple[Path, ...] = (
 #: Ordered JS assets, each emitted in its OWN ``<script>`` element. The order is
 #: the load contract: ``player.js`` (namespace + engine) first so every later
 #: module finds ``window.CTPS``; ``objects_draw.js`` then ``cargo.js`` (object/
-#: cargo plan, T4 -- issue #57) come immediately before ``boot.js`` --
-#: ``objects_draw.js`` establishes ``window.CTPS_OBJ`` and ``cargo.js``'s layer
-#: descriptors reference ``CTPS_OBJ.drawObject``/``drawZones`` at IIFE time, so
+#: cargo plan, T4 -- issue #57) then ``vision.js`` (randomized-vision plan, T10)
+#: come immediately before ``boot.js`` -- ``objects_draw.js`` establishes
+#: ``window.CTPS_OBJ`` and both ``cargo.js`` and ``vision.js`` reference its
+#: ``CTPS_OBJ.project``/``localToWorld``/``drawObject`` exports at IIFE time, so
 #: this order is a pinned contract, not incidental; ``boot.js`` stays last so
-#: it runs the registered inits once all modules (including these two) have
-#: registered.
+#: it runs the registered inits once all modules (including these) have
+#: registered. ``vision.js`` ships on EVERY page (unconditional asset, ADR-056
+#: upload leg) even when no mosaic is rolled -- only the emitted ``MOSAIC_META``
+#: / ``const MOSAIC`` DATA is conditional (AC12).
 _ASSET_JS: Tuple[Path, ...] = (
     PLAYER_JS_PATH,
     _ASSETS_DIR / "store.js",
@@ -108,6 +123,7 @@ _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "chrome.js",
     _ASSETS_DIR / "objects_draw.js",
     _ASSETS_DIR / "cargo.js",
+    _ASSETS_DIR / "vision.js",
     _ASSETS_DIR / "boot.js",
 )
 
@@ -129,10 +145,11 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: .ctps-chip`` generically, so it needs no change); the header gains an
 #: ``#ctps-layout-file`` upload input + its ``#ctps-layout-upload-btn`` button
 #: (in-browser layout upload leg of AC5); and the old ``.ctps-panel--holding``
-#: shell is replaced by the two-tab cargo panel (``#ctps-cargo``,
+#: shell is replaced by the cargo panel (``#ctps-cargo``,
 #: ``.ctps-cargo-tab[data-cargo-tab]``, ``#ctps-cargo-count-mag`` /
 #: ``#ctps-cargo-count-inv``, ``#ctps-mag-grid``, ``#ctps-inv-list`` -- the DOM
-#: contract T6 queries). ``#ctps-command``/``#ctps-log`` are unchanged, so
+#: contract T6 queries), which also carries the ADR-060 Vision-read tab (below).
+#: ``#ctps-command``/``#ctps-log`` are unchanged, so
 #: TC-STRUCT is unaffected.
 #:
 #: The drift-jump (``#ctps-drift-prev``/``#ctps-drift-next``) and play-speed
@@ -141,6 +158,23 @@ _ASSET_JS: Tuple[Path, ...] = (
 #: alongside the zoom widget in ``.ctps-tl-zoom-group``) so the transport bar's
 #: seek scrubber gets the full bar width. The wiring is id/class based and
 #: document-wide (``transport.js``), so the relocation needs no JS change.
+#:
+#: Randomized-vision additions (T10, ADR-060), markup only (behaviour is T11
+#: ``vision.js``): the ``.ctps-layer-chips`` row gains ``MOSAIC``/``CONE``
+#: (``data-layer="mosaic"`` / ``data-layer="vision-cone"``) chips (``chrome.js``
+#: wires every ``.ctps-layer-chips .ctps-chip`` generically, so no JS change);
+#: and the per-frame read HUD, which lives as a THIRD tab of the cargo panel
+#: (``#ctps-cargo-tab-vision`` / ``data-cargo-tab="vision"`` ->
+#: ``#ctps-cargo-panel-vision``, beside Magazine + Inventory) rather than its own
+#: rail section -- consolidating the rail to save vertical space. The tab body
+#: keeps the frozen ``#ctps-vision`` DOM ids (``#ctps-vision-hud-count`` /
+#: ``#ctps-vision-hud-detail`` + a ``#ctps-vision-badges`` slot for the no-roll /
+#: geom-mismatch badges) so ``vision.js`` binds unchanged; the tab's own count
+#: badge (``#ctps-cargo-count-vision``) mirrors the live ``k / 12`` read. These
+#: ship on EVERY page (unconditional markup, ADR-056 upload leg) regardless of
+#: whether a mosaic was rolled;
+#: ``#ctps-command``/``#ctps-log``/``PLAYER_META`` are untouched, so TC-STRUCT
+#: and the frozen ``PLAYER_META`` literal are unaffected.
 _BODY_MARKUP: str = """\
 <div class="ctps-app">
     <header class="ctps-header">
@@ -179,6 +213,10 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="zones">ZONES</button>
                 <button id="ctps-layer-deploy" class="ctps-chip"
                         type="button" data-layer="deploy">DEPLOY</button>
+                <button id="ctps-layer-mosaic" class="ctps-chip ctps-chip--active"
+                        type="button" data-layer="mosaic">MOSAIC</button>
+                <button id="ctps-layer-vision-cone" class="ctps-chip ctps-chip--active"
+                        type="button" data-layer="vision-cone">CONE</button>
             </div>
             <div class="ctps-scale-bar">
                 <span class="ctps-scale-line"></span>
@@ -204,15 +242,21 @@ _BODY_MARKUP: str = """\
                     <button id="ctps-cargo-tab-magazine"
                             class="ctps-cargo-tab ctps-cargo-tab--active"
                             type="button" role="tab" data-cargo-tab="magazine">
-                        <span class="ctps-cargo-tab-label">Magazine</span>
+                        <span class="ctps-cargo-tab-label">MAG</span>
                         <span id="ctps-cargo-count-mag"
-                              class="ctps-cargo-tab-count">0 / 12</span>
+                              class="ctps-cargo-tab-count">0/12</span>
                     </button>
                     <button id="ctps-cargo-tab-inventory" class="ctps-cargo-tab"
                             type="button" role="tab" data-cargo-tab="inventory">
-                        <span class="ctps-cargo-tab-label">Inventory</span>
+                        <span class="ctps-cargo-tab-label">INV</span>
                         <span id="ctps-cargo-count-inv"
-                              class="ctps-cargo-tab-count">0 / 1</span>
+                              class="ctps-cargo-tab-count">0/1</span>
+                    </button>
+                    <button id="ctps-cargo-tab-vision" class="ctps-cargo-tab"
+                            type="button" role="tab" data-cargo-tab="vision">
+                        <span class="ctps-cargo-tab-label">READ</span>
+                        <span id="ctps-cargo-count-vision"
+                              class="ctps-cargo-tab-count">&mdash;/12</span>
                     </button>
                 </div>
                 <div id="ctps-cargo-panel-magazine" class="ctps-cargo-panel"
@@ -222,6 +266,18 @@ _BODY_MARKUP: str = """\
                 <div id="ctps-cargo-panel-inventory" class="ctps-cargo-panel"
                      data-cargo-panel="inventory" hidden>
                     <div id="ctps-inv-list" class="ctps-inv-list"></div>
+                </div>
+                <div id="ctps-cargo-panel-vision" class="ctps-cargo-panel"
+                     data-cargo-panel="vision" hidden>
+                    <div id="ctps-vision" class="ctps-vision">
+                        <div id="ctps-vision-badges" class="ctps-vision-badges"></div>
+                        <div id="ctps-vision-hud" class="ctps-vision-hud">
+                            <span id="ctps-vision-hud-count"
+                                  class="ctps-vision-hud-count">&mdash;</span>
+                            <div id="ctps-vision-hud-detail"
+                                 class="ctps-vision-hud-detail"></div>
+                        </div>
+                    </div>
                 </div>
             </section>
             <section class="ctps-panel ctps-panel--tabs">
@@ -424,6 +480,120 @@ def _objects_script(objects: "Dict[str, Any] | None") -> "str | None":
     return _script(f"const OBJECTS = {objects_json};")
 
 
+def _mosaic_meta_script() -> str:
+    """Return the ``const MOSAIC_META`` ``<script>`` block (single colour source).
+
+    Emits the mosaic colour vocabulary — the names in
+    :data:`tools.path_planner.ctps.mosaic.COLOR_NAMES` order and the display hex
+    per :data:`tools.path_planner.ctps.mosaic.COLOR_HEX` — as
+    ``const MOSAIC_META = {"names":[...], "hex":{...}};`` so ``vision.js`` reads
+    the colour contract from ONE place (never a hand-synced JS copy). Only ever
+    emitted alongside a ``const MOSAIC`` block (never on its own).
+
+    :return: the ``<script>const MOSAIC_META = ...;</script>`` block.
+    """
+    meta = {
+        "names": list(_mosaic.COLOR_NAMES),
+        "hex": {name: _mosaic.COLOR_HEX[name] for name in _mosaic.COLOR_NAMES},
+    }
+    meta_json = json.dumps(meta, ensure_ascii=False).replace("</", "<\\/")
+    return _script(f"const MOSAIC_META = {meta_json};")
+
+
+def _mosaic_scripts(
+    track_dict: Dict[str, Any], objects: "Dict[str, Any] | None"
+) -> List[str]:
+    """Return the conditional ``MOSAIC_META`` + ``const MOSAIC`` script blocks.
+
+    The randomized-vision DATA is CONDITIONAL (unlike the always-shipped
+    ``vision.js`` asset + ``#ctps-vision`` markup): it is emitted only when a
+    mosaic can actually be drawn. Three renderable states (AC10), driven by the
+    layout mosaic GEOMETRY (``objects["mosaic"]``) and the trace mosaic ROLL
+    (``track_dict["mosaic"]``):
+
+    #. **layout geometry + trace roll** — the primary case: the 12 cells resolve
+       from the layout GEOMETRY x the trace COLORS
+       (:func:`tools.path_planner.ctps.mosaic.resolve_cells`), each carrying a
+       ``color``. ``geom_match`` compares the CURRENT layout geometry hash
+       against the trace's echoed ``geom_hash`` (``False`` -> the player badges
+       "geometry changed since recording"). ``roll`` is ``True``.
+    #. **layout geometry, NO trace roll** — the grid-outline case (old trace, or
+       a dump run without ``--mosaic``): the cells resolve to POSITIONS only (no
+       synthesized ``color``), ``roll`` is ``False``, ``geom_match`` is ``True``
+       (the geometry IS the current layout), and no ``seed`` is carried — the
+       player draws the outline with a "no roll recorded" badge.
+    #. **no layout geometry** — nothing to place: emit NOTHING (feature inactive,
+       per Error Handling), even if the trace carried colours (they cannot be
+       positioned without geometry).
+
+    A mosaic-free render (no layout geometry, no trace roll) therefore emits
+    NEITHER block (AC12), leaving ``PLAYER_META`` and every frozen literal
+    untouched.
+
+    :param track_dict: the Data Model B track dict; ``track_dict.get("mosaic")``
+        is the trace's echoed roll (``{"cells", "geom_hash", "injected",
+        "seed"?}``) or absent.
+    :param objects: the ``layout.json``-shaped dict, or ``None``;
+        ``objects.get("mosaic")`` is the layout's mosaic GEOMETRY block.
+    :return: ``[MOSAIC_META_script, MOSAIC_script]`` when a mosaic is
+        renderable, else ``[]``.
+    """
+    layout_mosaic = objects.get("mosaic") if isinstance(objects, dict) else None
+    if not isinstance(layout_mosaic, dict):
+        # No layout geometry -> nothing to place, feature inactive (even if the
+        # trace carried colours, they cannot be positioned).
+        return []
+
+    geom = _mosaic.MosaicConfig.from_dict(layout_mosaic)
+    layout_geom_hash = _mosaic.geom_hash(geom)
+
+    trace_mosaic = track_dict.get("mosaic")
+    has_roll = (
+        isinstance(trace_mosaic, dict)
+        and isinstance(trace_mosaic.get("cells"), list)
+        and len(trace_mosaic["cells"]) == _mosaic.CELL_COUNT
+    )
+
+    if has_roll:
+        # Primary case: layout geometry x trace colours -> coloured cells.
+        colors: List[str] = [str(c) for c in trace_mosaic["cells"]]
+        cells = _mosaic.resolve_cells(geom, colors)
+        trace_geom_hash = trace_mosaic.get("geom_hash")
+        mosaic_data: Dict[str, Any] = {
+            "cells": cells,
+            "mode": geom.mode,
+            "geom_hash": layout_geom_hash,
+            "geom_match": (trace_geom_hash == layout_geom_hash),
+            "roll": True,
+        }
+        seed = trace_mosaic.get("seed")
+        if seed is not None:
+            mosaic_data["seed"] = seed
+    else:
+        # Grid-outline case: layout geometry only, no recorded roll. Resolve the
+        # cell POSITIONS (placeholder colours dropped) so the player can draw the
+        # outline + a "no roll recorded" badge — never synthesize colours.
+        placeholder = [_mosaic.COLOR_NAMES[0]] * _mosaic.CELL_COUNT
+        positioned = _mosaic.resolve_cells(geom, placeholder)
+        cells = [
+            {"index": c["index"], "x_cm": c["x_cm"], "y_cm": c["y_cm"]}
+            for c in positioned
+        ]
+        mosaic_data = {
+            "cells": cells,
+            "mode": geom.mode,
+            "geom_hash": layout_geom_hash,
+            "geom_match": True,
+            "roll": False,
+        }
+
+    mosaic_json = json.dumps(mosaic_data, ensure_ascii=False).replace("</", "<\\/")
+    return [
+        _mosaic_meta_script(),
+        _script(f"const MOSAIC = {mosaic_json};"),
+    ]
+
+
 def render(
     track: Any,
     out_path: "str | Path",
@@ -510,6 +680,14 @@ def render(
     # `typeof OBJECTS !== "undefined"`.
     objects_script = _objects_script(objects)
 
+    # Conditional MOSAIC_META + const MOSAIC (randomized-vision plan, T10) --
+    # emitted only when a mosaic is renderable (layout geometry present; the
+    # trace roll adds colours, its absence draws the outline). A mosaic-free
+    # render emits neither block, leaving PLAYER_META + every frozen literal
+    # byte-identical (AC12). The always-shipped vision.js / #ctps-vision markup
+    # (ADR-056 upload leg) is emitted unconditionally, above.
+    mosaic_scripts = _mosaic_scripts(track_dict, objects)
+
     # Read every asset (missing sibling -> FileNotFoundError with its path).
     css_contents: List[str] = [_read_asset(path) for path in _ASSET_CSS]
     js_contents: List[str] = [_read_asset(path) for path in _ASSET_JS]
@@ -538,6 +716,7 @@ def render(
     ]
     if objects_script is not None:
         script_blocks.append(objects_script)
+    script_blocks.extend(mosaic_scripts)
     script_blocks.extend(_script(content) for content in js_contents)
     scripts = "\n".join(script_blocks)
 
