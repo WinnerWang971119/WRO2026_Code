@@ -11,7 +11,6 @@
 void buildMission()
 {
     Mission
-        .task("beltTest");
+        .task("ctpsExample1");
     Mission.start();
 }
-
