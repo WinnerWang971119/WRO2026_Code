@@ -580,16 +580,16 @@ the actuator to settle at end-of-statement (chain `.async()` to skip the wait �
 hardware still moves).
 
 ```cpp
-Manipulator.grab();              // close the grabber, block until settled
+Manipulator.grab();              // open the grabber to home, then close — block until settled
 Manipulator.release();           // open the grabber
 Manipulator.dump();              // move the dumper to its dump pose
 Manipulator.sortTo(2);           // swing the sorter to bin index 2 (bounds-checked)
 Manipulator.reset();             // home all three servos + stall-home the belt (safe pose)
-Manipulator.grab().async();      // fire and don't wait
+Manipulator.grab().async();      // fire and don't wait (update() advances the home->close stroke)
 ```
 
-> Today the verbs are thin scaffolding (`grab()` = `grabber.close()`, etc.). The real
-> multi-actuator choreography gets authored once the mechanism is built — that's a TODO.
+> Today the verbs are thin scaffolding (`grab()` runs the grabber's home->close stroke, etc.).
+> The real multi-actuator choreography gets authored once the mechanism is built — that's a TODO.
 
 ### B) Primitive handles (calibration / bring-up)
 

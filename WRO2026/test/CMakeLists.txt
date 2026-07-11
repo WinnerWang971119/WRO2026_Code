@@ -208,6 +208,7 @@ function(add_task_mock_force_includes target)
             "/FI${TASK_MOCKS_DIR}/PathTracker.h"
             "/FI${TASK_MOCKS_DIR}/LineFollower.h"
             "/FI${TASK_MOCKS_DIR}/Manipulator.h"
+            "/FI${TASK_MOCKS_DIR}/Vision.h"
         )
     else()
         # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
@@ -219,6 +220,7 @@ function(add_task_mock_force_includes target)
             "SHELL:-include ${TASK_MOCKS_DIR}/PathTracker.h"
             "SHELL:-include ${TASK_MOCKS_DIR}/LineFollower.h"
             "SHELL:-include ${TASK_MOCKS_DIR}/Manipulator.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/Vision.h"
         )
     endif()
 endfunction()
@@ -1604,6 +1606,7 @@ function(add_mission_mock_force_includes target)
             "/FI${MISSION_MOCKS_DIR}/LineFollower.h"
             "/FI${MISSION_MOCKS_DIR}/Manipulator.h"
             "/FI${MISSION_MOCKS_DIR}/Localization.h"
+            "/FI${MISSION_MOCKS_DIR}/Vision.h"
         )
     else()
         # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
@@ -1614,6 +1617,7 @@ function(add_mission_mock_force_includes target)
             "SHELL:-include ${MISSION_MOCKS_DIR}/LineFollower.h"
             "SHELL:-include ${MISSION_MOCKS_DIR}/Manipulator.h"
             "SHELL:-include ${MISSION_MOCKS_DIR}/Localization.h"
+            "SHELL:-include ${MISSION_MOCKS_DIR}/Vision.h"
         )
     endif()
 endfunction()

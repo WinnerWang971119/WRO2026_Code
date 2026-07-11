@@ -220,6 +220,28 @@ private:
     bool debugYield(const TaskArgs& args);
 
     /**
+     * @brief Grab the object to the bin in one call.
+     * @param bin  which bin it is sorting to.
+     * @note This is NOT a task that can be called at the mission.
+     */
+    bool _grabToBin(uint8_t bin);
+
+    /**
+     * @brief Capture one mosaic observation into the `Vision` latch, with a single retry.
+     *
+     * Thin wrapper over `Vision.readMosaic()`: on a fault it logs, clears the fault, and
+     * retries exactly once. The captured colours are NOT returned — they live in the
+     * `Vision` latch (the single source of truth); read them per-cell with
+     * `Vision.getColor(cell)` after this returns `true`.
+     *
+     * @return `true` if a mosaic frame was captured (either attempt); `false` if both the
+     *         initial read and the retry faulted, in which case the latch is unchanged.
+     * @note The chassis MUST be fully idle before calling — see `Vision::readMosaic`. This is
+     *       a command-time BLOCKING call and is NOT a task callable from the mission DSL.
+     */
+    bool _visionRead();
+
+    /**
      * @brief Drive the sorter servo to an absolute angle and block until it settles.
      *
      * Bring-up helper: sets `Manipulator.sorter` to `args.u8[0]` degrees and polls

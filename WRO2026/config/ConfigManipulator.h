@@ -133,6 +133,10 @@ namespace Config
      * Sized to comfortably exceed the largest single servo sweep
      * (max msPerDeg * 180 + settleMs ≈ 1.1 s). Belt-masked drains use the longer
      * BELT_HOME_TIMEOUT_MS instead, since the belt's home() chains stall+reset+MID.
+     * @note `grab()` drains a TWO-stop stroke (grabber home->close via
+     *       `ManipServo::homeThenClose`), so this must exceed TWICE the grabber's largest sweep
+     *       (worst case ≈ 2 * (GRABBER close-vs-home * msPerDeg + settleMs) ≈ 1.7 s today).
+     *       Keep that margin when tuning `GRABBER.msPerDeg` / `settleMs` at bring-up.
      */
     constexpr uint32_t MANIP_SERVO_DRAIN_TIMEOUT_MS = 2000;
 

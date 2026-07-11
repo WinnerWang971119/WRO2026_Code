@@ -74,7 +74,13 @@ ManipulatorClass::ManipulatorClass()
 
 ManipAction ManipulatorClass::grab()
 {
-    grabber.close();
+    // Open fully to home first, THEN close — a self-contained capture stroke, so a grab always
+    // runs the full open->close regardless of the grabber's prior pose. The two moves are a
+    // fire-and-forget two-stop sequence (ManipServo::homeThenClose): home fires now, close is
+    // queued and fired by update() once home settles. The returned action drains on M_GRAB, whose
+    // isDone() stays false until the SECOND move settles — so a blocking grab() waits for the whole
+    // stroke, and grab().async() returns immediately while update() advances it.
+    grabber.homeThenClose();
     return _action(M_GRAB);
 }
 
@@ -183,8 +189,12 @@ bool ManipulatorClass::begin()
 
 void ManipulatorClass::update()
 {
-    // Only the belt has a non-blocking state machine to advance; the three servos are pure
-    // software timers (isDone() reads the timer directly) and need no per-tick work.
+    // Advance each servo's optional two-stop sequence (e.g. grab()'s home->close) — update() is a
+    // no-op for a servo with no queued follow-up. Then advance the belt's non-blocking state
+    // machine. Servos without a pending follow-up cost only a timer compare here.
+    grabber.update();
+    sorter.update();
+    dumper.update();
     belt.update();
 }
 
