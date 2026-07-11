@@ -1,11 +1,12 @@
 """HTML emitter for the offline CTPS layout editor (``layout_editor.html``).
 
 The layout editor is a **second, standalone offline page** (object/cargo plan,
-T7 -- issue #57): a two-tab authoring tool (Field tab -> field objects; Robot
-tab -> manipulator zones) that saves/loads one ``layout.json``. It is a
-deliberately SEPARATE page from the player (``player_html.py``) so the frozen
-player seek core and its exact test contracts stay out of editor churn (the
-plan's "two offline pages, not one author-mode player" decision).
+T7 -- issue #57): a **three-tab** authoring tool (Field tab -> field objects;
+Robot tab -> manipulator zones + the vision cone; Mosaic tab -> the 4x3
+randomized-vision grid, ADR-060, T13) that saves/loads one ``layout.json``. It
+is a deliberately SEPARATE page from the player (``player_html.py``) so the
+frozen player seek core and its exact test contracts stay out of editor churn
+(the plan's "two offline pages, not one author-mode player" decision).
 
 This module mirrors :mod:`tools.path_planner.ctps.player_html`'s emit shape but
 owns its OWN, smaller asset tuple and its OWN self-containment lint pass:
@@ -17,26 +18,35 @@ owns its OWN, smaller asset tuple and its OWN self-containment lint pass:
   asset in its own ``<script>``** so a throwing top-level IIFE in one module
   cannot abort the others. Load order is the contract: ``objects_draw.js``
   FIRST (it establishes ``window.CTPS_OBJ``, which the editor canvas reuses),
-  then the editor modules (``editor_core.js`` -> ``editor_tools.js`` ->
-  ``editor_io.js`` -> ``editor_boot.js``, boot last).
+  then ``vision.js`` (the randomized-vision predicate/draw helpers -- shipped
+  UNCONDITIONALLY, like every other editor asset), then the editor modules
+  (``editor_core.js`` -> ``editor_tools.js`` -> ``editor_io.js`` ->
+  ``editor_boot.js``, boot last).
 * **Self-contained / offline.** The output embeds everything inline -- the CSS,
   every JS asset, an inline ``const FIELD`` field-backdrop constant (derived
-  from ``field_data``, the same block the player draws), and an optional printed
-  field map as a base64 ``data:`` URI. There are **no** external ``src=`` /
-  ``href=`` references, so the page opens on ``file://`` with zero network or
-  local dependency (AC1).
+  from ``field_data``, the same block the player draws), an unconditional
+  ``const MOSAIC_META`` colour-vocabulary constant (ADR-060 -- the editor
+  always authors the Mosaic tab, so it always needs swatch colours), and an
+  optional printed field map as a base64 ``data:`` URI. There are **no**
+  external ``src=`` / ``href=`` references, so the page opens on ``file://``
+  with zero network or local dependency (AC1).
 * **Emit-time self-containment lint.** :func:`_assert_self_contained` (shared
   with the player via :mod:`tools.path_planner.ctps._page_emit`, T1) inspects
   every asset + the HTML template markup -- but never the embedded ``FIELD`` /
-  ``MAP_IMAGE`` JSON *values*, which carry arbitrary field text -- and raises
-  :class:`ValueError` on any forbidden substring (AC1, P-TC7).
+  ``MAP_IMAGE`` / ``MOSAIC_META`` JSON *values*, which carry arbitrary field
+  text -- and raises :class:`ValueError` on any forbidden substring (AC1,
+  P-TC7).
 
 ``objects_draw.js`` is owned by the player-side tasks (T4/T5) and is *inlined*
 here unchanged so the shared ``window.CTPS_OBJ`` draw helpers exist for the
-editor canvas; this module never creates or edits it. The editor-only assets
-(``editor_core.js`` / ``editor_tools.js`` / ``editor_io.js`` / ``editor_boot.js``
-and ``editor.css``) ship as inert placeholders in T7 and are filled by T8 -- the
-emitter + its tests exercise the final asset layout now.
+editor canvas; this module never creates or edits it. ``vision.js`` is owned by
+T0 (stub) / T11 (fleshed out) and is likewise inlined unchanged -- this module
+only adds it to the unconditional asset tuple (T13) and consumes none of its
+exports directly (the Mosaic-tab / cone drawing that calls into
+``window.CTPS_VISION`` is T14). The editor-only assets (``editor_core.js`` /
+``editor_tools.js`` / ``editor_io.js`` / ``editor_boot.js`` and ``editor.css``)
+ship as inert placeholders in T7 and are filled by T8/T14-T17 -- the emitter +
+its tests exercise the final asset layout now.
 """
 
 from __future__ import annotations
@@ -58,6 +68,13 @@ from tools.path_planner.ctps._page_emit import script as _script
 # a stable helper -- not a refactor of the frozen player/renderer core.
 from tools.path_planner.ctps.track_builder import build_field_block
 
+# The mosaic colour vocabulary is single-sourced from `mosaic.py` (ADR-060) --
+# this module never hardcodes a colour name/hex. `MOSAIC_META` (emitted
+# unconditionally below, since the editor always authors the Mosaic tab) is the
+# ONLY consumer of these two names in this file.
+from tools.path_planner.ctps.mosaic import COLOR_HEX as _COLOR_HEX
+from tools.path_planner.ctps.mosaic import COLOR_NAMES as _COLOR_NAMES
+
 __all__ = ["render", "reembed_layout"]
 
 #: Directory holding the modular runtime assets, resolved relative to this
@@ -74,16 +91,22 @@ _ASSET_CSS: Tuple[Path, ...] = (
 
 #: Ordered JS assets, each emitted in its OWN ``<script>`` element. The order is
 #: the load contract: ``objects_draw.js`` FIRST -- it establishes the shared
-#: ``window.CTPS_OBJ`` draw helpers the editor canvas reuses -- then the editor
-#: modules; ``editor_core.js`` seeds ``window.CTPS_EDITOR`` + the duplicated
-#: world->pixel view transform, ``editor_tools.js`` / ``editor_io.js`` build on
-#: it, and ``editor_boot.js`` stays LAST so it runs the one-time init once every
-#: other module has registered. ``server_session.js`` (the shared self-closing-
-#: server heartbeat, ADR-057) is self-contained and order-independent -- it
-#: replaces the editor's former in-``editor_io.js`` session leg so the player and
-#: editor never desync on the liveness protocol.
+#: ``window.CTPS_OBJ`` draw helpers the editor canvas reuses -- then
+#: ``vision.js`` (the randomized-vision predicate/draw helpers, ADR-060 --
+#: shipped UNCONDITIONALLY on every page per the plan's unconditional-asset
+#: rule, mirroring ``objects_draw.js``'s own always-on placement), then the
+#: editor modules; ``editor_core.js`` seeds ``window.CTPS_EDITOR`` + the
+#: duplicated world->pixel view transform (and, from T14 on, the Mosaic-tab /
+#: vision-cone draw state that reuses ``window.CTPS_VISION``),
+#: ``editor_tools.js`` / ``editor_io.js`` build on it, and ``editor_boot.js``
+#: stays LAST so it runs the one-time init once every other module has
+#: registered. ``server_session.js`` (the shared self-closing-server heartbeat,
+#: ADR-057) is self-contained and order-independent -- it replaces the editor's
+#: former in-``editor_io.js`` session leg so the player and editor never desync
+#: on the liveness protocol.
 _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "objects_draw.js",
+    _ASSETS_DIR / "vision.js",
     _ASSETS_DIR / "editor_core.js",
     _ASSETS_DIR / "editor_tools.js",
     _ASSETS_DIR / "editor_io.js",
@@ -91,18 +114,28 @@ _ASSET_JS: Tuple[Path, ...] = (
     _ASSETS_DIR / "editor_boot.js",
 )
 
-#: Static page body markup (the sidecar's Change 3 layout: a two-tab editor with
-#: a Field/Robot tab row, a Rect/Circle/Select tool row, a Robot-tab render-size
-#: (zoom) control, Save/Load controls, one canvas stage, and a Properties panel
-#: authoring every ``layout.json`` schema field). Class-based only -- no inline
-#: element styles (per project frontend
-#: conventions); every dynamic value is set later by JS through a CSS custom
-#: property (the ADR-053 carve-out). Icons are unicode glyphs emitted as numeric
-#: HTML entities (never ``<use href>`` / ``<image href>``, which the
-#: self-containment ban forbids). The interactions (draw/select/save/load, and
-#: the rect-vs-circle field show/hide) are T8's job -- this constant only lays
-#: out the DOM T8 wires onto. Linted by :func:`_assert_self_contained` (it
-#: carries no field data).
+#: Static page body markup (the sidecar's Change 3 layout, extended by T13 to a
+#: THIRD tab: a Field/Robot/Mosaic tab row, a Rect/Circle/Select tool row, a
+#: Robot-tab render-size (zoom) control, Save/Load controls, one canvas stage,
+#: a Properties panel authoring every ``layout.json`` object/zone field, a
+#: Robot-tab-only vision-cone group (``#ctps-editor-robot-vision`` --
+#: ``robot.vision``: origin/half-angle/range, ``.ctps-mosaic-cone-*``), and a
+#: Mosaic-tab panel (``#ctps-editor-mosaic-panel`` -- grid geometry, mode
+#: toggle, palette, 4x3 pin grid, counts; ``.ctps-mosaic-*``, T12). Both new
+#: sections ship ``hidden`` by default in this static markup, matching the
+#: existing zoom-control convention -- :mod:`editor_boot` (T17) toggles
+#: ``.hidden`` per the active tab exactly as it already does for
+#: ``#ctps-editor-zoom``. Class-based only -- no inline element styles (per
+#: project frontend conventions); every dynamic value is set later by JS
+#: through a CSS custom property (the ADR-053 carve-out). Icons are unicode
+#: glyphs emitted as numeric HTML entities (never ``<use href>`` /
+#: ``<image href>``, which the self-containment ban forbids). The interactions
+#: (draw/select/save/load, the rect-vs-circle field show/hide, the pin-grid
+#: click-cycle, and the mosaic/cone state binding) are T8/T14-T17's job -- this
+#: constant only lays out the DOM those modules wire onto: stable ids
+#: (``ctps-mosaic-*`` / ``ctps-editor-robot-vision``) and ``data-mosaic-*`` /
+#: ``data-editor-tab`` attributes are the binding surface. Linted by
+#: :func:`_assert_self_contained` (it carries no field data).
 _BODY_MARKUP: str = """\
 <div class="ctps-app ctps-editor">
     <header class="ctps-header ctps-editor-header">
@@ -114,6 +147,8 @@ _BODY_MARKUP: str = """\
                     type="button" role="tab" data-editor-tab="field">Field</button>
             <button id="ctps-editor-tab-robot" class="ctps-editor-tab"
                     type="button" role="tab" data-editor-tab="robot">Robot</button>
+            <button id="ctps-editor-tab-mosaic" class="ctps-editor-tab"
+                    type="button" role="tab" data-editor-tab="mosaic">Mosaic</button>
         </div>
         <span class="ctps-header-spacer"></span>
         <div id="ctps-editor-tools" class="ctps-editor-tools" role="group"
@@ -232,6 +267,127 @@ _BODY_MARKUP: str = """\
                     </div>
                 </div>
             </section>
+            <section id="ctps-editor-robot-vision"
+                     class="ctps-panel ctps-mosaic-cone-group" hidden>
+                <div class="ctps-mosaic-cone-title">Vision cone</div>
+                <div class="ctps-editor-field-row">
+                    <label class="ctps-editor-field">
+                        <span class="ctps-editor-field-label">Origin X (cm)</span>
+                        <input type="number" step="0.1" id="ctps-mosaic-cone-origin-x"
+                               class="ctps-editor-input" data-mosaic-vision="origin_x_cm">
+                    </label>
+                    <label class="ctps-editor-field">
+                        <span class="ctps-editor-field-label">Origin Y (cm)</span>
+                        <input type="number" step="0.1" id="ctps-mosaic-cone-origin-y"
+                               class="ctps-editor-input" data-mosaic-vision="origin_y_cm">
+                    </label>
+                </div>
+                <label class="ctps-editor-field">
+                    <span class="ctps-editor-field-label">Half-angle (deg)</span>
+                    <input type="number" step="1" min="0" max="90"
+                           id="ctps-mosaic-cone-half-angle"
+                           class="ctps-editor-input" data-mosaic-vision="half_angle_deg">
+                </label>
+                <label class="ctps-editor-field">
+                    <span class="ctps-editor-field-label">Range (cm)</span>
+                    <input type="number" step="0.1" min="0" id="ctps-mosaic-cone-range"
+                           class="ctps-editor-input" data-mosaic-vision="range_cm">
+                </label>
+                <label class="ctps-mosaic-cone-unbounded">
+                    <input type="checkbox" id="ctps-mosaic-cone-range-unbounded"
+                           data-mosaic-vision-unbounded>
+                    Unbounded range
+                </label>
+            </section>
+            <section id="ctps-editor-mosaic-panel"
+                     class="ctps-panel ctps-mosaic-tab" hidden>
+                <div class="ctps-panel-title">Mosaic</div>
+                <div class="ctps-mosaic-section">
+                    <div class="ctps-mosaic-section-title">Geometry</div>
+                    <div class="ctps-editor-field-row">
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Center X (cm)</span>
+                            <input type="number" step="0.1" id="ctps-mosaic-center-x"
+                                   class="ctps-editor-input" data-mosaic-field="center_x_cm">
+                        </label>
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Center Y (cm)</span>
+                            <input type="number" step="0.1" id="ctps-mosaic-center-y"
+                                   class="ctps-editor-input" data-mosaic-field="center_y_cm">
+                        </label>
+                    </div>
+                    <label class="ctps-editor-field">
+                        <span class="ctps-editor-field-label">Heading (deg)</span>
+                        <input type="number" step="1" id="ctps-mosaic-heading"
+                               class="ctps-editor-input" data-mosaic-field="heading_deg">
+                    </label>
+                    <div class="ctps-editor-field-row">
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Rows</span>
+                            <input type="number" step="1" min="1" id="ctps-mosaic-rows"
+                                   class="ctps-editor-input" data-mosaic-field="rows">
+                        </label>
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Cols</span>
+                            <input type="number" step="1" min="1" id="ctps-mosaic-cols"
+                                   class="ctps-editor-input" data-mosaic-field="cols">
+                        </label>
+                    </div>
+                    <div class="ctps-editor-field-row">
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Cell W (cm)</span>
+                            <input type="number" step="0.1" min="0.1" id="ctps-mosaic-cell-w"
+                                   class="ctps-editor-input" data-mosaic-field="cell_w_cm">
+                        </label>
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Cell H (cm)</span>
+                            <input type="number" step="0.1" min="0.1" id="ctps-mosaic-cell-h"
+                                   class="ctps-editor-input" data-mosaic-field="cell_h_cm">
+                        </label>
+                    </div>
+                    <div class="ctps-editor-field-row">
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Row gap (cm)</span>
+                            <input type="number" step="0.1" min="0" id="ctps-mosaic-row-gap"
+                                   class="ctps-editor-input" data-mosaic-field="row_gap_cm">
+                        </label>
+                        <label class="ctps-editor-field">
+                            <span class="ctps-editor-field-label">Col gap (cm)</span>
+                            <input type="number" step="0.1" min="0" id="ctps-mosaic-col-gap"
+                                   class="ctps-editor-input" data-mosaic-field="col_gap_cm">
+                        </label>
+                    </div>
+                </div>
+                <div class="ctps-mosaic-section">
+                    <div class="ctps-mosaic-section-title">Mode</div>
+                    <div id="ctps-mosaic-mode" class="ctps-mosaic-mode"
+                         role="group" aria-label="Mosaic roll mode">
+                        <button id="ctps-mosaic-mode-random"
+                                class="ctps-mosaic-mode-btn ctps-mosaic-mode-btn--active"
+                                type="button" data-mosaic-mode="random">Random</button>
+                        <button id="ctps-mosaic-mode-directed"
+                                class="ctps-mosaic-mode-btn"
+                                type="button" data-mosaic-mode="directed">Directed</button>
+                    </div>
+                </div>
+                <div class="ctps-mosaic-section">
+                    <div class="ctps-mosaic-section-title">Palette</div>
+                    <div id="ctps-mosaic-palette" class="ctps-mosaic-palette"
+                         data-mosaic-palette-list></div>
+                </div>
+                <div class="ctps-mosaic-section">
+                    <div class="ctps-mosaic-section-title">Cells</div>
+                    <div id="ctps-mosaic-grid" class="ctps-mosaic-grid"
+                         role="group" aria-label="Mosaic pin grid"
+                         data-mosaic-grid></div>
+                </div>
+                <div class="ctps-mosaic-section">
+                    <div class="ctps-mosaic-section-title">Counts</div>
+                    <div id="ctps-mosaic-counts" class="ctps-mosaic-counts"
+                         data-mosaic-counts-list></div>
+                    <div id="ctps-mosaic-count-total" class="ctps-mosaic-count-total"></div>
+                </div>
+            </section>
         </aside>
     </div>
 </div>"""
@@ -298,6 +454,20 @@ def _map_data_uri(map_png: "str | Path | None") -> str:
     return json.dumps(f"data:image/{mime};base64,{b64}")
 
 
+#: ``const MOSAIC_META`` -- the mosaic colour vocabulary (names + display hex),
+#: single-sourced from :mod:`tools.path_planner.ctps.mosaic` (never hardcoded
+#: here) and emitted UNCONDITIONALLY (Decisions -> unconditional-assets): the
+#: editor always shows the Mosaic tab's palette/pin-grid/counts UI, so it
+#: always needs swatch colours, regardless of whether a ``mosaic`` block is
+#: currently loaded. Computed once at import time since the vocabulary is
+#: static -- ``str.replace("</", "<\\/")`` guards the (currently impossible,
+#: but defensively cheap) case of a future hex/name value containing
+#: ``</script>``, matching the ``FIELD`` / ``LAYOUT`` embed convention.
+_MOSAIC_META_JS: str = json.dumps(
+    {"names": list(_COLOR_NAMES), "hex": dict(_COLOR_HEX)},
+    ensure_ascii=False,
+).replace("</", "<\\/")
+
 #: The ``id`` on the ``<script>`` that carries ``const LAYOUT``. The edit-server
 #: swaps this whole element on every GET (see :func:`reembed_layout`) so a reload
 #: reflects the CURRENT on-disk ``layout.json`` — not the stale one-time embed
@@ -320,7 +490,11 @@ def _layout_literal(layout: "Dict[str, Any] | None") -> str:
 
     Emitted as a JSON VALUE (like ``FIELD``): ``</`` is escaped so an author's
     object name can never break out of the inline ``<script>``. A falsy
-    ``layout`` yields ``"null"`` so the editor boots empty.
+    ``layout`` yields ``"null"`` so the editor boots empty. Dumps ``layout``
+    WHOLESALE -- whatever keys the dict carries (``objects`` / ``robot`` /
+    ``mosaic`` / ``robot.vision``) are embedded verbatim; this function has no
+    per-key allowlist, so the ``mosaic`` + ``robot.vision`` blocks need no
+    change here to flow through (see :func:`reembed_layout`).
     """
     if layout:
         return json.dumps(layout, ensure_ascii=False).replace("</", "<\\/")
@@ -352,6 +526,18 @@ def reembed_layout(html_text: str, layout: "Dict[str, Any] | None") -> str:
     disappears while the robot shows its :func:`~...editor_core.defaultRobot`
     fallback. A falsy ``layout`` re-embeds ``const LAYOUT = null;``.
 
+    Carries the top-level ``mosaic`` block and the ``robot.vision`` cone
+    (ADR-060) through this SAME swap: ``layout`` is re-embedded as ONE opaque
+    JSON blob (see :func:`_layout_literal`), so a mosaic/vision-bearing dict
+    round-trips here with no dedicated mosaic/vision code path to keep in sync
+    -- Save -> reopen restores both blocks exactly as it already restores
+    ``objects`` / ``robot.grab_zone`` / ``robot.drop_points``. There is
+    deliberately no second embed for mosaic/vision: a served editor bakes only
+    ONE per-GET swap, and a second, independently-updated embed would be the
+    exact stale-embed trap this function exists to close (a Save that updates
+    ``LAYOUT`` but not a hypothetical sibling ``MOSAIC``/``VISION`` constant
+    would silently desync on reopen).
+
     :param html_text: a page previously emitted by :func:`render`.
     :param layout: the layout dict to embed, or ``None``/falsy for an empty scene.
     :return: the page text with the LAYOUT ``<script>`` element swapped.
@@ -373,13 +559,19 @@ def render(
     concatenated CSS assets in one ``<style>``; a ``const FIELD`` field-backdrop
     constant derived from ``field_data`` (the same block the player draws -- see
     :func:`tools.path_planner.ctps.track_builder.build_field_block`); an
-    optional ``const MAP_IMAGE`` data URI; a ``const LAYOUT`` the editor
-    auto-loads on open (``null`` when none); and every JS asset
-    (:data:`_ASSET_JS`) in load order, each in its own ``<script>``
-    (``objects_draw.js`` first so ``window.CTPS_OBJ`` exists for the editor
-    canvas, then the editor modules, ``editor_boot.js`` last). The page has
-    **no** external ``src`` / ``href`` to local files, so it runs offline on
-    ``file://`` with zero network or local dependency (AC1).
+    optional ``const MAP_IMAGE`` data URI; an UNCONDITIONAL ``const
+    MOSAIC_META`` colour-vocabulary constant (``{"names": [...], "hex":
+    {...}}``, single-sourced from :mod:`tools.path_planner.ctps.mosaic` --
+    ADR-060; the Mosaic tab's palette/pin-grid swatches always need it, so
+    unlike the player's ``MOSAIC_META`` it is never conditional here); a
+    ``const LAYOUT`` the editor auto-loads on open (``null`` when none,
+    carrying ``mosaic`` / ``robot.vision`` too when present -- see
+    :func:`reembed_layout`); and every JS asset (:data:`_ASSET_JS`) in load
+    order, each in its own ``<script>`` (``objects_draw.js`` first so
+    ``window.CTPS_OBJ`` exists for the editor canvas, then ``vision.js``
+    UNCONDITIONALLY, then the editor modules, ``editor_boot.js`` last). The
+    page has **no** external ``src`` / ``href`` to local files, so it runs
+    offline on ``file://`` with zero network or local dependency (AC1).
 
     Before writing, :func:`_assert_self_contained` lints the assets + the HTML
     template markup (never the embedded ``FIELD`` / ``MAP_IMAGE`` JSON values,
@@ -399,11 +591,18 @@ def render(
     :param map_png: optional path to the printed field map image to embed as the
         canvas background; ``None`` (default) renders the vector field only.
     :param layout: optional ``layout.json``-shaped dict (field objects + robot
-        zones) to embed as ``const LAYOUT`` so the editor auto-loads it on open
-        (the recently-saved layout, not a fresh scene); ``None``/falsy emits
-        ``const LAYOUT = null;`` and the editor boots empty. Embedded as a JSON
-        VALUE (like ``FIELD``) and TOLERANTLY ingested at boot — never strictly
-        validated here, so a slightly-off saved layout still opens for editing.
+        zones, and -- when present -- the top-level ``mosaic`` block and the
+        ``robot.vision`` cone, ADR-060) to embed as ``const LAYOUT`` so the
+        editor auto-loads it on open (the recently-saved layout, not a fresh
+        scene). This is a single whole-dict embed (:func:`_layout_literal`
+        ``json.dumps``'s ``layout`` verbatim) -- ``mosaic`` / ``robot.vision``
+        need no separate plumbing here; they ride the SAME embed path as
+        ``objects`` / ``robot.grab_zone`` etc. and round-trip through
+        :func:`reembed_layout` exactly like every other key. ``None``/falsy
+        emits ``const LAYOUT = null;`` and the editor boots empty. Embedded as
+        a JSON VALUE (like ``FIELD``) and TOLERANTLY ingested at boot — never
+        strictly validated here, so a slightly-off saved layout still opens for
+        editing.
     :return: the resolved :class:`pathlib.Path` that was written.
     :raises FileNotFoundError: if any required asset (e.g. ``editor_core.js``)
         is missing.
@@ -442,10 +641,13 @@ def render(
     styles = "\n\n".join(css_contents)
 
     # Inline constants first (editor_core/editor_boot ingest FIELD/MAP_IMAGE),
-    # then each JS asset in its own <script> in load order.
+    # then each JS asset in its own <script> in load order. MOSAIC_META is
+    # UNCONDITIONAL (Decisions -> unconditional-assets) -- the Mosaic tab always
+    # needs its palette/pin-grid swatch colours, even with no `mosaic` loaded.
     script_blocks: List[str] = [
         _script(f"const FIELD = {field_json};"),
         _script(f"const MAP_IMAGE = {map_image_js};"),
+        _script(f"const MOSAIC_META = {_MOSAIC_META_JS};"),
         _layout_script(layout),
     ]
     script_blocks.extend(_script(content) for content in js_contents)
