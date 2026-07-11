@@ -1572,3 +1572,103 @@
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
 }
+
+/* ===================================================================== */
+/* Vision panel (randomized-vision mosaic + cone HUD, #ctps-vision)       */
+/* ===================================================================== */
+/*
+ * A rail panel sibling to #ctps-cargo (Contracts & Interfaces: "Player
+ * DOM/CSS seam" — never #ctps-hud, which is `hidden`/0x0 by default). Markup
+ * is player_html.py's `_BODY_MARKUP` (T10); the per-frame read HUD + badges
+ * are updated by vision.js (T11). This block is only the LOOK — it reuses
+ * the shared `.ctps-panel` shell (background/border/radius) the same way
+ * `.ctps-panel--cargo` does, and reuses `.ctps-chip` for the vision-cone /
+ * mosaic layer toggles (chrome.js wires `.ctps-layer-chips .ctps-chip`
+ * generically off `data-layer`, so those two chips need no new CSS beyond
+ * the existing `.ctps-chip` / `.ctps-chip--active` rules already above).
+ */
+
+.ctps-panel--vision {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+}
+
+.ctps-vision-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ctps-space-3);
+}
+
+/* ----- read HUD line: "k/12 — cell j outside cone" --------------------- */
+
+/* Neutral/in-progress state (< 12/12): reads like any other mono data line
+ * in the rail (matches .ctps-command-detail's tone). */
+.ctps-vision-hud {
+    font-family: var(--ctps-font-mono);
+    font-size: 12.5px;
+    color: var(--ctps-text-2);
+}
+
+.ctps-vision-hud-count {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
+.ctps-vision-hud-detail {
+    margin-top: var(--ctps-space-1);
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+}
+
+/* 12/12 success state — vision.js toggles this modifier once every cell
+ * reads inside the cone. Distinct green so "the read would succeed" is
+ * unambiguous against the neutral in-progress tone above. */
+.ctps-vision-hud--success .ctps-vision-hud-count {
+    color: var(--ctps-success);
+}
+
+.ctps-vision-hud--success .ctps-vision-hud-detail {
+    color: var(--ctps-success);
+}
+
+/* ----- badges: "no roll recorded" / "geometry changed since recording" - */
+
+.ctps-vision-badge {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border-strong);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+}
+
+/* No mosaic roll present in the trace (old trace, or the dump ran without
+ * --mosaic) — a neutral informational badge, not an error. */
+.ctps-vision-badge--no-roll {
+    color: var(--ctps-muted);
+    border-color: var(--ctps-border-strong);
+}
+
+/* The trace's geom_hash no longer matches the loaded layout's geometry —
+ * warn-tinted like the header drift chip, since the rendered cell positions
+ * may no longer reflect what was actually recorded. */
+.ctps-vision-badge--geom-mismatch {
+    color: var(--ctps-drift);
+    border-color: var(--ctps-warn-border);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+}
+
+.ctps-vision-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-2);
+}
