@@ -61,6 +61,10 @@ WRO2026_Code/
 │
 └── tools/path_planner/       # offline Python pipeline (host, not on R4)
     └── [validator, graph_builder, planner, compiler, header_writer, sim, ...]
+    └── ctps/                 # compiled-trace path sim → HTML player (ADR-033); includes
+                               #   mosaic.py (randomized-vision roll/resolve/color contract),
+                               #   assets/vision.js (cone + mosaic render, unconditional asset),
+                               #   the mosaic + robot.vision layout.json blocks (ADR-060)
 ```
 
 ## Dependency graph

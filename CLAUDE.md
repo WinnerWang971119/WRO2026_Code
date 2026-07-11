@@ -29,7 +29,7 @@ Offline tooling in `tools/path_planner/`:
 - Pure-Python build pipeline (`validator`, `graph_builder`, `planner`, `compiler`, `header_writer`, `build_routes` CLI).
 - `field_data.json` holds the field geometry (source of truth); `field_data.py` is a thin loader that re-exposes it plus the enum-valued `EDGES` table; `edit_field.py` is the Tk GUI editor that mutates the JSON (ADR-022).
 - `sim/` — pure-Python PathTracker mirror for hardware-free verification.
-- `ctps/` — compiled-trace path sim: renders a mission trace recorded from the real C++ to a standalone HTML player (ADR-033).
+- `ctps/` — compiled-trace path sim: renders a mission trace recorded from the real C++ to a standalone HTML player (ADR-033). Includes randomized-vision plumbing (ADR-060): `mosaic.py` (seeded roll + Python-authoritative `resolve_cells` geometry + color contract), `assets/vision.js` (cone + mosaic render, ships unconditionally), the `mosaic` + `robot.vision` `layout.json` blocks, and a dormant host-test `Vision` mock + `read_mosaic` trace op (CI-proven, unused until a vision-consuming mission lands).
 - `pick_xy.py` — Tk GUI for measuring field coordinates off `maps/map.png`.
 - `pytest` suite (~40 test files) wired into GitHub Actions CI.
 
