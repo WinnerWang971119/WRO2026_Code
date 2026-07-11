@@ -18,6 +18,10 @@ build/
 # Claude Code local state — scheduler lock, git worktrees, per-machine settings.
 .claude/``
 
+# Playwright MCP browser-automation dumps (accessibility snapshots + console logs).
+# Written automatically on every browser session; transient, not source.
+.playwright-mcp/
+
 # CTPS generated artifacts
 **/mission_trace.json
 # Author's working cargo layout(s) — saved from the offline layout editor into
