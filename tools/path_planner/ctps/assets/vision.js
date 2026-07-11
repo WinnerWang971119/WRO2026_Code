@@ -562,11 +562,16 @@
 
     /**
      * Append one badge chip (`.ctps-vision-badge`) with `text` to `badgesEl`.
-     * Text + class only — never an inline style (the ADR-053 carve-out).
+     * When `modifier` is given, add that components.css modifier class (e.g.
+     * `ctps-vision-badge--geom-mismatch` for the drift-tinted warning) so the
+     * badge carries its intended tint. Text + class only — never an inline style
+     * (the ADR-053 carve-out).
      */
-    function _appendBadge(badgesEl, text) {
+    function _appendBadge(badgesEl, text, modifier) {
         var badge = document.createElement("span");
-        badge.className = "ctps-vision-badge";
+        badge.className = modifier
+            ? "ctps-vision-badge " + modifier
+            : "ctps-vision-badge";
         badge.textContent = text;
         badgesEl.appendChild(badge);
     }
@@ -598,10 +603,11 @@
             // `color`).
             var rolled = mosaic ? (mosaic.roll !== false) : _cellsHaveColor(cells);
             if (!rolled) {
-                _appendBadge(badgesEl, "no roll recorded");
+                _appendBadge(badgesEl, "no roll recorded", "ctps-vision-badge--no-roll");
             }
             if (mosaic && mosaic.geom_match === false) {
-                _appendBadge(badgesEl, "geometry changed since recording");
+                _appendBadge(badgesEl, "geometry changed since recording",
+                    "ctps-vision-badge--geom-mismatch");
             }
         }
         if (!_stateCone(state)) {
