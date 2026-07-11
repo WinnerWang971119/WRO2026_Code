@@ -28,6 +28,16 @@ Magazine geometry (lane count) and rear-box capacity are NOT authored in
 ``REAR_BOX_CAP``); :func:`validate` reads ``MAGAZINE_LANES`` to check
 ``robot.drop_points`` carries exactly one entry per lane.
 
+The optional top-level ``mosaic`` block and the optional ``robot.vision`` cone
+block (CTPS randomized-vision feature, ADR-060) are both validated by delegating
+to :mod:`tools.path_planner.ctps.mosaic`'s pure validators
+(:func:`~tools.path_planner.ctps.mosaic.validate_mosaic_config` /
+:func:`~tools.path_planner.ctps.mosaic.validate_vision_cone`) — their rules are
+NOT re-implemented here. Each raises a plain ``ValueError``; this module catches
+it and re-raises as :class:`LayoutError` with this module's ``ctps.layout:``
+key-path framing. Both blocks are fully optional: absent ⇒ no raise and no key
+in :meth:`Layout.to_dict`.
+
 Typical usage::
 
     from tools.path_planner.ctps.layout import load
@@ -51,6 +61,7 @@ import re
 from dataclasses import dataclass, field as dc_field
 from typing import Any, Optional
 
+from tools.path_planner.ctps import mosaic
 from tools.path_planner.ctps.config import MAGAZINE_LANES
 
 __all__ = [
@@ -63,6 +74,7 @@ __all__ = [
     "LayoutError",
     "RectZone",
     "DropPoint",
+    "VisionCone",
     "RobotConfig",
     "LayoutObject",
     "Layout",
@@ -180,6 +192,44 @@ class DropPoint:
 
 
 @dataclass
+class VisionCone:
+    """The robot-attached forward vision cone (``robot.vision``), robot-local.
+
+    All fields are in the robot-local frame — origin = robot centre, ``+x`` =
+    heading-forward, ``+y`` = robot-left — matching the manipulator zones. The
+    firmware never consumes this FOV geometry; it drives the CTPS player's
+    per-cell cone-visibility predicate (ADR-060). The rule set lives in
+    :func:`tools.path_planner.ctps.mosaic.validate_vision_cone`, not here.
+
+    :param origin_x_cm: Cone apex X, robot-local (``+x`` = forward of centre).
+    :param origin_y_cm: Cone apex Y, robot-local (``+y`` = robot-left).
+    :param half_angle_deg: Half-FOV in degrees; rays run at ``±`` this from
+        robot-forward. Must be strictly inside ``(0, 90)``.
+    :param range_cm: Cone reach in centimetres; ``> 0`` when set. ``None``
+        (unbounded) draws as long rays and admits any forward distance.
+    """
+
+    origin_x_cm: float
+    origin_y_cm: float
+    half_angle_deg: float
+    range_cm: Optional[float] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return the schema dict for this vision cone.
+
+        ``range_cm`` is always present in the emitted dict — ``None`` denotes an
+        unbounded cone (unlike the optional top-level ``mosaic`` / ``robot.vision``
+        blocks, which are omitted entirely from their parent dict when absent).
+        """
+        return {
+            "origin_x_cm": self.origin_x_cm,
+            "origin_y_cm": self.origin_y_cm,
+            "half_angle_deg": self.half_angle_deg,
+            "range_cm": self.range_cm,
+        }
+
+
+@dataclass
 class RobotConfig:
     """The ``robot`` section: manipulator zones, all in the robot-local frame.
 
@@ -189,19 +239,30 @@ class RobotConfig:
     :param drop_points: Exactly :data:`~tools.path_planner.ctps.config.MAGAZINE_LANES`
         points, one per magazine lane (``dump`` ejects lane ``n``'s front tile
         to ``drop_points[n]``).
+    :param vision: Optional robot-attached forward vision cone (``robot.vision``);
+        ``None`` when the layout authors no cone.
     """
 
     grab_zone: RectZone
     box_zone: RectZone
     drop_points: list[DropPoint]
+    vision: Optional[VisionCone] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the schema dict for the ``robot`` section."""
-        return {
+        """Return the schema dict for the ``robot`` section.
+
+        The ``vision`` key is emitted only when a cone is configured — an absent
+        cone omits the key entirely (never ``"vision": None``), so a cone-free
+        robot round-trips byte-identically to today.
+        """
+        out: dict[str, Any] = {
             "grab_zone": self.grab_zone.to_dict(),
             "box_zone": self.box_zone.to_dict(),
             "drop_points": [point.to_dict() for point in self.drop_points],
         }
+        if self.vision is not None:
+            out["vision"] = self.vision.to_dict()
+        return out
 
 
 @dataclass
@@ -271,23 +332,32 @@ class Layout:
         ``Layout`` produced by :func:`load`.
     :param objects: Field objects, in authored order.
     :param robot: Manipulator zone configuration.
+    :param mosaic: Optional top-level randomized-vision mosaic block (ADR-060);
+        ``None`` when the layout authors no mosaic.
     """
 
     schema_version: int
     objects: list[LayoutObject] = dc_field(default_factory=list)
     robot: Optional[RobotConfig] = None
+    mosaic: Optional[mosaic.MosaicConfig] = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the schema_version 1 dict for this layout.
 
         Round-trips byte-for-byte (through :func:`json.dumps`/``json.loads``)
-        with the dict :func:`load` produced this :class:`Layout` from.
+        with the dict :func:`load` produced this :class:`Layout` from. The
+        ``mosaic`` key is emitted only when a mosaic is configured — an absent
+        mosaic omits the key entirely (never ``"mosaic": None``), so a
+        mosaic-free layout round-trips byte-identically to today.
         """
-        return {
+        out: dict[str, Any] = {
             "schema_version": self.schema_version,
             "objects": [obj.to_dict() for obj in self.objects],
             "robot": self.robot.to_dict() if self.robot is not None else None,
         }
+        if self.mosaic is not None:
+            out["mosaic"] = self.mosaic.to_dict()
+        return out
 
     def validate(self) -> None:
         """Re-validate this layout's current field values (LOUD).
@@ -329,6 +399,7 @@ def validate(data: Any) -> None:
     _validate_schema_version(data)
     _validate_objects(data)
     _validate_robot(data)
+    _validate_top_level_mosaic(data)
 
 
 def _validate_schema_version(data: dict) -> None:
@@ -485,6 +556,53 @@ def _validate_robot(data: dict) -> None:
                     f"number; got {value!r}."
                 )
 
+    _validate_vision(robot)
+
+
+def _validate_vision(robot: dict) -> None:
+    """Validate the optional ``robot.vision`` cone block.
+
+    The cone is optional: an absent ``vision`` key returns immediately. When
+    present, the AC3 cone rules are enforced by delegating to
+    :func:`tools.path_planner.ctps.mosaic.validate_vision_cone` (whose
+    ``ValueError`` messages already start ``robot.vision.<key>`` / ``'robot.vision'``)
+    and re-raising as :class:`LayoutError` with this module's ``ctps.layout:``
+    prefix — the rule text lives once, in ``mosaic.py``.
+
+    :param robot: the already-validated ``robot`` section dict.
+    :raises LayoutError: prefixed ``ctps.layout: robot.vision...`` on the first
+        invalid cone field.
+    """
+    if "vision" not in robot:
+        return
+    try:
+        mosaic.validate_vision_cone(robot["vision"])
+    except ValueError as exc:
+        raise LayoutError(f"ctps.layout: {exc}") from exc
+
+
+def _validate_top_level_mosaic(data: dict) -> None:
+    """Validate the optional top-level ``mosaic`` block.
+
+    The block is optional: an absent ``mosaic`` key returns immediately. When
+    present, the AC3 mosaic rules are enforced by delegating to
+    :func:`tools.path_planner.ctps.mosaic.validate_mosaic_config` (whose
+    ``ValueError`` messages already start ``mosaic.<key>`` / ``'mosaic'``) and
+    re-raising as :class:`LayoutError` with this module's ``ctps.layout:``
+    prefix — the rule text lives once, in ``mosaic.py``. A non-dict ``mosaic``
+    is rejected by the delegate itself, so no extra type-check is needed here.
+
+    :param data: the already-top-level-checked ``layout.json`` dict.
+    :raises LayoutError: prefixed ``ctps.layout: mosaic...`` on the first invalid
+        mosaic field.
+    """
+    if "mosaic" not in data:
+        return
+    try:
+        mosaic.validate_mosaic_config(data["mosaic"])
+    except ValueError as exc:
+        raise LayoutError(f"ctps.layout: {exc}") from exc
+
 
 def _validate_zone(robot: dict, zone_key: str) -> None:
     """Validate one ``robot.grab_zone`` / ``robot.box_zone`` rect."""
@@ -536,6 +654,20 @@ def _build_drop_point(point: dict) -> DropPoint:
     return DropPoint(x_cm=float(point["x_cm"]), y_cm=float(point["y_cm"]))
 
 
+def _build_vision(vision: dict) -> VisionCone:
+    """Build a :class:`VisionCone` from an already-validated ``robot.vision`` dict.
+
+    ``range_cm`` is preserved as ``None`` when absent / null (an unbounded cone);
+    otherwise coerced to ``float``.
+    """
+    return VisionCone(
+        origin_x_cm=float(vision["origin_x_cm"]),
+        origin_y_cm=float(vision["origin_y_cm"]),
+        half_angle_deg=float(vision["half_angle_deg"]),
+        range_cm=None if vision.get("range_cm") is None else float(vision["range_cm"]),
+    )
+
+
 def _build_object(obj: dict) -> LayoutObject:
     """Build a :class:`LayoutObject` from an already-validated object dict."""
     shape = obj["shape"]
@@ -558,16 +690,23 @@ def _build_object(obj: dict) -> LayoutObject:
 def _build_layout(data: dict) -> Layout:
     """Build a fully-typed :class:`Layout` from an already-validated dict."""
     robot_data = data["robot"]
+    vision_data = robot_data.get("vision")
     robot = RobotConfig(
         grab_zone=_build_zone(robot_data["grab_zone"]),
         box_zone=_build_zone(robot_data["box_zone"]),
         drop_points=[_build_drop_point(point) for point in robot_data["drop_points"]],
+        vision=_build_vision(vision_data) if vision_data is not None else None,
     )
     objects = [_build_object(obj) for obj in data["objects"]]
+    mosaic_data = data.get("mosaic")
+    mosaic_cfg = (
+        mosaic.MosaicConfig.from_dict(mosaic_data) if mosaic_data is not None else None
+    )
     return Layout(
         schema_version=int(data["schema_version"]),
         objects=objects,
         robot=robot,
+        mosaic=mosaic_cfg,
     )
 
 
