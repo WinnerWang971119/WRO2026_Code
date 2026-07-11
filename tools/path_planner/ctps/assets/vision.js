@@ -619,9 +619,10 @@
      * success modifier for the current playhead. When both a cone and cells are
      * present, compute `visibleCells(poseAt(t), cone, cells)`, show `k/12`, name
      * the first cell outside the cone in the detail when `k < 12`, and add the
-     * `ctps-vision-hud--ok` modifier on the count at 12/12 (the green success
-     * state). With no cone or no cells, show an em-dash count and clear the
-     * detail (the badges explain why).
+     * `ctps-vision-hud--success` modifier on the `#ctps-vision-hud` container at
+     * 12/12 (the green success state — components.css keys the green off the
+     * container, not the count element). With no cone or no cells, show an
+     * em-dash count and clear the detail (the badges explain why).
      */
     function _renderHud(dom, state) {
         var countEl = dom.count;
@@ -632,7 +633,9 @@
         if (!cone || !cells || cells.length === 0) {
             if (countEl) {
                 countEl.textContent = "—"; // em dash — nothing to read
-                countEl.classList.remove("ctps-vision-hud--ok");
+            }
+            if (dom.hud) {
+                dom.hud.classList.remove("ctps-vision-hud--success");
             }
             if (detailEl) {
                 detailEl.textContent = "";
@@ -647,7 +650,12 @@
 
         if (countEl) {
             countEl.textContent = k + "/" + total;
-            countEl.classList.toggle("ctps-vision-hud--ok",
+        }
+        if (dom.hud) {
+            // The success modifier lives on the #ctps-vision-hud CONTAINER so the
+            // components.css rule `.ctps-vision-hud--success .ctps-vision-hud-count`
+            // greens the count + detail at 12/12.
+            dom.hud.classList.toggle("ctps-vision-hud--success",
                 readMosaicWouldSucceed(bools));
         }
         if (detailEl) {
