@@ -36,6 +36,17 @@
  *
  * @note HOST-ONLY translation unit — compiled into `test_ctps_mock_conformance` only,
  *       never the Arduino sketch.
+ *
+ * @note issue #130 (task T8): `setPower` / `setPreset` / `setStartSpeed` /
+ *       `setEndSpeed` / `tShape` / `flat` / `setBrake` now STORE their argument
+ *       into the mock builder's state (previously several of these were total
+ *       no-ops) so the recorder can serialize the additive `power`/`preset`/
+ *       `start_speed`/`end_speed`/`profiled`/`brake` `drive` JSON fields. The
+ *       setter names/signatures chained below are UNCHANGED by that fix, so
+ *       this TU required no edits to the chains themselves — it still only
+ *       proves compile-time conformance (per the KNOWN LIMIT above), not that
+ *       a setter actually stores; that runtime-capture guarantee is verified
+ *       by re-reading each setter body (see the T8 task notes), not by this TU.
  */
 
 #include "ctps_record.h"
@@ -147,6 +158,12 @@ int main()
         .setDistanceTarget(90.0f)
         .setOvershootMode(true)
         .setBrakeOnGate(true);
+
+    // recordDeclarePosition (issue #130, task T8) — link-and-run smoke coverage
+    // for the new declare_position recorder entry point, consistent with this
+    // TU's "chain and discard" style: the guard is the COMPILE (and, here,
+    // successful link) of the call, not a runtime assertion.
+    ctps::recordDeclarePosition("N1");
 
     return 0;
 }

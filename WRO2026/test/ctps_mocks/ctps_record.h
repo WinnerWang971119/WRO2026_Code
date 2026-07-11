@@ -47,6 +47,8 @@
 #include <string>
 #include <vector>
 
+#include "Config.h"   // Config::Color for the injected-mosaic echo (setInjectedMosaic).
+
 namespace ctps
 {
     /**
@@ -58,15 +60,19 @@ namespace ctps
      */
     enum class Op : uint8_t
     {
-        GOTO,          ///< Navigation hop. Fields: `target`, forced `arrival`/`route` direction.
-        TASK_START,    ///< Task dispatch begin. Fields: `name`, `args` (16 raw bytes).
-        TASK_END,      ///< Task dispatch end. Fields: `name`, `result`.
-        MANIP,         ///< Manipulator command. Fields: `method`, `arg`.
-        DRIVE,         ///< Raw drive move: `method`, `cm`/`deg`, `mode`/`heading`/`reverse`.
-        WAIT,          ///< Mission wait. Field: `ms`.
-        PRINT,         ///< Mission print. Field: `text`.
-        BEEP,          ///< Mission beep. Fields: `freq_hz`, `ms`.
-        LED,           ///< Mission LED. Fields: `r`, `g`, `b`, `ms`.
+        GOTO,              ///< Navigation hop. Fields: `target`, forced `arrival`/`route` direction.
+        TASK_START,        ///< Task dispatch begin. Fields: `name`, `args` (16 raw bytes).
+        TASK_END,          ///< Task dispatch end. Fields: `name`, `result`.
+        MANIP,             ///< Manipulator command. Fields: `method`, `arg`.
+        DRIVE,             ///< Raw drive move: `method`, `cm`/`deg`, `mode`/`heading`/`reverse`,
+                           ///< plus the optional per-command speed knobs (`power`/`preset`/
+                           ///< `start_speed`/`end_speed`/`profiled`/`brake`).
+        WAIT,              ///< Mission wait. Field: `ms`.
+        PRINT,             ///< Mission print. Field: `text`.
+        BEEP,              ///< Mission beep. Fields: `freq_hz`, `ms`.
+        LED,               ///< Mission LED. Fields: `r`, `g`, `b`, `ms`.
+        DECLARE_POSITION,  ///< Localization re-anchor. Field: `node` (reuses `target`; target node name).
+        READ_MOSAIC,       ///< Vision mosaic read. Field: `success` only (colors live in the top-level `mosaic` echo).
     };
 
     /**
@@ -99,6 +105,7 @@ namespace ctps
         uint8_t     g       = 0;             ///< LED: green channel.
         uint8_t     b       = 0;             ///< LED: blue channel.
         bool        result  = false;         ///< TASK_END: task body return value (true == ok).
+        bool        success = false;         ///< READ_MOSAIC: readMosaic() return value (true == read ok).
         float       cm      = 0.0f;          ///< DRIVE: distance for the linear drive moves.
         bool        hasCm   = false;         ///< DRIVE: true iff a linear move carries `cm` (gates cm emission).
         float       deg     = 0.0f;          ///< DRIVE: angle for turnDeg / turnToYaw.
@@ -110,6 +117,23 @@ namespace ctps
         float       heading    = 0.0f;       ///< DRIVE: held heading in degrees (gyro moves).
         bool        hasHeading = false;      ///< DRIVE: true iff setHeading() was called.
         bool        reverse    = false;      ///< DRIVE: reverse-direction flag (linear moves).
+
+        // DRIVE per-command speed knobs — carried by recordDriveMove; each key is
+        // emitted only when its "was-set" sentinel is true (or, for `preset`, when
+        // non-empty) — see commandStreamToJson. The recorder captures FACTS ONLY
+        // (whether a setter fired and what value it carried); default resolution
+        // happens Python-side.
+        int16_t     power         = 0;       ///< DRIVE: .setPower() PWM override.
+        bool        hasPower      = false;   ///< DRIVE: true iff setPower() was called.
+        std::string preset;                  ///< DRIVE: "slow"|"normal"|"fast" from .setPreset(); empty = unset.
+        int16_t     startSpeed    = 0;       ///< DRIVE: .setStartSpeed() PWM.
+        bool        hasStartSpeed = false;   ///< DRIVE: true iff setStartSpeed() was called.
+        int16_t     endSpeed      = 0;       ///< DRIVE: .setEndSpeed() PWM.
+        bool        hasEndSpeed   = false;   ///< DRIVE: true iff setEndSpeed() was called.
+        bool        profiled      = false;   ///< DRIVE: true=.tShape(), false=.flat(); valid iff hasProfiled.
+        bool        hasProfiled   = false;   ///< DRIVE: true iff .tShape() or .flat() was called.
+        bool        brake         = false;   ///< DRIVE: .setBrake() flag; valid iff hasBrake.
+        bool        hasBrake      = false;   ///< DRIVE: true iff setBrake() was called.
 
         // TASK_START: the raw 16-byte packed TaskArgs blob, captured verbatim
         // so the loader can decode per-task structs later. Always exactly
@@ -150,6 +174,14 @@ namespace ctps
      *                for AUTO; serialized only when set.
      */
     void recordGoto(const char* target, const char* arrival, const char* route);
+
+    /**
+     * @brief Record a Mission `declarePosition(name)` re-anchor op (Mission.cpp
+     *        hook, success path only — after the PathTracker-busy and
+     *        unknown-node guards have both passed).
+     * @param name Target node name. `nullptr` is stored as an empty string.
+     */
+    void recordDeclarePosition(const char* name);
 
     /**
      * @brief Record a Mission `wait` step.
@@ -207,20 +239,74 @@ namespace ctps
     void recordManip(const char* method, uint8_t arg);
 
     /**
+     * @brief Record a `Vision.readMosaic()` call (recorded by the Vision mock).
+     *
+     * Appends a single `Op::READ_MOSAIC` Record carrying @p success only — the
+     * rolled colors are echoed once at the top level via @ref setInjectedMosaic,
+     * so a per-op color copy would be redundant. `"op": "read_mosaic"` is the
+     * record-type discriminator in the serialized stream; the record never
+     * introduces a sub-field also named `op`/`kind`.
+     *
+     * @param success The `readMosaic()` return value (`true` == read ok).
+     */
+    void recordReadMosaic(bool success);
+
+    /**
+     * @brief Set the injected mosaic roll for the top-level `mosaic` trace echo.
+     *
+     * Called by `ctps_dump` when it runs with `--mosaic`. Stores the 12 injected
+     * cell colors (echoed as color NAMES), the optional roll seed, and the
+     * geometry fingerprint. Calling this arms the top-level `mosaic` block in
+     * @ref commandStreamToJson; when it is never called (dump ran without
+     * `--mosaic`), no `mosaic` key is emitted and the JSON is byte-identical to
+     * the pre-mosaic output.
+     *
+     * @param colors   The 12 injected cell colors, indexed `i = row*cols + col`.
+     * @param hasSeed  `true` iff a roll seed was supplied (`--mosaic-seed`
+     *                 present). When `false`, the `seed` key is OMITTED from the
+     *                 echo (@p seed is ignored).
+     * @param seed     The roll seed, echoed verbatim; meaningful only when
+     *                 @p hasSeed is `true`.
+     * @param geomHash The geometry fingerprint, echoed verbatim. `nullptr` is
+     *                 stored as an empty string.
+     */
+    void setInjectedMosaic(const Config::Color colors[12], bool hasSeed, long seed,
+                           const char* geomHash);
+
+    /**
      * @brief Captured fluent-builder state for one linear DRIVE move.
      *
      * Filled by the recording Drive / LineFollower builder mocks at their
      * destructor emission point and handed to @ref recordDriveMove. Only the
      * members relevant to the move's method are meaningful; an unset member
      * stays at the caller-supplied default and is suppressed by the serializer.
+     *
+     * The trailing six members are the per-command speed knobs (issue #130,
+     * task T8): each pairs a captured value with a "was-set" sentinel (or, for
+     * `preset`, an empty-string sentinel) so the recorder captures FACTS ONLY —
+     * whether a builder setter fired and what value it carried — and never
+     * bakes in a firmware default. Python resolves effective defaults later.
+     * A builder that never chains any of these six setters serializes byte-
+     * identical to the pre-T8 output.
      */
     struct DriveMoveParams
     {
-        float       cm;         ///< Commanded distance in centimetres.
-        const char* mode;       ///< "raw"|"sync"|"gyro"; nullptr/"" if setMode() unset.
-        bool        hasHeading; ///< true iff setHeading() was called on the builder.
-        float       heading;    ///< Held heading in degrees (honored only under mode "gyro").
-        bool        reverse;    ///< true iff setReverse(true) was called (reverse-direction move).
+        float       cm;            ///< Commanded distance in centimetres.
+        const char* mode;          ///< "raw"|"sync"|"gyro"; nullptr/"" if setMode() unset.
+        bool        hasHeading;    ///< true iff setHeading() was called on the builder.
+        float       heading;       ///< Held heading in degrees (honored only under mode "gyro").
+        bool        reverse;       ///< true iff setReverse(true) was called (reverse-direction move).
+        int16_t     power;         ///< .setPower() PWM override; valid iff hasPower.
+        bool        hasPower;      ///< true iff setPower() was called on the builder.
+        const char* preset;        ///< "slow"|"normal"|"fast" from .setPreset(); nullptr/"" if unset.
+        int16_t     startSpeed;    ///< .setStartSpeed() PWM; valid iff hasStartSpeed.
+        bool        hasStartSpeed; ///< true iff setStartSpeed() was called on the builder.
+        int16_t     endSpeed;      ///< .setEndSpeed() PWM; valid iff hasEndSpeed.
+        bool        hasEndSpeed;   ///< true iff setEndSpeed() was called on the builder.
+        bool        profiled;      ///< true=.tShape(), false=.flat(); valid iff hasProfiled.
+        bool        hasProfiled;   ///< true iff .tShape() or .flat() was called on the builder.
+        bool        brake;         ///< .setBrake() flag; valid iff hasBrake.
+        bool        hasBrake;      ///< true iff setBrake() was called on the builder.
     };
 
     /**
@@ -228,13 +314,16 @@ namespace ctps
      *        `stopAtLine` / `wallStop` / `lineFollowDist`).
      *
      * Appends a single `Op::DRIVE` Record carrying @p method plus the captured
-     * @p p fields. `mode` / `heading` / `reverse` are serialized only when set
-     * (non-empty mode, `hasHeading`, `reverse == true`); a bare distance move
-     * with none of them set stays byte-identical to the legacy output.
+     * @p p fields. `mode` / `heading` / `reverse` / `power` / `preset` /
+     * `start_speed` / `end_speed` / `profiled` / `brake` are serialized only
+     * when set (non-empty mode/preset, the matching `has___` sentinel, or
+     * `reverse == true`); a bare distance move with none of them set stays
+     * byte-identical to the legacy output.
      *
      * @param method Drive method name (`driveDist` / `stopAtLine` / `wallStop` /
      *               `lineFollowDist`). `nullptr` is stored as an empty string.
-     * @param p      Captured builder state (distance + optional mode/heading/reverse).
+     * @param p      Captured builder state (distance + optional mode/heading/
+     *               reverse/power/preset/startSpeed/endSpeed/profiled/brake).
      */
     void recordDriveMove(const char* method, const DriveMoveParams& p);
 

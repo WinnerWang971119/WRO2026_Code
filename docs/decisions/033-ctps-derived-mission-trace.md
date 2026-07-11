@@ -32,9 +32,10 @@ The player is a self-contained HTML/Canvas file so a recorded run scrubs in O(1)
 with no server or toolchain at field-day.
 
 Out of scope, stated explicitly: CTPS does not model the fault FSM (beep / flash
-/ await-reset) and does not aim for physical fidelity. Playback is
-constant-velocity for smooth scrubbing, not a real-duration prediction. The
-drift flag is the only physical problem CTPS surfaces.
+/ await-reset) and does not aim for physical fidelity. Playback speed is
+firmware-profile-derived (see ADR-058), not a real-duration prediction — it is
+a kinematic-shape preview, not a physics sim (no wheel slip, battery sag, or
+IMU noise). The drift flag is the only physical problem CTPS surfaces.
 
 ## How to apply
 
@@ -54,11 +55,12 @@ drift flag is the only physical problem CTPS surfaces.
   the ingestion source.
 - Real `Manipulator` / `Drive` tasks land and need richer recording than the
   current facade mocks capture.
-- A need for timing or physics fidelity arrives, at which point constant-velocity
-  playback and the fault-FSM exclusion must be reopened.
+- A need for physics fidelity (wheel slip, battery sag, IMU noise) arrives, at
+  which point the fault-FSM exclusion must be reopened.
 
 ## See also
 
 - [ADR-025 — Tasks layer composes subsystem calls as blocking method bodies](./025-tasks-as-blocking-methods.md) — supersedes its "Python mirror of each task body" sim-parity sub-decision.
 - [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./022-field-data-json-loader.md) — the derived-artifact precedent (`routes.h`).
 - [ADR-030 — Host-compile harness links the real production symbols, CI-enforced](./030-harness-links-real-sources-ci-enforced.md) — the host harness CTPS records through.
+- [ADR-058 — CTPS playback renders the firmware's T-shape motion profile](./058-ctps-firmware-motion-profile.md) — replaces constant-velocity playback with a firmware-profile-derived render.

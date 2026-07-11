@@ -11,10 +11,12 @@ Covered cases (CTPS plan, T10):
   and ``duration_s == keyframes[-1].t``.
 * **TC2** — a ``task_start`` / ``manip`` / ``goto`` / ``manip`` / ``task_end``
   stream produces ordered Track events with the expected labels.
-* **TC3** — a raw ``drive driveDist 15`` before a ``goto`` injects a chassis
-  offset past :data:`DRIFT_THRESHOLD_CM`, so a ``drift_warn`` event is emitted.
-* **TC4** — the same shape with a 2 cm drive stays under the threshold, so NO
-  ``drift_warn`` is emitted.
+* **TC3** — a raw ``drive driveDist 15`` before a ``goto`` routes through
+  ``operator_move``; the following goto's return prologue drives the offset
+  back, so a ``return_to_node`` marker is emitted and NO residual ``drift_warn``
+  survives (issue #130, T11).
+* **TC4** — the same shape with a 2 cm drive sits under the return trigger, so
+  neither a ``return_to_node`` marker nor a ``drift_warn`` is emitted (T11).
 
 Fixtures are hand-authored Data Model A command streams under
 ``tests/fixtures/ctps_*.json``; every ``goto`` target is reachable from the
@@ -34,8 +36,9 @@ Drive-recording additions (CTPS plan, T9 — NC9-NC14, NC16):
   honoured on all three forward-geometry methods.
 * **NC14** — a cm-less ``wallStop`` / ``lineFollowDist`` narrates only, with NO
   geometry keyframe and no ``float(None)`` crash.
-* **NC16** — a ``lineFollowDist`` offset before a ``goto`` emits a
-  ``drift_warn``; TC1-TC5 are kept unchanged.
+* **NC16** — a ``lineFollowDist`` offset before a ``goto`` routes through the
+  operator-offset / return-to-node path (a ``return_to_node`` marker, no
+  residual ``drift_warn``), exactly like ``driveDist`` (issue #130, T11).
 
 The toy chassis seeds facing ``START_HEADING_DEG == 90`` (node ``S``), so
 "forward along the current facing" is ``+y`` in these tests, not ``+x``.
@@ -75,10 +78,40 @@ Structured manip-key additions (CTPS object-cargo plan, T9 — P-TC3, P-TC4):
   keys, additive to the unchanged ``label``.
 * **P-TC4** — a manip-free trace's Track carries none of those new keys
   anywhere (golden byte-identical).
+
+Boundary-invariant + return/declare rebaseline (CTPS motion-profile plan, T13):
+
+* **TC7** — a GENERAL boundary-pose invariant: for every fixture in
+  :data:`_TC7_FIXTURES`, every ``step_through`` snapshot pose (an INDEPENDENT
+  reference replay) appears byte-exact among the built ``Track``'s keyframes,
+  in order, and the keyframe clock is non-decreasing (AC10). Scoped to
+  pivot-free fixtures — a pivot's chassis-nudge deliberately re-poses the
+  SHARED sim before its next primitive dispatches (the whole point of the
+  nudge is killing drift), so an independently-constructed reference sim
+  legitimately diverges from the rendered keyframes there; the pivot suite
+  above (TC1-TC13) already pins those via the node-landing + arc-geometry
+  assertions instead.
+* **TC8-scaffold** — ``ctps_all_hops_drift.json`` (new fixture): a mission
+  over the toy field graph exercising LINE, BLIND, PROJECTION, STOP_AT_LINE,
+  and reverse hops (the toy field's ``PIVOT_TURNS`` is empty, so no pivot hop
+  is reachable here — see the fixture docstring), asserting drift ~= 0 (float
+  noise) at every ``goto`` arrival. The full regression-locked sweep is T15's
+  ``test_ctps_drift.py``; this is the scaffold + the reusable fixture.
+* **TC9** — a raw drive integrates the offset; the next ``goto`` emits +
+  renders ``return_to_node``; no residual ``drift_warn`` survives (AC7).
+* **TC10** — a raw drive at trace end leaves a residual ``drift_warn``; an
+  over-cap raw drive under the FAULT gate raises ``OffMapFaultError``, which
+  ``build`` turns into a fault ``goto`` event that ends the track (AC7).
+* **TC11** — ``declare_position`` applies the sim belief reset (node change +
+  offset clear, heading preserved) and emits a marker; an unknown-node declare
+  no-ops and renders BYTE-IDENTICAL (sha256 of the sorted-key JSON) to the
+  same trace with the declare op dropped entirely (AC8).
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import warnings
 from math import ceil, hypot
 from pathlib import Path
@@ -86,7 +119,7 @@ from pathlib import Path
 import pytest
 
 from tools.path_planner.compiler import ACT_TURN_REL
-from tools.path_planner.ctps.config import ARC_STEP_DEG, DRIFT_THRESHOLD_CM, SIM_TURN_DEG_S
+from tools.path_planner.ctps.config import ARC_STEP_DEG
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
@@ -95,14 +128,77 @@ from tools.path_planner.planner import (
     compute_all_pairs_next_hop,
     parse_track_cm_from_config,
 )
+from tools.path_planner.sim import runtime as _runtime
 from tools.path_planner.sim.chassis import VirtualChassis
-from tools.path_planner.sim.runtime import PathTrackerSim
+from tools.path_planner.sim.runtime import (
+    OffMapFaultError,
+    OffMapGate,
+    PathTrackerSim,
+    RETURN_DISTANCE_CAP_CM,
+)
 from tools.path_planner.tests.fixtures import pivot_field_data, toy_field_data
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 #: Position tolerance for keyframe-vs-reference pose equality (cm / deg).
 _POSE_TOL = 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Densification helpers (issue #130, T10)
+#
+# Since T10 the track builder DENSIFIES every geometry step off the firmware
+# motion profile: the single flat keyframe the pre-#130 builder appended per
+# primitive is replaced by a run of profile-timed sub-keyframes whose LAST
+# sub-keyframe byte-equals the destination (snapshot) pose. So a test can no
+# longer assert an exact keyframe COUNT or index a "the single advance"
+# keyframe. The invariant that survives is: every destination pose appears
+# byte-exact among the keyframes IN ORDER (the boundary-pose invariant), and
+# the clock is monotone non-decreasing. These helpers express that contract.
+# ---------------------------------------------------------------------------
+
+
+def _pose_matches(kf, pose, tol=_POSE_TOL) -> bool:
+    """Whether a keyframe's ``(x, y, h)`` matches ``pose`` within ``tol``."""
+    px, py, ph = pose
+    return (
+        abs(kf["x"] - px) <= tol
+        and abs(kf["y"] - py) <= tol
+        and abs(kf["h"] - ph) <= tol
+    )
+
+
+def _boundary_indices(keyframes, ref_poses, tol=_POSE_TOL):
+    """Return the keyframe indices at which ``ref_poses`` appear, in order.
+
+    Walks ``keyframes`` once and, for each pose in ``ref_poses`` (the ordered
+    list of primitive-boundary / snapshot poses), finds the NEXT keyframe that
+    matches it within ``tol``. Asserts every ref pose is found (so the
+    boundary-pose invariant holds: each densified step ends exactly on its
+    snapshot pose) and that the matches are strictly increasing (in order).
+
+    :return: the list of matched keyframe indices, one per ref pose.
+    """
+    indices = []
+    cursor = 0
+    for pose in ref_poses:
+        found = None
+        for i in range(cursor, len(keyframes)):
+            if _pose_matches(keyframes[i], pose, tol):
+                found = i
+                break
+        assert found is not None, f"boundary pose {pose} not found in keyframes"
+        indices.append(found)
+        cursor = found + 1
+    return indices
+
+
+def _assert_monotone(times, strict=False):
+    """Assert a timestamp sequence is (strictly) non-decreasing."""
+    if strict:
+        assert all(b > a for a, b in zip(times, times[1:]))
+    else:
+        assert all(b >= a for a, b in zip(times, times[1:]))
 
 
 def _build_quiet(trace, field_data):
@@ -153,12 +249,15 @@ def _reference_snapshots(field_data, goto_targets):
 
 
 def test_tc1_two_goto_keyframes_match_reference_run():
-    """TC1: keyframe poses equal an independent step_through run; clock monotonic.
+    """TC1: every step_through boundary pose appears in order; clock monotonic.
 
-    Key assertion: ``track.keyframes[1:]`` (every keyframe past the seeded
-    start pose) equals, pose-for-pose, the snapshots of an independently
-    constructed ``step_through`` reference replay of the same two goals.
-    Also asserts the running clock is monotonic non-decreasing and
+    Post-#130 the builder densifies each hop, so keyframes no longer map 1:1
+    onto ``step_through`` yields. The invariant that survives is the
+    boundary-pose one: every snapshot of an independently constructed
+    ``step_through`` reference replay appears BYTE-EXACT among the keyframes, in
+    order (the last sub-keyframe of each densified step). The densified track
+    therefore has MORE keyframes than the reference has snapshots. Also asserts
+    the running clock is monotonic non-decreasing and
     ``duration_s == keyframes[-1]["t"]``.
     """
     trace = load(_FIXTURES / "ctps_two_goto.json")
@@ -170,14 +269,10 @@ def test_tc1_two_goto_keyframes_match_reference_run():
 
     reference = _reference_snapshots(toy_field_data, goto_targets)
 
-    # Keyframe[0] is the seeded start pose at t = 0; every subsequent keyframe
-    # is one step_through yield, so keyframes[1:] maps 1:1 onto the reference.
-    geometry_keyframes = track.keyframes[1:]
-    assert len(geometry_keyframes) == len(reference)
-    for kf, (rx, ry, rh) in zip(geometry_keyframes, reference):
-        assert kf["x"] == pytest.approx(rx, abs=_POSE_TOL)
-        assert kf["y"] == pytest.approx(ry, abs=_POSE_TOL)
-        assert kf["h"] == pytest.approx(rh, abs=_POSE_TOL)
+    # Densification: strictly more keyframes than reference snapshots, and every
+    # snapshot pose appears in order as a densified step's final sub-keyframe.
+    assert len(track.keyframes) > len(reference) + 1
+    _boundary_indices(track.keyframes, reference)
 
     # Seed keyframe sits at the start pose at t = 0.
     sx, sy = toy_field_data.NODES[toy_field_data.START_NODE]
@@ -186,8 +281,7 @@ def test_tc1_two_goto_keyframes_match_reference_run():
     assert track.keyframes[0]["y"] == pytest.approx(sy, abs=_POSE_TOL)
 
     # Monotonic non-decreasing clock.
-    times = [kf["t"] for kf in track.keyframes]
-    assert all(b >= a for a, b in zip(times, times[1:]))
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
     # duration_s is the final keyframe timestamp.
     assert track.duration_s == pytest.approx(track.keyframes[-1]["t"], abs=_POSE_TOL)
@@ -297,70 +391,70 @@ def test_p_tc4_manip_free_trace_track_byte_identical():
 
 
 # ---------------------------------------------------------------------------
-# TC3 — raw drive past the threshold raises a drift warning
+# TC3 — a raw drive before a goto renders a return-to-node maneuver (issue #130)
 # ---------------------------------------------------------------------------
 
 
-def test_tc3_drive_before_goto_emits_drift_warn():
-    """TC3: a 15 cm raw drive before goto B injects > DRIFT_THRESHOLD_CM offset.
+def test_tc3_drive_before_goto_renders_return_no_residual_drift():
+    """TC3 (T11): a 15 cm raw drive before goto B routes through ``operator_move``.
 
-    Key assertion: a ``drift_warn`` event is present, its label names the node
-    the chassis drifted off ("B"), and the reported offset exceeds
-    :data:`DRIFT_THRESHOLD_CM`. A clean goto now lands the axle ON the node
-    (no overshoot baseline — drift ≈ 0 without a raw move), so the 15 cm raw
-    move alone is the drift and clears the 10 cm threshold.
+    Since issue #130 (T11) a raw off-node move integrates the operator offset on
+    the shared sim; the following goto's ``step_through`` return prologue then
+    physically drives that offset back onto the node. So the trace renders a
+    ``return_to_node`` marker and — because the goto re-anchors — leaves NO
+    residual ``drift_warn`` (the pre-#130 open/close drift span is gone). This
+    replaces the old drift-span assertion; T13 owns the comprehensive
+    track-level rebaseline.
     """
     trace = load(_FIXTURES / "ctps_drive_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
-    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert len(drift_events) == 1
-
-    warn = drift_events[0]
-    assert "B" in warn["label"]
-
-    # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm > DRIFT_THRESHOLD_CM
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    # A goto follows the raw move, so the return re-anchors it: no residual.
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
 
 # ---------------------------------------------------------------------------
-# TC4 — even a small raw drive opens a drift span (threshold-free)
+# TC4 — a sub-return-trigger raw drive before a goto surfaces the drift
 # ---------------------------------------------------------------------------
 
 
-def test_tc4_small_drive_before_goto_opens_span_closed_by_goto():
-    """TC4: even a *small* raw drive before goto B opens a DRIFT span.
+def test_tc4_small_drive_before_goto_surfaces_subthreshold_drift():
+    """TC4: a 2 cm raw drive before goto B sits under the return trigger.
 
-    The ``DRIFT_THRESHOLD_CM`` gate is gone: any non-``goto`` translation is
-    off-plan, so a 2 cm ``driveDist`` emits exactly one ``drift_warn`` — a SPAN
-    opened at the drive and CLOSED by the following goto re-anchor (a finite
-    ``t_end`` strictly after the open time). The reported offset is still small
-    (under the old threshold) but it is now surfaced, not hidden. The fixture
-    keeps its historical ``_no_drift`` name.
+    The 2 cm offset is below ``RETURN_TRIGGER_THRESHOLD_CM`` (3 cm), so the
+    return gate resolves to NONE — no physical return maneuver is dispatched (the
+    firmware does NOT drive back for a sub-3 cm offset either), and so no
+    ``return_to_node`` marker. But the following goto's arrival re-anchor clears
+    the offset before the trace-end residual check, so the excursion is a real,
+    uncorrected error that would otherwise vanish. It is surfaced as a POINT
+    ``drift_warn`` at the goto start reporting the offset off the parked node.
     """
     trace = load(_FIXTURES / "ctps_drive_no_drift.json")
     track = _build_quiet(trace, toy_field_data)
 
+    # Sub-3 cm: no physical return maneuver, hence no return marker.
+    assert [ev for ev in track.events if ev["type"] == "return_to_node"] == []
+    # ... but the sub-threshold excursion is still flagged so it is not hidden.
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
     assert len(drift_events) == 1
-
     warn = drift_events[0]
-    assert "B" in warn["label"]
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm < DRIFT_THRESHOLD_CM     # small — but flagged now
-
-    # The span is CLOSED by the goto re-anchor: finite t_end, after the open t.
-    assert warn["t_end"] is not None
-    assert warn["t_end"] > warn["t"]
+    assert "2.0 cm off node" in warn["label"]
+    # A point event stamped at the goto start (before the arrival re-anchor), not
+    # a span: no t_end key.
+    assert "t_end" not in warn
+    assert warn["t"] > 0.0
 
 
-def test_drive_without_following_goto_drifts_to_end():
-    """A raw drive that ends the mission drifts to the end of the track.
+def test_drive_without_following_goto_keeps_trace_end_residual():
+    """A raw drive that ends the mission keeps a trace-end residual ``drift_warn``.
 
-    No ``goto`` follows the drive, so nothing re-anchors: the ``drift_warn``
-    span stays open and its ``t_end`` is the track's ``duration_s`` (runs to
-    end), with the offset measured off the logical node the chassis left.
+    No ``goto`` follows the drive, so nothing re-anchors the accumulated offset
+    (issue #130, T11): the residual surfaces as a single POINT ``drift_warn`` at
+    the track end (``t == duration_s``), its label reporting the residual
+    magnitude off the parked node. It is no longer a span (there is no re-anchor
+    to close it), so it carries no ``t_end``.
     """
     trace = Trace(
         schema_version=1,
@@ -374,8 +468,9 @@ def test_drive_without_following_goto_drifts_to_end():
     drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
     assert len(drift_events) == 1
     warn = drift_events[0]
-    assert warn["t_end"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
-    assert warn["t_end"] > warn["t"]
+    assert warn["t"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
+    # A point event, not a span: no t_end key.
+    assert "t_end" not in warn
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +491,12 @@ def test_tc5_stop_at_line_advances_chassis_by_expected_cm():
     trace = load(_FIXTURES / "ctps_stop_at_line.json")
     track = _build_quiet(trace, toy_field_data)
 
-    # Seed pose + exactly one advanced geometry keyframe.
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes[0], track.keyframes[1]
+    # Densified: the single advance is now a run of profile-timed sub-keyframes
+    # (seed + N), so assert the FINAL keyframe lands 12 cm from the seed rather
+    # than a fixed count. Every interior sub-keyframe lies on the seed->final
+    # segment, so the straight-line advance still totals the nominal cm.
+    assert len(track.keyframes) >= 2
+    seed, moved = track.keyframes[0], track.keyframes[-1]
 
     advance = hypot(moved["x"] - seed["x"], moved["y"] - seed["y"])
     assert advance == pytest.approx(12.0, abs=_POSE_TOL)
@@ -471,19 +569,21 @@ def _planar_distance(prev, cur):
 # ---------------------------------------------------------------------------
 
 
-def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
-    """NC9 (AC3): a single GYRO+heading ``driveDist`` yields exactly 3 keyframes.
+def test_nc9_gyro_heading_drive_dist_renders_two_phase_rotate_then_advance():
+    """NC9 (AC3): a single GYRO+heading ``driveDist`` renders rotate then advance.
 
     ``driveDist(35).setMode(GYRO).setHeading(90)`` renders two-phase: seed ->
-    rotate-in-place to the held heading (a keyframe at the UNCHANGED position)
-    -> advance along that heading (the translation keyframe). A single-command
-    trace therefore produces EXACTLY three keyframes — the rotation keyframe is
-    what distinguishes it from the two-keyframe plain move (NC10).
+    rotate-in-place to the held heading (a marker keyframe at the UNCHANGED
+    position) -> a DENSIFIED advance along that heading. Post-#130 the advance
+    is a run of profile-timed sub-keyframes, so the count is no longer exactly
+    three — but the two-phase structure survives: the second keyframe is the
+    rotation marker at the seed position facing the held heading, and the FINAL
+    keyframe is the 35 cm advance.
 
     The toy chassis seeds facing ``START_HEADING_DEG == 90`` (node ``S``), so
-    the turn-to-90 is a no-op rotation here; it still emits its own keyframe, so
-    the count is three. The advance runs along heading 90 (``0deg = +x``,
-    ``90deg = +y``), displacing ``+y`` by 35 and ending facing 90.
+    the turn-to-90 is a no-op rotation here; it still emits its marker keyframe.
+    The advance runs along heading 90 (``0deg = +x``, ``90deg = +y``),
+    displacing ``+y`` by 35 and ending facing 90.
     """
     track = _build_quiet(
         _inline_trace(
@@ -499,19 +599,19 @@ def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
         toy_field_data,
     )
 
-    # EXACTLY three keyframes: seed, rotation, translation.
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    rotation = track.keyframes[1]
+    translation = track.keyframes[-1]
 
     # Seed sits at the start pose at t = 0.
     assert seed["t"] == 0.0
 
-    # Rotation phase: UNCHANGED position, heading turned to the held 90.
+    # Rotation-phase marker: UNCHANGED position, heading turned to the held 90.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
     assert rotation["y"] == pytest.approx(seed["y"], abs=_POSE_TOL)
     assert rotation["h"] == pytest.approx(90.0, abs=_POSE_TOL)
 
-    # Translation phase: displaced along +y (heading 90), still facing 90.
+    # Translation phase (final keyframe): displaced along +y by 35, facing 90.
     assert translation["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert translation["x"] == pytest.approx(rotation["x"], abs=_POSE_TOL)
     assert translation["y"] - rotation["y"] == pytest.approx(35.0, abs=_POSE_TOL)
@@ -520,8 +620,7 @@ def test_nc9_gyro_heading_drive_dist_renders_exactly_three_keyframes():
     )
 
     # Timestamps monotonic non-decreasing.
-    times = [kf["t"] for kf in track.keyframes]
-    assert all(b >= a for a, b in zip(times, times[1:]))
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
 
 def test_nc9_gyro_fixture_adds_one_rotation_keyframe_per_gyro_move():
@@ -597,12 +696,12 @@ def test_nc10_non_gyro_heading_is_ignored(extra, heading):
         toy_field_data,
     )
 
-    # Two keyframes only: seed + a single advance (NOT the gyro two-phase).
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes
-
-    # No rotation phase: heading is unchanged from the seed facing.
-    assert moved["h"] == pytest.approx(seed["h"], abs=_POSE_TOL)
+    # No rotation phase: every keyframe stays on the seed facing (a gyro
+    # two-phase would insert a rotation marker turning to the held heading).
+    seed, moved = track.keyframes[0], track.keyframes[-1]
+    assert all(
+        kf["h"] == pytest.approx(seed["h"], abs=_POSE_TOL) for kf in track.keyframes
+    )
 
     # Advance runs along the CURRENT facing (seed heading) by 35 cm, regardless
     # of the recorded (ignored) heading value.
@@ -610,8 +709,9 @@ def test_nc10_non_gyro_heading_is_ignored(extra, heading):
         35.0, abs=_POSE_TOL
     )
 
-    # Decisive firmware-parity check: identical geometry to a plain move with no
-    # heading at all -> the recorded heading changed nothing.
+    # Decisive firmware-parity check: identical densified geometry to a plain
+    # move with no heading at all -> the recorded heading changed nothing (same
+    # distance + same resolved speed -> byte-identical densification).
     plain = _build_quiet(
         _inline_trace(
             {"seq": 0, "op": "drive", "method": "driveDist", "cm": 35.0}
@@ -646,9 +746,9 @@ def test_nc11_line_follow_dist_renders_forward_advance():
         toy_field_data,
     )
 
-    # Seed + exactly one forward geometry keyframe.
-    assert len(track.keyframes) == 2
-    seed, moved = track.keyframes
+    # Seed + a densified forward advance (final keyframe is the 90 cm landing).
+    assert len(track.keyframes) >= 2
+    seed, moved = track.keyframes[0], track.keyframes[-1]
 
     assert moved["h"] == pytest.approx(seed["h"], abs=_POSE_TOL)  # no turn
     assert _heading_projection(seed, moved, seed["h"]) == pytest.approx(
@@ -671,10 +771,14 @@ def test_nc11_line_follow_fixture_forward_leg_advances():
         load(_FIXTURES / "ctps_line_follow.json"), toy_field_data
     )
 
-    seed, forward_leg = track.keyframes[0], track.keyframes[1]
-    assert _heading_projection(seed, forward_leg, seed["h"]) == pytest.approx(
-        60.0, abs=_POSE_TOL
+    # Densified: the forward leg is a run of sub-keyframes; its landing is the
+    # peak forward projection (the reverse follow then walks it back), which
+    # equals the recorded 60 cm.
+    seed = track.keyframes[0]
+    peak = max(
+        _heading_projection(seed, kf, seed["h"]) for kf in track.keyframes[1:]
     )
+    assert peak == pytest.approx(60.0, abs=_POSE_TOL)
 
     drive_events = [ev for ev in track.events if ev["type"] == "drive"]
     assert len(drive_events) == 2
@@ -694,31 +798,117 @@ def test_nc12_reverse_moves_backward_forward_moves_forward():
     projection onto the facing — while the trailing ``driveDist`` displaces it
     FORWARD, for contrast. Magnitudes equal the recorded ``cm``.
     """
+    from math import cos, radians, sin
+
     track = _build_quiet(load(_FIXTURES / "ctps_reverse.json"), toy_field_data)
 
-    # Seed + one keyframe per command (no gyro two-phase in this fixture).
-    assert len(track.keyframes) == 5
     kfs = track.keyframes
-    heading = kfs[0]["h"]
+    seed = kfs[0]
+    heading = seed["h"]
 
     # Heading never changes — reverse translates, it never rotates.
     assert all(kf["h"] == pytest.approx(heading, abs=_POSE_TOL) for kf in kfs)
 
-    # Reversed lineFollowDist(40) / stopAtLine(15) / wallStop(10): backward.
-    for index, cm in enumerate((40.0, 15.0, 10.0), start=1):
-        projection = _heading_projection(kfs[index - 1], kfs[index], heading)
-        assert projection == pytest.approx(-cm, abs=_POSE_TOL)
+    # Each command's LANDING pose (densified: the last sub-keyframe of that
+    # move) sits at the cumulative signed projection from the seed. Signed
+    # per-move deltas: -40, -15, -10 (reversed), then +20 (forward). Build the
+    # ordered boundary poses off the seed and confirm each appears byte-exact.
+    ux, uy = cos(radians(heading)), sin(radians(heading))
+    cumulative = 0.0
+    boundary_poses = []
+    for delta in (-40.0, -15.0, -10.0, 20.0):
+        cumulative += delta
+        boundary_poses.append(
+            (seed["x"] + cumulative * ux, seed["y"] + cumulative * uy, heading)
+        )
+    landings = _boundary_indices(kfs, boundary_poses)
 
-    # Trailing plain driveDist(20): forward (positive projection), for contrast.
-    assert _heading_projection(kfs[3], kfs[4], heading) == pytest.approx(
-        20.0, abs=_POSE_TOL
-    )
+    # Per-move signed projection deltas between consecutive landings.
+    prev_idx = 0
+    for landing_idx, delta in zip(landings, (-40.0, -15.0, -10.0, 20.0)):
+        projection = _heading_projection(kfs[prev_idx], kfs[landing_idx], heading)
+        assert projection == pytest.approx(delta, abs=_POSE_TOL)
+        prev_idx = landing_idx
 
     # The three reversed drive events carry the "reverse" token; the last does not.
     drive_labels = [ev["label"] for ev in track.events if ev["type"] == "drive"]
     assert len(drive_labels) == 4
     assert all("reverse" in label for label in drive_labels[:3])
     assert "reverse" not in drive_labels[3]
+
+
+# ---------------------------------------------------------------------------
+# W1 — a negative `.setPower` driveDist backs up (signed power = reverse)
+# ---------------------------------------------------------------------------
+
+
+def test_w1_negative_power_drive_dist_moves_backward_positive_moves_forward():
+    """A raw ``driveDist(20).setPower(-70)`` backs the chassis up along its facing.
+
+    ``DriveDistBuilder::setPower`` takes a signed ``[-100, 100]`` with NO
+    ``setReverse`` — for a raw dead-reckon ``driveDist`` a negative power is the
+    reverse mechanism (the firmware drives a negative cruise backward). So the
+    render must move the chassis BACKWARD (a NEGATIVE projection onto the
+    unchanged heading) with the SAME magnitude as the recorded ``cm``. The old
+    ``abs()`` resolver rendered this as a forward move and integrated the
+    operator offset the wrong way. A positive power still advances FORWARD (no
+    regression). Neither move rotates — the facing is unchanged throughout.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {
+                "seq": 0,
+                "op": "drive",
+                "method": "driveDist",
+                "cm": 20.0,
+                "power": -70,
+            },
+            {
+                "seq": 1,
+                "op": "drive",
+                "method": "driveDist",
+                "cm": 15.0,
+                "power": 70,
+            },
+        ),
+        toy_field_data,
+    )
+
+    kfs = track.keyframes
+    seed = kfs[0]
+    heading = seed["h"]
+
+    # Pure translation — a signed-power driveDist never rotates.
+    assert all(kf["h"] == pytest.approx(heading, abs=_POSE_TOL) for kf in kfs)
+
+    # Boundary poses off the seed: the -70 move backs up 20 cm (signed -20),
+    # then the +70 move advances 15 cm (signed +15), both along the facing.
+    from math import cos, radians, sin
+
+    ux, uy = cos(radians(heading)), sin(radians(heading))
+    cumulative = 0.0
+    boundary_poses = []
+    for delta in (-20.0, 15.0):
+        cumulative += delta
+        boundary_poses.append(
+            (seed["x"] + cumulative * ux, seed["y"] + cumulative * uy, heading)
+        )
+    landings = _boundary_indices(kfs, boundary_poses)
+
+    # Per-move signed projection: the -70 move is NEGATIVE (backward), the +70
+    # move is POSITIVE (forward). Magnitudes equal the recorded cm.
+    prev_idx = 0
+    for landing_idx, delta in zip(landings, (-20.0, 15.0)):
+        projection = _heading_projection(kfs[prev_idx], kfs[landing_idx], heading)
+        assert projection == pytest.approx(delta, abs=_POSE_TOL)
+        prev_idx = landing_idx
+
+    # The first move (negative power) moved backward — assert the sign directly
+    # so a re-introduced abs() (rendering it forward) fails loudly here.
+    first_landing_proj = _heading_projection(seed, kfs[landings[0]], heading)
+    assert first_landing_proj < 0.0
+
+    _assert_monotone([kf["t"] for kf in kfs])
 
 
 # ---------------------------------------------------------------------------
@@ -751,8 +941,17 @@ def test_nc13_gyro_reverse_stop_at_line_rotates_then_backs_up():
         toy_field_data,
     )
 
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    translation = track.keyframes[-1]
+    # Rotation-end: the densified rotate-in-place keeps the seed position while
+    # sweeping heading to 45; the last keyframe still AT the seed position is
+    # the rotation endpoint (the advance then leaves that position).
+    rotation = seed
+    for kf in track.keyframes:
+        if _planar_distance(seed, kf) <= _POSE_TOL:
+            rotation = kf
+        else:
+            break
 
     # Rotation phase: UNCHANGED position, heading turned to the held 45.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
@@ -793,8 +992,15 @@ def test_nc13_gyro_heading_honoured_on_all_forward_geometry_methods(method):
         toy_field_data,
     )
 
-    assert len(track.keyframes) == 3
-    seed, rotation, translation = track.keyframes
+    seed = track.keyframes[0]
+    translation = track.keyframes[-1]
+    # Rotation-end: last densified keyframe still at the seed position.
+    rotation = seed
+    for kf in track.keyframes:
+        if _planar_distance(seed, kf) <= _POSE_TOL:
+            rotation = kf
+        else:
+            break
 
     # Rotation to the held heading at the unchanged position.
     assert rotation["x"] == pytest.approx(seed["x"], abs=_POSE_TOL)
@@ -842,22 +1048,20 @@ def test_nc14_cm_less_forward_geometry_narrate_only_no_crash():
 
 
 # ---------------------------------------------------------------------------
-# NC16 — a lineFollowDist offset before a goto emits a drift warning
+# NC16 — a lineFollowDist offset before a goto renders a return maneuver
 # ---------------------------------------------------------------------------
 
 
-def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
-    """NC16 (AC4/AC11 regression): a ``lineFollowDist`` offset then goto drifts.
+def test_nc16_line_follow_dist_before_goto_renders_return():
+    """NC16 (T11): a ``lineFollowDist`` offset then goto routes through the return.
 
-    Mirrors TC3's structure but with ``lineFollowDist`` as the offending raw
-    move: a 15 cm distance-gated follow before ``goto B`` injects an offset the
-    goto does not correct — ``lineFollowDist`` advances the shared chassis
-    without advancing the logical node, exactly the desync the drift check
-    surfaces. A ``drift_warn`` naming node B is emitted with a reported offset
-    past :data:`DRIFT_THRESHOLD_CM`. This pins that authored line-follows now
-    contribute drift events where they were previously invisible.
-
-    (TC1-TC5 above are kept unchanged and continue to run as-is.)
+    Mirrors TC3's structure but with ``lineFollowDist`` as the raw move: a 15 cm
+    distance-gated follow before ``goto B`` integrates the operator offset on the
+    shared sim (issue #130, T11), and the following goto's return prologue drives
+    it back — so a ``return_to_node`` marker is emitted and, because the goto
+    re-anchors, NO residual ``drift_warn`` survives. Pins that a raw
+    ``lineFollowDist`` participates in the operator-offset / return-to-node path
+    exactly like ``driveDist``.
     """
     track = _build_quiet(
         _inline_trace(
@@ -867,15 +1071,120 @@ def test_nc16_line_follow_dist_before_goto_emits_drift_warn():
         toy_field_data,
     )
 
-    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
-    assert len(drift_events) == 1
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
-    warn = drift_events[0]
-    assert "B" in warn["label"]
 
-    # Pull the centimetre figure out of the label ("chassis 15.0 cm off node B").
-    reported_cm = float(warn["label"].split("cm")[0].split()[-1])
-    assert reported_cm > DRIFT_THRESHOLD_CM
+# ---------------------------------------------------------------------------
+# T11 smoke — return_to_node / declare_position localization-lane markers
+# (issue #130). These prove this task's own change; T13 owns the comprehensive
+# TC9-TC11 track-level coverage + golden re-bless.
+# ---------------------------------------------------------------------------
+
+
+def test_t11_return_to_node_marker_shape_and_ordering():
+    """The ``return_to_node`` marker sits inside its goto's span and names the node.
+
+    A 15 cm raw drive then ``goto B`` renders the return prologue; the marker is
+    a POINT event stamped at the goto's start (so ``events`` stays sorted), its
+    ``type`` is exactly ``"return_to_node"`` (the string T12's ``buildDriftLane``
+    branches on), and its label names the node the return re-anchored (the toy
+    field's true start node ``S`` — ``build`` seeds from ``field_data.START_NODE``,
+    not the trace's informational ``start_node``).
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": 15.0},
+            {"seq": 1, "op": "goto", "target": "B"},
+        ),
+        toy_field_data,
+    )
+
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    marker = return_events[0]
+    assert "S" in marker["label"]
+
+    # The marker is stamped at (== ) the goto span's start and inside its bracket.
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert marker["t"] == pytest.approx(goto["t"], abs=_POSE_TOL)
+    assert goto["t"] <= marker["t"] <= goto["t_end"]
+
+    # Event timestamps remain non-decreasing overall.
+    ev_times = [ev["t"] for ev in track.events]
+    assert all(b >= a for a, b in zip(ev_times, ev_times[1:]))
+
+
+def test_t11_declare_position_marker_and_node_change():
+    """A ``declare_position`` op emits a declare marker and changes the sim node.
+
+    The op is a pure belief reset: it emits exactly one localization-lane event
+    of ``type == "declare_position"`` (the string T12 branches on) naming the
+    declared node, advances no keyframe / clock, and — because it re-anchored the
+    offset onto the (physically-unchanged) chassis — leaves no trace-end residual
+    ``drift_warn``. A downstream ``goto`` then plans FROM the declared node,
+    proving the belief actually moved.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "declare_position", "node": "C"},
+            {"seq": 1, "op": "goto", "target": "D"},
+        ),
+        toy_field_data,
+    )
+
+    declare_events = [
+        ev for ev in track.events if ev["type"] == "declare_position"
+    ]
+    assert len(declare_events) == 1
+    assert "C" in declare_events[0]["label"]
+
+    # The following goto plans FROM the declared node C (not the start A).
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert goto["label"].startswith("C->")
+
+    # No spurious residual: the declare cleared the offset.
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+
+def test_t11_declare_position_unknown_node_emits_no_marker():
+    """A ``declare_position`` to a node not in NODES emits NO marker (T7 no-op).
+
+    Per T7's contract the sim warns + no-ops on an unknown node (node + offset
+    unchanged), so the belief did not change and track_builder emits no
+    localization-lane marker. A following ``goto`` still plans from the ORIGINAL
+    start node ``S`` (the toy field's ``START_NODE``), proving the declare was
+    skipped.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "declare_position", "node": "NOPE"},
+            {"seq": 1, "op": "goto", "target": "B"},
+        ),
+        toy_field_data,
+    )
+
+    assert [
+        ev for ev in track.events if ev["type"] == "declare_position"
+    ] == []
+    goto = next(ev for ev in track.events if ev["type"] == "goto")
+    assert goto["label"].startswith("S->")
+
+
+def test_t11_clean_two_goto_trace_has_no_localization_markers():
+    """A clean (raw-move-free / declare-free) trace carries none of T11's markers.
+
+    Byte-invariance guard: without a raw move or a declare op, the trace emits no
+    ``return_to_node`` / ``declare_position`` markers and no residual
+    ``drift_warn`` — its events are exactly the pre-#130 (T10) set. Locks that
+    T11 is purely additive on the affected ops.
+    """
+    trace = load(_FIXTURES / "ctps_two_goto.json")
+    track = _build_quiet(trace, toy_field_data)
+
+    for kind in ("return_to_node", "declare_position", "drift_warn"):
+        assert [ev for ev in track.events if ev["type"] == kind] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1099,24 +1408,34 @@ def test_tc1_dead_reckon_pivot_lands_on_node_no_drift_warn():
 def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     """TC2 (AC1, AC4): the pivot's arc sub-keyframes trace the rigid rotation.
 
-    ``N = ceil(90 / ARC_STEP_DEG)`` sub-keyframes REPLACE the single in-place
-    turn keyframe (``N - 1`` intermediate keyframes plus the arc-end); each
-    sample is within tolerance of the documented Contracts formula (rotation
-    about the planted wheel); heading rotates through the full 90 deg; the
-    whole arc spans exactly ``90 / SIM_TURN_DEG_S`` seconds, split evenly
-    across the N steps; the running clock stays strictly monotonic across the
-    replacement span.
+    The pivot arc's GEOMETRY is unchanged from pre-#130 (``N = ceil(90 /
+    ARC_STEP_DEG)`` sub-keyframes tracing the rigid rotation about the planted
+    wheel); only the TIMING now comes from the firmware turn profile. The
+    approach and departure legs are ALSO densified now, so the arc is no longer
+    at a fixed keyframe index — it is located via the emitted ``pivots``
+    segment's ``[t0, t1]`` bracket. Each arc sample matches the documented
+    Contracts formula; heading rotates through the full 90 deg; the arc spans
+    exactly ``resolve_turn_profile(theta, is_pivot=True).duration_s()`` seconds,
+    split EVENLY across the N steps (constant-rate at the snapped floor, AC3);
+    the running clock stays strictly monotonic.
     """
+    from tools.path_planner.ctps.profile import resolve_turn_profile
+
     field, track = _dead_reckon_pivot_track()
 
     n = ceil(90.0 / ARC_STEP_DEG)
-    # seed + the trimmed U->V approach + N arc keyframes + the trimmed V->W
-    # departure — the arc REPLACES the single in-place turn keyframe.
-    assert len(track.keyframes) == n + 3
+    segment = track.pivots[0]
 
-    approach_end = track.keyframes[1]
-    arc = track.keyframes[2 : 2 + n]
+    # Locate the arc via the pivots-segment time bracket: the arc keyframes are
+    # the N with t0 < t <= t1; the approach-end (arc start) is the keyframe
+    # immediately before the first arc keyframe.
+    arc_start_idx = next(
+        i for i, kf in enumerate(track.keyframes) if kf["t"] > segment["t0"]
+    )
+    approach_end = track.keyframes[arc_start_idx - 1]
+    arc = track.keyframes[arc_start_idx : arc_start_idx + n]
     assert len(arc) == n
+    assert approach_end["t"] == pytest.approx(segment["t0"], abs=1e-9)
 
     radius_cm = parse_track_cm_from_config() / 2.0
     _wheel_center, expected_centers = _expected_arc_centers(
@@ -1136,21 +1455,22 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     assert approach_end["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert arc[-1]["h"] == pytest.approx(0.0, abs=_POSE_TOL)
 
-    # Even timing across the N replacement sub-keyframes.
+    # Even timing across the N replacement sub-keyframes (the sample_turn arc
+    # path pins each to t0 + k/N * duration — a uniform grid).
     times = [approach_end["t"]] + [kf["t"] for kf in arc]
     steps = [b - a for a, b in zip(times, times[1:])]
     for step in steps:
         assert step == pytest.approx(steps[0], abs=1e-9)
 
-    # Total arc duration: exactly the in-place turn's old visual duration.
-    assert arc[-1]["t"] - approach_end["t"] == pytest.approx(
-        90.0 / SIM_TURN_DEG_S, abs=1e-9
-    )
+    # Total arc duration: the firmware pivot-turn profile duration.
+    expected_dur = resolve_turn_profile(-90.0, is_pivot=True).duration_s()
+    assert arc[-1]["t"] - approach_end["t"] == pytest.approx(expected_dur, abs=1e-9)
+    assert segment["t1"] == pytest.approx(arc[-1]["t"], abs=1e-9)
 
-    # The running clock stays strictly monotonic across the whole keyframe
-    # list (the arc replacement plus the trailing departure keyframe).
-    all_times = [kf["t"] for kf in track.keyframes]
-    assert all(b > a for a, b in zip(all_times, all_times[1:]))
+    # The running clock stays monotonic non-decreasing across the whole list
+    # (the terminal brake keyframe of a densified leg may equal its
+    # predecessor's t, so this is non-strict).
+    _assert_monotone([kf["t"] for kf in track.keyframes])
 
 
 # ---------------------------------------------------------------------------
@@ -1174,7 +1494,11 @@ def test_tc3_pivots_segment_shape_wheel_right_for_negative_90deg():
     assert segment["theta_deg"] == pytest.approx(-90.0, abs=1e-9)
     assert segment["t0"] < segment["t1"]
 
-    approach_end = track.keyframes[1]
+    # The approach-end (arc start) is the keyframe at the segment's t0; the
+    # approach leg densifies now, so it is no longer keyframes[1].
+    approach_end = next(
+        kf for kf in track.keyframes if kf["t"] == pytest.approx(segment["t0"], abs=1e-9)
+    )
     radius_cm = parse_track_cm_from_config() / 2.0
     (wx, wy), _centers = _expected_arc_centers(
         approach_end["x"],
@@ -1270,12 +1594,9 @@ def test_tc6_pivot_free_goto_has_no_pivots_key():
     goto_targets = [cmd.target for cmd in trace.commands if cmd.op == "goto"]
     reference = _reference_snapshots(toy_field_data, goto_targets)
 
-    geometry_keyframes = track.keyframes[1:]
-    assert len(geometry_keyframes) == len(reference)
-    for kf, (rx, ry, rh) in zip(geometry_keyframes, reference):
-        assert kf["x"] == pytest.approx(rx, abs=_POSE_TOL)
-        assert kf["y"] == pytest.approx(ry, abs=_POSE_TOL)
-        assert kf["h"] == pytest.approx(rh, abs=_POSE_TOL)
+    # Densified: every step_through boundary pose appears in order (the toy field
+    # is pivot-free, so this is a plain LINE/BLIND densification with no arc).
+    _boundary_indices(track.keyframes, reference)
 
     assert track.pivots == []
     assert "pivots" not in track.to_dict()
@@ -1407,6 +1728,387 @@ def test_tc13_chained_sensor_departure_pivots_land_on_final_node():
     assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
 
     assert len(track.pivots) == 2
-    t0s = [segment["t0"] for segment in track.pivots]
-    assert t0s == sorted(t0s)   # emitted in chronological order
+    t0s_chained_sensor = [segment["t0"] for segment in track.pivots]
+    assert t0s_chained_sensor == sorted(t0s_chained_sensor)   # emitted in chronological order
     assert all(segment["wheel"] == "right" for segment in track.pivots)
+
+
+# ===========================================================================
+# T13 rebaseline: TC7 (boundary-pose invariant), TC8-scaffold (all-hops drift
+# fixture), TC9-TC11 (return-to-node / declare_position track-level coverage)
+# ===========================================================================
+
+
+def _track_hash(track) -> str:
+    """Return a stable sha256 hex digest of ``track``'s JSON-serialisable dict.
+
+    Sorts keys so field/dict ordering never perturbs the digest; floats
+    serialise via ``repr`` (Python's ``json`` module default), which is
+    deterministic for identical float values — sufficient for an
+    identical-build-vs-identical-build comparison (never cross-platform text
+    diffing). Used by TC11 to prove a ``declarePosition``-free trace and its
+    unknown-node-declare counterpart render BYTE-IDENTICAL tracks.
+
+    :param track: a built :class:`~tools.path_planner.ctps.track_builder.Track`.
+    :return: the hex sha256 digest of ``json.dumps(track.to_dict(), sort_keys=True)``.
+    """
+    payload = json.dumps(track.to_dict(), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# TC7 — GENERAL boundary-pose invariant (AC10)
+# ---------------------------------------------------------------------------
+#
+# Scoped to PIVOT-FREE fixtures: a pivot's chassis-nudge (`_build_pivot_arc`'s
+# caller) deliberately re-poses the SHARED sim's chassis before its NEXT
+# primitive dispatches -- that is the whole point of the nudge (killing the
+# ~12.7 cm in-place-turn drift, AC2). So an INDEPENDENTLY constructed
+# reference sim (which never receives that nudge) legitimately diverges from
+# the built Track's keyframes on a pivot fixture -- not a bug, the documented
+# TC7 tripwire in `_build_pivot_arc`'s own docstring covers that case
+# differently (the primitive-STREAM-unchanged assertion, `test_tc7_...`
+# above, in the pivot-arc test group). The pivot suite (TC1-TC13 above)
+# already pins pivot correctness via node-landing + arc-geometry assertions
+# instead of a step_through cross-check.
+_TC7_FIXTURES: list[tuple[str, object, list[str]]] = [
+    ("ctps_two_goto.json", toy_field_data, ["B", "C"]),
+    (
+        "ctps_all_hops_drift.json",
+        toy_field_data,
+        ["P1", "B", "S", "A", "P1", "C", "G", "B", "S"],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "fixture_name, field_data, goto_targets",
+    _TC7_FIXTURES,
+    ids=[name for name, _fd, _targets in _TC7_FIXTURES],
+)
+def test_tc7_boundary_pose_invariant_general(fixture_name, field_data, goto_targets):
+    """TC7 (AC10): every primitive's boundary pose byte-equals a keyframe, in order.
+
+    A GENERAL invariant test over multiple fixtures (not a one-off): for each
+    fixture, an INDEPENDENT ``step_through`` reference replay (fresh chassis +
+    sim, never touched by ``build``) yields the ordered sequence of primitive
+    boundary poses; every one of those poses must appear BYTE-EXACT among the
+    built ``Track``'s keyframes, in the same order (:func:`_boundary_indices`
+    asserts both — a miss raises, and the match cursor only moves forward).
+    Keyframe timestamps are asserted NON-DECREASING (AC10's other half) — a
+    terminal instantaneous-brake keyframe may equal its predecessor's ``t``,
+    so this is the non-strict check, matching ``player.js:110``'s zero-length
+    bracket tolerance.
+    """
+    trace = load(_FIXTURES / fixture_name)
+    track = _build_quiet(trace, field_data)
+
+    actual_targets = [cmd.target for cmd in trace.commands if cmd.op == "goto"]
+    assert actual_targets == goto_targets
+
+    reference = _reference_snapshots(field_data, goto_targets)
+
+    # Every reference boundary pose appears byte-exact, in order (raises on a
+    # miss or an out-of-order match).
+    _boundary_indices(track.keyframes, reference)
+
+    # Timestamps are non-decreasing across the whole densified keyframe list.
+    _assert_monotone([kf["t"] for kf in track.keyframes])
+
+
+# ---------------------------------------------------------------------------
+# TC8-scaffold — the all-hop-types fixture: drift ~= 0 at every goto arrival
+# ---------------------------------------------------------------------------
+
+
+def test_tc8_scaffold_all_hop_types_drift_sweep():
+    """TC8-scaffold (AC5): ``ctps_all_hops_drift.json`` lands drift ~= 0 everywhere.
+
+    Drives the new all-hop-types fixture (a 9-goto tour of the toy field graph
+    starting from its true ``START_NODE`` "S") and asserts, at EVERY ``goto``
+    arrival, the chassis lands on its target node to float-noise precision —
+    the sim chassis is the wheel axle and a clean goto (any hop type) lands
+    drift ~= 0 regardless of the final hop's kind (LINE / BLIND / PROJECTION /
+    STOP_AT_LINE); only a raw ``drive`` move injects real drift (T9/T10 above
+    already cover that path). Also confirms the fixture emits no
+    ``drift_warn`` anywhere (a clean all-goto mission never triggers the
+    residual indicator) and asserts the ACTUAL hop-tag set the route
+    exercises covers LINE / BLIND / PROJECTION / STOP_AT_LINE / reverse — the
+    toy field's ``PIVOT_TURNS`` is empty (confirmed by
+    ``toy_field_data.PIVOT_TURNS == []``), so no pivot hop is reachable here;
+    that gap is noted, not hidden. The FULL regression-locked drift sweep
+    (every hop type incl. pivot, via the pivot fixtures) is T15's
+    ``test_ctps_drift.py`` — this is the scaffold + the reusable fixture
+    T15 consumes.
+    """
+    assert toy_field_data.PIVOT_TURNS == []   # documents the known gap (no pivot hop)
+
+    trace = load(_FIXTURES / "ctps_all_hops_drift.json")
+    goto_targets = [cmd.target for cmd in trace.commands if cmd.op == "goto"]
+    assert len(goto_targets) == 9
+
+    # Independent reference replay: collect (primitive tag, arrival snapshot)
+    # so the hop-type coverage claim and the drift claim are both checked
+    # against a genuinely separate sim run, not the builder's own state.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        graph = build_graph(toy_field_data)
+        next_hop = compute_all_pairs_next_hop(
+            graph, BlindDecayParams.from_field_data(toy_field_data)
+        )
+    chassis = VirtualChassis.from_field_data(toy_field_data)
+    sim = PathTrackerSim(toy_field_data, graph, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    tags_seen: set[str] = set()
+    for target in goto_targets:
+        snap = None
+        for primitive, snap in sim.step_through(target):
+            tags_seen.add(primitive[0])
+        nx_, ny_ = toy_field_data.NODES[target]
+        drift = hypot(snap.x_cm - nx_, snap.y_cm - ny_)
+        assert drift < 1e-9, f"goto {target} landed off-node by {drift} cm"
+
+    # LINE (follow-to-intersection + its overshoot roll, AND the reverse
+    # follow), BLIND (forward dead-reckon AND its reverse), PROJECTION
+    # (follow-to-distance AND its reverse), and STOP_AT_LINE (the seek) are
+    # all present. No pivot tag can appear (PIVOT_TURNS is empty).
+    assert {
+        "follow_line_to_intersection",  # LINE forward
+        "line_overshoot",               # LINE roll-onto-node
+        "line_reverse",                 # LINE reverse
+        "forward",                      # BLIND forward
+        "blind_reverse",                # BLIND reverse
+        "follow_line_to_distance",      # PROJECTION forward
+        "projection_reverse",           # PROJECTION reverse
+        "stop_at_line",                 # STOP_AT_LINE seek
+    } <= tags_seen
+
+    # Now drive it through the real builder and confirm no residual indicator.
+    track = _build_quiet(trace, toy_field_data)
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+    assert track.duration_s > 0.0
+
+
+# ---------------------------------------------------------------------------
+# TC9 — raw drive integrates offset; next goto renders return, no residual
+# ---------------------------------------------------------------------------
+
+
+def test_tc9_raw_drive_then_goto_renders_return_no_residual(monkeypatch):
+    """TC9 (AC7): a raw drive's offset integrates; the next goto returns + re-anchors.
+
+    A fresh scenario (distinct from TC3/NC16 above, which this test's name
+    formalises as the plan's TC9): a 20 cm raw ``driveDist`` off the toy
+    field's start node ``S`` is followed by ``goto A``. The raw move must
+    route through ``operator_move`` (spied here to prove the WIRING, not just
+    the downstream effect) so the offset integrates on the shared sim; the
+    following goto then emits exactly one ``return_to_node`` marker and NO
+    residual ``drift_warn`` anywhere in the trace (the goto's return prologue
+    re-anchors the offset before the planned walk).
+    """
+    calls: list[tuple[float, float]] = []
+    original = PathTrackerSim.operator_move
+
+    def _spy(self, distance_cm, *, turn_deg=0.0):
+        calls.append((distance_cm, turn_deg))
+        return original(self, distance_cm, turn_deg=turn_deg)
+
+    monkeypatch.setattr(PathTrackerSim, "operator_move", _spy)
+
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": 20.0},
+            {"seq": 1, "op": "goto", "target": "A"},
+        ),
+        toy_field_data,
+    )
+
+    # The raw move actually reached operator_move (a real translation call).
+    assert any(dist == pytest.approx(20.0) for dist, _turn in calls)
+
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+
+# ---------------------------------------------------------------------------
+# TC10 — raw drive at trace end residual; over-cap raw drive faults the track
+# ---------------------------------------------------------------------------
+
+
+def test_tc10_raw_drive_at_trace_end_leaves_residual_drift_warn():
+    """TC10 (AC7): a raw drive with NO following goto leaves a residual indicator.
+
+    Formalises the plan's TC10 trace-end case (already exercised by
+    ``test_drive_without_following_goto_keeps_trace_end_residual`` above) as
+    its own named test: nothing re-anchors a raw move that ends the mission,
+    so exactly one ``drift_warn`` point event survives, stamped at the track
+    end, and no ``return_to_node`` marker is ever emitted (there is no
+    following goto to render one).
+    """
+    track = _build_quiet(
+        _inline_trace({"seq": 0, "op": "drive", "method": "driveDist", "cm": 20.0}),
+        toy_field_data,
+    )
+
+    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
+    assert len(drift_events) == 1
+    assert drift_events[0]["t"] == pytest.approx(track.duration_s, abs=_POSE_TOL)
+    assert [ev for ev in track.events if ev["type"] == "return_to_node"] == []
+
+
+def test_tc10_over_cap_raw_drive_under_fault_gate_ends_track():
+    """TC10 (AC7): an over-cap raw drive under the FAULT gate faults + ends the track.
+
+    A raw ``driveDist`` well past ``RETURN_DISTANCE_CAP_CM`` (50 cm) leaves an
+    accumulated offset the return gate refuses to plan for under the default
+    ``OffMapGate.FAULT`` (mirrors ``Fault::OFF_NODE`` — no chassis motion is
+    attempted for the return). ``sim.step_through`` raises
+    :class:`~tools.path_planner.sim.runtime.OffMapFaultError`, which ``build``
+    catches and turns into an ``"OFF-MAP"``-labelled ``goto`` fault event that
+    ENDS the track (no further commands are processed) — the branch T11 left
+    for T13 to cover. The default gate is FAULT (no monkeypatch needed), and
+    the trace-end residual check after the loop ALSO fires (the offset was
+    never cleared), so a fault-ended track surfaces both a fault ``goto``
+    event and a residual ``drift_warn``.
+    """
+    assert _runtime.OFF_MAP_GATE == OffMapGate.FAULT   # default gate; no patch needed
+
+    over_cap_cm = RETURN_DISTANCE_CAP_CM + 10.0
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": over_cap_cm},
+            {"seq": 1, "op": "goto", "target": "A"},
+        ),
+        toy_field_data,
+    )
+
+    fault_events = [
+        ev
+        for ev in track.events
+        if ev["type"] == "goto" and ev["label"].startswith("OFF-MAP")
+    ]
+    assert len(fault_events) == 1
+    assert "S->A" in fault_events[0]["label"]
+    assert f"{over_cap_cm:.1f}" in fault_events[0]["label"]
+    # An UNREACHABLE/OFF-MAP fault event carries no `t_end` (the goto never
+    # completed) -- it ended the track, so no return_to_node marker either.
+    assert "t_end" not in fault_events[0]
+    assert [ev for ev in track.events if ev["type"] == "return_to_node"] == []
+
+    # The trace-end residual fires too -- nothing re-anchored the offset.
+    drift_events = [ev for ev in track.events if ev["type"] == "drift_warn"]
+    assert len(drift_events) == 1
+    assert f"{over_cap_cm:.1f}" in drift_events[0]["label"]
+
+
+def test_tc10_over_cap_raw_drive_under_best_effort_gate_proceeds_capped(monkeypatch):
+    """TC10 contrast (AC7): the SAME over-cap drive under BEST_EFFORT proceeds capped.
+
+    Patches ``OFF_MAP_GATE`` to ``BEST_EFFORT`` (the sim reads the module
+    global at call time, so patching ``tools.path_planner.sim.runtime``'s
+    attribute — not a name re-imported into ``track_builder`` — is the
+    correct seam, mirroring ``test_runtime_sim.py``'s own pattern). No
+    ``OffMapFaultError`` is raised: the goto still renders a (capped) return
+    maneuver and completes, so a ``return_to_node`` marker appears and NO
+    fault ``goto`` event does.
+    """
+    monkeypatch.setattr(_runtime, "OFF_MAP_GATE", OffMapGate.BEST_EFFORT)
+
+    over_cap_cm = RETURN_DISTANCE_CAP_CM + 10.0
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": over_cap_cm},
+            {"seq": 1, "op": "goto", "target": "A"},
+        ),
+        toy_field_data,
+    )
+
+    assert [
+        ev
+        for ev in track.events
+        if ev["type"] == "goto" and ev["label"].startswith("OFF-MAP")
+    ] == []
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1
+    goto_events = [
+        ev
+        for ev in track.events
+        if ev["type"] == "goto" and not ev["label"].startswith("OFF-MAP")
+    ]
+    assert len(goto_events) == 1
+    assert "t_end" in goto_events[0]   # a completed (capped) goto carries t_end
+
+
+# ---------------------------------------------------------------------------
+# TC11 — declare_position applies + marks; a declare-free trace stays
+# byte-identical to an unknown-node (no-op) declare
+# ---------------------------------------------------------------------------
+
+
+def test_tc11_declare_position_applies_node_change_and_clears_offset():
+    """TC11 (AC8): ``declare_position`` changes the sim's belief, not the chassis.
+
+    A raw drive grows the offset off node ``A``; the operator then declares
+    the (unrelated) node ``C`` — a pure belief reset per T7's contract (node
+    change + offset clear, heading calibration untouched, NO chassis motion).
+    The marker is a zero-dwell event (the clock does not advance for it), the
+    trace-end residual is gone (the declare cleared the offset the raw drive
+    grew), and a following goto plans FROM ``C`` — proving the belief, not
+    just a label, actually changed.
+    """
+    track = _build_quiet(
+        _inline_trace(
+            {"seq": 0, "op": "drive", "method": "driveDist", "cm": 15.0},
+            {"seq": 1, "op": "declare_position", "node": "C"},
+            {"seq": 2, "op": "goto", "target": "D"},
+        ),
+        toy_field_data,
+    )
+
+    typed = [(ev["type"], ev["t"]) for ev in track.events]
+    drive_t = next(t for kind, t in typed if kind == "drive")
+    declare_events = [ev for ev in track.events if ev["type"] == "declare_position"]
+    assert len(declare_events) == 1
+    assert "C" in declare_events[0]["label"]
+
+    # The declare comes after the drive's narration event and shares its
+    # timestamp with the FOLLOWING goto's span start -- the declare itself
+    # does not advance the clock (no dwell, no geometry): it is emitted at
+    # whatever running clock the raw drive's densified advance left behind.
+    goto_events = [ev for ev in track.events if ev["type"] == "goto"]
+    assert declare_events[0]["t"] >= drive_t
+    assert declare_events[0]["t"] == pytest.approx(goto_events[0]["t"], abs=_POSE_TOL)
+    assert goto_events[0]["label"].startswith("C->")
+
+    # No residual anywhere -- the declare cleared the offset the raw drive grew.
+    assert [ev for ev in track.events if ev["type"] == "drift_warn"] == []
+
+
+def test_tc11_unknown_node_declare_is_byte_identical_to_declare_free_trace():
+    """TC11 negative path (AC8): an unknown-node declare renders BYTE-IDENTICAL.
+
+    Per T7's contract, ``LocalizationSim.declare_position`` on an unknown node
+    warns and no-ops (node + offset left completely unchanged), and
+    ``track_builder`` mirrors that by pre-validating against ``NODES`` and
+    emitting NO marker for it. So a trace carrying an unknown-node
+    ``declare_position`` op must produce a Track whose sha256 (over the
+    sorted-key JSON serialisation — :func:`_track_hash`) EXACTLY matches the
+    same trace with that op removed entirely: the op contributes nothing —
+    not a marker, not a keyframe, not a clock tick, not a warning suppressed
+    into a silent state change.
+    """
+    declare_free = _inline_trace({"seq": 0, "op": "goto", "target": "B"})
+    with_unknown_declare = _inline_trace(
+        {"seq": 0, "op": "declare_position", "node": "NOPE"},
+        {"seq": 1, "op": "goto", "target": "B"},
+    )
+
+    track_free = _build_quiet(declare_free, toy_field_data)
+    track_unknown = _build_quiet(with_unknown_declare, toy_field_data)
+
+    assert [
+        ev for ev in track_unknown.events if ev["type"] == "declare_position"
+    ] == []
+    assert _track_hash(track_free) == _track_hash(track_unknown)

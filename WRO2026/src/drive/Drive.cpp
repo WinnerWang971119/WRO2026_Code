@@ -14,6 +14,8 @@
 #include "Drive.h"
 
 #include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
+#include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
+                                    // math (host-tested + golden-pinned; issue #130).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
 
 #include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
@@ -814,23 +816,20 @@ int16_t DriveClass::_profileSpeedAt(float frac) const
         return _profilePeakSpd;
     }
 
-    // Distance variant — same shape, units in encoder degrees.
+    // Distance variant — same shape, units in encoder degrees. The interpolation is delegated
+    // to `tShapeSpeedAt` (TShapeProfilePolicy.h), which is unit-agnostic: we feed it the
+    // encoder-degree magnitudes cast to float. Bit-identical to the previous inline int32
+    // branch — every value here is an exact integer ≤ UINT16_MAX (`cmToEncDeg` returns
+    // uint16_t), far below float's 2^24 exact-integer ceiling, so the float compares /
+    // subtractions / divides see exactly the operands the int32 code saw.
     const int32_t traveled = (int32_t) (frac * (float) _profileTotalEnc);
-    if (traveled < _profileAccelEnc)
-    {
-        const float r =
-            _profileAccelEnc == 0 ? 1.0f : (float) traveled / (float) _profileAccelEnc;
-        return (int16_t) (_profileStartSpd + (int16_t) ((_profilePeakSpd - _profileStartSpd) * r));
-    }
-    else if (_profileTotalEnc > _profileDecelEnc
-             && traveled >= (_profileTotalEnc - _profileDecelEnc))
-    {
-        const int32_t into = traveled - (_profileTotalEnc - _profileDecelEnc);
-        const float   r =
-            _profileDecelEnc == 0 ? 1.0f : (float) into / (float) _profileDecelEnc;
-        return (int16_t) (_profilePeakSpd + (int16_t) ((_profileEndSpd - _profilePeakSpd) * r));
-    }
-    return _profilePeakSpd;
+
+    TShapeRamps ramps;
+    ramps.accelCm = (float) _profileAccelEnc;
+    ramps.decelCm = (float) _profileDecelEnc;
+    ramps.peakPwm = _profilePeakSpd;
+    return tShapeSpeedAt(
+        (float) traveled, (float) _profileTotalEnc, ramps, _profileStartSpd, _profileEndSpd);
 }
 
 uint8_t DriveClass::_execProfileMove(DriveMode mode,
@@ -882,26 +881,6 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
     _profileStartSpd = startSpeed;
     _profileEndSpd   = endSpeed;
 
-    // Resolve per-side ramp distances (cm) with the no-ramp epsilon AND the [MIN, MAX] clamps.
-    // Returns 0.0f on the no-ramp path (chained move already at cruise).
-    auto resolveRamp = [&](int16_t endpoint) -> float
-    {
-        if (abs(cruise - endpoint) < Config::TSHAPE_NO_RAMP_EPSILON_PWM)
-        {
-            return 0.0f;
-        }
-        float raw = (float) abs(cruise - endpoint) / accel;
-        if (raw < Config::TSHAPE_RAMP_MIN_CM)
-        {
-            raw = Config::TSHAPE_RAMP_MIN_CM;
-        }
-        if (raw > Config::TSHAPE_RAMP_MAX_CM)
-        {
-            raw = Config::TSHAPE_RAMP_MAX_CM;
-        }
-        return raw;
-    };
-
     if (isTime)
     {
         // ---------------------------------------------------------------------------------
@@ -914,8 +893,8 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         auto        cmToMs = [&](float cm) -> float
         {
             // No-ramp short-circuit MUST come before the cruise==0 fallback so that a chained
-            // move (resolveRamp returned 0.0f) honours the documented no-ramp invariant — even
-            // when cruise itself is 0 (degenerate stand-still call). CRITICAL-1 fix.
+            // move (resolveTShapeRampCm returned 0.0f) honours the documented no-ramp invariant
+            // — even when cruise itself is 0 (degenerate stand-still call). CRITICAL-1 fix.
             if (cm == 0.0f)
             {
                 return 0.0f;
@@ -929,8 +908,21 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
             return cm / (float) abs(cruise) * 1000.0f;
         };
 
-        float accelMs = cmToMs(resolveRamp(startSpeed));
-        float decelMs = cmToMs(resolveRamp(endSpeed));
+        // Per-side ramp distances (cm) resolved by the shared policy — no-ramp epsilon + the
+        // [MIN, MAX] clamps (`resolveTShapeRampCm`, TShapeProfilePolicy.h; returns 0.0f on the
+        // no-ramp path for a chained move already at cruise) — then converted to ms.
+        float accelMs = cmToMs(resolveTShapeRampCm(cruise,
+                                                   startSpeed,
+                                                   accel,
+                                                   Config::TSHAPE_RAMP_MIN_CM,
+                                                   Config::TSHAPE_RAMP_MAX_CM,
+                                                   Config::TSHAPE_NO_RAMP_EPSILON_PWM));
+        float decelMs = cmToMs(resolveTShapeRampCm(cruise,
+                                                   endSpeed,
+                                                   accel,
+                                                   Config::TSHAPE_RAMP_MIN_CM,
+                                                   Config::TSHAPE_RAMP_MAX_CM,
+                                                   Config::TSHAPE_NO_RAMP_EPSILON_PWM));
 
         // Triangle fallback: if the two FULL-peak ramps don't fit in the move, collapse the cruise
         // plateau and reduce the peak so the speed-vs-time integral still equals the cruise * total
@@ -995,68 +987,31 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
     {
         // ---------------------------------------------------------------------------------
         // Distance variant — encoder-based ramps in cm, converted to encoder degrees via the
-        // shared `cmToEncDeg` helper (WROMath.h). Negative `cruise` (backwards) is handled implicitly:
-        // we store `_profileTotalEnc` / `_profileAccelEnc` / `_profileDecelEnc` as positive
-        // magnitudes and `_updateProfile` compares them against `abs(encDelta)`. The PWM
-        // setpoints (`_profileStartSpd` / `_profilePeakSpd` / `_profileEndSpd`) carry the
-        // sign and are dispatched directly to the motors.
+        // shared `cmToEncDeg` helper (WROMath.h). The ramp resolution + triangle fallback +
+        // half-of-total cap moved VERBATIM into `resolveTShapeRamps` (TShapeProfilePolicy.h)
+        // so the math is host-tested + golden-pinned (issue #130); this block only converts
+        // the resolved cm to encoder degrees and seeds the profile state. Negative `cruise`
+        // (backwards) is handled implicitly: we store `_profileTotalEnc` / `_profileAccelEnc`
+        // / `_profileDecelEnc` as positive magnitudes and `_updateProfile` compares them
+        // against `abs(encDelta)`. The PWM setpoints (`_profileStartSpd` / `_profilePeakSpd`
+        // / `_profileEndSpd`) carry the sign and are dispatched directly to the motors.
         // ---------------------------------------------------------------------------------
-        float accelCm = resolveRamp(startSpeed);
-        float decelCm = resolveRamp(endSpeed);
-
-        // Triangle fallback — same reordering as the time variant (finding #15): the triangle test
-        // MUST run on the UN-capped ramp distances, otherwise the half-of-total cap floors each at
-        // totalCm*0.5 and their sum can never exceed `totalCm`, making the peak-reduction branch
-        // unreachable (short moves would then run at full cruise peak with no plateau). The branch
-        // rescales the ramps to sum to `totalCm`, so the half-cap below is a no-op on this path.
-        if (accelCm + decelCm > totalCm)
-        {
-            int16_t peak = (int16_t) (((int32_t) startSpeed + (int32_t) endSpeed
-                                       + (int32_t) cruise)
-                                      / 3);
-            if (peak > cruise && cruise >= 0)
-            {
-                peak = cruise;
-            }
-            if (peak < cruise && cruise < 0)
-            {
-                peak = cruise;
-            }
-            _profilePeakSpd = peak;
-
-            if (accelCm + decelCm > 0.0f)
-            {
-                const float scale = totalCm / (accelCm + decelCm);
-                accelCm *= scale;
-                decelCm *= scale;
-            }
-        }
-        else
-        {
-            _profilePeakSpd = cruise;
-        }
-
-        // Half-of-total cap — runs AFTER the triangle test (finding #15). In the triangle branch
-        // the ramps were rescaled to sum to totalCm, but an asymmetric pair can still leave one side
-        // above totalCm*0.5, so this cap may still trim the larger ramp; that only reshapes the apex
-        // (a small plateau at the reduced peak instead of a pure triangle) and is harmless because
-        // move completion is bound-gated on the encoder total, not on the velocity integral. In the
-        // full-trapezoid branch it bounds a lone over-long ramp so a cruise plateau still exists.
-        if (accelCm > totalCm * 0.5f)
-        {
-            accelCm = totalCm * 0.5f;
-        }
-        if (decelCm > totalCm * 0.5f)
-        {
-            decelCm = totalCm * 0.5f;
-        }
+        const TShapeRamps ramps = resolveTShapeRamps(totalCm,
+                                                     cruise,
+                                                     startSpeed,
+                                                     endSpeed,
+                                                     accel,
+                                                     Config::TSHAPE_RAMP_MIN_CM,
+                                                     Config::TSHAPE_RAMP_MAX_CM,
+                                                     Config::TSHAPE_NO_RAMP_EPSILON_PWM);
+        _profilePeakSpd = ramps.peakPwm;
 
         // Store ramp + total distances as positive magnitudes — `_updateProfile` and
         // `_profileSpeedAt` compare them against `abs(encDelta)` so the same code path
         // handles both forward and reverse moves transparently.
         _profileTotalEnc = (int32_t) cmToEncDeg(totalCm);
-        _profileAccelEnc = (int32_t) cmToEncDeg(accelCm < 0.0f ? 0.0f : accelCm);
-        _profileDecelEnc = (int32_t) cmToEncDeg(decelCm < 0.0f ? 0.0f : decelCm);
+        _profileAccelEnc = (int32_t) cmToEncDeg(ramps.accelCm < 0.0f ? 0.0f : ramps.accelCm);
+        _profileDecelEnc = (int32_t) cmToEncDeg(ramps.decelCm < 0.0f ? 0.0f : ramps.decelCm);
         _profileStartEnc = MiniR4.M2.getDegrees();
     }
 

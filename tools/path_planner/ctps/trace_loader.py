@@ -11,6 +11,12 @@ with a :class:`UserWarning` and do NOT raise, so the simulator degrades
 gracefully when new ops are added to the firmware before the Python side is
 updated.
 
+A trace may also carry a top-level ``mosaic`` block (a sibling of the
+``commands`` stream, echoed by ``ctps_dump`` when run with ``--mosaic``) and
+``read_mosaic`` command ops. Both are parsed tolerantly: absent is normal
+(``trace.mosaic`` is ``None``, no warning), and malformed is skipped with a
+:class:`UserWarning` — never fatal.
+
 Typical usage::
 
     from tools.path_planner.ctps.trace_loader import load
@@ -21,6 +27,9 @@ Typical usage::
 
     for cmd in trace.commands:
         print(cmd.seq, cmd.op, cmd.fields)
+
+    if trace.mosaic is not None:
+        print(trace.mosaic.cells, trace.mosaic.geom_hash)
 """
 
 from __future__ import annotations
@@ -51,6 +60,8 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "print",
         "beep",
         "led",
+        "declare_position",
+        "read_mosaic",
     }
 )
 
@@ -87,6 +98,18 @@ _KNOWN_DRIVE_MODES: frozenset[str] = frozenset(
         "raw",
         "sync",
         "gyro",
+    }
+)
+
+#: Recognised ``drive.preset`` strings (mirrors ``Drive::setPreset``).  A
+#: ``drive`` command whose ``preset`` is a string NOT in this set — or is not
+#: a string at all — is warned about and treated as unset (the resolver then
+#: falls back to the NORMAL default).
+_KNOWN_DRIVE_PRESETS: frozenset[str] = frozenset(
+    {
+        "slow",
+        "normal",
+        "fast",
     }
 )
 
@@ -129,12 +152,33 @@ class Command:
         ``setHeading`` was called (honoured only under ``mode == "gyro"``).
     :param reverse: Reverse-direction flag; set for ``drive`` commands when
         ``setReverse`` was called. ``None`` when the key is absent.
+    :param power: ``.setPower`` override (PWM); set for ``drive`` commands.
+        ``None`` when unset — the resolver uses the preset/default cruise.
+    :param preset: Speed preset (``"slow"`` / ``"normal"`` / ``"fast"``); set
+        for ``drive`` commands when ``.setPreset`` was called. ``None`` when
+        unset — the resolver defaults to NORMAL.
+    :param start_speed: ``.setStartSpeed`` override (PWM); set for ``drive``
+        commands. ``None`` when unset — the resolver applies the
+        sign-by-cruise default.
+    :param end_speed: ``.setEndSpeed`` override (PWM); set for ``drive``
+        commands. ``None`` when unset — the resolver applies the default
+        brake rule.
+    :param profiled: ``True`` for ``.tShape()``, ``False`` for ``.flat()``;
+        set for ``drive`` commands. ``None`` when unset — the resolver uses
+        the builder default (tShape on for ``driveDist``).
+    :param brake: ``.setBrake`` flag; set for ``drive`` commands. ``None``
+        when unset — the resolver defaults to ``True``.
+    :param node: Node name; set for ``declare_position`` commands.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.
     :param r: Red channel (0–255); set for ``led`` commands.
     :param g: Green channel (0–255); set for ``led`` commands.
     :param b: Blue channel (0–255); set for ``led`` commands.
     :param result: Outcome string (``"ok"`` or ``"yield"``); set for
         ``task_end`` commands.
+    :param success: Read outcome; set for ``read_mosaic`` commands. ``True``
+        unless the dump was run with ``--mosaic-fail-at`` targeting this
+        call. ``"op"`` remains the sole discriminator — ``success`` is only
+        ever a payload bool, never treated as a second op tag.
     :param fields: Forward-compatible catch-all for any key present in the
         raw JSON entry that is not captured by the named fields above.
         Unknown ops and unrecognised ``drive.method`` commands are dropped
@@ -146,28 +190,66 @@ class Command:
     op: str
 
     # -- op-specific optional fields ----------------------------------------
-    target:   Optional[str]   = None   # goto
-    arrival:  Optional[str]   = None   # goto: forced arrival direction "front"|"rear"
-    route:    Optional[str]   = None   # goto: forced route direction "front"|"rear"
-    ms:       Optional[int]   = None   # wait, beep, led
-    text:     Optional[str]   = None   # print
-    name:     Optional[str]   = None   # task_start, task_end
-    args_hex: Optional[str]   = None   # task_start
-    method:   Optional[str]   = None   # manip, drive
-    arg:      Optional[int]   = None   # manip
-    cm:       Optional[float] = None   # drive driveDist
-    deg:      Optional[float] = None   # drive turnDeg / turnToYaw
-    mode:     Optional[str]   = None   # drive: "raw"|"sync"|"gyro"
-    heading:  Optional[float] = None   # drive: held heading (gyro)
-    reverse:  Optional[bool]  = None   # drive: reverse-direction flag
-    freq_hz:  Optional[int]   = None   # beep
-    r:        Optional[int]   = None   # led
-    g:        Optional[int]   = None   # led
-    b:        Optional[int]   = None   # led
-    result:   Optional[str]   = None   # task_end
+    target:      Optional[str]   = None   # goto
+    arrival:     Optional[str]   = None   # goto: forced arrival direction "front"|"rear"
+    route:       Optional[str]   = None   # goto: forced route direction "front"|"rear"
+    ms:          Optional[int]   = None   # wait, beep, led
+    text:        Optional[str]   = None   # print
+    name:        Optional[str]   = None   # task_start, task_end
+    args_hex:    Optional[str]   = None   # task_start
+    method:      Optional[str]   = None   # manip, drive
+    arg:         Optional[int]   = None   # manip
+    cm:          Optional[float] = None   # drive driveDist
+    deg:         Optional[float] = None   # drive turnDeg / turnToYaw
+    mode:        Optional[str]   = None   # drive: "raw"|"sync"|"gyro"
+    heading:     Optional[float] = None   # drive: held heading (gyro)
+    reverse:     Optional[bool]  = None   # drive: reverse-direction flag
+    power:       Optional[int]   = None   # drive: .setPower override (PWM)
+    preset:      Optional[str]   = None   # drive: "slow"|"normal"|"fast"
+    start_speed: Optional[int]   = None   # drive: .setStartSpeed override (PWM)
+    end_speed:   Optional[int]   = None   # drive: .setEndSpeed override (PWM)
+    profiled:    Optional[bool]  = None   # drive: true=.tShape, false=.flat
+    brake:       Optional[bool]  = None   # drive: .setBrake flag
+    node:        Optional[str]   = None   # declare_position
+    freq_hz:     Optional[int]   = None   # beep
+    r:           Optional[int]   = None   # led
+    g:           Optional[int]   = None   # led
+    b:           Optional[int]   = None   # led
+    result:      Optional[str]   = None   # task_end
+    success:     Optional[bool]  = None   # read_mosaic
 
     # -- forward-compatible extras -------------------------------------------
     fields: dict = field(default_factory=dict)
+
+
+@dataclass
+class MosaicTrace:
+    """The top-level ``mosaic`` echo block from a ``--mosaic``-injected dump.
+
+    A sibling of the ``commands`` stream (not an op) — see the ``Trace
+    additions`` section of the CTPS randomized-vision plan. Present only when
+    ``ctps_dump`` was run with ``--mosaic``; absent for an old trace or a dump
+    run without the flag (``Trace.mosaic`` is ``None`` in that case, with no
+    warning).
+
+    :param cells: Exactly 12 color-name strings, cell-index order
+        (``i = row*cols + col``). Not validated against the color palette
+        here — the loader is tolerant; a bad name is a rendering concern, not
+        a load-time error.
+    :param seed: The seed used to roll the mosaic, if one was echoed
+        (``--mosaic-seed`` was passed to the dump). ``None`` when absent —
+        this is a normal, unwarned case (the dump omits the key when no seed
+        was resolved).
+    :param geom_hash: Geometry fingerprint string echoed by the dump, for the
+        player's "geometry changed since this trace was recorded" guard.
+    :param injected: Always ``True`` for a block that reached this dataclass
+        (the dump only echoes ``mosaic`` when injection occurred).
+    """
+
+    cells: list[str]
+    geom_hash: str
+    injected: bool
+    seed: Optional[int] = None
 
 
 @dataclass
@@ -184,6 +266,9 @@ class Trace:
         (e.g. an unknown task name).  The command list may be partial.
     :param commands: Ordered list of parsed :class:`Command` objects.
         Unknown ops and unknown ``drive.method`` values are excluded.
+    :param mosaic: The top-level ``mosaic`` echo block, or ``None`` when
+        absent (no ``--mosaic`` on the dump) or malformed (skipped with a
+        :class:`UserWarning` — never fatal).
     """
 
     schema_version: int
@@ -191,6 +276,7 @@ class Trace:
     start_heading_deg: float
     build_error: bool
     commands: list[Command]
+    mosaic: Optional[MosaicTrace] = None
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +334,10 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "target", "arrival", "route", "ms", "text", "name", "args_hex",
         "method", "arg", "cm", "deg",
         "mode", "heading", "reverse",
+        "power", "preset", "start_speed", "end_speed", "profiled", "brake",
+        "node",
         "freq_hz", "r", "g", "b", "result",
+        "success",
     }
     extra_fields: dict = {k: v for k, v in raw.items() if k not in named_keys}
 
@@ -340,7 +429,256 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                 )
                 cmd.reverse = False
 
+        # power: accept only a real int (not a bool — `bool` subclasses `int`,
+        # so a stray `true`/`false` in this slot must NOT silently become
+        # 1/0). A non-int-or-bool-int value warns and is treated as unset.
+        # Absent → leave None.
+        if "power" in raw:
+            raw_power = raw["power"]
+            if isinstance(raw_power, int) and not isinstance(raw_power, bool):
+                cmd.power = raw_power
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.power "
+                    f"{raw_power!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.power = None
+
+        # preset: must be a string AND in the known set. Type-check that it is
+        # a string BEFORE the set-membership test so a non-string (e.g. a
+        # list) warns rather than raising. An invalid preset is treated as
+        # unset — the resolver defaults to NORMAL.
+        if "preset" in raw:
+            raw_preset = raw["preset"]
+            if isinstance(raw_preset, str) and raw_preset in _KNOWN_DRIVE_PRESETS:
+                cmd.preset = raw_preset
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: malformed drive.preset {raw_preset!r} at "
+                    f"seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.preset = None
+
+        # start_speed: accept only a real int (bool excluded — see `power`).
+        # Absent → leave None.
+        if "start_speed" in raw:
+            raw_start_speed = raw["start_speed"]
+            if isinstance(raw_start_speed, int) and not isinstance(raw_start_speed, bool):
+                cmd.start_speed = raw_start_speed
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.start_speed "
+                    f"{raw_start_speed!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.start_speed = None
+
+        # end_speed: accept only a real int (bool excluded — see `power`).
+        # Absent → leave None.
+        if "end_speed" in raw:
+            raw_end_speed = raw["end_speed"]
+            if isinstance(raw_end_speed, int) and not isinstance(raw_end_speed, bool):
+                cmd.end_speed = raw_end_speed
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.end_speed "
+                    f"{raw_end_speed!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.end_speed = None
+
+        # cm / deg: accept only a real int/float (bool excluded — see `heading`).
+        # `bool` subclasses `int`, so a JSON `true`/`false` in this slot would
+        # otherwise coerce to 1.0/0.0 and drive a phantom distance (`cm`) or a
+        # spurious 1° turn (`deg`). A non-numeric value warns and is dropped to
+        # None so a malformed field warns-and-skips downstream (the `cm`/`deg`
+        # None guards in track_builder) instead of silently moving. Absent → the
+        # constructor already left it None.
+        if "cm" in raw:
+            raw_cm = raw["cm"]
+            if isinstance(raw_cm, (int, float)) and not isinstance(raw_cm, bool):
+                cmd.cm = raw_cm
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.cm {raw_cm!r} at "
+                    f"seq={seq} — dropped.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.cm = None
+
+        if "deg" in raw:
+            raw_deg = raw["deg"]
+            if isinstance(raw_deg, (int, float)) and not isinstance(raw_deg, bool):
+                cmd.deg = raw_deg
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.deg {raw_deg!r} at "
+                    f"seq={seq} — dropped.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.deg = None
+
+        # profiled: accept ONLY a JSON boolean (mirrors the `reverse` guard —
+        # never bool(raw.get(...)), a truthy non-bool must not silently
+        # coerce). Any non-bool value warns and is treated as unset (the
+        # builder default: tShape on for driveDist). Absent → leave None.
+        if "profiled" in raw:
+            raw_profiled = raw["profiled"]
+            if isinstance(raw_profiled, bool):
+                cmd.profiled = raw_profiled
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-boolean drive.profiled "
+                    f"{raw_profiled!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.profiled = None
+
+        # brake: accept ONLY a JSON boolean (mirrors `reverse`/`profiled`).
+        # Any non-bool value warns and is treated as unset (the resolver
+        # default: brake=True). Absent → leave None.
+        if "brake" in raw:
+            raw_brake = raw["brake"]
+            if isinstance(raw_brake, bool):
+                cmd.brake = raw_brake
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-boolean drive.brake "
+                    f"{raw_brake!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.brake = None
+
+    # ----- declare_position: validate node -----------------------------------
+    if op == "declare_position":
+        raw_node = raw.get("node")
+        if isinstance(raw_node, str) and raw_node:
+            cmd.node = raw_node
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed declare_position.node "
+                f"{raw_node!r} at seq={seq} — skipped.",
+                UserWarning,
+                stacklevel=4,
+            )
+            # A declare_position with no valid node name carries no usable
+            # payload for track_builder (nothing to declare) — drop it
+            # entirely, mirroring the unknown-drive-method skip above.
+            return None
+
+    # ----- read_mosaic: validate success --------------------------------------
+    if op == "read_mosaic":
+        # "op" is the sole discriminator; "success" is only ever a payload
+        # bool. Accept ONLY a JSON boolean (mirrors the drive `reverse` /
+        # `profiled` / `brake` guards — never bool(raw.get(...)), since a
+        # stray non-bool must not silently coerce to True/False).
+        raw_success = raw.get("success")
+        if isinstance(raw_success, bool):
+            cmd.success = raw_success
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed read_mosaic.success "
+                f"{raw_success!r} at seq={seq} — treated as unset.",
+                UserWarning,
+                stacklevel=4,
+            )
+            cmd.success = None
+
     return cmd
+
+
+def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
+    """Convert the raw top-level ``mosaic`` value to a :class:`MosaicTrace`.
+
+    Tolerant like the rest of this loader: an absent block is normal (no
+    warning, returns ``None``); a present-but-malformed block skips with a
+    :class:`UserWarning` and also returns ``None``. Never raises.
+
+    :param raw: The value at the top-level ``"mosaic"`` key (``None`` if the
+        key was absent from the trace JSON).
+    :return: A :class:`MosaicTrace`, or ``None`` if absent/malformed.
+    """
+    if raw is None:
+        # No `--mosaic` on the dump (or an old trace) — normal, no warning.
+        return None
+
+    if not isinstance(raw, dict):
+        warnings.warn(
+            f"ctps.trace_loader: top-level 'mosaic' is not a dict "
+            f"(got {type(raw).__name__!r}) — skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_cells = raw.get("cells")
+    if (
+        not isinstance(raw_cells, list)
+        or len(raw_cells) != 12
+        or not all(isinstance(c, str) for c in raw_cells)
+    ):
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.cells' {raw_cells!r} "
+            f"(expected a list of 12 color-name strings) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_geom_hash = raw.get("geom_hash")
+    if not isinstance(raw_geom_hash, str) or not raw_geom_hash:
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.geom_hash' {raw_geom_hash!r} "
+            f"(expected a non-empty string) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_injected = raw.get("injected")
+    if not isinstance(raw_injected, bool):
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.injected' {raw_injected!r} "
+            f"(expected a bool) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    # seed is OPTIONAL — absent is normal (no --mosaic-seed on the dump), not
+    # a warning. Present-but-wrong-type is malformed and skips the whole
+    # block, consistent with every other field here. A JSON bool must be
+    # rejected explicitly since `bool` subclasses `int`.
+    seed: Optional[int] = None
+    if "seed" in raw:
+        raw_seed = raw["seed"]
+        if isinstance(raw_seed, int) and not isinstance(raw_seed, bool):
+            seed = raw_seed
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed 'mosaic.seed' {raw_seed!r} "
+                f"(expected an int or absent) — 'mosaic' block skipped.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return None
+
+    return MosaicTrace(
+        cells=list(raw_cells),
+        geom_hash=raw_geom_hash,
+        injected=raw_injected,
+        seed=seed,
+    )
 
 
 def _parse_dict(data: object) -> Trace:
@@ -387,12 +725,15 @@ def _parse_dict(data: object) -> Trace:
         if parsed is not None:
             commands.append(parsed)
 
+    mosaic = _parse_mosaic(data.get("mosaic"))
+
     return Trace(
         schema_version=version,
         start_node=start_node,
         start_heading_deg=start_heading_deg,
         build_error=build_error,
         commands=commands,
+        mosaic=mosaic,
     )
 
 

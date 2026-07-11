@@ -165,21 +165,27 @@
     }
 
     /**
-     * Rebuild branch (backward seek): replay from the start through `idx` so
-     * scrollback remains complete at every cursor position.
+     * Rebuild branch (backward seek): reconcile the existing line list down to
+     * `idx`, keeping full scrollback complete at every cursor position. Trims the
+     * surplus off the END rather than wiping and replaying the whole prefix, so a
+     * backward scrub over a long mission is O(lines removed), not O(prefix) per
+     * frame (which janked/froze the UI on hundreds of events).
      */
     function rebuildLogWindow(store, container, idx) {
         if (!container) {
             return;
         }
-        container.textContent = "";
-        logLineEls = [];
-        if (idx < 0) {
-            return;
+        var target = (idx < 0) ? 0 : idx + 1; // number of lines that should show
+        while (logLineEls.length > target) {
+            var removed = logLineEls.pop();
+            if (removed && removed.parentNode) {
+                removed.parentNode.removeChild(removed);
+            }
         }
+        // Backfill any missing tail so the window always covers 0..idx (defensive;
+        // forward crossings normally flow through `appendLogLines`).
         var events = CTPS.engine.events;
-        var start = 0;
-        for (var i = start; i <= idx; i++) {
+        for (var i = logLineEls.length; i < target; i++) {
             var el = makeLogLineEl(store, events[i]);
             container.appendChild(el);
             logLineEls.push(el);
@@ -269,28 +275,27 @@
     // ----- 3. Cargo tab-switching shell (#57 seam) --------------------------
 
     /**
-     * Toggle `.ctps-cargo-tab--active` on the two cargo tab buttons and
-     * `hidden` on the two `.ctps-cargo-panel` divs for `state.activeCargoTab`
-     * — the same active-class/hidden-attribute mechanic as
-     * `setTabActive`/`applyActiveTab` above, kept as its own function (rather
-     * than folded into that pair) because the cargo panel is its own rail
-     * section, not a `panelTabs` registrant. Content inside the panels is
-     * cargo.js's; this only decides which one is on screen.
+     * Toggle `.ctps-cargo-tab--active` on every cargo tab button and `hidden`
+     * on every `.ctps-cargo-panel` div for `state.activeCargoTab` — the same
+     * active-class/hidden-attribute mechanic as `setTabActive`/`applyActiveTab`
+     * above, kept as its own function (rather than folded into that pair)
+     * because the cargo panel is its own rail section, not a `panelTabs`
+     * registrant. Queries the tabs/panels generically off `data-cargo-tab` /
+     * `data-cargo-panel` so the ADR-060 Vision-read tab (a third
+     * magazine/inventory sibling) is handled with no hardcoded tab list.
+     * Content inside the panels is cargo.js's (and vision.js's); this only
+     * decides which one is on screen.
      */
     function renderHoldingShell(dom, state) {
         var activeTab = (state && state.activeCargoTab) || "magazine";
-        var isMagazine = (activeTab === "magazine");
-        if (dom.cargoTabMagazine) {
-            dom.cargoTabMagazine.classList.toggle("ctps-cargo-tab--active", isMagazine);
+        var tabs = document.querySelectorAll(".ctps-cargo-tab[data-cargo-tab]");
+        for (var i = 0; i < tabs.length; i++) {
+            tabs[i].classList.toggle("ctps-cargo-tab--active",
+                tabs[i].getAttribute("data-cargo-tab") === activeTab);
         }
-        if (dom.cargoTabInventory) {
-            dom.cargoTabInventory.classList.toggle("ctps-cargo-tab--active", !isMagazine);
-        }
-        if (dom.cargoPanelMagazine) {
-            dom.cargoPanelMagazine.hidden = !isMagazine;
-        }
-        if (dom.cargoPanelInventory) {
-            dom.cargoPanelInventory.hidden = isMagazine;
+        var panels = document.querySelectorAll(".ctps-cargo-panel[data-cargo-panel]");
+        for (var j = 0; j < panels.length; j++) {
+            panels[j].hidden = panels[j].getAttribute("data-cargo-panel") !== activeTab;
         }
     }
 
@@ -347,10 +352,9 @@
             inspector: document.getElementById("ctps-inspector"),
             tabLog: document.getElementById("ctps-tab-log"),
             tabInspector: document.getElementById("ctps-tab-inspector"),
-            cargoTabMagazine: document.getElementById("ctps-cargo-tab-magazine"),
-            cargoTabInventory: document.getElementById("ctps-cargo-tab-inventory"),
-            cargoPanelMagazine: document.getElementById("ctps-cargo-panel-magazine"),
-            cargoPanelInventory: document.getElementById("ctps-cargo-panel-inventory"),
+            // The cargo tab buttons + panels are toggled generically by
+            // `renderHoldingShell` off `data-cargo-tab` / `data-cargo-panel`
+            // (so the ADR-060 Vision-read tab needs no entry here).
         };
     }
 

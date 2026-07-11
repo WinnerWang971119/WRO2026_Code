@@ -202,15 +202,20 @@
         {
             // Fresh-start helper: best-effort close of any prior CTPS player
             // server on port 8770 so the next serve task always relaunches.
+            // Uses the --stop-player CLI flag (not an inline `python -c`
+            // string): a quote/comma/paren-free argv survives VS Code's
+            // Windows shell-task quoting on every shell.
             "label": "CTPS: stop player server",
             "type": "shell",
             "command": "uv",
             "args": [
                 "run",
                 "python",
-                "-c",
-                "from tools.path_planner.ctps.edit_server import _request_close; "
-                "_request_close('127.0.0.1', 8770)"
+                "-m",
+                "tools.path_planner.ctps",
+                "--stop-player",
+                "--port",
+                "8770"
             ],
             "presentation": {
                 "reveal": "silent",

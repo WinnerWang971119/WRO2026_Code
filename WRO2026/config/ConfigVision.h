@@ -110,7 +110,8 @@ namespace Config
         YELLOW,
         BLUE,
         GREEN,
-        WHITE
+        WHITE,
+        RED
     };
 #pragma pop_macro("WHITE")
 
@@ -147,6 +148,10 @@ namespace Config
      * @note Device-side achromatic White (hue 240..245) is handled before this table is
      *       consulted, so `WHITE` does NOT need a band entry here.
      */
+    // @note `Color::RED` is a valid classification target but has NO band yet:
+    //       its hue wraps across the 0/239 seam, so its bounds must be measured
+    //       on the real tiles at bench T8. Until then a red reading falls in no
+    //       band and classifies as `Color::UNKNOWN` (same as any other gap).
     constexpr HueBand HUE_BANDS[] = {
         {  20,  45, Color::YELLOW },   // placeholder — calibrate at T8
         {  80, 140, Color::GREEN  },   // placeholder — calibrate at T8

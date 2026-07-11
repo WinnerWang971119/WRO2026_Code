@@ -73,6 +73,20 @@ Also covers the object/cargo plan's emitter leg (T4 — issue #57):
   ``PLAYER_META.render_mode`` stays driven by ``pivots`` alone
   (``"wheel-arc"``), and the lint doesn't trip — pivots and objects don't
   interfere.
+
+Also covers the CTPS timeline zoom + pan plan's emitter leg (T6):
+
+* **TC1** — the new timeline dock markup (toolbar, scroll viewport/content,
+  custom scrollbar thumb, zoom widget) renders with the exact ids/classes
+  pinned by the DOM contract, alongside the still-present
+  ``class="ctps-timeline"`` dock (AC14).
+* **TC3** — ``#ctps-ruler``, ``#ctps-lanes``, ``#ctps-playhead`` are
+  preserved (moved inside the new scroll wrapper, never removed).
+* **TC5** — the contract markers ``--ctps-content-w``/``--ctps-tl-thumb-w``
+  (in both ``components.css`` and ``timeline_view.js``),
+  ``CTPS.timelineView`` (in ``timeline_view.js``), and ``rebuildRuler`` (in
+  both ``timeline.js`` and ``timeline_view.js``) are pinned by reading the
+  on-disk asset sources directly.
 """
 
 from __future__ import annotations
@@ -85,6 +99,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.path_planner.ctps import mosaic as mosaic_module
 from tools.path_planner.ctps import player_html as player_html_module
 from tools.path_planner.ctps.layout import LayoutError
 from tools.path_planner.ctps.player_html import (
@@ -171,6 +186,128 @@ def _extract_embedded_objects(html: str) -> "dict | None":
     return json.loads(raw_json)
 
 
+#: Captures the JSON document assigned to ``const MOSAIC_META`` in the emitted
+#: page (randomized-vision plan, T10/T21 -- ADR-060). Own ``<script>`` (same
+#: non-greedy-to-``</script>`` shape as the sibling regexes above); only
+#: emitted alongside a renderable mosaic, so a mosaic-free render has no match
+#: (TC18/AC12).
+_MOSAIC_META_RE = re.compile(r"const MOSAIC_META = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+#: Captures the JSON document assigned to ``const MOSAIC`` in the emitted page.
+#: Deliberately does NOT match ``MOSAIC_META`` (the literal ``const MOSAIC =``
+#: — note the trailing space before ``=`` — never matches
+#: ``const MOSAIC_META =``, whose ``_META`` sits directly against ``MOSAIC``
+#: with no space).
+_MOSAIC_RE = re.compile(r"const MOSAIC = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+
+def _extract_mosaic_meta(html: str) -> "dict | None":
+    """Pull the embedded ``const MOSAIC_META = {...}`` dict out of the page.
+
+    Mirrors :func:`_extract_embedded_objects`: returns ``None`` (rather than
+    asserting) when absent -- the expected shape for a mosaic-free render
+    (TC18/AC12).
+    """
+    match = _MOSAIC_META_RE.search(html)
+    if match is None:
+        return None
+    raw_json = match.group("json").replace("<\\/", "</")
+    return json.loads(raw_json)
+
+
+def _extract_mosaic(html: str) -> "dict | None":
+    """Pull the embedded ``const MOSAIC = {...}`` dict out of the page.
+
+    Mirrors :func:`_extract_embedded_objects`: returns ``None`` (rather than
+    asserting) when absent -- the expected shape for a mosaic-free render
+    (TC18/AC12).
+    """
+    match = _MOSAIC_RE.search(html)
+    if match is None:
+        return None
+    raw_json = match.group("json").replace("<\\/", "</")
+    return json.loads(raw_json)
+
+
+#: A fixed, pinned 12-cell mosaic roll (directed-mode order) used across the
+#: TC17/TC19 fixtures below so the resolved world positions + colours are
+#: stable and hand-verifiable.
+_PINNED_MOSAIC_CELLS = [
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+]
+
+
+def _mosaic_geometry_block() -> dict:
+    """Return a fresh, schema-valid ``mosaic`` GEOMETRY block (directed mode).
+
+    Directed mode with every cell pinned to :data:`_PINNED_MOSAIC_CELLS` --
+    matches the trace roll fixture below cell-for-cell, so TC17's "geometry x
+    trace colours" resolve is trivially self-consistent (and TC19's grid-
+    outline case reuses the identical geometry with no trace roll).
+    """
+    return {
+        "mode": "directed",
+        "center_x_cm": 50.0,
+        "center_y_cm": 30.0,
+        "heading_deg": 0.0,
+        "rows": 4,
+        "cols": 3,
+        "cell_w_cm": 5.0,
+        "cell_h_cm": 5.0,
+        "row_gap_cm": 1.0,
+        "col_gap_cm": 1.0,
+        "palette": ["YELLOW", "BLUE", "GREEN", "WHITE"],
+        "cells": list(_PINNED_MOSAIC_CELLS),
+        "counts": {},
+        "seed": None,
+    }
+
+
+def _layout_with_mosaic_and_vision() -> dict:
+    """Return a fresh, schema-valid layout dict carrying a mosaic + vision cone.
+
+    Built on :func:`_valid_layout_dict` (same field-objects/robot shape every
+    other player test uses) plus the top-level ``mosaic`` geometry
+    (:func:`_mosaic_geometry_block`) and a ``robot.vision`` forward cone --
+    the two ADR-060 blocks :func:`render` reads to resolve/embed
+    ``MOSAIC_META`` + ``const MOSAIC`` and the cone.
+    """
+    layout = _valid_layout_dict()
+    layout["mosaic"] = _mosaic_geometry_block()
+    layout["robot"]["vision"] = {
+        "origin_x_cm": 12.0,
+        "origin_y_cm": 0.0,
+        "half_angle_deg": 25.0,
+        "range_cm": 60.0,
+    }
+    return layout
+
+
+def _seeded_mosaic_trace_dict() -> dict:
+    """Return a hand-built LRS-shaped track dict carrying a pinned mosaic roll.
+
+    Mirrors TC6's source-agnostic pattern (poses + events only, no command
+    stream) but adds the trace-carried top-level ``mosaic`` echo block (Data
+    Model -- "Trace additions"): a fixed seed, the SAME 12 pinned colours as
+    :func:`_mosaic_geometry_block`'s cells (so the resolved world cells carry
+    exactly those colours), and a ``geom_hash`` computed from the SAME
+    geometry so ``geom_match`` comes back ``True``.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    geom = mosaic_module.MosaicConfig.from_dict(_mosaic_geometry_block())
+    track_dict["mosaic"] = {
+        "cells": list(_PINNED_MOSAIC_CELLS),
+        "seed": 12345,
+        "geom_hash": mosaic_module.geom_hash(geom),
+        "injected": True,
+    }
+    return track_dict
+
+
 def _valid_layout_dict() -> dict:
     """Return a fresh, schema-valid ``layout.json`` dict (schema_version 1).
 
@@ -210,6 +347,10 @@ def _valid_layout_dict() -> dict:
 #: The exact TC9 literal (player_html.py's Contracts -> Emitter): both P-TC5
 #: and P-TC6 assert PLAYER_META equals this verbatim, proving the object/
 #: cargo feature never perturbs it either with or without a layout.
+#: NOTE (issue #130): the "drift" entry is the lane ID, not its display
+#: label — the dock label was relabelled to "LOCALIZATION" in timeline.js,
+#: but the id (and therefore this manifest) is unchanged by design, so the
+#: literal stays as-is.
 _EXPECTED_TC9_META = {
     "source": "PREDICTED",
     "filename": "",
@@ -402,7 +543,9 @@ def test_tc_meta_embedded_and_round_trips(tmp_path):
     into the TRACK assignment — T2's Contracts -> Emitter), parses via
     :func:`json.loads` to a dict, and carries the source badge, trace
     filename, the lane manifest
-    (``task``/``goto``/``magazine``/``rearbox``/``drift``, in dock order), the
+    (``task``/``goto``/``magazine``/``rearbox``/``drift``, in dock order —
+    the ``drift`` entry is the lane ID; its dock LABEL is "LOCALIZATION" as
+    of issue #130, but the id/manifest is unchanged by design), the
     tab manifest (``log``/``inspector``), and the default
     render mode (``"box"``) — while TRACK still round-trips unchanged
     alongside it.
@@ -490,6 +633,8 @@ def test_tc9_render_mode_is_box_and_meta_is_expected_literal_when_pivot_free(
 
     assert "pivots" not in embedded
 
+    # "drift" is the lane ID (unchanged, issue #130); its dock LABEL is
+    # relabelled to "LOCALIZATION" in timeline.js — see test_tl_localization_*.
     expected_meta = {
         "source": "PREDICTED",
         "filename": "",
@@ -612,6 +757,95 @@ def test_tc_struct_container_classes_and_rail_ids_present(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# TC1 / TC3 / TC5 (CTPS Timeline Zoom + Pan plan) — new dock markup, preserved
+# ids, and asset contract markers
+# ---------------------------------------------------------------------------
+
+
+def test_tl_tc1_zoom_pan_timeline_markup_present(tmp_path):
+    """TC1: the timeline zoom/pan restructuring's new markup renders.
+
+    Key assertion: the zoom toolbar, the scroll viewport + content wrapper,
+    the custom scrollbar thumb, and the zoom widget (buttons/slider/readout)
+    are all present as the DOM contract's exact ids/classes, and the dock
+    itself is still the pinned ``class="ctps-timeline"`` container.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "tl_markup.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    for marker in (
+        'id="ctps-tl-viewport"',
+        'id="ctps-tl-content"',
+        'id="ctps-tl-thumb"',
+        'id="ctps-zoom"',
+        'id="ctps-zoom-in"',
+        'id="ctps-zoom-out"',
+        'id="ctps-zoom-fit"',
+        'id="ctps-zoom-level"',
+        'class="ctps-tl-toolbar"',
+        'class="ctps-tl-scroll"',
+        'class="ctps-timeline"',
+    ):
+        assert marker in html, f"missing timeline dock marker: {marker}"
+
+
+def test_tl_tc3_preserved_ruler_lanes_playhead_ids_present(tmp_path):
+    """TC3: the pre-existing ruler/lanes/playhead ids are preserved, not removed.
+
+    Key assertion: ``#ctps-ruler``, ``#ctps-lanes``, ``#ctps-playhead`` still
+    appear verbatim in the rendered page — the restructuring moves them
+    inside the new ``#ctps-tl-content`` scroll wrapper but keeps their ids so
+    ``timeline.js`` still finds and fills them.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "tl_preserved_ids.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert 'id="ctps-ruler"' in html
+    assert 'id="ctps-lanes"' in html
+    assert 'id="ctps-playhead"' in html
+
+
+def test_tl_tc5_contract_markers_present_in_assets():
+    """TC5: the zoom/pan contract markers are pinned at their asset SOURCES.
+
+    Key assertion: reads the on-disk asset files directly (via
+    :data:`player_html_module._ASSETS_DIR`), not the inlined page, so the
+    test pins the contract at its origin rather than merely re-checking the
+    inlining covered by TC-ASSETS. ``--ctps-content-w`` and
+    ``--ctps-tl-thumb-w`` each appear in both ``components.css`` and
+    ``timeline_view.js``; ``CTPS.timelineView`` is assigned in
+    ``timeline_view.js``; and ``rebuildRuler`` is defined in ``timeline.js``
+    and referenced from ``timeline_view.js`` (the T3/T4 seam in the
+    Contracts section).
+    """
+    components_css = (player_html_module._ASSETS_DIR / "components.css").read_text(
+        encoding="utf-8"
+    )
+    timeline_view_js = (
+        player_html_module._ASSETS_DIR / "timeline_view.js"
+    ).read_text(encoding="utf-8")
+    timeline_js = (player_html_module._ASSETS_DIR / "timeline.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "--ctps-content-w" in components_css
+    assert "--ctps-content-w" in timeline_view_js
+    assert "--ctps-tl-thumb-w" in components_css
+    assert "--ctps-tl-thumb-w" in timeline_view_js
+    assert "CTPS.timelineView" in timeline_view_js
+    assert "rebuildRuler" in timeline_js
+    assert "rebuildRuler" in timeline_view_js
+
+
+# ---------------------------------------------------------------------------
 # TC-ASSETS — every _ASSET_JS / _ASSET_CSS file exists and is inlined
 # ---------------------------------------------------------------------------
 
@@ -710,6 +944,93 @@ def test_tc_gotoend_timeline_lane_reads_spans():
 
     assert "t_end" in js
     assert "UNREACHABLE" in js
+
+
+# ---------------------------------------------------------------------------
+# TC-LOCALIZATION — drift lane relabelled to LOCALIZATION; renders all three
+# localization-lane event types (issue #130, Contracts "Localization-lane
+# event types" seam: track_builder/T11 emits, timeline.js/T12 renders)
+# ---------------------------------------------------------------------------
+
+
+def test_tc_localization_lane_id_kept_drift_label_relabelled():
+    """TC-LOCALIZATION: the lane id stays `drift`; only the dock label changes.
+
+    Key assertion (text heuristic): ``timeline.js`` still registers the lane
+    under ``id: "drift"`` (PLAYER_META's manifest and the DOM class
+    ``ctps-lane--drift``/``ctps-lane-label--drift`` depend on the id staying
+    put) but its ``label`` is now the literal ``"LOCALIZATION"`` — matching
+    the existing dock's uppercase casing (TASK/GOTO/MAGAZINE/REAR BOX).
+    """
+    js = (PLAYER_JS_PATH.parent / "timeline.js").read_text(encoding="utf-8")
+
+    assert re.search(r'id:\s*"drift"', js)
+    assert re.search(r'label:\s*"LOCALIZATION"', js)
+    # The old "DRIFT" dock label is gone (not just co-present).
+    assert not re.search(r'label:\s*"DRIFT"', js)
+
+
+def test_tc_localization_lane_builder_handles_all_three_event_types():
+    """TC-LOCALIZATION: buildDriftLane renders drift_warn + the two new types.
+
+    Key assertion (text heuristic): ``timeline.js``'s lane builder still
+    branches on ``drift_warn`` (unchanged rendering — a pin + a span) and now
+    also branches on ``return_to_node`` and ``declare_position``, each
+    emitting a distinctly-classed pin (``ctps-pin--return`` /
+    ``ctps-pin--declare``) per the Contracts event-type seam T11 emits into.
+    """
+    js = (PLAYER_JS_PATH.parent / "timeline.js").read_text(encoding="utf-8")
+
+    assert '"drift_warn"' in js
+    assert '"return_to_node"' in js
+    assert '"declare_position"' in js
+    assert "ctps-pin--drift" in js
+    assert "ctps-pin--return" in js
+    assert "ctps-pin--declare" in js
+
+
+def test_tc_localization_lane_marker_classes_styled_in_css():
+    """TC-LOCALIZATION: the two new marker classes get their own CSS look.
+
+    Key assertion: ``components.css`` defines a rule for each of
+    ``ctps-pin--return`` and ``ctps-pin--declare`` (distinct visual classes,
+    alongside the pre-existing ``ctps-pin--drift``) so the three localization
+    marker types are visually distinguishable on the timeline.
+    """
+    css = (PLAYER_JS_PATH.parent / "components.css").read_text(encoding="utf-8")
+
+    assert ".ctps-pin--drift" in css
+    assert ".ctps-pin--return" in css
+    assert ".ctps-pin--declare" in css
+
+
+def test_tc_localization_lane_renders_return_and_declare_markers(tmp_path):
+    """TC-LOCALIZATION (integration): a track with the new events renders both.
+
+    Key assertion: a hand-built LRS-shaped track dict (source-agnostic, mirrors
+    TC6) carrying one ``return_to_node`` and one ``declare_position`` event
+    round-trips those events unchanged through the embedded ``const TRACK``,
+    and the page still inlines ``timeline.js`` with both new marker classes —
+    proving the render path never drops or chokes on the new event types.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    track_dict["events"] = list(track_dict["events"]) + [
+        {"t": 5.0, "type": "return_to_node", "label": "return to D"},
+        {"t": 6.5, "type": "declare_position", "label": "declared at E"},
+    ]
+
+    out_path = tmp_path / "localization_events.html"
+    render(track_dict, out_path)  # must not raise
+    html = out_path.read_text(encoding="utf-8")
+
+    embedded = _extract_embedded_track(html)
+    assert {"t": 5.0, "type": "return_to_node", "label": "return to D"} in embedded["events"]
+    assert {"t": 6.5, "type": "declare_position", "label": "declared at E"} in embedded["events"]
+
+    assert "ctps-pin--return" in html
+    assert "ctps-pin--declare" in html
 
 
 # ---------------------------------------------------------------------------
@@ -1036,3 +1357,265 @@ def test_tc_cargo_struct_panel_chips_and_upload_markup_present(tmp_path):
     assert "ctps-panel--holding" not in html
     assert 'id="ctps-hold-count"' not in html
     assert 'id="ctps-hold-list"' not in html
+
+
+# ---------------------------------------------------------------------------
+# DEPLOY chip + layer markup/JS-presence assertions (manip-area deploy toggle
+# plan, T5 — AC1, AC2, AC6, AC7)
+# ---------------------------------------------------------------------------
+
+
+def test_deploy_chip_and_layer_present(tmp_path):
+    """The DEPLOY chip, store default, and inlined draw/layer JS are present.
+
+    Covers TC1-TC3 of the manip-area deploy toggle plan: the chip markup
+    (``data-layer="deploy"``, ``>DEPLOY<``, ``id="ctps-layer-deploy"``) is
+    default-OFF (class exactly ``ctps-chip``, never ``ctps-chip--active``);
+    ``store.layers`` defaults ``deploy: false``; and the inlined JS carries
+    both the masked draw function (``drawDeployedZones``) and the ``deploy``
+    layer registration (``id: "deploy"``).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "deploy_chip.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # Chip markup present.
+    assert 'data-layer="deploy"' in html
+    assert ">DEPLOY<" in html
+    assert 'id="ctps-layer-deploy"' in html
+
+    # Chip is default-OFF: class exactly "ctps-chip", never "--active".
+    assert 'id="ctps-layer-deploy" class="ctps-chip"' in html
+    assert 'id="ctps-layer-deploy" class="ctps-chip ctps-chip--active"' not in html
+
+    # Store default.
+    assert "deploy: false" in html
+
+    # Inlined JS: the masked draw fn and the layer registration.
+    assert "drawDeployedZones" in html
+    assert 'id: "deploy"' in html
+
+
+# ---------------------------------------------------------------------------
+# TC17 — player, seeded mosaic + cone: MOSAIC_META/MOSAIC/#ctps-vision regions
+# (randomized-vision plan, T21 -- ADR-060, AC10/AC12)
+# ---------------------------------------------------------------------------
+
+#: The pinned :func:`resolve_cells` output for :func:`_mosaic_geometry_block`'s
+#: geometry x :data:`_PINNED_MOSAIC_CELLS` colours (hand-derived the same way
+#: as test_ctps_mosaic.py's TC5 -- center=(50,30), heading=0, rows=4/cols=3,
+#: cell=5x5cm, gaps=1/1cm; row 0 at +y "top", col 0 at -x "left").
+_TC17_EXPECTED_CELLS = [
+    {"index": 0, "x_cm": 44.0, "y_cm": 39.0, "color": "YELLOW"},
+    {"index": 1, "x_cm": 50.0, "y_cm": 39.0, "color": "BLUE"},
+    {"index": 2, "x_cm": 56.0, "y_cm": 39.0, "color": "GREEN"},
+    {"index": 3, "x_cm": 44.0, "y_cm": 33.0, "color": "WHITE"},
+    {"index": 4, "x_cm": 50.0, "y_cm": 33.0, "color": "YELLOW"},
+    {"index": 5, "x_cm": 56.0, "y_cm": 33.0, "color": "BLUE"},
+    {"index": 6, "x_cm": 44.0, "y_cm": 27.0, "color": "GREEN"},
+    {"index": 7, "x_cm": 50.0, "y_cm": 27.0, "color": "WHITE"},
+    {"index": 8, "x_cm": 56.0, "y_cm": 27.0, "color": "YELLOW"},
+    {"index": 9, "x_cm": 44.0, "y_cm": 21.0, "color": "BLUE"},
+    {"index": 10, "x_cm": 50.0, "y_cm": 21.0, "color": "GREEN"},
+    {"index": 11, "x_cm": 56.0, "y_cm": 21.0, "color": "WHITE"},
+]
+
+
+def test_tc17_player_seeded_mosaic_and_cone_regions_are_present_and_stable(tmp_path):
+    """TC17: a seeded mosaic + cone render stable MOSAIC_META/MOSAIC/#ctps-vision.
+
+    Key assertion: rendering a layout carrying a mosaic GEOMETRY block plus a
+    trace carrying a pinned roll (fixed seed, fixed 12-cell colours) resolves
+    ``const MOSAIC`` to the exact HAND-DERIVED world cells (positions +
+    colours, matching test_ctps_mosaic.py's TC5 derivation style),
+    ``geom_match`` true (the trace's geom_hash matches the layout's current
+    geometry), ``roll`` true, and the pinned ``seed``; ``MOSAIC_META`` carries
+    the single-sourced colour vocabulary; and the unconditional
+    ``#ctps-vision`` panel + its layer chips render alongside.
+    """
+    track_dict = _seeded_mosaic_trace_dict()
+    layout_dict = _layout_with_mosaic_and_vision()
+
+    out_path = tmp_path / "mosaic_seeded.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    # MOSAIC_META -- the single-sourced colour vocabulary (names + display hex).
+    meta = _extract_mosaic_meta(html)
+    assert meta is not None
+    assert meta["names"] == list(mosaic_module.COLOR_NAMES)
+    assert meta["hex"] == {
+        name: mosaic_module.COLOR_HEX[name] for name in mosaic_module.COLOR_NAMES
+    }
+
+    # const MOSAIC -- 12 resolved cells (position + colour), geom_match, roll,
+    # and the pinned seed, all stable across a re-render (seeded fixture).
+    mosaic_data = _extract_mosaic(html)
+    assert mosaic_data is not None
+    assert len(mosaic_data["cells"]) == 12
+    assert mosaic_data["cells"] == _TC17_EXPECTED_CELLS
+    assert mosaic_data["mode"] == "directed"
+    assert mosaic_data["geom_match"] is True
+    assert mosaic_data["roll"] is True
+    assert mosaic_data["seed"] == 12345
+
+    # #ctps-vision panel + its layer chips (unconditional markup, ADR-056).
+    assert 'id="ctps-vision"' in html
+    assert 'data-layer="vision-cone"' in html
+    assert 'data-layer="mosaic"' in html
+
+    # Re-rendering the SAME fixture is stable (a seeded golden, not a re-roll).
+    out_path_2 = tmp_path / "mosaic_seeded_2.html"
+    render(track_dict, out_path_2, objects=layout_dict)
+    html_2 = out_path_2.read_text(encoding="utf-8")
+    assert _extract_mosaic(html_2) == mosaic_data
+    assert _extract_mosaic_meta(html_2) == meta
+
+
+# ---------------------------------------------------------------------------
+# TC18 — player, mosaic-free (the AC12 guard): no MOSAIC_META/MOSAIC, TC9
+# PLAYER_META literal unchanged, existing suite green (randomized-vision plan,
+# T21 -- AC12)
+# ---------------------------------------------------------------------------
+
+
+def test_tc18_player_mosaic_free_emits_no_mosaic_data_and_meta_is_unchanged(tmp_path):
+    """TC18: a mosaic-free render emits no MOSAIC_META/MOSAIC; TC9 meta intact.
+
+    Key assertion (the AC12 guard): with no ``mosaic`` block anywhere (no
+    layout at all -- the plain TC9 fixture), the page has neither
+    ``const MOSAIC_META`` nor ``const MOSAIC``, and ``PLAYER_META`` equals the
+    exact frozen TC9 literal verbatim -- proving the new unconditional
+    vision.js/#ctps-vision additions never perturb the pre-existing contract.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    assert "pivots" not in track_dict  # fixture precondition: pivot-free
+    assert "mosaic" not in track_dict  # fixture precondition: roll-free
+
+    out_path = tmp_path / "mosaic_free.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # No `const MOSAIC_META =` / `const MOSAIC =` ASSIGNMENT anywhere -- note
+    # this deliberately does not assert the bare substring "MOSAIC_META" is
+    # absent, since vision.js's own doc comments reference the global by name
+    # (the asset itself ships unconditionally, ADR-056); only the DATA is
+    # conditional.
+    assert "const MOSAIC_META =" not in html
+    assert "const MOSAIC =" not in html
+    assert _extract_mosaic_meta(html) is None
+    assert _extract_mosaic(html) is None
+
+    meta = _extract_player_meta(html)
+    assert meta == _EXPECTED_TC9_META
+
+
+def test_tc18_player_mosaic_free_with_layout_but_no_mosaic_block_emits_no_data(tmp_path):
+    """TC18 (companion): a layout WITHOUT a mosaic block still emits no MOSAIC data.
+
+    Key assertion: ``objects`` truthy (the ordinary cargo layout fixture, no
+    ``mosaic`` key) still triggers no ``MOSAIC_META``/``MOSAIC`` -- the
+    resolve is gated on the layout's OWN ``mosaic`` geometry, never on
+    ``objects`` being present at all.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    layout_dict = _valid_layout_dict()
+    assert "mosaic" not in layout_dict
+
+    out_path = tmp_path / "mosaic_free_with_layout.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert _extract_mosaic_meta(html) is None
+    assert _extract_mosaic(html) is None
+    # The layout itself still embeds fine (the cargo path is unaffected).
+    assert _extract_embedded_objects(html) == layout_dict
+
+
+def test_tc18_vision_js_is_inlined_in_the_frozen_asset_pipeline(tmp_path):
+    """TC18: the generic asset-pipeline test naturally covers the new vision.js.
+
+    Key assertion (belt-and-suspenders on top of TC-ASSETS): ``vision.js`` is
+    a member of :data:`_ASSET_JS` (the unconditional-asset rule, ADR-056) and
+    its on-disk content is inlined verbatim into a MOSAIC-FREE render, proving
+    the asset ships even with no mosaic renderable.
+    """
+    vision_js_paths = [p for p in _ASSET_JS if p.name == "vision.js"]
+    assert len(vision_js_paths) == 1, "vision.js must be registered exactly once in _ASSET_JS"
+
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "vision_asset.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    vision_js = vision_js_paths[0].read_text(encoding="utf-8")
+    assert vision_js in html
+
+
+# ---------------------------------------------------------------------------
+# TC19 — player, mosaic geometry present but trace has NO roll: grid-outline
+# path (randomized-vision plan, T21 -- ADR-060, AC10)
+# ---------------------------------------------------------------------------
+
+
+def test_tc19_player_geometry_present_no_roll_renders_grid_outline(tmp_path):
+    """TC19: layout mosaic geometry + a roll-free trace renders the outline path.
+
+    Key assertion: with a layout carrying mosaic GEOMETRY but a track dict
+    with no top-level ``mosaic`` echo at all (an old trace, or a dump run
+    without ``--mosaic``), ``const MOSAIC`` still resolves (positions only, no
+    synthesized colour), ``roll`` is ``False``, ``geom_match`` is ``True`` (the
+    geometry IS the current layout), no ``seed`` key is carried, and the
+    ``#ctps-vision-badges`` slot markup is present for the client-rendered
+    "no roll recorded" badge (the badge TEXT itself is drawn by vision.js at
+    runtime, not baked into the static page -- see vision.js's
+    ``_renderBadges``).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    assert "mosaic" not in track_dict  # no roll recorded
+    layout_dict = _layout_with_mosaic_and_vision()
+
+    out_path = tmp_path / "mosaic_no_roll.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    mosaic_data = _extract_mosaic(html)
+    assert mosaic_data is not None
+    assert len(mosaic_data["cells"]) == 12
+    # Positions only -- no synthesized "color" key on any cell.
+    for cell in mosaic_data["cells"]:
+        assert "color" not in cell
+        assert isinstance(cell["x_cm"], float)
+        assert isinstance(cell["y_cm"], float)
+    assert mosaic_data["roll"] is False
+    assert mosaic_data["geom_match"] is True
+    assert "seed" not in mosaic_data
+
+    # MOSAIC_META still ships (the colour vocabulary is present whenever a
+    # mosaic is renderable at all, roll or not).
+    assert _extract_mosaic_meta(html) is not None
+
+    # The badge SLOT markup (client-rendered text) is present in the static
+    # page even though the "no roll recorded" text itself is JS-driven.
+    assert 'id="ctps-vision-badges"' in html
+    assert '"no roll recorded"' in (PLAYER_JS_PATH.parent / "vision.js").read_text(
+        encoding="utf-8"
+    )
+
+    # Box overlay is EVENT-driven (boxClose shows, boxOpen clears), NOT gated on
+    # the cargo model's captured-cargo `scene.rearBox` — so it reflects the rear
+    # box on any trace regardless of whether a Cargo object lay in the box zone.
+    assert "_tInAnyBoxSpan" in html
+    assert "windows.box" in html
+    assert "box: _tInAnyBoxSpan(t, windows.box)" in html

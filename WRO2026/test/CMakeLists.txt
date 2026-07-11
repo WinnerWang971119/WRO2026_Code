@@ -208,6 +208,7 @@ function(add_task_mock_force_includes target)
             "/FI${TASK_MOCKS_DIR}/PathTracker.h"
             "/FI${TASK_MOCKS_DIR}/LineFollower.h"
             "/FI${TASK_MOCKS_DIR}/Manipulator.h"
+            "/FI${TASK_MOCKS_DIR}/Vision.h"
         )
     else()
         # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
@@ -219,6 +220,7 @@ function(add_task_mock_force_includes target)
             "SHELL:-include ${TASK_MOCKS_DIR}/PathTracker.h"
             "SHELL:-include ${TASK_MOCKS_DIR}/LineFollower.h"
             "SHELL:-include ${TASK_MOCKS_DIR}/Manipulator.h"
+            "SHELL:-include ${TASK_MOCKS_DIR}/Vision.h"
         )
     endif()
 endfunction()
@@ -977,6 +979,16 @@ target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
 # recording mocks (`PathTracker.h` / `Localization.h`) pull in the production `routes.h`
 # directly.
 add_ctps_mock_force_includes(ctps_dump)
+# Vision.h is the ONE recording mock scoped to ctps_dump only (dormant CTPS vision plumbing,
+# ADR-049/060) — NOT added to the shared add_ctps_mock_force_includes (which conformance
+# also calls). This makes VISION_H defined in the dump build, materializing the guarded
+# `VisionClass Vision;` in ctps_record.cpp and shadowing the real Vision.h when Tasks.cpp
+# (a future vision mission) calls it.
+if(MSVC)
+    target_compile_options(ctps_dump PRIVATE "/FI${CTPS_MOCKS_DIR}/Vision.h")
+else()
+    target_compile_options(ctps_dump PRIVATE "SHELL:-include ${CTPS_MOCKS_DIR}/Vision.h")
+endif()
 # Pin the dump binary to the build-tree root so the Python orchestrator
 # (tools/path_planner/ctps) locates it under any generator. Single-config
 # generators (Make/Ninja) already place it there; the _DEBUG/_RELEASE variants
@@ -989,6 +1001,27 @@ set_target_properties(ctps_dump PROPERTIES
 add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
 set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
+
+# Exe-level argv ctests (TC12/TC13/TC16) — run the ctps_dump binary end-to-end now that
+# T6 has landed the mosaic argv. These complement the compiled test_ctps_dump target
+# (TC14/TC15). The mode word (--fixture) MUST come first — ctps_dump reads argv[1] as the mode.
+#
+# TC12 — mosaic echo: --mosaic injects and the top-level mosaic block is echoed. The
+# geom-hash value only appears inside the echoed mosaic block, so matching it proves the
+# echo emitted (spacing-independent).
+add_test(NAME ctps_dump_mosaic_echo
+         COMMAND ctps_dump --fixture --mosaic YBGWYBGWYBGW --mosaic-seed 7 --mosaic-geom-hash abc123)
+set_tests_properties(ctps_dump_mosaic_echo PROPERTIES
+    PASS_REGULAR_EXPRESSION "abc123")
+
+# TC13 — baseline: no --mosaic => no top-level mosaic block emitted (byte-identical to today).
+add_test(NAME ctps_dump_no_mosaic COMMAND ctps_dump --fixture)
+set_tests_properties(ctps_dump_no_mosaic PROPERTIES
+    FAIL_REGULAR_EXPRESSION "\"mosaic\":")
+
+# TC16 — malformed --mosaic exits non-zero (exit 2).
+add_test(NAME ctps_dump_bad_mosaic COMMAND ctps_dump --fixture --mosaic ZZZ)
+set_tests_properties(ctps_dump_bad_mosaic PROPERTIES WILL_FAIL TRUE)
 
 # =========================================================================================
 # CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
@@ -1023,6 +1056,29 @@ target_compile_definitions(test_ctps_mock_conformance PRIVATE CTPS_RECORD)
 add_fixture_routes_force_include(test_ctps_mock_conformance)   # FIRST — its ROUTES_H must win
 add_ctps_mock_force_includes(test_ctps_mock_conformance)
 add_test(NAME ctps_mock_conformance COMMAND test_ctps_mock_conformance)
+
+# T22 host test for the Vision mock + dump plumbing. Guarded on EXISTS so this CMakeLists
+# configures cleanly before T22 authors the source; it activates on the next reconfigure
+# once test_ctps_dump.cpp lands.
+if(EXISTS ${TEST_DIR}/test_ctps_dump.cpp)
+    add_executable(test_ctps_dump
+        ${TEST_DIR}/test_ctps_dump.cpp
+        ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+        ${CTPS_MOCKS_DIR}/ctps_record.cpp
+    )
+    target_include_directories(test_ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+    target_compile_definitions(test_ctps_dump PRIVATE CTPS_RECORD)
+    add_fixture_routes_force_include(test_ctps_dump)   # FIRST — its ROUTES_H must win
+    add_ctps_mock_force_includes(test_ctps_dump)
+    # plus the dump-only Vision.h force-include so VISION_H is defined here too (the mock is
+    # this target's subject-under-test and ctps_record.cpp's guarded `Vision` global needs it):
+    if(MSVC)
+        target_compile_options(test_ctps_dump PRIVATE "/FI${CTPS_MOCKS_DIR}/Vision.h")
+    else()
+        target_compile_options(test_ctps_dump PRIVATE "SHELL:-include ${CTPS_MOCKS_DIR}/Vision.h")
+    endif()
+    add_test(NAME ctps_dump_mock COMMAND test_ctps_dump)
+endif()
 
 # =========================================================================================
 # Test executable #10 — Localization operator-offset integrator (PR1a, TC1/TC2/TC2b/TC3).
@@ -1550,6 +1606,7 @@ function(add_mission_mock_force_includes target)
             "/FI${MISSION_MOCKS_DIR}/LineFollower.h"
             "/FI${MISSION_MOCKS_DIR}/Manipulator.h"
             "/FI${MISSION_MOCKS_DIR}/Localization.h"
+            "/FI${MISSION_MOCKS_DIR}/Vision.h"
         )
     else()
         # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
@@ -1560,6 +1617,7 @@ function(add_mission_mock_force_includes target)
             "SHELL:-include ${MISSION_MOCKS_DIR}/LineFollower.h"
             "SHELL:-include ${MISSION_MOCKS_DIR}/Manipulator.h"
             "SHELL:-include ${MISSION_MOCKS_DIR}/Localization.h"
+            "SHELL:-include ${MISSION_MOCKS_DIR}/Vision.h"
         )
     endif()
 endfunction()
@@ -1780,3 +1838,192 @@ target_include_directories(test_path_tracker_heading_reset_parity PRIVATE
 add_fixture_routes_force_include(test_path_tracker_heading_reset_parity)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_heading_reset_parity)
 add_test(NAME path_tracker_heading_reset_parity COMMAND test_path_tracker_heading_reset_parity)
+
+# =========================================================================================
+# Test executable #24 — `tshape_profile_dump` + freshness gate (issue #130, T3).
+#
+# Host golden-vector dump for the header-only, Arduino-free `TShapeProfilePolicy.h` (T2).
+# Includes ONLY the policy header plus the REAL `Config::TSHAPE_*` / `PWM_MIN_MAGNITUDE`
+# constants via `config/ConfigGlobal.h` + `config/ConfigDrive.h` directly — both are pure
+# `<stdint.h>`-only `constexpr` headers with ZERO Arduino/MatrixMiniR4 surface, so they are
+# host-includable as-is with no mock indirection (unlike the `Config.h` umbrella, which pulls
+# in `<Arduino.h>`). No SUT `.cpp`, no `MOCK_SOURCES`, no force-includes needed — the dump TU
+# is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just
+# prints JSON to stdout. The actual ctest is `tshape_profile_freshness` below, which drives
+# `tshape_profile_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file
+# and BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/tshape_profile_goldens.json` (the `routes.h`
+# regenerate-then-diff freshness-gate pattern, ctest-native so it also runs locally, not just
+# in a dedicated CI job). A firmware retune that changes `Config::TSHAPE_*` — or any change to
+# the policy's arithmetic — changes this binary's stdout and fails the ctest until the fixture
+# is regenerated and recommitted. Consumed by the Python parity test (T6 / TC1).
+# =========================================================================================
+set(TSHAPE_DUMP_DIR ${TEST_DIR}/tshape_profile_dump)
+
+add_executable(tshape_profile_dump
+    ${TSHAPE_DUMP_DIR}/tshape_profile_dump.cpp
+)
+target_include_directories(tshape_profile_dump PRIVATE ${SKETCH_DIR})
+
+set(TSHAPE_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/tshape_profile_goldens.json)
+
+add_test(NAME tshape_profile_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:tshape_profile_dump>
+            -DGOLDEN_FILE=${TSHAPE_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/tshape_profile_goldens.fresh.json
+            -P ${TSHAPE_DUMP_DIR}/tshape_profile_freshness.cmake
+)
+
+# =========================================================================================
+# Test executable #25 — `chain_speed_dump` + freshness gate (ADR-059, T4).
+#
+# Host golden-vector dump for the header-only, Arduino-free `ChainSpeedPolicy.h` (T4's two-pass
+# collinear-run velocity planner). Includes ONLY the policy header plus the REAL
+# `Config::PWM_MIN_MAGNITUDE` / `PWM_MAX` / `TSHAPE_ACCEL_PWM_PER_CM` / `TSHAPE_MIN_MOVE_CM` /
+# `TSHAPE_START_SPEED` / `SPEED_NORMAL` constants (all pure `<stdint.h>`-only `constexpr`), so it
+# needs NOTHING on the include path except `${SKETCH_DIR}` — the TU is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just prints
+# JSON to stdout. The actual ctest is `chain_speed_freshness` below, which drives
+# `chain_speed_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file and
+# BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/chain_speed_goldens.json` (the `routes.h` /
+# `tshape_profile` regenerate-then-diff freshness-gate pattern, ctest-native so it also runs
+# locally, not just in a dedicated CI job). A firmware retune that changes
+# `Config::TSHAPE_ACCEL_PWM_PER_CM` / `PWM_MIN_MAGNITUDE` — or any change to the policy's
+# arithmetic — changes this binary's stdout and fails the ctest until the fixture is regenerated
+# and recommitted. Consumed by the Python parity mirror `chain_speed.py` (T5 / AC6 / TC1).
+# =========================================================================================
+set(CHAIN_SPEED_DUMP_DIR ${TEST_DIR}/chain_speed_dump)
+
+add_executable(chain_speed_dump
+    ${CHAIN_SPEED_DUMP_DIR}/chain_speed_dump.cpp
+)
+target_include_directories(chain_speed_dump PRIVATE ${SKETCH_DIR})
+
+set(CHAIN_SPEED_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/chain_speed_goldens.json)
+
+add_test(NAME chain_speed_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:chain_speed_dump>
+            -DGOLDEN_FILE=${CHAIN_SPEED_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/chain_speed_goldens.fresh.json
+            -P ${CHAIN_SPEED_DUMP_DIR}/chain_speed_freshness.cmake
+)
+
+# =========================================================================================
+# Test executables #26a-d — ADR-059 blind-chain FSM (T10; TC4-TC8; AC3/AC7/AC9).
+#
+# All four link the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` +
+# `YawSource.cpp` + `path_mocks.cpp` — the SAME shared issue-#106 recipe as every other
+# PathTracker+Drive real-link target above (`${SKETCH_DIR}`-FIRST include order, fixture
+# routes force-included FIRST, then `add_path_force_includes` for the EventTrace /
+# WROLineArray / Intersection / LineFollower peripheral mocks). See the block comment
+# above `test_path_tracker_passthrough_on` for the full shared-recipe rationale.
+#
+# The blind-chain assertions reduce to lower-MCU observables read off the REAL `Drive.cpp`
+# through the shared `MiniR4.DriveDC` mock (`lastMoveSyncL/R`, `brakeCallCount`/`lastBrake`)
+# — there is no public accessor on `PathTrackerClass` for the private `_chain` run buffer,
+# and this test file does NOT add one (T7's `.h`/`.cpp` stay untouched). See the file
+# docblock in `test_path_tracker_blind_chain.cpp` for the full observable-mapping rationale.
+#
+# Four targets, one per override combination (mirrors the `test_path_tracker_heading_reset`
+# four-target split): the SAME source file compiled four ways, each with a DIFFERENT
+# `target_compile_definitions` override reaching BOTH this test main AND the separately-
+# compiled `PathTracker.cpp` TU (memory `gotcha-cross-tu-config-override-compile-def` — an
+# in-file `#define` would NOT reach `PathTracker.cpp`). `MAX_CHAIN_HOPS` is an ARRAY
+# DIMENSION in `PathTracker.h` (`Config::MAX_CHAIN_HOPS + 1`-sized run-buffer arrays), so
+# its override MUST be this target-wide `-D`, never an in-file `#define` (ODR: every TU in
+# the target must agree on the array size).
+#   - #26a (default):        chaining ON, no cap override -- TC4, TC6c (ineligible reasons),
+#                             TC7, TC8.
+#   - #26b (disabled build): `PATH_BLIND_CHAIN_ENABLED_DEFAULT=false` +
+#                             `BLIND_CHAIN_TEST_DISABLED` -- TC5 (AC12 byte-identity to
+#                             today's stop-at-every-node behavior). The extra define skips
+#                             TC6c/TC7/TC8 in `main()` (they assert genuine chain formation,
+#                             meaningless with chaining off).
+#   - #26c (hop cap):        `MAX_CHAIN_HOPS_DEFAULT=2` + `BLIND_CHAIN_TEST_HOP_CAP` --
+#                             TC6a (hop-cap truncation + log + reform).
+#   - #26d (distance cap):   `PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0` +
+#                             `BLIND_CHAIN_TEST_DISTANCE_CAP` -- TC6b (distance-cap
+#                             truncation + log).
+# The `BLIND_CHAIN_TEST_*` defines are TEST-MAIN-ONLY switches (read by this file's own
+# `#ifdef` in `main()`, never by production code) selecting which `main()` body runs under
+# the capped build — #26c/#26d must NOT also run the uncapped TC6c/TC7/TC8 bodies, which
+# assume the SHIPPED `MAX_CHAIN_HOPS`/`PATH_BLIND_CHAIN_MAX_CM` defaults.
+# =========================================================================================
+
+# --- Test executable #26a — default knobs (chaining ON). TC4, TC6c, TC7, TC8. ---
+add_executable(test_path_tracker_blind_chain
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_blind_chain PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_blind_chain COMMAND test_path_tracker_blind_chain)
+
+# --- Test executable #26b — PATH_BLIND_CHAIN_ENABLED == false build. TC5 (AC12). ---
+add_executable(test_path_tracker_blind_chain_disabled
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_disabled
+    PRIVATE PATH_BLIND_CHAIN_ENABLED_DEFAULT=false BLIND_CHAIN_TEST_DISABLED)
+target_include_directories(test_path_tracker_blind_chain_disabled PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_disabled)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_disabled)
+add_test(NAME path_tracker_blind_chain_disabled COMMAND test_path_tracker_blind_chain_disabled)
+
+# --- Test executable #26c — MAX_CHAIN_HOPS == 2 build. TC6a (hop-cap truncation). ---
+add_executable(test_path_tracker_blind_chain_hop_cap
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_hop_cap
+    PRIVATE MAX_CHAIN_HOPS_DEFAULT=2 BLIND_CHAIN_TEST_HOP_CAP)
+target_include_directories(test_path_tracker_blind_chain_hop_cap PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_hop_cap)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_hop_cap)
+add_test(NAME path_tracker_blind_chain_hop_cap COMMAND test_path_tracker_blind_chain_hop_cap)
+
+# --- Test executable #26d — PATH_BLIND_CHAIN_MAX_CM == 50 build. TC6b (distance-cap). ---
+add_executable(test_path_tracker_blind_chain_distance_cap
+    ${TEST_DIR}/test_path_tracker_blind_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_compile_definitions(test_path_tracker_blind_chain_distance_cap
+    PRIVATE PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0f BLIND_CHAIN_TEST_DISTANCE_CAP)
+target_include_directories(test_path_tracker_blind_chain_distance_cap PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_blind_chain_distance_cap)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_blind_chain_distance_cap)
+add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_blind_chain_distance_cap)

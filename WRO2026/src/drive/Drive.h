@@ -1343,6 +1343,13 @@ private:
      *
      * @param traveledFrac Fraction of total move completed in [0.0, 1.0].
      * @return Current speed setpoint as PWM in `[-100, 100]`.
+     *
+     * @note The distance-domain interpolation is delegated to `tShapeSpeedAt()`
+     *       (TShapeProfilePolicy.h — host-tested + golden-pinned, issue #130). The
+     *       encoder-degree magnitudes are fed to it as exact-integer floats (all ≤
+     *       UINT16_MAX, far below float's 2^24 exact-integer ceiling), which is bit-identical
+     *       to the previous inline int32 branch. The time-domain branch stays inline in
+     *       Drive.cpp.
      */
     int16_t _profileSpeedAt(float traveledFrac) const;
 
@@ -1370,6 +1377,11 @@ private:
      * @return `0x00` on successful seed; non-zero if pre-conditions failed
      *         (currently only `0x01` when `accel <= 0` — caller should fall back to a
      *         fire-and-forget non-profiled move).
+     *
+     * @note The distance-variant ramp resolution + triangle fallback + half-of-total cap are
+     *       delegated VERBATIM to `resolveTShapeRamps()` (TShapeProfilePolicy.h); the time
+     *       variant resolves its per-side ramp cm via `resolveTShapeRampCm()` and converts
+     *       cm → ms inline here. Behavior-identical extraction (issue #130).
      */
     uint8_t _execProfileMove(DriveMode mode,
                              bool      isTime,

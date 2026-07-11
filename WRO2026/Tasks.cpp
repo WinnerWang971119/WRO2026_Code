@@ -9,11 +9,9 @@
 #include "src/mission/PathTracker.h"
 #include "src/drive/Drive.h"
 #include "src/drive/LineFollower.h"
+#include "src/perception/Vision.h"
 
 #include <Arduino.h>
-#ifdef CTPS_RECORD
-#include <time.h>
-#endif
 #include <string.h>    // strcmp
 
 #include "Config.h"
@@ -37,24 +35,24 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "debugYield", &TasksClass::debugYield },
     { "servoTest", &TasksClass::servoTest },
     { "home", &TasksClass::home },
+    { "idleWait", &TasksClass::idleWait },
     { "testChassis", &TasksClass::testChassis },
-    { "emptyTest", &TasksClass::emptyTest },
     { "testOne", &TasksClass::testOne },
     { "test1", &TasksClass::test1 },
     { "test0621", &TasksClass::test0621 },
+    { "ctpsExample1", &TasksClass::ctpsExample1 },
+    { "emptyTest", &TasksClass::emptyTest },
     { "actuatorSweep", &TasksClass::actuatorSweep },
-    { "beltTest", &TasksClass::beltTest },
     { "actuatorStep", &TasksClass::actuatorStep },
     { "manipDirectTest", &TasksClass::manipDirectTest },
-    { "ctpsExample1", &TasksClass::ctpsExample1 },
+    { "beltTest", &TasksClass::beltTest },
     //Add new tasks here
 };
 
 const size_t TasksClass::_registry_count =
     sizeof(_registry) / sizeof(_registry[0]);
 
-static_assert(sizeof(TasksClass::_registry) / sizeof(TaskRegistryEntry)
-              <= Config::MAX_TASKS,
+static_assert(TasksClass::_registry_count <= Config::MAX_TASKS,
               "Registry exceeds MAX_TASKS");
 
 // =============================================================================
@@ -202,6 +200,52 @@ bool TasksClass::inTask() const
     return _inTask;
 }
 
+bool TasksClass::waitStationaryMs(uint32_t ms, const __FlashStringHelper* site)
+{
+    if (!Drive.isIdle() || !PathTracker.isIdle() || LineFollower.isEnabled())
+    {
+        Serial.print(F("[Tasks] "));
+        Serial.print(site);
+        Serial.println(F(": refusing idle wait while motion is active"));
+        return false;
+    }
+
+    const uint32_t startMs = millis();
+    static bool    noCallbackWarned = false;
+
+    while ((millis() - startMs) < ms)
+    {
+        if (_aborted)
+        {
+            Serial.print(F("[Tasks] "));
+            Serial.print(site);
+            Serial.println(F(": aborted during idle wait"));
+            return false;
+        }
+
+        if (_tickCallback != nullptr)
+        {
+            _tickCallback();
+        }
+        else
+        {
+            if (!noCallbackWarned)
+            {
+                Serial.print(F("[Tasks] "));
+                Serial.print(site);
+                Serial.println(F(": no tick callback set — only wall-clock time will "
+                                 "advance during the wait. Call Tasks.setTickCallback(...) "
+                                 "in setup()."));
+                noCallbackWarned = true;
+            }
+            delay(1);
+        }
+        yield();
+    }
+
+    return true;
+}
+
 // =============================================================================
 // Task bodies
 // =============================================================================
@@ -292,10 +336,46 @@ bool TasksClass::home(const TaskArgs& /*args*/)
     return true;
 }
 
+bool TasksClass::idleWait(const TaskArgs& args)
+{
+    return waitStationaryMs(args.u32[0], F("idleWait"));
+}
+
 bool TasksClass::testChassis(const TaskArgs& /*args*/)
 {
     LineFollower.setEnabled(true).setDistanceTarget(50);
     return LineFollower.waitUntilDistanceReached();
+}
+
+bool TasksClass::testOne(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("Inter1");
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
+    return true;
+}
+
+bool TasksClass::test1(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("Inter1");
+    (void)Manipulator.grab();
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    Drive.setSpeed(30, 60);
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
+    Drive.wallStop(20.0f);
+    Drive.driveDist(20).setPower(80).setMode(DriveMode::GYRO);
+    LineFollower.setEnabled(true).setDistanceTarget(90);
+    LineFollower.waitUntilDistanceReached();
+    return true;
+}
+
+bool TasksClass::test0621(const TaskArgs& /*args*/)
+{
+    Drive.driveDist(35).setStartSpeed(40).setPower(100).setEndSpeed(10).setMode(DriveMode::GYRO).setHeading(0);
+    return true;
 }
 
 // =============================================================================
@@ -371,6 +451,37 @@ bool TasksClass::_waitForBelt(uint32_t timeoutMs, const char* label)
     return true;
 }
 
+bool TasksClass::_grabToBin(uint8_t bin)
+{
+    Manipulator.sortTo(bin).async();
+    Manipulator.release();
+    Manipulator.grab();
+    return true;
+}
+
+bool TasksClass::_visionRead()
+{
+    if (Vision.readMosaic())
+    {
+        return true;
+    }
+
+    // First attempt faulted. readMosaic() left the latch untouched (ADR-037); clear the
+    // fault and give it one more try before reporting failure up to the task.
+    Serial.print(F("[Tasks] vision read fault ("));
+    Serial.print((uint8_t) Vision.getFault().kind);
+    Serial.println(F("), retrying"));
+    Vision.clearFault();
+
+    if (Vision.readMosaic())
+    {
+        return true;
+    }
+
+    Serial.println(F("[Tasks] vision read failed"));
+    return false;
+}
+
 bool TasksClass::emptyTest(const TaskArgs& /*args*/)
 {
     Serial.println(F("[Tasks] emptyTest"));
@@ -379,29 +490,20 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
     (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open");
     _waitMs(200);
 
-    for (uint8_t bin = 0; bin < 4; ++bin)
-    {
-        Manipulator.sortTo(bin);
-        _waitMs(200);
+    Manipulator.sortTo(2);
+    _waitMs(200);
 
-        Manipulator.grabber.open();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber open");
-        _waitMs(3000);
+    Manipulator.grabber.open();
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
+    _waitMs(3000);
 
-        Manipulator.grabber.home();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber home");
-        _waitMs(1000);
+    Manipulator.grabber.close();
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close");
+    _waitMs(1000);
 
-        Manipulator.grabber.close();
-        (void)_waitForServo(Manipulator.grabber,
-                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
-                            "grabber close");
-        _waitMs(2000);
-    }
+    Manipulator.grabber.open();
+    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
+    _waitMs(1000);
 
     Manipulator.dumper.close();
     (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close");
@@ -410,37 +512,6 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
     Manipulator.dumper.home();
     (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home");
 
-    return true;
-}
-
-bool TasksClass::testOne(const TaskArgs& /*args*/)
-{
-    PathTracker.goTo("Inter1");
-    PathTracker.goTo("Inter2");
-    PathTracker.goTo("Inter3");
-    PathTracker.goTo("position1");
-    return true;
-}
-
-bool TasksClass::test1(const TaskArgs& /*args*/)
-{
-    PathTracker.goTo("Inter1");
-    (void)Manipulator.grab();
-    Manipulator.belt.toStation(Config::BeltStation::ABC);
-    Drive.setSpeed(30, 60);
-    PathTracker.goTo("Inter2");
-    PathTracker.goTo("Inter3");
-    PathTracker.goTo("position1");
-    Drive.wallStop(20.0f);
-    Drive.driveDist(20).setPower(80).setMode(DriveMode::GYRO);
-    LineFollower.setEnabled(true).setDistanceTarget(90);
-    LineFollower.waitUntilDistanceReached();
-    return true;
-}
-
-bool TasksClass::test0621(const TaskArgs& /*args*/)
-{
-    Drive.driveDist(35).setStartSpeed(40).setPower(100).setEndSpeed(10).setMode(DriveMode::GYRO).setHeading(0);
     return true;
 }
 
@@ -850,115 +921,51 @@ bool TasksClass::manipDirectTest(const TaskArgs& /*args*/)
 
 bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 {
-    constexpr uint8_t kMosaicPickCount = 12;
-    constexpr uint8_t kMosaicVisitCount = 6;
-    constexpr uint8_t kMosaicPoolCount  = 8;
-    static_assert((kMosaicPickCount % Config::SORTER_BIN_COUNT) == 0,
-                  "ctpsExample1 expects the mosaic pick count to divide evenly across sorter bins");
-    constexpr uint8_t kLaneDepth = kMosaicPickCount / Config::SORTER_BIN_COUNT;
-    static_assert((kMosaicPickCount % kMosaicVisitCount) == 0,
-                  "ctpsExample1 expects an even number of picks per mosaic stop");
-    constexpr uint8_t kPicksPerStop = kMosaicPickCount / kMosaicVisitCount;
-
-    uint8_t laneOrder[kMosaicPickCount];
-    uint8_t laneWrite = 0;
-    for (uint8_t lane = 0; lane < Config::SORTER_BIN_COUNT; ++lane)
-    {
-        for (uint8_t depth = 0; depth < kLaneDepth; ++depth)
-        {
-            laneOrder[laneWrite++] = lane;
-        }
-    }
-
-    uint32_t rngState = ((uint32_t) millis() << 16) ^ 0x9E3779B9u;
-#ifdef CTPS_RECORD
-    rngState ^= (uint32_t)time(nullptr);
-    rngState ^= (uint32_t)clock();
-    rngState ^= (uint32_t)(uintptr_t)&rngState;
-#endif
-    auto nextRand = [&rngState]() -> uint32_t
-    {
-        // Small xorshift32 shuffle source: cheap on-device and dependency-free in host CTPS.
-        rngState ^= (rngState << 13);
-        rngState ^= (rngState >> 17);
-        rngState ^= (rngState << 5);
-        return rngState;
-    };
-
-    for (int8_t i = (int8_t)kMosaicPickCount - 1; i > 0; --i)
-    {
-        const uint8_t j = (uint8_t)(nextRand() % (uint32_t)(i + 1));
-        const uint8_t t = laneOrder[(uint8_t)i];
-        laneOrder[(uint8_t)i] = laneOrder[j];
-        laneOrder[j]          = t;
-    }
-
-    struct MosaicStop
-    {
-        const char* name;
-        Direction   arrivalDirection;
-        bool        forceArrivalDirection;
-    };
-
-    const MosaicStop mosaicStops[kMosaicPoolCount] = {
-        { "MYU", Direction::FRONT, false },
-        { "MYD", Direction::FRONT, false },
-        { "MBU", Direction::FRONT, false },
-        { "MBD", Direction::FRONT, false },
-        { "MGU", Direction::FRONT, false },
-        { "MGD", Direction::FRONT, false },
-        { "MWU", Direction::FRONT, false },
-        { "MWD", Direction::FRONT, false },
-    };
-
-    uint8_t mosaicOrder[kMosaicPoolCount] = { 0, 1, 2, 3, 4, 5, 6, 7 };
-    for (int8_t i = (int8_t)kMosaicPoolCount - 1; i > 0; --i)
-    {
-        const uint8_t j = (uint8_t)(nextRand() % (uint32_t)(i + 1));
-        const uint8_t t = mosaicOrder[(uint8_t)i];
-        mosaicOrder[(uint8_t)i] = mosaicOrder[j];
-        mosaicOrder[j]          = t;
-    }
-
-    uint8_t laneCursor = 0;
-    auto grabToNextLane = [&laneOrder, &laneCursor]()
-    {
-        Manipulator.sortTo(laneOrder[laneCursor++]);
-        Manipulator.grab();
-    };
-
-    PathTracker.goTo("MYD").setArrivalDirection(Direction::FRONT);
+    PathTracker.goTo("MYU"); // Get mosaic
     Drive.turnToYaw(90);
-
-    for (uint8_t stopIndex = 0; stopIndex < kMosaicVisitCount; ++stopIndex)
-    {
-        const MosaicStop& stop = mosaicStops[mosaicOrder[stopIndex]];
-
-        Serial.print(F("[Tasks] ctpsExample1 mosaic -> "));
-        Serial.println(stop.name);
-
-        if (stop.forceArrivalDirection)
-        {
-            PathTracker.goTo(stop.name).setArrivalDirection(stop.arrivalDirection);
-        }
-        else
-        {
-            PathTracker.goTo(stop.name);
-        }
-
-        Drive.turnToYaw(90);
-        for (uint8_t pick = 0; pick < kPicksPerStop; ++pick)
-        {
-            grabToNextLane();
-        }
-    }
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MYD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MBU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MBD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
+    PathTracker.goTo("MGU"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(0);
+    Manipulator.grab();
+    Manipulator.sortTo(1);
+    Manipulator.grab();
+    PathTracker.goTo("MGD"); // Get mosaic
+    Drive.turnToYaw(90);
+    Manipulator.sortTo(2);
+    Manipulator.grab();
+    Manipulator.sortTo(3);
+    Manipulator.grab();
 
     //Grab shovel
     PathTracker.goTo("shovel1O");
+    Drive.turnToYaw(90);
     Manipulator.boxClose();
 
     //Go to shovel drop
     PathTracker.goTo("shovel1F");
+    Drive.turnToYaw(0);
     Manipulator.boxOpen();
 
     //Go to dump
@@ -972,20 +979,19 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 
     PathTracker.goTo("CG1").setArrivalDirection(Direction::REAR);
     Manipulator.boxClose();
-    PathTracker.goTo("CG2");
     Drive.turnToYaw(0);
     PathTracker.goTo("CG3");
     Manipulator.boxOpen();
-    PathTracker.goTo("CY1").setArrivalDirection(Direction::REAR);
+    PathTracker.goTo("CY1");
+    Drive.turnToYaw(180);
     Manipulator.boxClose();
-    PathTracker.goTo("CY2");
-    Drive.turnToYaw(90);
     PathTracker.goTo("CY3").setArrivalDirection(Direction::REAR);
     Manipulator.boxOpen();
 
 
 
-
-
-    return true;
+    // Return the final settle's result: waitStationaryMs reports false when it
+    // refuses to start (motion still active) or is aborted mid-wait via
+    // Tasks.abort(), so an aborted final wait must not report success to Mission.
+    return waitStationaryMs(500);
 }

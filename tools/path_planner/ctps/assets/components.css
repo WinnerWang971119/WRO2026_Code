@@ -497,22 +497,19 @@
     border-color: var(--ctps-accent);
 }
 
-.ctps-transport-divider {
-    display: inline-block;
-    width: 1px;
-    height: 20px;
-    background: var(--ctps-border);
-}
-
+/* Drift-jump + speed live in the dock toolbar (see `.ctps-tl-toolbar`), so
+ * they are sized to the toolbar's compact 20px scale, not the 28px transport
+ * buttons. */
 .ctps-drift-jump {
     box-sizing: border-box;
-    height: 28px;
-    padding: 0 var(--ctps-space-3);
+    height: 20px;
+    padding: 0 var(--ctps-space-2);
     background: transparent;
     color: var(--ctps-drift);
     border: 1px solid var(--ctps-warn-border);
     border-radius: var(--ctps-radius-chip);
-    font-size: 12px;
+    font-size: 11px;
+    line-height: 1;
     cursor: pointer;
     -webkit-appearance: none;
     appearance: none;
@@ -528,8 +525,9 @@
 .ctps-speed {
     box-sizing: border-box;
     display: flex;
+    align-items: center;
     gap: 2px;
-    padding: 2px;
+    padding: 1px;
     background: var(--ctps-bg);
     border: 1px solid var(--ctps-border);
     border-radius: var(--ctps-radius-chip);
@@ -539,7 +537,8 @@
     box-sizing: border-box;
     font-family: var(--ctps-font-ui);
     font-size: 11px;
-    padding: 3px 8px;
+    line-height: 1;
+    padding: 3px 7px;
     background: transparent;
     color: var(--ctps-muted);
     border: none;
@@ -674,21 +673,34 @@
 }
 
 /* ===================================================================== */
-/* Timeline dock: lanes, spans, pins, playhead, ruler                     */
+/* Timeline dock: toolbar, viewport, scrollbar, lanes, spans, pins, ruler  */
 /* ===================================================================== */
 /*
- * timeline.js appends #ctps-ruler's two children (a bare .ctps-lane-label
- * gutter + a .ctps-ruler-track) and #ctps-lanes' children as FLAT, ALTERNATING
- * siblings — one .ctps-lane-label then one .ctps-lane per registered lane,
- * NOT a label nested inside its lane. A 2-column CSS Grid on both containers
- * (52px label column + 1fr track column) auto-places that alternating
- * sequence into label/track pairs, one pair per row, without any JS-side
- * markup change. --ctps-lane-gutter / --ctps-lane-gap (declared once here on
- * the shared .ctps-timeline ancestor, additive alongside layout.css's
- * flex/position/margin rule for the same selector) keep the grid template AND
- * the playhead's offset calc below in exact agreement, so the playhead lines
- * up with lane items and ruler ticks that share the same track column instead
- * of the dock's full width.
+ * The dock body is ONE horizontal scroll viewport (#ctps-tl-viewport,
+ * layout.css) whose sole child #ctps-tl-content holds a vertical stack of
+ * full-content-width rows (.ctps-tl-row — the ruler row inside #ctps-ruler,
+ * one per lane inside #ctps-lanes) plus the playhead. Each row is
+ * `[.ctps-lane-label (sticky, opaque, z-index:3)] [track element
+ * (.ctps-lane / #ctps-ruler-track, flex-basis --ctps-content-w)]` — see
+ * layout.css's Timeline dock section for why the label needs a full-width
+ * row (not a grid cell) to get real sticky travel. This file owns the LOOK:
+ * panel bg on the sticky label (opaque — no span may bleed through), the
+ * hidden native scrollbar + its themed replacement (.ctps-tl-scroll /
+ * .ctps-tl-scroll-thumb), the zoom toolbar widget, and the .ctps-tl--nozoom
+ * disabled treatment for a degenerate/already-fits trace.
+ *
+ * --ctps-lane-gutter / --ctps-lane-gap (declared once here on the shared
+ * .ctps-timeline ancestor, additive alongside layout.css's flex/position/
+ * margin rule for the same selector) keep the row track's flex-basis, the
+ * #ctps-tl-content width calc, AND the playhead's offset calc below in exact
+ * agreement, so the playhead lines up with lane items and ruler ticks that
+ * share the same --ctps-content-w-wide track column.
+ *
+ * --ctps-content-w itself (a CSS length, e.g. "640px") is written on
+ * .ctps-timeline by timeline_view.js via setProperty — every read below
+ * supplies a fallback (100% for a track's flex-basis, 0px inside a calc) so
+ * a pre-hydration render or a thrown init degrades to a full-width,
+ * non-zooming dock instead of collapsing.
  */
 
 .ctps-timeline {
@@ -700,10 +712,168 @@
     padding: var(--ctps-space-3);
 }
 
+/* ----- dock toolbar: playback (left) + zoom (right) ------------------- */
+/* The toolbar row hosts two flex groups pushed to opposite ends: the
+ * transport group (drift-jumps + play speed, moved off the transport bar so
+ * the seek scrubber there gets the full bar width) on the left, and the zoom
+ * widget on the right. Only the zoom group dims on a `.ctps-tl--nozoom`
+ * trace — speed/drift stay live regardless of whether the dock can zoom. */
+.ctps-tl-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--ctps-space-2);
+    padding-bottom: var(--ctps-space-2);
+    margin-bottom: var(--ctps-space-2);
+    border-bottom: 1px solid var(--ctps-border);
+}
+
+.ctps-tl-transport-group,
+.ctps-tl-zoom-group {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+}
+
+/* `-` / `+` (square) and `Fit` (text, auto width) share the same button look
+ * as `.ctps-transport-btn` / `.ctps-chip`, but sized/typed to match the lane
+ * labels (9.5px UI font) per the design's toolbar spec. */
+.ctps-zoom-btn,
+.ctps-zoom-fit {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    background: var(--ctps-raised);
+    color: var(--ctps-text-2);
+    border: 1px solid var(--ctps-border-strong);
+    border-radius: var(--ctps-radius-chip);
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    line-height: 1;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-zoom-btn {
+    width: 20px;
+    padding: 0;
+}
+
+.ctps-zoom-fit {
+    padding: 0 var(--ctps-space-2);
+}
+
+.ctps-zoom-btn:hover,
+.ctps-zoom-fit:hover {
+    background: var(--ctps-border-strong);
+    color: var(--ctps-text);
+}
+
+.ctps-zoom-btn:active,
+.ctps-zoom-fit:active {
+    background: var(--ctps-border);
+}
+
+.ctps-zoom-btn:disabled,
+.ctps-zoom-fit:disabled {
+    opacity: .4;
+    cursor: default;
+    pointer-events: none;
+}
+
+/* Native <input type="range"> styled minimally against the tokens — a thin
+ * track + a small accent-ringed thumb, matching `.ctps-seek`'s thumb without
+ * that control's two-layer fill-gradient trick (the zoom slider has no
+ * drift-tick overlay to sit above). */
+.ctps-zoom-slider {
+    box-sizing: border-box;
+    width: 90px;
+    height: 4px;
+    margin: 0 var(--ctps-space-1);
+    background: transparent;
+    cursor: pointer;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+}
+
+.ctps-zoom-slider::-webkit-slider-runnable-track {
+    height: 4px;
+    background: var(--ctps-border);
+    border-radius: 2px;
+}
+
+.ctps-zoom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 11px;
+    height: 11px;
+    margin-top: -3.5px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-zoom-slider::-moz-range-track {
+    height: 4px;
+    background: var(--ctps-border);
+    border-radius: 2px;
+    border: none;
+}
+
+.ctps-zoom-slider::-moz-range-thumb {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--ctps-text);
+    border: 2px solid var(--ctps-accent);
+    cursor: pointer;
+}
+
+.ctps-zoom-slider:disabled {
+    opacity: .4;
+    cursor: default;
+}
+
+.ctps-zoom-slider:focus-visible {
+    outline: none;
+}
+
+/* The `N.N×` readout — mono/faint like the ruler ticks, per the color table. */
+.ctps-zoom-level {
+    font-family: var(--ctps-font-mono);
+    font-size: 10px;
+    color: var(--ctps-faint);
+    min-width: 32px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ----- scroll viewport: native scrollbar hidden ----------------------- */
+/* layout.css owns the functional `overflow-x: auto; overflow-y: hidden`; this
+ * file only hides the native scrollbar chrome — the themed .ctps-tl-scroll-
+ * thumb below is the visible, draggable control instead. Native scroll
+ * gestures (trackpad, shift-wheel) still work; only the OS scrollbar chrome
+ * is invisible. */
+.ctps-tl-viewport {
+    scrollbar-width: none;
+    /* Drag-to-scrub (timeline.js wireScrub) sweeps the pointer across the lane
+     * spans, ruler ticks and gutter labels living in this viewport; without
+     * this a scrub drag would text-select those labels instead. -webkit- for
+     * Safari on the macOS teammates' machines. */
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.ctps-tl-viewport::-webkit-scrollbar {
+    display: none;
+}
+
 .ctps-ruler {
-    display: grid;
-    grid-template-columns: var(--ctps-lane-gutter) 1fr;
-    column-gap: var(--ctps-lane-gap);
     height: 14px;
     font-family: var(--ctps-font-mono);
     font-size: 9px;
@@ -724,16 +894,16 @@
     white-space: nowrap;
 }
 
-.ctps-lanes {
-    display: grid;
-    grid-template-columns: var(--ctps-lane-gutter) 1fr;
-    column-gap: var(--ctps-lane-gap);
-    row-gap: 4px;
-}
+/* #ctps-lanes is now a plain wrapper — layout.css's `.ctps-tl-row` (one per
+ * lane) supplies the row structure, and its own `+`-selector rule supplies
+ * the 4px vertical gap the old 2-column grid's `row-gap` used to. */
 
 .ctps-lane-label {
     display: flex;
     align-items: center;
+    /* Opaque so a scrolled-under span/tick can never bleed through the
+     * sticky-pinned label — it must always read cleanly over the track. */
+    background: var(--ctps-panel);
     font-family: var(--ctps-font-ui);
     font-size: 9.5px;
     font-weight: 600;
@@ -853,26 +1023,91 @@
     border-bottom-color: var(--ctps-drift);
 }
 
-/* Anchored to .ctps-timeline (position: relative via layout.css). Its
- * containing block is the timeline's PADDING box, but the lane/ruler grids live
- * in the CONTENT box (inset by the panel padding), so the calc adds the
- * padding-left offset at the start and removes 2x padding from the 100% basis —
- * then 0%..100% of --ctps-frac maps onto exactly the track column every lane
- * item and ruler tick shares (aligned at both ends, not just the midpoint). */
+/* LOCALIZATION lane (id "drift"; issue #130) — the two markers added
+ * alongside drift_warn. Both reuse existing palette tokens rather than
+ * introducing new ones, but each gets its own modifier class so the three
+ * marker types read as visually distinct on the timeline. */
+
+/* buildDriftLane's return_to_node item carries cls "ctps-pin--return" — the
+ * physical return-to-node maneuver the firmware ran before the next goto;
+ * tinted with the theme accent so it reads as a corrective, not a fault. */
+.ctps-pin--return {
+    border-bottom-color: var(--ctps-accent);
+}
+
+/* buildDriftLane's declare_position item carries cls "ctps-pin--declare" —
+ * an operator-declared belief reset, semantically distinct from a physical
+ * correction; tinted with the hold color so it never reads as an error. */
+.ctps-pin--declare {
+    border-bottom-color: var(--ctps-hold);
+}
+
+/* Now a child of #ctps-tl-content (position: relative via layout.css) rather
+ * than of .ctps-timeline itself, so it pans/zooms with the scrolled track
+ * instead of staying fixed to the viewport. #ctps-tl-content has no padding
+ * of its own, so 0%..100% of --ctps-frac maps directly onto the
+ * --ctps-content-w-wide track column every lane item and ruler tick shares
+ * (aligned at both ends, not just the midpoint) once the gutter+gap offset is
+ * added. z-index:2 — BELOW the sticky labels (z-index:3) — so a playhead
+ * whose viewport-x falls under the pinned gutter while scrolled never paints
+ * over the label. */
 .ctps-playhead {
     position: absolute;
     top: 0;
     bottom: 0;
     left: calc(
-        var(--ctps-space-3) + var(--ctps-lane-gutter) + var(--ctps-lane-gap) +
-        var(--ctps-frac, 0) *
-        (100% - 2 * var(--ctps-space-3) - var(--ctps-lane-gutter) - var(--ctps-lane-gap))
+        var(--ctps-lane-gutter) + var(--ctps-lane-gap) +
+        var(--ctps-frac, 0) * var(--ctps-content-w, 0px)
     );
     width: 1.5px;
     background: var(--ctps-text);
     box-shadow: 0 0 4px 0 var(--ctps-text);
     pointer-events: none;
-    z-index: 3;
+    z-index: 2;
+}
+
+/* ----- custom themed horizontal scrollbar (panning) -------------------- */
+/* A track strip below the viewport; #ctps-tl-thumb's width/left are written
+ * by timeline_view.js via setProperty as scroll-ratio percentages
+ * (clientWidth/scrollWidth, scrollLeft/scrollWidth) — the fallbacks below
+ * (100% wide / 0% left) mirror the fit-to-width, no-scroll default so the
+ * strip degrades sanely before that JS runs. */
+.ctps-tl-scroll {
+    position: relative;
+    height: 6px;
+    margin-top: var(--ctps-space-2);
+    background: var(--ctps-raised);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.ctps-tl-scroll-thumb {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--ctps-tl-thumb-x, 0%);
+    width: var(--ctps-tl-thumb-w, 100%);
+    background: var(--ctps-border-strong);
+    border-radius: 3px;
+    cursor: pointer;
+}
+
+.ctps-tl-scroll-thumb:hover {
+    background: var(--ctps-text-2);
+}
+
+/* ----- degenerate / already-fits trace: disable the whole widget ------- */
+/* timeline_view.js adds this modifier to .ctps-timeline when dur <= 0 or
+ * zoomMax <= 1 (a trace that already fits at 1x — zoom would be a no-op).
+ * Scoped to the zoom group only: the sibling transport group (speed/drift)
+ * has nothing to do with zoom, so it stays interactive. */
+.ctps-timeline.ctps-tl--nozoom .ctps-tl-zoom-group {
+    opacity: .5;
+    pointer-events: none;
+}
+
+.ctps-timeline.ctps-tl--nozoom .ctps-tl-scroll-thumb {
+    display: none;
 }
 
 /* ===================================================================== */
@@ -1073,9 +1308,22 @@
 .ctps-help-btn:focus-visible,
 .ctps-drift-chip:focus-visible,
 .ctps-fullview-btn:focus-visible,
-.ctps-modal-close:focus-visible {
+.ctps-modal-close:focus-visible,
+.ctps-zoom-btn:focus-visible,
+.ctps-zoom-fit:focus-visible {
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
+}
+
+/* The zoom slider's own focus ring is drawn on its thumb (matching
+ * .ctps-seek's focus-visible thumb treatment) — see the Timeline dock
+ * section's `.ctps-zoom-slider:focus-visible::-webkit-slider-thumb` etc. */
+.ctps-zoom-slider:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
+}
+
+.ctps-zoom-slider:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 3px var(--ctps-bg), 0 0 0 5px var(--ctps-accent);
 }
 
 /* ===================================================================== */
@@ -1157,6 +1405,7 @@
  * below is deliberately the other typeface — documents the UI/data split. */
 .ctps-cargo-tab-label {
     font-family: var(--ctps-font-ui);
+    white-space: nowrap;
 }
 
 /* Count badge ("N / CAP"): mono with tabular-nums so the digits hold their
@@ -1323,4 +1572,97 @@
 .ctps-cargo-tab:focus-visible {
     outline: 2px solid var(--ctps-accent);
     outline-offset: 1px;
+}
+
+/* ===================================================================== */
+/* Vision read (randomized-vision mosaic + cone HUD, #ctps-vision)        */
+/* ===================================================================== */
+/*
+ * The read HUD lives INSIDE the cargo panel as its third tab
+ * (#ctps-cargo-panel-vision, beside Magazine + Inventory) to save vertical
+ * rail space — so `.ctps-vision` is just the badges+HUD stack within that
+ * tab body (the `.ctps-cargo-panel` shell already supplies padding/scroll).
+ * Markup is player_html.py's `_BODY_MARKUP`; the per-frame read HUD + badges
+ * + the tab's own `#ctps-cargo-count-vision` badge are updated by vision.js.
+ * The vision-cone / mosaic layer toggles reuse `.ctps-chip` (chrome.js wires
+ * `.ctps-layer-chips .ctps-chip` generically off `data-layer`, so those two
+ * chips need no new CSS beyond the existing `.ctps-chip` rules above).
+ */
+
+.ctps-vision {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+}
+
+/* ----- read HUD line: "k/12 — cell j outside cone" --------------------- */
+
+/* Neutral/in-progress state (< 12/12): reads like any other mono data line
+ * in the rail (matches .ctps-command-detail's tone). */
+.ctps-vision-hud {
+    font-family: var(--ctps-font-mono);
+    font-size: 12.5px;
+    color: var(--ctps-text-2);
+}
+
+.ctps-vision-hud-count {
+    font-variant-numeric: tabular-nums;
+    font-weight: 700;
+}
+
+.ctps-vision-hud-detail {
+    margin-top: var(--ctps-space-1);
+    font-family: var(--ctps-font-mono);
+    font-size: 11px;
+    color: var(--ctps-muted);
+}
+
+/* 12/12 success state — vision.js toggles this modifier once every cell
+ * reads inside the cone. Distinct green so "the read would succeed" is
+ * unambiguous against the neutral in-progress tone above. */
+.ctps-vision-hud--success .ctps-vision-hud-count {
+    color: var(--ctps-success);
+}
+
+.ctps-vision-hud--success .ctps-vision-hud-detail {
+    color: var(--ctps-success);
+}
+
+/* ----- badges: "no roll recorded" / "geometry changed since recording" - */
+
+.ctps-vision-badge {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-family: var(--ctps-font-ui);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border-strong);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+}
+
+/* No mosaic roll present in the trace (old trace, or the dump ran without
+ * --mosaic) — a neutral informational badge, not an error. */
+.ctps-vision-badge--no-roll {
+    color: var(--ctps-muted);
+    border-color: var(--ctps-border-strong);
+}
+
+/* The trace's geom_hash no longer matches the loaded layout's geometry —
+ * warn-tinted like the header drift chip, since the rendered cell positions
+ * may no longer reflect what was actually recorded. */
+.ctps-vision-badge--geom-mismatch {
+    color: var(--ctps-drift);
+    border-color: var(--ctps-warn-border);
+    background: color-mix(in srgb, var(--ctps-drift) 14%, transparent);
+}
+
+.ctps-vision-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-2);
 }

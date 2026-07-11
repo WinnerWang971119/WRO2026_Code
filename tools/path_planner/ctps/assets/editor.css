@@ -408,6 +408,263 @@ body {
 }
 
 /* ===================================================================== */
+/* Mosaic tab (randomized-vision feature, #136)                          */
+/* ===================================================================== */
+/*
+ * The third editor tab (Field / Robot / Mosaic — layout_editor_html.py T13):
+ * grid-geometry/gaps/palette/mode rows on top of the shared
+ * `.ctps-editor-field` / `.ctps-editor-input` shell already used by the
+ * Field/Robot property panels, then the 4x3 clickable pin grid + counts
+ * inputs below. Vision-cone fields on the Robot tab reuse the same
+ * `.ctps-mosaic-cone-*` group so both tabs share one visual language.
+ */
+
+.ctps-mosaic-tab {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-4);
+}
+
+.ctps-mosaic-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+}
+
+.ctps-mosaic-section-title {
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+/* Geometry / gaps rows (center x/y, heading, rows/cols, cell w/h, gaps) reuse
+ * `.ctps-editor-field` + `.ctps-editor-field-row` verbatim — no new class
+ * needed for those inputs. */
+
+/* ----- mode toggle (random | directed) --------------------------------- */
+
+.ctps-mosaic-mode {
+    display: flex;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-mosaic-mode-btn {
+    box-sizing: border-box;
+    flex: 1 1 auto;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-mosaic-mode-btn--active {
+    background: var(--ctps-accent);
+    color: var(--ctps-bg);
+    border-color: var(--ctps-accent);
+}
+
+/* ----- palette: the set of colors available to pin/roll ---------------- */
+
+.ctps-mosaic-palette {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--ctps-space-2);
+}
+
+/* One palette entry: a small color swatch + its name, toggleable (in/out of
+ * the authored palette). Filled with the authored color via the same
+ * `--ctps-cell-color` custom property the pin grid cells read (JS sets it
+ * once per color from MOSAIC_META.hex, so the palette chip and every pin
+ * grid cell in that color always agree). */
+.ctps-mosaic-palette-chip {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+    padding: 3px 8px 3px 3px;
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+    background: var(--ctps-raised);
+    color: var(--ctps-muted);
+    font-family: var(--ctps-font-ui);
+    font-size: 10.5px;
+    font-weight: 600;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+.ctps-mosaic-palette-chip--active {
+    color: var(--ctps-text);
+    border-color: var(--ctps-border-strong);
+}
+
+.ctps-mosaic-palette-swatch {
+    box-sizing: border-box;
+    width: 14px;
+    height: 14px;
+    border-radius: var(--ctps-radius-chip);
+    border: 1px solid var(--ctps-border-strong);
+    background: var(--ctps-cell-color, var(--ctps-faint));
+}
+
+/* ----- 4x3 clickable pin grid ------------------------------------------- */
+
+/* Container: JS sets grid-template-columns/rows to the authored rows/cols
+ * (default 4x3, always 12 cells total — AC3's rows*cols==12 invariant), so
+ * this only fixes the per-cell box size via the shared token. */
+.ctps-mosaic-grid {
+    display: inline-grid;
+    grid-template-columns: repeat(3, var(--ctps-mosaic-cell-size));
+    grid-auto-rows: var(--ctps-mosaic-cell-size);
+    gap: var(--ctps-space-2);
+}
+
+/* A single pin-grid cell, click-cycles unset -> palette[0] -> ... -> unset
+ * (Contracts: "Pin-grid interaction"). Base rule is the layout/interaction
+ * shell shared by both visual states below. */
+.ctps-mosaic-cell {
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--ctps-mosaic-cell-size);
+    height: var(--ctps-mosaic-cell-size);
+    border-radius: var(--ctps-radius-chip);
+    font-family: var(--ctps-font-mono);
+    font-size: 9px;
+    font-weight: 700;
+    cursor: pointer;
+    -webkit-appearance: none;
+    appearance: none;
+}
+
+/* Unset/rolled cell: an OUTLINED EMPTY cell (dashed, transparent fill) —
+ * visually distinct from a filled WHITE swatch, which is a solid fill with
+ * a plain (non-dashed) border, per the Contracts "Pin-grid interaction". */
+.ctps-mosaic-cell--unset {
+    background: transparent;
+    border: 1px dashed var(--ctps-border-strong);
+    color: var(--ctps-faint);
+}
+
+/* Filled/pinned cell: the authored color via --ctps-cell-color (JS sets this
+ * per-cell from MOSAIC_META.hex — never a hardcoded hex in this sheet). A
+ * solid border (not dashed) is what makes even a pinned WHITE cell read as
+ * "filled" against the dashed-outline unset state. The mono label sits in
+ * --ctps-bg (near-black) so it reads against the palette's bright hues,
+ * matching the cargo panel's `.ctps-mag-cell` convention. */
+.ctps-mosaic-cell--filled {
+    background: var(--ctps-cell-color, var(--ctps-raised));
+    border: 1px solid var(--ctps-border-strong);
+    color: var(--ctps-bg);
+}
+
+.ctps-mosaic-cell:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
+
+/* ----- counts inputs (random-mode quota per null cell) ------------------ */
+
+.ctps-mosaic-counts {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-2);
+}
+
+.ctps-mosaic-count-row {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-3);
+}
+
+/* Reuses `.ctps-mosaic-palette-swatch` for the color key; the row's own
+ * label + input are the only new pieces. */
+.ctps-mosaic-count-label {
+    flex: 1 1 auto;
+    font-family: var(--ctps-font-ui);
+    font-size: 11px;
+    color: var(--ctps-text-2);
+}
+
+.ctps-mosaic-count-input {
+    box-sizing: border-box;
+    width: 52px;
+    font-family: var(--ctps-font-mono);
+    font-size: 12px;
+    padding: 4px 6px;
+    background: var(--ctps-bg);
+    color: var(--ctps-text);
+    border: 1px solid var(--ctps-border);
+    border-radius: var(--ctps-radius-chip);
+}
+
+/* Live "sum(counts) == #null cells" readout — reads as an error tint the
+ * same way `.ctps-editor-save-state--dirty` does when the invariant fails. */
+.ctps-mosaic-count-total {
+    font-family: var(--ctps-font-mono);
+    font-size: 10.5px;
+    color: var(--ctps-muted);
+}
+
+.ctps-mosaic-count-total--error {
+    color: var(--ctps-drift);
+}
+
+/* ----- vision-cone field group (Robot tab) ------------------------------ */
+
+/* Groups origin_x/origin_y/half_angle/range under one titled block on the
+ * Robot tab; its rows are plain `.ctps-editor-field` / `.ctps-editor-field-
+ * row` like every other Robot-tab input, so only the group wrapper + title
+ * are new. */
+.ctps-mosaic-cone-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--ctps-space-3);
+    padding-top: var(--ctps-space-3);
+    border-top: 1px solid var(--ctps-border);
+}
+
+.ctps-mosaic-cone-title {
+    font-family: var(--ctps-font-ui);
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--ctps-muted);
+}
+
+/* range_cm's "unbounded" checkbox (null/absent = long unbounded rays) sits
+ * beside its numeric input rather than in its own field row. */
+.ctps-mosaic-cone-unbounded {
+    display: flex;
+    align-items: center;
+    gap: var(--ctps-space-2);
+    font-family: var(--ctps-font-ui);
+    font-size: 10.5px;
+    color: var(--ctps-muted);
+}
+
+/* Keyboard focus — matches the shared focus-visible idiom above. */
+.ctps-mosaic-mode-btn:focus-visible,
+.ctps-mosaic-palette-chip:focus-visible,
+.ctps-mosaic-count-input:focus-visible {
+    outline: 2px solid var(--ctps-accent);
+    outline-offset: 1px;
+}
+
+/* ===================================================================== */
 /* Responsive: rail drops under the stage on a narrow viewport            */
 /* ===================================================================== */
 

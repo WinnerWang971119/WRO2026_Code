@@ -20,6 +20,7 @@
 #include "../nav/PivotTrimPolicy.h"
 #include "../nav/ReturnToNodePolicy.h"
 #include "../nav/StopAtLinePolicy.h"
+#include "../util/WROMath.h"    // encDegToCm — the ADR-059 measured boundary-carry conversion
 
 PathTrackerClass PathTracker;
 
@@ -184,6 +185,25 @@ namespace
         Serial.print(delta);
         Serial.print(F("); "));
     }
+
+    /// Print the ADR-059 blind-chain CAP-truncation diagnostic (Error Handling: "no silent
+    /// cap"). Fired by the walk-ahead ONLY when an otherwise-ELIGIBLE hop is refused by a run
+    /// cap (`MAX_CHAIN_HOPS` or `PATH_BLIND_CHAIN_MAX_CM`) — ordinary chain ends (bend, seek,
+    /// goal, ...) are silent, so this line never spams a normal route. @p reason names the cap
+    /// that fired ("hop cap" / "distance cap"); @p nextNode is the first hop LEFT OUT of the
+    /// run (it dispatches later as a normal braked hop; a fresh chain may re-form there).
+    void _printChainCapTruncation(const __FlashStringHelper* reason, uint8_t hops,
+                                  float totalCm, uint8_t nextNode)
+    {
+        Serial.print(F("[PathTracker] ADR-059: chain capped ("));
+        Serial.print(reason);
+        Serial.print(F(") at "));
+        Serial.print(hops);
+        Serial.print(F(" hops / "));
+        Serial.print(totalCm);
+        Serial.print(F(" cm before node "));
+        Serial.println(FieldMap::getNode(nextNode).name);
+    }
 }    // namespace
 
 // =========================================================================================
@@ -299,15 +319,40 @@ namespace
         pt_parity::emit(line);
     }
 
-    /// `blind_dead_reckon` — {reverse, drive_mode, dist_cm,
-    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}.
-    void _ptEmitBlindDeadReckon(bool reverse, Routes::BlindMode driveMode, float distCm)
+    /// `blind_dead_reckon` — {reverse, drive_mode, dist_cm, start_pwm, end_pwm, chain,
+    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}. ADR-059 field-set bump (strict schema — the
+    /// three new fields are emitted on EVERY blind_dead_reckon record, chained or not; the
+    /// exact wire contract lives in PathTrackerParityTrace.h's "ADR-059 wire schema" block).
+    /// `start_pwm`/`end_pwm` are the RESOLVED velocity-PLAN endpoints (ChainHopSpeed for a
+    /// chained hop; the plain-tShape / RAW_FLAT plan otherwise), NOT any degraded dispatch
+    /// detail, so the sim (which has no encoder noise) emits identical values. NOTE the
+    /// chain flag key is `chain` — NEVER a sub-field named "kind"
+    /// (memory `gotcha-parity-record-kind-is-discriminator`).
+    void _ptEmitBlindDeadReckon(bool reverse, Routes::BlindMode driveMode, float distCm,
+                                int16_t startPwm, int16_t endPwm, bool chain)
     {
         char line[256];
         std::snprintf(line, sizeof(line),
                       "{\"kind\":\"blind_dead_reckon\",\"reverse\":%s,\"drive_mode\":\"%s\","
-                      "\"dist_cm\":%.6f,\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
-                      _ptBool(reverse), _ptDriveModeName(driveMode), (double) distCm);
+                      "\"dist_cm\":%.6f,\"start_pwm\":%d,\"end_pwm\":%d,\"chain\":%s,"
+                      "\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
+                      _ptBool(reverse), _ptDriveModeName(driveMode), (double) distCm,
+                      (int) startPwm, (int) endPwm, _ptBool(chain));
+        pt_parity::emit(line);
+    }
+
+    /// `blind_pass` — {node}. ADR-059: emitted at each NON-braking mid-hop node boundary of
+    /// a blind-chain run — the tick the chained hop's move retires in `BLIND_FORWARD`,
+    /// immediately BEFORE the `onDeadReckonedAdvance` stamp, so the record sits between the
+    /// two hops' `blind_dead_reckon` records in the stream (the sim mirrors the same
+    /// ordering; the tag maps to the sim's `ACT_BLIND_PASS = "blind_pass"`). The run's FINAL
+    /// (braked) arrival emits NO pass record. Deliberately minimal: the chained speeds
+    /// already ride the surrounding drive records.
+    void _ptEmitBlindPass(uint8_t node)
+    {
+        char line[256];
+        std::snprintf(line, sizeof(line), "{\"kind\":\"blind_pass\",\"node\":\"%s\"}",
+                      _ptNodeName(node));
         pt_parity::emit(line);
     }
 
@@ -421,6 +466,8 @@ bool PathTrackerClass::begin()
     _resetNode               = FieldMap::NODE_NONE;
     // ADR-036: no pivot latched at boot.
     _resetPivotLatch();
+    // ADR-059: no blind-chain run in flight at boot.
+    _chainReset();
     _activeRouteDirection    = Direction::AUTO;
     _activeArrivalDirection  = Direction::AUTO;
     _activeStopAtLine        = StopAtLine::AUTO;
@@ -486,6 +533,9 @@ void PathTrackerClass::abort()
     // ADR-036: drop any latched pivot so a mid-pivot abort cannot leak the
     // outgoing trim into the next goal's first dead-reckon drive.
     _resetPivotLatch();
+    // ADR-059: drop any in-flight blind-chain run — the chassis was hard-stopped, so the
+    // chained speed plan (and its boundary-carry baseline) is void.
+    _chainReset();
     _activeRouteDirection   = Direction::AUTO;
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
@@ -721,6 +771,11 @@ void PathTrackerClass::_stepFsm()
             // so a pivot never fires across a `goTo(...)` boundary and a stop at
             // the pivot node degrades to a normal turn.
             _resetPivotLatch();
+            // ADR-059: defensive — a blind-chain run retires at its own final-hop
+            // dispatch and its walk never extends past the goal, so no run can be
+            // live here; clear anyway so a run could never span a goTo() boundary
+            // (mirrors the pivot-latch discipline above).
+            _chainReset();
 
             // Return-to-node prologue (issue #36, PR1b). Evaluate the accumulated
             // operator offset BEFORE planning: a non-trivial offset drives the
@@ -1098,6 +1153,22 @@ void PathTrackerClass::_stepFsm()
         {
             if (Drive.isIdle())
             {
+                // ADR-059: a still-ACTIVE chain run here means the hop that just retired
+                // was a NON-final chained hop (the final hop retires the run at its own
+                // dispatch), i.e. this node boundary is a non-braking pass — the chained
+                // move ended at its planned endPwm with `setBrake(false)` and the next
+                // chained hop re-drives the wheels at that same PWM one plan tick later.
+                // Emit the `blind_pass` parity record BEFORE the advance stamp so the
+                // record sits between the two hops' blind_dead_reckon records (the sim
+                // mirrors this ordering). The node is still stamped exactly ONCE via the
+                // unchanged onDeadReckonedAdvance below (AC3) — blind nodes have no
+                // positional re-anchor, chained or not.
+#ifdef PT_PARITY_TRACE
+                if (_chain.active)
+                {
+                    _ptEmitBlindPass(_nextHop);
+                }
+#endif
                 Localization.onDeadReckonedAdvance(_nextHop);
                 _state = State::PLAN_NEXT_HOP;
             }
@@ -1307,6 +1378,9 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     // ADR-036: a fault aborts the in-flight goal — drop any latched pivot so it
     // cannot bleed into a post-clearFault() goal.
     _resetPivotLatch();
+    // ADR-059: a fault stops the chassis — drop any in-flight blind-chain run so a stale
+    // speed plan cannot bleed into a post-clearFault() goal's first blind dispatch.
+    _chainReset();
 
     Serial.print(F("[PathTracker] FAULT "));
     Serial.print(faultMnemonic(kind));
@@ -1952,6 +2026,17 @@ bool PathTrackerClass::_dispatchTurnIfNeeded(float bodyHeadingWorld, uint8_t tur
     // the chassis. (PR#35 findings #32 / #90.)
     _passThrough = false;
 
+    // ADR-059: same rule for a blind-chain run. The walk-ahead classified the joints on EDGE
+    // headings, but this live check compares the IMU heading — if drift has opened a real
+    // delta mid-run, the turn takes the wheels and the chassis stops, so the chained speed
+    // plan (built for a no-stop run) is void. Drop it loudly; the post-turn dispatch is then
+    // an ordinary braked soft-start hop, and a fresh chain may re-form on a later hop.
+    if (_chain.active)
+    {
+        Serial.println(F("[PathTracker] ADR-059: pre-edge turn fired mid-chain; dropping run"));
+        _chainReset();
+    }
+
     Drive.turnToYaw(Localization.toImuYaw(bodyHeadingWorld)).setMode(turnModeByte).async();
     return true;
 }
@@ -2034,44 +2119,59 @@ uint8_t PathTrackerClass::_peekNextNextHop() const
     return nextNext;
 }
 
-bool PathTrackerClass::_passThroughHeadingOk(const Routes::EdgeInfo& outbound,
-                                             uint8_t next) const
+bool PathTrackerClass::passThroughHeadingEligible(float                   inboundBodyHeadingDeg,
+                                                  Direction               inboundDirection,
+                                                  const Routes::EdgeInfo& outboundEdge,
+                                                  bool                    outboundIsLastHop,
+                                                  Direction activeArrivalDirection,
+                                                  Direction activeRouteDirection)
 {
-    // Shared ADR-023 collinearity + same-direction test for a mid→next (B→C) edge.
-    // Both pass-through gates (the intersection-gated line–line–line collapse in
-    // LINE_FOLLOW and the distance-gated line–proj–line collapse in
-    // `_evaluateProjectionPassThrough`) call this so the heading rule lives in ONE
-    // place (mirrors the Python sim's single `_should_pass_through()`).
+    // The PURE ADR-023 collinearity + same-direction test (ADR-059). Every input is an
+    // explicit argument — no FSM member reads — so the blind-chain walk-ahead can call it
+    // repeatedly for multi-hop lookahead with synthesized inbound headings, and the Python
+    // sim mirrors THIS one function (full contract in the header doxygen).
     //
-    // Compare BODY headings (the chassis arrives facing `_resolvedBodyHeading`):
-    // re-resolve the B→C direction with the inbound body heading as the current
-    // heading, rotate the outbound edge heading 180° for REAR, then wrap-normalize the
-    // delta. The next-next hop is still part of the active goTo(), so the same cached
-    // route/arrival overrides apply (arrival only binds when C is the final
-    // destination, handled by the isLastHop flag). A FRONT↔REAR flip would force a
-    // mid-flight LineFollower board swap — never a pass-through, so the resolved
-    // direction must match too.
-    const float inboundBody = _resolvedBodyHeading;
+    // Compare BODY headings: re-resolve the outbound direction with the inbound body
+    // heading as the current heading, rotate the outbound edge heading 180° for REAR, then
+    // wrap-normalize the delta. A FRONT↔REAR flip would force a mid-flight LineFollower
+    // board swap (or a blind-chain sign flip) — never a continuation, so the resolved
+    // direction must match the inbound one too.
     const Direction nextDir = resolveDirection(
-        outbound.direction_override,
+        outboundEdge.direction_override,
         Routes::PIPELINE_CONFIG.direction,
-        _activeArrivalDirection,
-        _activeRouteDirection,
-        inboundBody,
-        outbound.heading_deg,
-        (next == _destinationNode),
+        activeArrivalDirection,
+        activeRouteDirection,
+        inboundBodyHeadingDeg,
+        outboundEdge.heading_deg,
+        outboundIsLastHop,
         Config::BIDIRECTIONAL_AUTO_ENABLED,
         Config::LINE_BOARD_COUNT);
 
-    float outboundBody = outbound.heading_deg;
+    float outboundBody = outboundEdge.heading_deg;
     if (nextDir == Direction::REAR)
     {
         outboundBody = fmodf(outboundBody + 180.0f, 360.0f);
         if (outboundBody < 0.0f) outboundBody += 360.0f;
     }
 
-    const float delta = wrapDeltaDeg(outboundBody - inboundBody);
-    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG) && (nextDir == _resolvedDirection);
+    const float delta = wrapDeltaDeg(outboundBody - inboundBodyHeadingDeg);
+    return (fabsf(delta) <= Config::NAV_TURN_TOLERANCE_DEG) && (nextDir == inboundDirection);
+}
+
+bool PathTrackerClass::_passThroughHeadingOk(const Routes::EdgeInfo& outbound,
+                                             uint8_t next) const
+{
+    // LIVE-STATE ADAPTER over the pure predicate (ADR-059). Both pass-through gates (the
+    // intersection-gated line–line–line collapse in LINE_FOLLOW and the distance-gated
+    // line–proj–line collapse in `_evaluateProjectionPassThrough`) call this thin wrapper;
+    // the heading/direction MATH lives only in `passThroughHeadingEligible`, which the
+    // blind-chain walk-ahead calls directly — one predicate, three gates, no drift
+    // (mirrors the Python sim's single `_should_pass_through()`). The next-next hop is
+    // still part of the active goTo(), so the same cached route/arrival overrides apply
+    // (arrival only binds when C is the final destination, via the isLastHop flag).
+    return passThroughHeadingEligible(_resolvedBodyHeading, _resolvedDirection, outbound,
+                                      (next == _destinationNode), _activeArrivalDirection,
+                                      _activeRouteDirection);
 }
 
 bool PathTrackerClass::_evaluateProjectionPassThrough() const
@@ -2125,6 +2225,213 @@ bool PathTrackerClass::_evaluateProjectionPassThrough() const
     // intersection-gated pass-through uses, factored into the one shared
     // `_passThroughHeadingOk()` predicate so the two sites cannot drift.
     return _passThroughHeadingOk(outbound, c);
+}
+
+void PathTrackerClass::_chainReset()
+{
+    // ADR-059: value-initialize the whole run buffer back to the inactive state.
+    // `active == false` gates every read, so the array wipe is hygiene, not correctness.
+    _chain = ChainRun{};
+}
+
+void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMode hop0Mode,
+                                      float hop0DistCm, int16_t cruisePwm, int16_t entryPwm)
+{
+    // ADR-059 blind-chain walk-ahead (full contract in the header doxygen). On entry the
+    // hop being dispatched (hop 0: `cur -> _nextHop`) is already classified
+    // BLIND_DEAD_RECKON by the caller; this method decides whether hop 0 STARTS a chained
+    // run and, if so, how far the run extends. Leaves `_chain` INACTIVE unless a genuine
+    // >= 2-hop run forms (AC12: a non-chain hop takes the ordinary per-hop path untouched).
+
+    // ---- Hop-0 eligibility. -------------------------------------------------------------
+    // RAW_FLAT has no ramps to chain; a sub-TSHAPE_MIN_MOVE_CM hop silently degrades the
+    // Drive profile (start/end speeds ignored); an active approaching pivot means the
+    // chassis must stop delta short of `_nextHop` and pivot there — all three make hop 0 an
+    // ordinary braked hop.
+    if (hop0Mode == Routes::BlindMode::RAW_FLAT)
+    {
+        return;
+    }
+    if (hop0DistCm < Config::TSHAPE_MIN_MOVE_CM)
+    {
+        return;
+    }
+    if (_approachingPivot.active)
+    {
+        return;
+    }
+
+    _chain.node[0]      = cur;
+    _chain.node[1]      = _nextHop;
+    _chain.hopDistCm[0] = hop0DistCm;
+
+    uint8_t count       = 1;             // hops admitted so far (hop 0 is in)
+    float   totalCm     = hop0DistCm;    // summed COMMANDED run distance
+    float   inboundBody = _resolvedBodyHeading;    // hop 0's body heading seeds the walk
+
+    // ---- Walk NEXT_HOP forward, admitting one hop per iteration. --------------------------
+    // Every `break` below ENDS the chain BEFORE the hop under evaluation (Error Handling):
+    // that hop dispatches later as a normal braked hop. Only the two run CAPS log — an
+    // ordinary ineligibility (goal / reset / seek / bend / flip / short hop) is silent.
+    while (true)
+    {
+        const uint8_t a = _chain.node[count];    // node the run currently ends on
+
+        // Goal node: a run may END on the goal (the final hop brakes there) but never
+        // continues past it. RESET node: the wall-zero interlude fires on arrival and
+        // needs a stopped chassis, so the run must brake there too.
+        if (a == _destinationNode)
+        {
+            break;
+        }
+        if (FieldMap::getNodeType(a) == Routes::NodeType::RESET)
+        {
+            break;
+        }
+
+        const uint8_t b = FieldMap::getNextHop(a, _destinationNode);
+        if (b == FieldMap::NODE_NONE || b == a)
+        {
+            break;    // no route / self-loop — same guards as _peekNextNextHop
+        }
+
+        const Routes::EdgeInfo& e = FieldMap::getEdge(a, b);
+        if (e.type != Routes::EdgeType::BLIND)
+        {
+            break;    // a LINE hop is the line-follower's domain — the run ends before it
+        }
+
+        // Pivot guards (defensive: a validator-passed pivot turn is >= PIVOT_MIN_TURN_DEG,
+        // never collinear, so the heading predicate below would reject these joints anyway).
+        // A pivot AT the joint (prev, a, b) means the turn at `a` is a pivot maneuver; a
+        // pivot ONTO b (a, b, c) means the a->b hop must stop delta short of b. Both brake.
+        if (FieldMap::findPivotTurn(_chain.node[count - 1], a, b) != nullptr)
+        {
+            break;
+        }
+        if (b != _destinationNode)
+        {
+            const uint8_t c = FieldMap::getNextHop(b, _destinationNode);
+            if (c != FieldMap::NODE_NONE && c != b
+                && FieldMap::findPivotTurn(a, b, c) != nullptr)
+            {
+                break;
+            }
+        }
+
+        // Collinear + same-direction — the PURE predicate (a bend or a FRONT<->REAR flip
+        // ends the run; the direction therefore stays constant along the whole run).
+        if (!passThroughHeadingEligible(inboundBody, _resolvedDirection, e,
+                                        (b == _destinationNode), _activeArrivalDirection,
+                                        _activeRouteDirection))
+        {
+            break;
+        }
+
+        // Seek / motion-bundle resolution — the SAME resolver inputs the dispatch site
+        // builds, so walk-time and dispatch-time classification cannot diverge. A seek
+        // (stopAtLine) hop is chain-ineligible (the run ends; the seek is a fresh braked
+        // hop whose arm window must absorb the run's residual dead-reckon error). That is
+        // no longer a compile-enforced PATH_BLIND_CHAIN_MAX_CM <= STOP_AT_LINE_ARM_WINDOW_CM
+        // budget: the distance cap was decoupled (owner decision, ConfigNav.h) and
+        // MAX_CHAIN_HOPS is now the practical bound. If a chain-into-seek drift shows up on
+        // the bench, add a SEPARATE bound scoped to that handoff (do NOT re-tie the cap).
+        const bool autoRule =
+            Routes::BLIND_PROJECTION_AUTO_SEEK && FieldMap::isProjectionNode(b);
+        const StopAtLineQuery sq{
+            _activeStopAtLine,
+            e.stop_at_line_override,
+            _resolveBlindMode(e),
+            Routes::PIPELINE_CONFIG.blind,
+            _resolvedDirection,
+            Config::LINE_BOARD_COUNT,
+            autoRule};
+        const StopAtLineResolution sr = resolveStopAtLine(sq);
+        if (sr.seek)
+        {
+            break;
+        }
+        if (sr.motionMode == Routes::BlindMode::RAW_FLAT)
+        {
+            break;    // no ramps to chain
+        }
+
+        // A hop below the profile floor cannot carry chained start/end speeds (the Drive
+        // builder silently degrades it to a flat move) — the run ends before it.
+        if (e.distance_cm < Config::TSHAPE_MIN_MOVE_CM)
+        {
+            break;
+        }
+
+        // ---- Run caps — LOGGED truncations, never silent (Error Handling). --------------
+        // The hop under evaluation passed EVERY eligibility guard above, so refusing it
+        // here is a genuine cap truncation: the run ends at the cap (its current final hop
+        // brakes) and a fresh chain may re-form from `b`'s hop onward.
+        if (count >= Config::MAX_CHAIN_HOPS)
+        {
+            _printChainCapTruncation(F("hop cap"), count, totalCm, b);
+            break;
+        }
+        if (totalCm + e.distance_cm > Config::PATH_BLIND_CHAIN_MAX_CM)
+        {
+            _printChainCapTruncation(F("distance cap"), count, totalCm, b);
+            break;
+        }
+
+        // ---- Admit the hop. --------------------------------------------------------------
+        // Mid-run hops carry the raw edge length: no pivot can trim them (the pivot guards
+        // above ended the run at any pivot-adjacent joint), so the walk-time distance
+        // equals the dispatch-time `resolvePivotTrim` output exactly.
+        _chain.hopDistCm[count] = e.distance_cm;
+        _chain.node[count + 1]  = b;
+        ++count;
+        totalCm += e.distance_cm;
+
+        // The next joint's inbound body heading is THIS hop's body heading (REAR rotates
+        // 180°, matching `_onPlanNextHop`'s bodyTarget math) — pairwise joint tests, the
+        // same tolerance semantics the per-hop skip-turn check applies at dispatch time.
+        inboundBody = e.heading_deg;
+        if (_resolvedDirection == Direction::REAR)
+        {
+            inboundBody = fmodf(inboundBody + 180.0f, 360.0f);
+            if (inboundBody < 0.0f)
+            {
+                inboundBody += 360.0f;
+            }
+        }
+    }
+
+    if (count < 2)
+    {
+        return;    // not a chain — hop 0 dispatches on the ordinary per-hop path (AC12)
+    }
+
+    // ---- Resolve the per-hop speed plan (pure two-pass planner, ChainSpeedPolicy.h). -----
+    // `entryPwm` seeds the forward pass (AC5: the ADR-023 captured cruise after a
+    // pass-through, else the +/-TSHAPE_START_SPEED cold-start seed); the backward pass
+    // sheds every node speed low enough that the final hop's ordinary cruise->floor->brake
+    // stop fits. The final hop's plan is `{startPwm, 0, brake=true}` by construction.
+    const ChainSpeedConfig cfg{Config::PWM_MIN_MAGNITUDE, Config::PWM_MAX,
+                               Config::TSHAPE_ACCEL_PWM_PER_CM, Config::TSHAPE_MIN_MOVE_CM};
+    resolveChainSpeeds(_chain.hopDistCm, count, cruisePwm, entryPwm, cfg, _chain.speed);
+
+    _chain.active         = true;
+    _chain.reverse        = reverse;
+    _chain.hopCount       = count;
+    _chain.hopIndex       = 0;
+    _chain.dispatchEncSum = 0;
+    _chain.dispatchCmdCm  = 0.0f;
+
+    Serial.print(F("[PathTracker] ADR-059: blind chain "));
+    Serial.print(FieldMap::getNode(_chain.node[0]).name);
+    Serial.print(F(" -> "));
+    Serial.print(FieldMap::getNode(_chain.node[count]).name);
+    Serial.print(F(": hops="));
+    Serial.print(count);
+    Serial.print(F(" dist="));
+    Serial.print(totalCm);
+    Serial.print(F(" cm entryPwm="));
+    Serial.println(entryPwm);
 }
 
 void PathTrackerClass::_dispatchEdgeAfterTurn()
@@ -2229,6 +2536,17 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
 
     const EdgeDispatchDecision decision = resolveEdgeDispatch(q);
 
+    // ADR-059 defensive: a blind-chain run only ever continues through BLIND_DEAD_RECKON
+    // dispatches — the walk-ahead admitted exclusively plain-dead-reckon BLIND hops, so any
+    // other primitive arriving while a run is live means the world diverged from the walk
+    // (unreachable by construction on a static NEXT_HOP table). Drop the run loudly and let
+    // the primitive dispatch normally rather than carry a stale speed plan forward.
+    if (_chain.active && decision.primitive != DispatchPrimitive::BLIND_DEAD_RECKON)
+    {
+        Serial.println(F("[PathTracker] ADR-059: non-blind dispatch mid-chain; dropping run"));
+        _chainReset();
+    }
+
     switch (decision.primitive)
     {
         case DispatchPrimitive::LINE_FOLLOW_INTERSECTION:
@@ -2282,6 +2600,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         .setPreset(preset)
                         .setReverse(decision.reverse)
                         .setOvershootMode(false)
+                        .setTShapeRampDown(!_projPassThrough)
                         .setBrakeOnGate(decision.brakeOnGate)
                         .setDistanceTarget(effectiveDistCm);
 #ifdef PT_PARITY_TRACE
@@ -2377,7 +2696,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // (Drive.h:1288-1296 documents the matching sign-by-cruise rule).
             const int16_t cruisePwm = decision.reverse ? (int16_t) -Config::SPEED_NORMAL
                                                         : (int16_t)  Config::SPEED_NORMAL;
-            const int16_t signedStartSpeed =
+            int16_t signedStartSpeed =
                 decision.reverse ? (int16_t) -startSpeed : startSpeed;
 
             // `_pivotTrimDistance(edge)` fires the dead-reckon clamp underflow trace and
@@ -2385,72 +2704,340 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // `resolvePivotTrim` with identical inputs: edge.distance_cm minus the two
             // latched pivot trims, clamped to the floor). Dispatching its return is
             // behavior-identical to the pre-refactor code while keeping the trace;
-            // the dispatched `effectiveDistCm` is the value the parity stream records.
+            // the dispatched distance is the value the parity stream records.
             const float effectiveDistCm = _pivotTrimDistance(edge);
 
-            // The resolved motion bundle (`decision.driveMode`) maps onto one of three
-            // Drive builder chains:
-            //   - SYNC_TSHAPE : driveDist(cm).setMode(SYNC).tShape() (encoder-rate sync
-            //                   PID + trapezoidal velocity profile)
-            //   - GYRO_TSHAPE : driveDist(cm).setMode(GYRO).tShape() (straight-line yaw
-            //                   lock; heading is the BODY heading, already REAR-rotated)
-            //   - RAW_FLAT    : driveDist(cm).setMode(RAW).setStartSpeed(cruise)
-            //                   .setEndSpeed(cruise) (open-loop PWM, no ramp)
-            // DEFAULT/STOP_AT_LINE cannot reach this switch — the resolver guarantees a
-            // concrete bundle; the SYNC_TSHAPE default below is belt-and-braces.
-            switch (decision.driveMode)
+            // ---------------------------------------------------------------------------
+            // ADR-059 blind-chain resolution. Exactly one of three paths applies:
+            //   (a) a run is IN FLIGHT — this dispatch is its next hop: subtract the
+            //       MEASURED inter-hop boundary carry (AC9) and take the hop's resolved
+            //       (startPwm, endPwm, brake) from the run buffer;
+            //   (b) no run + chaining enabled — try to START one via the walk-ahead
+            //       (`_chainTryStart`); on success this hop is the run's first mid-hop;
+            //   (c) chaining disabled / no eligible run — the ordinary per-hop dispatch
+            //       below is UNTOUCHED (AC12; TC5: PATH_BLIND_CHAIN_ENABLED=false is
+            //       byte-identical to today's stop-at-every-node behavior).
+            // ---------------------------------------------------------------------------
+            float   dispatchCm  = effectiveDistCm;
+            bool    chainMid    = false;    // dispatch with chained endPwm + setBrake(false)
+            int16_t chainEndPwm = 0;
+
+            if (_chain.active)
             {
-                case Routes::BlindMode::GYRO_TSHAPE:
+                const uint8_t k = (uint8_t) (_chain.hopIndex + 1);
+                const bool    match =
+                    (k < _chain.hopCount) && (cur == _chain.node[k])
+                    && (_nextHop == _chain.node[k + 1])
+                    && (decision.reverse == _chain.reverse)
+                    && (decision.driveMode != Routes::BlindMode::RAW_FLAT);
+                if (match)
                 {
-                    // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
-                    // rotated 180 deg for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
-                    const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
-                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
+                    // Measured inter-hop boundary carry (AC9). Between the previous hop's
+                    // profile completing and THIS dispatch, the chassis keeps rolling
+                    // (Drive's empty-queue chained-end path releases the brake and coasts
+                    // — Drive.cpp finding #13 — for the ~2-3 FSM ticks of the
+                    // BLIND_FORWARD -> PLAN_NEXT_HOP -> dispatch boundary, ~1.5-3 cm at
+                    // cruise). That travel lands BEFORE the new move's encoder baseline,
+                    // so subtract the MEASURED overshoot — travel since the previous
+                    // hop's dispatch minus its commanded distance — from this hop's
+                    // command. Dispatch-to-dispatch deltas tile the run's timeline with
+                    // no gap or overlap, so the correction telescopes and the run's final
+                    // node lands on-node with NO error accumulation over N hops. Never an
+                    // assumed constant. A negative measurement (host mocks with parked
+                    // encoders; an under-traveled move) clamps to 0 — never LENGTHEN a
+                    // hop, and the parity harness (encoders parked) then records the
+                    // planned distances exactly like the sim.
+                    const int32_t encSum = Drive.getEncL() + Drive.getEncR();
+                    const float   traveledCm =
+                        fabsf(encDegToCm((encSum - _chain.dispatchEncSum) / 2));
+                    float carryCm = traveledCm - _chain.dispatchCmdCm;
+                    if (carryCm < 0.0f)
+                    {
+                        carryCm = 0.0f;
+                    }
+                    dispatchCm = effectiveDistCm - carryCm;
+                    if (dispatchCm < Config::PIVOT_TRIM_MIN_DRIVE_CM)
+                    {
+                        dispatchCm = Config::PIVOT_TRIM_MIN_DRIVE_CM;
+                    }
+
+                    _chain.hopIndex  = k;
+                    signedStartSpeed = _chain.speed[k].startPwm;
+                    if (!_chain.speed[k].brake)
+                    {
+                        chainMid    = true;
+                        chainEndPwm = _chain.speed[k].endPwm;
+                    }
+                    // else: the run's FINAL hop — the braked cruise->floor->brake stop
+                    // (AC3), dispatched below with the chained start speed AND the tShape
+                    // end target pinned to the FLOOR (see `chainFinalEndPwm`).
+                }
+                else
+                {
+                    // Divergence from the walked plan — unreachable by construction on a
+                    // static NEXT_HOP table (a mid-run turn already drops the run in
+                    // _dispatchTurnIfNeeded); guard it anyway. The chassis is physically
+                    // near the previous hop's planned exit PWM, so seed the fallback
+                    // braked hop from it (sign-checked against the new cruise) instead of
+                    // re-dipping to the floor.
+                    Serial.println(
+                        F("[PathTracker] ADR-059: chain divergence at dispatch; "
+                          "abandoning run"));
+                    const int16_t heldPwm = _chain.speed[_chain.hopIndex].endPwm;
+                    _chainReset();
+                    if (heldPwm != 0 && ((heldPwm < 0) == (cruisePwm < 0)))
+                    {
+                        signedStartSpeed = heldPwm;
+                    }
+                }
+            }
+            else if (Config::PATH_BLIND_CHAIN_ENABLED)
+            {
+                _chainTryStart(cur, decision.reverse, decision.driveMode, effectiveDistCm,
+                               cruisePwm, signedStartSpeed);
+                if (_chain.active)
+                {
+                    // Hop 0 of a fresh run. `speed[0].startPwm` is the entryPwm clamped
+                    // into [PWM_MIN_MAGNITUDE, |cruise|] by the planner (== the ADR-023
+                    // captured cruise after a pass-through, else the cold-start seed —
+                    // AC5). hopCount >= 2, so hop 0 is always a non-braking mid-hop.
+                    signedStartSpeed = _chain.speed[0].startPwm;
+                    if (!_chain.speed[0].brake)
+                    {
+                        chainMid    = true;
+                        chainEndPwm = _chain.speed[0].endPwm;
+                    }
+                }
+            }
+
+            const bool chainHop = _chain.active;
+
+            // ADR-059 chain-FINAL hop (the run buffer's braked last hop; `chainHop` with
+            // `chainMid` false): pin the braked tShape's end target to the FLOOR
+            // (±PWM_MIN_MAGNITUDE), NOT 0. The braked-default endSpeed=0 asks the kernel
+            // to shed cruise->0 — (85−0)/5 = 17 cm of ramp-down — which cannot fit a
+            // short final hop, so the profile triangle-collapses
+            // (TShapeProfilePolicy.h: peak = (85+0+85)/3 = 56) and the hop LAUNCHES
+            // below the cruise the chassis physically enters at — the exact re-dip lurch
+            // ADR-059 removes. Ending at the floor sizes the shed at
+            // (cruise − PWM_MIN)/accel = 7 cm, which fits: the hop launches at the plan
+            // start, sheds cruise->floor, and the brake (still default-on) completes
+            // floor->rest — ADR-058's cruise->floor->brake stop shape. Non-chain braked
+            // hops deliberately keep the endSpeed=0 default (they start from rest / a
+            // low seed and do not triangle-collapse; changing them would alter existing
+            // motion and re-pin goldens — AC12).
+            // Revisit the final end speed if the robot cannot brake to rest from the
+            // floor due to inertia on a short final hop (owner decision, Diego 2026-07).
+            const bool    chainFinal = chainHop && !chainMid;
+            const int16_t chainFinalEndPwm =
+                decision.reverse ? (int16_t) -Config::PWM_MIN_MAGNITUDE
+                                 : (int16_t) Config::PWM_MIN_MAGNITUDE;
+
+            // RAW_FLAT start resolution, hoisted so the RAW dispatch branch and the parity
+            // emit below cannot drift: pass-through is the one case where the inbound
+            // LineFollower cruise can legitimately differ from cruisePwm (non-NORMAL
+            // preset on the inbound LINE edge). Only read on the RAW_FLAT branch.
+            const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
+
+            if (chainHop && dispatchCm < Config::TSHAPE_MIN_MOVE_CM)
+            {
+                // ADR-059 degraded chained stub: the measured-carry subtraction shrank
+                // this hop below the profile floor (a planned >= TSHAPE_MIN_MOVE_CM hop
+                // with a large boundary carry). The builder would silently degrade the
+                // profiled dispatch to a FLAT move at POWER = cruise — a mid-run PWM step
+                // to cruise (or a cruise-then-brake slam on the final hop). Dispatch the
+                // stub explicitly FLAT at the hop's OWN planned PWM instead: a mid-hop
+                // holds its planned exit speed (no brake, run continues), a final hop
+                // crawls the residual at its low planned entry speed into the ordinary
+                // brake. RAW_FLAT never chains, so only SYNC/GYRO reach this.
+                const int16_t stubPwm = chainMid ? chainEndPwm : signedStartSpeed;
+                Serial.print(F("[PathTracker] ADR-059: chained hop shrunk to "));
+                Serial.print(dispatchCm);
+                Serial.println(F(" cm (below profile floor); dispatching flat at plan PWM"));
+                if (decision.driveMode == Routes::BlindMode::GYRO_TSHAPE)
+                {
+                    Drive.driveDist(dispatchCm)
                          .setMode(DriveMode::GYRO)
-                         .setHeading(imuTarget)
-                         .setPower(cruisePwm)
-                         .setStartSpeed(signedStartSpeed)    // pass-through: cruise; else +/-PWM_MIN_MAGNITUDE
-                         .tShape()
+                         .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                         .setPower(stubPwm)
+                         .flat()
+                         .setBrake(!chainMid)
                          .async();
-                    break;
                 }
-
-                case Routes::BlindMode::RAW_FLAT:
+                else
                 {
-                    // RAW_FLAT pins start=end=cruise for a flat open-loop profile (the "FLAT"
-                    // in the name). Pass-through is the one case where the inbound
-                    // LineFollower cruise can legitimately differ from cruisePwm (non-NORMAL
-                    // preset on the inbound LINE edge); use the captured startSpeed there.
-                    // Non-pass-through MUST keep .setStartSpeed(cruisePwm) — anything else
-                    // introduces a ramp and breaks the FLAT contract for callers that picked
-                    // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
-                    const int16_t rawStart = _passThrough ? signedStartSpeed : cruisePwm;
-                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
-                         .setMode(DriveMode::RAW)
-                         .setPower(cruisePwm)
-                         .setStartSpeed(rawStart)
-                         .setEndSpeed(cruisePwm)
-                         .async();
-                    break;
-                }
-
-                case Routes::BlindMode::SYNC_TSHAPE:
-                case Routes::BlindMode::DEFAULT:    // defensive — see comment above
-                default:
-                {
-                    Drive.driveDist(effectiveDistCm)    // ADR-036 pivot-trimmed (LOCAL); table distance untouched
+                    Drive.driveDist(dispatchCm)
                          .setMode(DriveMode::SYNC)
-                         .setPower(cruisePwm)
-                         .setStartSpeed(signedStartSpeed)
-                         .tShape()
+                         .setPower(stubPwm)
+                         .flat()
+                         .setBrake(!chainMid)
                          .async();
-                    break;
+                }
+            }
+            else
+            {
+                // The resolved motion bundle (`decision.driveMode`) maps onto one of three
+                // Drive builder chains:
+                //   - SYNC_TSHAPE : driveDist(cm).setMode(SYNC).tShape() (encoder-rate sync
+                //                   PID + trapezoidal velocity profile)
+                //   - GYRO_TSHAPE : driveDist(cm).setMode(GYRO).tShape() (straight-line yaw
+                //                   lock; heading is the BODY heading, already REAR-rotated)
+                //   - RAW_FLAT    : driveDist(cm).setMode(RAW).setStartSpeed(cruise)
+                //                   .setEndSpeed(cruise) (open-loop PWM, no ramp)
+                // DEFAULT/STOP_AT_LINE cannot reach this switch — the resolver guarantees a
+                // concrete bundle; the SYNC_TSHAPE default below is belt-and-braces.
+                //
+                // ADR-059: a chained MID-hop (`chainMid`) additionally chains
+                // `.setEndSpeed(chainEndPwm).setBrake(false)` so the chassis passes the
+                // node boundary without braking to rest (AC3) — Drive's empty-queue
+                // chained-end path then releases the brake and coasts for the short
+                // boundary window until the next chained hop re-drives the wheels at that
+                // same planned PWM. A chain FINAL hop (`chainFinal`) takes the braked
+                // statement with its start speed seeded from the run plan and its tShape
+                // end target pinned to the FLOOR (`chainFinalEndPwm` — see the block
+                // above for why 0 triangle-collapses a short final hop); a non-chain hop
+                // is byte-identical to pre-ADR-059 (AC12). RAII rule throughout: each
+                // Drive chain is ONE discarded-temporary statement.
+                switch (decision.driveMode)
+                {
+                    case Routes::BlindMode::GYRO_TSHAPE:
+                    {
+                        // GYRO holds the BODY heading — use `_resolvedBodyHeading` (already
+                        // rotated 180 deg for REAR by `_onPlanNextHop`), not raw edge.heading_deg.
+                        const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
+                        if (chainMid)
+                        {
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::GYRO)
+                                 .setHeading(imuTarget)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainEndPwm)           // ChainHopSpeed.endPwm
+                                 .setBrake(false)                    // never brake mid-run (AC3)
+                                 .tShape()
+                                 .async();
+                        }
+                        else if (chainFinal)
+                        {
+                            // ADR-059 chain-FINAL: braked stop shedding cruise->FLOOR
+                            // (brake completes floor->rest) — see `chainFinalEndPwm`.
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::GYRO)
+                                 .setHeading(imuTarget)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainFinalEndPwm)      // floor, not 0
+                                 .tShape()
+                                 .async();
+                        }
+                        else
+                        {
+                            Drive.driveDist(dispatchCm)    // ADR-036 pivot-trimmed (LOCAL)
+                                 .setMode(DriveMode::GYRO)
+                                 .setHeading(imuTarget)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ADR-023 seed
+                                 .tShape()
+                                 .async();
+                        }
+                        break;
+                    }
+
+                    case Routes::BlindMode::RAW_FLAT:
+                    {
+                        // RAW_FLAT pins start=end=cruise for a flat open-loop profile (the "FLAT"
+                        // in the name); `rawStart` (hoisted above) covers the pass-through case.
+                        // Non-pass-through MUST keep start = cruisePwm — anything else
+                        // introduces a ramp and breaks the FLAT contract for callers that picked
+                        // RAW_FLAT precisely to avoid a ramp. See ADR-023 and issue #19.
+                        // ADR-059: RAW_FLAT is chain-ineligible (no ramps to chain), so this
+                        // branch is always a plain per-hop dispatch.
+                        Drive.driveDist(dispatchCm)    // ADR-036 pivot-trimmed (LOCAL)
+                             .setMode(DriveMode::RAW)
+                             .setPower(cruisePwm)
+                             .setStartSpeed(rawStart)
+                             .setEndSpeed(cruisePwm)
+                             .async();
+                        break;
+                    }
+
+                    case Routes::BlindMode::SYNC_TSHAPE:
+                    case Routes::BlindMode::DEFAULT:    // defensive — see comment above
+                    default:
+                    {
+                        if (chainMid)
+                        {
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::SYNC)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainEndPwm)           // ChainHopSpeed.endPwm
+                                 .setBrake(false)                    // never brake mid-run (AC3)
+                                 .tShape()
+                                 .async();
+                        }
+                        else if (chainFinal)
+                        {
+                            // ADR-059 chain-FINAL: braked stop shedding cruise->FLOOR
+                            // (brake completes floor->rest) — see `chainFinalEndPwm`.
+                            Drive.driveDist(dispatchCm)    // carry-adjusted (AC9)
+                                 .setMode(DriveMode::SYNC)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)    // ChainHopSpeed.startPwm
+                                 .setEndSpeed(chainFinalEndPwm)      // floor, not 0
+                                 .tShape()
+                                 .async();
+                        }
+                        else
+                        {
+                            Drive.driveDist(dispatchCm)    // ADR-036 pivot-trimmed (LOCAL)
+                                 .setMode(DriveMode::SYNC)
+                                 .setPower(cruisePwm)
+                                 .setStartSpeed(signedStartSpeed)
+                                 .tShape()
+                                 .async();
+                        }
+                        break;
+                    }
                 }
             }
 #ifdef PT_PARITY_TRACE
-            _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode,
-                                   effectiveDistCm);
+            {
+                // Wire fields (strict ADR-050 schema — see PathTrackerParityTrace.h's
+                // "ADR-059 wire schema" block): start_pwm/end_pwm are the RESOLVED
+                // velocity-PLAN endpoints, so the sim (carry-free) emits identical
+                // values; dist_cm is the carry-adjusted COMMANDED distance (== the
+                // planned distance whenever the measured carry is 0, as in the parity
+                // harness). A braked hop (incl. the chain FINAL) records end_pwm = 0 —
+                // the plan endpoint is rest; the chain-final dispatch pinning its tShape
+                // end target to the floor (`chainFinalEndPwm`) is a DISPATCH detail,
+                // deliberately NOT recorded here.
+                int16_t emitStartPwm = signedStartSpeed;
+                int16_t emitEndPwm   = chainMid ? chainEndPwm : (int16_t) 0;
+                if (decision.driveMode == Routes::BlindMode::RAW_FLAT)
+                {
+                    emitStartPwm = rawStart;
+                    emitEndPwm   = cruisePwm;
+                }
+                _ptEmitBlindDeadReckon(decision.reverse, decision.driveMode, dispatchCm,
+                                       emitStartPwm, emitEndPwm, chainHop);
+            }
 #endif
+            // ADR-059 run bookkeeping: snapshot the boundary baselines the NEXT hop's
+            // measured-carry subtraction reads (encoder sum + the distance just
+            // commanded), then retire the run when the hop just dispatched is its FINAL
+            // (braked) hop — BLIND_FORWARD's pass emit keys on `_chain.active`, so the
+            // final arrival correctly emits no `blind_pass`, and a fresh chain may
+            // re-form on the far side.
+            if (chainHop)
+            {
+                _chain.dispatchEncSum = Drive.getEncL() + Drive.getEncR();
+                _chain.dispatchCmdCm  = dispatchCm;
+                if ((uint8_t) (_chain.hopIndex + 1) >= _chain.hopCount)
+                {
+                    _chainReset();
+                }
+            }
             _state       = State::BLIND_FORWARD;
             _passThrough = false;    // consumed
             break;

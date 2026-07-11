@@ -82,12 +82,13 @@ public:
     /**
      * @brief Register the cooperative-tick callback driven during blocking task waits.
      *
-     * Some task bodies (``servoTest``, ``home``) block until an actuator settles. While
-     * they spin they must keep every module ticking — otherwise EventTrace stops
-     * rendering, the belt's own ``update()`` stops advancing, etc. — so the wait invokes
-     * this callback each iteration (mirroring ``ManipulatorClass::setTickCallback`` and
-     * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes ``cooperativeTick``
-     * here in ``setup()`` after every module's ``begin()`` has run.
+    * Some task bodies (``servoTest``, ``home``, ``idleWait``) block until an actuator
+    * settles or a cooperative timeout elapses. While they spin they must keep every
+    * module ticking — otherwise EventTrace stops rendering, the belt's own ``update()``
+    * stops advancing, etc. — so the wait invokes this callback each iteration
+    * (mirroring ``ManipulatorClass::setTickCallback`` and
+    * ``Drive``/``PathTracker``/``LineFollower``). The sketch passes
+    * ``cooperativeTick`` here in ``setup()`` after every module's ``begin()`` has run.
      *
      * @param cb Cooperative-tick function pointer, or ``nullptr`` to clear it (the
      *           blocking waits then degrade to ticking only ``Manipulator.update()`` and
@@ -168,6 +169,7 @@ public:
     /** @brief ``true`` while ``runTask`` is currently dispatching a body. */
     bool inTask() const;
 
+private:
     /**
      * @brief Static registry of all known task names + their member-fn pointers.
      *
@@ -176,13 +178,18 @@ public:
      * and a file-scope ``static_assert`` rejects the build if the count
      * exceeds ``Config::MAX_TASKS``.
      *
-     * @note Public so the bounds ``static_assert`` and any future external
-     *       validators (e.g. a Mission queue-time pre-check) can read the
-     *       size without the entries needing to grow a friend declaration.
-     *       The members are ``const`` — privacy here gives no additional
-     *       safety, only friction.
+     * @note Kept private because the registry is an implementation detail of
+     *       ``TasksClass`` lookup and dispatch.
      */
     static const TaskRegistryEntry _registry[];
+
+public:
+    /**
+    * @brief Number of entries in ``_registry``.
+    *
+    * Exposed so file-scope validation in ``Tasks.cpp`` can enforce the
+    * ``Config::MAX_TASKS`` cap without exposing the array itself.
+    */
     static const size_t            _registry_count;
 
 private:
@@ -213,6 +220,28 @@ private:
     bool debugYield(const TaskArgs& args);
 
     /**
+     * @brief Grab the object to the bin in one call.
+     * @param bin  which bin it is sorting to.
+     * @note This is NOT a task that can be called at the mission.
+     */
+    bool _grabToBin(uint8_t bin);
+
+    /**
+     * @brief Capture one mosaic observation into the `Vision` latch, with a single retry.
+     *
+     * Thin wrapper over `Vision.readMosaic()`: on a fault it logs, clears the fault, and
+     * retries exactly once. The captured colours are NOT returned — they live in the
+     * `Vision` latch (the single source of truth); read them per-cell with
+     * `Vision.getColor(cell)` after this returns `true`.
+     *
+     * @return `true` if a mosaic frame was captured (either attempt); `false` if both the
+     *         initial read and the retry faulted, in which case the latch is unchanged.
+     * @note The chassis MUST be fully idle before calling — see `Vision::readMosaic`. This is
+     *       a command-time BLOCKING call and is NOT a task callable from the mission DSL.
+     */
+    bool _visionRead();
+
+    /**
      * @brief Drive the sorter servo to an absolute angle and block until it settles.
      *
      * Bring-up helper: sets `Manipulator.sorter` to `args.u8[0]` degrees and polls
@@ -237,6 +266,19 @@ private:
      */
     bool home(const TaskArgs& args);
 
+    /**
+     * @brief Stationary cooperative wait task.
+     *
+     * Spins for ``args.u32[0]`` milliseconds while driving the registered cooperative
+     * tick callback so the rest of the robot keeps updating. Refuses to start if the
+     * chassis is already moving (Drive / PathTracker busy or LineFollower enabled).
+     *
+     * @param args ``u32[0]`` = wait duration in milliseconds.
+     * @return ``true`` when the timeout elapses; ``false`` if motion is active at entry
+     *         or the task framework is aborted during the wait.
+     */
+    bool idleWait(const TaskArgs& args);
+
     bool test1(const TaskArgs& args);
 
     /**
@@ -253,6 +295,23 @@ private:
     bool testChassis(const TaskArgs& args);
 
     /**
+     * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool testOne(const TaskArgs& args);
+    bool test0621(const TaskArgs& args);
+
+    /**
+     * @brief Bring-up CTPS demo.
+     *
+     * @param args Ignored.
+     * @return Always `true`.
+     */
+    bool ctpsExample1(const TaskArgs& args);
+
+    /**
      * @brief Empty no-op test hook.
      *
      * Reserved for quick Mission/task plumbing tests. Does no motion, no manipulator actuation,
@@ -262,15 +321,6 @@ private:
      * @return Always ``true``.
      */
     bool emptyTest(const TaskArgs& args);
-
-    /**
-     * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
-     *
-     * @param args Ignored.
-     * @return Always `true`.
-     */
-    bool testOne(const TaskArgs& args);
-    bool test0621(const TaskArgs& args);
 
     /**
      * @brief Bench self-test: sweep every configured drivetrain/manipulator actuator.
@@ -286,14 +336,15 @@ private:
     bool actuatorSweep(const TaskArgs& args);
 
     /**
-     * @brief Belt-only bring-up test.
+     * @brief Belt-only bring-up: start the belt home sequence.
      *
-     * Moves the conveyor through the configured named stations so the operator can confirm
-     * direction, travel, and end positions without any grabber / sorter / dumper motion.
+     * Calls `Manipulator.belt.home()` (stall into the LEFT/HOME end-stop, re-zero the encoder,
+     * then drive to the MID rest position) so the operator can watch the belt seek home without
+     * any grabber / sorter / dumper motion. `belt.home()` is non-blocking, so the sequence
+     * continues via `Manipulator.update()` after this returns.
      *
      * @param args Ignored.
-     * @return ``true`` if the belt reached every commanded station within timeout; ``false``
-     *         on the first station timeout.
+     * @return Always ``true``.
      */
     bool beltTest(const TaskArgs& args);
 
@@ -337,12 +388,15 @@ private:
     bool manipDirectTest(const TaskArgs& args);
 
     /**
-     * @brief Bring-up CTPS demo.
+     * @brief Stationary cooperative delay helper for task bodies.
      *
-     * @param args Ignored.
-     * @return Always `true`.
+     * @param ms    Timeout in milliseconds.
+     * @param site  Short caller tag for diagnostics.
+     * @return ``true`` when the timeout elapses; ``false`` if the chassis is moving at
+     *         entry or the task framework is aborted mid-wait.
      */
-    bool ctpsExample1(const TaskArgs& args);
+    bool waitStationaryMs(uint32_t ms,
+                          const __FlashStringHelper* site = F("waitStationaryMs"));
 
     // --- Cooperative-wait helpers -------------------------------------------
     // Shared by the bring-up tasks (``emptyTest`` / ``actuatorSweep`` /

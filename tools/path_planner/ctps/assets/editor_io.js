@@ -1,24 +1,30 @@
 /* CTPS — Layout Editor: I/O (Blob save + FileReader load of layout.json).
  *
  * The persistence layer of the two-tab offline editor (object/cargo plan, T8 --
- * issue #57). On `file://`, localStorage and the File System Access API are both
- * dead, so the round-trip is a Blob download + a FileReader upload. When instead
- * the page is served by the local edit-server (ADR-057 -- any non-`file:`
- * origin), Save POSTs straight to `/save` (written into `layouts/layout.json`)
- * and a heartbeat + close-beacon let that server auto-close when the tab goes
- * away. A server save that fails for any reason falls back to the download, so
- * no edit is ever lost:
+ * issue #57; randomized-vision plan, T16 -- ADR-060). On `file://`, localStorage
+ * and the File System Access API are both dead, so the round-trip is a Blob
+ * download + a FileReader upload. When instead the page is served by the local
+ * edit-server (ADR-057 -- any non-`file:` origin), Save POSTs straight to
+ * `/save` (written into `layouts/layout.json`) and a heartbeat + close-beacon
+ * let that server auto-close when the tab goes away. A server save that fails
+ * for any reason falls back to the download, so no edit is ever lost:
  *
- *   - Save: serialise the authored field objects + robot zones to a
- *     schema_version-1 `layout.json` dict (the exact shape ctps/layout.py
- *     validates), stringify it, and download it through a JS-created anchor whose
- *     download URL is assigned as a PROPERTY with spaces (`a.href = url`) so the
- *     self-containment lint -- which bans the literal attribute form -- never
- *     trips. Never a static markup attribute, never a data-image URI.
+ *   - Save: serialise the authored field objects + robot zones + (T16) the
+ *     `mosaic` block + `robot.vision` cone to a schema_version-1 `layout.json`
+ *     dict (the exact shape ctps/layout.py validates), stringify it, and
+ *     download it through a JS-created anchor whose download URL is assigned as
+ *     a PROPERTY with spaces (`a.href = url`) so the self-containment lint --
+ *     which bans the literal attribute form -- never trips. Never a static
+ *     markup attribute, never a data-image URI.
  *   - Load: a hidden file input + FileReader read the text and TOLERANTLY parse
  *     it (skip + `console.warn` a malformed object, keep the rest; a structurally
  *     invalid file shows an inline message and leaves the current scene intact) --
- *     the JS counterpart to layout.py's strict raise.
+ *     the JS counterpart to layout.py's strict raise. The optional `mosaic` /
+ *     `robot.vision` blocks follow the SAME tolerance: a malformed or partial
+ *     block warns and falls back to `E.defaultMosaic()` / `E.defaultVisionCone()`
+ *     (never thrown -- the loud validation is layout.py's job, not the
+ *     in-browser editor's), and a layout carrying neither block loads fine,
+ *     leaving `E.state.mosaic` / `E.state.vision` at their current values.
  *
  * A save -> load round-trip is loss-free: every field the editor authors is
  * written on save and read back on load, unchanged.
@@ -48,10 +54,64 @@
     }
 
     /**
+     * A schema dict for the top-level `mosaic` block (Data Model / ADR-060),
+     * matching Python `MosaicConfig.to_dict()` key-for-key. `counts` is emitted
+     * as the state currently holds it (never re-derived) so a directed-mode
+     * mosaic -- whose `counts` Python's own `to_dict()` still emits as `{}` --
+     * round-trips byte-identical to what was authored/loaded, and a random-mode
+     * mosaic keeps its exact quotas. `seed: null` means "fresh per invocation";
+     * a fixed seed round-trips verbatim.
+     */
+    function _mosaicDict(m) {
+        var counts = {};
+        var srcCounts = m.counts || {};
+        for (var name in srcCounts) {
+            if (Object.prototype.hasOwnProperty.call(srcCounts, name)) {
+                counts[name] = srcCounts[name];
+            }
+        }
+        return {
+            mode: m.mode,
+            center_x_cm: m.center_x_cm,
+            center_y_cm: m.center_y_cm,
+            heading_deg: m.heading_deg,
+            rows: m.rows,
+            cols: m.cols,
+            cell_w_cm: m.cell_w_cm,
+            cell_h_cm: m.cell_h_cm,
+            row_gap_cm: m.row_gap_cm,
+            col_gap_cm: m.col_gap_cm,
+            palette: m.palette.slice(),
+            cells: m.cells.slice(),
+            counts: counts,
+            seed: (m.seed === undefined) ? null : m.seed,
+        };
+    }
+
+    /**
+     * A schema dict for the robot-local `robot.vision` cone (Data Model /
+     * ADR-060), matching Python `VisionCone.to_dict()` key-for-key.
+     * `range_cm: null` means unbounded and is ALWAYS emitted (never dropped) --
+     * mirroring `VisionCone.to_dict()`'s own always-present `range_cm` key.
+     */
+    function _visionDict(v) {
+        return {
+            origin_x_cm: v.origin_x_cm,
+            origin_y_cm: v.origin_y_cm,
+            half_angle_deg: v.half_angle_deg,
+            range_cm: (v.range_cm === undefined) ? null : v.range_cm,
+        };
+    }
+
+    /**
      * Serialise the current editor state to a schema_version-1 layout dict. Only
      * the dimension keys matching each object's shape are emitted (a rect never
      * carries radius_cm; a circle never carries w_cm/h_cm) -- mirroring
-     * layout.py's `LayoutObject.to_dict`.
+     * layout.py's `LayoutObject.to_dict`. The top-level `mosaic` block and the
+     * `robot.vision` cone (T16 -- ADR-060) are always emitted here: the editor
+     * state always carries a mosaic/vision (seeded by `E.defaultMosaic()` /
+     * `E.defaultVisionCone()` at boot, per Contracts -- Schema keys), matching
+     * how `layout.py`'s own dataclasses round-trip a present block verbatim.
      */
     function _serialize() {
         var objects = [];
@@ -81,15 +141,23 @@
         for (var j = 0; j < rob.drop_points.length; j++) {
             drops.push({ x_cm: rob.drop_points[j].x_cm, y_cm: rob.drop_points[j].y_cm });
         }
-        return {
+        var robotDict = {
+            grab_zone: _zoneDict(rob.grab_zone),
+            box_zone: _zoneDict(rob.box_zone),
+            drop_points: drops,
+        };
+        if (E.state.vision) {
+            robotDict.vision = _visionDict(E.state.vision);
+        }
+        var layout = {
             schema_version: 1,
             objects: objects,
-            robot: {
-                grab_zone: _zoneDict(rob.grab_zone),
-                box_zone: _zoneDict(rob.box_zone),
-                drop_points: drops,
-            },
+            robot: robotDict,
         };
+        if (E.state.mosaic) {
+            layout.mosaic = _mosaicDict(E.state.mosaic);
+        }
+        return layout;
     }
 
     /**
@@ -212,43 +280,11 @@
         }
     }
 
-    /**
-     * When served by the edit-server, keep it alive with a heartbeat and shut it
-     * down when this tab goes away -- so the server auto-closes and can never
-     * dangle. A `POST /ping` every few seconds is the liveness signal (its
-     * silence, on any un-clean exit, trips the server's watchdog); a
-     * `navigator.sendBeacon('/close')` on unload is the clean-close fast path.
-     * Inert on a `file:` open (no server to talk to).
-     */
-    function _startServerSession() {
-        if (!_serverMode()) {
-            return;
-        }
-        var HEARTBEAT_MS = 3000;
-        setInterval(function () {
-            // Fire-and-forget: a rejected ping just means the server already
-            // closed, which is fine.
-            try {
-                fetch("/ping", { method: "POST" }).catch(function () {});
-            } catch (e) {
-                /* no-op */
-            }
-        }, HEARTBEAT_MS);
-
-        function _closeBeacon() {
-            try {
-                if (navigator.sendBeacon) {
-                    navigator.sendBeacon("/close", "");
-                } else {
-                    fetch("/close", { method: "POST", keepalive: true });
-                }
-            } catch (e) {
-                /* no-op */
-            }
-        }
-        window.addEventListener("pagehide", _closeBeacon);
-        window.addEventListener("beforeunload", _closeBeacon);
-    }
+    // The edit-server heartbeat/close session (POST /ping + /close beacon,
+    // ADR-057) now lives in the shared `assets/server_session.js`, inlined into
+    // both the served editor and the served player so the liveness protocol has
+    // a single source. It self-guards on `file:` and auto-runs on load, so there
+    // is nothing to start from here.
 
     // ----- load (FileReader -> tolerant parse) -----------------------------
 
@@ -350,10 +386,257 @@
             return null;
         }
         var dflt = E.defaultRobot();
+        // The player's layout.py hard-requires exactly one drop point per magazine
+        // lane (`len(drop_points) != MAGAZINE_LANES` -> LayoutError), and Save
+        // writes whatever we keep here back verbatim. A loaded file with the wrong
+        // count would round-trip as "saved cleanly" yet be un-embeddable, so fall
+        // back to the default full set (and flag it) instead of emitting a layout
+        // the player will reject.
+        var requiredDrops = dflt.drop_points.length;
+        if (drops && drops.length !== requiredDrops) {
+            if (E.status) {
+                E.status(
+                    "drop_points needs exactly " + requiredDrops +
+                    " entries (one per lane); using defaults");
+            }
+            drops = null;
+        }
         return {
             grab_zone: grab || dflt.grab_zone,
             box_zone: box || dflt.box_zone,
             drop_points: drops || dflt.drop_points,
+        };
+    }
+
+    // ----- tolerant mosaic / vision-cone ingest (T16 -- ADR-060) -----------
+    // The mirror image of layout.py's `validate_mosaic_config` /
+    // `validate_vision_cone` (AC3 rules), but NEVER throws: a malformed or
+    // partial block warns via `console.warn` and the caller falls back to
+    // `E.defaultMosaic()` / `E.defaultVisionCone()`. The loud, precise-key-path
+    // raise stays layout.py's job (Error Handling); the in-browser editor must
+    // survive any upload, however broken, without crashing.
+
+    var _MOSAIC_CELL_COUNT = 12;   // rows*cols MUST equal this (Config::VISION_CELL_COUNT)
+    var _MOSAIC_MODES = { random: true, directed: true };
+
+    /**
+     * Prototype-safe own-key test. Every membership check on the tolerant-ingest
+     * path routes through here so a hostile upload that shadows `hasOwnProperty`
+     * (e.g. a `counts`/`palette` colour literally named "hasOwnProperty") can
+     * never turn a lookup into an uncaught `TypeError` -- the ingest NEVER throws.
+     */
+    function _hasOwn(obj, key) {
+        return Object.prototype.hasOwnProperty.call(obj, key);
+    }
+
+    /**
+     * The canonical colour set as an own-key map, single-sourced from
+     * `MOSAIC_META.names` (the unconditional editor-emitted colour constant from
+     * `mosaic.py` -- ADR-060; never a hand-duplicated list). Returns `null` when
+     * the constant is absent (a legacy/served page): the caller then SKIPS the
+     * canonical-membership gate and enforces only the structural rules, so a
+     * page missing the vocabulary degrades gracefully rather than rejecting
+     * every palette. Mirrors `editor_core.js::_paletteNames`'s tolerant read.
+     */
+    function _canonicalColorSet() {
+        if (typeof MOSAIC_META !== "undefined" && MOSAIC_META && MOSAIC_META.names &&
+            typeof MOSAIC_META.names.length === "number") {
+            var set = {};
+            for (var i = 0; i < MOSAIC_META.names.length; i++) {
+                set[MOSAIC_META.names[i]] = true;
+            }
+            return set;
+        }
+        return null;
+    }
+
+    /** True for a finite, non-negative integer (seed / counts quota). */
+    function _nonNegInt(v) {
+        return typeof v === "number" && isFinite(v) && v >= 0 && Math.floor(v) === v;
+    }
+
+    /** True for a finite, positive integer (rows / cols). */
+    function _posInt(v) {
+        return typeof v === "number" && isFinite(v) && v > 0 && Math.floor(v) === v;
+    }
+
+    /**
+     * Tolerantly parse the top-level `mosaic` block. Returns a well-formed
+     * mosaic state object, or `null` (with a `console.warn`) when `data` is
+     * absent or fails any AC3-equivalent check -- the caller falls back to
+     * `E.defaultMosaic()`. Mirrors `mosaic.validate_mosaic_config` (Python)'s
+     * rules -- structure, geometry, palette/cell/counts colour membership
+     * (canonical via `MOSAIC_META.names` when present + palette-subset), the
+     * directed-no-null / random-counts-sum invariants, and the seed rule -- but
+     * tolerant (warn + default) instead of loud (raise). The one place it is a
+     * SUBSET, not a full mirror: on a page missing the emitted `MOSAIC_META`
+     * constant the canonical-colour gate is skipped (structural rules still
+     * hold), since there is no in-browser single source to check against.
+     */
+    function _parseMosaic(data) {
+        if (data === undefined) {
+            return undefined; // no key at all -- distinct from "present but bad"
+        }
+        if (!data || typeof data !== "object") {
+            console.warn("layout: mosaic is not an object; using defaults");
+            return null;
+        }
+        if (typeof data.mode !== "string" || !_hasOwn(_MOSAIC_MODES, data.mode)) {
+            console.warn("layout: mosaic.mode must be 'random' or 'directed'; using defaults");
+            return null;
+        }
+        if (!_posInt(data.rows) || !_posInt(data.cols) || data.rows * data.cols !== _MOSAIC_CELL_COUNT) {
+            console.warn(
+                "layout: mosaic.rows * mosaic.cols must equal " + _MOSAIC_CELL_COUNT +
+                "; using defaults");
+            return null;
+        }
+        if (!_finite(data.center_x_cm) || !_finite(data.center_y_cm) || !_finite(data.heading_deg)) {
+            console.warn("layout: mosaic center_*/heading_deg must be finite numbers; using defaults");
+            return null;
+        }
+        if (!_finite(data.cell_w_cm) || data.cell_w_cm <= 0 ||
+            !_finite(data.cell_h_cm) || data.cell_h_cm <= 0) {
+            console.warn("layout: mosaic.cell_w_cm/cell_h_cm must be finite numbers > 0; using defaults");
+            return null;
+        }
+        if (!_finite(data.row_gap_cm) || data.row_gap_cm < 0 ||
+            !_finite(data.col_gap_cm) || data.col_gap_cm < 0) {
+            console.warn("layout: mosaic.row_gap_cm/col_gap_cm must be finite numbers >= 0; using defaults");
+            return null;
+        }
+        if (!Array.isArray(data.palette) || data.palette.length === 0) {
+            console.warn("layout: mosaic.palette must be a non-empty list; using defaults");
+            return null;
+        }
+        // Each palette entry must be a known canonical colour (Python's
+        // `_validate_palette` gates on `COLOR_NAMES`). `cells`/`counts` are then
+        // gated on palette membership below, so a canonical palette transitively
+        // rejects any non-canonical cell/count colour -- the same layering Python
+        // uses. `_canonicalColorSet()` is `null` on a page missing `MOSAIC_META`;
+        // there we skip only THIS gate (structural rules still apply).
+        var canonical = _canonicalColorSet();
+        var paletteSet = {};
+        for (var p = 0; p < data.palette.length; p++) {
+            var pname = data.palette[p];
+            if (typeof pname !== "string" || _hasOwn(paletteSet, pname)) {
+                console.warn("layout: mosaic.palette has an invalid or duplicate colour; using defaults");
+                return null;
+            }
+            if (canonical !== null && !_hasOwn(canonical, pname)) {
+                console.warn(
+                    "layout: mosaic.palette[" + p + "] '" + pname +
+                    "' is not a known colour; using defaults");
+                return null;
+            }
+            paletteSet[pname] = true;
+        }
+        if (!Array.isArray(data.cells) || data.cells.length !== _MOSAIC_CELL_COUNT) {
+            console.warn(
+                "layout: mosaic.cells must have exactly " + _MOSAIC_CELL_COUNT +
+                " entries; using defaults");
+            return null;
+        }
+        var nullCount = 0;
+        for (var c = 0; c < data.cells.length; c++) {
+            var cell = data.cells[c];
+            if (cell === null) {
+                nullCount++;
+                continue;
+            }
+            if (typeof cell !== "string" || !_hasOwn(paletteSet, cell)) {
+                console.warn("layout: mosaic.cells[" + c + "] is not null or a palette colour; using defaults");
+                return null;
+            }
+        }
+        if (data.mode === "directed") {
+            if (nullCount !== 0) {
+                console.warn("layout: mosaic.mode='directed' requires every cell pinned; using defaults");
+                return null;
+            }
+        } else {
+            var counts = (data.counts === undefined) ? {} : data.counts;
+            if (!counts || typeof counts !== "object" || Array.isArray(counts)) {
+                console.warn("layout: mosaic.counts must be an object; using defaults");
+                return null;
+            }
+            var total = 0;
+            for (var name in counts) {
+                // `counts` is user-supplied upload data -- a payload like
+                // {"counts":{"hasOwnProperty":12}} shadows the method, so call
+                // it prototype-safely (never `counts.hasOwnProperty(...)`) or a
+                // TypeError escapes _ingest and crashes the editor on Load.
+                if (!Object.prototype.hasOwnProperty.call(counts, name)) {
+                    continue;
+                }
+                if (!_hasOwn(paletteSet, name) || !_nonNegInt(counts[name])) {
+                    console.warn("layout: mosaic.counts has an invalid colour or quota; using defaults");
+                    return null;
+                }
+                total += counts[name];
+            }
+            if (total !== nullCount) {
+                console.warn(
+                    "layout: mosaic.counts must sum to the null-cell count (" + nullCount +
+                    "); using defaults");
+                return null;
+            }
+        }
+        if (data.seed !== undefined && data.seed !== null && !_nonNegInt(data.seed)) {
+            console.warn("layout: mosaic.seed must be null or a non-negative integer; using defaults");
+            return null;
+        }
+        return {
+            mode: data.mode,
+            center_x_cm: +data.center_x_cm,
+            center_y_cm: +data.center_y_cm,
+            heading_deg: +data.heading_deg,
+            rows: data.rows,
+            cols: data.cols,
+            cell_w_cm: +data.cell_w_cm,
+            cell_h_cm: +data.cell_h_cm,
+            row_gap_cm: +data.row_gap_cm,
+            col_gap_cm: +data.col_gap_cm,
+            palette: data.palette.slice(),
+            cells: data.cells.slice(),
+            counts: (data.counts === undefined) ? {} : data.counts,
+            seed: (data.seed === undefined) ? null : data.seed,
+        };
+    }
+
+    /**
+     * Tolerantly parse the `robot.vision` cone. Returns a well-formed vision
+     * state object, or `null` (with a `console.warn`) when `data` is absent or
+     * fails any AC3-equivalent check -- the caller falls back to
+     * `E.defaultVisionCone()`. Mirrors `mosaic.validate_vision_cone` (Python),
+     * but tolerant instead of loud.
+     */
+    function _parseVision(data) {
+        if (data === undefined) {
+            return undefined; // no key at all -- distinct from "present but bad"
+        }
+        if (!data || typeof data !== "object") {
+            console.warn("layout: robot.vision is not an object; using defaults");
+            return null;
+        }
+        if (!_finite(data.origin_x_cm) || !_finite(data.origin_y_cm)) {
+            console.warn("layout: robot.vision.origin_x_cm/origin_y_cm must be finite numbers; using defaults");
+            return null;
+        }
+        if (!_finite(data.half_angle_deg) || data.half_angle_deg <= 0 || data.half_angle_deg >= 90) {
+            console.warn("layout: robot.vision.half_angle_deg must be strictly in (0, 90); using defaults");
+            return null;
+        }
+        var range = data.range_cm;
+        if (range !== undefined && range !== null && (!_finite(range) || range <= 0)) {
+            console.warn("layout: robot.vision.range_cm must be null or a finite number > 0; using defaults");
+            return null;
+        }
+        return {
+            origin_x_cm: +data.origin_x_cm,
+            origin_y_cm: +data.origin_y_cm,
+            half_angle_deg: +data.half_angle_deg,
+            range_cm: (range === undefined || range === null) ? null : +range,
         };
     }
 
@@ -370,6 +653,19 @@
         E.state.objects = objects;
         if (robot) {
             E.state.robot = robot;
+        }
+        // A layout with no mosaic/vision block leaves the current state alone
+        // (it already carries `E.defaultMosaic()`/`E.defaultVisionCone()` from
+        // boot); a PRESENT-but-malformed block warns and resets to defaults
+        // rather than leaving stale/partial data in place.
+        var robotSection = (data.robot && typeof data.robot === "object") ? data.robot : {};
+        var mosaic = _parseMosaic(data.mosaic);
+        if (mosaic !== undefined) {
+            E.state.mosaic = mosaic || E.defaultMosaic();
+        }
+        var vision = _parseVision(robotSection.vision);
+        if (vision !== undefined) {
+            E.state.vision = vision || E.defaultVisionCone();
         }
         E.state.selection = null;
         // Robot bounds may have shifted -> re-fit both views, then repaint.
@@ -419,7 +715,4 @@
     E.ingestLayout = _ingest;
     E.refreshSaveState = refreshSaveState;
     E.initSaveState = initSaveState;
-
-    // Start the edit-server heartbeat/close session (no-op on a file:// open).
-    _startServerSession();
 })();

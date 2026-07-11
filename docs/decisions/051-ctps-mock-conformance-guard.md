@@ -66,6 +66,19 @@ keeps emission idempotent.
   one first, so its `ROUTES_H` wins). Give the TU a unique filename with its own
   `main()` so it is never globbed or force-included into another target.
 
+## Additive: per-command speed knobs + `recordDeclarePosition` (2026-07, issue #130)
+
+`DriveMoveParams` grew `power`/`preset`/`startSpeed`/`endSpeed`/`profiled`/`brake`
+fields (the `.setPower`/`.setPreset`/`.setStartSpeed`/`.setEndSpeed`/`.tShape`/
+`.flat`/`.setBrake` knobs the mocks previously dropped), captured at all five
+construction sites — the three `Drive.h` builders plus both `LineFollower.h`
+`lineFollowDist` sites — and a new `recordDeclarePosition(name)` free function
+hooked into `Mission.cpp::declarePosition`'s success path. Both guards above
+extend to the new fields/setters unchanged: the conformance TU chains each new
+setter, and the Python name-superset check covers them. No new drift class —
+same two-guard mechanism, more surface. See ADR-058 for why (firmware-faithful
+CTPS playback needs the resolved per-command speed).
+
 ## Trigger to revisit
 
 - If a real setter uses a narrower type than call-site assignability accepts (e.g., a
@@ -79,4 +92,5 @@ keeps emission idempotent.
 - [ADR-030 — Host-compile harness links the real production symbols; CI-enforced](./030-harness-links-real-sources-ci-enforced.md) — the `ctps_mock_conformance` target is an always-built CI-enforced ctest that extends this rule to the CTPS mock surface.
 - [ADR-049 — Host-test mock HAL: thin record-and-test-set fidelity, dedicated-dir shadowing rule](./049-host-test-mock-hal.md) — the trust-boundary rule and `dedicated-dir / force-include` pattern that `ctps_mocks/` follows.
 - [ADR-033 — CTPS ingests a derived mission trace; no Python re-implementation of task bodies](./033-ctps-derived-mission-trace.md) — the CTPS recording facade and `drive.method` 3-place contract the mock builders feed.
+- [ADR-058 — CTPS playback renders the firmware's T-shape motion profile](./058-ctps-firmware-motion-profile.md) — consumer of the per-command speed knobs this guard was extended to cover.
 - Issue #89 (the `flat()`/`setPreset()` drift that motivated these guards).

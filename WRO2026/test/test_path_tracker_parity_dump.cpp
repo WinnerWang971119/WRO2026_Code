@@ -259,9 +259,26 @@ void driveTurn()
 
 /// @brief Retire a BLIND dead-reckon move: over-advance the encoder + hold the done-bit (covers
 ///        both the profiled and flat regimes, CONTRACT 1) each tick until the FSM leaves
-///        BLIND_FORWARD (onDeadReckonedAdvance -> PLAN_NEXT_HOP).
+///        BLIND_FORWARD (onDeadReckonedAdvance -> PLAN_NEXT_HOP), then RESTORE the M2/M3 encoders
+///        to their pre-move baseline (ADR-059 parked-encoder parity contract).
+///
+/// A profiled (tShape) blind move only IDLEs when its encoder-frac gate trips
+/// (`traveled >= _profileTotalEnc`), and `_profileTotalEnc` is PRIVATE to Drive, so the harness
+/// cannot advance to it exactly — it must over-advance (the big generic step) to trip the gate.
+/// That over-advance is fine for a plain (non-chained) blind hop (the carry logic is not entered),
+/// but for an ADR-059 CHAINED hop the firmware measures the inter-hop boundary carry as
+/// `traveledCm - dispatchCmdCm` off `Drive.getEncL()/getEncR()` at the NEXT dispatch — a bogus
+/// 20000-deg over-advance makes that carry enormous and floors every chained hop's `dist_cm` to
+/// `PIVOT_TRIM_MIN_DRIVE_CM`, diverging from the (carry-free) sim. So AFTER the move completes we
+/// RESTORE M2/M3 to their pre-move values: the next dispatch then snapshots the SAME baseline, the
+/// measured travel is 0 (< the command), and the firmware's carry clamps to 0 — the "host mocks
+/// with parked encoders ... records the planned distances exactly like the sim" case the firmware
+/// carry clamp documents. The profile still completed (it saw the over-advance mid-loop); only the
+/// post-completion baseline is parked, so the boundary carry is 0 on every chained hop.
 void driveBlind()
 {
+    const int32_t baseL = Drive.getEncL();
+    const int32_t baseR = Drive.getEncR();
     for (int i = 0; i < path_harness::kMaxHandshakeTicks
                     && PathTracker.state() == State::BLIND_FORWARD && !PathTracker.hasFault();
          ++i)
@@ -272,6 +289,12 @@ void driveBlind()
         MiniR4.DriveDC.mockSetPrevTaskDone(true);
         cooperativeTick();
     }
+    // Park the encoders back at the pre-move baseline so the chained-hop boundary-carry
+    // measurement at the NEXT dispatch reads 0 (the profile already completed off the mid-loop
+    // over-advance above; only this post-completion baseline is parked). Harmless for a plain
+    // blind hop (its carry path is never entered).
+    MiniR4.M2.mockSetDegrees(baseL);
+    MiniR4.M3.mockSetDegrees(baseR);
 }
 
 /// @brief Retire a STOP_AT_LINE seek the GENERIC way (cannot pass a per-hop `cm` without

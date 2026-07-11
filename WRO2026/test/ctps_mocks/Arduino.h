@@ -21,7 +21,7 @@
  *   - `PI`, `abs()` (the `<cstdlib>` overloads, hoisted into the global ns)
  *   - `delay` / `yield` no-ops
  *   - a test-controllable mock clock: `millis()` + `mockAdvanceMillis(...)`
- *   - `F()` flash-string macro (host: returns its argument unchanged)
+ *   - `F()` flash-string macro (host: yields `const __FlashStringHelper*`, matching Arduino)
  *   - a `Serial` singleton — NO-OP `print` / `println` overloads (the dump
  *     emits no Serial text; the recording sink is the only output)
  *
@@ -58,6 +58,12 @@
 // ---------------------------------------------------------------------------
 
 using std::abs;
+
+// ---------------------------------------------------------------------------
+// `__FlashStringHelper` — incomplete forward declaration.
+// ---------------------------------------------------------------------------
+
+class __FlashStringHelper;
 
 // ---------------------------------------------------------------------------
 // Time / loop-yield primitives.
@@ -100,11 +106,11 @@ inline void yield()
 }
 
 // ---------------------------------------------------------------------------
-// `F()` flash-string macro — host passthrough of the C-string literal.
+// `F()` flash-string macro — host cast mirroring Arduino's flash-string type.
 // ---------------------------------------------------------------------------
 
 #ifndef F
-#define F(string_literal) (string_literal)
+#define F(string_literal) (reinterpret_cast<const __FlashStringHelper*>(string_literal))
 #endif
 
 // ---------------------------------------------------------------------------
@@ -131,6 +137,7 @@ public:
     void begin(unsigned long /*baud*/) {}
 
     void print(const char* /*s*/) {}
+    void print(const __FlashStringHelper* /*s*/) {}
     void print(int /*n*/) {}
     void print(unsigned int /*n*/) {}
     void print(long /*n*/) {}
@@ -140,6 +147,7 @@ public:
 
     void println() {}
     void println(const char* /*s*/) {}
+    void println(const __FlashStringHelper* /*s*/) {}
     void println(int /*n*/) {}
     void println(unsigned int /*n*/) {}
     void println(long /*n*/) {}

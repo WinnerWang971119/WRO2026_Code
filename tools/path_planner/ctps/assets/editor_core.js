@@ -1,8 +1,9 @@
 /* CTPS — Layout Editor: core (view transform + field backdrop + tab state).
  *
  * Seeds the editor's own namespace (`window.CTPS_EDITOR`, distinct from the
- * player's `window.CTPS`) and owns the canvas side of the two-tab offline editor
- * (object/cargo plan, T8 -- issue #57):
+ * player's `window.CTPS`) and owns the canvas side of the three-tab offline
+ * editor (object/cargo plan, T8 -- issue #57; randomized-vision plan, T14 --
+ * ADR-060):
  *
  *   - a DUPLICATED `computeView` (the ~40-line world->pixel transform, copied
  *     from renderer.js's private `_computeView` per the plan's Contracts ->
@@ -12,11 +13,19 @@
  *     nodes) drawn from `const FIELD`,
  *   - the Robot-tab backdrop: the default robot box at `robot_frame_cm` per
  *     side (the true physical chassis footprint), plus the manipulator zones
- *     via `window.CTPS_OBJ.drawZones`,
+ *     via `window.CTPS_OBJ.drawZones`, and (T14) the robot-attached vision cone
+ *     via `window.CTPS_VISION.drawVisionCone` at an identity pose (the editor
+ *     has no robot motion),
+ *   - the Mosaic-tab backdrop (T14): the 12-cell mosaic grid, drawn in WORLD
+ *     frame (like the Field tab) via `window.CTPS_VISION.mosaicCellCenters` +
+ *     `drawMosaicCells` -- the SAME geometry mirror `vision.js` exposes to the
+ *     player's live-preview path, reused here rather than re-implemented so the
+ *     editor preview agrees with the Python `resolve_cells` authority,
  *   - object rendering via `window.CTPS_OBJ.drawObject`, the selection halo, the
  *     live rubber-band draft, and a fit-to-view scale bar,
- *   - Field/Robot tab state + the single clear+redraw repaint (never a
- *     getImageData/putImageData snapshot -- the device-px ghost trap).
+ *   - Field/Robot/Mosaic tab state (incl. default `mosaic` + `vision` blocks,
+ *     T14) + the single clear+redraw repaint (never a getImageData/
+ *     putImageData snapshot -- the device-px ghost trap).
  *
  * Vanilla ES5 (var/function), works offline. Styling touches DOM only through
  * the `hidden` property + classList (never an inline element style); all colour
@@ -29,6 +38,7 @@
 (function () {
     var E = (window.CTPS_EDITOR = window.CTPS_EDITOR || {});
     var OBJ = window.CTPS_OBJ; // objects_draw.js (inlined first): project/drawObject/drawZones.
+    var VIS = window.CTPS_VISION; // vision.js (inlined before this file): mosaic/cone geometry+draw.
 
     // ----- layout / paint constants (named, no magic literals inline) ------
     var PADDING = 24;            // px inset of the drawn field within the stage box
@@ -62,6 +72,22 @@
     var SCALE_FONT = "10px ui-monospace, Consolas, monospace";
     var SCALE_CANDIDATES = [100, 50, 20, 10, 5, 2, 1]; // nice scale-bar spans (cm)
     var SCALE_MAX_FRAC = 0.45;   // scale bar may occupy at most this frac of the width
+
+    // ----- mosaic / vision-cone defaults (T14 -- ADR-060) -------------------
+    var MOSAIC_ROWS_DEFAULT = 4;         // default grid rows (rows*cols MUST == 12)
+    var MOSAIC_COLS_DEFAULT = 3;         // default grid cols
+    var MOSAIC_CELL_W_CM_DEFAULT = 5.0;  // default cell width (cm)
+    var MOSAIC_CELL_H_CM_DEFAULT = 5.0;  // default cell height (cm)
+    var MOSAIC_ROW_GAP_CM_DEFAULT = 1.0; // default uniform row gap (cm)
+    var MOSAIC_COL_GAP_CM_DEFAULT = 1.0; // default uniform column gap (cm)
+    var MOSAIC_HEADING_DEG_DEFAULT = 0.0; // default mosaic orientation (deg)
+    var MOSAIC_CELL_COUNT = 12;          // rows*cols MUST equal this (Config::VISION_CELL_COUNT)
+    var MOSAIC_MARGIN_CM = 10;           // extra world margin around the mosaic on the Mosaic tab
+    var VISION_ORIGIN_X_CM_DEFAULT = 12.0; // default cone apex, forward of the robot centre (cm)
+    var VISION_ORIGIN_Y_CM_DEFAULT = 0.0;  // default cone apex lateral offset (cm)
+    var VISION_HALF_ANGLE_DEG_DEFAULT = 25.0; // default half-FOV (deg)
+    var VISION_RANGE_CM_DEFAULT = null;    // default range: null == unbounded
+    var VISION_CONE_PREVIEW_REACH_CM = 60; // Robot-tab bounds-fit reach when range_cm is unbounded
 
     // ----- token colour resolution (cached; static in this app) ------------
     var _colors = null;
@@ -157,9 +183,11 @@
 
     /**
      * The Robot-tab world extent `[x0,y0,x1,y1]` (robot-LOCAL cm): the union of
-     * the robot box, both zones, and every drop point, plus a margin. The Robot
-     * tab renders the local frame directly (pose identity), so local cm ARE the
-     * view's world cm.
+     * the robot box, both zones, every drop point, and (T14) the vision cone's
+     * apex + its two edge-ray tips (bounded reach, or a fixed preview reach when
+     * `range_cm` is null/unbounded so an infinite cone does not blow out the
+     * view), plus a margin. The Robot tab renders the local frame directly
+     * (pose identity), so local cm ARE the view's world cm.
      */
     function _robotBounds() {
         var half = _robotHalfCm();
@@ -187,9 +215,72 @@
                 }
             }
         }
+        var cone = E.state.vision;
+        if (cone) {
+            var reach = (typeof cone.range_cm === "number" && cone.range_cm > 0)
+                ? cone.range_cm : VISION_CONE_PREVIEW_REACH_CM;
+            var half_rad = cone.half_angle_deg * Math.PI / 180;
+            ext(cone.origin_x_cm, cone.origin_y_cm);
+            ext(cone.origin_x_cm + reach * Math.cos(half_rad),
+                cone.origin_y_cm + reach * Math.sin(half_rad));
+            ext(cone.origin_x_cm + reach * Math.cos(-half_rad),
+                cone.origin_y_cm + reach * Math.sin(-half_rad));
+        }
         return [
             box.minX - ROBOT_MARGIN_CM, box.minY - ROBOT_MARGIN_CM,
             box.maxX + ROBOT_MARGIN_CM, box.maxY + ROBOT_MARGIN_CM,
+        ];
+    }
+
+    /**
+     * The mosaic's world-cm bounding box `{minX,minY,maxX,maxY}` -- the union of
+     * every resolved cell centre +/- half a cell -- or null when no mosaic is
+     * present or the vision helpers are unavailable. Single source shared by the
+     * Mosaic-tab bounds fit, the drag hit-test (editor_tools.js `_hitMosaic`),
+     * and the selection halo so all three agree on the mosaic's footprint.
+     */
+    function mosaicBBox() {
+        var mosaic = E.state.mosaic;
+        if (!mosaic || !VIS || !VIS.mosaicCellCenters) {
+            return null;
+        }
+        var centers = VIS.mosaicCellCenters(mosaic);
+        if (!centers.length) {
+            return null;
+        }
+        var halfW = mosaic.cell_w_cm / 2;
+        var halfH = mosaic.cell_h_cm / 2;
+        var bb = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+        for (var i = 0; i < centers.length; i++) {
+            var c = centers[i];
+            if (c.x_cm - halfW < bb.minX) { bb.minX = c.x_cm - halfW; }
+            if (c.x_cm + halfW > bb.maxX) { bb.maxX = c.x_cm + halfW; }
+            if (c.y_cm - halfH < bb.minY) { bb.minY = c.y_cm - halfH; }
+            if (c.y_cm + halfH > bb.maxY) { bb.maxY = c.y_cm + halfH; }
+        }
+        return bb;
+    }
+
+    /**
+     * The Mosaic-tab world extent `[x0,y0,x1,y1]` (WORLD cm): the union of the
+     * field bounds (so the field map stays visible for placement context) and
+     * the mosaic's own resolved-cell extent (so an off-centre or oversized
+     * mosaic still fits fully in view -- the task's "extend the editor bounds"
+     * step), plus a margin.
+     */
+    function _mosaicBounds() {
+        var b = _fieldBounds();
+        var box = { minX: b[0], minY: b[1], maxX: b[2], maxY: b[3] };
+        var bb = mosaicBBox();
+        if (bb) {
+            if (bb.minX < box.minX) { box.minX = bb.minX; }
+            if (bb.maxX > box.maxX) { box.maxX = bb.maxX; }
+            if (bb.minY < box.minY) { box.minY = bb.minY; }
+            if (bb.maxY > box.maxY) { box.maxY = bb.maxY; }
+        }
+        return [
+            box.minX - MOSAIC_MARGIN_CM, box.minY - MOSAIC_MARGIN_CM,
+            box.maxX + MOSAIC_MARGIN_CM, box.maxY + MOSAIC_MARGIN_CM,
         ];
     }
 
@@ -276,7 +367,13 @@
 
     /** The transform for the currently active tab. */
     function activeView() {
-        return E.state.activeTab === "robot" ? E.state.robotView : E.state.fieldView;
+        if (E.state.activeTab === "robot") {
+            return E.state.robotView;
+        }
+        if (E.state.activeTab === "mosaic") {
+            return E.state.mosaicView;
+        }
+        return E.state.fieldView;
     }
 
     // ----- optional field-map background -----------------------------------
@@ -307,12 +404,16 @@
 
     // ----- field-backdrop drawing (Field tab) ------------------------------
 
-    /** Field-bounds rect (top-left / size) in canvas pixels. */
-    function _boundsRect(view) {
-        var b = view.bounds;
+    /** Project a world extent `[x0,y0,x1,y1]` to a top-left/size canvas-pixel rect. */
+    function _projectBounds(view, b) {
         var tl = OBJ.project(view, b[0], b[3]); // (x0, y1) -> top-left
         var br = OBJ.project(view, b[2], b[1]); // (x1, y0) -> bottom-right
         return { x: tl.px, y: tl.py, w: br.px - tl.px, h: br.py - tl.py };
+    }
+
+    /** The current view's own extent (`view.bounds`) as a canvas-pixel rect. */
+    function _boundsRect(view) {
+        return _projectBounds(view, view.bounds);
     }
 
     /** Draw the printed map (if loaded + dimmed), else the vector obstacles. */
@@ -465,7 +566,7 @@
         ctx.restore();
     }
 
-    /** Draw the Robot-tab backdrop: robot box + zones overlay + labels. */
+    /** Draw the Robot-tab backdrop: robot box + zones overlay + labels + vision cone. */
     function drawRobotBackdrop(ctx, view) {
         drawRobotBox(ctx, view);
         var rob = E.state.robot;
@@ -474,6 +575,70 @@
             OBJ.drawZones(ctx, view, { x: 0, y: 0, h: 0 }, rob, OBJ.project);
             _drawZoneLabels(ctx, view, rob);
         }
+        drawRobotVisionCone(ctx, view);
+    }
+
+    /**
+     * Draw the robot-attached vision cone on the Robot tab, reusing
+     * `CTPS_VISION.drawVisionCone` (the SAME predicate-adjacent draw the player
+     * uses) at an IDENTITY pose: the editor has no robot motion, so the cone is
+     * drawn at the robot's own local origin, heading 0 -- exactly the pose-0
+     * convention `drawRobotBackdrop`'s zones already use. No-op when `VIS` (the
+     * `vision.js` export, inlined before this file) or the cone state is absent.
+     */
+    function drawRobotVisionCone(ctx, view) {
+        var cone = E.state.vision;
+        if (!cone || !VIS || !VIS.drawVisionCone) {
+            return;
+        }
+        VIS.drawVisionCone(ctx, view, { x: 0, y: 0, h: 0 }, cone, OBJ.project);
+    }
+
+    /**
+     * Draw the Mosaic-tab backdrop: the field bounds outline (for spatial
+     * context, matching the Field tab's frame) plus the 12-cell mosaic grid,
+     * reusing `CTPS_VISION.mosaicCellCenters` (the geometry mirror) +
+     * `drawMosaicCells` (the shared draw) -- the SAME functions the player uses
+     * for its live preview, so the editor never re-implements the resolve_cells
+     * geometry (Notes for Implementer -> geometry mirror). Pinned cells (a
+     * non-null `mosaic.cells[i]`) are reflected as filled colour; unset cells
+     * draw as a bare outline (no roll to preview in the editor).
+     */
+    function drawMosaicBackdrop(ctx, view) {
+        var C = _theColors();
+        // The field map + nodes as a PLACEMENT backdrop so the mosaic seats
+        // against the real field (the "show the map and output the mosaic where I
+        // want it" requirement). The surface is drawn to the FIELD bounds
+        // (projected in the mosaic view), NOT `view.bounds` -- the mosaic view is
+        // the wider field-union-mosaic extent, so projecting `view.bounds` would
+        // stretch the map past the field it depicts. Nodes reuse the Field-tab
+        // draw (world coords, correct under any view).
+        var r = _projectBounds(view, _fieldBounds());
+        _drawFieldSurface(ctx, view, r);
+        ctx.save();
+        ctx.strokeStyle = C.borderStrong;
+        ctx.lineWidth = BOUNDS_W;
+        ctx.strokeRect(r.x, r.y, r.w, r.h);
+        ctx.restore();
+        _drawNodes(ctx, view);
+
+        var mosaic = E.state.mosaic;
+        if (!mosaic || !VIS || !VIS.mosaicCellCenters || !VIS.drawMosaicCells) {
+            return;
+        }
+        var centers = VIS.mosaicCellCenters(mosaic);
+        var cells = new Array(centers.length);
+        for (var i = 0; i < centers.length; i++) {
+            var c = centers[i];
+            cells[i] = {
+                index: c.index,
+                x_cm: c.x_cm,
+                y_cm: c.y_cm,
+                color: mosaic.cells ? mosaic.cells[c.index] : null,
+            };
+        }
+        var meta = (typeof MOSAIC_META !== "undefined") ? MOSAIC_META : null;
+        VIS.drawMosaicCells(ctx, view, cells, OBJ.project, meta, mosaic.cell_w_cm);
     }
 
     // ----- selection halo + rubber-band draft ------------------------------
@@ -543,6 +708,16 @@
                 ctx.beginPath();
                 ctx.arc(pp.px, pp.py, DROP_DOT_R + SEL_PAD, 0, Math.PI * 2);
                 ctx.stroke();
+            }
+        } else if (s.kind === "mosaic") {
+            // A dashed halo around the whole mosaic footprint while it is the
+            // drag target -- the visual grab affordance for placing it on the map.
+            var mb = mosaicBBox();
+            if (mb) {
+                var mtl = OBJ.project(view, mb.minX, mb.maxY);
+                var mbr = OBJ.project(view, mb.maxX, mb.minY);
+                ctx.strokeRect(mtl.px - SEL_PAD, mtl.py - SEL_PAD,
+                    (mbr.px - mtl.px) + 2 * SEL_PAD, (mbr.py - mtl.py) + 2 * SEL_PAD);
             }
         }
         ctx.restore();
@@ -630,6 +805,8 @@
         ctx.clearRect(0, 0, view.cssW, view.cssH);
         if (E.state.activeTab === "robot") {
             drawRobotBackdrop(ctx, view);
+        } else if (E.state.activeTab === "mosaic") {
+            drawMosaicBackdrop(ctx, view);
         } else {
             drawFieldBackdrop(ctx, view);
             drawObjects(ctx, view);
@@ -641,8 +818,9 @@
 
     /**
      * Re-measure the canvas, size its backing store to the CSS box x dpr,
-     * recompute BOTH tab transforms (the Robot-tab extent may have changed after
-     * a load), and repaint. Safe before the canvas is wired.
+     * recompute ALL THREE tab transforms (the Robot-tab extent may have changed
+     * after a load; the Mosaic-tab extent likewise depends on the current mosaic
+     * state), and repaint. Safe before the canvas is wired.
      */
     function resize() {
         var canvas = E.canvas;
@@ -661,6 +839,7 @@
         E.state.robotView = _applyRobotZoom(
             computeView(_robotBounds(), cssW, cssH, dpr)
         );
+        E.state.mosaicView = computeView(_mosaicBounds(), cssW, cssH, dpr);
         redraw();
     }
 
@@ -668,7 +847,7 @@
 
     /** Switch the active tab; clears any transient selection/draft/drag. */
     function setTab(name) {
-        if (name !== "field" && name !== "robot") {
+        if (name !== "field" && name !== "robot" && name !== "mosaic") {
             return;
         }
         E.state.activeTab = name;
@@ -764,17 +943,103 @@
         };
     }
 
+    /**
+     * The colour vocabulary the Mosaic tab authors against: `MOSAIC_META.names`
+     * (the unconditional editor-emitted colour constant, single-sourced from
+     * `mosaic.py` -- ADR-060) when present, else an empty list (a legacy/served
+     * page missing the constant degrades to no palette rather than a
+     * hand-duplicated colour name).
+     */
+    function _paletteNames() {
+        if (typeof MOSAIC_META !== "undefined" && MOSAIC_META && MOSAIC_META.names) {
+            return MOSAIC_META.names.slice();
+        }
+        return [];
+    }
+
+    /**
+     * Even-as-possible per-colour quotas for `count` NULL cells spread over
+     * `names.length` palette colours, summing to EXACTLY `count` (the leading
+     * colours absorb the +1 remainder) -- e.g. 12 cells over 4 colours -> 3
+     * each; 12 over 3 -> 4 each.
+     */
+    function _evenCounts(names, count) {
+        var counts = {};
+        if (!names || names.length === 0) {
+            return counts;
+        }
+        var base = Math.floor(count / names.length);
+        var extra = count % names.length;
+        for (var i = 0; i < names.length; i++) {
+            counts[names[i]] = base + (i < extra ? 1 : 0);
+        }
+        return counts;
+    }
+
+    /**
+     * A fresh default `mosaic` block (ADR-060): seated at the FIELD CENTRE
+     * (derived from the current field bounds' midpoint -- never a hardcoded
+     * coordinate, so the default stays sane across fields), a 4x3 grid, a
+     * reasonable cell size + uniform gaps, `mode:"random"` over the full
+     * `MOSAIC_META` palette, every cell unset (`null` -- rolled), and `counts`
+     * spread evenly over the palette summing to the full 12 cells.
+     */
+    function defaultMosaic() {
+        var b = _fieldBounds();
+        var centerX = (b[0] + b[2]) / 2;
+        var centerY = (b[1] + b[3]) / 2;
+        var palette = _paletteNames();
+        var cells = new Array(MOSAIC_CELL_COUNT);
+        for (var i = 0; i < MOSAIC_CELL_COUNT; i++) {
+            cells[i] = null;
+        }
+        return {
+            mode: "random",
+            center_x_cm: centerX,
+            center_y_cm: centerY,
+            heading_deg: MOSAIC_HEADING_DEG_DEFAULT,
+            rows: MOSAIC_ROWS_DEFAULT,
+            cols: MOSAIC_COLS_DEFAULT,
+            cell_w_cm: MOSAIC_CELL_W_CM_DEFAULT,
+            cell_h_cm: MOSAIC_CELL_H_CM_DEFAULT,
+            row_gap_cm: MOSAIC_ROW_GAP_CM_DEFAULT,
+            col_gap_cm: MOSAIC_COL_GAP_CM_DEFAULT,
+            palette: palette,
+            cells: cells,
+            counts: _evenCounts(palette, MOSAIC_CELL_COUNT),
+            seed: null,
+        };
+    }
+
+    /**
+     * A fresh default `robot.vision` cone: origin forward of the robot centre,
+     * on the robot's midline, a ~25 deg half-angle, and an unbounded (`null`)
+     * range -- a reasonable starting FOV an author narrows/bounds per the real
+     * camera mount.
+     */
+    function defaultVisionCone() {
+        return {
+            origin_x_cm: VISION_ORIGIN_X_CM_DEFAULT,
+            origin_y_cm: VISION_ORIGIN_Y_CM_DEFAULT,
+            half_angle_deg: VISION_HALF_ANGLE_DEG_DEFAULT,
+            range_cm: VISION_RANGE_CM_DEFAULT,
+        };
+    }
+
     // ----- shared editor state (seeded here; siblings attach onto E) --------
     E.state = {
         activeTab: "field",
         tool: "select",
         objects: [],
         robot: defaultRobot(),
+        mosaic: defaultMosaic(),
+        vision: defaultVisionCone(),
         selection: null,   // {kind:"object",id} | {kind:"grab_zone"|"box_zone"} | {kind:"drop",index}
         draft: null,       // {tool,x0,y0,x1,y1} in the active view's world cm
         drag: null,        // {selection, offX, offY} in world cm
         fieldView: null,
         robotView: null,
+        mosaicView: null,
         robotZoom: ROBOT_ZOOM_DEFAULT, // render-only Robot-tab zoom (never serialised)
         idSeq: 0,
     };
@@ -792,4 +1057,16 @@
     E.objectById = objectById;
     E.nextId = nextId;
     E.defaultRobot = defaultRobot;
+    // Mosaic / vision-cone state (T14 -- ADR-060). T15 (property-panel editing +
+    // the pin-grid cycle) and T16 (serialize/ingest) read/mutate `E.state.mosaic`
+    // / `E.state.vision` directly (matching how T15 already mutates
+    // `E.state.robot` in place) and call `E.redraw()` after; the two factories
+    // + the palette accessor are exposed so a "reset to default" affordance or
+    // ingest-side fallback never re-derives the field-centre-seat rule.
+    E.defaultMosaic = defaultMosaic;
+    E.defaultVisionCone = defaultVisionCone;
+    E.mosaicPaletteNames = _paletteNames;
+    // The mosaic footprint (world cm), shared with editor_tools.js's drag
+    // hit-test so click-to-grab and the selection halo use one definition.
+    E.mosaicBBox = mosaicBBox;
 })();

@@ -35,6 +35,7 @@
 // where one exists, and to the real sketch header otherwise.
 #include "Manipulator.h"     // ctps_mocks — records manip ops
 #include "Drive.h"           // ctps_mocks — records raw drive ops
+#include "Vision.h"          // ctps_mocks — Vision injection + readMosaic recording (force-included by T7; guard makes this idempotent)
 #include "src/mission/Mission.h"         // real — operator DSL (recording hooks under CTPS_RECORD)
 #include "MissionScript.h"   // real — buildMission()
 #include "Tasks.h"           // real — Tasks.begin()
@@ -45,6 +46,7 @@
 #include <Arduino.h>         // ctps_mocks — mock clock millis() / mockAdvanceMillis()
 
 #include <cstdint>
+#include <cstdlib>           // std::strtol for --mosaic-seed / --mosaic-fail-at parsing
 #include <cstring>
 #include <iostream>
 #include <string>
@@ -59,6 +61,178 @@ namespace
     ///        WAIT / BEEP / LED duration gate (`now - start >= duration`) trips
     ///        on the next tick, so the dump completes instantly.
     constexpr uint32_t CTPS_TICK_ADVANCE_MS = 100000u;
+
+    /// @brief Number of mosaic cells the `--mosaic` letters string must carry
+    ///        (the 4×3 mosaic; == `Config::VISION_CELL_COUNT`). A compile-time
+    ///        cross-check keeps the two counts in lockstep.
+    constexpr size_t CTPS_MOSAIC_CELL_COUNT = 12;
+    static_assert(CTPS_MOSAIC_CELL_COUNT == Config::VISION_CELL_COUNT,
+                  "ctps_dump mosaic cell count must equal Config::VISION_CELL_COUNT");
+
+    // -------------------------------------------------------------------------
+    // Mosaic argv parsing (T6) — the `--mosaic*` options that arm the injected
+    // Vision roll + the top-level trace echo. Order-free, scanned across ALL of
+    // argv, and composable with `--fixture`; the `argv[1]` mode selector in
+    // `main` is unaffected.
+    // -------------------------------------------------------------------------
+
+    /**
+     * @brief Parsed `--mosaic*` argv options.
+     *
+     * A fully default-constructed value (`present == false`) means the dump ran
+     * WITHOUT `--mosaic`: no injection, no echo, and byte-identical baseline
+     * output (AC6 / TC13). All other fields are meaningful only when
+     * `present == true`.
+     */
+    struct MosaicArgs
+    {
+        bool          present = false;   ///< `--mosaic <letters>` was supplied and valid.
+        Config::Color colors[CTPS_MOSAIC_CELL_COUNT] = {};   ///< The 12 injected cell colors (index i = row*cols+col).
+        bool          hasSeed = false;   ///< `--mosaic-seed <int>` was supplied.
+        long          seed    = 0;       ///< The roll seed, echoed verbatim (meaningful iff hasSeed).
+        std::string   geomHash;          ///< `--mosaic-geom-hash <str>`, echoed verbatim (empty = unset).
+        int           failAt  = 0;       ///< `--mosaic-fail-at <int>`: Nth readMosaic() fails (0/absent = never).
+    };
+
+    /**
+     * @brief Map a single `--mosaic` wire letter to its `Config::Color`.
+     *
+     * The wire alphabet is the canonical `mosaic.COLOR_LETTER` map single-sourced
+     * in `tools/path_planner/ctps/mosaic.py`: `Y→YELLOW`, `B→BLUE`, `G→GREEN`,
+     * `W→WHITE`, `R→RED`. Any other character (including lowercase, digits, or
+     * the `UNKNOWN` sentinel's absence of a letter) is rejected.
+     *
+     * @param c   The wire letter to map.
+     * @param out Set to the mapped color on success; left unmodified on failure.
+     * @return `true` iff @p c is one of the five valid uppercase letters.
+     */
+    bool letterToColor(char c, Config::Color& out)
+    {
+        switch (c)
+        {
+            case 'Y': out = Config::Color::YELLOW; return true;
+            case 'B': out = Config::Color::BLUE;   return true;
+            case 'G': out = Config::Color::GREEN;  return true;
+            case 'W': out = Config::Color::WHITE;  return true;
+            case 'R': out = Config::Color::RED;    return true;
+            default:  return false;
+        }
+    }
+
+    /**
+     * @brief Scan argv for the order-free `--mosaic*` options.
+     *
+     * Walks `argv[1 .. argc-1]` (the `argv[1]` mode selector in `main` is read
+     * separately and untouched). Recognizes:
+     *   - `--mosaic <letters>` — the value MUST be exactly
+     *     `CTPS_MOSAIC_CELL_COUNT` characters, each a valid `letterToColor`
+     *     letter; parsed into @p out.colors and sets `present = true`.
+     *   - `--mosaic-seed <int>` — parsed as `long`; sets `hasSeed = true`.
+     *   - `--mosaic-geom-hash <str>` — stored verbatim (the dump never hashes).
+     *   - `--mosaic-fail-at <int>` — parsed as `int` (0/absent = never fail).
+     *
+     * On any malformed `--mosaic` (missing value, wrong length, or a bad letter)
+     * a precise diagnostic is written to `std::cerr` and the function returns
+     * `false` WITHOUT mutating @p out.present — the caller must then abort before
+     * running any mission or emitting any JSON, so no partial `mosaic` block is
+     * produced (AC6 / TC16). Unknown args are ignored (they may be the mode
+     * selector or a future flag).
+     *
+     * @param argc Argument count from `main`.
+     * @param argv Argument vector from `main`.
+     * @param out  Destination for the parsed options (only written on success).
+     * @return `true` if every recognized option parsed cleanly; `false` on a
+     *         malformed `--mosaic` (the only fatal case).
+     */
+    bool parseMosaicArgs(int argc, char** argv, MosaicArgs& out)
+    {
+        for (int i = 1; i < argc; ++i)
+        {
+            const char* arg = argv[i];
+
+            if (std::strcmp(arg, "--mosaic") == 0)
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "ctps_dump: --mosaic requires a value (" << CTPS_MOSAIC_CELL_COUNT
+                              << " letters, one of Y/B/G/W per cell)\n";
+                    return false;
+                }
+                const char* letters = argv[++i];
+                if (std::strlen(letters) != CTPS_MOSAIC_CELL_COUNT)
+                {
+                    std::cerr << "ctps_dump: --mosaic value must be exactly " << CTPS_MOSAIC_CELL_COUNT
+                              << " letters, got '" << letters << "' (" << std::strlen(letters)
+                              << ")\n";
+                    return false;
+                }
+                for (size_t c = 0; c < CTPS_MOSAIC_CELL_COUNT; ++c)
+                {
+                    if (!letterToColor(letters[c], out.colors[c]))
+                    {
+                        std::cerr << "ctps_dump: --mosaic letter '" << letters[c] << "' at index "
+                                  << c << " is not one of Y/B/G/W\n";
+                        return false;
+                    }
+                }
+                out.present = true;
+            }
+            else if (std::strcmp(arg, "--mosaic-seed") == 0)
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "ctps_dump: --mosaic-seed requires an integer value\n";
+                    return false;
+                }
+                // Python owns the seed's validity/range; the dump only echoes it.
+                out.seed    = std::strtol(argv[++i], nullptr, 10);
+                out.hasSeed = true;
+            }
+            else if (std::strcmp(arg, "--mosaic-geom-hash") == 0)
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "ctps_dump: --mosaic-geom-hash requires a value\n";
+                    return false;
+                }
+                // Python owns geom_hash; the dump stores it verbatim.
+                out.geomHash = argv[++i];
+            }
+            else if (std::strcmp(arg, "--mosaic-fail-at") == 0)
+            {
+                if (i + 1 >= argc)
+                {
+                    std::cerr << "ctps_dump: --mosaic-fail-at requires an integer value\n";
+                    return false;
+                }
+                out.failAt = static_cast<int>(std::strtol(argv[++i], nullptr, 10));
+            }
+            // Any other arg (the mode selector, an unknown flag) is ignored here.
+        }
+        return true;
+    }
+
+    /**
+     * @brief Arm the mock injection + recorder echo from the parsed mosaic args.
+     *
+     * A no-op when `args.present` is false (no `--mosaic`), so the baseline dump
+     * is untouched. When present, configures the Vision mock's injected colors +
+     * fail-at AND arms the top-level `mosaic` trace echo. MUST be called AFTER
+     * `ctpsSetup()` (which runs `ctps::reset()` + `mockResetMillis()`, clearing
+     * the injected-mosaic state) — otherwise the reset would wipe the arm.
+     *
+     * @param args The parsed `--mosaic*` options.
+     */
+    void applyMosaicInjection(const MosaicArgs& args)
+    {
+        if (!args.present)
+        {
+            return;
+        }
+        Vision._setInjectedColors(args.colors);
+        Vision._setFailAt(args.failAt);
+        ctps::setInjectedMosaic(args.colors, args.hasSeed, args.seed, args.geomHash.c_str());
+    }
 
     /**
      * @brief Bring every CTPS-linked facade up and clear the recording sink.
@@ -84,6 +258,18 @@ namespace
         Drive.setTickCallback(nullptr);
         PathTracker.setTickCallback(nullptr);
         LineFollower.setTickCallback(nullptr);
+
+        // Tasks is the exception. A blocking task wait like `waitStationaryMs`
+        // is gated on the WALL CLOCK (`while (millis() - start < ms)`), not on a
+        // mock's is-idle query, so a nullptr callback would spin forever: with no
+        // callback the wait falls to `delay(1)` + `yield()` (both host no-ops) and
+        // `millis()` stays frozen, because `drainMission` only advances the mock
+        // clock in its OUTER loop — which is blocked inside `Mission.update()`
+        // while the task body runs. Give Tasks a callback that advances the mock
+        // clock each iteration (the same lever `drainMission` uses per Mission
+        // tick), so every task-level wait trips its gate on the first iteration
+        // and the dump stays instant.
+        Tasks.setTickCallback([] { mockAdvanceMillis(CTPS_TICK_ADVANCE_MS); });
 
         ctps::reset();
         mockResetMillis();
@@ -253,10 +439,16 @@ namespace
      *
      * @return 0 on success (after printing `CTPS DUMP SELFTEST OK`); 1 on the
      *         first failed assertion (after printing a diagnostic to stderr).
+     *
+     * @param args Parsed mosaic options. The CI self-test runs with NO `--mosaic`
+     *             (a default-constructed value), so no echo block appears — only
+     *             the synthetic `read_mosaic` op below. A caller MAY inject to
+     *             exercise the echo, but the default path is what CI asserts.
      */
-    int runSelfTest()
+    int runSelfTest(const MosaicArgs& args = MosaicArgs{})
     {
         ctpsSetup();
+        applyMosaicInjection(args);
         buildMissionFixture();
 
         // TC9 — the mission must drain (idle/fault) within the tick budget.
@@ -268,6 +460,16 @@ namespace
         // AC4 — manip + drive ops live in a synthetic bracketed task segment
         // appended after the Mission drains.
         recordManipDriveSegment();
+
+        // AC7 — synthetic `read_mosaic` emission. No registered mission/task body
+        // calls Vision yet (the feature is dormant until a Phase-6 vision mission
+        // exists), so the self-test drives ONE readMosaic() directly against the
+        // mock. The mock records exactly one `Op::READ_MOSAIC` via
+        // `ctps::recordReadMosaic`, which CI-proves the recorder→JSON half of the
+        // op contract with no real consumer. Asserted below (Record + serialized
+        // JSON). The self-test runs with NO `--mosaic`, so this produces the op
+        // WITHOUT any top-level `mosaic` echo — exactly the dormant case.
+        Vision.readMosaic();
 
         // Direction-override capture: a goto carrying setArrivalDirection /
         // setRouteDirection must serialize the "arrival"/"route" tags. A
@@ -434,6 +636,18 @@ namespace
             return 1;
         }
 
+        // AC7 — the synthetic Vision.readMosaic() above recorded exactly one
+        // READ_MOSAIC op. Assert it at the Record level (the serialized-JSON half
+        // is a kJsonProbes entry below), proving the read_mosaic op pipeline end
+        // to end with no real consumer.
+        const size_t readMosaic =
+            findFrom(0, [](const ctps::Record& r) { return r.op == ctps::Op::READ_MOSAIC; });
+        if (readMosaic >= log.size())
+        {
+            std::cerr << "ctps_dump self-test: missing read_mosaic op record\n";
+            return 1;
+        }
+
         // NC3 / AC12 — the SERIALIZED command-stream JSON carries the new
         // drive-detail keys. Substring assertions over the whole document: the
         // gyro driveDist's `mode`/`heading`, a reversed move's `reverse`, and the
@@ -454,6 +668,7 @@ namespace
             {"\"method\": \"lineFollowDist\", \"cm\":", "lineFollowDist cm"},
             {"\"arrival\": \"rear\"", "goto arrival: rear"},
             {"\"route\": \"front\"", "goto route: front"},
+            {"\"op\": \"read_mosaic\"", "read_mosaic op"},
         };
         for (const JsonProbe& probe : kJsonProbes)
         {
@@ -475,11 +690,16 @@ namespace
      *
      * @param fixture `true` to run `buildMissionFixture()`, `false` to run the
      *                authored `buildMission()`.
+     * @param args    Parsed mosaic options. When `args.present`, the injected
+     *                Vision roll is armed and a top-level `mosaic` block is
+     *                echoed into the JSON; when absent, the JSON is byte-identical
+     *                to the pre-mosaic baseline (AC6 / TC13).
      * @return 0 on success, 1 if the drain exceeded the tick budget (TC9).
      */
-    int runDump(bool fixture)
+    int runDump(bool fixture, const MosaicArgs& args = MosaicArgs{})
     {
         ctpsSetup();
+        applyMosaicInjection(args);
 
         if (fixture)
         {
@@ -512,22 +732,39 @@ namespace
 /**
  * @brief CTPS dump entry point. Dispatches on argv[1] (see file docstring).
  *
+ * The `argv[1]` mode selector is unchanged (`--self-test` / `--fixture` /
+ * default). The `--mosaic*` options are ADDITIONAL, order-free, scanned across
+ * all of argv and composable with `--fixture`. They are parsed FIRST so a
+ * malformed `--mosaic` (missing value / wrong length / bad letter) fails with a
+ * stderr message and a non-zero exit BEFORE any mission runs or any JSON is
+ * emitted — no partial `mosaic` block is ever produced (AC6 / TC16).
+ *
  * @param argc Argument count.
- * @param argv Argument vector. `argv[1]` selects the mode:
- *             `--self-test` / `--fixture` / (default = authored mission dump).
- * @return 0 on success, 1 on a self-test mismatch or a drain-budget overrun.
+ * @param argv Argument vector. `argv[1]` selects the mode; `--mosaic`,
+ *             `--mosaic-seed`, `--mosaic-geom-hash`, `--mosaic-fail-at` are the
+ *             order-free mosaic options.
+ * @return 0 on success; 1 on a self-test mismatch or a drain-budget overrun; a
+ *         non-zero code on a malformed `--mosaic` (before any output).
  */
 int main(int argc, char** argv)
 {
+    // Parse the mosaic options up front. A malformed `--mosaic` returns here
+    // before dispatch, so no mission runs and no JSON is printed.
+    MosaicArgs mosaic;
+    if (!parseMosaicArgs(argc, argv, mosaic))
+    {
+        return 2;
+    }
+
     const char* mode = (argc > 1) ? argv[1] : "";
 
     if (std::strcmp(mode, "--self-test") == 0)
     {
-        return runSelfTest();
+        return runSelfTest(mosaic);
     }
     if (std::strcmp(mode, "--fixture") == 0)
     {
-        return runDump(/*fixture=*/true);
+        return runDump(/*fixture=*/true, mosaic);
     }
-    return runDump(/*fixture=*/false);
+    return runDump(/*fixture=*/false, mosaic);
 }

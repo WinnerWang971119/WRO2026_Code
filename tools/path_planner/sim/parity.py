@@ -75,6 +75,7 @@ from tools.path_planner.pipeline_config import (
 )
 from tools.path_planner.sim.chassis import VirtualChassis, _normalize
 from tools.path_planner.sim.runtime import (
+    ACT_BLIND_PASS,
     ACT_BLIND_REVERSE,
     ACT_FOLLOW_DIST,
     ACT_FOLLOW_DIST_PASS,
@@ -98,6 +99,8 @@ from tools.path_planner.sim.runtime import (
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     PIVOT_TRIM_MIN_DRIVE_CM,
+    SPEED_NORMAL,
+    TSHAPE_START_SPEED,
     Direction,
     EdgeDispatchQuery,
     PathTrackerSim,
@@ -199,12 +202,29 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
         "overshoot_cm": float,
         "reanchor": str,
     },
+    # ADR-059 field-set BUMP: `start_pwm` / `end_pwm` / `chain` are emitted on
+    # EVERY blind_dead_reckon record (chained or not) by both the firmware
+    # (`_ptEmitBlindDeadReckon`) and the sim (`normalize_sim_stream`). The strict
+    # loader raises on an unknown OR missing field of a known kind, so the two
+    # sides MUST land this bump together (which T7 firmware + T8 sim do). The
+    # run-membership key is `chain`, deliberately NOT any sub-field named "kind"
+    # (`kind` is the record-type discriminator this dict is keyed on; memory
+    # `gotcha-parity-record-kind-is-discriminator`).
     "blind_dead_reckon": {
         "reverse": bool,
         "drive_mode": str,
         "dist_cm": float,
+        "start_pwm": int,
+        "end_pwm": int,
+        "chain": bool,
         "reanchor": str,
     },
+    # ADR-059: emitted at each NON-braking mid-hop node boundary of a blind-chain
+    # run (the sim tag `ACT_BLIND_PASS`; the firmware `_ptEmitBlindPass`). Sits
+    # BETWEEN the two adjacent hops' `blind_dead_reckon` records; the run's final
+    # braked arrival emits none. Its sole sub-field is `node` — deliberately NOT
+    # `kind` (the record-type discriminator).
+    "blind_pass": {"node": str},
     "return_turn": {"body_heading_deg": float, "wheel": str},
     "return_move": {
         "mode": str,
@@ -730,17 +750,43 @@ def _make_stop_at_line_seek(
 
 
 def _make_blind_dead_reckon(
-    reverse: bool, drive_mode: str, dist_cm: float
+    reverse: bool,
+    drive_mode: str,
+    dist_cm: float,
+    start_pwm: int,
+    end_pwm: int,
+    chain: bool,
 ) -> TraceRecord:
+    """Build a ``blind_dead_reckon`` record (ADR-059 field-set bump).
+
+    ``start_pwm`` / ``end_pwm`` are the RESOLVED velocity-plan endpoints (signed
+    int16), ``chain`` whether this hop is part of an ADR-059 chained run — the
+    three fields the firmware ``_ptEmitBlindDeadReckon`` emits on EVERY record of
+    this kind. The strict schema requires them, so both sides carry them always.
+    """
     return TraceRecord(
         "blind_dead_reckon",
         {
             "reverse": bool(reverse),
             "drive_mode": drive_mode,
             "dist_cm": float(dist_cm),
+            "start_pwm": int(start_pwm),
+            "end_pwm": int(end_pwm),
+            "chain": bool(chain),
             "reanchor": _REANCHOR_FOR_KIND["blind_dead_reckon"],
         },
     )
+
+
+def _make_blind_pass(node: str) -> TraceRecord:
+    """Build a ``blind_pass`` record (ADR-059). The sole field is ``node``.
+
+    Emitted at each NON-braking mid-hop node boundary of a blind-chain run (the
+    sim's :data:`~tools.path_planner.sim.runtime.ACT_BLIND_PASS` tag; the
+    firmware's `_ptEmitBlindPass`). It carries no motion (the chained hop already
+    advanced onto ``node``), so :func:`integrate_pose` treats it as a NO-OP.
+    """
+    return TraceRecord("blind_pass", {"node": str(node)})
 
 
 def _make_wall(
@@ -906,12 +952,49 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             reverse = tag == ACT_BLIND_REVERSE
             dist_cm = prim[2] if reverse else prim[1]
             decision = hops[hop_idx].blind_decision(reverse, cfg, graph, field)
+            drive_mode = _drive_mode_name(decision.drive_mode)
+
+            # ADR-059 velocity-plan endpoints. The sim (runtime._walk_hops)
+            # appends a `(start_pwm, end_pwm, chain)` suffix to the ACT tuple
+            # whenever it resolved a NON-default plan — a chained hop OR a
+            # pass-through-seeded lone hop. When present, use it verbatim; a
+            # PRISTINE tuple (no suffix) is a cold-start non-chain hop, whose
+            # endpoints are computed here to match the firmware:
+            #   RAW_FLAT : start = end = +/-SPEED_NORMAL (its flat open-loop plan)
+            #   tShape   : start = +/-TSHAPE_START_SPEED, end = 0 (braked stop)
+            # (memory `gotcha-ctps-mock-noop-setter-drops-builder-knob`: the plan
+            # endpoints are a load-bearing knob — never dropped to a default that
+            # differs from the firmware's emitted value.)
+            suffix_at = 4 if reverse else 2
+            if len(prim) > suffix_at + 2:
+                start_pwm = int(prim[suffix_at])
+                end_pwm = int(prim[suffix_at + 1])
+                chain = bool(prim[suffix_at + 2])
+            else:
+                chain = False
+                if decision.drive_mode == BlindMode.RAW_FLAT:
+                    cruise = -SPEED_NORMAL if reverse else SPEED_NORMAL
+                    start_pwm = cruise
+                    end_pwm = cruise
+                else:
+                    start_pwm = -TSHAPE_START_SPEED if reverse else TSHAPE_START_SPEED
+                    end_pwm = 0
+
             records.append(
                 _make_blind_dead_reckon(
-                    reverse, _drive_mode_name(decision.drive_mode), dist_cm
+                    reverse, drive_mode, dist_cm, start_pwm, end_pwm, chain
                 )
             )
             hop_idx += 1
+
+        elif tag == ACT_BLIND_PASS:
+            # (tag, node) — ADR-059 blind-chain NON-braking mid-hop boundary
+            # marker. It carries NO motion of its own (the chained
+            # ACT_FORWARD/ACT_BLIND_REVERSE hop already advanced onto `node` and
+            # advanced `hop_idx`), so this records `blind_pass` WITHOUT touching
+            # `hop_idx`. Sits between the two adjacent hops' `blind_dead_reckon`
+            # records, mirroring the firmware `_ptEmitBlindPass` stream order.
+            records.append(_make_blind_pass(prim[1]))
 
         elif tag == ACT_WALL_STOP:
             # (tag, node, axis_idx, wall_coord)
@@ -1109,6 +1192,13 @@ def integrate_pose(
             # nothing in (x, y, heading). Do NOT route through `_apply_wall`
             # (it reads `field.RESET_NODES[node]`, which KeyErrors on a
             # non-reset pass-through node).
+            pass
+        elif kind == "blind_pass":
+            # ADR-059: a blind-chain NON-braking boundary marker. The chained
+            # `blind_dead_reckon` hop that precedes it already advanced onto (and
+            # re-anchored at) this node, so the pass marker is a pose NO-OP — like
+            # `heading_reset`, it changes nothing in (x, y, heading) and does NOT
+            # advance the hop cursor (it is a boundary, not a hop).
             pass
         else:
             raise ParitySchemaError(
