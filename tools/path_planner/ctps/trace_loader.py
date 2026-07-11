@@ -11,6 +11,12 @@ with a :class:`UserWarning` and do NOT raise, so the simulator degrades
 gracefully when new ops are added to the firmware before the Python side is
 updated.
 
+A trace may also carry a top-level ``mosaic`` block (a sibling of the
+``commands`` stream, echoed by ``ctps_dump`` when run with ``--mosaic``) and
+``read_mosaic`` command ops. Both are parsed tolerantly: absent is normal
+(``trace.mosaic`` is ``None``, no warning), and malformed is skipped with a
+:class:`UserWarning` — never fatal.
+
 Typical usage::
 
     from tools.path_planner.ctps.trace_loader import load
@@ -21,6 +27,9 @@ Typical usage::
 
     for cmd in trace.commands:
         print(cmd.seq, cmd.op, cmd.fields)
+
+    if trace.mosaic is not None:
+        print(trace.mosaic.cells, trace.mosaic.geom_hash)
 """
 
 from __future__ import annotations
@@ -52,6 +61,7 @@ _KNOWN_OPS: frozenset[str] = frozenset(
         "beep",
         "led",
         "declare_position",
+        "read_mosaic",
     }
 )
 
@@ -165,6 +175,10 @@ class Command:
     :param b: Blue channel (0–255); set for ``led`` commands.
     :param result: Outcome string (``"ok"`` or ``"yield"``); set for
         ``task_end`` commands.
+    :param success: Read outcome; set for ``read_mosaic`` commands. ``True``
+        unless the dump was run with ``--mosaic-fail-at`` targeting this
+        call. ``"op"`` remains the sole discriminator — ``success`` is only
+        ever a payload bool, never treated as a second op tag.
     :param fields: Forward-compatible catch-all for any key present in the
         raw JSON entry that is not captured by the named fields above.
         Unknown ops and unrecognised ``drive.method`` commands are dropped
@@ -202,9 +216,40 @@ class Command:
     g:           Optional[int]   = None   # led
     b:           Optional[int]   = None   # led
     result:      Optional[str]   = None   # task_end
+    success:     Optional[bool]  = None   # read_mosaic
 
     # -- forward-compatible extras -------------------------------------------
     fields: dict = field(default_factory=dict)
+
+
+@dataclass
+class MosaicTrace:
+    """The top-level ``mosaic`` echo block from a ``--mosaic``-injected dump.
+
+    A sibling of the ``commands`` stream (not an op) — see the ``Trace
+    additions`` section of the CTPS randomized-vision plan. Present only when
+    ``ctps_dump`` was run with ``--mosaic``; absent for an old trace or a dump
+    run without the flag (``Trace.mosaic`` is ``None`` in that case, with no
+    warning).
+
+    :param cells: Exactly 12 color-name strings, cell-index order
+        (``i = row*cols + col``). Not validated against the color palette
+        here — the loader is tolerant; a bad name is a rendering concern, not
+        a load-time error.
+    :param seed: The seed used to roll the mosaic, if one was echoed
+        (``--mosaic-seed`` was passed to the dump). ``None`` when absent —
+        this is a normal, unwarned case (the dump omits the key when no seed
+        was resolved).
+    :param geom_hash: Geometry fingerprint string echoed by the dump, for the
+        player's "geometry changed since this trace was recorded" guard.
+    :param injected: Always ``True`` for a block that reached this dataclass
+        (the dump only echoes ``mosaic`` when injection occurred).
+    """
+
+    cells: list[str]
+    geom_hash: str
+    injected: bool
+    seed: Optional[int] = None
 
 
 @dataclass
@@ -221,6 +266,9 @@ class Trace:
         (e.g. an unknown task name).  The command list may be partial.
     :param commands: Ordered list of parsed :class:`Command` objects.
         Unknown ops and unknown ``drive.method`` values are excluded.
+    :param mosaic: The top-level ``mosaic`` echo block, or ``None`` when
+        absent (no ``--mosaic`` on the dump) or malformed (skipped with a
+        :class:`UserWarning` — never fatal).
     """
 
     schema_version: int
@@ -228,6 +276,7 @@ class Trace:
     start_heading_deg: float
     build_error: bool
     commands: list[Command]
+    mosaic: Optional[MosaicTrace] = None
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +337,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "power", "preset", "start_speed", "end_speed", "profiled", "brake",
         "node",
         "freq_hz", "r", "g", "b", "result",
+        "success",
     }
     extra_fields: dict = {k: v for k, v in raw.items() if k not in named_keys}
 
@@ -526,7 +576,109 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
             # entirely, mirroring the unknown-drive-method skip above.
             return None
 
+    # ----- read_mosaic: validate success --------------------------------------
+    if op == "read_mosaic":
+        # "op" is the sole discriminator; "success" is only ever a payload
+        # bool. Accept ONLY a JSON boolean (mirrors the drive `reverse` /
+        # `profiled` / `brake` guards — never bool(raw.get(...)), since a
+        # stray non-bool must not silently coerce to True/False).
+        raw_success = raw.get("success")
+        if isinstance(raw_success, bool):
+            cmd.success = raw_success
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed read_mosaic.success "
+                f"{raw_success!r} at seq={seq} — treated as unset.",
+                UserWarning,
+                stacklevel=4,
+            )
+            cmd.success = None
+
     return cmd
+
+
+def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
+    """Convert the raw top-level ``mosaic`` value to a :class:`MosaicTrace`.
+
+    Tolerant like the rest of this loader: an absent block is normal (no
+    warning, returns ``None``); a present-but-malformed block skips with a
+    :class:`UserWarning` and also returns ``None``. Never raises.
+
+    :param raw: The value at the top-level ``"mosaic"`` key (``None`` if the
+        key was absent from the trace JSON).
+    :return: A :class:`MosaicTrace`, or ``None`` if absent/malformed.
+    """
+    if raw is None:
+        # No `--mosaic` on the dump (or an old trace) — normal, no warning.
+        return None
+
+    if not isinstance(raw, dict):
+        warnings.warn(
+            f"ctps.trace_loader: top-level 'mosaic' is not a dict "
+            f"(got {type(raw).__name__!r}) — skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_cells = raw.get("cells")
+    if (
+        not isinstance(raw_cells, list)
+        or len(raw_cells) != 12
+        or not all(isinstance(c, str) for c in raw_cells)
+    ):
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.cells' {raw_cells!r} "
+            f"(expected a list of 12 color-name strings) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_geom_hash = raw.get("geom_hash")
+    if not isinstance(raw_geom_hash, str) or not raw_geom_hash:
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.geom_hash' {raw_geom_hash!r} "
+            f"(expected a non-empty string) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    raw_injected = raw.get("injected")
+    if not isinstance(raw_injected, bool):
+        warnings.warn(
+            f"ctps.trace_loader: malformed 'mosaic.injected' {raw_injected!r} "
+            f"(expected a bool) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    # seed is OPTIONAL — absent is normal (no --mosaic-seed on the dump), not
+    # a warning. Present-but-wrong-type is malformed and skips the whole
+    # block, consistent with every other field here. A JSON bool must be
+    # rejected explicitly since `bool` subclasses `int`.
+    seed: Optional[int] = None
+    if "seed" in raw:
+        raw_seed = raw["seed"]
+        if isinstance(raw_seed, int) and not isinstance(raw_seed, bool):
+            seed = raw_seed
+        else:
+            warnings.warn(
+                f"ctps.trace_loader: malformed 'mosaic.seed' {raw_seed!r} "
+                f"(expected an int or absent) — 'mosaic' block skipped.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return None
+
+    return MosaicTrace(
+        cells=list(raw_cells),
+        geom_hash=raw_geom_hash,
+        injected=raw_injected,
+        seed=seed,
+    )
 
 
 def _parse_dict(data: object) -> Trace:
@@ -573,12 +725,15 @@ def _parse_dict(data: object) -> Trace:
         if parsed is not None:
             commands.append(parsed)
 
+    mosaic = _parse_mosaic(data.get("mosaic"))
+
     return Trace(
         schema_version=version,
         start_node=start_node,
         start_heading_deg=start_heading_deg,
         build_error=build_error,
         commands=commands,
+        mosaic=mosaic,
     )
 
 
