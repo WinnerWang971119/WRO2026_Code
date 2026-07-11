@@ -25,7 +25,7 @@ from tools.reorg import test_includes as ti
 # ---------------------------------------------------------------------------
 
 
-def test_discover_mock_basenames_matches_the_known_8(test_root: Path) -> None:
+def test_discover_mock_basenames_matches_the_known_9(test_root: Path) -> None:
     # Every basename that is BOTH a migration-tracked mover AND shadowed by a
     # mock header somewhere under WRO2026/test/ today.
     expected = {
@@ -37,6 +37,7 @@ def test_discover_mock_basenames_matches_the_known_8(test_root: Path) -> None:
         "Manipulator.h",
         "PathTracker.h",
         "Localization.h",
+        "Vision.h",
     }
     mocked = ti.discover_mock_basenames(test_root)
     # discover_mock_basenames also picks up non-tracked vendor mocks (Arduino.h,
@@ -46,7 +47,7 @@ def test_discover_mock_basenames_matches_the_known_8(test_root: Path) -> None:
     assert {name for name in mocked if name in MAPPING} == expected
 
 
-def test_ambiguous_basenames_matches_the_known_8(test_root: Path) -> None:
+def test_ambiguous_basenames_matches_the_known_9(test_root: Path) -> None:
     expected = {
         "Drive.h",
         "Intersection.h",
@@ -56,6 +57,7 @@ def test_ambiguous_basenames_matches_the_known_8(test_root: Path) -> None:
         "Manipulator.h",
         "PathTracker.h",
         "Localization.h",
+        "Vision.h",
     }
     assert ti.ambiguous_basenames(test_root) == expected
 
@@ -64,7 +66,7 @@ def test_unambiguous_movers_have_no_mock_anywhere(test_root: Path) -> None:
     """Spot-check a handful of the 30 non-ambiguous movers: truly no mock exists."""
     ambiguous = ti.ambiguous_basenames(test_root)
     for basename in ("WROMath.h", "FieldMap.h", "NavTypes.h", "routes.h", "YawSource.h",
-                      "StopAtLinePolicy.h", "PivotTrimPolicy.h", "Vision.h", "VisionFrame.h"):
+                      "StopAtLinePolicy.h", "PivotTrimPolicy.h", "VisionFrame.h"):
         assert basename not in ambiguous
 
 

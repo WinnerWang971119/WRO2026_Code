@@ -421,14 +421,18 @@ _INLINE_MEMBER_RE = re.compile(r'out \+= ",? ?\\"([a-z_]+)\\":')
 
 #: Document-level (``Trace``, not per-command ``Command``) JSON fields emitted
 #: ONCE by ``commandStreamToJson`` outside the per-record ``switch`` — i.e.
-#: before the ``"commands": [`` array opens. These share the same
-#: ``appendStrMember`` / inline-literal emission idioms as the per-command
-#: fields, so the regex scan below recovers them too, but they belong to
-#: ``trace_loader.Trace`` (``start_node``, ``start_heading_deg``,
-#: ``build_error``), never to a single ``Command`` entry, and must be excluded
-#: from the per-command field-superset comparison.
+#: before the ``"commands": [`` array opens, or (for the top-level ``mosaic``
+#: echo) after it closes. These share the same ``appendStrMember`` /
+#: inline-literal emission idioms as the per-command fields, so the regex scan
+#: below recovers them too, but they belong to ``trace_loader.Trace``
+#: (``start_node``, ``start_heading_deg``, ``build_error``) or
+#: ``trace_loader.MosaicTrace`` (``geom_hash`` — the top-level ``mosaic`` block
+#: emitted via ``appendStrMember(out, "geom_hash", ...)``; ``cells``/``seed``/
+#: ``injected`` use other emission idioms the regex does not match, so they
+#: never reach this set), never to a single ``Command`` entry, and must be
+#: excluded from the per-command field-superset comparison.
 _TRACE_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"start_node", "start_heading_deg", "build_error"}
+    {"start_node", "start_heading_deg", "build_error", "geom_hash"}
 )
 
 
@@ -504,10 +508,11 @@ def test_ctps_record_cpp_emits_expected_json_field_names():
     raw_scan = set(
         _APPEND_STR_MEMBER_RE.findall(_strip_comments(_read(_CTPS_RECORD_CPP)))
     ) | set(_INLINE_MEMBER_RE.findall(_strip_comments(_read(_CTPS_RECORD_CPP))))
-    assert _TRACE_LEVEL_KEYS & raw_scan == {"start_node"}, (
+    assert _TRACE_LEVEL_KEYS & raw_scan == {"start_node", "geom_hash"}, (
         "sanity: the raw (pre-filter) regex scan should still see start_node "
-        "(the only Trace-level key using the appendStrMember idiom); a miss "
-        "here means the extraction rule itself has drifted from the source."
+        "and geom_hash (the Trace-level / mosaic-echo keys using the "
+        "appendStrMember idiom); a miss here means the extraction rule itself "
+        "has drifted from the source."
     )
 
 

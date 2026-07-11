@@ -977,6 +977,16 @@ target_compile_definitions(ctps_dump PRIVATE CTPS_RECORD)
 # recording mocks (`PathTracker.h` / `Localization.h`) pull in the production `routes.h`
 # directly.
 add_ctps_mock_force_includes(ctps_dump)
+# Vision.h is the ONE recording mock scoped to ctps_dump only (dormant CTPS vision plumbing,
+# ADR-049/060) — NOT added to the shared add_ctps_mock_force_includes (which conformance
+# also calls). This makes VISION_H defined in the dump build, materializing the guarded
+# `VisionClass Vision;` in ctps_record.cpp and shadowing the real Vision.h when Tasks.cpp
+# (a future vision mission) calls it.
+if(MSVC)
+    target_compile_options(ctps_dump PRIVATE "/FI${CTPS_MOCKS_DIR}/Vision.h")
+else()
+    target_compile_options(ctps_dump PRIVATE "SHELL:-include ${CTPS_MOCKS_DIR}/Vision.h")
+endif()
 # Pin the dump binary to the build-tree root so the Python orchestrator
 # (tools/path_planner/ctps) locates it under any generator. Single-config
 # generators (Make/Ninja) already place it there; the _DEBUG/_RELEASE variants
@@ -989,6 +999,27 @@ set_target_properties(ctps_dump PROPERTIES
 add_test(NAME ctps_dump_selftest COMMAND ctps_dump --self-test)
 set_tests_properties(ctps_dump_selftest PROPERTIES
     PASS_REGULAR_EXPRESSION "CTPS DUMP SELFTEST OK")
+
+# Exe-level argv ctests (TC12/TC13/TC16) — run the ctps_dump binary end-to-end now that
+# T6 has landed the mosaic argv. These complement the compiled test_ctps_dump target
+# (TC14/TC15). The mode word (--fixture) MUST come first — ctps_dump reads argv[1] as the mode.
+#
+# TC12 — mosaic echo: --mosaic injects and the top-level mosaic block is echoed. The
+# geom-hash value only appears inside the echoed mosaic block, so matching it proves the
+# echo emitted (spacing-independent).
+add_test(NAME ctps_dump_mosaic_echo
+         COMMAND ctps_dump --fixture --mosaic YBGWYBGWYBGW --mosaic-seed 7 --mosaic-geom-hash abc123)
+set_tests_properties(ctps_dump_mosaic_echo PROPERTIES
+    PASS_REGULAR_EXPRESSION "abc123")
+
+# TC13 — baseline: no --mosaic => no top-level mosaic block emitted (byte-identical to today).
+add_test(NAME ctps_dump_no_mosaic COMMAND ctps_dump --fixture)
+set_tests_properties(ctps_dump_no_mosaic PROPERTIES
+    FAIL_REGULAR_EXPRESSION "\"mosaic\":")
+
+# TC16 — malformed --mosaic exits non-zero (exit 2).
+add_test(NAME ctps_dump_bad_mosaic COMMAND ctps_dump --fixture --mosaic ZZZ)
+set_tests_properties(ctps_dump_bad_mosaic PROPERTIES WILL_FAIL TRUE)
 
 # =========================================================================================
 # CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
@@ -1023,6 +1054,29 @@ target_compile_definitions(test_ctps_mock_conformance PRIVATE CTPS_RECORD)
 add_fixture_routes_force_include(test_ctps_mock_conformance)   # FIRST — its ROUTES_H must win
 add_ctps_mock_force_includes(test_ctps_mock_conformance)
 add_test(NAME ctps_mock_conformance COMMAND test_ctps_mock_conformance)
+
+# T22 host test for the Vision mock + dump plumbing. Guarded on EXISTS so this CMakeLists
+# configures cleanly before T22 authors the source; it activates on the next reconfigure
+# once test_ctps_dump.cpp lands.
+if(EXISTS ${TEST_DIR}/test_ctps_dump.cpp)
+    add_executable(test_ctps_dump
+        ${TEST_DIR}/test_ctps_dump.cpp
+        ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+        ${CTPS_MOCKS_DIR}/ctps_record.cpp
+    )
+    target_include_directories(test_ctps_dump PRIVATE ${CTPS_MOCKS_DIR} ${SKETCH_DIR} ${TEST_DIR})
+    target_compile_definitions(test_ctps_dump PRIVATE CTPS_RECORD)
+    add_fixture_routes_force_include(test_ctps_dump)   # FIRST — its ROUTES_H must win
+    add_ctps_mock_force_includes(test_ctps_dump)
+    # plus the dump-only Vision.h force-include so VISION_H is defined here too (the mock is
+    # this target's subject-under-test and ctps_record.cpp's guarded `Vision` global needs it):
+    if(MSVC)
+        target_compile_options(test_ctps_dump PRIVATE "/FI${CTPS_MOCKS_DIR}/Vision.h")
+    else()
+        target_compile_options(test_ctps_dump PRIVATE "SHELL:-include ${CTPS_MOCKS_DIR}/Vision.h")
+    endif()
+    add_test(NAME ctps_dump_mock COMMAND test_ctps_dump)
+endif()
 
 # =========================================================================================
 # Test executable #10 — Localization operator-offset integrator (PR1a, TC1/TC2/TC2b/TC3).

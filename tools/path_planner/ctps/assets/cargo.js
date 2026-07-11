@@ -847,8 +847,13 @@
     // ----- Magazine tab: 4 vertical lanes of 3, front tile at the BOTTOM ----
 
     /**
-     * Rebuild `#ctps-mag-grid`: one column per lane (0..MAGAZINE_LANES-1),
-     * each a stack of MAGAZINE_DEPTH cells top-to-bottom. FIFO lane order:
+     * Rebuild `#ctps-mag-grid`: one column per lane, DISPLAYED right-to-left
+     * (lane MAGAZINE_LANES-1 leftmost .. lane 0 rightmost) so the header row
+     * reads 3..0 to match the operator's view of the physical magazine. This is
+     * a DISPLAY flip only: each column stays keyed on its own `lane` (its header
+     * label, stack, and sorter-selection), and the data model / `sortTo(n)` lane
+     * numbering are unchanged -- only the column paint order reverses.
+     * Each column is a stack of MAGAZINE_DEPTH cells top-to-bottom. FIFO lane order:
      * `grab` pushes the newest tile onto the END of the sorter-selected lane,
      * `dump` shifts the oldest off index 0 (T5), so index 0 is the OLDEST tile
      * (the front / dump side) and it belongs at the BOTTOM row. For row `r`
@@ -876,7 +881,9 @@
         var magazine = (scene && scene.magazine) || [];
         var selectedLane = (scene && typeof scene.sorterLane === "number")
             ? scene.sorterLane : -1;
-        for (var lane = 0; lane < MAGAZINE_LANES; lane++) {
+        // Iterate lanes HIGH->LOW so lane 3 paints leftmost and lane 0 rightmost
+        // (the 3..0 display flip); each column still carries its own lane index.
+        for (var lane = MAGAZINE_LANES - 1; lane >= 0; lane--) {
             var stack = magazine[lane] || [];
             var laneEl = document.createElement("div");
             laneEl.className = "ctps-mag-lane";

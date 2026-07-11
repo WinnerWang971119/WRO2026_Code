@@ -99,6 +99,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.path_planner.ctps import mosaic as mosaic_module
 from tools.path_planner.ctps import player_html as player_html_module
 from tools.path_planner.ctps.layout import LayoutError
 from tools.path_planner.ctps.player_html import (
@@ -183,6 +184,128 @@ def _extract_embedded_objects(html: str) -> "dict | None":
         return None
     raw_json = match.group("json").replace("<\\/", "</")
     return json.loads(raw_json)
+
+
+#: Captures the JSON document assigned to ``const MOSAIC_META`` in the emitted
+#: page (randomized-vision plan, T10/T21 -- ADR-060). Own ``<script>`` (same
+#: non-greedy-to-``</script>`` shape as the sibling regexes above); only
+#: emitted alongside a renderable mosaic, so a mosaic-free render has no match
+#: (TC18/AC12).
+_MOSAIC_META_RE = re.compile(r"const MOSAIC_META = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+#: Captures the JSON document assigned to ``const MOSAIC`` in the emitted page.
+#: Deliberately does NOT match ``MOSAIC_META`` (the literal ``const MOSAIC =``
+#: — note the trailing space before ``=`` — never matches
+#: ``const MOSAIC_META =``, whose ``_META`` sits directly against ``MOSAIC``
+#: with no space).
+_MOSAIC_RE = re.compile(r"const MOSAIC = (?P<json>.*?);\s*</script>", re.DOTALL)
+
+
+def _extract_mosaic_meta(html: str) -> "dict | None":
+    """Pull the embedded ``const MOSAIC_META = {...}`` dict out of the page.
+
+    Mirrors :func:`_extract_embedded_objects`: returns ``None`` (rather than
+    asserting) when absent -- the expected shape for a mosaic-free render
+    (TC18/AC12).
+    """
+    match = _MOSAIC_META_RE.search(html)
+    if match is None:
+        return None
+    raw_json = match.group("json").replace("<\\/", "</")
+    return json.loads(raw_json)
+
+
+def _extract_mosaic(html: str) -> "dict | None":
+    """Pull the embedded ``const MOSAIC = {...}`` dict out of the page.
+
+    Mirrors :func:`_extract_embedded_objects`: returns ``None`` (rather than
+    asserting) when absent -- the expected shape for a mosaic-free render
+    (TC18/AC12).
+    """
+    match = _MOSAIC_RE.search(html)
+    if match is None:
+        return None
+    raw_json = match.group("json").replace("<\\/", "</")
+    return json.loads(raw_json)
+
+
+#: A fixed, pinned 12-cell mosaic roll (directed-mode order) used across the
+#: TC17/TC19 fixtures below so the resolved world positions + colours are
+#: stable and hand-verifiable.
+_PINNED_MOSAIC_CELLS = [
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+    "YELLOW", "BLUE", "GREEN", "WHITE",
+]
+
+
+def _mosaic_geometry_block() -> dict:
+    """Return a fresh, schema-valid ``mosaic`` GEOMETRY block (directed mode).
+
+    Directed mode with every cell pinned to :data:`_PINNED_MOSAIC_CELLS` --
+    matches the trace roll fixture below cell-for-cell, so TC17's "geometry x
+    trace colours" resolve is trivially self-consistent (and TC19's grid-
+    outline case reuses the identical geometry with no trace roll).
+    """
+    return {
+        "mode": "directed",
+        "center_x_cm": 50.0,
+        "center_y_cm": 30.0,
+        "heading_deg": 0.0,
+        "rows": 4,
+        "cols": 3,
+        "cell_w_cm": 5.0,
+        "cell_h_cm": 5.0,
+        "row_gap_cm": 1.0,
+        "col_gap_cm": 1.0,
+        "palette": ["YELLOW", "BLUE", "GREEN", "WHITE"],
+        "cells": list(_PINNED_MOSAIC_CELLS),
+        "counts": {},
+        "seed": None,
+    }
+
+
+def _layout_with_mosaic_and_vision() -> dict:
+    """Return a fresh, schema-valid layout dict carrying a mosaic + vision cone.
+
+    Built on :func:`_valid_layout_dict` (same field-objects/robot shape every
+    other player test uses) plus the top-level ``mosaic`` geometry
+    (:func:`_mosaic_geometry_block`) and a ``robot.vision`` forward cone --
+    the two ADR-060 blocks :func:`render` reads to resolve/embed
+    ``MOSAIC_META`` + ``const MOSAIC`` and the cone.
+    """
+    layout = _valid_layout_dict()
+    layout["mosaic"] = _mosaic_geometry_block()
+    layout["robot"]["vision"] = {
+        "origin_x_cm": 12.0,
+        "origin_y_cm": 0.0,
+        "half_angle_deg": 25.0,
+        "range_cm": 60.0,
+    }
+    return layout
+
+
+def _seeded_mosaic_trace_dict() -> dict:
+    """Return a hand-built LRS-shaped track dict carrying a pinned mosaic roll.
+
+    Mirrors TC6's source-agnostic pattern (poses + events only, no command
+    stream) but adds the trace-carried top-level ``mosaic`` echo block (Data
+    Model -- "Trace additions"): a fixed seed, the SAME 12 pinned colours as
+    :func:`_mosaic_geometry_block`'s cells (so the resolved world cells carry
+    exactly those colours), and a ``geom_hash`` computed from the SAME
+    geometry so ``geom_match`` comes back ``True``.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    geom = mosaic_module.MosaicConfig.from_dict(_mosaic_geometry_block())
+    track_dict["mosaic"] = {
+        "cells": list(_PINNED_MOSAIC_CELLS),
+        "seed": 12345,
+        "geom_hash": mosaic_module.geom_hash(geom),
+        "injected": True,
+    }
+    return track_dict
 
 
 def _valid_layout_dict() -> dict:
@@ -1274,6 +1397,221 @@ def test_deploy_chip_and_layer_present(tmp_path):
     # Inlined JS: the masked draw fn and the layer registration.
     assert "drawDeployedZones" in html
     assert 'id: "deploy"' in html
+
+
+# ---------------------------------------------------------------------------
+# TC17 — player, seeded mosaic + cone: MOSAIC_META/MOSAIC/#ctps-vision regions
+# (randomized-vision plan, T21 -- ADR-060, AC10/AC12)
+# ---------------------------------------------------------------------------
+
+#: The pinned :func:`resolve_cells` output for :func:`_mosaic_geometry_block`'s
+#: geometry x :data:`_PINNED_MOSAIC_CELLS` colours (hand-derived the same way
+#: as test_ctps_mosaic.py's TC5 -- center=(50,30), heading=0, rows=4/cols=3,
+#: cell=5x5cm, gaps=1/1cm; row 0 at +y "top", col 0 at -x "left").
+_TC17_EXPECTED_CELLS = [
+    {"index": 0, "x_cm": 44.0, "y_cm": 39.0, "color": "YELLOW"},
+    {"index": 1, "x_cm": 50.0, "y_cm": 39.0, "color": "BLUE"},
+    {"index": 2, "x_cm": 56.0, "y_cm": 39.0, "color": "GREEN"},
+    {"index": 3, "x_cm": 44.0, "y_cm": 33.0, "color": "WHITE"},
+    {"index": 4, "x_cm": 50.0, "y_cm": 33.0, "color": "YELLOW"},
+    {"index": 5, "x_cm": 56.0, "y_cm": 33.0, "color": "BLUE"},
+    {"index": 6, "x_cm": 44.0, "y_cm": 27.0, "color": "GREEN"},
+    {"index": 7, "x_cm": 50.0, "y_cm": 27.0, "color": "WHITE"},
+    {"index": 8, "x_cm": 56.0, "y_cm": 27.0, "color": "YELLOW"},
+    {"index": 9, "x_cm": 44.0, "y_cm": 21.0, "color": "BLUE"},
+    {"index": 10, "x_cm": 50.0, "y_cm": 21.0, "color": "GREEN"},
+    {"index": 11, "x_cm": 56.0, "y_cm": 21.0, "color": "WHITE"},
+]
+
+
+def test_tc17_player_seeded_mosaic_and_cone_regions_are_present_and_stable(tmp_path):
+    """TC17: a seeded mosaic + cone render stable MOSAIC_META/MOSAIC/#ctps-vision.
+
+    Key assertion: rendering a layout carrying a mosaic GEOMETRY block plus a
+    trace carrying a pinned roll (fixed seed, fixed 12-cell colours) resolves
+    ``const MOSAIC`` to the exact HAND-DERIVED world cells (positions +
+    colours, matching test_ctps_mosaic.py's TC5 derivation style),
+    ``geom_match`` true (the trace's geom_hash matches the layout's current
+    geometry), ``roll`` true, and the pinned ``seed``; ``MOSAIC_META`` carries
+    the single-sourced colour vocabulary; and the unconditional
+    ``#ctps-vision`` panel + its layer chips render alongside.
+    """
+    track_dict = _seeded_mosaic_trace_dict()
+    layout_dict = _layout_with_mosaic_and_vision()
+
+    out_path = tmp_path / "mosaic_seeded.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    # MOSAIC_META -- the single-sourced colour vocabulary (names + display hex).
+    meta = _extract_mosaic_meta(html)
+    assert meta is not None
+    assert meta["names"] == list(mosaic_module.COLOR_NAMES)
+    assert meta["hex"] == {
+        name: mosaic_module.COLOR_HEX[name] for name in mosaic_module.COLOR_NAMES
+    }
+
+    # const MOSAIC -- 12 resolved cells (position + colour), geom_match, roll,
+    # and the pinned seed, all stable across a re-render (seeded fixture).
+    mosaic_data = _extract_mosaic(html)
+    assert mosaic_data is not None
+    assert len(mosaic_data["cells"]) == 12
+    assert mosaic_data["cells"] == _TC17_EXPECTED_CELLS
+    assert mosaic_data["mode"] == "directed"
+    assert mosaic_data["geom_match"] is True
+    assert mosaic_data["roll"] is True
+    assert mosaic_data["seed"] == 12345
+
+    # #ctps-vision panel + its layer chips (unconditional markup, ADR-056).
+    assert 'id="ctps-vision"' in html
+    assert 'data-layer="vision-cone"' in html
+    assert 'data-layer="mosaic"' in html
+
+    # Re-rendering the SAME fixture is stable (a seeded golden, not a re-roll).
+    out_path_2 = tmp_path / "mosaic_seeded_2.html"
+    render(track_dict, out_path_2, objects=layout_dict)
+    html_2 = out_path_2.read_text(encoding="utf-8")
+    assert _extract_mosaic(html_2) == mosaic_data
+    assert _extract_mosaic_meta(html_2) == meta
+
+
+# ---------------------------------------------------------------------------
+# TC18 — player, mosaic-free (the AC12 guard): no MOSAIC_META/MOSAIC, TC9
+# PLAYER_META literal unchanged, existing suite green (randomized-vision plan,
+# T21 -- AC12)
+# ---------------------------------------------------------------------------
+
+
+def test_tc18_player_mosaic_free_emits_no_mosaic_data_and_meta_is_unchanged(tmp_path):
+    """TC18: a mosaic-free render emits no MOSAIC_META/MOSAIC; TC9 meta intact.
+
+    Key assertion (the AC12 guard): with no ``mosaic`` block anywhere (no
+    layout at all -- the plain TC9 fixture), the page has neither
+    ``const MOSAIC_META`` nor ``const MOSAIC``, and ``PLAYER_META`` equals the
+    exact frozen TC9 literal verbatim -- proving the new unconditional
+    vision.js/#ctps-vision additions never perturb the pre-existing contract.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    assert "pivots" not in track_dict  # fixture precondition: pivot-free
+    assert "mosaic" not in track_dict  # fixture precondition: roll-free
+
+    out_path = tmp_path / "mosaic_free.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # No `const MOSAIC_META =` / `const MOSAIC =` ASSIGNMENT anywhere -- note
+    # this deliberately does not assert the bare substring "MOSAIC_META" is
+    # absent, since vision.js's own doc comments reference the global by name
+    # (the asset itself ships unconditionally, ADR-056); only the DATA is
+    # conditional.
+    assert "const MOSAIC_META =" not in html
+    assert "const MOSAIC =" not in html
+    assert _extract_mosaic_meta(html) is None
+    assert _extract_mosaic(html) is None
+
+    meta = _extract_player_meta(html)
+    assert meta == _EXPECTED_TC9_META
+
+
+def test_tc18_player_mosaic_free_with_layout_but_no_mosaic_block_emits_no_data(tmp_path):
+    """TC18 (companion): a layout WITHOUT a mosaic block still emits no MOSAIC data.
+
+    Key assertion: ``objects`` truthy (the ordinary cargo layout fixture, no
+    ``mosaic`` key) still triggers no ``MOSAIC_META``/``MOSAIC`` -- the
+    resolve is gated on the layout's OWN ``mosaic`` geometry, never on
+    ``objects`` being present at all.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    layout_dict = _valid_layout_dict()
+    assert "mosaic" not in layout_dict
+
+    out_path = tmp_path / "mosaic_free_with_layout.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    assert _extract_mosaic_meta(html) is None
+    assert _extract_mosaic(html) is None
+    # The layout itself still embeds fine (the cargo path is unaffected).
+    assert _extract_embedded_objects(html) == layout_dict
+
+
+def test_tc18_vision_js_is_inlined_in_the_frozen_asset_pipeline(tmp_path):
+    """TC18: the generic asset-pipeline test naturally covers the new vision.js.
+
+    Key assertion (belt-and-suspenders on top of TC-ASSETS): ``vision.js`` is
+    a member of :data:`_ASSET_JS` (the unconditional-asset rule, ADR-056) and
+    its on-disk content is inlined verbatim into a MOSAIC-FREE render, proving
+    the asset ships even with no mosaic renderable.
+    """
+    vision_js_paths = [p for p in _ASSET_JS if p.name == "vision.js"]
+    assert len(vision_js_paths) == 1, "vision.js must be registered exactly once in _ASSET_JS"
+
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "vision_asset.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    vision_js = vision_js_paths[0].read_text(encoding="utf-8")
+    assert vision_js in html
+
+
+# ---------------------------------------------------------------------------
+# TC19 — player, mosaic geometry present but trace has NO roll: grid-outline
+# path (randomized-vision plan, T21 -- ADR-060, AC10)
+# ---------------------------------------------------------------------------
+
+
+def test_tc19_player_geometry_present_no_roll_renders_grid_outline(tmp_path):
+    """TC19: layout mosaic geometry + a roll-free trace renders the outline path.
+
+    Key assertion: with a layout carrying mosaic GEOMETRY but a track dict
+    with no top-level ``mosaic`` echo at all (an old trace, or a dump run
+    without ``--mosaic``), ``const MOSAIC`` still resolves (positions only, no
+    synthesized colour), ``roll`` is ``False``, ``geom_match`` is ``True`` (the
+    geometry IS the current layout), no ``seed`` key is carried, and the
+    ``#ctps-vision-badges`` slot markup is present for the client-rendered
+    "no roll recorded" badge (the badge TEXT itself is drawn by vision.js at
+    runtime, not baked into the static page -- see vision.js's
+    ``_renderBadges``).
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    assert "mosaic" not in track_dict  # no roll recorded
+    layout_dict = _layout_with_mosaic_and_vision()
+
+    out_path = tmp_path / "mosaic_no_roll.html"
+    render(track_dict, out_path, objects=layout_dict)
+    html = out_path.read_text(encoding="utf-8")
+
+    mosaic_data = _extract_mosaic(html)
+    assert mosaic_data is not None
+    assert len(mosaic_data["cells"]) == 12
+    # Positions only -- no synthesized "color" key on any cell.
+    for cell in mosaic_data["cells"]:
+        assert "color" not in cell
+        assert isinstance(cell["x_cm"], float)
+        assert isinstance(cell["y_cm"], float)
+    assert mosaic_data["roll"] is False
+    assert mosaic_data["geom_match"] is True
+    assert "seed" not in mosaic_data
+
+    # MOSAIC_META still ships (the colour vocabulary is present whenever a
+    # mosaic is renderable at all, roll or not).
+    assert _extract_mosaic_meta(html) is not None
+
+    # The badge SLOT markup (client-rendered text) is present in the static
+    # page even though the "no roll recorded" text itself is JS-driven.
+    assert 'id="ctps-vision-badges"' in html
+    assert '"no roll recorded"' in (PLAYER_JS_PATH.parent / "vision.js").read_text(
+        encoding="utf-8"
+    )
 
     # Box overlay is EVENT-driven (boxClose shows, boxOpen clears), NOT gated on
     # the cargo model's captured-cargo `scene.rearBox` — so it reflects the rear

@@ -45,8 +45,16 @@
         speed: 1,
         activeTab: "log",
         fullView: false,
+        // Layer visibility mirrors the `.ctps-layer-chips` markup's initial
+        // `ctps-chip--active` state (chrome.js's refreshLayerChips reads
+        // `store.layers[name]` on init to seat each chip, so a chip whose key is
+        // absent here would be forced OFF). The randomized-vision layers
+        // `mosaic` / `vision-cone` (chip keys `data-layer="mosaic"` /
+        // `data-layer="vision-cone"`) default ON like their active chips —
+        // vision.js's layers no-op anyway when no MOSAIC / cone DATA is present.
         layers: { map: true, trail: true, path: true, nodes: true,
-                  objects: true, zones: false, deploy: false },
+                  objects: true, zones: false, deploy: false,
+                  mosaic: true, "vision-cone": true },
         selection: { kind: "robot", id: null },
         // ----- cargo model (object/cargo plan -- issue #57) ---------------
         // `objects`/`robotCfg` come from a loaded layout (the `OBJECTS` global or an
@@ -57,6 +65,17 @@
         objects: [],
         robotCfg: null,
         scene: null,
+        // ----- randomized-vision model (ADR-060) --------------------------
+        // `mosaicCells` is the resolved 12-cell mosaic the vision layers/HUD
+        // read: the embedded `MOSAIC` global on an emitted page, OR an UPLOADED
+        // layout's `mosaic` block re-resolved through vision.js on a mosaic-free
+        // page (ADR-056 upload leg). `mosaicMeta` carries the colour vocabulary
+        // (`{names, hex}`) so the cell fills read from ONE source; `visionCone`
+        // is the robot-LOCAL cone geometry (`robot.vision`). All null/absent
+        // until a mosaic or cone is present — the vision layers then no-op.
+        mosaicCells: null,
+        mosaicMeta: null,
+        visionCone: null,
         // `sorterError` is set by `loadLayout` from the resolver: a message when
         // the loaded trace fired a grab with no sorter lane selected, else null.
         sorterError: null,
@@ -217,11 +236,43 @@
     }
 
     /**
-     * Ingest a layout dict (`{ objects, robot }` — the embedded `OBJECTS` global or an
-     * uploaded file): stash `objects`/`robotCfg`, resolve the scene timeline once
-     * via cargo.js, seat the snapshot for the current playhead, hoist the
-     * resolver's grab-before-sortTo flag onto `sorterError`, and notify the
-     * touched keys in one shot.
+     * Seat the randomized-vision embed (ADR-060) on the store: the resolved
+     * mosaic cells, the colour-vocabulary meta, and the robot-local vision cone.
+     * Called by vision.js on boot with the emitted `MOSAIC`/`MOSAIC_META`
+     * globals + the cone from the loaded `robot.vision`, and again by
+     * `loadLayout` on the upload leg (an uploaded `mosaic`/`robot.vision` layout
+     * re-resolved through vision.js). Any argument may be null (absent feature);
+     * the vision layers/HUD then no-op. Notifies the touched keys so the layers
+     * repaint and the HUD refreshes.
+     *
+     * @param cells the resolved 12-cell array (`[{index,x_cm,y_cm,color?}]`), or
+     *     null when no mosaic is present.
+     * @param meta the `{names, hex}` colour vocabulary, or null.
+     * @param cone the robot-local `{origin_x_cm, origin_y_cm, half_angle_deg,
+     *     range_cm}` cone, or null.
+     */
+    store.setVisionEmbed = function (cells, meta, cone) {
+        store.mosaicCells = cells || null;
+        store.mosaicMeta = meta || null;
+        store.visionCone = cone || null;
+        notify(["mosaicCells", "mosaicMeta", "visionCone"]);
+    };
+
+    /**
+     * Ingest a layout dict (`{ objects, robot, mosaic? }` — the embedded
+     * `OBJECTS` global or an uploaded file): stash `objects`/`robotCfg`, resolve
+     * the scene timeline once via cargo.js, seat the snapshot for the current
+     * playhead, hoist the resolver's grab-before-sortTo flag onto `sorterError`,
+     * and notify the touched keys in one shot.
+     *
+     * ADR-056 upload leg (randomized vision): when the dict carries a `mosaic`
+     * geometry block or a `robot.vision` cone, re-derive the vision embed through
+     * vision.js (`CTPS.vision.embedFromLayout`) and seat it via
+     * `setVisionEmbed`, so an uploaded mosaic/cone renders on a page emitted
+     * WITHOUT one (the embedded `MOSAIC` path is untouched — vision.js
+     * seats that itself on boot). A dict with neither leaves the current embed
+     * in place (an upload of a mosaic-free layout does not clobber an emitted
+     * mosaic; a fresh emitted page starts null anyway).
      */
     store.loadLayout = function (layoutDict) {
         layoutDict = layoutDict || {};
@@ -235,6 +286,18 @@
         sceneIdx = sceneIndexAt(store.t);
         store.scene = sceneAt(sceneIdx);
         notify(["objects", "robotCfg", "scene", "sorterError"]);
+
+        // Upload leg: re-derive the vision embed from the uploaded layout's own
+        // `mosaic`/`robot.vision` blocks (vision.js owns the resolve so the cell
+        // geometry stays single-sourced). Only overwrites the embed when the
+        // uploaded dict actually carries mosaic geometry or a cone, so uploading
+        // a cargo-only layout never wipes an embedded mosaic.
+        var embed = (CTPS.vision && CTPS.vision.embedFromLayout)
+            ? CTPS.vision.embedFromLayout(layoutDict)
+            : null;
+        if (embed && (embed.cells || embed.cone)) {
+            store.setVisionEmbed(embed.cells, embed.meta, embed.cone);
+        }
     };
 
     store.setCargoTab = function (name) {
