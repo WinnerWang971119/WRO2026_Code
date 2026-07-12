@@ -35,18 +35,13 @@ TasksClass Tasks;
 const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
-    { "debugYield", &TasksClass::debugYield },
     { "servoTest", &TasksClass::servoTest },
-    { "home", &TasksClass::home },
-    { "idleWait", &TasksClass::idleWait },
-    { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
     { "ctpsExample1", &TasksClass::ctpsExample1 },
     { "emptyTest", &TasksClass::emptyTest },
-    { "actuatorSweep", &TasksClass::actuatorSweep },
-    { "actuatorStep", &TasksClass::actuatorStep },
     { "manipDirectTest", &TasksClass::manipDirectTest },
     { "beltTest", &TasksClass::beltTest },
+    { "readMosaic", &TasksClass::readMosaic },
     //Add new tasks here
 };
 
@@ -201,7 +196,7 @@ bool TasksClass::inTask() const
     return _inTask;
 }
 
-bool TasksClass::waitStationaryMs(uint32_t ms, const __FlashStringHelper* site)
+bool TasksClass::_waitStationaryMs(uint32_t ms, const __FlashStringHelper* site)
 {
     if (!Drive.isIdle() || !PathTracker.isIdle() || LineFollower.isEnabled())
     {
@@ -260,17 +255,6 @@ bool TasksClass::demoEcho(const TaskArgs& args)
     return true;
 }
 
-bool TasksClass::debugYield(const TaskArgs& /*args*/)
-{
-    // Production-side stub for the YIELD path so Mission's TASK case has
-    // an end-to-end test target. The host-mirror's `alwaysYield` stub used
-    // to be the only path that exercised `_advanceStep` + `TASK YIELD %s`
-    // emission; this body lets a real Mission/Tasks integration check the
-    // same branch.
-    Serial.println(F("[Tasks] debugYield"));
-    return false;
-}
-
 bool TasksClass::servoTest(const TaskArgs& pos)
 {
     Manipulator.sorter.setAngle(static_cast<uint16_t>(pos.u8[0]));
@@ -302,55 +286,12 @@ bool TasksClass::servoTest(const TaskArgs& pos)
     return true;
 }
 
-bool TasksClass::home(const TaskArgs& /*args*/)
-{
-    // belt.home() is the whole routine: reset() (stall to the LEFT/HOME end-stop + re-zero
-    // the encoder there), settle, then drive on to the MID rest position. It's non-blocking,
-    // so poll until the full sequence lands (the belt's own watchdogs bound each stage).
-    //
-    // Drive the registered cooperative-tick callback each iteration so every module keeps
-    // ticking during the block (the same pattern as Manipulator::_drain); fall back to ticking
-    // only Manipulator.update() with a one-shot warning if no callback is set. yield() services
-    // the R4 background; we never block with a fixed delay().
-    Manipulator.belt.home();
-    static bool noCallbackWarned = false;
-    while (!Manipulator.belt.isDone())
-    {
-        if (_tickCallback != nullptr)
-        {
-            _tickCallback();
-        }
-        else
-        {
-            if (!noCallbackWarned)
-            {
-                Serial.println(F("[Tasks] home: no tick callback set — only "
-                                 "Manipulator.update() will tick during the wait. Call "
-                                 "Tasks.setTickCallback(...) in setup()."));
-                noCallbackWarned = true;
-            }
-            Manipulator.update();
-        }
-        yield();
-    }
-
-    return true;
-}
-
-bool TasksClass::idleWait(const TaskArgs& args)
-{
-    return waitStationaryMs(args.u32[0], F("idleWait"));
-}
-
-bool TasksClass::testChassis(const TaskArgs& /*args*/)
-{
-    LineFollower.setEnabled(true).setDistanceTarget(50);
-    return LineFollower.waitUntilDistanceReached();
-}
-
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    Drive.driveDist(100).setMode(DriveMode::SYNC);
+    PathTracker.goTo("Inter1");
+    PathTracker.goTo("Inter2");
+    PathTracker.goTo("Inter3");
+    PathTracker.goTo("position1");
     return true;
 }
 
@@ -500,145 +441,6 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
     return true;
 }
 
-bool TasksClass::actuatorSweep(const TaskArgs& /*args*/)
-{
-    static constexpr int16_t  TEST_DRIVE_PWM      = 35;
-    static constexpr uint32_t TEST_DRIVE_MS       = 700;
-    static constexpr uint32_t TEST_SETTLE_MS      = 250;
-    static constexpr uint32_t TEST_DRIVE_STOP_MS  = 150;
-
-    auto runDriveLeg = [this](const char* label, int16_t left, int16_t right)
-    {
-        Serial.print(F("[Tasks] actuatorSweep: "));
-        Serial.println(label);
-        Drive.setSpeed(left, right);
-        _waitMs(TEST_DRIVE_MS);
-        Drive.stop(true);
-        _waitMs(TEST_DRIVE_STOP_MS);
-    };
-
-    Serial.println(F("[Tasks] actuatorSweep: start"));
-
-    Drive.stop(true);
-    (void)Manipulator.reset();
-
-    runDriveLeg("left forward", TEST_DRIVE_PWM, 0);
-    runDriveLeg("left reverse", -TEST_DRIVE_PWM, 0);
-    runDriveLeg("right forward", 0, TEST_DRIVE_PWM);
-    runDriveLeg("right reverse", 0, -TEST_DRIVE_PWM);
-    runDriveLeg("drive forward", TEST_DRIVE_PWM, TEST_DRIVE_PWM);
-    runDriveLeg("drive reverse", -TEST_DRIVE_PWM, -TEST_DRIVE_PWM);
-
-    Serial.println(F("[Tasks] actuatorSweep: belt stations"));
-    Manipulator.belt.toStation(Config::BeltStation::LEFT);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.belt.toStation(Config::BeltStation::FAR_END);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far end"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Serial.println(F("[Tasks] actuatorSweep: grabber"));
-    Manipulator.grabber.open();
-    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.grabber.close();
-    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.grabber.home();
-    if (!_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber home"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Serial.println(F("[Tasks] actuatorSweep: sorter bins"));
-    for (uint8_t bin = 0; bin < Config::SORTER_BIN_COUNT; ++bin)
-    {
-        Manipulator.sorter.setAngle(Config::SORTER_BIN_ANGLE[bin]);
-        if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter bin"))
-        {
-            Drive.stop(true);
-            return false;
-        }
-        _waitMs(TEST_SETTLE_MS);
-    }
-    for (int8_t bin = (int8_t)Config::SORTER_BIN_COUNT - 1; bin >= 0; --bin)
-    {
-        Manipulator.sorter.setAngle(Config::SORTER_BIN_ANGLE[(uint8_t)bin]);
-        if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter return"))
-        {
-            Drive.stop(true);
-            return false;
-        }
-        _waitMs(TEST_SETTLE_MS);
-    }
-    Manipulator.sorter.home();
-    if (!_waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter home"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Serial.println(F("[Tasks] actuatorSweep: dumper"));
-    Manipulator.dumper.open();
-    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.dumper.close();
-    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    Manipulator.dumper.home();
-    if (!_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper home"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
-
-    (void)Manipulator.reset();
-    Drive.stop(true);
-    Serial.println(F("[Tasks] actuatorSweep: done"));
-    return true;
-}
-
 bool TasksClass::beltTest(const TaskArgs& /*args*/)
 {
     Manipulator.belt.home();
@@ -646,126 +448,7 @@ bool TasksClass::beltTest(const TaskArgs& /*args*/)
     return true;
 }
 
-bool TasksClass::actuatorStep(const TaskArgs& args)
-{
-    static constexpr uint8_t TARGET_GRABBER_POSE  = 0;
-    static constexpr uint8_t TARGET_GRABBER_ABS   = 1;
-    static constexpr uint8_t TARGET_SORTER_BIN    = 2;
-    static constexpr uint8_t TARGET_SORTER_ABS    = 3;
-    static constexpr uint8_t TARGET_DUMPER_POSE   = 4;
-    static constexpr uint8_t TARGET_DUMPER_ABS    = 5;
-    static constexpr uint8_t TARGET_BELT_STATION  = 6;
-    static constexpr uint8_t TARGET_DRIVE_LEG     = 7;
-
-    static constexpr uint8_t POSE_HOME  = 0;
-    static constexpr uint8_t POSE_OPEN  = 1;
-    static constexpr uint8_t POSE_CLOSE = 2;
-
-    static constexpr uint8_t DRIVE_LEFT_FORWARD   = 0;
-    static constexpr uint8_t DRIVE_LEFT_REVERSE   = 1;
-    static constexpr uint8_t DRIVE_RIGHT_FORWARD  = 2;
-    static constexpr uint8_t DRIVE_RIGHT_REVERSE  = 3;
-    static constexpr uint8_t DRIVE_BOTH_FORWARD   = 4;
-    static constexpr uint8_t DRIVE_BOTH_REVERSE   = 5;
-
-    const uint8_t target = args.u8[0];
-    const uint8_t value  = args.u8[1];
-    const uint8_t aux    = args.u8[2];
-    const uint8_t dwell  = args.u8[3];
-
-    switch (target)
-    {
-    case TARGET_GRABBER_POSE:
-        if (value == POSE_HOME) { Manipulator.grabber.home(); }
-        else if (value == POSE_OPEN) { Manipulator.grabber.open(); }
-        else if (value == POSE_CLOSE) { Manipulator.grabber.close(); }
-        else
-        {
-            Serial.print(F("[Tasks] actuatorStep: bad grabber pose "));
-            Serial.println((int)value);
-            return false;
-        }
-        return _waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber pose");
-
-    case TARGET_GRABBER_ABS:
-        Manipulator.grabber.setAngle(value);
-        return _waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber abs");
-
-    case TARGET_SORTER_BIN:
-        if (value >= Config::SORTER_BIN_COUNT)
-        {
-            Serial.print(F("[Tasks] actuatorStep: bad sorter bin "));
-            Serial.println((int)value);
-            return false;
-        }
-        (void)Manipulator.sortTo(value);
-        return true;
-
-    case TARGET_SORTER_ABS:
-        Manipulator.sorter.setAngle(value);
-        return _waitForServo(Manipulator.sorter, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "sorter abs");
-
-    case TARGET_DUMPER_POSE:
-        if (value == POSE_HOME) { Manipulator.dumper.home(); }
-        else if (value == POSE_OPEN) { Manipulator.dumper.open(); }
-        else if (value == POSE_CLOSE) { Manipulator.dumper.close(); }
-        else
-        {
-            Serial.print(F("[Tasks] actuatorStep: bad dumper pose "));
-            Serial.println((int)value);
-            return false;
-        }
-        return _waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper pose");
-
-    case TARGET_DUMPER_ABS:
-        Manipulator.dumper.setAngle(value);
-        return _waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper abs");
-
-    case TARGET_BELT_STATION:
-        if (value >= Config::BELT_STATION_COUNT)
-        {
-            Serial.print(F("[Tasks] actuatorStep: bad belt station "));
-            Serial.println((int)value);
-            return false;
-        }
-        Manipulator.belt.toStation(static_cast<Config::BeltStation>(value));
-        return _waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt station");
-
-    case TARGET_DRIVE_LEG:
-    {
-        const int16_t pwm = (aux > 100) ? 100 : aux;
-        const uint32_t dwellMs = (dwell == 0 ? 5u : (uint32_t)dwell) * 100u;
-        int16_t left = 0;
-        int16_t right = 0;
-
-        if (value == DRIVE_LEFT_FORWARD) { left = pwm; }
-        else if (value == DRIVE_LEFT_REVERSE) { left = -pwm; }
-        else if (value == DRIVE_RIGHT_FORWARD) { right = pwm; }
-        else if (value == DRIVE_RIGHT_REVERSE) { right = -pwm; }
-        else if (value == DRIVE_BOTH_FORWARD) { left = pwm; right = pwm; }
-        else if (value == DRIVE_BOTH_REVERSE) { left = -pwm; right = -pwm; }
-        else
-        {
-            Serial.print(F("[Tasks] actuatorStep: bad drive leg "));
-            Serial.println((int)value);
-            return false;
-        }
-
-        Drive.setSpeed(left, right);
-        _waitMs(dwellMs);
-        Drive.stop(true);
-        _waitMs(150);
-        return true;
-    }
-
-    default:
-        Serial.print(F("[Tasks] actuatorStep: bad target "));
-        Serial.println((int)target);
-        return false;
-    }
-}
-
-bool TasksClass::manipDirectTest(const TaskArgs& args)
+bool TasksClass::manipDirectTest(const TaskArgs& /*args*/)
 {
     static constexpr uint32_t TEST_SETTLE_MS = 250;
 
@@ -867,43 +550,41 @@ bool TasksClass::manipDirectTest(const TaskArgs& args)
     }
     _waitMs(TEST_SETTLE_MS);
 
-    if (args.u8[0] == 1){
-        Serial.println(F("[Tasks] manipDirectTest: belt left/mid/far_end/mid"));
-        Manipulator.belt.toStation(Config::BeltStation::LEFT);
-        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
-        {
-            Drive.stop(true);
-            return false;
-        }
-        _waitMs(TEST_SETTLE_MS);
-
-        Manipulator.belt.toStation(Config::BeltStation::MID);
-        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
-        {
-            Drive.stop(true);
-            return false;
-        }
-        _waitMs(TEST_SETTLE_MS);
-
-        Manipulator.belt.toStation(Config::BeltStation::FAR_END);
-        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
-        {
-            Drive.stop(true);
-            return false;
-        }
-        _waitMs(TEST_SETTLE_MS);
-
-        Manipulator.belt.toStation(Config::BeltStation::MID);
-        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
-        {
-            Drive.stop(true);
-            return false;
-        }
+    Serial.println(F("[Tasks] manipDirectTest: belt left/mid/far_end/mid"));
+    Manipulator.belt.toStation(Config::BeltStation::LEFT);
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
+    {
+        Drive.stop(true);
+        return false;
     }
+    _waitMs(TEST_SETTLE_MS);
+
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
+    {
+        Drive.stop(true);
+        return false;
+    }
+    _waitMs(TEST_SETTLE_MS);
+
+    Manipulator.belt.toStation(Config::BeltStation::FAR_END);
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
+    {
+        Drive.stop(true);
+        return false;
+    }
+    _waitMs(TEST_SETTLE_MS);
+
+    Manipulator.belt.toStation(Config::BeltStation::MID);
+    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
+    {
+        Drive.stop(true);
+        return false;
+    }
+
     Drive.stop(true);
     Serial.println(F("[Tasks] manipDirectTest: done"));
     return true;
-    
 }
 
 bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
@@ -1042,4 +723,10 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
     Manipulator.boxOpen();
 
     return true;
+}
+
+bool TasksClass::readMosaic(const TaskArgs& /*args*/)
+{
+    PathTracker.goTo("").setArrivalDirection(Direction::FRONT);
+    return _visionRead();
 }
