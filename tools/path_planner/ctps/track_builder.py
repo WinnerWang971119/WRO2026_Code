@@ -1281,6 +1281,24 @@ def build(trace: Trace, field_data) -> Track:
     events: List[Dict[str, Any]] = []
     t = 0.0
 
+    # Post-stop settle dwell (Config::HOP_SETTLE_MS, ADR-061), owned here in
+    # SECONDS: ``ProfileConfig.hop_settle_ms`` stays ms (T5's parse surface),
+    # the render call sites own the ms -> s conversion. ``0`` (the config
+    # default disabled, or a firmware ``-DHOP_SETTLE_MS_DEFAULT=0`` pin) fully
+    # disables every dwell insertion below, so the render stays byte-identical
+    # to pre-feature. See the Settle-fire matrix in
+    # docs/plans/2026-07-12-hop-settle-wait.md — the paired firmware host
+    # ctest (T4) and this render (T7's pytest) both assert against that same
+    # matrix; a future edit to either eligibility mapping must update both.
+    hop_settle_s: float = default_config().hop_settle_ms / 1000.0
+    # Deferred one-primitive dwell-2 flag: set by a rendered COLD pre-edge turn
+    # on a normal hop (either the plain in-place turn or the pivot-arc path),
+    # consumed on the NEXT real drive advance (turn -> move), matching the
+    # firmware's SETTLE(EDGE_AFTER_TURN). A zero-motion heading-only re-anchor
+    # between the turn and the drive must NOT clear it — only the advance
+    # branch (the ``else`` of the zero-motion check) does.
+    pending_turn_dwell: bool = False
+
     # Optional single-wheel pivot-arc overlay segments (issue #55). Appended in
     # chronological (t0-increasing) order as each goto's route takes a declared
     # pivot; stays empty — and the ``pivots`` key is omitted from the Track — for
@@ -1748,6 +1766,19 @@ def build(trace: Trace, field_data) -> Track:
                 ):
                     tag = primitive[0]
                     node_now = sim.localization.current_node()
+                    # dwell-1 (Settle-fire matrix), deferred per-iteration flag:
+                    # a settle-eligible braked arrival OWES a post-stop dwell,
+                    # but the ``append_dwell_keyframe`` must run AFTER the
+                    # ``pending_pivot_land`` landing-correction block below — that
+                    # block rewrites ``keyframes[-1]`` (the ARRIVAL keyframe) to
+                    # the trim-corrected pose, so an inline dwell here would take
+                    # the correction on the dwell keyframe and leave the arrival
+                    # keyframe at the over-shot dead-reckoned pose (C1). The flag
+                    # is set at the braked ``append_run_segment`` sites and
+                    # consumed once, at the very end of this iteration, so it can
+                    # never leak a dwell into a later primitive. This mirrors the
+                    # deferred dwell-2 (``pending_turn_dwell``) already above.
+                    settle_dwell_pending = False
                     if node_now != cur_node:
                         # A hop just re-anchored onto a new node: the OLD current
                         # node is this one's predecessor, and any wall reset seen
@@ -1861,6 +1892,15 @@ def build(trace: Trace, field_data) -> Track:
                                 cos(depart_rad),
                                 sin(depart_rad),
                             )
+                            # dwell-2 (Settle-fire matrix): a pivot IS a cold
+                            # turn on a normal hop (the return prologue's own
+                            # turn never reaches this branch — ``find_pivot_turn``
+                            # misses with ``prev_node=None`` at a goto's start,
+                            # so it renders as the plain in-place turn above,
+                            # not an arc). No ``_RETURN_DRIVE_TAGS`` check
+                            # needed here; the suppression is at the advance
+                            # site regardless.
+                            pending_turn_dwell = True
 
                     if not arced:
                         # Densify this hop's geometry step off the firmware
@@ -1921,6 +1961,14 @@ def build(trace: Trace, field_data) -> Track:
                                 append_turn_keyframes(
                                     snap.x_cm, snap.y_cm, snap.heading_deg
                                 )
+                                # dwell-2 (Settle-fire matrix): a cold pre-edge
+                                # turn on a normal hop settles before the move
+                                # that follows. Deferred: the return-prologue's
+                                # own turn also renders here (a non-pivot plain
+                                # turn), so the suppression is applied at the
+                                # NEXT advance site (``_RETURN_DRIVE_TAGS``),
+                                # not here.
+                                pending_turn_dwell = True
                             # else: a heading-reset / no-op OR a sub-tolerance
                             # pass-through alignment turn is fully transparent —
                             # append NOTHING and leave the run open. Rendering a
@@ -1929,6 +1977,22 @@ def build(trace: Trace, field_data) -> Track:
                             # keyframe at the run-tail pose; the next follow leg's
                             # snapshot pins the corrected heading byte-exact anyway.
                         else:
+                            # dwell-2 (Settle-fire matrix): consume the deferred
+                            # cold-turn flag on this, the NEXT real drive advance
+                            # after a rendered turn (the "turn -> move" seam).
+                            # Suppressed when this advance IS the return-to-node
+                            # prologue's own drive (``_RETURN_DRIVE_TAGS`` —
+                            # matrix row "Return-prologue pre-edge turn" ->
+                            # settles neither the turn nor the move). Cleared
+                            # unconditionally on this advance regardless of
+                            # whether the dwell actually fires, matching the
+                            # firmware's one-shot ``SettleResume::EDGE_AFTER_TURN``
+                            # (a zero-motion heading reset above does NOT reach
+                            # this branch, so it cannot consume/clear the flag).
+                            if pending_turn_dwell:
+                                if hop_settle_s > 0 and tag not in _RETURN_DRIVE_TAGS:
+                                    append_dwell_keyframe(hop_settle_s)
+                                pending_turn_dwell = False
                             # A CHAINED blind hop (ADR-059) rides its resolved
                             # per-hop (start_pwm, end_pwm, chain) on the primitive
                             # tuple — CTPS CONSUMES those recorded speeds for the
@@ -1951,6 +2015,28 @@ def build(trace: Trace, field_data) -> Track:
                                     braked,
                                     chain_speeds=(start_pwm, end_pwm),
                                 )
+                                # dwell-1 (Settle-fire matrix): a blind-chain
+                                # hop only settles on its FINAL (braked) hop —
+                                # an intermediate chained hop nets end_pwm != 0
+                                # (not braked) and never reaches here armed.
+                                # Suppressed at a wall-reset / return-prologue
+                                # tag, or an arrival at a RESET node (the wall
+                                # interlude owns that boundary — mirrors the
+                                # firmware ``getNodeType(arrived) != RESET``
+                                # gate in ``_enterSettle``). DEFERRED: the dwell
+                                # keyframe is appended at the end of this
+                                # iteration, AFTER the ``pending_pivot_land``
+                                # landing-correction runs, so the correction
+                                # patches the ARRIVAL keyframe and the dwell then
+                                # holds the corrected pose (C1).
+                                if (
+                                    hop_settle_s > 0
+                                    and braked
+                                    and tag not in _WALL_RESET_TAGS
+                                    and tag not in _RETURN_DRIVE_TAGS
+                                    and not sim.localization.is_reset_node(node_now)
+                                ):
+                                    settle_dwell_pending = True
                             else:
                                 # A braked stop ends the run; a pass tag or a
                                 # mid-run follow leg (``ACT_FOLLOW_INT``) continues
@@ -1969,6 +2055,35 @@ def build(trace: Trace, field_data) -> Track:
                                     braked,
                                     rear_led=tag in _REAR_LED_STOP_TAGS,
                                 )
+                                # dwell-1 (Settle-fire matrix): post-stop, before
+                                # the next maneuver — fires on every settle-
+                                # eligible braked arrival (LINE_OVERSHOOT /
+                                # PROJECTION_FOLLOW stop / STOP_AT_LINE / a
+                                # non-chain BLIND_FORWARD), which also covers the
+                                # goal's final braked hop (its internal
+                                # ``flush_run`` IS this call site — the goal-end
+                                # ``flush_run(strict=True)`` below operates on an
+                                # already-empty buffer for a healthy goto, so it
+                                # must NOT also dwell, or the goal would double-
+                                # dwell). Suppressed at a wall-reset / return-
+                                # prologue tag, or an arrival at a RESET node.
+                                # DEFERRED: the dwell keyframe is appended at the
+                                # end of this iteration, AFTER the
+                                # ``pending_pivot_land`` landing-correction runs,
+                                # so on a pivot-departure landing the correction
+                                # patches the ARRIVAL keyframe FIRST and the dwell
+                                # then holds the corrected (settled) pose (C1). A
+                                # plain braked arrival (no pivot landing) still
+                                # gets its dwell immediately after the arrival
+                                # keyframe — unchanged.
+                                if (
+                                    hop_settle_s > 0
+                                    and braked
+                                    and tag not in _WALL_RESET_TAGS
+                                    and tag not in _RETURN_DRIVE_TAGS
+                                    and not sim.localization.is_reset_node(node_now)
+                                ):
+                                    settle_dwell_pending = True
                         if (
                             pending_pivot_land is not None
                             and node_now == pending_pivot_land[0]
@@ -2015,6 +2130,19 @@ def build(trace: Trace, field_data) -> Track:
                                 chassis.x_cm = land_x
                                 chassis.y_cm = land_y
                             pending_pivot_land = None
+                        # dwell-1 (Settle-fire matrix), deferred append: now that
+                        # the ``pending_pivot_land`` landing-correction has run
+                        # (patching the ARRIVAL keyframe ``keyframes[-1]`` to the
+                        # trim-corrected pose on a pivot-departure landing), hold
+                        # the settle at that corrected pose. For a plain braked
+                        # arrival (no pivot landing) this fires immediately after
+                        # the arrival keyframe, exactly as an inline append would
+                        # (behavior unchanged). The flag is consumed here on the
+                        # SAME iteration as the braked arrival, so it never leaks
+                        # into a later primitive.
+                        if settle_dwell_pending:
+                            append_dwell_keyframe(hop_settle_s)
+                            settle_dwell_pending = False
             except UnreachableGoalError:
                 # Emit any buffered collinear run of the REACHABLE prefix before
                 # the fault so its keyframes are on the timeline (a partial run
@@ -2070,6 +2198,15 @@ def build(trace: Trace, field_data) -> Track:
             # following braked stop) → per-primitive fallback + UserWarning
             # (AC11 / TC11). Interior boundary flushes above stay non-strict —
             # an unbraked pass run ending at a turn/pivot is legitimate.
+            #
+            # NO dwell-1 insertion here: for a healthy goto this flush operates
+            # on an already-empty ``run_segments`` buffer (the goal's last hop
+            # was itself a braked ``append_run_segment`` call above, whose own
+            # internal ``flush_run()`` already fired dwell-1). Adding a second
+            # dwell here would double the goal-arrival settle (the firmware
+            # emits exactly ONE SETTLE per braked arrival). The malformed-trace
+            # fallback path warns and returns without reaching a dwell decision
+            # here either way.
             flush_run(strict=True)
 
             # A successful goto emits a `goto` SPAN event covering the whole
