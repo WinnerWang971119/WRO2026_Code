@@ -158,6 +158,7 @@ class ProfileConfig:
     wall_push_pwm: int     # WALL_STOP_PUSH_PWM
     track_cm: float       # Config::TRACK_MM / 10 (chassis track width)
     rear_axle_offset_cm: float  # LINE_SENSOR_AXLE_OFFSET_REAR_CM (REAR overshoot window)
+    hop_settle_ms: int    # HOP_SETTLE_MS (ConfigNav.h) — post-stop settle dwell
 
 
 def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileConfig:
@@ -169,7 +170,7 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
     to a stale literal, surfacing at CTPS build time with the constant name +
     file (see the plan's Error Handling section).
 
-    Constants are distributed across three headers:
+    Constants are distributed across four headers:
 
     - ``ConfigDrive.h`` (``config_path``): the ``TSHAPE_*`` / ``TURN_*`` /
       ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, the
@@ -177,19 +178,27 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
       plus the symbolic ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
     - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` / ``PWM_MAX``.
     - ``ConfigLine.h``: ``CRUISE_SPEED = SPEED_NORMAL`` (symbolic).
+    - ``ConfigNav.h``: ``HOP_SETTLE_MS``, whose ``constexpr uint32_t`` RHS is the
+      symbolic identifier ``HOP_SETTLE_MS_DEFAULT`` — resolved one level deep
+      through that identifier's ``#define HOP_SETTLE_MS_DEFAULT <literal>``
+      (not a ``constexpr``) via :mod:`tools.path_planner.config_parse`'s
+      ``#define`` fallback.
 
-    The two sibling headers are resolved relative to ``config_path``'s directory
-    so a test that copies a perturbed header set into a temp dir (TC2's
-    ``config_path`` seam) reads a self-consistent trio, while the default reads
-    the real firmware headers. The symbolic-RHS search set is likewise rooted at
-    ``config_path``'s directory so ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE`` and
-    ``CRUISE_SPEED = SPEED_NORMAL`` resolve against the same (possibly temp)
-    headers rather than the real ones.
+    The sibling headers are resolved relative to ``config_path``'s directory so
+    a test that copies a perturbed header set into a temp dir (TC2's
+    ``config_path`` seam) reads a self-consistent set, while the default reads
+    the real firmware headers. A perturbation test exercising ``hop_settle_ms``
+    must copy ``ConfigNav.h`` into that temp dir alongside the others, or the
+    ``HOP_SETTLE_MS`` read raises (no fallback literal, issue #44). The
+    symbolic-RHS search set is likewise rooted at ``config_path``'s directory so
+    ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``, ``CRUISE_SPEED = SPEED_NORMAL``,
+    and ``HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT`` all resolve against the same
+    (possibly temp) headers rather than the real ones.
 
     :param config_path: the ``ConfigDrive.h`` holding the drive constants;
         defaults to the real header resolved relative to this module
-        (cwd-independent). Its parent directory must also hold ``ConfigGlobal.h``
-        and ``ConfigLine.h``.
+        (cwd-independent). Its parent directory must also hold ``ConfigGlobal.h``,
+        ``ConfigLine.h``, and ``ConfigNav.h``.
     :return: a fully-populated :class:`ProfileConfig`.
     :raises OSError: when ``config_path`` (or a sibling / symbolic-RHS search
         header) is unreadable.
@@ -200,9 +209,11 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
     config_dir = config_path.parent
     global_h = config_dir / "ConfigGlobal.h"
     line_h = config_dir / "ConfigLine.h"
+    nav_h = config_dir / "ConfigNav.h"
     # Symbolic RHS (TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE, CRUISE_SPEED =
-    # SPEED_NORMAL) resolves one level across the trio rooted at config_dir.
-    search = (config_path, global_h, line_h)
+    # SPEED_NORMAL, HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT) resolves one level
+    # across this set, rooted at config_dir.
+    search = (config_path, global_h, line_h, nav_h)
 
     return ProfileConfig(
         accel=parse_config_float("TSHAPE_ACCEL_PWM_PER_CM", config_path),
@@ -225,6 +236,7 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         rear_axle_offset_cm=parse_config_float(
             "LINE_SENSOR_AXLE_OFFSET_REAR_CM", config_path
         ),
+        hop_settle_ms=parse_config_int("HOP_SETTLE_MS", nav_h, search),
     )
 
 

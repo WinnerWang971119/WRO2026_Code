@@ -114,12 +114,12 @@ _IDENTIFIER_RE = r"[A-Za-z_][A-Za-z0-9_]*"
 
 
 def config_int_pattern(name: str) -> re.Pattern:
-    """Return an anchored regex capturing a ``constexpr int16_t``/``uint8_t`` RHS.
+    """Return an anchored regex capturing a ``constexpr int16_t``/``uint8_t``/``uint32_t`` RHS.
 
-    Matches ``[static ]constexpr (int16_t|uint8_t) <name> = <rhs>;`` where
-    ``<rhs>`` is either a signed integer literal or a bare identifier (captured
-    verbatim in group 1 -- the caller decides whether it is a literal or a
-    symbolic reference). Tolerates an optional leading ``static`` (the
+    Matches ``[static ]constexpr (int16_t|uint8_t|uint32_t) <name> = <rhs>;``
+    where ``<rhs>`` is either a signed integer literal or a bare identifier
+    (captured verbatim in group 1 -- the caller decides whether it is a literal
+    or a symbolic reference). Tolerates an optional leading ``static`` (the
     ``MatrixTT``/``LegoEV3`` profile structs in ``ConfigDrive.h`` use
     ``static constexpr`` for their nested members) and surrounding whitespace.
 
@@ -128,11 +128,12 @@ def config_int_pattern(name: str) -> re.Pattern:
     mid-line declaration of the same constant is NOT a match and cannot shadow
     the real one.
 
-    :param name: the C++ ``constexpr int16_t``/``uint8_t`` identifier to match.
+    :param name: the C++ ``constexpr int16_t``/``uint8_t``/``uint32_t``
+        identifier to match.
     :return: a compiled :class:`re.Pattern` with the raw RHS text in group 1.
     """
     return re.compile(
-        r"^[ \t]*(?:static\s+)?constexpr\s+(?:int16_t|uint8_t)\s+"
+        r"^[ \t]*(?:static\s+)?constexpr\s+(?:int16_t|uint8_t|uint32_t)\s+"
         + re.escape(name)
         + r"\s*=\s*(-?[0-9]+|"
         + _IDENTIFIER_RE
@@ -144,47 +145,92 @@ def config_int_pattern(name: str) -> re.Pattern:
 _INT_LITERAL_RE = re.compile(r"^-?[0-9]+$")
 
 
+def config_define_pattern(name: str) -> re.Pattern:
+    """Return an anchored regex capturing a preprocessor ``#define <name> <rhs>``.
+
+    Matches a line like ``#define HOP_SETTLE_MS_DEFAULT 100``, tolerating
+    whitespace between the ``#`` and ``define`` and around the value. The RHS is
+    captured verbatim in group 1 (a bare integer literal or a bare identifier --
+    same convention as :func:`config_int_pattern`), so the caller decides
+    whether it resolves directly or needs another hop.
+
+    Anchored with :data:`re.MULTILINE` to the start of a line (after optional
+    leading whitespace), mirroring the ``constexpr`` patterns, so a
+    ``//``-commented ``#define`` cannot shadow the real one.
+
+    :param name: the macro identifier to match (e.g. ``HOP_SETTLE_MS_DEFAULT``).
+    :return: a compiled :class:`re.Pattern` with the raw RHS text in group 1.
+    """
+    return re.compile(
+        r"^[ \t]*#[ \t]*define[ \t]+"
+        + re.escape(name)
+        + r"[ \t]+(-?[0-9]+|"
+        + _IDENTIFIER_RE
+        + r")[ \t]*$",
+        re.MULTILINE,
+    )
+
+
 def parse_config_int(
     name: str,
     config_path: Path = DEFAULT_CONFIG_H_PATH,
     search_headers: tuple[Path, ...] = DEFAULT_INT_SEARCH_HEADERS,
 ) -> int:
-    """Parse a ``constexpr int16_t``/``uint8_t`` constant, resolving a symbolic RHS.
+    """Parse a ``constexpr int16_t``/``uint8_t``/``uint32_t`` constant, resolving a symbolic RHS.
 
     Reads the named declaration out of ``config_path``. If the right-hand side
     is a plain integer literal (e.g. ``TSHAPE_ACCEL_PWM_PER_CM = 5``), that
     value is returned directly. If the right-hand side is a bare identifier
     (e.g. ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE`` or
     ``CRUISE_SPEED = SPEED_NORMAL``), this performs **exactly one level** of
-    resolution: it searches ``search_headers`` (in order) for an integer-literal
-    declaration of that identifier and returns its value.
+    resolution: it searches ``search_headers`` (in order) for either
+
+    - an integer-literal ``constexpr`` declaration of that identifier
+      (:func:`config_int_pattern`), tried first; or, if not found in that
+      header,
+    - a preprocessor ``#define <rhs> <literal>`` of that identifier
+      (:func:`config_define_pattern`) -- the shape used by the
+      ``#ifndef NAME_DEFAULT`` / ``#define NAME_DEFAULT <literal>`` /
+      ``constexpr ... NAME = NAME_DEFAULT;`` override idiom (e.g.
+      ``HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT`` in ``ConfigNav.h``, where
+      ``HOP_SETTLE_MS_DEFAULT`` is a ``#define``, not a ``constexpr``),
+
+    and returns the resolved literal's value.
 
     This is a bounded resolver, not a general C++ evaluator (issue #44
     no-stale-fallback policy):
 
-    - Only ONE identifier hop is followed. If the resolved declaration's own
-      RHS is itself a bare identifier (a two-level chain), this raises rather
-      than continuing to chase it.
+    - Only ONE identifier hop is followed, across either RHS shape above. If
+      the resolved declaration's own RHS is itself a bare identifier (a
+      two-level chain), this raises rather than continuing to chase it -- this
+      applies equally to a ``constexpr`` chain and a ``#define`` chain.
     - Only a bare integer literal or a single bare identifier is accepted as an
       RHS. Any expression (``A + B``, ``A * 2``, a cast, a ternary, ...) fails
-      to match :func:`config_int_pattern` at all and raises.
-    - The symbolic lookup is scoped to ``search_headers`` (by default
-      ``ConfigDrive.h`` / ``ConfigGlobal.h`` / ``ConfigLine.h`` -- the only
-      headers named in the CTPS motion-profile plan's Decisions), never an
-      open-ended search of every header under ``config/``.
+      to match either pattern and raises.
+    - The symbolic lookup is scoped to ``search_headers``, never an open-ended
+      search of every header under ``config/``. For the ``int16_t``/``uint8_t``
+      constants that means ``ConfigDrive.h`` / ``ConfigGlobal.h`` /
+      ``ConfigLine.h`` (the default); a caller resolving a ``uint32_t``
+      ``#define``-backed constant (e.g. ``HOP_SETTLE_MS``) passes its own
+      ``search_headers`` including ``ConfigNav.h``.
+    - Per header, the ``constexpr`` pattern is tried before the ``#define``
+      fallback, so resolution order is deterministic even if a header
+      (hypothetically) contained both spellings of the same name.
 
-    :param name: the ``constexpr int16_t``/``uint8_t`` identifier to read.
+    :param name: the ``constexpr int16_t``/``uint8_t``/``uint32_t`` identifier
+        to read.
     :param config_path: header to read ``name``'s own declaration from;
         defaults to ``ConfigDrive.h`` resolved relative to this module.
     :param search_headers: headers searched, in order, to resolve a symbolic
-        RHS one level deep; defaults to
-        :data:`DEFAULT_INT_SEARCH_HEADERS`.
+        RHS one level deep (as a ``constexpr`` literal or a ``#define``
+        literal); defaults to :data:`DEFAULT_INT_SEARCH_HEADERS`.
     :return: the resolved integer value.
     :raises OSError: when ``config_path`` (or, during symbolic resolution, one
         of ``search_headers``) cannot be read.
     :raises ValueError: when no matching declaration is found, the RHS is
         neither a literal nor a bare identifier (i.e. an expression), or the
-        resolved symbol's own RHS is not itself a literal (a two-level chain).
+        resolved symbol's own RHS is not itself a literal (a two-level chain,
+        whether via ``constexpr`` or ``#define``).
     """
     try:
         text = config_path.read_text(encoding="utf-8")
@@ -199,7 +245,7 @@ def parse_config_int(
     match = config_int_pattern(name).search(text)
     if match is None:
         raise ValueError(
-            f"Cannot parse '{name}': no '[static ]constexpr (int16_t|uint8_t) "
+            f"Cannot parse '{name}': no '[static ]constexpr (int16_t|uint8_t|uint32_t) "
             f"{name} = <literal-or-identifier>;' declaration found in "
             f"{config_path}. The offline tools refuse to fall back to a stale "
             f"literal (issue #44) -- fix the header or the parser, do not "
@@ -226,7 +272,17 @@ def parse_config_int(
                 f"(issue #44)."
             ) from exc
 
+        # Try the constexpr declaration shape first (e.g. `CRUISE_SPEED =
+        # SPEED_NORMAL` resolving `SPEED_NORMAL`'s own constexpr decl); only if
+        # that is absent from THIS header, fall back to a preprocessor #define
+        # of the same identifier (e.g. `HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT`
+        # resolving the `#define HOP_SETTLE_MS_DEFAULT <literal>` idiom). Trying
+        # constexpr first, per header, keeps resolution order deterministic.
         resolved_match = config_int_pattern(rhs).search(header_text)
+        source = "constexpr"
+        if resolved_match is None:
+            resolved_match = config_define_pattern(rhs).search(header_text)
+            source = "#define"
         if resolved_match is None:
             continue
 
@@ -234,18 +290,19 @@ def parse_config_int(
         if not _INT_LITERAL_RE.match(resolved_rhs):
             raise ValueError(
                 f"Cannot resolve '{name} = {rhs}': '{rhs}' itself resolves to "
-                f"'{resolved_rhs}' in {header}, a second identifier -- this is "
-                f"a two-level chain. The parser resolves exactly ONE level of "
-                f"symbolic RHS and fails loud rather than chasing a chain "
-                f"(issue #44) -- flatten the header so '{rhs}' is a literal, or "
-                f"extend the resolver deliberately (not via recursion)."
+                f"'{resolved_rhs}' via a {source} declaration in {header}, a "
+                f"second identifier -- this is a two-level chain. The parser "
+                f"resolves exactly ONE level of symbolic RHS and fails loud "
+                f"rather than chasing a chain (issue #44) -- flatten the header "
+                f"so '{rhs}' is a literal, or extend the resolver deliberately "
+                f"(not via recursion)."
             )
         return int(resolved_rhs)
 
     searched = ", ".join(str(h) for h in search_headers)
     raise ValueError(
-        f"Cannot resolve '{name} = {rhs}': no integer-literal declaration of "
-        f"'{rhs}' found in any of [{searched}]. The offline tools refuse to "
-        f"fall back to a stale literal (issue #44) -- fix the header or the "
-        f"parser, do not hard-code the value."
+        f"Cannot resolve '{name} = {rhs}': no integer-literal 'constexpr' "
+        f"declaration or '#define' of '{rhs}' found in any of [{searched}]. "
+        f"The offline tools refuse to fall back to a stale literal (issue #44) "
+        f"-- fix the header or the parser, do not hard-code the value."
     )

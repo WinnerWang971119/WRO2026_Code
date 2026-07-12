@@ -75,9 +75,11 @@ from tools.path_planner.ctps.profile import (
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 GOLDENS_PATH = FIXTURES_DIR / "tshape_profile_goldens.json"
 
-# The three sibling headers profile.py's config loader resolves relative to
-# `config_path.parent` (ConfigDrive.h itself + ConfigGlobal.h + ConfigLine.h).
-_CONFIG_HEADER_NAMES = ("ConfigDrive.h", "ConfigGlobal.h", "ConfigLine.h")
+# The sibling headers profile.py's config loader resolves relative to
+# `config_path.parent` (ConfigDrive.h itself + ConfigGlobal.h + ConfigLine.h +
+# ConfigNav.h). ConfigNav.h is required for HOP_SETTLE_MS resolution, so a
+# perturbation test's temp dir must hold it too or load_profile_config raises.
+_CONFIG_HEADER_NAMES = ("ConfigDrive.h", "ConfigGlobal.h", "ConfigLine.h", "ConfigNav.h")
 
 
 def _load_goldens() -> list[dict]:
