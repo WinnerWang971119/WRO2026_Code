@@ -27,6 +27,25 @@ Covered cases (cite the plan's Testing Strategy)
   default 100) renders ZERO dwell keyframes: byte-identical to a preserved
   pre-feature baseline shape (same keyframe count / duration as the
   same route rendered with the dwell fully stripped).
+* **PROJECTION_FOLLOW stop-at-B** (matrix row "``PROJECTION_FOLLOW``,
+  stop-at-B") — a ``goto`` that BRAKES at a projection node (the projection
+  node IS the goto's destination, so the line/proj-pass-through gate declines
+  by construction — ``projection_node == goal_name``) DOES settle. TC10 above
+  already covers the pass-THROUGH twin of this row (``ProjL``, an
+  intermediate); this closes the braked-STOP half the render tether left
+  unpinned.
+* **Return-prologue turn/drive → no dwell, then the first post-return cold
+  turn → dwell fires** (matrix rows "Return-prologue pre-edge turn" and
+  "First cold turn AFTER ... ``RETURN_TO_NODE`` completes") — a raw
+  off-node ``drive`` command (routed through
+  ``sim.operator_move``/``operator_advance_keyframe``, issue #130 T11) grows
+  an operator offset past ``RETURN_TRIGGER_THRESHOLD_CM`` BEFORE a ``goto``;
+  the sim's ``step_through`` then yields the return-to-node prologue (its own
+  pre-edge turn + dead-reckon drive) FIRST, immediately followed by the
+  planned walk's own first-hop cold turn. Asserts the prologue's turn/drive
+  span carries NO dwell (the render suppresses via ``_RETURN_DRIVE_TAGS``,
+  same mechanism TC10's wall-return case exercises) and that dwell-2 DOES
+  fire on the first normal hop's cold turn once the prologue completes.
 
 All routes replay the SAME feature-complete ``field_fixture`` map the
 firmware host-test tether (T4) links (``WRO2026/test/fixtures/field_fixture.py``,
@@ -47,7 +66,7 @@ import pytest
 
 from tools.path_planner.ctps import track_builder
 from tools.path_planner.ctps.profile import ProfileConfig, default_config
-from tools.path_planner.ctps.trace_loader import Trace, load
+from tools.path_planner.ctps.trace_loader import Command, Trace, load
 
 # ---------------------------------------------------------------------------
 # field_fixture (the feature-complete parity map) lives in WRO2026/test/fixtures/,
@@ -437,6 +456,170 @@ def test_tc10_wall_return_interlude_gets_no_dwell_but_the_next_cold_turn_does():
     assert _xy_in(wall1_xy, next_span_dwells), (
         f"the first cold turn AFTER WALL_DEPART completes must settle (at "
         f"Wall1's pose, the post-depart parked pose), got {next_span_dwells}"
+    )
+
+
+# ===========================================================================
+# Settle-fire matrix row: `PROJECTION_FOLLOW`, stop-at-B -> dwell fires
+# (render half of the tether gap this file closes; TC10 above already covers
+# the pass-THROUGH twin of this row via `ProjL`)
+# ===========================================================================
+
+
+def test_projection_follow_stop_at_b_gets_a_dwell():
+    """Settle-fire matrix: a BRAKED arrival AT a projection node settles.
+
+    ``Corner -> ProjB`` walks the BLIND auto-seek hop into ``ProjB`` (a
+    PROJECTION node reached by a BLIND edge, per ``field_fixture``'s
+    ``Corner, ProjB, Zed`` sensor-regime pivot triple). Because ``ProjB`` is
+    THIS goto's own destination, the line/projection pass-through gate
+    declines by construction (``_should_projection_pass_through`` returns
+    ``False`` whenever ``projection_node == goal_name`` —
+    ``sim/runtime.py``'s ``projection_node == goal_name`` guard, mirroring
+    the firmware's non-final ``_nextHop == _destinationNode`` check): the
+    arrival is a normal (non-pass) ``PROJECTION_FOLLOW`` stop, dispatched as
+    ``ACT_STOP_AT_LINE`` (the BLIND->projection auto-seek tag), which sits in
+    the braked :data:`~tools.path_planner.ctps.track_builder._STOP_GATED_TAGS`
+    family — the exact matrix row "``PROJECTION_FOLLOW``, stop-at-B ->
+    ``!_projPassThrough`` -> braked -> **yes**".
+
+    This is the STOP half of the pair TC10's ``test_tc10_line_pass_through_run_gets_no_dwell``
+    already pins the PASS-THROUGH half of (``ProjL``, an interior node on a
+    ``goto`` that continues past it) — together the two tests pin both rows
+    of the projection-node matrix pair.
+    """
+    trace = _goto_trace("Corner", "ProjB")
+    track = _build_quiet(trace)
+
+    goto_events = [ev for ev in track.events if ev["type"] == "goto"]
+    proj_span = next(ev for ev in goto_events if ev["label"] == "Corner->ProjB")
+    span_dwells = [
+        (x, y)
+        for t0, _t1, x, y in _find_dwells(track.keyframes)
+        if proj_span["t"] - 1e-9 <= t0 <= proj_span["t_end"] + 1e-9
+    ]
+
+    projb_xy = tuple(float(c) for c in _FIELD_DATA.NODES["ProjB"])
+    assert _xy_in(projb_xy, span_dwells), (
+        f"a braked PROJECTION_FOLLOW stop-at-B arrival (ProjB, the goto's own "
+        f"destination) must get a settle dwell, found dwells at {span_dwells}"
+    )
+
+
+# ===========================================================================
+# Settle-fire matrix rows: return-prologue turn/drive -> NO dwell; the first
+# cold turn on the following NORMAL hop -> dwell fires
+# ===========================================================================
+
+
+def test_return_prologue_gets_no_dwell_but_the_first_post_return_cold_turn_does():
+    """Settle-fire matrix: the return-to-node prologue settles neither its own
+    turn nor its own drive; the first cold turn of the NEXT normal hop does.
+
+    Constructs a RAW off-node ``drive`` (a ``driveDist`` command, routed
+    through ``PathTrackerSim.operator_move`` via ``track_builder``'s
+    ``operator_advance_keyframe`` — issue #130 T11) BEFORE a ``goto``, so the
+    sim accumulates an operator offset the goto's ``step_through`` must
+    correct via the return-to-node prologue before it can plan the walk.
+
+    ``Start``'s spawn heading is 0 deg (``field_fixture.START_HEADING_DEG``).
+    A 15 cm forward ``driveDist`` (no ``goto`` yet) pushes the chassis to
+    offset ``(15, 0)`` off ``Start`` — comfortably between
+    ``RETURN_TRIGGER_THRESHOLD_CM`` (3 cm) and ``RETURN_DISTANCE_CAP_CM``
+    (50 cm), so the return gate resolves to a genuine (in-trust) RETURN, not
+    NONE or an OFF_MAP fault. The following ``goto("Inter1")`` then makes
+    ``sim.step_through`` yield, in order: the return prologue's pre-edge turn
+    (facing the inverse-offset heading, ``atan2(-0, -15) == 180 deg`` — a
+    turn from 0 to 180, well past ``NAV_TURN_TOLERANCE_DEG``) and its
+    dead-reckon drive (``Start`` is a BLIND anchor, so the return dead-reckons
+    via ``ACT_RETURN_FORWARD`` rather than line-seeking), THEN the planned
+    walk's own first (and only) hop ``Start -> Inter1``, whose cold pre-edge
+    turn (180 deg -> ~23.96 deg, the ``Start->Inter1`` edge heading) is an
+    ordinary normal-hop turn, NOT part of the interlude.
+
+    Per the Settle-fire matrix:
+
+    * the return prologue's own pre-edge turn and its
+      ``ACT_RETURN_FORWARD`` drive settle NEITHER (render-side suppression:
+      ``track_builder``'s ``_RETURN_DRIVE_TAGS`` gate on both the deferred
+      dwell-2 turn->move seam and the dwell-1 braked-arrival seam — the same
+      mechanism ``test_tc10_wall_return_interlude_gets_no_dwell_but_the_next_cold_turn_does``
+      exercises for the WALL_DEPART case);
+    * the first cold turn of the following NORMAL hop (``Start -> Inter1``,
+      now that the return is complete) DOES settle (dwell-2 turn->move) —
+      the interlude is over, so this is an ordinary cold pre-edge turn;
+    * the braked arrival at ``Inter1`` (a forced-seek ``stop_at_line`` BLIND
+      edge, per the ``_EDGES`` override) ALSO settles (dwell-1, the ordinary
+      goal-arrival dwell) — asserted here only as a sanity check that the
+      goto completed normally past the prologue.
+    """
+    start_xy = tuple(float(c) for c in _FIELD_DATA.NODES["Start"])
+    inter1_xy = tuple(float(c) for c in _FIELD_DATA.NODES["Inter1"])
+
+    trace = load(
+        {
+            "schema_version": 1,
+            "start_node": _FIELD_DATA.START_NODE,
+            "start_heading_deg": _FIELD_DATA.START_HEADING_DEG,
+            "build_error": False,
+            "commands": [
+                {"seq": 0, "op": "drive", "method": "driveDist", "cm": 15.0},
+                {"seq": 1, "op": "goto", "target": "Inter1"},
+            ],
+        }
+    )
+    track = _build_quiet(trace)
+
+    # The return prologue is rendered as `drive`/`return_to_node` narration
+    # BEFORE the `goto` span in the trace, but its geometry is emitted INSIDE
+    # the goto's `step_through` call — so it plays out inside the `goto`
+    # event's [t, t_end] span, ahead of the planned walk's own hop(s). Confirm
+    # the marker fired (the offset genuinely triggered a physical return, not
+    # the sub-threshold no-op path) before isolating spans by time.
+    return_events = [ev for ev in track.events if ev["type"] == "return_to_node"]
+    assert len(return_events) == 1, (
+        f"expected exactly one return_to_node marker (a 15 cm offset must "
+        f"trigger a genuine return), got {return_events}"
+    )
+    return_t = return_events[0]["t"]
+
+    goto_events = [ev for ev in track.events if ev["type"] == "goto"]
+    goto_span = next(ev for ev in goto_events if ev["label"] == "Start->Inter1")
+
+    all_dwells = _find_dwells(track.keyframes)
+    # Every dwell inside this goto's span, ordered by t0.
+    span_dwells = sorted(
+        (t0, t1, x, y)
+        for t0, t1, x, y in all_dwells
+        if goto_span["t"] - 1e-9 <= t0 <= goto_span["t_end"] + 1e-9
+    )
+
+    # No dwell keyframe sits BEFORE the first normal-hop cold turn completes:
+    # the return prologue's own turn + ACT_RETURN_FORWARD drive render first
+    # (starting at/after `return_t`) and must be dwell-free. Concretely: the
+    # ONLY dwells in this goto are the first-hop turn->move dwell (parked at
+    # Start's pose, the return-corrected anchor) and the goal-arrival dwell
+    # at Inter1 — never one parked mid-prologue.
+    assert len(span_dwells) == 2, (
+        f"expected exactly 2 dwells in the Start->Inter1 span (the "
+        f"post-return first-hop cold turn + the goal arrival at Inter1), "
+        f"got {span_dwells}"
+    )
+    dwell_xy = [(x, y) for _t0, _t1, x, y in span_dwells]
+    assert dwell_xy[0] == pytest.approx(start_xy, abs=_POSE_TOL), (
+        "the first dwell in the goto span must be the post-return first-hop "
+        "cold turn->move, parked back at Start's (return-corrected) pose — "
+        "not inside the return prologue itself"
+    )
+    assert dwell_xy[1] == pytest.approx(inter1_xy, abs=_POSE_TOL), (
+        "the second dwell must be the ordinary goal-arrival dwell at Inter1"
+    )
+    # The prologue is rendered before the walk: its marker/keyframes precede
+    # the first (and only) dwell this goto carries.
+    assert return_t <= span_dwells[0][0], (
+        f"the return_to_node marker (t={return_t}) must precede the "
+        f"post-return cold-turn dwell (t={span_dwells[0][0]}) — the "
+        f"prologue renders before the planned walk"
     )
 
 
