@@ -3,7 +3,7 @@
  * @brief Host-link test for the ADR-061 post-stop settle dwell (`State::SETTLE`),
  *        driving the REAL `PathTracker` + `Drive` + `Localization` + `YawSource` FSMs
  *        through the shared cooperative-tick harness (2026-07-12 hop-settle-wait plan, T4;
- *        TC1-TC7b; AC2-AC5, AC8 firmware half).
+ *        TC1-TC7b + TC-EX1..EX4 tether-gap closure; AC2-AC5, AC8 firmware half).
  *
  * @details
  * This is the FIRMWARE half of the ADR-061 eligibility tether (AC8). It asserts that the
@@ -14,6 +14,17 @@
  * same transition. Compiled at the DEFAULT `HOP_SETTLE_MS = 100` (this target adds NO
  * `-DHOP_SETTLE_MS_DEFAULT` override — the legacy dispatch-assertion targets are pinned to 0,
  * this one runs at the shipped default so the settle actually fires).
+ *
+ * TC-EX1..EX4 close a post-ship tether gap (AC8 review finding): TC1-TC7b left four matrix rows
+ * unpinned by an explicit assertion — `PROJECTION_FOLLOW` stop-at-B / pass-through, and the two
+ * return-to-node-prologue boundaries (the prologue's own turn+move skip; the first NORMAL hop's
+ * cold turn after the prologue completes DOES settle). TC-EX1/EX2 mirror `test_path_tracker_
+ * pass_through_projection.cpp`'s TC-PP2 / TC-PP1 scenarios (`ProjL` stop-at-goal vs. the
+ * Inter1->ProjL->Inter2 collinear pass-through); TC-EX3/EX4 reuse the parity-dump's curated
+ * `off_n6_h0` offset recipe (`Zed -> ProjB`, +6 cm @ heading 0) to drive a genuine
+ * RETURN_TO_NODE prologue then its first post-return cold turn. (`off_n14_h0` was rejected:
+ * its `Inter2 -> Inter3` hop resolves AUTO->REAR, cancelling the post-return turn — see the
+ * banner on `test_TCEx3_TCEx4_...`.)
  *
  * =====================================================================================
  * THE SETTLE-FIRE MATRIX (quoted from docs/plans/2026-07-12-hop-settle-wait.md, section
@@ -76,6 +87,25 @@ namespace
 {
 /// @brief Convenience alias for the now-public per-edge FSM state enum (issue #108, AC12).
 using State = PathTrackerClass::State;
+
+/// @brief Normalize a heading (deg) to the firmware's `[0, 360)` body-heading convention.
+///
+/// @note Mirrors `test_path_tracker_parity_dump.cpp`'s `normHeadingDeg`: the return-to-node
+///       prologue sets `_resolvedBodyHeading` from `atan2(...)`, which yields a value in
+///       `(-180, 180]` (e.g. -180 for a due-west return) that the FSM does NOT re-wrap to
+///       `[0, 360)`, whereas a normal hop's `_resolvedBodyHeading` is the edge heading already
+///       in `[0, 360)`. `Drive`'s turn target goes through `Localization::toImuYaw`, which DOES
+///       `_normalize` to `[0, 360)`, so the chassis must be parked at the normalized heading (a
+///       raw -180 vs +180 sign flip is the difference between settling and spinning to budget).
+inline int16_t normHeadingDeg(float deg)
+{
+    long d = lroundf(deg) % 360;
+    if (d < 0)
+    {
+        d += 360;
+    }
+    return (int16_t) d;
+}
 
 // ===========================================================================================
 // Shared drivers.
@@ -585,6 +615,299 @@ void test_TC5b_first_cold_turn_after_wall_interlude()
 }
 
 // ===========================================================================================
+// TC-EX1 — PROJECTION_FOLLOW stop-at-B: a braked (non-pass-through) arrival AT a projection
+//       node settles (dwell-1). Mirrors `test_path_tracker_pass_through_projection.cpp`'s
+//       TC-PP2 (`goTo(ProjL)`): the collinear onward flank ProjL->Inter2 genuinely exists, so
+//       the ONLY reason the pass-through gate declines is the not-final guard (ProjL IS the
+//       goal) -- isolating a genuine BRAKED arrival at a projection node, not a degenerate
+//       dead-end. Matrix row: `PROJECTION_FOLLOW, stop-at-B` (`!_projPassThrough`) -> YES.
+// ===========================================================================================
+void test_TCEx1_projection_stop_at_b_settles()
+{
+    TEST_SCOPE("TC-EX1: goTo(ProjL) -- braked PROJECTION_FOLLOW stop-at-B arrival enters SETTLE (dwell-1)");
+
+    const uint8_t inter1 = nodeByName("Inter1");
+    const uint8_t projL  = nodeByName("ProjL");
+    const uint8_t inter2 = nodeByName("Inter2");
+    ASSERT_TRUE(inter1 != FieldMap::NODE_NONE && projL != FieldMap::NODE_NONE);
+    ASSERT_TRUE(inter2 != FieldMap::NODE_NONE);
+    ASSERT_TRUE(FieldMap::isProjectionNode(projL));
+    ASSERT_EQ(routedFirstHop(inter1, projL), projL);
+    ASSERT_TRUE(FieldMap::getEdge(inter1, projL).type == Routes::EdgeType::LINE);
+    // A collinear onward flank genuinely exists (proves the decline below is the not-final
+    // guard, not a missing flank) -- same isolation TC-PP2 relies on.
+    ASSERT_TRUE(FieldMap::getEdge(projL, inter2).type == Routes::EdgeType::LINE);
+
+    // Inter1->ProjL departs heading 0 == the seated facing (no pre-turn); reach PROJECTION_FOLLOW
+    // via the shared harness entry (armed, non-overshoot, still at Inter1).
+    driveToLineFollowEntry("Inter1", "ProjL");
+    ASSERT_EQ(Localization.getCurrentNode(), inter1);
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    // ProjL IS the goal: the not-final guard rejects pass-through -> armed with brake-on-gate
+    // TRUE (a genuine braked stop-at-B, matching TC-PP2's assert).
+    ASSERT_TRUE(LineFollower.lastBrakeOnGate);
+
+    // Trip the projection DISTANCE gate (a projection node carries no junction marker): the
+    // braked arrival advances the node and (per the matrix) enters SETTLE before PLAN_NEXT_HOP.
+    LineFollower.mockSetDistanceReached(true);
+    cooperativeTick();
+
+    ASSERT_EQ(Localization.getCurrentNode(), projL);
+    ASSERT_FALSE(LineFollower.isEnabled());               // disabled on the braked stop
+    ASSERT_EQ(PathTracker.state() == State::SETTLE, true);    // dwell-1: braked stop-at-B
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Retire the dwell: ProjL is the goal, so the resume plan sees cur==dest and settles IDLE.
+    driveSettle();
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+    ASSERT_EQ(Localization.getCurrentNode(), projL);
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================================
+// TC-EX2 — PROJECTION_FOLLOW pass-through: a collinear line(A)-projection(B)-line(C) hop that
+//       routes PAST the projection node NEVER settles at B. Mirrors `test_path_tracker_
+//       pass_through_projection.cpp`'s TC-PP1 (`goTo(Inter2)` from `Inter1`, routed through
+//       `ProjL`): the distance gate trips a MID-FOLLOW dead-reckon advance at ProjL (no brake),
+//       so no braked-arrival state is ever entered there. Matrix row: `PROJECTION_FOLLOW,
+//       pass-through` (`_projPassThrough`) -> no.
+// ===========================================================================================
+void test_TCEx2_projection_pass_through_skips_settle()
+{
+    TEST_SCOPE("TC-EX2: Inter1->ProjL->Inter2 collinear pass-through never settles at ProjL");
+
+    const uint8_t inter1 = nodeByName("Inter1");
+    const uint8_t projL  = nodeByName("ProjL");
+    const uint8_t inter2 = nodeByName("Inter2");
+    ASSERT_TRUE(inter1 != FieldMap::NODE_NONE && projL != FieldMap::NODE_NONE);
+    ASSERT_TRUE(inter2 != FieldMap::NODE_NONE);
+    // Routing pin: goTo(Inter2) from Inter1 MUST traverse ProjL (no bypass) -- the pass-through
+    // hop under test is genuinely traversed, mirroring TC-PP1's routing guard.
+    ASSERT_EQ(routedFirstHop(inter1, inter2), projL);
+    assertNoBypass(inter1, inter2);
+    ASSERT_TRUE(FieldMap::getEdge(inter1, projL).type == Routes::EdgeType::LINE);
+    ASSERT_TRUE(FieldMap::getEdge(projL, inter2).type == Routes::EdgeType::LINE);
+
+    // Inter1->ProjL departs heading 0 == the seated facing (no pre-turn); reach PROJECTION_FOLLOW
+    // for the Inter1->ProjL leg via the shared harness entry.
+    driveToLineFollowEntry("Inter1", "Inter2");
+    ASSERT_EQ(Localization.getCurrentNode(), inter1);
+    ASSERT_TRUE(LineFollower.isEnabled());
+
+    // Inter2 is routed PAST ProjL (not the goal at ProjL): the pass-through gate fires, so the
+    // projection follow armed with brake-on-gate FALSE (the opposite of TC-EX1's braked stop).
+    ASSERT_FALSE(LineFollower.lastBrakeOnGate);
+
+    // THE TC-EX2 CLAIM: trip the DISTANCE gate at ProjL. `_projPassThrough` routes the arrival
+    // straight to a mid-follow dead-reckon advance (never SETTLE), because no braked-arrival
+    // state was entered. Use the per-tick `sawSettle` walker (`tickToStateNoSettle`'s pattern,
+    // inlined here since the target after the trip is "node advanced to projL", not a fixed
+    // FSM state) so a stray settle on the SAME tick as the trip fails loudly.
+    bool sawSettle = false;
+    LineFollower.mockSetDistanceReached(true);
+    cooperativeTick();
+    if (PathTracker.state() == State::SETTLE)
+    {
+        sawSettle = true;
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), projL);    // mid-follow dead-reckon advance landed here
+    ASSERT_TRUE(LineFollower.isEnabled());               // kept live -- the follow continues
+    ASSERT_FALSE(sawSettle);
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Continue the pass-through to its real junction re-anchor at Inter2 (the goal), watching for
+    // a stray SETTLE on every tick along the way (there is exactly one braked arrival left -- the
+    // final goal arrival at Inter2 -- so a settle observed there is expected and asserted below,
+    // NOT folded into this walk's negative claim, which only covers the ProjL leg).
+    LineFollower.mockSetDistanceReached(false);    // clear the stale trip before the next leg
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
+    {
+        cooperativeTick();
+        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
+            && Localization.getCurrentNode() == projL)
+        {
+            break;    // LINE_FOLLOW armed for the ProjL -> Inter2 leg
+        }
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), projL);
+    ASSERT_TRUE(LineFollower.isEnabled());
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================================
+// TC-EX3 / TC-EX4 — return-to-node prologue: the prologue's OWN pre-edge turn + move never
+//       settle (`_returnActive`), but the FIRST NORMAL hop's cold turn AFTER the prologue
+//       completes DOES settle (dwell-2, the interlude-is-over case). Reuses the parity-dump's
+//       proven curated offset case `off_n6_h0` (Zed -> ProjB, +6 cm @ heading 0): a BLIND anchor
+//       return (dead-reckon, magnitude < LINE_SENSOR_AXLE_OFFSET_CM makes it moot anyway since
+//       Zed is not a LINE node) that resolves a return heading of 180 deg. The post-return first
+//       hop Zed->ProjB departs heading 90 -- a genuine 90 deg cold turn off the return's parked
+//       180 facing. (`off_n14_h0`, Inter2->Inter3, was rejected: that edge's heading (0) is
+//       exactly the REAR-equivalent of the return facing (180), so the AUTO bidirectional
+//       turn-saving heuristic (`resolveDirection`, `BIDIRECTIONAL_TURN_THRESHOLD_DEG`=90) picks
+//       REAR and the turn collapses to a no-op -- Zed->ProjB's 90 deg delta sits AT the
+//       threshold, which is not `>` it, so AUTO keeps FRONT and the turn genuinely fires.)
+// ===========================================================================================
+void test_TCEx3_TCEx4_return_prologue_skips_first_post_return_turn_settles()
+{
+    TEST_SCOPE("TC-EX3/4: off_n6_h0 return prologue skips SETTLE; first post-return cold turn settles (dwell-2)");
+
+    const uint8_t zed   = nodeByName("Zed");
+    const uint8_t projB = nodeByName("ProjB");
+    ASSERT_TRUE(zed != FieldMap::NODE_NONE && projB != FieldMap::NODE_NONE);
+    ASSERT_EQ(routedFirstHop(zed, projB), projB);    // single direct BLIND hop, pinned
+    ASSERT_TRUE(FieldMap::getNodeType(zed) == Routes::NodeType::BLIND);
+    const Routes::EdgeInfo& outEdge = FieldMap::getEdge(zed, projB);
+    ASSERT_TRUE(outEdge.type == Routes::EdgeType::BLIND);
+    ASSERT_EQ((int) lroundf(outEdge.heading_deg), 90);
+
+    // Manufacture a REAL operator offset through the Localization integrator (the parity-dump
+    // `off_n6_h0` recipe): seat at Zed heading 0, push +6 cm along heading 0. Zed is a BLIND
+    // anchor, so the return is a dead-reckoned drive (return heading = atan2(-0,-6) = 180 deg).
+    constexpr float   kOffsetMagCm      = 6.0f;
+    constexpr int16_t kOffsetHeadingDeg = 0;
+    constexpr int16_t kReturnHeadingDeg = 180;    // atan2(-0, -6) -- the reverse of the push axis.
+
+    resetWorld();
+
+    // Defensive drain (NOT part of the matrix claim): `resetWorld()` calls `Drive.begin()`, which
+    // reseeds `_moveDone`/`_turnDone` but -- unlike `PathTracker.begin()` -- does NOT reset Drive's
+    // internal sub-state machines (`_profileState`/`_turnProfileState`/`_stopState`/`_wallState`/
+    // `_qCount`, all private). A PRECEDING test in this file (`TC5b_first_cold_turn_after_wall_
+    // interlude`) deliberately ends mid-flight, one `driveSettle()` past its own dwell-2, with a
+    // dispatched-but-unretired normal-hop move still in flight on the shared `Drive` singleton --
+    // so `Drive.isIdle()` can read false here even though `PathTracker` itself is freshly `begin()`-
+    // reset to IDLE. Retire any such leftover generically (advance the encoder + hold the done-bit,
+    // the same over-advance `expectBlindHop`/`driveBlind` use, harmless if nothing was in flight)
+    // BEFORE seating this case's own world, so the return prologue below dispatches against a
+    // genuinely idle Drive regardless of run order.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !Drive.isIdle(); ++i)
+    {
+        MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+        MiniR4.DriveDC.mockSetPrevTaskDone(true);
+        Drive.update();
+    }
+    ASSERT_TRUE(Drive.isIdle());
+
+    resetWorld();    // re-reset: the drain above may have advanced Localization/PathTracker state
+                      // (e.g. retired the leftover move into a node advance) that this case must not
+                      // inherit; a second clean reset costs nothing and guarantees a blank slate.
+    seatAt("Zed", kOffsetHeadingDeg);
+    pushOperatorOffset(kOffsetMagCm, kOffsetHeadingDeg);
+    PathTracker.goTo(projB).async();
+
+    // DEQUEUE sees the non-trivial offset -> RETURN_TO_NODE. The prologue's own pre-edge turn
+    // (facing 0 -> the return heading 180) must NEVER settle: it is gated on `_returnActive`,
+    // which is still true through the whole prologue (both the turn AND the return move).
+    // Walk per-tick with a `sawSettle` latch, parking the mock yaw at the FSM's resolved body
+    // heading each tick (the `parkYawAtResolvedHeading` idiom from the parity dump, normalized
+    // to [0,360) since `_resolvedBodyHeading` for a return is the raw atan2 result) so the
+    // return's own turn genuinely settles and the walk does not spin to budget.
+    bool sawSettle = false;
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && PathTracker.state() != State::RETURN_TO_NODE && !PathTracker.hasFault();
+         ++i)
+    {
+        mmL.mockYawDeg = (double) hwYaw(normHeadingDeg(PathTracker.resolvedBodyHeadingDeg()));
+        cooperativeTick();
+        if (PathTracker.state() == State::SETTLE)
+        {
+            sawSettle = true;
+        }
+    }
+    ASSERT_EQ(PathTracker.state() == State::RETURN_TO_NODE, true);    // the return move dispatched
+    ASSERT_FALSE(sawSettle);    // TC-EX3 claim (part 1): the prologue's own pre-edge turn never settled
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Retire the return's dead-reckon move (park the resolved heading, over-advance the encoder +
+    // hold the done-bit -- the `expectBlindHop`/`driveBlind` idiom, covers both the profiled and
+    // flat regimes), continuing the sawSettle walk through to RETURN_TO_NODE's own exit.
+    {
+        for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                        && PathTracker.state() == State::RETURN_TO_NODE && !PathTracker.hasFault();
+             ++i)
+        {
+            mmL.mockYawDeg = (double) hwYaw(normHeadingDeg(PathTracker.resolvedBodyHeadingDeg()));
+            MiniR4.M2.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+            MiniR4.M3.mockAdvanceDegrees(path_harness::kEncoderAdvanceStep);
+            MiniR4.DriveDC.mockSetPrevTaskDone(true);
+            cooperativeTick();
+            if (PathTracker.state() == State::SETTLE)
+            {
+                sawSettle = true;
+            }
+        }
+    }
+    ASSERT_FALSE(PathTracker.state() == State::RETURN_TO_NODE);    // the return move retired
+    ASSERT_FALSE(sawSettle);    // TC-EX3 claim (part 2): the prologue's own return MOVE never settled either
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_EQ(Localization.getCurrentNode(), zed);    // re-anchored the SAME node, not advanced
+
+    // The prologue is over (`_returnActive` cleared): PLAN_NEXT_HOP now plans the first NORMAL
+    // hop, Zed->ProjB (heading 90), a genuine 90 deg cold turn off the return's parked 180 facing
+    // (AUTO keeps FRONT here -- see the file-header note on why off_n14_h0 was rejected). Tick to
+    // TURNING (parking the return heading so any residual settles first), asserting no stray
+    // SETTLE before the turn dispatches.
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && PathTracker.state() != State::TURNING && !PathTracker.hasFault();
+         ++i)
+    {
+        mmL.mockYawDeg = (double) hwYaw(kReturnHeadingDeg);
+        cooperativeTick();
+    }
+    ASSERT_EQ(PathTracker.state() == State::TURNING, true);    // first post-return hop's cold turn dispatched
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Retire the cold turn (park ProjB's app-facing 90 each tick). At TURNING idle the FSM enters
+    // SETTLE (EDGE_AFTER_TURN) -- the interlude is over, so `_returnActive` is now false and this
+    // is an ordinary normal-hop cold turn: dwell-2 fires (TC-EX4 claim).
+    expectPreTurn((int16_t) lroundf(outEdge.heading_deg), (uint8_t) Routes::PIPELINE_CONFIG.turn);
+    ASSERT_EQ(PathTracker.state() == State::SETTLE, true);    // TC-EX4: dwell-2 after the return interlude
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    driveSettle();
+    ASSERT_FALSE(PathTracker.state() == State::SETTLE);
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Drain to completion (NOT part of the matrix claim, but required so this test leaves NO
+    // in-flight Drive command behind — see the defensive-drain note above this function's own
+    // `resetWorld()`; a test that ends mid-dispatch is exactly the shape that gap needs a NEW test
+    // to avoid reintroducing). ProjB is a PROJECTION node, so the BLIND_PROJECTION_AUTO_SEEK rule
+    // (see `test_path_tracker_projection.cpp` TC-PJ2) makes dwell-2's resume dispatch a
+    // `Drive.stopAtLine` SEEK for Zed->ProjB, NOT a plain dead-reckon `driveDist` — retire it with
+    // the seek-aware helpers (`tickUntilSeekInFlight` + `expectStopAtLine`), mirroring TC1/TC7b's
+    // own STOP_AT_LINE retire, rather than `expectBlindHop`'s dead-reckon-only over-advance (which
+    // would overrun the seek's max-distance gate and mis-fault LINE_NOT_FOUND).
+    mmL.mockYawDeg = (double) hwYaw((int16_t) lroundf(outEdge.heading_deg));
+    const uint32_t seekCallsBefore = MiniR4.DriveDC.moveSyncCallCount;
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && MiniR4.DriveDC.moveSyncCallCount == seekCallsBefore && !PathTracker.hasFault();
+         ++i)
+    {
+        mmL.mockYawDeg = (double) hwYaw((int16_t) lroundf(outEdge.heading_deg));
+        cooperativeTick();
+    }
+    ASSERT_GT(MiniR4.DriveDC.moveSyncCallCount, seekCallsBefore);    // the seek is genuinely in flight
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    expectStopAtLine(outEdge.distance_cm, /*found*/ true);
+
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.isIdle(); ++i)
+    {
+        cooperativeTick();
+    }
+    ASSERT_TRUE(PathTracker.isIdle());
+    ASSERT_EQ(Localization.getCurrentNode(), projB);
+    ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================================
 // TC6 — arrival at a RESET node does NOT settle: the wall interlude owns that boundary. Drive
 //       `position1 -> Wall1` and assert the FSM transitions into WALL_STOP (never SETTLE), and
 //       the interlude proceeds exactly as test_path_tracker_reset_arrival asserts. Matrix row:
@@ -701,6 +1024,9 @@ int main()
     test_TC5a_goal_arrival_settles_before_idle();
     test_TC5b_first_plan_no_dwell1_but_dwell2_fires();
     test_TC5b_first_cold_turn_after_wall_interlude();
+    test_TCEx1_projection_stop_at_b_settles();
+    test_TCEx2_projection_pass_through_skips_settle();
+    test_TCEx3_TCEx4_return_prologue_skips_first_post_return_turn_settles();
     test_TC6_reset_arrival_skips_settle();
     test_TC7b_end_to_end_settle_is_clock_gated();
 
