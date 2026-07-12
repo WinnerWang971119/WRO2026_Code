@@ -143,6 +143,26 @@ def _last_index_at(keyframes, x_cm, y_cm):
     return idxs[-1]
 
 
+def _first_index_at(keyframes, x_cm, y_cm):
+    """Return the index of the FIRST keyframe sitting byte-exact at ``(x, y)``.
+
+    A braked arrival at a settle-eligible node (Config::HOP_SETTLE_MS > 0,
+    ADR-061) is followed by a same-pose ``append_dwell_keyframe`` dwell
+    keyframe, so ``_last_index_at`` on that node now returns the DWELL
+    keyframe rather than the genuine braked ARRIVAL keyframe. Callers that
+    need the arrival boundary itself (e.g. to slice OUT the terminal-brake
+    ramp from an "interior velocities" check) must anchor on the FIRST
+    keyframe at the node, which is unaffected by any trailing dwell.
+    """
+    idxs = [
+        i
+        for i, k in enumerate(keyframes)
+        if abs(k["x"] - x_cm) <= _POSE_TOL and abs(k["y"] - y_cm) <= _POSE_TOL
+    ]
+    assert idxs, f"no keyframe at ({x_cm}, {y_cm})"
+    return idxs[0]
+
+
 def _velocity_into(keyframes, vels, x_cm, y_cm):
     """Return the inbound velocity of the keyframe landing byte-exact at ``(x, y)``."""
     for i, k in enumerate(keyframes[1:], start=1):
@@ -250,8 +270,16 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
     assert 0 < b_idx < c_idx < d_idx, (
         f"boundary poses out of order: B={b_idx}, C={c_idx}, D={d_idx}"
     )
-    # D is the run's terminal keyframe (the braked goal arrival).
+    # D is the run's terminal keyframe — the LAST keyframe at D, which (at the
+    # shipped Config::HOP_SETTLE_MS > 0 default, ADR-061) is the goal-arrival
+    # settle dwell keyframe appended right after the braked arrival, not the
+    # arrival itself.
     assert d_idx == len(run) - 1
+    # The genuine braked ARRIVAL boundary — the FIRST keyframe at D — is
+    # distinct from ``d_idx`` whenever a trailing dwell keyframe was appended.
+    # Used below to exclude the terminal-brake ramp (and any trailing dwell)
+    # from the "no intra-run stop keyframe" interior check.
+    d_arrival_idx = _first_index_at(run, *d_xy)
 
     vels = _inbound_velocities(run)
 
@@ -284,8 +312,10 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
     # ZERO intra-run stop keyframes: no interior keyframe (between the run start
     # and the terminal D arrival) sits at rest — a stop keyframe would be a
     # zero-length (zero-dt) span at the pre-terminal position, i.e. an interior
-    # velocity of 0.
-    interior = vels[: d_idx - 1]  # exclude the last span (the terminal brake)
+    # velocity of 0. Sliced off the ARRIVAL boundary (``d_arrival_idx``, not
+    # ``d_idx``) so this excludes the terminal-brake ramp AND any trailing
+    # settle dwell span alike — neither is an "intra-run" dip.
+    interior = vels[: d_arrival_idx - 1]  # exclude the last span (the terminal brake)
     assert all(v > _VEL_TOL for v in interior), (
         "an intra-run stop keyframe (interior zero velocity) was emitted"
     )
@@ -380,12 +410,18 @@ def test_subtolerance_alignment_turn_keeps_collinear_run_grouped():
     )
     b_idx = _last_index_at(run, *b_xy)
     c_idx = _last_index_at(run, *c_xy)
-    d_idx = _last_index_at(run, *d_xy)
     assert plateau[0] < b_idx <= plateau[-1] + 1
     assert plateau[0] < c_idx <= plateau[-1] + 1
 
-    # No interior stop keyframe up to the terminal brake into D.
-    interior = vels[: d_idx - 1]
+    # No interior stop keyframe up to the terminal brake into D. Anchored on
+    # the ARRIVAL boundary (the FIRST keyframe at D), not the last — at the
+    # shipped Config::HOP_SETTLE_MS > 0 default (ADR-061) the goal arrival
+    # appends a trailing same-pose settle dwell keyframe, so "the last
+    # keyframe at D" no longer identifies the arrival. The terminal-brake
+    # ramp legitimately dips to/below the floor right before that arrival —
+    # this must stay excluded, exactly as before the dwell existed.
+    d_arrival_idx = _first_index_at(run, *d_xy)
+    interior = vels[: d_arrival_idx - 1]
     assert all(v > floor_speed for v in interior), (
         "an intra-run dip toward the floor was emitted — the run split at a "
         "sub-tolerance alignment turn"
