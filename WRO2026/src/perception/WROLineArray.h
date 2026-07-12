@@ -7,7 +7,8 @@
  * `WROLineArray` is the WRO 2026 competition replacement for the vendor `MatrixLineTracer`
  * 10-channel line sensor. It owns 1 or 2 `MatrixColor`-protocol I2C boards (front, optional
  * rear), unpacks each board's 4 CMYK bytes into 8 reflectance channels (each 0..9, higher =
- * darker / closer to the line), applies per-channel software calibration on top of the
+ * brighter/whiter, lower = darker; the followed line is DARK, so a LOW reading means the
+ * channel is over the line), applies per-channel software calibration on top of the
  * firmware-level hardware calibration, and exposes the exact three-method surface
  * `MatrixLineTracer` did — `getError()`, `isOnline()`, `getJunctionType()` — so it drops in
  * to `LineFollower` and `Intersection` with no controller-side logic changes.
@@ -236,10 +237,10 @@ public:
      * @brief Whether ANY channel on the active board is on-line, mirroring
      *        `MatrixLineTracer::isOnline()`.
      *
-     * @return `true` if at least one channel's normalized reading
-     *         `(value - LOW) / (HIGH - LOW)` exceeds `Config::LINE_CHANNEL_ON_RATIO`
-     *         (default `0.5f`, i.e. midpoint between calibrated white and calibrated
-     *         dark); `false` otherwise.
+     * @return `true` if at least one channel's on-line-ness
+     *         `(HIGH - value) / (HIGH - LOW)` exceeds `Config::LINE_CHANNEL_ON_RATIO`
+     *         (default `0.5f`, i.e. the channel reads at least halfway from calibrated
+     *         white toward calibrated dark); `false` otherwise.
      * @note When `Config::LINE_ARRAY_TICK_CACHE_ENABLED == true` this is a pure
      *       cache read — the value reflects whatever `update()` latched at the
      *       top of the current cooperative tick. When the toggle is `false`
@@ -337,7 +338,8 @@ public:
      *
      * @param out  Output buffer of exactly 8 bytes. Channel index 0 is the leftmost
      *             channel; channel index 7 is the rightmost. Values are in the packed
-     *             range `0..9` (higher = darker = closer to the line), unmodified by
+     *             range `0..9` (higher = brighter/white, lower = darker; the followed
+     *             line is DARK, so a LOW value means over the line), unmodified by
      *             any software calibration.
      * @return `true` if the I2C transaction succeeded and `out` is populated; `false`
      *         on transaction failure (`out` is left untouched — caller must zero
@@ -506,12 +508,29 @@ private:
     bool _readBoardInternal(uint8_t boardIdx, uint8_t out[8]);
 
     /**
+     * @brief Normalise a raw channel reading into a [0,1] on-line-ness score.
+     *
+     * The followed line is DARK on a light field, so on-line-ness grows as the reading
+     * falls from the calibrated white endpoint (`high`, per-channel max) toward the dark
+     * endpoint (`low`, per-channel min): returns `(high - raw) / (high - low)`, 1.0 at
+     * `low`, 0.0 at `high`, clamped to `[0,1]`. Callers MUST pre-reject dead channels
+     * (`low >= high`). Shared by `_computeError`, `_isOnlineFromCache`, and
+     * `_classifyJunction` so the three cannot drift out of polarity sync.
+     *
+     * @param raw  Raw packed channel value (`0..9`).
+     * @param low  Calibrated DARK / on-line endpoint (`Config::LINE_CALIB_LOW`).
+     * @param high Calibrated WHITE / off-line endpoint (`Config::LINE_CALIB_HIGH`).
+     * @return On-line-ness in `[0,1]`; higher = darker = more on the line.
+     */
+    static float _onnessNorm(uint8_t raw, uint8_t low, uint8_t high);
+
+    /**
      * @brief Compute the weighted-center error for an 8-channel sample.
      *
      * Each channel `i` contributes weight `_sensorWeights[i] = {-3.5, -2.5, -1.5, -0.5,
-     * +0.5, +1.5, +2.5, +3.5}` scaled by its normalized intensity
-     * `(channels[i] - LOW[B][i]) / (HIGH[B][i] - LOW[B][i])`. Dead channels (where
-     * `LOW >= HIGH`) contribute zero.
+     * +0.5, +1.5, +2.5, +3.5}` scaled by its normalized on-line-ness
+     * `(HIGH[B][i] - channels[i]) / (HIGH[B][i] - LOW[B][i])` (1.0 = over the dark line,
+     * 0.0 = over white). Dead channels (where `LOW >= HIGH`) contribute zero.
      *
      * @param channels  Raw per-channel reading buffer (8 bytes, `0..9`).
      * @return Signed weighted-center error in `[-3.5, +3.5]`, or `0.0f` when the

@@ -677,6 +677,28 @@ bool WROLineArrayClass::_readBoardInternal(uint8_t boardIdx, uint8_t out[8])
     return true;
 }
 
+float WROLineArrayClass::_onnessNorm(uint8_t raw, uint8_t low, uint8_t high)
+{
+    // The followed line is DARK on a light field, so a channel is "more on-line" the
+    // closer its reading falls to the calibrated dark endpoint (`low`, the per-channel
+    // minimum) and away from the white endpoint (`high`, the per-channel maximum):
+    // 1.0 at the darkest calibrated value, 0.0 at the brightest, clamped to [0, 1].
+    // Callers pre-reject dead channels (`low >= high`) so the denominator is positive.
+    // The `(int)` promotion keeps the subtraction signed, so a raw byte that momentarily
+    // reads brighter than `high` (or darker than `low`) clamps to the range instead of
+    // underflowing the unsigned arithmetic.
+    float onness = (float) ((int) high - (int) raw) / (float) ((int) high - (int) low);
+    if (onness < 0.0f)
+    {
+        onness = 0.0f;
+    }
+    else if (onness > 1.0f)
+    {
+        onness = 1.0f;
+    }
+    return onness;
+}
+
 float WROLineArrayClass::_computeError(const uint8_t channels[8]) const
 {
     // Symmetric weights centred on the gap between ch3 and ch4. Negative weights pull
@@ -705,25 +727,16 @@ float WROLineArrayClass::_computeError(const uint8_t channels[8]) const
             continue;
         }
 
-        // Normalise into [0, 1]. The raw byte can momentarily fall below LOW or
-        // exceed HIGH if the operator's calibration sweep missed an extreme — clamp
-        // so the weight contribution stays bounded and the controller does not see
-        // out-of-range error magnitudes.
-        float norm = (float) (channels[c] - low) / (float) (high - low);
-        if (norm < 0.0f)
-        {
-            norm = 0.0f;
-        }
-        else if (norm > 1.0f)
-        {
-            norm = 1.0f;
-        }
+        // Normalised on-line-ness in [0, 1]: 1.0 = channel over the dark line, 0.0 =
+        // over the white field. `_onnessNorm` owns the dark-line polarity + clamping.
+        const float norm = _onnessNorm(channels[c], low, high);
 
-        // Only channels above the ON ratio contribute. A channel reading just above
-        // the LOW baseline (low norm) is almost certainly background noise and
-        // including it would pull the weighted centre toward whichever outer
-        // channel happens to be slightly noisier. Compare to `> ratio` (strict) to
-        // match `_isOnlineFromCache` and avoid a ratio==0.5 + noisy floor edge case.
+        // Only channels above the ON ratio contribute. A channel with only weak
+        // on-line-ness (norm just above 0 — reading near white, off the line) is
+        // almost certainly background and including it would pull the weighted centre
+        // toward whichever outer channel happens to be slightly noisier. Compare to
+        // `> ratio` (strict) to match `_isOnlineFromCache` and avoid a ratio==0.5 +
+        // noisy floor edge case.
         if (norm > Config::LINE_CHANNEL_ON_RATIO)
         {
             weightedSum += norm * _sensorWeights[c];
@@ -747,15 +760,7 @@ bool WROLineArrayClass::_isOnlineFromCache(const uint8_t channels[8]) const
             continue;
         }
 
-        float norm = (float) (channels[c] - low) / (float) (high - low);
-        if (norm < 0.0f)
-        {
-            norm = 0.0f;
-        }
-        else if (norm > 1.0f)
-        {
-            norm = 1.0f;
-        }
+        const float norm = _onnessNorm(channels[c], low, high);
 
         // Early exit on the first qualifying channel — `isOnline()` semantics is
         // "ANY channel exceeds the ratio", not a vote count.
@@ -793,15 +798,7 @@ uint8_t WROLineArrayClass::_classifyJunction(const uint8_t channels[8]) const
             continue;
         }
 
-        float norm = (float) (channels[c] - low) / (float) (high - low);
-        if (norm < 0.0f)
-        {
-            norm = 0.0f;
-        }
-        else if (norm > 1.0f)
-        {
-            norm = 1.0f;
-        }
+        const float norm = _onnessNorm(channels[c], low, high);
 
         on[c] = (norm > Config::LINE_CHANNEL_ON_RATIO);
     }

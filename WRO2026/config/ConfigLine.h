@@ -104,16 +104,21 @@ namespace Config
     constexpr uint8_t LINE_REAR_I2C_PORT = 4;
 
     /**
-     * @brief Per-board, per-channel calibrated WHITE (off-line) reflectance value.
+     * @brief Per-board, per-channel calibrated DARK (on-line) reflectance value — the
+     *        per-channel MINIMUM seen during the sweep (a channel reads its darkest when
+     *        it is over the black line).
      *
      * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
-     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     * range produced by the MXColor firmware after Layer-1 hardware calibration. The
+     * followed line is DARK on a light field, so LOW is the low-reflectance endpoint:
+     * on-line-ness is `(HIGH - raw) / (HIGH - LOW)`, which is 1.0 at LOW and 0.0 at HIGH.
      *
-     * Workflow: run WROLineArray::calibrate() with the sensor over a WHITE surface,
-     * read the Serial output, and paste the 8 values per board into the inner arrays
-     * here, then reflash. Values survive power cycles because they live in firmware
-     * (Layer-2 calibration). Zeroed defaults are safe before first calibration —
-     * they cause every channel to be treated as "fully bright = off-line".
+     * Workflow: run WROLineArray::calibrate(), sweep each board over white AND the line
+     * during the timed window, then paste the whole printed block (both arrays) here and
+     * reflash. Values survive power cycles because they live in firmware (Layer-2
+     * calibration). The default of 0 places the dark endpoint at full dark; combined with
+     * the HIGH default of 9, an uncalibrated channel only reads on-line below mid
+     * brightness, so a bright surface fails safe to off-line.
      */
     constexpr uint8_t LINE_CALIB_LOW[2][8] = {
         {0, 0, 0, 0, 0, 0, 0, 0},
@@ -121,15 +126,17 @@ namespace Config
     };
 
     /**
-     * @brief Per-board, per-channel calibrated DARK (on-line) reflectance value.
+     * @brief Per-board, per-channel calibrated WHITE (off-line) reflectance value — the
+     *        per-channel MAXIMUM seen during the sweep (a channel reads its brightest
+     *        over the white field, off the line).
      *
      * Dimension: [LINE_BOARD_COUNT][8]. Channel values are in the 0..9 packed-byte
-     * range produced by the MXColor firmware after Layer-1 hardware calibration.
+     * range produced by the MXColor firmware after Layer-1 hardware calibration. HIGH is
+     * the bright endpoint of the on-line-ness map `(HIGH - raw) / (HIGH - LOW)`.
      *
-     * Workflow: run WROLineArray::calibrate() with the sensor over the DARK line,
-     * read the Serial output, and paste the 8 values per board into the inner arrays
-     * here, then reflash. Defaults of 9 (maximum brightness delta) are safe before
-     * first calibration — they prevent false on-line detections when LOW == HIGH.
+     * Workflow: same sweep as LINE_CALIB_LOW — paste the whole printed block. Defaults of
+     * 9 (max brightness) keep every channel off-line until a distinctly dark reading
+     * appears, and guarantee HIGH > LOW so no channel is flagged dead before calibration.
      */
     constexpr uint8_t LINE_CALIB_HIGH[2][8] = {
         {9, 9, 9, 9, 9, 9, 9, 9},
@@ -144,7 +151,7 @@ namespace Config
      * 1.0f to require a stronger dark reading (reduces false positives on smudged
      * surfaces); decrease toward 0.0f to trigger earlier (increases sensitivity).
      *
-     * Applied per-channel: onLine = (raw - LOW[b][ch]) / (HIGH[b][ch] - LOW[b][ch])
+     * Applied per-channel: onLine = (HIGH[b][ch] - raw) / (HIGH[b][ch] - LOW[b][ch])
      *                               >= LINE_CHANNEL_ON_RATIO.
      */
     constexpr float LINE_CHANNEL_ON_RATIO = 0.5f;
