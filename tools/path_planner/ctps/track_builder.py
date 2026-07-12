@@ -448,9 +448,17 @@ _STOP_GATED_TAGS: frozenset[str] = frozenset(
 #: Mid-run geometry contributors — a follow leg that lands the sensor short of
 #: its node and is ALWAYS immediately followed by a pass or an overshoot (never
 #: braking on its own). It contributes distance to the open run but never ENDS
-#: it; the pass / overshoot that follows decides the boundary. ``ACT_FOLLOW_INT``
-#: is the sole member today (the LINE follow-to-intersection leg).
-_MID_RUN_CONTRIB_TAGS: frozenset[str] = frozenset({ACT_FOLLOW_INT})
+#: it; the pass / overshoot that follows decides the boundary.
+#:
+#: The FORWARD (``ACT_FOLLOW_INT``) and REAR (``ACT_LINE_REVERSE``) line-follow
+#: legs are structurally identical — the sim emits each as a follow leg that
+#: lands one axle-offset short of the node, then a SEPARATE ``ACT_LINE_OVERSHOOT``
+#: (or ``ACT_LINE_PASS``) that rolls onto / passes the node (``runtime.py`` LINE
+#: dispatch). Both must therefore be mid-run contributors, or a REAR line hop's
+#: collinear run splits at the reverse leg's short-landing point into two ramps
+#: (the stop-at-every-node lie the grouper repairs for FORWARD hops) — and, once
+#: ADR-061's hop-settle lands, fires a spurious mid-edge settle dwell there.
+_MID_RUN_CONTRIB_TAGS: frozenset[str] = frozenset({ACT_FOLLOW_INT, ACT_LINE_REVERSE})
 
 #: Collinear pass-through primitive tags — a NON-braking node boundary. The
 #: firmware holds cruise across these (ADR-023 line pass-through; the T2

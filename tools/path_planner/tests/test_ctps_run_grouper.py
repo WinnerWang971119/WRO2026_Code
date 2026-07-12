@@ -70,6 +70,7 @@ from tools.path_planner.sim.runtime import (
     ACT_HEADING_RESET,
     ACT_LINE_OVERSHOOT,
     ACT_LINE_PASS,
+    ACT_LINE_REVERSE,
     ACT_TURN_REL,
     NAV_TURN_TOLERANCE_DEG,
     Direction,
@@ -169,6 +170,23 @@ def _velocity_into(keyframes, vels, x_cm, y_cm):
         if abs(k["x"] - x_cm) <= _POSE_TOL and abs(k["y"] - y_cm) <= _POSE_TOL:
             return vels[i - 1]
     raise AssertionError(f"no keyframe lands at ({x_cm}, {y_cm})")
+
+
+def _zero_motion_dwells(keyframes):
+    """Return indices ``i`` where ``keyframes[i] -> [i+1]`` is a same-pose,
+    time-advancing dwell keyframe (an ``append_dwell_keyframe`` settle / manip
+    hold: identical pose, clock advanced). One per genuine braked-arrival settle.
+    """
+    out = []
+    for i, (a, b) in enumerate(zip(keyframes, keyframes[1:])):
+        same_pose = (
+            abs(b["x"] - a["x"]) <= _POSE_TOL
+            and abs(b["y"] - a["y"]) <= _POSE_TOL
+            and abs(b["h"] - a["h"]) <= _POSE_TOL
+        )
+        if same_pose and (b["t"] - a["t"]) > 1e-9:
+            out.append(i)
+    return out
 
 
 def _make_step_through_spy(sequence):
@@ -549,6 +567,84 @@ def test_tc11_heading_reset_interleave_keeps_run_grouped(monkeypatch):
     # No interior stop keyframe (the run is unbroken up to the terminal brake).
     interior = vels[:-1]
     assert all(v > _VEL_TOL for v in interior)
+
+
+# ===========================================================================
+# REAR line hop — the reverse follow leg is a mid-run contributor (ADR-061 #122
+# follow-up). Regression for the "stop in the middle of the hop" bug.
+# ===========================================================================
+
+
+def test_rear_line_hop_reverse_leg_is_mid_run_no_mid_edge_stop(monkeypatch):
+    """A REAR line hop's ``ACT_LINE_REVERSE`` leg groups like ``ACT_FOLLOW_INT``.
+
+    The sim emits a REAR line hop symmetrically to a forward one: a follow leg
+    that lands one axle-offset SHORT of the node (``ACT_LINE_REVERSE``, the REAR
+    mirror of ``ACT_FOLLOW_INT``), then a SEPARATE ``ACT_LINE_OVERSHOOT`` that
+    rolls onto the node. Both follow legs must be mid-run contributors, so the
+    reverse leg + overshoot render as ONE trapezoid — cruise held THROUGH the
+    reverse leg's short-landing point, a single terminal ramp-down/stop, and
+    exactly ONE settle dwell (the goal arrival after the overshoot).
+
+    Before the fix, ``ACT_LINE_REVERSE`` was absent from
+    ``_MID_RUN_CONTRIB_TAGS``, so the grouper treated the reverse leg as a braked
+    arrival: the run split at its short-landing point into two ramps (an interior
+    stop), and ADR-061's hop-settle fired a spurious mid-edge dwell there — the
+    ~100 ms "stop in the middle of the hop" on ``CG2 -> CG1``.
+    """
+    cfg = default_config()
+    assert cfg.hop_settle_ms > 0, "settle must be ON for this regression to bite"
+    cruise_speed = SCALE_CM_S_PER_PWM * cfg.line_cruise
+
+    offset = 12.02  # rear-board axle offset (the overshoot roll distance)
+    reverse_leg_cm = 40.0
+    sequence = [
+        # Reverse follow leg — lands SHORT of the node (mid-run, must not brake).
+        ((ACT_LINE_REVERSE, "B", "line"), reverse_leg_cm),
+        # Overshoot rolls onto the node (braked goal arrival — one settle dwell).
+        ((ACT_LINE_OVERSHOOT, offset), offset),
+    ]
+    monkeypatch.setattr(
+        PathTrackerSim, "step_through", _make_step_through_spy(sequence)
+    )
+
+    trace = Trace(
+        schema_version=1,
+        start_node=toy_field_data.START_NODE,
+        start_heading_deg=toy_field_data.START_HEADING_DEG,
+        build_error=False,
+        commands=[Command(seq=0, op="goto", target="B")],
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        track = build(trace, toy_field_data)
+
+    kfs = track.keyframes
+    seed = kfs[0]
+    vels = _inbound_velocities(kfs)
+
+    # ONE trapezoid: a contiguous cruise plateau, not two ramps split at the
+    # reverse leg's short-landing point.
+    plateau = [i for i, v in enumerate(vels) if abs(v - cruise_speed) <= _VEL_TOL]
+    assert plateau, "no cruise plateau — the reverse hop did not group into one run"
+    assert plateau == list(range(plateau[0], plateau[-1] + 1)), (
+        "the cruise plateau is broken — ACT_LINE_REVERSE split the run"
+    )
+
+    # Exactly ONE settle dwell — the goal arrival after the overshoot — and it
+    # sits at the FINAL (goal) pose, never at the reverse leg's short-landing
+    # point (seed + reverse_leg_cm), which would be the spurious mid-edge stop.
+    dwells = _zero_motion_dwells(kfs)
+    assert len(dwells) == 1, (
+        f"expected 1 goal-arrival settle dwell, got {len(dwells)} "
+        "(a mid-edge dwell means the reverse leg was mis-classified as braked)"
+    )
+    dwell_kf = kfs[dwells[0]]
+    total_advance = math.hypot(dwell_kf["x"] - seed["x"], dwell_kf["y"] - seed["y"])
+    assert total_advance == pytest.approx(reverse_leg_cm + offset, abs=1e-6), (
+        "the settle dwell is not at the goal pose — it fired mid-edge"
+    )
 
 
 # ===========================================================================
