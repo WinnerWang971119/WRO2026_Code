@@ -41,8 +41,6 @@ const TaskRegistryEntry TasksClass::_registry[] =
     { "idleWait", &TasksClass::idleWait },
     { "testChassis", &TasksClass::testChassis },
     { "testOne", &TasksClass::testOne },
-    { "test1", &TasksClass::test1 },
-    { "test0621", &TasksClass::test0621 },
     { "ctpsExample1", &TasksClass::ctpsExample1 },
     { "emptyTest", &TasksClass::emptyTest },
     { "actuatorSweep", &TasksClass::actuatorSweep },
@@ -352,32 +350,7 @@ bool TasksClass::testChassis(const TaskArgs& /*args*/)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("Inter1");
-    PathTracker.goTo("Inter2");
-    PathTracker.goTo("Inter3");
-    PathTracker.goTo("position1");
-    return true;
-}
-
-bool TasksClass::test1(const TaskArgs& /*args*/)
-{
-    PathTracker.goTo("Inter1");
-    (void)Manipulator.grab();
-    Manipulator.belt.toStation(Config::BeltStation::MID);
-    Drive.setSpeed(30, 60);
-    PathTracker.goTo("Inter2");
-    PathTracker.goTo("Inter3");
-    PathTracker.goTo("position1");
-    Drive.wallStop(20.0f);
-    Drive.driveDist(20).setPower(80).setMode(DriveMode::GYRO);
-    LineFollower.setEnabled(true).setDistanceTarget(90);
-    LineFollower.waitUntilDistanceReached();
-    return true;
-}
-
-bool TasksClass::test0621(const TaskArgs& /*args*/)
-{
-    Drive.driveDist(35).setStartSpeed(40).setPower(100).setEndSpeed(10).setMode(DriveMode::GYRO).setHeading(0);
+    Drive.driveDist(100).setMode(DriveMode::SYNC);
     return true;
 }
 
@@ -792,7 +765,7 @@ bool TasksClass::actuatorStep(const TaskArgs& args)
     }
 }
 
-bool TasksClass::manipDirectTest(const TaskArgs& /*args*/)
+bool TasksClass::manipDirectTest(const TaskArgs& args)
 {
     static constexpr uint32_t TEST_SETTLE_MS = 250;
 
@@ -894,41 +867,43 @@ bool TasksClass::manipDirectTest(const TaskArgs& /*args*/)
     }
     _waitMs(TEST_SETTLE_MS);
 
-    Serial.println(F("[Tasks] manipDirectTest: belt left/mid/far_end/mid"));
-    Manipulator.belt.toStation(Config::BeltStation::LEFT);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
+    if (args.u8[0] == 1){
+        Serial.println(F("[Tasks] manipDirectTest: belt left/mid/far_end/mid"));
+        Manipulator.belt.toStation(Config::BeltStation::LEFT);
+        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt left"))
+        {
+            Drive.stop(true);
+            return false;
+        }
+        _waitMs(TEST_SETTLE_MS);
 
-    Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
+        Manipulator.belt.toStation(Config::BeltStation::MID);
+        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 1"))
+        {
+            Drive.stop(true);
+            return false;
+        }
+        _waitMs(TEST_SETTLE_MS);
 
-    Manipulator.belt.toStation(Config::BeltStation::FAR_END);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
-    {
-        Drive.stop(true);
-        return false;
-    }
-    _waitMs(TEST_SETTLE_MS);
+        Manipulator.belt.toStation(Config::BeltStation::FAR_END);
+        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt far_end"))
+        {
+            Drive.stop(true);
+            return false;
+        }
+        _waitMs(TEST_SETTLE_MS);
 
-    Manipulator.belt.toStation(Config::BeltStation::MID);
-    if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
-    {
-        Drive.stop(true);
-        return false;
+        Manipulator.belt.toStation(Config::BeltStation::MID);
+        if (!_waitForBelt(Config::BELT_HOME_TIMEOUT_MS, "belt mid 2"))
+        {
+            Drive.stop(true);
+            return false;
+        }
     }
-
     Drive.stop(true);
     Serial.println(F("[Tasks] manipDirectTest: done"));
     return true;
+    
 }
 
 bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)

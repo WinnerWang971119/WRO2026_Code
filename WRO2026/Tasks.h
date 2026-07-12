@@ -279,7 +279,7 @@ private:
      */
     bool idleWait(const TaskArgs& args);
 
-    bool test1(const TaskArgs& args);
+    bool testOne(const TaskArgs& args);
 
     /**
      * @brief Line-follow a short fixed distance — a smoke test for the line + drive path.
@@ -293,15 +293,6 @@ private:
      *         not idle when the task ran.
      */
     bool testChassis(const TaskArgs& args);
-
-    /**
-     * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
-     *
-     * @param args Ignored.
-     * @return Always `true`.
-     */
-    bool testOne(const TaskArgs& args);
-    bool test0621(const TaskArgs& args);
 
     /**
      * @brief Bring-up CTPS demo.
@@ -382,7 +373,7 @@ private:
      * handles (`grabber` / `sorter` / `dumper` / `belt`) so bring-up can verify each actuator
      * without going through the semantic verbs.
      *
-     * @param args Ignored.
+     * @param args u8[0] = 1 to enable belt test; otherwise ignored.
      * @return ``true`` when every primitive movement completed; ``false`` on a belt/servo timeout.
      */
     bool manipDirectTest(const TaskArgs& args);

@@ -20,11 +20,11 @@
 namespace Config
 {
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 4.0f;
+    constexpr float LINE_KP = 3.0f;
     /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
     constexpr float LINE_KI = 0.0f;
     /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 0.0f;
+    constexpr float LINE_KD = 0.3f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

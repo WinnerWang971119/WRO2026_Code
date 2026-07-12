@@ -48,7 +48,7 @@ namespace Config
      * so P+D corrections always result in motion. Zero commands pass through —
      * the caller intended to stop, deadband is irrelevant.
      */
-    constexpr int16_t PWM_MIN_MAGNITUDE = 50;
+    constexpr int16_t PWM_MIN_MAGNITUDE = 35;
 
     // ---------------------------------------------------------------------------------------
     // OLED event trace
