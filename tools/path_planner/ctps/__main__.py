@@ -573,7 +573,9 @@ def _resolve_mosaic_args(
 
     rng = random.Random(seed)
     colors = mosaic.roll_mosaic(cfg, rng)
-    letters = "".join(mosaic.COLOR_LETTER[name] for name in colors)
+    # color_to_letter (not COLOR_LETTER directly) so an AIR cell from an
+    # under-filled random roll joins as AIR_LETTER instead of raising KeyError.
+    letters = "".join(mosaic.color_to_letter(name) for name in colors)
     geom_h = mosaic.geom_hash(cfg)
 
     return [

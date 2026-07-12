@@ -25,11 +25,15 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from tools.path_planner.ctps.mosaic import (
+    AIR_LETTER,
+    AIR_NAME,
     CELL_COUNT,
+    COLOR_LETTER,
     COLOR_NAMES,
     MODE_DIRECTED,
     MODE_RANDOM,
     MosaicConfig,
+    color_to_letter,
     resolve_cells,
     roll_mosaic,
     validate_mosaic_config,
@@ -194,6 +198,111 @@ def test_tc3_roll_mosaic_random_pins_kept_nulls_match_remaining_multiset():
 
 
 # ---------------------------------------------------------------------------
+# Roll — random UNDER-fill (sum(counts) < #nulls): leftover cells become AIR (ADR-063)
+# ---------------------------------------------------------------------------
+
+
+def test_roll_random_underfill_pads_leftover_cells_with_air():
+    """Under-fill: sum(counts) < #nulls -> the leftover null cells become AIR.
+
+    counts sum to 8 over 12 null cells -> exactly 4 AIR cells; each colour still
+    appears exactly its quota.
+    """
+    counts = {"YELLOW": 2, "BLUE": 2, "GREEN": 2, "WHITE": 2}  # sum 8, 12 nulls
+    cfg = _random_mosaic_config(counts)
+
+    result = roll_mosaic(cfg, random.Random(3))
+
+    assert len(result) == CELL_COUNT
+    assert result.count(AIR_NAME) == CELL_COUNT - 8  # 4 air cells
+    for name, quota in counts.items():
+        assert result.count(name) == quota
+
+
+def test_roll_random_underfill_keeps_pins_air_only_in_null_cells():
+    """Under-fill with pins: pins kept verbatim; AIR only ever lands in null cells."""
+    cells: List[Optional[str]] = [None] * CELL_COUNT
+    cells[0] = "RED"
+    cells[11] = "RED"
+    counts = {"YELLOW": 1, "BLUE": 1}  # sum 2 over 10 null cells -> 8 air
+    cfg = _random_mosaic_config(counts, cells=cells)
+
+    result = roll_mosaic(cfg, random.Random(9))
+
+    # Pins kept verbatim and never overwritten with air.
+    assert result[0] == "RED"
+    assert result[11] == "RED"
+    null_indices = [i for i in range(CELL_COUNT) if i not in (0, 11)]
+    filled = [result[i] for i in null_indices]
+    assert filled.count(AIR_NAME) == 10 - 2  # 8 air among the 10 null cells
+    assert filled.count("YELLOW") == 1
+    assert filled.count("BLUE") == 1
+
+
+def test_roll_random_underfill_is_deterministic():
+    """Under-fill roll is deterministic for a fixed seed (air placement included)."""
+    counts = {"YELLOW": 2, "BLUE": 2}  # sum 4, 12 nulls -> 8 air
+    cfg = _random_mosaic_config(counts)
+
+    assert roll_mosaic(cfg, random.Random(5)) == roll_mosaic(cfg, random.Random(5))
+
+
+def test_roll_random_empty_counts_is_all_air():
+    """sum(counts) == 0 -> every null cell becomes AIR (the extreme under-fill)."""
+    cfg = _random_mosaic_config({})
+
+    result = roll_mosaic(cfg, random.Random(1))
+
+    assert result == [AIR_NAME] * CELL_COUNT
+
+
+# ---------------------------------------------------------------------------
+# Roll — random OVER-fill (sum(counts) > #nulls): keep a random subset (ADR-063)
+# ---------------------------------------------------------------------------
+
+
+def test_roll_random_overfill_keeps_exactly_null_count_no_air():
+    """Over-fill: sum(counts) > #nulls -> exactly #nulls cells filled, no AIR.
+
+    Each colour appears AT MOST its quota (the excess is dropped at random).
+    """
+    counts = {"YELLOW": 6, "BLUE": 6, "GREEN": 6}  # sum 18 over 12 null cells
+    cfg = _random_mosaic_config(counts)
+
+    result = roll_mosaic(cfg, random.Random(11))
+
+    assert len(result) == CELL_COUNT
+    assert AIR_NAME not in result
+    assert all(color in counts for color in result)
+    for name, quota in counts.items():
+        assert result.count(name) <= quota
+
+
+def test_roll_random_overfill_is_deterministic():
+    """Over-fill roll is deterministic for a fixed seed (which units survive)."""
+    counts = {"YELLOW": 8, "BLUE": 8}  # sum 16 over 12 null cells
+    cfg = _random_mosaic_config(counts)
+
+    assert roll_mosaic(cfg, random.Random(6)) == roll_mosaic(cfg, random.Random(6))
+
+
+# ---------------------------------------------------------------------------
+# color_to_letter — the single-sourced --mosaic wire alphabet incl. the AIR letter
+# ---------------------------------------------------------------------------
+
+
+def test_color_to_letter_maps_palette_and_air():
+    """Each palette colour maps to its letter; the AIR sentinel maps to AIR_LETTER."""
+    for name, letter in COLOR_LETTER.items():
+        assert color_to_letter(name) == letter
+    assert color_to_letter(AIR_NAME) == AIR_LETTER
+    # A rolled list carrying air joins to a wire string without raising (the
+    # orchestrator's _resolve_mosaic_args path).
+    rolled = ["YELLOW", AIR_NAME, "RED"]
+    assert "".join(color_to_letter(c) for c in rolled) == "Y" + AIR_LETTER + "R"
+
+
+# ---------------------------------------------------------------------------
 # TC4 — directed mode (all 12 pinned) -> output == pins verbatim, seed irrelevant
 # ---------------------------------------------------------------------------
 
@@ -336,18 +445,24 @@ def test_tc6_rejects_directed_mode_with_a_null_cell():
     assert "null" in message
 
 
-def test_tc6_rejects_random_mode_counts_sum_mismatch():
-    """TC6: random mode sum(counts) != #nulls raises."""
-    data = _valid_mosaic_dict()
-    # 12 nulls, but counts sum to 11.
-    data["counts"] = {"YELLOW": 3, "BLUE": 3, "GREEN": 4, "WHITE": 1}
+def test_tc6_accepts_random_mode_counts_any_sum():
+    """TC6 (ADR-063): random mode accepts counts summing under, over, or to #nulls.
 
-    with pytest.raises(ValueError) as exc_info:
-        validate_mosaic_config(data)
+    The old ``sum(counts) == #nulls`` equality is gone: an under-fill leaves the
+    leftover cells as air, an over-fill keeps a random subset, and both are
+    resolved in ``roll_mosaic`` — so none of these raise at validation.
+    """
+    under = _valid_mosaic_dict()
+    under["counts"] = {"YELLOW": 3, "BLUE": 3, "GREEN": 4, "WHITE": 1}  # sum 11 < 12
+    validate_mosaic_config(under)  # must not raise
 
-    message = str(exc_info.value)
-    assert "counts" in message
-    assert "null" in message
+    over = _valid_mosaic_dict()
+    over["counts"] = {"YELLOW": 6, "BLUE": 6, "GREEN": 6, "WHITE": 6}  # sum 24 > 12
+    validate_mosaic_config(over)  # must not raise
+
+    empty = _valid_mosaic_dict()
+    empty["counts"] = {}  # sum 0 -> every null cell becomes air
+    validate_mosaic_config(empty)  # must not raise
 
 
 def test_tc6_rejects_bad_palette_color():

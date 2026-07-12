@@ -22,7 +22,8 @@
  *     `MOSAIC_META`; the 4x3 pin grid (`data-mosaic-grid`) cycles each cell
  *     `unset -> palette[0] -> ... -> palette[n-1] -> unset` on click; the counts
  *     inputs (`data-mosaic-counts-list`) author the random-mode quotas with a
- *     live "sum == #null cells" hint. `initMosaicPanel`/`refreshMosaicPanel` are
+ *     live count readout (an under-fill leaves air cells, an over-fill trims to
+ *     a random subset -- ADR-063). `initMosaicPanel`/`refreshMosaicPanel` are
  *     the entrypoints T17 calls to (re)populate the palette/grid/counts from
  *     state (e.g. after a Load).
  *
@@ -1022,11 +1023,12 @@
     }
 
     /**
-     * Update the `#ctps-mosaic-count-total` live readout: `"sum(counts) / N
-     * null cells"`, flagged with the `--error` modifier (T12's live-authoring
-     * tint) when they disagree in random mode. Directed mode shows the pinned
-     * count instead (counts are ignored/hidden there) so the readout never
-     * falsely reds a fully-directed mosaic.
+     * Update the `#ctps-mosaic-count-total` live readout. Random mode shows
+     * `"sum(counts) / N null cells"` with an informational suffix describing how
+     * a non-exact fill resolves (ADR-063): an under-fill fills the leftover
+     * cells with air, an over-fill keeps a random subset. Neither is an error,
+     * so the `--error` tint is never applied. Directed mode shows the pinned
+     * count instead (counts are ignored/hidden there).
      */
     function _updateCountsTotal() {
         var el = document.getElementById("ctps-mosaic-count-total");
@@ -1045,8 +1047,15 @@
         }
         var sum = _countsSum();
         var nulls = _nullCellCount();
-        el.textContent = sum + " / " + nulls + " null cells";
-        el.classList.toggle("ctps-mosaic-count-total--error", sum !== nulls);
+        var text = sum + " / " + nulls + " null cells";
+        if (sum < nulls) {
+            text += " (" + (nulls - sum) + " air)";
+        } else if (sum > nulls) {
+            text += " (trims to " + nulls + ", random)";
+        }
+        el.textContent = text;
+        // Any non-negative sum is valid now (ADR-063) -- never an error tint.
+        el.classList.remove("ctps-mosaic-count-total--error");
     }
 
     /**

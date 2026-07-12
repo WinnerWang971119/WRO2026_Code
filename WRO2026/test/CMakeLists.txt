@@ -1036,9 +1036,19 @@ add_test(NAME ctps_dump_no_mosaic COMMAND ctps_dump --fixture)
 set_tests_properties(ctps_dump_no_mosaic PROPERTIES
     FAIL_REGULAR_EXPRESSION "\"mosaic\":")
 
-# TC16 — malformed --mosaic exits non-zero (exit 2).
+# TC16 — malformed --mosaic exits non-zero (exit 2). 'Z' stays unmapped even
+# after the ADR-063 air letter, so this negative case is unaffected.
 add_test(NAME ctps_dump_bad_mosaic COMMAND ctps_dump --fixture --mosaic ZZZ)
 set_tests_properties(ctps_dump_bad_mosaic PROPERTIES WILL_FAIL TRUE)
+
+# TC-air (ADR-063) — an 'A' letter injects an "air" cell as Config::Color::UNKNOWN,
+# which ctps_record echoes as "UNKNOWN" in the mosaic.cells block. Without air-letter
+# support the dump rejects 'A' (exit 2, no JSON emitted), so requiring "UNKNOWN" in
+# stdout proves BOTH that 'A' parses and that it round-trips as UNKNOWN.
+add_test(NAME ctps_dump_mosaic_air
+         COMMAND ctps_dump --fixture --mosaic AYBGWYBGWYBG --mosaic-seed 7 --mosaic-geom-hash abc123)
+set_tests_properties(ctps_dump_mosaic_air PROPERTIES
+    PASS_REGULAR_EXPRESSION "UNKNOWN")
 
 # =========================================================================================
 # CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
