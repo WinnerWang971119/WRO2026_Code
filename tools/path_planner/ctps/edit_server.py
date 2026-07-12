@@ -26,6 +26,7 @@ Stdlib only — no third-party dependencies, no persistent state.
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 import time
@@ -255,6 +256,53 @@ def _request_close(host: str, port: int) -> None:
         urllib.request.urlopen(req, timeout=1).close()
     except Exception:  # noqa: BLE001 - eviction is best-effort
         pass
+
+
+#: Upper bound on how long :func:`_wait_port_free` polls for a just-closed server
+#: to release the port. Comfortably above a ``serve_forever`` poll cycle (0.5 s)
+#: plus process teardown; on the common path the port frees in well under a
+#: second, so the wait rarely runs to this cap.
+_PORT_FREE_TIMEOUT_S: float = 3.0
+
+
+def _wait_port_free(
+    host: str, port: int, timeout: float = _PORT_FREE_TIMEOUT_S
+) -> bool:
+    """Block until ``host:port`` stops accepting connections, or ``timeout``.
+
+    A ``POST /close`` returns as soon as the server sends its 204 — but the
+    incumbent then takes up to a ``serve_forever`` poll cycle to actually run
+    ``shutdown()`` + ``server_close()`` and exit its process. The fresh-start
+    ``--stop-player`` task waits on this before the follow-on ``--serve`` starts,
+    so the new server never races a still-shutting-down incumbent (and, on
+    Windows, never silently double-binds it under ``SO_REUSEADDR``). It also lets
+    the launcher — e.g. a VS Code background task — observe the old process exit
+    before it decides whether to relaunch the serve step.
+
+    Polls a plain TCP connect: a refused/unreachable connect proves nothing is
+    listening, so the port is free. Best-effort — a port still held by a foreign
+    process (not our server) simply times out and the caller's rebind surfaces
+    the real error, matching :func:`_request_close`'s semantics.
+
+    :param host: the host the server was bound to (``127.0.0.1``).
+    :param port: the fixed port to wait on; a ``0`` port is meaningless here and
+        returns immediately.
+    :param timeout: total seconds to poll before giving up.
+    :return: ``True`` once the port refuses a connection; ``False`` if it was
+        still accepting when ``timeout`` elapsed.
+    """
+    if port == 0:
+        return True
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                pass
+        except OSError:
+            # Refused / unreachable — nothing is listening; the port is free.
+            return True
+        time.sleep(_EVICT_POLL_S)
+    return False
 
 
 def _bind_server(address, html_bytes, layout_out, current_html):

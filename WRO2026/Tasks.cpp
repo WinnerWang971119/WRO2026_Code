@@ -288,10 +288,6 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("Inter1");
-    PathTracker.goTo("Inter2");
-    PathTracker.goTo("Inter3");
-    PathTracker.goTo("position1");
     return true;
 }
 
@@ -727,6 +723,6 @@ bool TasksClass::ctpsExample1(const TaskArgs& /*args*/)
 
 bool TasksClass::readMosaic(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("").setArrivalDirection(Direction::FRONT);
+    PathTracker.goTo("CY3").setArrivalDirection(Direction::FRONT);
     return _visionRead();
 }
