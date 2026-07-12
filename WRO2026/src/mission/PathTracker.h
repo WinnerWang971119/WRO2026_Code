@@ -648,6 +648,18 @@ private:
 
     void _dispatchEdgeAfterTurn();
 
+    /// @brief Where the FSM resumes when the SETTLE dwell elapses.
+    ///
+    /// Defined here — BEFORE `_enterSettle(SettleResume)` and the `_settleResume`
+    /// member that consume it — because a member function's parameter type must be a
+    /// COMPLETE type at its point of declaration. MSVC rejects a forward use (C2061);
+    /// g++ is lenient, so the CI (g++) host-tests job would NOT catch a misordering.
+    enum class SettleResume : uint8_t
+    {
+        PLAN,            // -> State::PLAN_NEXT_HOP (post-stop, pre-maneuver / goal arrival)
+        EDGE_AFTER_TURN  // -> _dispatchEdgeAfterTurn() (post-cold-turn, pre-move)
+    };
+
     /**
      * @brief Enter the non-blocking post-stop settle dwell (ADR-061).
      *
@@ -928,13 +940,6 @@ private:
     /// the shared pre-turn has faced the chassis at the return heading. Meaningless outside a
     /// return; defaults to 0.
     float _returnDistCm = 0.0f;
-
-    /// @brief Where the FSM resumes when the SETTLE dwell elapses.
-    enum class SettleResume : uint8_t
-    {
-        PLAN,            // -> State::PLAN_NEXT_HOP (post-stop, pre-maneuver / goal arrival)
-        EDGE_AFTER_TURN  // -> _dispatchEdgeAfterTurn() (post-cold-turn, pre-move)
-    };
 
     /// @brief `millis()` deadline for the in-flight SETTLE dwell (ADR-061).
     ///
