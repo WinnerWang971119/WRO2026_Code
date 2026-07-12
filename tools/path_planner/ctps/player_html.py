@@ -215,7 +215,7 @@ _BODY_MARKUP: str = """\
                         type="button" data-layer="deploy">DEPLOY</button>
                 <button id="ctps-layer-mosaic" class="ctps-chip ctps-chip--active"
                         type="button" data-layer="mosaic">MOSAIC</button>
-                <button id="ctps-layer-vision-cone" class="ctps-chip ctps-chip--active"
+                <button id="ctps-layer-vision-cone" class="ctps-chip"
                         type="button" data-layer="vision-cone">CONE</button>
             </div>
             <div class="ctps-scale-bar">

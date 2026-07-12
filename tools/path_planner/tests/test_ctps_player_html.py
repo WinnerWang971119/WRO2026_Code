@@ -1399,6 +1399,33 @@ def test_deploy_chip_and_layer_present(tmp_path):
     assert 'id: "deploy"' in html
 
 
+def test_cone_chip_defaults_off(tmp_path):
+    """The CONE chip opens OFF: bare ``ctps-chip`` markup + ``vision-cone: false``.
+
+    The page ships the CONE chip and the ``vision-cone`` layer unconditionally
+    (ADR-056), but the cone must not be drawn until the operator toggles it on:
+    the chip markup carries exactly ``ctps-chip`` (never ``ctps-chip--active``)
+    and ``store.layers`` defaults ``"vision-cone": false``. MOSAIC stays ON.
+    """
+    track_dict = json.loads(
+        (_FIXTURES / "ctps_lrs_track.json").read_text(encoding="utf-8")
+    )
+    out_path = tmp_path / "cone_chip.html"
+    render(track_dict, out_path)
+    html = out_path.read_text(encoding="utf-8")
+
+    # Chip markup present but default-OFF: class exactly "ctps-chip".
+    assert 'id="ctps-layer-vision-cone" class="ctps-chip"' in html
+    assert (
+        'id="ctps-layer-vision-cone" class="ctps-chip ctps-chip--active"'
+        not in html
+    )
+
+    # Store default: cone hidden, mosaic still shown.
+    assert '"vision-cone": false' in html
+    assert "mosaic: true" in html
+
+
 # ---------------------------------------------------------------------------
 # TC17 — player, seeded mosaic + cone: MOSAIC_META/MOSAIC/#ctps-vision regions
 # (randomized-vision plan, T21 -- ADR-060, AC10/AC12)
