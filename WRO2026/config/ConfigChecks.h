@@ -238,6 +238,23 @@ namespace Config
                   "past 32 requires re-checking available RAM, not just bumping this literal. "
                   "See config/ConfigNav.h.");
 
+    // -----------------------------------------------------------------------------------------
+    // Hop-settle wait checks (ConfigNav.h, ADR-061)
+    //
+    // COUPLED SITE: Config::HOP_SETTLE_MS is held once per braked hop (and again per cold
+    // turn->move seam) by PathTracker's non-blocking State::SETTLE before the FSM dispatches
+    // the next maneuver. Every settle dwell on a goal's braked hops adds against the 60 s
+    // PATH_DRAIN_TIMEOUT_MS_PER_GOAL drain budget that bounds PathTracker::_drainBlocking and
+    // Mission's isIdle() poll -- a settle value large enough to threaten that budget on a
+    // multi-hop goal is a config typo, not an intentional tuning value.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(HOP_SETTLE_MS <= 2000,
+                  "Config::HOP_SETTLE_MS must be <= 2000 ms -- a settle dwell longer than "
+                  "~2 s per braked hop would eat into the 60 s PATH_DRAIN_TIMEOUT_MS_PER_GOAL "
+                  "drain budget on a multi-hop goal and indicates a config typo rather than an "
+                  "intentional value. See config/ConfigNav.h.");
+
 }    // namespace Config
 
 #endif    // CONFIG_CHECKS_H

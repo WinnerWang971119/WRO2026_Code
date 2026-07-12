@@ -50,6 +50,36 @@ namespace Config
     constexpr uint32_t PATH_DRAIN_TIMEOUT_MS_PER_GOAL = 60000;
 
     /**
+     * @brief Settle dwell (ms) held after a stopped hop before the next maneuver.
+     *
+     * After the chassis brakes to rest at a node, `PathTracker` holds the FSM idle in
+     * `State::SETTLE` (brakes engaged, non-blocking, `Drive` untouched) for this many
+     * milliseconds before dispatching the next pre-edge turn/move — giving residual
+     * inertia time to dissipate before a turn or drive re-anchors against it.
+     *
+     * @note `0` DISABLES the feature entirely: `State::SETTLE` is never entered, and the
+     *       dispatched primitive sequence is byte-identical to pre-feature. This is the
+     *       single rollback knob.
+     * @note Settle is SKIPPED (regardless of this value) on: a LINE/projection
+     *       pass-through, an ADR-059 blind-chain intermediate hop, a goal's first-plan
+     *       pre-maneuver dwell (standing start), arrival at a `RESET` node, and the
+     *       return-to-node prologue's own turn/move (and the wall interludes). See
+     *       ADR-061 for the full fire/skip matrix.
+     * @note **Compile-time override:** guarded by `#ifndef HOP_SETTLE_MS_DEFAULT` so a
+     *       host test can pin it target-wide via `-DHOP_SETTLE_MS_DEFAULT=0` (disable) or
+     *       another value without editing this file — same idiom as
+     *       `PATH_PASS_THROUGH_ENABLED_DEFAULT` above.
+     * @note CTPS (`tools/path_planner/ctps/track_builder.py`) parses this value directly
+     *       from this source file via `config_parse` (never hand-mirrored, ADR-058) to
+     *       render a matching dwell keyframe at each settle seam. See ADR-061.
+     * @note Consumer: `PathTracker`'s SETTLE state (ADR-061).
+     */
+#ifndef HOP_SETTLE_MS_DEFAULT
+#define HOP_SETTLE_MS_DEFAULT 100
+#endif
+    constexpr uint32_t HOP_SETTLE_MS = HOP_SETTLE_MS_DEFAULT;   // TODO bench-tune
+
+    /**
      * @brief Tolerance (degrees) below which `PathTracker` skips an absolute turn dispatch.
      *
      * Avoids a sub-degree twitch at every edge join when consecutive edges happen to be
