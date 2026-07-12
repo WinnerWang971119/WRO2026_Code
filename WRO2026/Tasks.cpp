@@ -493,20 +493,29 @@ bool TasksClass::emptyTest(const TaskArgs& /*args*/)
     (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper open");
     _waitMs(200);
 
-    Manipulator.sortTo(2);
-    _waitMs(200);
+    for (uint8_t bin = 0; bin < 4; ++bin)
+    {
+        Manipulator.sortTo(bin);
+        _waitMs(200);
 
-    Manipulator.grabber.open();
-    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
-    _waitMs(3000);
+        Manipulator.grabber.open();
+        (void)_waitForServo(Manipulator.grabber,
+                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
+                            "grabber open");
+        _waitMs(3000);
 
-    Manipulator.grabber.close();
-    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber close");
-    _waitMs(1000);
+        Manipulator.grabber.home();
+        (void)_waitForServo(Manipulator.grabber,
+                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
+                            "grabber home");
+        _waitMs(1000);
 
-    Manipulator.grabber.open();
-    (void)_waitForServo(Manipulator.grabber, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "grabber open");
-    _waitMs(1000);
+        Manipulator.grabber.close();
+        (void)_waitForServo(Manipulator.grabber,
+                            Config::MANIP_SERVO_DRAIN_TIMEOUT_MS,
+                            "grabber close");
+        _waitMs(2000);
+    }
 
     Manipulator.dumper.close();
     (void)_waitForServo(Manipulator.dumper, Config::MANIP_SERVO_DRAIN_TIMEOUT_MS, "dumper close");
