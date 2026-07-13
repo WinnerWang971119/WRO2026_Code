@@ -287,7 +287,10 @@ public:
 
     // ------------------------------------------------------------------ surface used by LineFollower
 
-    uint8_t setSpeed(int16_t L, int16_t R)
+    // floorMag mirrors the real Drive::setSpeed signature (T4 kinetic decel floor). This mock
+    // records the PRE-snap value LineFollower passed, so the deadband floor is irrelevant here —
+    // the arg is accepted (defaulted) only so the 3-arg call site compiles against this regime.
+    uint8_t setSpeed(int16_t L, int16_t R, int16_t /*floorMag*/ = Config::PWM_MIN_MAGNITUDE)
     {
         _record.setSpeedCallCount++;
         _record.lastSetSpeedL = L;
