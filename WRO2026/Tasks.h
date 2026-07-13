@@ -239,6 +239,15 @@ private:
      */
     bool servoTest(const TaskArgs& args);
 
+    /// @brief Test-support stub for Mission's TASK YIELD path: prints its
+    ///        signature and returns false so a real Mission/Tasks integration can
+    ///        exercise the yield (not abort) branch end-to-end.
+    bool debugYield(const TaskArgs& args);
+
+    /// @brief Cooperative idle-hold for `args.u32[0]` ms while the chassis is
+    ///        stationary; refuses (returns false) if any motion is active.
+    bool idleWait(const TaskArgs& args);
+
     bool testOne(const TaskArgs& args);
 
     /**

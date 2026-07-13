@@ -36,6 +36,8 @@ const TaskRegistryEntry TasksClass::_registry[] =
 {
     { "demoEcho",   &TasksClass::demoEcho   },
     { "servoTest", &TasksClass::servoTest },
+    { "debugYield", &TasksClass::debugYield },
+    { "idleWait", &TasksClass::idleWait },
     { "testOne", &TasksClass::testOne },
     { "ctpsExample1", &TasksClass::ctpsExample1 },
     { "emptyTest", &TasksClass::emptyTest },
@@ -289,6 +291,25 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
     return true;
+}
+
+bool TasksClass::debugYield(const TaskArgs& /*args*/)
+{
+    // Production-side stub for the YIELD path so Mission's TASK case has
+    // an end-to-end test target. The host-mirror's `alwaysYield` stub used
+    // to be the only path that exercised `_advanceStep` + `TASK YIELD %s`
+    // emission; this body lets a real Mission/Tasks integration check the
+    // same branch.
+    Serial.println(F("[Tasks] debugYield"));
+    return false;
+}
+
+bool TasksClass::idleWait(const TaskArgs& args)
+{
+    // Cooperative idle-hold for `args.u32[0]` ms (chassis must be stationary):
+    // pumps the tick callback while the mock/real clock advances. Also the
+    // end-to-end target for the "refusing idle wait while motion is active" guard.
+    return _waitStationaryMs(args.u32[0], F("idleWait"));
 }
 
 // =============================================================================
