@@ -15,7 +15,8 @@
  * materialises, then factor out.
  *
  * Currently included:
- *   - `deadbandSnap`  — PWM saturation cap + motor-deadband floor (Drive + LineFollower).
+ *   - `deadbandSnap`  — PWM saturation cap + motor-deadband floor, floor overridable per call
+ *                        (Drive + LineFollower).
  *   - `presetToPwm`   — `Config::SpeedPreset` → PWM (Drive builders + LineFollower).
  *   - `cmToEncDeg`    — wheel-distance to encoder-degree conversion (Drive distance moves).
  *   - `encDegToCm`    — inverse of `cmToEncDeg` (LineFollower's tShape ramp tracking).
@@ -52,7 +53,7 @@
 // =============================================================================================
 
 /**
- * @brief Clamp a raw PWM command into {0} U [PWM_MIN_MAGNITUDE, PWM_MAX]
+ * @brief Clamp a raw PWM command into {0} U [floorMag, PWM_MAX]
  *        (with mirrored negative range), snapping non-zero small magnitudes
  *        UP to the deadband floor.
  *
@@ -64,14 +65,19 @@
  *   * `_updateProfile()`'s speed-emission per tick (so ramp setpoints below
  *     the floor still move the chassis).
  *
- * @param pwm Raw signed PWM in any range.
+ * @param pwm      Raw signed PWM in any range.
+ * @param floorMag Deadband floor magnitude to snap non-zero small commands up to. Defaults to
+ *                 `Config::PWM_MIN_MAGNITUDE` (the static breakaway floor), preserving every
+ *                 existing one-arg caller. Callers on a decel/stop tail — where the chassis is
+ *                 already rolling and doesn't need a full breakaway kick — may pass the lower
+ *                 kinetic floor `Config::PWM_MOVING_MIN` instead.
  * @return Clamped/snapped PWM:
  *           - `pwm == 0` -> returns `0` unchanged (intentional stop)
- *           - `0 < |pwm| < PWM_MIN_MAGNITUDE` -> returns `+/-PWM_MIN_MAGNITUDE` (sign preserved)
+ *           - `0 < |pwm| < floorMag` -> returns `+/-floorMag` (sign preserved)
  *           - `|pwm| > PWM_MAX` -> returns `+/-PWM_MAX` (sign preserved)
  *           - else -> returns `pwm` unchanged
  */
-inline int16_t deadbandSnap(int16_t pwm)
+inline int16_t deadbandSnap(int16_t pwm, int16_t floorMag = Config::PWM_MIN_MAGNITUDE)
 {
     if (pwm == 0)
     {
@@ -79,13 +85,13 @@ inline int16_t deadbandSnap(int16_t pwm)
     }
     if (pwm > 0)
     {
-        if (pwm < Config::PWM_MIN_MAGNITUDE) return Config::PWM_MIN_MAGNITUDE;
-        if (pwm > Config::PWM_MAX)           return Config::PWM_MAX;
+        if (pwm < floorMag)        return floorMag;
+        if (pwm > Config::PWM_MAX) return Config::PWM_MAX;
         return pwm;
     }
     // pwm < 0
-    if (pwm > -Config::PWM_MIN_MAGNITUDE) return -Config::PWM_MIN_MAGNITUDE;
-    if (pwm < -Config::PWM_MAX)           return -Config::PWM_MAX;
+    if (pwm > -floorMag)          return -floorMag;
+    if (pwm < -Config::PWM_MAX)   return -Config::PWM_MAX;
     return pwm;
 }
 

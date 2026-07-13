@@ -367,7 +367,7 @@ public:
      * @param R Right-motor power in `[-100, 100]`.
      * @return Always `0x00` (success).
      */
-    uint8_t setSpeed(int16_t L, int16_t R)
+    uint8_t setSpeed(int16_t L, int16_t R, int16_t /*floorMag*/ = Config::PWM_MIN_MAGNITUDE)
     {
         _record.setSpeedCallCount++;
         _record.lastSetSpeedL = L;

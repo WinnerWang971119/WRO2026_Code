@@ -61,6 +61,7 @@ import pytest
 
 from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH
 from tools.path_planner.ctps.profile import (
+    SCALE_CM_S_PER_PWM,
     ProfileConfig,
     default_config,
     load_profile_config,
@@ -413,8 +414,9 @@ def test_stop_at_end_speed_zero_has_finite_duration() -> None:
 
 
 def test_stop_at_end_speed_zero_has_floor_crawl_tail_before_dist_cm() -> None:
-    """The decel ramp reaches ``PWM_MIN_MAGNITUDE`` strictly before ``dist_cm``,
-    leaving a floor-crawl tail — the visible "crawl then brake" shape (AC2)."""
+    """The decel ramp reaches the kinetic decel-tail floor (``PWM_MOVING_MIN``)
+    strictly before ``dist_cm``, leaving a floor-crawl tail — the visible
+    "crawl then brake" shape (AC7)."""
     cfg = load_profile_config()
     profile = resolve_drive_profile(
         40.0, cruise_pwm=85, start_pwm=50, end_pwm=0, profiled=True, cfg=cfg
@@ -426,11 +428,13 @@ def test_stop_at_end_speed_zero_has_floor_crawl_tail_before_dist_cm() -> None:
         profile.dist_cm
     )
 
-    # The PWM setpoint at the floor crossing is exactly the deadband floor,
-    # and it stays pinned at the floor through the crawl tail up to (but not
-    # including a further drop past) dist_cm.
+    # The PWM setpoint at the floor crossing is exactly the KINETIC decel-tail
+    # floor (PWM_MOVING_MIN) — the decel ramp floors lower than the static
+    # breakaway floor (pwm_min) once in the profile decel region — and it stays
+    # pinned at that floor through the crawl tail up to (but not including a
+    # further drop past) dist_cm.
     pwm_at_crossing = profile.pwm_at_s(profile.floor_crossing_cm)
-    assert abs(pwm_at_crossing) == pytest.approx(cfg.pwm_min, abs=1)
+    assert abs(pwm_at_crossing) == pytest.approx(cfg.pwm_moving_min, abs=1)
 
 
 def test_stop_at_end_speed_zero_no_divide_by_zero_at_boundaries() -> None:
@@ -798,30 +802,37 @@ _AC8_STOP_DIST_CM: float = 40.0
 def test_tc9_ac8_rear_window_fit_compresses_shed_to_window() -> None:
     """TC9 / AC8: a FAST + REAR-led final hop renders the window-fitted shed.
 
-    ``resolve_drive_profile(dist, cruise=90 (FAST), start=50, end=0,
+    ``resolve_drive_profile(dist, cruise=90 (FAST), start=35, end=0,
     profiled=True, rear_window_cm=rear_axle_offset_cm)`` must model the
-    LineFollower window-fit: the natural ``peak -> floor`` shed (8 cm at cruise
-    90) OVERRUNS the ~7.68 cm rear window, so the display decel is compressed to
-    the window — a steeper ramp that reaches the floor AT the distance gate.
+    LineFollower window-fit: the natural ``peak -> floor`` shed against the
+    KINETIC floor (``(90 - 30) / 4 = 15`` cm at cruise 90) OVERRUNS the ~7.68 cm
+    rear window, so the display decel is compressed to the window — a steeper
+    ramp that reaches the floor AT the distance gate.
 
     Pins the four AC8 post-conditions:
 
     * ``decel_cm <= rear_window`` — the shed fits inside the window,
     * ``floor_crossing_cm == dist`` — it reaches the floor exactly at the gate,
     * ``floor_tail_cm == 0`` — no floor-crawl tail past the gate,
-    * ``abs(end_pwm) == PWM_MIN`` — the display decel lands at floor speed (not
-      0) at the gate, then brakes (the firmware ramp-down shape).
+    * ``abs(end_pwm) == PWM_MOVING_MIN`` — the display decel lands at the
+      KINETIC decel-tail floor (not 0) at the gate, then brakes (the firmware
+      ramp-down shape); the window-fit itself solves against the kinetic
+      floor (``_window_fit_stop``'s ``floor_mag``), not the static one.
     """
     cfg = default_config()
     fast = cfg.speed_fast
     pwm_min = cfg.pwm_min
+    moving_min = cfg.pwm_moving_min
     rear_window = float(cfg.rear_axle_offset_cm)
 
     # Precondition: FAST is the AC8 preset and the natural shed genuinely
     # overruns the rear window (else the fit would be a no-op and the test
-    # vacuous). Natural above-floor shed = (|peak| - floor) / accel.
+    # vacuous). Natural above-floor shed = (|peak| - floor) / accel, mirroring
+    # the production window-fit's floor operand — the KINETIC floor
+    # (``_window_fit_stop`` is called with ``cfg.pwm_moving_min``), not the
+    # static breakaway floor.
     assert fast == 90
-    natural_shed = (fast - pwm_min) / cfg.accel
+    natural_shed = (fast - moving_min) / cfg.accel
     assert natural_shed > rear_window, (
         f"natural shed {natural_shed} cm must overrun the rear window "
         f"{rear_window} cm for this test to bind"
@@ -841,22 +852,22 @@ def test_tc9_ac8_rear_window_fit_compresses_shed_to_window() -> None:
     assert profile.decel_cm == pytest.approx(rear_window, abs=1e-6)
     assert profile.floor_crossing_cm == pytest.approx(profile.dist_cm, abs=1e-6)
     assert profile.floor_tail_cm == pytest.approx(0.0, abs=1e-6)
-    # The display decel ramps peak -> floor (not to 0), so it lands at floor speed
-    # at the gate before the instantaneous brake.
-    assert abs(profile.end_pwm) == pwm_min
+    # The display decel ramps peak -> floor (not to 0), so it lands at the
+    # kinetic floor speed at the gate before the instantaneous brake.
+    assert abs(profile.end_pwm) == moving_min
 
 
 def test_tc9_ac8_front_window_binds_fast_shed() -> None:
     """TC9 / AC8: the FRONT window (12.02) NOW BINDS the FAST shed.
 
-    After the PWM-floor / accel retune the natural FAST shed grew to
-    ``(speed_fast - pwm_min) / accel = (90 - 35) / 4 = 13.75 cm``, which now
+    The natural FAST shed against the KINETIC decel-tail floor is
+    ``(speed_fast - pwm_moving_min) / accel = (90 - 30) / 4 = 15 cm``, which
     EXCEEDS the ~12.02 cm front overshoot window (``LINE_SENSOR_AXLE_OFFSET_CM``).
     So a front-led-window resolve FITS the ``peak -> floor`` shed to the window:
     the decel spans exactly the window, the floor-crossing pins to the gate, the
     crawl tail is dropped, and the display ``end_pwm`` becomes the sign-corrected
-    floor (the firmware ramps peak -> floor, not to 0). Before the retune the
-    8 cm shed fit inside the window and this fit was a no-op.
+    KINETIC floor (the firmware ramps peak -> floor, not to 0) — the window-fit
+    solves against ``cfg.pwm_moving_min``, not the static breakaway floor.
     """
     from tools.path_planner.config_parse import (
         DEFAULT_CONFIG_H_PATH,
@@ -866,11 +877,12 @@ def test_tc9_ac8_front_window_binds_fast_shed() -> None:
     cfg = default_config()
     fast = cfg.speed_fast
     pwm_min = cfg.pwm_min
+    moving_min = cfg.pwm_moving_min
     front_window = parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", DEFAULT_CONFIG_H_PATH)
 
     # Precondition: the natural FAST shed now OVERRUNS the front window, so the
     # window-fit must actually fire (the mirror image of the old no-op case).
-    natural_shed = (fast - pwm_min) / cfg.accel
+    natural_shed = (fast - moving_min) / cfg.accel
     assert natural_shed > front_window, (
         f"natural shed {natural_shed} cm must exceed the front window "
         f"{front_window} cm for the window-fit to bind"
@@ -887,11 +899,11 @@ def test_tc9_ac8_front_window_binds_fast_shed() -> None:
 
     # Binding: the shed is compressed to the window — the decel spans exactly the
     # window, the floor-crossing pins to the gate, the crawl tail is dropped, and
-    # the display end_pwm ramps to the floor (not the 0-brake).
+    # the display end_pwm ramps to the kinetic floor (not the 0-brake).
     assert profile.decel_cm == pytest.approx(front_window)
     assert profile.floor_crossing_cm == pytest.approx(_AC8_STOP_DIST_CM)
     assert profile.floor_tail_cm == pytest.approx(0.0)
-    assert profile.end_pwm == pwm_min
+    assert profile.end_pwm == moving_min
 
     # Cross-check: an unfitted resolve (rear_window_cm=None) keeps the NATURAL
     # stop — a floor-crawl tail survives and end_pwm stays the 0-brake. The window
@@ -908,3 +920,88 @@ def test_tc9_ac8_front_window_binds_fast_shed() -> None:
     assert natural.end_pwm == 0
     assert profile.decel_cm != pytest.approx(natural.decel_cm)
     assert profile.floor_tail_cm != pytest.approx(natural.floor_tail_cm)
+
+
+# ---------------------------------------------------------------------------
+# TC11 — accel + cruise stay on the STATIC floor (phase-gating negative, AC7)
+# ---------------------------------------------------------------------------
+#
+# The kinetic decel-tail floor (PWM_MOVING_MIN) must apply ONLY in the profile
+# decel region (`velocity_at_s`'s `in_decel` gate). The accel ramp and the
+# cruise plateau must keep floor-ing at the STATIC breakaway floor
+# (PWM_MIN_MAGNITUDE), mirroring firmware `Drive::_decelTailFloorMag`. A move
+# whose `start_pwm` AND `cruise_pwm` are both set BELOW the static floor is the
+# only shape that can catch a kinetic-floor leak onto accel/cruise: if the
+# implementation wrongly floored those phases at the kinetic floor (30) the
+# displayed velocity would read low; the static floor (35) is the correct,
+# higher value.
+
+
+def test_tc11_accel_and_cruise_floor_at_static_not_kinetic_floor() -> None:
+    """TC11: accel-ramp and cruise-plateau display velocity floors at ``pwm_min``.
+
+    Builds a profiled move with ``start_pwm=10`` (below both floors) and
+    ``cruise_pwm=20`` (also below both floors, so the cruise plateau's raw PWM
+    magnitude is sub-floor and the floor clamp is actually exercised there too).
+    Both the early-accel sample (raw ``pwm_at_s`` well under 30) and a
+    mid-cruise sample must display at the STATIC floor's velocity
+    (``SCALE_CM_S_PER_PWM * pwm_min``), never the lower kinetic-floor velocity
+    (``SCALE_CM_S_PER_PWM * pwm_moving_min``) — guarding the phase gate in
+    :meth:`DriveProfile.velocity_at_s`.
+    """
+    cfg = load_profile_config()
+    assert cfg.pwm_moving_min < cfg.pwm_min, (
+        "the kinetic floor must be strictly below the static floor for this "
+        "test to distinguish the two"
+    )
+
+    profile = resolve_drive_profile(
+        40.0, cruise_pwm=20, start_pwm=10, end_pwm=0, profiled=True, cfg=cfg
+    )
+    # Precondition: this shape has a genuine cruise plateau to sample (not a
+    # collapsed triangle), and the raw peak/cruise PWM is itself sub-floor so
+    # the floor clamp is exercised (not merely a no-op above-floor value).
+    assert profile.cruise_cm > 0.0
+    assert abs(profile.peak_pwm) < cfg.pwm_moving_min
+
+    static_floor_v = SCALE_CM_S_PER_PWM * cfg.pwm_min
+    kinetic_floor_v = SCALE_CM_S_PER_PWM * cfg.pwm_moving_min
+
+    # Early accel-ramp sample: raw pwm_at_s is well below even the kinetic
+    # floor, so the displayed velocity must be the STATIC floor, not the
+    # (lower) kinetic floor.
+    assert abs(profile.pwm_at_s(0.0)) < cfg.pwm_moving_min
+    assert profile.velocity_at_s(0.0) == pytest.approx(static_floor_v)
+    assert profile.velocity_at_s(0.0) != pytest.approx(kinetic_floor_v)
+
+    # Mid-cruise sample: same guarantee on the plateau.
+    s_cruise = profile.accel_cm + profile.cruise_cm / 2.0
+    assert abs(profile.pwm_at_s(s_cruise)) < cfg.pwm_moving_min
+    assert profile.velocity_at_s(s_cruise) == pytest.approx(static_floor_v)
+    assert profile.velocity_at_s(s_cruise) != pytest.approx(kinetic_floor_v)
+
+
+# ---------------------------------------------------------------------------
+# TC13 — PWM_MOVING_MIN parses to 30 (AC1)
+# ---------------------------------------------------------------------------
+
+
+def test_tc13_pwm_moving_min_parses_to_30() -> None:
+    """TC13: ``PWM_MOVING_MIN`` parses to 30 through the CTPS config loader.
+
+    Mirrors how the sibling static floor (``PWM_MIN_MAGNITUDE`` / ``pwm_min``)
+    is pinned elsewhere in this module (e.g. ``test_doubling_tshape_accel_...``
+    asserts ``baseline_cfg.accel``): a plain sanity pin on
+    ``load_profile_config()``'s parsed field, plus the raw
+    :func:`parse_config_int` read against ``ConfigGlobal.h`` directly (the same
+    two-layer shape ``test_config_parse.py`` uses for ``PWM_MIN_MAGNITUDE``),
+    so a firmware retune of the seed value fails this test loudly rather than
+    silently drifting from the render.
+    """
+    from tools.path_planner.config_parse import parse_config_int
+
+    cfg = load_profile_config()
+    assert cfg.pwm_moving_min == 30
+
+    global_h = DEFAULT_CONFIG_H_PATH.parent / "ConfigGlobal.h"
+    assert parse_config_int("PWM_MOVING_MIN", global_h) == 30
