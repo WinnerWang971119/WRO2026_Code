@@ -44,7 +44,7 @@ namespace FieldMap
             Routes::EdgeType::NONE,         // type
             0.0f,                           // distance_cm
             0.0f,                           // heading_deg
-            Routes::LineMode::DEFAULT,      // line_mode_override
+            Routes::SpeedTier::DEFAULT,     // speed_override
             Routes::BlindMode::DEFAULT,     // blind_mode_override
             Routes::DirectionMode::DEFAULT, // direction_override
             Routes::StopAtLineMode::DEFAULT // stop_at_line_override
