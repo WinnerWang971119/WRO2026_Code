@@ -27,12 +27,16 @@ The stop is modelled, not integrated to infinity
 -------------------------------------------------
 Naively clocking each keyframe with ``dt = ds / (k * pwm(s))`` diverges when the
 end speed is 0 (the integral of ``ds/v`` near a linear zero is logarithmically
-infinite). Instead the physical velocity floors at the motor deadband:
-``v(s) = SCALE_CM_S_PER_PWM * max(|pwm(s)|, PWM_MIN_MAGNITUDE)``. Each ramp phase
-gets a CLOSED-FORM duration (a log term above the floor, a linear term inside
-the floor band). A profiled stop therefore renders as: decel ramp peak -> 50,
-then a constant-50 floor-crawl to move end, then an INSTANTANEOUS brake — a
-terminal keyframe that may share its predecessor's timestamp.
+infinite). Instead the physical velocity floors at the motor deadband. There are
+TWO floors, mirroring ``Drive::_decelTailFloorMag``: the STATIC breakaway floor
+``PWM_MIN_MAGNITUDE`` (35) on the accel ramp and cruise plateau, and the lower
+KINETIC decel-tail floor ``PWM_MOVING_MIN`` (<= 35) once the profile enters its
+decel region — ``v(s) = SCALE_CM_S_PER_PWM * max(|pwm(s)|, floor)``. Each ramp
+phase gets a CLOSED-FORM duration (a log term above the floor, a linear term
+inside the floor band). A profiled stop therefore renders as: decel ramp
+peak -> ``PWM_MOVING_MIN``, then a constant-``PWM_MOVING_MIN`` floor-crawl to
+move end, then an INSTANTANEOUS brake — a terminal keyframe that may share its
+predecessor's timestamp.
 
 Public API (see the plan Contracts, 2026-07-09 CTPS motion-profile spec)
 ------------------------------------------------------------------------
@@ -144,7 +148,8 @@ class ProfileConfig:
     ramp_min: float       # TSHAPE_RAMP_MIN_CM
     ramp_max: float       # TSHAPE_RAMP_MAX_CM
     no_ramp_eps: int      # TSHAPE_NO_RAMP_EPSILON_PWM
-    pwm_min: int          # PWM_MIN_MAGNITUDE (motor deadband floor, 50)
+    pwm_min: int          # PWM_MIN_MAGNITUDE (static breakaway floor, 35)
+    pwm_moving_min: int   # PWM_MOVING_MIN (kinetic decel-tail floor, <= pwm_min)
     pwm_max: int          # PWM_MAX (saturation cap, 95)
     start_speed: int      # TSHAPE_START_SPEED (= PWM_MIN_MAGNITUDE)
     min_move_cm: float    # TSHAPE_MIN_MOVE_CM (5) — profiled/flat regime gate
@@ -176,7 +181,8 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
       ``WALL_STOP_*`` / ``SPEED_*`` / ``TRACK_MM`` knobs, the
       ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` rear overshoot window (AC8 window-fit),
       plus the symbolic ``TSHAPE_START_SPEED = PWM_MIN_MAGNITUDE``.
-    - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` / ``PWM_MAX``.
+    - ``ConfigGlobal.h``: ``PWM_MIN_MAGNITUDE`` (static breakaway floor) /
+      ``PWM_MOVING_MIN`` (kinetic decel-tail floor) / ``PWM_MAX``.
     - ``ConfigLine.h``: ``CRUISE_SPEED = SPEED_NORMAL`` (symbolic).
     - ``ConfigNav.h``: ``HOP_SETTLE_MS``, whose ``constexpr uint32_t`` RHS is the
       symbolic identifier ``HOP_SETTLE_MS_DEFAULT`` — resolved one level deep
@@ -221,6 +227,7 @@ def load_profile_config(config_path: Path = DEFAULT_CONFIG_H_PATH) -> ProfileCon
         ramp_max=parse_config_float("TSHAPE_RAMP_MAX_CM", config_path),
         no_ramp_eps=parse_config_int("TSHAPE_NO_RAMP_EPSILON_PWM", config_path, search),
         pwm_min=parse_config_int("PWM_MIN_MAGNITUDE", global_h, search),
+        pwm_moving_min=parse_config_int("PWM_MOVING_MIN", global_h, search),
         pwm_max=parse_config_int("PWM_MAX", global_h, search),
         start_speed=parse_config_int("TSHAPE_START_SPEED", config_path, search),
         min_move_cm=parse_config_float("TSHAPE_MIN_MOVE_CM", config_path),
@@ -498,11 +505,14 @@ def deadband_snap(pwm: int, pwm_min: int, pwm_max: int) -> int:
 # ==============================================================================
 #
 # Velocity model (display-only, float64):
-#   v(s) = SCALE_CM_S_PER_PWM * max(|pwm(s)|, PWM_MIN_MAGNITUDE)
-# where pwm(s) is LINEAR in distance along a ramp. The duration of a ramp is
-# the closed-form integral of ds/v(s), split at the point where |pwm| crosses
-# the deadband floor. This is what makes an endSpeed=0 stop FINITE (the naive
-# dt = ds/(k*pwm) diverges near a linear zero).
+#   v(s) = SCALE_CM_S_PER_PWM * max(|pwm(s)|, floor)
+# where pwm(s) is LINEAR in distance along a ramp and `floor` is the STATIC
+# breakaway floor (PWM_MIN_MAGNITUDE) on the accel ramp / cruise plateau, or the
+# lower KINETIC decel-tail floor (PWM_MOVING_MIN) on the decel ramp / floor-crawl
+# tail (mirrors Drive::_decelTailFloorMag). The duration of a ramp is the
+# closed-form integral of ds/v(s), split at the point where |pwm| crosses that
+# floor. This is what makes an endSpeed=0 stop FINITE (the naive dt = ds/(k*pwm)
+# diverges near a linear zero).
 
 
 def _linear_ramp_duration(
@@ -532,7 +542,10 @@ def _linear_ramp_duration(
     :param mag0: |PWM| at the ramp start.
     :param mag1: |PWM| at the ramp end.
     :param scale: cm/s per PWM unit (``SCALE_CM_S_PER_PWM``); > 0.
-    :param floor: deadband floor magnitude (``PWM_MIN_MAGNITUDE``); > 0.
+    :param floor: deadband floor magnitude to integrate against; the caller
+        passes the STATIC breakaway floor (``PWM_MIN_MAGNITUDE``) for an accel
+        ramp or the KINETIC decel-tail floor (``PWM_MOVING_MIN``) for a decel
+        ramp; > 0.
     :return: non-negative ramp duration in seconds.
     """
     if length_cm <= 0.0:
@@ -595,10 +608,10 @@ class DriveProfile:
     Produced by :func:`resolve_drive_profile`. Distances are along the move in
     cm; PWM is the signed pre-snap setpoint. Phase layout along ``[0, dist_cm]``:
 
-        [0, accel_cm)                 ramp up   start_pwm -> peak_pwm
-        [accel_cm, accel_cm+cruise_cm) cruise   hold at peak_pwm
-        [.., floor_crossing_cm)       ramp down peak_pwm -> floor
-        [floor_crossing_cm, dist_cm)  floor-crawl at PWM_MIN_MAGNITUDE
+        [0, accel_cm)                 ramp up   start_pwm -> peak_pwm (static floor)
+        [accel_cm, accel_cm+cruise_cm) cruise   hold at peak_pwm (static floor)
+        [.., floor_crossing_cm)       ramp down peak_pwm -> kinetic floor
+        [floor_crossing_cm, dist_cm)  floor-crawl at PWM_MOVING_MIN (kinetic floor)
         dist_cm                       terminal brake (instantaneous)
 
     ``profiled=False`` (flat, or a ``< min_move_cm`` move) collapses to a single
@@ -673,10 +686,14 @@ class DriveProfile:
     def velocity_at_s(self, s: float) -> float:
         """Display velocity (cm/s) at distance ``s`` — PWM floored at the deadband.
 
-        ``v(s) = SCALE_CM_S_PER_PWM * max(|pwm_at_s(s)|, PWM_MIN_MAGNITUDE)``.
-        The floor is what keeps a stop finite: at the end of a profiled move the
-        PWM ramps to 0 but the chassis still crawls at ``PWM_MIN_MAGNITUDE`` until
-        the terminal brake.
+        ``v(s) = SCALE_CM_S_PER_PWM * max(|pwm_at_s(s)|, floor)``, where ``floor``
+        is the KINETIC floor (``PWM_MOVING_MIN``) once ``s`` is in the decel
+        region, and the STATIC breakaway floor (``PWM_MIN_MAGNITUDE``) on the
+        accel ramp and the cruise plateau — mirroring the firmware's
+        ``Drive::_decelTailFloorMag`` (kinetic floor applies ONLY in the profile
+        decel region). The floor is what keeps a stop finite: at the end of a
+        profiled move the PWM ramps to 0 but the chassis still crawls at the
+        decel-tail floor until the terminal brake.
 
         Uses the int-truncated kernel PWM (:meth:`pwm_at_s`) so a displayed
         velocity readout matches the firmware setpoint at that point. Phase
@@ -688,7 +705,10 @@ class DriveProfile:
         :return: strictly-positive display velocity in cm/s.
         """
         mag = abs(self.pwm_at_s(s))
-        floored = max(mag, self._cfg.pwm_min)
+        decel_start = self.dist_cm - self.decel_cm
+        in_decel = self.decel_cm > 0.0 and s >= decel_start
+        floor = self._cfg.pwm_moving_min if in_decel else self._cfg.pwm_min
+        floored = max(mag, floor)
         return SCALE_CM_S_PER_PWM * floored
 
     def _pwm_mag_exact_at_s(self, s: float) -> float:
@@ -748,7 +768,12 @@ class DriveProfile:
         """
         cfg = self._cfg
         scale = SCALE_CM_S_PER_PWM
+        # Static breakaway floor — accel ramp and cruise plateau. The decel side
+        # (ramp-down + floor-crawl tail) instead floors at the KINETIC decel-tail
+        # floor (PWM_MOVING_MIN), mirroring Drive::_decelTailFloorMag: the kinetic
+        # floor applies ONLY in the profile decel region.
         floor = float(cfg.pwm_min)
+        decel_floor = float(cfg.pwm_moving_min)
 
         if self.dist_cm <= 0.0:
             return []
@@ -758,40 +783,41 @@ class DriveProfile:
             return [(0.0, self.dist_cm, self.dist_cm / (scale * mag))]
 
         segments: List[Tuple[float, float, float]] = []
-        # Ramp-up: start_pwm -> peak_pwm over [0, accel_cm).
+        # Ramp-up: start_pwm -> peak_pwm over [0, accel_cm). Static floor.
         a_end = self.accel_cm
         if a_end > 0.0:
             dur = _linear_ramp_duration(
                 a_end, abs(self.start_pwm), abs(self.peak_pwm), scale, floor
             )
             segments.append((0.0, a_end, dur))
-        # Cruise: constant peak over [accel_cm, accel_cm + cruise_cm).
+        # Cruise: constant peak over [accel_cm, accel_cm + cruise_cm). Static floor.
         c_end = a_end + self.cruise_cm
         if self.cruise_cm > 0.0:
             mag = max(abs(self.peak_pwm), cfg.pwm_min)
             segments.append((a_end, c_end, self.cruise_cm / (scale * mag)))
-        # Ramp-down above the floor: peak -> max(|end_pwm|, floor) over
+        # Ramp-down above the floor: peak -> max(|end_pwm|, decel_floor) over
         # [c_end, floor_crossing_cm). Timing the descent to the TRUE end magnitude
         # (not always the deadband floor) keeps duration_s() consistent with the
         # interior keyframes, whose _pwm_mag_exact_at_s ramps to |end_pwm|. When the
         # move ends at/above the floor (e.g. setEndSpeed(60)) floor_crossing_cm ==
         # dist_cm (no crawl tail), so this spans the whole decel and lands on
-        # |end_pwm|; when it ends below the floor the ramp still bottoms at the floor
-        # and the floor-crawl tail below carries the rest. The end=0 stop is unchanged.
+        # |end_pwm|; when it ends below the floor the ramp still bottoms at the
+        # KINETIC floor and the floor-crawl tail below carries the rest. The end=0
+        # stop is unchanged in shape, only the floor value moves.
         above_len = self.floor_crossing_cm - c_end
         if above_len > 0.0:
-            decel_target = max(abs(self.end_pwm), floor)
+            decel_target = max(abs(self.end_pwm), decel_floor)
             dur = _linear_ramp_duration(
-                above_len, abs(self.peak_pwm), decel_target, scale, floor
+                above_len, abs(self.peak_pwm), decel_target, scale, decel_floor
             )
             segments.append((c_end, self.floor_crossing_cm, dur))
-        # Floor-crawl tail: constant floor over [floor_crossing_cm, dist_cm).
+        # Floor-crawl tail: constant KINETIC floor over [floor_crossing_cm, dist_cm).
         if self.floor_tail_cm > 0.0:
             segments.append(
                 (
                     self.floor_crossing_cm,
                     self.dist_cm,
-                    self.floor_tail_cm / (scale * floor),
+                    self.floor_tail_cm / (scale * decel_floor),
                 )
             )
         return segments
@@ -834,13 +860,15 @@ def resolve_drive_profile(
     zero-velocity move whose display velocity still floors at the deadband.
 
     The floor-crossing distance is found by walking the decel ramp: it is where
-    the pre-snap PWM magnitude first drops to ``pwm_min``. From that point to
-    ``dist_cm`` the chassis crawls at the floor, then brakes.
+    the pre-snap PWM magnitude first drops to the KINETIC decel-tail floor
+    (``pwm_moving_min``), mirroring ``Drive::_decelTailFloorMag``. From that
+    point to ``dist_cm`` the chassis crawls at that kinetic floor, then brakes.
 
     LineFollower window-fit (AC8 / TC9)
     -----------------------------------
-    A braked stop sheds ``peak -> PWM_MIN_MAGNITUDE`` (the floor) then brakes; the
-    natural shed distance is ``(|peak| - floor) / accel`` (8 cm at FAST cruise 90).
+    A braked stop sheds ``peak -> PWM_MOVING_MIN`` (the kinetic decel-tail floor)
+    then brakes; the natural shed distance is ``(|peak| - floor) / accel`` (8 cm
+    at FAST cruise 90, floor = the kinetic floor).
     A REAR-led final hop only has ``LINE_SENSOR_AXLE_OFFSET_REAR_CM`` (~7.68 cm) of
     overshoot window, so the firmware FITS the ramp-down to the window
     (``LineFollower.cpp:287-301``: ``rampDownCm = min(defaultRampCm, window)``) — a
@@ -928,7 +956,7 @@ def resolve_drive_profile(
         cruise_cm = 0.0
 
     floor_crossing_cm = _decel_floor_crossing(
-        dist, accel_cm, decel_cm, peak_pwm, start_pwm, end_pwm, cfg.pwm_min
+        dist, accel_cm, decel_cm, peak_pwm, start_pwm, end_pwm, cfg.pwm_moving_min
     )
     floor_tail_cm = dist - floor_crossing_cm
     if floor_tail_cm < 0.0:
@@ -957,7 +985,7 @@ def resolve_drive_profile(
             floor_crossing_cm,
             floor_tail_cm,
             float(rear_window_cm),
-            cfg.pwm_min,
+            cfg.pwm_moving_min,
         )
 
     return DriveProfile(
@@ -986,7 +1014,7 @@ def _window_fit_stop(
     floor_crossing_cm: float,
     floor_tail_cm: float,
     rear_window_cm: float,
-    pwm_min: int,
+    floor_mag: int,
 ) -> Tuple[float, float, float, float, int]:
     """Reshape a braked stop's display decel to the LineFollower window-fit (AC8).
 
@@ -1002,6 +1030,8 @@ def _window_fit_stop(
     the crawl tail is dropped, and the display ``end_pwm`` is set to the
     sign-corrected floor so the decel display segment ramps ``peak -> floor`` (not
     to 0) and lands at floor speed at the gate, matching the firmware ramp-down.
+    ``floor_mag`` is the KINETIC decel-tail floor (``PWM_MOVING_MIN``) the caller
+    passes for a braked stop — the window-fit ends at that kinetic floor (TC10).
 
     :param dist_cm: total move distance (cm).
     :param accel_cm: the resolved ramp-up distance (unchanged by the fit).
@@ -1012,13 +1042,14 @@ def _window_fit_stop(
     :param floor_tail_cm: the resolved natural floor-crawl tail length.
     :param rear_window_cm: the available rear overshoot window (cm); non-positive
         or larger-than-natural leaves the shed unchanged.
-    :param pwm_min: the deadband floor magnitude.
+    :param floor_mag: the floor magnitude to fit/solve against (the caller passes
+        the kinetic decel-tail floor for a braked stop).
     :return: ``(decel_cm, cruise_cm, floor_crossing_cm, floor_tail_cm,
         eff_end_pwm)`` — the reshaped display fields; identical to the passed-in
         natural values (with ``eff_end_pwm == 0``) when no fit is needed.
     """
     peak_mag = abs(int(peak_pwm))
-    floor = float(pwm_min)
+    floor = float(floor_mag)
 
     # The natural above-floor shed (peak -> floor) of the resolved decel ramp: the
     # fraction of the peak->0 ramp spent above the floor. A peak already at/below
@@ -1041,7 +1072,7 @@ def _window_fit_stop(
         fitted_cruise_cm = 0.0
     # End at the floor (sign-corrected) so the display decel ramps peak -> floor
     # and lands at floor speed at the gate, then brakes.
-    eff_end_pwm = -int(pwm_min) if peak_pwm < 0 else int(pwm_min)
+    eff_end_pwm = -int(floor_mag) if peak_pwm < 0 else int(floor_mag)
     return fitted_decel, fitted_cruise_cm, dist_cm, 0.0, eff_end_pwm
 
 
@@ -1052,21 +1083,22 @@ def _decel_floor_crossing(
     peak_pwm: int,
     start_pwm: int,
     end_pwm: int,
-    pwm_min: int,
+    floor_mag: int,
 ) -> float:
     """Distance at which the decel ramp's |PWM| first drops to the deadband floor.
 
-    From this distance to ``dist_cm`` the chassis crawls at ``pwm_min`` (the
+    From this distance to ``dist_cm`` the chassis crawls at ``floor_mag`` (the
     floor-crawl tail) before the terminal brake. If the move never rises above /
     never drops to the floor on the decel side (e.g. ``end_pwm`` magnitude is
     already >= floor, so there is no sub-floor tail), the crossing is ``dist_cm``
-    (no tail).
+    (no tail). The caller passes the KINETIC decel-tail floor (``PWM_MOVING_MIN``)
+    for this crossing, mirroring ``Drive::_decelTailFloorMag``.
 
     The decel ramp is linear in distance from ``peak_pwm`` at
     ``dist_cm - decel_cm`` to ``end_pwm`` at ``dist_cm``. Solve for where its
-    magnitude equals ``pwm_min``. Uses the display (float64) linear PWM, not the
-    int-truncated :func:`tshape_speed_at`, so the crossing is smooth; the tiny
-    difference from the int-cast curve is display-only and sub-pixel.
+    magnitude equals ``floor_mag``. Uses the display (float64) linear PWM, not
+    the int-truncated :func:`tshape_speed_at`, so the crossing is smooth; the
+    tiny difference from the int-cast curve is display-only and sub-pixel.
 
     :param dist_cm: total move distance (cm).
     :param accel_cm: resolved ramp-up distance.
@@ -1074,7 +1106,8 @@ def _decel_floor_crossing(
     :param peak_pwm: signed peak PWM.
     :param start_pwm: signed start PWM.
     :param end_pwm: signed end PWM.
-    :param pwm_min: deadband floor magnitude.
+    :param floor_mag: the floor magnitude to solve against (the caller passes the
+        kinetic decel-tail floor).
     :return: the floor-crossing distance in ``[0, dist_cm]``.
     """
     # No decel ramp (chained no-ramp move): the crawl tail exists only if the
@@ -1087,17 +1120,17 @@ def _decel_floor_crossing(
     end_mag = abs(end_pwm)
 
     # The decel ramp descends peak_mag -> end_mag over the last decel_cm.
-    if end_mag >= pwm_min:
+    if end_mag >= floor_mag:
         # Never drops below the floor — no sub-floor crawl tail.
         return dist_cm
-    if peak_mag <= pwm_min:
+    if peak_mag <= floor_mag:
         # Whole decel ramp is already at/below the floor: the crawl tail begins
         # at the start of the decel ramp.
         return dist_cm - decel_cm
 
     # Linear descent from peak_mag to end_mag; find the fraction into the ramp
-    # where the magnitude hits pwm_min.
-    frac = (peak_mag - pwm_min) / (peak_mag - end_mag)
+    # where the magnitude hits floor_mag.
+    frac = (peak_mag - floor_mag) / (peak_mag - end_mag)
     return (dist_cm - decel_cm) + frac * decel_cm
 
 
@@ -1591,19 +1624,32 @@ def _cumulative_time_fn(profile: DriveProfile):
     makes the keyframe timestamps follow the PROFILE (dense in time near the
     ramps, where velocity is low) rather than a uniform clock.
 
+    Each phase's partial duration integrates against ITS OWN floor — the static
+    breakaway floor (``pwm_min``) for the accel ramp / cruise plateau, the
+    kinetic decel-tail floor (``pwm_moving_min``) for the decel ramp / floor-crawl
+    tail — so an interior keyframe landing inside the decel phase is timed
+    consistently with that phase's own closed-form duration (:meth:`DriveProfile.
+    _phase_segments`), preserving the "partials sum to the full duration"
+    invariant.
+
     :param profile: the resolved drive profile.
     :return: a callable ``time_at(s) -> float`` non-decreasing over ``[0, dist]``.
     """
     segments = profile._phase_segments()
     cfg = profile._cfg
     scale = SCALE_CM_S_PER_PWM
-    floor = float(cfg.pwm_min)
+    static_floor = float(cfg.pwm_min)
+    decel_floor = float(cfg.pwm_moving_min)
+    decel_start = profile.dist_cm - profile.decel_cm
 
-    # Precompute the cumulative time at the START of each segment.
-    starts: List[Tuple[float, float, float, float]] = []  # (s0, s1, t0_seg, dur)
+    # Precompute the cumulative time at the START of each segment, along with the
+    # floor that segment integrates against (kinetic on the decel side, static
+    # elsewhere).
+    starts: List[Tuple[float, float, float, float, float]] = []  # (s0, s1, t0_seg, dur, floor)
     t_acc = 0.0
     for (s0, s1, dur) in segments:
-        starts.append((s0, s1, t_acc, dur))
+        seg_floor = decel_floor if (profile.decel_cm > 0.0 and s0 >= decel_start) else static_floor
+        starts.append((s0, s1, t_acc, dur, seg_floor))
         t_acc += dur
     total_t = t_acc
 
@@ -1612,13 +1658,13 @@ def _cumulative_time_fn(profile: DriveProfile):
             return 0.0
         if s >= profile.dist_cm:
             return total_t
-        for (s0, s1, t0_seg, dur) in starts:
+        for (s0, s1, t0_seg, dur, seg_floor) in starts:
             if s <= s1 or (s1 == s0):
                 if s <= s0:
                     return t0_seg
                 # Partial closed-form duration from s0 to s within this phase.
                 return t0_seg + _partial_phase_duration(
-                    profile, s0, s1, s, scale, floor
+                    profile, s0, s1, s, scale, seg_floor
                 )
         return total_t
 
@@ -1646,7 +1692,9 @@ def _partial_phase_duration(
     :param s1: phase end distance.
     :param s: the interior distance (``s0 <= s <= s1``).
     :param scale: cm/s per PWM unit.
-    :param floor: deadband floor magnitude.
+    :param floor: deadband floor magnitude for THIS phase — the caller passes
+        the kinetic decel-tail floor on the decel side, the static breakaway
+        floor elsewhere (see :func:`_cumulative_time_fn`).
     :return: non-negative partial duration in seconds.
     """
     if s <= s0 or s1 <= s0:
