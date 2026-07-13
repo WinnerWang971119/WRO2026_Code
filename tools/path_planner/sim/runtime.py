@@ -3460,20 +3460,22 @@ class PathTrackerSim:
                 cruise_mag = _speed_tier_to_pwm(resolve_speed(edge, cfg))
 
                 # `entry_pwm`: captured cruise after a pass-through (ADR-023 carry,
-                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. The captured
-                # cruise is MODELED here as SPEED_NORMAL, which matches the firmware
-                # exactly only when the preceding LINE hop ran the NORMAL tier (the
-                # all-NORMAL parity field). For a non-NORMAL line-into-blind
-                # pass-through the firmware carries its true per-tier LineFollower
-                # cruise; reconciling this seed to the previous hop's resolved tier is
-                # finalized with the firmware pass-through seed (T7) so the two
-                # surfaces stay in parity. Regardless, the seed is CLAMPED to this
-                # hop's resolved cruise so a fast entry into a slower blind hop never
-                # exceeds the hop's own cruise (ADR-064 / AC12: a FAST line into a SLOW
-                # blind enters at <= 60). The cold-start seed (TSHAPE_START_SPEED = 35)
-                # is already below every tier, so only the pass-through branch needs
-                # the clamp. `resolve_chain_speeds` re-clamps into [pwm_min, |cruise|]
-                # on top.
+                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. KNOWN
+                # SIM LIMITATION (pre-existing, not introduced by ADR-064): the sim
+                # does not model per-tier LineFollower presets, so it models the
+                # captured cruise as SPEED_NORMAL. The firmware carries the TRUE
+                # inbound tier (`presetToPwm(LineFollower.getPreset())`), so for a
+                # non-NORMAL LINE-into-BLIND pass-through the firmware entry speed can
+                # exceed this model (a FAST line into a FAST blind enters at 90 on the
+                # robot, 70 here). The all-NORMAL parity field keeps the two surfaces
+                # in agreement; closing the gap (seed from the previous hop's resolved
+                # tier) is a deferred sim-fidelity follow-up. Regardless, the seed is
+                # CLAMPED to this hop's resolved cruise so a fast entry into a slower
+                # blind hop never exceeds the hop's own cruise (ADR-064 / AC12: a FAST
+                # line into a SLOW blind enters at <= 60). The cold-start seed
+                # (TSHAPE_START_SPEED = 35) is already below every tier, so only the
+                # pass-through branch needs the clamp. `resolve_chain_speeds` re-clamps
+                # into [pwm_min, |cruise|] on top.
                 if pass_through_active:
                     entry_mag = min(SPEED_NORMAL, cruise_mag)
                 else:
