@@ -29,7 +29,7 @@ the module-level attributes the existing
       "pivot_turns":           [["<u>", "<v>", "<w>"], ...],
       "RESET_NODES":           {"<name>": {"axis": "x"|"y", "wall_coord": <float>, "facing": <float in [0, 360)>}, ...},
       "blind_projection_auto_seek": <bool>,
-      "pipeline_line_mode":      "<LineMode name>",
+      "pipeline_speed":          "<SpeedTier name>",
       "pipeline_blind_mode":     "<BlindMode name>",
       "pipeline_turn_mode":      "<TurnMode name>",
       "pipeline_direction_mode": "<DirectionMode name>",
@@ -50,21 +50,25 @@ re-localization. Unlike the array-of-arrays fields above, its values are
 plain JSON objects (no tuple conversion applies); they round-trip through the
 loader unchanged.
 
-``EDGES`` is the per-edge override overlay (ADR-047, superseding ADR-022's
-"JSON can't hold the enums" clause). It is a list of override-only objects, each
+``EDGES`` is the per-edge override overlay (ADR-064, superseding ADR-047's
+overloaded ``primitive_mode`` encoding and ADR-022's "JSON can't hold the
+enums" clause). It is a list of override-only objects, each
 ``{"type": "LINE"|"BLIND", "u", "v"}`` plus any of the optional override keys
-``primitive_mode`` (an enum member NAME string -- ``"FAST"``, ``"GYRO_TSHAPE"``,
-... -- the validator/header resolve to a ``LineMode`` / ``BlindMode`` member),
-``direction`` (``"front"|"rear"``), and ``stop_at_line`` (``"on"|"off"``).
-Geometry (``distance_cm`` / ``heading_deg``) is OPTIONAL -- derived from node
-coords downstream when absent; only legacy hand-authored entries carry it, and
-they round-trip verbatim. EDGES entries are dicts, so the tuple discipline below
+``speed`` (a uniform ``SpeedTier`` member NAME string -- ``"SLOW"``,
+``"NORMAL"``, ``"FAST"`` -- applies to both LINE and BLIND edges), ``mode``
+(a type-switched member NAME string -- LINE resolves against
+``LineFollowMode``, BLIND against ``BlindMode``), ``direction``
+(``"front"|"rear"``), and ``stop_at_line`` (``"on"|"off"``). Geometry
+(``distance_cm`` / ``heading_deg``) is OPTIONAL -- derived from node coords
+downstream when absent; only legacy hand-authored entries carry it, and they
+round-trip verbatim. EDGES entries are dicts, so the tuple discipline below
 does NOT apply -- they pass through :func:`load_field_json` unchanged.
 
 The four ``pipeline_*`` keys are the field-sourced PIPELINE_CONFIG defaults
-(ADR-047): each is an enum member NAME string (``"NORMAL"``, ``"SYNC_TSHAPE"``,
-...) or absent (= inherit the ``pipeline_config.py`` default). ``EDGES`` and the
-four ``pipeline_*`` keys are optional (absent-stays-absent on round-trip).
+(ADR-064, ``pipeline_speed`` was ``pipeline_line_mode`` under ADR-047): each is
+an enum member NAME string (``"NORMAL"``, ``"SYNC_TSHAPE"``, ...) or absent
+(= inherit the ``pipeline_config.py`` default). ``EDGES`` and the four
+``pipeline_*`` keys are optional (absent-stays-absent on round-trip).
 
 Tuple-vs-list discipline
 ------------------------
@@ -126,7 +130,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "pivot_turns",
     "RESET_NODES",
     "blind_projection_auto_seek",
-    "pipeline_line_mode",
+    "pipeline_speed",
     "pipeline_blind_mode",
     "pipeline_turn_mode",
     "pipeline_direction_mode",
@@ -141,7 +145,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
 # ``pivot_turns`` (per-turn single-wheel pivots), ``RESET_NODES`` (wall-zero
 # reset nodes), ``blind_projection_auto_seek`` (the field-wide BLIND->PROJECTION
 # auto-seek flag, emitted only when set to its non-default ``False``), the four
-# ``pipeline_*`` mode defaults (ADR-047 field-sourced PIPELINE_CONFIG; absent =
+# ``pipeline_*`` mode defaults (ADR-064 field-sourced PIPELINE_CONFIG; absent =
 # inherit the pipeline_config.py default), and ``EDGES`` (the override-only
 # per-edge overlay; absent = no overrides). Without this membership the dump
 # writer would drop a key the editor tracks -- ``_build_ordered_payload`` only
@@ -151,7 +155,7 @@ _OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "pivot_turns",
         "RESET_NODES",
         "blind_projection_auto_seek",
-        "pipeline_line_mode",
+        "pipeline_speed",
         "pipeline_blind_mode",
         "pipeline_turn_mode",
         "pipeline_direction_mode",

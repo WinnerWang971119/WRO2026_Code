@@ -26,10 +26,10 @@ Behaviour
    values are passed through verbatim so numeric types (``int`` vs ``float``)
    survive the round-trip and the loaded module attributes compare equal by
    ``repr`` to their pre-migration counterparts.  A legacy Python ``EDGES``
-   literal is carried INTO the JSON ``"EDGES"`` key (ADR-047): each entry is
-   reduced to an override-only string-tag dict ``{type, u, v, primitive_mode?,
-   direction?, stop_at_line?}`` -- enum-instance ``primitive_mode`` overrides are
-   converted to their member-name strings, the ``DEFAULT`` sentinel is dropped
+   literal is carried INTO the JSON ``"EDGES"`` key (ADR-064): each entry is
+   reduced to an override-only string-tag dict ``{type, u, v, speed?, mode?,
+   direction?, stop_at_line?}`` -- enum-instance ``speed`` / ``mode`` overrides
+   are converted to their member-name strings, the ``DEFAULT`` sentinel is dropped
    (absence already means inherit), and derived geometry (``distance_cm`` /
    ``heading_deg``) is dropped (it is re-derived from node coords downstream).
 #. **Source rewrite** -- ``field_data.py`` is rebuilt from a generated header
@@ -256,14 +256,14 @@ _EDGE_REQUIRED_KEYS: tuple[str, ...] = ("type", "u", "v")
 
 # Optional per-edge override keys carried into the JSON (string tags). Geometry
 # is intentionally NOT here -- it is derived, not migrated.
-_EDGE_OVERRIDE_KEYS: tuple[str, ...] = ("primitive_mode", "direction", "stop_at_line")
+_EDGE_OVERRIDE_KEYS: tuple[str, ...] = ("speed", "mode", "direction", "stop_at_line")
 
 
 def _edge_to_override_dict(entry: dict[str, Any]) -> dict[str, Any]:
     """Reduce a legacy ``EDGES`` entry to an override-only JSON string-tag dict.
 
     Carries the required identity keys (``type`` / ``u`` / ``v``) verbatim and
-    the optional override keys (``primitive_mode`` / ``direction`` /
+    the optional override keys (``speed`` / ``mode`` / ``direction`` /
     ``stop_at_line``) when present, converting any enum-instance value to its
     member-name string (JSON cannot hold an enum). The ``DEFAULT`` sentinel is
     dropped -- absence already means "inherit the pipeline default", and the
@@ -302,8 +302,8 @@ def _enum_name(value: Any) -> Any:
     """Return an enum value's member name, or the value unchanged otherwise.
 
     JSON cannot serialise an ``enum.Enum`` instance; the project encodes a
-    per-edge ``primitive_mode`` override as its member-name string (e.g.
-    ``LineMode.FAST`` -> ``"FAST"``). A value that is already a plain string or
+    per-edge ``speed`` / ``mode`` override as its member-name string (e.g.
+    ``SpeedTier.FAST`` -> ``"FAST"``). A value that is already a plain string or
     scalar passes through untouched.
 
     :param value: A field value from an ``EDGES`` entry.
