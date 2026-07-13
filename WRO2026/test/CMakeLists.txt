@@ -360,6 +360,59 @@ function(add_path_force_includes target)
     endif()
 endfunction()
 
+# -----------------------------------------------------------------------------------------
+# Force-include the peripheral mocks a REAL-linked `LineFollower.cpp` build needs BEFORE any
+# source-file parsing — a SMALLER sibling of `add_path_force_includes` for the kinetic
+# decel-tail-floor real-`Drive.cpp`+real-`LineFollower.cpp` target
+# (`test_line_follower_real_setspeed`, T7 of docs/plans/2026-07-12-kinetic-decel-tail-floor.md).
+#
+# THE ONE LOAD-BEARING DIFFERENCE from `add_path_force_includes`: this helper OMITS
+# `${PATH_MOCKS_DIR}/LineFollower.h`. That mock defines a MOCK `LineFollowerClass` /
+# `LineFollower` global sharing the production `LINEFOLLOWER_H` guard — exactly what the five
+# PathTracker+Drive targets want (they only *command* LineFollower, never run its P+D math).
+# T7 is the opposite case: it links the REAL `LineFollower.cpp` as ITS subject-under-test (the
+# whole point is asserting the value that flows `LineFollower.update() -> Drive.setSpeed(...,
+# floorMag) -> deadbandSnap -> MiniR4.DriveDC.Move`), so force-including the mock would collide
+# with the real class definition the target compiles. Do NOT add it here.
+#
+# What IS force-included (identical set/order to `add_path_force_includes`, minus LineFollower):
+#   - `${HAL_MOCKS_DIR}/EventTrace.h`      (guard `EVENTTRACE_H`) — real Drive.cpp/LineFollower.cpp
+#     do not call EventTrace today, but this mirrors the sibling helper defensively (cheap, and
+#     keeps the two helpers structurally parallel for future EventTrace call sites).
+#   - `${PATH_MOCKS_DIR}/WROLineArray.h`   (guard `WROLINEARRAY_H`) — real `Drive.cpp` reads
+#     `LineArray.getJunctionType()` / calls `setReverseActive(...)`; real `LineFollower.cpp`
+#     reads `getError()` / `isOnline()` / `getJunctionType()`.
+#   - `${PATH_MOCKS_DIR}/Intersection.h`   (guard `INTERSECTION_H`) — real `LineFollower.cpp`
+#     `#include`s the production `Intersection.h` (for `waitUntilIntersection()`'s
+#     `Intersection.isAtIntersection()` call); this shadows it with the thin path mock so the
+#     target does not also need to link real `Intersection.cpp` (which binds `WROLineArrayClass`
+#     directly and would double up the sensor surface already mocked above).
+#
+# NO `MatrixMiniR4.h` / `Drive.h` / `LineFollower.h` force-include: `<MatrixMiniR4.h>` /
+# `<Arduino.h>` are angle-bracket includes with no `${SKETCH_DIR}` counterpart, so the
+# `${HAL_MOCKS_DIR}`-on-the-include-path order alone resolves them; `Drive.h` / `LineFollower.h`
+# must resolve to the REAL sketch headers (THE INVERSION — `${SKETCH_DIR}` leads the target's
+# include dirs), so they are never force-included here.
+# -----------------------------------------------------------------------------------------
+function(add_line_follower_real_force_includes target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${HAL_MOCKS_DIR}/EventTrace.h"
+            "/FI${PATH_MOCKS_DIR}/WROLineArray.h"
+            "/FI${PATH_MOCKS_DIR}/Intersection.h"
+        )
+    else()
+        # `SHELL:` keeps each `-include <path>` pair atomic — see the note in
+        # `add_mock_force_includes` for why CMake de-dup would otherwise collapse the three to
+        # one and break the build (`cannot specify -o with -c ... multiple files`).
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${HAL_MOCKS_DIR}/EventTrace.h"
+            "SHELL:-include ${PATH_MOCKS_DIR}/WROLineArray.h"
+            "SHELL:-include ${PATH_MOCKS_DIR}/Intersection.h"
+        )
+    endif()
+endfunction()
+
 # =========================================================================================
 # Test executable #1 — LineFollower overshoot / brake-on-gate / junction-freeze.
 # Exercises T10a, T10b, T10d (AC6 + AC9).
@@ -2145,3 +2198,121 @@ add_test(NAME config_hop_settle_ceiling_compile_fail
 )
 set_tests_properties(config_hop_settle_ceiling_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "Config::HOP_SETTLE_MS must be <= 2000 ms")
+
+# =========================================================================================
+# Test executable #29 — LineFollower stop ramp-down / mid-follow floor, REAL Drive.cpp-linked
+# (docs/plans/2026-07-12-kinetic-decel-tail-floor.md, T7, TC7 / AC4).
+#
+# THE FALSE-GREEN TRAP this target exists to close: `test_line_follower_overshoot` (executable
+# #1, above) links the MOCK `DriveClass` (`mocks/Drive.h`), whose `setSpeed(...)` just RECORDS
+# the value LineFollower passed in — the PRE-snap value. A test of the kinetic-floor snap
+# written against that mock would false-green: it would never actually run
+# `Drive::setSpeed`'s `_applyBias` + `deadbandSnap(L/R, floorMag)` call, so a bug that dropped
+# `floorMag` on the wire (or wired the wrong constant) would still "pass". This target instead
+# links the REAL `Drive.cpp` so the full production chain runs on every tick:
+#   `LineFollower.update() -> Drive.setSpeed(L, R, stopFloorMag) -> _applyBias (identity,
+#    MOTOR_BIAS_L/R == 1.0) -> deadbandSnap(L, floorMag) / deadbandSnap(R, floorMag) ->
+#    MiniR4.DriveDC.Move(L, R)`
+# and every assertion below reads `MiniR4.DriveDC.lastMoveL` / `lastMoveR` — the value the
+# DriveDC HAL mock RECORDED as dispatched — never a value LineFollower computed internally.
+#
+# Links the REAL `LineFollower.cpp` + REAL `Drive.cpp` + REAL `YawSource.cpp` (Drive.cpp's turn
+# executors read `YawSource.readYawDegOr` / `toHwHeading`; neither TC below drives a turn, but
+# the TU still needs the symbol) + `path_mocks.cpp` (facade globals: `MiniR4` / `Serial` /
+# `Serial1` / `g_mockMillis` / `mockTickCount` — NOT `Drive`, real `Drive.cpp` is its sole
+# definer). Mirrors the issue-#106 PathTracker+Drive recipe (see the block comment above
+# `test_path_tracker_passthrough_on`) with NO PathTracker and NO routes/Localization — per the
+# plan, Drive.cpp needs YawSource but neither real `.cpp` here touches routes.h or Localization.
+#
+# `target_include_directories` leads with `${SKETCH_DIR}` (THE INVERSION — real `Drive.h` /
+# `LineFollower.h` win over any mock), then `${HAL_MOCKS_DIR}` / `${PATH_MOCKS_DIR}` /
+# `${TEST_DIR}`. `${MOCKS_DIR}` is OMITTED entirely: `mocks/Drive.h` shares the `DRIVE_H` guard
+# with the real `Drive.h` this target compiles (ODR mutual-exclusion — a target may not see both
+# `mocks/` and a real-Drive-linked include set).
+#
+# Force-includes: `add_line_follower_real_force_includes` (EventTrace + WROLineArray +
+# Intersection ONLY — the smaller sibling of `add_path_force_includes` defined above). Does
+# **NOT** force-include `path_mocks/LineFollower.h` (the mock LineFollowerClass) — this target
+# links the REAL `LineFollower.cpp` as its subject-under-test, so the mock would collide with
+# the real class definition. Does NOT force-include Drive.h / MatrixMiniR4.h / LineFollower.h —
+# the real sketch headers must win (Drive.h/LineFollower.h) or resolve via the HAL-mocks-on-path
+# order (the angle-bracket `<MatrixMiniR4.h>`/`<Arduino.h>`).
+# =========================================================================================
+add_executable(test_line_follower_real_setspeed
+    ${TEST_DIR}/line_follower_real_setspeed/test_line_follower_real_setspeed.cpp
+    ${SKETCH_DIR}/src/drive/LineFollower.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_line_follower_real_setspeed PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_line_follower_real_force_includes(test_line_follower_real_setspeed)
+add_test(NAME line_follower_real_setspeed COMMAND test_line_follower_real_setspeed)
+
+# =========================================================================================
+# Test executables #29a/#29b — kinetic decel-tail floor (`PWM_MOVING_MIN`), real-linked
+# (2026-07-12-kinetic-decel-tail-floor plan, T6; TC1-TC6; AC2, AC3, AC5, AC6).
+#
+# Host-drives the REAL `Drive.cpp` `.tShape()` trapezoidal profile DIRECTLY (no PathTracker /
+# Localization / routes — this feature lives entirely inside `Drive`'s profile state machine),
+# asserting the DISPATCHED setpoint the mock `MiniR4.DriveDC` records
+# (`lastMoveSyncL`/`lastMoveSyncR`), never the planned/resolved value — a short braked hop
+# triangle-collapses the planned peak (TC6), so only the mock's recorded dispatch is trustworthy.
+#
+# REGIME: mirrors the issue-#106 PathTracker+Drive real-link recipe (see the block comment above
+# `test_path_tracker_passthrough_on`) MINUS PathTracker.cpp/Localization.cpp/the fixture routes —
+# this target never touches PathTracker, so none of that machinery is linked or force-included:
+#   - Links the REAL `Drive.cpp` + `YawSource.cpp` (Drive.cpp's `_emitContinuous` GYRO branch
+#     references `YawSource::toHwHeading` — the symbol must resolve at link time even though
+#     every scenario here uses the default SYNC mode and never executes that branch) +
+#     `path_mocks.cpp` (facade globals: `MiniR4`/`Serial`/`Serial1`/`EventTrace`/clock — NOT
+#     `Drive`, so it never collides with the real `Drive.cpp`, the sole definer of `Drive`).
+#   - `${SKETCH_DIR}` FIRST (the inversion) so the real `Drive.h`/`YawSource.h` win;
+#     `${HAL_MOCKS_DIR}` supplies the angle-bracket `<MatrixMiniR4.h>`/`<Arduino.h>` (the
+#     `MiniR4.M2`/`M3` mock encoders + `MiniR4.DriveDC` mock recorder these tests read) and is
+#     force-included for `EventTrace.h` (part of the standard `add_path_force_includes` bundle,
+#     even though `Drive.cpp` itself never calls `EventTrace`); `${PATH_MOCKS_DIR}` supplies the
+#     force-included `WROLineArray.h`/`Intersection.h`/`LineFollower.h` peripherals the real
+#     `Drive.cpp` translation unit needs to link (its seek/dispatch machinery references them)
+#     even though these scenarios never dispatch a `stopAtLine`/`wallStop`.
+#   - `${MOCKS_DIR}` (the mock-`DriveClass` world) is DELIBERATELY OMITTED — that mock's
+#     `setSpeed` records the PRE-snap value, which would false-green every assertion here (the
+#     task-brief trap #1). `${FIXTURE_ROUTES_DIR}` is also omitted — no routes are needed.
+#
+# #29a is the default-floor build (TC1/TC2/TC3/TC5/TC6). #29b is the TC4 identity build:
+# `target_compile_definitions(... PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)` — the SYMBOL, not a
+# hardcoded 35, so the off-switch survives a future floor retune — reaches EVERY translation unit
+# in that target (this test main AND the separately-compiled `Drive.cpp`), sidestepping the
+# cross-TU `constexpr` override trap an in-file `#define` would fall into (task-brief trap #3).
+# =========================================================================================
+
+set(DRIVE_DECEL_FLOOR_DIR ${TEST_DIR}/drive_decel_floor)
+
+# --- Test executable #29a — default PWM_MOVING_MIN=30 build. TC1/TC2/TC3/TC5/TC6. ---
+add_executable(test_drive_decel_floor
+    ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_decel_floor PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_decel_floor)    # EventTrace + path_mocks peripherals (NO routes force-include needed)
+add_test(NAME drive_decel_floor COMMAND test_drive_decel_floor)
+
+# --- Test executable #29b — TC4 identity build: PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE. ---
+add_executable(test_drive_decel_floor_identity
+    ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor_identity.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_decel_floor_identity PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_decel_floor_identity)
+# The off-switch (AC5 identity): PWM_MOVING_MIN == PWM_MIN_MAGNITUDE reaches BOTH this test main
+# AND the separately-compiled Drive.cpp in this target — see the block comment above.
+target_compile_definitions(test_drive_decel_floor_identity
+    PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
+add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
