@@ -18,6 +18,8 @@
  *   - `deadbandSnap`  — PWM saturation cap + motor-deadband floor, floor overridable per call
  *                        (Drive + LineFollower).
  *   - `presetToPwm`   — `Config::SpeedPreset` → PWM (Drive builders + LineFollower).
+ *   - `speedTierToPreset` — `Routes::SpeedTier` (per-edge, generated) → `Config::SpeedPreset`
+ *                            (PathTracker edge dispatch; composes with `presetToPwm`).
  *   - `cmToEncDeg`    — wheel-distance to encoder-degree conversion (Drive distance moves).
  *   - `encDegToCm`    — inverse of `cmToEncDeg` (LineFollower's tShape ramp tracking).
  *   - `stopAtLineArmed` — arm-window predicate for `Drive.stopAtLine()` (Drive seek + host test).
@@ -47,6 +49,7 @@
 #include <stdint.h>
 
 #include "../../Config.h"
+#include "../nav/routes.h"
 
 // =============================================================================================
 // PWM clamping
@@ -124,6 +127,37 @@ inline int16_t presetToPwm(Config::SpeedPreset preset)
         return Config::SPEED_FAST;
     }
     return Config::SPEED_NORMAL;
+}
+
+/**
+ * @brief Map a generated per-edge `Routes::SpeedTier` to its `Config::SpeedPreset`.
+ *
+ * The ONE mapping seam between the per-edge tier baked into `routes.h` (source of truth: the
+ * offline path-planner emitter) and the runtime PWM resolution in `presetToPwm`. Callers compose
+ * `presetToPwm(speedTierToPreset(tier))` to get the cruise PWM for an edge — this function does
+ * not return a PWM itself, so there is exactly one place a future blind-vs-line PWM split would
+ * plug in.
+ *
+ * @param tier Per-edge speed tier resolved for the current hop.
+ * @return `Config::SpeedPreset::SLOW`, `NORMAL`, or `FAST` depending on input;
+ *         `Config::SpeedPreset::NORMAL` for `Routes::SpeedTier::DEFAULT` or any unrecognised value
+ *         (defensive default, mirroring `presetToPwm`). `DEFAULT` is resolved to a concrete tier
+ *         upstream in the firmware, so this branch is not normally reached.
+ */
+inline Config::SpeedPreset speedTierToPreset(Routes::SpeedTier tier)
+{
+    switch (tier)
+    {
+    case Routes::SpeedTier::DEFAULT:
+        return Config::SpeedPreset::NORMAL;
+    case Routes::SpeedTier::SLOW:
+        return Config::SpeedPreset::SLOW;
+    case Routes::SpeedTier::NORMAL:
+        return Config::SpeedPreset::NORMAL;
+    case Routes::SpeedTier::FAST:
+        return Config::SpeedPreset::FAST;
+    }
+    return Config::SpeedPreset::NORMAL;
 }
 
 // =============================================================================================
