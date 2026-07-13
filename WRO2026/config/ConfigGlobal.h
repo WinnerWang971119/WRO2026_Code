@@ -51,13 +51,15 @@ namespace Config
     constexpr int16_t PWM_MIN_MAGNITUDE = 35;
 
 #ifndef PWM_MOVING_MIN_DEFAULT
-#define PWM_MOVING_MIN_DEFAULT 30    // TODO bench-tune (Phase 3): kinetic decel-tail floor
+#define PWM_MOVING_MIN_DEFAULT 30
 #endif
     /** @brief Kinetic (moving) deadband floor for the tShape/line-stop decel tail.
      *  @warning Load-bearing: consumed by Drive::_updateProfile decel, Drive::setSpeed,
      *           LineFollower stop ramp-down, ctps/profile.py, sim/runtime.py. Must stay
-     *           <= PWM_MIN_MAGNITUDE. == PWM_MIN_MAGNITUDE disables the feature (identity). */
-    constexpr int16_t PWM_MOVING_MIN = PWM_MOVING_MIN_DEFAULT;
+     *           <= PWM_MIN_MAGNITUDE. == PWM_MIN_MAGNITUDE disables the feature (identity).
+     *  @note The offline parser (config_parse.py) requires the #define value to end the
+     *        line — keep the bench-tune TODO on the constexpr below, not the #define. */
+    constexpr int16_t PWM_MOVING_MIN = PWM_MOVING_MIN_DEFAULT;    // TODO bench-tune (Phase 3)
 
     // ---------------------------------------------------------------------------------------
     // OLED event trace
