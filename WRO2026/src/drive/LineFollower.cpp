@@ -258,8 +258,8 @@ void LineFollowerClass::update()
     // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone below
     // — mid-follow PID and lost-line CRAWL must keep the static floor (a stationary chassis
     // needs the higher static-friction breakaway PWM), while the ramp-down tail is already
-    // moving and can crawl at the lower kinetic floor without stalling. See ADR "kinetic
-    // decel tail floor".
+    // moving and can crawl at the lower kinetic floor without stalling. See the
+    // PWM_MOVING_MIN @warning in ConfigGlobal.h for the rationale.
     int16_t stopFloorMag = Config::PWM_MIN_MAGNITUDE;
 
     // -------------------------------------------------------------------------------------
@@ -324,7 +324,7 @@ void LineFollowerClass::update()
 
             // In the stop ramp-down zone: this tick's emit(s) must use the kinetic floor
             // so `deadbandSnap` does not re-snap the lerped-down `cruise` back up to the
-            // static floor. See ADR "kinetic decel tail floor" AC4.
+            // static floor. See the PWM_MOVING_MIN @warning in ConfigGlobal.h.
             stopFloorMag = Config::PWM_MOVING_MIN;
         }
         // else: still in the cruise plateau zone — leave `cruise` unchanged.
