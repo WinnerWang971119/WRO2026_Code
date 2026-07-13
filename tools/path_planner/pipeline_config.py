@@ -19,12 +19,32 @@ from dataclasses import dataclass
 from enum import IntEnum
 
 
-class LineMode(IntEnum):
-    """Cruise preset for an EDGE_LINE traversal (LineFollower setPreset)."""
-    DEFAULT = 0  # inherit PIPELINE_CONFIG.line at runtime
-    NORMAL  = 1
-    SLOW    = 2
-    FAST    = 3
+class SpeedTier(IntEnum):
+    """Cruise speed preset for a traversal — consumed by BOTH edge types.
+
+    Resolves to the matching ``Config::SPEED_SLOW/NORMAL/FAST`` (60/70/90) in
+    firmware. Everything serializes by NAME, so the value order (SLOW=1,
+    NORMAL=2) is cosmetic; the underlying int size matches the retired
+    ``LineMode`` so the generated ``EdgeInfo`` layout/offsets stay unchanged.
+    """
+    DEFAULT = 0  # inherit PIPELINE_CONFIG.speed at C++ dispatch
+    SLOW    = 1  # -> Config::SPEED_SLOW   (60)
+    NORMAL  = 2  # -> Config::SPEED_NORMAL (70)
+    FAST    = 3  # -> Config::SPEED_FAST   (90)
+
+
+class LineFollowMode(IntEnum):
+    """LINE-edge follow lateral offset — PYTHON-ONLY (validator vocabulary).
+
+    Not emitted to C++ this PR: it exists only so the validator can accept the
+    JSON ``mode`` key on a LINE edge. Only ``MIDDLE`` is authorable today;
+    ``LEFT`` / ``RIGHT`` are validator-rejected until LineFollower offset-follow
+    lands (issue #156).
+    """
+    DEFAULT = 0  # inherit (== MIDDLE today)
+    MIDDLE  = 1  # centered follow (only authorable value this PR)
+    LEFT    = 2  # RESERVED — validator-rejected until offset-follow lands (issue #156)
+    RIGHT   = 3  # RESERVED — validator-rejected until offset-follow lands (issue #156)
 
 
 class BlindMode(IntEnum):
@@ -33,6 +53,9 @@ class BlindMode(IntEnum):
     SYNC_TSHAPE  = 1  # DriveMode::SYNC + tShape (today's runtime default)
     GYRO_TSHAPE  = 2  # DriveMode::GYRO + tShape — straight-line yaw lock
     RAW_FLAT     = 3  # DriveMode::RAW + no profile — open-loop, no ramp
+    # STOP_AT_LINE stays for the firmware seek-ladder (ADR-038/039,
+    # StopAtLinePolicy.h) but is NO LONGER JSON-authorable: a seek is authored
+    # via the `stop_at_line` axis instead (ADR-064). No EDGES cell emits it.
     STOP_AT_LINE = 4  # drive blind, arm near endpoint, stop on the crossing line, re-anchor
 
 
@@ -61,7 +84,7 @@ class StopAtLineMode(IntEnum):
 @dataclass(frozen=True)
 class PipelineConfig:
     """Mission-wide motion-mode defaults baked into routes.cpp at build time."""
-    line:       LineMode       = LineMode.NORMAL
+    speed:      SpeedTier      = SpeedTier.NORMAL
     blind:      BlindMode      = BlindMode.SYNC_TSHAPE
     turn:       TurnMode       = TurnMode.COUNTER_ROT
     direction:  DirectionMode  = DirectionMode.DEFAULT
@@ -73,7 +96,7 @@ class PipelineConfig:
         # degrades to the C++ hardcoded fallback.  DirectionMode.DEFAULT is
         # intentional here (means "defer to builder auto algorithm") and is exempt.
         _CATEGORY_FIELDS: tuple[tuple[str, object], ...] = (
-            ("line",       LineMode.DEFAULT),
+            ("speed",      SpeedTier.DEFAULT),
             ("blind",      BlindMode.DEFAULT),
             ("turn",       TurnMode.DEFAULT),
         )
@@ -94,7 +117,7 @@ class PipelineConfig:
         Reads the four optional mission-wide motion-mode defaults the field data
         may carry (ADR-047) and resolves each into the matching enum member:
 
-        * ``PIPELINE_LINE_MODE``      -> :class:`LineMode`
+        * ``PIPELINE_SPEED``          -> :class:`SpeedTier`
         * ``PIPELINE_BLIND_MODE``     -> :class:`BlindMode`
         * ``PIPELINE_TURN_MODE``      -> :class:`TurnMode`
         * ``PIPELINE_DIRECTION_MODE`` -> :class:`DirectionMode`
@@ -108,7 +131,7 @@ class PipelineConfig:
         many ``SimpleNamespace`` test fixtures that omit these keys keep working.
 
         The constructed instance runs through :meth:`__post_init__`, so the
-        same DEFAULT-sentinel rule the validator enforces (line/blind/turn may
+        same DEFAULT-sentinel rule the validator enforces (speed/blind/turn may
         not be DEFAULT; direction may) is re-asserted here as a second gate.
 
         :param field_data: the ``tools.path_planner.field_data`` module (or any
@@ -121,7 +144,7 @@ class PipelineConfig:
         # (attr, EnumCls, singleton-field) for each mission-wide category. The
         # singleton field supplies the inherit-on-absent fallback.
         _SPECS: tuple[tuple[str, type, str], ...] = (
-            ("PIPELINE_LINE_MODE",      LineMode,      "line"),
+            ("PIPELINE_SPEED",          SpeedTier,     "speed"),
             ("PIPELINE_BLIND_MODE",     BlindMode,     "blind"),
             ("PIPELINE_TURN_MODE",      TurnMode,      "turn"),
             ("PIPELINE_DIRECTION_MODE", DirectionMode, "direction"),
@@ -146,7 +169,8 @@ PIPELINE_CONFIG = PipelineConfig()
 
 
 __all__ = [
-    "LineMode",
+    "SpeedTier",
+    "LineFollowMode",
     "BlindMode",
     "TurnMode",
     "DirectionMode",
