@@ -1499,7 +1499,8 @@ class EditorApp:
         edge_type: str,
         u: str,
         v: str,
-        primitive_mode: Optional[str],
+        speed: Optional[str],
+        mode: Optional[str],
         direction: Optional[str],
         stop_at_line: Optional[str],
     ) -> None:
@@ -1515,13 +1516,21 @@ class EditorApp:
         :param edge_type: Derived edge type tag (``"LINE"`` / ``"BLIND"``).
         :param u: Source node name (forward ``u -> v``).
         :param v: Destination node name.
-        :param primitive_mode: Mode tag, or ``None`` to inherit.
+        :param speed: ``SpeedTier`` tag, or ``None`` to inherit.
+        :param mode: Mode tag (LINE: ``MIDDLE``; BLIND: ``SYNC_TSHAPE`` /
+            ``GYRO_TSHAPE`` / ``RAW_FLAT``), or ``None`` to inherit.
         :param direction: ``"front"`` / ``"rear"``, or ``None`` to inherit.
         :param stop_at_line: ``"on"`` / ``"off"``, or ``None`` to inherit.
         """
         self._dispatch(
             SetEdgeOverride(
-                edge_type, u, v, primitive_mode, direction, stop_at_line
+                edge_type,
+                u,
+                v,
+                speed=speed,
+                mode=mode,
+                direction=direction,
+                stop_at_line=stop_at_line,
             )
         )
 
@@ -1552,7 +1561,7 @@ class EditorApp:
         are enforced at Save by the validator, so this handler just routes the
         selector to the command.
 
-        :param which: Pipeline category (``"line"`` / ``"blind"`` / ``"turn"`` /
+        :param which: Pipeline category (``"speed"`` / ``"blind"`` / ``"turn"`` /
             ``"direction"``).
         :param value: Mode member name, or ``None`` to inherit.
         """
