@@ -434,6 +434,17 @@ void driveGoalToCompletion()
                 driveWallDepart();
                 break;
 
+            case State::SETTLE:
+                // Non-blocking hop-settle dwell (ADR-061): advance the mock clock past the
+                // deadline in ONE step so the settle retires deterministically, rather than
+                // relying on ~HOP_SETTLE_MS/kMillisPerTick filler cooperativeTicks via the
+                // default branch. `_settleDeadlineMs` is private, so advance by the known dwell
+                // magnitude + margin (the deadline is millis()+HOP_SETTLE_MS, stamped at entry,
+                // so advancing by HOP_SETTLE_MS+1 from now always passes it).
+                mockAdvanceMillis(Config::HOP_SETTLE_MS + 1);
+                cooperativeTick();
+                break;
+
             case State::IDLE:
             case State::DEQUEUE:
             case State::PLAN_NEXT_HOP:

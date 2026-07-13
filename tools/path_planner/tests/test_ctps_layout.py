@@ -512,20 +512,23 @@ def test_rejects_mosaic_directed_mode_with_a_null_cell():
     assert "null" in message
 
 
-def test_rejects_mosaic_random_mode_counts_sum_mismatch():
-    """mosaic: random mode sum(counts) != #null cells raises LayoutError."""
-    data = _layout_with_mosaic_and_vision(_random_mosaic_block())
-    # 10 nulls in this fixture's cells; counts intentionally sum to 9.
-    data["mosaic"]["counts"] = {"YELLOW": 3, "BLUE": 3, "GREEN": 3}
+def test_accepts_mosaic_random_mode_counts_any_sum():
+    """mosaic: random mode counts may sum under OR over #null cells (ADR-063) -> loads.
 
-    with pytest.raises(LayoutError) as exc_info:
-        load(data)
+    layout.py wires up mosaic.validate_mosaic_config, whose counts-sum equality
+    was relaxed in ADR-063 (under-fill leaves leftover cells as air, over-fill
+    keeps a random subset). Neither an under-fill nor an over-fill raises a
+    LayoutError — this proves the relaxation flows through the layout layer.
+    """
+    # 10 nulls in this fixture's cells; counts sum to 6 (under-fill).
+    under = _layout_with_mosaic_and_vision(_random_mosaic_block())
+    under["mosaic"]["counts"] = {"YELLOW": 3, "BLUE": 3}
+    load(under)  # must not raise
 
-    message = str(exc_info.value)
-    assert message.startswith("ctps.layout:")
-    assert "mosaic" in message
-    assert "counts" in message
-    assert "null" in message
+    # counts sum to 16 (over-fill).
+    over = _layout_with_mosaic_and_vision(_random_mosaic_block())
+    over["mosaic"]["counts"] = {"YELLOW": 8, "BLUE": 8}
+    load(over)  # must not raise
 
 
 def test_rejects_mosaic_pin_color_not_in_palette():

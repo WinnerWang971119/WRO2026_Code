@@ -72,15 +72,20 @@ static void test_find_task()
     // Positive — both registered tasks resolve, and the returned row's name
     // matches the queried name. (Asserting the name, not a fixed registry
     // index, keeps the test robust to a future registry reorder.)
+    // The ASSERTs here are non-aborting (TestAssert.h), so every deref of a
+    // findTask result is short-circuit-guarded on non-null: a miss (e.g. a task
+    // renamed/removed out from under this test) then fails CLEANLY rather than
+    // dereferencing nullptr and segfaulting the whole binary.
     const TaskRegistryEntry* echo = Tasks.findTask("demoEcho");
     ASSERT_TRUE(echo != nullptr);
-    ASSERT_TRUE(echo->name != nullptr);
-    ASSERT_TRUE(std::strcmp(echo->name, "demoEcho") == 0);
+    ASSERT_TRUE(echo != nullptr && echo->name != nullptr);
+    ASSERT_TRUE(echo != nullptr && echo->name != nullptr && std::strcmp(echo->name, "demoEcho") == 0);
 
     const TaskRegistryEntry* yield = Tasks.findTask("debugYield");
     ASSERT_TRUE(yield != nullptr);
-    ASSERT_TRUE(yield->name != nullptr);
-    ASSERT_TRUE(std::strcmp(yield->name, "debugYield") == 0);
+    ASSERT_TRUE(yield != nullptr && yield->name != nullptr);
+    ASSERT_TRUE(yield != nullptr && yield->name != nullptr
+                && std::strcmp(yield->name, "debugYield") == 0);
 
     // Negative — unknown name.
     ASSERT_TRUE(Tasks.findTask("doesNotExist") == nullptr);

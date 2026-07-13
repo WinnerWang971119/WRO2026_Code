@@ -110,7 +110,7 @@ namespace Config
     {
         static constexpr uint16_t PPR = 360;
         static constexpr uint16_t RPM = 300;
-        static constexpr float    MOVESYNC_KP = 0.02f;
+        static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
         static constexpr float    MOVEGYRO_KP = 0.52f;
@@ -133,7 +133,7 @@ namespace Config
      *          per-physical-chassis measurements and MUST be re-captured via
      *          Drive.calibrateMotorBias() after a swap. See ADR-011 + ADR-022.
      */
-    using ActiveMotor = MatrixTT;
+    using ActiveMotor = LegoEV3;
 
     constexpr uint16_t MOTOR_PPR    = ActiveMotor::PPR;
     constexpr uint16_t MOTOR_RPM    = ActiveMotor::RPM;
@@ -182,10 +182,10 @@ namespace Config
     };
 
     /** @brief PWM target for `SpeedPreset::SLOW` (intersections, tight corners). */
-    constexpr int16_t SPEED_SLOW = 70;
+    constexpr int16_t SPEED_SLOW = 60;
 
     /** @brief PWM target for `SpeedPreset::NORMAL` (default cruise / general moves). */
-    constexpr int16_t SPEED_NORMAL = 85;
+    constexpr int16_t SPEED_NORMAL = 70;
 
     /** @brief PWM target for `SpeedPreset::FAST` (long straights, low-precision moves). */
     constexpr int16_t SPEED_FAST = 90;
@@ -497,7 +497,7 @@ namespace Config
      *
      * @note TODO: tune on real chassis.
      */
-    constexpr float TURN_TOLERANCE_DEG = 1.0f;
+    constexpr float TURN_TOLERANCE_DEG = 0.5f;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
@@ -578,10 +578,10 @@ namespace Config
     // =============================================================================
 
     /** @brief PWM units gained per cm of travel during the ramp phase. */
-    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 5.0f;
+    constexpr float TSHAPE_ACCEL_PWM_PER_CM = 4.0f;
 
     /** @brief Floor on the per-side ramp distance — never shorter than this (cm). */
-    constexpr float TSHAPE_RAMP_MIN_CM = 2.0f;
+    constexpr float TSHAPE_RAMP_MIN_CM = 5.0f;
 
     /** @brief Ceiling on the per-side ramp distance — never longer than this (cm). */
     constexpr float TSHAPE_RAMP_MAX_CM = 20.0f;
@@ -616,7 +616,7 @@ namespace Config
      * Prevents the MIN_CM floor from forcing a tiny pointless ramp on chained moves
      * where startSpeed or endSpeed is already at (or very near) cruise.
      */
-    constexpr int16_t TSHAPE_NO_RAMP_EPSILON_PWM = 2;
+    constexpr int16_t TSHAPE_NO_RAMP_EPSILON_PWM = 5;
 
     /** @brief Tick-rate target for the profile state machine — only used as a comment marker. */
     // Profile is driven from Drive.update() at whatever rate the main loop ticks (~50-200 Hz typical).

@@ -48,13 +48,14 @@
         // Layer visibility mirrors the `.ctps-layer-chips` markup's initial
         // `ctps-chip--active` state (chrome.js's refreshLayerChips reads
         // `store.layers[name]` on init to seat each chip, so a chip whose key is
-        // absent here would be forced OFF). The randomized-vision layers
-        // `mosaic` / `vision-cone` (chip keys `data-layer="mosaic"` /
-        // `data-layer="vision-cone"`) default ON like their active chips —
-        // vision.js's layers no-op anyway when no MOSAIC / cone DATA is present.
+        // absent here would be forced OFF). Of the randomized-vision layers
+        // (chip keys `data-layer="mosaic"` / `data-layer="vision-cone"`),
+        // `mosaic` defaults ON but `vision-cone` defaults OFF (page opens with
+        // the cone hidden) — both matching their chips' initial class. vision.js's
+        // layers no-op anyway when no MOSAIC / cone DATA is present.
         layers: { map: true, trail: true, path: true, nodes: true,
                   objects: true, zones: false, deploy: false,
-                  mosaic: true, "vision-cone": true },
+                  mosaic: true, "vision-cone": false },
         selection: { kind: "robot", id: null },
         // ----- cargo model (object/cargo plan -- issue #57) ---------------
         // `objects`/`robotCfg` come from a loaded layout (the `OBJECTS` global or an

@@ -430,8 +430,10 @@ add_executable(test_path_tracker_passthrough_on
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
 target_compile_definitions(test_path_tracker_passthrough_on
-    PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=true)
+    PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
 # SKETCH_DIR FIRST (the inversion); hal_mocks/ + path_mocks/ supply the angle-bracket vendor
 # headers + the force-included peripheral mocks; mocks/ OMITTED (ODR mutual-exclusion).
 target_include_directories(test_path_tracker_passthrough_on PRIVATE
@@ -450,8 +452,10 @@ add_executable(test_path_tracker_passthrough_off
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
 target_compile_definitions(test_path_tracker_passthrough_off
-    PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false)
+    PRIVATE PATH_PASS_THROUGH_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_passthrough_off PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_passthrough_off)   # FIRST (ROUTES_H)
@@ -473,8 +477,10 @@ add_executable(test_path_tracker_bidirectional_on
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
 target_compile_definitions(test_path_tracker_bidirectional_on
-    PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true)
+    PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_bidirectional_on PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_bidirectional_on)   # FIRST (ROUTES_H)
@@ -494,8 +500,10 @@ add_executable(test_path_tracker_bidirectional_off
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
 target_compile_definitions(test_path_tracker_bidirectional_off
-    PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false)
+    PRIVATE BIDIRECTIONAL_AUTO_ENABLED_DEFAULT=false HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_bidirectional_off PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_bidirectional_off)   # FIRST (ROUTES_H)
@@ -520,6 +528,9 @@ add_executable(test_path_tracker_stop_at_line
 )
 target_include_directories(test_path_tracker_stop_at_line PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_stop_at_line PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_stop_at_line)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_stop_at_line)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_stop_at_line COMMAND test_path_tracker_stop_at_line)
@@ -547,6 +558,9 @@ add_executable(test_path_tracker_projection
 )
 target_include_directories(test_path_tracker_projection PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_projection PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_projection)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_projection)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_projection COMMAND test_path_tracker_projection)
@@ -573,6 +587,9 @@ add_executable(test_path_tracker_pass_through_projection
 )
 target_include_directories(test_path_tracker_pass_through_projection PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_pass_through_projection PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_pass_through_projection)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_pass_through_projection)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pass_through_projection)
@@ -1019,9 +1036,19 @@ add_test(NAME ctps_dump_no_mosaic COMMAND ctps_dump --fixture)
 set_tests_properties(ctps_dump_no_mosaic PROPERTIES
     FAIL_REGULAR_EXPRESSION "\"mosaic\":")
 
-# TC16 — malformed --mosaic exits non-zero (exit 2).
+# TC16 — malformed --mosaic exits non-zero (exit 2). 'Z' stays unmapped even
+# after the ADR-063 air letter, so this negative case is unaffected.
 add_test(NAME ctps_dump_bad_mosaic COMMAND ctps_dump --fixture --mosaic ZZZ)
 set_tests_properties(ctps_dump_bad_mosaic PROPERTIES WILL_FAIL TRUE)
+
+# TC-air (ADR-063) — an 'A' letter injects an "air" cell as Config::Color::UNKNOWN,
+# which ctps_record echoes as "UNKNOWN" in the mosaic.cells block. Without air-letter
+# support the dump rejects 'A' (exit 2, no JSON emitted), so requiring "UNKNOWN" in
+# stdout proves BOTH that 'A' parses and that it round-trips as UNKNOWN.
+add_test(NAME ctps_dump_mosaic_air
+         COMMAND ctps_dump --fixture --mosaic AYBGWYBGWYBG --mosaic-seed 7 --mosaic-geom-hash abc123)
+set_tests_properties(ctps_dump_mosaic_air PROPERTIES
+    PASS_REGULAR_EXPRESSION "UNKNOWN")
 
 # =========================================================================================
 # CTPS mock-conformance TU #8b — `test_ctps_mock_conformance` (issue #89, task T5).
@@ -1347,6 +1374,10 @@ add_executable(test_path_tracker_reset_arrival
 )
 target_include_directories(test_path_tracker_reset_arrival PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4). The RESET arrival itself never settles regardless,
+# but the target's post-interlude plan ticks are pinned for byte-identity.
+target_compile_definitions(test_path_tracker_reset_arrival PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_reset_arrival)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_reset_arrival)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_reset_arrival COMMAND test_path_tracker_reset_arrival)
@@ -1383,7 +1414,9 @@ add_executable(test_path_tracker_reset_arrival_strict
 )
 # Force the strict wall-normal flag ON for THIS target only (both `Localization.cpp` and the
 # test main see strict = true) — same target-wide `-D` as `test_reanchor_at_wall_strict`.
-target_compile_definitions(test_path_tracker_reset_arrival_strict PRIVATE WALL_NORMAL_STRICT_ENABLED_DEFAULT=true)
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
+target_compile_definitions(test_path_tracker_reset_arrival_strict PRIVATE WALL_NORMAL_STRICT_ENABLED_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_reset_arrival_strict PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_reset_arrival_strict)   # FIRST (ROUTES_H)
@@ -1769,6 +1802,9 @@ add_executable(test_path_tracker_heading_reset
 )
 target_include_directories(test_path_tracker_heading_reset PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_heading_reset PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_heading_reset)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_heading_reset)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_heading_reset COMMAND test_path_tracker_heading_reset)
@@ -1783,8 +1819,10 @@ add_executable(test_path_tracker_heading_reset_junction_on
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
 target_compile_definitions(test_path_tracker_heading_reset_junction_on
-    PRIVATE LINE_HEADING_RESET_ON_JUNCTION_DEFAULT=true)
+    PRIVATE LINE_HEADING_RESET_ON_JUNCTION_DEFAULT=true HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_heading_reset_junction_on PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_heading_reset_junction_on)   # FIRST (ROUTES_H)
@@ -1805,8 +1843,10 @@ add_executable(test_path_tracker_heading_reset_forced_reset
     ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
 target_compile_definitions(test_path_tracker_heading_reset_forced_reset
-    PRIVATE HEADING_RESET_FORCED_RESET_FIXTURE)
+    PRIVATE HEADING_RESET_FORCED_RESET_FIXTURE HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_heading_reset_forced_reset PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_forced_reset_routes_force_include(test_path_tracker_heading_reset_forced_reset)   # FIRST (ROUTES_H)
@@ -1830,8 +1870,11 @@ add_executable(test_path_tracker_heading_reset_parity
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4). (This is the self-asserting heading-reset PARITY ctest, NOT the parity DUMP
+# target `test_path_tracker_parity_dump`, which stays at the default 100 per the plan.)
 target_compile_definitions(test_path_tracker_heading_reset_parity
-    PRIVATE PT_PARITY_TRACE
+    PRIVATE PT_PARITY_TRACE HOP_SETTLE_MS_DEFAULT=0
     HEADING_RESET_PARITY_CAPTURE_PATH="${CMAKE_CURRENT_BINARY_DIR}/heading_reset_parity_capture.ndjson")
 target_include_directories(test_path_tracker_heading_reset_parity PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
@@ -1970,6 +2013,9 @@ add_executable(test_path_tracker_blind_chain
 )
 target_include_directories(test_path_tracker_blind_chain PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+# ADR-061: pin HOP_SETTLE_MS=0 so this dispatch-assertion target's tick sequence is
+# unperturbed by the settle dwell (T4).
+target_compile_definitions(test_path_tracker_blind_chain PRIVATE HOP_SETTLE_MS_DEFAULT=0)
 add_fixture_routes_force_include(test_path_tracker_blind_chain)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_blind_chain)            # EventTrace + path_mocks peripherals
 add_test(NAME path_tracker_blind_chain COMMAND test_path_tracker_blind_chain)
@@ -1984,8 +2030,10 @@ add_executable(test_path_tracker_blind_chain_disabled
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
 target_compile_definitions(test_path_tracker_blind_chain_disabled
-    PRIVATE PATH_BLIND_CHAIN_ENABLED_DEFAULT=false BLIND_CHAIN_TEST_DISABLED)
+    PRIVATE PATH_BLIND_CHAIN_ENABLED_DEFAULT=false BLIND_CHAIN_TEST_DISABLED HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_blind_chain_disabled PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_blind_chain_disabled)   # FIRST (ROUTES_H)
@@ -2002,8 +2050,10 @@ add_executable(test_path_tracker_blind_chain_hop_cap
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
 target_compile_definitions(test_path_tracker_blind_chain_hop_cap
-    PRIVATE MAX_CHAIN_HOPS_DEFAULT=2 BLIND_CHAIN_TEST_HOP_CAP)
+    PRIVATE MAX_CHAIN_HOPS_DEFAULT=2 BLIND_CHAIN_TEST_HOP_CAP HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_blind_chain_hop_cap PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_blind_chain_hop_cap)   # FIRST (ROUTES_H)
@@ -2020,10 +2070,78 @@ add_executable(test_path_tracker_blind_chain_distance_cap
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
+# ADR-061: also pin HOP_SETTLE_MS=0 so the settle dwell does not perturb this target's tick
+# sequence (T4).
 target_compile_definitions(test_path_tracker_blind_chain_distance_cap
-    PRIVATE PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0f BLIND_CHAIN_TEST_DISTANCE_CAP)
+    PRIVATE PATH_BLIND_CHAIN_MAX_CM_DEFAULT=50.0f BLIND_CHAIN_TEST_DISTANCE_CAP HOP_SETTLE_MS_DEFAULT=0)
 target_include_directories(test_path_tracker_blind_chain_distance_cap PRIVATE
     ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
 add_fixture_routes_force_include(test_path_tracker_blind_chain_distance_cap)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_blind_chain_distance_cap)
 add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_blind_chain_distance_cap)
+
+# =========================================================================================
+# Test executable #27 — ADR-061 post-stop settle dwell eligibility tether (T4; AC8 firmware
+# half, TC1-TC7b). See docs/plans/2026-07-12-hop-settle-wait.md "Settle-fire matrix".
+#
+# Drives the REAL `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` +
+# `path_mocks.cpp` over `fixtures/routes_fixture.cpp` and asserts `State::SETTLE` fires EXACTLY
+# on the Settle-fire matrix (braked stop / cold turn->move / goal arrival) and is SKIPPED on
+# every "no" boundary (pass-through, chain intermediate, first-plan dwell-1, RESET arrival, the
+# wall/return interlude's own turns) with the surrounding dispatch byte-identical to today.
+#
+# Compiled at the DEFAULT `HOP_SETTLE_MS = 100` (NO `-DHOP_SETTLE_MS_DEFAULT` override) so the
+# settle actually fires -- the legacy dispatch-assertion targets are pinned to 0 above/below; THIS
+# one runs at the shipped default. Same shared issue-#106 recipe as every other PathTracker+Drive
+# real-link target (see the block comment above `test_path_tracker_passthrough_on`): SKETCH_DIR-first
+# include order (the inversion), link the real sources + `path_mocks.cpp`, fixture routes force-
+# included FIRST then `add_path_force_includes`, NO `add_mock_force_includes`.
+# =========================================================================================
+add_executable(test_path_tracker_settle
+    ${TEST_DIR}/test_path_tracker_settle.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_settle PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+add_fixture_routes_force_include(test_path_tracker_settle)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_settle)            # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_settle COMMAND test_path_tracker_settle)
+
+# =========================================================================================
+# Test executable #28 — TC12 / ADR-061 negative (compile-fail target).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when `HOP_SETTLE_MS` exceeds the 2000 ms
+# ceiling. Built with `-DHOP_SETTLE_MS_DEFAULT=3000` (over the ceiling). The build is expected to
+# FAIL; ctest uses PASS_REGULAR_EXPRESSION on the metacharacter-free substring
+# `Config::HOP_SETTLE_MS must be <= 2000 ms` (NOT the full multi-line message, which carries a
+# `--` and other characters). When PASS_REGULAR_EXPRESSION is set, ctest decides pass/fail purely
+# on whether the regex matches the captured build output and IGNORES the process exit code -- so
+# the test PASSES only when the intended assert fires and FAILS if the build broke for any
+# unrelated reason. NEVER `WILL_FAIL` (memory `gotcha_ctest_compile_fail_assertion`).
+#
+# Mirrors `test_manipulator_belt_collision` EXACTLY: `EXCLUDE_FROM_ALL` +
+# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, NO `add_mock_force_includes` so a
+# mock-header typo cannot mask the intended diagnostic, sketch + mocks include dirs (via
+# `COMMON_INCLUDES`) so the quoted `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# =========================================================================================
+add_executable(test_config_hop_settle_ceiling_fail
+    ${TEST_DIR}/test_config_hop_settle_ceiling_fail.cpp
+)
+set_target_properties(test_config_hop_settle_ceiling_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_hop_settle_ceiling_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_hop_settle_ceiling_fail PRIVATE HOP_SETTLE_MS_DEFAULT=3000)
+
+add_test(NAME config_hop_settle_ceiling_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_hop_settle_ceiling_fail --config $<CONFIG>
+)
+set_tests_properties(config_hop_settle_ceiling_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "Config::HOP_SETTLE_MS must be <= 2000 ms")

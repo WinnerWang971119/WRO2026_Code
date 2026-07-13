@@ -1,6 +1,6 @@
 # ADR-060: CTPS randomized vision — trace-carried roll, unified pinned-cells schema, thin dormant mock
 
-**Status:** Partially implemented
+**Status:** Partially implemented (counts-sum rule amended by ADR-063)
 **Date decided:** 2026-07 (phase)
 
 ## Rule
@@ -19,7 +19,9 @@ The mosaic schema is a **unified pinned-cells** shape: `mosaic.cells[12]`
 (`null` = rolled, or a pinned color name) + `mosaic.counts` (quota for the null
 cells) + a `mode` label. `mode:"directed"` requires all 12 cells pinned;
 `mode:"random"` allows any subset pinned, with `counts` summing to the number
-of null cells. One roll function and one validator cover both, and "mostly
+of null cells (**relaxed by ADR-063**: `counts` may sum to any non-negative
+number — an under-fill leaves the leftover cells as air, an over-fill keeps a
+random subset). One roll function and one validator cover both, and "mostly
 directed with N random cells" falls out for free.
 
 Cell→world geometry (`resolve_cells`) is **Python-authoritative and unit

@@ -467,8 +467,9 @@
      * `E.defaultMosaic()`. Mirrors `mosaic.validate_mosaic_config` (Python)'s
      * rules -- structure, geometry, palette/cell/counts colour membership
      * (canonical via `MOSAIC_META.names` when present + palette-subset), the
-     * directed-no-null / random-counts-sum invariants, and the seed rule -- but
-     * tolerant (warn + default) instead of loud (raise). The one place it is a
+     * directed-no-null invariant (random `counts` may sum to any non-negative
+     * number, ADR-063), and the seed rule -- but tolerant (warn + default)
+     * instead of loud (raise). The one place it is a
      * SUBSET, not a full mirror: on a page missing the emitted `MOSAIC_META`
      * constant the canonical-colour gate is skipped (structural rules still
      * hold), since there is no in-browser single source to check against.
@@ -560,7 +561,6 @@
                 console.warn("layout: mosaic.counts must be an object; using defaults");
                 return null;
             }
-            var total = 0;
             for (var name in counts) {
                 // `counts` is user-supplied upload data -- a payload like
                 // {"counts":{"hasOwnProperty":12}} shadows the method, so call
@@ -573,14 +573,10 @@
                     console.warn("layout: mosaic.counts has an invalid colour or quota; using defaults");
                     return null;
                 }
-                total += counts[name];
             }
-            if (total !== nullCount) {
-                console.warn(
-                    "layout: mosaic.counts must sum to the null-cell count (" + nullCount +
-                    "); using defaults");
-                return null;
-            }
+            // sum(counts) is NOT constrained to nullCount (ADR-063): an under-fill
+            // leaves the leftover null cells as air, an over-fill keeps a random
+            // subset -- both resolved by roll_mosaic, so any non-negative sum is ok.
         }
         if (data.seed !== undefined && data.seed !== null && !_nonNegInt(data.seed)) {
             console.warn("layout: mosaic.seed must be null or a non-negative integer; using defaults");

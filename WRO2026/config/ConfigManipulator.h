@@ -78,16 +78,16 @@ namespace Config
     };
 
     /** @brief Grabber servo calibration. TODO calibrate. */
-    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 105, 5.0f, 80, false };  // TODO calibrate
+    constexpr ServoCfg GRABBER = { GRABBER_RC_ID, 125, 5, 105, 7.0f, 80, true };  
     /** @brief Dumper servo calibration. TODO calibrate. */
-    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  78, 33, 18, 5.0f, 80, false };  // TODO calibrate
+    constexpr ServoCfg DUMPER  = { DUMPER_RC_ID,  78, 33, 18, 5.0f, 80, false };  
     /** @brief Sorter servo calibration; open/close poses unused (bins drive the angle). TODO. */
-    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 5.2f, 95, false };  // open/close unused; TODO
+    constexpr ServoCfg SORTER  = { SORTER_RC_ID,  90,  0,   0, 5.2f, 95, false };  // open/close unused; 
 
     /** @brief Number of discrete sorter bins. TODO finalize. */
-    constexpr uint8_t  SORTER_BIN_COUNT = 4;                          // TODO finalize
+    constexpr uint8_t  SORTER_BIN_COUNT = 4;                          
     /** @brief Sorter servo angle (degrees) for each bin index. TODO calibrate. */
-    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 102, 126};  // TODO calibrate
+    constexpr uint16_t SORTER_BIN_ANGLE[SORTER_BIN_COUNT] = { 55, 76, 102, 126};  
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 

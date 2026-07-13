@@ -462,6 +462,10 @@ bool PathTrackerClass::begin()
     _returnUsesLineSeek      = false;
     _returnActive            = false;
     _returnDistCm            = 0.0f;
+    // ADR-061: no settle dwell in flight at boot (the SETTLE state is the real guard; this is
+    // defensive parity with the other latch resets).
+    _settleDeadlineMs        = 0;
+    _settleResume            = SettleResume::PLAN;
     // PR2: no wall-zero reset interlude in flight at boot.
     _resetNode               = FieldMap::NODE_NONE;
     // ADR-036: no pivot latched at boot.
@@ -527,6 +531,10 @@ void PathTrackerClass::abort()
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // ADR-061: a hard-cancel drops any in-flight settle dwell so a later goal cannot inherit a
+    // stale deadline.
+    _settleDeadlineMs       = 0;
+    _settleResume           = SettleResume::PLAN;
     // PR2: drop any in-flight wall-zero reset interlude so a re-arm on a later goal
     // re-fires the wall push.
     _resetNode              = FieldMap::NODE_NONE;
@@ -910,7 +918,21 @@ void PathTrackerClass::_stepFsm()
                 // LINE-return-without-turn bug).
                 if (_returnActive)
                 {
+                    // Return-prologue's own pre-edge turn never settles (dwell-2 is scoped to
+                    // normal hops; the return interlude owns its own timing). Dispatch the
+                    // return seek/drive directly, as today.
                     _dispatchReturnMoveAfterTurn();
+                }
+                else if (Config::HOP_SETTLE_MS > 0)
+                {
+                    // ADR-061 dwell-2: a cold pre-edge turn on a NORMAL hop just braked to
+                    // rest. Settle before dispatching the move (the turn->move dwell). NO
+                    // RESET check here — this is a turn->move dwell, not an arrival dwell —
+                    // and NOT gated on `_planIsFirstAfterDequeue` (that flag was already
+                    // cleared in `_onPlanNextHop` before TURNING ran, so the first hop's cold
+                    // turn settles like any other). `_dispatchEdgeAfterTurn()` runs when the
+                    // dwell elapses (SettleResume::EDGE_AFTER_TURN).
+                    _enterSettle(SettleResume::EDGE_AFTER_TURN);
                 }
                 else
                 {
@@ -1084,7 +1106,19 @@ void PathTrackerClass::_stepFsm()
             if (LineFollower.isDistanceReached())
             {
                 Localization.onIntersection(_nextHop);
-                _state = State::PLAN_NEXT_HOP;
+                // ADR-061 dwell-1: a `_passThrough` arrival is a NON-braked continuing
+                // pass-through (LineFollower stays live at cruise) — no settle, plan straight
+                // through. A non-pass arrival braked to rest — settle before the next maneuver
+                // (subject to the enabled + non-RESET gate). Order is load-bearing: the
+                // `onIntersection` stamp above ran FIRST.
+                if (_passThrough)
+                {
+                    _state = State::PLAN_NEXT_HOP;
+                }
+                else
+                {
+                    _settleOrPlanAfterArrival(_nextHop);
+                }
             }
             return;
         }
@@ -1144,7 +1178,11 @@ void PathTrackerClass::_stepFsm()
                 LineFollower.setEnabled(false);
                 Localization.onDeadReckonedAdvance(_nextHop);
                 _projPassThrough = false;    // consumed (defensive; already false here)
-                _state           = State::PLAN_NEXT_HOP;
+                // ADR-061 dwell-1: this branch braked to rest at B — settle before the next
+                // maneuver (subject to the enabled + non-RESET gate). The pass-through branch
+                // above is a non-braked continue and never reaches here. Order is load-bearing:
+                // the `onDeadReckonedAdvance` stamp above ran FIRST.
+                _settleOrPlanAfterArrival(_nextHop);
             }
             return;
         }
@@ -1163,14 +1201,29 @@ void PathTrackerClass::_stepFsm()
                 // mirrors this ordering). The node is still stamped exactly ONCE via the
                 // unchanged onDeadReckonedAdvance below (AC3) — blind nodes have no
                 // positional re-anchor, chained or not.
+                //
+                // ADR-061: capture the chain-active flag OUTSIDE the trace block (the
+                // `_chain.active` read below drives the settle decision, not just the trace).
+                // A still-active chain is a non-final chained pass (no brake) -> NO settle;
+                // a non-chain hop (or the final chained hop, whose dispatch already retired
+                // the run) braked to rest -> settle.
+                const bool chainActive = _chain.active;
 #ifdef PT_PARITY_TRACE
-                if (_chain.active)
+                if (chainActive)
                 {
                     _ptEmitBlindPass(_nextHop);
                 }
 #endif
                 Localization.onDeadReckonedAdvance(_nextHop);
-                _state = State::PLAN_NEXT_HOP;
+                // Order is load-bearing: the `onDeadReckonedAdvance` stamp above ran FIRST.
+                if (chainActive)
+                {
+                    _state = State::PLAN_NEXT_HOP;
+                }
+                else
+                {
+                    _settleOrPlanAfterArrival(_nextHop);
+                }
             }
             return;
         }
@@ -1203,7 +1256,10 @@ void PathTrackerClass::_stepFsm()
             if (Drive.isIdle())
             {
                 Localization.onIntersection(_nextHop);
-                _state = State::PLAN_NEXT_HOP;
+                // ADR-061 dwell-1: a STOP_AT_LINE seek always brakes to rest — settle before
+                // the next maneuver (subject to the enabled + non-RESET gate). Order is
+                // load-bearing: the `onIntersection` stamp above ran FIRST.
+                _settleOrPlanAfterArrival(_nextHop);
             }
             return;
         }
@@ -1333,6 +1389,27 @@ void PathTrackerClass::_stepFsm()
             return;
         }
 
+        case State::SETTLE:
+        {
+            // ADR-061: non-blocking post-stop dwell. Drive is idle/braked and NO Drive command
+            // is issued here — the state is self-bounded by `_settleDeadlineMs`, so `update()`
+            // returns each tick and the deadline compare resolves it. Rollover-safe compare
+            // (matches the `_drainBlocking` deadline idiom): `(int32_t)(millis() - deadline)`
+            // is non-negative once the deadline is reached, even across a `millis()` wrap.
+            if ((int32_t) (millis() - _settleDeadlineMs) >= 0)
+            {
+                if (_settleResume == SettleResume::PLAN)
+                {
+                    _state = State::PLAN_NEXT_HOP;
+                }
+                else    // EDGE_AFTER_TURN
+                {
+                    _dispatchEdgeAfterTurn();
+                }
+            }
+            return;
+        }
+
         case State::FAULT:
         {
             return;
@@ -1372,6 +1449,10 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // ADR-061: a fault aborts the in-flight goal — drop any in-flight settle dwell so it
+    // cannot bleed into a post-clearFault() goal.
+    _settleDeadlineMs       = 0;
+    _settleResume           = SettleResume::PLAN;
     // PR2: a fault aborts the in-flight goal — drop any in-flight wall-zero reset
     // interlude so it cannot bleed into a post-clearFault() goal.
     _resetNode              = FieldMap::NODE_NONE;
@@ -1560,6 +1641,34 @@ void PathTrackerClass::_dispatchReturnMoveAfterTurn()
         .tShape()
         .async();
     _state = State::RETURN_TO_NODE;
+}
+
+void PathTrackerClass::_enterSettle(SettleResume resume)
+{
+    // Non-blocking dwell (ADR-061). Stamp the rollover-safe deadline, latch the resume
+    // target, and park in SETTLE. No Drive command is issued — Drive stays idle/braked, so
+    // the dwell is self-bounded by `_settleDeadlineMs` and `update()` returns each tick.
+    _settleDeadlineMs = millis() + Config::HOP_SETTLE_MS;
+    _settleResume     = resume;
+    _state            = State::SETTLE;
+}
+
+void PathTrackerClass::_settleOrPlanAfterArrival(uint8_t arrivedNode)
+{
+    // Shared dwell-1 decision for the four braked arrival states (ADR-061). The caller has
+    // already advanced `Localization` for `arrivedNode` (order is load-bearing). Settle only
+    // when the feature is enabled AND the arrival is not a RESET node — the wall-zero reset
+    // interlude owns the dwell at a RESET boundary. Otherwise plan immediately, byte-identical
+    // to the pre-feature transition.
+    if (Config::HOP_SETTLE_MS > 0
+        && FieldMap::getNodeType(arrivedNode) != Routes::NodeType::RESET)
+    {
+        _enterSettle(SettleResume::PLAN);
+    }
+    else
+    {
+        _state = State::PLAN_NEXT_HOP;
+    }
 }
 
 bool PathTrackerClass::_maybeEnterReset(uint8_t cur)

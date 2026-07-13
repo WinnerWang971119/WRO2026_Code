@@ -311,15 +311,15 @@ PATH_PASS_THROUGH_ENABLED: bool = True
 # ``Config::SPEED_NORMAL`` byte-for-byte. Hand-mirrored (Python cannot import the
 # C++ header); no dedicated regex-parity test (it rides the golden-pinned
 # ``chain_speed.py`` config parse + the parity sweep).
-SPEED_NORMAL: int = 85
+SPEED_NORMAL: int = 70
 
 # MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h
-# (``= PWM_MIN_MAGNITUDE`` = 50). The cold-start ramp seed a non-pass-through
+# (``= PWM_MIN_MAGNITUDE`` = 35). The cold-start ramp seed a non-pass-through
 # blind hop's velocity plan begins at (ADR-023). ADR-059 emits it as the
 # ``start_pwm`` of every non-chained, non-pass-through ``blind_dead_reckon``
 # record, so it must match the firmware's ``Config::TSHAPE_START_SPEED``.
 # Hand-mirrored; keep in lockstep.
-TSHAPE_START_SPEED: int = 50
+TSHAPE_START_SPEED: int = 35
 
 # MUST mirror ``Config::TSHAPE_MIN_MOVE_CM`` in WRO2026/config/ConfigDrive.h
 # (5.0). The Drive-profile floor below which a hop silently degrades to a flat

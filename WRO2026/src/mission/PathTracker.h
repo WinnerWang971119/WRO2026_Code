@@ -269,6 +269,7 @@ public:
         WALL_STOP,
         REANCHOR,
         WALL_DEPART,
+        SETTLE,
         FAULT
     };
 
@@ -647,6 +648,54 @@ private:
 
     void _dispatchEdgeAfterTurn();
 
+    /// @brief Where the FSM resumes when the SETTLE dwell elapses.
+    ///
+    /// Defined here — BEFORE `_enterSettle(SettleResume)` and the `_settleResume`
+    /// member that consume it — because a member function's parameter type must be a
+    /// COMPLETE type at its point of declaration. MSVC rejects a forward use (C2061);
+    /// g++ is lenient, so the CI (g++) host-tests job would NOT catch a misordering.
+    enum class SettleResume : uint8_t
+    {
+        PLAN,            // -> State::PLAN_NEXT_HOP (post-stop, pre-maneuver / goal arrival)
+        EDGE_AFTER_TURN  // -> _dispatchEdgeAfterTurn() (post-cold-turn, pre-move)
+    };
+
+    /**
+     * @brief Enter the non-blocking post-stop settle dwell (ADR-061).
+     *
+     * Stamps `_settleDeadlineMs = millis() + Config::HOP_SETTLE_MS`, latches @p resume, and
+     * transitions the FSM into `State::SETTLE`. The dwell is a `millis()`-gated hold — it
+     * issues NO Drive command (Drive stays idle/braked), so it is self-bounded by
+     * `_settleDeadlineMs` and cannot hang the cooperative tick (iron rule 1).
+     *
+     * Called only where the Settle-fire matrix says "yes": each of the four braked arrival
+     * states (via `_settleOrPlanAfterArrival`) with `SettleResume::PLAN`, and the cold
+     * pre-edge turn on a normal hop with `SettleResume::EDGE_AFTER_TURN`. The caller is
+     * responsible for advancing `Localization` FIRST (order is load-bearing — settling before
+     * the node stamp would delay `getCurrentNode()` and every observer by the whole dwell).
+     *
+     * @param resume Where the `SETTLE` state routes when the deadline elapses:
+     *               `PLAN` -> `State::PLAN_NEXT_HOP`, `EDGE_AFTER_TURN` ->
+     *               `_dispatchEdgeAfterTurn()`.
+     */
+    void _enterSettle(SettleResume resume);
+
+    /**
+     * @brief Shared dwell-1 decision for a braked arrival (ADR-061).
+     *
+     * Applied by the four braked arrival states (`LINE_OVERSHOOT` non-pass, `STOP_AT_LINE`,
+     * `PROJECTION_FOLLOW` stop, non-chain `BLIND_FORWARD`) AFTER they have advanced
+     * `Localization` for @p arrivedNode. Enters `State::SETTLE` (resume `PLAN`) when
+     * `Config::HOP_SETTLE_MS > 0` AND @p arrivedNode is not a `Routes::NodeType::RESET` node
+     * (the wall interlude owns the RESET boundary); otherwise transitions straight to
+     * `State::PLAN_NEXT_HOP` exactly as the pre-feature code did. Centralising the decision
+     * keeps the four arrival sites from drifting.
+     *
+     * @param arrivedNode The just-stamped arrival node (`_nextHop` ==
+     *                    `Localization.getCurrentNode()` after the stamp).
+     */
+    void _settleOrPlanAfterArrival(uint8_t arrivedNode);
+
     /**
      * @brief One-hop lookahead: the hop AFTER `_nextHop` toward `_destinationNode`.
      *
@@ -891,6 +940,22 @@ private:
     /// the shared pre-turn has faced the chassis at the return heading. Meaningless outside a
     /// return; defaults to 0.
     float _returnDistCm = 0.0f;
+
+    /// @brief `millis()` deadline for the in-flight SETTLE dwell (ADR-061).
+    ///
+    /// Stamped `millis() + Config::HOP_SETTLE_MS` on SETTLE entry by `_enterSettle(...)`.
+    /// Compared rollover-safe in the `SETTLE` state: `(int32_t)(millis() - _settleDeadlineMs)
+    /// >= 0`. Meaningless outside SETTLE; the state itself is the real guard, so the reset to 0
+    /// on begin/abort/fault is defensive only.
+    uint32_t _settleDeadlineMs = 0;
+
+    /// @brief Resume target latched for the in-flight SETTLE dwell (ADR-061).
+    ///
+    /// Set by `_enterSettle(...)`: `PLAN` for a braked arrival's pre-maneuver dwell (dwell-1,
+    /// also covers goal arrival), `EDGE_AFTER_TURN` for a cold pre-edge turn's turn->move dwell
+    /// (dwell-2). Read once by the `SETTLE` state to pick `PLAN_NEXT_HOP` vs
+    /// `_dispatchEdgeAfterTurn()` when the deadline elapses.
+    SettleResume _settleResume = SettleResume::PLAN;
 
     /// @brief Per-arrival latch guarding the wall-zero reset interlude (PR2, AC9).
     ///

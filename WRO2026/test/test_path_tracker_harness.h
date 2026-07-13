@@ -688,6 +688,51 @@ inline void expectStopAtLine(float cm, bool found)
     }
 }
 
+/**
+ * @brief Retire an in-flight non-blocking `SETTLE` dwell: jump the mock clock past the
+ *        settle deadline in ONE step, then tick until the FSM leaves `SETTLE` (ADR-061).
+ *
+ * @details
+ * The ADR-061 post-stop settle is a `millis()`-gated hold, NOT a Drive command: on entry
+ * `PathTracker::_enterSettle(...)` stamps `_settleDeadlineMs = millis() + Config::HOP_SETTLE_MS`
+ * and parks the FSM in `State::SETTLE`; the `SETTLE` state body then returns each tick until the
+ * rollover-safe compare `(int32_t)(millis() - _settleDeadlineMs) >= 0` goes true, at which point
+ * it resumes to `PLAN_NEXT_HOP` (dwell-1 / goal arrival) or `_dispatchEdgeAfterTurn()` (dwell-2,
+ * the cold-turn -> move dwell). Nothing in the harness scripts an encoder / done-bit for a settle
+ * — the ONLY input the dwell consumes is the clock.
+ *
+ * `_settleDeadlineMs` is PRIVATE (`PathTracker.h`), so this helper cannot read the exact deadline.
+ * It does NOT need to: the deadline is `millis() + Config::HOP_SETTLE_MS` and `Config::HOP_SETTLE_MS`
+ * is a compile-time constant visible here (real `Config.h` is `#include`d at the top of this
+ * header), so a SINGLE `mockAdvanceMillis(Config::HOP_SETTLE_MS + 1)` guarantees the clock is at
+ * least one tick PAST the deadline regardless of what `millis()` read at entry — the known-magnitude
+ * advance is exact without a getter. The `+ 1` covers the boundary (the compare is `>= 0`, so being
+ * exactly AT the deadline already resolves; the extra ms is defensive against a same-tick stamp).
+ * The follow-up tick loop then runs the resume transition; it is bounded by
+ * `path_harness::kMaxHandshakeTicks` so a real-FSM regression that never leaves `SETTLE` fails as a
+ * budget-exhausted assert instead of hanging, and it short-circuits on a fault so a mid-dwell fault
+ * (which resets the settle members, `PathTracker::_enterFault`) exits cleanly.
+ *
+ * @note NO assert here on its own: unlike the per-hop retire helpers, `driveSettle()` is a pure
+ *       clock-jump utility — the CALLER asserts the observed `State::SETTLE` BEFORE calling it and
+ *       the resumed state (dispatch / IDLE / PLAN) AFTER. `mockAdvanceMillis` is declared in the
+ *       mock `<Arduino.h>` already `#include`d by this harness; `Config::HOP_SETTLE_MS` and
+ *       `PathTrackerClass::State::SETTLE` are visible via the real `Config.h` / `PathTracker.h`
+ *       included at the top of this header. When `Config::HOP_SETTLE_MS == 0` the FSM never enters
+ *       `SETTLE`, so the loop condition is false on entry and this is a harmless no-op.
+ */
+inline void driveSettle()
+{
+    mockAdvanceMillis(Config::HOP_SETTLE_MS + 1);
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks
+                    && PathTracker.state() == PathTrackerClass::State::SETTLE
+                    && !PathTracker.hasFault();
+         ++i)
+    {
+        cooperativeTick();
+    }
+}
+
 // ===========================================================================================
 // Reset-arrival + return-to-node helpers (issue #113)
 //

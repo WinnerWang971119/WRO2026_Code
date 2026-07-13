@@ -573,7 +573,9 @@ def _resolve_mosaic_args(
 
     rng = random.Random(seed)
     colors = mosaic.roll_mosaic(cfg, rng)
-    letters = "".join(mosaic.COLOR_LETTER[name] for name in colors)
+    # color_to_letter (not COLOR_LETTER directly) so an AIR cell from an
+    # under-filled random roll joins as AIR_LETTER instead of raising KeyError.
+    letters = "".join(mosaic.color_to_letter(name) for name in colors)
     geom_h = mosaic.geom_hash(cfg)
 
     return [
@@ -1123,6 +1125,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     # quoting; a plain ``--stop-player --port N`` argv is safe on every shell.
     if args.stop_player:
         edit_server._request_close("127.0.0.1", args.port)
+        # Block until the port is actually free before returning. /close acks
+        # instantly but the incumbent takes up to a serve_forever poll cycle to
+        # exit, so returning here immediately lets the follow-on --serve task
+        # race a dying server (empty port when the browser opens) — the cause of
+        # the alternating ok/fail reopen. Waiting for the port to free (and thus
+        # the old process to exit) makes the reopen deterministic.
+        edit_server._wait_port_free("127.0.0.1", args.port)
         return 0
 
     # --- --editor flow: serve the authoring page, nothing else ---------------

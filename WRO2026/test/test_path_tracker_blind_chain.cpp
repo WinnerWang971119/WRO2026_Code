@@ -142,18 +142,15 @@ void predictChainPlan(const float* hopDistCm, uint8_t hopCount, int16_t cruisePw
 ///     profile oracle below is the only correct predictor for a mid-hop.
 ///   - **Chain-FINAL braked hop** (`plan[k].brake`): T13 pins the braked end target
 ///     to the FLOOR — `.setStartSpeed(plan[k].startPwm).setEndSpeed(±PWM_MIN_MAGNITUDE)`
-///     — NOT the braked-default `Config::TSHAPE_END_SPEED` (0). With
-///     `startSpd == plan[k].startPwm == cruise` (the backward pass leaves the final
-///     hop's entry at cruise here) and `endSpd == PWM_MIN_MAGNITUDE`, the decel
-///     `(cruise − PWM_MIN)/accel = 7 cm` fits the 8 cm hop, so the accel ramp is
-///     zero and `traveled == 0` is BELOW the decel-zone entry
-///     (`totalCm − decelCm`): `tShapeSpeedAt(0)` returns `peakPwm == cruise ==
-///     plan[k].startPwm`. So the final hop LAUNCHES at the plan start (no
-///     triangle-collapse re-dip — the T13 bug fix). Asserting `plan[k].startPwm`
-///     directly is exact AND honest here (the launch IS the plan start), so this
-///     helper short-circuits to it rather than re-dipping through the profile math
-///     with a stale (endSpd=0) end target — that stale target is exactly the
-///     pre-T13 model that predicted the wrong 56.
+///     — NOT the braked-default `Config::TSHAPE_END_SPEED` (0), so the oracle runs the
+///     profile with `endSpd == PWM_MIN_MAGNITUDE`. When the decel
+///     `(cruise − PWM_MIN)/accel` shed FITS the hop, the accel ramp is zero and
+///     `traveled == 0` sits BELOW the decel-zone entry, so `tShapeSpeedAt(0)` returns
+///     `peakPwm` and the hop LAUNCHES at the plan start. When the shed OVERRUNS the hop
+///     (a lower-floor / gentler-accel tune — e.g. `(70 − 35)/4 = 8.75 cm` in an 8 cm
+///     hop), the profile triangle-collapses and `traveled == 0` launches BELOW the plan
+///     start. Running the profile with the floor end target predicts BOTH regimes
+///     exactly; a bare `plan[k].startPwm` short-circuit is only correct in the first.
 ///
 /// This helper is the ONLY correct oracle for "what does the FSM actually emit on
 /// hop k's first tick"; for a mid-hop it must run the profile, never hand-assert
@@ -163,9 +160,14 @@ int16_t predictHopDispatchPwm(const float* hopDistCm, const ChainHopSpeed* plan,
 {
     if (plan[k].brake)
     {
-        // Chain-final braked hop: T13 dispatches setEndSpeed(±PWM_MIN_MAGNITUDE), so the
-        // (cruise−PWM_MIN)/accel shed fits and the launch equals the plan start exactly.
-        return plan[k].startPwm;
+        // Chain-final braked hop: T13 dispatches `.setEndSpeed(±PWM_MIN_MAGNITUDE)`, so the
+        // dispatched decel targets the FLOOR, not plan[k].endPwm. Model that exactly by
+        // running the profile with the floor end target: the launch equals plan[k].startPwm
+        // ONLY when the (cruise−PWM_MIN)/accel shed fits the hop; when the shed overruns the
+        // hop (a lower-floor / gentler-accel tune) the profile triangle-collapses and the
+        // hop launches BELOW plan[k].startPwm.
+        return predictProfilePwmAt(0.0f, hopDistCm[k], cruisePwm, plan[k].startPwm,
+                                   Config::PWM_MIN_MAGNITUDE);
     }
     return predictProfilePwmAt(0.0f, hopDistCm[k], cruisePwm, plan[k].startPwm, plan[k].endPwm);
 }
@@ -506,19 +508,18 @@ void test_main_chain_dispatch()
     tickUntilBlindDispatch();
 
     // ---- Hop 3 (FINAL): ChainC -> ChainD. -----------------------------------
-    // The final hop is the cruise->floor->brake stop: it starts at the plan's start
-    // speed (the backward pass leaves it at cruise 85 here) and completes with a true
-    // brake. T13 dispatches `.setEndSpeed(±PWM_MIN_MAGNITUDE)` (floor, not 0) so the
-    // (cruise−PWM_MIN)/accel = 7 cm shed fits the 8 cm hop -- the hop LAUNCHES at the
-    // plan start (85), sheds cruise->floor, and the brake completes floor->rest. So the
-    // recorded launch is `plan[3].startPwm` (85), NOT the pre-T13 triangle-collapse 56;
-    // predictHopDispatchPwm short-circuits a braked final hop to `plan[k].startPwm`.
+    // The final hop is the cruise->floor->brake stop: T13 dispatches
+    // `.setEndSpeed(±PWM_MIN_MAGNITUDE)` (floor, not 0) and the brake completes floor->rest.
+    // Under the shipped tune the (cruise−PWM_MIN)/accel = (70−35)/4 = 8.75 cm shed OVERRUNS
+    // the 8 cm hop, so the profile triangle-collapses and the hop LAUNCHES BELOW the plan
+    // start (unlike the pre-retune 7 cm / 8 cm case that launched exactly at the plan start).
+    // predictHopDispatchPwm models that collapse via the profile math with the floor target.
     if (Config::PATH_BLIND_CHAIN_ENABLED)
     {
         const int16_t expected3 = predictHopDispatchPwm(kMainHopDistCm, plan, 3, Config::SPEED_NORMAL);
         ASSERT_EQ(MiniR4.DriveDC.lastMoveSyncL, expected3);
         ASSERT_TRUE(plan[3].brake);
-        ASSERT_EQ(expected3, plan[3].startPwm);    // T13: final hop launches at the plan start (85).
+        ASSERT_TRUE(expected3 < plan[3].startPwm);    // shed overruns the hop -> collapses below plan start
     }
     else
     {

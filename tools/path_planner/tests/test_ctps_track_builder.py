@@ -1416,8 +1416,8 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     segment's ``[t0, t1]`` bracket. Each arc sample matches the documented
     Contracts formula; heading rotates through the full 90 deg; the arc spans
     exactly ``resolve_turn_profile(theta, is_pivot=True).duration_s()`` seconds,
-    split EVENLY across the N steps (constant-rate at the snapped floor, AC3);
-    the running clock stays strictly monotonic.
+    split into a fast cruise group then a slower slow-zone group (the two-stage
+    turn, AC3); the running clock stays strictly monotonic.
     """
     from tools.path_planner.ctps.profile import resolve_turn_profile
 
@@ -1455,12 +1455,23 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     assert approach_end["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert arc[-1]["h"] == pytest.approx(0.0, abs=_POSE_TOL)
 
-    # Even timing across the N replacement sub-keyframes (the sample_turn arc
-    # path pins each to t0 + k/N * duration — a uniform grid).
+    # Two-stage timing across the N uniform-ANGLE sub-keyframes: the cruise-band
+    # degrees sweep at the fast (50) rate and the final TURN_SLOW_ZONE_DEG degrees
+    # at the snapped floor (35), so the per-step durations split into a short
+    # cruise group then a longer slow group, in the inverse PWM ratio 50 / 35.
+    turn = resolve_turn_profile(-90.0, is_pivot=True)
+    n_slow = round(turn.slow_deg / ARC_STEP_DEG)
+    n_cruise = n - n_slow
+    assert 0 < n_cruise < n
     times = [approach_end["t"]] + [kf["t"] for kf in arc]
     steps = [b - a for a, b in zip(times, times[1:])]
-    for step in steps:
-        assert step == pytest.approx(steps[0], abs=1e-9)
+    cruise_steps = steps[:n_cruise]
+    slow_steps = steps[n_cruise:]
+    for step in cruise_steps:
+        assert step == pytest.approx(cruise_steps[0], abs=1e-9)
+    for step in slow_steps:
+        assert step == pytest.approx(slow_steps[0], abs=1e-9)
+    assert slow_steps[0] / cruise_steps[0] == pytest.approx(50.0 / 35.0, rel=1e-6)
 
     # Total arc duration: the firmware pivot-turn profile duration.
     expected_dur = resolve_turn_profile(-90.0, is_pivot=True).duration_s()

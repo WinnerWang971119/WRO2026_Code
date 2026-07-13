@@ -97,24 +97,26 @@ namespace
     /**
      * @brief Map a single `--mosaic` wire letter to its `Config::Color`.
      *
-     * The wire alphabet is the canonical `mosaic.COLOR_LETTER` map single-sourced
-     * in `tools/path_planner/ctps/mosaic.py`: `Y→YELLOW`, `B→BLUE`, `G→GREEN`,
-     * `W→WHITE`, `R→RED`. Any other character (including lowercase, digits, or
-     * the `UNKNOWN` sentinel's absence of a letter) is rejected.
+     * The wire alphabet is single-sourced in `tools/path_planner/ctps/mosaic.py`
+     * (`mosaic.COLOR_LETTER` + `AIR_LETTER`, joined via `color_to_letter`):
+     * `Y→YELLOW`, `B→BLUE`, `G→GREEN`, `W→WHITE`, `R→RED`, and `A→UNKNOWN` — an
+     * "air" / empty cell produced by an under-filled random roll (ADR-063). Any
+     * other character (including lowercase or digits) is rejected.
      *
      * @param c   The wire letter to map.
      * @param out Set to the mapped color on success; left unmodified on failure.
-     * @return `true` iff @p c is one of the five valid uppercase letters.
+     * @return `true` iff @p c is one of the six valid uppercase letters.
      */
     bool letterToColor(char c, Config::Color& out)
     {
         switch (c)
         {
-            case 'Y': out = Config::Color::YELLOW; return true;
-            case 'B': out = Config::Color::BLUE;   return true;
-            case 'G': out = Config::Color::GREEN;  return true;
-            case 'W': out = Config::Color::WHITE;  return true;
-            case 'R': out = Config::Color::RED;    return true;
+            case 'Y': out = Config::Color::YELLOW;  return true;
+            case 'B': out = Config::Color::BLUE;    return true;
+            case 'G': out = Config::Color::GREEN;   return true;
+            case 'W': out = Config::Color::WHITE;   return true;
+            case 'R': out = Config::Color::RED;     return true;
+            case 'A': out = Config::Color::UNKNOWN; return true;  // "air" / empty (ADR-063)
             default:  return false;
         }
     }
@@ -155,7 +157,7 @@ namespace
                 if (i + 1 >= argc)
                 {
                     std::cerr << "ctps_dump: --mosaic requires a value (" << CTPS_MOSAIC_CELL_COUNT
-                              << " letters, one of Y/B/G/W per cell)\n";
+                              << " letters, one of Y/B/G/W/R or A (air) per cell)\n";
                     return false;
                 }
                 const char* letters = argv[++i];
@@ -171,7 +173,7 @@ namespace
                     if (!letterToColor(letters[c], out.colors[c]))
                     {
                         std::cerr << "ctps_dump: --mosaic letter '" << letters[c] << "' at index "
-                                  << c << " is not one of Y/B/G/W\n";
+                                  << c << " is not one of Y/B/G/W/R/A\n";
                         return false;
                     }
                 }

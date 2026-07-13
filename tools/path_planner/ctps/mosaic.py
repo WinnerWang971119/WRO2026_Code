@@ -2,8 +2,10 @@
 
 This is the leaf module for the CTPS "randomized vision" feature (ADR-060): the
 **one place** the mosaic colour vocabulary (:data:`COLOR_NAMES` /
-:data:`COLOR_LETTER` / :data:`COLOR_HEX`), the seeded roll
-(:func:`roll_mosaic`), the world-frame cell geometry (:func:`resolve_cells`),
+:data:`COLOR_LETTER` / :data:`COLOR_HEX`, plus the :data:`AIR_NAME` /
+:data:`AIR_LETTER` empty-cell sentinel and the :func:`color_to_letter` wire
+join), the seeded roll (:func:`roll_mosaic`), the world-frame cell geometry
+(:func:`resolve_cells`),
 the geometry fingerprint (:func:`geom_hash`), and the pure schema validators
 (:func:`validate_mosaic_config` / :func:`validate_vision_cone`) live. Every
 downstream consumer reads from here and never re-hardcodes any of it:
@@ -22,7 +24,10 @@ downstream consumer reads from here and never re-hardcodes any of it:
 Colour contract (must match ``Config::Color`` minus ``UNKNOWN``):
 ``enum class Color : uint8_t { UNKNOWN=0, YELLOW, BLUE, GREEN, WHITE, RED };`` ⇒
 :data:`COLOR_NAMES` ``= ("YELLOW", "BLUE", "GREEN", "WHITE", "RED")`` in exactly
-that order. Drift fails CI via the T3 header-parse guard.
+that order. Drift fails CI via the T3 header-parse guard. The ``UNKNOWN=0``
+enumerant is exposed separately as the AIR (empty-cell) sentinel
+(:data:`AIR_NAME` ``= "UNKNOWN"``, :data:`AIR_LETTER` ``= "A"``); it is NOT in
+:data:`COLOR_NAMES`, so the parity guard is unaffected (ADR-063).
 
 Cell ordering / geometry (authoritative — the same index ``i`` is the position
 in ``cells[]``, the ``counts``-fill order, the trace ``mosaic.cells[]``,
@@ -56,6 +61,9 @@ __all__ = [
     "COLOR_NAMES",
     "COLOR_LETTER",
     "COLOR_HEX",
+    "AIR_NAME",
+    "AIR_LETTER",
+    "color_to_letter",
     "MODE_DIRECTED",
     "MODE_RANDOM",
     "CELL_COUNT",
@@ -80,7 +88,8 @@ COLOR_NAMES: Tuple[str, ...] = ("YELLOW", "BLUE", "GREEN", "WHITE", "RED")
 
 #: Single-letter code per colour — the ``ctps_dump --mosaic <12 letters>`` wire
 #: alphabet (the C++ mock parses letter -> ``Config::Color`` against the real
-#: enum). Exactly one letter per :data:`COLOR_NAMES` entry.
+#: enum). Exactly one letter per :data:`COLOR_NAMES` entry; the AIR sentinel
+#: carries its own :data:`AIR_LETTER` (join via :func:`color_to_letter`).
 COLOR_LETTER: Dict[str, str] = {
     "YELLOW": "Y",
     "BLUE": "B",
@@ -101,6 +110,45 @@ COLOR_HEX: Dict[str, str] = {
 
 #: The set of valid colour names (for O(1) membership tests in validators).
 _COLOR_NAME_SET: frozenset[str] = frozenset(COLOR_NAMES)
+
+#: The "air" (empty) cell — an unlit mosaic cell with no block present. It maps
+#: to the firmware ``Config::Color::UNKNOWN`` enumerant (declaration value 0),
+#: whose canonical name string is ``"UNKNOWN"`` (exactly what the C++
+#: ``ctps_record`` emits for that enum). AIR is deliberately kept OUT of
+#: :data:`COLOR_NAMES` / :data:`COLOR_HEX` — it is not a palette colour: the
+#: header-parse enum-parity guard strips ``UNKNOWN`` from the enum body,
+#: ``MOSAIC_META`` carries only the five real colours, and the player renders an
+#: AIR cell through its existing unknown-colour outline fallback (no synthesized
+#: fill). AIR is produced ONLY by :func:`roll_mosaic` when random-mode counts
+#: under-fill the null cells; it is never an authorable/pinnable value (ADR-063).
+AIR_NAME: str = "UNKNOWN"
+
+#: Wire letter for an AIR cell on the ``ctps_dump --mosaic <letters>`` argv. The
+#: C++ ``letterToColor`` maps ``'A' -> Config::Color::UNKNOWN`` (the mirror of
+#: this constant). Distinct from every :data:`COLOR_LETTER` value.
+AIR_LETTER: str = "A"
+
+
+def color_to_letter(name: str) -> str:
+    """Map a rolled cell colour name to its single ``--mosaic`` wire letter.
+
+    The single source of the wire alphabet (ADR-060 keeps it here, never
+    re-hardcoded): the five palette colours resolve through
+    :data:`COLOR_LETTER`, and the AIR sentinel (:data:`AIR_NAME`) resolves to
+    :data:`AIR_LETTER`. The orchestrator builds the ``--mosaic`` argv value by
+    joining this over a rolled cell list, so an AIR cell (from an under-filled
+    random roll) travels the wire as :data:`AIR_LETTER` and the C++ dump injects
+    it as ``Config::Color::UNKNOWN``.
+
+    :param name: a rolled cell colour name — a :data:`COLOR_NAMES` entry or
+        :data:`AIR_NAME`.
+    :return: the single wire letter for ``name``.
+    :raises KeyError: if ``name`` is neither a palette colour nor
+        :data:`AIR_NAME`.
+    """
+    if name == AIR_NAME:
+        return AIR_LETTER
+    return COLOR_LETTER[name]
 
 #: Roll modes — exact strings, shared with the schema / editor.
 MODE_DIRECTED: str = "directed"
@@ -202,9 +250,10 @@ class MosaicConfig:
     :param palette: allowed colour names (a subset of :data:`COLOR_NAMES`).
     :param cells: exactly :data:`CELL_COUNT` entries — each ``None`` (rolled) or
         a pinned palette colour name.
-    :param counts: random-mode quota per colour for the NULL cells; the values
-        sum to the number of ``None`` entries in ``cells``. Empty / ignored in
-        directed mode.
+    :param counts: random-mode quota per colour for the NULL cells. The values
+        may sum to any non-negative number (ADR-063): an under-fill leaves the
+        leftover null cells as air, an over-fill keeps a random subset. Empty /
+        ignored in directed mode.
     :param seed: fixed non-negative ``int`` seed, or ``None`` (fresh per
         invocation — the caller resolves it).
     """
@@ -322,11 +371,22 @@ def roll_mosaic(cfg: MosaicConfig, rng: "Any") -> List[str]:
       ``None`` cells are filled — in ASCENDING cell-index order — from the
       :attr:`MosaicConfig.counts` multiset shuffled by ``rng``. The pool is the
       counts expanded to one entry per unit (e.g. ``{Y:3, B:3, G:4}`` -> 10
-      entries), ``rng.shuffle``-d, then dealt into the null cells left-to-right.
+      entries). ``sum(counts)`` need NOT equal the null-cell count (ADR-063):
+
+      * **exact fill** (``sum == #nulls``): the pool is ``rng.shuffle``-d, then
+        dealt into the null cells left-to-right (byte-identical to pre-ADR-063).
+      * **under-fill** (``sum < #nulls``): the pool is padded with
+        :data:`AIR_NAME` up to ``#nulls`` BEFORE the shuffle, so the leftover
+        cells become empty ("air") and the air lands at random positions among
+        the null cells (not always the tail).
+      * **over-fill** (``sum > #nulls``): the pool is shuffled and only the
+        first ``#nulls`` units are dealt — the excess is dropped at random, so
+        the kept subset is a uniform random sample of the counts multiset.
 
     Assumes ``cfg`` already passed :func:`validate_mosaic_config` (so
     ``len(cells) == CELL_COUNT``, directed has no null cell, and random's
-    ``sum(counts) == #nulls``); it does not re-validate.
+    ``counts`` keys/values are palette colours / non-negative ints); it does not
+    re-validate.
 
     :param cfg: the mosaic configuration (mode + cells + counts).
     :param rng: a :class:`random.Random` instance (explicitly passed; the seed
@@ -347,15 +407,25 @@ def roll_mosaic(cfg: MosaicConfig, rng: "Any") -> List[str]:
             f"expected one of {sorted(_ALLOWED_MODES)!r}."
         )
 
-    # Random: build the null-cell pool from the counts multiset, shuffle it with
-    # the caller's rng, then deal it into the null cells in ascending index
-    # order. Counts are iterated in COLOR_NAMES order so the unshuffled pool is
-    # deterministic before the shuffle (the shuffle is the only entropy).
+    # Random: build the null-cell pool from the counts multiset, then deal it
+    # into the null cells in ascending index order. Counts are iterated in
+    # COLOR_NAMES order so the unshuffled pool is deterministic before the
+    # shuffle (the shuffle is the only entropy).
+    null_count = sum(1 for cell in cfg.cells if cell is None)
     pool: List[str] = []
     for name in COLOR_NAMES:
         pool.extend([name] * int(cfg.counts.get(name, 0)))
+
+    # Under-fill: pad the pool with AIR so the leftover null cells become empty.
+    # Air is padded BEFORE the shuffle so it lands at random positions among the
+    # null cells, not always at the tail.
+    if len(pool) < null_count:
+        pool.extend([AIR_NAME] * (null_count - len(pool)))
+
     rng.shuffle(pool)
 
+    # Over-fill: len(pool) > null_count, so dealing only null_count entries drops
+    # the excess at random (the shuffle already randomised which units survive).
     result: List[str] = []
     pool_iter = iter(pool)
     for pinned in cfg.cells:
@@ -533,9 +603,10 @@ def validate_mosaic_config(data: Any) -> None:
     * ``cells`` has exactly :data:`CELL_COUNT` entries, each ``None`` or a
       palette colour;
     * **directed** mode: no ``None`` cell;
-    * **random** mode: ``counts`` keys are palette colours, values are
-      non-negative ints, and ``sum(counts.values())`` equals the number of
-      ``None`` cells;
+    * **random** mode: ``counts`` keys are palette colours and values are
+      non-negative ints; ``sum(counts.values())`` may be ANY non-negative
+      number (ADR-063) — an under-fill leaves the leftover cells as air, an
+      over-fill keeps a random subset (both resolved in :func:`roll_mosaic`);
     * ``seed`` is ``None`` or a non-negative ``int`` (``-1`` / ``1.5`` / a bool
       are rejected).
 
@@ -683,7 +754,14 @@ def _validate_cells(data: dict, palette: frozenset[str]) -> int:
 def _validate_mode_specific(
     data: dict, palette: frozenset[str], null_count: int
 ) -> None:
-    """Validate the directed-no-null / random-counts rules given the null count."""
+    """Validate the directed-no-null / random-counts colour+quota rules.
+
+    ``null_count`` gates only the directed-mode "every cell pinned" check;
+    random-mode ``counts`` may sum to ANY non-negative number (ADR-063) — an
+    under-fill leaves the leftover null cells as AIR and an over-fill keeps a
+    random subset, both resolved in :func:`roll_mosaic`, so no sum equality is
+    enforced here.
+    """
     mode = data["mode"]
     if mode == MODE_DIRECTED:
         if null_count != 0:
@@ -693,13 +771,13 @@ def _validate_mode_specific(
             )
         return
 
-    # random mode
+    # random mode: counts keys must be palette colours and values non-negative
+    # ints. sum(counts) is intentionally NOT constrained to null_count (ADR-063).
     counts = data.get("counts", {})
     if not isinstance(counts, dict):
         raise ValueError(
             f"mosaic.counts must be a dict; got {type(counts).__name__!r}."
         )
-    total = 0
     for name, quota in counts.items():
         if name not in _COLOR_NAME_SET:
             raise ValueError(
@@ -716,12 +794,6 @@ def _validate_mode_specific(
                 f"mosaic.counts[{name!r}] must be a non-negative integer; "
                 f"got {quota!r}."
             )
-        total += quota
-    if total != null_count:
-        raise ValueError(
-            f"mosaic.mode='random': sum(counts) must equal the number of null "
-            f"cells ({null_count}); got {total}."
-        )
 
 
 def _validate_seed(data: dict) -> None:

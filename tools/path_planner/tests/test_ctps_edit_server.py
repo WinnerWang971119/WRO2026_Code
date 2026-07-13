@@ -146,6 +146,62 @@ def test_bind_server_reopens_occupied_fixed_port(tmp_path):
         old_watchdog.join(timeout=3)
 
 
+def test_wait_port_free_returns_immediately_when_nothing_listening():
+    """An unused fixed port is reported free at once (no wait on the common path)."""
+    free = _free_fixed_port()  # grabbed then released -> nothing listening
+    assert edit_server._wait_port_free("127.0.0.1", free, timeout=1.0) is True
+
+
+def test_wait_port_free_shortcircuits_ephemeral_port():
+    """``port == 0`` is meaningless to wait on and returns immediately."""
+    assert edit_server._wait_port_free("127.0.0.1", 0, timeout=1.0) is True
+
+
+def test_wait_port_free_times_out_while_server_holds_port(tmp_path):
+    """A still-listening server keeps the port busy until ``timeout`` elapses."""
+    fixed = _free_fixed_port()
+    server = edit_server._EditorServer(
+        ("127.0.0.1", fixed), edit_server._EditorHandler,
+        b"<html>BUSY</html>", tmp_path / "busy.json",
+    )
+    thread = _serve_closing(server)
+    _wait_until_serving(fixed)
+    try:
+        # The server is up, so the port never frees within the (short) window.
+        assert edit_server._wait_port_free("127.0.0.1", fixed, timeout=0.5) is False
+    finally:
+        server.shutdown()
+        thread.join(timeout=3)
+
+
+def test_wait_port_free_unblocks_after_close_frees_port(tmp_path):
+    """After ``/close`` releases the socket, the wait flips to free.
+
+    Models the ``--stop-player`` flow: evict the incumbent, then block until the
+    port is truly free so the follow-on ``--serve`` binds a clean port instead of
+    racing a dying server — the fix for the alternating ok/fail reopen.
+    """
+    fixed = _free_fixed_port()
+    server = edit_server._EditorServer(
+        ("127.0.0.1", fixed), edit_server._EditorHandler,
+        b"<html>OLD</html>", tmp_path / "old.json",
+    )
+    thread = _serve_closing(server)
+    watchdog = threading.Thread(
+        target=edit_server._watchdog, args=(server,), daemon=True
+    )
+    watchdog.start()
+    _wait_until_serving(fixed)
+
+    edit_server._request_close("127.0.0.1", fixed)  # ack is instant; exit lags
+    try:
+        assert edit_server._wait_port_free("127.0.0.1", fixed, timeout=3.0) is True
+    finally:
+        server.shutdown()  # no-op if the /close already stopped it
+        thread.join(timeout=3)
+        watchdog.join(timeout=3)
+
+
 def test_bind_server_reraises_on_ephemeral_bind_failure(monkeypatch):
     """An ephemeral (``port==0``) bind failure is never masked by eviction retries.
 

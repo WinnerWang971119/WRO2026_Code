@@ -206,20 +206,6 @@ private:
     bool demoEcho(const TaskArgs& args);
 
     /**
-     * @brief Always-yield task body — returns ``false`` so the FSM's YIELD
-     *        path (``TASK YIELD %s`` event + Serial line + ``_advanceStep``)
-     *        has a production-side exercise.
-     *
-     * @param args  Ignored.
-     * @return Always ``false``.
-     *
-     * @note Without this, the YIELD path is exercised only by the host-test
-     *       mirror's stub and any regression in Mission's TASK case that
-     *       mis-handles ``ok==false`` would ship undetected.
-     */
-    bool debugYield(const TaskArgs& args);
-
-    /**
      * @brief Grab the object to the bin in one call.
      * @param bin  which bin it is sorting to.
      * @note This is NOT a task that can be called at the mission.
@@ -253,55 +239,16 @@ private:
      */
     bool servoTest(const TaskArgs& args);
 
-    /**
-     * @brief Home the conveyor belt via `ManipBelt::home()`, then return.
-     *
-     * Thin wrapper: calls `Manipulator.belt.home()` — which stalls to the LEFT/HOME
-     * end-stop, re-zeros the encoder, and drives on to the MID rest position — and polls
-     * `Manipulator.update()` until the whole sequence lands. The belt's own per-stage
-     * watchdogs bound the moves, so the wait always terminates.
-     *
-     * @param args Ignored.
-     * @return Always `true`.
-     */
-    bool home(const TaskArgs& args);
+    /// @brief Test-support stub for Mission's TASK YIELD path: prints its
+    ///        signature and returns false so a real Mission/Tasks integration can
+    ///        exercise the yield (not abort) branch end-to-end.
+    bool debugYield(const TaskArgs& args);
 
-    /**
-     * @brief Stationary cooperative wait task.
-     *
-     * Spins for ``args.u32[0]`` milliseconds while driving the registered cooperative
-     * tick callback so the rest of the robot keeps updating. Refuses to start if the
-     * chassis is already moving (Drive / PathTracker busy or LineFollower enabled).
-     *
-     * @param args ``u32[0]`` = wait duration in milliseconds.
-     * @return ``true`` when the timeout elapses; ``false`` if motion is active at entry
-     *         or the task framework is aborted during the wait.
-     */
+    /// @brief Cooperative idle-hold for `args.u32[0]` ms while the chassis is
+    ///        stationary; refuses (returns false) if any motion is active.
     bool idleWait(const TaskArgs& args);
 
-    bool test1(const TaskArgs& args);
-
-    /**
-     * @brief Line-follow a short fixed distance — a smoke test for the line + drive path.
-     *
-     * Bring-up helper: enables the LineFollower with a hard-coded 50 cm distance target and
-     * blocks (driving the cooperative tick) until the distance gate trips. The arg is
-     * ignored — the 50 cm target is fixed in the body, not taken from `args`.
-     *
-     * @param args Ignored.
-     * @return `true` once the 50 cm gate trips; `false` if the follow times out or Drive was
-     *         not idle when the task ran.
-     */
-    bool testChassis(const TaskArgs& args);
-
-    /**
-     * @brief Bring-up nav demo: hop a fixed node sequence via PathTracker.
-     *
-     * @param args Ignored.
-     * @return Always `true`.
-     */
     bool testOne(const TaskArgs& args);
-    bool test0621(const TaskArgs& args);
 
     /**
      * @brief Bring-up CTPS demo.
@@ -323,19 +270,6 @@ private:
     bool emptyTest(const TaskArgs& args);
 
     /**
-     * @brief Bench self-test: sweep every configured drivetrain/manipulator actuator.
-     *
-     * Exercises the drive pair in both directions, then sweeps the belt and all three servos
-     * across their configured poses / stations with waits between steps so the operator can
-     * visually confirm motion and direction.
-     *
-     * @param args Ignored.
-     * @return ``true`` if every phase completed within its timeout; ``false`` if a servo or
-     *         the belt failed to settle in time.
-     */
-    bool actuatorSweep(const TaskArgs& args);
-
-    /**
      * @brief Belt-only bring-up: start the belt home sequence.
      *
      * Calls `Manipulator.belt.home()` (stall into the LEFT/HOME end-stop, re-zero the encoder,
@@ -349,43 +283,24 @@ private:
     bool beltTest(const TaskArgs& args);
 
     /**
-     * @brief Single-step actuator jog for calibration.
-     *
-     * Uses the first four ``u8`` arg slots as a tiny command packet so the operator can jog one
-     * actuator at a time from ``Mission.task(...)`` without defining a custom struct:
-     *
-     *   ``u8[0]`` = target
-     *   ``u8[1]`` = value / pose / leg
-     *   ``u8[2]`` = aux (PWM / angle / unused)
-     *   ``u8[3]`` = dwell in 100 ms ticks (drive only)
-     *
-     * Targets:
-     *   - 0 = grabber pose      (value: 0 home / 1 open / 2 close)
-     *   - 1 = grabber abs angle (value: angle 0..180)
-     *   - 2 = sorter bin        (value: bin index)
-     *   - 3 = sorter abs angle  (value: angle 0..180)
-     *   - 4 = dumper pose       (value: 0 home / 1 open / 2 close)
-     *   - 5 = dumper abs angle  (value: angle 0..180)
-     *   - 6 = belt station      (value: 0 left / 1 mid / 2 far_end / 3 abc)
-     *   - 7 = drive leg         (value: 0 LF / 1 LR / 2 RF / 3 RR / 4 BF / 5 BR,
-     *                            aux: PWM 0..100, dwell: 100 ms ticks)
-     *
-     * @param args Packed command bytes as described above.
-     * @return ``true`` on a successful jog; ``false`` on an invalid selector or a timeout.
-     */
-    bool actuatorStep(const TaskArgs& args);
-
-    /**
      * @brief Primitive-handle bench test for every manipulator actuator.
      *
      * Drives the three servos and the belt DIRECTLY through `Manipulator`'s public primitive
      * handles (`grabber` / `sorter` / `dumper` / `belt`) so bring-up can verify each actuator
      * without going through the semantic verbs.
      *
-     * @param args Ignored.
+     * @param args u8[0] = 1 to enable belt test; otherwise ignored.
      * @return ``true`` when every primitive movement completed; ``false`` on a belt/servo timeout.
      */
     bool manipDirectTest(const TaskArgs& args);
+
+    /**
+     * @brief Go to the place and read the mosaic colors.
+     * @param args  Ignored.
+     * @return `true` if read successfully; `false` if the read failed (after one retry).
+     * @note Read the colors using the `Vision` latch. use .getColor(cell) to read the color of each cell after this returns `true`.
+     */
+    bool readMosaic(const TaskArgs& args);
 
     /**
      * @brief Stationary cooperative delay helper for task bodies.
@@ -395,7 +310,7 @@ private:
      * @return ``true`` when the timeout elapses; ``false`` if the chassis is moving at
      *         entry or the task framework is aborted mid-wait.
      */
-    bool waitStationaryMs(uint32_t ms,
+    bool _waitStationaryMs(uint32_t ms,
                           const __FlashStringHelper* site = F("waitStationaryMs"));
 
     // --- Cooperative-wait helpers -------------------------------------------
