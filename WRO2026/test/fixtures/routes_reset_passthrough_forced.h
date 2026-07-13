@@ -39,7 +39,7 @@ namespace Routes {
     enum class NodeType : uint8_t { LINE = 0, BLIND = 1, RESET = 2, PROJECTION = 3 };
     enum class EdgeType : uint8_t { NONE = 0, LINE = 1, BLIND = 2 };
 
-    enum class LineMode      : uint8_t { DEFAULT = 0, NORMAL = 1, SLOW = 2, FAST = 3 };
+    enum class SpeedTier     : uint8_t { DEFAULT = 0, SLOW = 1, NORMAL = 2, FAST = 3 };
     enum class BlindMode     : uint8_t { DEFAULT = 0, SYNC_TSHAPE = 1, GYRO_TSHAPE = 2, RAW_FLAT = 3, STOP_AT_LINE = 4 };
     enum class TurnMode      : uint8_t { DEFAULT = 0, COUNTER_ROT = 1, PIVOT_LEFT = 2, PIVOT_RIGHT = 3 };
     enum class DirectionMode : uint8_t { DEFAULT = 0, FORCE_FORWARD = 1, FORCE_REVERSE = 2 };
@@ -47,7 +47,7 @@ namespace Routes {
     enum class StopAtLineMode : uint8_t { DEFAULT = 0, ON = 1, OFF = 2 };
 
     struct PipelineConfig {
-        LineMode      line;
+        SpeedTier     speed;
         BlindMode     blind;
         TurnMode      turn;
         DirectionMode direction;
@@ -59,7 +59,7 @@ namespace Routes {
         EdgeType       type;
         float          distance_cm;
         float          heading_deg;
-        LineMode       line_mode_override;
+        SpeedTier      speed_override;
         BlindMode      blind_mode_override;
         DirectionMode  direction_override;
         StopAtLineMode stop_at_line_override;
