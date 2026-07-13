@@ -394,7 +394,7 @@ def _build_rewritten_source(docstring: str) -> str:
         "",
         "from tools.path_planner.editor.loader import load_field_json",
         "from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE  # noqa: F401",
-        "from tools.path_planner.pipeline_config import LineMode, BlindMode, TurnMode  # noqa: F401",
+        "from tools.path_planner.pipeline_config import SpeedTier, BlindMode, TurnMode  # noqa: F401",
         "",
         "_data = load_field_json()",
         'FIELD_MM              = _data["FIELD_MM"]',
