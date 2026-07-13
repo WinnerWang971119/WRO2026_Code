@@ -85,14 +85,15 @@ Public surface:
 * :class:`PathTrackerSim` -- the FSM. ``go_to(goal_name)`` walks NEXT_HOP.
 * :func:`walk_next_hop` -- given a NextHopTable, returns the explicit
   node-name list from source to target.
-* :func:`resolve_line_mode` / :func:`resolve_blind_mode` -- pure helpers that
-  mirror the C++ ``_resolve*Mode(EdgeInfo)`` lookups: read the edge's optional
-  override attribute and fall back to :data:`PIPELINE_CONFIG` when the override
-  is absent or set to its ``DEFAULT`` sentinel. The pre-turn pivot wheel is no
+* :func:`resolve_speed` / :func:`resolve_blind_mode` -- pure helpers that
+  mirror the C++ ``_resolveSpeed`` / ``_resolveBlindMode(EdgeInfo)`` lookups:
+  read the edge's optional override attribute (``speed`` / ``mode``) and fall
+  back to :data:`PIPELINE_CONFIG` when the override is absent or set to its
+  ``DEFAULT`` sentinel. The pre-turn pivot wheel is no
   longer an edge field -- it is resolved per turn from the
   :data:`PivotTurnRecord` table (ADR-036) latched in :meth:`_walk_hops`.
   (``resolve_projection_mode`` is gone -- ``ProjectionMode`` was deleted with
-  the projection edge type; a LINE→projection follow uses ``resolve_line_mode``.)
+  the projection edge type; a LINE→projection follow uses ``resolve_speed``.)
 * :class:`UnreachableGoalError` -- raised on ``next_hop[from][goal] is None``.
 * :data:`ACT_LINE_OVERSHOOT` -- sim-only primitive tag for the
   LINE_OVERSHOOT FSM transition. NOT emitted by
@@ -238,8 +239,8 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
-    LineMode,
     PipelineConfig,
+    SpeedTier,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -312,6 +313,17 @@ PATH_PASS_THROUGH_ENABLED: bool = True
 # C++ header); no dedicated regex-parity test (it rides the golden-pinned
 # ``chain_speed.py`` config parse + the parity sweep).
 SPEED_NORMAL: int = 70
+
+# MUST mirror ``Config::SPEED_SLOW`` / ``Config::SPEED_FAST`` in
+# WRO2026/config/ConfigDrive.h -- the SLOW / FAST cruise PWM presets a per-edge
+# ``SpeedTier`` resolves to (ADR-064; blind speed reuses the line presets). The
+# resolved blind cruise, the RAW_FLAT flat plan, the blind-chain cruise, and the
+# clamped pass-through entry seed all derive from these via
+# :func:`_speed_tier_to_pwm`. Hand-mirrored alongside SPEED_NORMAL (Python cannot
+# import the C++ header); keep SLOW=60 / NORMAL=70 / FAST=90 byte-identical to
+# ConfigDrive.h -- the sim MUST mirror the robot (the parity sweep catches drift).
+SPEED_SLOW: int = 60
+SPEED_FAST: int = 90
 
 # MUST mirror ``Config::TSHAPE_START_SPEED`` in WRO2026/config/ConfigDrive.h
 # (``= PWM_MIN_MAGNITUDE`` = 35). The cold-start ramp seed a non-pass-through
@@ -435,8 +447,8 @@ ACT_FOLLOW_DIST_PASS: str = "follow_line_to_distance_pass"
 # ``ACT_PROJECTION_REVERSE`` is the REAR mirror of the LINE→projection
 # follow-to-distance hop (a LINE edge whose destination is a projection
 # node, driven backward). Projection is no longer an edge type (issue #64),
-# so the primitive's 4th element is the LINE edge's ``line_mode`` (via
-# :func:`resolve_line_mode`) -- ``ProjectionMode`` was deleted with the
+# so the primitive's 4th element is the LINE edge's resolved ``SpeedTier`` (via
+# :func:`resolve_speed`) -- ``ProjectionMode`` was deleted with the
 # projection edge type.
 ACT_LINE_REVERSE: str       = "line_reverse"          # (ACT_LINE_REVERSE, target_node, line_mode)
 ACT_BLIND_REVERSE: str      = "blind_reverse"         # (ACT_BLIND_REVERSE, target_node, distance_cm, blind_mode)
@@ -796,7 +808,9 @@ __all__ = [
     "PIVOT_TRIM_MIN_DRIVE_CM",
     "RETURN_DISTANCE_CAP_CM",
     "RETURN_TRIGGER_THRESHOLD_CM",
+    "SPEED_FAST",
     "SPEED_NORMAL",
+    "SPEED_SLOW",
     "TSHAPE_MIN_MOVE_CM",
     "TSHAPE_START_SPEED",
     "TURN_EPSILON_DEG",
@@ -818,9 +832,9 @@ __all__ = [
     "resolve_blind_mode",
     "resolve_direction",
     "resolve_edge_dispatch",
-    "resolve_line_mode",
     "resolve_return_action",
     "resolve_sensor_overshoot_trim",
+    "resolve_speed",
     "resolve_stop_at_line",
     "walk_next_hop",
     "wrap_pm180",
@@ -1133,36 +1147,69 @@ def _resolve_override(
     return coerced
 
 
-def resolve_line_mode(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> LineMode:
-    """Return the effective :class:`LineMode` for an EDGE_LINE traversal.
+def resolve_speed(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> SpeedTier:
+    """Return the effective :class:`SpeedTier` for a traversal (any edge type).
+
+    The per-edge ``speed`` override (a verbatim :class:`SpeedTier` name the graph
+    builder forwards onto both directions) applies to BOTH LINE and BLIND hops
+    (ADR-064 split the old unified ``primitive_mode`` key into ``speed`` +
+    ``mode``); absent / ``DEFAULT`` inherits ``cfg.speed``.
 
     :param edge: directed graph edge attribute mapping (e.g.
-        ``graph.edges[u, v]``). May or may not carry ``primitive_mode``.
-    :param cfg: the resolved :class:`PipelineConfig` whose ``line`` field
+        ``graph.edges[u, v]``). May or may not carry ``speed``.
+    :param cfg: the resolved :class:`PipelineConfig` whose ``speed`` field
         supplies the inherit-on-DEFAULT fallback. Defaults to the module-level
         :data:`PIPELINE_CONFIG` singleton so legacy callers (and the many
         ``SimpleNamespace`` fixtures) keep working unchanged. ``compile_path``
         and ``PathTrackerSim._walk_hops`` pass a
         :meth:`PipelineConfig.from_field_data` result so a field-sourced
-        ``PIPELINE_LINE_MODE`` reaches the offline sim, not just the emitted
+        ``PIPELINE_SPEED`` reaches the offline sim, not just the emitted
         ``routes.cpp`` (R4: the sim must mirror the robot).
-    :return: the override if set (non-DEFAULT), else ``cfg.line``.
+    :return: the override if set (non-DEFAULT), else ``cfg.speed``.
     """
-    return _resolve_override(edge, "primitive_mode", cfg.line, LineMode)
+    return _resolve_override(edge, "speed", cfg.speed, SpeedTier)
+
+
+def _speed_tier_to_pwm(tier: SpeedTier) -> int:
+    """Map a resolved :class:`SpeedTier` to its cruise PWM magnitude.
+
+    Function-identical mirror of the firmware
+    ``presetToPwm(speedTierToPreset(tier))`` chain (``WROMath.h`` +
+    ``ConfigDrive.h``): ``SLOW`` -> :data:`SPEED_SLOW` (60), ``NORMAL`` ->
+    :data:`SPEED_NORMAL` (70), ``FAST`` -> :data:`SPEED_FAST` (90). ``DEFAULT``
+    defensively maps to :data:`SPEED_NORMAL` -- the resolver delivers a concrete
+    tier before this point (``DEFAULT`` is inherited upstream via
+    :func:`resolve_speed`), matching the C++ default arm. Hand-mirrored; the
+    parity sweep pins the values (the sim MUST mirror the robot).
+
+    :param tier: a resolved :class:`SpeedTier` (never expected to be
+        :attr:`SpeedTier.DEFAULT` in practice).
+    :return: the unsigned cruise PWM magnitude; the caller applies the
+        travel-direction sign.
+    """
+    if tier == SpeedTier.SLOW:
+        return SPEED_SLOW
+    if tier == SpeedTier.FAST:
+        return SPEED_FAST
+    return SPEED_NORMAL
 
 
 def resolve_blind_mode(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> BlindMode:
     """Return the effective :class:`BlindMode` for an EDGE_BLIND traversal.
 
     :param edge: directed graph edge attribute mapping. May or may not carry
-        ``primitive_mode``.
+        ``mode`` (the BLIND drive-mode override the graph builder forwards onto
+        both directions; ADR-064 split the old unified ``primitive_mode`` key
+        into ``speed`` + ``mode``).
     :param cfg: the resolved :class:`PipelineConfig` whose ``blind`` field
         supplies the inherit-on-DEFAULT fallback. Defaults to the module-level
-        :data:`PIPELINE_CONFIG` singleton (see :func:`resolve_line_mode` for
+        :data:`PIPELINE_CONFIG` singleton (see :func:`resolve_speed` for
         why ``compile_path`` / ``_walk_hops`` thread a field-sourced config).
+        ``BlindMode.STOP_AT_LINE`` stays resolvable from ``cfg.blind`` for the
+        firmware seek-ladder dead path, but is no longer per-edge authorable.
     :return: the override if set (non-DEFAULT), else ``cfg.blind``.
     """
-    return _resolve_override(edge, "primitive_mode", cfg.blind, BlindMode)
+    return _resolve_override(edge, "mode", cfg.blind, BlindMode)
 
 
 def resolve_stop_at_line(
@@ -1443,8 +1490,10 @@ class EdgeDispatchQuery:
     :ivar direction: the resolved travel direction (``FRONT``/``REAR``; never
         ``AUTO``).
     :ivar raw_distance_cm: the directed edge length (``edge.distance_cm``).
-    :ivar line_mode: the resolved :class:`LineMode` for the edge (carried to
-        mirror the C++ struct; the decision logic does not read it).
+    :ivar line_mode: the resolved :class:`SpeedTier` for the edge (carried to
+        mirror the C++ struct; the decision logic does not read it). The field
+        keeps its ``line_mode`` name so the cross-language dispatch truth-table
+        fixture stays byte-identical; ADR-064 renames only the C++ struct field.
     :ivar stop_at_line: the ``(seek, motion_mode)`` from
         :func:`resolve_stop_at_line` -- read only for BLIND edges.
     :ivar proj_pass_through: FSM pass-through lookahead flag (LINE->proj->line
@@ -1462,7 +1511,7 @@ class EdgeDispatchQuery:
     dest_is_projection: bool
     direction: "Direction"
     raw_distance_cm: float
-    line_mode: LineMode
+    line_mode: SpeedTier
     stop_at_line: Tuple[bool, BlindMode]
     proj_pass_through: bool
     departing_trim_cm: float
@@ -2756,16 +2805,16 @@ class PathTrackerSim:
 
     # -- mode resolution (instance-method passthroughs) ----------------------
 
-    def resolve_line_mode(
+    def resolve_speed(
         self, edge, cfg: PipelineConfig = PIPELINE_CONFIG
-    ) -> LineMode:
-        """See module-level :func:`resolve_line_mode`.
+    ) -> SpeedTier:
+        """See module-level :func:`resolve_speed`.
 
         ``cfg`` defaults to the :data:`PIPELINE_CONFIG` singleton so existing
         callers keep working; ``_walk_hops`` threads the field-sourced config
         so the sim mirrors the robot's per-field pipeline default (R4).
         """
-        return resolve_line_mode(edge, cfg)
+        return resolve_speed(edge, cfg)
 
     def resolve_blind_mode(
         self, edge, cfg: PipelineConfig = PIPELINE_CONFIG
@@ -3082,9 +3131,9 @@ class PathTrackerSim:
                     direction=direction,
                     raw_distance_cm=distance_cm,
                     line_mode=(
-                        resolve_line_mode(edge, cfg)
+                        resolve_speed(edge, cfg)
                         if edge_type == EDGE_LINE
-                        else cfg.line
+                        else cfg.speed
                     ),
                     stop_at_line=stop_at_line,
                     proj_pass_through=proj_pass_through,
@@ -3153,7 +3202,7 @@ class PathTrackerSim:
                         else ACT_PROJECTION_REVERSE,
                         nxt,
                         effective_dist_cm,
-                        resolve_line_mode(edge, cfg),
+                        resolve_speed(edge, cfg),
                     )
                 else:
                     self._chassis.follow_line_to_distance(effective_dist_cm)
@@ -3238,7 +3287,7 @@ class PathTrackerSim:
 
                 if decision.reverse:
                     self._chassis.reverse(follow_cm)
-                    yield (ACT_LINE_REVERSE, nxt, resolve_line_mode(edge, cfg))
+                    yield (ACT_LINE_REVERSE, nxt, resolve_speed(edge, cfg))
                 else:
                     self._chassis.follow_line_to_intersection(follow_cm)
                     yield (ACT_FOLLOW_INT, None)
@@ -3403,13 +3452,30 @@ class PathTrackerSim:
                 # parked-encoder parity harness), so the dispatched distance is the
                 # planned `effective_dist_cm` on every hop.
                 # -----------------------------------------------------------------
+                # This hop's resolved cruise magnitude (per-edge SpeedTier ->
+                # PWM; ADR-064). Every blind PWM below derives from it: the
+                # pass-through entry-seed clamp, the RAW_FLAT flat plan, and the
+                # blind-chain cruise. NORMAL stays byte-identical to the old
+                # hardcoded SPEED_NORMAL.
+                cruise_mag = _speed_tier_to_pwm(resolve_speed(edge, cfg))
+
                 # `entry_pwm`: captured cruise after a pass-through (ADR-023 carry,
-                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. The sim does
-                # not model line presets, so the captured cruise is the NORMAL-preset
-                # SPEED_NORMAL (== the firmware's `presetToPwm(getPreset())` default);
-                # `resolve_chain_speeds` clamps it into [pwm_min, |cruise|] anyway.
+                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. The captured
+                # cruise is MODELED here as SPEED_NORMAL, which matches the firmware
+                # exactly only when the preceding LINE hop ran the NORMAL tier (the
+                # all-NORMAL parity field). For a non-NORMAL line-into-blind
+                # pass-through the firmware carries its true per-tier LineFollower
+                # cruise; reconciling this seed to the previous hop's resolved tier is
+                # finalized with the firmware pass-through seed (T7) so the two
+                # surfaces stay in parity. Regardless, the seed is CLAMPED to this
+                # hop's resolved cruise so a fast entry into a slower blind hop never
+                # exceeds the hop's own cruise (ADR-064 / AC12: a FAST line into a SLOW
+                # blind enters at <= 60). The cold-start seed (TSHAPE_START_SPEED = 35)
+                # is already below every tier, so only the pass-through branch needs
+                # the clamp. `resolve_chain_speeds` re-clamps into [pwm_min, |cruise|]
+                # on top.
                 if pass_through_active:
-                    entry_mag = SPEED_NORMAL
+                    entry_mag = min(SPEED_NORMAL, cruise_mag)
                 else:
                     entry_mag = TSHAPE_START_SPEED
                 entry_pwm = -entry_mag if decision.reverse else entry_mag
@@ -3476,8 +3542,10 @@ class PathTrackerSim:
                 emit_suffix = chain_hop or pass_through_active
                 if decision.drive_mode == BlindMode.RAW_FLAT:
                     # RAW_FLAT plan endpoints: start = pass-through captured cruise
-                    # else cruise; end = cruise (the flat contract).
-                    raw_cruise = -SPEED_NORMAL if decision.reverse else SPEED_NORMAL
+                    # else cruise; end = cruise (the flat contract). The cruise is
+                    # this edge's resolved SpeedTier (ADR-064), not a hardcoded
+                    # SPEED_NORMAL, so a `speed: FAST` RAW_FLAT hop runs flat at 90.
+                    raw_cruise = -cruise_mag if decision.reverse else cruise_mag
                     hop_start_pwm = entry_pwm if pass_through_active else raw_cruise
                     hop_end_pwm = raw_cruise
 
@@ -3646,6 +3714,13 @@ class PathTrackerSim:
         if self._approaching_pivot is not None:
             return
 
+        # Hop 0's resolved speed tier defines the whole run's cruise (ADR-064): a
+        # chained run shares one velocity profile, so the walk-ahead below breaks
+        # at any hop whose resolved tier differs (SPEED-only restriction; mode
+        # mixing SYNC<->GYRO still chains). Mirrors the firmware `_chainTryStart`.
+        hop0_tier = resolve_speed(self._graph.edges[cur, nxt], cfg)
+        cruise_mag = _speed_tier_to_pwm(hop0_tier)
+
         nodes: List[str] = [cur, nxt]
         hop_dist_cm: List[float] = [hop0_dist_cm]
         count = 1                     # hops admitted so far (hop 0 is in)
@@ -3718,6 +3793,14 @@ class PathTrackerSim:
             if motion_mode == BlindMode.RAW_FLAT:
                 break
 
+            # SPEED-only chain restriction (ADR-064): a hop whose resolved speed
+            # tier differs from hop 0's ends the run — one chained run carries a
+            # single cruise, so it cannot straddle a tier boundary. Mode mixing
+            # (SYNC<->GYRO) still chains (only SPEED gates), matching the firmware
+            # `_chainTryStart` walk-ahead restriction.
+            if resolve_speed(edge, cfg) != hop0_tier:
+                break
+
             # A hop below the profile floor cannot carry chained start/end speeds.
             if float(edge["distance_cm"]) < TSHAPE_MIN_MOVE_CM:
                 break
@@ -3752,9 +3835,11 @@ class PathTrackerSim:
 
         # ---- Resolve the per-hop speed plan (pure two-pass planner). -----------
         # `entry_pwm` seeds the forward pass (AC5); the final hop's plan is
-        # `{start_pwm, 0, brake=True}` by construction. cruise = +/-SPEED_NORMAL
-        # (sign carries the run direction, matching the firmware `cruisePwm`).
-        cruise_pwm = -SPEED_NORMAL if reverse else SPEED_NORMAL
+        # `{start_pwm, 0, brake=True}` by construction. cruise = +/-cruise_mag,
+        # hop 0's resolved SpeedTier PWM (ADR-064; the whole tier-homogeneous run
+        # shares it). Sign carries the run direction, matching the firmware
+        # `cruisePwm`.
+        cruise_pwm = -cruise_mag if reverse else cruise_mag
         speeds = resolve_chain_speeds(hop_dist_cm, count, cruise_pwm, entry_pwm)
 
         self._chain = _ChainRun(
