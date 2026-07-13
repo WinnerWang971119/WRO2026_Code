@@ -254,12 +254,21 @@ void LineFollowerClass::update()
         }
     }
 
+    // Emit floor for this tick's Drive.setSpeed calls. Defaults to the static deadband
+    // floor and is lowered to the kinetic floor ONLY inside the stop ramp-down zone below
+    // — mid-follow PID and lost-line CRAWL must keep the static floor (a stationary chassis
+    // needs the higher static-friction breakaway PWM), while the ramp-down tail is already
+    // moving and can crawl at the lower kinetic floor without stalling. See ADR "kinetic
+    // decel tail floor".
+    int16_t stopFloorMag = Config::PWM_MIN_MAGNITUDE;
+
     // -------------------------------------------------------------------------------------
     // Trapezoidal ramp-DOWN before the distance gate. Lerps cruise from the captured
-    // `_tShapeRampDownStart` PWM down to `Config::PWM_MIN_MAGNITUDE` (sign-corrected for
-    // reverse) over the approach distance, so when the gate trips the active brake fires
-    // at floor PWM rather than from full cruise. Runs INDEPENDENTLY of the ramp-up branch
-    // above — both can apply in sequence over a long PROJECTION_FOLLOW edge.
+    // `_tShapeRampDownStart` PWM down to `Config::PWM_MOVING_MIN` (the kinetic floor,
+    // sign-corrected for reverse) over the approach distance, so when the gate trips the
+    // active brake fires at the kinetic floor PWM rather than from full cruise. Runs
+    // INDEPENDENTLY of the ramp-up branch above — both can apply in sequence over a long
+    // PROJECTION_FOLLOW edge.
     //
     // See DECISIONS.md "LineFollower distance-gated stops use a symmetric trapezoidal
     // profile" for the full rationale.
@@ -273,11 +282,13 @@ void LineFollowerClass::update()
         const float   remainingCm = _distanceTargetCm - traveledCm;
 
         // Sign-by-direction on the floor target: when `_tShapeRampDownStart` is negative
-        // (reverse), the floor is `-PWM_MIN_MAGNITUDE` so the lerp stays on the negative
-        // side of zero and the deadband floor is honored in reverse too.
+        // (reverse), the floor is `-PWM_MOVING_MIN` so the lerp stays on the negative
+        // side of zero and the kinetic floor is honored in reverse too. The tail lerps to
+        // the kinetic floor (not the static deadband floor) so the crawl right before the
+        // gate trips does not stall against static friction.
         const int16_t targetFloor = (_tShapeRampDownStart < 0)
-                                        ? (int16_t) -Config::PWM_MIN_MAGNITUDE
-                                        : (int16_t) Config::PWM_MIN_MAGNITUDE;
+                                        ? (int16_t) -Config::PWM_MOVING_MIN
+                                        : (int16_t) Config::PWM_MOVING_MIN;
 
         // Default geometry: how far the ramp WOULD want, given full cruise range and the
         // configured accel. Clamped to global ramp bounds, then fitted to the available
@@ -310,6 +321,11 @@ void LineFollowerClass::update()
             const float clampedR = (r < 0.0f) ? 0.0f : ((r > 1.0f) ? 1.0f : r);
             cruise               = (int16_t) (targetFloor
                                 + (int16_t) ((_tShapeRampDownStart - targetFloor) * clampedR));
+
+            // In the stop ramp-down zone: this tick's emit(s) must use the kinetic floor
+            // so `deadbandSnap` does not re-snap the lerped-down `cruise` back up to the
+            // static floor. See ADR "kinetic decel tail floor" AC4.
+            stopFloorMag = Config::PWM_MOVING_MIN;
         }
         // else: still in the cruise plateau zone — leave `cruise` unchanged.
     }
@@ -355,8 +371,8 @@ void LineFollowerClass::update()
             // of update(). The online-path middle block (junction-freeze + P+D) is
             // skipped via `runOnlinePath = false` because the sensor is offline and
             // sampling getJunctionType()/getError() against it would be invalid.
-            const int16_t snapped = deadbandSnap(cruise);
-            Drive.setSpeed(snapped, snapped);
+            const int16_t snapped = deadbandSnap(cruise, stopFloorMag);
+            Drive.setSpeed(snapped, snapped, stopFloorMag);
             runOnlinePath = false;
             // Fall through to the distance-gate block below — do NOT early return.
             // The encoder gate must keep ticking even in dead-reckon mode.
@@ -439,8 +455,8 @@ void LineFollowerClass::update()
             // mirrors the snap applied in the P+D path so a cruise value inside the deadband
             // range (rare but possible during ramp-up) is not silently dropped by
             // Drive.setSpeed's internal re-snap.
-            const int16_t snapped = deadbandSnap(cruise);
-            Drive.setSpeed(snapped, snapped);
+            const int16_t snapped = deadbandSnap(cruise, stopFloorMag);
+            Drive.setSpeed(snapped, snapped, stopFloorMag);
 
             // Fall through to the distance-gate block below — do NOT early return. The
             // encoder distance counter must keep ticking during the freeze (acceptance
@@ -497,10 +513,10 @@ void LineFollowerClass::update()
             // be silently lost in the dead zone. Drive.setSpeed re-snaps internally — the
             // snap here ensures the value passed in already reflects the post-mix
             // correction so future readers see a consistent post-snap value.
-            L = deadbandSnap(L);
-            R = deadbandSnap(R);
+            L = deadbandSnap(L, stopFloorMag);
+            R = deadbandSnap(R, stopFloorMag);
 
-            Drive.setSpeed(L, R);
+            Drive.setSpeed(L, R, stopFloorMag);
         }
     }    // end if (runOnlinePath)
 
