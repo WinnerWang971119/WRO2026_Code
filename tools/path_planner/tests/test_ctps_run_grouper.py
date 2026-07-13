@@ -438,9 +438,16 @@ def test_subtolerance_alignment_turn_keeps_collinear_run_grouped():
     # keyframe at D" no longer identifies the arrival. The terminal-brake
     # ramp legitimately dips to/below the floor right before that arrival —
     # this must stay excluded, exactly as before the dwell existed.
+    #
+    # Threshold is the KINETIC decel-tail floor (PWM_MOVING_MIN), not the static
+    # floor: the terminal ramp into D now legitimately crawls down to PWM_MOVING_MIN,
+    # so its above-floor samples sit in the (kinetic, static) band. A genuine run-split
+    # re-seeds a BRAKED stop toward ~0 at an intermediate node — far below the kinetic
+    # floor — so this still catches a split while tolerating the legitimate terminal tail.
     d_arrival_idx = _first_index_at(run, *d_xy)
     interior = vels[: d_arrival_idx - 1]
-    assert all(v > floor_speed for v in interior), (
+    kinetic_floor_speed = SCALE_CM_S_PER_PWM * cfg.pwm_moving_min
+    assert all(v > kinetic_floor_speed - tol for v in interior), (
         "an intra-run dip toward the floor was emitted — the run split at a "
         "sub-tolerance alignment turn"
     )
