@@ -302,6 +302,29 @@ function(add_forced_reset_routes_force_include target)
 endfunction()
 
 # -----------------------------------------------------------------------------------------
+# Force-include the per-edge speed/mode shadow routes table
+# (`fixtures/routes_speed_chain.h`) BEFORE any source-file parsing — the same shadow trick
+# as `add_forced_reset_routes_force_include`, pointed at a small HAND-AUTHORED table carrying
+# the per-edge `speed`/`mode`/`stop_at_line` combinations the single-sourced `routes_fixture`
+# does not author (a same-tier SYNC/GYRO chain, a mid-run tier boundary, a seek-with-speed,
+# and a FAST-line -> SLOW-blind pass-through). NOT single-sourced from `field_fixture.py`,
+# NOT governed by ADR-050 (issues #97/#99, ADR-064). Used by exactly ONE target:
+# `test_path_tracker_speed_chain`.
+# -----------------------------------------------------------------------------------------
+function(add_speed_chain_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${FIXTURE_ROUTES_DIR}/routes_speed_chain.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_speed_chain.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
 # Force-include the issue-#106 PathTracker+Drive real-link peripheral mocks BEFORE any
 # source-file parsing — the same load-bearing shadow trick as `add_hal_force_includes` /
 # `add_mission_mock_force_includes`, pointed at `hal_mocks/EventTrace.h` + the three
@@ -2132,6 +2155,36 @@ target_include_directories(test_path_tracker_blind_chain_distance_cap PRIVATE
 add_fixture_routes_force_include(test_path_tracker_blind_chain_distance_cap)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_blind_chain_distance_cap)
 add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_blind_chain_distance_cap)
+
+# =========================================================================================
+# Test executable — per-edge speed axis FSM (issues #97 + #99, ADR-064; T14host TC10/TC14).
+#
+# Same shared issue-#106 real-link recipe as the blind-chain targets above (real
+# `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` + `path_mocks.cpp`,
+# `${SKETCH_DIR}`-FIRST include order, then `add_path_force_includes`), with ONE swap: it
+# links the hand-authored `routes_speed_chain.cpp` shadow table and force-includes
+# `routes_speed_chain.h` FIRST (guard `ROUTES_H`) instead of `routes_fixture.{h,cpp}`. That
+# table carries the per-edge `speed`/`mode`/`stop_at_line` combinations the single-sourced
+# `routes_fixture` does not author, so the SPEED-tier chain gate (a same-tier SYNC<->GYRO run
+# still chains; a tier boundary breaks it), the per-edge seek cruise speed, and the
+# pass-through entry seed clamp can be driven through the REAL FSM. Nodes resolve BY NAME.
+# HOP_SETTLE_MS=0 keeps the dispatch tick sequence unperturbed by the ADR-061 settle dwell.
+# =========================================================================================
+add_executable(test_path_tracker_speed_chain
+    ${TEST_DIR}/test_path_tracker_speed_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_speed_chain.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_speed_chain PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+target_compile_definitions(test_path_tracker_speed_chain PRIVATE HOP_SETTLE_MS_DEFAULT=0 PATH_BLIND_CHAIN_ENABLED_DEFAULT=1)
+add_speed_chain_routes_force_include(test_path_tracker_speed_chain)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_speed_chain)                # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_speed_chain COMMAND test_path_tracker_speed_chain)
 
 # =========================================================================================
 # Test executable #27 — ADR-061 post-stop settle dwell eligibility tether (T4; AC8 firmware

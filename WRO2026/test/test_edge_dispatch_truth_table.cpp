@@ -155,20 +155,24 @@ static Direction toDirection(const std::string& s)
 }
 
 /**
- * @brief Map a `lineMode` cell to `Routes::LineMode`. Aborts on an unknown token.
+ * @brief Map a `lineMode` cell to `Routes::SpeedTier`. Aborts on an unknown token.
  *
- * @note Only the three concrete presets appear (the resolved line mode is never
+ * @note Only the three concrete presets appear (the resolved speed tier is never
  *       DEFAULT); the field is carried by the query but never read by the
- *       decision, so this map exists purely to populate the query faithfully.
+ *       decision, so this map exists purely to populate the query faithfully. The
+ *       CSV column is still named `lineMode` and its `SpeedTier` member spellings
+ *       (NORMAL/SLOW/FAST) are byte-identical to the retired `LineMode`, so the
+ *       fixture data is unchanged — only the C++ type it maps into was renamed
+ *       (ADR-064, `line_mode_override` -> `speed_override`).
  */
-static Routes::LineMode toLineMode(const std::string& s)
+static Routes::SpeedTier toSpeed(const std::string& s)
 {
-    return mapToken<Routes::LineMode>(
+    return mapToken<Routes::SpeedTier>(
         s,
-        {{"NORMAL", Routes::LineMode::NORMAL},
-         {"SLOW", Routes::LineMode::SLOW},
-         {"FAST", Routes::LineMode::FAST}},
-        "Routes::LineMode");
+        {{"NORMAL", Routes::SpeedTier::NORMAL},
+         {"SLOW", Routes::SpeedTier::SLOW},
+         {"FAST", Routes::SpeedTier::FAST}},
+        "Routes::SpeedTier");
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +412,7 @@ int main()
             q.destNodeType = toNodeType(wro_csv::field(table, i, cDestNodeType));
             q.direction    = toDirection(wro_csv::field(table, i, cDirection));
             q.rawDistanceCm = toFloat(wro_csv::field(table, i, cRawDistance));
-            q.lineMode     = toLineMode(wro_csv::field(table, i, cLineMode));
+            q.speed        = toSpeed(wro_csv::field(table, i, cLineMode));
             q.stopAtLine.seek       = toBool(wro_csv::field(table, i, cSeek));
             q.stopAtLine.motionMode = toBlindMode(wro_csv::field(table, i, cMotionMode));
             q.projPassThrough  = toBool(wro_csv::field(table, i, cProjPassThrough));
