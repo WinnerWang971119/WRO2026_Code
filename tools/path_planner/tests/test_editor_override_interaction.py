@@ -13,7 +13,7 @@ Test cases (from the plan's Testing Strategy):
 * **TC14** -- edge-click in EDGE mode opens the inline editor and it STAYS open:
   a new edge opens the blank add-form pre-filled with the clicked pair + derived
   type; an existing-override edge opens pre-filled for edit.
-* **TC21** -- open an existing override, change ``primitive_mode``, Save -> the
+* **TC21** -- open an existing override, change ``speed``, Save -> the
   single ``model.edges`` entry is updated in place (same index, same
   ``(type, u, v)``), no duplicate.
 * **TC18** -- a node nudge (``MoveNode``) does NOT rebuild the override-list
@@ -54,7 +54,7 @@ import pytest  # noqa: E402
 from tools.path_planner.editor.history import History  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.editor.panels import (  # noqa: E402
-    _INHERIT_PRIMITIVE_LABEL,
+    _INHERIT_OVERRIDE_LABEL,
     _PIPELINE_DIRECTION_VALUES,
     _PIPELINE_UNSET_LABEL,
     SidePanels,
@@ -217,7 +217,10 @@ def test_edge_click_new_edge_opens_blank_addform_and_stays_open(
     assert panels._edge_override_v_var.get() == "B"
     assert panels._edge_override_type_var.get() == "LINE"
     assert (
-        panels._edge_override_primitive_var.get() == _INHERIT_PRIMITIVE_LABEL
+        panels._edge_override_speed_var.get() == _INHERIT_OVERRIDE_LABEL
+    )
+    assert (
+        panels._edge_override_mode_var.get() == _INHERIT_OVERRIDE_LABEL
     )
 
 
@@ -234,7 +237,7 @@ def test_edge_click_existing_override_opens_prefilled_for_edit(
     """
     app, panels, model, canvas = app_with_panels
     # Author an override on the A->B LINE edge, then re-seed the panel.
-    model.edges = [{"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}]
+    model.edges = [{"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}]
     panels.refresh(model)
 
     _click_edge(app, canvas, "A", "B")
@@ -244,7 +247,7 @@ def test_edge_click_existing_override_opens_prefilled_for_edit(
     assert panels._edge_override_v_var.get() == "B"
     assert panels._edge_override_type_var.get() == "LINE"
     # Pre-filled with the authored tag (not the inherit sentinel).
-    assert panels._edge_override_primitive_var.get() == "FAST"
+    assert panels._edge_override_speed_var.get() == "FAST"
 
 
 def test_edge_click_blind_edge_derives_blind_type(app_with_panels):
@@ -261,33 +264,33 @@ def test_edge_click_blind_edge_derives_blind_type(app_with_panels):
 
 
 # ---------------------------------------------------------------------------
-# TC21 -- open an existing override, change primitive_mode, Save -> in-place
+# TC21 -- open an existing override, change speed, Save -> in-place
 # ---------------------------------------------------------------------------
 
 
 def test_edit_existing_override_save_updates_in_place_no_duplicate(
     app_with_panels,
 ):
-    """TC21: opening an existing override, changing ``primitive_mode``, and
+    """TC21: opening an existing override, changing ``speed``, and
     Saving updates the single ``model.edges`` entry IN PLACE -- same index, same
     ``(type, u, v)`` identity, no duplicate row.
 
     Drives the full operator flow: edge-click opens the editor pre-filled for
-    edit (U3), the operator changes the primitive-mode var, and the Save button's
+    edit (U3), the operator changes the speed var, and the Save button's
     command dispatches a real ``SetEdgeOverride`` keyed on the unchanged
     ``(LINE, A, B)`` identity.
     """
     app, panels, model, canvas = app_with_panels
-    model.edges = [{"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}]
+    model.edges = [{"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}]
     panels.refresh(model)
     assert len(model.edges) == 1
 
     _click_edge(app, canvas, "A", "B")
     assert _editor_is_open(panels)
-    assert panels._edge_override_primitive_var.get() == "FAST"
+    assert panels._edge_override_speed_var.get() == "FAST"
 
-    # The operator changes the primitive mode, then clicks Save.
-    panels._edge_override_primitive_var.set("SLOW")
+    # The operator changes the speed, then clicks Save.
+    panels._edge_override_speed_var.set("SLOW")
     panels._override_save_button.invoke()
 
     # Exactly one entry survives -- updated in place, not duplicated.
@@ -296,7 +299,7 @@ def test_edit_existing_override_save_updates_in_place_no_duplicate(
     assert entry["type"] == "LINE"
     assert entry["u"] == "A"
     assert entry["v"] == "B"
-    assert entry["primitive_mode"] == "SLOW", "primitive_mode updated in place"
+    assert entry["speed"] == "SLOW", "speed updated in place"
     # No second (LINE, A, B) entry exists anywhere in the overlay.
     matches = [
         e
@@ -323,7 +326,7 @@ def test_node_nudge_does_not_rebuild_override_rows(app_with_panels):
     """
     app, panels, model, _canvas = app_with_panels
     # Seed an override so there is a real row whose widget identity we can track.
-    model.edges = [{"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}]
+    model.edges = [{"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}]
     panels.refresh(model)
     before = dict(panels._edge_override_row_frames)
     assert ("LINE", "A", "B") in before, "the seeded override row must exist"
@@ -355,7 +358,7 @@ def test_override_rows_rebuild_when_edges_change(app_with_panels):
     assert panels._edge_override_row_frames == {}
 
     # Add an override via the real command path, then refresh: the row appears.
-    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None, None)
 
     assert ("LINE", "A", "B") in panels._edge_override_row_frames, (
         "a real edges change must rebuild the rows"

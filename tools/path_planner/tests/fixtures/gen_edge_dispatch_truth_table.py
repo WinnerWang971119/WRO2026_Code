@@ -27,8 +27,10 @@ Column schema (named header, consumed by ``csv.DictReader`` / ``wro_csv``)::
                           this is a fixed sentinel -- see the prune rules)
       direction           FRONT | REAR
       rawDistanceCm       float -- edge.distance_cm
-      lineMode            NORMAL | SLOW | FAST (the resolved line mode; carried in
-                          the query but NEVER read by the decision logic)
+      lineMode            NORMAL | SLOW | FAST (the resolved speed tier; carried in
+                          the query but NEVER read by the decision logic. The CSV
+                          column keeps its historical `lineMode` name -- the
+                          SpeedTier member spellings are byte-identical, ADR-064)
       seek                true | false -- the resolveStopAtLine seek result
                           (BLIND only; sentinel `false` on a LINE row)
       motionMode          SYNC_TSHAPE | GYRO_TSHAPE | RAW_FLAT -- the
@@ -84,7 +86,7 @@ schema stays one uniform 19-column table):
 
 Value spellings mirror the enum MEMBER NAMES exactly so each test's
 string->enum map consumes them without translation (the C++ token spellings of
-``EdgeType`` / ``NodeType`` / ``Direction`` / ``LineMode`` / ``BlindMode`` /
+``EdgeType`` / ``NodeType`` / ``Direction`` / ``SpeedTier`` / ``BlindMode`` /
 ``DispatchPrimitive`` / ``ReanchorKind``). Floats are emitted with a fixed
 6-decimal format -- both readers parse them back with ``float`` and compare with
 a tiny tolerance, never as strings.
@@ -119,8 +121,10 @@ DEST_NODE_TYPES: Tuple[str, ...] = ("LINE", "PROJECTION")
 # Direction member names (post-resolveDirection; never AUTO).
 DIRECTIONS: Tuple[str, ...] = ("FRONT", "REAR")
 
-# Routes::LineMode member names (resolved; never DEFAULT). Carried by the query
-# but never read by the decision -- iterated on the LINE block to prove that.
+# Routes::SpeedTier member names (resolved; never DEFAULT). Carried by the query
+# but never read by the decision -- iterated on the LINE block to prove that. The
+# CSV column keeps its historical `lineMode` spelling (byte-identical data); only
+# the C++ query field it feeds was renamed to `speed:SpeedTier` (ADR-064).
 LINE_MODES: Tuple[str, ...] = ("NORMAL", "SLOW", "FAST")
 
 # Routes::BlindMode motion bundles a resolveStopAtLine result can carry -- never

@@ -391,7 +391,7 @@ def test_tc22_migrate_carries_python_edges_literal_into_json(
     (the legacy authoring form) must, after ``--migrate``:
 
     1. land those entries in ``field_data.json``'s ``"EDGES"`` key as override-only
-       STRING-TAG dicts -- enum-instance ``primitive_mode`` converted to its
+       STRING-TAG dicts -- enum-instance ``speed`` / ``mode`` converted to its
        member NAME, derived geometry (distance_cm / heading_deg) DROPPED, and the
        DEFAULT sentinel DROPPED (absence already means inherit);
     2. land in the canonical slot (between blind_projection / pivot keys and
@@ -401,7 +401,7 @@ def test_tc22_migrate_carries_python_edges_literal_into_json(
     """
     import json
 
-    from tools.path_planner.pipeline_config import BlindMode, LineMode
+    from tools.path_planner.pipeline_config import BlindMode, SpeedTier
 
     pre_py = _write_pre_migration_source(tmp_path)
     json_path = tmp_path / "field_data.json"
@@ -416,13 +416,13 @@ def test_tc22_migrate_carries_python_edges_literal_into_json(
             "v": "B",
             "distance_cm": 190.0,  # derived geometry -> dropped on migration
             "heading_deg": 0.0,    # derived geometry -> dropped on migration
-            "primitive_mode": LineMode.FAST,  # enum instance -> "FAST" name
+            "speed": SpeedTier.FAST,  # enum instance -> "FAST" name
         },
         {
             "type": "BLIND",
             "u": "B",
             "v": "G",
-            "primitive_mode": BlindMode.DEFAULT,  # DEFAULT sentinel -> dropped
+            "mode": BlindMode.DEFAULT,  # DEFAULT sentinel -> dropped
             "stop_at_line": "on",
         },
     ]
@@ -453,14 +453,14 @@ def test_tc22_migrate_carries_python_edges_literal_into_json(
         "type": "LINE",
         "u": "A",
         "v": "B",
-        "primitive_mode": "FAST",  # enum instance reduced to its member name
+        "speed": "FAST",  # enum instance reduced to its member name
     }, "LINE entry must drop geometry and stringify the enum"
     assert "distance_cm" not in line_entry
     assert "heading_deg" not in line_entry
 
     blind_entry = next(e for e in written["EDGES"] if e["type"] == "BLIND")
     # DEFAULT sentinel dropped (absence == inherit); stop_at_line preserved.
-    assert "primitive_mode" not in blind_entry, "DEFAULT sentinel must be dropped"
+    assert "mode" not in blind_entry, "DEFAULT sentinel must be dropped"
     assert blind_entry == {
         "type": "BLIND",
         "u": "B",
@@ -483,7 +483,7 @@ def test_tc22_migrate_carries_python_edges_literal_into_json(
     monkeypatch.setattr(loader_mod, "_DEFAULT_JSON_PATH", json_path)
     post_module = _load_module_from_path(pre_py, "tools.path_planner.field_data")
     assert post_module.EDGES == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
     ]
 

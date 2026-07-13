@@ -47,7 +47,7 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
-    LineMode,
+    SpeedTier,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -102,8 +102,8 @@ from tools.path_planner.sim.runtime import (
     resolve_blind_mode,
     resolve_direction,
     resolve_edge_dispatch,
-    resolve_line_mode,
     resolve_return_action,
+    resolve_speed,
     resolve_stop_at_line,
 )
 from tools.path_planner.sim.parity import (
@@ -656,28 +656,30 @@ def test_sim_blind_edge_emits_forward_no_overshoot():
 
 
 # ---------------------------------------------------------------------------
-# TC11 — per-edge override resolution (LineMode / BlindMode / TurnMode)
-# (issue #64 retired ProjectionMode along with the projection EDGE type)
+# TC11 — per-edge override resolution (SpeedTier / BlindMode / TurnMode)
+# (issue #64 retired ProjectionMode along with the projection EDGE type; ADR-064
+# renamed the LINE/BLIND-shared speed axis from LineMode -> SpeedTier, keyed on
+# the ``speed`` edge attribute, and resolve_blind_mode now reads ``mode``.)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_line_mode_default_falls_back_to_pipeline_config():
-    """resolve_line_mode: missing/DEFAULT override -> PIPELINE_CONFIG.line, concrete -> as-is."""
-    # Edge with no primitive_mode attr -> fallback.
+def test_resolve_speed_default_falls_back_to_pipeline_config():
+    """resolve_speed: missing/DEFAULT override -> PIPELINE_CONFIG.speed, concrete -> as-is."""
+    # Edge with no speed attr -> fallback.
     edge_missing: dict = {}
-    assert resolve_line_mode(edge_missing) == PIPELINE_CONFIG.line
+    assert resolve_speed(edge_missing) == PIPELINE_CONFIG.speed
 
     # Edge with DEFAULT sentinel -> fallback.
-    edge_default = {"primitive_mode": LineMode.DEFAULT}
-    assert resolve_line_mode(edge_default) == PIPELINE_CONFIG.line
+    edge_default = {"speed": SpeedTier.DEFAULT}
+    assert resolve_speed(edge_default) == PIPELINE_CONFIG.speed
 
     # Edge with concrete value -> returned as-is.
-    edge_fast = {"primitive_mode": LineMode.FAST}
-    assert resolve_line_mode(edge_fast) == LineMode.FAST
+    edge_fast = {"speed": SpeedTier.FAST}
+    assert resolve_speed(edge_fast) == SpeedTier.FAST
 
     # Raw int value -> coerced to enum, returned as-is.
-    edge_raw_int = {"primitive_mode": int(LineMode.SLOW)}
-    assert resolve_line_mode(edge_raw_int) == LineMode.SLOW
+    edge_raw_int = {"speed": int(SpeedTier.SLOW)}
+    assert resolve_speed(edge_raw_int) == SpeedTier.SLOW
 
 
 def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
@@ -685,13 +687,13 @@ def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
     edge_missing: dict = {}
     assert resolve_blind_mode(edge_missing) == PIPELINE_CONFIG.blind
 
-    edge_default = {"primitive_mode": BlindMode.DEFAULT}
+    edge_default = {"mode": BlindMode.DEFAULT}
     assert resolve_blind_mode(edge_default) == PIPELINE_CONFIG.blind
 
-    edge_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
+    edge_gyro = {"mode": BlindMode.GYRO_TSHAPE}
     assert resolve_blind_mode(edge_gyro) == BlindMode.GYRO_TSHAPE
 
-    edge_raw = {"primitive_mode": BlindMode.RAW_FLAT}
+    edge_raw = {"mode": BlindMode.RAW_FLAT}
     assert resolve_blind_mode(edge_raw) == BlindMode.RAW_FLAT
 
 
@@ -702,16 +704,16 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
     ``resolve_pre_turn_mode`` helper): the pivot wheel is now resolved per turn
     from the ``PivotTurnRecord`` table, not an edge field. Issue #64 removed the
     per-edge ``resolve_projection_mode`` (projection is a node type now). Only the
-    surviving per-edge mode passthroughs (line / blind) are checked here.
+    surviving per-edge mode passthroughs (speed / blind) are checked here.
     """
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
     sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
 
-    edge_line_fast = {"primitive_mode": LineMode.FAST}
-    edge_blind_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
+    edge_line_fast = {"speed": SpeedTier.FAST}
+    edge_blind_gyro = {"mode": BlindMode.GYRO_TSHAPE}
 
-    assert sim.resolve_line_mode(edge_line_fast) == LineMode.FAST
+    assert sim.resolve_speed(edge_line_fast) == SpeedTier.FAST
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
 
 
@@ -1194,10 +1196,10 @@ def test_bidir_tc11_line_into_projection_rear_emits_projection_reverse():
     LINE->projection ``ACT_FOLLOW_DIST`` -- the projection node has no junction
     marker, so the reverse follow is DISTANCE-terminated. Tuple shape:
     (ACT_PROJECTION_REVERSE, target_node, distance_cm, line_mode). The mode slot
-    carries the resolved ``LineMode`` (``PIPELINE_CONFIG.line`` = NORMAL), since
+    carries the resolved ``SpeedTier`` (``PIPELINE_CONFIG.speed`` = NORMAL), since
     a LINE->projection follow takes its motion profile from the LINE edge's own
-    line_mode (``ProjectionMode`` deleted). Per-edge FORCE_REVERSE override used
-    for determinism.  Verifies AC11.
+    resolved speed (``ProjectionMode`` deleted). Per-edge FORCE_REVERSE override
+    used for determinism.  Verifies AC11.
     """
     distance_cm = 25.0
     nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
@@ -1239,7 +1241,7 @@ def test_bidir_tc11_line_into_projection_rear_emits_projection_reverse():
     _, target_node, emitted_dist, emitted_mode = proj_rev_prims[0]
     assert target_node == "B"
     assert emitted_dist == pytest.approx(distance_cm, abs=1e-9)
-    assert emitted_mode == LineMode.NORMAL   # PIPELINE_CONFIG.line default (LINE->proj motion)
+    assert emitted_mode == SpeedTier.NORMAL   # PIPELINE_CONFIG.speed default (LINE->proj motion)
 
     assert sim.localization.current_node() == "B"
 
@@ -1329,8 +1331,8 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
     T12 is already landed: compile_path emits ACT_LINE_REVERSE for REAR hops.
     A 2-node graph A->B with direction_override=FORCE_REVERSE gives a minimal
     fixture where compiler and sim must produce the same sequence:
-        (ACT_TURN_REL, 180.0)                   -- turn to face 180deg (body heading for REAR)
-        (ACT_LINE_REVERSE, 'B', LineMode.NORMAL) -- REAR traverse
+        (ACT_TURN_REL, 180.0)                    -- turn to face 180deg (body heading for REAR)
+        (ACT_LINE_REVERSE, 'B', SpeedTier.NORMAL) -- REAR traverse
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM)  -- sim-only overshoot step
                                                  -- (7.68 cm: a REAR hop rolls the REAR
                                                  --  board's own axle offset, ADR-035)
@@ -1685,7 +1687,7 @@ def test_bidir_tc9c_rear_to_front_direction_flip_suppresses_pass_through():
 #
 # Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim.go_to
 # EDGE_BLIND branch (FRONT STOP_AT_LINE re-anchor; REAR blind-reverse).
-# Fixtures: synthetic single-edge graphs marked primitive_mode=
+# Fixtures: synthetic single-edge graphs marked mode=
 # BlindMode.STOP_AT_LINE (the schema's per-edge override slot).
 # ===========================================================================
 
@@ -1720,7 +1722,7 @@ def _stop_at_line_blind_sim(
 ):
     """Build a sim over a single STOP_AT_LINE BLIND edge A->B heading 0 deg.
 
-    The forward (A, B) edge carries ``primitive_mode=BlindMode.STOP_AT_LINE``
+    The forward (A, B) edge carries ``mode=BlindMode.STOP_AT_LINE``
     (and, when @p force_reverse is set, ``direction_override=FORCE_REVERSE``
     so the hop resolves REAR). The sim's localization is swapped for a
     :class:`_RecordingLocalizationSim` so the test can assert which advance
@@ -1739,7 +1741,7 @@ def _stop_at_line_blind_sim(
         type=EDGE_BLIND,
         distance_cm=float(distance_cm),
         heading_deg=0.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     if force_reverse:
         fwd_attrs["direction_override"] = int(DirectionMode.FORCE_REVERSE)
@@ -1752,7 +1754,7 @@ def _stop_at_line_blind_sim(
         type=EDGE_BLIND,
         distance_cm=float(distance_cm),
         heading_deg=180.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
@@ -2052,9 +2054,9 @@ _EDGE_TYPE_MAP = {
 }
 
 _LINE_MODE_MAP = {
-    "NORMAL": LineMode.NORMAL,
-    "SLOW":   LineMode.SLOW,
-    "FAST":   LineMode.FAST,
+    "NORMAL": SpeedTier.NORMAL,
+    "SLOW":   SpeedTier.SLOW,
+    "FAST":   SpeedTier.FAST,
 }
 
 # Drive-mode column spans the DEFAULT sentinel (line primitives) plus the three
@@ -2197,7 +2199,7 @@ def test_tc1_resolve_edge_dispatch_matches_fixture():
 
 
 # ===========================================================================
-# TC7 -- _resolve_override / resolve_line_mode accept bare string mode names
+# TC7 -- _resolve_override / resolve_speed accept bare string mode names
 #
 # Finding #41: IntEnum(str) raises ValueError for 'NORMAL'; only IntEnum['NORMAL']
 # works for name-based lookup.  After the fix _resolve_override must accept
@@ -2205,42 +2207,42 @@ def test_tc1_resolve_edge_dispatch_matches_fixture():
 # ===========================================================================
 
 
-def test_resolve_line_mode_accepts_bare_string_name():
-    """TC7: an edge with primitive_mode='NORMAL' (bare string) resolves without ValueError.
+def test_resolve_speed_accepts_bare_string_name():
+    """TC7: an edge with speed='NORMAL' (bare string) resolves without ValueError.
 
     Before finding #41 was fixed, ``_resolve_override`` would call
-    ``LineMode('NORMAL')`` which raises ValueError because LineMode is an
+    ``SpeedTier('NORMAL')`` which raises ValueError because SpeedTier is an
     IntEnum and only accepts integer values for value-based lookup.
-    The fix adds a str branch that uses ``LineMode['NORMAL']`` (name lookup)
+    The fix adds a str branch that uses ``SpeedTier['NORMAL']`` (name lookup)
     to match the handling in header_writer._override_enum_value.
 
     Asserts:
-    - ``resolve_line_mode({'primitive_mode': 'NORMAL'})`` returns ``LineMode.NORMAL``
+    - ``resolve_speed({'speed': 'NORMAL'})`` returns ``SpeedTier.NORMAL``
       without raising.
     - A string 'DEFAULT' still collapses to the pipeline default (same as the enum
       sentinel), so the DEFAULT fallback path works for strings too.
     - An unknown string name falls back to the pipeline default rather than crashing.
     """
     # Known concrete string name -> correct enum member, no ValueError.
-    edge_str_normal = {"primitive_mode": "NORMAL"}
-    result = resolve_line_mode(edge_str_normal)
-    assert result == LineMode.NORMAL, (
-        f"Expected LineMode.NORMAL for primitive_mode='NORMAL'; got {result!r}"
+    edge_str_normal = {"speed": "NORMAL"}
+    result = resolve_speed(edge_str_normal)
+    assert result == SpeedTier.NORMAL, (
+        f"Expected SpeedTier.NORMAL for speed='NORMAL'; got {result!r}"
     )
 
     # 'DEFAULT' string -> falls back to pipeline default (same as enum DEFAULT).
-    edge_str_default = {"primitive_mode": "DEFAULT"}
-    assert resolve_line_mode(edge_str_default) == PIPELINE_CONFIG.line
+    edge_str_default = {"speed": "DEFAULT"}
+    assert resolve_speed(edge_str_default) == PIPELINE_CONFIG.speed
 
     # Unknown string -> falls back to pipeline default without raising.
-    edge_str_unknown = {"primitive_mode": "NONEXISTENT_MODE"}
-    assert resolve_line_mode(edge_str_unknown) == PIPELINE_CONFIG.line
+    edge_str_unknown = {"speed": "NONEXISTENT_MODE"}
+    assert resolve_speed(edge_str_unknown) == PIPELINE_CONFIG.speed
 
 
-def test_resolve_line_mode_string_name_end_to_end_via_sim():
-    """TC7 (end-to-end): go_to over an EDGE_LINE with primitive_mode='NORMAL' completes.
+def test_resolve_speed_string_name_end_to_end_via_sim():
+    """TC7 (end-to-end): go_to over an EDGE_LINE with speed='NORMAL' completes.
 
-    Builds a 2-node graph where the A->B edge carries ``primitive_mode='NORMAL'``
+    Builds a 2-node graph where the A->B edge carries ``speed='NORMAL'``
     as a bare string (the form graph_builder forwards verbatim when field_data
     uses string tags and validation is skipped, as in test fixtures).  Confirms
     the sim's go_to path does not crash and emits the standard LINE primitives.
@@ -2258,7 +2260,7 @@ def test_resolve_line_mode_string_name_end_to_end_via_sim():
         type=EDGE_LINE,
         distance_cm=30.0,
         heading_deg=0.0,
-        primitive_mode="NORMAL",
+        speed="NORMAL",
     )
     g.add_edge(
         "B", "A",

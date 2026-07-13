@@ -6,9 +6,12 @@ rules T1 landed so the GUI and the Save-to-disk validator never disagree:
 * **TC13** (U5) -- edge-mode ``L`` on a reset-incident pair is REFUSED with a
   status message and no dispatch; a control ``L`` on a PROJECTION-incident pair
   is ALLOWED (LINE->projection stays legal, ADR-046).
-* **TC15** (U2) -- the inline override Save rejects ``primitive_mode=STOP_AT_LINE``
-  together with ``stop_at_line='off'``: the status message NAMES the
-  contradiction, no command dispatches, and the editor stays OPEN for correction.
+* **TC15** (U2, superseded by ADR-064) -- ``BlindMode.STOP_AT_LINE`` is folded
+  onto the ``stop_at_line`` axis and is no longer an authorable per-edge
+  ``mode`` tag at all, so the old contradiction (``primitive_mode=STOP_AT_LINE``
+  + ``stop_at_line='off'``) is now inexpressible through the GUI: the Mode
+  picker never offers ``STOP_AT_LINE``, and the save-mirror check that used to
+  reject the pairing was dropped along with it.
 * **TC16** (R6) -- editing one FIELD_MM dimension while the model holds a sub-mm
   OTHER dimension leaves the untouched dimension's stored model value unchanged
   after commit (no truncation through the rounded display var).
@@ -46,7 +49,6 @@ from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.editor.panels import (  # noqa: E402
     Mode,
     SidePanels,
-    _OVERRIDE_STOP_AT_LINE_CONFLICT_MSG,
 )
 
 
@@ -242,7 +244,9 @@ def test_line_key_on_projection_incident_pair_is_allowed(edge_app):
 
 
 # ---------------------------------------------------------------------------
-# TC15 -- inline Save STOP_AT_LINE + stop_at_line='off' (U2)
+# TC15 (superseded by ADR-064) -- STOP_AT_LINE folded onto the stop_at_line
+# axis; the old U2 save-mirror contradiction is now inexpressible through the
+# GUI.
 # ---------------------------------------------------------------------------
 
 
@@ -278,57 +282,43 @@ def _editor_is_open(panels: SidePanels) -> bool:
     return bool(panels._edge_override_editor.winfo_manager())
 
 
-def test_inline_save_stop_at_line_conflict_is_rejected(save_app):
-    """TC15 (U2): authoring ``primitive_mode=STOP_AT_LINE`` together with
-    ``stop_at_line='off'`` on a BLIND edge and clicking Save is REJECTED -- the
-    status message NAMES the contradiction (mentions both STOP_AT_LINE and
-    stop_at_line='off'), NO ``on_set_edge_override`` fires, and the editor stays
-    OPEN so the operator can correct it.
+def test_blind_mode_picker_excludes_stop_at_line(save_app):
+    """TC15 (superseded by ADR-064): the BLIND Mode combobox never offers
+    ``STOP_AT_LINE``.
 
-    Mirrors the validator's single anti-ambiguity gate so the GUI Save and the
-    Save-to-disk validator agree.
+    ADR-064 folds ``BlindMode.STOP_AT_LINE`` onto the ``stop_at_line`` axis: a
+    seek is authored via ``stop_at_line: on``, never via the Mode picker, so
+    the old contradiction (``STOP_AT_LINE`` + ``stop_at_line='off'``) is now
+    inexpressible through the GUI -- the picker cannot even offer the tag the
+    old save-mirror check used to reject.
     """
-    _app, panels, _model, save_calls = save_app
+    _app, panels, _model, _save_calls = save_app
 
-    # Open the inline editor pre-filled for the B->G BLIND edge (add-form), then
-    # author the contradictory pair.
     panels.prefill_add_row("BLIND", "B", "G")
-    assert _editor_is_open(panels)
-    panels._edge_override_primitive_var.set("STOP_AT_LINE")
-    panels._edge_override_stop_at_line_var.set("off")
+    values = tuple(panels._edge_override_mode_combo.cget("values"))
 
-    panels._override_save_button.invoke()
-
-    # No dispatch happened.
-    assert save_calls == [], "the contradiction must not dispatch a SetEdgeOverride"
-    # The editor stays open for correction.
-    assert _editor_is_open(panels), "a rejected Save must leave the editor open"
-    # The status message names the contradiction (both fields).
-    status = panels._status_var.get()
-    assert status == _OVERRIDE_STOP_AT_LINE_CONFLICT_MSG
-    assert "STOP_AT_LINE" in status
-    assert "stop_at_line=off" in status
+    assert "STOP_AT_LINE" not in values
 
 
-def test_inline_save_stop_at_line_on_is_accepted(save_app):
-    """TC15 (control): STOP_AT_LINE together with ``stop_at_line='on'`` is the
-    legal seek pairing -- it dispatches normally and closes the editor.
+def test_inline_save_stop_at_line_via_axis_dispatches(save_app):
+    """TC15 (control): authoring ``stop_at_line='on'`` alone (no Mode override)
+    dispatches normally and closes the editor.
 
-    Proves the guard rejects only the one contradiction, not every STOP_AT_LINE
-    authoring.
+    Proves the seek is still authorable -- just on its own ``stop_at_line``
+    axis, never as a ``mode`` tag.
     """
     _app, panels, _model, save_calls = save_app
 
     panels.prefill_add_row("BLIND", "B", "G")
-    panels._edge_override_primitive_var.set("STOP_AT_LINE")
     panels._edge_override_stop_at_line_var.set("on")
 
     panels._override_save_button.invoke()
 
-    assert len(save_calls) == 1, "the legal STOP_AT_LINE + on pairing must dispatch"
-    edge_type, u, v, primitive, _direction, stop = save_calls[0]
+    assert len(save_calls) == 1, "stop_at_line='on' alone must dispatch"
+    edge_type, u, v, speed, mode, _direction, stop = save_calls[0]
     assert (edge_type, u, v) == ("BLIND", "B", "G")
-    assert primitive == "STOP_AT_LINE"
+    assert speed is None
+    assert mode is None
     assert stop == "on"
     assert not _editor_is_open(panels), "a successful Save closes the editor"
 

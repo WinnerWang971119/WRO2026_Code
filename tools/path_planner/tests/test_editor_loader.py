@@ -275,12 +275,12 @@ def _small_fixture_with_edges_and_pipeline(tmp_path: Path) -> Path:
     fixture already defines, so the loaded dict stays well-formed.
     """
     data = json.loads(_SMALL_FIXTURE.read_text(encoding="utf-8"))
-    data["pipeline_line_mode"] = "FAST"
+    data["pipeline_speed"] = "FAST"
     data["pipeline_blind_mode"] = "GYRO_TSHAPE"
     data["pipeline_turn_mode"] = "PIVOT_LEFT"
     data["pipeline_direction_mode"] = "DEFAULT"
     data["EDGES"] = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {
             "type": "BLIND",
             "u": "B",
@@ -310,7 +310,7 @@ def test_tc10_edges_and_pipeline_round_trip_data_equality(tmp_path: Path) -> Non
     assert isinstance(first_load["EDGES"], list)
     for entry in first_load["EDGES"]:
         assert isinstance(entry, dict)
-    assert first_load["pipeline_line_mode"] == "FAST"
+    assert first_load["pipeline_speed"] == "FAST"
     assert first_load["pipeline_blind_mode"] == "GYRO_TSHAPE"
     assert first_load["pipeline_turn_mode"] == "PIVOT_LEFT"
     assert first_load["pipeline_direction_mode"] == "DEFAULT"
@@ -357,7 +357,7 @@ def test_tc10_edges_and_pipeline_dumped_in_canonical_slots(tmp_path: Path) -> No
 
     # Pipeline keys precede EDGES, EDGES precedes OBSTACLES.
     assert (
-        keys.index("pipeline_line_mode")
+        keys.index("pipeline_speed")
         < keys.index("pipeline_blind_mode")
         < keys.index("pipeline_turn_mode")
         < keys.index("pipeline_direction_mode")
@@ -376,7 +376,7 @@ def test_tc11_new_keys_absent_round_trip_absent(tmp_path: Path) -> None:
     first_load = load_field_json(_SMALL_FIXTURE)
     for key in (
         "EDGES",
-        "pipeline_line_mode",
+        "pipeline_speed",
         "pipeline_blind_mode",
         "pipeline_turn_mode",
         "pipeline_direction_mode",
@@ -389,7 +389,7 @@ def test_tc11_new_keys_absent_round_trip_absent(tmp_path: Path) -> None:
 
     for key in (
         "EDGES",
-        "pipeline_line_mode",
+        "pipeline_speed",
         "pipeline_blind_mode",
         "pipeline_turn_mode",
         "pipeline_direction_mode",
@@ -416,7 +416,7 @@ def test_tc12_model_dual_serialization_parity() -> None:
 
     1. ``to_module_proxy()`` exposes EDGES + the SCREAMING_SNAKE PIPELINE_*
        attributes so the validator sees the edited values (validate runs clean);
-    2. an INVALID edited value (a DEFAULT pipeline_line_mode) is actually CAUGHT
+    2. an INVALID edited value (a DEFAULT pipeline_speed) is actually CAUGHT
        through the proxy -- proving the proxy is wired into validate(), not inert;
     3. ``to_json_dict()`` emits EDGES (snake) + the four pipeline keys; and
     4. both surfaces carry the SAME logical key set (proxy SCREAMING_SNAKE <->
@@ -439,8 +439,8 @@ def test_tc12_model_dual_serialization_parity() -> None:
         line_segments=[("A", "B")],
         blind_edges=[],
         obstacles=[],
-        edges=[{"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}],
-        pipeline_line_mode="FAST",
+        edges=[{"type": "LINE", "u": "A", "v": "B", "speed": "FAST", "mode": "MIDDLE"}],
+        pipeline_speed="FAST",
         pipeline_blind_mode="GYRO_TSHAPE",
         pipeline_turn_mode="PIVOT_LEFT",
         pipeline_direction_mode="DEFAULT",
@@ -449,9 +449,9 @@ def test_tc12_model_dual_serialization_parity() -> None:
     # (1) The proxy exposes the edited values, and validate() runs clean.
     proxy = model.to_module_proxy()
     assert proxy.EDGES == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST", "mode": "MIDDLE"}
     ]
-    assert proxy.PIPELINE_LINE_MODE == "FAST"
+    assert proxy.PIPELINE_SPEED == "FAST"
     assert proxy.PIPELINE_BLIND_MODE == "GYRO_TSHAPE"
     assert proxy.PIPELINE_TURN_MODE == "PIVOT_LEFT"
     assert proxy.PIPELINE_DIRECTION_MODE == "DEFAULT"
@@ -459,18 +459,18 @@ def test_tc12_model_dual_serialization_parity() -> None:
 
     # (2) An invalid edited pipeline value is CAUGHT through the proxy, proving
     # the proxy is actually wired into validate (not a persisted-but-unvalidated
-    # field). line may not be DEFAULT (circular).
-    model.pipeline_line_mode = "DEFAULT"
-    with pytest.raises(FieldDataError, match="PIPELINE_LINE_MODE"):
+    # field). speed may not be DEFAULT (circular).
+    model.pipeline_speed = "DEFAULT"
+    with pytest.raises(FieldDataError, match="PIPELINE_SPEED"):
         model.validate()
-    model.pipeline_line_mode = "FAST"  # restore for the serialization checks
+    model.pipeline_speed = "FAST"  # restore for the serialization checks
 
     # (3) to_json_dict emits EDGES (snake) + the four pipeline keys.
     json_dict = model.to_json_dict()
     assert json_dict["EDGES"] == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST", "mode": "MIDDLE"}
     ]
-    assert json_dict["pipeline_line_mode"] == "FAST"
+    assert json_dict["pipeline_speed"] == "FAST"
     assert json_dict["pipeline_blind_mode"] == "GYRO_TSHAPE"
     assert json_dict["pipeline_turn_mode"] == "PIVOT_LEFT"
     assert json_dict["pipeline_direction_mode"] == "DEFAULT"
@@ -480,7 +480,7 @@ def test_tc12_model_dual_serialization_parity() -> None:
     # attributes, so no surface persists a key the other never validates.
     json_to_proxy = {
         "EDGES": "EDGES",
-        "pipeline_line_mode": "PIPELINE_LINE_MODE",
+        "pipeline_speed": "PIPELINE_SPEED",
         "pipeline_blind_mode": "PIPELINE_BLIND_MODE",
         "pipeline_turn_mode": "PIPELINE_TURN_MODE",
         "pipeline_direction_mode": "PIPELINE_DIRECTION_MODE",

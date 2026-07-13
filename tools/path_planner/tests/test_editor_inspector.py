@@ -713,11 +713,11 @@ def test_app_set_edge_override_callback_dispatches_and_refreshes() -> None:
     before_refresh = panels.refresh_count
 
     # A--B is a LINE segment; the panel fires the derived type + the picked pair.
-    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None, None)
 
     assert app._history.can_undo is True
     assert model.edges == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     assert panels.refresh_count > before_refresh, "refresh must run after dispatch"
 
@@ -726,7 +726,7 @@ def test_app_clear_edge_override_callback_dispatches() -> None:
     """The ``on_clear_edge_override`` handler dispatches a ClearEdgeOverride; the
     overlay entry is removed and undo/redo is available."""
     app, panels, model = make_dispatch_app()
-    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None, None)
     assert len(model.edges) == 1
 
     app._on_panel_clear_edge_override("LINE", "A", "B")
@@ -783,20 +783,20 @@ def test_app_inspector_refresh_reflects_all_issue79_state_after_dispatch() -> No
     app, panels, model = make_dispatch_app()
     before = panels.refresh_count
 
-    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None)
-    app._on_panel_set_edge_override("BLIND", "B", "G", None, None, "on")
-    app._on_panel_pipeline_mode_change("line", "SLOW")
+    app._on_panel_set_edge_override("LINE", "A", "B", "FAST", None, None, None)
+    app._on_panel_set_edge_override("BLIND", "B", "G", None, None, None, "on")
+    app._on_panel_pipeline_mode_change("speed", "SLOW")
     app._on_panel_field_wide_flag_change("blind_projection_auto_seek", False)
     app._on_panel_field_dimensions_change(2362.0, 1143.0)
 
     # The model carries every edited surface.
-    assert {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"} in (
+    assert {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"} in (
         model.edges
     )
     assert {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"} in (
         model.edges
     )
-    assert model.pipeline_line_mode == "SLOW"
+    assert model.pipeline_speed == "SLOW"
     assert model.blind_projection_auto_seek is False
     assert model.field_mm == (2362.0, 1143.0)
 

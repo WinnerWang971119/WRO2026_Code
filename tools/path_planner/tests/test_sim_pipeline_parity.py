@@ -2,9 +2,9 @@
 
 R4 (PR #98 triage). ``PipelineConfig.from_field_data(field_data)`` reached the
 firmware only through ``header_writer``; the offline resolvers
-``resolve_line_mode`` / ``resolve_blind_mode`` read the module-global
+``resolve_speed`` / ``resolve_blind_mode`` read the module-global
 ``PIPELINE_CONFIG`` singleton directly, so once an operator set a field-sourced
-``PIPELINE_LINE_MODE`` / ``PIPELINE_BLIND_MODE`` the emitted ``routes.cpp``
+``PIPELINE_SPEED`` / ``PIPELINE_BLIND_MODE`` the emitted ``routes.cpp``
 reflected it but the offline sim / compiler did NOT — a silent sim↔robot
 divergence. T4 threads a resolved ``cfg`` from ``compile_path`` /
 ``PathTrackerSim._walk_hops`` into every resolver call site.
@@ -13,10 +13,10 @@ These tests are deliberately built on an OWN, isolated synthetic fixture (the
 toy golden is owned by another task and must not be touched). The fixture
 exercises:
 
-* a REAR ``EDGE_LINE`` hop with NO ``primitive_mode`` override, so the emitted
-  ``ACT_LINE_REVERSE`` carries the resolved ``cfg.line`` — observable ONLY via
-  ``resolve_line_mode``; a missed call site there leaves the singleton default;
-* a REAR ``EDGE_BLIND`` hop with NO ``primitive_mode`` override, so the emitted
+* a REAR ``EDGE_LINE`` hop with NO ``speed`` override, so the emitted
+  ``ACT_LINE_REVERSE`` carries the resolved ``cfg.speed`` — observable ONLY via
+  ``resolve_speed``; a missed call site there leaves the singleton default;
+* a REAR ``EDGE_BLIND`` hop with NO ``mode`` override, so the emitted
   ``ACT_BLIND_REVERSE`` carries the resolved ``cfg.blind`` — observable ONLY via
   ``resolve_blind_mode``.
 
@@ -47,8 +47,8 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
-    LineMode,
     PipelineConfig,
+    SpeedTier,
 )
 from tools.path_planner.sim import (
     PathTrackerSim,
@@ -66,17 +66,17 @@ from tools.path_planner.sim.runtime import (
 # (NORMAL / SYNC_TSHAPE), and neither is the STOP_AT_LINE blind tag — so the
 # REAR blind hop deterministically dead-reckons (ACT_BLIND_REVERSE) regardless
 # of the chassis board count, keeping the emitted blind_mode observable.
-_FIELD_LINE_MODE = LineMode.FAST
+_FIELD_SPEED = SpeedTier.FAST
 _FIELD_BLIND_MODE = BlindMode.GYRO_TSHAPE
 
 # Sanity: the chosen field modes MUST differ from the singleton defaults, or
 # the "differs from singleton-default emission" assertion is vacuous.
-assert _FIELD_LINE_MODE != PIPELINE_CONFIG.line
+assert _FIELD_SPEED != PIPELINE_CONFIG.speed
 assert _FIELD_BLIND_MODE != PIPELINE_CONFIG.blind
 assert _FIELD_BLIND_MODE != BlindMode.STOP_AT_LINE
 
 
-def _build_fixture(*, line_mode_name=None, blind_mode_name=None):
+def _build_fixture(*, speed_name=None, blind_mode_name=None):
     """Return ``(field_data, graph, next_hop)`` for the A->B->C REAR fixture.
 
     ``A --LINE--> B --BLIND--> C`` with a 90deg turn at B, both edges forced
@@ -86,8 +86,8 @@ def _build_fixture(*, line_mode_name=None, blind_mode_name=None):
     each LINE hop on the plain ``ACT_LINE_OVERSHOOT`` path so the two streams
     stay comparable.
 
-    When ``line_mode_name`` / ``blind_mode_name`` are given (enum member names)
-    they are attached as ``PIPELINE_LINE_MODE`` / ``PIPELINE_BLIND_MODE`` on the
+    When ``speed_name`` / ``blind_mode_name`` are given (enum member names)
+    they are attached as ``PIPELINE_SPEED`` / ``PIPELINE_BLIND_MODE`` on the
     field; omitting them leaves the field with no pipeline keys (so
     ``from_field_data`` falls back to the singleton).
     """
@@ -98,8 +98,8 @@ def _build_fixture(*, line_mode_name=None, blind_mode_name=None):
         START_HEADING_DEG=0.0,
         PIVOT_TURNS=[],
     )
-    if line_mode_name is not None:
-        field_kwargs["PIPELINE_LINE_MODE"] = line_mode_name
+    if speed_name is not None:
+        field_kwargs["PIPELINE_SPEED"] = speed_name
     if blind_mode_name is not None:
         field_kwargs["PIPELINE_BLIND_MODE"] = blind_mode_name
     field_data = SimpleNamespace(**field_kwargs)
@@ -109,8 +109,8 @@ def _build_fixture(*, line_mode_name=None, blind_mode_name=None):
         graph.add_node(name, x_cm=float(x), y_cm=float(y))
 
     # A->B LINE (forward heading 0), B->C BLIND (forward heading 0). Both
-    # carry direction_override=FORCE_REVERSE and NO primitive_mode, so the
-    # resolved cfg.line / cfg.blind is the only source of the emitted mode.
+    # carry direction_override=FORCE_REVERSE and NO speed/mode override, so the
+    # resolved cfg.speed / cfg.blind is the only source of the emitted mode.
     graph.add_edge(
         "A", "B",
         type=EDGE_LINE,
@@ -170,7 +170,7 @@ def _interleave_line_overshoot(primitives: List[Primitive]) -> List[Primitive]:
     return out
 
 
-def _line_reverse_mode(primitives: List[Primitive]) -> LineMode:
+def _line_reverse_mode(primitives: List[Primitive]) -> SpeedTier:
     """Return the line_mode element of the lone ACT_LINE_REVERSE primitive."""
     matches = [p for p in primitives if p[0] == ACT_LINE_REVERSE]
     assert len(matches) == 1, f"expected exactly one ACT_LINE_REVERSE, got {matches!r}"
@@ -187,7 +187,7 @@ def _blind_reverse_mode(primitives: List[Primitive]) -> BlindMode:
 
 
 # ---------------------------------------------------------------------------
-# TC10 — sim vs compiler primitives with non-default PIPELINE_LINE_MODE /
+# TC10 — sim vs compiler primitives with non-default PIPELINE_SPEED /
 #        PIPELINE_BLIND_MODE; match each other AND differ from the singleton
 #        default emission (a missed call site diverges).
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ def _blind_reverse_mode(primitives: List[Primitive]) -> BlindMode:
 def test_tc10_sim_matches_compiler_under_field_pipeline_modes():
     """The sim mirrors the compiler when the field carries non-default modes."""
     field_data, graph, next_hop = _build_fixture(
-        line_mode_name=_FIELD_LINE_MODE.name,
+        speed_name=_FIELD_SPEED.name,
         blind_mode_name=_FIELD_BLIND_MODE.name,
     )
 
@@ -215,7 +215,7 @@ def test_tc10_sim_matches_compiler_under_field_pipeline_modes():
     # The fixture forces both hops REAR with a 90deg turn at B, so the sim path
     # is:
     #   (ACT_TURN_REL, 180.0)                          face REAR for A->B
-    #   (ACT_LINE_REVERSE, 'B', cfg.line)              REAR line hop
+    #   (ACT_LINE_REVERSE, 'B', cfg.speed)             REAR line hop
     #   (ACT_LINE_OVERSHOOT, REAR_OFFSET)              sim-only roll
     #   (ACT_TURN_REL, 90.0)                           re-aim REAR for B->C
     #   (ACT_BLIND_REVERSE, 'C', 40.0, cfg.blind)      REAR blind dead-reckon
@@ -226,13 +226,13 @@ def test_tc10_sim_matches_compiler_under_field_pipeline_modes():
 def test_tc10_emitted_modes_follow_the_field_not_the_singleton():
     """The emitted modes equal the field-sourced cfg, and differ from the singleton.
 
-    This is the missed-call-site detector: ``resolve_line_mode`` /
+    This is the missed-call-site detector: ``resolve_speed`` /
     ``resolve_blind_mode`` are the ONLY path the field value reaches these REAR
     payloads, so a site left on ``PIPELINE_CONFIG`` would surface the singleton
     default here.
     """
     field_data, graph, next_hop = _build_fixture(
-        line_mode_name=_FIELD_LINE_MODE.name,
+        speed_name=_FIELD_SPEED.name,
         blind_mode_name=_FIELD_BLIND_MODE.name,
     )
     walked = walk_next_hop(next_hop, "A", "C")
@@ -242,10 +242,10 @@ def test_tc10_emitted_modes_follow_the_field_not_the_singleton():
     sim_prims = _run_sim(field_data, graph, next_hop, "C")
 
     # Compiler side: emitted modes follow the field-sourced config.
-    assert _line_reverse_mode(compiler_prims) == _FIELD_LINE_MODE
+    assert _line_reverse_mode(compiler_prims) == _FIELD_SPEED
     assert _blind_reverse_mode(compiler_prims) == _FIELD_BLIND_MODE
     # Sim side: same.
-    assert _line_reverse_mode(sim_prims) == _FIELD_LINE_MODE
+    assert _line_reverse_mode(sim_prims) == _FIELD_SPEED
     assert _blind_reverse_mode(sim_prims) == _FIELD_BLIND_MODE
 
     # And they differ from the singleton-default emission — built by compiling
@@ -258,9 +258,9 @@ def test_tc10_emitted_modes_follow_the_field_not_the_singleton():
     )
     default_sim_prims = _run_sim(default_field, default_graph, default_next_hop, "C")
 
-    assert _line_reverse_mode(default_compiler_prims) == PIPELINE_CONFIG.line
+    assert _line_reverse_mode(default_compiler_prims) == PIPELINE_CONFIG.speed
     assert _blind_reverse_mode(default_compiler_prims) == PIPELINE_CONFIG.blind
-    assert _line_reverse_mode(default_sim_prims) == PIPELINE_CONFIG.line
+    assert _line_reverse_mode(default_sim_prims) == PIPELINE_CONFIG.speed
     assert _blind_reverse_mode(default_sim_prims) == PIPELINE_CONFIG.blind
 
     # The field-sourced emission must NOT equal the singleton-default emission.
@@ -302,7 +302,7 @@ def test_tc10b_from_field_data_without_keys_equals_singleton():
     cfg = PipelineConfig.from_field_data(field_no_keys)
     assert cfg == PIPELINE_CONFIG
     # Field-by-field, to make a future field addition fail loudly here too.
-    assert cfg.line == PIPELINE_CONFIG.line
+    assert cfg.speed == PIPELINE_CONFIG.speed
     assert cfg.blind == PIPELINE_CONFIG.blind
     assert cfg.turn == PIPELINE_CONFIG.turn
     assert cfg.direction == PIPELINE_CONFIG.direction
@@ -314,11 +314,11 @@ def test_tc10b_from_field_data_with_keys_overrides_singleton():
         NODES={"A": (0.0, 0.0)},
         START_NODE="A",
         START_HEADING_DEG=0.0,
-        PIPELINE_LINE_MODE=_FIELD_LINE_MODE.name,
+        PIPELINE_SPEED=_FIELD_SPEED.name,
         PIPELINE_BLIND_MODE=_FIELD_BLIND_MODE.name,
     )
     cfg = PipelineConfig.from_field_data(field_with_keys)
-    assert cfg.line == _FIELD_LINE_MODE
+    assert cfg.speed == _FIELD_SPEED
     assert cfg.blind == _FIELD_BLIND_MODE
     # Unset keys still inherit the singleton.
     assert cfg.turn == PIPELINE_CONFIG.turn
