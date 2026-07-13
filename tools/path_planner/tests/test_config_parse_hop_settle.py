@@ -60,7 +60,7 @@ def test_tshape_start_speed_still_resolves_unchanged() -> None:
 def test_plain_literal_constant_still_resolves_unchanged() -> None:
     """A plain ``constexpr int16_t NAME = <literal>;`` constant still parses directly."""
     global_h = _CONFIG_DIR / "ConfigGlobal.h"
-    assert parse_config_int("PWM_MIN_MAGNITUDE", global_h) == 50
+    assert parse_config_int("PWM_MIN_MAGNITUDE", global_h) == 35
 
 
 # ---------------------------------------------------------------------------------------

@@ -270,7 +270,7 @@ def _copy_config_headers(dest_dir: Path) -> Path:
 
 
 def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Path) -> None:
-    """Doubling ``TSHAPE_ACCEL_PWM_PER_CM`` 5->10 halves ramp distances/durations.
+    """Doubling ``TSHAPE_ACCEL_PWM_PER_CM`` 4->8 halves ramp distances/durations.
 
     Copies all three Config sub-headers into a temp dir (the ``config_path``
     seam), doubles ``TSHAPE_ACCEL_PWM_PER_CM`` in the copied ``ConfigDrive.h``
@@ -280,7 +280,7 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
     shortens too, so the whole move's render duration changes (AC4).
     """
     baseline_cfg = load_profile_config()
-    assert baseline_cfg.accel == pytest.approx(5.0)
+    assert baseline_cfg.accel == pytest.approx(4.0)
 
     perturbed_dir = tmp_path / "perturbed_config"
     perturbed_dir.mkdir()
@@ -288,8 +288,8 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
 
     original_text = perturbed_drive_h.read_text(encoding="utf-8")
     doubled_text = original_text.replace(
-        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 5.0f;",
-        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 10.0f;",
+        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 4.0f;",
+        "constexpr float TSHAPE_ACCEL_PWM_PER_CM = 8.0f;",
     )
     assert doubled_text != original_text, (
         "the literal TSHAPE_ACCEL_PWM_PER_CM declaration text did not match; "
@@ -298,15 +298,19 @@ def test_doubling_tshape_accel_halves_ramp_distances_and_durations(tmp_path: Pat
     perturbed_drive_h.write_text(doubled_text, encoding="utf-8")
 
     perturbed_cfg = load_profile_config(perturbed_drive_h)
-    assert perturbed_cfg.accel == pytest.approx(10.0)
+    assert perturbed_cfg.accel == pytest.approx(8.0)
 
-    # A representative trapezoid move (dist=40, cruise=85, start=50, end=0):
-    # ramp distance = |delta| / accel, so doubling accel halves BOTH ramps.
+    # A representative trapezoid move (dist=40, cruise=90, start=35, end=35):
+    # ramp distance = |delta| / accel, so doubling accel halves BOTH ramps. The
+    # move starts and ends AT the PWM floor (so no sub-floor decel-tail crawl
+    # muddies the decel ramp) and the delta is wide enough that even the
+    # doubled-accel ramps stay above TSHAPE_RAMP_MIN_CM — the halving is visible
+    # and neither floor-clamped nor floor-tailed.
     baseline_profile = resolve_drive_profile(
-        40.0, cruise_pwm=85, start_pwm=50, end_pwm=0, profiled=True, cfg=baseline_cfg
+        40.0, cruise_pwm=90, start_pwm=35, end_pwm=35, profiled=True, cfg=baseline_cfg
     )
     perturbed_profile = resolve_drive_profile(
-        40.0, cruise_pwm=85, start_pwm=50, end_pwm=0, profiled=True, cfg=perturbed_cfg
+        40.0, cruise_pwm=90, start_pwm=35, end_pwm=35, profiled=True, cfg=perturbed_cfg
     )
 
     assert perturbed_profile.accel_cm == pytest.approx(baseline_profile.accel_cm / 2.0)
@@ -666,46 +670,50 @@ def _sub_keyframe_rates(keyframes: list[dict]) -> list[float]:
 
 
 @pytest.mark.parametrize("is_pivot", [False, True])
-def test_tc6_default_config_turn_renders_constant_rate(is_pivot: bool) -> None:
-    """TC6(a): with the default Config a turn/pivot renders CONSTANT-RATE.
+def test_tc6_default_config_turn_renders_two_stage(is_pivot: bool) -> None:
+    """TC6(a): with the default Config a turn/pivot renders TWO-STAGE.
 
-    ``TURN_CRUISE_PWM = 50`` and ``TURN_SLOW_SPEED_PWM = 20`` both deadband-snap
-    to ``|PWM| = 50``, so the cruise and slow stage angular rates are equal: the
-    cumulative-time-over-angle function collapses to the single uniform rate and
-    ``sample_turn`` emits evenly-timed sub-keyframes (per-degree timing is
-    identical across the whole swing — no visible two-stage ramp). This is the
-    invariant that keeps the default render byte-identical to the pre-two-stage
-    constant-rate arc.
+    ``TURN_CRUISE_PWM = 50`` stays above the ``PWM_MIN_MAGNITUDE = 35`` deadband
+    floor, while ``TURN_SLOW_SPEED_PWM = 20`` snaps UP to that floor (35). The
+    snapped cruise stage (50) therefore outruns the snapped slow stage (35), so
+    the final ``TURN_SLOW_ZONE_DEG`` degrees sweep slower than the cruise band —
+    a genuine two-stage ramp at the default config. (Before the PWM-floor retune
+    both stages snapped to the shared 50 floor and the render was constant-rate.)
     """
     profile = resolve_turn_profile(90.0, is_pivot=is_pivot)
 
-    # Both snapped stages are the floor -> equal rates.
+    # Cruise stays above the floor; the slow stage snaps up to it -> distinct rates.
     assert profile.fast_pwm == 50
-    assert profile.slow_pwm == 50
-    assert profile.omega_cruise_deg_s == pytest.approx(profile.omega_slow_deg_s)
+    assert profile.slow_pwm == 35
+    assert profile.omega_cruise_deg_s > profile.omega_slow_deg_s
 
-    # The two-stage integral reduces to |theta| / omega for every partial angle:
-    # the per-degree timing is uniform, so time_at_angle is linear in angle.
-    half = profile.time_at_angle(45.0)
-    full = profile.time_at_angle(90.0)
-    assert half == pytest.approx(full / 2.0)
-    assert full == pytest.approx(profile.duration_s())
+    # Per-degree timing: the final slow-zone degrees take proportionally LONGER
+    # than the cruise degrees (the two-stage signature). Rate is linear in |PWM|,
+    # so the ratio of per-degree times is 50 / 35.
+    t_cruise = profile.time_at_angle(profile.cruise_deg)
+    t_total = profile.time_at_angle(90.0)
+    cruise_sec_per_deg = t_cruise / profile.cruise_deg
+    slow_sec_per_deg = (t_total - t_cruise) / profile.slow_deg
+    assert slow_sec_per_deg > cruise_sec_per_deg
+    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(50.0 / 35.0)
+    assert t_total == pytest.approx(profile.duration_s())
 
+    # The sampled sub-keyframes split into a faster cruise group then a slower
+    # slow-band group: the first interval strictly outruns the last.
     kfs = sample_turn(profile, _TURN_START_POSE, _TURN_END_POSE, t0=0.0)
     rates = _sub_keyframe_rates(kfs)
     assert len(rates) >= 2
-    # Constant-rate: every interval sweeps at the same deg/s.
-    for r in rates:
-        assert r == pytest.approx(rates[0], rel=1e-9)
+    assert rates[0] > rates[-1]
+    assert max(rates) / min(rates) == pytest.approx(50.0 / 35.0, rel=1e-6)
 
 
 def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path) -> None:
     """TC6(b): raising ``TURN_CRUISE_PWM`` above the floor yields TWO rates.
 
     Via the ``config_path`` temp-header seam (the same seam TC2 uses), set
-    ``TURN_CRUISE_PWM = 80`` (> the ``PWM_MIN_MAGNITUDE = 50`` floor). Now the
+    ``TURN_CRUISE_PWM = 80`` (> the ``PWM_MIN_MAGNITUDE = 35`` floor). Now the
     snapped cruise stage (80) outruns the snapped slow stage (``TURN_SLOW_SPEED_PWM
-    = 20`` -> snaps to 50), so the CRUISE segment (all but the final
+    = 20`` -> snaps to 35), so the CRUISE segment (all but the final
     ``TURN_SLOW_ZONE_DEG`` degrees) sweeps more degrees per unit time than the
     final slow band. This is the genuine two-stage ramp the plan's TC6 calls for,
     now driven by Config instead of the deferred per-turn override.
@@ -733,7 +741,7 @@ def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path)
     # Sweep 90 deg: 60 deg cruise (fast) then the final 30 deg slow (TURN_SLOW_ZONE_DEG).
     profile = resolve_turn_profile(90.0, is_pivot=False, cfg=cfg)
     assert profile.fast_pwm == 80          # 80 > floor -> stays 80
-    assert profile.slow_pwm == 50          # 20 snaps UP to the 50 floor
+    assert profile.slow_pwm == 35          # 20 snaps UP to the 35 floor
     assert profile.cruise_deg == pytest.approx(60.0)
     assert profile.slow_deg == pytest.approx(30.0)
     # Distinct stage rates: the cruise stage is strictly faster than the slow one.
@@ -747,8 +755,8 @@ def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path)
     slow_sec_per_deg = (t_total - t_cruise) / profile.slow_deg
     assert slow_sec_per_deg > cruise_sec_per_deg
     # The ratio of per-degree times equals the inverse ratio of the snapped PWMs
-    # (rate is linear in |PWM|): 80 / 50 = 1.6.
-    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(80.0 / 50.0)
+    # (rate is linear in |PWM|): 80 / 35.
+    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(80.0 / 35.0)
 
     # And the sampled sub-keyframes split into a fast group then a slow group:
     # the last interval (deep in the slow band) is strictly slower than the first
@@ -759,7 +767,7 @@ def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path)
     assert rates[0] > rates[-1]
     fast_rate = max(rates)
     slow_rate = min(rates)
-    assert fast_rate / slow_rate == pytest.approx(80.0 / 50.0, rel=1e-6)
+    assert fast_rate / slow_rate == pytest.approx(80.0 / 35.0, rel=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -838,15 +846,17 @@ def test_tc9_ac8_rear_window_fit_compresses_shed_to_window() -> None:
     assert abs(profile.end_pwm) == pwm_min
 
 
-def test_tc9_ac8_front_window_does_not_bind_natural_stop_unchanged() -> None:
-    """TC9 / AC8: the FRONT window (12.02) does NOT bind the FAST shed.
+def test_tc9_ac8_front_window_binds_fast_shed() -> None:
+    """TC9 / AC8: the FRONT window (12.02) NOW BINDS the FAST shed.
 
-    The FRONT overshoot window (``LINE_SENSOR_AXLE_OFFSET_CM`` ~= 12.02 cm) is
-    wider than the 8 cm natural FAST shed, so a front-led-window resolve leaves
-    the natural stop UNCHANGED — a floor-crawl tail survives
-    (``floor_tail_cm > 0``) and the display ``end_pwm`` stays the 0-brake. This
-    is the control proving the window-fit only fires when the window actually
-    binds (the AC8 requirement is a fit, not an unconditional reshape).
+    After the PWM-floor / accel retune the natural FAST shed grew to
+    ``(speed_fast - pwm_min) / accel = (90 - 35) / 4 = 13.75 cm``, which now
+    EXCEEDS the ~12.02 cm front overshoot window (``LINE_SENSOR_AXLE_OFFSET_CM``).
+    So a front-led-window resolve FITS the ``peak -> floor`` shed to the window:
+    the decel spans exactly the window, the floor-crossing pins to the gate, the
+    crawl tail is dropped, and the display ``end_pwm`` becomes the sign-corrected
+    floor (the firmware ramps peak -> floor, not to 0). Before the retune the
+    8 cm shed fit inside the window and this fit was a no-op.
     """
     from tools.path_planner.config_parse import (
         DEFAULT_CONFIG_H_PATH,
@@ -858,12 +868,12 @@ def test_tc9_ac8_front_window_does_not_bind_natural_stop_unchanged() -> None:
     pwm_min = cfg.pwm_min
     front_window = parse_config_float("LINE_SENSOR_AXLE_OFFSET_CM", DEFAULT_CONFIG_H_PATH)
 
-    # Precondition: the front window is WIDER than the natural FAST shed (so it
-    # cannot bind) — the mirror image of the rear-window precondition above.
+    # Precondition: the natural FAST shed now OVERRUNS the front window, so the
+    # window-fit must actually fire (the mirror image of the old no-op case).
     natural_shed = (fast - pwm_min) / cfg.accel
-    assert front_window > natural_shed, (
-        f"front window {front_window} cm must exceed the natural shed "
-        f"{natural_shed} cm for this control to be meaningful"
+    assert natural_shed > front_window, (
+        f"natural shed {natural_shed} cm must exceed the front window "
+        f"{front_window} cm for the window-fit to bind"
     )
 
     profile = resolve_drive_profile(
@@ -875,13 +885,17 @@ def test_tc9_ac8_front_window_does_not_bind_natural_stop_unchanged() -> None:
         rear_window_cm=front_window,
     )
 
-    # Not binding: the natural stop is unchanged — a floor-crawl tail survives
-    # and the display end_pwm stays the 0-brake (no reshape to the floor).
-    assert profile.floor_tail_cm > 0.0
-    assert profile.end_pwm == 0
+    # Binding: the shed is compressed to the window — the decel spans exactly the
+    # window, the floor-crossing pins to the gate, the crawl tail is dropped, and
+    # the display end_pwm ramps to the floor (not the 0-brake).
+    assert profile.decel_cm == pytest.approx(front_window)
+    assert profile.floor_crossing_cm == pytest.approx(_AC8_STOP_DIST_CM)
+    assert profile.floor_tail_cm == pytest.approx(0.0)
+    assert profile.end_pwm == pwm_min
 
-    # Cross-check: an unfitted resolve (rear_window_cm=None) produces the SAME
-    # natural stop — the wide front window changed nothing.
+    # Cross-check: an unfitted resolve (rear_window_cm=None) keeps the NATURAL
+    # stop — a floor-crawl tail survives and end_pwm stays the 0-brake. The window
+    # genuinely reshaped the stop.
     natural = resolve_drive_profile(
         _AC8_STOP_DIST_CM,
         cruise_pwm=fast,
@@ -890,6 +904,7 @@ def test_tc9_ac8_front_window_does_not_bind_natural_stop_unchanged() -> None:
         profiled=True,
         rear_window_cm=None,
     )
-    assert profile.decel_cm == pytest.approx(natural.decel_cm, abs=1e-6)
-    assert profile.floor_tail_cm == pytest.approx(natural.floor_tail_cm, abs=1e-6)
-    assert profile.end_pwm == natural.end_pwm
+    assert natural.floor_tail_cm > 0.0
+    assert natural.end_pwm == 0
+    assert profile.decel_cm != pytest.approx(natural.decel_cm)
+    assert profile.floor_tail_cm != pytest.approx(natural.floor_tail_cm)
