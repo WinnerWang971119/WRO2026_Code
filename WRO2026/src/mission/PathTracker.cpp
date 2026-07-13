@@ -28,7 +28,7 @@ PathTrackerClass PathTracker;
 // Mode resolution helpers (file-local).
 //
 // Each `Routes::EdgeInfo` carries per-category override fields
-// (`line_mode_override`, `blind_mode_override`, `direction_override`,
+// (`speed_override`, `blind_mode_override`, `direction_override`,
 // `stop_at_line_override`). The value `DEFAULT` means "inherit from
 // `Routes::PIPELINE_CONFIG.<category>`"; anything else wins over the
 // pipeline-wide default. These helpers resolve DEFAULT → concrete at
@@ -39,12 +39,13 @@ PathTrackerClass PathTracker;
 
 namespace
 {
-    /// Resolve the LINE-edge cruise-mode for the given edge.
-    Routes::LineMode _resolveLineMode(const Routes::EdgeInfo& edge)
+    /// Resolve the per-edge cruise SPEED tier for the given edge (both LINE and
+    /// BLIND). `SpeedTier::DEFAULT` inherits the mission-wide `PIPELINE_CONFIG.speed`.
+    Routes::SpeedTier _resolveSpeed(const Routes::EdgeInfo& edge)
     {
-        return (edge.line_mode_override == Routes::LineMode::DEFAULT)
-            ? Routes::PIPELINE_CONFIG.line
-            : edge.line_mode_override;
+        return (edge.speed_override == Routes::SpeedTier::DEFAULT)
+            ? Routes::PIPELINE_CONFIG.speed
+            : edge.speed_override;
     }
 
     /// Resolve the BLIND-edge motion-profile mode for the given edge.
@@ -80,25 +81,6 @@ namespace
         Serial.print(F(" requires rear board ("));
         Serial.print(site);
         Serial.println(F(")"));
-    }
-
-    /**
-     * @brief Map a `Routes::LineMode` to a `Config::SpeedPreset` for
-     *        `LineFollower.setPreset(...)`.
-     *
-     * @note `LineMode::DEFAULT` should not reach this helper (callers resolve it
-     *       via `_resolveLineMode()` first). It is mapped to `NORMAL` defensively.
-     */
-    Config::SpeedPreset _lineModeToPreset(Routes::LineMode m)
-    {
-        switch (m)
-        {
-            case Routes::LineMode::SLOW:    return Config::SpeedPreset::SLOW;
-            case Routes::LineMode::FAST:    return Config::SpeedPreset::FAST;
-            case Routes::LineMode::NORMAL:  return Config::SpeedPreset::NORMAL;
-            case Routes::LineMode::DEFAULT:
-            default:                        return Config::SpeedPreset::NORMAL;
-        }
     }
 
     /**
@@ -243,15 +225,18 @@ namespace
         }
     }
 
-    const char* _ptLineModeName(Routes::LineMode m)
+    /// Spell a resolved `Routes::SpeedTier` for the parity `line_mode` wire key. The
+    /// trace key stays `line_mode` and the value is the SpeedTier member name
+    /// (SLOW/NORMAL/FAST) so the sim's parity mirror stays byte-compatible.
+    const char* _ptLineModeName(Routes::SpeedTier m)
     {
         switch (m)
         {
-            case Routes::LineMode::NORMAL: return "NORMAL";
-            case Routes::LineMode::SLOW:   return "SLOW";
-            case Routes::LineMode::FAST:   return "FAST";
-            case Routes::LineMode::DEFAULT:
-            default:                       return "NORMAL";    // resolved before reaching here
+            case Routes::SpeedTier::NORMAL: return "NORMAL";
+            case Routes::SpeedTier::SLOW:   return "SLOW";
+            case Routes::SpeedTier::FAST:   return "FAST";
+            case Routes::SpeedTier::DEFAULT:
+            default:                        return "NORMAL";    // resolved before reaching here
         }
     }
 
@@ -269,13 +254,14 @@ namespace
         pt_parity::emit(line);
     }
 
-    /// `line_follow` — {reverse, line_mode}.
-    void _ptEmitLineFollow(bool reverse, Routes::LineMode lineMode)
+    /// `line_follow` — {reverse, line_mode}. The `line_mode` value is the resolved
+    /// SpeedTier member name (wire key unchanged for parity byte-compatibility).
+    void _ptEmitLineFollow(bool reverse, Routes::SpeedTier speed)
     {
         char line[256];
         std::snprintf(line, sizeof(line),
                       "{\"kind\":\"line_follow\",\"reverse\":%s,\"line_mode\":\"%s\"}",
-                      _ptBool(reverse), _ptLineModeName(lineMode));
+                      _ptBool(reverse), _ptLineModeName(speed));
         pt_parity::emit(line);
     }
 
@@ -291,8 +277,9 @@ namespace
     }
 
     /// `projection_follow` — {reverse, line_mode, dist_cm, pass_through,
-    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}.
-    void _ptEmitProjectionFollow(bool reverse, Routes::LineMode lineMode, float distCm,
+    /// reanchor:"ON_DEAD_RECKONED_ADVANCE"}. The `line_mode` value is the resolved
+    /// SpeedTier member name (wire key unchanged for parity byte-compatibility).
+    void _ptEmitProjectionFollow(bool reverse, Routes::SpeedTier speed, float distCm,
                                  bool passThrough)
     {
         char line[256];
@@ -300,7 +287,7 @@ namespace
                       "{\"kind\":\"projection_follow\",\"reverse\":%s,\"line_mode\":\"%s\","
                       "\"dist_cm\":%.6f,\"pass_through\":%s,"
                       "\"reanchor\":\"ON_DEAD_RECKONED_ADVANCE\"}",
-                      _ptBool(reverse), _ptLineModeName(lineMode), (double) distCm,
+                      _ptBool(reverse), _ptLineModeName(speed), (double) distCm,
                       _ptBool(passThrough));
         pt_parity::emit(line);
     }
@@ -1618,10 +1605,14 @@ void PathTrackerClass::_dispatchReturnMoveAfterTurn()
         (void) Intersection.isAtIntersection();
 
         const int16_t imuTarget = Localization.toImuYaw(_resolvedBodyHeading);
+        // The return move carries no EdgeInfo, so seek at the mission-wide pipeline
+        // speed (PIPELINE_CONFIG.speed → PWM) rather than the Drive default. NORMAL
+        // stays byte-identical to the former default SPEED_NORMAL.
         Drive.stopAtLine(_returnDistCm)
             .setReverse(false)
             .setMode(DriveMode::GYRO)
             .setHeading(imuTarget)
+            .setPower(presetToPwm(speedTierToPreset(Routes::PIPELINE_CONFIG.speed)))
             .async();
         _state = State::RETURN_TO_NODE;
         return;
@@ -1636,7 +1627,7 @@ void PathTrackerClass::_dispatchReturnMoveAfterTurn()
     // shape. RAII rule: one discarded-temporary .async() statement.
     Drive.driveDist(_returnDistCm)
         .setMode(DriveMode::SYNC)
-        .setPower(Config::SPEED_NORMAL)
+        .setPower(presetToPwm(speedTierToPreset(Routes::PIPELINE_CONFIG.speed)))
         .setStartSpeed(Config::TSHAPE_START_SPEED)
         .tShape()
         .async();
@@ -2344,7 +2335,8 @@ void PathTrackerClass::_chainReset()
 }
 
 void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMode hop0Mode,
-                                      float hop0DistCm, int16_t cruisePwm, int16_t entryPwm)
+                                      Routes::SpeedTier hop0Speed, float hop0DistCm,
+                                      int16_t cruisePwm, int16_t entryPwm)
 {
     // ADR-059 blind-chain walk-ahead (full contract in the header doxygen). On entry the
     // hop being dispatched (hop 0: `cur -> _nextHop`) is already classified
@@ -2465,6 +2457,17 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMo
             break;    // no ramps to chain
         }
 
+        // SPEED-tier boundary (issue #97). The run merges every admitted hop into ONE
+        // velocity profile at a single cruise, so a hop whose resolved SpeedTier (edge
+        // override, else PIPELINE_CONFIG.speed) differs from hop 0's cannot share that
+        // profile and ends the run before it. SPEED ONLY — a SYNC<->GYRO mode mix at the
+        // SAME tier still chains (the mode-mixed run already chains today, and adding a
+        // stop there would fight the fewer-stops preference).
+        if (_resolveSpeed(e) != hop0Speed)
+        {
+            break;
+        }
+
         // A hop below the profile floor cannot carry chained start/end speeds (the Drive
         // builder silently degrades it to a flat move) — the run ends before it.
         if (e.distance_cm < Config::TSHAPE_MIN_MOVE_CM)
@@ -2526,6 +2529,7 @@ void PathTrackerClass::_chainTryStart(uint8_t cur, bool reverse, Routes::BlindMo
 
     _chain.active         = true;
     _chain.reverse        = reverse;
+    _chain.speedTier      = hop0Speed;
     _chain.hopCount       = count;
     _chain.hopIndex       = 0;
     _chain.dispatchEncSum = 0;
@@ -2607,7 +2611,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
     q.destNodeType      = FieldMap::getNodeType(_nextHop);
     q.direction         = _resolvedDirection;
     q.rawDistanceCm     = edge.distance_cm;
-    q.lineMode          = _resolveLineMode(edge);
+    q.speed             = _resolveSpeed(edge);
     q.projPassThrough   = projPassThrough;
     q.departingTrimCm   = departingTrimCm;
     q.approachingTrimCm = approachingTrimCm;
@@ -2672,13 +2676,13 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // LINE_OVERSHOOT window. For a pass-through into this edge `setEnabled(true)`
             // hits the already-enabled fast-path (no ramp-up reseed); see ADR-023.
             (void) Intersection.isAtIntersection();
-            const Config::SpeedPreset preset = _lineModeToPreset(q.lineMode);
+            const Config::SpeedPreset preset = speedTierToPreset(q.speed);
             LineFollower.setEnabled(true)
                         .setPreset(preset)
                         .setReverse(decision.reverse)
                         .setOvershootMode(false);
 #ifdef PT_PARITY_TRACE
-            _ptEmitLineFollow(decision.reverse, q.lineMode);
+            _ptEmitLineFollow(decision.reverse, q.speed);
 #endif
             _state       = State::LINE_FOLLOW;
             _passThrough = false;    // consumed
@@ -2702,7 +2706,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             // return is behavior-identical to the pre-refactor code while keeping the
             // trace; the dispatched `effectiveDistCm` is what the parity stream records.
             (void) Intersection.isAtIntersection();
-            const Config::SpeedPreset preset = _lineModeToPreset(q.lineMode);
+            const Config::SpeedPreset preset = speedTierToPreset(q.speed);
             _projPassThrough            = q.projPassThrough;
             const float effectiveDistCm = _pivotTrimDistance(edge);
             LineFollower.setEnabled(true)
@@ -2713,7 +2717,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                         .setBrakeOnGate(decision.brakeOnGate)
                         .setDistanceTarget(effectiveDistCm);
 #ifdef PT_PARITY_TRACE
-            _ptEmitProjectionFollow(decision.reverse, q.lineMode, effectiveDistCm,
+            _ptEmitProjectionFollow(decision.reverse, q.speed, effectiveDistCm,
                                     _projPassThrough);
 #endif
             _state       = State::PROJECTION_FOLLOW;
@@ -2769,6 +2773,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 .setReverse(decision.reverse)
                 .setMode(blindModeToDriveMode(decision.driveMode))
                 .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
+                .setPower(presetToPwm(speedTierToPreset(_resolveSpeed(edge))))
                 .setOvershoot(decision.overshootCm)
                 .async();
 #ifdef PT_PARITY_TRACE
@@ -2798,13 +2803,30 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 LineFollower.setEnabled(false).setBrake(false);
             }
 
+            // Per-edge blind cruise magnitude (issue #97). Resolve THIS hop's SpeedTier
+            // (edge override, else PIPELINE_CONFIG.speed) to a PWM — the former hardcoded
+            // Config::SPEED_NORMAL is now a per-edge value. NORMAL/absent stays byte-
+            // identical to the previous 70. Computed BEFORE the seed clamp and the signed
+            // cruise so both derive from it.
+            const int16_t cruiseMag = presetToPwm(speedTierToPreset(_resolveSpeed(edge)));
+
+            // AC12 pass-through entry seed clamp: the captured inbound line cruise (e.g. a
+            // FAST line at 90) must not enter a slower blind hop above its own cruise. Clamp
+            // the UNSIGNED seed magnitude to the resolved cruise before the sign is applied,
+            // so a FAST(90) line into a SLOW(60) blind enters at 60, not 90. A cold-start
+            // seed (TSHAPE_START_SPEED) already sits below any tier, so this is a no-op there.
+            if (startSpeed > cruiseMag)
+            {
+                startSpeed = cruiseMag;
+            }
+
             // BLIND REAR (T7 / issue #19): sign-by-power is the convention —
             // `driveDist` rejects negative cm at Drive.h:1254 (positive distance,
             // signed PWM). Negate the cruise + start/end speeds when REAR so the
             // trapezoid ramps from a negative-direction PWM straight away
             // (Drive.h:1288-1296 documents the matching sign-by-cruise rule).
-            const int16_t cruisePwm = decision.reverse ? (int16_t) -Config::SPEED_NORMAL
-                                                        : (int16_t)  Config::SPEED_NORMAL;
+            const int16_t cruisePwm = decision.reverse ? (int16_t) -cruiseMag
+                                                        : (int16_t)  cruiseMag;
             int16_t signedStartSpeed =
                 decision.reverse ? (int16_t) -startSpeed : startSpeed;
 
@@ -2838,6 +2860,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     (k < _chain.hopCount) && (cur == _chain.node[k])
                     && (_nextHop == _chain.node[k + 1])
                     && (decision.reverse == _chain.reverse)
+                    && (_resolveSpeed(edge) == _chain.speedTier)
                     && (decision.driveMode != Routes::BlindMode::RAW_FLAT);
                 if (match)
                 {
@@ -2902,8 +2925,8 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             }
             else if (Config::PATH_BLIND_CHAIN_ENABLED)
             {
-                _chainTryStart(cur, decision.reverse, decision.driveMode, effectiveDistCm,
-                               cruisePwm, signedStartSpeed);
+                _chainTryStart(cur, decision.reverse, decision.driveMode, _resolveSpeed(edge),
+                               effectiveDistCm, cruisePwm, signedStartSpeed);
                 if (_chain.active)
                 {
                     // Hop 0 of a fresh run. `speed[0].startPwm` is the entryPwm clamped

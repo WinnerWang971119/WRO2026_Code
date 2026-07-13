@@ -15,7 +15,7 @@
  *
  * `resolveEdgeDispatch(...)` answers one question per hop: given the already-
  * resolved inputs for an edge — its type, the destination node type, the resolved
- * travel direction, the resolved line/blind modes, the stop-at-line decision, the
+ * travel direction, the resolved speed tier and blind mode, the stop-at-line decision, the
  * pivot trims, and the projection pass-through lookahead — which terminal
  * primitive does the FSM dispatch, and with what commanded parameters? The output
  * is a classification, NOT a full descriptor:
@@ -82,7 +82,7 @@ struct EdgeDispatchQuery
     Routes::NodeType     destNodeType;      ///< Dest node type: LINE | PROJECTION.
     Direction            direction;         ///< FRONT | REAR (already resolved; never AUTO).
     float                rawDistanceCm;      ///< edge.distance_cm.
-    Routes::LineMode     lineMode;          ///< Resolved line mode for the edge (never DEFAULT).
+    Routes::SpeedTier    speed;             ///< Resolved speed tier for the edge (never DEFAULT).
     StopAtLineResolution stopAtLine;        ///< resolveStopAtLine(...) result; only read for BLIND.
     bool                 projPassThrough;    ///< FSM lookahead; only meaningful LINE->projection.
     float                departingTrimCm;    ///< _departingPivot.trim_cm or 0.
@@ -138,8 +138,8 @@ struct EdgeDispatchDecision
  *         reanchor, brakeOnGate}` classification per the frozen contract above.
  *
  * @note `q.stopAtLine` is read only for BLIND edges; `q.projPassThrough` only for a
- *       LINE -> projection hop. `q.lineMode` is carried by the FSM, not the
- *       decision (line primitives take their motion profile from the edge directly).
+ *       LINE -> projection hop. `q.speed` is carried by the FSM, not the
+ *       decision (both edge types take their cruise speed from the edge directly).
  */
 inline EdgeDispatchDecision resolveEdgeDispatch(const EdgeDispatchQuery& q)
 {
