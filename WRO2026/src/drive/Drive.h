@@ -244,13 +244,17 @@ public:
      * line-follower outer loop calls every tick — using `MoveSync` here would stack a PID on
      * top of the line-follower's PID and oscillate.
      *
-     * @param L Left-motor power in `[-100, 100]`.
-     * @param R Right-motor power in `[-100, 100]`.
+     * @param L        Left-motor power in `[-100, 100]`.
+     * @param R        Right-motor power in `[-100, 100]`.
+     * @param floorMag Deadband floor magnitude passed through to `deadbandSnap` on each wheel.
+     *                 Defaults to the static breakaway floor (`Config::PWM_MIN_MAGNITUDE`); the
+     *                 `LineFollower` stop ramp-down passes the lower kinetic floor
+     *                 (`Config::PWM_MOVING_MIN`) once the chassis is already rolling.
      * @return `0x00` on success, lower-MCU error code otherwise.
      * @note Continuous; does not touch the move/turn done flags.
      * @note Bias-compensated via `_applyBias` (raw-PWM path).
      */
-    uint8_t setSpeed(int16_t L, int16_t R);
+    uint8_t setSpeed(int16_t L, int16_t R, int16_t floorMag = Config::PWM_MIN_MAGNITUDE);
 
     /**
      * @brief Continuously drive both wheels with the lower-MCU's MoveSync regulator.
@@ -1178,15 +1182,22 @@ private:
      * motor-bias scalar — SYNC / GYRO close the loop on the STM32 and a feedforward scalar would
      * fight the inner PID (see DECISIONS.md).
      *
-     * @param mode    Continuous primitive to dispatch (`RAW` / `SYNC` / `GYRO`).
-     * @param mag     Signed PWM magnitude (caller carries direction in the sign).
-     * @param heading Yaw target — only consulted in `GYRO` mode; ignored otherwise.
+     * @param mode     Continuous primitive to dispatch (`RAW` / `SYNC` / `GYRO`).
+     * @param mag      Signed PWM magnitude (caller carries direction in the sign).
+     * @param heading  Yaw target — only consulted in `GYRO` mode; ignored otherwise.
+     * @param floorMag Deadband floor magnitude threaded into every `deadbandSnap` call inside.
+     *                 Defaults to the static breakaway floor (`Config::PWM_MIN_MAGNITUDE`); the
+     *                 profile decel tail toward a sub-static-floor endSpeed passes the lower
+     *                 kinetic floor (`Config::PWM_MOVING_MIN`) via `_decelTailFloorMag`.
      *
      * @note Reads NO instance state — every input is a parameter, so the profile
      *       (`_profileMode` / `_profileHeading`) and the seek (`_stopMode` / `_stopHeading`)
      *       cannot cross-contaminate through it.
      */
-    void _emitContinuous(DriveMode mode, int16_t mag, int16_t heading);
+    void _emitContinuous(DriveMode mode,
+                         int16_t   mag,
+                         int16_t   heading,
+                         int16_t   floorMag = Config::PWM_MIN_MAGNITUDE);
 
     /**
      * @brief Advance the profile state machine one tick. Called from `update()` when active.
@@ -1352,6 +1363,21 @@ private:
      *       Drive.cpp.
      */
     int16_t _profileSpeedAt(float traveledFrac) const;
+
+    /**
+     * @brief Deadband floor magnitude for the current profile tick: the lower KINETIC floor
+     *        (Config::PWM_MOVING_MIN) only while ramping DOWN toward an endSpeed below the static
+     *        breakaway floor; the static floor (Config::PWM_MIN_MAGNITUDE) everywhere else.
+     *
+     * Phase-gated so the accel/breakaway and cruise phases keep the full static kick (a rest-start
+     * ramp-up below the static floor must NOT be softened) — only the decel tail, where the chassis
+     * is already rolling, crawls at the kinetic floor. Mirrors `_profileSpeedAt`'s decel-region
+     * boundary exactly so the floor toggles on the same tick the setpoint enters the peak->end ramp.
+     *
+     * @param frac Traveled fraction in [0,1] (same value passed to `_profileSpeedAt` this tick).
+     * @return Config::PWM_MOVING_MIN in the sub-floor decel tail; Config::PWM_MIN_MAGNITUDE otherwise.
+     */
+    int16_t _decelTailFloorMag(float frac) const;
 
     /**
      * @brief Resolve all profile parameters and seed the state machine.

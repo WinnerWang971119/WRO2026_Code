@@ -154,11 +154,11 @@ void DriveClass::update()
 // Continuous primitives
 // -----------------------------------------------------------------------------------------
 
-uint8_t DriveClass::setSpeed(int16_t L, int16_t R)
+uint8_t DriveClass::setSpeed(int16_t L, int16_t R, int16_t floorMag)
 {
     _applyBias(L, R);
-    L = deadbandSnap(L);
-    R = deadbandSnap(R);
+    L = deadbandSnap(L, floorMag);
+    R = deadbandSnap(R, floorMag);
     return MiniR4.DriveDC.Move(L, R);
 }
 
@@ -665,7 +665,7 @@ void DriveClass::_applyBias(int16_t& L, int16_t& R) const
 // Trapezoidal-profile state machine (`.tShape()` cooperative driver)
 // -----------------------------------------------------------------------------------------
 
-void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
+void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading, int16_t floorMag)
 {
     // Shared continuous-emit path for both `_updateProfile` and `_updateStopAtLine`. Reads NO
     // instance state — every input is a parameter — so the two callers cannot cross-contaminate
@@ -678,14 +678,14 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
         int16_t L = mag;
         int16_t R = mag;
         _applyBias(L, R);
-        L = deadbandSnap(L);
-        R = deadbandSnap(R);
+        L = deadbandSnap(L, floorMag);
+        R = deadbandSnap(R, floorMag);
         MiniR4.DriveDC.Move(L, R);
         break;
     }
     case DriveMode::SYNC:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
-        MiniR4.DriveDC.MoveSync(deadbandSnap(mag), deadbandSnap(mag));
+        MiniR4.DriveDC.MoveSync(deadbandSnap(mag, floorMag), deadbandSnap(mag, floorMag));
         break;
     case DriveMode::GYRO:
         // No _applyBias here — STM32 closes the loop. See DECISIONS.md.
@@ -693,7 +693,7 @@ void DriveClass::_emitContinuous(DriveMode mode, int16_t mag, int16_t heading)
         // converts to raw. All three GYRO channels feeding this (_profileHeading / _stopHeading
         // / _wallHeading) carry app-frame values, so this single wrap covers straight-line,
         // stop-at-line, and wall-stop alike.
-        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag), YawSource.toHwHeading(heading));
+        MiniR4.DriveDC.MoveGyro(deadbandSnap(mag, floorMag), YawSource.toHwHeading(heading));
         break;
     }
 }
@@ -783,7 +783,7 @@ void DriveClass::_updateProfile()
     // Compute speed setpoint and issue the appropriate continuous primitive through the shared
     // emitter (the heading is consulted only in GYRO mode).
     const int16_t spd = _profileSpeedAt(frac);
-    _emitContinuous(_profileMode, spd, _profileHeading);
+    _emitContinuous(_profileMode, spd, _profileHeading, _decelTailFloorMag(frac));
 }
 
 int16_t DriveClass::_profileSpeedAt(float frac) const
@@ -830,6 +830,30 @@ int16_t DriveClass::_profileSpeedAt(float frac) const
     ramps.peakPwm = _profilePeakSpd;
     return tShapeSpeedAt(
         (float) traveled, (float) _profileTotalEnc, ramps, _profileStartSpd, _profileEndSpd);
+}
+
+int16_t DriveClass::_decelTailFloorMag(float frac) const
+{
+    // Only a stop/near-stop (endSpeed below the static floor) gets the kinetic tail. A move that
+    // ends at or above the static floor never dips into the softened band, so keep it static.
+    if (abs(_profileEndSpd) >= Config::PWM_MIN_MAGNITUDE)
+    {
+        return Config::PWM_MIN_MAGNITUDE;
+    }
+
+    bool inDecel;
+    if (_profileIsTime)
+    {
+        const uint32_t elapsedMs = (uint32_t) (frac * (float) _profileTotalMs);
+        inDecel = (_profileTotalMs > _profileDecelMs)
+                  && (elapsedMs >= (_profileTotalMs - _profileDecelMs));
+    }
+    else
+    {
+        const int32_t traveled = (int32_t) (frac * (float) _profileTotalEnc);
+        inDecel = (traveled >= (_profileTotalEnc - _profileDecelEnc));
+    }
+    return inDecel ? Config::PWM_MOVING_MIN : Config::PWM_MIN_MAGNITUDE;
 }
 
 uint8_t DriveClass::_execProfileMove(DriveMode mode,
