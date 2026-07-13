@@ -125,6 +125,10 @@ jobs:
         env:
           PARITY_DUMP_EXE: ${{ github.workspace }}/build/parity/test_path_tracker_parity_dump
         run: |
+          # Without an explicit `shell: bash`, the default is `bash -e` WITHOUT
+          # pipefail, so `pytest | tee` would mask a pytest failure behind tee's
+          # exit 0. Set pipefail so a failing parity run actually fails the job.
+          set -o pipefail
           uv run --no-sync pytest tools/path_planner/tests/test_pathtracker_parity.py -v 2>&1 \
             | tee build/parity/parity_pytest.log
 
