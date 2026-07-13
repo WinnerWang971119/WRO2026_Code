@@ -1249,7 +1249,7 @@ class SetEdgeOverride:
     :ivar speed: ``SpeedTier`` tag, valid on both LINE and BLIND edges, or
         ``None`` to inherit.  Validated at Save by
         ``validator._validate_edges_field``; this command stores it verbatim.
-    :ivar mode: ``LineMode`` tag -- ``"MIDDLE"`` -- on a LINE edge, or
+    :ivar mode: ``LineFollowMode`` tag -- ``"MIDDLE"`` -- on a LINE edge, or
         ``BlindMode`` tag -- ``"SYNC_TSHAPE"`` / ``"GYRO_TSHAPE"`` /
         ``"RAW_FLAT"`` -- on a BLIND edge, or ``None`` to inherit.  Validated at
         Save by ``validator._validate_edges_field``; this command stores it
