@@ -91,15 +91,35 @@ _BLIND_DECAY_EXPONENT_MIN: float = 1.0
 #: (the decay normalizer in cm) and ``robot_radius_cm`` (the inflation radius).
 _POSITIVE_KNOB_MIN_EXCLUSIVE: float = 0.0
 
-#: Recognized ``which`` selectors :class:`SetPipelineMode` may target, each
-#: mapping to the same-named ``FieldModel.pipeline_<which>_mode`` attribute.
-#: The validator (``_validate_pipeline_config``) enforces the per-category tag
-#: vocabulary and the DEFAULT rule at Save time; this command only routes the
-#: selector to the right field, so it accepts any string tag (or ``None`` to
-#: inherit) verbatim and leaves the value check to ``validate()``.
+#: Recognized ``which`` selectors :class:`SetPipelineMode` may target, mapped
+#: to their ``FieldModel`` attribute by ``_PIPELINE_WHICH_TO_ATTR`` below.  Most
+#: selectors map to a same-named ``pipeline_<which>_mode`` attribute, but
+#: ``"speed"`` maps to ``pipeline_speed`` (no ``_mode`` suffix), so the mapping
+#: is an explicit dict rather than an f-string pattern -- see
+#: ``_PIPELINE_WHICH_TO_ATTR``. The validator (``_validate_pipeline_config``)
+#: enforces the per-category tag vocabulary and the DEFAULT rule at Save time;
+#: this command only routes the selector to the right field, so it accepts any
+#: string tag (or ``None`` to inherit) verbatim and leaves the value check to
+#: ``validate()``.
 _VALID_PIPELINE_WHICH: frozenset[str] = frozenset(
-    {"line", "blind", "turn", "direction"}
+    {"speed", "blind", "turn", "direction"}
 )
+
+#: Explicit ``which`` -> ``FieldModel`` attribute-name mapping for
+#: :class:`SetPipelineMode`.  Cannot be derived by an
+#: ``f"pipeline_{which}_mode"`` pattern because the renamed speed-tier field is
+#: ``pipeline_speed`` (asymmetric with ``pipeline_blind_mode`` /
+#: ``pipeline_turn_mode`` / ``pipeline_direction_mode``); a silent
+#: ``setattr(model, "pipeline_speed_mode", ...)`` would create a phantom
+#: attribute that ``to_json_dict`` / ``to_module_proxy`` never read. Keeping the
+#: mapping explicit makes the selector -> attribute correspondence
+#: correct-by-construction.
+_PIPELINE_WHICH_TO_ATTR: dict[str, str] = {
+    "speed": "pipeline_speed",
+    "blind": "pipeline_blind_mode",
+    "turn": "pipeline_turn_mode",
+    "direction": "pipeline_direction_mode",
+}
 
 #: Recognized field-wide boolean flags :class:`SetFieldWideFlag` may toggle,
 #: each mapping to a same-named ``FieldModel`` attribute.
@@ -112,7 +132,8 @@ _VALID_FIELD_WIDE_FLAGS: frozenset[str] = frozenset(
 #: only the non-``None`` ones; an omitted key means "inherit", so absence is
 #: semantically distinct from a present-but-default value.
 _OVERRIDE_VALUE_KEYS: tuple[str, ...] = (
-    "primitive_mode",
+    "speed",
+    "mode",
     "direction",
     "stop_at_line",
 )
@@ -498,7 +519,7 @@ class RenameNode:
         """Return EDGES overlay *entry* with ``u`` / ``v`` == *frm* set to *to*.
 
         Rewrites only the directed-pair ``u`` / ``v`` keys; ``type`` and every
-        other override key (``primitive_mode`` / ``direction`` /
+        other override key (``speed`` / ``mode`` / ``direction`` /
         ``stop_at_line`` / any hand-authored geometry) are copied through
         unchanged so the entry's ``(type, u, v)`` identity tracks the rename
         without merging or dropping it.  A fresh dict is returned so an undo
@@ -1199,7 +1220,7 @@ class SetEdgeOverride:
 
     On an ADD (no existing entry for the identity), writes an **override-only**
     entry into ``model.edges``: the identity triple ``{"type", "u", "v"}`` plus
-    whichever of ``primitive_mode`` / ``direction`` / ``stop_at_line`` are
+    whichever of ``speed`` / ``mode`` / ``direction`` / ``stop_at_line`` are
     non-``None``.  A ``None`` field is OMITTED from the entry -- absence means
     "inherit" (the planner derives that aspect from the pipeline default / node
     geometry), which is semantically distinct from a present-but-default value.
@@ -1211,7 +1232,7 @@ class SetEdgeOverride:
     exists), the entry is replaced IN PLACE (preserving its list position) and
     every key the editor does NOT own is CARRIED FORWARD from the prior entry --
     hand-authored ``distance_cm`` / ``heading_deg`` geometry (or any other
-    non-editor key) survives the edit; only the three editor-owned keys are
+    non-editor key) survives the edit; only the four editor-owned keys are
     set (when the command supplies a value) or removed (when ``None`` -- absent
     from the form means set-to-inherit). This is what stops an inline edit from
     silently dropping geometry a non-editor surface authored (R5).
@@ -1225,9 +1246,14 @@ class SetEdgeOverride:
         selected segment).  Stored verbatim as the entry's ``"type"``.
     :ivar u: Source node name (forward direction ``u -> v``).
     :ivar v: Destination node name.
-    :ivar primitive_mode: ``LineMode`` tag (on a LINE edge) / ``BlindMode`` tag
-        (on a BLIND edge), or ``None`` to inherit.  Validated at Save by
+    :ivar speed: ``SpeedTier`` tag, valid on both LINE and BLIND edges, or
+        ``None`` to inherit.  Validated at Save by
         ``validator._validate_edges_field``; this command stores it verbatim.
+    :ivar mode: ``LineMode`` tag -- ``"MIDDLE"`` -- on a LINE edge, or
+        ``BlindMode`` tag -- ``"SYNC_TSHAPE"`` / ``"GYRO_TSHAPE"`` /
+        ``"RAW_FLAT"`` -- on a BLIND edge, or ``None`` to inherit.  Validated at
+        Save by ``validator._validate_edges_field``; this command stores it
+        verbatim.
     :ivar direction: ``"front"`` / ``"rear"`` (forward ``u -> v`` only), or
         ``None`` to inherit.
     :ivar stop_at_line: ``"on"`` / ``"off"`` (forward ``u -> v`` only), or
@@ -1237,7 +1263,8 @@ class SetEdgeOverride:
     edge_type: str
     u: str
     v: str
-    primitive_mode: str | None = None
+    speed: str | None = None
+    mode: str | None = None
     direction: str | None = None
     stop_at_line: str | None = None
 
@@ -1268,7 +1295,7 @@ class SetEdgeOverride:
             # REPLACE in place: build the new entry from the prior one so every
             # key the editor does not own (hand-authored geometry like
             # distance_cm / heading_deg, or any future non-editor key) survives;
-            # only the three editor-owned keys are set-or-removed.
+            # only the four editor-owned keys are set-or-removed.
             model.edges[index] = self._build_entry(self._original_entry)
         else:
             self._had_entry = False
@@ -1319,7 +1346,7 @@ class SetEdgeOverride:
           *prior* so every key the editor does NOT own (hand-authored
           ``distance_cm`` / ``heading_deg`` geometry, or any other non-editor
           key) survives the edit. Then reassert the identity triple and, for
-          each of the three editor-owned keys (``primitive_mode`` /
+          each of the four editor-owned keys (``speed`` / ``mode`` /
           ``direction`` / ``stop_at_line``), SET it when the command supplies a
           value and REMOVE it when the command's value is ``None`` (absent from
           the form == set-to-inherit). This is what stops an edit through the
@@ -1416,16 +1443,19 @@ class SetPipelineMode:
     """Set one field-sourced ``PIPELINE_CONFIG`` default mode (or clear it).
 
     Backs the inspector's PIPELINE DEFAULTS comboboxes.  ``which`` selects the
-    category and maps to the same-named ``model.pipeline_<which>_mode``
-    attribute; ``value`` is a mode member NAME (string tag), or ``None`` to
-    clear the field-sourced default (inherit the ``pipeline_config.py``
-    default).  The per-category tag vocabulary and the DEFAULT rule
-    (line / blind / turn may not be ``DEFAULT``; direction may) are enforced at
-    Save by ``validator._validate_pipeline_config``; this command only routes
-    the selector to the right field and stores the value verbatim, mirroring how
-    the model carries the four keys as opaque string tags.
+    category and maps to a ``FieldModel`` attribute via the explicit
+    ``_PIPELINE_WHICH_TO_ATTR`` table (``"speed"`` -> ``pipeline_speed``;
+    ``"blind"`` / ``"turn"`` / ``"direction"`` -> the same-named
+    ``pipeline_<which>_mode`` attribute); ``value`` is a mode member NAME
+    (string tag), or ``None`` to clear the field-sourced default (inherit the
+    ``pipeline_config.py`` default).  The per-category tag vocabulary and the
+    DEFAULT rule (speed / blind / turn may not be ``DEFAULT``; direction may)
+    are enforced at Save by ``validator._validate_pipeline_config``; this
+    command only routes the selector to the right field and stores the value
+    verbatim, mirroring how the model carries the four keys as opaque string
+    tags.
 
-    :ivar which: Category selector; one of ``"line"`` / ``"blind"`` /
+    :ivar which: Category selector; one of ``"speed"`` / ``"blind"`` /
         ``"turn"`` / ``"direction"``.
     :ivar value: Mode member name (string tag), or ``None`` to inherit.
     """
@@ -1439,7 +1469,7 @@ class SetPipelineMode:
     )
 
     def apply(self, model: FieldModel) -> None:
-        """Set ``model.pipeline_<which>_mode`` to ``self.value``.
+        """Set the model attribute selected by ``self.which`` to ``self.value``.
 
         :param model: Target model.
         :raises ValueError: If ``self.which`` is not one of the four recognized
@@ -1450,7 +1480,10 @@ class SetPipelineMode:
                 f"SetPipelineMode: which must be one of "
                 f"{sorted(_VALID_PIPELINE_WHICH)!r}, got {self.which!r}"
             )
-        attr = f"pipeline_{self.which}_mode"
+        # Explicit map, not an f"pipeline_{which}_mode" pattern: the renamed
+        # speed-tier field is ``pipeline_speed`` (no ``_mode`` suffix), which
+        # the pattern cannot express -- see ``_PIPELINE_WHICH_TO_ATTR``.
+        attr = _PIPELINE_WHICH_TO_ATTR[self.which]
         self._attr = attr
         self._original_value = getattr(model, attr)
         setattr(model, attr, self.value)
