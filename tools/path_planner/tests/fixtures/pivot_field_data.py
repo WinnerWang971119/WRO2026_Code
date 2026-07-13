@@ -211,7 +211,7 @@ def _make_field(
         ``"blind"`` node -- the validator rejects an on-line start).
     :param start_heading_deg: ``START_HEADING_DEG`` in ``[0, 360)``.
     :param edges: optional rich-edge list -- each entry a dict
-        ``{"type": ..., "u": ..., "v": ...}`` plus any of ``primitive_mode`` /
+        ``{"type": ..., "u": ..., "v": ...}`` plus any of ``speed`` / ``mode`` /
         ``direction`` / ``stop_at_line``.  When supplied it is set verbatim as
         the ``EDGES`` attribute (``build_graph`` reads it OPTIONALLY via
         ``getattr``); when ``None`` the attribute is OMITTED entirely so legacy
