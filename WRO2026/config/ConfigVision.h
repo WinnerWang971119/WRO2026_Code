@@ -15,9 +15,11 @@
  *       Constants marked `TODO` must be measured on the physical HUE12 camera
  *       at hardware bring-up (bench task T8) before competition use.
  * @note `VISION_CELL_TO_SLOT` uses the `_DEFAULT` override idiom so the TC19
- *       compile-time test can inject a collision via `-DVISION_CELL_TO_SLOT_DEFAULT=...`
- *       without editing this file (mirrors `Config.h`'s `PATH_PASS_THROUGH_ENABLED`
- *       and `ConfigManipulator.h`'s `SORTER_RC_ID` / `BELT_M_ID` idiom).
+ *       compile-time test can inject a non-identity map without editing this file. It
+ *       defines the scalar `VISION_CELL_TO_SLOT_REVERSE_FOR_TEST` (not a brace-init
+ *       `-DVISION_CELL_TO_SLOT_DEFAULT={...}`, which macOS `/bin/sh` brace-expands and
+ *       corrupts); see the mapping's docblock below. Mirrors `Config.h`'s
+ *       `PATH_PASS_THROUGH_ENABLED` and `ConfigManipulator.h`'s `SORTER_RC_ID` / `BELT_M_ID`.
  */
 namespace Config
 {
@@ -171,14 +173,22 @@ namespace Config
      * the HUE12 reports. Slots not referenced here are unused and excluded from framing guards.
      *
      * @note **TC19 override hook:** the initializer is guarded by
-     *       `#ifndef VISION_CELL_TO_SLOT_DEFAULT` so a compile-time test can force a slot
-     *       collision via `-DVISION_CELL_TO_SLOT_DEFAULT={...}` without editing this file.
-     *       This mirrors the `PATH_PASS_THROUGH_ENABLED_DEFAULT` / `SORTER_RC_ID_DEFAULT`
-     *       idiom used elsewhere in Config.
+     *       `#ifndef VISION_CELL_TO_SLOT_DEFAULT`. The host test does not pass the brace-init
+     *       list on the command line — `-DVISION_CELL_TO_SLOT_DEFAULT={...}` is unquoted and
+     *       macOS `/bin/sh` brace-expands the `{a,b,c}`, corrupting the value. Instead it defines
+     *       the scalar `VISION_CELL_TO_SLOT_REVERSE_FOR_TEST`, which selects the reversed
+     *       (self-inverse) mapping below with no brace/comma on the command line. A direct
+     *       `-DVISION_CELL_TO_SLOT_DEFAULT={...}` still wins where the shell does not brace-expand.
+     *       Mirrors the `PATH_PASS_THROUGH_ENABLED_DEFAULT` / `SORTER_RC_ID_DEFAULT` idiom.
      */
 #ifndef VISION_CELL_TO_SLOT_DEFAULT
+#ifdef VISION_CELL_TO_SLOT_REVERSE_FOR_TEST
+#define VISION_CELL_TO_SLOT_DEFAULT \
+    { 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 }
+#else
 #define VISION_CELL_TO_SLOT_DEFAULT \
     { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 }
+#endif
 #endif
     constexpr uint8_t VISION_CELL_TO_SLOT[VISION_CELL_COUNT] = VISION_CELL_TO_SLOT_DEFAULT;
 

@@ -976,11 +976,16 @@ target_include_directories(test_vision PRIVATE ${COMMON_INCLUDES})
 # cell c -> slot (11 - c): every slot 0..11 referenced once, so ConfigChecks.h's
 # uniqueness/range static_asserts still hold. Mirrors the `PATH_PASS_THROUGH_ENABLED_DEFAULT`
 # / `BELT_M_ID_DEFAULT` compile-definition override idiom used by the sibling targets.
-# The braces/commas are wrapped in CMake's `[=[ ... ]=]` bracket-argument so CMake passes the
-# whole brace-init list as one definition value (quoted into the vcxproj for MSVC, escaped for
-# GNU/Clang) without splitting on the commas.
+#
+# Pass a SCALAR selector, NOT the brace-init list itself. CMake emits a `-D...={11,10,...}`
+# value unquoted on the command line, and macOS `/bin/sh` (bash) brace-expands `{a,b,c}` into
+# separate `-D` flags — the last wins (`=0`), so the array initializer becomes `= 0` and the
+# build breaks (Linux `/bin/sh` is dash and does not expand, which is why CI never caught it).
+# The scalar flag carries no brace/comma, so it survives every shell; ConfigVision.h maps it to
+# the reversed list. A direct `-DVISION_CELL_TO_SLOT_DEFAULT={...}` still works where the shell
+# does not brace-expand.
 target_compile_definitions(test_vision PRIVATE
-    [=[VISION_CELL_TO_SLOT_DEFAULT={11,10,9,8,7,6,5,4,3,2,1,0}]=])
+    VISION_CELL_TO_SLOT_REVERSE_FOR_TEST)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(test_vision PRIVATE -fsanitize=address,undefined)
