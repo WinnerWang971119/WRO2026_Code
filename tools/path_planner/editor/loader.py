@@ -193,10 +193,11 @@ def load_field_json(path: Path | None = None) -> dict:
         ``None`` (the default), reads ``tools/path_planner/field_data.json``
         sibling of ``field_data.py``.
     :return: A new dict with the field-data attributes.
-    :raises FieldDataError: when the file does not exist, or when the
-        file contents are not valid JSON. The original
-        :class:`json.JSONDecodeError` is chained via ``raise ... from``
-        so the offending line/column survives.
+    :raises FieldDataError: when the file does not exist, when the file
+        contents are not valid JSON, or when it carries the retired
+        top-level ``pipeline_line_mode`` key (renamed to ``pipeline_speed``
+        under ADR-064). The original :class:`json.JSONDecodeError` is
+        chained via ``raise ... from`` so the offending line/column survives.
     """
     target = Path(path) if path is not None else _DEFAULT_JSON_PATH
 
@@ -220,6 +221,24 @@ def load_field_json(path: Path | None = None) -> dict:
         raise FieldDataError(
             f"field_data.json must be a JSON object at the top level; "
             f"got: {type(parsed).__name__}"
+        )
+
+    # Retired top-level key: pipeline_line_mode (ADR-064) -----------------
+    # ADR-047's ``pipeline_line_mode`` (a LineMode name) was renamed to
+    # ``pipeline_speed`` (a SpeedTier name) when the overloaded per-edge
+    # ``primitive_mode`` slot split into orthogonal speed/mode axes. field_data.py
+    # reads only ``pipeline_speed``, so a field still on the old key would load
+    # silently as NORMAL and drop every line edge from its authored tier (e.g.
+    # FAST 90 -> NORMAL 70) with no error. Reject it up front with a targeted
+    # migration message -- mirroring the per-edge ``primitive_mode`` guard in
+    # validator.py -- so the author renames the key rather than chasing a silent
+    # speed change. The load is the single choke point both field_data.py and the
+    # editor read through, so this covers every consumer.
+    if "pipeline_line_mode" in parsed:
+        raise FieldDataError(
+            "top-level 'pipeline_line_mode' was renamed to 'pipeline_speed' "
+            "(ADR-064): rename the key. Its value is still a SpeedTier name "
+            "(SLOW|NORMAL|FAST)."
         )
 
     return _convert_arrays_to_tuples(parsed)

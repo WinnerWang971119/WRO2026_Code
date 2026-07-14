@@ -537,3 +537,32 @@ def test_load_malformed_json_raises_field_data_error_with_lineno(
     assert "line" in str(exc_info.value).lower(), (
         f"Expected 'line' in error message; got: {exc_info.value}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Error path: the retired pipeline_line_mode key (ADR-064) is rejected loudly
+# ---------------------------------------------------------------------------
+
+
+def test_load_retired_pipeline_line_mode_key_raises_migration_error(
+    tmp_path: Path,
+) -> None:
+    """A field still carrying the ADR-047 top-level ``pipeline_line_mode`` key
+    must raise FieldDataError pointing at the renamed ``pipeline_speed`` key.
+
+    Without this guard the stale key loads silently (field_data.py reads only
+    ``pipeline_speed``), dropping every line edge from its authored tier to
+    NORMAL with no error. The message must name both keys so the fix is obvious.
+    """
+    raw = json.loads(_SMALL_FIXTURE.read_text(encoding="utf-8"))
+    raw["pipeline_line_mode"] = "FAST"
+    stale = tmp_path / "stale_pipeline_key.json"
+    stale.write_text(json.dumps(raw, indent=2), encoding="utf-8", newline="\n")
+
+    with pytest.raises(FieldDataError) as exc_info:
+        load_field_json(stale)
+
+    message = str(exc_info.value)
+    assert "pipeline_line_mode" in message and "pipeline_speed" in message, (
+        f"Expected both key names in migration message; got: {message}"
+    )
