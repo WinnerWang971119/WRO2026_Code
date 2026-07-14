@@ -57,7 +57,10 @@ from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from tools.path_planner.editor import theme
-from tools.path_planner.editor.commands import _find_override_index
+from tools.path_planner.editor.commands import (
+    _PIPELINE_WHICH_TO_ATTR,
+    _find_override_index,
+)
 from tools.path_planner.editor.model import NODE_TYPE_VALUES, RESET_AXIS_VALUES
 from tools.path_planner.pipeline_config import (
     BlindMode,
@@ -303,18 +306,12 @@ _PIPELINE_MODE_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("direction", "Direction:", _PIPELINE_DIRECTION_VALUES),
 )
 
-# Explicit ``which`` -> ``FieldModel`` attribute-name mapping, mirroring
-# ``commands._PIPELINE_WHICH_TO_ATTR``.  Cannot be derived by an
-# ``f"pipeline_{which}_mode"`` pattern because the renamed speed-tier field is
-# ``pipeline_speed`` (asymmetric with ``pipeline_blind_mode`` /
-# ``pipeline_turn_mode`` / ``pipeline_direction_mode``); a naive f-string read
-# would raise on ``which == "speed"``.
-_PIPELINE_WHICH_TO_ATTR: dict[str, str] = {
-    "speed": "pipeline_speed",
-    "blind": "pipeline_blind_mode",
-    "turn": "pipeline_turn_mode",
-    "direction": "pipeline_direction_mode",
-}
+# The ``which`` -> ``FieldModel`` attribute-name mapping is defined once in
+# ``commands._PIPELINE_WHICH_TO_ATTR`` (imported above) so this panel and the
+# ``SetPipelineMode`` command never drift out of lockstep. It stays explicit
+# rather than an ``f"pipeline_{which}_mode"`` pattern because the renamed
+# speed-tier field is ``pipeline_speed`` (asymmetric with ``pipeline_blind_mode``
+# / ``pipeline_turn_mode`` / ``pipeline_direction_mode``).
 
 # Canonical flag name for the field-wide blind->projection auto-seek toggle.
 _BLIND_PROJECTION_AUTO_SEEK_FLAG: str = "blind_projection_auto_seek"
