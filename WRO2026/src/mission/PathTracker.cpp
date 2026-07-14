@@ -2773,7 +2773,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 .setReverse(decision.reverse)
                 .setMode(blindModeToDriveMode(decision.driveMode))
                 .setHeading(Localization.toImuYaw(_resolvedBodyHeading))
-                .setPower(presetToPwm(speedTierToPreset(_resolveSpeed(edge))))
+                .setPower(presetToPwm(speedTierToPreset(q.speed)))
                 .setOvershoot(decision.overshootCm)
                 .async();
 #ifdef PT_PARITY_TRACE
@@ -2803,12 +2803,12 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                 LineFollower.setEnabled(false).setBrake(false);
             }
 
-            // Per-edge blind cruise magnitude (issue #97). Resolve THIS hop's SpeedTier
-            // (edge override, else PIPELINE_CONFIG.speed) to a PWM — the former hardcoded
-            // Config::SPEED_NORMAL is now a per-edge value. NORMAL/absent stays byte-
-            // identical to the previous 70. Computed BEFORE the seed clamp and the signed
-            // cruise so both derive from it.
-            const int16_t cruiseMag = presetToPwm(speedTierToPreset(_resolveSpeed(edge)));
+            // Per-edge blind cruise magnitude (issue #97). Reuse THIS hop's already-
+            // resolved SpeedTier (`q.speed`, the edge override else PIPELINE_CONFIG.speed)
+            // as a PWM — the former hardcoded Config::SPEED_NORMAL is now a per-edge value.
+            // NORMAL/absent stays byte-identical to the previous 70. Computed BEFORE the
+            // seed clamp and the signed cruise so both derive from it.
+            const int16_t cruiseMag = presetToPwm(speedTierToPreset(q.speed));
 
             // AC12 pass-through entry seed clamp: the captured inbound line cruise (e.g. a
             // FAST line at 90) must not enter a slower blind hop above its own cruise. Clamp
@@ -2860,7 +2860,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
                     (k < _chain.hopCount) && (cur == _chain.node[k])
                     && (_nextHop == _chain.node[k + 1])
                     && (decision.reverse == _chain.reverse)
-                    && (_resolveSpeed(edge) == _chain.speedTier)
+                    && (q.speed == _chain.speedTier)
                     && (decision.driveMode != Routes::BlindMode::RAW_FLAT);
                 if (match)
                 {
@@ -2925,7 +2925,7 @@ void PathTrackerClass::_dispatchEdgeAfterTurn()
             }
             else if (Config::PATH_BLIND_CHAIN_ENABLED)
             {
-                _chainTryStart(cur, decision.reverse, decision.driveMode, _resolveSpeed(edge),
+                _chainTryStart(cur, decision.reverse, decision.driveMode, q.speed,
                                effectiveDistCm, cruisePwm, signedStartSpeed);
                 if (_chain.active)
                 {
