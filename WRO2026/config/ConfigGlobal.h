@@ -19,7 +19,22 @@ namespace Config
     // ---------------------------------------------------------------------------------------
 
     /** @brief Battery cell count passed to `MiniR4.PWR.setBattCell()`. MUST match the pack. */
-    constexpr uint8_t BATT_CELLS = 2;
+    constexpr uint8_t BATT_CELLS = 3;
+
+    /**
+     * @brief Boot-time minimum pack voltage (V). Below this, setup() fails the boot.
+     *
+     * `setup()` reads `MiniR4.PWR.getBattVoltage()` once (with a single retry on a
+     * transient read miss) and, if the measured pack voltage is below this floor,
+     * folds a `BATT LOW` failure into the same `BOOT FAIL` path as a failed module
+     * begin() — red RGB LEDs + one long low tone + the OLED event ring. This keeps
+     * a run from starting on a sagging pack, which drifts every open-loop move.
+     *
+     * @note Sized for the 3S competition pack (12.6 V full, 11.1 V nominal): 11.9 V
+     *       is a "get off the field" floor comfortably above the 10.2 V empty point.
+     *       MUST be re-chosen if `BATT_CELLS` changes — a 2S pack can never reach it.
+     */
+    constexpr float BATT_MIN_VOLTAGE_V = 11.9f;
 
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).

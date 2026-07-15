@@ -7,9 +7,11 @@
  * PR3 deliverable: human-typed mission DSL on top of PR2's PathTracker.
  *
  * Operator flow:
- *   1. Power on. Module begin()s run; OLED shows `BOOT OK` (or `BOOT FAIL`).
- *      On success the buzzer chirps 3x and the RGB LEDs turn green; on failure
- *      it emits one long low tone and the LEDs turn red.
+ *   1. Power on. The pack voltage is read and every module begin()s run; OLED
+ *      shows `BOOT OK` (or `BOOT FAIL`). A pack below `Config::BATT_MIN_VOLTAGE_V`
+ *      fails the boot just like a failed module begin(). On success the buzzer
+ *      chirps 3x and the RGB LEDs turn green; on failure it emits one long low
+ *      tone and the LEDs turn red.
  *   2. Place chassis on `Routes::START_NODE` (`A`) facing `START_HEADING_DEG`.
  *   2a. Optional pre-mission calibration: hold BTN_DOWN for >= 2 s to
  *       open the OLED CALIBRATION menu. BTN_DOWN short-presses cycle
@@ -181,6 +183,19 @@ void setup()
     Serial.begin(115200);
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
+    // Boot-time battery gate. getBattVoltage() returns the measured pack voltage,
+    // or 0 on an I2C read miss — retry once (the retry-once idiom used throughout
+    // MMLower callers) before treating the pack as under-voltage. A read that is
+    // still 0 (< the floor) fails the boot, which is the fail-safe outcome: never
+    // start a run when the pack voltage cannot be confirmed above the floor.
+    float battVoltage = MiniR4.PWR.getBattVoltage();
+    if (battVoltage <= 0.0f)
+    {
+        delay(50);
+        battVoltage = MiniR4.PWR.getBattVoltage();
+    }
+    const bool battOk = (battVoltage >= Config::BATT_MIN_VOLTAGE_V);
+
     const bool arrayOk = LineArray.begin();
     const bool driveOk = Drive.begin();
     const bool lineOk  = LineFollower.begin();
@@ -200,11 +215,20 @@ void setup()
     Tasks.setTickCallback(cooperativeTick);
     Vision.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
+    _setupFailed = !(battOk && arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
 
     if (_setupFailed)
     {
-        Serial.println(F("WRO2026 PR3 BOOT FAIL — module begin() returned false:"));
+        Serial.println(F("WRO2026 PR3 BOOT FAIL:"));
+        if (!battOk)
+        {
+            Serial.print(F("  - Battery low/unreadable: "));
+            Serial.print(battVoltage);
+            Serial.print(F(" V < "));
+            Serial.print(Config::BATT_MIN_VOLTAGE_V);
+            Serial.println(F(" V"));
+            EventTrace.pushEvent("BATT LOW");
+        }
         if (!arrayOk)  { Serial.println(F("  - LineArray"));    EventTrace.pushEvent("FAIL ARR"); }
         if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
         if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
