@@ -411,3 +411,202 @@ def test_dispatch_upload_board_list_failure_raises(monkeypatch) -> None:
             port="auto",
             baud=None,
         )
+
+
+# ---------------------------------------------------------------------------
+# upload-monitor -- kill any open monitor, flash, reopen the monitor.
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_upload_monitor_kills_flashes_then_monitors(monkeypatch) -> None:
+    """upload-monitor sequences kill -> detect -> upload -> re-detect -> monitor."""
+    fake_cli = _fake_cli(monkeypatch)
+    fqbn = "arduino:renesas_uno:unor4wifi"
+    sketch = "WRO2026"
+    expected_sketch_dir = str(act._resolve_sketch_dir(sketch))
+
+    monkeypatch.setattr(act.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(act.time, "sleep", lambda _s: None)
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, *_args, **_kwargs):
+        calls.append(list(args))
+        if "board" in args and "list" in args:
+            return subprocess.CompletedProcess(
+                args,
+                returncode=0,
+                stdout='{"detected_ports":[{"port":{"address":"/dev/ttyACM0"}}]}',
+            )
+        return subprocess.CompletedProcess(args, returncode=0)
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    rc = act.dispatch(
+        action="upload-monitor",
+        cli="arduino-cli",
+        fqbn=fqbn,
+        sketch=sketch,
+        port="auto",
+        baud="115200",
+    )
+
+    assert rc == 0
+    # kill -> board list -> upload -> board list (re-detect) -> monitor.
+    assert calls[0] == ["pkill", "-f", "arduino-cli monitor"]
+    verbs = [call[1] if call[0] == fake_cli else call[0] for call in calls]
+    assert verbs == ["pkill", "board", "upload", "board", "monitor"]
+    assert calls[2] == [
+        fake_cli,
+        "upload",
+        "--fqbn",
+        fqbn,
+        "--port",
+        "/dev/ttyACM0",
+        expected_sketch_dir,
+    ]
+    assert calls[-1] == [
+        fake_cli,
+        "monitor",
+        "--port",
+        "/dev/ttyACM0",
+        "--config",
+        "baudrate=115200",
+    ]
+
+
+def test_dispatch_upload_monitor_failed_flash_skips_monitor(monkeypatch) -> None:
+    """A non-zero upload exit is propagated and no monitor is launched."""
+    fake_cli = _fake_cli(monkeypatch)
+
+    monkeypatch.setattr(act.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(act.time, "sleep", lambda _s: None)
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, *_args, **_kwargs):
+        calls.append(list(args))
+        if "board" in args and "list" in args:
+            return subprocess.CompletedProcess(
+                args,
+                returncode=0,
+                stdout='{"detected_ports":[{"port":{"address":"/dev/ttyACM0"}}]}',
+            )
+        if "upload" in args:
+            return subprocess.CompletedProcess(
+                args, returncode=1, stdout="", stderr="flash failed"
+            )
+        return subprocess.CompletedProcess(args, returncode=0)
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    rc = act.dispatch(
+        action="upload-monitor",
+        cli="arduino-cli",
+        fqbn="arduino:renesas_uno:unor4wifi",
+        sketch="WRO2026",
+        port="auto",
+        baud="115200",
+    )
+
+    assert rc == 1
+    assert all("monitor" not in call for call in calls if call[0] == fake_cli)
+
+
+def test_dispatch_upload_monitor_missing_baud_fails_before_flash(monkeypatch) -> None:
+    """A blank baud aborts BEFORE any subprocess runs -- nothing gets flashed."""
+    _fake_cli(monkeypatch)
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, *_args, **_kwargs):
+        calls.append(list(args))
+        return subprocess.CompletedProcess(args, returncode=0)
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    with pytest.raises(act.ResolveError, match="baud"):
+        act.dispatch(
+            action="upload-monitor",
+            cli="arduino-cli",
+            fqbn="arduino:renesas_uno:unor4wifi",
+            sketch="WRO2026",
+            port="auto",
+            baud="  ",
+        )
+
+    assert calls == []
+
+
+def test_kill_monitor_windows_uses_powershell_stop_process(monkeypatch) -> None:
+    """On Windows the kill goes through PowerShell Stop-Process (no pkill)."""
+    monkeypatch.setattr(act.platform, "system", lambda: "Windows")
+
+    calls: list[list[str]] = []
+
+    def fake_run(args, *_args, **_kwargs):
+        calls.append(list(args))
+        # A stopped ProcessId on stdout means "killed at least one".
+        return subprocess.CompletedProcess(args, returncode=0, stdout="4242\n")
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    killed = act._kill_monitor_processes()
+
+    assert killed is True
+    assert len(calls) == 1
+    assert calls[0][0] == "powershell"
+    script = calls[0][-1]
+    assert "Stop-Process" in script
+    assert "arduino-cli*" in script
+
+
+def test_kill_monitor_posix_no_match_returns_false(monkeypatch) -> None:
+    """pkill exit 1 (nothing matched) reads as 'no monitor was running'."""
+    monkeypatch.setattr(act.platform, "system", lambda: "Darwin")
+
+    def fake_run(args, *_args, **_kwargs):
+        return subprocess.CompletedProcess(args, returncode=1)
+
+    monkeypatch.setattr(act.subprocess, "run", fake_run)
+
+    assert act._kill_monitor_processes() is False
+
+
+def test_resolve_port_after_reset_retries_until_board_returns(monkeypatch) -> None:
+    """Empty detections right after a flash are polled until re-enumeration."""
+    attempts = iter([[], [], [{"port": {"address": "/dev/ttyACM0"}}]])
+    monkeypatch.setattr(
+        act, "_list_detected_ports", lambda _cli, _fqbn: next(attempts)
+    )
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(act.time, "sleep", lambda s: sleeps.append(s))
+
+    port = act._resolve_port_after_reset("/fake/bin/arduino-cli", "fqbn", "auto")
+
+    assert port == "/dev/ttyACM0"
+    assert len(sleeps) == 2  # one wait between each of the three attempts
+
+
+def test_resolve_port_after_reset_exhausted_raises(monkeypatch) -> None:
+    """A board that never re-enumerates surfaces the final ResolveError."""
+    monkeypatch.setattr(act, "_list_detected_ports", lambda _cli, _fqbn: [])
+    monkeypatch.setattr(act.time, "sleep", lambda _s: None)
+
+    with pytest.raises(act.ResolveError, match="No Arduino board detected"):
+        act._resolve_port_after_reset("/fake/bin/arduino-cli", "fqbn", "auto")
+
+
+def test_resolve_port_after_reset_explicit_port_returns_immediately(monkeypatch) -> None:
+    """An explicit configured port skips detection entirely (no board list)."""
+
+    def _boom(_cli, _fqbn):
+        raise AssertionError("board list must not run for an explicit port")
+
+    monkeypatch.setattr(act, "_list_detected_ports", _boom)
+    monkeypatch.setattr(act.time, "sleep", lambda _s: None)
+
+    port = act._resolve_port_after_reset("/fake/bin/arduino-cli", "fqbn", "COM5")
+
+    assert port == "COM5"

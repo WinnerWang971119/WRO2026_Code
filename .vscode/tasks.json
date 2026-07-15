@@ -123,6 +123,14 @@
             "problemMatcher": []
         },
         {
+            // upload-monitor closes any running serial monitor (it holds
+            // the port and would block the flash), uploads, then reopens
+            // the monitor in this terminal -- sequenced inside
+            // tools/arduino_cli_task.py so the ordering and the
+            // flash-failed short-circuit hold on Windows and macOS alike.
+            // instanceLimit 2 lets a re-run start while the previous
+            // run's monitor still owns its terminal; the new run kills
+            // that monitor, which lets the old instance exit.
             "label": "Arduino: Upload WRO2026",
             "type": "shell",
             "command": "uv",
@@ -130,7 +138,7 @@
                 "run",
                 "python",
                 "${workspaceFolder}/tools/arduino_cli_task.py",
-                "upload",
+                "upload-monitor",
                 "--cli",
                 "${config:wro2026.arduino.cliPath}",
                 "--fqbn",
@@ -138,10 +146,15 @@
                 "--sketch",
                 "${config:wro2026.arduino.sketchPath}",
                 "--port",
-                "${config:wro2026.arduino.port}"
+                "${config:wro2026.arduino.port}",
+                "--baud",
+                "${config:wro2026.arduino.baudRate}"
             ],
             "dependsOn": "Arduino: Verify WRO2026",
             "dependsOrder": "sequence",
+            "runOptions": {
+                "instanceLimit": 2
+            },
             "presentation": {
                 "reveal": "always",
                 "panel": "shared",
