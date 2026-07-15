@@ -2365,3 +2365,16 @@ add_path_force_includes(test_drive_decel_floor_identity)
 target_compile_definitions(test_drive_decel_floor_identity
     PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
+
+# ===== Drive-lane hardening test (T2 #150; T3/T4 append TC8/TC9 to this same target) =====
+set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
+add_executable(test_drive_hardening
+    ${DRIVE_HARDENING_DIR}/test_drive_hardening.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_hardening PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_hardening)
+add_test(NAME drive_hardening COMMAND test_drive_hardening)

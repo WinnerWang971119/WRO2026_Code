@@ -1816,6 +1816,21 @@ void DriveClass::_drainBlocking()
 
     while (!_isIdle() || _qCount > 0)
     {
+        // Fault early-out (issue #150): a fault latched BEFORE this verb's command was
+        // enqueued freezes `_dispatchNext` forever (its own fault gate refuses to pop the
+        // queue while `hasFault()`), so a sync verb issued while faulted would otherwise sit
+        // here spinning for the ENTIRE budget below before the timeout branch fires — and
+        // that branch unconditionally overwrites `_fault.kind` with `DRAIN_TIMEOUT`, losing
+        // whatever fault (e.g. `DISPATCH_FAILED`, `LINE_NOT_FOUND`, `IMU_READ_FAILED`) was
+        // actually latched. Bail out immediately instead: drop the just-enqueued command
+        // (it can never dispatch anyway) and return with the ORIGINAL `_fault.kind` intact,
+        // so higher-level recovery sees the true cause, not a fabricated timeout.
+        if (hasFault())
+        {
+            _clearQueue();
+            return;
+        }
+
         if ((int32_t) (millis() - deadline) >= 0)
         {
             Serial.println(F("[Drive] _drainBlocking: timeout — aborting queue"));
