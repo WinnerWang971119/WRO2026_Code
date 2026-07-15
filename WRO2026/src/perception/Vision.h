@@ -184,10 +184,13 @@ public:
      * reported as 240..245.
      *
      * @param cell Zero-based cell index in `[0, Config::VISION_CELL_COUNT)`.
-     * @return The raw hue byte for the requested cell. Returns `0` if @p cell is out of
-     *         range **or** if no successful `readMosaic()` has occurred yet (ADR-028
-     *         bounds-checking precedent — out-of-range never traps; it returns a defined
-     *         safe sentinel).
+     * @return The raw hue byte for the requested cell. Returns `Config::VISION_RAW_HUE_NONE`
+     *         (`0xFF`) if @p cell is out of range **or** if no successful `readMosaic()` has
+     *         occurred yet (ADR-028 bounds-checking precedent — out-of-range never traps; it
+     *         returns a defined safe sentinel). This sentinel never collides with a genuinely
+     *         latched hue — a raw hue of `255` (the device's own "no detection" code) always
+     *         classifies as `Color::UNKNOWN`, which rejects the whole candidate frame before
+     *         `_rawHue` is ever committed.
      * @note Pure — does not affect any state, the fault latch, or the UART link.
      */
     uint8_t getRawHue(uint8_t cell) const;
