@@ -62,6 +62,66 @@ namespace Config
                   "PWM_MOVING_MIN must be in (0, PWM_MIN_MAGNITUDE]");
 
     // -----------------------------------------------------------------------------------------
+    // Line-junction predicate checks (ConfigLine.h, issue #152).
+    //
+    // COUPLED SITE: WROLineArrayClass::getJunctionType() classifies against these three knobs
+    // over the fixed 8-channel line array (valid channel indices 0..7). An out-of-range knob
+    // would either reference a channel that does not exist or make a junction predicate
+    // permanently unsatisfiable / trivially always-true. Each knob got an `#ifndef *_DEFAULT`
+    // override hook in ConfigLine.h precisely so a compile-fail probe can trip these asserts.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(LINE_JUNCTION_LEFT_HI <= 7,
+                  "Config::LINE_JUNCTION_LEFT_HI must be <= 7 -- it is an inclusive upper channel "
+                  "index into the fixed 8-channel line array (valid indices run 0 through 7); a "
+                  "higher value would test a channel that does not exist.");
+
+    static_assert(LINE_JUNCTION_RIGHT_LO >= 1 && LINE_JUNCTION_RIGHT_LO <= 7,
+                  "Config::LINE_JUNCTION_RIGHT_LO must be between 1 and 7 inclusive -- it is a "
+                  "lower channel index into the fixed 8-channel line array, and the RIGHT "
+                  "junction predicate treats ch[0..RIGHT_LO-1] as the required OFF-LINE side, so "
+                  "0 would leave no off-line channel to check and a value above 7 would index "
+                  "past the array.");
+
+    static_assert(LINE_JUNCTION_T_MIN_ON >= 1 && LINE_JUNCTION_T_MIN_ON <= 8,
+                  "Config::LINE_JUNCTION_T_MIN_ON must be between 1 and 8 inclusive -- it is a "
+                  "channel-lit COUNT over the fixed 8-channel line array; 0 would declare a "
+                  "T_OR_CROSS junction with zero channels lit and a count above 8 could never be "
+                  "satisfied by an 8-channel array.");
+
+    // -----------------------------------------------------------------------------------------
+    // Turn-ladder invariant (ConfigDrive.h, issue #152).
+    //
+    // COUPLED SITE: Drive::_updateTurnProfile() drives at TURN_CRUISE_PWM until the heading
+    // error falls within TURN_SLOW_ZONE_DEG of the target, ramps down to TURN_SLOW_SPEED_PWM,
+    // and brakes once the error is within TURN_TOLERANCE_DEG. TURN_SLOW_SPEED_PWM is
+    // INTENTIONALLY set below the motor deadband floor (PWM_MIN_MAGNITUDE) -- `deadbandSnap`
+    // floors it back up to PWM_MIN_MAGNITUDE at emit time (see the corrected doc comment on
+    // TURN_SLOW_SPEED_PWM in ConfigDrive.h) -- so this invariant deliberately does NOT assert
+    // `TURN_SLOW_SPEED_PWM >= PWM_MIN_MAGNITUDE` (that would be false today: 20 < 35). Each
+    // constant referenced below got an `#ifndef *_DEFAULT` override hook in ConfigDrive.h so a
+    // compile-fail probe can trip each clause independently.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(TURN_SLOW_SPEED_PWM > 0 && TURN_SLOW_SPEED_PWM <= TURN_CRUISE_PWM &&
+                  TURN_CRUISE_PWM <= PWM_MAX,
+                  "Config::TURN_SLOW_SPEED_PWM/TURN_CRUISE_PWM/PWM_MAX turn-ladder ordering "
+                  "violated -- require 0 < TURN_SLOW_SPEED_PWM <= TURN_CRUISE_PWM <= PWM_MAX so "
+                  "the slow-zone ramp is a reduction from cruise, never an increase, and cruise "
+                  "never exceeds the saturation cap.");
+
+    static_assert(TURN_CRUISE_PWM >= PWM_MIN_MAGNITUDE,
+                  "Config::TURN_CRUISE_PWM must be >= PWM_MIN_MAGNITUDE -- the fast turn phase "
+                  "must clear the motor deadband floor or the chassis would never break static "
+                  "friction during the cruise phase of a turn.");
+
+    static_assert(TURN_TOLERANCE_DEG < TURN_SLOW_ZONE_DEG,
+                  "Config::TURN_TOLERANCE_DEG must be < TURN_SLOW_ZONE_DEG -- the slow zone must "
+                  "be strictly wider than the final tolerance gate or the TurnGyro state machine "
+                  "would brake at TURN_CRUISE_PWM without ever ramping down through the slow "
+                  "zone.");
+
+    // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)
     // -----------------------------------------------------------------------------------------
 
