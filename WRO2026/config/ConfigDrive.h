@@ -71,11 +71,21 @@ namespace Config
      *  @warning See block comment above — do NOT edit without auditing Drive.cpp / Drive.h. */
     constexpr uint8_t MOTOR_RIGHT_ID = 3;    // M3
 
-    /** @brief Reverse the left motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_LEFT_REVERSE = false;
+    /** @brief Reverse the left motor's positive-power direction at the driver level.
+     *  @note Per-chassis MOUNTING fact, NOT tied to the motor model — `ActiveMotor` does not
+     *        carry it. Contract (vendor direction check): `M2.setPower(+50)` must spin the
+     *        left wheel TOWARD THE FRONT and `DriveDC.Move(30, 0)` must curve forward-right.
+     *        Wrong flags leave SYNC/RAW straight moves looking fine but mirror the STM32
+     *        gyro correction: GYRO moves veer in a runaway arc and heading holds lock 180°
+     *        off target. Re-run the direction check after ANY motor re-wire or chassis swap.
+     *  @warning (true, false) = Lofaix/EV3 mounting (matches vendor `setupLEGOMotors()`).
+     *           The TT test rover uses (false, true). */
+    constexpr bool MOTOR_LEFT_REVERSE = true;
 
-    /** @brief Reverse the right motor's positive-power direction at the driver level. */
-    constexpr bool MOTOR_RIGHT_REVERSE = true;
+    /** @brief Reverse the right motor's positive-power direction at the driver level.
+     *  @note See `MOTOR_LEFT_REVERSE` — the two flags describe one mounting and change
+     *        together as a pair. */
+    constexpr bool MOTOR_RIGHT_REVERSE = false;
 
     // ---------------------------------------------------------------------------------------
     // Motor profile + PID gains (selected via ActiveMotor)
@@ -113,9 +123,9 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
-        static constexpr float    MOVEGYRO_KP = 0.52f;
+        static constexpr float    MOVEGYRO_KP = 12.5f;
         static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 0.15f;
+        static constexpr float    MOVEGYRO_KD = 2.0f;
         static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
         static constexpr float    TURNGYRO_KI = 0.02f;
         static constexpr float    TURNGYRO_KD = 1.54f;
