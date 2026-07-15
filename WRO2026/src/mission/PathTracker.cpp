@@ -494,6 +494,13 @@ void PathTrackerClass::clearFault()
     {
         _state = State::IDLE;
     }
+    // ADR-067: cascade the clear to Drive. A latched Drive fault (e.g. a return seek that ran to
+    // its max distance and latched `DriveClass::Fault::LINE_NOT_FOUND`, surfacing this tracker's
+    // `Fault::DRIVE_FAULT`) is NOT touched by clearing our own fault, and `Drive.stop()` does not
+    // clear it either. Without this the very next `goTo()` dispatch is frozen by Drive's fault
+    // gate and the shared Drive-fault guard immediately re-trips `Fault::DRIVE_FAULT`, leaving the
+    // robot unrecoverable without a reboot. A no-op when Drive carries no latched fault.
+    Drive.clearFault();
 }
 
 void PathTrackerClass::abort()
@@ -535,6 +542,10 @@ void PathTrackerClass::abort()
     _activeArrivalDirection = Direction::AUTO;
     _activeStopAtLine       = StopAtLine::AUTO;
     _fault                  = FaultInfo{};
+    // ADR-067: cascade the fault clear to Drive. `Drive.stop(true)` above halts the chassis but
+    // does NOT clear a latched Drive fault, so a hard-cancel that leaves Drive faulted would freeze
+    // the next `goTo()` dispatch behind Drive's fault gate. A no-op when Drive is already clean.
+    Drive.clearFault();
 }
 
 const char* PathTrackerClass::faultMnemonic(Fault kind)

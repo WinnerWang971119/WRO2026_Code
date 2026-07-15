@@ -184,11 +184,22 @@ public:
     bool hasFault() const { return _mockFault.kind != Fault::NONE; }
     /** @brief @return the latched fault snapshot. */
     FaultInfo getFault() const { return _mockFault; }
-    /** @brief Clear the latched fault. @note Records via `clearFaultCallCount`. */
+    /**
+     * @brief Clear the latched fault. @note Records via `clearFaultCallCount`.
+     * @note ADR-067: the real `PathTrackerClass::clearFault()` cascades to `Drive.clearFault()`.
+     *       This mock mirrors that cross-module contract (an observable-contract mirror, NOT FSM
+     *       evolution — same spirit as `faultMnemonic` above) so the Mission-layer
+     *       `declarePosition` test still proves BOTH faults clear now that `declarePosition` relies
+     *       on the cascade rather than an explicit `Drive.clearFault()`. `Drive` resolves to the
+     *       `hal_mocks/Drive.h` global, force-included target-wide AHEAD of this header by the
+     *       `test_mission_dispatch` cmake wiring (`add_hal_force_includes` before
+     *       `add_mission_mock_force_includes`).
+     */
     void clearFault()
     {
         ++clearFaultCallCount;
         _mockFault = FaultInfo{};
+        Drive.clearFault();
     }
 
     // --- hard cancel ---

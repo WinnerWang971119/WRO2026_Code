@@ -212,6 +212,11 @@ void MissionClass::abort()
     PathTracker.abort();
     LineFollower.setEnabled(false);
     Drive.stop(true);
+    // ADR-067: clear any latched Drive fault as part of the abort cascade. `PathTracker.abort()`
+    // above already cascades this, but the mission-level halt clears it explicitly too so a full
+    // stop always re-arms Drive regardless of PathTracker's internal ordering. `Drive.stop()` does
+    // not touch `_fault`; this does. A no-op when Drive carries no latched fault.
+    Drive.clearFault();
 
     _count       = 0;
     _idx         = 0;
@@ -255,21 +260,17 @@ bool MissionClass::declarePosition(const char* name)
     ctps::recordDeclarePosition(name);
 #endif
 
-    // Clear the latched PathTracker fault if any — this is the "clears the fault" half
-    // of the recovery, and it lives HERE (Mission layer) because Localization can't
-    // reach up into PathTracker. clearFault() resets the fault and returns the FSM to IDLE.
-    if (PathTracker.hasFault())
-    {
-        PathTracker.clearFault();
-    }
-
-    // Also clear Drive's OWN latched fault (#2). A return seek that ran to its max distance
-    // latched `Fault::LINE_NOT_FOUND` on Drive and surfaced PathTracker `OFF_NODE`;
-    // `PathTracker.clearFault()` does NOT touch Drive and `Drive.stop()` does not clear it
-    // either, so without this the very next `goTo()` trips the generic Drive-fault guard
-    // (-> `Fault::DRIVE_FAULT`) and the robot is unrecoverable without a reboot. Harmless (a
-    // no-op) when Drive has no fault latched.
-    Drive.clearFault();
+    // Clear any latched fault as the "clears the fault" half of the recovery, and it lives HERE
+    // (Mission layer) because Localization can't reach up into PathTracker. `clearFault()` resets
+    // PathTracker's own fault, returns the FSM to IDLE, and — per ADR-067 — cascades to
+    // `Drive.clearFault()`. It is called UNCONDITIONALLY (not gated on `PathTracker.hasFault()`)
+    // so a Drive-side latched fault is always cleared here, even on the idle-but-Drive-faulted
+    // entry (e.g. a task-issued Drive verb faulted while PathTracker sat idle). A return seek that
+    // ran to its max distance latches `LINE_NOT_FOUND` on Drive and surfaces PathTracker
+    // `OFF_NODE`; recovering that is the whole point of declarePosition, and without the cascade
+    // the very next `goTo()` would be frozen by Drive's fault gate (-> `Fault::DRIVE_FAULT`),
+    // leaving the robot unrecoverable without a reboot. A no-op on the clean path.
+    PathTracker.clearFault();
 
     // Surface the recovery so the operator sees it happened (OLED + Serial). Buffer width
     // tracks EventTrace's ring slot so the truncation rule stays single-sourced. `name` is

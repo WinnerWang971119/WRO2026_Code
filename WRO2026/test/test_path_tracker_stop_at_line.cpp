@@ -125,6 +125,79 @@ float driveToSeekInFlight(const char* startName, const char* goalName)
     ASSERT_TRUE(false);    // budget exhausted: the FSM never dispatched the seek
     return edge.distance_cm;
 }
+
+// ===========================================================================
+// TC4 fault-clear cascade re-dispatch probe (#145 / ADR-067).
+//
+// Re-issue `goTo(goalName)` from `startName` on the CURRENT world — WITHOUT a
+// `resetWorld()`, so nothing clears a latched fault behind the cascade under
+// test — and report whether Drive accepts the command (a NEW `MoveSync` beyond
+// the pre-`goTo` baseline) WITHOUT the FSM re-tripping a fault.
+//
+// `seatAt(startName)` re-anchors Localization + zeroes the operator offset (a
+// clean PLAN path, no return-to-node prologue); it does NOT touch either fault
+// surface, so a Drive fault the cascade FAILED to clear survives into the
+// dispatch and the shared Drive-fault guard re-enters `Fault::DRIVE_FAULT` on
+// the first non-IDLE tick (Drive's fault gate freezes `_dispatchNext`, so no
+// `MoveSync` is ever emitted). With the cascade WORKING, Drive is clean, the
+// seek dispatches its continuous SYNC drive, and no fault is raised.
+//
+// @return `true`  — a fresh `MoveSync` dispatched and PathTracker stayed unfaulted
+//                   (the next dispatch did NOT re-trip `DRIVE_FAULT`).
+//         `false` — the FSM re-faulted, or no dispatch happened within budget.
+// ===========================================================================
+bool reGoToDispatchesSeekWithoutFault(const char* startName, const char* goalName)
+{
+    // Re-anchor + zero offset (does NOT touch Drive/PathTracker fault state).
+    seatAt(startName);
+
+    const uint8_t           start     = nodeByName(startName);
+    const uint8_t           firstHop  = routedFirstHop(start, nodeByName(goalName));
+    const Routes::EdgeInfo& edge      = FieldMap::getEdge(start, firstHop);
+    const int16_t           hwHeading = hwYaw((int16_t) lroundf(edge.heading_deg));
+
+    const auto baseline = MiniR4.DriveDC.moveSyncCallCount;
+
+    PathTracker.goTo(nodeByName(goalName)).async();
+
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
+    {
+        mmL.mockYawDeg = (double) hwHeading;
+        cooperativeTick();
+        if (PathTracker.hasFault())
+        {
+            return false;    // re-tripped a fault: the cascade left Drive frozen.
+        }
+        if (MiniR4.DriveDC.moveSyncCallCount > baseline)
+        {
+            return true;     // a fresh seek dispatched — Drive accepted the command.
+        }
+    }
+    return false;            // budget exhausted: the FSM never re-dispatched the seek.
+}
+
+// ===========================================================================
+// Latch a real Drive `LINE_NOT_FOUND` fault (and its surfaced PathTracker
+// `DRIVE_FAULT`) by running the `Start -> Inter1` seek to its max distance with
+// no line — the SAME machinery TC-SL2 uses — leaving the FSM in FAULT with both
+// fault surfaces set. Shared by the two TC4 cascade cases.
+// ===========================================================================
+void latchDriveFaultViaNoLineSeek()
+{
+    const float expectedCm = driveToSeekInFlight("Start", "Inter1");
+    expectStopAtLine(expectedCm, /*found*/ false);    // Drive latches LINE_NOT_FOUND.
+
+    // The shared Drive-fault guard maps it to PathTracker DRIVE_FAULT on the next tick(s).
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks && !PathTracker.hasFault(); ++i)
+    {
+        cooperativeTick();
+    }
+
+    ASSERT_TRUE(Drive.hasFault());
+    ASSERT_TRUE(Drive.getFault().kind == DriveClass::Fault::LINE_NOT_FOUND);
+    ASSERT_TRUE(PathTracker.hasFault());
+    ASSERT_TRUE(PathTracker.getFault().kind == PathTrackerClass::Fault::DRIVE_FAULT);
+}
 }    // namespace
 
 // ===========================================================================
@@ -332,6 +405,72 @@ void test_TC_SL3_seek_overshoot_trim_on_sensor_pivot()
     }
     ASSERT_EQ(Localization.getCurrentNode(), projb);
     ASSERT_FALSE(PathTracker.hasFault());
+}
+
+// ===========================================================================
+// TC4 (#145 / ADR-067) — Drive fault-clear cascade, real FSM.
+//
+// Latch a real Drive `LINE_NOT_FOUND` fault (surfacing PathTracker `DRIVE_FAULT`),
+// then recover through `PathTracker.clearFault()` — the same call the BTN_DOWN
+// mission reset and `declarePosition` route through. ADR-067 makes `clearFault()`
+// cascade to `Drive.clearFault()`, so BOTH fault surfaces clear and the next
+// `goTo()` dispatches instead of re-tripping `DRIVE_FAULT`. Before ADR-067 the
+// Drive fault survived, Drive's queue stayed frozen, and the re-`goTo()` re-tripped
+// `DRIVE_FAULT` — a reboot-only dead end.
+// ===========================================================================
+
+void test_TC4_clearFault_cascade_clears_drive_fault_and_redispatches()
+{
+    TEST_SCOPE("TC4: PathTracker.clearFault() cascades to Drive; next goTo does not re-trip DRIVE_FAULT");
+
+    latchDriveFaultViaNoLineSeek();
+
+    // The cascade under test (BTN_DOWN mission reset recovers through this exact call).
+    PathTracker.clearFault();
+
+    // Both fault surfaces cleared — the Drive half is the ADR-067 cascade (clearFault() alone
+    // used to leave Drive latched; Drive.stop() does not clear it either).
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_FALSE(Drive.hasFault());
+
+    // The next dispatch issues a fresh seek WITHOUT re-entering DRIVE_FAULT — proof the cascade
+    // un-froze Drive's command queue.
+    ASSERT_TRUE(reGoToDispatchesSeekWithoutFault("Start", "Inter1"));
+    ASSERT_FALSE(Drive.hasFault());
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Retire the in-flight seek so Drive's `_stopState` returns to IDLE — `resetWorld()`'s
+    // `Drive.begin()` does NOT clear sub-FSM state, so a left-running seek would poison the next
+    // case (abort() runs `Drive.stop(true)` -> `_endStopAtLine`, restoring IDLE).
+    PathTracker.abort();
+}
+
+// ===========================================================================
+// TC4b (#145 / ADR-067) — the same cascade via the hard-cancel `abort()` path.
+//
+// `PathTracker.abort()` (which `Mission::abort()` and the safety stop route
+// through) also cascades to `Drive.clearFault()`, so a hard-cancel after a
+// latched Drive fault leaves BOTH surfaces clean and the next `goTo()` dispatches.
+// ===========================================================================
+
+void test_TC4b_abort_cascade_clears_drive_fault_and_redispatches()
+{
+    TEST_SCOPE("TC4b: PathTracker.abort() cascades to Drive; next goTo does not re-trip DRIVE_FAULT");
+
+    latchDriveFaultViaNoLineSeek();
+
+    // The abort cascade under test.
+    PathTracker.abort();
+
+    ASSERT_FALSE(PathTracker.hasFault());
+    ASSERT_FALSE(Drive.hasFault());    // ADR-067: abort() cascaded to Drive.clearFault().
+
+    ASSERT_TRUE(reGoToDispatchesSeekWithoutFault("Start", "Inter1"));
+    ASSERT_FALSE(Drive.hasFault());
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // Retire the in-flight seek so `_stopState` returns to IDLE for case isolation (see TC4).
+    PathTracker.abort();
 }
 
 // ===========================================================================
@@ -892,8 +1031,9 @@ static void test_TC4_seek_overbudget_trim_clamps_to_floor()
 
 int main()
 {
-    std::printf("INFO: PathTracker STOP_AT_LINE — real FSM seek (TC-SL1/SL2/SL3) + "
-                "frozen resolver truth table (TC-SL4: TC1-TC7/TC13/TC20/TC4)\n");
+    std::printf("INFO: PathTracker STOP_AT_LINE — real FSM seek (TC-SL1/SL2/SL3), Drive "
+                "fault-clear cascade (TC4/TC4b, #145/ADR-067) + frozen resolver truth table "
+                "(TC-SL4: TC1-TC7/TC13/TC20/TC4)\n");
 
     // --- Real-FSM hops (TC-SL1 / TC-SL2 / TC-SL3) -----------------------------
     test_routing_start_to_inter1_is_the_stop_at_line_edge();
@@ -901,6 +1041,10 @@ int main()
     test_TC_SL1_success_reanchors_via_on_intersection();
     test_TC_SL2_no_line_surfaces_drive_fault();
     test_TC_SL3_seek_overshoot_trim_on_sensor_pivot();
+
+    // --- TC4 (#145 / ADR-067): Drive fault-clear cascade (clearFault + abort) ---
+    test_TC4_clearFault_cascade_clears_drive_fault_and_redispatches();
+    test_TC4b_abort_cascade_clears_drive_fault_and_redispatches();
 
     // --- TC-SL4: frozen resolver truth table (KEPT — direct calls, not mirrors) ---
     // resolveStopAtLine: TC1-TC7, the kept representative in-FSM subset (full
