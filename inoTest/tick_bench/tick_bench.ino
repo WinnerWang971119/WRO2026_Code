@@ -33,8 +33,12 @@
  * path (no header shadowing). The `.ino` files in `WRO2026/` are ignored by the library compiler, so
  * there is no `setup()`/`loop()` collision with `WRO2026.ino`.
  *
- * @note BUILD: from the repo root, run `uv run inoTest/tick_bench/build.py`. The wrapper also works
- *       from any directory when given by absolute path. Direct arduino-cli equivalent:
+ * @note BUILD + UPLOAD + MONITOR: from the repo root, run
+ *       `uv run inoTest/tick_bench/build.py`. The wrapper auto-detects one matching board, uploads,
+ *       waits for USB to reconnect, then opens a 115200-baud serial monitor. Use `--build-only` to
+ *       compile without a connected robot, or `--port <port>` to select a board explicitly. The
+ *       wrapper also works from any directory when given by absolute path. Build-only arduino-cli
+ *       equivalent:
  *       arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi inoTest/tick_bench \
  *         --library WRO2026 --library WRO2026/src/drive --library WRO2026/src/perception \
  *         --library WRO2026/src/nav --library WRO2026/src/mission --library WRO2026/src/manip \
