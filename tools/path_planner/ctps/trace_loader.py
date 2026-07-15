@@ -40,6 +40,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
+from tools.path_planner.ctps import mosaic
+
 # ---------------------------------------------------------------------------
 # Schema contract
 # ---------------------------------------------------------------------------
@@ -112,6 +114,16 @@ _KNOWN_DRIVE_PRESETS: frozenset[str] = frozenset(
         "fast",
     }
 )
+
+#: Whitelist for a top-level ``mosaic.cells`` entry: the five real colour
+#: names (:data:`mosaic.COLOR_NAMES`) plus the AIR/empty-cell sentinel
+#: (:data:`mosaic.AIR_NAME`). A cell string NOT in this set means the whole
+#: ``mosaic`` block is malformed and is skipped (see :func:`_parse_mosaic`) —
+#: never a partial 11-cell mosaic, to preserve the fixed 12-cell index
+#: contract.
+_VALID_MOSAIC_CELL_NAMES: frozenset[str] = frozenset(mosaic.COLOR_NAMES) | {
+    mosaic.AIR_NAME
+}
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +245,12 @@ class MosaicTrace:
     warning).
 
     :param cells: Exactly 12 color-name strings, cell-index order
-        (``i = row*cols + col``). Not validated against the color palette
-        here — the loader is tolerant; a bad name is a rendering concern, not
-        a load-time error.
+        (``i = row*cols + col``). Each entry is validated against
+        :data:`mosaic.COLOR_NAMES` plus the AIR sentinel
+        (:data:`mosaic.AIR_NAME`) — a single unknown name is enough to
+        reject the whole block (see :func:`_parse_mosaic`), so a
+        :class:`MosaicTrace` that reaches this dataclass always carries 12
+        whitelisted names.
     :param seed: The seed used to roll the mosaic, if one was echoed
         (``--mosaic-seed`` was passed to the dump). ``None`` when absent —
         this is a normal, unwarned case (the dump omits the key when no seed
@@ -602,7 +617,11 @@ def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
 
     Tolerant like the rest of this loader: an absent block is normal (no
     warning, returns ``None``); a present-but-malformed block skips with a
-    :class:`UserWarning` and also returns ``None``. Never raises.
+    :class:`UserWarning` and also returns ``None``. This includes a
+    ``cells`` entry outside the :data:`_VALID_MOSAIC_CELL_NAMES` whitelist —
+    a single unknown colour name rejects the WHOLE block (never a partial
+    11-cell mosaic) to preserve the fixed 12-cell index contract. Never
+    raises.
 
     :param raw: The value at the top-level ``"mosaic"`` key (``None`` if the
         key was absent from the trace JSON).
@@ -630,6 +649,18 @@ def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
         warnings.warn(
             f"ctps.trace_loader: malformed 'mosaic.cells' {raw_cells!r} "
             f"(expected a list of 12 color-name strings) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    if not all(c in _VALID_MOSAIC_CELL_NAMES for c in raw_cells):
+        # Reject the WHOLE block on any unknown cell name — never a partial
+        # 11-cell mosaic, so the fixed 12-cell index contract always holds.
+        warnings.warn(
+            f"ctps.trace_loader: 'mosaic.cells' {raw_cells!r} contains a "
+            f"colour name outside the whitelist (expected one of "
+            f"{sorted(_VALID_MOSAIC_CELL_NAMES)!r}) — 'mosaic' block skipped.",
             UserWarning,
             stacklevel=4,
         )
