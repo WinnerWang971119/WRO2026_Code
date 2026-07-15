@@ -123,6 +123,9 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
+        /**
+         * Move GYRO PID is configured with Battery at ~11.5V
+         */
         static constexpr float    MOVEGYRO_KP = 9.0f;
         static constexpr float    MOVEGYRO_KI = 0.0f;
         static constexpr float    MOVEGYRO_KD = 1.0f;
