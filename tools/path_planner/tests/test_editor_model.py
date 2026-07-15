@@ -755,3 +755,79 @@ def test_snapshot_restore_preserves_blind_projection_auto_seek() -> None:
     model.restore(snap)
 
     assert model.blind_projection_auto_seek is False
+
+
+# ---------------------------------------------------------------------------
+# TC11b (#154-19): the editor JSON round-trip must preserve keys that are
+# explicitly authored in the source file even when their value equals the
+# in-memory default that to_json_dict otherwise omits ("absent stays absent"
+# is correct for a field that never touched the key, but wrong for a field
+# that wrote it down on purpose). Both pivot_turns ([] is its default-empty
+# value) and blind_projection_auto_seek (True is its default) are affected;
+# this exercises both together through the real loader, mirroring
+# test_pivot_turns_open_save_open_preservation's full open -> save -> open
+# path.
+# ---------------------------------------------------------------------------
+
+
+def test_json_round_trip_preserves_authored_default_valued_keys(tmp_path) -> None:
+    """An authored `pivot_turns: []` + `blind_projection_auto_seek: true`
+    survive an editor open -> save round-trip byte-identically.
+
+    Before this fix, both keys equal their in-memory defaults (an empty list
+    and True), so to_json_dict's "omit if default" rule silently dropped them
+    on Save even though the source file authored them explicitly -- a diff an
+    operator never asked for.
+    """
+    import json
+    from pathlib import Path
+
+    from tools.path_planner.editor.loader import dump_field_json, load_field_json
+
+    source = make_model().to_json_dict()
+    source["pivot_turns"] = []
+    source["blind_projection_auto_seek"] = True
+    src_path = Path(tmp_path) / "field_with_authored_defaults.json"
+    src_path.write_text(json.dumps(source, indent=2) + "\n", encoding="utf-8", newline="\n")
+
+    # Open -> build model (the editor's Open flow).
+    opened = FieldModel.from_json_dict(load_field_json(src_path))
+    assert opened.pivot_turns == []
+    assert opened.blind_projection_auto_seek is True
+
+    # Save (the editor's Save flow) without touching either field.
+    saved_dict = opened.to_json_dict()
+    assert saved_dict["pivot_turns"] == []
+    assert saved_dict["blind_projection_auto_seek"] is True
+
+    saved_path = Path(tmp_path) / "field_with_authored_defaults_saved.json"
+    dump_field_json(saved_dict, saved_path)
+
+    # Reopen and confirm both keys are still present with the authored values
+    # -- not silently reverted to "absent" by a prior save.
+    reopened_data = load_field_json(saved_path)
+    assert reopened_data["pivot_turns"] == []
+    assert reopened_data["blind_projection_auto_seek"] is True
+
+    reopened = FieldModel.from_json_dict(reopened_data)
+    assert reopened.pivot_turns == []
+    assert reopened.blind_projection_auto_seek is True
+    assert reopened == opened
+
+
+def test_json_round_trip_still_omits_unauthored_default_valued_keys() -> None:
+    """A field that never authored either key still round-trips key-absent.
+
+    Companion to the "authored" test above: proves the fix is presence-gated,
+    not an unconditional always-emit that would spam every fresh field with
+    ``pivot_turns: []`` / ``blind_projection_auto_seek: true``.
+    """
+    model = make_model()
+    json_dict = model.to_json_dict()
+    assert "pivot_turns" not in json_dict
+    assert "blind_projection_auto_seek" not in json_dict
+
+    restored = FieldModel.from_json_dict(json_dict)
+    re_saved = restored.to_json_dict()
+    assert "pivot_turns" not in re_saved
+    assert "blind_projection_auto_seek" not in re_saved
