@@ -29,3 +29,6 @@ build/
 # per-machine authoring state, not source. Chrome suffixes repeat saves as
 # `layout (1).json`, hence the glob. The folder's README.md stays tracked.
 tools/path_planner/layouts/layout*.json
+
+# macOS Finder artifacts
+.DS_Store
