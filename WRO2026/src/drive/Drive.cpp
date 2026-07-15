@@ -348,9 +348,10 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). Best-effort
-    // fallback 0.0 preserves the prior dispatch-time behavior of acting on the vendor's 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). On a failed
+    // read, fall back to `_heldYaw` (the last known-good heading) rather than a fabricated 0.0
+    // (issue #153) — acting on a bogus 0.0 could aim the turn at a wildly wrong target.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(_heldYaw);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
     // Capture the initial signed delta normalized into (-180, +180] so the BRAKE-edge
@@ -409,8 +410,10 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045); best-effort 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). On a failed
+    // read, fall back to `_heldYaw` (the last known-good heading), not a fabricated 0.0
+    // (issue #153) — see `_execTurnDeg` for the full rationale.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(_heldYaw);
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
     const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
@@ -508,14 +511,16 @@ void DriveClass::resetEnc()
 
 double DriveClass::getYaw() const
 {
-    // Corrected app-frame yaw via the single owner (ADR-045); best-effort 0.0 on read failure.
-    return YawSource.readYawDegOr(0.0);
+    // Corrected app-frame yaw via the single owner (ADR-045). On read failure, fall back to
+    // `_heldYaw` (the last known-good heading), not a fabricated 0.0 (issue #153).
+    return YawSource.readYawDegOr(_heldYaw);
 }
 
 void DriveClass::holdYaw()
 {
-    // Latch the corrected app-frame yaw (ADR-045); best-effort 0.0 on read failure.
-    _heldYaw = (int16_t) YawSource.readYawDegOr(0.0);
+    // Latch the corrected app-frame yaw (ADR-045). On read failure, keep `_heldYaw` at its
+    // current value instead of collapsing it to a fabricated 0.0 (issue #153).
+    _heldYaw = (int16_t) YawSource.readYawDegOr(_heldYaw);
 }
 
 // -----------------------------------------------------------------------------------------

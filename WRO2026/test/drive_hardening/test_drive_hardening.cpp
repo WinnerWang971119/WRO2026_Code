@@ -50,6 +50,18 @@
  * repeatedly. `YawSource::readYawDeg`'s internal retry-once backoff calls `delay(2)` on every
  * failed read, which is what actually advances the mock clock tick-by-tick here — no manual
  * `mockAdvanceMillis()` is needed to reach `Config::TURN_IMU_STALL_TIMEOUT_MS`.
+ *
+ * TC8 (#153, fabricated 0.0 yaw fallback) — `_execTurnDeg`, `_execTurnToYaw`, `getYaw()`, and
+ * `holdYaw()` each read the current yaw via `YawSource.readYawDegOr(fallback)`; before the fix
+ * every one of them passed a literal `0.0` fallback, so a double-failed IMU read silently
+ * substituted a fabricated "due north" heading instead of the last known-good one. TC8 seeds a
+ * known-good `_heldYaw` via a successful read, then forces every further read to fail
+ * (`mmL.mockResult = MMLower::RESULT::ERROR`) and proves each of the four call sites now falls
+ * back to `_heldYaw`: a relative `turnDeg` computes the correct absolute target (cur + delta,
+ * not 0 + delta), an absolute `turnToYaw` short-circuits correctly instead of arming a spurious
+ * CRUISE turn, and `holdYaw()` leaves `_heldYaw` at its prior value instead of collapsing it to
+ * 0. Dispatch uses `.async()` + exactly one `Drive.update()` tick so the assertions land before
+ * any further ticks could accumulate toward the persistent-IMU-stall watchdog TC7 exploits.
  */
 
 #include "TestAssert.h"
@@ -167,13 +179,125 @@ void tc7_drain_fault_early_out()
 }
 
 // ===========================================================================================
-// Entry. T3 (#153) / T4 (#154-16) append their `tc8_.../tc9_...` calls here.
+// TC8 (#153) — a turn/hold dispatched while the IMU read fails must fall back to `_heldYaw`
+// (the last known-good heading), never to a fabricated `0.0`.
+//
+// Background: `_execTurnDeg`, `_execTurnToYaw`, `getYaw()`, and `holdYaw()` each read the
+// current yaw via `YawSource.readYawDegOr(fallback)`. Before the fix, every call site passed
+// a literal `0.0` fallback — a double-failed IMU read (both the primary attempt and the
+// internal retry-after-`delay()` come back non-OK) silently substituted a fabricated "facing
+// due north" heading. For `_execTurnDeg`, that fabricated `cur` is added to the caller's
+// relative delta, aiming the turn at the WRONG absolute target. For `_execTurnToYaw`, the
+// fabricated `cur` corrupts the tolerance/short-circuit decision (the delta-vs-target
+// computation), possibly arming a full CRUISE turn where the true heading was already at
+// target (or vice versa). `holdYaw()` would collapse `_heldYaw` itself to 0, corrupting every
+// later yaw-locked move. The fix threads `_heldYaw` through as the fallback at all four sites
+// instead.
+//
+// Since `_heldYaw` is a private member, the only public window onto it is `Drive.getYaw()`
+// (which itself now falls back to `_heldYaw` on a failed read) — so each scenario below seeds
+// a known-good `_heldYaw` via a successful read, then forces every subsequent IMU read to fail
+// and observes the fallback value through `getYaw()` / `isTurnDone()`.
+//
+// Each sub-scenario dispatches via `.async()` + exactly ONE `Drive.update()` tick. Per
+// `DriveClass::update()` (Drive.cpp ~:90-151), stage 2 (`_updateTurnProfile()`, an idempotent
+// no-op while `_turnProfileState == IDLE`) runs BEFORE stage 3 (`_dispatchNext()`), so a single
+// tick dispatches `_execTurnDeg`/`_execTurnToYaw` exactly once and returns without entering the
+// CRUISE/BRAKE state machine on this same tick — no risk of accumulating enough failed reads to
+// trip the persistent-IMU-stall watchdog (`Config::TURN_IMU_STALL_TIMEOUT_MS`) that TC7 exploits
+// deliberately; TC8 must NOT trip it, or the fault would mask the fallback assertions below.
+// ===========================================================================================
+void tc8_fabricated_yaw_fallback()
+{
+    TEST_SCOPE("TC8 (#153): failed IMU read during turn/hold dispatch falls back to _heldYaw, "
+               "never a fabricated 0.0");
+
+    // --- Sub-scenario A: _execTurnDeg (Drive.cpp ~:354) + getYaw() (~:516) -----------------
+    // Seed _heldYaw = 50 via a successful read, then force every further read to fail and
+    // dispatch a RELATIVE turn of +45 degrees. `_execTurnDeg`'s target = cur + deg, so a
+    // correctly-recovered cur (50, from _heldYaw) yields target 95; the old fabricated-0.0 bug
+    // would instead compute target = 0 + 45 = 45. Either branch (short-circuit or CRUISE-arm)
+    // unconditionally sets `_heldYaw = target`, so the post-dispatch `getYaw()` fallback read
+    // (still failing) surfaces exactly that target: 95.0 with the fix, 45.0 with the bug —
+    // a clean, non-tautological, numerically-distinct assertion.
+    {
+        resetWorld();
+
+        // `mmL.mockYawDeg` is the RAW pre-sign-flip value: `YawSource::readYawDeg` applies
+        // `appYaw = Config::IMU_YAW_SIGN * raw` (IMU_YAW_SIGN == -1.0f on this chassis), so a
+        // raw mock of -50 reads back as the app-frame yaw +50.
+        mmL.mockResult  = MMLower::RESULT::OK;
+        mmL.mockYawDeg  = -50.0;
+        Drive.holdYaw();    // successful read seeds _heldYaw = 50.
+
+        mmL.mockResult = MMLower::RESULT::ERROR;    // every subsequent IMU read now fails.
+
+        Drive.turnDeg(45).async();    // enqueue only — no drain, no execution yet.
+        Drive.update();               // exactly one tick: dispatches _execTurnDeg.
+
+        ASSERT_FALSE(Drive.hasFault());    // one failed read at dispatch must not trip the
+                                            // persistent-stall watchdog (re-seeded at arm time).
+        ASSERT_EQ(Drive.getYaw(), 95.0);    // 50 (held) + 45 (delta) — never 0 + 45 = 45.
+    }
+
+    // --- Sub-scenario B: _execTurnToYaw (Drive.cpp ~:416) -----------------------------------
+    // Seed _heldYaw = 100, then dispatch an ABSOLUTE turnToYaw(100) — i.e. a true no-op turn.
+    // `_execTurnToYaw`'s target is the caller's absolute yaw (100) regardless of cur, so both
+    // the fix and the bug set `_heldYaw = 100` — but the SHORT-CIRCUIT decision (whether the
+    // turn is already within `Config::TURN_TOLERANCE_DEG` of target) depends entirely on cur:
+    // a correctly-recovered cur (100) makes |target-cur| = 0, short-circuiting immediately
+    // (`isTurnDone()` true). The old fabricated-0.0 bug would compute |100-0| = 100, arming a
+    // full (and entirely spurious) CRUISE turn instead (`isTurnDone()` false).
+    {
+        resetWorld();
+
+        // Raw mock -100 -> app-frame yaw +100 (IMU_YAW_SIGN == -1.0f; see sub-scenario A).
+        mmL.mockResult = MMLower::RESULT::OK;
+        mmL.mockYawDeg = -100.0;
+        Drive.holdYaw();    // successful read seeds _heldYaw = 100.
+
+        mmL.mockResult = MMLower::RESULT::ERROR;
+
+        Drive.turnToYaw(100).async();
+        Drive.update();    // exactly one tick: dispatches _execTurnToYaw.
+
+        ASSERT_FALSE(Drive.hasFault());
+        ASSERT_TRUE(Drive.isTurnDone());    // short-circuited — cur correctly recovered as 100,
+                                             // not fabricated as 0 (which would arm a spurious
+                                             // 100-degree CRUISE turn and leave this false).
+        ASSERT_TRUE(Drive.isMoveDone());    // the short-circuit branch collapses both bits.
+    }
+
+    // --- Sub-scenario C: holdYaw() (Drive.cpp ~:523) ----------------------------------------
+    // Seed _heldYaw = 77 via a successful read, then call holdYaw() again while every read
+    // fails. The fix keeps _heldYaw at 77 (fallback = its own prior value); the old
+    // fabricated-0.0 bug would collapse it to 0. Read the result back through getYaw()'s own
+    // (already-proven, by sub-scenario A) fallback.
+    {
+        resetWorld();
+
+        // Raw mock -77 -> app-frame yaw +77 (IMU_YAW_SIGN == -1.0f; see sub-scenario A).
+        mmL.mockResult = MMLower::RESULT::OK;
+        mmL.mockYawDeg = -77.0;
+        Drive.holdYaw();    // successful read seeds _heldYaw = 77.
+
+        mmL.mockResult = MMLower::RESULT::ERROR;
+        Drive.holdYaw();    // failed read — must NOT collapse _heldYaw to 0.
+
+        ASSERT_FALSE(Drive.hasFault());
+        ASSERT_EQ(Drive.getYaw(), 77.0);    // _heldYaw preserved at 77, never reset to 0.
+    }
+}
+
+// ===========================================================================================
+// Entry. T4 (#154-16) appends its `tc9_...` call here.
 // ===========================================================================================
 int main()
 {
     std::printf("INFO: Drive-lane hardening (#141-159 batch) — real Drive.cpp, real YawSource.cpp\n");
 
     tc7_drain_fault_early_out();
+    tc8_fabricated_yaw_fallback();
 
     TEST_REPORT();
 }
