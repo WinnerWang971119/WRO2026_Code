@@ -43,6 +43,7 @@ from tools.path_planner.graph_builder import (
     EDGE_LINE,
     build_graph,
 )
+from tools.path_planner.header_writer import _resolve_reset_rows
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
@@ -3891,6 +3892,97 @@ def test_tc18b_non_reset_node_emits_no_interlude():
     )
     assert chassis.x_cm == pytest.approx(30.0, abs=1e-9)
     assert sim.localization.current_node() == "B"
+
+
+# ===========================================================================
+# TC19 — wall-reset facing quantized identically to the firmware int16 (#154-17)
+#
+# Covers: an authored fractional RESET_NODES facing must resolve to the SAME
+# believed heading in the sim as the int16 `ResetNode.facing` the real
+# firmware squares to. header_writer._resolve_reset_rows (header_writer.py:884)
+# rounds to the nearest integer degree, then reduces mod 360 so a value
+# rounding UP to 360 (e.g. 359.7) wraps to 0. PathTrackerSim._dispatch_wall_reset
+# mirrors that exact rule when it resolves `facing` off the RESET_NODES spec.
+# Cross-checks against the REAL emitter function (not a re-derived formula) so
+# a future rounding-rule change on either side that drifts out of lockstep
+# breaks this test.
+#
+# Code under test: tools/path_planner/sim/runtime.py --
+# PathTrackerSim._dispatch_wall_reset facing quantization; cross-checked
+# against tools/path_planner/header_writer.py -- _resolve_reset_rows.
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "authored_facing, expected_int",
+    [
+        pytest.param(45.5, 46, id="rounding_tie"),
+        pytest.param(359.7, 0, id="wrap_to_zero"),
+    ],
+)
+def test_tc19_wall_reset_facing_quantized_like_firmware_int16(authored_facing, expected_int):
+    """A fractional authored facing resolves to the SAME int the firmware emits.
+
+    Calls the actual ``_resolve_reset_rows`` emitter function as ground truth
+    (rather than re-implementing its rounding rule inline), then runs the
+    reset interlude and asserts the sim's believed heading matches that emitted
+    int16 exactly -- covering a rounding tie (``45.5 -> 46``) and a wrap
+    (``359.7 -> 0``).
+    """
+    fd, g, next_hop = _reset_chain_field(reset_facing=authored_facing)
+    sim, chassis = _make_reset_sim(fd, g, next_hop)
+
+    rows = _resolve_reset_rows(fd.RESET_NODES, {"R": 0})
+    assert rows == [(0, 0, 10.0, expected_int)]
+
+    sim.go_to("R")
+
+    assert chassis.heading_deg == pytest.approx(float(expected_int), abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "authored_facing, expected_int",
+    [
+        pytest.param(45.5, 46, id="rounding_tie"),
+        pytest.param(359.7, 0, id="wrap_to_zero"),
+    ],
+)
+def test_tc19b_apply_wall_matches_dispatch_wall_reset_for_fractional_facing(
+    authored_facing, expected_int
+):
+    """``_apply_wall`` (parity replay) quantizes a fractional facing IDENTICALLY
+    to ``_dispatch_wall_reset`` (the forward sim), per #154-17.
+
+    T10 quantized ``_dispatch_wall_reset``'s facing to the firmware's emitted
+    ``ResetNode.facing`` int16 rule; this closes the matching gap on the
+    parity-replay side (``sim/parity.py::_apply_wall``), which read the SAME
+    ``RESET_NODES`` spec but was still normalizing the raw float. Builds the
+    SAME ``_reset_chain_field`` fixture TC19 uses, runs the forward sim's
+    interlude via ``go_to`` to get the ground-truth chassis pose, then hand-
+    builds the wall-reset ``TraceRecord`` trio ``normalize_sim_stream`` would
+    emit for that same interlude (node ``"R"``, ``axis_idx=0``,
+    ``wall_coord=10.0`` / node ``x=30.0`` per the fixture's defaults) and
+    replays it through ``integrate_pose``, which dispatches to ``_apply_wall``.
+    Both paths must land on the identical pose.
+    """
+    fd, g, next_hop = _reset_chain_field(reset_facing=authored_facing)
+    sim, chassis = _make_reset_sim(fd, g, next_hop)
+
+    sim.go_to("R")
+    assert chassis.heading_deg == pytest.approx(float(expected_int), abs=1e-9)
+
+    records = [
+        TraceRecord("wall_stop", {"node": "R", "axis_idx": 0, "wall_coord": 10.0}),
+        TraceRecord("wall_reanchor", {"node": "R", "axis_idx": 0, "wall_coord": 10.0}),
+        TraceRecord("wall_depart", {"node": "R", "axis_idx": 0, "node_coord": 30.0}),
+    ]
+    poses = integrate_pose(
+        records, fd, node_sequence=[], start_node="R", start_heading_deg=0.0
+    )
+
+    assert poses[-1].heading == pytest.approx(chassis.heading_deg, abs=1e-9)
+    assert poses[-1].x == pytest.approx(chassis.x_cm, abs=1e-9)
+    assert poses[-1].y == pytest.approx(chassis.y_cm, abs=1e-9)
 
 
 # ===========================================================================

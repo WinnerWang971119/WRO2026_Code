@@ -1072,7 +1072,15 @@ def _apply_wall(chassis: VirtualChassis, field, record: TraceRecord) -> None:
     node = record.fields["node"]
     axis_idx = record.fields["axis_idx"]
     info = field.RESET_NODES[node]
-    facing = _normalize(float(info["facing"]))
+    # Quantize identically to `_dispatch_wall_reset` (runtime.py), which itself
+    # mirrors the firmware's emitted `ResetNode.facing` int16 field
+    # (header_writer._resolve_reset_rows, header_writer.py:884): round to the
+    # nearest integer degree, then reduce mod 360 so a value rounding UP to 360
+    # (e.g. 359.7 -> 360) wraps to 0. A plain float `_normalize` here would
+    # leave a fractional facing un-rounded and diverge from the firmware's
+    # quantized heading — the mod-360 already yields the `[0, 360)` contract,
+    # so no further `_normalize` call is needed.
+    facing = float(int(round(float(info["facing"]))) % 360)
 
     if kind == "wall_stop":
         # Phase 1: square to the wall normal, press the on-axis coord to the wall.

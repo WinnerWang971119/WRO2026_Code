@@ -2726,7 +2726,15 @@ class PathTrackerSim:
 
         axis = info["axis"]                       # "x" or "y"
         wall_coord = float(info["wall_coord"])
-        facing = _normalize(float(info["facing"]))
+        # Quantize identically to the firmware's emitted `ResetNode.facing`
+        # int16 field (header_writer._resolve_reset_rows, header_writer.py:884):
+        # round to the nearest integer degree, then reduce mod 360 so a value
+        # rounding UP to 360 (e.g. 359.7 -> 360) wraps to 0. An authored
+        # fractional facing must resolve to the SAME believed heading in the
+        # sim as the int16 the real firmware squares to -- a plain float
+        # `_normalize` here would leave 359.7 un-rounded and diverge from the
+        # firmware's quantized 0.
+        facing = float(int(round(float(info["facing"]))) % 360)
         axis_idx = _RESET_AXIS_TO_IDX[axis]       # cross-task ResetNode encoding (x=0/y=1)
 
         # The reset node's own stored on-axis coordinate -- the same source
