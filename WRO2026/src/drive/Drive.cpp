@@ -1401,6 +1401,21 @@ void DriveClass::_updateWallStop()
     // push primitive, so SQUARE issues no continuous motion of its own.
     if (_wallState == WallStopState::SQUARE)
     {
+        // #154-16: a fault can latch THIS tick, inside `_updateTurnProfile()` (which runs earlier
+        // in `update()`, per the stage-2 ordering above `_updateWallStop()`). That fault handler
+        // (e.g. the persistent-IMU-read-failure watchdog) hard-stops the motors AND collapses
+        // `_turnProfileState` back to IDLE as part of its own teardown — which is
+        // indistinguishable, to the `_turnProfileState != IDLE` check below, from "squaring
+        // finished successfully". Without this guard SQUARE would misread that as "squared" and
+        // wrongly hand off straight to PUSH on the very same tick the chassis was just faulted,
+        // re-arming continuous motion after a hard-stop. Check `hasFault()` FIRST and abort the
+        // wallStop cleanly instead — SQUARE must never advance to PUSH once a fault is latched.
+        if (hasFault())
+        {
+            _endWallStop(true);
+            return;
+        }
+
         if (_turnProfileState != TurnProfileState::IDLE)
         {
             return;    // still squaring — let `_updateTurnProfile` drive the in-place turn.

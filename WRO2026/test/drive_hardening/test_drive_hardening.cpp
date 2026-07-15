@@ -6,9 +6,10 @@
  * @details
  * This is the FIRST target in the `Drive.cpp` hardening lane (T1 #142 -> T2 #150 -> T3 #153 ->
  * T4 #154-16 -> T5 #141). T1 (#142, the in-flight turn passed-target guard) was dropped from
- * this PR and handed off separately, so this file starts at TC7 (#150). T3 and T4 APPEND
- * TC8/TC9 to this SAME file/target later in the chain — new tests must be added as additional
- * standalone `void tcN_...()` functions and dispatched from `main()`, never as a second target.
+ * this PR and handed off separately, so this file starts at TC7 (#150). T5 (#141) APPENDS
+ * further tests to this SAME file/target later in the chain — new tests must be added as
+ * additional standalone `void tcN_...()` functions and dispatched from `main()`, never as a
+ * second target.
  *
  * TC7 (#150, drain fault early-out) — `Drive::_drainBlocking()`'s spin loop now checks
  * `hasFault()` as the very first statement of every iteration. Without that check, a sync verb
@@ -62,6 +63,17 @@
  * CRUISE turn, and `holdYaw()` leaves `_heldYaw` at its prior value instead of collapsing it to
  * 0. Dispatch uses `.async()` + exactly one `Drive.update()` tick so the assertions land before
  * any further ticks could accumulate toward the persistent-IMU-stall watchdog TC7 exploits.
+ *
+ * TC9 (#154-16, wallStop SQUARE fault guard) — `_updateWallStop()`'s SQUARE branch now checks
+ * `hasFault()` before its "still squaring?" check. `_updateTurnProfile()` runs BEFORE
+ * `_updateWallStop()` every tick, so a fault that escalates from the square-up turn's own
+ * persistent-IMU-read-failure watchdog (the same TC7/TC8 mechanism) collapses
+ * `_turnProfileState` back to IDLE as part of ITS teardown, on the SAME tick — which, without the
+ * guard, SQUARE misreads as "squared successfully" and wrongly hands off to PUSH right after the
+ * chassis was hard-stopped for the fault. TC9 reuses TC7's persistent-IMU-dropout script during
+ * an armed square-up turn and proves `_endWallStop(true)` fires instead: `Drive.isIdle()` reads
+ * true on the fault tick (not the bug's `_wallState == PUSH`), and a further tick issues no
+ * additional `MoveGyro` call (PUSH never actually drives the wheels).
  */
 
 #include "TestAssert.h"
@@ -80,8 +92,8 @@ namespace
 ///       not a `MiniR4` child) or the mock clock — both are reset explicitly here, matching
 ///       `test_yaw_source.cpp`'s per-scenario reset idiom.
 /// @note `Drive.clearFault()` guarantees a clean fault slate between test functions in this
-///       file even though TC7 is currently the only one — T3/T4 append siblings that will also
-///       call `resetWorld()` first.
+///       file — TC7/TC8/TC9 each call `resetWorld()` first, and T5 will do the same for any
+///       siblings it appends.
 void resetWorld()
 {
     mockResetMiniR4();
@@ -290,7 +302,100 @@ void tc8_fabricated_yaw_fallback()
 }
 
 // ===========================================================================================
-// Entry. T4 (#154-16) appends its `tc9_...` call here.
+// TC9 (#154-16) — a fault latched during the wallStop SQUARE (square-up) phase must abort the
+// push cleanly via `_endWallStop(true)`; SQUARE must NEVER hand off to PUSH once `hasFault()`.
+//
+// Background: `wallStop()` dispatch arms the square-up turn via `_execTurnToYaw` (Drive.cpp
+// ~:1762) and enters `WallStopState::SQUARE`. Each tick, `_updateWallStop()`'s SQUARE branch
+// waits for `_turnProfileState == IDLE` before seeding the push watchdogs and transitioning to
+// PUSH. The bug: `_updateTurnProfile()` runs BEFORE `_updateWallStop()` on every tick (Drive.cpp
+// `update()` stage 2 ordering), so if the square-up turn's own persistent-IMU-read-failure
+// watchdog escalates to a hard `Fault::IMU_READ_FAILED` (exactly TC7/TC8's mechanism), that fault
+// handler collapses `_turnProfileState` back to IDLE as PART OF its own teardown — on the SAME
+// tick. Without a `hasFault()` guard, SQUARE's "still squaring?" check misreads that collapse as
+// "squared successfully" and wrongly advances straight to PUSH, re-arming continuous motion
+// (a fresh encoder baseline + a live push PWM) immediately after the chassis was just
+// hard-stopped for a real fault. The fix checks `hasFault()` FIRST, at the very top of the SQUARE
+// branch, and aborts via `_endWallStop(true)` (active-brake, mirrors every other fault-triggered
+// wallStop abort — `stop()` and the `_drainBlocking` DRAIN_TIMEOUT path both use the same call).
+//
+// Setup: dispatch an async `Drive.wallStop(20.0f).setHeading(90)` while the IMU reads healthy, so
+// dispatch arms a REAL square-up turn (current yaw 0 -> target 90, well past
+// `Config::TURN_TOLERANCE_DEG`) rather than short-circuiting as a no-op. One tick with a healthy
+// IMU is enough to dispatch the WALL_STOP command and enter SQUARE with `_turnProfileState ==
+// CRUISE`. Then, exactly like TC7, the mock lower-MCU IMU read is scripted to fail every call
+// (`mmL.mockResult = MMLower::RESULT::ERROR`) and ticked until the persistent-read-failure
+// watchdog escalates (`Config::TURN_IMU_STALL_TIMEOUT_MS`).
+//
+// Assert: (a) the escalation really did latch `Fault::IMU_READ_FAILED` (the real mechanism, not a
+// test-only hook); (b) `Drive.isIdle()` is TRUE immediately after that tick — proving
+// `_endWallStop(true)` fired and collapsed `_wallState` back to IDLE (`_moveDone`/`_turnDone`)
+// on the SAME tick the fault latched, rather than the bug's `_wallState == PUSH` /
+// `_moveDone == false`; (c) one further tick issues NO additional `MoveGyro` call (wallStop's
+// default push mode is GYRO) — proving PUSH never actually ran and drove the wheels. Without the
+// fix, (b) fails immediately (SQUARE fell through to PUSH on the fault tick) and (c) would also
+// fail the following tick (PUSH would command the flat push PWM via `MoveGyro`).
+// ===========================================================================================
+void tc9_wallstop_square_fault_guard()
+{
+    TEST_SCOPE("TC9 (#154-16): fault latched during wallStop SQUARE — _endWallStop(true) fires, "
+               "PUSH never runs");
+
+    resetWorld();
+
+    // Seed a known-good _heldYaw = 0 via a successful read (mirrors TC8's seeding idiom). Raw
+    // mock 0.0 -> app-frame yaw 0.0 (IMU_YAW_SIGN == -1.0f; see TC8 sub-scenario A).
+    mmL.mockResult = MMLower::RESULT::OK;
+    mmL.mockYawDeg = 0.0;
+    Drive.holdYaw();
+
+    // Dispatch an async wallStop whose square-up heading (90) differs from the current yaw (0) by
+    // far more than Config::TURN_TOLERANCE_DEG, so `_execTurnToYaw` arms a real CRUISE turn
+    // instead of short-circuiting as a no-op square-up. Single-temporary RAII enqueue (Drive
+    // builder RAII gotcha) — never store the builder in a named local.
+    Drive.wallStop(20.0f).setHeading(90).async();
+
+    // One tick with a healthy IMU: dispatches WALL_STOP (_execTurnToYaw arms the CRUISE turn,
+    // _turnProfileState -> CRUISE) and enters WallStopState::SQUARE.
+    Drive.update();
+
+    ASSERT_FALSE(Drive.hasFault());
+    ASSERT_FALSE(Drive.isIdle());    // squaring up — neither idle nor faulted yet.
+
+    // Force every subsequent IMU read to fail, exactly like TC7's persistent-dropout script.
+    mmL.mockResult = MMLower::RESULT::ERROR;
+
+    // Tick until the persistent-IMU-read-failure watchdog escalates to IMU_READ_FAILED. This is
+    // the exact tick the bug lived on: the fault handler collapses _turnProfileState to IDLE
+    // INSIDE this same Drive.update() call, before _updateWallStop() runs its SQUARE branch.
+    tickUntilFault(2000);
+
+    ASSERT_TRUE(Drive.hasFault());
+    ASSERT_TRUE(Drive.getFault().kind == DriveClass::Fault::IMU_READ_FAILED);
+
+    // --- The actual T4/#154-16 exercise -----------------------------------------------------
+    // `_endWallStop(true)` must have fired on that very tick: _wallState back to IDLE, _moveDone /
+    // _turnDone collapsed true, queue already cleared by the turn-profile fault handler — so
+    // Drive.isIdle() (which requires _wallState == IDLE AND _moveDone/_turnDone AND _qCount == 0)
+    // reads true. Without the fix, SQUARE fell through to PUSH on this same tick, leaving
+    // _wallState == PUSH and _moveDone == false, so this would read false.
+    ASSERT_TRUE(Drive.isIdle());
+
+    const uint32_t moveGyroCallsAfterFault = MiniR4.DriveDC.moveGyroCallCount;
+
+    // One further tick. If PUSH had wrongly started (the bug), _updateWallStop's PUSH branch
+    // would command the flat push PWM via `_emitContinuous(DriveMode::GYRO, ...)` ->
+    // `MiniR4.DriveDC.MoveGyro(...)` (wallStop's default mode is GYRO — see WallStopBuilder). With
+    // the fix _wallState is already IDLE, so _updateWallStop() short-circuits at its very first
+    // line and nothing fires.
+    Drive.update();
+
+    ASSERT_EQ(MiniR4.DriveDC.moveGyroCallCount, moveGyroCallsAfterFault);
+    ASSERT_TRUE(Drive.isIdle());
+}
+
+// ===========================================================================================
+// Entry.
 // ===========================================================================================
 int main()
 {
@@ -298,6 +403,7 @@ int main()
 
     tc7_drain_fault_early_out();
     tc8_fabricated_yaw_fallback();
+    tc9_wallstop_square_fault_guard();
 
     TEST_REPORT();
 }
