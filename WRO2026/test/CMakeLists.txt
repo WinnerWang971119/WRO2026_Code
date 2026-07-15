@@ -2495,3 +2495,20 @@ add_test(NAME config_turn_tolerance_zone_compile_fail
 )
 set_tests_properties(config_turn_tolerance_zone_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "TURN_TOLERANCE_DEG must be < TURN_SLOW_ZONE_DEG")
+
+# --- PathTracker lost-line fault escalation test (T7 #146), real-linked ---
+add_executable(test_path_tracker_lost_line
+    ${TEST_DIR}/test_path_tracker_lost_line.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_lost_line PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+target_compile_definitions(test_path_tracker_lost_line PRIVATE HOP_SETTLE_MS_DEFAULT=0)
+add_fixture_routes_force_include(test_path_tracker_lost_line)
+add_path_force_includes(test_path_tracker_lost_line)
+add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)

@@ -449,6 +449,9 @@ bool PathTrackerClass::begin()
     _returnUsesLineSeek      = false;
     _returnActive            = false;
     _returnDistCm            = 0.0f;
+    // #146: no lost-line escalation window in flight at boot.
+    _lineLostTiming          = false;
+    _lineLostSinceMs         = 0;
     // ADR-061: no settle dwell in flight at boot (the SETTLE state is the real guard; this is
     // defensive parity with the other latch resets).
     _settleDeadlineMs        = 0;
@@ -525,6 +528,10 @@ void PathTrackerClass::abort()
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // #146: a hard-cancel drops any in-flight lost-line escalation window so a later goal cannot
+    // inherit its accrued loss time.
+    _lineLostTiming         = false;
+    _lineLostSinceMs        = 0;
     // ADR-061: a hard-cancel drops any in-flight settle dwell so a later goal cannot inherit a
     // stale deadline.
     _settleDeadlineMs       = 0;
@@ -562,6 +569,7 @@ const char* PathTrackerClass::faultMnemonic(Fault kind)
         case Fault::OFF_NODE:             return "OFN";
         case Fault::WALL_NOT_SQUARE:      return "WSQ";
         case Fault::PIVOT_TRIM_UNDERFLOW: return "PTU";
+        case Fault::LINE_LOST:            return "LLN";
     }
     return "??";
 }
@@ -942,6 +950,40 @@ void PathTrackerClass::_stepFsm()
 
         case State::LINE_FOLLOW:
         {
+            // -----------------------------------------------------------------
+            // #146 — bounded lost-line fault ESCALATION (NOT the deferred ADR-009
+            // sweep/reacquire/resume recovery). Poll `LineFollower.isLineLost()`
+            // ONLY here in `LINE_FOLLOW`: `LINE_OVERSHOOT` is a deliberate
+            // dead-reckon PAST the line (its overshoot-mode arm expects the sensor
+            // to go offline as the line ends at the node), so polling it would be
+            // incoherent. Suppress the poll during a PathTracker-owned pass-through
+            // dead-reckon window (`_passThrough` / `_projPassThrough`) — those are
+            // the FSM's OWN flags, so the escalation never reaches into
+            // LineFollower's private `_overshootMode` (cross-lane). A loss that
+            // persists for `Config::LINE_LOST_FAULT_MS` of CONTINUOUS
+            // line-following outside such a window means the chassis wandered off
+            // the line; escalate to `Fault::LINE_LOST`. Any reacquire (or a
+            // suppressed tick) resets the timer, so only a genuine sustained
+            // departure faults; the timer is also cleared on state-exit (below),
+            // abort, and fault.
+            if (_passThrough || _projPassThrough || !LineFollower.isLineLost())
+            {
+                _lineLostTiming = false;
+            }
+            else if (!_lineLostTiming)
+            {
+                _lineLostTiming  = true;
+                _lineLostSinceMs = millis();
+            }
+            else if ((uint32_t) (millis() - _lineLostSinceMs) >= Config::LINE_LOST_FAULT_MS)
+            {
+                // Read `_destinationNode` as the fault's `to` BEFORE `_enterFault`
+                // clears it (the argument is evaluated first). Mirrors the
+                // DRIVE_FAULT dispatch pattern.
+                _enterFault(Fault::LINE_LOST, Localization.getCurrentNode(), _destinationNode);
+                return;
+            }
+
             // On intersection-detect: do NOT advance Localization yet. The line
             // sensor sits `Config::LINE_SENSOR_AXLE_OFFSET_CM` ahead of the wheel
             // axle, so the chassis center is still that distance short of the
@@ -1072,7 +1114,11 @@ void PathTrackerClass::_stepFsm()
 #ifdef PT_PARITY_TRACE
                 _ptEmitLineOvershoot(overshootTargetCm, _passThrough);
 #endif
-                _state = State::LINE_OVERSHOOT;
+                // #146: leaving LINE_FOLLOW (state-exit) — clear the lost-line timer so a
+                // later re-entry cannot inherit stale accrued loss time. LINE_OVERSHOOT is a
+                // deliberate dead-reckon and is not polled.
+                _lineLostTiming = false;
+                _state          = State::LINE_OVERSHOOT;
             }
             return;
         }
@@ -1447,6 +1493,10 @@ void PathTrackerClass::_enterFault(Fault kind, uint8_t from, uint8_t to)
     _returnUsesLineSeek     = false;
     _returnActive           = false;
     _returnDistCm           = 0.0f;
+    // #146: a fault aborts the in-flight goal — drop any in-flight lost-line escalation window so
+    // its accrued loss time cannot bleed into a post-clearFault() goal.
+    _lineLostTiming         = false;
+    _lineLostSinceMs        = 0;
     // ADR-061: a fault aborts the in-flight goal — drop any in-flight settle dwell so it
     // cannot bleed into a post-clearFault() goal.
     _settleDeadlineMs       = 0;
