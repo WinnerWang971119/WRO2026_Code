@@ -2365,3 +2365,18 @@ add_path_force_includes(test_drive_decel_floor_identity)
 target_compile_definitions(test_drive_decel_floor_identity
     PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
+
+# =========================================================================================
+# Test executable #30 — TurnPDPolicy unit tests (ADR-068, T5 / TC1–TC8).
+#
+# Pure decision math for the per-tick PD turn executor. `TurnPDPolicy.h` is deliberately
+# self-contained (`<math.h>` + `<stdint.h>` only — zero Arduino / Config.h surface), so this
+# target needs NO mocks and NO MOCK_SOURCES, exactly like `test_turn_sign_policy` /
+# `test_pivot_trim_policy`. Every tunable is injected as a parameter, which is what makes the
+# control law testable in isolation from the Drive FSM.
+# =========================================================================================
+add_executable(test_turn_pd_policy
+    ${TEST_DIR}/test_turn_pd_policy.cpp
+)
+target_include_directories(test_turn_pd_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME turn_pd_policy COMMAND test_turn_pd_policy)
