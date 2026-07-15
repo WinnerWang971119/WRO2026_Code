@@ -70,7 +70,7 @@ choice explicit at each call site and gives the cache a single invalidation poin
 
 - [ADR-045](./045-imu-yaw-sign-normalization.md) — the `YawSource` single-owner / RESULT-surfacing /
   leave-out-param-untouched-on-failure pattern this ADR mirrors for encoders.
-- [ADR-027](./027-stop-at-line-seek.md) — the stop-at-line seek whose baseline + no-progress
+- [ADR-027](./027-drive-stop-at-line.md) — the stop-at-line seek whose baseline + no-progress
   watchdog reads route through `EncoderSource`.
 - [ADR-004](./004-pid-stays-on-stm32.md) — motor position/speed PID stays on the STM32; the R4 only
   reads the encoder degrees this module surfaces.
