@@ -4611,15 +4611,19 @@ def test_tc5_stop_at_line_fold_resolution_equivalence(trigger):
 
 
 # ===========================================================================
-# W2 -- sim tier-branch coverage (ADR-064, the sim legs of TC10 + TC14)
+# W2 -- sim tier-branch coverage (ADR-064, the sim legs of TC10 + TC14; issue
+# #159's TC18 fix folded into (b))
 #
 # Drives PathTrackerSim over synthetic collinear BLIND fields to pin three
 # per-edge-speed behaviours in the offline mirror so it cannot silently drift
 # from the firmware:
 #   (a) a chain breaks at a resolved-tier boundary, but SAME-tier hops still
 #       chain across a SYNC<->GYRO mode boundary (TC10 / AC7);
-#   (b) a FAST-line -> collinear SLOW-blind pass-through clamps the blind entry
-#       seed to <= the SLOW cruise (TC14 / AC12);
+#   (b) a LINE pass-through's blind entry seed derives from the INBOUND LINE
+#       hop's resolved SpeedTier, clamped to THIS hop's own cruise (TC14 /
+#       AC12 direction; TC18 / issue #159 exact magnitude -- the sim used to
+#       model every captured cruise as the hardcoded SPEED_NORMAL regardless
+#       of the true inbound tier);
 #   (c) a BLIND edge cruises at its resolved per-tier PWM (SLOW=60 / FAST=90)
 #       via resolve_speed -> _speed_tier_to_pwm (TC1 / AC1).
 # ===========================================================================
@@ -4750,23 +4754,44 @@ def test_w2a_same_tier_chains_across_mode_boundary():
     assert sim.localization.current_node() == "C"
 
 
-def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
-    """W2(b): a FAST-line -> collinear SLOW-blind pass-through clamps entry <= 60.
+@pytest.mark.parametrize(
+    "inbound_tier, outbound_tier, expected_seed",
+    [
+        (SpeedTier.FAST, SpeedTier.FAST, 90),
+        (SpeedTier.FAST, SpeedTier.SLOW, 60),
+        (SpeedTier.SLOW, SpeedTier.FAST, 60),
+    ],
+    ids=[
+        "FAST_into_FAST_seed_90",
+        "FAST_into_SLOW_clamped_60",
+        "SLOW_into_FAST_seed_60",
+    ],
+)
+def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
+    inbound_tier, outbound_tier, expected_seed
+):
+    """W2(b) / TC18 (issue #159): the pass-through blind entry seed derives from
+    the INBOUND LINE hop's resolved tier, clamped to THIS hop's own cruise.
 
-    ``A ->LINE(FAST) B ->BLIND(SLOW) C`` collinear: the LINE pass-through at the
-    junction B keeps the follower live, so the B->C blind hop is
-    PASS-THROUGH-SEEDED. Its entry seed is clamped to the hop's own resolved
-    cruise, so a fast inbound speed cannot enter the SLOW blind hop above the SLOW
-    cruise (60).
+    ``A ->LINE(inbound_tier) B ->BLIND(outbound_tier) C`` collinear: the LINE
+    pass-through at junction B keeps the follower live, so the B->C blind hop is
+    PASS-THROUGH-SEEDED. Before the fix the sim modeled every captured cruise as
+    the hardcoded ``SPEED_NORMAL`` (70) regardless of the true inbound tier; now
+    the seed is ``min(_speed_tier_to_pwm(inbound_tier), _speed_tier_to_pwm(
+    outbound_tier))`` -- the tier the follower actually left off at, clamped down
+    so it never exceeds this hop's own cruise:
 
-    Documented sim limitation (pre-existing, not ADR-064): the captured cruise is
-    modeled as ``SPEED_NORMAL`` (70), not the true FAST preset -- so this pins the
-    CLAMP DIRECTION (entry <= SLOW cruise), not the exact captured magnitude. The
-    clamp pulls the modeled 70 down to the SLOW cruise (60).
+    * FAST -> FAST: no clamp binds, seed = 90 (the un-clamped ``SPEED_NORMAL``-era
+      model would have produced 70 here -- non-vacuous).
+    * FAST -> SLOW: the clamp binds, seed = 60 (the SLOW cruise), not the inbound
+      90 (AC12's clamp direction, now with the true magnitude).
+    * SLOW -> FAST: the inbound tier (60) is already below this hop's FAST
+      cruise (90), so the clamp does not need to bind; seed = 60, not the
+      un-clamped ``SPEED_NORMAL``-era 70.
 
-    Non-vacuous: without the clamp the seed would be the un-clamped ``SPEED_NORMAL``
-    (70), which is both ``> 60`` and ``>= SPEED_NORMAL`` -- both assertions below
-    reject that.
+    Non-vacuous: asserting the exact ``expected_seed`` (not just a `<=` bound)
+    rejects both the pre-fix hardcoded-NORMAL model and a clamp that binds in the
+    wrong direction.
     """
     nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (100.0, 0.0)}
     fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=0.0)
@@ -4775,18 +4800,14 @@ def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
     g.add_node("A", type="line")
     g.add_node("B", type="line")
     g.add_node("C", type="blind")
-    # A->B LINE, FAST. (The sim models the captured pass-through cruise as
-    # SPEED_NORMAL regardless of the LINE tier, so FAST here is the authored
-    # scenario, not the seed magnitude -- see the docstring.)
     g.add_edge("A", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0,
-               speed=SpeedTier.FAST)
+               speed=inbound_tier)
     g.add_edge("B", "A", type=EDGE_LINE, distance_cm=50.0, heading_deg=180.0,
-               speed=SpeedTier.FAST)
-    # B->C BLIND, SLOW -> cruise 60.
+               speed=inbound_tier)
     g.add_edge("B", "C", type=EDGE_BLIND, distance_cm=50.0, heading_deg=0.0,
-               speed=SpeedTier.SLOW)
+               speed=outbound_tier)
     g.add_edge("C", "B", type=EDGE_BLIND, distance_cm=50.0, heading_deg=180.0,
-               speed=SpeedTier.SLOW)
+               speed=outbound_tier)
 
     next_hop = _linear_next_hop(["A", "B", "C"])
     chassis = VirtualChassis.from_field_data(fd)
@@ -4801,12 +4822,7 @@ def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
     assert len(seeded) == 1, prims
     start_pwm = seeded[0][2]
 
-    slow_cruise = _runtime._speed_tier_to_pwm(SpeedTier.SLOW)   # 60
-    # The clamp caps the entry seed at the SLOW cruise ...
-    assert start_pwm <= slow_cruise
-    # ... and demonstrably engaged: it pulled the seed below the un-clamped
-    # SPEED_NORMAL the sim models the captured cruise as.
-    assert start_pwm < _runtime.SPEED_NORMAL
+    assert start_pwm == expected_seed
     assert sim.localization.current_node() == "C"
 
 

@@ -2970,6 +2970,17 @@ class PathTrackerSim:
         # (AC5) instead of the cold-start +/-TSHAPE_START_SPEED. Reset every hop.
         pass_through_active = False
 
+        # Issue #159: the inbound LINE hop's RESOLVED SpeedTier, carried
+        # alongside `pass_through_active` so the NEXT hop's BLIND dispatch can
+        # seed `entry_pwm` from the tier the follower was ACTUALLY cruising at
+        # (mirrors the firmware's `presetToPwm(LineFollower.getPreset())`
+        # carry), not a hardcoded NORMAL guess. `None` whenever
+        # `pass_through_active` is False; always a concrete `SpeedTier`
+        # otherwise (only a LINE edge's pass-through branches set
+        # `heading_reset_kind`, and `resolved_line_mode` is resolved for every
+        # LINE edge below).
+        pass_through_tier: Optional[SpeedTier] = None
+
         current = self._localization.current_node()
         while current != goal_name:
             nxt = self._next_hop[current][goal_name]
@@ -3142,17 +3153,21 @@ class PathTrackerSim:
             else:
                 stop_at_line = (False, BlindMode.DEFAULT)
 
+            # Resolved once here so both the classifier query AND the issue
+            # #159 pass-through tier carry (below) read the SAME value -- a
+            # BLIND edge falls back to `cfg.speed` (the classifier never reads
+            # `line_mode` off a BLIND query; see `EdgeDispatchQuery.line_mode`).
+            resolved_line_mode = (
+                resolve_speed(edge, cfg) if edge_type == EDGE_LINE else cfg.speed
+            )
+
             decision = resolve_edge_dispatch(
                 EdgeDispatchQuery(
                     edge_type=edge_type,
                     dest_is_projection=dest_is_projection,
                     direction=direction,
                     raw_distance_cm=distance_cm,
-                    line_mode=(
-                        resolve_speed(edge, cfg)
-                        if edge_type == EDGE_LINE
-                        else cfg.speed
-                    ),
+                    line_mode=resolved_line_mode,
                     stop_at_line=stop_at_line,
                     proj_pass_through=proj_pass_through,
                     departing_trim_cm=departing_trim_cm,
@@ -3478,24 +3493,21 @@ class PathTrackerSim:
                 cruise_mag = _speed_tier_to_pwm(resolve_speed(edge, cfg))
 
                 # `entry_pwm`: captured cruise after a pass-through (ADR-023 carry,
-                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. KNOWN
-                # SIM LIMITATION (pre-existing, not introduced by ADR-064): the sim
-                # does not model per-tier LineFollower presets, so it models the
-                # captured cruise as SPEED_NORMAL. The firmware carries the TRUE
-                # inbound tier (`presetToPwm(LineFollower.getPreset())`), so for a
-                # non-NORMAL LINE-into-BLIND pass-through the firmware entry speed can
-                # exceed this model (a FAST line into a FAST blind enters at 90 on the
-                # robot, 70 here). The all-NORMAL parity field keeps the two surfaces
-                # in agreement; closing the gap (seed from the previous hop's resolved
-                # tier) is a deferred sim-fidelity follow-up. Regardless, the seed is
-                # CLAMPED to this hop's resolved cruise so a fast entry into a slower
-                # blind hop never exceeds the hop's own cruise (ADR-064 / AC12: a FAST
-                # line into a SLOW blind enters at <= 60). The cold-start seed
-                # (TSHAPE_START_SPEED = 35) is already below every tier, so only the
-                # pass-through branch needs the clamp. `resolve_chain_speeds` re-clamps
-                # into [pwm_min, |cruise|] on top.
+                # AC5), else the cold-start +/-TSHAPE_START_SPEED seed. Issue #159
+                # fix: the sim now models the per-tier LineFollower preset the
+                # firmware actually carries -- the seed derives from
+                # `pass_through_tier`, the INBOUND LINE hop's resolved `SpeedTier`
+                # (mirroring the firmware's `presetToPwm(LineFollower.getPreset())`
+                # carry), not a hardcoded SPEED_NORMAL guess. The seed is then
+                # CLAMPED to this hop's resolved cruise so a fast entry into a
+                # slower blind hop never exceeds the hop's own cruise (ADR-064 /
+                # AC12: a FAST line into a SLOW blind enters at <= 60; a FAST line
+                # into a FAST blind enters at 90, matching the firmware). The
+                # cold-start seed (TSHAPE_START_SPEED = 35) is already below every
+                # tier, so only the pass-through branch needs the clamp.
+                # `resolve_chain_speeds` re-clamps into [pwm_min, |cruise|] on top.
                 if pass_through_active:
-                    entry_mag = min(SPEED_NORMAL, cruise_mag)
+                    entry_mag = min(_speed_tier_to_pwm(pass_through_tier), cruise_mag)
                 else:
                     entry_mag = TSHAPE_START_SPEED
                 entry_pwm = -entry_mag if decision.reverse else entry_mag
@@ -3648,6 +3660,13 @@ class PathTrackerSim:
             # not the cold-start floor. Set iff THIS hop emitted a pass tag; reset
             # otherwise so a stop-and-go arrival correctly seeds the cold start.
             pass_through_active = heading_reset_kind is not None
+            # Issue #159: carry THIS hop's resolved LINE tier alongside the
+            # active flag -- `resolved_line_mode` is this hop's LINE edge tier
+            # whenever `pass_through_active` is True (the pass-through branches
+            # only fire on a LINE edge), so the NEXT hop's BLIND dispatch seeds
+            # from the tier the follower actually left off at, not a hardcoded
+            # guess.
+            pass_through_tier = resolved_line_mode if pass_through_active else None
 
             current = nxt
 
