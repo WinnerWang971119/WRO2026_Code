@@ -1,11 +1,11 @@
 # ADR-012: Fluent builder for any verb with 3+ knobs; direct call for 0–2
 
-**Status:** Implemented
+**Status:** Implemented (`[[nodiscard]]` clause superseded by [ADR-065](./065-raii-builders-not-nodiscard.md))
 **Date decided:** 2026-05 (Phase 1.5)
 
 ## Rule
 
-Any verb that takes 3 or more configurable parameters is exposed as a `[[nodiscard]]`-marked fluent builder. Chained `.setX(...)` setters return a reference; the action executes when the temporary destructs at end-of-statement (RAII auto-execute).
+Any verb that takes 3 or more configurable parameters is exposed as a fluent builder. Chained `.setX(...)` setters return a reference; the action executes when the temporary destructs at end-of-statement (RAII auto-execute).
 
 Verbs that take 0–2 parameters stay direct (non-fluent).
 
@@ -25,14 +25,15 @@ Wide positional argument lists (`moveDist(power, cm, brake, mode, blocking, head
 
 - Builder destructors capture parameters into a POD and dispatch to a private `_execXxx()` — they do not block (see [ADR-015](./015-drive-command-queue.md), [ADR-016](./016-sync-default-builders.md)).
 - Builders are copy-deleted; move is implemented with an `_executed` flag transfer for idempotent destruction.
-- `[[nodiscard]]` makes "I built it and forgot to execute" a compile warning.
+- The builders originally carried `[[nodiscard]]`; that clause is superseded by [ADR-065](./065-raii-builders-not-nodiscard.md) — the attribute flagged the canonical bare-statement call and never caught the bind-to-a-local hazard.
 - Rule applies project-wide: Drive, LineFollower's `setEnabled`, PathTracker's `goTo`, Mission verbs. Future modules inherit the convention.
 
 ## Trigger to revisit
 
-A use case where a builder's RAII destruction is wrong (e.g., the call site genuinely wants to construct without executing). Until then, `[[nodiscard]]` + RAII is the default.
+A use case where a builder's RAII destruction is wrong (e.g., the call site genuinely wants to construct without executing). Until then, RAII auto-execute is the default.
 
 ## See also
 
 - [ADR-015](./015-drive-command-queue.md) — queue dispatcher that the builders feed
 - [ADR-016](./016-sync-default-builders.md) — destructor blocking policy
+- [ADR-065](./065-raii-builders-not-nodiscard.md) — builders carry no `[[nodiscard]]`; never bind one to a named variable

@@ -63,7 +63,7 @@ enum class DriveMode : uint8_t
 class DriveClass;
 
 // ---------------------------------------------------------------------------
-// No-op move-only `[[nodiscard]]` builders mirroring the production fluent
+// No-op move-only builders mirroring the production fluent
 // verbs. Task bodies use them as discarded temporaries
 // (`Drive.driveDist(30).tShape();`), so construction / destruction do nothing
 // and every chain setter returns `*this`. The mock builders carry no owner
@@ -75,7 +75,7 @@ class DriveClass;
 // file-level ADR-059/T10 note above.
 // ---------------------------------------------------------------------------
 
-/// @brief Shared macro emitting a move-only `[[nodiscard]]` builder body with the
+/// @brief Shared macro emitting a move-only builder body with the
 ///        given chain setters. Keeps the five near-identical no-op mock builders terse.
 #define WRO_MOCK_BUILDER_BOILERPLATE(NAME)                                  \
     NAME() = default;                                                       \
@@ -100,7 +100,7 @@ class DriveClass;
  * chain statement ends, moving through zero or more `DriveDistBuilder&&` hops
  * along the way (mandatory copy elision in C++17, or the move ctor pre-17).
  */
-class [[nodiscard]] DriveDistBuilder
+class DriveDistBuilder
 {
 public:
     /// @brief Bind to the owning mock `Drive` and the requested distance.
@@ -157,7 +157,7 @@ private:
     bool        _recorded      = false;    ///< Set on the moved-from instance so its dtor no-ops.
 };
 
-class [[nodiscard]] DriveTimeBuilder
+class DriveTimeBuilder
 {
 public:
     WRO_MOCK_BUILDER_BOILERPLATE(DriveTimeBuilder)
@@ -175,7 +175,7 @@ public:
     DriveTimeBuilder& setEndSpeed(int16_t) { return *this; }
 };
 
-class [[nodiscard]] TurnDegBuilder
+class TurnDegBuilder
 {
 public:
     WRO_MOCK_BUILDER_BOILERPLATE(TurnDegBuilder)
@@ -187,7 +187,7 @@ public:
     TurnDegBuilder& async() { return *this; }
 };
 
-class [[nodiscard]] TurnToYawBuilder
+class TurnToYawBuilder
 {
 public:
     WRO_MOCK_BUILDER_BOILERPLATE(TurnToYawBuilder)
@@ -199,7 +199,7 @@ public:
     TurnToYawBuilder& async() { return *this; }
 };
 
-class [[nodiscard]] StopAtLineBuilder
+class StopAtLineBuilder
 {
 public:
     WRO_MOCK_BUILDER_BOILERPLATE(StopAtLineBuilder)
@@ -216,7 +216,7 @@ public:
     StopAtLineBuilder& async() { return *this; }
 };
 
-class [[nodiscard]] WallStopBuilder
+class WallStopBuilder
 {
 public:
     WRO_MOCK_BUILDER_BOILERPLATE(WallStopBuilder)
@@ -351,12 +351,12 @@ public:
     uint8_t forwardGyro(int16_t /*power*/) { return 0; }
 
     // fluent verbs
-    [[nodiscard]] DriveDistBuilder  driveDist(float cm) { return DriveDistBuilder{*this, cm}; }
-    [[nodiscard]] DriveTimeBuilder  driveTime(float /*sec*/) { return DriveTimeBuilder{}; }
-    [[nodiscard]] TurnDegBuilder    turnDeg(int16_t /*deg*/) { return TurnDegBuilder{}; }
-    [[nodiscard]] TurnToYawBuilder  turnToYaw(int16_t /*yaw*/) { return TurnToYawBuilder{}; }
-    [[nodiscard]] StopAtLineBuilder stopAtLine(float /*expectedCm*/) { return StopAtLineBuilder{}; }
-    [[nodiscard]] WallStopBuilder   wallStop(float /*cm*/) { return WallStopBuilder{}; }
+    DriveDistBuilder  driveDist(float cm) { return DriveDistBuilder{*this, cm}; }
+    DriveTimeBuilder  driveTime(float /*sec*/) { return DriveTimeBuilder{}; }
+    TurnDegBuilder    turnDeg(int16_t /*deg*/) { return TurnDegBuilder{}; }
+    TurnToYawBuilder  turnToYaw(int16_t /*yaw*/) { return TurnToYawBuilder{}; }
+    StopAtLineBuilder stopAtLine(float /*expectedCm*/) { return StopAtLineBuilder{}; }
+    WallStopBuilder   wallStop(float /*cm*/) { return WallStopBuilder{}; }
 
     // state accessors
     bool isMoveDone() const { return true; }

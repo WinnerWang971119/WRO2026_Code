@@ -14,7 +14,7 @@
  *
  * Verified production call sites this surface satisfies:
  *   - `Drive.cpp:1607-1609`   `if (LineFollower.isEnabled()) LineFollower.setEnabled(false).setBrake(false);`
- *                             (the `_dispatchNext` race-guard — the `[[nodiscard]]` builder
+ *                             (the `_dispatchNext` race-guard — the builder
  *                             return MUST support `.setBrake(...)` or real `Drive.cpp` will
  *                             not compile).
  *   - `PathTracker.cpp:300`   `LineFollower.setEnabled(false);`                              (bare)
@@ -33,8 +33,8 @@
  *   - `PathTracker.cpp:2119`  `presetToPwm(LineFollower.getPreset());`
  *   - `PathTracker.cpp:2120`  `LineFollower.setEnabled(false).setBrake(false);`
  *
- * The `setEnabled` builder mirrors the real immovable (copy- and move-deleted),
- * `[[nodiscard]]` chain surface so every chained statement above compiles unchanged. Each
+ * The `setEnabled` builder mirrors the real immovable (copy- and move-deleted)
+ * chain surface so every chained statement above compiles unchanged. Each
  * builder setter records its key arg straight back into the owner (record-on-call, NOT
  * deferred to a dtor-apply) so a test can assert `lastEnabled` / `lastBrakeOnGate` /
  * `lastTShapeRampDown` / `lastDistanceTarget` immediately after the statement.
@@ -76,14 +76,14 @@ class LineFollowerClass;
  * @brief Recording mock of `LineFollowerEnableBuilder`.
  *
  * @details
- * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]` to match the real
+ * Non-copyable AND non-movable (both deleted below) to match the real
  * builder — `setEnabled()` returns it by value via guaranteed copy elision (C++17), not a
  * move. Unlike the real builder (which defers its apply to the destructor), this mock holds
  * a reference to the owner and records each setter's key arg into the owner ON CALL, so the
  * captured value is observable the instant the chained statement ends — no dtor-apply timing
  * to reason about in a test. Every setter returns `*this` for fluent chaining.
  */
-class [[nodiscard]] LineFollowerEnableBuilder
+class LineFollowerEnableBuilder
 {
 public:
     /**
@@ -211,20 +211,19 @@ public:
     /**
      * @brief Enable or disable the line follower.
      * @param on `true` to arm following, `false` to disable.
-     * @return A `[[nodiscard]]` `LineFollowerEnableBuilder` bound to this owner for chaining.
+     * @return A `LineFollowerEnableBuilder` bound to this owner for chaining.
      * @note Records `lastEnabled`, bumps `setEnabledCount`, and sets the test-set `_enabled`
      *       state (so `isEnabled()` reflects the transition) BEFORE returning the builder —
      *       so a bare `setEnabled(false);` and the chained `setEnabled(false).setBrake(false)`
      *       race-guard both record. The real `Drive.cpp`/`PathTracker.cpp` discard the
-     *       returned builder at end-of-statement; the `[[nodiscard]]` is satisfied by their
-     *       chained `.setBrake(...)` / void-context use.
+     *       returned builder at end-of-statement.
      * @note Clears `_distanceReached` on every enable/disable, matching the real controller —
      *       which disarms the latch both when disabled (LineFollower.cpp:742) and when a fresh
      *       distance target arms (LineFollower.cpp:717). Without this a trip set for one hop would
      *       survive the next hop's re-arm and false-pass a regression that re-armed without a new
      *       gate trip.
      */
-    [[nodiscard]] LineFollowerEnableBuilder setEnabled(bool on)
+    LineFollowerEnableBuilder setEnabled(bool on)
     {
         lastEnabled = on;
         setEnabledCount++;

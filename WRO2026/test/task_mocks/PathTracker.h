@@ -13,8 +13,8 @@
  * records nothing. Every verb is a no-op; every state query reports
  * idle / fault-free so a blocking task body advances without a tick loop.
  *
- * The `goTo` builder mirrors the real immovable (copy- and move-deleted),
- * `[[nodiscard]]` chain surface (all setters no-op, returning `*this`) so an
+ * The `goTo` builder mirrors the real immovable (copy- and move-deleted)
+ * chain surface (all setters no-op, returning `*this`) so an
  * arbitrarily chained call
  * (`PathTracker.goTo("N").async().setStopAtLine(...)`) compiles unchanged.
  */
@@ -31,12 +31,12 @@
 /**
  * @brief No-op mock of `PathTrackerGoToBuilder`.
  *
- * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]`, matching
+ * Non-copyable AND non-movable (both deleted below), matching
  * the real builder's call-as-temporary contract — `goTo()` returns it by value via
  * guaranteed copy elision (C++17), not a move. Construction and destruction do
  * nothing — there is no queue.
  */
-class [[nodiscard]] PathTrackerGoToBuilder
+class PathTrackerGoToBuilder
 {
 public:
     PathTrackerGoToBuilder() = default;
@@ -88,8 +88,8 @@ public:
     bool isIdle() const { return true; }
 
     // --- control verbs ---
-    [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t /*goalId*/) { return PathTrackerGoToBuilder{}; }
-    [[nodiscard]] PathTrackerGoToBuilder goTo(const char* /*goalName*/) { return PathTrackerGoToBuilder{}; }
+    PathTrackerGoToBuilder goTo(uint8_t /*goalId*/) { return PathTrackerGoToBuilder{}; }
+    PathTrackerGoToBuilder goTo(const char* /*goalName*/) { return PathTrackerGoToBuilder{}; }
 
     // --- fault state — never faulted ---
     bool      hasFault() const { return false; }

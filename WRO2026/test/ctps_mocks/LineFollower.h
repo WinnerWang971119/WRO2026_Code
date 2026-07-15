@@ -25,7 +25,7 @@
  *     the enable-builder destructor would emit a SECOND (duplicate) record for
  *     the same follow.
  *
- * The enable builder mirrors the real move-only `[[nodiscard]]` shape (deleted
+ * The enable builder mirrors the real move-only shape (deleted
  * copy + move) so the discarded-temporary call sites compile the same way they
  * do against the real header. It stays non-movable — CTPS only ever sees
  * discarded temporaries and C++17 guaranteed copy elision means no move is
@@ -74,7 +74,7 @@ inline const char* lineFollowerPresetToStr(Config::SpeedPreset p)
 /**
  * @brief Recording mock of `LineFollowerEnableBuilder`.
  *
- * Move-only `[[nodiscard]]` like the real builder. Most setters are no-ops
+ * Move-only like the real builder. Most setters are no-ops
  * returning `*this`; `setDistanceTarget` / `setReverse` / `setPreset` /
  * `setBrake` / `tShape` / `flat` capture the state the `lineFollowDist`
  * record needs. The captured state is emitted exactly once from the
@@ -84,7 +84,7 @@ inline const char* lineFollowerPresetToStr(Config::SpeedPreset p)
  * mirrors the real `_hasReverseOverride` seam (LineFollower.cpp:610), which
  * preserves a prior `LineFollower.setReverse(true)`.
  */
-class [[nodiscard]] LineFollowerEnableBuilder
+class LineFollowerEnableBuilder
 {
 public:
     /**
@@ -240,8 +240,8 @@ public:
     /** @brief No-op cooperative tick. */
     void update() {}
 
-    /** @brief Return the recording enable builder (matches the real `[[nodiscard]]` verb). */
-    [[nodiscard]] LineFollowerEnableBuilder setEnabled(bool on)
+    /** @brief Return the recording enable builder (matches the real verb). */
+    LineFollowerEnableBuilder setEnabled(bool on)
     {
         return LineFollowerEnableBuilder(*this, on);
     }

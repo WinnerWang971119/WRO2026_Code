@@ -68,11 +68,11 @@ public:
 /**
  * @brief No-op mock of `ManipAction`.
  *
- * Move-only and `[[nodiscard]]` to match the real coordinated-verb handle; the
+ * Move-only to match the real coordinated-verb handle; the
  * real dtor drains the action unless `.async()` was called — the mock dtor does
  * nothing.
  */
-class [[nodiscard]] ManipAction
+class ManipAction
 {
 public:
     ManipAction() = default;

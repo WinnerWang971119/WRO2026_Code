@@ -185,7 +185,7 @@ class PathTrackerClass;
  * `.async()` to opt out (the destructor still enqueues but returns).
  * Mission DSL uses `.async()` and polls `isIdle()`.
  */
-class [[nodiscard]] PathTrackerGoToBuilder
+class PathTrackerGoToBuilder
 {
 public:
     PathTrackerGoToBuilder(PathTrackerClass& owner, uint8_t goalId);
@@ -377,8 +377,8 @@ public:
                                            Direction               activeArrivalDirection,
                                            Direction               activeRouteDirection);
 
-    [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId);
-    [[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName);
+    PathTrackerGoToBuilder goTo(uint8_t goalId);
+    PathTrackerGoToBuilder goTo(const char* goalName);
 
     bool       hasFault() const;
     FaultInfo  getFault() const;

@@ -33,8 +33,8 @@
  *   - `mockSetFault`'s `fromNode` / `destNode` are whatever the test passes;
  *     this mock never derives them from a planned route.
  *
- * The `goTo` builder mirrors the real immovable (copy- and move-deleted),
- * `[[nodiscard]]` chain surface so an arbitrarily chained call
+ * The `goTo` builder mirrors the real immovable (copy- and move-deleted)
+ * chain surface so an arbitrarily chained call
  * (`PathTracker.goTo(g).setRouteDirection(...).setArrivalDirection(...)
  * .setStopAtLine(...).async()`) compiles unchanged. Unlike the real builder (which
  * defers its apply to the destructor), it holds a `PathTrackerClass&` back-reference
@@ -58,14 +58,14 @@ class PathTrackerClass;
 /**
  * @brief Recording mock of `PathTrackerGoToBuilder`.
  *
- * Non-copyable AND non-movable (both deleted below) and `[[nodiscard]]`, matching
+ * Non-copyable AND non-movable (both deleted below), matching
  * the real builder's call-as-temporary contract — `goTo()` returns it by value via
  * guaranteed copy elision (C++17), not a move. Unlike the real builder (which defers
  * its apply to the destructor), this mock holds a `PathTrackerClass&` back-reference
  * and RECORDS each chain setter's arg into the owner ON CALL, so a test can assert
  * exactly what Mission forwarded at GOTO execute. `async()` stays a no-op.
  */
-class [[nodiscard]] PathTrackerGoToBuilder
+class PathTrackerGoToBuilder
 {
 public:
     /**
@@ -148,10 +148,10 @@ public:
     /**
      * @brief Mission's call: dispatch a goal by node id.
      * @param goalId The destination node id Mission resolved.
-     * @return A no-op chainable builder (immovable, `[[nodiscard]]`).
+     * @return A no-op chainable builder (immovable).
      * @note  Records the goal: `lastGoToGoal = goalId` and bumps `goToCallCount`.
      */
-    [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId)
+    PathTrackerGoToBuilder goTo(uint8_t goalId)
     {
         lastGoToGoal = goalId;
         ++goToCallCount;
@@ -166,7 +166,7 @@ public:
      * @note  Bumps `goToCallCount` only. It CANNOT resolve a name to an id
      *        without `FieldMap`, so it deliberately does NOT touch `lastGoToGoal`.
      */
-    [[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName)
+    PathTrackerGoToBuilder goTo(const char* goalName)
     {
         (void)goalName;
         ++goToCallCount;

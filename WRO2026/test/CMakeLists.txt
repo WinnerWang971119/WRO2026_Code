@@ -117,26 +117,17 @@ set(COMMON_INCLUDES
 # host compiler raises but Arduino's avr-g++ doesn't.
 # -----------------------------------------------------------------------------------------
 if(MSVC)
-    add_compile_options(/W3 /permissive- /wd4244 /wd4267 /wd4305 /wd4127 /wd4456 /wd4458 /wd4189 /wd4834)
+    add_compile_options(/W3 /permissive- /wd4244 /wd4267 /wd4305 /wd4127 /wd4456 /wd4458 /wd4189)
     # 4244/4267/4305 — narrowing int<->int16/float conversions (intentional in PWM clamp paths).
     # 4127 — conditional expression is constant (intentional: tShape gates).
     # 4456 — declaration hides previous local (the production code shadows `traveledCm` in two scopes).
     # 4458 — declaration hides class member (parameter / member name collisions in builder ctors).
     # 4189 — local variable initialized but not used (defensive guards like `clearedStaleEdge`).
-    # 4834 — discarding return value with [[nodiscard]] (the LineFollower fluent builder is
-    #        designed to be used as a temporary — `setEnabled(false);` is intentional usage).
 else()
-    # -Wno-unused-result / -Wno-attributes parallel MSVC's /wd4834: the
-    # LineFollower fluent builder is `[[nodiscard]]` and `setEnabled(false);` as
-    # a bare expression-statement is intentional usage. Without these flags
-    # gcc/clang emit -Wunused-result on the test mains' `resetWorld()` helper
-    # (and -Werror in a future CI tightening would break the host-compile job).
     add_compile_options(-Wall -Wextra
                         -Wno-narrowing
                         -Wno-sign-compare
-                        -Wno-unused-but-set-variable
-                        -Wno-unused-result
-                        -Wno-attributes)
+                        -Wno-unused-but-set-variable)
 endif()
 
 # -----------------------------------------------------------------------------------------

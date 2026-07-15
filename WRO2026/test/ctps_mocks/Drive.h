@@ -29,7 +29,7 @@
  * `static_assert(!is_copy_constructible && !is_move_constructible)` after each
  * builder documents and enforces that invariant.
  *
- * The builders mirror the real move-only `[[nodiscard]]` shape so discarded-
+ * The builders mirror the real move-only shape so discarded-
  * temporary call sites compile exactly as they do against the real header. All
  * "is-done?" queries report instant completion (`isIdle()` -> true,
  * `hasFault()` -> false) so task bodies' fake-blocking drain exits in one
@@ -111,7 +111,7 @@ inline const char* speedPresetToStr(Config::SpeedPreset p)
  * `DriveDistBuilder` has NO `setReverse`, so the emitted `reverse` flag is
  * always `false` here.
  */
-class [[nodiscard]] DriveDistBuilder
+class DriveDistBuilder
 {
 public:
     /** @brief Store the distance; the record is emitted once from the destructor. */
@@ -241,7 +241,7 @@ static_assert(
  * compiles; authored task bodies use `driveDist` / `turnDeg` / `turnToYaw` for
  * geometry.
  */
-class [[nodiscard]] DriveTimeBuilder
+class DriveTimeBuilder
 {
 public:
     DriveTimeBuilder(DriveClass& /*drive*/, float /*sec*/) {}
@@ -288,7 +288,7 @@ static_assert(
  * A turn encodes its heading change as the turn itself, so no `mode` / `heading`
  * is captured — the destructor re-emits the relative delta unchanged.
  */
-class [[nodiscard]] TurnDegBuilder
+class TurnDegBuilder
 {
 public:
     TurnDegBuilder(DriveClass& /*drive*/, int16_t deg) : _deg(deg) {}
@@ -331,7 +331,7 @@ static_assert(
  * no `mode` / `heading` is captured — the destructor re-emits the absolute target
  * unchanged.
  */
-class [[nodiscard]] TurnToYawBuilder
+class TurnToYawBuilder
 {
 public:
     TurnToYawBuilder(DriveClass& /*drive*/, int16_t yaw) : _yaw(yaw) {}
@@ -374,7 +374,7 @@ static_assert(
  * `setHeading`), and `reverse` (via `setReverse`) and emits them through
  * `ctps::recordDriveMove`.
  */
-class [[nodiscard]] StopAtLineBuilder
+class StopAtLineBuilder
 {
 public:
     StopAtLineBuilder(DriveClass& /*drive*/, float expectedCm) : _expectedCm(expectedCm) {}
@@ -486,7 +486,7 @@ static_assert(
  *       default here would make the mock behavioural; a thin mock captures only
  *       the caller's explicit setter calls.
  */
-class [[nodiscard]] WallStopBuilder
+class WallStopBuilder
 {
 public:
     WallStopBuilder(DriveClass& /*drive*/, float expectedCm) : _expectedCm(expectedCm) {}
@@ -603,15 +603,15 @@ public:
     void setTickCallback(void (*)()) {}
 
     // --- Fluent verbs — return recording builders (which record on destruction). ---
-    [[nodiscard]] DriveDistBuilder driveDist(float cm) { return DriveDistBuilder(*this, cm); }
-    [[nodiscard]] DriveTimeBuilder driveTime(float sec) { return DriveTimeBuilder(*this, sec); }
-    [[nodiscard]] TurnDegBuilder   turnDeg(int16_t deg) { return TurnDegBuilder(*this, deg); }
-    [[nodiscard]] TurnToYawBuilder turnToYaw(int16_t yaw) { return TurnToYawBuilder(*this, yaw); }
-    [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm)
+    DriveDistBuilder driveDist(float cm) { return DriveDistBuilder(*this, cm); }
+    DriveTimeBuilder driveTime(float sec) { return DriveTimeBuilder(*this, sec); }
+    TurnDegBuilder   turnDeg(int16_t deg) { return TurnDegBuilder(*this, deg); }
+    TurnToYawBuilder turnToYaw(int16_t yaw) { return TurnToYawBuilder(*this, yaw); }
+    StopAtLineBuilder stopAtLine(float expectedCm)
     {
         return StopAtLineBuilder(*this, expectedCm);
     }
-    [[nodiscard]] WallStopBuilder wallStop(float expectedCm)
+    WallStopBuilder wallStop(float expectedCm)
     {
         return WallStopBuilder(*this, expectedCm);
     }
