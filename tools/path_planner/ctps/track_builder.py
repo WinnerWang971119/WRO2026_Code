@@ -412,10 +412,13 @@ _RESIDUAL_DRIFT_EPS_CM: float = 1e-6
 
 #: Goto-hop primitive tags that render as a LINE-follow advance — cruise
 #: defaults to ``ConfigLine::CRUISE_SPEED`` (the follow-phase speed). Covers the
-#: forward follows, both pass-through variants, the REAR line/projection
-#: follows, and the line-backed return seek. (``ACT_LINE_OVERSHOOT`` /
-#: ``ACT_LINE_PASS`` are the roll-onto-node step handled with the distance-gated
-#: stop family below.)
+#: forward follows, both pass-through variants, and the REAR line/projection
+#: follows. (``ACT_LINE_OVERSHOOT`` / ``ACT_LINE_PASS`` are the roll-onto-node
+#: step handled with the distance-gated stop family below. ``ACT_RETURN_STOP_AT_LINE``
+#: — the line-backed return seek — is deliberately EXCLUDED: issue #157 renders it
+#: at ``PIPELINE_CONFIG.speed`` via :data:`_RETURN_DRIVE_TAGS` instead, matching
+#: firmware's ``_dispatchReturnMoveAfterTurn`` rather than the un-tiered line
+#: cruise.)
 _LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
     {
         ACT_FOLLOW_INT,
@@ -424,7 +427,6 @@ _LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
         ACT_LINE_REVERSE,
         ACT_PROJECTION_REVERSE,
         ACT_PROJECTION_REVERSE_PASS,
-        ACT_RETURN_STOP_AT_LINE,
     }
 )
 
@@ -500,14 +502,25 @@ _BLIND_TAGS: frozenset[str] = frozenset(
 #: :class:`SpeedTier` (ADR-064, issue #97) — the forward / reverse blind
 #: dead-reckon nav hops and the forward / rear line seeks. These are the ONLY
 #: tags for which a LONE (non-chain) hop's cruise is tier-resolved from the edge
-#: (:func:`_primitive_drive_speed`'s ``speed_tier``). Deliberately EXCLUDES:
+#: (:func:`_primitive_drive_speed`'s ``speed_tier``). Deliberately EXCLUDES three
+#: families, each rendered a different way (issue #157):
 #:   * ``ACT_LINE_OVERSHOOT`` — a LINE-family roll-past; the CTPS models the LINE
 #:     follow itself at ``ConfigLine::CRUISE_SPEED`` (un-tiered, a pre-existing sim
 #:     limitation), so tier-adjusting only the overshoot would desync it from its
 #:     own follow leg. (Both stay at the ``SPEED_NORMAL``-valued line cruise.)
-#:   * ``ACT_RETURN_FORWARD`` / ``ACT_WALL_DEPART`` — return / recovery moves the
-#:     firmware drives at ``PIPELINE_CONFIG.speed`` (no ``EdgeInfo`` to resolve),
-#:     not a per-edge tier.
+#:   * ``ACT_RETURN_FORWARD`` / ``ACT_RETURN_STOP_AT_LINE`` — the return-to-node
+#:     prologue's dead-reckon / line-seek moves (:data:`_RETURN_DRIVE_TAGS`). The
+#:     firmware's ``_dispatchReturnMoveAfterTurn`` drives BOTH at
+#:     ``PIPELINE_CONFIG.speed`` — the MISSION-WIDE tier, since a synthetic return
+#:     hop has no ``EdgeInfo`` to per-edge-resolve. :func:`_primitive_drive_speed`
+#:     intercepts these directly via ``pipeline_cfg.speed``, bypassing this
+#:     per-edge set entirely.
+#:   * ``ACT_WALL_DEPART`` — the wall-departure recovery move. Unlike the return
+#:     moves above, the firmware drives this at the Drive ``NORMAL`` default with
+#:     NO ``.setPower`` call at all — neither per-edge NOR
+#:     ``PIPELINE_CONFIG.speed``. CTPS mirrors that by leaving it out of every
+#:     speed set: it falls through :func:`_primitive_drive_speed` to the
+#:     ``SPEED_NORMAL`` fallback, unaffected by ``pipeline_cfg``.
 #: A chained hop never uses this path (it consumes the recorded per-hop suffix via
 #: ``_resolve_blind_run_profile``), so only cold-start lone hops / seeks resolve here.
 _PER_EDGE_SPEED_TAGS: frozenset[str] = frozenset(
@@ -596,7 +609,7 @@ def _blind_cruise_pwm(cfg, speed_tier: Optional[SpeedTier]) -> int:
 
 
 def _primitive_drive_speed(
-    tag: str, speed_tier: Optional[SpeedTier] = None
+    tag: str, pipeline_cfg: PipelineConfig, speed_tier: Optional[SpeedTier] = None
 ) -> Tuple[int, int, int, bool]:
     """Resolve a goto-hop primitive's effective ``(cruise, start, end, profiled)``.
 
@@ -604,6 +617,16 @@ def _primitive_drive_speed(
     its cruise from the parsed firmware Config (plan Decisions, the per-kind
     cruise table):
 
+    * the return-to-node prologue (:data:`_RETURN_DRIVE_TAGS` —
+      ``ACT_RETURN_FORWARD`` / ``ACT_RETURN_STOP_AT_LINE``) -> ``pipeline_cfg``'s
+      MISSION-WIDE :class:`SpeedTier` PWM (issue #157 — matches firmware
+      ``_dispatchReturnMoveAfterTurn``'s ``PIPELINE_CONFIG.speed`` dispatch; a
+      synthetic return hop has no ``EdgeInfo`` to per-edge-resolve), ramping
+      cruise -> ``PWM_MIN_MAGNITUDE`` then braking (``end == 0``).
+      ``ACT_WALL_DEPART`` is deliberately NOT in this family — the firmware
+      drives it at the Drive ``NORMAL`` default with no ``.setPower`` call at
+      all, so it falls through to the generic ``SPEED_NORMAL`` branch below,
+      unaffected by ``pipeline_cfg``.
     * collinear PASS (:data:`_PASS_TAGS`) -> the follow cruise
       (``ConfigLine::CRUISE_SPEED``) held THROUGH the node: ``end == cruise``,
       NO brake. A pass-through is a non-braking boundary (the firmware holds
@@ -624,7 +647,9 @@ def _primitive_drive_speed(
       :class:`SpeedTier` PWM (``speed_tier``; ADR-064 — the firmware blind cruise
       ``presetToPwm(speedTierToPreset(_resolveSpeed(edge)))``) T-shape.
       ``NORMAL`` / absent stays the ``SPEED_NORMAL`` default (70), byte-identical
-      to the pre-ADR-064 render.
+      to the pre-ADR-064 render. (``ACT_RETURN_FORWARD`` is nominally a member of
+      :data:`_BLIND_TAGS` too, but the return-tag branch above intercepts it
+      first, so it never reaches this generic per-edge-tier path.)
 
     ``start`` is the sign-by-direction ``TSHAPE_START_SPEED`` seed (the sign of
     ``cruise`` carries the drive direction into the ramp); ``end`` is 0 (brake to
@@ -643,6 +668,10 @@ def _primitive_drive_speed(
     forward — the visible ramp shape is identical either way.
 
     :param tag: the primitive action tag (``primitive[0]``).
+    :param pipeline_cfg: the field-sourced :class:`PipelineConfig` resolved ONCE
+        in :func:`build` (``PipelineConfig.from_field_data``). Consumed ONLY by
+        the return-to-node branch (:data:`_RETURN_DRIVE_TAGS`); every other
+        branch — including ``ACT_WALL_DEPART`` — is unaffected by it.
     :param speed_tier: this hop edge's resolved :class:`SpeedTier` (ADR-064), or
         ``None`` when no per-edge tier applies. Consumed ONLY by the BLIND /
         stop-gated seek branches (the two families that carried the hardcoded
@@ -654,6 +683,18 @@ def _primitive_drive_speed(
     cfg = default_config()
     start = int(cfg.start_speed)
 
+    if tag in _RETURN_DRIVE_TAGS:
+        # Return-to-node prologue (issue #157): the firmware's
+        # _dispatchReturnMoveAfterTurn drives BOTH the dead-reckon
+        # (ACT_RETURN_FORWARD) and line-seek (ACT_RETURN_STOP_AT_LINE) return
+        # moves at PIPELINE_CONFIG.speed — the mission-wide tier, not a
+        # per-edge resolution (a synthetic return hop has no EdgeInfo).
+        # ACT_WALL_DEPART is intentionally excluded from _RETURN_DRIVE_TAGS:
+        # the firmware drives it at the Drive NORMAL default with no
+        # .setPower call, so it falls through to the generic SPEED_NORMAL
+        # path below instead.
+        cruise = _blind_cruise_pwm(cfg, pipeline_cfg.speed)
+        return cruise, start, 0, True
     if tag == ACT_WALL_STOP:
         # Constant-push wall seek: a flat crawl at WALL_STOP_PUSH_PWM, no ramp.
         return int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), False
@@ -2087,7 +2128,7 @@ def build(trace: Trace, field_data) -> Track:
                                     snap.x_cm,
                                     snap.y_cm,
                                     snap.heading_deg,
-                                    _primitive_drive_speed(tag),
+                                    _primitive_drive_speed(tag, pipeline_cfg),
                                     braked,
                                     chain_speeds=(start_pwm, end_pwm),
                                 )
@@ -2157,7 +2198,7 @@ def build(trace: Trace, field_data) -> Track:
                                     snap.x_cm,
                                     snap.y_cm,
                                     snap.heading_deg,
-                                    _primitive_drive_speed(tag, hop_speed_tier),
+                                    _primitive_drive_speed(tag, pipeline_cfg, hop_speed_tier),
                                     braked,
                                     rear_led=tag in _REAR_LED_STOP_TAGS,
                                 )

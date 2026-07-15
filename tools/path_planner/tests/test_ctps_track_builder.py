@@ -106,6 +106,17 @@ Boundary-invariant + return/declare rebaseline (CTPS motion-profile plan, T13):
   offset clear, heading preserved) and emits a marker; an unknown-node declare
   no-ops and renders BYTE-IDENTICAL (sha256 of the sorted-key JSON) to the
   same trace with the declare op dropped entirely (AC8).
+
+CTPS RETURN-move speed (issue #157):
+
+* **TC17** — under a field-sourced ``PIPELINE_SPEED: FAST``, both
+  ``ACT_RETURN_FORWARD`` (dead-reckon return) and ``ACT_RETURN_STOP_AT_LINE``
+  (line-seek return) render their cruise plateau at the FAST PWM
+  (``cfg.speed_fast``, matching firmware's ``_dispatchReturnMoveAfterTurn``
+  dispatching both at ``PIPELINE_CONFIG.speed``), while ``ACT_WALL_DEPART``
+  stays at the un-tiered ``SPEED_NORMAL`` default (matching firmware's
+  ``.setPower``-free wall-departure move) — proving the three tags are no
+  longer conflated.
 """
 
 from __future__ import annotations
@@ -115,14 +126,17 @@ import json
 import warnings
 from math import ceil, hypot
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from tools.path_planner.compiler import ACT_TURN_REL
-from tools.path_planner.ctps.config import ARC_STEP_DEG
+from tools.path_planner.ctps.config import ARC_STEP_DEG, SCALE_CM_S_PER_PWM
+from tools.path_planner.ctps.profile import default_config
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
 from tools.path_planner.graph_builder import build_graph
+from tools.path_planner.pipeline_config import SpeedTier
 from tools.path_planner.planner import (
     BlindDecayParams,
     compute_all_pairs_next_hop,
@@ -2123,3 +2137,224 @@ def test_tc11_unknown_node_declare_is_byte_identical_to_declare_free_trace():
         ev for ev in track_unknown.events if ev["type"] == "declare_position"
     ] == []
     assert _track_hash(track_free) == _track_hash(track_unknown)
+
+
+# ===========================================================================
+# TC17 — CTPS RETURN-move speed (issue #157)
+#
+# Covers: under a field-sourced ``PIPELINE_SPEED: FAST``, both return-to-node
+# prologue tags (``ACT_RETURN_FORWARD`` dead-reckon, ``ACT_RETURN_STOP_AT_LINE``
+# line-seek) render their cruise plateau at the FAST PWM, matching firmware's
+# ``_dispatchReturnMoveAfterTurn`` (both dispatched at ``PIPELINE_CONFIG.speed``);
+# ``ACT_WALL_DEPART`` stays at the un-tiered ``SPEED_NORMAL`` default, matching
+# firmware's ``.setPower``-free wall-departure move.
+#
+# Two hand-rolled minimal fields (not the toy field, which has no reset node and
+# whose START_NODE is always BLIND) drive :func:`build` directly:
+#
+# * ``_return_speed_field_data`` — a 2-node ``S``(blind, start) -> ``A``(line)
+#   chain. A 45 cm raw ``driveDist`` off ``S`` before ``goto A`` triggers the
+#   dead-reckon return (``S`` is BLIND); a second 45 cm raw ``driveDist`` off
+#   ``A`` before a second ``goto A`` triggers the line-seek return (``A`` is
+#   LINE-typed and 45 cm clears ``LINE_SENSOR_AXLE_OFFSET_CM``). 45 cm is chosen
+#   so the return's own T-shape profile is a genuine full trapezoid (not
+#   triangular) at cruise=90 -- a short return never reaches the nominal cruise
+#   PWM, which would make the velocity assertion fail for a geometric reason
+#   unrelated to the fix under test.
+# * ``_wall_depart_field_data`` — a 2-node ``S``(blind, start) -> ``R``(reset)
+#   chain with a single ``goto R``: the arrival auto-fires the WALL_STOP ->
+#   REANCHOR -> WALL_DEPART interlude (no raw drive needed). The 60 cm wall
+#   standoff nets a WALL_DEPART distance of 52 cm (standoff -
+#   ``WALL_CONTACT_OFFSET_CM``), comfortably long enough for a full trapezoid at
+#   cruise=70 too.
+#
+# Both fields set ``PIPELINE_SPEED = SpeedTier.FAST`` directly (a Python
+# fixture may author the enum instance, not just the string name -- see
+# ``validator._validate_pipeline_config``), so the ONLY per-edge / mission-wide
+# speed knob active is the mission-wide FAST tier: no ``EDGES`` overrides exist
+# on either field, so any segment resolving a tier at all resolves FAST.
+# ===========================================================================
+
+#: Velocity match tolerance (cm/s) for the cruise-plateau speed assertions
+#: below, mirroring ``test_ctps_run_grouper.py``'s ``_VEL_TOL``.
+_TC17_VEL_TOL: float = 1e-6
+
+
+def _return_speed_field_data() -> SimpleNamespace:
+    """A 2-node BLIND(start) -> LINE field that exercises both return tags.
+
+    :return: a validator-clean :class:`SimpleNamespace` field-data object.
+    """
+    return SimpleNamespace(
+        FIELD_MM=(3000.0, 2000.0),
+        MAP_PNG="maps/map.png",
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        NODES={"S": (0.0, 0.0), "A": (60.0, 0.0)},
+        NODE_TYPES={"S": "blind", "A": "line"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[("S", "A")],
+        OBSTACLES=[],
+        PIVOT_TURNS=[],
+        RESET_NODES={},
+        EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        PIPELINE_SPEED=SpeedTier.FAST,
+    )
+
+
+def _wall_depart_field_data() -> SimpleNamespace:
+    """A 2-node BLIND(start) -> RESET field that exercises ``ACT_WALL_DEPART``.
+
+    :return: a validator-clean :class:`SimpleNamespace` field-data object.
+    """
+    return SimpleNamespace(
+        FIELD_MM=(3000.0, 2000.0),
+        MAP_PNG="maps/map.png",
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        NODES={"S": (0.0, 0.0), "R": (180.0, 0.0)},
+        NODE_TYPES={"S": "blind", "R": "reset"},
+        LINE_SEGMENTS=[],
+        BLIND_EDGES=[("S", "R")],
+        OBSTACLES=[],
+        PIVOT_TURNS=[],
+        RESET_NODES={"R": {"axis": "x", "wall_coord": 120.0, "facing": 0.0}},
+        EDGES=[],
+        BLIND_PROJECTION_AUTO_SEEK=True,
+        PIPELINE_SPEED=SpeedTier.FAST,
+    )
+
+
+def _max_inbound_velocity(keyframes, start_idx: int, end_idx: int) -> float:
+    """Return the fastest inbound speed (cm/s) among ``keyframes[start_idx:end_idx]``.
+
+    A ramped T-shape segment's per-step average speed rises through the accel
+    ramp, holds flat across the cruise plateau, then falls through the decel
+    ramp -- so the MAXIMUM inbound speed in the slice equals the cruise PWM's
+    speed exactly (``SCALE_CM_S_PER_PWM * cruise_pwm``), regardless of exactly
+    where the interior ramp samples land. This avoids hand-picking the plateau
+    keyframe pair by index or position.
+
+    :param keyframes: the full ``track.keyframes`` list.
+    :param start_idx: index of the segment's first (entry) keyframe.
+    :param end_idx: index of the segment's last (landing) keyframe.
+    :return: the fastest inbound speed observed between consecutive keyframes
+        in ``[start_idx, end_idx]``; ``0.0`` if the slice is empty/degenerate.
+    """
+    speeds = []
+    for a, b in zip(keyframes[start_idx:end_idx], keyframes[start_idx + 1 : end_idx + 1]):
+        dt = b["t"] - a["t"]
+        dist = hypot(b["x"] - a["x"], b["y"] - a["y"])
+        speeds.append(dist / dt if dt > 1e-12 else 0.0)
+    return max(speeds) if speeds else 0.0
+
+
+def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
+    """TC17 (issue #157): both return tags render at FAST; wall-depart stays NORMAL.
+
+    Two independent builds, each isolating one primitive family so no boundary
+    pose repeats ambiguously within a single build:
+
+    1. ``_return_speed_field_data`` drives ``drive driveDist 45`` -> ``goto A``
+       -> ``drive driveDist 45`` -> ``goto A``. The first ``goto`` triggers
+       ``ACT_RETURN_FORWARD`` (dead-reckon, ``S`` is BLIND); the second
+       triggers ``ACT_RETURN_STOP_AT_LINE`` (line-seek, ``A`` is LINE-typed and
+       re-anchors back onto itself, so the trailing ``goto A`` needs no further
+       hop). Both must render their cruise plateau at ``cfg.speed_fast`` (90),
+       matching ``PIPELINE_SPEED: FAST`` -- pre-fix, both rendered at
+       ``cfg.speed_normal`` (70) instead, conflating the return moves with the
+       un-tiered wall-depart default.
+    2. ``_wall_depart_field_data`` drives a single ``goto R`` (``R`` typed
+       ``reset``): the arrival auto-fires WALL_STOP -> REANCHOR -> WALL_DEPART.
+       ``ACT_WALL_DEPART`` must STILL render at ``cfg.speed_normal`` (70) despite
+       the SAME ``PIPELINE_SPEED: FAST`` field -- it mirrors the firmware's
+       ``.setPower``-free wall-departure move, which never consults
+       ``PIPELINE_CONFIG.speed`` at all.
+    """
+    cfg = default_config()
+    fast_speed = SCALE_CM_S_PER_PWM * cfg.speed_fast
+    normal_speed = SCALE_CM_S_PER_PWM * cfg.speed_normal
+    # Sanity-pin the current firmware Config values the plan cites (90 / 70) so
+    # a future retune of ConfigDrive.h is caught here rather than silently
+    # changing what "renders at 90" means.
+    assert cfg.speed_fast == 90
+    assert cfg.speed_normal == 70
+
+    # -- Return tags: ACT_RETURN_FORWARD (dead-reckon) + ACT_RETURN_STOP_AT_LINE (line-seek) --
+    return_trace = Trace(
+        schema_version=1,
+        start_node="S",
+        start_heading_deg=0.0,
+        build_error=False,
+        commands=[
+            Command(seq=0, op="drive", method="driveDist", cm=45.0),
+            Command(seq=1, op="goto", target="A"),
+            Command(seq=2, op="drive", method="driveDist", cm=45.0),
+            Command(seq=3, op="goto", target="A"),
+        ],
+    )
+    return_track = _build_quiet(return_trace, _return_speed_field_data())
+
+    # Boundary poses, in chronological order: the return-forward span (facing
+    # 180 after the inverse-offset pre-turn, S's exact node coordinate at the
+    # far end), then the return-stop-at-line span (facing 0 after ITS
+    # inverse-offset pre-turn, A's exact node coordinate at the far end).
+    # ``_boundary_indices`` matches poses IN ORDER via an advancing cursor, so
+    # this list alone disambiguates every coordinate from any other occurrence
+    # of the same (x, y) at a different heading or trace position.
+    return_boundaries = _boundary_indices(
+        return_track.keyframes,
+        [
+            (45.0, 0.0, 180.0),  # return_forward: entry (post pre-turn)
+            (0.0, 0.0, 180.0),  # return_forward: landing (S's node coordinate)
+            (15.0, 0.0, 0.0),  # return_stop_at_line: entry (post pre-turn)
+            (60.0, 0.0, 0.0),  # return_stop_at_line: landing (A's node coordinate)
+        ],
+    )
+    return_forward_v = _max_inbound_velocity(
+        return_track.keyframes, return_boundaries[0], return_boundaries[1]
+    )
+    return_stop_at_line_v = _max_inbound_velocity(
+        return_track.keyframes, return_boundaries[2], return_boundaries[3]
+    )
+    assert return_forward_v == pytest.approx(fast_speed, abs=_TC17_VEL_TOL)
+    assert return_stop_at_line_v == pytest.approx(fast_speed, abs=_TC17_VEL_TOL)
+
+    # -- ACT_WALL_DEPART: unaffected by PIPELINE_SPEED, stays NORMAL --
+    wall_trace = Trace(
+        schema_version=1,
+        start_node="S",
+        start_heading_deg=0.0,
+        build_error=False,
+        commands=[Command(seq=0, op="goto", target="R")],
+    )
+    wall_track = _build_quiet(wall_trace, _wall_depart_field_data())
+
+    # (128, 0, 0) is the unique REANCHOR-landed axle coordinate (wall_coord 120
+    # + WALL_CONTACT_OFFSET_CM 8); (180, 0, 0) is R's node coordinate, which
+    # ALSO appears earlier (the inbound arrival, before WALL_STOP runs) -- the
+    # ordered cursor in ``_boundary_indices`` skips that earlier occurrence and
+    # lands on WALL_DEPART's own landing, the later one.
+    wall_boundaries = _boundary_indices(
+        wall_track.keyframes,
+        [
+            (128.0, 0.0, 0.0),  # wall_depart: entry (post REANCHOR)
+            (180.0, 0.0, 0.0),  # wall_depart: landing (R's node coordinate)
+        ],
+    )
+    wall_depart_v = _max_inbound_velocity(
+        wall_track.keyframes, wall_boundaries[0], wall_boundaries[1]
+    )
+    assert wall_depart_v == pytest.approx(normal_speed, abs=_TC17_VEL_TOL)
+    assert wall_depart_v != pytest.approx(fast_speed, abs=_TC17_VEL_TOL)
