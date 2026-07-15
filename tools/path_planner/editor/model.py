@@ -107,20 +107,21 @@ class FieldModel:
         geometry. Identity is ``(type, u, v)`` (a directed pair is not unique
         across types). Defaults to an empty list when the JSON omits the
         optional ``EDGES`` key (absent stays absent).
-    :param pipeline_line_mode: Field-sourced ``PIPELINE_CONFIG`` default for the
-        line-following primitive mode, as a ``LineMode`` member name (string
-        tag) or ``None`` to inherit the ``pipeline_config.py`` default. Carried
-        through both serialization surfaces so the editor can author it;
-        ``None`` round-trips as an absent JSON key (absent stays absent).
+    :param pipeline_speed: Field-sourced ``PIPELINE_CONFIG`` default for the
+        drive speed tier (applies to both LINE and BLIND edges), as a
+        ``SpeedTier`` member name (string tag) or ``None`` to inherit the
+        ``pipeline_config.py`` default. Carried through both serialization
+        surfaces so the editor can author it; ``None`` round-trips as an
+        absent JSON key (absent stays absent).
     :param pipeline_blind_mode: Field-sourced ``PIPELINE_CONFIG`` default for
         the blind-drive primitive mode, as a ``BlindMode`` member name or
-        ``None`` (inherit). Absent-stays-absent like ``pipeline_line_mode``.
+        ``None`` (inherit). Absent-stays-absent like ``pipeline_speed``.
     :param pipeline_turn_mode: Field-sourced ``PIPELINE_CONFIG`` default for the
         turn mode, as a ``TurnMode`` member name or ``None`` (inherit).
-        Absent-stays-absent like ``pipeline_line_mode``.
+        Absent-stays-absent like ``pipeline_speed``.
     :param pipeline_direction_mode: Field-sourced ``PIPELINE_CONFIG`` default
         for the direction mode, as a ``DirectionMode`` member name or ``None``
-        (inherit). Absent-stays-absent like ``pipeline_line_mode``.
+        (inherit). Absent-stays-absent like ``pipeline_speed``.
     """
 
     # Ordered list of top-level JSON keys.  ``to_json_dict`` produces keys in
@@ -143,7 +144,7 @@ class FieldModel:
         "pivot_turns",
         "RESET_NODES",
         "blind_projection_auto_seek",
-        "pipeline_line_mode",
+        "pipeline_speed",
         "pipeline_blind_mode",
         "pipeline_turn_mode",
         "pipeline_direction_mode",
@@ -188,14 +189,14 @@ class FieldModel:
     # existing call sites that build a FieldModel without overrides stay valid;
     # absent in JSON stays absent on save.
     edges: list[dict] = field(default_factory=list)
-    # Optional field-sourced PIPELINE_CONFIG defaults, each a LineMode /
+    # Optional field-sourced PIPELINE_CONFIG defaults, each a SpeedTier /
     # BlindMode / TurnMode / DirectionMode member NAME (string tag) or None to
     # inherit the pipeline_config.py default. Carried through BOTH serialization
     # surfaces (the dual-serialization seam): to_module_proxy exposes them as
     # SCREAMING_SNAKE PIPELINE_* so validate() runs against the edited values,
     # and to_json_dict emits them under their snake/JSON keys. None
     # round-trips as an absent key (absent stays absent).
-    pipeline_line_mode: str | None = None
+    pipeline_speed: str | None = None
     pipeline_blind_mode: str | None = None
     pipeline_turn_mode: str | None = None
     pipeline_direction_mode: str | None = None
@@ -250,7 +251,7 @@ class FieldModel:
         self.blind_projection_auto_seek = snap.blind_projection_auto_seek
         # pipeline_* are immutable (str | None); plain assignment is enough,
         # mirroring blind_projection_auto_seek.
-        self.pipeline_line_mode = snap.pipeline_line_mode
+        self.pipeline_speed = snap.pipeline_speed
         self.pipeline_blind_mode = snap.pipeline_blind_mode
         self.pipeline_turn_mode = snap.pipeline_turn_mode
         self.pipeline_direction_mode = snap.pipeline_direction_mode
@@ -292,7 +293,7 @@ class FieldModel:
         ``pivot_turns``     ``pivot_turns``
         ``RESET_NODES``     ``reset_nodes``
         ``EDGES``           ``edges``
-        ``pipeline_line_mode`` ``pipeline_line_mode``
+        ``pipeline_speed``  ``pipeline_speed``
         ``pipeline_blind_mode`` ``pipeline_blind_mode``
         ``pipeline_turn_mode`` ``pipeline_turn_mode``
         ``pipeline_direction_mode`` ``pipeline_direction_mode``
@@ -355,7 +356,7 @@ class FieldModel:
             # every key as-is (no normalization, no geometry drop) so a
             # geometry-carrying hand-authored entry round-trips byte-identically.
             edges=[copy.deepcopy(entry) for entry in data.get("EDGES", [])],
-            pipeline_line_mode=data.get("pipeline_line_mode"),
+            pipeline_speed=data.get("pipeline_speed"),
             pipeline_blind_mode=data.get("pipeline_blind_mode"),
             pipeline_turn_mode=data.get("pipeline_turn_mode"),
             pipeline_direction_mode=data.get("pipeline_direction_mode"),
@@ -384,12 +385,12 @@ class FieldModel:
         ``getattr(..., 'EDGES', None)`` early-return -- the dual-serialization
         trap). Exposed verbatim so the validator sees exactly what is saved.
 
-        ``PIPELINE_LINE_MODE`` / ``PIPELINE_BLIND_MODE`` / ``PIPELINE_TURN_MODE``
+        ``PIPELINE_SPEED`` / ``PIPELINE_BLIND_MODE`` / ``PIPELINE_TURN_MODE``
         / ``PIPELINE_DIRECTION_MODE`` ARE exposed for the same reason: the model
         persists the four ``pipeline_*`` keys via :meth:`to_json_dict`, so the
         proxy must carry their SCREAMING_SNAKE forms or
         :func:`validator._validate_pipeline_config` (which reads
-        ``getattr(field_data, 'PIPELINE_LINE_MODE', None)`` etc.) never checks
+        ``getattr(field_data, 'PIPELINE_SPEED', None)`` etc.) never checks
         the edited values -- the same dual-serialization trap.
 
         ``PIVOT_TURNS`` IS exposed: the model persists it via
@@ -436,7 +437,7 @@ class FieldModel:
             RESET_NODES=self.reset_nodes,
             BLIND_PROJECTION_AUTO_SEEK=self.blind_projection_auto_seek,
             EDGES=self.edges,
-            PIPELINE_LINE_MODE=self.pipeline_line_mode,
+            PIPELINE_SPEED=self.pipeline_speed,
             PIPELINE_BLIND_MODE=self.pipeline_blind_mode,
             PIPELINE_TURN_MODE=self.pipeline_turn_mode,
             PIPELINE_DIRECTION_MODE=self.pipeline_direction_mode,
@@ -540,8 +541,8 @@ class FieldModel:
         # OPTIONAL pipeline defaults: emit each only when authored (not None),
         # in canonical key order, so an unauthored field omits the key entirely
         # (absent stays absent) -- no spurious null diff.
-        if self.pipeline_line_mode is not None:
-            result["pipeline_line_mode"] = self.pipeline_line_mode
+        if self.pipeline_speed is not None:
+            result["pipeline_speed"] = self.pipeline_speed
         if self.pipeline_blind_mode is not None:
             result["pipeline_blind_mode"] = self.pipeline_blind_mode
         if self.pipeline_turn_mode is not None:

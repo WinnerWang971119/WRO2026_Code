@@ -117,26 +117,17 @@ set(COMMON_INCLUDES
 # host compiler raises but Arduino's avr-g++ doesn't.
 # -----------------------------------------------------------------------------------------
 if(MSVC)
-    add_compile_options(/W3 /permissive- /wd4244 /wd4267 /wd4305 /wd4127 /wd4456 /wd4458 /wd4189 /wd4834)
+    add_compile_options(/W3 /permissive- /wd4244 /wd4267 /wd4305 /wd4127 /wd4456 /wd4458 /wd4189)
     # 4244/4267/4305 — narrowing int<->int16/float conversions (intentional in PWM clamp paths).
     # 4127 — conditional expression is constant (intentional: tShape gates).
     # 4456 — declaration hides previous local (the production code shadows `traveledCm` in two scopes).
     # 4458 — declaration hides class member (parameter / member name collisions in builder ctors).
     # 4189 — local variable initialized but not used (defensive guards like `clearedStaleEdge`).
-    # 4834 — discarding return value with [[nodiscard]] (the LineFollower fluent builder is
-    #        designed to be used as a temporary — `setEnabled(false);` is intentional usage).
 else()
-    # -Wno-unused-result / -Wno-attributes parallel MSVC's /wd4834: the
-    # LineFollower fluent builder is `[[nodiscard]]` and `setEnabled(false);` as
-    # a bare expression-statement is intentional usage. Without these flags
-    # gcc/clang emit -Wunused-result on the test mains' `resetWorld()` helper
-    # (and -Werror in a future CI tightening would break the host-compile job).
     add_compile_options(-Wall -Wextra
                         -Wno-narrowing
                         -Wno-sign-compare
-                        -Wno-unused-but-set-variable
-                        -Wno-unused-result
-                        -Wno-attributes)
+                        -Wno-unused-but-set-variable)
 endif()
 
 # -----------------------------------------------------------------------------------------
@@ -297,6 +288,29 @@ function(add_forced_reset_routes_force_include target)
         # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
         target_compile_options(${target} PRIVATE
             "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.h"
+        )
+    endif()
+endfunction()
+
+# -----------------------------------------------------------------------------------------
+# Force-include the per-edge speed/mode shadow routes table
+# (`fixtures/routes_speed_chain.h`) BEFORE any source-file parsing — the same shadow trick
+# as `add_forced_reset_routes_force_include`, pointed at a small HAND-AUTHORED table carrying
+# the per-edge `speed`/`mode`/`stop_at_line` combinations the single-sourced `routes_fixture`
+# does not author (a same-tier SYNC/GYRO chain, a mid-run tier boundary, a seek-with-speed,
+# and a FAST-line -> SLOW-blind pass-through). NOT single-sourced from `field_fixture.py`,
+# NOT governed by ADR-050 (issues #97/#99, ADR-064). Used by exactly ONE target:
+# `test_path_tracker_speed_chain`.
+# -----------------------------------------------------------------------------------------
+function(add_speed_chain_routes_force_include target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE
+            "/FI${FIXTURE_ROUTES_DIR}/routes_speed_chain.h"
+        )
+    else()
+        # `SHELL:` keeps the `-include <path>` pair atomic — see `add_mock_force_includes`.
+        target_compile_options(${target} PRIVATE
+            "SHELL:-include ${FIXTURE_ROUTES_DIR}/routes_speed_chain.h"
         )
     endif()
 endfunction()
@@ -953,11 +967,16 @@ target_include_directories(test_vision PRIVATE ${COMMON_INCLUDES})
 # cell c -> slot (11 - c): every slot 0..11 referenced once, so ConfigChecks.h's
 # uniqueness/range static_asserts still hold. Mirrors the `PATH_PASS_THROUGH_ENABLED_DEFAULT`
 # / `BELT_M_ID_DEFAULT` compile-definition override idiom used by the sibling targets.
-# The braces/commas are wrapped in CMake's `[=[ ... ]=]` bracket-argument so CMake passes the
-# whole brace-init list as one definition value (quoted into the vcxproj for MSVC, escaped for
-# GNU/Clang) without splitting on the commas.
+#
+# Pass a SCALAR selector, NOT the brace-init list itself. CMake emits a `-D...={11,10,...}`
+# value unquoted on the command line, and macOS `/bin/sh` (bash) brace-expands `{a,b,c}` into
+# separate `-D` flags — the last wins (`=0`), so the array initializer becomes `= 0` and the
+# build breaks (Linux `/bin/sh` is dash and does not expand, which is why CI never caught it).
+# The scalar flag carries no brace/comma, so it survives every shell; ConfigVision.h maps it to
+# the reversed list. A direct `-DVISION_CELL_TO_SLOT_DEFAULT={...}` still works where the shell
+# does not brace-expand.
 target_compile_definitions(test_vision PRIVATE
-    [=[VISION_CELL_TO_SLOT_DEFAULT={11,10,9,8,7,6,5,4,3,2,1,0}]=])
+    VISION_CELL_TO_SLOT_REVERSE_FOR_TEST)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(test_vision PRIVATE -fsanitize=address,undefined)
@@ -2132,6 +2151,36 @@ target_include_directories(test_path_tracker_blind_chain_distance_cap PRIVATE
 add_fixture_routes_force_include(test_path_tracker_blind_chain_distance_cap)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_blind_chain_distance_cap)
 add_test(NAME path_tracker_blind_chain_distance_cap COMMAND test_path_tracker_blind_chain_distance_cap)
+
+# =========================================================================================
+# Test executable — per-edge speed axis FSM (issues #97 + #99, ADR-064; T14host TC10/TC14).
+#
+# Same shared issue-#106 real-link recipe as the blind-chain targets above (real
+# `PathTracker.cpp` + `Drive.cpp` + `Localization.cpp` + `YawSource.cpp` + `path_mocks.cpp`,
+# `${SKETCH_DIR}`-FIRST include order, then `add_path_force_includes`), with ONE swap: it
+# links the hand-authored `routes_speed_chain.cpp` shadow table and force-includes
+# `routes_speed_chain.h` FIRST (guard `ROUTES_H`) instead of `routes_fixture.{h,cpp}`. That
+# table carries the per-edge `speed`/`mode`/`stop_at_line` combinations the single-sourced
+# `routes_fixture` does not author, so the SPEED-tier chain gate (a same-tier SYNC<->GYRO run
+# still chains; a tier boundary breaks it), the per-edge seek cruise speed, and the
+# pass-through entry seed clamp can be driven through the REAL FSM. Nodes resolve BY NAME.
+# HOP_SETTLE_MS=0 keeps the dispatch tick sequence unperturbed by the ADR-061 settle dwell.
+# =========================================================================================
+add_executable(test_path_tracker_speed_chain
+    ${TEST_DIR}/test_path_tracker_speed_chain.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_speed_chain.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_speed_chain PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+target_compile_definitions(test_path_tracker_speed_chain PRIVATE HOP_SETTLE_MS_DEFAULT=0 PATH_BLIND_CHAIN_ENABLED_DEFAULT=1)
+add_speed_chain_routes_force_include(test_path_tracker_speed_chain)   # FIRST (ROUTES_H)
+add_path_force_includes(test_path_tracker_speed_chain)                # EventTrace + path_mocks peripherals
+add_test(NAME path_tracker_speed_chain COMMAND test_path_tracker_speed_chain)
 
 # =========================================================================================
 # Test executable #27 — ADR-061 post-stop settle dwell eligibility tether (T4; AC8 firmware

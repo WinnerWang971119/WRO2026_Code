@@ -47,7 +47,7 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
-    LineMode,
+    SpeedTier,
     StopAtLineMode,
 )
 from tools.path_planner.planner import (
@@ -102,8 +102,8 @@ from tools.path_planner.sim.runtime import (
     resolve_blind_mode,
     resolve_direction,
     resolve_edge_dispatch,
-    resolve_line_mode,
     resolve_return_action,
+    resolve_speed,
     resolve_stop_at_line,
 )
 from tools.path_planner.sim.parity import (
@@ -656,28 +656,30 @@ def test_sim_blind_edge_emits_forward_no_overshoot():
 
 
 # ---------------------------------------------------------------------------
-# TC11 — per-edge override resolution (LineMode / BlindMode / TurnMode)
-# (issue #64 retired ProjectionMode along with the projection EDGE type)
+# TC11 — per-edge override resolution (SpeedTier / BlindMode / TurnMode)
+# (issue #64 retired ProjectionMode along with the projection EDGE type; ADR-064
+# renamed the LINE/BLIND-shared speed axis from LineMode -> SpeedTier, keyed on
+# the ``speed`` edge attribute, and resolve_blind_mode now reads ``mode``.)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_line_mode_default_falls_back_to_pipeline_config():
-    """resolve_line_mode: missing/DEFAULT override -> PIPELINE_CONFIG.line, concrete -> as-is."""
-    # Edge with no primitive_mode attr -> fallback.
+def test_resolve_speed_default_falls_back_to_pipeline_config():
+    """resolve_speed: missing/DEFAULT override -> PIPELINE_CONFIG.speed, concrete -> as-is."""
+    # Edge with no speed attr -> fallback.
     edge_missing: dict = {}
-    assert resolve_line_mode(edge_missing) == PIPELINE_CONFIG.line
+    assert resolve_speed(edge_missing) == PIPELINE_CONFIG.speed
 
     # Edge with DEFAULT sentinel -> fallback.
-    edge_default = {"primitive_mode": LineMode.DEFAULT}
-    assert resolve_line_mode(edge_default) == PIPELINE_CONFIG.line
+    edge_default = {"speed": SpeedTier.DEFAULT}
+    assert resolve_speed(edge_default) == PIPELINE_CONFIG.speed
 
     # Edge with concrete value -> returned as-is.
-    edge_fast = {"primitive_mode": LineMode.FAST}
-    assert resolve_line_mode(edge_fast) == LineMode.FAST
+    edge_fast = {"speed": SpeedTier.FAST}
+    assert resolve_speed(edge_fast) == SpeedTier.FAST
 
     # Raw int value -> coerced to enum, returned as-is.
-    edge_raw_int = {"primitive_mode": int(LineMode.SLOW)}
-    assert resolve_line_mode(edge_raw_int) == LineMode.SLOW
+    edge_raw_int = {"speed": int(SpeedTier.SLOW)}
+    assert resolve_speed(edge_raw_int) == SpeedTier.SLOW
 
 
 def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
@@ -685,13 +687,13 @@ def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
     edge_missing: dict = {}
     assert resolve_blind_mode(edge_missing) == PIPELINE_CONFIG.blind
 
-    edge_default = {"primitive_mode": BlindMode.DEFAULT}
+    edge_default = {"mode": BlindMode.DEFAULT}
     assert resolve_blind_mode(edge_default) == PIPELINE_CONFIG.blind
 
-    edge_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
+    edge_gyro = {"mode": BlindMode.GYRO_TSHAPE}
     assert resolve_blind_mode(edge_gyro) == BlindMode.GYRO_TSHAPE
 
-    edge_raw = {"primitive_mode": BlindMode.RAW_FLAT}
+    edge_raw = {"mode": BlindMode.RAW_FLAT}
     assert resolve_blind_mode(edge_raw) == BlindMode.RAW_FLAT
 
 
@@ -702,16 +704,16 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
     ``resolve_pre_turn_mode`` helper): the pivot wheel is now resolved per turn
     from the ``PivotTurnRecord`` table, not an edge field. Issue #64 removed the
     per-edge ``resolve_projection_mode`` (projection is a node type now). Only the
-    surviving per-edge mode passthroughs (line / blind) are checked here.
+    surviving per-edge mode passthroughs (speed / blind) are checked here.
     """
     graph, next_hop = toy_graph_and_table
     chassis = VirtualChassis.from_field_data(toy_field)
     sim = PathTrackerSim(toy_field, graph, next_hop, chassis)
 
-    edge_line_fast = {"primitive_mode": LineMode.FAST}
-    edge_blind_gyro = {"primitive_mode": BlindMode.GYRO_TSHAPE}
+    edge_line_fast = {"speed": SpeedTier.FAST}
+    edge_blind_gyro = {"mode": BlindMode.GYRO_TSHAPE}
 
-    assert sim.resolve_line_mode(edge_line_fast) == LineMode.FAST
+    assert sim.resolve_speed(edge_line_fast) == SpeedTier.FAST
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
 
 
@@ -1194,10 +1196,10 @@ def test_bidir_tc11_line_into_projection_rear_emits_projection_reverse():
     LINE->projection ``ACT_FOLLOW_DIST`` -- the projection node has no junction
     marker, so the reverse follow is DISTANCE-terminated. Tuple shape:
     (ACT_PROJECTION_REVERSE, target_node, distance_cm, line_mode). The mode slot
-    carries the resolved ``LineMode`` (``PIPELINE_CONFIG.line`` = NORMAL), since
+    carries the resolved ``SpeedTier`` (``PIPELINE_CONFIG.speed`` = NORMAL), since
     a LINE->projection follow takes its motion profile from the LINE edge's own
-    line_mode (``ProjectionMode`` deleted). Per-edge FORCE_REVERSE override used
-    for determinism.  Verifies AC11.
+    resolved speed (``ProjectionMode`` deleted). Per-edge FORCE_REVERSE override
+    used for determinism.  Verifies AC11.
     """
     distance_cm = 25.0
     nodes = {"A": (0.0, 0.0), "B": (distance_cm, 0.0)}
@@ -1239,7 +1241,7 @@ def test_bidir_tc11_line_into_projection_rear_emits_projection_reverse():
     _, target_node, emitted_dist, emitted_mode = proj_rev_prims[0]
     assert target_node == "B"
     assert emitted_dist == pytest.approx(distance_cm, abs=1e-9)
-    assert emitted_mode == LineMode.NORMAL   # PIPELINE_CONFIG.line default (LINE->proj motion)
+    assert emitted_mode == SpeedTier.NORMAL   # PIPELINE_CONFIG.speed default (LINE->proj motion)
 
     assert sim.localization.current_node() == "B"
 
@@ -1329,8 +1331,8 @@ def test_bidir_tc18_compiler_sim_parity_rear_hop():
     T12 is already landed: compile_path emits ACT_LINE_REVERSE for REAR hops.
     A 2-node graph A->B with direction_override=FORCE_REVERSE gives a minimal
     fixture where compiler and sim must produce the same sequence:
-        (ACT_TURN_REL, 180.0)                   -- turn to face 180deg (body heading for REAR)
-        (ACT_LINE_REVERSE, 'B', LineMode.NORMAL) -- REAR traverse
+        (ACT_TURN_REL, 180.0)                    -- turn to face 180deg (body heading for REAR)
+        (ACT_LINE_REVERSE, 'B', SpeedTier.NORMAL) -- REAR traverse
         (ACT_LINE_OVERSHOOT, LINE_SENSOR_AXLE_OFFSET_REAR_CM)  -- sim-only overshoot step
                                                  -- (7.68 cm: a REAR hop rolls the REAR
                                                  --  board's own axle offset, ADR-035)
@@ -1685,7 +1687,7 @@ def test_bidir_tc9c_rear_to_front_direction_flip_suppresses_pass_through():
 #
 # Code under test: tools/path_planner/sim/runtime.py -- PathTrackerSim.go_to
 # EDGE_BLIND branch (FRONT STOP_AT_LINE re-anchor; REAR blind-reverse).
-# Fixtures: synthetic single-edge graphs marked primitive_mode=
+# Fixtures: synthetic single-edge graphs marked mode=
 # BlindMode.STOP_AT_LINE (the schema's per-edge override slot).
 # ===========================================================================
 
@@ -1720,7 +1722,7 @@ def _stop_at_line_blind_sim(
 ):
     """Build a sim over a single STOP_AT_LINE BLIND edge A->B heading 0 deg.
 
-    The forward (A, B) edge carries ``primitive_mode=BlindMode.STOP_AT_LINE``
+    The forward (A, B) edge carries ``mode=BlindMode.STOP_AT_LINE``
     (and, when @p force_reverse is set, ``direction_override=FORCE_REVERSE``
     so the hop resolves REAR). The sim's localization is swapped for a
     :class:`_RecordingLocalizationSim` so the test can assert which advance
@@ -1739,7 +1741,7 @@ def _stop_at_line_blind_sim(
         type=EDGE_BLIND,
         distance_cm=float(distance_cm),
         heading_deg=0.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     if force_reverse:
         fwd_attrs["direction_override"] = int(DirectionMode.FORCE_REVERSE)
@@ -1752,7 +1754,7 @@ def _stop_at_line_blind_sim(
         type=EDGE_BLIND,
         distance_cm=float(distance_cm),
         heading_deg=180.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     next_hop = _next_hop_two_node("A", "B")
     chassis = VirtualChassis.from_field_data(fd)
@@ -2052,9 +2054,9 @@ _EDGE_TYPE_MAP = {
 }
 
 _LINE_MODE_MAP = {
-    "NORMAL": LineMode.NORMAL,
-    "SLOW":   LineMode.SLOW,
-    "FAST":   LineMode.FAST,
+    "NORMAL": SpeedTier.NORMAL,
+    "SLOW":   SpeedTier.SLOW,
+    "FAST":   SpeedTier.FAST,
 }
 
 # Drive-mode column spans the DEFAULT sentinel (line primitives) plus the three
@@ -2197,7 +2199,7 @@ def test_tc1_resolve_edge_dispatch_matches_fixture():
 
 
 # ===========================================================================
-# TC7 -- _resolve_override / resolve_line_mode accept bare string mode names
+# TC7 -- _resolve_override / resolve_speed accept bare string mode names
 #
 # Finding #41: IntEnum(str) raises ValueError for 'NORMAL'; only IntEnum['NORMAL']
 # works for name-based lookup.  After the fix _resolve_override must accept
@@ -2205,42 +2207,42 @@ def test_tc1_resolve_edge_dispatch_matches_fixture():
 # ===========================================================================
 
 
-def test_resolve_line_mode_accepts_bare_string_name():
-    """TC7: an edge with primitive_mode='NORMAL' (bare string) resolves without ValueError.
+def test_resolve_speed_accepts_bare_string_name():
+    """TC7: an edge with speed='NORMAL' (bare string) resolves without ValueError.
 
     Before finding #41 was fixed, ``_resolve_override`` would call
-    ``LineMode('NORMAL')`` which raises ValueError because LineMode is an
+    ``SpeedTier('NORMAL')`` which raises ValueError because SpeedTier is an
     IntEnum and only accepts integer values for value-based lookup.
-    The fix adds a str branch that uses ``LineMode['NORMAL']`` (name lookup)
+    The fix adds a str branch that uses ``SpeedTier['NORMAL']`` (name lookup)
     to match the handling in header_writer._override_enum_value.
 
     Asserts:
-    - ``resolve_line_mode({'primitive_mode': 'NORMAL'})`` returns ``LineMode.NORMAL``
+    - ``resolve_speed({'speed': 'NORMAL'})`` returns ``SpeedTier.NORMAL``
       without raising.
     - A string 'DEFAULT' still collapses to the pipeline default (same as the enum
       sentinel), so the DEFAULT fallback path works for strings too.
     - An unknown string name falls back to the pipeline default rather than crashing.
     """
     # Known concrete string name -> correct enum member, no ValueError.
-    edge_str_normal = {"primitive_mode": "NORMAL"}
-    result = resolve_line_mode(edge_str_normal)
-    assert result == LineMode.NORMAL, (
-        f"Expected LineMode.NORMAL for primitive_mode='NORMAL'; got {result!r}"
+    edge_str_normal = {"speed": "NORMAL"}
+    result = resolve_speed(edge_str_normal)
+    assert result == SpeedTier.NORMAL, (
+        f"Expected SpeedTier.NORMAL for speed='NORMAL'; got {result!r}"
     )
 
     # 'DEFAULT' string -> falls back to pipeline default (same as enum DEFAULT).
-    edge_str_default = {"primitive_mode": "DEFAULT"}
-    assert resolve_line_mode(edge_str_default) == PIPELINE_CONFIG.line
+    edge_str_default = {"speed": "DEFAULT"}
+    assert resolve_speed(edge_str_default) == PIPELINE_CONFIG.speed
 
     # Unknown string -> falls back to pipeline default without raising.
-    edge_str_unknown = {"primitive_mode": "NONEXISTENT_MODE"}
-    assert resolve_line_mode(edge_str_unknown) == PIPELINE_CONFIG.line
+    edge_str_unknown = {"speed": "NONEXISTENT_MODE"}
+    assert resolve_speed(edge_str_unknown) == PIPELINE_CONFIG.speed
 
 
-def test_resolve_line_mode_string_name_end_to_end_via_sim():
-    """TC7 (end-to-end): go_to over an EDGE_LINE with primitive_mode='NORMAL' completes.
+def test_resolve_speed_string_name_end_to_end_via_sim():
+    """TC7 (end-to-end): go_to over an EDGE_LINE with speed='NORMAL' completes.
 
-    Builds a 2-node graph where the A->B edge carries ``primitive_mode='NORMAL'``
+    Builds a 2-node graph where the A->B edge carries ``speed='NORMAL'``
     as a bare string (the form graph_builder forwards verbatim when field_data
     uses string tags and validation is skipped, as in test fixtures).  Confirms
     the sim's go_to path does not crash and emits the standard LINE primitives.
@@ -2258,7 +2260,7 @@ def test_resolve_line_mode_string_name_end_to_end_via_sim():
         type=EDGE_LINE,
         distance_cm=30.0,
         heading_deg=0.0,
-        primitive_mode="NORMAL",
+        speed="NORMAL",
     )
     g.add_edge(
         "B", "A",
@@ -4503,3 +4505,357 @@ def test_adr052_tc15h_normalize_sim_stream_unknown_act_tag_loud_fails():
     case = ParityCase(case_id="A__B__clean", start="A", goal="B")
     with pytest.raises(ParitySchemaError, match="unknown sim ACT tag"):
         normalize_sim_stream(sim, case)
+
+
+# ===========================================================================
+# W1 / TC5 -- STOP_AT_LINE fold resolution-equivalence (ADR-064, issues #97/#99)
+#
+# The ADR-064 fold removes the per-edge ``STOP_AT_LINE`` BLIND mode and lowers a
+# legacy ``STOP_AT_LINE`` edge to the canonical
+# ``mode: SYNC_TSHAPE + stop_at_line: on`` form. TC5 pins that the two forms
+# resolve to the SAME ``(seek, motion_mode)`` through ``resolve_stop_at_line``
+# across all FOUR degrade triggers -- with ``motion_mode`` pinned SYNC_TSHAPE --
+# so the fold cannot silently change the seek / dead-reckon decision. This is a
+# RESOLUTION-EQUIVALENCE assertion (``{seek, motionMode}`` equal), NOT a
+# bit-compare against a pre-fold golden. Degrade semantics per
+# ``WRO2026/src/nav/StopAtLinePolicy.h`` and the plan's Decisions bullet on the
+# fold.
+#
+# ``pipeline_blind`` is SYNC_TSHAPE -- today's ``PIPELINE_CONFIG.blind`` default,
+# the case the plan documents as behaviour-unchanged: the pre-fold degraded seek
+# dead-reckoned under ``PIPELINE_CONFIG.blind`` (StopAtLinePolicy.h:182-183), and
+# the explicit ``SYNC_TSHAPE`` lowering pins that degrade to SYNC to match the
+# non-degraded seek mode a bare ``STOP_AT_LINE`` edge already runs
+# (StopAtLinePolicy.h:173-174).
+# ===========================================================================
+
+# Each row names one degrade trigger. ``legacy_override`` / ``lowered_override``
+# are the per-edge ``stop_at_line_override`` each form carries: the legacy
+# ``STOP_AT_LINE`` edge carries no seek override of its own (DEFAULT) and seeks
+# via the legacy force-on tag; the lowered form bakes ``stop_at_line: on``
+# (StopAtLineMode.ON).
+#
+# Trigger 4 (``edge_override_off``) is the one the lowered case CANNOT express as
+# a ``STOP_AT_LINE`` + override-OFF pair: the canonical lowering pins the
+# override to ON, so a lowered edge can never simultaneously carry OFF. What IS
+# expressible is a plain non-seeking SYNC edge (``mode: SYNC_TSHAPE +
+# stop_at_line: off``), so BOTH forms carry override OFF on that row and must
+# still agree -- pinning that "author a non-seek SYNC edge two ways" resolves
+# identically (the ADR-048 ``STOP_AT_LINE + off`` contradiction is now simply
+# inexpressible).
+_TC5_FOLD_TRIGGERS = [
+    # (id, call_flag, direction, line_board_count,
+    #  legacy_override, lowered_override, expect_seek)
+    ("normal_seek", StopAtLine.AUTO, Direction.FRONT, 2,
+     StopAtLineMode.DEFAULT, StopAtLineMode.ON, True),
+    ("rear_1board", StopAtLine.AUTO, Direction.REAR, 1,
+     StopAtLineMode.DEFAULT, StopAtLineMode.ON, False),
+    ("call_off", StopAtLine.OFF, Direction.FRONT, 2,
+     StopAtLineMode.DEFAULT, StopAtLineMode.ON, False),
+    ("edge_override_off", StopAtLine.AUTO, Direction.FRONT, 2,
+     StopAtLineMode.OFF, StopAtLineMode.OFF, False),
+]
+
+
+@pytest.mark.parametrize(
+    "trigger",
+    _TC5_FOLD_TRIGGERS,
+    ids=[row[0] for row in _TC5_FOLD_TRIGGERS],
+)
+def test_tc5_stop_at_line_fold_resolution_equivalence(trigger):
+    """TC5: legacy STOP_AT_LINE == lowered SYNC_TSHAPE+ON resolve identically.
+
+    For each degrade trigger the legacy per-edge ``BlindMode.STOP_AT_LINE`` edge
+    and its lowered ``mode: SYNC_TSHAPE + stop_at_line: on`` twin must produce the
+    SAME ``(seek, motion_mode)`` from ``resolve_stop_at_line``, and that
+    ``motion_mode`` must be ``SYNC_TSHAPE`` (the fold's SYNC pin). ``expect_seek``
+    is asserted too so the equivalence is non-vacuous -- a regression that flipped
+    the seek decision or degraded to a different motion bundle fails here.
+    """
+    (
+        _id,
+        call_flag,
+        direction,
+        board_count,
+        legacy_override,
+        lowered_override,
+        expect_seek,
+    ) = trigger
+    pipeline_blind = BlindMode.SYNC_TSHAPE
+
+    legacy = resolve_stop_at_line(
+        call_flag,
+        legacy_override,
+        BlindMode.STOP_AT_LINE,   # the legacy per-edge STOP_AT_LINE tag
+        pipeline_blind,
+        direction,
+        board_count,
+        False,                    # auto_rule_active
+    )
+    lowered = resolve_stop_at_line(
+        call_flag,
+        lowered_override,
+        BlindMode.SYNC_TSHAPE,    # the lowered `mode: SYNC_TSHAPE`
+        pipeline_blind,
+        direction,
+        board_count,
+        False,                    # auto_rule_active
+    )
+
+    # Resolution-equivalence: both forms agree on the whole {seek, motion_mode}.
+    assert legacy == lowered, (
+        f"fold divergence on trigger {_id!r}: legacy={legacy!r} lowered={lowered!r}"
+    )
+    # ... and both land on the expected seek with motion pinned SYNC_TSHAPE.
+    assert legacy == (expect_seek, BlindMode.SYNC_TSHAPE)
+
+
+# ===========================================================================
+# W2 -- sim tier-branch coverage (ADR-064, the sim legs of TC10 + TC14)
+#
+# Drives PathTrackerSim over synthetic collinear BLIND fields to pin three
+# per-edge-speed behaviours in the offline mirror so it cannot silently drift
+# from the firmware:
+#   (a) a chain breaks at a resolved-tier boundary, but SAME-tier hops still
+#       chain across a SYNC<->GYRO mode boundary (TC10 / AC7);
+#   (b) a FAST-line -> collinear SLOW-blind pass-through clamps the blind entry
+#       seed to <= the SLOW cruise (TC14 / AC12);
+#   (c) a BLIND edge cruises at its resolved per-tier PWM (SLOW=60 / FAST=90)
+#       via resolve_speed -> _speed_tier_to_pwm (TC1 / AC1).
+# ===========================================================================
+
+
+def _linear_next_hop(names) -> dict:
+    """Dense next-hop table for a linear chain ``names[0] -> ... -> names[-1]``.
+
+    Every source routes one step toward the target along the linear order (the
+    successor toward a later target, the predecessor toward an earlier one), so
+    the table covers both forward and return goals without invoking the planner.
+    """
+    idx = {name: i for i, name in enumerate(names)}
+    table: dict = {}
+    for src in names:
+        row: dict = {}
+        for tgt in names:
+            if src == tgt:
+                row[tgt] = src
+            elif idx[tgt] > idx[src]:
+                row[tgt] = names[idx[src] + 1]
+            else:
+                row[tgt] = names[idx[src] - 1]
+        table[src] = row
+    return table
+
+
+def _collinear_blind_chain_sim(hop_specs, *, distance_cm: float = 40.0):
+    """Build a sim over a collinear (heading 0) BLIND chain with per-hop overrides.
+
+    ``hop_specs`` is one dict per hop; each may carry ``"speed"`` (a
+    :class:`SpeedTier`) and/or ``"mode"`` (a :class:`BlindMode`) that become the
+    corresponding graph-edge override attributes on both directions. Nodes are
+    laid out ``A, B, C, ...`` along ``+x`` spaced ``distance_cm`` apart so the
+    geometry matches the 0 deg heading, and every node is typed ``"blind"`` so no
+    projection auto-seek fires. ``distance_cm`` defaults to 40 cm -- well above
+    ``TSHAPE_MIN_MOVE_CM`` (chain-eligible) and long enough for the ramp to reach
+    cruise.
+
+    :returns: ``(sim, chassis)`` with localization already zeroed at ``A``.
+    """
+    names = [chr(ord("A") + i) for i in range(len(hop_specs) + 1)]
+    nodes = {name: (float(i) * distance_cm, 0.0) for i, name in enumerate(names)}
+    fd = _minimal_field(nodes=nodes, start_node=names[0], start_heading_deg=0.0)
+
+    g = nx.DiGraph()
+    for name in names:
+        g.add_node(name, type="blind")
+    for i, spec in enumerate(hop_specs):
+        u, v = names[i], names[i + 1]
+        fwd = dict(type=EDGE_BLIND, distance_cm=float(distance_cm), heading_deg=0.0)
+        rev = dict(type=EDGE_BLIND, distance_cm=float(distance_cm), heading_deg=180.0)
+        for key in ("speed", "mode"):
+            if key in spec:
+                fwd[key] = spec[key]
+                rev[key] = spec[key]
+        g.add_edge(u, v, **fwd)
+        g.add_edge(v, u, **rev)
+
+    next_hop = _linear_next_hop(names)
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+    return sim, chassis
+
+
+def test_w2a_blind_chain_breaks_at_tier_boundary():
+    """W2(a): two collinear BLIND hops of DIFFERENT resolved tiers do NOT chain.
+
+    ``A ->(NORMAL) B ->(SLOW) C``: the two hops are collinear + chain-eligible in
+    every respect except their resolved :class:`SpeedTier`, so the chain must end
+    at the tier boundary (a single velocity run cannot straddle two cruises).
+    Each hop therefore dispatches as its own braked, PRISTINE ``(ACT_FORWARD,
+    dist)`` move -- no ``ACT_BLIND_PASS`` boundary marker and no velocity suffix.
+
+    Non-vacuous: if the SPEED-only chain restriction regressed, the walk-ahead
+    would fold B into hop 0's run and emit ``(ACT_BLIND_PASS, "B")`` plus 5-tuple
+    velocity suffixes (driving the SLOW hop at the NORMAL cruise) -- which these
+    assertions reject. The same-tier control below proves the two hops WOULD
+    otherwise chain.
+    """
+    sim, _chassis = _collinear_blind_chain_sim(
+        [{"speed": SpeedTier.NORMAL}, {"speed": SpeedTier.SLOW}]
+    )
+
+    prims = sim.go_to("C")
+    tags = [p[0] for p in prims]
+
+    # The chain broke at the tier boundary: node B was braked at, not passed.
+    assert ACT_BLIND_PASS not in tags
+    forwards = [p for p in prims if p[0] == ACT_FORWARD]
+    assert len(forwards) == 2
+    # Both hops are the pristine 2-tuple (no chained velocity suffix).
+    assert all(len(p) == 2 for p in forwards), forwards
+    assert sim.localization.current_node() == "C"
+
+
+def test_w2a_same_tier_chains_across_mode_boundary():
+    """W2(a) control: two SAME-tier BLIND hops chain across a SYNC<->GYRO boundary.
+
+    ``A ->(NORMAL, SYNC_TSHAPE) B ->(NORMAL, GYRO_TSHAPE) C``: same resolved tier,
+    different drive mode. The blind-chain rule restricts on SPEED tier ONLY, so
+    the mode boundary must NOT break the run -- the two hops fold into one
+    continuous motion with an ``(ACT_BLIND_PASS, "B")`` marker at the non-braking
+    node and a chained velocity suffix on each hop.
+
+    Non-vacuous: a (hypothetical) mode-equality restriction would split this into
+    two braked hops with no ``ACT_BLIND_PASS`` -- which these assertions reject
+    (AC7: same-tier hops still chain, mode mixing unchanged).
+    """
+    sim, _chassis = _collinear_blind_chain_sim(
+        [
+            {"speed": SpeedTier.NORMAL, "mode": BlindMode.SYNC_TSHAPE},
+            {"speed": SpeedTier.NORMAL, "mode": BlindMode.GYRO_TSHAPE},
+        ]
+    )
+
+    prims = sim.go_to("C")
+    tags = [p[0] for p in prims]
+
+    # The mode boundary did not break the chain: B was passed without braking.
+    assert tags.count(ACT_BLIND_PASS) == 1
+    assert (ACT_BLIND_PASS, "B") in prims
+    # Both hops carry the chained 5-tuple velocity suffix (chain flag True).
+    forwards = [p for p in prims if p[0] == ACT_FORWARD]
+    assert len(forwards) == 2
+    assert all(len(p) == 5 and p[4] is True for p in forwards), forwards
+    assert sim.localization.current_node() == "C"
+
+
+def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
+    """W2(b): a FAST-line -> collinear SLOW-blind pass-through clamps entry <= 60.
+
+    ``A ->LINE(FAST) B ->BLIND(SLOW) C`` collinear: the LINE pass-through at the
+    junction B keeps the follower live, so the B->C blind hop is
+    PASS-THROUGH-SEEDED. Its entry seed is clamped to the hop's own resolved
+    cruise, so a fast inbound speed cannot enter the SLOW blind hop above the SLOW
+    cruise (60).
+
+    Documented sim limitation (pre-existing, not ADR-064): the captured cruise is
+    modeled as ``SPEED_NORMAL`` (70), not the true FAST preset -- so this pins the
+    CLAMP DIRECTION (entry <= SLOW cruise), not the exact captured magnitude. The
+    clamp pulls the modeled 70 down to the SLOW cruise (60).
+
+    Non-vacuous: without the clamp the seed would be the un-clamped ``SPEED_NORMAL``
+    (70), which is both ``> 60`` and ``>= SPEED_NORMAL`` -- both assertions below
+    reject that.
+    """
+    nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (100.0, 0.0)}
+    fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=0.0)
+
+    g = nx.DiGraph()
+    g.add_node("A", type="line")
+    g.add_node("B", type="line")
+    g.add_node("C", type="blind")
+    # A->B LINE, FAST. (The sim models the captured pass-through cruise as
+    # SPEED_NORMAL regardless of the LINE tier, so FAST here is the authored
+    # scenario, not the seed magnitude -- see the docstring.)
+    g.add_edge("A", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0,
+               speed=SpeedTier.FAST)
+    g.add_edge("B", "A", type=EDGE_LINE, distance_cm=50.0, heading_deg=180.0,
+               speed=SpeedTier.FAST)
+    # B->C BLIND, SLOW -> cruise 60.
+    g.add_edge("B", "C", type=EDGE_BLIND, distance_cm=50.0, heading_deg=0.0,
+               speed=SpeedTier.SLOW)
+    g.add_edge("C", "B", type=EDGE_BLIND, distance_cm=50.0, heading_deg=180.0,
+               speed=SpeedTier.SLOW)
+
+    next_hop = _linear_next_hop(["A", "B", "C"])
+    chassis = VirtualChassis.from_field_data(fd)
+    sim = PathTrackerSim(fd, g, next_hop, chassis)
+    sim.localization.zero_heading_from_current()
+
+    prims = sim.go_to("C")
+
+    # The B->C blind hop is a lone pass-through-seeded hop (C is the goal), so it
+    # rides the resolved (start_pwm, end_pwm, chain) suffix, chain False.
+    seeded = [p for p in prims if p[0] == ACT_FORWARD and len(p) == 5]
+    assert len(seeded) == 1, prims
+    start_pwm = seeded[0][2]
+
+    slow_cruise = _runtime._speed_tier_to_pwm(SpeedTier.SLOW)   # 60
+    # The clamp caps the entry seed at the SLOW cruise ...
+    assert start_pwm <= slow_cruise
+    # ... and demonstrably engaged: it pulled the seed below the un-clamped
+    # SPEED_NORMAL the sim models the captured cruise as.
+    assert start_pwm < _runtime.SPEED_NORMAL
+    assert sim.localization.current_node() == "C"
+
+
+def test_w2c_per_tier_blind_cruise_resolves_to_preset():
+    """W2(c): resolve_speed -> _speed_tier_to_pwm maps SLOW->60 and FAST->90.
+
+    The direct pin on the sim's per-edge blind cruise resolution -- the exact
+    composition the dispatch (``cruise_mag = _speed_tier_to_pwm(resolve_speed(
+    edge))``) and the chain walk-ahead both use. ADR-064 blind speed reuses the
+    line presets (SLOW/NORMAL/FAST = 60/70/90).
+    """
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.SLOW})) == 60
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.NORMAL})) == 70
+    assert _runtime._speed_tier_to_pwm(resolve_speed({"speed": SpeedTier.FAST})) == 90
+    # Tie the literals to the module's Config mirrors so a retune moves together.
+    assert _runtime.SPEED_SLOW == 60
+    assert _runtime.SPEED_FAST == 90
+
+
+@pytest.mark.parametrize(
+    "tier, expected_cruise",
+    [
+        (SpeedTier.SLOW, 60),
+        (SpeedTier.FAST, 90),
+    ],
+    ids=["SLOW_cruise_60", "FAST_cruise_90"],
+)
+def test_w2c_per_tier_blind_cruise_drives_chain_at_preset(tier, expected_cruise):
+    """W2(c): a same-tier BLIND chain cruises at its resolved per-tier PWM.
+
+    A 3-hop collinear chain of one tier is folded into a single continuous run;
+    the peak commanded PWM magnitude across the emitted chain suffix is the run
+    cruise, which must equal the tier's resolved preset (SLOW=60, FAST=90) -- NOT
+    the hardcoded NORMAL (70) blind speed used before ADR-064.
+
+    Non-vacuous: if per-edge blind speed regressed to a constant NORMAL, both the
+    SLOW and FAST chains would peak at 70 -- failing the 60 / 90 assertion.
+    """
+    sim, _chassis = _collinear_blind_chain_sim(
+        [{"speed": tier}, {"speed": tier}, {"speed": tier}]
+    )
+
+    prims = sim.go_to("D")
+
+    forwards = [p for p in prims if p[0] == ACT_FORWARD]
+    assert len(forwards) == 3
+    assert all(len(p) == 5 for p in forwards), forwards
+    # Peak commanded magnitude across every hop's (start_pwm, end_pwm) == cruise.
+    pwm_mags = [abs(value) for p in forwards for value in (p[2], p[3])]
+    assert max(pwm_mags) == expected_cruise
+    assert expected_cruise == _runtime._speed_tier_to_pwm(tier)
+    assert sim.localization.current_node() == "D"

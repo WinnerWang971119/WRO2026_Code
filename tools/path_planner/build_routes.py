@@ -181,7 +181,7 @@ def _run(
     # 1. Validate the field-data module before doing any geometry work.
     #    Validation failure is fatal: routes.h must NOT be written.
     log(
-        f"pipeline_config: line={PIPELINE_CONFIG.line.name}, "
+        f"pipeline_config: speed={PIPELINE_CONFIG.speed.name}, "
         f"blind={PIPELINE_CONFIG.blind.name}, "
         f"turn={PIPELINE_CONFIG.turn.name}"
     )

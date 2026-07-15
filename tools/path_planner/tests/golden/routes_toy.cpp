@@ -5,7 +5,7 @@
 
 namespace Routes {
     const PipelineConfig PIPELINE_CONFIG = {
-        LineMode::NORMAL,
+        SpeedTier::NORMAL,
         BlindMode::SYNC_TSHAPE,
         TurnMode::COUNTER_ROT,
         DirectionMode::DEFAULT,
@@ -37,84 +37,84 @@ namespace Routes {
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         // [from][to]; type=NONE if no direct edge
         { // from A (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 190.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 140.000000f, 90.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 114.017543f, 37.874984f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::LINE, 45.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::BLIND, 67.268120f, 311.987212f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::LINE, 190.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::LINE, 140.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::LINE, 114.017543f, 37.874984f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::LINE, 45.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::BLIND, 67.268120f, 311.987212f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from B (index 1)
-            { EdgeType::LINE, 190.000000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 140.000000f, 90.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 122.065556f, 145.007980f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::BLIND, 86.023253f, 54.462322f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::LINE, 145.000000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::LINE, 190.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::LINE, 140.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::LINE, 122.065556f, 145.007980f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::BLIND, 86.023253f, 54.462322f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::LINE, 145.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from C (index 2)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 140.000000f, 270.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 190.000000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 122.065556f, 214.992020f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::LINE, 140.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::LINE, 190.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::LINE, 122.065556f, 214.992020f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from D (index 3)
-            { EdgeType::LINE, 140.000000f, 270.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 190.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 114.017543f, 322.125016f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::LINE, 140.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::LINE, 190.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::LINE, 114.017543f, 322.125016f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from E (index 4)
-            { EdgeType::LINE, 114.017543f, 217.874984f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 122.065556f, 325.007980f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 122.065556f, 34.992020f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 114.017543f, 142.125016f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::LINE, 114.017543f, 217.874984f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::LINE, 122.065556f, 325.007980f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::LINE, 122.065556f, 34.992020f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::LINE, 114.017543f, 142.125016f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from G (index 5)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::BLIND, 86.023253f, 234.462322f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::BLIND, 86.023253f, 234.462322f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from P1 (index 6)
-            { EdgeType::LINE, 45.000000f, 180.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 145.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::BLIND, 50.000000f, 270.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::LINE, 45.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::LINE, 145.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::BLIND, 50.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
         { // from S (index 7)
-            { EdgeType::BLIND, 67.268120f, 131.987212f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::BLIND, 50.000000f, 90.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            { EdgeType::BLIND, 67.268120f, 131.987212f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
+            { EdgeType::BLIND, 50.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
         },
     };
 

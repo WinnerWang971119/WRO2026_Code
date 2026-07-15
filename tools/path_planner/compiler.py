@@ -107,7 +107,7 @@ ACT_STOP_AT_LINE = "stop_at_line"
 # 3-tuples (EDGE_LINE into a junction node) or 4-tuples (EDGE_LINE into a
 # projection node, plus the EDGE_BLIND variants).
 # The second slot of a reverse tuple is the target node name (str), not a float.
-# BlindMode / LineMode are imported lazily inside compile_path to avoid a
+# BlindMode / SpeedTier are imported lazily inside compile_path to avoid a
 # circular dependency with sim.runtime; Any stands in for those IntEnum types
 # here so this module-level alias is importable without triggering that
 # circular import.
@@ -308,7 +308,7 @@ def compile_path(
         _read_edge_stop_at_line_override,
         resolve_blind_mode,
         resolve_direction,
-        resolve_line_mode,
+        resolve_speed,
         resolve_stop_at_line,
     )
 
@@ -403,10 +403,10 @@ def compile_path(
                         ACT_PROJECTION_REVERSE,
                         v,
                         float(edge["distance_cm"]),
-                        resolve_line_mode(edge, cfg),
+                        resolve_speed(edge, cfg),
                     ))
                 else:
-                    out.append((ACT_LINE_REVERSE, v, resolve_line_mode(edge, cfg)))
+                    out.append((ACT_LINE_REVERSE, v, resolve_speed(edge, cfg)))
             elif edge_type == EDGE_BLIND:
                 # REAR blind is mode-sensitive via the unified resolver: a
                 # 2-board REAR STOP_AT_LINE hop seeks with the rear board and

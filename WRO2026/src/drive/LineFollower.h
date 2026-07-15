@@ -32,7 +32,7 @@
  *    to own the motors until the next fresh intersection edge, then stop.
  *
  * Fluent API:
- *  The verb method `setEnabled(bool)` returns a `[[nodiscard]]` builder
+ *  The verb method `setEnabled(bool)` returns a builder
  *  (`LineFollowerEnableBuilder`). Setters such as `.setBrake(bool)` and `.setPreset(...)` are
  *  staged on the builder; the staged state is applied exactly once when the builder destructs
  *  at end-of-statement (RAII auto-execute). See `LineFollowerEnableBuilder` for examples.
@@ -87,8 +87,8 @@ class LineFollowerClass;
  *    "Sync + T-shape as default move profile" for rationale.
  *
  * Lifetime / safety:
- *  - The builder is `[[nodiscard]]`: storing the temporary in a variable without using it
- *    triggers a compiler warning, since the staged state would never apply.
+ *  - Use as a bare statement or chain setters inline. Never bind the builder to a named
+ *    variable — that defers the apply to end of scope (ADR-065).
  *  - Copy is disabled outright. Move is disabled too — chain temporaries are constructed in
  *    place via NRVO, so a move constructor is not needed and removing it eliminates any risk
  *    of a double-execute.
@@ -97,7 +97,7 @@ class LineFollowerClass;
  *       `LineFollowerClass::_applyEnableBuilder(...)` backdoor, then sets `_executed = true`
  *       so a second destructor invocation (defensive) does nothing.
  */
-class [[nodiscard]] LineFollowerEnableBuilder
+class LineFollowerEnableBuilder
 {
 public:
     /**
@@ -416,7 +416,7 @@ public:
     /**
      * @brief Begin a fluent enable/disable transition.
      *
-     * Returns a `[[nodiscard]]` `LineFollowerEnableBuilder` that stages the target state. The
+     * Returns a `LineFollowerEnableBuilder` that stages the target state. The
      * transition is applied exactly once when the builder destructs at end-of-statement, so
      * the bare expression `LineFollower.setEnabled(true);` Just Works as a one-liner.
      *

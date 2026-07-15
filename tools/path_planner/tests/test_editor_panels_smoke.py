@@ -54,7 +54,7 @@ from tools.path_planner.editor.panels import (  # noqa: E402
 from tools.path_planner.pipeline_config import (  # noqa: E402
     BlindMode,
     DirectionMode,
-    LineMode,
+    SpeedTier,
     TurnMode,
 )
 
@@ -446,7 +446,7 @@ _ISSUE79_SECTION_WIDGETS: tuple[str, ...] = (
 )
 
 # The four PIPELINE DEFAULTS categories, in the contract's ``which`` spelling.
-_PIPELINE_WHICH: tuple[str, ...] = ("line", "blind", "turn", "direction")
+_PIPELINE_WHICH: tuple[str, ...] = ("speed", "blind", "turn", "direction")
 
 
 def test_side_panels_exposes_issue79_callback_slots(side_panels):
@@ -501,16 +501,23 @@ def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
     categories offers ``DEFAULT`` -- the empty "unset" sentinel is the single way
     to mean "inherit the pipeline_config.py default" (== key absent), so a
     redundant ``DEFAULT`` member would be a second spelling of the same intent
-    and is excluded everywhere (R12; direction joined line/blind/turn here).
-    Every category leads with that empty unset sentinel.
+    and is excluded everywhere (R12; direction joined speed/blind/turn here).
+    Every category leads with that empty unset sentinel. ``blind`` additionally
+    excludes ``STOP_AT_LINE`` (ADR-064: folded onto the ``stop_at_line`` axis, so
+    it is no longer authorable as the pipeline blind default either).
     """
     combos = side_panels._pipeline_mode_combos
 
     enum_for_which = {
-        "line": LineMode,
+        "speed": SpeedTier,
         "blind": BlindMode,
         "turn": TurnMode,
         "direction": DirectionMode,
+    }
+    # Extra members excluded from a category's offered vocabulary beyond the
+    # universal DEFAULT exclusion.
+    extra_excluded_by_which: dict[str, tuple] = {
+        "blind": (BlindMode.STOP_AT_LINE,),
     }
 
     for which, enum_cls in enum_for_which.items():
@@ -519,11 +526,12 @@ def test_side_panels_pipeline_combobox_vocab_excludes_default_where_required(
         assert values[0] == "", f"{which}: unset sentinel must lead the values"
 
         offered = set(values[1:])
+        excluded = (enum_cls.DEFAULT,) + extra_excluded_by_which.get(which, ())
         # Every category -- direction included -- excludes DEFAULT (== inherit).
         expected = {
             member.name
             for member in enum_cls
-            if member is not enum_cls.DEFAULT
+            if member not in excluded
         }
         assert offered == expected, f"{which}: tag vocabulary mismatch"
         assert enum_cls.DEFAULT.name not in offered, (
@@ -581,7 +589,7 @@ def test_side_panels_graft_methods_survive_refresh(side_panels):
 
     # Author an override into the model, refresh, then edit must find + open it.
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     side_panels.refresh(model)
     assert side_panels.prefill_edit_row("LINE", "A", "B") is True
@@ -598,10 +606,10 @@ def test_side_panels_refresh_reflects_issue79_model_state(side_panels):
     """
     model = _load_model()
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
     ]
-    model.pipeline_line_mode = "FAST"
+    model.pipeline_speed = "FAST"
     model.pipeline_blind_mode = "GYRO_TSHAPE"
     model.blind_projection_auto_seek = False
     model.field_mm = (2362.0, 1143.0)
@@ -613,7 +621,7 @@ def test_side_panels_refresh_reflects_issue79_model_state(side_panels):
 
     # Pipeline comboboxes reflect the set values; an unset category shows the
     # empty sentinel.
-    assert side_panels._pipeline_mode_vars["line"].get() == "FAST"
+    assert side_panels._pipeline_mode_vars["speed"].get() == "FAST"
     assert side_panels._pipeline_mode_vars["blind"].get() == "GYRO_TSHAPE"
     assert side_panels._pipeline_mode_vars["turn"].get() == ""
     assert side_panels._pipeline_mode_vars["direction"].get() == ""

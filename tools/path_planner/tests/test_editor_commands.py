@@ -743,13 +743,13 @@ def test_set_edge_override_apply_adds_entry_and_revert_restores_exactly() -> Non
     pre_apply_repr = repr(model.to_json_dict())
     assert model.edges == []
 
-    cmd = SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST")
+    cmd = SetEdgeOverride("LINE", "A", "B", speed="FAST")
     cmd.apply(model)
 
     # The override entry is present and override-only (identity triple + the
     # one non-None override key; no geometry keys are ever written).
     assert model.edges == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
 
     cmd.revert(model)
@@ -762,7 +762,7 @@ def test_set_edge_override_omits_inherit_keys() -> None:
     so only the explicitly-set keys appear alongside the identity triple."""
     model = make_override_model()
 
-    # Only stop_at_line is set; primitive_mode + direction stay None (omitted).
+    # Only stop_at_line is set; speed/mode + direction stay None (omitted).
     SetEdgeOverride("BLIND", "B", "G", stop_at_line="on").apply(model)
 
     assert model.edges == [
@@ -776,11 +776,11 @@ def test_set_edge_override_replace_in_place_preserves_position_and_reverts() -> 
     model = make_override_model()
 
     # Seed two overrides so the replaced one is NOT at the tail (position matters).
-    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("LINE", "A", "B", speed="FAST").apply(model)
     SetEdgeOverride("BLIND", "B", "G", direction="front").apply(model)
     pre_replace_repr = repr(model.to_json_dict())
 
-    replace = SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW")
+    replace = SetEdgeOverride("LINE", "A", "B", speed="SLOW")
     replace.apply(model)
 
     # The LINE entry stays at index 0 (replaced in place), now carrying SLOW.
@@ -788,7 +788,7 @@ def test_set_edge_override_replace_in_place_preserves_position_and_reverts() -> 
         "type": "LINE",
         "u": "A",
         "v": "B",
-        "primitive_mode": "SLOW",
+        "speed": "SLOW",
     }
     assert model.edges[1] == {
         "type": "BLIND",
@@ -809,7 +809,7 @@ def test_set_edge_override_undo_redo_undo_is_stable() -> None:
     history = History()
     original_json = model.to_json_dict()
 
-    history.do(SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST"), model)
+    history.do(SetEdgeOverride("LINE", "A", "B", speed="FAST"), model)
     state_after_apply = model.to_json_dict()
     assert state_after_apply != original_json
 
@@ -836,7 +836,7 @@ def test_clear_edge_override_apply_revert_round_trip() -> None:
     """TC14: ClearEdgeOverride removes the entry on apply and re-inserts it at
     its original index on revert (round-trip invariant)."""
     model = make_override_model()
-    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("LINE", "A", "B", speed="FAST").apply(model)
     SetEdgeOverride("BLIND", "B", "G", stop_at_line="on").apply(model)
     pre_clear_repr = repr(model.to_json_dict())
 
@@ -855,7 +855,7 @@ def test_clear_edge_override_apply_revert_round_trip() -> None:
         "type": "LINE",
         "u": "A",
         "v": "B",
-        "primitive_mode": "FAST",
+        "speed": "FAST",
     }
 
 
@@ -882,7 +882,7 @@ def test_edge_override_type_u_v_identity_is_independent() -> None:
     model = make_override_model()
 
     # Both overrides target the SAME directed pair A -> B but different types.
-    SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST").apply(model)
+    SetEdgeOverride("LINE", "A", "B", speed="FAST").apply(model)
     SetEdgeOverride("BLIND", "A", "B", stop_at_line="on").apply(model)
 
     # Two distinct entries — the directed pair is NOT unique across types.
@@ -891,7 +891,7 @@ def test_edge_override_type_u_v_identity_is_independent() -> None:
         "type": "LINE",
         "u": "A",
         "v": "B",
-        "primitive_mode": "FAST",
+        "speed": "FAST",
     }
     blind_entry = {"type": "BLIND", "u": "A", "v": "B", "stop_at_line": "on"}
     assert line_entry in model.edges
@@ -909,7 +909,7 @@ def test_edge_override_type_u_v_identity_is_independent() -> None:
 @pytest.mark.parametrize(
     ("which", "attr", "value"),
     [
-        ("line", "pipeline_line_mode", "FAST"),
+        ("speed", "pipeline_speed", "FAST"),
         ("blind", "pipeline_blind_mode", "GYRO_TSHAPE"),
         ("turn", "pipeline_turn_mode", "COUNTER_ROT"),
         ("direction", "pipeline_direction_mode", "DEFAULT"),
@@ -936,15 +936,15 @@ def test_set_pipeline_mode_clear_to_none_round_trip() -> None:
     """TC14: SetPipelineMode with value=None clears a previously-set mode back to
     inherit; revert restores the prior member name exactly."""
     model = make_override_model()
-    SetPipelineMode("line", "FAST").apply(model)
-    assert model.pipeline_line_mode == "FAST"
+    SetPipelineMode("speed", "FAST").apply(model)
+    assert model.pipeline_speed == "FAST"
 
-    clear = SetPipelineMode("line", None)
+    clear = SetPipelineMode("speed", None)
     clear.apply(model)
-    assert model.pipeline_line_mode is None
+    assert model.pipeline_speed is None
 
     clear.revert(model)
-    assert model.pipeline_line_mode == "FAST"
+    assert model.pipeline_speed == "FAST"
 
 
 def test_set_pipeline_mode_unknown_which_raises() -> None:
@@ -1023,7 +1023,7 @@ def test_issue79_commands_undo_redo_round_trip_through_history() -> None:
 
     states_after: list[dict] = []
 
-    history.do(SetEdgeOverride("LINE", "A", "B", primitive_mode="FAST"), model)
+    history.do(SetEdgeOverride("LINE", "A", "B", speed="FAST"), model)
     states_after.append(model.to_json_dict())
 
     history.do(SetEdgeOverride("BLIND", "B", "G", stop_at_line="on"), model)
@@ -1076,7 +1076,7 @@ def test_rename_node_cascades_into_edges_forward_and_reverse() -> None:
     # (A appears as v).  A second BLIND override on B -> G (untouched by the
     # rename) proves only matching endpoints move.
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "LINE", "u": "B", "v": "A", "direction": "rear"},
         {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
     ]
@@ -1085,12 +1085,12 @@ def test_rename_node_cascades_into_edges_forward_and_reverse() -> None:
     cmd = RenameNode("A", "AA")
     cmd.apply(model)
 
-    # Forward entry: u rewritten A -> AA; type + primitive_mode preserved.
+    # Forward entry: u rewritten A -> AA; type + speed preserved.
     assert model.edges[0] == {
         "type": "LINE",
         "u": "AA",
         "v": "B",
-        "primitive_mode": "FAST",
+        "speed": "FAST",
     }
     # Reverse entry: v rewritten A -> AA; type + direction preserved.
     assert model.edges[1] == {
@@ -1122,7 +1122,7 @@ def test_rename_node_edges_cascade_does_not_alias_original_entries() -> None:
     the captured pre-rename state and break undo.
     """
     model = make_override_model()
-    original_entry = {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+    original_entry = {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     model.edges = [original_entry]
 
     RenameNode("A", "AA").apply(model)
@@ -1140,7 +1140,7 @@ def test_rename_node_through_history_redo_keeps_edges_cascade() -> None:
     lockstep (redo re-applies the u/v rewrite, undo reverts it)."""
     model = make_override_model()
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     history = History()
     original_json = model.to_json_dict()
@@ -1262,7 +1262,7 @@ def test_delete_node_cascades_incident_overrides_and_reverts() -> None:
     # reverse) plus one NOT incident, to prove only the incident ones cascade
     # and the untouched one keeps its position.
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
         {"type": "BLIND", "u": "G", "v": "B", "direction": "rear"},
     ]
@@ -1276,7 +1276,7 @@ def test_delete_node_cascades_incident_overrides_and_reverts() -> None:
 
     # Both G-incident overrides are gone; the A--B override survives untouched.
     assert model.edges == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     assert "G" not in model.nodes
     # No surviving entry references the deleted node (no orphan).
@@ -1329,7 +1329,7 @@ def test_delete_edge_cascades_override_and_graph_builder_does_not_reemit() -> No
     model = make_valid_override_model()
     # A--B is a LINE segment; author a LINE override on it (forward + reverse).
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "LINE", "u": "B", "v": "A", "direction": "rear"},
     ]
     pre_apply_repr = repr(model.to_json_dict())
@@ -1368,7 +1368,7 @@ def test_delete_edge_cascade_matches_only_the_deleted_kind() -> None:
     # want to touch here -- so test the realistic case: a LINE override on the
     # deleted LINE pair AND a BLIND override on a DIFFERENT live blind pair.
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"},
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"},
         {"type": "BLIND", "u": "B", "v": "G", "stop_at_line": "on"},
     ]
 
@@ -1401,7 +1401,7 @@ def test_kind_flip_line_to_blind_drops_line_override_and_save_ok() -> None:
     model.node_types["B"] = "blind"
     # A--B carries a LINE override; flip it to a BLIND edge.
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     pre_flip_repr = repr(model.to_json_dict())
 
@@ -1429,7 +1429,7 @@ def test_kind_flip_macro_revert_through_history_restores_override() -> None:
     restores the LINE segment + its override, redo re-flips and re-drops it."""
     model = make_override_model()
     model.edges = [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
     history = History()
     original_json = model.to_json_dict()
@@ -1444,7 +1444,7 @@ def test_kind_flip_macro_revert_through_history_restores_override() -> None:
     assert history.undo(model) is True
     assert model.to_json_dict() == original_json
     assert model.edges == [
-        {"type": "LINE", "u": "A", "v": "B", "primitive_mode": "FAST"}
+        {"type": "LINE", "u": "A", "v": "B", "speed": "FAST"}
     ]
 
     assert history.redo(model) is True
@@ -1489,10 +1489,10 @@ def _make_invariant_seed_model() -> FieldModel:
         blind_edges=[("B", "C"), ("C", "D")],
         obstacles=[],
         edges=[
-            {"type": "LINE", "u": "S", "v": "A", "primitive_mode": "FAST"},
+            {"type": "LINE", "u": "S", "v": "A", "speed": "FAST"},
             {"type": "LINE", "u": "A", "v": "B", "direction": "front"},
             {"type": "BLIND", "u": "B", "v": "C", "stop_at_line": "on"},
-            {"type": "BLIND", "u": "C", "v": "D", "primitive_mode": "GYRO"},
+            {"type": "BLIND", "u": "C", "v": "D", "mode": "GYRO_TSHAPE"},
             # A reverse-direction override on a live pair, to exercise both
             # orientations of the DeleteEdge cascade.
             {"type": "BLIND", "u": "D", "v": "C", "direction": "rear"},
@@ -1549,26 +1549,26 @@ def test_set_edge_override_replace_preserves_hand_authored_geometry() -> None:
     distance_cm / heading_deg keeps those (non-editor-owned) keys after the
     replace; the editor-owned keys are updated."""
     model = make_override_model()
-    # Seed an entry with geometry plus an editor-owned primitive_mode, as a
+    # Seed an entry with geometry plus an editor-owned speed, as a
     # hand-authored field_data.json EDGES entry would carry.
     model.edges = [
         {
             "type": "LINE",
             "u": "A",
             "v": "B",
-            "primitive_mode": "FAST",
+            "speed": "FAST",
             "distance_cm": 42.5,
             "heading_deg": 17.0,
         }
     ]
 
-    # Edit only the editor-owned primitive_mode (the inline editor's add-form
+    # Edit only the editor-owned speed (the inline editor's add-form
     # carries no geometry controls, so distance_cm / heading_deg are absent).
-    SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW").apply(model)
+    SetEdgeOverride("LINE", "A", "B", speed="SLOW").apply(model)
 
     entry = model.edges[0]
     # Editor-owned key updated...
-    assert entry["primitive_mode"] == "SLOW"
+    assert entry["speed"] == "SLOW"
     # ...and the hand-authored geometry survives the in-place replace.
     assert entry["distance_cm"] == 42.5
     assert entry["heading_deg"] == 17.0
@@ -1587,19 +1587,19 @@ def test_set_edge_override_replace_removes_omitted_editor_key_keeps_geometry() -
             "type": "BLIND",
             "u": "B",
             "v": "G",
-            "primitive_mode": "GYRO",
+            "mode": "GYRO_TSHAPE",
             "stop_at_line": "on",
             "distance_cm": 60.0,
         }
     ]
 
-    # Re-author with ONLY direction set: primitive_mode and stop_at_line are
+    # Re-author with ONLY direction set: mode and stop_at_line are
     # absent from the form -> they must be removed (inherit), geometry survives.
     SetEdgeOverride("BLIND", "B", "G", direction="rear").apply(model)
 
     entry = model.edges[0]
     assert entry["direction"] == "rear"
-    assert "primitive_mode" not in entry  # omitted -> removed (inherit)
+    assert "mode" not in entry  # omitted -> removed (inherit)
     assert "stop_at_line" not in entry  # omitted -> removed (inherit)
     assert entry["distance_cm"] == 60.0  # non-editor-owned key preserved
     assert len(model.edges) == 1
@@ -1613,16 +1613,16 @@ def test_set_edge_override_replace_preserving_geometry_reverts_exactly() -> None
         "type": "LINE",
         "u": "A",
         "v": "B",
-        "primitive_mode": "FAST",
+        "speed": "FAST",
         "distance_cm": 42.5,
         "heading_deg": 17.0,
     }
     model.edges = [dict(original_entry)]
     pre_replace_repr = repr(model.to_json_dict())
 
-    cmd = SetEdgeOverride("LINE", "A", "B", primitive_mode="SLOW")
+    cmd = SetEdgeOverride("LINE", "A", "B", speed="SLOW")
     cmd.apply(model)
-    assert model.edges[0]["primitive_mode"] == "SLOW"
+    assert model.edges[0]["speed"] == "SLOW"
 
     cmd.revert(model)
     assert model.edges[0] == original_entry

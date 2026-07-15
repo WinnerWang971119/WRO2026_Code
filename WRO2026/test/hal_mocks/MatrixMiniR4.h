@@ -13,7 +13,7 @@
  *
  * The facade exposes EVERY actuator/sensor family the production `Drive.cpp` and
  * `Mission.cpp` reach through `MiniR4.*`, with vendor-faithful signatures verified
- * against `MatrixMiniR4/src/Modules/*`:
+ * against the `MatrixMiniR4/src/Modules/` headers:
  *   - `DriveDC` (`MiniR4DriveDC<1>` → non-template `MockDriveDC`): the full Move/MoveSync/
  *     MoveGyro/MoveDegs/MoveSyncDegs/MoveGyroDegs/MoveTime/MoveSyncTime/MoveGyroTime/brake/
  *     begin/setMove*PID/setTurnGyroPID/isPrevTaskDone/resetCounter/getDegrees surface.

@@ -44,7 +44,7 @@ class PathTrackerClass;
  * `setStopAtLine` setters stay no-ops (the sim has no async / call-site
  * stop-at-line surface); the direction setters store into the builder.
  */
-class [[nodiscard]] PathTrackerGoToBuilder
+class PathTrackerGoToBuilder
 {
 public:
     /**
@@ -151,13 +151,13 @@ public:
     bool isIdle() const { return true; }
 
     /** @brief Records `goto` (resolving id → name) and returns a recording builder. */
-    [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId)
+    PathTrackerGoToBuilder goTo(uint8_t goalId)
     {
         return PathTrackerGoToBuilder(*this, goalId);
     }
 
     /** @brief Name overload — resolve to an id first, then delegate. */
-    [[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName)
+    PathTrackerGoToBuilder goTo(const char* goalName)
     {
         return PathTrackerGoToBuilder(*this, FieldMap::findNodeByName(goalName));
     }

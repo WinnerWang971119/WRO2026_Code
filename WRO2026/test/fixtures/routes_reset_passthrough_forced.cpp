@@ -12,7 +12,7 @@
 
 namespace Routes {
     const PipelineConfig PIPELINE_CONFIG = {
-        LineMode::NORMAL,
+        SpeedTier::NORMAL,
         BlindMode::SYNC_TSHAPE,
         TurnMode::COUNTER_ROT,
         DirectionMode::DEFAULT,
@@ -33,19 +33,19 @@ namespace Routes {
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         { // from PassA (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::LINE, 40.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
+            { EdgeType::LINE, 40.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
         },
         { // from PassResetB (index 1)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::LINE, 40.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
+            { EdgeType::LINE, 40.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
         },
         { // from PassC (index 2)
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::NONE, 0.000000f, 0.000000f, LineMode::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
+            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
         },
     };
 

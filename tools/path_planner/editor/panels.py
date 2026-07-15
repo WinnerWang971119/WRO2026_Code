@@ -57,13 +57,16 @@ from tkinter import ttk
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 from tools.path_planner.editor import theme
-from tools.path_planner.editor.commands import _find_override_index
+from tools.path_planner.editor.commands import (
+    _PIPELINE_WHICH_TO_ATTR,
+    _find_override_index,
+)
 from tools.path_planner.editor.model import NODE_TYPE_VALUES, RESET_AXIS_VALUES
 from tools.path_planner.pipeline_config import (
     BlindMode,
     DirectionMode,
-    LineMode,
-    StopAtLineMode,
+    LineFollowMode,
+    SpeedTier,
     TurnMode,
 )
 
@@ -213,26 +216,41 @@ _EDGE_TYPE_BLIND: str = "BLIND"
 # The sentinel a combobox shows for "no override key -- inherit the pipeline
 # default".  Selecting it means the corresponding key is OMITTED from the
 # override entry (and from the dispatched value, which is ``None``).  Presented
-# verbatim per the sidecar's "default (inherit)" wording for primitive_mode and
+# verbatim per the sidecar's "default (inherit)" wording for speed / mode and
 # the bare "default" wording for direction / stop_at_line.
-_INHERIT_PRIMITIVE_LABEL: str = "default (inherit)"
+_INHERIT_OVERRIDE_LABEL: str = "default (inherit)"
 _INHERIT_LABEL: str = "default"
 
-# ``primitive_mode`` tag vocabularies, single-sourced from the planner enums so
-# the GUI can never offer a tag the validator rejects.  ``DEFAULT`` is excluded
-# from the authorable tags (it == absence; the inherit sentinel covers it).
-_LINE_MODE_TAGS: tuple[str, ...] = tuple(
-    member.name for member in LineMode if member is not LineMode.DEFAULT
+# ``speed`` tag vocabulary -- uniform across BOTH edge types, single-sourced
+# from :class:`SpeedTier` so the GUI can never offer a tag the validator
+# rejects.  ``DEFAULT`` is excluded from the authorable tags (it == absence;
+# the inherit sentinel covers it).
+_SPEED_TAGS: tuple[str, ...] = tuple(
+    member.name for member in SpeedTier if member is not SpeedTier.DEFAULT
 )
+# Combobox values for the Speed picker -- the SAME list for LINE and BLIND
+# edges.  The inherit sentinel leads the list so it is the natural "no
+# override" choice.
+_SPEED_VALUES: tuple[str, ...] = (_INHERIT_OVERRIDE_LABEL, *_SPEED_TAGS)
+
+# ``mode`` tag vocabularies -- type-switched, single-sourced from the planner
+# enums.  LINE only authors ``MIDDLE`` (``LEFT`` / ``RIGHT`` are reserved
+# until LineFollower lateral offset-follow lands -- the validator rejects
+# them, so the GUI must never offer them).  BLIND authors every ``BlindMode``
+# tag except ``DEFAULT`` (== absence) and ``STOP_AT_LINE`` (folded onto the
+# ``stop_at_line`` axis -- ADR-064).
+_LINE_MODE_TAGS: tuple[str, ...] = (LineFollowMode.MIDDLE.name,)
 _BLIND_MODE_TAGS: tuple[str, ...] = tuple(
-    member.name for member in BlindMode if member is not BlindMode.DEFAULT
+    member.name
+    for member in BlindMode
+    if member not in (BlindMode.DEFAULT, BlindMode.STOP_AT_LINE)
 )
 
-# Combobox values for the primitive-mode picker, keyed by the derived edge type.
-# The inherit sentinel leads each list so it is the natural "no override" choice.
-_PRIMITIVE_VALUES_BY_TYPE: dict[str, tuple[str, ...]] = {
-    _EDGE_TYPE_LINE: (_INHERIT_PRIMITIVE_LABEL, *_LINE_MODE_TAGS),
-    _EDGE_TYPE_BLIND: (_INHERIT_PRIMITIVE_LABEL, *_BLIND_MODE_TAGS),
+# Combobox values for the Mode picker, keyed by the derived edge type.  The
+# inherit sentinel leads each list so it is the natural "no override" choice.
+_MODE_VALUES_BY_TYPE: dict[str, tuple[str, ...]] = {
+    _EDGE_TYPE_LINE: (_INHERIT_OVERRIDE_LABEL, *_LINE_MODE_TAGS),
+    _EDGE_TYPE_BLIND: (_INHERIT_OVERRIDE_LABEL, *_BLIND_MODE_TAGS),
 }
 
 # ``direction`` override vocabulary (forward ``u->v`` only).  The inherit
@@ -247,13 +265,20 @@ _STOP_AT_LINE_VALUES: tuple[str, ...] = (_INHERIT_LABEL, "on", "off")
 # (== key absent), so a redundant ``DEFAULT`` member would be a second spelling
 # of the same intent and is excluded everywhere (R12).
 _PIPELINE_UNSET_LABEL: str = ""
-_PIPELINE_LINE_VALUES: tuple[str, ...] = (
+_PIPELINE_SPEED_VALUES: tuple[str, ...] = (
     _PIPELINE_UNSET_LABEL,
-    *(member.name for member in LineMode if member is not LineMode.DEFAULT),
+    *(member.name for member in SpeedTier if member is not SpeedTier.DEFAULT),
 )
+# STOP_AT_LINE is excluded: it is no longer JSON-authorable as a mode (folded
+# onto the ``stop_at_line`` axis -- ADR-064), so it must not be offered as a
+# pipeline-wide blind default either.
 _PIPELINE_BLIND_VALUES: tuple[str, ...] = (
     _PIPELINE_UNSET_LABEL,
-    *(member.name for member in BlindMode if member is not BlindMode.DEFAULT),
+    *(
+        member.name
+        for member in BlindMode
+        if member not in (BlindMode.DEFAULT, BlindMode.STOP_AT_LINE)
+    ),
 )
 _PIPELINE_TURN_VALUES: tuple[str, ...] = (
     _PIPELINE_UNSET_LABEL,
@@ -269,14 +294,24 @@ _PIPELINE_DIRECTION_VALUES: tuple[str, ...] = (
 )
 
 # The four pipeline-mode categories, as ``(which, label, values_tuple)`` triples
-# in display order.  ``which`` is the string the command/contract keys on; it
-# also names the model attribute ``pipeline_<which>_mode``.
+# in display order.  ``which`` is the string the command/contract keys on;
+# most name the model attribute ``pipeline_<which>_mode``, but ``"speed"`` is
+# the asymmetric exception -- it names ``pipeline_speed`` (no ``_mode``
+# suffix) -- so the model attribute is resolved via
+# :data:`_PIPELINE_WHICH_TO_ATTR`, not an f-string pattern.
 _PIPELINE_MODE_SPECS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("line", "Line:", _PIPELINE_LINE_VALUES),
+    ("speed", "Speed:", _PIPELINE_SPEED_VALUES),
     ("blind", "Blind:", _PIPELINE_BLIND_VALUES),
     ("turn", "Turn:", _PIPELINE_TURN_VALUES),
     ("direction", "Direction:", _PIPELINE_DIRECTION_VALUES),
 )
+
+# The ``which`` -> ``FieldModel`` attribute-name mapping is defined once in
+# ``commands._PIPELINE_WHICH_TO_ATTR`` (imported above) so this panel and the
+# ``SetPipelineMode`` command never drift out of lockstep. It stays explicit
+# rather than an ``f"pipeline_{which}_mode"`` pattern because the renamed
+# speed-tier field is ``pipeline_speed`` (asymmetric with ``pipeline_blind_mode``
+# / ``pipeline_turn_mode`` / ``pipeline_direction_mode``).
 
 # Canonical flag name for the field-wide blind->projection auto-seek toggle.
 _BLIND_PROJECTION_AUTO_SEEK_FLAG: str = "blind_projection_auto_seek"
@@ -300,18 +335,6 @@ _OVERRIDE_DELETE_GLYPH: str = "✕"  # multiplication x as a delete glyph
 _OVERRIDE_ARROW: str = "->"
 # Empty-state hint shown when no overrides exist.
 _OVERRIDE_EMPTY_HINT: str = "no edge overrides"
-
-# Status message naming the one rejected primitive/stop combination (U2): a
-# ``primitive_mode`` of ``BlindMode.STOP_AT_LINE`` (a seek bundle) together with
-# ``stop_at_line='off'`` (force dead-reckon) directly contradict, so the inline
-# editor refuses the Save and leaves the form open for correction.  Mirrors the
-# validator's single anti-ambiguity gate (``validator._validate_edges_field``)
-# so the GUI and the Save-to-disk validator never disagree.
-_OVERRIDE_STOP_AT_LINE_CONFLICT_MSG: str = (
-    "STOP_AT_LINE seek conflicts with stop_at_line=off -- drop one: keep "
-    "STOP_AT_LINE (omit stop_at_line or set it on) to seek, or pick a "
-    "non-seeking primitive to dead-reckon."
-)
 
 # Default mode-display text before the app sets anything.
 _DEFAULT_MODE_TEXT: str = "Mode: --"
@@ -630,14 +653,22 @@ class SidePanels(tk.Frame):
         #
         # ``on_set_edge_override`` fires when the inline editor's Save commits
         # for a derived-type edge.  Arguments are
-        # ``(edge_type, u, v, primitive_mode, direction, stop_at_line)`` where
+        # ``(edge_type, u, v, speed, mode, direction, stop_at_line)`` where
         # ``edge_type`` is ``"LINE"`` / ``"BLIND"`` (derived, not operator-set),
-        # ``u`` / ``v`` are node names, and the three override values are each a
+        # ``u`` / ``v`` are node names, and the four override values are each a
         # string tag or ``None`` (``None`` == "inherit", key omitted).  The app
         # routes this to a ``SetEdgeOverride`` command.
         self.on_set_edge_override: Optional[
             Callable[
-                [str, str, str, Optional[str], Optional[str], Optional[str]],
+                [
+                    str,
+                    str,
+                    str,
+                    Optional[str],
+                    Optional[str],
+                    Optional[str],
+                    Optional[str],
+                ],
                 None,
             ]
         ] = None
@@ -649,7 +680,7 @@ class SidePanels(tk.Frame):
         ] = None
         # ``on_pipeline_mode_change`` fires when a PIPELINE DEFAULTS combobox
         # commits.  Arguments are ``(which, value)`` where ``which`` is one of
-        # ``"line"`` / ``"blind"`` / ``"turn"`` / ``"direction"`` and ``value``
+        # ``"speed"`` / ``"blind"`` / ``"turn"`` / ``"direction"`` and ``value``
         # is the chosen mode-member name or ``None`` (the unset sentinel, key
         # absent -> planner falls back to the pipeline_config.py default).
         # Routed to ``SetPipelineMode``.
@@ -726,13 +757,16 @@ class SidePanels(tk.Frame):
 
         # ---- Edge-overrides add/edit form Tk variables (issue #79) -----
         # The inline editor sets the edge by u/v comboboxes; ``type`` is
-        # auto-derived and shown read-only.  The three override controls each
+        # auto-derived and shown read-only.  The four override controls each
         # default to their inherit sentinel (no override key).
         self._edge_override_u_var = tk.StringVar(value="")
         self._edge_override_v_var = tk.StringVar(value="")
         self._edge_override_type_var = tk.StringVar(value="")
-        self._edge_override_primitive_var = tk.StringVar(
-            value=_INHERIT_PRIMITIVE_LABEL
+        self._edge_override_speed_var = tk.StringVar(
+            value=_INHERIT_OVERRIDE_LABEL
+        )
+        self._edge_override_mode_var = tk.StringVar(
+            value=_INHERIT_OVERRIDE_LABEL
         )
         self._edge_override_direction_var = tk.StringVar(value=_INHERIT_LABEL)
         self._edge_override_stop_at_line_var = tk.StringVar(value=_INHERIT_LABEL)
@@ -1745,8 +1779,8 @@ class SidePanels(tk.Frame):
         sub-frame that is hidden until the operator clicks ``+ add override`` or
         a row's ``e``.  The inline editor sets the edge by ``u`` / ``v``
         comboboxes, derives + locks the ``type``, and exposes the
-        ``primitive_mode`` / ``direction`` / ``stop_at_line`` override controls;
-        geometry (distance / heading) is never shown.
+        ``speed`` / ``mode`` / ``direction`` / ``stop_at_line`` override
+        controls; geometry (distance / heading) is never shown.
 
         The list is rebuilt and the picker dropdowns repopulated on every
         :meth:`refresh`.  This builder wires the widgets only; it never
@@ -1875,18 +1909,34 @@ class SidePanels(tk.Frame):
         )
         self._edge_override_type_label.pack(side="left", padx=(6, 0))
 
-        # Primitive-mode row: combobox whose VALUES switch on the derived type.
-        primitive_row = self._themed_frame(self._edge_override_editor)
-        primitive_row.pack(side="top", fill="x")
-        self._themed_label(primitive_row, text="Primitive:").pack(side="left")
-        self._edge_override_primitive_combo = ttk.Combobox(
-            primitive_row,
-            textvariable=self._edge_override_primitive_var,
-            values=list(_PRIMITIVE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]),
+        # Speed row: uniform combobox -- the SAME values regardless of the
+        # derived edge type.
+        speed_row = self._themed_frame(self._edge_override_editor)
+        speed_row.pack(side="top", fill="x")
+        self._themed_label(speed_row, text="Speed:").pack(side="left")
+        self._edge_override_speed_combo = ttk.Combobox(
+            speed_row,
+            textvariable=self._edge_override_speed_var,
+            values=list(_SPEED_VALUES),
             state="readonly",
             style=_STYLE_COMBOBOX,
         )
-        self._edge_override_primitive_combo.pack(
+        self._edge_override_speed_combo.pack(
+            side="right", fill="x", expand=True
+        )
+
+        # Mode row: combobox whose VALUES switch on the derived type.
+        mode_row = self._themed_frame(self._edge_override_editor)
+        mode_row.pack(side="top", fill="x")
+        self._themed_label(mode_row, text="Mode:").pack(side="left")
+        self._edge_override_mode_combo = ttk.Combobox(
+            mode_row,
+            textvariable=self._edge_override_mode_var,
+            values=list(_MODE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]),
+            state="readonly",
+            style=_STYLE_COMBOBOX,
+        )
+        self._edge_override_mode_combo.pack(
             side="right", fill="x", expand=True
         )
 
@@ -1944,11 +1994,12 @@ class SidePanels(tk.Frame):
     def _build_pipeline_defaults_panel(self, master: tk.Misc) -> None:
         """Create the collapsible **Pipeline defaults** section (issue #79).
 
-        Four mode comboboxes (Line / Blind / Turn / Direction).  Line / Blind /
-        Turn cannot be ``DEFAULT`` (matches ``PipelineConfig.__post_init__``);
-        Direction may.  Leaving a value at the empty "unset" sentinel keeps the
-        corresponding field absent so the planner falls back to the
-        ``pipeline_config.py`` default.  Each combobox commit fires
+        Four mode comboboxes (Speed / Blind / Turn / Direction).  Speed /
+        Blind / Turn cannot be ``DEFAULT`` (matches
+        ``PipelineConfig.__post_init__``); Direction may.  Leaving a value at
+        the empty "unset" sentinel keeps the corresponding field absent so
+        the planner falls back to the ``pipeline_config.py`` default.  Each
+        combobox commit fires
         :attr:`on_pipeline_mode_change` with the category ``which`` and the
         chosen value (or ``None`` for the unset sentinel).
 
@@ -2419,7 +2470,7 @@ class SidePanels(tk.Frame):
 
             # --- Pipeline defaults: sync each combobox from the model. ---
             for which, _label, _values in _PIPELINE_MODE_SPECS:
-                stored = getattr(model, f"pipeline_{which}_mode")
+                stored = getattr(model, _PIPELINE_WHICH_TO_ATTR[which])
                 self._pipeline_mode_vars[which].set(
                     stored if stored is not None else _PIPELINE_UNSET_LABEL
                 )
@@ -2937,43 +2988,52 @@ class SidePanels(tk.Frame):
             return None
         return self._edges_overlay[index]
 
-    def _set_override_primitive_values(self, edge_type: str) -> None:
-        """Switch the primitive-mode combobox VALUES for the derived edge type.
+    def _set_override_mode_values(self, edge_type: str) -> None:
+        """Switch the Mode combobox VALUES for the derived edge type.
 
-        ``LineMode`` tags for a LINE edge, ``BlindMode`` tags for a BLIND edge
-        (each led by the inherit sentinel).  An unknown / empty derived type
-        falls back to the LINE list so the combobox is never value-less.
+        ``LineFollowMode`` tags (``MIDDLE`` only) for a LINE edge, ``BlindMode``
+        tags for a BLIND edge (each led by the inherit sentinel).  An unknown /
+        empty derived type falls back to the LINE list so the combobox is never
+        value-less.  The Speed combobox is uniform across edge types, so it is
+        never re-configured here.
 
         :param edge_type: The derived edge type (``"LINE"`` / ``"BLIND"``).
         """
-        values = _PRIMITIVE_VALUES_BY_TYPE.get(
-            edge_type, _PRIMITIVE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]
+        values = _MODE_VALUES_BY_TYPE.get(
+            edge_type, _MODE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]
         )
-        self._edge_override_primitive_combo.configure(values=list(values))
+        self._edge_override_mode_combo.configure(values=list(values))
 
     def _set_override_form(self, entry: Optional[dict]) -> None:
         """Populate the inline-editor override controls from *entry*.
 
         Each control is set to the entry's authored tag, or to its inherit
         sentinel when the key is absent / *entry* is ``None`` (the add case).
-        The type-derived primitive-mode VALUES are NOT set here -- the caller
-        sets them via :meth:`_set_override_primitive_values` once the type is
-        known.
+        The type-derived Mode VALUES are NOT set here -- the caller sets them
+        via :meth:`_set_override_mode_values` once the type is known.
 
         :param entry: An overlay dict to read from, or ``None`` for a blank
             add-form.
         """
         if entry is None:
-            self._edge_override_primitive_var.set(_INHERIT_PRIMITIVE_LABEL)
+            self._edge_override_speed_var.set(_INHERIT_OVERRIDE_LABEL)
+            self._edge_override_mode_var.set(_INHERIT_OVERRIDE_LABEL)
             self._edge_override_direction_var.set(_INHERIT_LABEL)
             self._edge_override_stop_at_line_var.set(_INHERIT_LABEL)
             return
-        primitive = entry.get("primitive_mode")
-        if primitive is None:
-            self._edge_override_primitive_var.set(_INHERIT_PRIMITIVE_LABEL)
+        speed = entry.get("speed")
+        if speed is None:
+            self._edge_override_speed_var.set(_INHERIT_OVERRIDE_LABEL)
         else:
-            self._edge_override_primitive_var.set(
-                getattr(primitive, "name", str(primitive))
+            self._edge_override_speed_var.set(
+                getattr(speed, "name", str(speed))
+            )
+        mode = entry.get("mode")
+        if mode is None:
+            self._edge_override_mode_var.set(_INHERIT_OVERRIDE_LABEL)
+        else:
+            self._edge_override_mode_var.set(
+                getattr(mode, "name", str(mode))
             )
         direction = entry.get("direction")
         self._edge_override_direction_var.set(
@@ -2988,8 +3048,7 @@ class SidePanels(tk.Frame):
         """Reflect a derived edge ``type`` in the read-only type label + combo.
 
         Sets the type label text (blank when no segment matches) and tints it by
-        kind, then switches the primitive-mode combobox VALUES to the matching
-        tag set.
+        kind, then switches the Mode combobox VALUES to the matching tag set.
 
         :param edge_type: The derived type, or ``None`` when the picked pair is
             not an existing segment.
@@ -2997,7 +3056,7 @@ class SidePanels(tk.Frame):
         self._edge_override_type_var.set(edge_type or "")
         tag_color = theme.BRICK if edge_type == _EDGE_TYPE_BLIND else theme.INK
         self._edge_override_type_label.configure(foreground=tag_color)
-        self._set_override_primitive_values(edge_type or _EDGE_TYPE_LINE)
+        self._set_override_mode_values(edge_type or _EDGE_TYPE_LINE)
 
     def _show_override_editor(self) -> None:
         """Reveal the inline override editor sub-frame (idempotent)."""
@@ -3085,7 +3144,7 @@ class SidePanels(tk.Frame):
         The edge-mode graft's existing-override half (U1/U3): when the operator
         clicks an edge that ALREADY carries an override, the app calls this to
         OPEN the inline editor populated from that override -- the directed pair,
-        the derived (read-only) type, and the three override controls at their
+        the derived (read-only) type, and the four override controls at their
         authored tags -- so the operator can correct it in place.  Re-Saving
         dispatches a fresh :attr:`on_set_edge_override` for the same identity (the
         command replaces in place, keyed on ``(type, u, v)``), so editing never
@@ -3336,7 +3395,7 @@ class SidePanels(tk.Frame):
         """Open the inline editor pre-filled from an existing row's *entry*.
 
         Triggered by a row's ``e`` button.  Loads the edge ``u`` / ``v``, the
-        derived (read-only) type, and the three override controls from the
+        derived (read-only) type, and the four override controls from the
         clicked overlay entry so the operator can amend it; re-Saving dispatches
         a fresh :attr:`on_set_edge_override` for the same identity (the command
         replaces in place, keyed on ``(type, u, v)``).
@@ -3360,8 +3419,8 @@ class SidePanels(tk.Frame):
 
         Triggered by either edge combobox.  Looks up the picked pair against the
         cached segment sets, shows the derived (read-only) type, and
-        context-switches the primitive-mode combobox VALUES.  A pair that is not
-        an existing segment leaves the type blank (Save then inline-rejects).
+        context-switches the Mode combobox VALUES.  A pair that is not an
+        existing segment leaves the type blank (Save then inline-rejects).
         A pre-existing override for the newly-picked edge pre-loads its controls
         so re-picking an already-overridden edge surfaces its current values.
 
@@ -3388,8 +3447,8 @@ class SidePanels(tk.Frame):
         inline-rejected with a status message (mirrors the existing inline-reject
         pattern).  Each override control maps its inherit sentinel to ``None``
         (key omitted) and any tag to the verbatim string; the slot then receives
-        ``(edge_type, u, v, primitive_mode, direction, stop_at_line)``.  The
-        editor is hidden on a successful dispatch.
+        ``(edge_type, u, v, speed, mode, direction, stop_at_line)``.  The editor
+        is hidden on a successful dispatch.
         """
         if self._suppress_callbacks:
             return
@@ -3402,66 +3461,20 @@ class SidePanels(tk.Frame):
             )
             return
 
-        primitive_label = self._edge_override_primitive_var.get()
-        primitive_mode = (
-            None
-            if primitive_label == _INHERIT_PRIMITIVE_LABEL
-            else primitive_label
-        )
+        speed_label = self._edge_override_speed_var.get()
+        speed = None if speed_label == _INHERIT_OVERRIDE_LABEL else speed_label
+        mode_label = self._edge_override_mode_var.get()
+        mode = None if mode_label == _INHERIT_OVERRIDE_LABEL else mode_label
         direction_label = self._edge_override_direction_var.get()
         direction = None if direction_label == _INHERIT_LABEL else direction_label
         stop_label = self._edge_override_stop_at_line_var.get()
         stop_at_line = None if stop_label == _INHERIT_LABEL else stop_label
 
-        # U2: reject the one contradiction -- primitive_mode = STOP_AT_LINE (a
-        # seek bundle) together with stop_at_line='off' (force dead-reckon).  The
-        # same predicate the validator's single anti-ambiguity gate uses, mirrored
-        # here for fast feedback so the GUI and the Save-to-disk validator agree.
-        # On a hit: name the contradiction in the status bar, do NOT dispatch, and
-        # leave the editor OPEN so the operator can correct one of the two fields.
-        if self._is_stop_at_line_conflict(primitive_mode, stop_at_line):
-            self._status_var.set(_OVERRIDE_STOP_AT_LINE_CONFLICT_MSG)
-            return
-
         if self.on_set_edge_override is not None:
             self.on_set_edge_override(
-                edge_type, u, v, primitive_mode, direction, stop_at_line
+                edge_type, u, v, speed, mode, direction, stop_at_line
             )
         self._hide_override_editor()
-
-    @staticmethod
-    def _is_stop_at_line_conflict(
-        primitive_mode: Optional[str], stop_at_line: Optional[str]
-    ) -> bool:
-        """Return ``True`` for the rejected STOP_AT_LINE + ``stop_at_line='off'`` pair.
-
-        Mirrors the contradiction predicate in
-        :func:`tools.path_planner.validator._validate_edges_field`: a
-        ``primitive_mode`` resolving to :attr:`BlindMode.STOP_AT_LINE` together
-        with ``stop_at_line`` resolving to ``OFF``.  Both arguments arrive as the
-        inline editor's verbatim tag strings (or ``None`` for "inherit"), but the
-        check also accepts the enum forms so it stays identical to the validator's
-        predicate should a caller pass an enum instance.
-
-        :param primitive_mode: The override's ``primitive_mode`` tag / enum, or
-            ``None`` when the key is inherited.
-        :param stop_at_line: The override's ``stop_at_line`` tag / enum, or
-            ``None`` when the key is inherited.
-        :return: ``True`` iff the pair is the rejected contradiction.
-        """
-        primitive_is_stop_at_line = False
-        if isinstance(primitive_mode, BlindMode):
-            primitive_is_stop_at_line = primitive_mode == BlindMode.STOP_AT_LINE
-        elif isinstance(primitive_mode, str):
-            primitive_is_stop_at_line = (
-                primitive_mode == BlindMode.STOP_AT_LINE.name
-            )
-        stop_is_off = False
-        if isinstance(stop_at_line, StopAtLineMode):
-            stop_is_off = stop_at_line == StopAtLineMode.OFF
-        elif isinstance(stop_at_line, str):
-            stop_is_off = stop_at_line.lower() == "off"
-        return primitive_is_stop_at_line and stop_is_off
 
     def _handle_cancel_override(self) -> None:
         """Close the inline override editor without dispatching (Cancel)."""
@@ -3489,7 +3502,7 @@ class SidePanels(tk.Frame):
         sentinel maps to ``None`` (key absent -> inherit the pipeline_config.py
         default); any member name is forwarded verbatim.
 
-        :param which: The pipeline category (``"line"`` / ``"blind"`` /
+        :param which: The pipeline category (``"speed"`` / ``"blind"`` /
             ``"turn"`` / ``"direction"``) whose combobox committed.
         """
         if self._suppress_callbacks:

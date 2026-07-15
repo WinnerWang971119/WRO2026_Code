@@ -75,7 +75,7 @@ from tools.path_planner.header_writer import (
     compute_source_hash,
     emit_routes,
 )
-from tools.path_planner.pipeline_config import LineMode, TurnMode
+from tools.path_planner.pipeline_config import BlindMode, SpeedTier, TurnMode
 from tools.path_planner.planner import (
     BlindDecayParams,
     PivotTurnRecord,
@@ -418,7 +418,7 @@ def test_projection_node_drops_retired_projection_symbols(emit_targets):
         assert retired not in cpp_text, f"{retired!r} leaked into routes.cpp"
 
     # EdgeInfo is exactly 7 fields: type, distance_cm, heading_deg,
-    # line_mode_override, blind_mode_override, direction_override,
+    # speed_override, blind_mode_override, direction_override,
     # stop_at_line_override. Slice the struct body and count the field lines.
     struct_start = header_text.index("struct EdgeInfo {")
     struct_end = header_text.index("};", struct_start)
@@ -574,13 +574,14 @@ def test_pipeline_config_default_emit(emit_targets):
 
     Issue #64 dropped the ``projection`` PipelineConfig member (and the
     ``ProjectionMode`` enum), so the emitted struct now carries only
-    line / blind / turn / direction.
+    speed / blind / turn / direction (ADR-064 renamed ``line``->``speed`` and
+    ``LineMode``->``SpeedTier``).
     """
     _, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
     cpp_text = source_path.read_text(encoding="utf-8")
     assert "const PipelineConfig PIPELINE_CONFIG = {" in cpp_text
-    assert "LineMode::NORMAL" in cpp_text
+    assert "SpeedTier::NORMAL" in cpp_text
     assert "BlindMode::SYNC_TSHAPE" in cpp_text
     assert "TurnMode::COUNTER_ROT" in cpp_text
     # ProjectionMode was retired (issue #64) -- it must NOT appear anywhere.
@@ -611,8 +612,8 @@ def test_blind_mode_enum_emits_stop_at_line(emit_targets):
     assert "RAW_FLAT = 3" in blind_line
 
 
-def test_edge_primitive_mode_override_emit(emit_targets):
-    """TC2: an EDGE_LINE with primitive_mode=LineMode.FAST emits the override."""
+def test_edge_speed_override_emit(emit_targets):
+    """TC2: an EDGE_LINE with speed=SpeedTier.FAST emits the override."""
     header_path, source_path = emit_targets
     fd = _build_toy_field_data()
     # Drop one LINE_SEGMENTS pair so the rich-EDGES entry is the only
@@ -628,15 +629,39 @@ def test_edge_primitive_mode_override_emit(emit_targets):
             "v":              "E",
             "distance_cm":    114.02,
             "heading_deg":    37.87,
-            "primitive_mode": LineMode.FAST,
+            "speed":          SpeedTier.FAST,
         },
     ]
     _emit_toy(fd, header_path, source_path)
     cpp_text = source_path.read_text(encoding="utf-8")
-    # The override must appear in the line_mode_override slot of at
+    # The override must appear in the speed_override slot of at
     # least one EdgeInfo cell. Bare-text containment is enough; the
     # idempotency / golden tests lock the surrounding shape.
-    assert "LineMode::FAST" in cpp_text
+    assert "SpeedTier::FAST" in cpp_text
+
+
+def test_edge_blind_mode_override_emit(emit_targets):
+    """TC3: an EDGE_BLIND with mode=BlindMode.SYNC_TSHAPE emits the override.
+
+    ``mode`` is type-switched: on a BLIND edge it lands on the
+    ``blind_mode_override`` slot (unchanged mechanism from the retired
+    ``primitive_mode``, just re-keyed by ADR-064).
+    """
+    header_path, source_path = emit_targets
+    fd = _build_toy_field_data()
+    fd.EDGES = [
+        {
+            "type":        EDGE_BLIND,
+            "u":           "B",
+            "v":           "G",
+            "distance_cm": 118.03,
+            "heading_deg": 321.34,
+            "mode":        BlindMode.SYNC_TSHAPE,
+        },
+    ]
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    assert "BlindMode::SYNC_TSHAPE" in cpp_text
 
 
 # ---------------------------------------------------------------------------
@@ -651,13 +676,13 @@ def test_edge_primitive_mode_override_emit(emit_targets):
 # ---------------------------------------------------------------------------
 
 
-def test_tc1_string_tag_primitive_mode_emits_line_mode_fast(emit_targets):
-    """TC1 (emit): a JSON string-tag primitive_mode='FAST' emits LineMode::FAST.
+def test_tc1_string_tag_speed_emits_speed_tier_fast(emit_targets):
+    """TC1 (emit): a JSON string-tag speed='FAST' emits SpeedTier::FAST.
 
     The validate/build half is in test_field_data; this proves the JSON string
-    encoding (a bare member NAME, NOT a LineMode instance) resolves all the way
-    through ``header_writer._override_enum_value`` to the C++ ``LineMode::FAST``
-    literal in the edge's ``line_mode_override`` slot.
+    encoding (a bare member NAME, NOT a SpeedTier instance) resolves all the way
+    through ``header_writer._override_enum_value`` to the C++ ``SpeedTier::FAST``
+    literal in the edge's ``speed_override`` slot.
     """
     header_path, source_path = emit_targets
     fd = _build_toy_field_data()
@@ -668,12 +693,12 @@ def test_tc1_string_tag_primitive_mode_emits_line_mode_fast(emit_targets):
             "type": EDGE_LINE,
             "u": "A",
             "v": "E",
-            "primitive_mode": "FAST",  # a JSON string TAG, not LineMode.FAST
+            "speed": "FAST",  # a JSON string TAG, not SpeedTier.FAST
         }
     ]
     _emit_toy(fd, header_path, source_path)
     cpp_text = source_path.read_text(encoding="utf-8")
-    assert "LineMode::FAST" in cpp_text
+    assert "SpeedTier::FAST" in cpp_text
 
 
 def _small_pipeline_field() -> SimpleNamespace:
@@ -708,7 +733,7 @@ def _small_pipeline_field() -> SimpleNamespace:
         EDGES=[],
         BLIND_PROJECTION_AUTO_SEEK=True,
         RESET_NODES={},
-        PIPELINE_LINE_MODE=None,
+        PIPELINE_SPEED=None,
         PIPELINE_BLIND_MODE=None,
         PIPELINE_TURN_MODE=None,
         PIPELINE_DIRECTION_MODE=None,
@@ -737,19 +762,19 @@ def test_tc7_field_sourced_pipeline_blind_mode_emits_custom(emit_targets):
     # The blind default is no longer the singleton SYNC_TSHAPE.
     assert "BlindMode::SYNC_TSHAPE" not in cfg_block
     # Absent categories fall back to the pipeline_config.py singleton defaults.
-    assert "LineMode::NORMAL" in cfg_block
+    assert "SpeedTier::NORMAL" in cfg_block
     assert "TurnMode::COUNTER_ROT" in cfg_block
 
 
 def test_tc7_field_sourced_pipeline_all_categories_emit(emit_targets):
     """TC7 (all four): every field-sourced PIPELINE_* key resolves into the struct.
 
-    Pins that line / blind / turn / direction each read from the field-sourced
+    Pins that speed / blind / turn / direction each read from the field-sourced
     name, not just the blind category above.
     """
     header_path, source_path = emit_targets
     fd = _small_pipeline_field()
-    fd.PIPELINE_LINE_MODE = "FAST"
+    fd.PIPELINE_SPEED = "FAST"
     fd.PIPELINE_BLIND_MODE = "RAW_FLAT"
     fd.PIPELINE_TURN_MODE = "PIVOT_RIGHT"
     fd.PIPELINE_DIRECTION_MODE = "FORCE_REVERSE"
@@ -758,7 +783,7 @@ def test_tc7_field_sourced_pipeline_all_categories_emit(emit_targets):
     cfg_start = cpp_text.index("const PipelineConfig PIPELINE_CONFIG = {")
     cfg_end = cpp_text.index("};", cfg_start)
     cfg_block = cpp_text[cfg_start:cfg_end]
-    assert "LineMode::FAST" in cfg_block
+    assert "SpeedTier::FAST" in cfg_block
     assert "BlindMode::RAW_FLAT" in cfg_block
     assert "TurnMode::PIVOT_RIGHT" in cfg_block
     assert "DirectionMode::FORCE_REVERSE" in cfg_block
@@ -769,7 +794,7 @@ def test_tc8_absent_pipeline_keys_emit_singleton_defaults(emit_targets):
 
     The toy fixture authors no PIPELINE_* keys (and the small field here leaves
     them None), so the emitted struct must be the pipeline_config.py singleton:
-    line NORMAL, blind SYNC_TSHAPE, turn COUNTER_ROT, direction DEFAULT. This is
+    speed NORMAL, blind SYNC_TSHAPE, turn COUNTER_ROT, direction DEFAULT. This is
     the half that makes the byte-golden hold: absent keys => default emission.
     """
     header_path, source_path = emit_targets
@@ -779,7 +804,7 @@ def test_tc8_absent_pipeline_keys_emit_singleton_defaults(emit_targets):
     cfg_start = cpp_text.index("const PipelineConfig PIPELINE_CONFIG = {")
     cfg_end = cpp_text.index("};", cfg_start)
     cfg_block = cpp_text[cfg_start:cfg_end]
-    assert "LineMode::NORMAL" in cfg_block
+    assert "SpeedTier::NORMAL" in cfg_block
     assert "BlindMode::SYNC_TSHAPE" in cfg_block
     assert "TurnMode::COUNTER_ROT" in cfg_block
     assert "DirectionMode::DEFAULT" in cfg_block
@@ -805,7 +830,7 @@ def test_tc8_toy_field_has_no_pipeline_keys_and_golden_is_byte_identical(emit_ta
     # silently rebaseline the golden).
     for absent_key in (
         "EDGES",
-        "PIPELINE_LINE_MODE",
+        "PIPELINE_SPEED",
         "PIPELINE_BLIND_MODE",
         "PIPELINE_TURN_MODE",
         "PIPELINE_DIRECTION_MODE",

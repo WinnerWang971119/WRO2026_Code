@@ -29,7 +29,7 @@ the module-level attributes the existing
       "pivot_turns":           [["<u>", "<v>", "<w>"], ...],
       "RESET_NODES":           {"<name>": {"axis": "x"|"y", "wall_coord": <float>, "facing": <float in [0, 360)>}, ...},
       "blind_projection_auto_seek": <bool>,
-      "pipeline_line_mode":      "<LineMode name>",
+      "pipeline_speed":          "<SpeedTier name>",
       "pipeline_blind_mode":     "<BlindMode name>",
       "pipeline_turn_mode":      "<TurnMode name>",
       "pipeline_direction_mode": "<DirectionMode name>",
@@ -50,21 +50,25 @@ re-localization. Unlike the array-of-arrays fields above, its values are
 plain JSON objects (no tuple conversion applies); they round-trip through the
 loader unchanged.
 
-``EDGES`` is the per-edge override overlay (ADR-047, superseding ADR-022's
-"JSON can't hold the enums" clause). It is a list of override-only objects, each
+``EDGES`` is the per-edge override overlay (ADR-064, superseding ADR-047's
+overloaded ``primitive_mode`` encoding and ADR-022's "JSON can't hold the
+enums" clause). It is a list of override-only objects, each
 ``{"type": "LINE"|"BLIND", "u", "v"}`` plus any of the optional override keys
-``primitive_mode`` (an enum member NAME string -- ``"FAST"``, ``"GYRO_TSHAPE"``,
-... -- the validator/header resolve to a ``LineMode`` / ``BlindMode`` member),
-``direction`` (``"front"|"rear"``), and ``stop_at_line`` (``"on"|"off"``).
-Geometry (``distance_cm`` / ``heading_deg``) is OPTIONAL -- derived from node
-coords downstream when absent; only legacy hand-authored entries carry it, and
-they round-trip verbatim. EDGES entries are dicts, so the tuple discipline below
+``speed`` (a uniform ``SpeedTier`` member NAME string -- ``"SLOW"``,
+``"NORMAL"``, ``"FAST"`` -- applies to both LINE and BLIND edges), ``mode``
+(a type-switched member NAME string -- LINE resolves against
+``LineFollowMode``, BLIND against ``BlindMode``), ``direction``
+(``"front"|"rear"``), and ``stop_at_line`` (``"on"|"off"``). Geometry
+(``distance_cm`` / ``heading_deg``) is OPTIONAL -- derived from node coords
+downstream when absent; only legacy hand-authored entries carry it, and they
+round-trip verbatim. EDGES entries are dicts, so the tuple discipline below
 does NOT apply -- they pass through :func:`load_field_json` unchanged.
 
 The four ``pipeline_*`` keys are the field-sourced PIPELINE_CONFIG defaults
-(ADR-047): each is an enum member NAME string (``"NORMAL"``, ``"SYNC_TSHAPE"``,
-...) or absent (= inherit the ``pipeline_config.py`` default). ``EDGES`` and the
-four ``pipeline_*`` keys are optional (absent-stays-absent on round-trip).
+(ADR-064, ``pipeline_speed`` was ``pipeline_line_mode`` under ADR-047): each is
+an enum member NAME string (``"NORMAL"``, ``"SYNC_TSHAPE"``, ...) or absent
+(= inherit the ``pipeline_config.py`` default). ``EDGES`` and the four
+``pipeline_*`` keys are optional (absent-stays-absent on round-trip).
 
 Tuple-vs-list discipline
 ------------------------
@@ -126,7 +130,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
     "pivot_turns",
     "RESET_NODES",
     "blind_projection_auto_seek",
-    "pipeline_line_mode",
+    "pipeline_speed",
     "pipeline_blind_mode",
     "pipeline_turn_mode",
     "pipeline_direction_mode",
@@ -141,7 +145,7 @@ _TOP_LEVEL_KEY_ORDER: tuple[str, ...] = (
 # ``pivot_turns`` (per-turn single-wheel pivots), ``RESET_NODES`` (wall-zero
 # reset nodes), ``blind_projection_auto_seek`` (the field-wide BLIND->PROJECTION
 # auto-seek flag, emitted only when set to its non-default ``False``), the four
-# ``pipeline_*`` mode defaults (ADR-047 field-sourced PIPELINE_CONFIG; absent =
+# ``pipeline_*`` mode defaults (ADR-064 field-sourced PIPELINE_CONFIG; absent =
 # inherit the pipeline_config.py default), and ``EDGES`` (the override-only
 # per-edge overlay; absent = no overrides). Without this membership the dump
 # writer would drop a key the editor tracks -- ``_build_ordered_payload`` only
@@ -151,7 +155,7 @@ _OPTIONAL_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
         "pivot_turns",
         "RESET_NODES",
         "blind_projection_auto_seek",
-        "pipeline_line_mode",
+        "pipeline_speed",
         "pipeline_blind_mode",
         "pipeline_turn_mode",
         "pipeline_direction_mode",
@@ -189,10 +193,11 @@ def load_field_json(path: Path | None = None) -> dict:
         ``None`` (the default), reads ``tools/path_planner/field_data.json``
         sibling of ``field_data.py``.
     :return: A new dict with the field-data attributes.
-    :raises FieldDataError: when the file does not exist, or when the
-        file contents are not valid JSON. The original
-        :class:`json.JSONDecodeError` is chained via ``raise ... from``
-        so the offending line/column survives.
+    :raises FieldDataError: when the file does not exist, when the file
+        contents are not valid JSON, or when it carries the retired
+        top-level ``pipeline_line_mode`` key (renamed to ``pipeline_speed``
+        under ADR-064). The original :class:`json.JSONDecodeError` is
+        chained via ``raise ... from`` so the offending line/column survives.
     """
     target = Path(path) if path is not None else _DEFAULT_JSON_PATH
 
@@ -216,6 +221,24 @@ def load_field_json(path: Path | None = None) -> dict:
         raise FieldDataError(
             f"field_data.json must be a JSON object at the top level; "
             f"got: {type(parsed).__name__}"
+        )
+
+    # Retired top-level key: pipeline_line_mode (ADR-064) -----------------
+    # ADR-047's ``pipeline_line_mode`` (a LineMode name) was renamed to
+    # ``pipeline_speed`` (a SpeedTier name) when the overloaded per-edge
+    # ``primitive_mode`` slot split into orthogonal speed/mode axes. field_data.py
+    # reads only ``pipeline_speed``, so a field still on the old key would load
+    # silently as NORMAL and drop every line edge from its authored tier (e.g.
+    # FAST 90 -> NORMAL 70) with no error. Reject it up front with a targeted
+    # migration message -- mirroring the per-edge ``primitive_mode`` guard in
+    # validator.py -- so the author renames the key rather than chasing a silent
+    # speed change. The load is the single choke point both field_data.py and the
+    # editor read through, so this covers every consumer.
+    if "pipeline_line_mode" in parsed:
+        raise FieldDataError(
+            "top-level 'pipeline_line_mode' was renamed to 'pipeline_speed' "
+            "(ADR-064): rename the key. Its value is still a SpeedTier name "
+            "(SLOW|NORMAL|FAST)."
         )
 
     return _convert_arrays_to_tuples(parsed)

@@ -3,6 +3,11 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (PR #98 triage, issue #79 follow-up, Phase 3)
 
+> **Rule 2 (the `STOP_AT_LINE` + `stop_at_line='off'` contradiction check) dissolved by
+> [ADR-064](./064-per-edge-mode-speed-orthogonalization.md).** Once `STOP_AT_LINE` can no
+> longer be authored as a Mode value, the contradiction it names is inexpressible — there is
+> nothing left to reject. Rule 1 (reset-incidence) is untouched and stays in force.
+
 ## Rule
 
 Two field-data contract rules the validator (`tools/path_planner/validator.py`) now enforces:
@@ -16,12 +21,14 @@ Two field-data contract rules the validator (`tools/path_planner/validator.py`) 
    kinds). Defense-in-depth mirrors the predicate in the editor (`auto_edges` classifies a
    reset-incident candidate `"blind"`; edge-mode `L` refuses a reset-incident pair).
 
-2. **`STOP_AT_LINE` + `stop_at_line='off'` is a contradiction and is rejected.** An `EDGES` entry
-   whose `primitive_mode` resolves to `BlindMode.STOP_AT_LINE` (the seek bundle) together with a
-   `stop_at_line` of `OFF` (force dead-reckon, no seek) is rejected with a `FieldDataError` naming
-   the `EDGES[i]` index and both halves of the contradiction. This is the **only** primitive/stop
-   combination rejected; every other pairing (`STOP_AT_LINE` + `ON`, `SYNC_TSHAPE` + `OFF`, …)
-   stays legal. Mirrored by the inline editor Save for fast operator feedback.
+2. **(dissolved by ADR-064) `STOP_AT_LINE` + `stop_at_line='off'` is a contradiction and is
+   rejected.** An `EDGES` entry whose `primitive_mode` resolves to `BlindMode.STOP_AT_LINE` (the
+   seek bundle) together with a `stop_at_line` of `OFF` (force dead-reckon, no seek) is rejected
+   with a `FieldDataError` naming the `EDGES[i]` index and both halves of the contradiction. This
+   is the **only** primitive/stop combination rejected; every other pairing (`STOP_AT_LINE` + `ON`,
+   `SYNC_TSHAPE` + `OFF`, …) stays legal. Mirrored by the inline editor Save for fast operator
+   feedback. As of ADR-064, `STOP_AT_LINE` is not a Mode at all, so this check no longer runs —
+   documented here for history only.
 
 ## Why
 
@@ -63,9 +70,9 @@ expressible from the GUI:
 - A reset node ever gains a legitimate line-follow approach (e.g. a wall-zero node that also sits
   on a junction) — re-open the incidence rule; today's anchor model assumes a reset node is reached
   blind.
-- A future `BlindMode` member is added whose seek semantics are conditional, making the
-  `STOP_AT_LINE` + `OFF` contradiction one of several — generalize the per-edge contradiction check
-  rather than special-casing each pair.
+- ~~A future `BlindMode` member is added whose seek semantics are conditional, making the
+  `STOP_AT_LINE` + `OFF` contradiction one of several~~ — moot: ADR-064 removed `STOP_AT_LINE`
+  as an authorable Mode, so there is no contradiction left to generalize.
 
 ## See also
 
@@ -74,5 +81,6 @@ expressible from the GUI:
 - [ADR-043 — Wall-zero reset nodes](./043-wall-zero-reset-nodes.md) — the reset node kind whose blind-only incidence this rule pins.
 - [ADR-041 — Blind-decay routing](./041-blind-decay-routing.md) — the `{line, reset}` anchor set a `LINE`→reset seam would corrupt.
 - [ADR-029 — The validator is the single anti-ambiguity gate](./029-validator-anti-ambiguity.md) — both rejections land here, GUI guards are mirrors.
+- [ADR-064 — Per-edge mode/speed orthogonalization](./064-per-edge-mode-speed-orthogonalization.md) — dissolves Rule 2 above (the `STOP_AT_LINE` + `stop_at_line='off'` contradiction); Rule 1 (reset-incidence) stands.
 - `docs/plans/2026-06-24-pr98-triage-fixes.md` — originating plan (U2 / U5 / R8).
 - PR #98 (closed by this).

@@ -22,8 +22,11 @@ Optional edge attributes (only present when supplied on the source edge
 dict; forwarded verbatim for downstream consumers like the validator,
 compiler, and header writer):
 
-* ``primitive_mode`` : opaque string tag selecting the per-edge primitive
-  pipeline mode. Not validated here.
+* ``speed``  : opaque string tag selecting the per-edge speed tier.
+  Uniform across both edge types. Not validated here.
+* ``mode``   : opaque string tag selecting the per-edge primitive mode
+  (type-switched: interpretation depends on the edge's ``type``). Not
+  validated here.
 * ``direction_override`` : integer (the value of a
   :class:`pipeline_config.DirectionMode` member, 1 = FORCE_FORWARD,
   2 = FORCE_REVERSE). Forces forward/reverse traversal of this directed
@@ -226,7 +229,7 @@ def edge_clips_obstacle(
 
 # Symmetric: describes HOW to traverse the segment, not which end is the
 # entry. Safe to copy onto both directions of a bidirectional pair.
-_BIDIRECTIONAL_OPTIONAL_KEYS = ("primitive_mode",)
+_BIDIRECTIONAL_OPTIONAL_KEYS = ("speed", "mode")
 
 # Direction-dependent: ``direction`` forces forward/reverse traversal of
 # the directed edge, and ``stop_at_line`` forces (or suppresses) the
@@ -263,11 +266,11 @@ _STOP_AT_LINE_STR_TO_MODE = {
 def _extract_bidirectional_attrs(options: dict) -> dict:
     """Pull symmetric metadata out of a source-edge options dict.
 
-    Symmetric attributes (currently just ``primitive_mode``) describe the
-    segment itself rather than the entry direction, so they are copied
-    verbatim onto both the forward and reverse directed edges. Absent
-    keys stay absent so downstream consumers can distinguish "no
-    override" from an explicit value.
+    Symmetric attributes (``speed``, ``mode``) describe the segment itself
+    rather than the entry direction, so they are copied verbatim onto both
+    the forward and reverse directed edges. Absent keys stay absent so
+    downstream consumers can distinguish "no override" from an explicit
+    value.
 
     :param options: dict-like source-edge attributes (may be empty).
     :return: dict of attributes to splat onto both directions.
@@ -333,7 +336,7 @@ def _emit_directed_pair(
 
     Optional ``options`` carries two flavors of metadata:
 
-    * **Bidirectional** (``primitive_mode``): describes the segment
+    * **Bidirectional** (``speed``, ``mode``): describe the segment
       itself; copied onto both directions.
     * **Directional** (``direction``, ``stop_at_line``): describes behavior
       that depends on which end is the entry. Applied ONLY to the forward
@@ -346,7 +349,7 @@ def _emit_directed_pair(
        **A directional override is SINGLE-DIRECTION and silently skipped
        on reverse traversal.** ``direction_override`` lands on the u -> v
        edge only; the reverse (v -> u) edge here gets just the symmetric
-       ``primitive_mode``. Because every pair is bidirectional and
+       ``speed`` / ``mode``. Because every pair is bidirectional and
        Dijkstra picks whichever direction is shorter, ``NEXT_HOP`` may
        route v -> u -- in which case the override does NOT apply and the
        hop falls back to ``PIPELINE_CONFIG.direction`` with no warning.
@@ -409,7 +412,7 @@ def build_graph(field_data) -> nx.DiGraph:
     6. **Optional**: emit bidirectional edges for every dict in
        ``field_data.EDGES`` (if the attribute exists). Each dict supplies
        ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`), ``u``,
-       and ``v``, plus any of the optional keys ``primitive_mode``,
+       and ``v``, plus any of the optional keys ``speed``, ``mode``,
        ``direction``, ``stop_at_line`` which are forwarded verbatim to
        the resulting directed edges. Same obstacle-clip drop applies, and
        drops warn the same way BLIND_EDGES drops do because the routing
@@ -523,7 +526,7 @@ def build_graph(field_data) -> nx.DiGraph:
             # AUTHORING WARNING (finding #40): a directional override on this
             # EDGES entry -- ``direction`` ("front"/"rear") or ``stop_at_line``
             # ("on"/"off") -- applies ONLY to the u -> v hop. The reverse
-            # (v -> u) edge below inherits just the symmetric ``primitive_mode``.
+            # (v -> u) edge below inherits just the symmetric ``speed`` / ``mode``.
             # Edges are bidirectional and Dijkstra picks the shorter sense, so if
             # NEXT_HOP routes v -> u the override is SILENTLY ignored and the hop
             # falls back to the pipeline default. To force the override on the

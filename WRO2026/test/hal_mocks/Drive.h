@@ -122,7 +122,7 @@ void _recordStopAtLine(DriveClass& d, float expectedCm);
 void _recordWallStop(DriveClass& d, float cm);
 
 // ---------------------------------------------------------------------------
-// Move-only `[[nodiscard]]` builders mirroring the production fluent verbs. Task
+// Move-only builders mirroring the production fluent verbs. Task
 // bodies use them as discarded temporaries (`Drive.driveDist(30).tShape();`), so
 // every chain setter returns `*this`. UNLIKE the production builders (and the
 // `mocks/Drive.h` no-op builders), these record their verb + key arg AT
@@ -132,7 +132,7 @@ void _recordWallStop(DriveClass& d, float cm);
 // touched ONLY through the free functions, never inline (the MSVC C2027 trap).
 // ---------------------------------------------------------------------------
 
-/// @brief Shared macro emitting the move-only `[[nodiscard]]` boilerplate (no default
+/// @brief Shared macro emitting the move-only boilerplate (no default
 ///        ctor — every builder is constructed with its owner + key arg).
 #define WRO_HAL_BUILDER_BOILERPLATE(NAME)                                   \
     NAME(NAME&&) noexcept            = default;                             \
@@ -143,7 +143,7 @@ void _recordWallStop(DriveClass& d, float cm);
 /**
  * @brief Recording mock of `DriveDistBuilder`. Records `driveDist(cm)` on construction.
  */
-class [[nodiscard]] DriveDistBuilder
+class DriveDistBuilder
 {
 public:
     /** @brief Construct + record the move immediately (call site is a discarded temporary). */
@@ -167,7 +167,7 @@ public:
 /**
  * @brief Recording mock of `DriveTimeBuilder`. Records `driveTime(sec)` on construction.
  */
-class [[nodiscard]] DriveTimeBuilder
+class DriveTimeBuilder
 {
 public:
     /** @brief Construct + record the move immediately (call site is a discarded temporary). */
@@ -191,7 +191,7 @@ public:
 /**
  * @brief Recording mock of `TurnDegBuilder`. Records `turnDeg(deg)` on construction.
  */
-class [[nodiscard]] TurnDegBuilder
+class TurnDegBuilder
 {
 public:
     /** @brief Construct + record the turn immediately (call site is a discarded temporary). */
@@ -209,7 +209,7 @@ public:
 /**
  * @brief Recording mock of `TurnToYawBuilder`. Records `turnToYaw(yaw)` on construction.
  */
-class [[nodiscard]] TurnToYawBuilder
+class TurnToYawBuilder
 {
 public:
     /** @brief Construct + record the turn immediately (call site is a discarded temporary). */
@@ -227,7 +227,7 @@ public:
 /**
  * @brief Recording mock of `StopAtLineBuilder`. Records `stopAtLine(expectedCm)` on construction.
  */
-class [[nodiscard]] StopAtLineBuilder
+class StopAtLineBuilder
 {
 public:
     /** @brief Construct + record the seek immediately (call site is a discarded temporary). */
@@ -250,7 +250,7 @@ public:
 /**
  * @brief Recording mock of `WallStopBuilder`. Records `wallStop(cm)` on construction.
  */
-class [[nodiscard]] WallStopBuilder
+class WallStopBuilder
 {
 public:
     /** @brief Construct + record the push immediately (call site is a discarded temporary). */
@@ -453,20 +453,20 @@ public:
 
     // fluent verbs — return recording builders (which capture verb + key arg on construction)
     /** @brief Build a distance-bounded move; records `driveDist(cm)` immediately. */
-    [[nodiscard]] DriveDistBuilder driveDist(float cm) { return DriveDistBuilder(*this, cm); }
+    DriveDistBuilder driveDist(float cm) { return DriveDistBuilder(*this, cm); }
     /** @brief Build a time-bounded move; records `driveTime(sec)` immediately. */
-    [[nodiscard]] DriveTimeBuilder driveTime(float sec) { return DriveTimeBuilder(*this, sec); }
+    DriveTimeBuilder driveTime(float sec) { return DriveTimeBuilder(*this, sec); }
     /** @brief Build a relative turn; records `turnDeg(deg)` immediately. */
-    [[nodiscard]] TurnDegBuilder turnDeg(int16_t deg) { return TurnDegBuilder(*this, deg); }
+    TurnDegBuilder turnDeg(int16_t deg) { return TurnDegBuilder(*this, deg); }
     /** @brief Build an absolute-yaw turn; records `turnToYaw(yaw)` immediately. */
-    [[nodiscard]] TurnToYawBuilder turnToYaw(int16_t yaw) { return TurnToYawBuilder(*this, yaw); }
+    TurnToYawBuilder turnToYaw(int16_t yaw) { return TurnToYawBuilder(*this, yaw); }
     /** @brief Build a drive-until-line seek; records `stopAtLine(expectedCm)` immediately. */
-    [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm)
+    StopAtLineBuilder stopAtLine(float expectedCm)
     {
         return StopAtLineBuilder(*this, expectedCm);
     }
     /** @brief Build a push-until-wall move; records `wallStop(cm)` immediately. */
-    [[nodiscard]] WallStopBuilder wallStop(float cm) { return WallStopBuilder(*this, cm); }
+    WallStopBuilder wallStop(float cm) { return WallStopBuilder(*this, cm); }
 
     // state accessors
     /** @brief Whether the last bounded move finished. Always `true` (no completion modeling). */

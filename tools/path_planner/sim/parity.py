@@ -69,8 +69,8 @@ from tools.path_planner.graph_builder import (
 )
 from tools.path_planner.pipeline_config import (
     BlindMode,
-    LineMode,
     PipelineConfig,
+    SpeedTier,
     TurnMode,
 )
 from tools.path_planner.sim.chassis import VirtualChassis, _normalize
@@ -99,17 +99,17 @@ from tools.path_planner.sim.runtime import (
     LINE_SENSOR_AXLE_OFFSET_CM,
     LINE_SENSOR_AXLE_OFFSET_REAR_CM,
     PIVOT_TRIM_MIN_DRIVE_CM,
-    SPEED_NORMAL,
     TSHAPE_START_SPEED,
     Direction,
     EdgeDispatchQuery,
     PathTrackerSim,
     StopAtLine,
     _read_edge_stop_at_line_override,
+    _speed_tier_to_pwm,
     _wall_axle_coord,
     resolve_blind_mode,
     resolve_edge_dispatch,
-    resolve_line_mode,
+    resolve_speed,
     resolve_stop_at_line,
     walk_next_hop,
 )
@@ -366,15 +366,19 @@ def _turn_mode_name(mode: TurnMode) -> str:
     return "COUNTER_ROT"
 
 
-def _line_mode_name(mode: LineMode) -> str:
-    """Spell a :class:`LineMode` exactly as the C++ ``_ptLineModeName`` does.
+def _line_mode_name(mode: SpeedTier) -> str:
+    """Spell a LINE edge's resolved :class:`SpeedTier` exactly as the C++
+    ``_ptLineModeName`` does.
 
-    ``DEFAULT`` maps to ``"NORMAL"`` (the resolver delivers a concrete mode
-    before this point; the fallback mirrors the C++ default arm).
+    The wire field stays named ``line_mode`` (frozen trace schema); ADR-064 only
+    re-sources its value from the per-edge ``speed`` tier, whose member names
+    (``SLOW`` / ``NORMAL`` / ``FAST``) match the old ``LineMode`` spelling
+    byte-for-byte. ``DEFAULT`` maps to ``"NORMAL"`` (the resolver delivers a
+    concrete tier before this point; the fallback mirrors the C++ default arm).
     """
-    if mode == LineMode.SLOW:
+    if mode == SpeedTier.SLOW:
         return "SLOW"
-    if mode == LineMode.FAST:
+    if mode == SpeedTier.FAST:
         return "FAST"
     return "NORMAL"
 
@@ -633,7 +637,7 @@ class _HopResolution:
             dest_is_projection=dest_is_projection,
             direction=direction,
             raw_distance_cm=float(self.edge["distance_cm"]),
-            line_mode=cfg.line,
+            line_mode=cfg.speed,
             stop_at_line=stop_at_line,
             proj_pass_through=False,
             departing_trim_cm=(
@@ -829,7 +833,8 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
       from the sim's pivot / pipeline resolution, never recomputed in a shared
       normalizer (which would be vacuous agreement).
     * ``line_mode`` (forward line_follow / projection_follow) —
-      ``resolve_line_mode(edge, cfg)`` for that hop's edge.
+      ``resolve_speed(edge, cfg)`` for that hop's edge (the wire field keeps its
+      ``line_mode`` name; ADR-064 re-sources its value from the ``speed`` tier).
     * ``drive_mode`` + ``overshoot_cm`` (seek / dead-reckon) — the sim's own
       :func:`resolve_edge_dispatch` decision for that hop.
 
@@ -912,7 +917,7 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
         elif tag in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
             # line_follow start of a LINE->junction hop (overshoot completes it).
             reverse = tag == ACT_LINE_REVERSE
-            line_mode = _line_mode_name(resolve_line_mode(hops[hop_idx].edge, cfg))
+            line_mode = _line_mode_name(resolve_speed(hops[hop_idx].edge, cfg))
             records.append(_make_line_follow(reverse, line_mode))
         elif tag in (ACT_LINE_OVERSHOOT, ACT_LINE_PASS):
             # (tag, advance_cm) — completes the LINE->junction hop.
@@ -928,7 +933,7 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             reverse = tag in (ACT_PROJECTION_REVERSE, ACT_PROJECTION_REVERSE_PASS)
             pass_through = tag in (ACT_FOLLOW_DIST_PASS, ACT_PROJECTION_REVERSE_PASS)
             dist_cm = prim[2] if reverse else prim[1]
-            line_mode = _line_mode_name(resolve_line_mode(hops[hop_idx].edge, cfg))
+            line_mode = _line_mode_name(resolve_speed(hops[hop_idx].edge, cfg))
             records.append(
                 _make_projection_follow(reverse, line_mode, dist_cm, pass_through)
             )
@@ -960,7 +965,9 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             # pass-through-seeded lone hop. When present, use it verbatim; a
             # PRISTINE tuple (no suffix) is a cold-start non-chain hop, whose
             # endpoints are computed here to match the firmware:
-            #   RAW_FLAT : start = end = +/-SPEED_NORMAL (its flat open-loop plan)
+            #   RAW_FLAT : start = end = +/-cruise (its flat open-loop plan), where
+            #              cruise is this edge's resolved SpeedTier PWM (ADR-064:
+            #              a `speed: FAST` RAW_FLAT hop runs flat at 90, not 70)
             #   tShape   : start = +/-TSHAPE_START_SPEED, end = 0 (braked stop)
             # (memory `gotcha-ctps-mock-noop-setter-drops-builder-knob`: the plan
             # endpoints are a load-bearing knob — never dropped to a default that
@@ -973,7 +980,10 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             else:
                 chain = False
                 if decision.drive_mode == BlindMode.RAW_FLAT:
-                    cruise = -SPEED_NORMAL if reverse else SPEED_NORMAL
+                    cruise_mag = _speed_tier_to_pwm(
+                        resolve_speed(hops[hop_idx].edge, cfg)
+                    )
+                    cruise = -cruise_mag if reverse else cruise_mag
                     start_pwm = cruise
                     end_pwm = cruise
                 else:

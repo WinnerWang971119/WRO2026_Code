@@ -30,9 +30,8 @@
  * The mock builder destructors call `ctps::recordDriveMove`, so this target links
  * `ctps_record.cpp` (the mock `Drive` / `LineFollower` globals + the recorder) and the
  * issue #91 `routes_fixture.cpp` (the force-included mock `PathTracker.h` transitively
- * pulls `routes.h`). Each chain is one discarded-temporary statement; the mock builders
- * are `[[nodiscard]]`, and the CTPS build suppresses that warning directory-wide
- * (`/wd4834`; `-Wno-unused-result -Wno-attributes`), exactly as `ctps_dump.cpp` relies on.
+ * pulls `routes.h`). Each chain is one discarded-temporary statement, exactly as
+ * `ctps_dump.cpp` relies on (RAII auto-execute at end-of-statement — ADR-065).
  *
  * @note HOST-ONLY translation unit — compiled into `test_ctps_mock_conformance` only,
  *       never the Arduino sketch.

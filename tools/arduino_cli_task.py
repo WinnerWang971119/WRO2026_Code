@@ -9,7 +9,8 @@ wrapper. It is invoked from the workspace's VS Code tasks via::
         [--port <port>] [--baud <baud>]
 
 ``<action>`` is one of ``verify``, ``upload``, ``list-boards``,
-``monitor``. The behaviour mirrors the PowerShell script exactly:
+``monitor``, ``upload-monitor``. The first four mirror the PowerShell
+script exactly:
 
   verify       <cli> compile --fqbn <fqbn> <sketchDir>
   upload       resolve the serial port, then
@@ -17,6 +18,14 @@ wrapper. It is invoked from the workspace's VS Code tasks via::
   list-boards  <cli> board list
   monitor      resolve the serial port + baud, then
                <cli> monitor --port <port> --config baudrate=<baud>
+  upload-monitor
+               close any running ``arduino-cli monitor`` (it holds the
+               serial port and would block the flash), run ``upload``,
+               then -- only when the flash succeeded -- re-detect the
+               port and reopen the monitor. Sequenced here in Python
+               (not via VS Code task chaining) so the ordering and the
+               flash-failed short-circuit hold on Windows and macOS
+               alike.
 
 Serial-port resolution filters ``arduino-cli board list`` by the
 configured FQBN so unrelated serial devices (a second Arduino, a USB
@@ -28,9 +37,10 @@ same ``usbmodem*`` / ``usbserial*`` suffix are collapsed to the single
 Design:
   The two ``resolve_*`` helpers are PURE -- they take already-collected
   inputs and never touch the filesystem or a subprocess, so they are
-  unit-testable in isolation. :func:`dispatch` is the only function that
-  spawns ``arduino-cli``; it gathers the FQBN-filtered detected ports and
-  feeds them to :func:`resolve_serial_port`.
+  unit-testable in isolation. All subprocess work funnels through
+  :func:`dispatch` (and the ``_do_*`` / ``_kill_*`` / ``_list_*`` helpers
+  it calls); it gathers the FQBN-filtered detected ports and feeds them
+  to :func:`resolve_serial_port`.
 
 Error handling:
   Resolution failures (missing arduino-cli, no/ambiguous board, no baud)
@@ -48,6 +58,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -57,6 +68,15 @@ from typing import Optional
 _MACOS_CU_PREFIX = "/dev/cu."
 _MACOS_TTY_PREFIX = "/dev/tty."
 _BAD_CPU_TYPE_TOKEN = "bad cpu type in executable"
+
+# upload-monitor pacing. After a monitor is killed the OS needs a moment
+# to release the serial port; after a flash the R4 reboots and drops off
+# the USB bus briefly (on macOS the cu.usbmodem* node can come back under
+# a new name), so port re-detection is polled instead of attempted once.
+_MONITOR_KILL_SETTLE_S = 1.0
+_UPLOAD_SETTLE_S = 2.0
+_MONITOR_REDETECT_ATTEMPTS = 10
+_MONITOR_REDETECT_DELAY_S = 1.0
 
 
 class ResolveError(Exception):
@@ -336,6 +356,111 @@ def _run_cli_buffered(cli: str, args: list[str], fqbn: str) -> int:
     return completed.returncode
 
 
+def _kill_monitor_processes() -> bool:
+    """Best-effort close of any running ``arduino-cli monitor`` process.
+
+    An open monitor holds the serial port and makes the next upload fail.
+    Killing the process (rather than asking VS Code to terminate its task)
+    also frees a monitor started outside VS Code, and needs no fragile
+    task-terminate command plumbing. Only the ``arduino-cli`` child itself
+    is targeted -- a task wrapper that spawned it exits on its own once
+    the child dies. Failures are swallowed: no monitor running is the
+    normal case, not an error.
+
+    :return: ``True`` when at least one monitor process was terminated.
+    """
+    if platform.system() == "Windows":
+        # Single-quoted PowerShell only: nested double quotes do not
+        # survive every argv -> command-line round trip on Windows.
+        # Printing each stopped ProcessId lets us detect "killed any".
+        script = (
+            "Get-CimInstance Win32_Process"
+            " | Where-Object { $_.Name -like 'arduino-cli*'"
+            " -and $_.CommandLine -match ' monitor ' }"
+            " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }"
+        )
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return bool((completed.stdout or "").strip())
+
+    # macOS / Linux. pkill -f matches the full command line, so this hits
+    # the `<...>/arduino-cli monitor --port ...` child and nothing else
+    # (this wrapper's own argv never contains "arduino-cli monitor";
+    # exit 0 means at least one process matched).
+    completed = subprocess.run(
+        ["pkill", "-f", "arduino-cli monitor"],
+        capture_output=True,
+    )
+    return completed.returncode == 0
+
+
+def _resolve_port_after_reset(
+    resolved_cli: str, fqbn: str, configured: Optional[str]
+) -> str:
+    """Resolve the monitor port after a flash reset the board.
+
+    Immediately after an upload the board may not have re-enumerated yet,
+    so a one-shot ``board list`` can come back empty (or briefly list a
+    stale node next to the new one). Poll detection up to
+    ``_MONITOR_REDETECT_ATTEMPTS`` times before giving up.
+
+    :param resolved_cli: the resolved arduino-cli executable path.
+    :param fqbn: fully-qualified board name to filter detection by.
+    :param configured: the configured port; explicit values return
+        verbatim on the first attempt (mirroring resolve_serial_port).
+    :return: the resolved serial-port address.
+    :raises ResolveError: when resolution still fails on the final attempt.
+    """
+    for attempt in range(_MONITOR_REDETECT_ATTEMPTS):
+        if attempt:
+            time.sleep(_MONITOR_REDETECT_DELAY_S)
+        try:
+            detected = (
+                _list_detected_ports(resolved_cli, fqbn)
+                if _needs_autodetect(configured)
+                else []
+            )
+            return resolve_serial_port(detected, configured)
+        except ResolveError:
+            if attempt == _MONITOR_REDETECT_ATTEMPTS - 1:
+                raise
+    raise AssertionError("unreachable: loop either returns or re-raises")
+
+
+def _do_upload(
+    resolved_cli: str, fqbn: str, sketch: str, port: Optional[str]
+) -> int:
+    """Resolve the upload port and flash the sketch (the ``upload`` body).
+
+    Shared by the ``upload`` and ``upload-monitor`` actions.
+
+    :param resolved_cli: the resolved arduino-cli executable path.
+    :param fqbn: fully-qualified board name.
+    :param sketch: sketch path (absolute, or relative to the repo root).
+    :param port: configured serial port (``None``/blank/``auto`` ->
+        auto-detect).
+    :return: the arduino-cli child process exit code.
+    :raises ResolveError: on an unresolved port or a failing ``board list``.
+    """
+    sketch_dir = _resolve_sketch_dir(sketch)
+    detected = (
+        _list_detected_ports(resolved_cli, fqbn)
+        if _needs_autodetect(port)
+        else []
+    )
+    upload_port = resolve_serial_port(detected, port)
+    print(f"Uploading to {upload_port}")
+    return _run_cli_buffered(
+        resolved_cli,
+        ["upload", "--fqbn", fqbn, "--port", upload_port, str(sketch_dir)],
+        fqbn,
+    )
+
+
 def _needs_autodetect(configured: Optional[str]) -> bool:
     """Return whether the serial port must be auto-detected.
 
@@ -366,7 +491,7 @@ def dispatch(
     detected ports to :func:`resolve_serial_port`.
 
     :param action: one of ``verify``, ``upload``, ``list-boards``,
-        ``monitor``.
+        ``monitor``, ``upload-monitor``.
     :param cli: configured arduino-cli path or command name.
     :param fqbn: fully-qualified board name.
     :param sketch: sketch path (absolute, or relative to the repo root).
@@ -392,18 +517,29 @@ def dispatch(
         return _run_cli(resolved_cli, ["board", "list"])
 
     if action == "upload":
-        sketch_dir = _resolve_sketch_dir(sketch)
-        detected = (
-            _list_detected_ports(resolved_cli, fqbn)
-            if _needs_autodetect(port)
-            else []
-        )
-        upload_port = resolve_serial_port(detected, port)
-        print(f"Uploading to {upload_port}")
-        return _run_cli_buffered(
+        return _do_upload(resolved_cli, fqbn, sketch, port)
+
+    if action == "upload-monitor":
+        # Resolve the baud FIRST so a bad config fails before the flash
+        # touches the board (failing after would strand the user with
+        # new firmware and no monitor).
+        monitor_baud = resolve_baud(baud)
+
+        if _kill_monitor_processes():
+            print("Closed a running serial monitor to free the port.")
+            time.sleep(_MONITOR_KILL_SETTLE_S)
+
+        upload_rc = _do_upload(resolved_cli, fqbn, sketch, port)
+        if upload_rc != 0:
+            return upload_rc
+
+        print("Upload done -- waiting for the board to re-enumerate...")
+        time.sleep(_UPLOAD_SETTLE_S)
+        monitor_port = _resolve_port_after_reset(resolved_cli, fqbn, port)
+        print(f"Monitoring {monitor_port} at {monitor_baud} baud")
+        return _run_cli(
             resolved_cli,
-            ["upload", "--fqbn", fqbn, "--port", upload_port, str(sketch_dir)],
-            fqbn,
+            ["monitor", "--port", monitor_port, "--config", f"baudrate={monitor_baud}"],
         )
 
     if action == "monitor":
@@ -438,7 +574,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "action",
-        choices=("verify", "upload", "list-boards", "monitor"),
+        choices=("verify", "upload", "list-boards", "monitor", "upload-monitor"),
         help="The arduino-cli task to run.",
     )
     parser.add_argument(
@@ -464,7 +600,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--baud",
         default=None,
-        help="Monitor baud rate (required for the 'monitor' action).",
+        help="Monitor baud rate (required for 'monitor' and 'upload-monitor').",
     )
     args = parser.parse_args(argv)
 

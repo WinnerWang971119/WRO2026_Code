@@ -541,10 +541,11 @@ def test_property_random_paths() -> None:
 # ``(ACT_FORWARD, distance_cm)``; a REAR traversal of the same edge keeps the
 # existing ``(ACT_BLIND_REVERSE, v, distance_cm, blind_mode)`` shape but now
 # carries ``BlindMode.STOP_AT_LINE`` in the mode slot. The override is keyed
-# on the ``primitive_mode`` graph attribute (a :class:`BlindMode` enum), the
-# same slot ``resolve_blind_mode`` reads -- the ``field_data`` schema spells
-# this per-edge as a ``primitive_mode`` override, so the tests author the
-# graph edge directly the same way the override-resolution tests do.
+# on the ``mode`` graph attribute (a :class:`BlindMode` enum), the same slot
+# ``resolve_blind_mode`` reads -- ``BlindMode.STOP_AT_LINE`` is no longer
+# JSON-authorable per-edge (ADR-064; it is folded onto ``stop_at_line``), but
+# it stays a legal RAW graph attribute for the firmware seek-ladder dead path
+# these tests exercise directly, bypassing the validator.
 
 
 def _stop_at_line_blind_graph(
@@ -555,11 +556,11 @@ def _stop_at_line_blind_graph(
 ) -> nx.DiGraph:
     """Build a 2-node A->B graph with a STOP_AT_LINE BLIND edge.
 
-    The forward (A, B) edge carries ``primitive_mode=BlindMode.STOP_AT_LINE``
-    (and, when @p force_reverse is set, ``direction_override=FORCE_REVERSE``
-    so the hop resolves REAR without depending on the auto heading delta).
-    The reverse (B, A) edge mirrors the mode but never inherits the
-    directional override, matching :func:`graph_builder._emit_directed_pair`.
+    The forward (A, B) edge carries ``mode=BlindMode.STOP_AT_LINE`` (and,
+    when @p force_reverse is set, ``direction_override=FORCE_REVERSE`` so the
+    hop resolves REAR without depending on the auto heading delta). The
+    reverse (B, A) edge mirrors the mode but never inherits the directional
+    override, matching :func:`graph_builder._emit_directed_pair`.
 
     :param distance_cm: forward edge length in centimetres.
     :param heading_deg: forward edge heading in ``[0, 360)`` degrees.
@@ -574,7 +575,7 @@ def _stop_at_line_blind_graph(
         type=EDGE_BLIND,
         distance_cm=distance_cm,
         heading_deg=heading_deg,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     if force_reverse:
         fwd_attrs["direction_override"] = int(DirectionMode.FORCE_REVERSE)
@@ -584,7 +585,7 @@ def _stop_at_line_blind_graph(
         type=EDGE_BLIND,
         distance_cm=distance_cm,
         heading_deg=(heading_deg + 180.0) % 360.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     return g
 
@@ -670,7 +671,7 @@ def test_compile_stop_at_line_only_on_stop_at_line_mode() -> None:
 
     Guards the mode-sensitivity boundary: the STOP_AT_LINE action must NOT
     leak onto blind edges that do not carry the override. A bare BLIND edge
-    (no ``primitive_mode``) inherits ``PIPELINE_CONFIG.blind`` and keeps the
+    (no ``mode``) inherits ``PIPELINE_CONFIG.blind`` and keeps the
     dead-reckoned forward hop.
     """
     g = nx.DiGraph()
@@ -751,7 +752,7 @@ def test_stop_at_line_compiler_sim_parity_rear() -> None:
         type=EDGE_BLIND,
         distance_cm=50.0,
         heading_deg=0.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
         direction_override=int(DirectionMode.FORCE_REVERSE),
     )
     g.add_edge(
@@ -759,7 +760,7 @@ def test_stop_at_line_compiler_sim_parity_rear() -> None:
         type=EDGE_BLIND,
         distance_cm=50.0,
         heading_deg=180.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     next_hop = {
         "A": {"A": "A", "B": "B", "C": "B"},
@@ -816,14 +817,14 @@ def test_stop_at_line_compiler_sim_parity() -> None:
         type=EDGE_BLIND,
         distance_cm=50.0,
         heading_deg=90.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     g.add_edge(
         "C", "B",
         type=EDGE_BLIND,
         distance_cm=50.0,
         heading_deg=270.0,
-        primitive_mode=BlindMode.STOP_AT_LINE,
+        mode=BlindMode.STOP_AT_LINE,
     )
     next_hop = {
         "A": {"A": "A", "B": "B", "C": "B"},

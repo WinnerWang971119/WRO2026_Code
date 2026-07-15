@@ -78,7 +78,7 @@ from tools.path_planner.compiler import (
     ACT_TURN_REL,
 )
 from tools.path_planner.graph_builder import build_graph
-from tools.path_planner.pipeline_config import TurnMode
+from tools.path_planner.pipeline_config import PipelineConfig, SpeedTier, TurnMode
 from tools.path_planner.planner import (
     BlindDecayParams,
     compute_all_pairs_next_hop,
@@ -106,6 +106,7 @@ from tools.path_planner.sim.runtime import (
     OffMapFaultError,
     PathTrackerSim,
     UnreachableGoalError,
+    resolve_speed,
     wrap_pm180,
 )
 
@@ -495,6 +496,29 @@ _BLIND_TAGS: frozenset[str] = frozenset(
     }
 )
 
+#: Goto-hop primitive tags whose firmware dispatch resolves a PER-EDGE
+#: :class:`SpeedTier` (ADR-064, issue #97) — the forward / reverse blind
+#: dead-reckon nav hops and the forward / rear line seeks. These are the ONLY
+#: tags for which a LONE (non-chain) hop's cruise is tier-resolved from the edge
+#: (:func:`_primitive_drive_speed`'s ``speed_tier``). Deliberately EXCLUDES:
+#:   * ``ACT_LINE_OVERSHOOT`` — a LINE-family roll-past; the CTPS models the LINE
+#:     follow itself at ``ConfigLine::CRUISE_SPEED`` (un-tiered, a pre-existing sim
+#:     limitation), so tier-adjusting only the overshoot would desync it from its
+#:     own follow leg. (Both stay at the ``SPEED_NORMAL``-valued line cruise.)
+#:   * ``ACT_RETURN_FORWARD`` / ``ACT_WALL_DEPART`` — return / recovery moves the
+#:     firmware drives at ``PIPELINE_CONFIG.speed`` (no ``EdgeInfo`` to resolve),
+#:     not a per-edge tier.
+#: A chained hop never uses this path (it consumes the recorded per-hop suffix via
+#: ``_resolve_blind_run_profile``), so only cold-start lone hops / seeks resolve here.
+_PER_EDGE_SPEED_TAGS: frozenset[str] = frozenset(
+    {
+        ACT_FORWARD,
+        ACT_BLIND_REVERSE,
+        ACT_STOP_AT_LINE,
+        ACT_STOP_AT_LINE_REVERSE,
+    }
+)
+
 #: Goto-hop primitive tags rendered as a pure in-place turn (no advance), timed
 #: by the turn profile. ``ACT_HEADING_RESET`` is a heading-only re-bind with no
 #: pose change (the sim snapshot heading equals the incoming), so it lands here
@@ -546,7 +570,34 @@ _RETURN_DRIVE_TAGS: frozenset[str] = frozenset(
 _REAR_LED_STOP_TAGS: frozenset[str] = frozenset({ACT_STOP_AT_LINE_REVERSE})
 
 
-def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
+def _blind_cruise_pwm(cfg, speed_tier: Optional[SpeedTier]) -> int:
+    """Map a resolved per-edge :class:`SpeedTier` to its blind cruise PWM magnitude.
+
+    Mirrors the firmware ``presetToPwm(speedTierToPreset(_resolveSpeed(edge)))``
+    chain (ADR-064) over the parsed :class:`ProfileConfig` presets so a goto-hop
+    BLIND / seek advance renders at its OWN resolved tier instead of the hardcoded
+    ``SPEED_NORMAL`` default: ``SLOW`` -> ``SPEED_SLOW`` (60), ``FAST`` ->
+    ``SPEED_FAST`` (90). ``NORMAL`` / ``DEFAULT`` / ``None`` (a tier that was not
+    resolved — an edge outside the graph, or a non-blind primitive) map to
+    ``SPEED_NORMAL`` (70), so an all-``NORMAL`` field is byte-identical to the
+    pre-ADR-064 render.
+
+    :param cfg: the parsed :class:`ProfileConfig` carrying the preset PWMs.
+    :param speed_tier: the hop edge's resolved :class:`SpeedTier`, or ``None``
+        when no per-edge tier applies.
+    :return: the unsigned cruise PWM magnitude (the caller keeps it positive; the
+        travel direction lives in the snapshot pose — see the note below).
+    """
+    if speed_tier == SpeedTier.SLOW:
+        return int(cfg.speed_slow)
+    if speed_tier == SpeedTier.FAST:
+        return int(cfg.speed_fast)
+    return int(cfg.speed_normal)
+
+
+def _primitive_drive_speed(
+    tag: str, speed_tier: Optional[SpeedTier] = None
+) -> Tuple[int, int, int, bool]:
     """Resolve a goto-hop primitive's effective ``(cruise, start, end, profiled)``.
 
     Goto-expanded hops carry no recorded speed, so each primitive KIND sources
@@ -563,12 +614,17 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
       cruise``.
     * LINE follow (:data:`_LINE_FOLLOW_TAGS`) -> ``ConfigLine::CRUISE_SPEED``.
     * distance-gated stop / LINE_OVERSHOOT roll (:data:`_STOP_GATED_TAGS`) ->
-      the Drive preset ``SPEED_NORMAL``, ramping cruise -> ``PWM_MIN_MAGNITUDE``
-      then braking (``end == 0``) so the stop is visible (AC2).
+      this hop's resolved per-edge :class:`SpeedTier` PWM (``speed_tier``;
+      ADR-064 — the seek's ``.setPower(cruiseMag)`` on the robot), ramping
+      cruise -> ``PWM_MIN_MAGNITUDE`` then braking (``end == 0``) so the stop is
+      visible (AC2). ``NORMAL`` / absent stays the ``SPEED_NORMAL`` default (70).
     * ``wallStop`` (:data:`ACT_WALL_STOP`) -> a CONSTANT ``WALL_STOP_PUSH_PWM``
       crawl (flat, no ramp), matching the firmware's constant-push seek.
-    * blind / dead-reckon (:data:`_BLIND_TAGS`) -> the Drive preset
-      ``SPEED_NORMAL`` T-shape.
+    * blind / dead-reckon (:data:`_BLIND_TAGS`) -> this hop's resolved per-edge
+      :class:`SpeedTier` PWM (``speed_tier``; ADR-064 — the firmware blind cruise
+      ``presetToPwm(speedTierToPreset(_resolveSpeed(edge)))``) T-shape.
+      ``NORMAL`` / absent stays the ``SPEED_NORMAL`` default (70), byte-identical
+      to the pre-ADR-064 render.
 
     ``start`` is the sign-by-direction ``TSHAPE_START_SPEED`` seed (the sign of
     ``cruise`` carries the drive direction into the ramp); ``end`` is 0 (brake to
@@ -587,6 +643,11 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
     forward — the visible ramp shape is identical either way.
 
     :param tag: the primitive action tag (``primitive[0]``).
+    :param speed_tier: this hop edge's resolved :class:`SpeedTier` (ADR-064), or
+        ``None`` when no per-edge tier applies. Consumed ONLY by the BLIND /
+        stop-gated seek branches (the two families that carried the hardcoded
+        ``SPEED_NORMAL`` blind cruise); the line-follow / pass / wallStop cruises
+        are unaffected. ``None`` / ``NORMAL`` / ``DEFAULT`` keeps the 70 default.
     :return: ``(cruise, start, end, profiled)`` — signed PWM for the first
         three (all non-negative here), bool for profiled.
     """
@@ -604,15 +665,13 @@ def _primitive_drive_speed(tag: str) -> Tuple[int, int, int, bool]:
         return cruise, start, cruise, True
     if tag in _LINE_FOLLOW_TAGS:
         return int(cfg.line_cruise), start, 0, True
-    # The stop-gated family and the blind/dead-reckon family BOTH cruise at the
-    # Drive preset SPEED_NORMAL and brake to rest (``end == 0``); they differ
-    # only in intent (a sensor/line gate vs. pure odometry), which the snapshot
-    # pose already captures, so the ramped-to-rest T-shape timing is identical.
-    # A tag outside every known set (never expected) also lands here — a finite
-    # blind-preset T-shape rather than raising.
-    if tag in _STOP_GATED_TAGS or tag in _BLIND_TAGS:
-        return int(cfg.speed_normal), start, 0, True
-    return int(cfg.speed_normal), start, 0, True
+    # The stop-gated seek family, the blind/dead-reckon family, and any tag
+    # outside every known set (never expected) all share ONE ramped-to-rest
+    # T-shape: cruise at this hop's resolved per-edge SpeedTier (ADR-064;
+    # NORMAL/absent/None == SPEED_NORMAL, byte-identical to the old hardcode),
+    # brake to rest (``end == 0``). Intent (a sensor/line gate vs. pure odometry)
+    # lives in the snapshot pose, not the timing curve, so one arm covers all.
+    return _blind_cruise_pwm(cfg, speed_tier), start, 0, True
 
 
 def _blind_chain_suffix(
@@ -1268,6 +1327,15 @@ def build(trace: Trace, field_data) -> Track:
     next_hop = compute_all_pairs_next_hop(
         graph, BlindDecayParams.from_field_data(field_data)
     )
+    # Field-sourced pipeline config, resolved ONCE (mirrors the sim's
+    # ``_walk_hops``: ``PipelineConfig.from_field_data(self._field_data)``). The
+    # per-edge SpeedTier resolution below MUST use this, not the module singleton
+    # ``PIPELINE_CONFIG`` — a field that sets a mission-wide ``PIPELINE_SPEED``
+    # inherits through it, so an inheriting lone blind hop renders at the same tier
+    # the robot / sim run (the two-resolution-surfaces trap). ``from_field_data``
+    # falls back to the singleton for a fixture lacking the key, so this is safe
+    # for every field.
+    pipeline_cfg = PipelineConfig.from_field_data(field_data)
 
     # 2. Exactly ONE chassis + ONE sim for the whole track (drift accumulates
     #    correctly only on a single long-lived pair). Zero the heading once,
@@ -2055,11 +2123,41 @@ def build(trace: Trace, field_data) -> Track:
                                     tag not in _PASS_TAGS
                                     and tag not in _MID_RUN_CONTRIB_TAGS
                                 )
+                                # ADR-064 per-edge blind speed: a LONE (non-chain)
+                                # blind hop or a seek carries NO recorded per-hop
+                                # speed — the sim leaves the cold-start tuple
+                                # pristine (AC12); only chained / pass-through hops
+                                # ride a (start_pwm, end_pwm) suffix (handled in the
+                                # chain branch above via ``_resolve_blind_run_profile``).
+                                # So resolve THIS hop's edge SpeedTier from the field
+                                # graph the CTPS already built — the SAME pure per-edge
+                                # read the firmware dispatch runs (``_resolveSpeed(edge)``),
+                                # against the FIELD-SOURCED ``pipeline_cfg`` (so a
+                                # mission-wide ``PIPELINE_SPEED`` inherits identically to
+                                # the sim / robot) — NOT a chain re-derivation — so a
+                                # ``speed: FAST`` lone blind hop / seek renders at
+                                # SPEED_FAST (90) instead of the hardcoded SPEED_NORMAL.
+                                # Scoped to the genuine per-edge nav-hop tags
+                                # (``_PER_EDGE_SPEED_TAGS``) — the line-overshoot / return
+                                # / wall families are excluded so they keep their existing
+                                # cruise. ``has_edge`` guards a hop whose (prev, cur) is
+                                # not a graph edge. NORMAL / absent / non-edge → 70
+                                # (byte-identical to the pre-ADR-064 render, so all-NORMAL
+                                # goldens are unchanged).
+                                hop_speed_tier = None
+                                if (
+                                    tag in _PER_EDGE_SPEED_TAGS
+                                    and prev_node is not None
+                                    and graph.has_edge(prev_node, cur_node)
+                                ):
+                                    hop_speed_tier = resolve_speed(
+                                        graph.edges[prev_node, cur_node], pipeline_cfg
+                                    )
                                 append_run_segment(
                                     snap.x_cm,
                                     snap.y_cm,
                                     snap.heading_deg,
-                                    _primitive_drive_speed(tag),
+                                    _primitive_drive_speed(tag, hop_speed_tier),
                                     braked,
                                     rear_led=tag in _REAR_LED_STOP_TAGS,
                                 )

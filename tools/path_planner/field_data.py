@@ -25,11 +25,15 @@ the live editor (`edit_field.py`) mutates. This module is a thin loader that
 re-exposes those values under their historical attribute names so callers do
 not need to know about the JSON layout. The rich ``EDGES`` override table and
 the pipeline-wide ``PIPELINE_*`` mode defaults are ALSO sourced from
-:file:`field_data.json` now (ADR-047, superseding ADR-022's "JSON can't hold the
-enums" clause): per-edge ``primitive_mode`` overrides are encoded as enum member
-NAME strings (e.g. ``"FAST"``, ``"GYRO_TSHAPE"``) the validator/header resolve to
-their ``LineMode`` / ``BlindMode`` member, and geometry is derived from node
-coords when absent. A legacy Python enum-instance EDGES literal still validates
+:file:`field_data.json` now (ADR-047/064, superseding ADR-022's "JSON can't hold
+the enums" clause): a per-edge override carries a uniform ``speed`` key
+(``SpeedTier`` names ``"SLOW"`` / ``"NORMAL"`` / ``"FAST"``, applying to BOTH edge
+types) and a type-switched ``mode`` key (LINE edges: ``"MIDDLE"``; BLIND edges:
+``"SYNC_TSHAPE"`` / ``"GYRO_TSHAPE"`` / ``"RAW_FLAT"``), both encoded as enum
+member NAME strings the validator/header resolve to their ``SpeedTier`` /
+``BlindMode`` member. The retired ``primitive_mode`` key is removed (ADR-064; the
+validator emits a targeted migration error). Geometry is derived from node coords
+when absent. A legacy Python enum-instance EDGES literal still validates
 (tests/fixtures); ``edit_field.py --migrate`` ports any such literal INTO the
 JSON ``"EDGES"`` key.
 
@@ -44,7 +48,7 @@ so editor saves do not flip the planner suite red.
 
 from tools.path_planner.editor.loader import load_field_json
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE  # noqa: F401
-from tools.path_planner.pipeline_config import LineMode, BlindMode, TurnMode  # noqa: F401
+from tools.path_planner.pipeline_config import SpeedTier, BlindMode, TurnMode  # noqa: F401
 
 _data = load_field_json()
 FIELD_MM              = _data["FIELD_MM"]
@@ -81,16 +85,18 @@ BLIND_PROJECTION_AUTO_SEEK = _data.get("blind_projection_auto_seek", True)
 # validator/header consume this.
 RESET_NODES           = _data.get("RESET_NODES", {})
 
-# Pipeline-wide motion-mode defaults, field-sourced via the JSON (ADR-047).
+# Pipeline-wide motion-mode defaults, field-sourced via the JSON (ADR-047/064).
 # Each is an enum member NAME string (e.g. "FAST", "GYRO_TSHAPE") or None when
 # the key is absent from the JSON; absence means "inherit the pipeline_config.py
 # PipelineConfig default for that category." header_writer resolves each name to
-# its enum member (line/blind/turn reject DEFAULT, direction allows it) and falls
-# back to the pipeline_config.py default when None, so committed routes stay
-# byte-identical for a field that omits these keys. Defined unconditionally via
-# `_data.get(..., None)` so the module attribute always exists for the strict
-# bare-attribute reads in header_writer (mirrors RESET_NODES above).
-PIPELINE_LINE_MODE      = _data.get("pipeline_line_mode", None)
+# its enum member (speed/blind/turn reject DEFAULT, direction allows it) and
+# falls back to the pipeline_config.py default when None, so committed routes
+# stay byte-identical for a field that omits these keys. Defined unconditionally
+# via `_data.get(..., None)` so the module attribute always exists for the strict
+# bare-attribute reads in header_writer (mirrors RESET_NODES above). The speed
+# default is a SpeedTier name (SLOW/NORMAL/FAST) carried on the `pipeline_speed`
+# key (renamed from `pipeline_line_mode`, which held a LineMode name; ADR-064).
+PIPELINE_SPEED          = _data.get("pipeline_speed", None)
 PIPELINE_BLIND_MODE     = _data.get("pipeline_blind_mode", None)
 PIPELINE_TURN_MODE      = _data.get("pipeline_turn_mode", None)
 PIPELINE_DIRECTION_MODE = _data.get("pipeline_direction_mode", None)
@@ -142,12 +148,20 @@ PIPELINE_DIRECTION_MODE = _data.get("pipeline_direction_mode", None)
 #
 # OPTIONAL overrides (absent = inherit the pipeline-wide PIPELINE_CONFIG
 # default for that edge's category at C++ dispatch time):
-#   primitive_mode : enum member NAME string tag verbatim — LineMode names
-#                    ("NORMAL" / "SLOW" / "FAST") on a "LINE" edge, BlindMode
-#                    names ("SYNC_TSHAPE" / "GYRO_TSHAPE" / "RAW_FLAT" /
-#                    "STOP_AT_LINE") on a "BLIND" edge. Do NOT author "DEFAULT"
-#                    (absence already means inherit). A LineMode | BlindMode
-#                    enum instance is also accepted for legacy Python authoring.
+#   speed          : enum member NAME string tag — SpeedTier names
+#                    ("SLOW" / "NORMAL" / "FAST"), applying to BOTH edge types
+#                    (a LINE cruise preset and a BLIND cruise/seek speed). Do
+#                    NOT author "DEFAULT" (absence already means inherit).
+#                    Bidirectional: forwarded onto both directions of the pair.
+#   mode           : type-switched enum member NAME string tag. On a "LINE"
+#                    edge: LineFollowMode "MIDDLE" (the only authorable value
+#                    this PR; "LEFT" / "RIGHT" are validator-rejected until
+#                    LineFollower offset-follow lands, issue #156) — LINE mode is
+#                    surface-only, it emits no EdgeInfo field. On a "BLIND" edge:
+#                    BlindMode "SYNC_TSHAPE" / "GYRO_TSHAPE" / "RAW_FLAT"
+#                    ("STOP_AT_LINE" is rejected — author a seek via
+#                    stop_at_line: on instead, ADR-064). Do NOT author "DEFAULT".
+#                    Bidirectional: forwarded onto both directions of the pair.
 #   direction      : "front" | "rear" — asymmetric per-directed-edge
 #                    traversal override; applies only to the forward
 #                    (u → v) edge, never mirrored to the reverse. Use
@@ -155,10 +169,12 @@ PIPELINE_DIRECTION_MODE = _data.get("pipeline_direction_mode", None)
 #                    the reverse direction too.
 #   stop_at_line   : "on" | "off" — per-edge stop-at-line override; forward
 #                    (u → v) only, same single-direction rule as ``direction``.
+#                    The sole seek axis now (BlindMode STOP_AT_LINE retired,
+#                    ADR-064).
 #
 # graph_builder.build_graph() emits a bidirectional directed pair for each
-# entry, deriving distance/heading from node coords when absent.
-# ``primitive_mode`` is forwarded onto both directions; the direction-dependent
-# overrides (``direction`` / ``stop_at_line``) land on the forward edge only.
+# entry, deriving distance/heading from node coords when absent. ``speed`` and
+# ``mode`` are forwarded onto both directions; the direction-dependent overrides
+# (``direction`` / ``stop_at_line``) land on the forward edge only.
 # ---------------------------------------------------------------------------
 EDGES = _data.get("EDGES", [])

@@ -5,8 +5,8 @@
 
 ## Rule
 
-`Drive` gains a stop-on-line motion primitive, `Drive.stopAtLine(expectedCm)`, a
-`[[nodiscard]]` RAII fluent builder in the `driveDist` family. It drives the
+`Drive` gains a stop-on-line motion primitive, `Drive.stopAtLine(expectedCm)`, an
+RAII fluent builder in the `driveDist` family. It drives the
 chassis straight toward an expected perpendicular crossing line and stops on it
 with an active brake. To detect the crossing, `Drive` reads the line sensor
 directly — `LineArray.getJunctionType()` — a **read-only** dependency from the

@@ -112,20 +112,6 @@ void resetWorld()
     Drive.stop();
 }
 
-/// @brief Tick `Drive.update()` `n` times, advancing the canonical M2/M3 encoders by
-///        @p encDeltaPerTick degrees each tick BEFORE the update call (so `_updateProfile`'s
-///        `frac` computation on that tick sees the advanced position — matching the
-///        `test_path_tracker_settle.cpp` idiom of advancing state, THEN ticking).
-void tickProfile(int32_t encDeltaPerTick, int n)
-{
-    for (int i = 0; i < n; ++i)
-    {
-        MiniR4.M2.mockAdvanceDegrees(encDeltaPerTick);
-        MiniR4.M3.mockAdvanceDegrees(encDeltaPerTick);
-        Drive.update();
-    }
-}
-
 /// @brief Tick `Drive.update()` one encoder-degree at a time until `MiniR4.M2`'s advance since
 ///        dispatch reaches (or first exceeds) @p targetEncDelta, or @p maxTicks is exhausted.
 ///        Fine-grained single-degree stepping lets a test land ON a specific phase boundary

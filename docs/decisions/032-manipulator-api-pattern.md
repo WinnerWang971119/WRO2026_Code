@@ -6,7 +6,7 @@
 ## Rule
 
 The `Manipulator` facade exposes coordinated semantic verbs (`grab`, `release`, `sortTo`, `dump`,
-`reset`) as `[[nodiscard]]` blocking-by-default builders with an `.async()` opt-out, per ADR-012.
+`reset`) as blocking-by-default builders with an `.async()` opt-out, per ADR-012.
 
 Internally the facade owns two actuator classes:
 - **`ManipServo`** (×3 instances: grabber, sorter, dumper) — fire-and-forget RC servo wrappers

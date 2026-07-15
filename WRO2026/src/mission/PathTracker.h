@@ -138,13 +138,13 @@
  *
  * Per-edge motion-mode resolution:
  *  - Each `Routes::EdgeInfo` carries per-category override fields
- *    (`line_mode_override`, `blind_mode_override`, `direction_override`,
+ *    (`speed_override`, `blind_mode_override`, `direction_override`,
  *    `stop_at_line_override`). `DEFAULT` means "inherit
  *    `Routes::PIPELINE_CONFIG.<category>`." The dispatcher resolves DEFAULT →
  *    concrete at edge-dispatch time and chains the appropriate builder setters.
- *    Edges are LINE or BLIND only (issue #64); a LINE edge into a projection
- *    DESTINATION node still takes its motion profile from the LINE edge's own
- *    `line_mode_override`. The pre-edge turn wheel is no longer an `EdgeInfo`
+ *    Edges are LINE or BLIND only (issue #64); both edge types take their cruise
+ *    SPEED from the same `speed_override` tier (a LINE edge into a projection
+ *    DESTINATION node included). The pre-edge turn wheel is no longer an `EdgeInfo`
  *    field: it is resolved per turn from the `Routes::PivotTurn` table
  *    (ADR-036) when the hop departs a pivot node, else the pipeline default.
  *
@@ -185,7 +185,7 @@ class PathTrackerClass;
  * `.async()` to opt out (the destructor still enqueues but returns).
  * Mission DSL uses `.async()` and polls `isIdle()`.
  */
-class [[nodiscard]] PathTrackerGoToBuilder
+class PathTrackerGoToBuilder
 {
 public:
     PathTrackerGoToBuilder(PathTrackerClass& owner, uint8_t goalId);
@@ -377,8 +377,8 @@ public:
                                            Direction               activeArrivalDirection,
                                            Direction               activeRouteDirection);
 
-    [[nodiscard]] PathTrackerGoToBuilder goTo(uint8_t goalId);
-    [[nodiscard]] PathTrackerGoToBuilder goTo(const char* goalName);
+    PathTrackerGoToBuilder goTo(uint8_t goalId);
+    PathTrackerGoToBuilder goTo(const char* goalName);
 
     bool       hasFault() const;
     FaultInfo  getFault() const;
@@ -823,10 +823,15 @@ private:
      * @param reverse    Hop 0's resolved `decision.reverse` — latched into the run so a
      *                   mid-run direction flip is detected as a divergence.
      * @param hop0Mode   Hop 0's resolved motion bundle (`decision.driveMode`).
+     * @param hop0Speed  Hop 0's resolved `SpeedTier` (`_resolveSpeed(edge)`) — latched into
+     *                   the run so a later hop of a DIFFERENT tier ends the chain (the run
+     *                   shares one cruise; issue #97). SPEED only: a same-tier SYNC<->GYRO
+     *                   mode mix still chains.
      * @param hop0DistCm Hop 0's COMMANDED distance (`decision.commandedDistanceCm` — the
      *                   pivot-trimmed value actually dispatched, so the speed plan is
      *                   resolved over the distances really driven).
-     * @param cruisePwm  The signed run cruise (±`Config::SPEED_NORMAL` by direction).
+     * @param cruisePwm  The signed run cruise (±the hop's resolved `SpeedTier` PWM by
+     *                   direction; NORMAL == the former `Config::SPEED_NORMAL`).
      * @param entryPwm   The signed PWM the chassis is physically at when the run begins:
      *                   the ADR-023 captured LineFollower cruise after a LINE/projection
      *                   pass-through, else ±`Config::TSHAPE_START_SPEED` (AC5 — seeding
@@ -837,7 +842,8 @@ private:
      *       chassis must stop δ short of `_nextHop` and pivot there).
      */
     void _chainTryStart(uint8_t cur, bool reverse, Routes::BlindMode hop0Mode,
-                        float hop0DistCm, int16_t cruisePwm, int16_t entryPwm);
+                        Routes::SpeedTier hop0Speed, float hop0DistCm, int16_t cruisePwm,
+                        int16_t entryPwm);
 
     /**
      * @brief Reset the ADR-059 blind-chain run buffer to the inactive state.
@@ -1119,6 +1125,9 @@ private:
     ///                              final hop).
     ///  - `hopIndex`              — the hop most recently DISPATCHED (in flight).
     ///  - `reverse`               — hop 0's resolved direction, for divergence detection.
+    ///  - `speedTier`             — hop 0's resolved `SpeedTier`; the walk-ahead admits a
+    ///                              hop only when its resolved tier matches (issue #97), and
+    ///                              the dispatch re-check drops the run on a divergent tier.
     ///  - `dispatchEncSum`        — `Drive.getEncL() + getEncR()` snapshotted at the
     ///                              in-flight hop's dispatch; with `dispatchCmdCm` it
     ///                              yields the MEASURED inter-hop boundary carry that is
@@ -1132,15 +1141,16 @@ private:
     /// fresh run may re-form on the far side (cap overflow is not a fault).
     struct ChainRun
     {
-        bool          active   = false;
-        bool          reverse  = false;
-        uint8_t       hopCount = 0;
-        uint8_t       hopIndex = 0;
-        uint8_t       node[Config::MAX_CHAIN_HOPS + 1] = {};
-        float         hopDistCm[Config::MAX_CHAIN_HOPS] = {};
-        ChainHopSpeed speed[Config::MAX_CHAIN_HOPS]     = {};
-        int32_t       dispatchEncSum = 0;
-        float         dispatchCmdCm  = 0.0f;
+        bool              active         = false;
+        bool              reverse        = false;
+        Routes::SpeedTier speedTier      = Routes::SpeedTier::DEFAULT;
+        uint8_t           hopCount       = 0;
+        uint8_t           hopIndex       = 0;
+        uint8_t           node[Config::MAX_CHAIN_HOPS + 1]  = {};
+        float             hopDistCm[Config::MAX_CHAIN_HOPS] = {};
+        ChainHopSpeed     speed[Config::MAX_CHAIN_HOPS]     = {};
+        int32_t           dispatchEncSum = 0;
+        float             dispatchCmdCm  = 0.0f;
     };
     ChainRun _chain;
 

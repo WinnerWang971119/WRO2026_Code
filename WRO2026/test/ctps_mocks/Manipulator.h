@@ -88,11 +88,11 @@ public:
  *
  * The real builder fires its actuator setpoint in the verb body and waits at
  * end-of-statement; here the verb has already recorded the `manip` op, so this
- * builder only has to satisfy the call-as-temporary surface. Move-only and
- * `[[nodiscard]]` like the real handle (copy + assigns deleted, move ctor kept so
+ * builder only has to satisfy the call-as-temporary surface. Move-only
+ * like the real handle (copy + assigns deleted, move ctor kept so
  * the verb can return it by value on pre-C++17 compilers). `async()` is a no-op.
  */
-class [[nodiscard]] ManipAction
+class ManipAction
 {
 public:
     ManipAction() = default;

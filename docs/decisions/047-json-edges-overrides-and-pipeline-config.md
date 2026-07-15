@@ -3,6 +3,8 @@
 **Status:** Implemented
 **Date decided:** 2026-06 (issue #79, Phase 3)
 
+> **`primitive_mode` string-tag ENCODING clause superseded by [ADR-064](./064-per-edge-mode-speed-orthogonalization.md).** JSON-native `EDGES` overrides, field-sourced `PIPELINE_CONFIG`, and optional override geometry all still stand; only the `primitive_mode` key itself — the single field conflating speed and motion-mode/seek — is retired. It splits into a uniform `speed` key + a type-switched `mode` key; `STOP_AT_LINE` is no longer an authorable mode (see ADR-064).
+
 ## Rule
 
 `EDGES` override entries live in `field_data.json` — `field_data.py` reads
@@ -51,16 +53,17 @@ that affects `routes.h` / `routes.cpp`.
 
 ## Trigger to revisit
 
-- A `primitive_mode` enum gains a member whose name collides with a JSON keyword or cannot
-  be expressed verbatim — extend the tag vocabulary or add an escape convention.
-- Per-edge blind speed / numeric PWM is added (issue #97) — the override entry shape
-  must be extended; the validator and inspector extend alongside.
+- ~~A `primitive_mode` enum gains a member whose name collides with a JSON keyword or cannot
+  be expressed verbatim~~ — moot: `primitive_mode` is retired by ADR-064.
+- ~~Per-edge blind speed / numeric PWM is added (issue #97)~~ — fired: ADR-064 lands per-edge
+  blind speed (`speed`/`SpeedTier`); numeric PWM authoring stays deferred.
 
 ## See also
 
 - [ADR-022 — field_data geometry lives in JSON; field_data.py is a loader](./022-field-data-json-loader.md) — partially superseded (JSON-can't-hold-enums and PIPELINE_CONFIG-out-of-GUI-scope clauses replaced here).
 - [ADR-029 — The validator is the single anti-ambiguity and input-finiteness gate](./029-validator-anti-ambiguity.md) — string-tag rejection lives here.
 - [ADR-046 — Projection is a node property](./046-projection-as-node-property.md) — the `blind_projection_auto_seek` field-wide toggle is surfaced in the same GUI refactor.
+- [ADR-064 — Per-edge mode/speed orthogonalization](./064-per-edge-mode-speed-orthogonalization.md) — supersedes the `primitive_mode` string-tag ENCODING clause above (splits it into `speed` + `mode`); the rest of this ADR stands.
 - `docs/plans/2026-06-23-issue-79-edges-json-overrides-gui.md` — originating plan (decisions section).
 - Issue #79 (closed by this).
-- Issue #97 — per-edge blind speed (deferred; next EDGES override extension).
+- Issue #97 — per-edge blind speed (absorbed into ADR-064).

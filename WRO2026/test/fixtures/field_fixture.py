@@ -40,8 +40,8 @@ emitted ``routes_fixture.cpp`` is a hard, realistic stress map (not a 7-node toy
     gate-decline branches are reachable by the real FSM (#112);
   * two single-wheel pivot turns -- one ``line`` regime (LINE legs) and one
     ``sensor`` regime (BLIND auto-seek into a projection node);
-  * per-edge ``EDGES`` overrides -- ``primitive_mode`` (a ``LineMode`` and a
-    ``BlindMode``), an asymmetric ``direction`` (rear) override, and a
+  * per-edge ``EDGES`` overrides -- ``speed`` (a ``SpeedTier``) and ``mode``
+    (a ``BlindMode``), an asymmetric ``direction`` (rear) override, and a
     ``stop_at_line`` seek override;
   * blind-decay routing (the ``BLIND_DECAY_*`` knobs, with blind edges of varying
     length).
@@ -120,7 +120,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE  # noqa: E402
-from tools.path_planner.pipeline_config import BlindMode, LineMode  # noqa: E402
+from tools.path_planner.pipeline_config import BlindMode, SpeedTier  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Node geometry. Field is 320 cm x 154 cm (FIELD_MM below). Origin SW; +x East,
@@ -307,8 +307,8 @@ def _edge(u: str, v: str, etype, **overrides) -> dict:
 # type, so no conflict). None of these edges is a pivot leg (rear is rejected on
 # pivot legs; pivots are FRONT-only in v1).
 _EDGES = [
-    _edge("Inter2", "Inter3", EDGE_LINE, primitive_mode=LineMode.FAST),       # LineMode override
-    _edge("final", "position1", EDGE_BLIND, primitive_mode=BlindMode.GYRO_TSHAPE),  # BlindMode override
+    _edge("Inter2", "Inter3", EDGE_LINE, speed=SpeedTier.FAST),               # SpeedTier override
+    _edge("final", "position1", EDGE_BLIND, mode=BlindMode.GYRO_TSHAPE),      # BlindMode override
     _edge("Inter1", "Spur", EDGE_LINE, direction="rear"),                     # asymmetric direction override
     _edge("Start", "Inter1", EDGE_BLIND, stop_at_line="on"),                  # forced seek override
     # ADR-059 chain-ineligibility probe (TC6, issue #106/T10-T11): forces

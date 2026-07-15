@@ -15,7 +15,12 @@ import pytest
 
 from tools.path_planner.editor.loader import load_field_json
 from tools.path_planner.graph_builder import build_graph, EDGE_BLIND, EDGE_LINE
-from tools.path_planner.pipeline_config import BlindMode, LineMode, StopAtLineMode
+from tools.path_planner.pipeline_config import (
+    BlindMode,
+    LineFollowMode,
+    SpeedTier,
+    StopAtLineMode,
+)
 from tools.path_planner.tests.fixtures import toy_field_data as real_field_data
 from tools.path_planner.validator import (
     BLIND_DECAY_EXPONENT_MAX,
@@ -390,39 +395,21 @@ def test_validator_rejects_invalid_direction_value() -> None:
         validate(fd)
 
 
-# -- TC4: STOP_AT_LINE blind-mode override ----------------------------------
+# -- TC4: BLIND `mode` override (ADR-064: STOP_AT_LINE folded onto stop_at_line) --
 #
-# A per-edge BLIND override of STOP_AT_LINE must validate; an override of the
-# wrong enum type (or an unknown string) must still be rejected. The schema
-# spells the per-edge primitive override as ``primitive_mode`` carrying a
-# :class:`BlindMode` member, so a STOP_AT_LINE override is
-# ``primitive_mode=BlindMode.STOP_AT_LINE`` on a BLIND edge.
+# A per-edge BLIND override of a concrete drive mode (e.g. GYRO_TSHAPE) must
+# validate as a string tag; an override of the wrong enum type (or an unknown
+# string) must still be rejected. ``STOP_AT_LINE`` is no longer authorable as a
+# ``mode`` tag at all -- ADR-064 folds it onto the ``stop_at_line`` axis, so a
+# per-edge ``mode=BlindMode.STOP_AT_LINE`` (or the string form) is rejected with
+# a message pointing at ``stop_at_line: on``.
 
 
-def test_validator_accepts_stop_at_line_blind_override() -> None:
-    """TC4: an EDGES BLIND edge with primitive_mode=BlindMode.STOP_AT_LINE validates."""
-    fd = _clone_field_data()
-    fd.EDGES = [
-        {
-            "type": EDGE_BLIND,
-            "u": "B",
-            "v": "G",
-            "distance_cm": 86.0,
-            "heading_deg": 54.46,
-            "primitive_mode": BlindMode.STOP_AT_LINE,
-        }
-    ]
-    assert validate(fd) is None
+def test_validator_rejects_stop_at_line_blind_mode_override() -> None:
+    """TC4: an EDGES BLIND edge with mode=BlindMode.STOP_AT_LINE is rejected.
 
-
-def test_validator_accepts_blind_mode_name_string() -> None:
-    """Issue #79 (TC: string-tag): a valid BlindMode NAME string validates.
-
-    Under ADR-047 ``primitive_mode`` may be the bare enum member NAME the JSON
-    encoding uses (``"STOP_AT_LINE"``), not only a ``BlindMode`` instance. A
-    valid BlindMode name on a BLIND edge must now be ACCEPTED -- this is the
-    old-contract reversal: pre-#79 the string form was rejected, but the JSON
-    editor authors exactly this form, so the validator must resolve it.
+    ADR-064 folds STOP_AT_LINE onto the ``stop_at_line`` axis: the seek is
+    authored via ``stop_at_line: on``, never as a BLIND ``mode`` tag.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -432,7 +419,51 @@ def test_validator_accepts_blind_mode_name_string() -> None:
             "v": "G",
             "distance_cm": 86.0,
             "heading_deg": 54.46,
-            "primitive_mode": "STOP_AT_LINE",  # a bare BlindMode member NAME
+            "mode": BlindMode.STOP_AT_LINE,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"stop_at_line.*on"):
+        validate(fd)
+
+
+def test_validator_rejects_stop_at_line_blind_mode_string_override() -> None:
+    """TC4 (string-tag mirror): mode='STOP_AT_LINE' is rejected the same way.
+
+    The retired tag is caught identically whether authored as the enum
+    instance or the bare JSON string name.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "mode": "STOP_AT_LINE",
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"stop_at_line.*on"):
+        validate(fd)
+
+
+def test_validator_accepts_blind_mode_name_string() -> None:
+    """Issue #79 (TC: string-tag): a valid, still-authorable BlindMode NAME
+    string validates.
+
+    ``mode`` may be the bare enum member NAME the JSON encoding uses
+    (``"GYRO_TSHAPE"``), not only a ``BlindMode`` instance. A concrete,
+    non-retired BlindMode name on a BLIND edge must be ACCEPTED.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "distance_cm": 86.0,
+            "heading_deg": 54.46,
+            "mode": "GYRO_TSHAPE",  # a bare BlindMode member NAME
         }
     ]
     assert validate(fd) is None
@@ -443,8 +474,8 @@ def test_validator_rejects_unknown_blind_mode() -> None:
 
     The string-tag accept above is not a blanket pass on any string: a name
     that is not a ``BlindMode`` member (``"NOT_A_MODE"``) must fail with a
-    precise ``primitive_mode`` diagnostic. This pins the unknown-name reject
-    that survives the #79 widening of the accepted vocabulary.
+    precise ``mode`` diagnostic. This pins the unknown-name reject that
+    survives the #79 widening of the accepted vocabulary.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -454,19 +485,19 @@ def test_validator_rejects_unknown_blind_mode() -> None:
             "v": "G",
             "distance_cm": 86.0,
             "heading_deg": 54.46,
-            "primitive_mode": "NOT_A_MODE",  # not a BlindMode member name
+            "mode": "NOT_A_MODE",  # not a BlindMode member name
         }
     ]
-    with pytest.raises(FieldDataError, match="primitive_mode"):
+    with pytest.raises(FieldDataError, match="mode"):
         validate(fd)
 
 
-def test_validator_rejects_line_mode_on_stop_at_line_blind_edge() -> None:
-    """TC4 (cross-type): a LineMode override on a BLIND edge is rejected.
+def test_validator_rejects_line_follow_mode_on_blind_edge() -> None:
+    """TC4/TC13 (cross-type): a LineFollowMode override on a BLIND edge is rejected.
 
-    The mode enum must match the edge type. A ``LineMode`` on a BLIND edge --
-    even a concrete one -- is a category error and must fail rather than be
-    silently coerced toward STOP_AT_LINE.
+    The mode enum must match the edge type. A ``LineFollowMode`` instance on a
+    BLIND edge -- even a concrete one -- is a category error and must fail
+    rather than be silently coerced toward a BlindMode member.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -476,7 +507,7 @@ def test_validator_rejects_line_mode_on_stop_at_line_blind_edge() -> None:
             "v": "G",
             "distance_cm": 86.0,
             "heading_deg": 54.46,
-            "primitive_mode": LineMode.FAST,
+            "mode": LineFollowMode.MIDDLE,
         }
     ]
     with pytest.raises(FieldDataError, match="BlindMode"):
@@ -562,7 +593,7 @@ def test_validator_accepts_same_type_line_override() -> None:
     """TC5 (positive): EDGE_LINE on a LINE_SEGMENTS pair is a valid override.
 
     The intended use of a rich EDGES entry is as an override layer attaching
-    distance/heading/primitive_mode to an existing edge. A matching-type entry
+    distance/heading/speed to an existing edge. A matching-type entry
     on an existing pair must NOT be rejected by the anti-ambiguity rule.
     """
     fd = _clone_field_data()
@@ -573,7 +604,7 @@ def test_validator_accepts_same_type_line_override() -> None:
             "v": "B",
             "distance_cm": 100.0,
             "heading_deg": 0.0,
-            "primitive_mode": LineMode.FAST,
+            "speed": SpeedTier.FAST,
         }
     ]
     assert validate(fd) is None
@@ -583,7 +614,9 @@ def test_validator_accepts_same_type_blind_override() -> None:
     """TC5 (positive, mirror): EDGE_BLIND on a BLIND_EDGES pair is accepted.
 
     ('B','G') is the toy field's BLIND_EDGES pair; a matching-type BLIND
-    override is the legitimate path the STOP_AT_LINE edge relies on.
+    override is a legitimate overlay. The seek edge the toy field relies on
+    now authors its seek via ``stop_at_line: on`` (ADR-064); a concrete
+    ``mode`` tag here proves the same-type override path independently.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -593,31 +626,33 @@ def test_validator_accepts_same_type_blind_override() -> None:
             "v": "G",
             "distance_cm": 86.0,
             "heading_deg": 54.46,
-            "primitive_mode": BlindMode.STOP_AT_LINE,
+            "mode": BlindMode.GYRO_TSHAPE,
         }
     ]
     assert validate(fd) is None
 
 
-# -- Issue #79 / ADR-047: JSON string-tag primitive_mode + optional geometry --
+# -- Issue #79 / ADR-047, re-keyed by ADR-064: JSON string-tag speed/mode +
+#    optional geometry --------------------------------------------------------
 #
-# Per-edge ``primitive_mode`` gains a JSON-representable string-tag encoding
-# (the enum member NAME verbatim) accepted alongside the legacy enum instance,
-# cross-checked against the edge type, and rejecting the DEFAULT sentinel in
+# Per-edge ``speed`` (uniform, both edge types) and ``mode`` (type-switched)
+# each gain a JSON-representable string-tag encoding (the enum member NAME
+# verbatim) accepted alongside the legacy enum instance; ``mode`` is
+# cross-checked against the edge type, and both reject the DEFAULT sentinel in
 # BOTH forms. Geometry (distance_cm / heading_deg) becomes optional on an
 # override-only overlay entry and is derived from the node coords downstream.
 # The toy field already carries the A-B LINE pair and the B-G BLIND pair, so a
 # same-type override on either is a legitimate overlay.
 
 
-def test_tc1_edges_line_mode_name_string_validates_and_resolves() -> None:
-    """TC1 (validate + build): a LINE edge with primitive_mode='FAST' validates.
+def test_tc1_edges_speed_name_string_validates_and_resolves() -> None:
+    """TC1/TC2 (validate + build): a LINE edge with speed='FAST' validates.
 
-    The string TAG (a LineMode member name) on a same-type LINE override of the
+    The string TAG (a SpeedTier member name) on a same-type LINE override of the
     A-B pair must validate, and ``build_graph`` must forward it verbatim onto the
-    resolved directed edge so the emitter can resolve it to ``LineMode::FAST``
+    resolved directed edge so the emitter can resolve it to ``SpeedTier::FAST``
     (the emit half lives in test_header_writer). Geometry is supplied here; the
-    override-only (geometry-omitted) form is TC2.
+    override-only (geometry-omitted) form is the next test.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -627,20 +662,20 @@ def test_tc1_edges_line_mode_name_string_validates_and_resolves() -> None:
             "v": "B",
             "distance_cm": 190.0,
             "heading_deg": 0.0,
-            "primitive_mode": "FAST",
+            "speed": "FAST",
         }
     ]
     assert validate(fd) is None
     g = build_graph(fd)
     # The string tag is forwarded verbatim onto both directions (bidirectional).
-    assert g.edges["A", "B"]["primitive_mode"] == "FAST"
-    assert g.edges["B", "A"]["primitive_mode"] == "FAST"
+    assert g.edges["A", "B"]["speed"] == "FAST"
+    assert g.edges["B", "A"]["speed"] == "FAST"
 
 
 def test_tc2_edges_entry_geometry_omitted_validates_and_derives() -> None:
     """TC2: an EDGES override with distance_cm / heading_deg OMITTED validates.
 
-    An override-only overlay entry carries only ``{type, u, v, primitive_mode}``.
+    An override-only overlay entry carries only ``{type, u, v, speed}``.
     The validator must NOT require geometry, and ``build_graph`` must derive
     distance / heading from the node coords (A=(10,10), B=(200,10): 190 cm due
     East), byte-identically to the planner graph.
@@ -651,7 +686,7 @@ def test_tc2_edges_entry_geometry_omitted_validates_and_derives() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "FAST",
+            "speed": "FAST",
         }
     ]
     assert validate(fd) is None
@@ -662,7 +697,7 @@ def test_tc2_edges_entry_geometry_omitted_validates_and_derives() -> None:
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
     assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
     # The override still rides on the derived edge.
-    assert g.edges["A", "B"]["primitive_mode"] == "FAST"
+    assert g.edges["A", "B"]["speed"] == "FAST"
 
 
 def test_tc2_stop_at_line_fixture_carries_geometry_verbatim() -> None:
@@ -683,12 +718,12 @@ def test_tc2_stop_at_line_fixture_carries_geometry_verbatim() -> None:
     assert g.edges["B", "G"]["distance_cm"] == pytest.approx(86.0232526704263, abs=1e-9)
 
 
-def test_tc3_edges_primitive_mode_enum_instance_validates() -> None:
-    """TC3: a primitive_mode authored as an enum INSTANCE still validates (legacy).
+def test_tc3_edges_speed_enum_instance_validates() -> None:
+    """TC3: a speed authored as an enum INSTANCE still validates (legacy).
 
-    The legacy Python authoring form (``LineMode.FAST`` -- an enum instance, not
-    a string) must keep validating and build into the graph identically. Pairs
-    with the string-tag path (TC1) so both encodings stay live.
+    The legacy Python authoring form (``SpeedTier.FAST`` -- an enum instance,
+    not a string) must keep validating and build into the graph identically.
+    Pairs with the string-tag path (TC1) so both encodings stay live.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -696,19 +731,20 @@ def test_tc3_edges_primitive_mode_enum_instance_validates() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": LineMode.FAST,
+            "speed": SpeedTier.FAST,
         }
     ]
     assert validate(fd) is None
     g = build_graph(fd)
-    assert g.edges["A", "B"]["primitive_mode"] is LineMode.FAST
+    assert g.edges["A", "B"]["speed"] is SpeedTier.FAST
 
 
-def test_tc4_line_mode_name_string_on_blind_edge_rejected() -> None:
-    """TC4: a LineMode NAME string on a BLIND edge is a cross-type error.
+def test_tc13_line_follow_mode_string_on_blind_edge_rejected() -> None:
+    """TC13: a LineFollowMode NAME string on a BLIND edge is a cross-type error.
 
-    ``"FAST"`` is a LineMode member, illegal on a BLIND edge. The validator must
-    reject it (the BlindMode cross-check), naming the expected ``BlindMode``.
+    ``"MIDDLE"`` is a LineFollowMode member, illegal as a BLIND ``mode``. The
+    validator must reject it (the BlindMode cross-check), naming the expected
+    ``BlindMode``.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -716,18 +752,18 @@ def test_tc4_line_mode_name_string_on_blind_edge_rejected() -> None:
             "type": EDGE_BLIND,
             "u": "B",
             "v": "G",
-            "primitive_mode": "FAST",  # a LineMode name on a BLIND edge
+            "mode": "MIDDLE",  # a LineFollowMode name on a BLIND edge
         }
     ]
     with pytest.raises(FieldDataError, match="BlindMode"):
         validate(fd)
 
 
-def test_tc4_blind_mode_name_string_on_line_edge_rejected() -> None:
-    """TC4 (inverse): a BlindMode NAME string on a LINE edge is rejected.
+def test_tc13_blind_mode_string_on_line_edge_rejected() -> None:
+    """TC13 (inverse): a BlindMode NAME string on a LINE edge is rejected.
 
-    ``"STOP_AT_LINE"`` is a BlindMode member, illegal on a LINE edge. The
-    validator must reject it, naming the expected ``LineMode``.
+    ``"SYNC_TSHAPE"`` is a BlindMode member, illegal as a LINE ``mode``. The
+    validator must reject it, naming the expected ``LineFollowMode`` / ``MIDDLE``.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -735,35 +771,35 @@ def test_tc4_blind_mode_name_string_on_line_edge_rejected() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "STOP_AT_LINE",  # a BlindMode name on a LINE edge
+            "mode": "SYNC_TSHAPE",  # a BlindMode name on a LINE edge
         }
     ]
-    with pytest.raises(FieldDataError, match="LineMode"):
+    with pytest.raises(FieldDataError, match="MIDDLE"):
         validate(fd)
 
 
-def test_tc5_unknown_primitive_mode_tag_rejected() -> None:
-    """TC5: an unknown primitive_mode tag is rejected with a precise diagnostic."""
+def test_tc13_unknown_speed_tag_rejected() -> None:
+    """TC13: an unknown speed tag is rejected with a precise diagnostic."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "BOGUS",  # not a LineMode member name
+            "speed": "BOGUS",  # not a SpeedTier member name
         }
     ]
-    with pytest.raises(FieldDataError, match="primitive_mode"):
+    with pytest.raises(FieldDataError, match="speed"):
         validate(fd)
 
 
-def test_tc6_primitive_mode_default_string_rejected() -> None:
-    """TC6: the literal string 'DEFAULT' is rejected (DEFAULT == absence).
+def test_tc13_speed_default_string_rejected() -> None:
+    """TC13: the literal string 'DEFAULT' is rejected (DEFAULT == absence).
 
-    ``LineMode["DEFAULT"]`` RESOLVES (DEFAULT is a real member), so the
+    ``SpeedTier["DEFAULT"]`` RESOLVES (DEFAULT is a real member), so the
     unknown-name guard would miss it -- the validator must reject the literal
     ``"DEFAULT"`` string explicitly. Authoring DEFAULT is a confusion: absence
-    already encodes "inherit PIPELINE_CONFIG".
+    already encodes "inherit PIPELINE_CONFIG.speed".
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -771,18 +807,18 @@ def test_tc6_primitive_mode_default_string_rejected() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "DEFAULT",
+            "speed": "DEFAULT",
         }
     ]
-    with pytest.raises(FieldDataError, match="primitive_mode"):
+    with pytest.raises(FieldDataError, match="speed"):
         validate(fd)
 
 
-def test_tc6_primitive_mode_default_enum_instance_rejected() -> None:
-    """TC6 (enum form): the LineMode.DEFAULT INSTANCE is rejected too.
+def test_tc13_speed_default_enum_instance_rejected() -> None:
+    """TC13 (enum form): the SpeedTier.DEFAULT INSTANCE is rejected too.
 
     Both forms of DEFAULT -- the string and the enum instance -- must fail, so
-    a legacy Python entry that explicitly sets ``primitive_mode=LineMode.DEFAULT``
+    a legacy Python entry that explicitly sets ``speed=SpeedTier.DEFAULT``
     is caught the same way as the JSON ``"DEFAULT"`` string.
     """
     fd = _clone_field_data()
@@ -791,19 +827,19 @@ def test_tc6_primitive_mode_default_enum_instance_rejected() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": LineMode.DEFAULT,
+            "speed": SpeedTier.DEFAULT,
         }
     ]
     with pytest.raises(FieldDataError, match="DEFAULT"):
         validate(fd)
 
 
-def test_tc6_blind_primitive_mode_default_string_rejected() -> None:
-    """TC6 (blind mirror): 'DEFAULT' on a BLIND edge is rejected too.
+def test_tc13_blind_mode_default_string_rejected() -> None:
+    """TC13 (blind mirror): mode='DEFAULT' on a BLIND edge is rejected too.
 
-    The DEFAULT-sentinel rejection is symmetric across edge types:
-    ``BlindMode["DEFAULT"]`` also resolves, so a BLIND override of ``"DEFAULT"``
-    must be rejected before the enum lookup.
+    The DEFAULT-sentinel rejection also fires for the type-switched ``mode``
+    axis: ``BlindMode["DEFAULT"]`` resolves, so a BLIND override of
+    ``mode="DEFAULT"`` must be rejected rather than silently coerced.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -811,10 +847,135 @@ def test_tc6_blind_primitive_mode_default_string_rejected() -> None:
             "type": EDGE_BLIND,
             "u": "B",
             "v": "G",
-            "primitive_mode": "DEFAULT",
+            "mode": "DEFAULT",
         }
     ]
-    with pytest.raises(FieldDataError, match="primitive_mode"):
+    with pytest.raises(FieldDataError, match="mode"):
+        validate(fd)
+
+
+# -- TC6/TC7/TC8: LINE `mode` surface + the retired `primitive_mode` key ------
+#
+# LINE Mode is surface-only this PR (ADR-064): only ``MIDDLE`` is authorable
+# (validates and emits nothing -- no ``EdgeInfo`` field); ``LEFT``/``RIGHT`` are
+# reserved until the LineFollower lateral offset-follow lands (issue #156). The
+# retired ``primitive_mode`` key is rejected wherever it appears, with a
+# targeted migration message naming ``mode``/``speed`` and ADR-064.
+
+
+def test_tc6_line_mode_middle_validates() -> None:
+    """TC6: mode='MIDDLE' on a LINE edge validates (emit-side is header_writer)."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "MIDDLE",
+        }
+    ]
+    assert validate(fd) is None
+    # The overlay attribute survives onto the graph (the emitter is what drops
+    # it -- LINE `mode` has no EdgeInfo field this PR).
+    g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] == "MIDDLE"
+
+
+def test_tc6_line_mode_middle_enum_instance_validates() -> None:
+    """TC6 (enum form): mode=LineFollowMode.MIDDLE also validates."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": LineFollowMode.MIDDLE,
+        }
+    ]
+    assert validate(fd) is None
+
+
+def test_tc7_line_mode_left_rejected() -> None:
+    """TC7: mode='LEFT' on a LINE edge is rejected (issue #156, not yet implemented)."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "LEFT",
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
+        validate(fd)
+
+
+def test_tc7_line_mode_right_rejected() -> None:
+    """TC7 (mirror): mode='RIGHT' on a LINE edge is rejected the same way."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "RIGHT",
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
+        validate(fd)
+
+
+def test_tc7_line_mode_left_enum_instance_rejected() -> None:
+    """TC7 (enum form): mode=LineFollowMode.LEFT is rejected too."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": LineFollowMode.LEFT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
+        validate(fd)
+
+
+def test_tc8_primitive_mode_anywhere_rejected() -> None:
+    """TC8: `primitive_mode` anywhere in EDGES is rejected with the ADR-064 message.
+
+    Special-cased AHEAD of the generic key/shape checks so a stale fixture
+    points straight at the two replacement keys (`mode` + `speed`) rather than
+    tripping a generic unknown-key error.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "primitive_mode": "FAST",
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"mode.*speed.*ADR-064"):
+        validate(fd)
+
+
+def test_tc8_primitive_mode_on_blind_edge_rejected() -> None:
+    """TC8 (mirror): `primitive_mode` on a BLIND edge is rejected identically.
+
+    The retired-key guard fires before the edge-type-specific speed/mode
+    resolution, so the rejection is the same regardless of edge type.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "primitive_mode": BlindMode.STOP_AT_LINE,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"mode.*speed.*ADR-064"):
         validate(fd)
 
 
@@ -875,25 +1036,26 @@ def test_tc20_override_only_pivot_leg_resolves_stop_at_line() -> None:
         validate(fd)
 
 
-# -- Issue #79 / ADR-047: field-sourced PIPELINE_CONFIG validation -------------
+# -- Issue #79 / ADR-047, re-keyed by ADR-064: field-sourced PIPELINE_CONFIG
+#    validation ------------------------------------------------------------
 #
 # The four optional PIPELINE_* keys carry mission-wide motion-mode defaults as
 # enum member NAMES. _validate_pipeline_config mirrors
-# PipelineConfig.__post_init__: line / blind / turn may NOT be DEFAULT (circular
+# PipelineConfig.__post_init__: speed / blind / turn may NOT be DEFAULT (circular
 # when set as the pipeline default itself); DirectionMode.DEFAULT IS allowed.
 # Reads are non-strict, so a field that omits every key validates unchanged.
 
 
-def test_tc9_pipeline_line_mode_default_rejected() -> None:
-    """TC9: pipeline_line_mode = 'DEFAULT' is rejected (line may not be DEFAULT).
+def test_tc9_pipeline_speed_default_rejected() -> None:
+    """TC9: pipeline_speed = 'DEFAULT' is rejected (speed may not be DEFAULT).
 
-    DEFAULT means "inherit PIPELINE_CONFIG.line", which is circular when set as
-    the pipeline default itself. ``LineMode["DEFAULT"]`` resolves, so the literal
+    DEFAULT means "inherit PIPELINE_CONFIG.speed", which is circular when set as
+    the pipeline default itself. ``SpeedTier["DEFAULT"]`` resolves, so the literal
     must be rejected before the enum lookup.
     """
     fd = _clone_field_data()
-    fd.PIPELINE_LINE_MODE = "DEFAULT"
-    with pytest.raises(FieldDataError, match="PIPELINE_LINE_MODE"):
+    fd.PIPELINE_SPEED = "DEFAULT"
+    with pytest.raises(FieldDataError, match="PIPELINE_SPEED"):
         validate(fd)
 
 
@@ -933,7 +1095,7 @@ def test_pipeline_modes_concrete_name_strings_accepted() -> None:
     authors concrete tags for every category validates clean.
     """
     fd = _clone_field_data()
-    fd.PIPELINE_LINE_MODE = "FAST"
+    fd.PIPELINE_SPEED = "FAST"
     fd.PIPELINE_BLIND_MODE = "GYRO_TSHAPE"
     fd.PIPELINE_TURN_MODE = "PIVOT_LEFT"
     fd.PIPELINE_DIRECTION_MODE = "FORCE_FORWARD"
@@ -948,18 +1110,44 @@ def test_pipeline_mode_unknown_name_rejected() -> None:
         validate(fd)
 
 
+def test_tc4_pipeline_blind_mode_stop_at_line_string_rejected() -> None:
+    """TC4 (pipeline half): pipeline_blind_mode = 'STOP_AT_LINE' is rejected.
+
+    The per-edge half is covered elsewhere; this pins the mission-wide default
+    half so a hand-edited field_data.json (which bypasses the editor combobox)
+    cannot set the blind default to the retired seek bundle. ADR-064 folded
+    STOP_AT_LINE onto the stop_at_line axis, so the pipeline rung is unauthorable.
+    """
+    fd = _clone_field_data()
+    fd.PIPELINE_BLIND_MODE = "STOP_AT_LINE"
+    with pytest.raises(FieldDataError, match=r"ADR-064"):
+        validate(fd)
+
+
+def test_tc4_pipeline_blind_mode_stop_at_line_enum_rejected() -> None:
+    """TC4 (pipeline half): a BlindMode.STOP_AT_LINE instance is rejected too.
+
+    Hits the resolved-member branch of the validator (a legacy/programmatic
+    enum-instance authoring), distinct from the string-name branch above.
+    """
+    fd = _clone_field_data()
+    fd.PIPELINE_BLIND_MODE = BlindMode.STOP_AT_LINE
+    with pytest.raises(FieldDataError, match=r"ADR-064"):
+        validate(fd)
+
+
 def test_pipeline_mode_enum_instance_accepted() -> None:
     """A PIPELINE_* key authored as an enum INSTANCE validates (legacy/programmatic).
 
-    Mirrors the primitive_mode enum-instance acceptance: a Python fixture that
-    sets ``PIPELINE_LINE_MODE = LineMode.FAST`` is accepted, while the same
+    Mirrors the speed enum-instance acceptance: a Python fixture that
+    sets ``PIPELINE_SPEED = SpeedTier.FAST`` is accepted, while the same
     field's enum-instance DEFAULT is rejected by the circular-DEFAULT rule.
     """
     fd = _clone_field_data()
-    fd.PIPELINE_LINE_MODE = LineMode.FAST
+    fd.PIPELINE_SPEED = SpeedTier.FAST
     assert validate(fd) is None
-    fd.PIPELINE_LINE_MODE = LineMode.DEFAULT
-    with pytest.raises(FieldDataError, match="PIPELINE_LINE_MODE"):
+    fd.PIPELINE_SPEED = SpeedTier.DEFAULT
+    with pytest.raises(FieldDataError, match="PIPELINE_SPEED"):
         validate(fd)
 
 
@@ -967,13 +1155,11 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     """TC4: the committed STOP_AT_LINE fixture field loads, validates, and seeks.
 
     The fixture authors the stop-at-line BLIND edge in the on-disk JSON
-    schema via ``stop_at_line: "on"`` (a per-edge seek trigger, distinct from
-    the ``primitive_mode`` motion bundle). Under issue #79 / ADR-047 a JSON
-    ``primitive_mode`` string TAG (``"STOP_AT_LINE"``) is now also accepted
-    (see ``test_validator_accepts_blind_mode_name_string``); this fixture keeps
-    using ``stop_at_line: "on"`` because the seek trigger is the behavior it
-    exercises. Loading it through the editor loader and validating must
-    succeed, and building the
+    schema via ``stop_at_line: "on"`` (the sole per-edge seek trigger since
+    ADR-064 folded ``BlindMode.STOP_AT_LINE`` onto this axis; it is no longer
+    authorable as a ``mode`` tag at all -- see
+    ``test_validator_rejects_stop_at_line_blind_mode_override``). Loading it
+    through the editor loader and validating must succeed, and building the
     graph must resolve the override onto the edge -- otherwise the "exemplar"
     silently dead-reckons through a crossing meant to re-seek the line
     (issue #93). Asserting the resolved ``StopAtLineMode.ON`` on the built
@@ -987,25 +1173,32 @@ def test_stop_at_line_fixture_loads_and_validates() -> None:
     assert g.get_edge_data("B", "G")["stop_at_line_override"] is StopAtLineMode.ON
 
 
-# -- ADR-048 (PR #98 / U2 + U5): new validator-contract rejections ------------
+# -- ADR-048 (PR #98 / U2 + U5), U2 superseded by ADR-064 ---------------------
 #
-# Two new EDGES-contract rules land together (ADR-048):
-#   * U2 -- an entry whose primitive_mode resolves to BlindMode.STOP_AT_LINE
-#     together with stop_at_line='off' is a contradiction and is rejected.
+# Two new EDGES-contract rules landed together in ADR-048:
+#   * U2 -- an entry whose primitive_mode resolved to BlindMode.STOP_AT_LINE
+#     together with stop_at_line='off' was a contradiction and was rejected.
 #   * U5 -- a LINE edge incident to a reset node is rejected (a reset node
 #     carries no line under the sensor, like a blind node). A LINE edge into a
 #     PROJECTION node stays legal (ADR-046).
+#
+# ADR-064 dissolves U2: STOP_AT_LINE is no longer authorable as a per-edge
+# ``mode`` tag AT ALL (folded onto the ``stop_at_line`` axis), so the
+# contradiction it used to fight is now inexpressible -- TC4 below pins the
+# unconditional rejection, and the two controls prove every other
+# mode/stop_at_line pairing stays legal (U2's fix is superseded, not a
+# regression).
 
 
-def test_tc1_stop_at_line_primitive_with_stop_off_rejected() -> None:
-    """TC1 (U2): primitive_mode=STOP_AT_LINE + stop_at_line='off' is rejected.
+def test_tc4_mode_stop_at_line_per_edge_rejected() -> None:
+    """TC4: mode=BlindMode.STOP_AT_LINE (per-edge) is rejected unconditionally.
 
     The toy field's ``B-G`` pair is its single BLIND_EDGES entry, so a same-type
-    BLIND override on it is a legitimate overlay -- the contradiction is the
-    motion bundle (STOP_AT_LINE, "seek the line") fighting the per-edge override
-    (stop_at_line='off', "force dead-reckon"). The validator must reject it with a
-    message that NAMES both halves of the contradiction (STOP_AT_LINE and
-    stop_at_line='off') so the author sees exactly which two keys conflict.
+    BLIND override on it is otherwise a legitimate overlay -- but ADR-064 folded
+    STOP_AT_LINE onto the ``stop_at_line`` axis, so it is rejected regardless of
+    what ``stop_at_line`` carries (unlike the old U2 contradiction, which fired
+    only when paired with ``stop_at_line='off'``). The message points at
+    ``stop_at_line: on`` and ADR-064.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -1013,25 +1206,23 @@ def test_tc1_stop_at_line_primitive_with_stop_off_rejected() -> None:
             "type": EDGE_BLIND,
             "u": "B",
             "v": "G",
-            "primitive_mode": BlindMode.STOP_AT_LINE,
-            "stop_at_line": "off",
+            "mode": BlindMode.STOP_AT_LINE,
+            "stop_at_line": "on",
         }
     ]
     with pytest.raises(FieldDataError) as excinfo:
         validate(fd)
     message = str(excinfo.value)
     assert "STOP_AT_LINE" in message
-    assert "stop_at_line='off'" in message
+    assert "stop_at_line" in message
 
 
-def test_tc1_stop_at_line_string_tag_with_stop_off_member_rejected() -> None:
-    """TC1 (U2, mirror): the string tag + StopAtLineMode.OFF member also contradicts.
+def test_tc4_stop_at_line_seek_authored_via_axis_only() -> None:
+    """TC4 (control): the seek is authored via stop_at_line alone, no mode tag.
 
-    The same contradiction authored in the JSON vocabulary -- a
-    ``primitive_mode`` string NAME ``"STOP_AT_LINE"`` plus a
-    ``StopAtLineMode.OFF`` member -- must reject identically. This pins that the
-    rule resolves BOTH the string and the enum-instance forms of each field, not
-    only the legacy enum-instance pairing.
+    The canonical ADR-064 lowering: a concrete non-seek ``mode`` (or no ``mode``
+    at all) together with ``stop_at_line='on'`` validates cleanly -- the seek
+    lives entirely on its own axis now.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -1039,41 +1230,19 @@ def test_tc1_stop_at_line_string_tag_with_stop_off_member_rejected() -> None:
             "type": EDGE_BLIND,
             "u": "B",
             "v": "G",
-            "primitive_mode": "STOP_AT_LINE",
-            "stop_at_line": StopAtLineMode.OFF,
-        }
-    ]
-    with pytest.raises(FieldDataError, match="STOP_AT_LINE"):
-        validate(fd)
-
-
-def test_tc1_stop_at_line_primitive_with_stop_on_accepted() -> None:
-    """TC1 (U2, negative): STOP_AT_LINE + stop_at_line='on' is NOT a contradiction.
-
-    Only the STOP_AT_LINE + OFF pairing is rejected. STOP_AT_LINE together with a
-    seek-affirming ON override agrees with the motion bundle, so it must validate
-    -- proving the rule is the one contradiction, not a blanket ban on pairing the
-    two keys.
-    """
-    fd = _clone_field_data()
-    fd.EDGES = [
-        {
-            "type": EDGE_BLIND,
-            "u": "B",
-            "v": "G",
-            "primitive_mode": BlindMode.STOP_AT_LINE,
             "stop_at_line": "on",
         }
     ]
     assert validate(fd) is None
 
 
-def test_tc1_non_seeking_blind_with_stop_off_accepted() -> None:
-    """TC1 (U2, negative): a non-seeking BlindMode + stop_at_line='off' is fine.
+def test_tc4_non_seeking_blind_with_stop_off_accepted() -> None:
+    """TC4 (control): a non-seeking BlindMode + stop_at_line='off' is fine.
 
     A ``SYNC_TSHAPE`` (dead-reckon) bundle authored with ``stop_at_line='off'``
-    is internally consistent (both say "do not seek"), so it must validate. This
-    is the second control proving the U2 gate fires ONLY on STOP_AT_LINE + OFF.
+    is internally consistent (both say "do not seek"), so it must validate --
+    every mode/stop_at_line pairing other than the retired STOP_AT_LINE tag
+    stays legal.
     """
     fd = _clone_field_data()
     fd.EDGES = [
@@ -1081,7 +1250,7 @@ def test_tc1_non_seeking_blind_with_stop_off_accepted() -> None:
             "type": EDGE_BLIND,
             "u": "B",
             "v": "G",
-            "primitive_mode": BlindMode.SYNC_TSHAPE,
+            "mode": BlindMode.SYNC_TSHAPE,
             "stop_at_line": "off",
         }
     ]
@@ -1136,14 +1305,14 @@ def test_tc3_line_edge_incident_to_projection_node_still_accepted() -> None:
 # -- TC4 (R8): pipeline DEFAULT error names the real field --------------------
 #
 # The pipeline DEFAULT-rejection message must name the actual PipelineConfig
-# singleton field (``line`` / ``blind`` / ``turn``), not ``enum_name.lower()``
-# (which yields the bogus ``"linemode"`` / ``"blindmode"`` / ``"turnmode"``).
+# singleton field (``speed`` / ``blind`` / ``turn``), not ``enum_name.lower()``
+# (which yields the bogus ``"speedtier"`` / ``"blindmode"`` / ``"turnmode"``).
 
 
 @pytest.mark.parametrize(
     "attr, field",
     [
-        ("PIPELINE_LINE_MODE", "line"),
+        ("PIPELINE_SPEED", "speed"),
         ("PIPELINE_BLIND_MODE", "blind"),
         ("PIPELINE_TURN_MODE", "turn"),
     ],
@@ -1151,9 +1320,9 @@ def test_tc3_line_edge_incident_to_projection_node_still_accepted() -> None:
 def test_tc4_pipeline_default_error_names_real_field(attr: str, field: str) -> None:
     """TC4 (R8): the DEFAULT rejection names PIPELINE_CONFIG.<field>, not <mode>.
 
-    Each line/blind/turn pipeline key, when authored as ``"DEFAULT"``, is
-    circular and rejected. The message must read ``PIPELINE_CONFIG.line`` (etc.),
-    the real singleton field name -- never ``PIPELINE_CONFIG.linemode``, which
+    Each speed/blind/turn pipeline key, when authored as ``"DEFAULT"``, is
+    circular and rejected. The message must read ``PIPELINE_CONFIG.speed`` (etc.),
+    the real singleton field name -- never ``PIPELINE_CONFIG.speedtier``, which
     ``enum_name.lower()`` would have produced and which names no field at all.
     """
     fd = _clone_field_data()
@@ -1589,7 +1758,7 @@ def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_defau
 ) -> None:
     """TC8: a no-override BLIND outgoing leg inherits PIPELINE_CONFIG.blind.
 
-    Review fix 1: a BLIND edge with no per-edge ``primitive_mode`` classifies on
+    Review fix 1: a BLIND edge with no per-edge ``mode`` classifies on
     the EFFECTIVE mode, which inherits ``PIPELINE_CONFIG.blind``. When that
     default is STOP_AT_LINE, the no-override BLIND outgoing leg is SENSOR-
     terminated, so the outgoing trim no-ops and a 90 deg pivot onto a SHORT
@@ -1608,7 +1777,7 @@ def test_pivot_turn_no_override_blind_classifies_sensor_under_stop_at_line_defau
             {"type": EDGE_BLIND, "u": "A", "v": "B",
              "distance_cm": 100.0, "heading_deg": 0.0},
             {"type": EDGE_BLIND, "u": "B", "v": "C",
-             "distance_cm": 2.0, "heading_deg": 90.0},  # no primitive_mode override
+             "distance_cm": 2.0, "heading_deg": 90.0},  # no mode override
         ],
         pivot_turns=[("A", "B", "C")],
     )
@@ -1643,7 +1812,7 @@ def test_pivot_turn_incoming_blind_seeks_under_stop_at_line_pipeline_default(
     fd = _pivot_field(
         edges=[
             {"type": EDGE_BLIND, "u": "A", "v": "B",
-             "distance_cm": 2.0, "heading_deg": 0.0},  # no primitive_mode override
+             "distance_cm": 2.0, "heading_deg": 0.0},  # no mode override
             {"type": EDGE_BLIND, "u": "B", "v": "C",
              "distance_cm": 100.0, "heading_deg": 90.0},
         ],

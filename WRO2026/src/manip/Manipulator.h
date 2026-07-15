@@ -78,12 +78,12 @@ class ManipulatorClass;
  *
  * The builder is **move-only** (deleted copy + move-assign; a move ctor is kept only so the
  * verb can return it by value on pre-C++17 compilers). `_executed` guards against a double
- * drain if the temporary is moved out of. `[[nodiscard]]` flags a discarded builder, which
- * almost always means a forgotten verb statement.
+ * drain if the temporary is moved out of. Call verbs as bare statements or chain `.async()`
+ * inline — binding the action to a named variable defers the drain to end of scope (ADR-065).
  *
  * @see ManipulatorClass for the verbs that produce these and the actuator-mask scheme.
  */
-class [[nodiscard]] ManipAction
+class ManipAction
 {
 public:
     ManipAction(const ManipAction&)            = delete;

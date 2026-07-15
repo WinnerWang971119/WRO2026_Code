@@ -280,19 +280,20 @@ def test_directed_edge_heading_respects_heading_override() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Issue #79 / ADR-047: graph_builder needs NO change -- it already (a) forwards
-# a string-tag ``primitive_mode`` verbatim onto both directions and (b) derives
-# geometry from node coords when an EDGES entry omits distance_cm / heading_deg.
-# These pin BOTH behaviors so the "graph_builder needs no change" claim is
-# guarded, not merely asserted in prose.
+# Issue #79 / ADR-047, re-keyed onto speed/mode by ADR-064: graph_builder needs
+# NO change for the split -- it already (a) forwards a string-tag ``speed`` /
+# ``mode`` verbatim onto both directions and (b) derives geometry from node
+# coords when an EDGES entry omits distance_cm / heading_deg. These pin BOTH
+# behaviors so the "graph_builder needs no change" claim is guarded, not
+# merely asserted in prose.
 # ---------------------------------------------------------------------------
 
 
-def test_edges_string_tag_primitive_mode_forwarded_verbatim() -> None:
-    """graph_builder forwards a JSON string-tag primitive_mode onto both edges.
+def test_edges_string_tag_speed_forwarded_verbatim() -> None:
+    """graph_builder forwards a JSON string-tag speed onto both edges.
 
     The validator owns the string<->enum cross-check; graph_builder just carries
-    the value through. A string tag (``"FAST"``, NOT a LineMode instance) must
+    the value through. A string tag (``"FAST"``, NOT a SpeedTier instance) must
     appear unchanged on both the forward and reverse directed edges, exactly like
     an enum instance would -- the header_writer then resolves it.
     """
@@ -303,14 +304,14 @@ def test_edges_string_tag_primitive_mode_forwarded_verbatim() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "FAST",  # string TAG, forwarded verbatim
+            "speed": "FAST",  # string TAG, forwarded verbatim
         }
     ]
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         g = build_graph(fd)
-    assert g.edges["A", "B"]["primitive_mode"] == "FAST"
-    assert g.edges["B", "A"]["primitive_mode"] == "FAST"
+    assert g.edges["A", "B"]["speed"] == "FAST"
+    assert g.edges["B", "A"]["speed"] == "FAST"
 
 
 def test_edges_override_only_entry_derives_geometry_from_coords() -> None:
@@ -328,7 +329,7 @@ def test_edges_override_only_entry_derives_geometry_from_coords() -> None:
             "type": EDGE_LINE,
             "u": "A",
             "v": "B",
-            "primitive_mode": "FAST",  # no distance_cm / heading_deg -> derived
+            "speed": "FAST",  # no distance_cm / heading_deg -> derived
         }
     ]
     with warnings.catch_warnings():
@@ -338,4 +339,4 @@ def test_edges_override_only_entry_derives_geometry_from_coords() -> None:
     assert g.edges["A", "B"]["heading_deg"] == pytest.approx(0.0, abs=1e-6)
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
     assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
-    assert g.edges["A", "B"]["primitive_mode"] == "FAST"
+    assert g.edges["A", "B"]["speed"] == "FAST"

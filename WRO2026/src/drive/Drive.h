@@ -325,10 +325,10 @@ public:
      *
      * @param cm Distance in centimetres (always non-negative — sign is carried by `power`).
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means
-     *       you forgot the chain.
+     * @note Use as a bare statement or chain setters inline. Never bind the builder to a
+     *       named variable — that defers execution to end of scope (ADR-065).
      */
-    [[nodiscard]] DriveDistBuilder driveDist(float cm);
+    DriveDistBuilder driveDist(float cm);
 
     /**
      * @brief Build a time-bounded straight-line move.
@@ -339,9 +339,8 @@ public:
      *
      * @param sec Duration in seconds.
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]`.
      */
-    [[nodiscard]] DriveTimeBuilder driveTime(float sec);
+    DriveTimeBuilder driveTime(float sec);
 
     /**
      * @brief Build a relative-yaw-delta turn.
@@ -353,9 +352,8 @@ public:
      * @param deg Relative yaw delta in degrees. Positive = whichever direction the lower MCU
      *            interprets as positive yaw (typically counter-clockwise).
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]`.
      */
-    [[nodiscard]] TurnDegBuilder turnDeg(int16_t deg);
+    TurnDegBuilder turnDeg(int16_t deg);
 
     /**
      * @brief Build an absolute-yaw turn.
@@ -366,9 +364,8 @@ public:
      * @param yaw Absolute yaw target in degrees (normalised through `_normalizeYaw` to
      *            `(-360, +360)` before being handed to `TurnGyro`).
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]`.
      */
-    [[nodiscard]] TurnToYawBuilder turnToYaw(int16_t yaw);
+    TurnToYawBuilder turnToYaw(int16_t yaw);
 
     /**
      * @brief Build a drive-until-line move that stops on an expected perpendicular crossing.
@@ -402,10 +399,10 @@ public:
      * @param expectedCm Nominal distance to the expected crossing line, in centimetres
      *                   (always non-negative — reverse direction is selected via `.setReverse`).
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means
-     *       you forgot the chain.
+     * @note Use as a bare statement or chain setters inline. Never bind the builder to a
+     *       named variable — that defers execution to end of scope (ADR-065).
      */
-    [[nodiscard]] StopAtLineBuilder stopAtLine(float expectedCm);
+    StopAtLineBuilder stopAtLine(float expectedCm);
 
     /**
      * @brief Build a push-until-wall move that re-zeros the chassis against a physical wall (AC8).
@@ -444,10 +441,10 @@ public:
      *           rejected if negative). Reverse direction is selected via `.setReverse()`, never a
      *           negative distance.
      * @return A fluent builder that auto-executes on destruction.
-     * @note `[[nodiscard]]` — discarding the builder without using it almost certainly means you
-     *       forgot the chain.
+     * @note Use as a bare statement or chain setters inline. Never bind the builder to a
+     *       named variable — that defers execution to end of scope (ADR-065).
      */
-    [[nodiscard]] WallStopBuilder wallStop(float cm);
+    WallStopBuilder wallStop(float cm);
 
     // -------------------------------------------------------------------------------------
     // State accessors
@@ -1496,7 +1493,8 @@ extern DriveClass Drive;
 // a builder is moved out of (we delete copy and move below to keep it simple, but the flag
 // also makes the destructor safe even if a future change re-enables move).
 //
-// `[[nodiscard]]` on the class itself means a stack-stored builder warns if unused.
+// Builders are meant to exist only as full-expression temporaries — never bind one to a
+// named variable, or execution defers to end of scope (ADR-065).
 // =========================================================================================
 
 /**
@@ -1511,7 +1509,7 @@ extern DriveClass Drive;
  * profile". Mission scripts read top-down like Python — each verb call blocks until done. The
  * auto-path planner opts out per call via `.async()` so it can poll `Drive.isIdle()` instead.
  */
-class [[nodiscard]] DriveDistBuilder
+class DriveDistBuilder
 {
 public:
     /**
@@ -1923,7 +1921,7 @@ private:
  * Setters mirror `DriveDistBuilder`; only the time vs. distance verb differs. Defaults:
  * `DriveMode::SYNC`, `tShape` on (see DECISIONS.md "Sync + T-shape as default move profile").
  */
-class [[nodiscard]] DriveTimeBuilder
+class DriveTimeBuilder
 {
 public:
     /**
@@ -2292,7 +2290,7 @@ private:
  * Defaults: power `Config::TURN_CRUISE_PWM`, mode `Config::TURN_MODE`, brake `Config::TURN_BRAKE`,
  * blocking `true`.
  */
-class [[nodiscard]] TurnDegBuilder
+class TurnDegBuilder
 {
 public:
     /**
@@ -2492,7 +2490,7 @@ private:
  * **Sync-blocking by default; chain `.async()` to opt out.** Auto-executes on destruction.
  * Defaults match `TurnDegBuilder`.
  */
-class [[nodiscard]] TurnToYawBuilder
+class TurnToYawBuilder
 {
 public:
     /**
@@ -2701,7 +2699,7 @@ private:
  * move default (see DECISIONS.md). Unlike `driveDist` there is NO `tShape` knob — the seek is a
  * continuous event-terminated move whose stop point is unknown until detection.
  */
-class [[nodiscard]] StopAtLineBuilder
+class StopAtLineBuilder
 {
 public:
     /**
@@ -3009,7 +3007,7 @@ private:
  * `timeout = Config::WALL_STOP_TIMEOUT_MS`. Unlike `driveDist` there is NO `tShape` knob — the push
  * is a continuous stall-terminated move whose stop point is unknown until the wheels stall.
  */
-class [[nodiscard]] WallStopBuilder
+class WallStopBuilder
 {
 public:
     /**
