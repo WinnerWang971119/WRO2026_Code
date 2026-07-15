@@ -182,6 +182,10 @@ private:
             const int c = Serial.read();
             if (c != '\r' && c != '\n' && c != ' ')
             {
+                Serial.print(F("[abort byte] dec="));
+                Serial.print(c);
+                Serial.print(F(" hex=0x"));
+                Serial.println(c, HEX);
                 requested = true;
             }
         }
