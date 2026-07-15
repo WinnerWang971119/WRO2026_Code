@@ -1066,15 +1066,23 @@ public:
 // ===========================================================================
 
 /**
- * @brief Result enum mirror of the vendor `MMLower::RESULT`.
+ * @brief Result enum mirrors of the vendor `MMLower::RESULT` / `MMLower::Drive_RESULT`.
  *
- * Only the two states `Localization.cpp` compares against are modelled: `OK`
- * (read succeeded, out-params written) and `ERROR` (any non-OK; the test scripts
- * a transient timeout with it). The underlying type matches the vendor's `uint8_t`.
+ * `RESULT` — the two states `Localization.cpp` / `EncoderSource.cpp` compare against: `OK`
+ * (read succeeded, out-params written) and `ERROR` (any non-OK; the test scripts a transient
+ * timeout with it). `Drive_RESULT` — the vendor's separate drive-command result type,
+ * modelled with the same two states so `EncoderSource::isPrevTaskDone()` can gate on it.
+ * The underlying type matches the vendor's `uint8_t`.
  */
 namespace MMLower
 {
     enum class RESULT : uint8_t
+    {
+        OK    = 0,
+        ERROR = 1
+    };
+
+    enum class Drive_RESULT : uint8_t
     {
         OK    = 0,
         ERROR = 1
@@ -1120,12 +1128,50 @@ public:
         return MMLower::RESULT::OK;
     }
 
-    /** @brief Restore defaults: yaw 0, result OK, call counter cleared. */
+    /**
+     * @brief Mirrors `mmL.GetEncoderDegrees(uint8_t,int32_t&)` — the RESULT-surfacing encoder
+     *        read `EncoderSource` uses in place of the RESULT-discarding `MiniR4DC::getDegrees`.
+     *
+     * DELEGATES the degrees to the corresponding `MiniR4.M<num>` backing so the 51-usage
+     * `M2/M3/M1.mockSetDegrees / mockAdvanceDegrees` test surface stays the single source of
+     * truth (real hardware reads the SAME encoder either way). Gated on `mockEncoderResult`:
+     * a fixture sets it to `ERROR` to script a timeout, and on a non-OK result the out-param
+     * is left UNTOUCHED, matching the vendor contract `EncoderSource::readDegrees` depends on.
+     * Defined out-of-class below (after `MiniR4` is declared) so the delegation resolves.
+     *
+     * @param num     M-bus channel `1..4`.
+     * @param enDeges Out-param set to `MiniR4.M<num>.getDegrees()` only on OK; untouched otherwise.
+     * @return `mockEncoderResult` (defaults to `OK`).
+     */
+    MMLower::RESULT GetEncoderDegrees(uint8_t num, int32_t& enDeges);
+
+    /**
+     * @brief Mirrors `mmL.Get_Drive_isTaskDone(uint8_t,bool*)` — the RESULT-surfacing task-done
+     *        read `EncoderSource::isPrevTaskDone` uses.
+     *
+     * DELEGATES the done-bit to `MiniR4.DriveDC.mockPrevTaskDone` (the existing test-settable
+     * flag) using the vendor convention `isEnd[0] == true` means "still running": a done task
+     * writes `isEnd[0] = false`. Gated on `mockTaskDoneResult`; on a non-OK result `isEnd` is
+     * left untouched. Defined out-of-class below (after `MiniR4` is declared).
+     *
+     * @param num   Drive instance id (`EncoderSource::DRIVE_INSTANCE_ID == 1`).
+     * @param isEnd Two-element buffer; `isEnd[0]` receives the running flag only on OK.
+     * @return `mockTaskDoneResult` (defaults to `OK`).
+     */
+    MMLower::Drive_RESULT Get_Drive_isTaskDone(uint8_t num, bool* isEnd);
+
+    /** @brief Restore defaults: yaw 0, encoder/task-done OK, all call counters cleared. */
     void mockReset()
     {
-        mockYawDeg           = 0.0;
-        mockResult           = MMLower::RESULT::OK;
-        getImuEulerCallCount = 0;
+        mockYawDeg                 = 0.0;
+        mockResult                 = MMLower::RESULT::OK;
+        getImuEulerCallCount       = 0;
+        mockEncoderResult          = MMLower::RESULT::OK;
+        getEncoderDegreesCallCount = 0;
+        lastEncoderNum             = 0;
+        mockTaskDoneResult         = MMLower::Drive_RESULT::OK;
+        getDriveTaskDoneCallCount  = 0;
+        lastTaskDoneNum            = 0;
     }
 
     // ---- Test setters / recorded state --------------------------------------
@@ -1138,6 +1184,24 @@ public:
 
     /// Number of `GetIMUEuler` calls since the last `mockReset()`.
     uint32_t getImuEulerCallCount = 0;
+
+    /// Result returned by `GetEncoderDegrees` (set to `ERROR` to script an encoder timeout).
+    MMLower::RESULT mockEncoderResult = MMLower::RESULT::OK;
+
+    /// Number of `GetEncoderDegrees` calls since the last `mockReset()`.
+    uint32_t getEncoderDegreesCallCount = 0;
+
+    /// Motor id passed to the most recent `GetEncoderDegrees` call.
+    uint8_t lastEncoderNum = 0;
+
+    /// Result returned by `Get_Drive_isTaskDone` (set to `ERROR` to script a task-done timeout).
+    MMLower::Drive_RESULT mockTaskDoneResult = MMLower::Drive_RESULT::OK;
+
+    /// Number of `Get_Drive_isTaskDone` calls since the last `mockReset()`.
+    uint32_t getDriveTaskDoneCallCount = 0;
+
+    /// Drive instance id passed to the most recent `Get_Drive_isTaskDone` call.
+    uint8_t lastTaskDoneNum = 0;
 };
 
 /// Single global instance. A C++17 `inline` variable so it has ONE definition across
@@ -1234,6 +1298,49 @@ public:
 /// `extern MatrixMiniR4 MiniR4;` so `#include <MatrixMiniR4.h>` resolves to this mock via
 /// the `-I hal_mocks/` include path).
 extern MatrixMiniR4 MiniR4;
+
+// ---------------------------------------------------------------------------------------
+// MockMMLower encoder / task-done reads — defined OUT-OF-CLASS here because they DELEGATE
+// to `MiniR4` (the `M<num>` encoder backing / `DriveDC` done flag), which is only declared
+// above this point. `inline` so they satisfy the ODR across every TU that includes this
+// header (mirroring the header's other inline definitions). See the in-class Doxygen.
+// ---------------------------------------------------------------------------------------
+
+inline MMLower::RESULT MockMMLower::GetEncoderDegrees(uint8_t num, int32_t& enDeges)
+{
+    getEncoderDegreesCallCount++;
+    lastEncoderNum = num;
+    if (mockEncoderResult != MMLower::RESULT::OK)
+    {
+        return mockEncoderResult;    // out-param untouched, matching the vendor timeout contract
+    }
+    switch (num)
+    {
+        case 1: enDeges = MiniR4.M1.getDegrees(); break;
+        case 2: enDeges = MiniR4.M2.getDegrees(); break;
+        case 3: enDeges = MiniR4.M3.getDegrees(); break;
+        case 4: enDeges = MiniR4.M4.getDegrees(); break;
+        default: return MMLower::RESULT::ERROR;    // unaddressable channel
+    }
+    return MMLower::RESULT::OK;
+}
+
+inline MMLower::Drive_RESULT MockMMLower::Get_Drive_isTaskDone(uint8_t num, bool* isEnd)
+{
+    getDriveTaskDoneCallCount++;
+    lastTaskDoneNum = num;
+    if (mockTaskDoneResult != MMLower::Drive_RESULT::OK)
+    {
+        return mockTaskDoneResult;    // isEnd untouched
+    }
+    // Vendor convention: isEnd[0] == true means "still running". Mirror the DriveDC done flag.
+    if (isEnd != nullptr)
+    {
+        isEnd[0] = !MiniR4.DriveDC.mockPrevTaskDone;
+        isEnd[1] = false;
+    }
+    return MMLower::Drive_RESULT::OK;
+}
 
 /**
  * @brief Reset every recorded field on the `MiniR4` mock (facade + all child mocks).

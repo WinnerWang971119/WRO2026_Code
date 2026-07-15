@@ -492,6 +492,7 @@ add_executable(test_path_tracker_passthrough_on
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -514,6 +515,7 @@ add_executable(test_path_tracker_passthrough_off
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -539,6 +541,7 @@ add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -562,6 +565,7 @@ add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -588,6 +592,7 @@ add_executable(test_path_tracker_stop_at_line
     ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -618,6 +623,7 @@ add_executable(test_path_tracker_projection
     ${TEST_DIR}/test_path_tracker_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -647,6 +653,7 @@ add_executable(test_path_tracker_pass_through_projection
     ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -686,6 +693,7 @@ add_executable(test_path_tracker_parity_dump
     ${TEST_DIR}/test_path_tracker_parity_dump.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -858,6 +866,7 @@ set_tests_properties(tasks_overflow_compile_fail PROPERTIES
 add_executable(test_manipulator
     ${TEST_DIR}/test_manipulator.cpp
     ${SKETCH_DIR}/src/manip/Manipulator.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_manipulator PRIVATE ${COMMON_INCLUDES})
@@ -1299,6 +1308,7 @@ add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1439,6 +1449,7 @@ add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1479,6 +1490,7 @@ add_executable(test_path_tracker_reset_arrival_strict
     ${TEST_DIR}/test_path_tracker_reset_arrival_strict.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1867,6 +1879,7 @@ add_executable(test_path_tracker_heading_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1886,6 +1899,7 @@ add_executable(test_path_tracker_heading_reset_junction_on
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1910,6 +1924,7 @@ add_executable(test_path_tracker_heading_reset_forced_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
@@ -1937,6 +1952,7 @@ add_executable(test_path_tracker_heading_reset_parity
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2078,6 +2094,7 @@ add_executable(test_path_tracker_blind_chain
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2097,6 +2114,7 @@ add_executable(test_path_tracker_blind_chain_disabled
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2117,6 +2135,7 @@ add_executable(test_path_tracker_blind_chain_hop_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2137,6 +2156,7 @@ add_executable(test_path_tracker_blind_chain_distance_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2170,6 +2190,7 @@ add_executable(test_path_tracker_speed_chain
     ${TEST_DIR}/test_path_tracker_speed_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_speed_chain.cpp
@@ -2203,6 +2224,7 @@ add_executable(test_path_tracker_settle
     ${TEST_DIR}/test_path_tracker_settle.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2291,6 +2313,7 @@ add_executable(test_line_follower_real_setspeed
     ${TEST_DIR}/line_follower_real_setspeed/test_line_follower_real_setspeed.cpp
     ${SKETCH_DIR}/src/drive/LineFollower.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2342,6 +2365,7 @@ set(DRIVE_DECEL_FLOOR_DIR ${TEST_DIR}/drive_decel_floor)
 add_executable(test_drive_decel_floor
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2354,6 +2378,7 @@ add_test(NAME drive_decel_floor COMMAND test_drive_decel_floor)
 add_executable(test_drive_decel_floor_identity
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor_identity.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2371,6 +2396,7 @@ set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
 add_executable(test_drive_hardening
     ${DRIVE_HARDENING_DIR}/test_drive_hardening.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2501,6 +2527,7 @@ add_executable(test_path_tracker_lost_line
     ${TEST_DIR}/test_path_tracker_lost_line.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2512,3 +2539,12 @@ target_compile_definitions(test_path_tracker_lost_line PRIVATE HOP_SETTLE_MS_DEF
 add_fixture_routes_force_include(test_path_tracker_lost_line)
 add_path_force_includes(test_path_tracker_lost_line)
 add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
+
+# --- EncoderSource lower-MCU encoder / task-done adapter test (T5 #141), real-linked ---
+add_executable(test_encoder_source
+    ${TEST_DIR}/test_encoder_source.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
+add_test(NAME encoder_source COMMAND test_encoder_source)
