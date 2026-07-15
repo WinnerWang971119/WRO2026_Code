@@ -34,7 +34,7 @@ namespace Config
      *       is a "get off the field" floor comfortably above the 10.2 V empty point.
      *       MUST be re-chosen if `BATT_CELLS` changes — a 2S pack can never reach it.
      */
-    constexpr float BATT_MIN_VOLTAGE_V = 11.9f;
+    constexpr float BATT_MIN_VOLTAGE_V = 11.0f;
 
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).

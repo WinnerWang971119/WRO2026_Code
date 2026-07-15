@@ -123,9 +123,9 @@ namespace Config
         static constexpr float    MOVESYNC_KP = 0.05f;
         static constexpr float    MOVESYNC_KI = 0.0f;
         static constexpr float    MOVESYNC_KD = 0.025f;
-        static constexpr float    MOVEGYRO_KP = 12.5f;
+        static constexpr float    MOVEGYRO_KP = 9.0f;
         static constexpr float    MOVEGYRO_KI = 0.0f;
-        static constexpr float    MOVEGYRO_KD = 2.0f;
+        static constexpr float    MOVEGYRO_KD = 1.0f;
         static constexpr float    TURNGYRO_KP = 22.75f;   // LE-F variant
         static constexpr float    TURNGYRO_KI = 0.02f;
         static constexpr float    TURNGYRO_KD = 1.54f;
