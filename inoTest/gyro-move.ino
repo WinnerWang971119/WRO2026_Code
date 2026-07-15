@@ -173,6 +173,21 @@ private:
         return d;
     }
 
+    /// @brief Discard Serial line-ending whitespace and report any real abort character.
+    bool abortRequested() const
+    {
+        bool requested = false;
+        while (Serial.available())
+        {
+            const int c = Serial.read();
+            if (c != '\r' && c != '\n' && c != ' ')
+            {
+                requested = true;
+            }
+        }
+        return requested;
+    }
+
     // ---- actuator helpers ----
 
     void applyProfile(const GyroProfile& pr)
@@ -215,7 +230,7 @@ private:
         bool           haveStart = readAppYaw(appStart);
         while (millis() - t0 < 10000)
         {
-            if (Serial.available()) { Serial.read(); break; }    // any key aborts
+            if (abortRequested()) { break; }    // any non-whitespace key aborts
             double raw = 0, app = 0;
             if (readRawYaw(raw) && readAppYaw(app))
             {
@@ -282,7 +297,7 @@ private:
 
         while (millis() - t0 < durMs)
         {
-            if (Serial.available()) { Serial.read(); Serial.println(F("[aborted]")); break; }
+            if (abortRequested()) { Serial.println(F("[aborted]")); break; }
 
             double app = 0;
             if (!readAppYaw(app))
