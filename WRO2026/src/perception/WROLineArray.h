@@ -320,6 +320,17 @@ public:
      *       non-fluent `LineFollower::setReverse(bool)` setter). Direct callers usually
      *       do NOT need to invoke this method — modify `LineFollower::setReverse(bool)`
      *       instead so the controller and the sensor stay in sync.
+     * @note **Stale-cache-on-flip (#149).** When `Config::LINE_ARRAY_TICK_CACHE_ENABLED`
+     *       is `true` and this call actually changes `_activeBoard`, `setReverseActive()`
+     *       immediately calls the internal cache refresh so `getError()` / `isOnline()` /
+     *       `getJunctionType()` reflect the NEW board for the REST of the current tick —
+     *       without this, a same-tick read right after the flip would still return the
+     *       OLD board's latched sample under the NEW board's identity. A call that does
+     *       not change the active board (redundant same-direction flip) skips the refresh
+     *       entirely, so no extra I2C transaction is issued outside the cooperative
+     *       tick's single `update()` chokepoint. When the toggle is `false` (legacy
+     *       path), every getter already refreshes inline on each call, so no extra
+     *       refresh is needed here.
      */
     void setReverseActive(bool reverse);
 

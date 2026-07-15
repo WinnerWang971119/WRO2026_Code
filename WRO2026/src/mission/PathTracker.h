@@ -16,7 +16,8 @@
  *    `.async()` to enqueue + return immediately.
  *  - A latched fault state (`Fault::NOT_ZEROED`, `UNREACHABLE`,
  *    `DRIVE_FAULT`, `BAD_NODE`, `DRAIN_TIMEOUT`, `REVERSE_UNAVAILABLE`,
- *    `OFF_NODE`, `WALL_NOT_SQUARE`) surfaced via `hasFault()` / `getFault()`.
+ *    `OFF_NODE`, `WALL_NOT_SQUARE`, `PIVOT_TRIM_UNDERFLOW`, `LINE_LOST`)
+ *    surfaced via `hasFault()` / `getFault()`.
  *    `clearFault()` re-arms the queue but does not restart motion.
  *    `faultMnemonic()` returns a short tag (`UNR`, `DRV`, ...) for the
  *    EventTrace / Mission output.
@@ -284,7 +285,8 @@ public:
         REVERSE_UNAVAILABLE  = 6,
         OFF_NODE             = 7, ///< Operator-offset cap exceeded; off-map gate (Config::OFF_MAP_GATE == FAULT) refused to plan return-to-node.
         WALL_NOT_SQUARE      = 8, ///< Wall-zero reset rejected: the strict wall-normal check (Config::WALL_NORMAL_STRICT_ENABLED) found the chassis too far off the wall normal to trust the re-square (AC11).
-        PIVOT_TRIM_UNDERFLOW = 9  ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
+        PIVOT_TRIM_UNDERFLOW = 9, ///< A STOP_AT_LINE seek into a pivot needs δ>offset (sharper than ~106°); a forward-only seek cannot land δ-short, so the dispatch faults instead of clamping off-target (ADR-044 D4; the validator catches every case but a pure call-site setStopAtLine(ON)).
+        LINE_LOST            = 10  ///< The LineFollower reported a continuous lost line for at least `Config::LINE_LOST_FAULT_MS` while `LINE_FOLLOW`-ing outside a deliberate dead-reckon window (issue #146). Bounded fault ESCALATION, not the deferred ADR-009 sweep/reacquire/resume recovery.
     };
 
     /**
@@ -946,6 +948,24 @@ private:
     /// the shared pre-turn has faced the chassis at the return heading. Meaningless outside a
     /// return; defaults to 0.
     float _returnDistCm = 0.0f;
+
+    /// @brief Whether a continuous lost-line window is currently being timed (issue #146).
+    ///
+    /// Set the first `LINE_FOLLOW` tick `LineFollower.isLineLost()` reports a loss OUTSIDE a
+    /// deliberate dead-reckon window (`_passThrough` / `_projPassThrough` clear); cleared the
+    /// instant the line reacquires, the FSM leaves `LINE_FOLLOW` (state-exit), or the goal is
+    /// aborted / faulted / re-begun. While set, `_lineLostSinceMs` holds the loss-start clock;
+    /// the escalation to `Fault::LINE_LOST` fires once the elapsed time reaches
+    /// `Config::LINE_LOST_FAULT_MS`. Meaningless outside a timed loss; defaults to `false`.
+    bool _lineLostTiming = false;
+
+    /// @brief `millis()` stamp of the first tick of the in-flight continuous loss (issue #146).
+    ///
+    /// Latched together with `_lineLostTiming` on the first sustained-loss tick and compared
+    /// rollover-safe against `Config::LINE_LOST_FAULT_MS` on each subsequent lost tick
+    /// (`(uint32_t)(millis() - _lineLostSinceMs) >= Config::LINE_LOST_FAULT_MS`). Only read while
+    /// `_lineLostTiming` is set, so the reset to 0 on begin/abort/fault/reacquire is defensive.
+    uint32_t _lineLostSinceMs = 0;
 
     /// @brief `millis()` deadline for the in-flight SETTLE dwell (ADR-061).
     ///

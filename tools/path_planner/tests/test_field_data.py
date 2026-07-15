@@ -632,6 +632,88 @@ def test_validator_accepts_same_type_blind_override() -> None:
     assert validate(fd) is None
 
 
+# -- Issue #151: swapped-pair EDGES heading-clobber guard ---------------------
+#
+# graph_builder._emit_directed_pair writes BOTH directed edges of a {u, v}
+# pair on every EDGES entry it processes -- an entry (u, v) writes u->v
+# verbatim and v->u as _reverse_heading of that same value. Authoring the
+# SWAPPED pair (v, u) as a second entry re-writes both directions again, so
+# an inconsistent swapped pair does not merge: whichever entry is processed
+# LAST silently clobbers the other's heading_deg with no warning. These
+# tests pin the validator's guard against that authoring trap. A/B is the
+# toy field's LINE_SEGMENTS pair -- A=(10,10), B=(200,10), so A->B is due
+# East (0 deg) and B->A is due West (180 deg).
+
+
+def test_validator_rejects_swapped_pair_explicit_heading_conflict() -> None:
+    """TC16: two swapped EDGES entries with conflicting EXPLICIT headings.
+
+    EDGES[0] authors A->B at 0 deg (correct); EDGES[1] authors the swapped
+    B->A at 170 deg instead of the reciprocal 180 deg. Whichever entry
+    graph_builder processes last would silently overwrite the other's
+    heading_deg on BOTH directions -- the validator must reject this up
+    front, naming both offending entries.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {"type": EDGE_LINE, "u": "A", "v": "B", "heading_deg": 0.0, "distance_cm": 190.0},
+        {"type": EDGE_LINE, "u": "B", "v": "A", "heading_deg": 170.0, "distance_cm": 190.0},
+    ]
+    with pytest.raises(FieldDataError, match=r"EDGES\[0\].*EDGES\[1\].*reciprocal"):
+        validate(fd)
+
+
+def test_validator_rejects_swapped_pair_explicit_vs_derived_heading_conflict() -> None:
+    """TC16: an explicit heading conflicts with the OTHER entry's derived heading.
+
+    EDGES[0] authors A->B at 45 deg (explicit, but wrong -- true geometry is
+    0 deg). EDGES[1] authors the swapped B->A with heading_deg OMITTED, so
+    it derives from the node coords (B->A is due West, 180 deg -- issue
+    #79). The reciprocal of that derived 180 deg is 0 deg, which conflicts
+    with EDGES[0]'s explicit 45 deg: the guard must still catch it even
+    though one side's heading was never typed out.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {"type": EDGE_LINE, "u": "A", "v": "B", "heading_deg": 45.0, "distance_cm": 190.0},
+        {"type": EDGE_LINE, "u": "B", "v": "A", "distance_cm": 190.0},
+    ]
+    with pytest.raises(FieldDataError, match=r"EDGES\[0\].*EDGES\[1\].*reciprocal"):
+        validate(fd)
+
+
+def test_validator_accepts_consistent_swapped_pair_heading() -> None:
+    """TC16 (positive): a consistent swapped pair -- 0 deg / 180 deg -- passes.
+
+    EDGES[0] authors A->B at 0 deg; EDGES[1] authors the swapped B->A at
+    exactly the reciprocal 180 deg. No clobber occurs (either processing
+    order writes the same values), so the guard must not fire.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {"type": EDGE_LINE, "u": "A", "v": "B", "heading_deg": 0.0, "distance_cm": 190.0},
+        {"type": EDGE_LINE, "u": "B", "v": "A", "heading_deg": 180.0, "distance_cm": 190.0},
+    ]
+    assert validate(fd) is None
+
+
+def test_validator_accepts_swapped_pair_heading_within_wrap_tolerance() -> None:
+    """TC16 (positive, wrap-aware): a pair reciprocal ACROSS the 0/360 seam passes.
+
+    EDGES[0] authors A->B at 0.0000001 deg; EDGES[1] authors the swapped
+    B->A at 179.9999999 deg, whose reciprocal (359.9999999 deg) differs
+    from EDGES[0]'s heading by only ~2e-7 deg once the difference is
+    wrapped across the 0/360 seam. A NON-wrap-aware ``abs(a - b)`` compare
+    would see a ~360 deg gap and false-positive; the guard must not.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {"type": EDGE_LINE, "u": "A", "v": "B", "heading_deg": 0.0000001, "distance_cm": 190.0},
+        {"type": EDGE_LINE, "u": "B", "v": "A", "heading_deg": 179.9999999, "distance_cm": 190.0},
+    ]
+    assert validate(fd) is None
+
+
 # -- Issue #79 / ADR-047, re-keyed by ADR-064: JSON string-tag speed/mode +
 #    optional geometry --------------------------------------------------------
 #

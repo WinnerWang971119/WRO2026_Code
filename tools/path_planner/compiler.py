@@ -29,7 +29,10 @@ Primitive vocabulary (forward hops):
 
 * ``("turn_relative", deg)`` -- in-place turn by ``deg`` degrees, CCW
   positive. Emitted between graph edges when the heading delta exceeds
-  the per-degree epsilon.
+  the turn-dispatch tolerance
+  :data:`tools.path_planner.sim.runtime.NAV_TURN_TOLERANCE_DEG` (0.5°) --
+  the same gate the firmware and the sim use, so a real field's tiny edge
+  residuals never surface as spurious micro-turns (#147).
 * ``("follow_line_to_intersection", None)`` -- line-follow until the
   next intersection event. Emitted for an :data:`EDGE_LINE` hop into a
   ``line`` node.
@@ -117,8 +120,6 @@ Primitive = Union[
     Tuple[str, str, float, Any],      # REAR EDGE_LINE -> projection / EDGE_BLIND: (act, target_node, dist, mode)
 ]
 
-_TURN_EPSILON_DEG = 1e-6
-
 
 def normalize_turn(delta_deg: float) -> float:
     """Normalize a heading delta to ``(-180, +180]`` degrees."""
@@ -143,10 +144,13 @@ def final_heading_after(
     the running heading, the edge's forward heading, the last-hop flag, and
     the module-level kill-switch / board-count constants). The body-target
     heading is ``edge_heading`` for FRONT hops and ``(edge_heading + 180) %
-    360`` for REAR hops, and the running heading advances only when the turn
-    delta exceeds the epsilon -- identical to ``compile_path`` -- so a REAR
-    final hop returns the ``+180`` chassis heading the robot is actually left
-    on rather than the raw forward edge heading.
+    360`` for REAR hops, and the running heading advances onto that body-target
+    UNCONDITIONALLY every hop (the one logical-heading rule of #147, identical to
+    ``compile_path`` and ``_emit_turn_to``) -- so a REAR final hop returns the
+    ``+180`` chassis heading the robot is actually left on rather than the raw
+    forward edge heading, and a chain of individually sub-tolerance hops can
+    never leave a residual that this function would report differently from the
+    heading ``compile_path`` drives.
 
     :param path: ordered list of node names; first element is the chassis's
         current node.
@@ -194,13 +198,16 @@ def final_heading_after(
         else:
             body_target = edge_heading % 360.0
 
-        # Advance the running heading only when ``compile_path`` would emit a
-        # turn (delta above the epsilon) -- below the threshold the chassis is
-        # left on the prior heading, so mirroring the guard keeps the returned
-        # pose byte-identical to the heading ``compile_path`` drives.
-        delta = normalize_turn(body_target - current_heading)
-        if abs(delta) > _TURN_EPSILON_DEG:
-            current_heading = body_target
+        # One logical-heading rule (#147): advance the running heading onto the
+        # hop's body-target UNCONDITIONALLY -- whether or not ``compile_path``
+        # would emit a turn for this hop. ``compile_path`` and ``_emit_turn_to``
+        # do the same, so the three surfaces track one logical heading and a
+        # chain of individually sub-tolerance hops can never accumulate a
+        # residual that would make this function disagree with the heading
+        # ``compile_path`` drives. (Turn EMISSION is gated on
+        # ``NAV_TURN_TOLERANCE_DEG`` in ``compile_path``; here there is no
+        # emission, so the heading simply follows the edge.)
+        current_heading = body_target
 
     return current_heading
 
@@ -233,7 +240,7 @@ def compile_path(
        * Compute the body-target heading: ``edge_heading`` for FRONT
          hops, ``(edge_heading + 180) % 360`` for REAR hops.
        * If ``abs(normalize_turn(body_target - current_heading))
-         > 1e-6``, emit ``(ACT_TURN_REL, delta)``.
+         > NAV_TURN_TOLERANCE_DEG`` (0.5°), emit ``(ACT_TURN_REL, delta)``.
        * Emit one motion primitive based on ``(edge['type'],
          destination_node_type)`` and direction. The destination node
          type is read **locally** from ``v`` (the end of this hop) via
@@ -256,11 +263,13 @@ def compile_path(
          ``(ACT_LINE_REVERSE, v, line_mode)``.
          REAR ``EDGE_BLIND`` -> ``(ACT_STOP_AT_LINE_REVERSE, ...)`` /
          ``(ACT_BLIND_REVERSE, v, distance_cm, blind_mode)``.
-       * Update ``current_heading = body_target`` ONLY when a turn was
-         actually emitted (delta exceeded the epsilon). Mirrors
-         :meth:`PathTrackerSim.go_to` -- leaving the running heading
-         untouched below the threshold avoids 1-ULP drift that would
-         break byte-identical parity on the next hop.
+       * Update ``current_heading = body_target`` UNCONDITIONALLY every hop
+         (the one logical-heading rule of #147) -- whether or not a turn was
+         emitted. Mirrors :meth:`PathTrackerSim.go_to` /
+         :meth:`PathTrackerSim._emit_turn_to`, which snaps the chassis heading
+         onto the target even on a skipped sub-tolerance turn, so a chain of
+         individually sub-tolerance hops can never accumulate into a spurious
+         compiler-only turn on a later hop.
 
     The emission shape MUST stay byte-identical to
     ``PathTrackerSim.go_to(...)`` so the offline simulator and the C++
@@ -302,6 +311,7 @@ def compile_path(
         ACT_STOP_AT_LINE_REVERSE,
         BIDIRECTIONAL_AUTO_ENABLED,
         LINE_BOARD_COUNT,
+        NAV_TURN_TOLERANCE_DEG,
         Direction,
         StopAtLine,
         _read_edge_dir_override,
@@ -366,15 +376,20 @@ def compile_path(
             body_target = edge_heading % 360.0
 
         delta = normalize_turn(body_target - current_heading)
-        if abs(delta) > _TURN_EPSILON_DEG:
+        if abs(delta) > NAV_TURN_TOLERANCE_DEG:
             out.append((ACT_TURN_REL, delta))
-            # Only update the running heading when a turn is actually
-            # emitted -- mirrors :meth:`PathTrackerSim.go_to` which leaves
-            # ``chassis.heading_deg`` untouched when the delta is below
-            # the epsilon. Skipping this guard would diverge by 1 ULP on
-            # the next hop and break the byte-identical parity check
-            # (TC18 / ``test_property_random_walks``).
-            current_heading = body_target
+        # One logical-heading rule (#147): advance the running heading onto
+        # ``body_target`` UNCONDITIONALLY -- whether or not a turn was emitted
+        # above. :meth:`PathTrackerSim._emit_turn_to` snaps the chassis heading
+        # onto the target even on a skipped sub-tolerance turn, and
+        # :func:`final_heading_after` advances identically, so the three
+        # surfaces track one logical heading. Leaving it on the prior heading
+        # below the tolerance would let a chain of individually sub-tolerance
+        # hops accumulate a >tolerance drift and surface a spurious
+        # compiler-only ``ACT_TURN_REL`` on a later hop (the #147 bug). Emission
+        # stays gated on ``NAV_TURN_TOLERANCE_DEG`` above; only the heading
+        # advance is unconditional.
+        current_heading = body_target
 
         if direction == Direction.REAR:
             if edge_type == EDGE_LINE:

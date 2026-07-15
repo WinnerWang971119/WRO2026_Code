@@ -538,10 +538,14 @@ Config::Color VisionClass::getColor(uint8_t cell) const
 
 uint8_t VisionClass::getRawHue(uint8_t cell) const
 {
-    // Same guard as getColor() — sentinel is 0 for the raw-hue axis (ADR-028).
+    // Same guard as getColor() — sentinel is the named Config::VISION_RAW_HUE_NONE (0xFF) for
+    // the raw-hue axis (ADR-028), never a bare literal. It can never collide with a genuinely
+    // latched hue: classifyHue() maps a raw 255 (device "no detection") to Color::UNKNOWN, so
+    // any candidate frame containing it fails _classifyCandidate's strict guard and is rejected
+    // before _rawHue is ever committed.
     if (cell >= Config::VISION_CELL_COUNT || !_hasRead)
     {
-        return 0;
+        return Config::VISION_RAW_HUE_NONE;
     }
     return _rawHue[cell];
 }

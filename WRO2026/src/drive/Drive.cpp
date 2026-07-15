@@ -17,6 +17,7 @@
 #include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
                                     // math (host-tested + golden-pinned; issue #130).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
+#include "../util/EncoderSource.h"    // Single owner of lower-MCU encoder + drive task-done I/O (ADR-066).
 
 #include "LineFollower.h"    // Race-guard: _dispatchNext() auto-disables LineFollower so
                               // its tick loop does not write setSpeed concurrently with a
@@ -116,8 +117,9 @@ void DriveClass::update()
     {
         // The lower MCU reports a single task-done bit, so move-done and turn-done collapse
         // into one signal here. Application code MUST NOT issue a bounded move and a turn
-        // concurrently — they would race for this flag.
-        if (MiniR4.DriveDC.isPrevTaskDone())
+        // concurrently — they would race for this flag. Route through EncoderSource (ADR-066):
+        // a comms timeout reads as "not done" instead of fabricating a phantom completion.
+        if (EncoderSource.isPrevTaskDone())
         {
             _moveDone = true;
             _turnDone = true;
@@ -348,9 +350,10 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). Best-effort
-    // fallback 0.0 preserves the prior dispatch-time behavior of acting on the vendor's 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). On a failed
+    // read, fall back to `_heldYaw` (the last known-good heading) rather than a fabricated 0.0
+    // (issue #153) — acting on a bogus 0.0 could aim the turn at a wildly wrong target.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(_heldYaw);
     const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
 
     // Capture the initial signed delta normalized into (-180, +180] so the BRAKE-edge
@@ -409,8 +412,10 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045); best-effort 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). On a failed
+    // read, fall back to `_heldYaw` (the last known-good heading), not a fabricated 0.0
+    // (issue #153) — see `_execTurnDeg` for the full rationale.
+    const int16_t cur    = (int16_t) YawSource.readYawDegOr(_heldYaw);
     const int16_t target = _normalizeYaw((int32_t) yaw);
 
     const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
@@ -491,31 +496,38 @@ void DriveClass::waitUntilIdle()
 
 int32_t DriveClass::getEncL() const
 {
-    // M2/M3 hardcoded to match Config::MOTOR_LEFT_ID/RIGHT_ID == 2/3. Editing those config
-    // constants requires changing the motor objects referenced here too.
-    return MiniR4.M2.getDegrees();
+    // Route the left encoder read through EncoderSource (ADR-066): last-good on a transient
+    // lower-MCU miss instead of a silent 0. Fallback 0 preserves the pre-ADR-066 cold-start
+    // behaviour (a never-yet-read encoder is treated as at zero).
+    return EncoderSource.readDegreesOr(Config::MOTOR_LEFT_ID, 0);
 }
 
 int32_t DriveClass::getEncR() const
 {
-    return MiniR4.M3.getDegrees();
+    return EncoderSource.readDegreesOr(Config::MOTOR_RIGHT_ID, 0);
 }
 
 void DriveClass::resetEnc()
 {
     MiniR4.DriveDC.resetCounter();
+    // The drive-base reset re-zeros BOTH drive-motor encoders, so invalidate both last-good
+    // slots (ADR-066): a post-reset read that fails must not serve a pre-reset value.
+    EncoderSource.resetCache(Config::MOTOR_LEFT_ID);
+    EncoderSource.resetCache(Config::MOTOR_RIGHT_ID);
 }
 
 double DriveClass::getYaw() const
 {
-    // Corrected app-frame yaw via the single owner (ADR-045); best-effort 0.0 on read failure.
-    return YawSource.readYawDegOr(0.0);
+    // Corrected app-frame yaw via the single owner (ADR-045). On read failure, fall back to
+    // `_heldYaw` (the last known-good heading), not a fabricated 0.0 (issue #153).
+    return YawSource.readYawDegOr(_heldYaw);
 }
 
 void DriveClass::holdYaw()
 {
-    // Latch the corrected app-frame yaw (ADR-045); best-effort 0.0 on read failure.
-    _heldYaw = (int16_t) YawSource.readYawDegOr(0.0);
+    // Latch the corrected app-frame yaw (ADR-045). On read failure, keep `_heldYaw` at its
+    // current value instead of collapsing it to a fabricated 0.0 (issue #153).
+    _heldYaw = (int16_t) YawSource.readYawDegOr(_heldYaw);
 }
 
 // -----------------------------------------------------------------------------------------
@@ -526,6 +538,8 @@ uint8_t DriveClass::calibrateMotorBias(int16_t power, uint32_t durationMs)
 {
     // Reset both encoders to zero so the post-spin readings ARE the per-wheel deltas.
     MiniR4.DriveDC.resetCounter();
+    EncoderSource.resetCache(Config::MOTOR_LEFT_ID);     // invalidate last-good after re-zero (ADR-066)
+    EncoderSource.resetCache(Config::MOTOR_RIGHT_ID);
 
     // Save the existing bias and force identity for the duration of the spin so the
     // measurement reflects raw motor behaviour, not pre-existing correction.
@@ -556,10 +570,20 @@ uint8_t DriveClass::calibrateMotorBias(int16_t power, uint32_t durationMs)
     stop(true);
 
     // Read final encoder degrees on each side (post-direction-correction by setReverse).
-    const int32_t  encL = MiniR4.M2.getDegrees();
-    const int32_t  encR = MiniR4.M3.getDegrees();
-    const uint32_t aL   = (uint32_t) abs(encL);
-    const uint32_t aR   = (uint32_t) abs(encR);
+    // Surfacing read (ADR-066): calibration MUST NOT compute a bias from a stale/0 baseline,
+    // so a hard read failure restores the saved bias and bails instead of dividing garbage.
+    int32_t encL = 0;
+    int32_t encR = 0;
+    if (!EncoderSource.readDegrees(Config::MOTOR_LEFT_ID, encL)
+        || !EncoderSource.readDegrees(Config::MOTOR_RIGHT_ID, encR))
+    {
+        _biasL = savedBiasL;
+        _biasR = savedBiasR;
+        Serial.println(F("[calibrateMotorBias] ERROR: encoder read failed — bias unchanged."));
+        return 0x03;
+    }
+    const uint32_t aL = (uint32_t) abs(encL);
+    const uint32_t aR = (uint32_t) abs(encR);
 
     // Sanity check: zero on either side means the motor never spun (stuck wheel, broken
     // encoder, or we tried to calibrate at too low a power). Don't divide by zero, don't
@@ -714,11 +738,13 @@ void DriveClass::_updateProfile()
     }
     else
     {
-        // Use the left motor (M2) as the canonical encoder, matching `getEncL()`. We compare
+        // Use the left motor as the canonical encoder, matching `getEncL()`. We compare
         // unsigned magnitudes everywhere so negative-direction (reverse) moves work without
         // any sign juggling: `_profileTotalEnc` is stored as a positive magnitude, and the
-        // encoder delta's absolute value is compared against it.
-        const int32_t  now      = MiniR4.M2.getDegrees();
+        // encoder delta's absolute value is compared against it. Continuous read via
+        // EncoderSource (ADR-066): on a transient miss fall back to `_profileStartEnc` so this
+        // tick reads zero travel (defer completion one tick) rather than a spurious 0-jump.
+        const int32_t  now      = EncoderSource.readDegreesOr(Config::MOTOR_LEFT_ID, _profileStartEnc);
         const int32_t  delta    = now - _profileStartEnc;
         const uint32_t traveled = (uint32_t) abs(delta);
         if (_profileTotalEnc == 0)
@@ -1036,7 +1062,19 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
         _profileTotalEnc = (int32_t) cmToEncDeg(totalCm);
         _profileAccelEnc = (int32_t) cmToEncDeg(ramps.accelCm < 0.0f ? 0.0f : ramps.accelCm);
         _profileDecelEnc = (int32_t) cmToEncDeg(ramps.decelCm < 0.0f ? 0.0f : ramps.decelCm);
-        _profileStartEnc = MiniR4.M2.getDegrees();
+
+        // Surfacing baseline read (ADR-066): every later `abs(now - _profileStartEnc)` delta is
+        // measured off this zero, so a stale/0 baseline would corrupt the whole move. Refuse to
+        // arm on a hard read failure — leave the profile IDLE and surface an error so the
+        // dispatcher faults DISPATCH_FAILED (the caller re-issues) instead of running blind.
+        int32_t startEnc = 0;
+        if (!EncoderSource.readDegrees(Config::MOTOR_LEFT_ID, startEnc))
+        {
+            Serial.println(F("[Drive] tShape: baseline encoder read failed — move not armed."));
+            _profileState = ProfileState::IDLE;
+            return 0x02;
+        }
+        _profileStartEnc = startEnc;
     }
 
     // Initial state — RAMP_UP, even if accelDist == 0; the first `_updateProfile` tick will
@@ -1184,7 +1222,7 @@ void DriveClass::_updateStopAtLine()
     }
 
     // DONE neither reads the encoder nor commands continuous motion — it only finalises. Handle it
-    // first so the per-tick STM32 encoder round-trip (`MiniR4.M2.getDegrees()`) and `encDegToCm`
+    // first so the per-tick STM32 encoder round-trip (`EncoderSource.readDegreesOr`) and `encDegToCm`
     // below are skipped entirely in that state.
     if (_stopState == StopAtLineState::DONE)
     {
@@ -1195,10 +1233,12 @@ void DriveClass::_updateStopAtLine()
         return;
     }
 
-    // Travel measured as an unsigned magnitude from the per-side baseline (M2, the canonical
-    // encoder), matching `_updateProfile`. Forward and reverse both accumulate positive `traveled`
-    // so the arm-window / max-distance comparisons need no sign juggling.
-    const int32_t nowEnc   = MiniR4.M2.getDegrees();
+    // Travel measured as an unsigned magnitude from the per-side baseline (the canonical left
+    // encoder), matching `_updateProfile`. Forward and reverse both accumulate positive
+    // `traveled` so the arm-window / max-distance comparisons need no sign juggling. Continuous
+    // read via EncoderSource (ADR-066): on a transient miss fall back to `_stopStartEnc` so this
+    // tick reads zero travel rather than a spurious 0-jump that could false-trip the max gate.
+    const int32_t nowEnc   = EncoderSource.readDegreesOr(Config::MOTOR_LEFT_ID, _stopStartEnc);
     const float   traveled = encDegToCm((int32_t) abs(nowEnc - _stopStartEnc));
 
     // No-progress watchdog (ADR-027): whenever `traveled` advances by at least
@@ -1396,6 +1436,21 @@ void DriveClass::_updateWallStop()
     // push primitive, so SQUARE issues no continuous motion of its own.
     if (_wallState == WallStopState::SQUARE)
     {
+        // #154-16: a fault can latch THIS tick, inside `_updateTurnProfile()` (which runs earlier
+        // in `update()`, per the stage-2 ordering above `_updateWallStop()`). That fault handler
+        // (e.g. the persistent-IMU-read-failure watchdog) hard-stops the motors AND collapses
+        // `_turnProfileState` back to IDLE as part of its own teardown — which is
+        // indistinguishable, to the `_turnProfileState != IDLE` check below, from "squaring
+        // finished successfully". Without this guard SQUARE would misread that as "squared" and
+        // wrongly hand off straight to PUSH on the very same tick the chassis was just faulted,
+        // re-arming continuous motion after a hard-stop. Check `hasFault()` FIRST and abort the
+        // wallStop cleanly instead — SQUARE must never advance to PUSH once a fault is latched.
+        if (hasFault())
+        {
+            _endWallStop(true);
+            return;
+        }
+
         if (_turnProfileState != TurnProfileState::IDLE)
         {
             return;    // still squaring — let `_updateTurnProfile` drive the in-place turn.
@@ -1405,7 +1460,18 @@ void DriveClass::_updateWallStop()
         // The inner stall watchdog REUSES `STOP_AT_LINE_STALL_TIMEOUT_MS` / `STOP_AT_LINE_PROGRESS_EPS_CM`
         // via `stopAtLineProgressed` / `stopAtLineStalled` — a stall here means SUCCESS (wall reached),
         // the inverse of the seek's `LINE_NOT_FOUND`.
-        _wallStartEnc       = MiniR4.M2.getDegrees();    // canonical encoder, matches `_updateProfile`
+        // Surfacing baseline read (ADR-066): the push's back-off / stall watchdogs measure
+        // `abs(now - _wallStartEnc)`, so a stale/0 baseline would corrupt every push tick. A
+        // hard read failure aborts the wallStop cleanly (like the fault guard above) rather than
+        // seeding the push watchdogs on garbage — the outer timeout can only start once seeded.
+        int32_t wallStartEnc = 0;
+        if (!EncoderSource.readDegrees(Config::MOTOR_LEFT_ID, wallStartEnc))
+        {
+            Serial.println(F("[Drive] wallStop: SQUARE baseline encoder read failed — aborting."));
+            _endWallStop(true);
+            return;
+        }
+        _wallStartEnc       = wallStartEnc;    // canonical encoder, matches `_updateProfile`
         _wallBackOffEnc     = _wallStartEnc;
         _wallLastProgressCm = 0.0f;
         _wallLastProgressMs = millis();
@@ -1415,10 +1481,12 @@ void DriveClass::_updateWallStop()
         return;            // begin pushing on the next tick.
     }
 
-    // Travel measured as an unsigned magnitude from the per-side baseline (M2, the canonical
-    // encoder), matching `_updateProfile` / `_updateStopAtLine`. Forward and reverse both accumulate
-    // positive `traveled`, so the back-off comparison needs no sign juggling.
-    const int32_t nowEnc   = MiniR4.M2.getDegrees();
+    // Travel measured as an unsigned magnitude from the per-side baseline (the canonical left
+    // encoder), matching `_updateProfile` / `_updateStopAtLine`. Forward and reverse both
+    // accumulate positive `traveled`, so the back-off comparison needs no sign juggling.
+    // Continuous read via EncoderSource (ADR-066): on a transient miss fall back to
+    // `_wallStartEnc` so this tick reads zero travel rather than a spurious 0-jump.
+    const int32_t nowEnc   = EncoderSource.readDegreesOr(Config::MOTOR_LEFT_ID, _wallStartEnc);
     const float   traveled = encDegToCm((int32_t) abs(nowEnc - _wallStartEnc));
 
     // Emit a continuous PWM at the given positive magnitude through the shared `_emitContinuous`,
@@ -1696,9 +1764,9 @@ void DriveClass::_dispatchNext()
             return;
         }
 
-        // Capture seek parameters. Per-side encoder baseline is M2 (the canonical encoder used by
-        // `_updateProfile`); `traveled` is measured as `abs(now - _stopStartEnc)` each tick so the
-        // forward/reverse direction needs no sign juggling here.
+        // Capture seek parameters. Per-side encoder baseline is the canonical left encoder (used
+        // by `_updateProfile`); `traveled` is measured as `abs(now - _stopStartEnc)` each tick so
+        // the forward/reverse direction needs no sign juggling here.
         _stopMode        = cmd.mode;
         _stopCruise      = cmd.power;
         _stopHeading     = cmd.heading;
@@ -1708,7 +1776,21 @@ void DriveClass::_dispatchNext()
         _stopOvershoot   = cmd.overshoot;
         _stopReverse     = cmd.reverse;
         _stopBrake       = cmd.brake;
-        _stopStartEnc    = MiniR4.M2.getDegrees();
+
+        // Surfacing baseline read (ADR-066): the no-progress / overshoot / max-distance gates all
+        // measure `abs(now - _stopStartEnc)`, so a stale/0 baseline would false-trip them. On a
+        // hard read failure refuse to arm the seek — set `rc` so the common path below faults
+        // DISPATCH_FAILED (stop + clear queue). Seeding NOW does a lower-MCU round trip, so the
+        // old "seeding cannot fail at dispatch" assumption no longer holds.
+        int32_t stopStartEnc = 0;
+        if (!EncoderSource.readDegrees(Config::MOTOR_LEFT_ID, stopStartEnc))
+        {
+            Serial.println(F("[Drive] stopAtLine: baseline encoder read failed — seek not armed."));
+            _isLineFound = false;
+            rc           = 0x02;
+            break;    // _stopState stays IDLE; the common rc!=0 path faults + clears the queue.
+        }
+        _stopStartEnc    = stopStartEnc;
         _stopDetectEnc   = _stopStartEnc;
         _stopDetectStreak = 0;
         _isLineFound     = false;    // cleared on dispatch; latched true only on a confirmed line.
@@ -1726,8 +1808,9 @@ void DriveClass::_dispatchNext()
         LineArray.setReverseActive(cmd.reverse);
 
         _stopState = StopAtLineState::SEEK;
-        _moveDone  = false;          // the seek owns _moveDone until DONE/fault. `rc` stays 0x00 —
-                                     // seeding cannot fail at dispatch (no lower-MCU round trip).
+        _moveDone  = false;          // the seek owns _moveDone until DONE/fault. `rc` is 0x00 here —
+                                     // the only dispatch-time failure is the baseline encoder read
+                                     // guarded above (which sets rc and breaks before this point).
         break;
     }
 
@@ -1816,6 +1899,21 @@ void DriveClass::_drainBlocking()
 
     while (!_isIdle() || _qCount > 0)
     {
+        // Fault early-out (issue #150): a fault latched BEFORE this verb's command was
+        // enqueued freezes `_dispatchNext` forever (its own fault gate refuses to pop the
+        // queue while `hasFault()`), so a sync verb issued while faulted would otherwise sit
+        // here spinning for the ENTIRE budget below before the timeout branch fires — and
+        // that branch unconditionally overwrites `_fault.kind` with `DRAIN_TIMEOUT`, losing
+        // whatever fault (e.g. `DISPATCH_FAILED`, `LINE_NOT_FOUND`, `IMU_READ_FAILED`) was
+        // actually latched. Bail out immediately instead: drop the just-enqueued command
+        // (it can never dispatch anyway) and return with the ORIGINAL `_fault.kind` intact,
+        // so higher-level recovery sees the true cause, not a fabricated timeout.
+        if (hasFault())
+        {
+            _clearQueue();
+            return;
+        }
+
         if ((int32_t) (millis() - deadline) >= 0)
         {
             Serial.println(F("[Drive] _drainBlocking: timeout — aborting queue"));

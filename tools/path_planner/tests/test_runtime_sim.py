@@ -43,6 +43,7 @@ from tools.path_planner.graph_builder import (
     EDGE_LINE,
     build_graph,
 )
+from tools.path_planner.header_writer import _resolve_reset_rows
 from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
@@ -3894,6 +3895,97 @@ def test_tc18b_non_reset_node_emits_no_interlude():
 
 
 # ===========================================================================
+# TC19 — wall-reset facing quantized identically to the firmware int16 (#154-17)
+#
+# Covers: an authored fractional RESET_NODES facing must resolve to the SAME
+# believed heading in the sim as the int16 `ResetNode.facing` the real
+# firmware squares to. header_writer._resolve_reset_rows (header_writer.py:884)
+# rounds to the nearest integer degree, then reduces mod 360 so a value
+# rounding UP to 360 (e.g. 359.7) wraps to 0. PathTrackerSim._dispatch_wall_reset
+# mirrors that exact rule when it resolves `facing` off the RESET_NODES spec.
+# Cross-checks against the REAL emitter function (not a re-derived formula) so
+# a future rounding-rule change on either side that drifts out of lockstep
+# breaks this test.
+#
+# Code under test: tools/path_planner/sim/runtime.py --
+# PathTrackerSim._dispatch_wall_reset facing quantization; cross-checked
+# against tools/path_planner/header_writer.py -- _resolve_reset_rows.
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "authored_facing, expected_int",
+    [
+        pytest.param(45.5, 46, id="rounding_tie"),
+        pytest.param(359.7, 0, id="wrap_to_zero"),
+    ],
+)
+def test_tc19_wall_reset_facing_quantized_like_firmware_int16(authored_facing, expected_int):
+    """A fractional authored facing resolves to the SAME int the firmware emits.
+
+    Calls the actual ``_resolve_reset_rows`` emitter function as ground truth
+    (rather than re-implementing its rounding rule inline), then runs the
+    reset interlude and asserts the sim's believed heading matches that emitted
+    int16 exactly -- covering a rounding tie (``45.5 -> 46``) and a wrap
+    (``359.7 -> 0``).
+    """
+    fd, g, next_hop = _reset_chain_field(reset_facing=authored_facing)
+    sim, chassis = _make_reset_sim(fd, g, next_hop)
+
+    rows = _resolve_reset_rows(fd.RESET_NODES, {"R": 0})
+    assert rows == [(0, 0, 10.0, expected_int)]
+
+    sim.go_to("R")
+
+    assert chassis.heading_deg == pytest.approx(float(expected_int), abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "authored_facing, expected_int",
+    [
+        pytest.param(45.5, 46, id="rounding_tie"),
+        pytest.param(359.7, 0, id="wrap_to_zero"),
+    ],
+)
+def test_tc19b_apply_wall_matches_dispatch_wall_reset_for_fractional_facing(
+    authored_facing, expected_int
+):
+    """``_apply_wall`` (parity replay) quantizes a fractional facing IDENTICALLY
+    to ``_dispatch_wall_reset`` (the forward sim), per #154-17.
+
+    T10 quantized ``_dispatch_wall_reset``'s facing to the firmware's emitted
+    ``ResetNode.facing`` int16 rule; this closes the matching gap on the
+    parity-replay side (``sim/parity.py::_apply_wall``), which read the SAME
+    ``RESET_NODES`` spec but was still normalizing the raw float. Builds the
+    SAME ``_reset_chain_field`` fixture TC19 uses, runs the forward sim's
+    interlude via ``go_to`` to get the ground-truth chassis pose, then hand-
+    builds the wall-reset ``TraceRecord`` trio ``normalize_sim_stream`` would
+    emit for that same interlude (node ``"R"``, ``axis_idx=0``,
+    ``wall_coord=10.0`` / node ``x=30.0`` per the fixture's defaults) and
+    replays it through ``integrate_pose``, which dispatches to ``_apply_wall``.
+    Both paths must land on the identical pose.
+    """
+    fd, g, next_hop = _reset_chain_field(reset_facing=authored_facing)
+    sim, chassis = _make_reset_sim(fd, g, next_hop)
+
+    sim.go_to("R")
+    assert chassis.heading_deg == pytest.approx(float(expected_int), abs=1e-9)
+
+    records = [
+        TraceRecord("wall_stop", {"node": "R", "axis_idx": 0, "wall_coord": 10.0}),
+        TraceRecord("wall_reanchor", {"node": "R", "axis_idx": 0, "wall_coord": 10.0}),
+        TraceRecord("wall_depart", {"node": "R", "axis_idx": 0, "node_coord": 30.0}),
+    ]
+    poses = integrate_pose(
+        records, fd, node_sequence=[], start_node="R", start_heading_deg=0.0
+    )
+
+    assert poses[-1].heading == pytest.approx(chassis.heading_deg, abs=1e-9)
+    assert poses[-1].x == pytest.approx(chassis.x_cm, abs=1e-9)
+    assert poses[-1].y == pytest.approx(chassis.y_cm, abs=1e-9)
+
+
+# ===========================================================================
 # TC18c — decay-weighted routing parity (PR3, AC17 pillar 3)
 #
 # Covers: the sim walks the SAME decay-weighted NEXT_HOP the firmware does.
@@ -4611,15 +4703,19 @@ def test_tc5_stop_at_line_fold_resolution_equivalence(trigger):
 
 
 # ===========================================================================
-# W2 -- sim tier-branch coverage (ADR-064, the sim legs of TC10 + TC14)
+# W2 -- sim tier-branch coverage (ADR-064, the sim legs of TC10 + TC14; issue
+# #159's TC18 fix folded into (b))
 #
 # Drives PathTrackerSim over synthetic collinear BLIND fields to pin three
 # per-edge-speed behaviours in the offline mirror so it cannot silently drift
 # from the firmware:
 #   (a) a chain breaks at a resolved-tier boundary, but SAME-tier hops still
 #       chain across a SYNC<->GYRO mode boundary (TC10 / AC7);
-#   (b) a FAST-line -> collinear SLOW-blind pass-through clamps the blind entry
-#       seed to <= the SLOW cruise (TC14 / AC12);
+#   (b) a LINE pass-through's blind entry seed derives from the INBOUND LINE
+#       hop's resolved SpeedTier, clamped to THIS hop's own cruise (TC14 /
+#       AC12 direction; TC18 / issue #159 exact magnitude -- the sim used to
+#       model every captured cruise as the hardcoded SPEED_NORMAL regardless
+#       of the true inbound tier);
 #   (c) a BLIND edge cruises at its resolved per-tier PWM (SLOW=60 / FAST=90)
 #       via resolve_speed -> _speed_tier_to_pwm (TC1 / AC1).
 # ===========================================================================
@@ -4750,23 +4846,44 @@ def test_w2a_same_tier_chains_across_mode_boundary():
     assert sim.localization.current_node() == "C"
 
 
-def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
-    """W2(b): a FAST-line -> collinear SLOW-blind pass-through clamps entry <= 60.
+@pytest.mark.parametrize(
+    "inbound_tier, outbound_tier, expected_seed",
+    [
+        (SpeedTier.FAST, SpeedTier.FAST, 90),
+        (SpeedTier.FAST, SpeedTier.SLOW, 60),
+        (SpeedTier.SLOW, SpeedTier.FAST, 60),
+    ],
+    ids=[
+        "FAST_into_FAST_seed_90",
+        "FAST_into_SLOW_clamped_60",
+        "SLOW_into_FAST_seed_60",
+    ],
+)
+def test_w2b_tc18_passthrough_entry_seed_derives_from_inbound_tier(
+    inbound_tier, outbound_tier, expected_seed
+):
+    """W2(b) / TC18 (issue #159): the pass-through blind entry seed derives from
+    the INBOUND LINE hop's resolved tier, clamped to THIS hop's own cruise.
 
-    ``A ->LINE(FAST) B ->BLIND(SLOW) C`` collinear: the LINE pass-through at the
-    junction B keeps the follower live, so the B->C blind hop is
-    PASS-THROUGH-SEEDED. Its entry seed is clamped to the hop's own resolved
-    cruise, so a fast inbound speed cannot enter the SLOW blind hop above the SLOW
-    cruise (60).
+    ``A ->LINE(inbound_tier) B ->BLIND(outbound_tier) C`` collinear: the LINE
+    pass-through at junction B keeps the follower live, so the B->C blind hop is
+    PASS-THROUGH-SEEDED. Before the fix the sim modeled every captured cruise as
+    the hardcoded ``SPEED_NORMAL`` (70) regardless of the true inbound tier; now
+    the seed is ``min(_speed_tier_to_pwm(inbound_tier), _speed_tier_to_pwm(
+    outbound_tier))`` -- the tier the follower actually left off at, clamped down
+    so it never exceeds this hop's own cruise:
 
-    Documented sim limitation (pre-existing, not ADR-064): the captured cruise is
-    modeled as ``SPEED_NORMAL`` (70), not the true FAST preset -- so this pins the
-    CLAMP DIRECTION (entry <= SLOW cruise), not the exact captured magnitude. The
-    clamp pulls the modeled 70 down to the SLOW cruise (60).
+    * FAST -> FAST: no clamp binds, seed = 90 (the un-clamped ``SPEED_NORMAL``-era
+      model would have produced 70 here -- non-vacuous).
+    * FAST -> SLOW: the clamp binds, seed = 60 (the SLOW cruise), not the inbound
+      90 (AC12's clamp direction, now with the true magnitude).
+    * SLOW -> FAST: the inbound tier (60) is already below this hop's FAST
+      cruise (90), so the clamp does not need to bind; seed = 60, not the
+      un-clamped ``SPEED_NORMAL``-era 70.
 
-    Non-vacuous: without the clamp the seed would be the un-clamped ``SPEED_NORMAL``
-    (70), which is both ``> 60`` and ``>= SPEED_NORMAL`` -- both assertions below
-    reject that.
+    Non-vacuous: asserting the exact ``expected_seed`` (not just a `<=` bound)
+    rejects both the pre-fix hardcoded-NORMAL model and a clamp that binds in the
+    wrong direction.
     """
     nodes = {"A": (0.0, 0.0), "B": (50.0, 0.0), "C": (100.0, 0.0)}
     fd = _minimal_field(nodes=nodes, start_node="A", start_heading_deg=0.0)
@@ -4775,18 +4892,14 @@ def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
     g.add_node("A", type="line")
     g.add_node("B", type="line")
     g.add_node("C", type="blind")
-    # A->B LINE, FAST. (The sim models the captured pass-through cruise as
-    # SPEED_NORMAL regardless of the LINE tier, so FAST here is the authored
-    # scenario, not the seed magnitude -- see the docstring.)
     g.add_edge("A", "B", type=EDGE_LINE, distance_cm=50.0, heading_deg=0.0,
-               speed=SpeedTier.FAST)
+               speed=inbound_tier)
     g.add_edge("B", "A", type=EDGE_LINE, distance_cm=50.0, heading_deg=180.0,
-               speed=SpeedTier.FAST)
-    # B->C BLIND, SLOW -> cruise 60.
+               speed=inbound_tier)
     g.add_edge("B", "C", type=EDGE_BLIND, distance_cm=50.0, heading_deg=0.0,
-               speed=SpeedTier.SLOW)
+               speed=outbound_tier)
     g.add_edge("C", "B", type=EDGE_BLIND, distance_cm=50.0, heading_deg=180.0,
-               speed=SpeedTier.SLOW)
+               speed=outbound_tier)
 
     next_hop = _linear_next_hop(["A", "B", "C"])
     chassis = VirtualChassis.from_field_data(fd)
@@ -4801,12 +4914,7 @@ def test_w2b_passthrough_entry_seed_clamped_to_slow_cruise():
     assert len(seeded) == 1, prims
     start_pwm = seeded[0][2]
 
-    slow_cruise = _runtime._speed_tier_to_pwm(SpeedTier.SLOW)   # 60
-    # The clamp caps the entry seed at the SLOW cruise ...
-    assert start_pwm <= slow_cruise
-    # ... and demonstrably engaged: it pulled the seed below the un-clamped
-    # SPEED_NORMAL the sim models the captured cruise as.
-    assert start_pwm < _runtime.SPEED_NORMAL
+    assert start_pwm == expected_seed
     assert sim.localization.current_node() == "C"
 
 

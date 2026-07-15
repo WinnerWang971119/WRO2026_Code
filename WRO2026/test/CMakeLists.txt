@@ -492,6 +492,7 @@ add_executable(test_path_tracker_passthrough_on
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -514,6 +515,7 @@ add_executable(test_path_tracker_passthrough_off
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -539,6 +541,7 @@ add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -562,6 +565,7 @@ add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -588,6 +592,7 @@ add_executable(test_path_tracker_stop_at_line
     ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -618,6 +623,7 @@ add_executable(test_path_tracker_projection
     ${TEST_DIR}/test_path_tracker_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -647,6 +653,7 @@ add_executable(test_path_tracker_pass_through_projection
     ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -686,6 +693,7 @@ add_executable(test_path_tracker_parity_dump
     ${TEST_DIR}/test_path_tracker_parity_dump.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -858,6 +866,7 @@ set_tests_properties(tasks_overflow_compile_fail PROPERTIES
 add_executable(test_manipulator
     ${TEST_DIR}/test_manipulator.cpp
     ${SKETCH_DIR}/src/manip/Manipulator.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_manipulator PRIVATE ${COMMON_INCLUDES})
@@ -1299,6 +1308,7 @@ add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1439,6 +1449,7 @@ add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1479,6 +1490,7 @@ add_executable(test_path_tracker_reset_arrival_strict
     ${TEST_DIR}/test_path_tracker_reset_arrival_strict.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1867,6 +1879,7 @@ add_executable(test_path_tracker_heading_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1886,6 +1899,7 @@ add_executable(test_path_tracker_heading_reset_junction_on
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1910,6 +1924,7 @@ add_executable(test_path_tracker_heading_reset_forced_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
@@ -1937,6 +1952,7 @@ add_executable(test_path_tracker_heading_reset_parity
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2078,6 +2094,7 @@ add_executable(test_path_tracker_blind_chain
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2097,6 +2114,7 @@ add_executable(test_path_tracker_blind_chain_disabled
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2117,6 +2135,7 @@ add_executable(test_path_tracker_blind_chain_hop_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2137,6 +2156,7 @@ add_executable(test_path_tracker_blind_chain_distance_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2170,6 +2190,7 @@ add_executable(test_path_tracker_speed_chain
     ${TEST_DIR}/test_path_tracker_speed_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_speed_chain.cpp
@@ -2203,6 +2224,7 @@ add_executable(test_path_tracker_settle
     ${TEST_DIR}/test_path_tracker_settle.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2291,6 +2313,7 @@ add_executable(test_line_follower_real_setspeed
     ${TEST_DIR}/line_follower_real_setspeed/test_line_follower_real_setspeed.cpp
     ${SKETCH_DIR}/src/drive/LineFollower.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2342,6 +2365,7 @@ set(DRIVE_DECEL_FLOOR_DIR ${TEST_DIR}/drive_decel_floor)
 add_executable(test_drive_decel_floor
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2354,6 +2378,7 @@ add_test(NAME drive_decel_floor COMMAND test_drive_decel_floor)
 add_executable(test_drive_decel_floor_identity
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor_identity.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2365,3 +2390,161 @@ add_path_force_includes(test_drive_decel_floor_identity)
 target_compile_definitions(test_drive_decel_floor_identity
     PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
+
+# ===== Drive-lane hardening test (T2 #150; T3/T4 append TC8/TC9 to this same target) =====
+set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
+add_executable(test_drive_hardening
+    ${DRIVE_HARDENING_DIR}/test_drive_hardening.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_hardening PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_hardening)
+add_test(NAME drive_hardening COMMAND test_drive_hardening)
+
+# =========================================================================================
+# Compile-fail probes — ConfigChecks.h junction-knob range + turn-ladder invariant asserts
+# (issue #152 config hardening). TC10a-TC10f each compile the SAME minimal TU
+# (test_config_junction_turn_ladder_fail.cpp) with one -D..._DEFAULT override that trips
+# exactly one static_assert. Builds are EXPECTED to fail; ctest decides pass/fail via
+# PASS_REGULAR_EXPRESSION on a metacharacter-free substring of the intended diagnostic and
+# IGNORES the exit code — so each test passes ONLY when its own assert fires. NEVER WILL_FAIL
+# (gotcha_ctest_compile_fail_assertion). No add_mock_force_includes so a mock typo cannot mask
+# the diagnostic; COMMON_INCLUDES gives the quoted "Config.h" chain + its <Arduino.h> mock.
+# Overrides go through target_compile_definitions, never an in-file #define
+# (gotcha-cross-tu-config-override-compile-def).
+# =========================================================================================
+
+# TC10a — LINE_JUNCTION_LEFT_HI past the 8-channel last valid index (7).
+add_executable(test_config_turn_ladder_fail_tc10a
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10a PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10a PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10a PRIVATE LINE_JUNCTION_LEFT_HI_DEFAULT=8)
+add_test(NAME config_junction_left_hi_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10a --config $<CONFIG>
+)
+set_tests_properties(config_junction_left_hi_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_LEFT_HI must be <= 7")
+
+# TC10b — LINE_JUNCTION_RIGHT_LO below the [1, 7] floor.
+add_executable(test_config_turn_ladder_fail_tc10b
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10b PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10b PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10b PRIVATE LINE_JUNCTION_RIGHT_LO_DEFAULT=0)
+add_test(NAME config_junction_right_lo_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10b --config $<CONFIG>
+)
+set_tests_properties(config_junction_right_lo_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_RIGHT_LO must be between 1 and 7 inclusive")
+
+# TC10c — LINE_JUNCTION_T_MIN_ON past the 8-channel channel-lit ceiling.
+add_executable(test_config_turn_ladder_fail_tc10c
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10c PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10c PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10c PRIVATE LINE_JUNCTION_T_MIN_ON_DEFAULT=9)
+add_test(NAME config_junction_t_min_on_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10c --config $<CONFIG>
+)
+set_tests_properties(config_junction_t_min_on_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_T_MIN_ON must be between 1 and 8 inclusive")
+
+# TC10d — TURN_CRUISE_PWM (100) > PWM_MAX (95): only the turn-ladder ordering assert fires.
+add_executable(test_config_turn_ladder_fail_tc10d
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10d PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10d PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10d PRIVATE TURN_CRUISE_PWM_DEFAULT=100)
+add_test(NAME config_turn_ladder_ordering_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10d --config $<CONFIG>
+)
+set_tests_properties(config_turn_ladder_ordering_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "TURN_SLOW_SPEED_PWM/TURN_CRUISE_PWM/PWM_MAX turn-ladder ordering violated")
+
+# TC10e — TURN_CRUISE_PWM (10) < PWM_MIN_MAGNITUDE (35), slow paired down to 5 so ordering
+#         still holds: only the cruise-floor assert fires.
+add_executable(test_config_turn_ladder_fail_tc10e
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10e PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10e PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10e PRIVATE
+    TURN_CRUISE_PWM_DEFAULT=10 TURN_SLOW_SPEED_PWM_DEFAULT=5)
+add_test(NAME config_turn_cruise_floor_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10e --config $<CONFIG>
+)
+set_tests_properties(config_turn_cruise_floor_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "TURN_CRUISE_PWM must be >= PWM_MIN_MAGNITUDE")
+
+# TC10f — TURN_TOLERANCE_DEG (35.0) >= TURN_SLOW_ZONE_DEG (30.0): slow zone not strictly wider.
+add_executable(test_config_turn_ladder_fail_tc10f
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10f PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10f PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10f PRIVATE TURN_TOLERANCE_DEG_DEFAULT=35.0f)
+add_test(NAME config_turn_tolerance_zone_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10f --config $<CONFIG>
+)
+set_tests_properties(config_turn_tolerance_zone_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "TURN_TOLERANCE_DEG must be < TURN_SLOW_ZONE_DEG")
+
+# --- PathTracker lost-line fault escalation test (T7 #146), real-linked ---
+add_executable(test_path_tracker_lost_line
+    ${TEST_DIR}/test_path_tracker_lost_line.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_lost_line PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+target_compile_definitions(test_path_tracker_lost_line PRIVATE HOP_SETTLE_MS_DEFAULT=0)
+add_fixture_routes_force_include(test_path_tracker_lost_line)
+add_path_force_includes(test_path_tracker_lost_line)
+add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
+
+# --- EncoderSource lower-MCU encoder / task-done adapter test (T5 #141), real-linked ---
+add_executable(test_encoder_source
+    ${TEST_DIR}/test_encoder_source.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
+add_test(NAME encoder_source COMMAND test_encoder_source)

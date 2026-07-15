@@ -659,9 +659,10 @@ static void tc16_declare_position_success()
     ASSERT_EQ(Localization.declareCount, 1);
     ASSERT_TRUE(eventPresent("DECL Inter1"));
     ASSERT_TRUE(serialHas("declarePosition Inter1"));
-    // Drive.clearFault() is unconditionally reached on the success path: with no
-    // fault latched it is a no-op, so hasFault() stays false (the reachability of
-    // the call is what TC18 confirms via a latched-fault clear).
+    // ADR-067: declarePosition clears Drive's fault via the PathTracker.clearFault()
+    // cascade (the mock mirrors it), reached unconditionally on the success path. With
+    // no fault latched it is a no-op, so hasFault() stays false (the reachability of the
+    // cascade is what TC18 confirms via a latched-fault clear).
     ASSERT_FALSE(Drive.hasFault());
 }
 
@@ -723,7 +724,7 @@ static void tc18_declare_position_clears_faults()
     ASSERT_EQ(Localization.lastDeclaredNode, inter1);
     ASSERT_EQ(PathTracker.clearFaultCallCount, (uint16_t) 1);
     ASSERT_FALSE(PathTracker.hasFault());
-    ASSERT_FALSE(Drive.hasFault());    // Drive.clearFault() reached on the success path
+    ASSERT_FALSE(Drive.hasFault());    // ADR-067: cleared via the PathTracker.clearFault() cascade
     ASSERT_TRUE(eventPresent("DECL Inter1"));
 }
 

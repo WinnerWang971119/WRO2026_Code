@@ -473,9 +473,16 @@ namespace Config
      *      until the heading error falls within ±TURN_SLOW_ZONE_DEG of the target,
      *      after which the turn ramps down to `TURN_SLOW_SPEED_PWM` (not overridable).
      *
+     * @note **Compile-time override:** guarded by `#ifndef TURN_CRUISE_PWM_DEFAULT` so a
+     *       host test can pin it target-wide via `-DTURN_CRUISE_PWM_DEFAULT=...` without
+     *       editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT` (`ConfigNav.h`).
+     *       Guarded by the turn-ladder invariant in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real chassis.
      */
-    constexpr int16_t TURN_CRUISE_PWM = 50;
+#ifndef TURN_CRUISE_PWM_DEFAULT
+#define TURN_CRUISE_PWM_DEFAULT 50
+#endif
+    constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
     /**
      * @brief Slow-zone half-width in degrees.
@@ -491,13 +498,25 @@ namespace Config
     /**
      * @brief PWM applied in the slow zone, in [-100, 100].
      *
-     * Held constant while |heading error| > TURN_TOLERANCE_DEG. Set equal to
-     * Config::PWM_MIN_MAGNITUDE so the motor reliably breaks static friction even
-     * at minimum command.
+     * Held constant while |heading error| > TURN_TOLERANCE_DEG. Intentionally set BELOW
+     * `Config::PWM_MIN_MAGNITUDE` (the motor deadband floor): `deadbandSnap` floors any
+     * non-zero command up to `PWM_MIN_MAGNITUDE` at emit time, so the EFFECTIVE slow-zone
+     * PWM the motor sees is `max(TURN_SLOW_SPEED_PWM, PWM_MIN_MAGNITUDE)` — always at or
+     * above the floor, never below it. Stating this constant below the floor documents the
+     * setpoint the profile logically wants; the snap-up is what actually guarantees the
+     * motor breaks static friction. See the turn-ladder `static_assert` in `ConfigChecks.h`
+     * — it deliberately does NOT assert `TURN_SLOW_SPEED_PWM >= PWM_MIN_MAGNITUDE` (that
+     * would be false today: 20 < 35).
      *
+     * @note **Compile-time override:** guarded by `#ifndef TURN_SLOW_SPEED_PWM_DEFAULT` so a
+     *       host test can pin it target-wide via `-DTURN_SLOW_SPEED_PWM_DEFAULT=...` without
+     *       editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT` (`ConfigNav.h`).
      * @note TODO: tune on real chassis.
      */
-    constexpr int16_t TURN_SLOW_SPEED_PWM = 20;
+#ifndef TURN_SLOW_SPEED_PWM_DEFAULT
+#define TURN_SLOW_SPEED_PWM_DEFAULT 20
+#endif
+    constexpr int16_t TURN_SLOW_SPEED_PWM = TURN_SLOW_SPEED_PWM_DEFAULT;
 
     /**
      * @brief Final heading tolerance in degrees.
@@ -505,9 +524,16 @@ namespace Config
      * When |heading error| ≤ this value, the TurnGyro state machine brakes and
      * declares the turn complete.
      *
+     * @note **Compile-time override:** guarded by `#ifndef TURN_TOLERANCE_DEG_DEFAULT` so a
+     *       host test can pin it target-wide via `-DTURN_TOLERANCE_DEG_DEFAULT=...` without
+     *       editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT` (`ConfigNav.h`).
+     *       Guarded by the turn-ladder invariant in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real chassis.
      */
-    constexpr float TURN_TOLERANCE_DEG = 0.5f;
+#ifndef TURN_TOLERANCE_DEG_DEFAULT
+#define TURN_TOLERANCE_DEG_DEFAULT 0.5f
+#endif
+    constexpr float TURN_TOLERANCE_DEG = TURN_TOLERANCE_DEG_DEFAULT;
 
     /**
      * @brief Persistent-IMU-fault watchdog timeout for the custom TurnGyro profile, in ms.
