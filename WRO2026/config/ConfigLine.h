@@ -20,11 +20,11 @@
 namespace Config
 {
     /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 3.0f;
+    constexpr float LINE_KP = 5.8f;
     /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
     constexpr float LINE_KI = 0.0f;
     /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 0.3f;
+    constexpr float LINE_KD = 1.1f;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following
@@ -40,7 +40,7 @@ namespace Config
     constexpr int16_t CRUISE_SPEED = SPEED_NORMAL;
 
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
-    constexpr int16_t LINE_MAX_CORR = 40;
+    constexpr int16_t LINE_MAX_CORR = 20;
 
     // ---------------------------------------------------------------------------------------
     // 8-channel custom line sensor (WROLineArray)
@@ -154,7 +154,7 @@ namespace Config
      * Applied per-channel: onLine = (HIGH[b][ch] - raw) / (HIGH[b][ch] - LOW[b][ch])
      *                               >= LINE_CHANNEL_ON_RATIO.
      */
-    constexpr float LINE_CHANNEL_ON_RATIO = 0.5f;
+    constexpr float LINE_CHANNEL_ON_RATIO = 0.7f;
 
     /**
      * @brief Minimum number of channels simultaneously ON-LINE to declare a
@@ -177,7 +177,7 @@ namespace Config
      *
      * @note TODO: tune on real mat.
      */
-    constexpr uint8_t LINE_JUNCTION_LEFT_HI = 4;
+    constexpr uint8_t LINE_JUNCTION_LEFT_HI = 5;
 
     /**
      * @brief Lower inclusive channel index for the RIGHT junction predicate.
@@ -188,7 +188,7 @@ namespace Config
      *
      * @note TODO: tune on real mat.
      */
-    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = 3;
+    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = 2;
 
     /**
      * @brief On-board LED brightness level applied by WROLineArray::begin() via the
@@ -260,7 +260,7 @@ namespace Config
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */
-    constexpr int16_t CRAWL_PWM = 60;
+    constexpr int16_t CRAWL_PWM = 40;
 
     /**
      * @brief Hard ceiling for the blocking `LineFollower.waitUntilDistanceReached()` helper.

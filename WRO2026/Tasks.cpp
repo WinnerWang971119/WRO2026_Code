@@ -290,7 +290,10 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    
+    //PathTracker.goTo("i1");
+    LineFollower.setEnabled(true).setReverse(false).setDistanceTarget(50);
+    LineFollower.waitUntilDistanceReached();
+    LineFollower.setEnabled(false);
     return true;
 }
 

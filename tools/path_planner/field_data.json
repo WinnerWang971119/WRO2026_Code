@@ -10,7 +10,7 @@
   "BLIND_DECAY_EXPONENT": 2.0,
   "BLIND_DECAY_D_REF": 50.0,
   "START_NODE": "Start",
-  "START_HEADING_DEG": 0.2,
+  "START_HEADING_DEG": 90.0,
   "NODES": {
     "C": [
       185.5,
@@ -152,21 +152,21 @@
       167.3,
       27.3
     ],
-    "shovel1F": [
-      81.16603695929538,
-      15.501518706013083
-    ],
     "shovel1O": [
       89.4,
-      27.3
-    ],
-    "shovel2F": [
-      32.5,
       27.3
     ],
     "shovel2O": [
       139.60200847841298,
       23.80051035107215
+    ],
+    "shovelGet": [
+      81.16603695929538,
+      15.501518706013083
+    ],
+    "shovelPut": [
+      32.5,
+      27.3
     ]
   },
   "NODE_TYPES": {
@@ -205,10 +205,10 @@
     "i3": "line",
     "i6": "line",
     "p1": "projection",
-    "shovel1F": "blind",
     "shovel1O": "line",
-    "shovel2F": "blind",
-    "shovel2O": "blind"
+    "shovel2O": "blind",
+    "shovelGet": "blind",
+    "shovelPut": "blind"
   },
   "LINE_SEGMENTS": [
     [
@@ -362,7 +362,7 @@
       "i3"
     ],
     [
-      "shovel2F",
+      "shovelPut",
       "i1"
     ],
     [
@@ -374,7 +374,7 @@
       "i3"
     ],
     [
-      "shovel1F",
+      "shovelGet",
       "shovel1O"
     ]
   ],
