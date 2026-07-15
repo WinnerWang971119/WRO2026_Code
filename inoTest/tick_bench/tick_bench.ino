@@ -33,7 +33,8 @@
  * path (no header shadowing). The `.ino` files in `WRO2026/` are ignored by the library compiler, so
  * there is no `setup()`/`loop()` collision with `WRO2026.ino`.
  *
- * @note BUILD: run from the repo root `C:/users/wangd/documents/wro2026/wro2026_code` —
+ * @note BUILD: from the repo root, run `uv run inoTest/tick_bench/build.py`. The wrapper also works
+ *       from any directory when given by absolute path. Direct arduino-cli equivalent:
  *       arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi inoTest/tick_bench \
  *         --library WRO2026 --library WRO2026/src/drive --library WRO2026/src/perception \
  *         --library WRO2026/src/nav --library WRO2026/src/mission --library WRO2026/src/manip \
