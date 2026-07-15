@@ -150,7 +150,6 @@ namespace
     constexpr uint8_t kHueYellow = 32;    // inside HUE_BANDS[0] {20,45}
     constexpr uint8_t kHueGreen  = 110;   // inside HUE_BANDS[1] {80,140}
     constexpr uint8_t kHueBlue   = 170;   // inside HUE_BANDS[2] {141,200}
-    constexpr uint8_t kHueWhite  = 242;   // device achromatic White (240..245)
     constexpr uint8_t kHueBlack  = 248;   // device Black (246..250)
     constexpr uint8_t kStaHigh   = 15;    // >= VISION_WHITE_STA_MAX — chromatic, not washed out
 
