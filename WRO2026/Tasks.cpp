@@ -290,9 +290,7 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    //Drive.holdYaw();
-    //Drive.driveDist(50).setMode(DriveMode::GYRO);
-    Drive.driveDist(50).setMode(DriveMode::SYNC); 
+    
     return true;
 }
 
