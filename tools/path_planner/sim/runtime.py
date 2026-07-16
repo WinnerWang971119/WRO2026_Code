@@ -94,6 +94,16 @@ Public surface:
   :data:`PivotTurnRecord` table (ADR-036) latched in :meth:`_walk_hops`.
   (``resolve_projection_mode`` is gone -- ``ProjectionMode`` was deleted with
   the projection edge type; a LINE→projection follow uses ``resolve_speed``.)
+* :func:`resolve_line_follow_mode` -- the LINE-follow lateral-bias sibling
+  (ADR-069, issue #156), mirroring the firmware ``_resolveLineFollowMode``.
+  Reads the directed LINE edge's own ``mode`` override, but -- unlike
+  ``resolve_speed`` / ``resolve_blind_mode`` -- has NO pipeline default:
+  ``DEFAULT`` (absent or explicit) always resolves to
+  :attr:`~tools.path_planner.pipeline_config.LineFollowMode.MIDDLE`, and the
+  key is DIRECTIONAL (LEFT/RIGHT is asymmetric under reversal, so the reverse
+  traversal is a separately authored edge). It is a PURE mode->mode mapping
+  (never touches the sim pose); the parity recorder reads it off each LINE /
+  projection-follow hop's edge to emit the ``follow_mode`` trace field.
 * :class:`UnreachableGoalError` -- raised on ``next_hop[from][goal] is None``.
 * :data:`ACT_LINE_OVERSHOOT` -- sim-only primitive tag for the
   LINE_OVERSHOOT FSM transition. NOT emitted by
@@ -239,6 +249,7 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
+    LineFollowMode,
     PipelineConfig,
     SpeedTier,
     StopAtLineMode,
@@ -832,6 +843,7 @@ __all__ = [
     "resolve_blind_mode",
     "resolve_direction",
     "resolve_edge_dispatch",
+    "resolve_line_follow_mode",
     "resolve_return_action",
     "resolve_sensor_overshoot_trim",
     "resolve_speed",
@@ -1210,6 +1222,61 @@ def resolve_blind_mode(edge, cfg: PipelineConfig = PIPELINE_CONFIG) -> BlindMode
     :return: the override if set (non-DEFAULT), else ``cfg.blind``.
     """
     return _resolve_override(edge, "mode", cfg.blind, BlindMode)
+
+
+def resolve_line_follow_mode(
+    edge, cfg: PipelineConfig = PIPELINE_CONFIG
+) -> LineFollowMode:
+    """Return the effective :class:`LineFollowMode` for an EDGE_LINE traversal.
+
+    Sibling of :func:`resolve_blind_mode` / :func:`resolve_speed` and the Python
+    mirror of the firmware ``PathTrackerClass::_resolveLineFollowMode`` (ADR-069,
+    issue #156). It resolves the LINE lateral-follow bias (centered vs LEFT/RIGHT
+    hug-side) for a LINE hop, but differs from its siblings in two deliberate
+    ways:
+
+    * **No pipeline default -- ``DEFAULT`` always resolves to
+      :attr:`LineFollowMode.MIDDLE`.** There is intentionally no
+      ``PIPELINE_CONFIG`` follow-offset field (no mission-wide "everything hugs
+      left" knob), so a missing or explicit-``DEFAULT`` override resolves to
+      :attr:`~LineFollowMode.MIDDLE` (centered, offset 0), NOT to any ``cfg``
+      value. ``MIDDLE`` / ``LEFT`` / ``RIGHT`` pass through unchanged. ``cfg`` is
+      accepted only so the resolver signature stays byte-identical to its
+      siblings (``resolve_speed`` / ``resolve_blind_mode`` thread a field-sourced
+      config); it is intentionally unread here.
+    * **Directional.** The lateral bias is asymmetric under reversal, so the LINE
+      ``mode`` override is authored per DIRECTED edge (``graph_builder`` pulls it
+      into ``_DIRECTIONAL_OPTIONAL_KEYS``, unlike the bidirectional BLIND
+      ``mode`` / ``speed``). This helper simply reads the directed edge's OWN
+      ``mode`` attribute -- the reverse traversal is a separately authored edge,
+      resolved independently -- so it mirrors how the sim treats ``direction``,
+      not the bidirectional keys. The reverse-sign convention (LEFT stays
+      left-of-travel when a hop runs on the rear board) is composed downstream by
+      ``PathTracker`` (``sign = decision.reverse ? -1 : +1``), NOT here: this
+      resolver returns the MODE, never the signed offset.
+
+    The graph attribute is the shared ``mode`` key (LINE vocab
+    ``MIDDLE|LEFT|RIGHT``); a BLIND edge's ``mode`` (a :class:`BlindMode`) never
+    reaches this resolver -- like :func:`resolve_blind_mode`, it is only ever
+    called on the matching edge type (a LINE hop's edge).
+
+    This is a PURE mode->mode mapping: it must NOT alter the sim pose or
+    displacement (the sim is the firmware's parity-locked pose oracle). Its sole
+    consumer is the parity recorder, which reads it off the same per-hop edge it
+    reads :func:`resolve_speed` off, to emit the ``follow_mode`` trace field.
+
+    :param edge: directed graph edge attribute mapping (e.g.
+        ``graph.edges[u, v]``). May or may not carry ``mode``; absence and an
+        explicit ``DEFAULT`` both resolve to :attr:`LineFollowMode.MIDDLE`.
+    :param cfg: accepted for signature parity with :func:`resolve_blind_mode` /
+        :func:`resolve_speed`; unread (there is no pipeline follow-offset
+        default). Defaults to the :data:`PIPELINE_CONFIG` singleton.
+    :return: the override if set (non-DEFAULT), else
+        :attr:`LineFollowMode.MIDDLE`.
+    """
+    return _resolve_override(
+        edge, "mode", LineFollowMode.MIDDLE, LineFollowMode
+    )
 
 
 def resolve_stop_at_line(
@@ -2851,6 +2918,17 @@ class PathTrackerSim:
         threads the field-sourced config (R4).
         """
         return resolve_blind_mode(edge, cfg)
+
+    def resolve_line_follow_mode(
+        self, edge, cfg: PipelineConfig = PIPELINE_CONFIG
+    ) -> LineFollowMode:
+        """See module-level :func:`resolve_line_follow_mode`.
+
+        ``cfg`` is accepted for signature parity with the other resolver
+        passthroughs but is unread -- there is no pipeline follow-offset default,
+        so ``DEFAULT`` always resolves to :attr:`LineFollowMode.MIDDLE`.
+        """
+        return resolve_line_follow_mode(edge, cfg)
 
     def find_pivot_turn(
         self, u: str, v: str, w: str
