@@ -14,6 +14,8 @@
 #include "Drive.h"
 
 #include "TurnSignPolicy.h"    // Turn-sign + counter-rotation wheel math (host-tested; ADR-045).
+#include "TurnPDPolicy.h"      // Per-tick turn PD control law: wrap / pdStep / slew / creep /
+                               // settle (host-tested; ADR-068). Consumed by _updateTurnProfile.
 #include "TShapeProfilePolicy.h"    // Distance-domain T-shape ramp/triangle/half-cap + speed-at
                                     // math (host-tested + golden-pinned; issue #130).
 #include "../nav/YawSource.h"         // Single owner of corrected (app CCW-positive) IMU yaw I/O (ADR-045).
@@ -337,38 +339,34 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // `power` is honored as the cruise-PWM magnitude override: callers can chain
-    // `Drive.turnDeg(deg).setPower(80)` for a faster turn. Slow-zone PWM stays at
-    // Config::TURN_SLOW_SPEED_PWM (the final-approach must stay gentle enough to
-    // stop within TURN_TOLERANCE_DEG). Non-positive overrides fall back to the
+    // `power` is honored as the PD authority-clamp magnitude override: callers can chain
+    // `Drive.turnDeg(deg).setPower(80)` for a faster turn. Non-positive overrides fall back to the
     // Config default to keep `_turnDeltaSign` as the sole source of rotation sign.
     //
-    // Mode encoding (NEW — repurposed from MiniR4.DriveDC.TurnGyro's 0/1 bits):
+    // Mode encoding (repurposed from MiniR4.DriveDC.TurnGyro's 0/1 bits):
     //   0 = COUNTER_ROT (both wheels spin opposite directions)
     //   1 = PIVOT_LEFT  (right wheel only — left wheel acts as pivot)
     //   2 = PIVOT_RIGHT (left wheel only — right wheel acts as pivot)
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045). Best-effort
-    // fallback 0.0 preserves the prior dispatch-time behavior of acting on the vendor's 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
-    const int16_t target = _normalizeYaw((int32_t) cur + (int32_t) deg);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045) as a FLOAT — no
+    // int16_t truncation anywhere in the turn path (ADR-068 AC2). Best-effort fallback 0.0
+    // preserves the prior dispatch-time behavior of acting on the vendor's 0.0. `_turnTargetYaw`
+    // keeps full sub-degree precision; the folded delta is the initial progress-frame error.
+    const double curYaw    = YawSource.readYawDegOr(0.0);
+    const float  target    = fmodf((float) curYaw + (float) deg, 360.0f);
+    const float  deltaNorm = turnWrap180(target - (float) curYaw);
 
-    // Capture the initial signed delta normalized into (-180, +180] so the BRAKE-edge
-    // tick cannot oscillate the spin direction when the IMU briefly straddles target.
-    const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
-
-    // Short-circuit on no-op turns. When the normalized delta is already within
-    // the heading tolerance, arming the profile would issue one spurious CRUISE
-    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
-    // Just mark the turn done and keep _heldYaw at the target so subsequent
-    // yaw-locked moves stay aligned.
-    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    // Short-circuit on no-op turns. When the folded delta is already within the heading tolerance,
+    // arming the PD would issue one spurious tick before it settles. Just mark the turn done and
+    // keep _heldYaw at the target so subsequent yaw-locked moves stay aligned. `wallStop`'s
+    // already-squared SQUARE phase relies on this short-circuit (AC9).
+    if (fabsf(deltaNorm) <= (float) Config::TURN_TOLERANCE_DEG)
     {
-        _heldYaw          = target;
+        _heldYaw          = _normalizeYaw((int32_t) target);
         _turnTargetYaw    = target;
         _turnProfileState = TurnProfileState::IDLE;
         _turnDone         = true;
-        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        _moveDone         = true;    // single-task-done bit collapse (matches settle branch).
         (void) power;
         (void) mode;
         (void) brake;
@@ -376,21 +374,36 @@ uint8_t DriveClass::_execTurnDeg(int16_t deg,
         return 0x00;
     }
 
-    const int8_t sign = turnSign(deltaNorm);
+    // Freeze the rotation sign at dispatch (progress-frame contract): +1 = CCW / yaw increases,
+    // -1 = CW. A true-zero delta is filtered by the short-circuit above, so the else is safe.
+    const int8_t sign = (deltaNorm > 0.0f) ? (int8_t) +1 : (int8_t) -1;
 
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
     _turnMotorMode          = mode;
     _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
     _turnProfileBrakeOnDone = brake;
-    _turnProfileState       = TurnProfileState::CRUISE;
+    _turnProfileState       = TurnProfileState::ACTIVE;
     _turnDone               = false;
-    _heldYaw                = target;
-    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
+    // `_heldYaw` is the coarse int16_t GYRO-hold heading (a separate `forwardGyro`/`*Gyro` member,
+    // ADR-045). The FLOAT PD target lives in `_turnTargetYaw`; storing a rounded heading here is
+    // not a control-error truncation.
+    _heldYaw                = _normalizeYaw((int32_t) target);
 
-    // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing
-    // extra here. We always return 0x00 — the new state machine cannot fail at dispatch
-    // (no lower-MCU round trip), so there is no rc to surface.
+    // Seed the PD controller state (ADR-068). All read by `_updateTurnProfile()` on its first tick.
+    const uint32_t nowMs = millis();
+    _turnErrOld         = fabsf(deltaNorm);                   // initial error -> D term ~= 0 tick 1.
+    _turnPrevSpeed      = (float) Config::TURN_BREAKAWAY_PWM; // ramp starts at the breakaway floor.
+    _turnInBandCount    = 0;
+    _turnBrokeAway      = false;                              // static kick until motion is seen.
+    _turnStartYaw       = (float) curYaw;                     // breakaway-motion reference yaw.
+    _turnStartMs        = nowMs;    // non-convergence timeout epoch.
+    _turnLastStepMs     = nowMs;    // measured-dt epoch for the time-normalized D term.
+    _turnLastGoodReadMs = nowMs;    // persistent-IMU-fault watchdog seed.
+
+    // Blocking path: TurnDegBuilder's destructor already calls _drainBlocking(); nothing extra
+    // here. We always return 0x00 — the PD controller cannot fail at dispatch (no lower-MCU round
+    // trip), so there is no rc to surface.
     (void) blocking;
     return 0x00;
 }
@@ -403,30 +416,28 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
 {
     // No _applyBias here — wheel-pattern dispatch happens in _updateTurnProfile().
     //
-    // `power` is honored as the cruise-PWM magnitude override; see _execTurnDeg
-    // for the full rationale. Slow-zone PWM stays at Config::TURN_SLOW_SPEED_PWM.
-    // Non-positive overrides fall back to the Config default.
+    // `power` is honored as the PD authority-clamp magnitude override; see _execTurnDeg for the
+    // full rationale. Non-positive overrides fall back to the Config default.
     //
     // Mode encoding identical to _execTurnDeg (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT).
 
-    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045); best-effort 0.0.
-    const int16_t cur    = (int16_t) YawSource.readYawDegOr(0.0);
-    const int16_t target = _normalizeYaw((int32_t) yaw);
+    // Read the corrected (app CCW-positive) IMU yaw through YawSource (ADR-045) as a FLOAT —
+    // no int16_t truncation in the turn path (ADR-068 AC2); best-effort 0.0.
+    const double curYaw    = YawSource.readYawDegOr(0.0);
+    const float  target    = fmodf((float) yaw, 360.0f);
+    const float  deltaNorm = turnWrap180(target - (float) curYaw);
 
-    const int32_t deltaNorm = normalizeTurnDelta((int32_t) target - (int32_t) cur);
-
-    // Short-circuit on no-op turns. When the normalized delta is already within
-    // the heading tolerance, arming the profile would issue one spurious CRUISE
-    // tick (sign defaults to -1 in the ternary below) before BRAKE catches up.
-    // Just mark the turn done and keep _heldYaw at the target so subsequent
-    // yaw-locked moves stay aligned.
-    if (abs(deltaNorm) <= Config::TURN_TOLERANCE_DEG)
+    // Short-circuit on no-op turns. When the folded delta is already within the heading tolerance,
+    // arming the PD would issue one spurious tick before it settles. Just mark the turn done and
+    // keep _heldYaw at the target so subsequent yaw-locked moves stay aligned. `wallStop`'s
+    // already-squared SQUARE phase relies on this short-circuit (AC9).
+    if (fabsf(deltaNorm) <= (float) Config::TURN_TOLERANCE_DEG)
     {
-        _heldYaw          = target;
+        _heldYaw          = _normalizeYaw((int32_t) target);
         _turnTargetYaw    = target;
         _turnProfileState = TurnProfileState::IDLE;
         _turnDone         = true;
-        _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+        _moveDone         = true;    // single-task-done bit collapse (matches settle branch).
         (void) power;
         (void) mode;
         (void) brake;
@@ -434,17 +445,30 @@ uint8_t DriveClass::_execTurnToYaw(int16_t yaw,
         return 0x00;
     }
 
-    const int8_t sign = turnSign(deltaNorm);
+    // Freeze the rotation sign at dispatch (progress-frame contract); see _execTurnDeg.
+    const int8_t sign = (deltaNorm > 0.0f) ? (int8_t) +1 : (int8_t) -1;
 
     _turnTargetYaw          = target;
     _turnDeltaSign          = sign;
     _turnMotorMode          = mode;
     _turnCruisePwm          = (power > 0) ? power : Config::TURN_CRUISE_PWM;
     _turnProfileBrakeOnDone = brake;
-    _turnProfileState       = TurnProfileState::CRUISE;
+    _turnProfileState       = TurnProfileState::ACTIVE;
     _turnDone               = false;
-    _heldYaw                = target;
-    _turnLastGoodReadMs     = millis();    // seed the persistent-IMU-fault watchdog at dispatch.
+    // `_heldYaw` is the coarse int16_t GYRO-hold heading (separate member, ADR-045); the FLOAT PD
+    // target lives in `_turnTargetYaw`.
+    _heldYaw                = _normalizeYaw((int32_t) target);
+
+    // Seed the PD controller state (ADR-068); see _execTurnDeg for the field-by-field rationale.
+    const uint32_t nowMs = millis();
+    _turnErrOld         = fabsf(deltaNorm);                   // initial error -> D term ~= 0 tick 1.
+    _turnPrevSpeed      = (float) Config::TURN_BREAKAWAY_PWM; // ramp starts at the breakaway floor.
+    _turnInBandCount    = 0;
+    _turnBrokeAway      = false;                              // static kick until motion is seen.
+    _turnStartYaw       = (float) curYaw;                     // breakaway-motion reference yaw.
+    _turnStartMs        = nowMs;    // non-convergence timeout epoch.
+    _turnLastStepMs     = nowMs;    // measured-dt epoch for the time-normalized D term.
+    _turnLastGoodReadMs = nowMs;    // persistent-IMU-fault watchdog seed.
 
     (void) blocking;
     return 0x00;
@@ -1048,12 +1072,19 @@ uint8_t DriveClass::_execProfileMove(DriveMode mode,
 }
 
 // -----------------------------------------------------------------------------------------
-// Custom TurnGyro state machine (replaces MiniR4.DriveDC.TurnGyro)
+// Turn PD controller (ADR-068 — replaces MiniR4.DriveDC.TurnGyro and the earlier two-stage
+// cruise/slow-zone bang-bang).
 //
-// Two-stage profile: CRUISE at TURN_CRUISE_PWM until within TURN_SLOW_ZONE_DEG of target,
-// then SLOW at TURN_SLOW_SPEED_PWM until within TURN_TOLERANCE_DEG, then BRAKE.
-// Both wheels' PWM magnitude/sign depends on _turnDeltaSign (captured at dispatch) and
-// _turnMotorMode (0=COUNTER_ROT, 1=PIVOT_LEFT, 2=PIVOT_RIGHT — repurposed from cmd.turnMode).
+// ONE PD step per cooperative tick, ported from the mentor's competition-verified `M_Turn_angle`
+// with a slew-rate limiter added for the heavier Lofaix chassis. The pure decision math lives in
+// `TurnPDPolicy.h`; this driver supplies the measured yaw + dt and dispatches the result. The
+// operator order is a contract (apply identically in CTPS):
+//   pdStep(err, errOld, dt) -> clamp to ±_turnCruisePwm -> turnSlewLimit -> turnCreepFloor
+//     -> turnWheelPattern(_turnDeltaSign, cmd, _turnMotorMode) -> Move(L, R)   (NO deadbandSnap)
+// The PD runs in the PROGRESS frame (`errProg = _turnDeltaSign * turnWrap180(target - yaw)`);
+// `turnWheelPattern` re-applies the world sign exactly once, so a negative command reverses the
+// wheels on overshoot. Exits on TURN_SETTLE_SAMPLES consecutive in-band samples, or on
+// TURN_TIMEOUT_MS (brake + log residual + done, WITHOUT a fault or queue clear).
 // -----------------------------------------------------------------------------------------
 
 void DriveClass::_updateTurnProfile()
@@ -1063,10 +1094,12 @@ void DriveClass::_updateTurnProfile()
         return;
     }
 
-    // Read current IMU yaw through YawSource (corrected app CCW-positive frame, ADR-045). On a
-    // transient lower-MCU read failure SKIP this tick: holding the previous Move(L,R) one more
-    // cycle is safer than acting on a fabricated 0.0 yaw, which mid-turn could flip the spin
-    // direction. This is a deliberate behavior change vs the old "act on the vendor's 0.0".
+    // Read current IMU yaw through YawSource (corrected app CCW-positive frame, ADR-045) as a
+    // FLOAT — no int16_t truncation (ADR-068 AC2); truncating the yaw each tick quantized the
+    // error to whole degrees, which is why the two-stage profile could never land inside its own
+    // sub-degree tolerance band. On a transient lower-MCU read failure SKIP this tick: holding the
+    // previous Move(L,R) one more cycle is safer than acting on a fabricated 0.0 yaw, which
+    // mid-turn could flip the spin direction.
     //
     // A SUSTAINED read failure is different. An async turn (`.async()`) has no `_drainBlocking`
     // deadline behind it, so skipping every tick would hold the counter-rotation Move(L,R) latched
@@ -1089,70 +1122,120 @@ void DriveClass::_updateTurnProfile()
                                                                  // shared by TURN_DEG / TURN_TO_YAW.
             _turnProfileState = TurnProfileState::IDLE;
             _turnDone         = true;
-            _moveDone         = true;    // single-task-done bit collapse (matches BRAKE branch).
+            _moveDone         = true;    // single-task-done bit collapse (matches settle/timeout).
             _clearQueue();
         }
         return;
     }
 
     // A good read landed — reset the persistent-fault watchdog window.
-    _turnLastGoodReadMs    = millis();
+    _turnLastGoodReadMs = millis();
 
-    const int16_t cur      = (int16_t) curYaw;
-    const int32_t rawDelta = normalizeTurnDelta((int32_t) _turnTargetYaw - (int32_t) cur);
-    // rawDelta is in (-180, +180] so a plain abs() is sufficient — no risk of int overflow.
-    // Consistent with the `abs(delta)` / `abs(encL)` pattern used elsewhere in this file.
-    const float absDelta = (float) abs(rawDelta);
+    // PROGRESS-frame error (ADR-068 sign contract): `_turnDeltaSign` was frozen at dispatch, so a
+    // POSITIVE error means "still short of the target" and a NEGATIVE error means "overshot and
+    // must reverse". The PD, clamp, slew, and creep all run on this scalar; `turnWheelPattern`
+    // re-applies the world sign exactly once when it dispatches the wheels.
+    const float err     = turnWrap180(_turnTargetYaw - (float) curYaw);
+    const float errProg = (float) _turnDeltaSign * err;
 
-    // Final stop band — tightest check first, then slow-zone entry.
-    if (absDelta <= Config::TURN_TOLERANCE_DEG)
+    // Settle debounce — N consecutive in-band samples. Pass the ABSOLUTE error: a negative
+    // overshoot error would otherwise satisfy `err < tolerance` and declare a still-overshot turn
+    // settled. A single out-of-band sample resets the count to 0 inside `turnSettleStep`.
+    _turnInBandCount = turnSettleStep(fabsf(errProg), Config::TURN_TOLERANCE_DEG, _turnInBandCount);
+    if (turnSettled(_turnInBandCount, Config::TURN_SETTLE_SAMPLES))
     {
-        _turnProfileState = TurnProfileState::BRAKE;
-    }
-    else if (absDelta <= Config::TURN_SLOW_ZONE_DEG
-             && _turnProfileState == TurnProfileState::CRUISE)
-    {
-        _turnProfileState = TurnProfileState::SLOW;
-    }
-
-    // Choose PWM magnitude by state.
-    int16_t pwmMag = 0;
-    switch (_turnProfileState)
-    {
-    case TurnProfileState::CRUISE:
-        pwmMag = _turnCruisePwm;
-        break;
-    case TurnProfileState::SLOW:
-        pwmMag = Config::TURN_SLOW_SPEED_PWM;
-        break;
-    case TurnProfileState::BRAKE:
         MiniR4.DriveDC.Move(0, 0);
         MiniR4.DriveDC.brake(_turnProfileBrakeOnDone);
         _turnProfileState = TurnProfileState::IDLE;
         _turnDone         = true;
-        _moveDone         = true;    // single-task-done bit collapse (matches _updateProfile)
-        return;
-    default:
-        // IDLE handled above; no other state values exist.
+        _moveDone         = true;    // single-task-done bit collapse (matches _updateProfile).
         return;
     }
 
-    // Apply rotation direction + wheel pattern via TurnSignPolicy (host-tested; ADR-045).
-    // `_turnDeltaSign` was captured at dispatch from the CORRECTED (app CCW-positive) yaw:
-    //   +1 → yaw must increase (CCW / left turn), -1 → yaw must decrease (CW / right turn).
-    // The CCW counter-rotation pattern is L = -sign*pwm, R = +sign*pwm. The app frame is made
-    // CCW-positive by Config::IMU_YAW_SIGN inside YawSource (the raw IMU is CW-positive), so this
-    // pattern is correct WITHOUT flipping signs here. If a chassis turns the wrong way, change
-    // Config::IMU_YAW_SIGN, not this block.
-    const TurnWheels wheels = turnWheelPattern(_turnDeltaSign, pwmMag, _turnMotorMode);
+    // Non-convergence timeout — brake, log the residual, mark the turn done WITHOUT latching a
+    // fault or clearing the queue (ADR-068). A sub-degree miss must not end a scored run;
+    // PathTracker re-anchors heading at line arrivals (ADR-052) regardless. Modular millis()
+    // subtraction is rollover-safe.
+    if (millis() - _turnStartMs >= Config::TURN_TIMEOUT_MS)
+    {
+        Serial.print(F("[Drive] turn: timeout — residual "));
+        Serial.print(errProg);
+        Serial.println(F(" deg (no fault)"));
+        MiniR4.DriveDC.Move(0, 0);
+        MiniR4.DriveDC.brake(_turnProfileBrakeOnDone);
+        _turnProfileState = TurnProfileState::IDLE;
+        _turnDone         = true;
+        _moveDone         = true;
+        return;
+    }
 
-    // Apply the same deadband snap / PWM saturation used by other drive outputs so
-    // profiled turns neither stall below the minimum effective magnitude nor exceed
-    // the configured PWM range at the actuator boundary.
-    const int16_t L = (int16_t) deadbandSnap(wheels.left);
-    const int16_t R = (int16_t) deadbandSnap(wheels.right);
+    // Breakaway hand-off. The STATIC floor to START an in-place spin from rest is HIGHER than the
+    // KINETIC floor that sustains it (bench: 44 vs 38 on Lofaix) — a spin scrubs the tires
+    // sideways and static scrub friction exceeds kinetic. Until the chassis has demonstrably
+    // rotated `TURN_BREAKAWAY_MOTION_DEG` from its start yaw, the creep floor below stays at the
+    // static `TURN_BREAKAWAY_PWM` so the turn actually breaks away; then it latches to the kinetic
+    // `TURN_CREEP_PWM`. Latched (never un-set) so a momentary sub-threshold read cannot drop an
+    // already-moving turn back to the higher kick and stutter. Absolute displacement, not progress
+    // toward target, so a wrong-way twitch that still broke static friction also counts as moving.
+    if (!_turnBrokeAway &&
+        fabsf(turnWrap180((float) curYaw - _turnStartYaw)) >= Config::TURN_BREAKAWAY_MOTION_DEG)
+    {
+        _turnBrokeAway = true;
+    }
 
-    MiniR4.DriveDC.Move(L, R);
+    // One PD step. The derivative is TIME-NORMALIZED by the MEASURED per-tick dt (the ~8 ms tick
+    // jitters to ~11.5 ms and the new gyro may speed the loop up, so dt cannot be assumed
+    // constant). `_turnLastStepMs` spans any skipped (bad-read) ticks, so the rate stays correct
+    // across a transient miss. Modular millis() subtraction is rollover-safe; a same-millis
+    // re-entry yields dt == 0 and `turnPdStep` contributes 0 D term.
+    const uint32_t nowMs = millis();
+    const float    dtSec = (float) (nowMs - _turnLastStepMs) / 1000.0f;
+    _turnLastStepMs      = nowMs;
+
+    // Operator order is a contract (TurnPDPolicy.h): pdStep -> clamp -> slewLimit -> creepFloor.
+    float cmd = turnPdStep(errProg, _turnErrOld, dtSec, Config::TURN_KP, Config::TURN_KD);
+
+    // Clamp to the caller's authority (the builder power override, or Config::TURN_CRUISE_PWM). A
+    // clamped P term already IS the deceleration ramp — there is no separate slow zone.
+    const float power = (float) _turnCruisePwm;
+    if (cmd > power)
+    {
+        cmd = power;
+    }
+    else if (cmd < -power)
+    {
+        cmd = -power;
+    }
+
+    // Ramp-up slew limit against the previous EMITTED (post-creep) command, so the heavy chassis
+    // cannot break traction on the initial kick. Ramp-down and reversal pass through unlimited.
+    cmd = turnSlewLimit(cmd, _turnPrevSpeed, (float) Config::TURN_SLEW_PWM_PER_TICK);
+
+    // Creep floor where the PD loses authority (|cmd| < threshold). NOT `deadbandSnap` — that
+    // snaps to a fixed floor and was the largest overshoot contributor (ADR-068 AC3). Two-level:
+    // from REST (`!_turnBrokeAway`) the floor is the higher STATIC `TURN_BREAKAWAY_PWM`, passed as
+    // BOTH threshold and floor so every sub-breakaway command snaps up to it and even a small turn
+    // (whose PD command never reaches cruise) still breaks static friction; once moving it drops to
+    // the efficient kinetic `TURN_CREEP_PWM`. A commanded exact 0 stays 0.
+    const int16_t floorThresh =
+        _turnBrokeAway ? Config::TURN_CREEP_THRESH_PWM : Config::TURN_BREAKAWAY_PWM;
+    const int16_t floorPwm = _turnBrokeAway ? Config::TURN_CREEP_PWM : Config::TURN_BREAKAWAY_PWM;
+    cmd                    = turnCreepFloor(cmd, floorThresh, floorPwm);
+
+    // Carry the POST-creep emitted command into the next tick's slew limiter (ADR-068): storing
+    // the pre-creep value would re-snap a command growing off the creep floor back to creep every
+    // tick and lock the ramp at the creep speed. `_turnErrOld` carries this tick's error for the
+    // next step's derivative.
+    _turnPrevSpeed = cmd;
+    _turnErrOld    = errProg;
+
+    // Dispatch the SIGNED progress-frame command through the wheel pattern (TurnSignPolicy.h),
+    // which re-applies `_turnDeltaSign` exactly once — a negative command reverses the wheels on
+    // overshoot. NO `deadbandSnap` on this path (ADR-068 AC3): the creep floor is the only floor.
+    // `Move` is idempotent (a setpoint write), so re-issuing the same value is inert and correct.
+    const TurnWheels wheels =
+        turnWheelPattern(_turnDeltaSign, (int16_t) lroundf(cmd), _turnMotorMode);
+    MiniR4.DriveDC.Move(wheels.left, wheels.right);
 }
 
 // -----------------------------------------------------------------------------------------

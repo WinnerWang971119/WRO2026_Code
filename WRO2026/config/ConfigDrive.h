@@ -539,11 +539,12 @@ namespace Config
      * @brief KINETIC creep floor (PWM magnitude) the turn PD emits once it loses authority
      *        (`|cmd| < TURN_CREEP_THRESH_PWM`), ADR-068.
      *
-     * Bench-measured on Lofaix (T1, 2026-07-16): the lowest PWM that reliably SUSTAINS rotation
-     * once the chassis is already turning — NOT the static breakaway floor
-     * (`Config::PWM_MIN_MAGNITUDE`, the higher PWM needed to START motion from rest). Do not
-     * reuse `deadbandSnap` / `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock
-     * ("Why the creep floor is not deadbandSnap").
+     * Bench-measured on Lofaix (T1, 2026-07-16, phase a2): the lowest PWM that reliably SUSTAINS
+     * rotation once the chassis is already turning — NOT the static breakaway floor
+     * (`TURN_BREAKAWAY_PWM`, the higher PWM needed to START an in-place spin from rest, measured
+     * HIGHER than this because a spin scrubs the tires sideways). Do not reuse `deadbandSnap` /
+     * `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the creep floor is not
+     * deadbandSnap").
      *
      * @note TODO: bench-tune (T11).
      */
@@ -551,6 +552,44 @@ namespace Config
 #define TURN_CREEP_PWM_DEFAULT 38
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
+
+    /**
+     * @brief STATIC breakaway floor (PWM magnitude) the turn PD emits from REST until the chassis
+     *        has demonstrably started rotating (ADR-068).
+     *
+     * Bench-measured on Lofaix (T1, 2026-07-16, phase a1): the lowest PWM that reliably STARTS an
+     * in-place spin from a standstill, plus a small margin. HIGHER than the kinetic
+     * `TURN_CREEP_PWM` that sustains an already-moving spin (44 vs 38 measured) because starting
+     * from rest must break STATIC scrub friction across every contact patch at once. Applied as
+     * the creep floor only while `!_turnBrokeAway`; once `_updateTurnProfile` sees the yaw move
+     * past `TURN_BREAKAWAY_MOTION_DEG` it drops to the efficient kinetic `TURN_CREEP_PWM`. Without
+     * it, a small in-place turn (whose PD command never exceeds the creep floor) would command
+     * only `TURN_CREEP_PWM`, which is below the static breakaway, and never start — hunting to
+     * `TURN_TIMEOUT_MS`.
+     *
+     * @note TODO: bench-tune (T11) — raise if a cold/heavy chassis or a sagging pack fails to
+     *       break away on the first ticks.
+     */
+#ifndef TURN_BREAKAWAY_PWM_DEFAULT
+#define TURN_BREAKAWAY_PWM_DEFAULT 46
+#endif
+    constexpr int16_t TURN_BREAKAWAY_PWM = TURN_BREAKAWAY_PWM_DEFAULT;
+
+    /**
+     * @brief Rotation from the turn's start yaw (degrees) after which the PD hands off from the
+     *        static `TURN_BREAKAWAY_PWM` kick to the kinetic `TURN_CREEP_PWM` floor (ADR-068).
+     *
+     * Chosen well above the bench IMU noise spread (T1: 0.100 deg over 100 stationary reads) so a
+     * stationary chassis's read jitter cannot falsely latch "moving" and drop it to a creep floor
+     * that cannot start it. Latched once reached — see `_updateTurnProfile`.
+     *
+     * @note TODO: bench-tune (T11) — lower to reach the efficient creep sooner, but stay clear of
+     *       the IMU noise floor.
+     */
+#ifndef TURN_BREAKAWAY_MOTION_DEG_DEFAULT
+#define TURN_BREAKAWAY_MOTION_DEG_DEFAULT 1.0f
+#endif
+    constexpr float TURN_BREAKAWAY_MOTION_DEG = TURN_BREAKAWAY_MOTION_DEG_DEFAULT;
 
     /**
      * @brief Maximum PWM growth per tick for the turn PD's ramp-up limiter (ADR-068,

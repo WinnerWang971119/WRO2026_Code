@@ -135,6 +135,29 @@ namespace Config
                   "ceiling, or a hunting turn eats the whole drain budget instead of the turn's "
                   "own bounded give-up.");
 
+    // (i) The static breakaway floor must sit ABOVE the kinetic creep floor — starting an in-place
+    // spin from rest breaks more (scrub) friction than sustaining one, so a breakaway at or below
+    // the creep would defeat its own purpose (bench: 46 vs 38 on Lofaix).
+    static_assert(TURN_BREAKAWAY_PWM > TURN_CREEP_PWM,
+                  "Config::TURN_BREAKAWAY_PWM must be > TURN_CREEP_PWM — the from-rest static "
+                  "breakaway floor is higher than the kinetic floor that sustains an already-"
+                  "moving spin. A breakaway <= creep cannot start a turn the creep floor could "
+                  "not already start.");
+
+    // (j) The breakaway kick must be reachable within the default authority ceiling, or the ±power
+    // clamp (which runs before the floor) caps the command below the floor the chassis needs.
+    static_assert(TURN_BREAKAWAY_PWM <= TURN_CRUISE_PWM,
+                  "Config::TURN_BREAKAWAY_PWM must be <= TURN_CRUISE_PWM — the ±power clamp runs "
+                  "before the floor, so a breakaway above the default authority ceiling could "
+                  "never be commanded on a default-power turn.");
+
+    // (k) The breakaway->creep hand-off distance must be at least one physically resolvable step,
+    // or a genuinely-rotating chassis could never accumulate enough measured motion to cross it.
+    static_assert(TURN_BREAKAWAY_MOTION_DEG >= TURN_MIN_RESOLVABLE_DEG,
+                  "Config::TURN_BREAKAWAY_MOTION_DEG must be >= TURN_MIN_RESOLVABLE_DEG — the "
+                  "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
+                  "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
+
     // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)
     // -----------------------------------------------------------------------------------------
