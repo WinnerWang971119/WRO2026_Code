@@ -30,11 +30,14 @@ namespace Config
      * begin() — red RGB LEDs + one long low tone + the OLED event ring. This keeps
      * a run from starting on a sagging pack, which drifts every open-loop move.
      *
-     * @note Sized for the 3S competition pack (12.6 V full, 11.1 V nominal): 11.9 V
-     *       is a "get off the field" floor comfortably above the 10.2 V empty point.
-     *       MUST be re-chosen if `BATT_CELLS` changes — a 2S pack can never reach it.
+     * @note Sized for the 3S competition pack (12.6 V full, 11.1 V nominal): 11.0 V
+     *       is a "get off the field" floor above the 10.2 V empty point. A loaded
+     *       serviceable pack sags below 11.9 V on the bench, so the old 11.9 V floor
+     *       failed boot on a good battery; 11.0 V clears that while still catching an
+     *       empty pack. MUST be re-chosen if `BATT_CELLS` changes — a 2S pack can
+     *       never reach it.
      */
-    constexpr float BATT_MIN_VOLTAGE_V = 11.9f;
+    constexpr float BATT_MIN_VOLTAGE_V = 11.0f;
 
     // =============================================================================
     // PWM bounds (saturation cap + motor deadband floor).
