@@ -131,7 +131,11 @@ from types import SimpleNamespace
 import pytest
 
 from tools.path_planner.compiler import ACT_TURN_REL
-from tools.path_planner.ctps.config import ARC_STEP_DEG, SCALE_CM_S_PER_PWM
+from tools.path_planner.ctps.config import (
+    ARC_STEP_DEG,
+    LINE_FOLLOW_OFFSET_DISPLAY_CM,
+    SCALE_CM_S_PER_PWM,
+)
 from tools.path_planner.ctps.profile import default_config
 from tools.path_planner.ctps.track_builder import build
 from tools.path_planner.ctps.trace_loader import Command, Trace, load
@@ -2358,3 +2362,49 @@ def test_tc17_return_moves_render_at_pipeline_speed_wall_depart_stays_normal():
     )
     assert wall_depart_v == pytest.approx(normal_speed, abs=_TC17_VEL_TOL)
     assert wall_depart_v != pytest.approx(fast_speed, abs=_TC17_VEL_TOL)
+
+
+# ---------------------------------------------------------------------------
+# TC13 (issue #156 / ADR-069 / AC10): the CTPS lateral hug-side render is
+# PARITY-SAFE. A biased ``lineFollowDist`` leg (``follow_offset`` set) draws a
+# visualization-only lateral nudge in the ``lateral_offsets`` overlay (mapped
+# through LINE_FOLLOW_OFFSET_DISPLAY_CM, the ADR-054 chassis-nudge precedent),
+# while the parity-locked LocalizationSim pose — the keyframes — is NEVER
+# touched: dropping ``follow_offset`` leaves the keyframes byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def test_tc13_biased_leg_renders_lateral_nudge_parity_safe():
+    """A biased lineFollowDist leg draws a lateral overlay; keyframes stay pose-safe.
+
+    ``ctps_lateral_offset.json`` drives a biased leg (``follow_offset: 1.5``)
+    then a centered leg. The built track must (1) carry exactly one
+    ``lateral_offsets`` overlay segment for the biased leg, its ``offset_cm``
+    mapped through ``LINE_FOLLOW_OFFSET_DISPLAY_CM``, and (2) leave the
+    keyframes byte-identical to the SAME trace with ``follow_offset`` stripped —
+    proving the nudge is draw-only and the LocalizationSim pose is untouched.
+    """
+    fixture = _FIXTURES / "ctps_lateral_offset.json"
+
+    trace = load(fixture)
+    track = _build_quiet(trace, toy_field_data)
+
+    # (1) exactly one lateral-nudge overlay segment, on the biased leg, mapped
+    # through the CTPS display constant (follow_offset 1.5 -> 1.5 * DISPLAY_CM).
+    assert len(track.lateral_offsets) == 1, track.lateral_offsets
+    seg = track.lateral_offsets[0]
+    assert seg["offset_cm"] == pytest.approx(LINE_FOLLOW_OFFSET_DISPLAY_CM * 1.5)
+    assert seg["t1"] > seg["t0"], "the overlay must span the real biased advance"
+
+    # (2) parity-safe: the SAME trace with follow_offset dropped yields NO
+    # overlay and BYTE-IDENTICAL keyframes (the pose never sees the offset).
+    dropped = json.loads(fixture.read_text(encoding="utf-8"))
+    for cmd in dropped["commands"]:
+        cmd.pop("follow_offset", None)
+    track_dropped = _build_quiet(load(dropped), toy_field_data)
+
+    assert track_dropped.lateral_offsets == []
+    assert track.keyframes == track_dropped.keyframes, (
+        "the lateral hug-side render must NOT perturb the LocalizationSim pose "
+        "(keyframes must be byte-identical with and without follow_offset)"
+    )

@@ -48,6 +48,7 @@ from tools.path_planner.pipeline_config import (
     PIPELINE_CONFIG,
     BlindMode,
     DirectionMode,
+    LineFollowMode,
     SpeedTier,
     StopAtLineMode,
 )
@@ -103,6 +104,7 @@ from tools.path_planner.sim.runtime import (
     resolve_blind_mode,
     resolve_direction,
     resolve_edge_dispatch,
+    resolve_line_follow_mode,
     resolve_return_action,
     resolve_speed,
     resolve_stop_at_line,
@@ -698,6 +700,87 @@ def test_resolve_blind_mode_default_falls_back_to_pipeline_config():
     assert resolve_blind_mode(edge_raw) == BlindMode.RAW_FLAT
 
 
+# ---------------------------------------------------------------------------
+# TC10 — resolve_line_follow_mode: the LINE lateral-bias sibling (issue #156 /
+# ADR-069). Unlike resolve_speed / resolve_blind_mode, it has NO pipeline
+# default (missing / DEFAULT both resolve to MIDDLE, never a cfg value), and it
+# is DIRECTIONAL (it reads the directed edge's own ``mode`` — the reverse
+# traversal is a separately authored edge, resolved independently).
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_line_follow_mode_default_resolves_to_middle():
+    """resolve_line_follow_mode: missing / DEFAULT -> MIDDLE (no pipeline default)."""
+    # Missing mode attr -> MIDDLE (centered), NOT a cfg fallback.
+    edge_missing: dict = {}
+    assert resolve_line_follow_mode(edge_missing) is LineFollowMode.MIDDLE
+
+    # Explicit DEFAULT sentinel -> MIDDLE (== absence / inherit == centered).
+    edge_default = {"mode": LineFollowMode.DEFAULT}
+    assert resolve_line_follow_mode(edge_default) is LineFollowMode.MIDDLE
+
+    # The bare 'DEFAULT' name resolves the same way as the enum instance.
+    edge_default_name = {"mode": "DEFAULT"}
+    assert resolve_line_follow_mode(edge_default_name) is LineFollowMode.MIDDLE
+
+
+def test_resolve_line_follow_mode_concrete_pass_through():
+    """resolve_line_follow_mode: MIDDLE / LEFT / RIGHT pass through unchanged."""
+    assert (
+        resolve_line_follow_mode({"mode": LineFollowMode.MIDDLE})
+        is LineFollowMode.MIDDLE
+    )
+    assert (
+        resolve_line_follow_mode({"mode": LineFollowMode.LEFT})
+        is LineFollowMode.LEFT
+    )
+    assert (
+        resolve_line_follow_mode({"mode": LineFollowMode.RIGHT})
+        is LineFollowMode.RIGHT
+    )
+    # Bare member-name strings (the JSON encoding) resolve identically.
+    assert resolve_line_follow_mode({"mode": "LEFT"}) is LineFollowMode.LEFT
+    assert resolve_line_follow_mode({"mode": "RIGHT"}) is LineFollowMode.RIGHT
+
+
+def test_resolve_line_follow_mode_is_directional_on_built_graph():
+    """resolve_line_follow_mode reads the directed edge's OWN mode (directional).
+
+    A LINE ``mode: LEFT`` authored on ``A->B`` is NOT mirrored onto ``B->A`` by
+    graph_builder (LINE mode is per-directed-edge), so the resolver returns LEFT
+    on the forward directed edge and MIDDLE on the (unauthored) reverse one --
+    the reverse bias is a separately authored edge, exactly as the C++
+    PathTracker composes the travel-frame sign downstream.
+    """
+    fd = SimpleNamespace(
+        # 'S' is a blind spawn (the validator rejects an on-line START node);
+        # A/B are the LINE junctions carrying the biased A->B edge under test.
+        NODES={"S": (10.0, -40.0), "A": (10.0, 10.0), "B": (200.0, 10.0)},
+        NODE_TYPES={"S": "blind", "A": "line", "B": "line"},
+        LINE_SEGMENTS=[("A", "B")],
+        BLIND_EDGES=[("S", "A")],
+        OBSTACLES=[],
+        ROBOT_RADIUS_CM=8.0,
+        BLIND_DECAY_ENABLED=True,
+        BLIND_DECAY_K=0.05,
+        BLIND_DECAY_EXPONENT=2.0,
+        BLIND_DECAY_D_REF=50.0,
+        START_NODE="S",
+        START_HEADING_DEG=0.0,
+        FIELD_MM=(3000, 2000),
+        MAP_PNG="maps/map.png",
+        EDGES=[{"type": EDGE_LINE, "u": "A", "v": "B", "mode": "LEFT"}],
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        graph = build_graph(fd)
+    assert resolve_line_follow_mode(graph.edges["A", "B"]) is LineFollowMode.LEFT
+    # Reverse traversal was never authored biased -> centered.
+    assert (
+        resolve_line_follow_mode(graph.edges["B", "A"]) is LineFollowMode.MIDDLE
+    )
+
+
 def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph_and_table):
     """PathTrackerSim.resolve_*_mode instance methods mirror the module-level helpers.
 
@@ -713,9 +796,14 @@ def test_sim_passthrough_resolve_helpers_match_module_level(toy_field, toy_graph
 
     edge_line_fast = {"speed": SpeedTier.FAST}
     edge_blind_gyro = {"mode": BlindMode.GYRO_TSHAPE}
+    edge_line_left = {"mode": LineFollowMode.LEFT}
 
     assert sim.resolve_speed(edge_line_fast) == SpeedTier.FAST
     assert sim.resolve_blind_mode(edge_blind_gyro) == BlindMode.GYRO_TSHAPE
+    # The LINE lateral-bias passthrough (issue #156) mirrors the module-level
+    # resolver too: a concrete LEFT passes through, a bare edge -> MIDDLE.
+    assert sim.resolve_line_follow_mode(edge_line_left) is LineFollowMode.LEFT
+    assert sim.resolve_line_follow_mode({}) is LineFollowMode.MIDDLE
 
 
 # ---------------------------------------------------------------------------

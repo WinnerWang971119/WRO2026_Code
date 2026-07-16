@@ -185,18 +185,21 @@ def _emit_with_toy_field(emit_targets: tuple[Path, Path]) -> tuple[Path, Path]:
 
 
 def _edge_cell_text(cpp_text: str, from_name: str, to_name: str) -> str:
-    """Return the single ``EdgeInfo`` aggregate-initialiser cell for ``from->to``.
+    """Return the single ``makeEdge(...)`` factory cell for ``from->to``.
 
     The emitter writes the EDGES table as one ``{ // from <name> (index N)``
     block per source node, with one cell line per destination ending in
-    ``// to <name>`` (see :func:`header_writer._emit_edges_table`). This
+    ``// to <name>`` (see :func:`header_writer._emit_edges_table`). Full
+    ``makeEdge`` adoption (issue #156) emits each cell as a
+    ``makeEdge(EdgeType::..., ...)`` factory call rather than the old brace
+    aggregate, so the cell text now ends on the factory's closing ``)`` (node
+    names carry no parens, so ``rfind(')')`` finds the call's own close). This
     slices to the EDGES table (the NEXT_HOP table reuses the same
     ``// from <name>`` annotation, so the search must start after the
     ``const EdgeInfo EDGES`` marker), walks to the ``from_name`` block, then
-    returns the cell text (everything up to the trailing ``}``) of the line
+    returns the cell text (everything up to the trailing ``)``) of the line
     annotated ``// to <to_name>`` so a test can assert on a single cell's
-    fields -- the four override-enum slots that close the cell -- without
-    matching the wrong table or source row.
+    ``makeEdge`` arguments without matching the wrong table or source row.
     """
     edges_marker = "const EdgeInfo EDGES"
     edges_start = cpp_text.index(edges_marker)
@@ -218,9 +221,9 @@ def _edge_cell_text(cpp_text: str, from_name: str, to_name: str) -> str:
                 break
             if line.rstrip().endswith(to_marker):
                 # Strip the trailing ", // to <name>" annotation, leaving the
-                # brace-enclosed cell ending at "}".
-                brace_end = line.rfind("}")
-                return line[: brace_end + 1].strip()
+                # makeEdge(...) call ending at its closing ")".
+                paren_end = line.rfind(")")
+                return line[: paren_end + 1].strip()
     raise AssertionError(
         "no EDGES cell found for " + from_name + "->" + to_name
     )
@@ -396,13 +399,14 @@ def test_projection_node_emits_nodetype_projection(emit_targets):
 
 
 def test_projection_node_drops_retired_projection_symbols(emit_targets):
-    """TC15 (negatives): EdgeType::PROJECTION / ProjectionMode / projection_mode_override absent; EdgeInfo is 7 fields.
+    """TC15 (negatives): EdgeType::PROJECTION / ProjectionMode / projection_mode_override absent; EdgeInfo is 8 fields.
 
     Issue #64 retired the projection EDGE type and its motion override. The
     emitted routes.{h,cpp} must carry NONE of: ``EdgeType::PROJECTION``,
     ``ProjectionMode`` (the enum), ``projection`` (the PipelineConfig member), or
     ``projection_mode_override`` (the EdgeInfo field). The ``EdgeInfo`` struct
-    must therefore have exactly 7 fields, ending on ``stop_at_line_override``.
+    now has exactly 8 fields (issue #156 added the trailing
+    ``line_follow_mode_override``), ending on ``line_follow_mode_override``.
     """
     header_path, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
@@ -417,9 +421,10 @@ def test_projection_node_drops_retired_projection_symbols(emit_targets):
         assert retired not in header_text, f"{retired!r} leaked into routes.h"
         assert retired not in cpp_text, f"{retired!r} leaked into routes.cpp"
 
-    # EdgeInfo is exactly 7 fields: type, distance_cm, heading_deg,
+    # EdgeInfo is exactly 8 fields: type, distance_cm, heading_deg,
     # speed_override, blind_mode_override, direction_override,
-    # stop_at_line_override. Slice the struct body and count the field lines.
+    # stop_at_line_override, line_follow_mode_override. Slice the struct body
+    # and count the field lines.
     struct_start = header_text.index("struct EdgeInfo {")
     struct_end = header_text.index("};", struct_start)
     struct_body = header_text[struct_start:struct_end]
@@ -427,10 +432,13 @@ def test_projection_node_drops_retired_projection_symbols(emit_targets):
         ln.strip() for ln in struct_body.splitlines()
         if ln.strip().endswith(";") and "struct EdgeInfo" not in ln
     ]
-    assert len(field_lines) == 7, (
-        f"EdgeInfo must have 7 fields; got {len(field_lines)}: {field_lines}"
+    assert len(field_lines) == 8, (
+        f"EdgeInfo must have 8 fields; got {len(field_lines)}: {field_lines}"
     )
-    assert field_lines[-1].startswith("StopAtLineMode") and "stop_at_line_override" in field_lines[-1]
+    assert (
+        field_lines[-1].startswith("LineFollowMode")
+        and "line_follow_mode_override" in field_lines[-1]
+    )
 
 
 def test_compute_source_hash_is_full_sha256():
@@ -662,6 +670,85 @@ def test_edge_blind_mode_override_emit(emit_targets):
     _emit_toy(fd, header_path, source_path)
     cpp_text = source_path.read_text(encoding="utf-8")
     assert "BlindMode::SYNC_TSHAPE" in cpp_text
+
+
+# ---------------------------------------------------------------------------
+# TC5/TC6 (emit half, issue #156 / ADR-069): a LINE `mode` override resolves to
+# the 8th EdgeInfo slot, EdgeInfo.line_follow_mode_override. LEFT / RIGHT /
+# MIDDLE each land on the trailing LineFollowMode::<TAG> argument of the biased
+# cell's makeEdge(...) call; absence (DEFAULT) drops the trailing arg entirely.
+# ---------------------------------------------------------------------------
+
+
+def _emit_line_mode_cell(emit_targets, mode) -> str:
+    """Emit the toy field with a LINE A->E override carrying ``mode`` and return the A->E cell.
+
+    Drops the ``A-E`` LINE_SEGMENTS pair so the rich EDGES entry is the sole
+    carrier of the A->E edge, isolating the emit to one predictable cell.
+    """
+    header_path, source_path = emit_targets
+    fd = _build_toy_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "E"}]
+    fd.EDGES = [
+        {
+            "type":        EDGE_LINE,
+            "u":           "A",
+            "v":           "E",
+            "distance_cm": 114.02,
+            "heading_deg": 37.87,
+            "mode":        mode,
+        },
+    ]
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    return _edge_cell_text(cpp_text, "A", "E")
+
+
+@pytest.mark.parametrize("tag", ["LEFT", "RIGHT", "MIDDLE"])
+def test_line_follow_mode_override_emit(emit_targets, tag):
+    """TC5/TC6: mode=LEFT|RIGHT|MIDDLE emits LineFollowMode::<TAG> as the cell's last arg."""
+    cell = _emit_line_mode_cell(emit_targets, tag)
+    assert cell.endswith(f"LineFollowMode::{tag})"), (
+        f"biased A->E cell must close on the line_follow_mode_override slot "
+        f"LineFollowMode::{tag}; got: {cell}"
+    )
+
+
+def test_line_follow_mode_override_emit_enum_instance(emit_targets):
+    """TC5 (enum form): mode=LineFollowMode.LEFT (instance) emits the same slot."""
+    from tools.path_planner.pipeline_config import LineFollowMode
+
+    cell = _emit_line_mode_cell(emit_targets, LineFollowMode.LEFT)
+    assert cell.endswith("LineFollowMode::LEFT)")
+
+
+def test_line_follow_mode_absent_emits_default(emit_targets):
+    """TC5/TC6: a LINE edge with NO mode drops the trailing line_follow arg (DEFAULT).
+
+    Absence == DEFAULT == the makeEdge trailing default, so the biased slot is
+    trimmed off the call entirely -- the cell carries no ``LineFollowMode::``
+    argument at all (it inherits DEFAULT from the factory signature).
+    """
+    header_path, source_path = emit_targets
+    fd = _build_toy_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "E"}]
+    fd.EDGES = [
+        {
+            "type":        EDGE_LINE,
+            "u":           "A",
+            "v":           "E",
+            "distance_cm": 114.02,
+            "heading_deg": 37.87,
+            "speed":       SpeedTier.FAST,  # a non-default override that is NOT the mode
+        },
+    ]
+    _emit_toy(fd, header_path, source_path)
+    cpp_text = source_path.read_text(encoding="utf-8")
+    a_to_e_cell = _edge_cell_text(cpp_text, "A", "E")
+    # The mode is absent -> no LineFollowMode literal in the cell; the speed
+    # override still lands (proving the cell IS the biased carrier, not empty).
+    assert "LineFollowMode::" not in a_to_e_cell
+    assert "SpeedTier::FAST" in a_to_e_cell
 
 
 # ---------------------------------------------------------------------------
@@ -1043,31 +1130,39 @@ def test_edge_info_struct_has_no_pivot_fields(emit_targets):
 
 
 def test_edge_info_cell_builders_drop_pivot_fields(emit_targets):
-    """TC14 (cell shape): every EDGES cell ends at its five override-enum slots.
+    """TC14 (cell shape): every EDGES cell is a makeEdge(...) factory call.
 
-    Both the populated ``_edge_cell`` and the empty ``_none_edge_cell`` builders
-    dropped the trailing ``pivot_trim_cm`` (and the turn-mode override slot), so
-    each emitted cell now closes on the ``stop_at_line_override`` enum literal --
-    not a float. A populated A->B cell and a NONE cell both end on a
-    ``StopAtLineMode::*`` literal.
+    Full makeEdge adoption (issue #156) replaced the old brace aggregate: both
+    the populated ``_edge_cell`` and the empty ``_none_edge_cell`` builders now
+    emit a ``makeEdge(EdgeType::..., ...)`` call that leans on the factory's
+    trailing defaults for every unspecified override, so a cell never carries
+    the retired trailing ``pivot_trim_cm`` float (nor a turn-mode slot) and no
+    longer closes on a brace. A populated A->B cell is a LINE makeEdge call and
+    a NONE cell collapses to ``makeEdge(EdgeType::NONE)``.
     """
     _, source_path = emit_targets
     _emit_with_toy_field(emit_targets)
     cpp_text = source_path.read_text(encoding="utf-8")
 
-    # A populated edge cell (A->B exists in the toy field) ends on the
-    # stop_at_line_override enum literal (the last field on EdgeInfo after
-    # direction_override), with no trailing float.
+    # A populated edge cell (A->B is a plain LINE edge in the toy field with no
+    # per-edge overrides) is a makeEdge(EdgeType::LINE, <dist>, ...) call that
+    # relies on trailing defaults for every override enum -- it closes on the
+    # factory's ")", never a trailing pivot_trim float or an aggregate brace.
     a_to_b_cell = _edge_cell_text(cpp_text, "A", "B")
-    assert a_to_b_cell.rstrip().endswith("StopAtLineMode::DEFAULT }"), (
-        "populated EdgeInfo cell must end on stop_at_line_override; got: " + a_to_b_cell
+    assert a_to_b_cell.startswith("makeEdge(EdgeType::LINE,"), (
+        "populated EdgeInfo cell must be a makeEdge(EdgeType::LINE, ...) call; "
+        "got: " + a_to_b_cell
     )
-    # No EdgeInfo cell carries a trailing pivot_trim_cm float anymore: the
-    # only floats in a cell are distance_cm / heading_deg near the START.
-    assert "EdgeType::NONE" in cpp_text
-    # A NONE cell also closes on the stop_at_line default (its 5 override slots).
-    assert "EdgeType::NONE, " in cpp_text
-    assert "StopAtLineMode::DEFAULT }" in a_to_b_cell
+    assert a_to_b_cell.endswith(")"), (
+        "makeEdge cell must close on the factory's ')'; got: " + a_to_b_cell
+    )
+    # No EdgeInfo cell carries the retired trailing pivot_trim_cm float, and the
+    # old override-brace aggregate (which closed on "StopAtLineMode::DEFAULT }")
+    # is gone entirely -- the makeEdge form leaves every unset override implicit.
+    assert "pivot_trim" not in cpp_text
+    assert "StopAtLineMode::DEFAULT }" not in cpp_text
+    # A NONE cell collapses to the bare factory call (all trailing defaults).
+    assert "makeEdge(EdgeType::NONE)" in cpp_text
 
 
 # Legacy EdgeType-suffix sentinel. Built via string concatenation so the
