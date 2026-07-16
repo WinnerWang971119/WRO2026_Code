@@ -491,7 +491,13 @@ void LineFollowerClass::update()
             const float dErr = err - _lastErr;
             _lastErr         = err;
 
-            float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
+            // Select the gain set for the leading board (ADR-066): the rear board's shorter
+            // sensor-to-axle lookahead needs its own Kp/Kd, so reverse follow uses the REAR
+            // gains and forward follow the FRONT gains.
+            const float kp = _reverse ? Config::LINE_KP_REAR : Config::LINE_KP;
+            const float kd = _reverse ? Config::LINE_KD_REAR : Config::LINE_KD;
+
+            float corr = (kp * err) + (kd * dErr);
 
             // Clamp the correction to the configured maximum.
             if (corr > Config::LINE_MAX_CORR)

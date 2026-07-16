@@ -19,12 +19,33 @@
  */
 namespace Config
 {
-    /** @brief Line-follower outer-loop Kp. @note TODO: tune on real strip. */
-    constexpr float LINE_KP = 5.8f;
-    /** @brief Line-follower outer-loop Ki. @note TODO: tune on real strip. */
+    /** @brief Line-follower outer-loop Kp (FRONT board / forward follow). @note TODO: tune on real strip. */
+    constexpr float LINE_KP = 5.6f;
+    /** @brief Line-follower outer-loop Ki. @note Unused by the P+D law (kept for future I-term). */
     constexpr float LINE_KI = 0.0f;
-    /** @brief Line-follower outer-loop Kd. @note TODO: tune on real strip. */
-    constexpr float LINE_KD = 1.1f;
+    /** @brief Line-follower outer-loop Kd (FRONT board / forward follow). @note TODO: tune on real strip. */
+    constexpr float LINE_KD = 1.4f;
+
+    // ---------------------------------------------------------------------------------------
+    // Rear-board (reverse follow) gains — ADR-066.
+    //
+    // The front line sensor sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle;
+    // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). That distance is the
+    // controller's lookahead, so the SAME Kp/Kd steer differently on each board: the shorter
+    // rear lookahead goes unstable (over-corrects, swings off the line) at gains the longer
+    // front lookahead rides smoothly. `LineFollower` therefore selects these gains whenever the
+    // rear board leads (reverse follow, `_reverse == true`); the FRONT gains above are used for
+    // forward follow. Tune them independently with the `inoTest/line_pid_tune` ping-pong tuner
+    // (its reverse runs optimise THIS set).
+    //
+    // Default to the front gains so behaviour is unchanged until the rear set is tuned — replace
+    // with the tuner's printed REAR values once measured.
+    // ---------------------------------------------------------------------------------------
+
+    /** @brief Line-follower outer-loop Kp (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
+    constexpr float LINE_KP_REAR = LINE_KP;
+    /** @brief Line-follower outer-loop Kd (REAR board / reverse follow). @note TODO: tune via ping-pong tuner. */
+    constexpr float LINE_KD_REAR = LINE_KD;
 
     // ---------------------------------------------------------------------------------------
     // Cruise / line following

@@ -10,9 +10,12 @@
  * the *outer* loop: it commands raw PWM, NOT `MoveSync`, so the lower-MCU's wheel-balance PID
  * does not stack on top of this one and oscillate (see `Drive::setSpeed` doxygen).
  *
- * Tuning is sourced exclusively from `Config::LINE_KP`, `Config::LINE_KI` (currently 0 — see
- * `update()` note), `Config::LINE_KD`, `Config::LINE_MAX_CORR`, and the active speed preset
- * (resolved by `_presetToPwm()` from `Config::SPEED_SLOW/NORMAL/FAST`). Hardware wiring,
+ * Tuning is sourced exclusively from the P+D gains, `Config::LINE_MAX_CORR`, and the active
+ * speed preset (resolved by `_presetToPwm()` from `Config::SPEED_SLOW/NORMAL/FAST`). The gains
+ * are direction-selected (ADR-066): forward follow uses `Config::LINE_KP` / `LINE_KD`, reverse
+ * follow (rear board leading) uses `Config::LINE_KP_REAR` / `LINE_KD_REAR` — the rear board's
+ * shorter sensor-to-axle lookahead needs its own tune. `Config::LINE_KI` is currently 0 and
+ * unused by the P+D law. Hardware wiring,
  * per-channel calibration baselines, and the firmware-level illumination/normalization for
  * the underlying MXColor boards live entirely in `WROLineArrayClass` (see `WROLineArray.h`
  * for the two-layer calibration contract). Lost-line behaviour is dispatched on
