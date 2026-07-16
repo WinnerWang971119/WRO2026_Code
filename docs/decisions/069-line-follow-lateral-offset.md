@@ -66,7 +66,10 @@ zero, so junction-freeze, the distance gate, and lost-line handling are untouche
 - CTPS renders the bias as a **visualization-only** lateral chassis nudge on the biased
   leg (the ADR-054 pivot-wheel-arc pattern), mapped through a named CTPS-layer constant
   `LINE_FOLLOW_OFFSET_DISPLAY_CM`; the parity-locked `LocalizationSim` pose is never
-  touched.
+  touched. Scope note: CTPS records the offset only on a distance-gated `lineFollowDist`
+  follow, so the nudge draws on that (and projection-follow) leg. A biased
+  until-intersection follow carries no recorded offset and renders centered — the render
+  is a fidelity aid on distance-gated legs, not a claim about every biased hop.
 - **Accepted, unmodeled approximation:** a biased arrival lands the axle roughly 1–1.5 cm
   laterally off the node versus what `Localization`/the sim assume. This sits inside
   junction-arrival tolerance and is left uncompensated in both — the project has a scar

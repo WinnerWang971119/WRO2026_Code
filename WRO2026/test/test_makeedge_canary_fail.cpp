@@ -28,7 +28,10 @@
  *   condition is a valid, evaluated compile-time constant) but violates the value contract — it
  *   ignores `type` and always stamps `EdgeType::LINE`, so `makeEdge(EdgeType::NONE).type ==
  *   EdgeType::NONE` is a constant `false` and the `static_assert` fires WITH its message on both
- *   clang and g++. The plan's TC-canary explicitly permits "or otherwise trips the emitted canary".
+ *   clang and g++. This still proves the guard: a genuinely non-constexpr factory hard-fails the
+ *   same assert line on every build (just without the user message), so the canary still catches a
+ *   broken factory; this value break additionally exercises the message path that the ctest's
+ *   PASS_REGULAR_EXPRESSION checks, proving the diagnostic reaches the operator.
  *
  * The CMake target is `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` (never part of the normal
  * build) and self-contained (only `<stdint.h>`), so an unrelated header typo cannot mask the
