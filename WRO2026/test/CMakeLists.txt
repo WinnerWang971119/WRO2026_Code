@@ -2380,3 +2380,25 @@ add_executable(test_turn_pd_policy
 )
 target_include_directories(test_turn_pd_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_pd_policy COMMAND test_turn_pd_policy)
+
+# =========================================================================================
+# Test executable #31 — Turn PD controller stateful integration (ADR-068, T6, TC9-TC17).
+#
+# First stateful test of the turn FSM: links the REAL Drive.cpp + YawSource.cpp per the
+# issue-#106 host-link recipe (SKETCH_DIR FIRST, path_mocks.cpp NOT hal_mocks.cpp, NO
+# force-included hal_mocks/Drive.h) so the dispatched MiniR4.DriveDC PWM is observable
+# end-to-end, post-creep-floor, post-slew-limit — not just the pure TurnPDPolicy.h math
+# (already covered in isolation by test_turn_pd_policy). PathTracker/Localization/routes are
+# NOT linked — Drive.cpp does not touch any of them, so this target stays the minimal
+# three-file link.
+# =========================================================================================
+add_executable(test_turn_pd_integration
+    ${TEST_DIR}/test_turn_pd_integration.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_turn_pd_integration PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks peripherals — no routes needed.
+add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
