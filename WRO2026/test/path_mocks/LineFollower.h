@@ -133,7 +133,7 @@ public:
     /** @brief Record the brake-on-gate override (`lastBrakeOnGate`). @return `*this`. */
     LineFollowerEnableBuilder& setBrakeOnGate(bool on);
 
-    /** @brief No-op stub for the lateral-offset override (see issue #156). @return `*this`. */
+    /** @brief Record the lateral-offset override (`lastLineFollowOffset`, issue #156). @return `*this`. */
     LineFollowerEnableBuilder& setLineFollowOffset(float offset);
 
 private:
@@ -176,6 +176,10 @@ public:
     bool lastReverse = false;
     /** @brief Last `on` value passed to `setOvershootMode(...)`. Default `false`. */
     bool lastOvershootMode = false;
+    /** @brief Last `offset` value passed to `setLineFollowOffset(...)` (issue #156). Default
+     *         `0.0f` (centred). PathTracker composes `sign * lineFollowModeToSetpoint(mode)`, so
+     *         this is the signed, reverse-frame-corrected setpoint the biased leg threads in. */
+    float lastLineFollowOffset = 0.0f;
 
     /**
      * @brief Reset all recording + test-set fields to their initial values.
@@ -183,16 +187,17 @@ public:
      */
     void mockReset()
     {
-        lastEnabled        = false;
-        setEnabledCount    = 0;
-        lastBrake          = true;
-        lastBrakeOnGate    = true;
-        lastTShapeRampUp   = true;
-        lastTShapeRampDown = true;
-        lastDistanceTarget = 0.0f;
-        lastPreset         = Config::SpeedPreset::NORMAL;
-        lastReverse        = false;
-        lastOvershootMode  = false;
+        lastEnabled          = false;
+        setEnabledCount      = 0;
+        lastBrake            = true;
+        lastBrakeOnGate      = true;
+        lastTShapeRampUp     = true;
+        lastTShapeRampDown   = true;
+        lastDistanceTarget   = 0.0f;
+        lastPreset           = Config::SpeedPreset::NORMAL;
+        lastReverse          = false;
+        lastOvershootMode    = false;
+        lastLineFollowOffset = 0.0f;
         _enabled           = false;
         _distanceReached   = false;
         _lineLost          = false;
@@ -394,8 +399,9 @@ inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setBrakeOnGate(bool
     return *this;
 }
 
-inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float /*offset*/)
+inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float offset)
 {
+    _owner.lastLineFollowOffset = offset;
     return *this;
 }
 

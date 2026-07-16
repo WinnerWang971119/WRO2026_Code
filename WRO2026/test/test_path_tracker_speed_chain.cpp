@@ -39,7 +39,12 @@
  *   - TC14 — pass-through entry seed clamp: a FAST line (`Ln0->Ln1`) feeding a
  *     collinear SLOW blind (`Ln1->Lb2`) enters the blind hop at <= the SLOW cruise
  *     (60): the captured inbound line cruise is clamped down to the hop's own
- *     resolved cruise before launch.
+ *     resolved cruise before launch. `Ln0->Ln1` also carries `LineFollowMode::LEFT`
+ *     (issue #156), so this case additionally pins that the FAST-line arm threads the
+ *     resolved lateral offset into the follower.
+ *   - TC16 — lateral offset threading (issue #156): the `LineFollowMode::LEFT`
+ *     `Ln0->Ln1` LINE edge arms the follower with the composed forward setpoint
+ *     `+Config::LINE_FOLLOW_OFFSET_ERROR` (a FORWARD hop, so no reverse-sign flip).
  *
  * Config overrides use `target_compile_definitions` (CMakeLists.txt), never an
  * in-file `#define` (`PathTracker.cpp` is a separate TU): `HOP_SETTLE_MS=0` so the
@@ -52,6 +57,14 @@
 
 namespace
 {
+/// @brief Float near-equality (TestAssert.h has no float assertion; avoids the `abs`/`fabs`
+///        macro clash from the mock `Arduino.h`).
+bool nearf(float a, float b, float eps = 1.0e-4f)
+{
+    const float d = a - b;
+    return d < eps && d > -eps;
+}
+
 /// @brief Tick the real FSM until a Drive move is IN FLIGHT (a blind hop / seek
 ///        dispatched), bounded so a never-dispatching regression fails as an
 ///        assert rather than hanging. Parks the mock IMU yaw at the collinear
@@ -248,6 +261,9 @@ void test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise()
     ASSERT_EQ(routedFirstHop(ln1, lb2), lb2);
     ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).type == Routes::EdgeType::LINE);
     ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).speed_override == Routes::SpeedTier::FAST);
+    // issue #156: Ln0->Ln1 is authored LEFT so the same run exercises the biased-leg thread.
+    ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).line_follow_mode_override
+                == Routes::LineFollowMode::LEFT);
     ASSERT_TRUE(FieldMap::getEdge(ln1, lb2).type == Routes::EdgeType::BLIND);
     ASSERT_TRUE(FieldMap::getEdge(ln1, lb2).speed_override == Routes::SpeedTier::SLOW);
 
@@ -271,6 +287,10 @@ void test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise()
     ASSERT_TRUE(LineFollower.isEnabled());
     // The FAST line edge armed the follower at the FAST preset.
     ASSERT_TRUE(LineFollower.lastPreset == Config::SpeedPreset::FAST);
+    // issue #156: the LEFT bias on Ln0->Ln1 threaded the composed forward setpoint into the
+    // follower arm. Ln0->Ln1 is a FORWARD hop (heading 0 == the seated facing), so the sign is
+    // +1 and the resolved offset is +Config::LINE_FOLLOW_OFFSET_ERROR (referenced, never a literal).
+    ASSERT_TRUE(nearf(LineFollower.lastLineFollowOffset, Config::LINE_FOLLOW_OFFSET_ERROR));
 
     // Cross Ln1: the intersection-gated pass-through peek fires (Ln1's onward flank
     // Ln1->Lb2 is collinear BLIND and Ln1 is not the goal), keeping the follower live
@@ -316,6 +336,51 @@ void test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise()
 }
 
 // ===========================================================================
+// TC16 — the LEFT LINE edge threads the resolved lateral offset into the follower.
+// ===========================================================================
+
+void test_tc16_left_bias_threads_offset()
+{
+    TEST_SCOPE("TC16: LineFollowMode::LEFT Ln0->Ln1 arms the follower with +OFFSET (issue #156)");
+
+    const uint8_t ln0 = nodeByName("Ln0");
+    const uint8_t ln1 = nodeByName("Ln1");
+    ASSERT_TRUE(ln0 != FieldMap::NODE_NONE && ln1 != FieldMap::NODE_NONE);
+
+    // Pin the biased cell + the direct route so a shadow-table edit fails LOUDLY here rather
+    // than silently binding this probe on a different (unbiased) edge.
+    ASSERT_EQ(routedFirstHop(ln0, ln1), ln1);
+    ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).type == Routes::EdgeType::LINE);
+    ASSERT_TRUE(FieldMap::getEdge(ln0, ln1).line_follow_mode_override
+                == Routes::LineFollowMode::LEFT);
+
+    resetWorld();
+    Serial.clearCapture();
+    seatAt("Ln0", 0);    // Ln0->Ln1 departs heading 0 (no pre-turn), so it is a FORWARD hop.
+    PathTracker.goTo(ln1).async();
+
+    // Tick until the LINE follow arms for the Ln0->Ln1 hop (the non-overshoot P+D entry).
+    for (int i = 0; i < path_harness::kMaxHandshakeTicks; ++i)
+    {
+        cooperativeTick();
+        if (LineFollower.isEnabled() && !LineFollower.lastOvershootMode
+            && Localization.getCurrentNode() == ln0)
+        {
+            break;
+        }
+    }
+    ASSERT_EQ(Localization.getCurrentNode(), ln0);
+    ASSERT_TRUE(LineFollower.isEnabled());
+    ASSERT_FALSE(PathTracker.hasFault());
+
+    // THE TC16 ASSERT: a FORWARD LEFT hop resolves to sign(+1) * lineFollowModeToSetpoint(LEFT) =
+    // +Config::LINE_FOLLOW_OFFSET_ERROR (referenced, never a literal, per the retune-fanout rule).
+    // Falsifiable: a MIDDLE/absent edge would thread 0.0f; a reverse hop would negate it.
+    ASSERT_TRUE(nearf(LineFollower.lastLineFollowOffset, Config::LINE_FOLLOW_OFFSET_ERROR));
+    ASSERT_TRUE(LineFollower.lastLineFollowOffset > 0.0f);
+}
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
@@ -328,6 +393,7 @@ int main()
     test_tc10b_same_tier_mode_mix_chains();
     test_tc10c_seek_cruises_at_resolved_tier();
     test_tc14_passthrough_entry_seed_clamped_to_resolved_cruise();
+    test_tc16_left_bias_threads_offset();
 
     TEST_REPORT();
 }

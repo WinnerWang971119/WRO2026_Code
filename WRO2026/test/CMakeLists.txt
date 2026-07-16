@@ -441,6 +441,25 @@ add_mock_force_includes(test_line_follower_overshoot)
 add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 
 # =========================================================================================
+# Test executable #1b — LineFollower lateral-offset setpoint bias (issue #156, TC1..TC4).
+#
+# Same recipe as `test_line_follower_overshoot`: links the REAL `LineFollower.cpp`
+# (`SUT_SOURCES`) against the `mocks/` Drive / WROLineArray / Intersection surface + the mock
+# facade globals (`MOCK_SOURCES`), with `add_mock_force_includes` shadowing the real peripheral
+# headers. Exercises the actual P+D controller so the commanded differential PWM is the observable
+# for the `corr = LINE_KP*(err - offset) + LINE_KD*(err - _lastErr)` bias (AC1/AC2/AC4) and the
+# reverse-hop composition PathTracker passes (AC3, via `WROMath::lineFollowModeToSetpoint`).
+# =========================================================================================
+add_executable(test_line_follower_offset
+    ${TEST_DIR}/test_line_follower_offset.cpp
+    ${SUT_SOURCES}
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_line_follower_offset PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_line_follower_offset)
+add_test(NAME line_follower_offset COMMAND test_line_follower_offset)
+
+# =========================================================================================
 # Test executables #2/#3 — the FIVE PathTracker mirror tests, re-wired to host-link the
 # REAL `PathTracker.cpp` + `Drive.cpp` (issue #106, closing the last gap in ADR-030).
 #
@@ -679,7 +698,7 @@ add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pas
 # dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
 #
 # It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
-# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=2`. It does NOT
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=3`. It does NOT
 # define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
 # with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
 # and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
@@ -704,7 +723,7 @@ target_include_directories(test_path_tracker_parity_dump PRIVATE
 add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
 target_compile_definitions(test_path_tracker_parity_dump
-    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=2)
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=3)
 
 # =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
@@ -1590,6 +1609,41 @@ add_test(NAME imu_yaw_sign_zero_compile_fail
 )
 set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "IMU_YAW_SIGN must be exactly")
+
+# =========================================================================================
+# Test executable #19b — makeEdge() constexpr canary negative (issue #156, TC-canary / AC8,
+# compile-fail target).
+#
+# Proves the emitted `makeEdge(...)` constexpr canary `static_assert` FIRES with its own message
+# when the factory contract is broken. The canary keeps the ~30 KB `const EDGES` array in flash
+# `.rodata`; a factory not usable in a constant expression demotes it to RAM (blowing the 32 KB
+# SRAM budget), so the build MUST fail loudly. The TU (self-contained, only `<stdint.h>`)
+# reproduces the emitted factory + canary verbatim against a deliberately value-broken body so the
+# canary is a constant `false` and fires WITH its message on both clang and g++ — see the file
+# docblock for why a value break (not a dropped `constexpr`) is used to exercise the message path.
+#
+# Mirrors `test_imu_yaw_sign_zero` EXACTLY: `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep
+# it out of the default build, and NO `add_mock_force_includes(...)` (nor any include dir) so an
+# unrelated header typo cannot mask the intended diagnostic. When `PASS_REGULAR_EXPRESSION` is set,
+# ctest decides pass/fail purely on whether the regex matches the captured build output and IGNORES
+# the exit code — so the test PASSES only when the canary message is emitted. NEVER `WILL_FAIL`
+# (memory `gotcha_ctest_compile_fail_assertion`): `WILL_FAIL` false-PASSes on any non-zero exit and
+# cannot coexist with `PASS_REGULAR_EXPRESSION`.
+# =========================================================================================
+add_executable(test_makeedge_canary_fail
+    ${TEST_DIR}/test_makeedge_canary_fail.cpp
+)
+set_target_properties(test_makeedge_canary_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+
+add_test(NAME makeedge_canary_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_makeedge_canary_fail --config $<CONFIG>
+)
+set_tests_properties(makeedge_canary_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "makeEdge must be constexpr-evaluable")
 
 # =========================================================================================
 # Test executable #20 — shared host-test mock HAL signature conformance (issue #105).
