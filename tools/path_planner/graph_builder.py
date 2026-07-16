@@ -26,7 +26,14 @@ compiler, and header writer):
   Uniform across both edge types. Not validated here.
 * ``mode``   : opaque string tag selecting the per-edge primitive mode
   (type-switched: interpretation depends on the edge's ``type``). Not
-  validated here.
+  validated here. Symmetry is now edge-type-conditional: on a
+  :data:`EDGE_BLIND` edge ``mode`` is bidirectional (copied to both
+  directions, like ``speed``); on a :data:`EDGE_LINE` edge ``mode``
+  selects a LEFT/RIGHT lateral follow bias, which is asymmetric under
+  reversal, so it is directional and applied to the forward (u -> v)
+  edge only -- the reverse edge needs its own ``EDGES`` entry to opt in
+  (same asymmetric-override shape as ``direction``/``stop_at_line``
+  below).
 * ``direction_override`` : integer (the value of a
   :class:`pipeline_config.DirectionMode` member, 1 = FORCE_FORWARD,
   2 = FORCE_REVERSE). Forces forward/reverse traversal of this directed
@@ -229,6 +236,16 @@ def edge_clips_obstacle(
 
 # Symmetric: describes HOW to traverse the segment, not which end is the
 # entry. Safe to copy onto both directions of a bidirectional pair.
+#
+# ``mode``'s symmetry is now edge-type-conditional rather than a blanket
+# bidirectional copy: it stays in this tuple for BLIND edges (a BLIND
+# ``mode`` describes symmetric dead-reckoning behavior), but a LINE edge's
+# ``mode`` selects a LEFT/RIGHT lateral follow bias -- asymmetric under
+# reversal -- so LINE `mode` is instead pulled into
+# :data:`_DIRECTIONAL_OPTIONAL_KEYS` at extraction time. See
+# :func:`_extract_bidirectional_attrs` / :func:`_extract_directional_attrs`,
+# which both branch on the edge's ``type`` to route ``mode`` to the correct
+# set.
 _BIDIRECTIONAL_OPTIONAL_KEYS = ("speed", "mode")
 
 # Direction-dependent: ``direction`` forces forward/reverse traversal of
@@ -240,6 +257,14 @@ _BIDIRECTIONAL_OPTIONAL_KEYS = ("speed", "mode")
 # asymmetric override stays on the forward (u -> v) edge only; to override
 # the reverse direction too, the author must add a separate ``EDGES`` entry
 # with ``u`` and ``v`` swapped.
+#
+# ``mode`` joins this set conditionally: on a LINE edge, LEFT/RIGHT is
+# asymmetric under reversal (LEFT-of-travel on u -> v is RIGHT-of-travel on
+# v -> u), so LINE ``mode`` belongs to the authored directed edge exactly
+# like ``direction``/``stop_at_line`` -- a companion reverse entry must be
+# authored separately to bias the reverse traversal too. BLIND ``mode``
+# never reaches this set; it stays bidirectional via
+# :data:`_BIDIRECTIONAL_OPTIONAL_KEYS`.
 _DIRECTIONAL_OPTIONAL_KEYS = ("direction", "stop_at_line")
 
 # String-to-integer mapping for the ``direction`` per-edge override.
@@ -263,33 +288,45 @@ _STOP_AT_LINE_STR_TO_MODE = {
 }
 
 
-def _extract_bidirectional_attrs(options: dict) -> dict:
+def _extract_bidirectional_attrs(options: dict, edge_type: str) -> dict:
     """Pull symmetric metadata out of a source-edge options dict.
 
-    Symmetric attributes (``speed``, ``mode``) describe the segment itself
-    rather than the entry direction, so they are copied verbatim onto both
-    the forward and reverse directed edges. Absent keys stay absent so
-    downstream consumers can distinguish "no override" from an explicit
-    value.
+    Symmetric attributes describe the segment itself rather than the entry
+    direction, so they are copied verbatim onto both the forward and
+    reverse directed edges. Absent keys stay absent so downstream consumers
+    can distinguish "no override" from an explicit value.
+
+    ``speed`` is always symmetric. ``mode`` is symmetric ONLY for a
+    :data:`EDGE_BLIND` edge -- a BLIND ``mode`` describes symmetric
+    dead-reckoning behavior. For a :data:`EDGE_LINE` edge, ``mode`` selects
+    a LEFT/RIGHT lateral follow bias that is asymmetric under reversal, so
+    it is skipped here and instead pulled by
+    :func:`_extract_directional_attrs`.
 
     :param options: dict-like source-edge attributes (may be empty).
+    :param edge_type: :data:`EDGE_LINE` or :data:`EDGE_BLIND` -- gates
+        whether ``mode`` is treated as symmetric.
     :return: dict of attributes to splat onto both directions.
     """
     forwarded: dict = {}
     for key in _BIDIRECTIONAL_OPTIONAL_KEYS:
+        if key == "mode" and edge_type != EDGE_BLIND:
+            # LINE mode is directional -- handled by
+            # _extract_directional_attrs instead.
+            continue
         if key in options:
             forwarded[key] = options[key]
     return forwarded
 
 
-def _extract_directional_attrs(options: dict) -> dict:
+def _extract_directional_attrs(options: dict, edge_type: str) -> dict:
     """Pull direction-dependent metadata out of a source-edge options dict.
 
-    These attributes (``direction``, ``stop_at_line``) describe behavior
-    that depends on which end is the entry, so the caller must apply the
-    returned dict ONLY to the forward (u -> v) directed edge -- never to
-    the reverse. The string mapping of each is resolved here so
-    downstream consumers don't have to re-derive it.
+    These attributes describe behavior that depends on which end is the
+    entry, so the caller must apply the returned dict ONLY to the forward
+    (u -> v) directed edge -- never to the reverse. The string mapping of
+    each is resolved here so downstream consumers don't have to re-derive
+    it.
 
     ``direction`` is translated from the field-data string vocabulary
     (``"front"`` / ``"rear"``) into the wire integer (1 / 2) and stored
@@ -304,7 +341,16 @@ def _extract_directional_attrs(options: dict) -> dict:
     writer reads to emit the ``StopAtLineMode::*`` literal. Absence yields
     no attribute, so header_writer falls back to DEFAULT (0).
 
+    ``mode`` is forwarded here, verbatim and unrenamed, ONLY for a
+    :data:`EDGE_LINE` edge -- LEFT/RIGHT is asymmetric under reversal, so
+    it belongs on the forward directed edge alongside ``direction`` /
+    ``stop_at_line``. A BLIND edge's ``mode`` never reaches this function's
+    output; it is symmetric and handled by
+    :func:`_extract_bidirectional_attrs` instead.
+
     :param options: dict-like source-edge attributes (may be empty).
+    :param edge_type: :data:`EDGE_LINE` or :data:`EDGE_BLIND` -- gates
+        whether ``mode`` is treated as directional.
     :return: dict of attributes to splat onto the forward edge only.
     """
     forwarded: dict = {}
@@ -320,6 +366,12 @@ def _extract_directional_attrs(options: dict) -> dict:
             forwarded["stop_at_line_override"] = value
         else:
             forwarded["stop_at_line_override"] = _STOP_AT_LINE_STR_TO_MODE[value.lower()]
+    if edge_type == EDGE_LINE and "mode" in options:
+        # LEFT/RIGHT is asymmetric under reversal -- forward-only, like
+        # direction/stop_at_line above. Verbatim, unrenamed: header_writer
+        # (T-headerwriter) resolves the string into
+        # EdgeInfo.line_follow_mode_override, keyed off the edge's type.
+        forwarded["mode"] = options["mode"]
     return forwarded
 
 
@@ -336,25 +388,33 @@ def _emit_directed_pair(
 
     Optional ``options`` carries two flavors of metadata:
 
-    * **Bidirectional** (``speed``, ``mode``): describe the segment
-      itself; copied onto both directions.
-    * **Directional** (``direction``, ``stop_at_line``): describes behavior
-      that depends on which end is the entry. Applied ONLY to the forward
-      (u -> v) edge. Mirroring it to the reverse edge would force the wrong
-      traversal sense / seek behavior on backward traversal (Codex P1). To
-      override the reverse direction too, add a separate ``EDGES`` entry
-      with ``u`` and ``v`` swapped.
+    * **Bidirectional** (``speed``; ``mode`` on a BLIND edge): describe the
+      segment itself; copied onto both directions.
+    * **Directional** (``direction``, ``stop_at_line``; ``mode`` on a LINE
+      edge): describes behavior that depends on which end is the entry.
+      Applied ONLY to the forward (u -> v) edge. Mirroring it to the
+      reverse edge would force the wrong traversal sense / seek /
+      lateral-bias behavior on backward traversal (Codex P1, extended to
+      LINE ``mode`` for the same reason: LEFT/RIGHT is asymmetric under
+      reversal). To override the reverse direction too, add a separate
+      ``EDGES`` entry with ``u`` and ``v`` swapped.
+
+    ``mode``'s flavor is edge-type-conditional -- see
+    :func:`_extract_bidirectional_attrs` / :func:`_extract_directional_attrs`,
+    which both branch on ``edge_type`` to route it correctly.
 
     .. warning::
        **A directional override is SINGLE-DIRECTION and silently skipped
-       on reverse traversal.** ``direction_override`` lands on the u -> v
-       edge only; the reverse (v -> u) edge here gets just the symmetric
-       ``speed`` / ``mode``. Because every pair is bidirectional and
+       on reverse traversal.** ``direction_override`` (and, on a LINE edge,
+       ``mode``) lands on the u -> v edge only; the reverse (v -> u) edge
+       here gets just the symmetric ``speed`` (plus ``mode`` too, but only
+       when this is a BLIND edge). Because every pair is bidirectional and
        Dijkstra picks whichever direction is shorter, ``NEXT_HOP`` may
        route v -> u -- in which case the override does NOT apply and the
-       hop falls back to ``PIPELINE_CONFIG.direction`` with no warning.
-       If you need the override in both senses, author a second ``EDGES``
-       entry with ``u`` and ``v`` swapped (see finding #40).
+       hop falls back to ``PIPELINE_CONFIG.direction`` (or centered/MIDDLE
+       follow, for LINE ``mode``) with no warning. If you need the
+       override in both senses, author a second ``EDGES`` entry with
+       ``u`` and ``v`` swapped (see finding #40).
 
     Geometric attributes (``distance_cm``, ``heading_deg``) default to
     the Euclidean / atan2 of ``pu`` and ``pv``. When ``options`` supplies
@@ -375,8 +435,8 @@ def _emit_directed_pair(
             distance_cm = float(options["distance_cm"])
         if "heading_deg" in options:
             heading = float(options["heading_deg"])
-    bidirectional = _extract_bidirectional_attrs(options) if options else {}
-    directional   = _extract_directional_attrs(options)   if options else {}
+    bidirectional = _extract_bidirectional_attrs(options, edge_type) if options else {}
+    directional   = _extract_directional_attrs(options, edge_type)   if options else {}
     g.add_edge(
         u, v,
         type=edge_type,
@@ -414,9 +474,13 @@ def build_graph(field_data) -> nx.DiGraph:
        ``type`` (one of :data:`EDGE_LINE`, :data:`EDGE_BLIND`), ``u``,
        and ``v``, plus any of the optional keys ``speed``, ``mode``,
        ``direction``, ``stop_at_line`` which are forwarded verbatim to
-       the resulting directed edges. Same obstacle-clip drop applies, and
-       drops warn the same way BLIND_EDGES drops do because the routing
-       intent is explicit.
+       the resulting directed edges. ``mode``'s symmetry is
+       edge-type-conditional: bidirectional (both directions) on a BLIND
+       edge, directional (forward ``u -> v`` only, like ``direction`` /
+       ``stop_at_line``) on a LINE edge -- see
+       :func:`_extract_bidirectional_attrs` / :func:`_extract_directional_attrs`.
+       Same obstacle-clip drop applies, and drops warn the same way
+       BLIND_EDGES drops do because the routing intent is explicit.
     7. Warn (``UserWarning``) for any node that ended up with no incident
        edges.
 
@@ -524,13 +588,17 @@ def build_graph(field_data) -> nx.DiGraph:
                 )
                 continue
             # AUTHORING WARNING (finding #40): a directional override on this
-            # EDGES entry -- ``direction`` ("front"/"rear") or ``stop_at_line``
-            # ("on"/"off") -- applies ONLY to the u -> v hop. The reverse
-            # (v -> u) edge below inherits just the symmetric ``speed`` / ``mode``.
-            # Edges are bidirectional and Dijkstra picks the shorter sense, so if
-            # NEXT_HOP routes v -> u the override is SILENTLY ignored and the hop
-            # falls back to the pipeline default. To force the override on the
-            # reverse hop too, add a second EDGES entry with u/v swapped.
+            # EDGES entry -- ``direction`` ("front"/"rear"), ``stop_at_line``
+            # ("on"/"off"), or (on a LINE edge only) ``mode`` ("LEFT"/"RIGHT")
+            # -- applies ONLY to the u -> v hop. The reverse (v -> u) edge
+            # below inherits just the symmetric ``speed`` (plus ``mode`` too,
+            # but only when this is a BLIND edge -- LINE ``mode`` does NOT
+            # mirror). Edges are bidirectional and Dijkstra picks the shorter
+            # sense, so if NEXT_HOP routes v -> u the override is SILENTLY
+            # ignored and the hop falls back to the pipeline default (or
+            # centered/MIDDLE follow, for LINE ``mode``). To force the
+            # override on the reverse hop too, add a second EDGES entry with
+            # u/v swapped.
             _emit_directed_pair(g, u, v, pu, pv, edge_type, options=edge)
 
     for node in g.nodes():
