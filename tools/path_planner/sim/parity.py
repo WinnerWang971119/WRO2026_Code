@@ -69,6 +69,7 @@ from tools.path_planner.graph_builder import (
 )
 from tools.path_planner.pipeline_config import (
     BlindMode,
+    LineFollowMode,
     PipelineConfig,
     SpeedTier,
     TurnMode,
@@ -109,15 +110,19 @@ from tools.path_planner.sim.runtime import (
     _wall_axle_coord,
     resolve_blind_mode,
     resolve_edge_dispatch,
+    resolve_line_follow_mode,
     resolve_speed,
     resolve_stop_at_line,
     walk_next_hop,
 )
 
 #: Expected ``schema_version`` on every ``goal_start`` framing record. The C++
-#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=2``; any mismatch on load
-#: is a hard, loud failure (a desynced emitter vs loader).
-PARITY_SCHEMA_VERSION: int = 2
+#: dump target compiles with ``-DPARITY_SCHEMA_VERSION=3``; any mismatch on load
+#: is a hard, loud failure (a desynced emitter vs loader). Bumped 2 -> 3 for the
+#: issue-#156 / ADR-069 parity v3 wire schema: the two LINE-follow records gain a
+#: ``follow_mode`` field and rename the historically-misnamed ``line_mode`` (which
+#: has always held the resolved speed tier) to ``speed``.
+PARITY_SCHEMA_VERSION: int = 3
 
 
 __all__ = [
@@ -186,11 +191,20 @@ TRACE_RECORD_FIELDS: Dict[str, Dict[str, Any]] = {
         "realized_offset_cm": float,
     },
     "turn": {"body_heading_deg": float, "wheel": str},
-    "line_follow": {"reverse": bool, "line_mode": str},
+    # Parity v3 (issue #156 / ADR-069) field-set BUMP on both LINE-follow records:
+    # `line_mode` is RENAMED to `speed` (its value has always been the resolved
+    # SpeedTier tier name — only the key was misnamed) and a new `follow_mode`
+    # (the RESOLVED LineFollowMode member name MIDDLE/LEFT/RIGHT — the MODE, not
+    # the signed offset, recorded PRE-reverse-sign) is added right after it. The
+    # field ORDER here mirrors the C++ `_ptEmitLineFollow` / `_ptEmitProjectionFollow`
+    # serialization byte-for-byte (the strict loader keys on the field SET, but the
+    # order is kept in lockstep so both sides read identically).
+    "line_follow": {"reverse": bool, "speed": str, "follow_mode": str},
     "line_overshoot": {"advance_cm": float, "pass_through": bool, "reanchor": str},
     "projection_follow": {
         "reverse": bool,
-        "line_mode": str,
+        "speed": str,
+        "follow_mode": str,
         "dist_cm": float,
         "pass_through": bool,
         "reanchor": str,
@@ -370,17 +384,36 @@ def _line_mode_name(mode: SpeedTier) -> str:
     """Spell a LINE edge's resolved :class:`SpeedTier` exactly as the C++
     ``_ptLineModeName`` does.
 
-    The wire field stays named ``line_mode`` (frozen trace schema); ADR-064 only
-    re-sources its value from the per-edge ``speed`` tier, whose member names
-    (``SLOW`` / ``NORMAL`` / ``FAST``) match the old ``LineMode`` spelling
-    byte-for-byte. ``DEFAULT`` maps to ``"NORMAL"`` (the resolver delivers a
-    concrete tier before this point; the fallback mirrors the C++ default arm).
+    The parity v3 bump (issue #156 / ADR-069) RENAMES this value's wire field from
+    the historically-misnamed ``line_mode`` to ``speed``; the helper name is kept
+    (like the C++ ``_ptLineModeName``) to limit churn, but it produces the
+    :class:`SpeedTier` member name (``SLOW`` / ``NORMAL`` / ``FAST``), NOT a follow
+    mode. ``DEFAULT`` maps to ``"NORMAL"`` (the resolver delivers a concrete tier
+    before this point; the fallback mirrors the C++ default arm).
     """
     if mode == SpeedTier.SLOW:
         return "SLOW"
     if mode == SpeedTier.FAST:
         return "FAST"
     return "NORMAL"
+
+
+def _follow_mode_name(mode: LineFollowMode) -> str:
+    """Spell a RESOLVED :class:`LineFollowMode` exactly as the C++
+    ``_ptFollowModeName`` does (issue #156 / ADR-069 parity v3).
+
+    The value is the LineFollowMode member name (``MIDDLE`` / ``LEFT`` / ``RIGHT``)
+    for the ``follow_mode`` wire key — the MODE, recorded PRE-reverse-sign, never
+    the signed float offset the follower ultimately applies.
+    :func:`~tools.path_planner.sim.runtime.resolve_line_follow_mode` resolves
+    ``DEFAULT`` -> ``MIDDLE`` upstream, so ``DEFAULT`` is never reached here; the
+    fallback to ``"MIDDLE"`` mirrors the C++ defensive default arm.
+    """
+    if mode == LineFollowMode.LEFT:
+        return "LEFT"
+    if mode == LineFollowMode.RIGHT:
+        return "RIGHT"
+    return "MIDDLE"
 
 
 def _drive_mode_name(mode: BlindMode) -> str:
@@ -708,8 +741,11 @@ def _make_return_move(
     )
 
 
-def _make_line_follow(reverse: bool, line_mode: str) -> TraceRecord:
-    return TraceRecord("line_follow", {"reverse": bool(reverse), "line_mode": line_mode})
+def _make_line_follow(reverse: bool, speed: str, follow_mode: str) -> TraceRecord:
+    return TraceRecord(
+        "line_follow",
+        {"reverse": bool(reverse), "speed": speed, "follow_mode": follow_mode},
+    )
 
 
 def _make_line_overshoot(advance_cm: float, pass_through: bool) -> TraceRecord:
@@ -724,13 +760,14 @@ def _make_line_overshoot(advance_cm: float, pass_through: bool) -> TraceRecord:
 
 
 def _make_projection_follow(
-    reverse: bool, line_mode: str, dist_cm: float, pass_through: bool
+    reverse: bool, speed: str, follow_mode: str, dist_cm: float, pass_through: bool
 ) -> TraceRecord:
     return TraceRecord(
         "projection_follow",
         {
             "reverse": bool(reverse),
-            "line_mode": line_mode,
+            "speed": speed,
+            "follow_mode": follow_mode,
             "dist_cm": float(dist_cm),
             "pass_through": bool(pass_through),
             "reanchor": _REANCHOR_FOR_KIND["projection_follow"],
@@ -832,9 +869,16 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
       turn (the firmware routes returns through the pipeline turn). Surfaced
       from the sim's pivot / pipeline resolution, never recomputed in a shared
       normalizer (which would be vacuous agreement).
-    * ``line_mode`` (forward line_follow / projection_follow) —
-      ``resolve_speed(edge, cfg)`` for that hop's edge (the wire field keeps its
-      ``line_mode`` name; ADR-064 re-sources its value from the ``speed`` tier).
+    * ``speed`` (line_follow / projection_follow) — ``resolve_speed(edge, cfg)``
+      for that hop's edge (parity v3 renamed this wire field from the
+      historically-misnamed ``line_mode``; the value is still the ``speed`` tier).
+    * ``follow_mode`` (line_follow / projection_follow) —
+      ``resolve_line_follow_mode(edge, cfg)`` for that hop's edge, stringified to
+      the RESOLVED :class:`~tools.path_planner.pipeline_config.LineFollowMode`
+      member name (``MIDDLE`` / ``LEFT`` / ``RIGHT``, never ``DEFAULT``) — the MODE,
+      recorded PRE-reverse-sign (issue #156 / ADR-069). The reverse-board sign the
+      firmware composes downstream is deliberately NOT applied here (this is the
+      mode, not the signed offset).
     * ``drive_mode`` + ``overshoot_cm`` (seek / dead-reckon) — the sim's own
       :func:`resolve_edge_dispatch` decision for that hop.
 
@@ -917,8 +961,10 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
         elif tag in (ACT_FOLLOW_INT, ACT_LINE_REVERSE):
             # line_follow start of a LINE->junction hop (overshoot completes it).
             reverse = tag == ACT_LINE_REVERSE
-            line_mode = _line_mode_name(resolve_speed(hops[hop_idx].edge, cfg))
-            records.append(_make_line_follow(reverse, line_mode))
+            edge = hops[hop_idx].edge
+            speed = _line_mode_name(resolve_speed(edge, cfg))
+            follow_mode = _follow_mode_name(resolve_line_follow_mode(edge, cfg))
+            records.append(_make_line_follow(reverse, speed, follow_mode))
         elif tag in (ACT_LINE_OVERSHOOT, ACT_LINE_PASS):
             # (tag, advance_cm) — completes the LINE->junction hop.
             records.append(_make_line_overshoot(prim[1], tag == ACT_LINE_PASS))
@@ -933,9 +979,13 @@ def normalize_sim_stream(sim: PathTrackerSim, case: ParityCase) -> List[TraceRec
             reverse = tag in (ACT_PROJECTION_REVERSE, ACT_PROJECTION_REVERSE_PASS)
             pass_through = tag in (ACT_FOLLOW_DIST_PASS, ACT_PROJECTION_REVERSE_PASS)
             dist_cm = prim[2] if reverse else prim[1]
-            line_mode = _line_mode_name(resolve_speed(hops[hop_idx].edge, cfg))
+            edge = hops[hop_idx].edge
+            speed = _line_mode_name(resolve_speed(edge, cfg))
+            follow_mode = _follow_mode_name(resolve_line_follow_mode(edge, cfg))
             records.append(
-                _make_projection_follow(reverse, line_mode, dist_cm, pass_through)
+                _make_projection_follow(
+                    reverse, speed, follow_mode, dist_cm, pass_through
+                )
             )
             hop_idx += 1
 
