@@ -55,6 +55,10 @@ namespace Config
                   "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
                   "recovery branch never hits the deadband floor or saturation cap silently.");
 
+    static_assert(LINE_FOLLOW_OFFSET_ERROR >= 0.0f && LINE_FOLLOW_OFFSET_ERROR <= 2.5f,
+                  "Config::LINE_FOLLOW_OFFSET_ERROR must stay in [0,2.5] error units (>=1 unit "
+                  "margin before the outer channel; LINE_KP*offset stays under LINE_MAX_CORR=40).");
+
     // PWM_MOVING_MIN is the kinetic decel-tail floor; it must never exceed the static breakaway
     // floor (PWM_MIN_MAGNITUDE) it substitutes for. Equal to PWM_MIN_MAGNITUDE disables the
     // feature (identity passthrough) — see the @warning on PWM_MOVING_MIN in ConfigGlobal.h.
