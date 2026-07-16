@@ -74,6 +74,7 @@ from tools.path_planner.graph_builder import EDGE_BLIND, EDGE_LINE
 from tools.path_planner.pipeline_config import (
     BlindMode,
     DirectionMode,
+    LineFollowMode,
     PipelineConfig,
     SpeedTier,
     StopAtLineMode,
@@ -122,10 +123,11 @@ _RESET_AXIS_TO_UINT8: Dict[str, int] = {
 # Default sentinel strings emitted when an override slot is unset. Each
 # corresponds to the ``DEFAULT = 0`` member on the matching enum so a
 # zero-initialised EdgeInfo means "inherit PIPELINE_CONFIG".
-_SPEED_TIER_DEFAULT        = "SpeedTier::DEFAULT"
-_BLIND_MODE_DEFAULT        = "BlindMode::DEFAULT"
-_DIRECTION_MODE_DEFAULT    = "DirectionMode::DEFAULT"
-_STOP_AT_LINE_MODE_DEFAULT = "StopAtLineMode::DEFAULT"
+_SPEED_TIER_DEFAULT         = "SpeedTier::DEFAULT"
+_BLIND_MODE_DEFAULT         = "BlindMode::DEFAULT"
+_DIRECTION_MODE_DEFAULT     = "DirectionMode::DEFAULT"
+_STOP_AT_LINE_MODE_DEFAULT  = "StopAtLineMode::DEFAULT"
+_LINE_FOLLOW_MODE_DEFAULT   = "LineFollowMode::DEFAULT"
 
 # C++ qualified-name prefix for ``TurnMode`` enum literals emitted into the
 # ``PIVOT_TURNS`` table (e.g. ``TurnMode::PIVOT_LEFT``). The pivot wheel is
@@ -144,6 +146,7 @@ _MODE_ENUMS: Tuple[type, ...] = (
     BlindMode,
     TurnMode,
     DirectionMode,
+    LineFollowMode,
 )
 
 
@@ -170,6 +173,50 @@ def _emit_mode_enum_lines() -> List[str]:
             + " };"
         )
     return lines
+
+
+def _emit_make_edge_factory() -> List[str]:
+    """Emit the ``constexpr EdgeInfo makeEdge(...)`` factory + canary lines.
+
+    Every ``EDGES`` cell (and every hand-authored fixture / ``FieldMap::noEdge``)
+    is built through this single ``constexpr`` factory (issue #156), so a future
+    ``EdgeInfo`` field only touches this signature -- the cell builders keep
+    relying on the trailing defaults instead of a positional aggregate. The
+    ``static_assert`` canary fails the build if the factory ever stops being
+    ``constexpr``-evaluable, which would demote the ``const EDGES`` array out of
+    flash ``.rodata`` and into RAM.
+
+    Single-return and C++14-compatible: the host tests compile this under MSVC,
+    so no C++17-only constructs (no ``if constexpr`` / structured bindings).
+    """
+    return_prefix = _INDENT * 2 + "return EdgeInfo{ "
+    return_cont   = " " * len(return_prefix)
+    assert_prefix = _INDENT + "static_assert("
+    assert_cont   = " " * len(assert_prefix)
+    return [
+        _INDENT + "// makeEdge(...): every EDGES cell is built through this",
+        _INDENT + "// constexpr factory (issue #156) so a future EdgeInfo field",
+        _INDENT + "// only touches this signature. Trailing defaults fill the",
+        _INDENT + "// unspecified overrides; a NONE cell is makeEdge(EdgeType::NONE).",
+        _INDENT + "// The static_assert canary fails the build if makeEdge ever",
+        _INDENT + "// stops being constexpr (which would demote EDGES out of flash).",
+        _INDENT + "constexpr EdgeInfo makeEdge(",
+        _INDENT * 2 + "EdgeType       type,",
+        _INDENT * 2 + "float          distance_cm              = 0.0f,",
+        _INDENT * 2 + "float          heading_deg              = 0.0f,",
+        _INDENT * 2 + "SpeedTier      speed_override           = SpeedTier::DEFAULT,",
+        _INDENT * 2 + "BlindMode      blind_mode_override      = BlindMode::DEFAULT,",
+        _INDENT * 2 + "DirectionMode  direction_override       = DirectionMode::DEFAULT,",
+        _INDENT * 2 + "StopAtLineMode stop_at_line_override    = StopAtLineMode::DEFAULT,",
+        _INDENT * 2 + "LineFollowMode line_follow_mode_override = LineFollowMode::DEFAULT)",
+        _INDENT + "{",
+        return_prefix + "type, distance_cm, heading_deg, speed_override,",
+        return_cont + "blind_mode_override, direction_override,",
+        return_cont + "stop_at_line_override, line_follow_mode_override };",
+        _INDENT + "}",
+        _INDENT + "static_assert(makeEdge(EdgeType::NONE).type == EdgeType::NONE,",
+        assert_cont + '"makeEdge must be constexpr-evaluable");',
+    ]
 
 
 def _format_float(value: float) -> str:
@@ -232,20 +279,27 @@ def _override_enum_value(
     return enum_cls.__name__ + "::" + member.name
 
 
-def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
-    """Compute the four override-enum literals for one edge.
+def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str, str]:
+    """Compute the five override-enum literals for one edge.
 
     Returns ``(speed_override, blind_override, direction_override,
-    stop_at_line_override)`` in the same order they appear on the C++
-    ``EdgeInfo`` struct.
+    stop_at_line_override, line_follow_override)`` in the same order they appear
+    on the C++ ``EdgeInfo`` struct.
 
     * ``speed`` -> ``speed_override`` (a :class:`SpeedTier`) for ANY edge
       type; absent, so defaults to ``SpeedTier::DEFAULT`` (inherit
       ``PIPELINE_CONFIG.speed`` at dispatch time).
-    * ``mode`` -> ``blind_mode_override`` (a :class:`BlindMode`) ONLY on a
-      BLIND edge; a LINE edge's ``mode`` is a surface-only authoring key this
-      PR (no ``EdgeInfo`` field, emits nothing) and is intentionally ignored
-      here. Absent, so defaults to ``BlindMode::DEFAULT``.
+    * ``mode`` is type-switched:
+
+      - on a BLIND edge it lands on ``blind_mode_override`` (a
+        :class:`BlindMode`);
+      - on a LINE edge it lands on ``line_follow_mode_override`` (a
+        :class:`LineFollowMode`) -- the lateral offset-follow selector (issue
+        #156).
+
+      The two never share a slot: a BLIND ``mode`` is ignored for the
+      line-follow slot and a LINE ``mode`` is ignored for the blind slot.
+      Absent, so each defaults to its ``DEFAULT`` sentinel.
     * ``direction_override`` always lands on the direction slot; absent today,
       so defaults to ``DirectionMode::DEFAULT``.
     * ``stop_at_line_override`` is a second directional slot read straight off
@@ -260,6 +314,7 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
     blind_override        = _BLIND_MODE_DEFAULT
     direction_override    = _DIRECTION_MODE_DEFAULT
     stop_at_line_override = _STOP_AT_LINE_MODE_DEFAULT
+    line_follow_override  = _LINE_FOLLOW_MODE_DEFAULT
 
     speed = edge_attrs.get("speed")
     if speed is not None:
@@ -267,14 +322,21 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
             SpeedTier, speed, _SPEED_TIER_DEFAULT
         )
 
-    # ``mode`` is type-switched: it lands on the BLIND drive-mode slot only on
-    # a BLIND edge. On a LINE edge ``mode`` is surface-only this PR (no
-    # EdgeInfo field), so it is read but deliberately not emitted.
+    # ``mode`` is type-switched: on a BLIND edge it lands on the BLIND
+    # drive-mode slot; on a LINE edge it lands on the line-follow lateral-offset
+    # slot (issue #156). Each edge type feeds exactly one slot; the other is
+    # left at its DEFAULT sentinel.
     mode = edge_attrs.get("mode")
-    if mode is not None and edge_attrs.get("type") == EDGE_BLIND:
-        blind_override = _override_enum_value(
-            BlindMode, mode, _BLIND_MODE_DEFAULT
-        )
+    if mode is not None:
+        edge_type = edge_attrs.get("type")
+        if edge_type == EDGE_BLIND:
+            blind_override = _override_enum_value(
+                BlindMode, mode, _BLIND_MODE_DEFAULT
+            )
+        elif edge_type == EDGE_LINE:
+            line_follow_override = _override_enum_value(
+                LineFollowMode, mode, _LINE_FOLLOW_MODE_DEFAULT
+            )
 
     direction_mode = edge_attrs.get("direction_override")
     if direction_mode is not None:
@@ -293,26 +355,44 @@ def _resolve_overrides(edge_attrs: Mapping) -> Tuple[str, str, str, str]:
         blind_override,
         direction_override,
         stop_at_line_override,
+        line_follow_override,
     )
+
+
+def _make_edge_call(
+    type_literal: str,
+    trailing: Sequence[Tuple[str, str]],
+) -> str:
+    """Render a ``Routes::makeEdge(...)`` factory call for one ``EDGES`` cell.
+
+    ``type_literal`` is the required leading ``EdgeType::*`` argument (always
+    emitted). ``trailing`` is the ordered ``(value, default)`` pairs for the
+    remaining ``makeEdge`` parameters, in C++ signature order (distance,
+    heading, then the five override enums). Any suffix of arguments whose
+    ``value`` equals its ``default`` is dropped so the call relies on the
+    factory's trailing defaults: a NONE cell collapses to
+    ``makeEdge(EdgeType::NONE)`` and a plain LINE edge to
+    ``makeEdge(EdgeType::LINE, <dist>, <heading>)``.
+
+    Full ``makeEdge`` adoption (issue #156) replaces the old brace-enclosed
+    aggregate initialiser, so a future ``EdgeInfo`` field only touches the
+    factory signature -- never the two cell builders' positional layout.
+    """
+    last_significant = -1
+    for index, (value, default) in enumerate(trailing):
+        if value != default:
+            last_significant = index
+    args = [type_literal]
+    args.extend(value for value, _default in trailing[: last_significant + 1])
+    return "makeEdge(" + ", ".join(args) + ")"
 
 
 def _none_edge_cell() -> str:
-    # Field order MUST match the C++ ``EdgeInfo`` struct positionally (ADR-036:
-    # ``pivot_trim_cm`` / ``pre_turn_mode_override`` are gone -- pivots live in
-    # the sparse ``PIVOT_TURNS`` table now; issue #64: ``projection_mode_override``
-    # is gone -- projection is a node type, not an edge type). Both this and
-    # ``_edge_cell`` must emit the same four override slots in the same order
-    # (speed, blind, direction, stop_at_line) or the brace-enclosed aggregate
-    # initialiser misaligns.
-    return (
-        "{ EdgeType::NONE, "
-        + _format_float(0.0) + ", " + _format_float(0.0) + ", "
-        + _SPEED_TIER_DEFAULT + ", "
-        + _BLIND_MODE_DEFAULT + ", "
-        + _DIRECTION_MODE_DEFAULT
-        + ", " + _STOP_AT_LINE_MODE_DEFAULT
-        + " }"
-    )
+    # Full makeEdge adoption (issue #156): a NONE cell carries only its edge
+    # type and relies entirely on the factory's trailing defaults, so it never
+    # needs updating when EdgeInfo grows a field -- only the makeEdge signature
+    # does. Kept in lockstep with ``_edge_cell`` (both emit makeEdge(...)).
+    return _make_edge_call("EdgeType::NONE", ())
 
 
 def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
@@ -327,15 +407,22 @@ def _edge_cell(graph: nx.DiGraph, from_name: str, to_name: str) -> str:
         blind_override,
         direction_override,
         stop_at_line_override,
+        line_follow_override,
     ) = _resolve_overrides(edge)
-    return (
-        "{ " + enum_name + ", " + distance + ", " + heading + ", "
-        + speed_override + ", "
-        + blind_override + ", "
-        + direction_override
-        + ", " + stop_at_line_override
-        + " }"
+    zero_float = _format_float(0.0)
+    # Ordered (value, default) pairs matching the makeEdge(...) signature after
+    # the leading EdgeType; trailing args equal to their default are trimmed by
+    # _make_edge_call.
+    trailing = (
+        (distance, zero_float),
+        (heading, zero_float),
+        (speed_override, _SPEED_TIER_DEFAULT),
+        (blind_override, _BLIND_MODE_DEFAULT),
+        (direction_override, _DIRECTION_MODE_DEFAULT),
+        (stop_at_line_override, _STOP_AT_LINE_MODE_DEFAULT),
+        (line_follow_override, _LINE_FOLLOW_MODE_DEFAULT),
     )
+    return _make_edge_call(enum_name, trailing)
 
 
 def _node_row(
@@ -516,7 +603,10 @@ def _build_routes_h_lines(
     lines.append(_INDENT * 2 + "BlindMode      blind_mode_override;")
     lines.append(_INDENT * 2 + "DirectionMode  direction_override;")
     lines.append(_INDENT * 2 + "StopAtLineMode stop_at_line_override;")
+    lines.append(_INDENT * 2 + "LineFollowMode line_follow_mode_override;")
     lines.append(_INDENT + "};")
+    lines.append("")
+    lines.extend(_emit_make_edge_factory())
     lines.append("")
     lines.append(
         _INDENT + "// Single-wheel pivot turn (ADR-036). A pivot is a property"
