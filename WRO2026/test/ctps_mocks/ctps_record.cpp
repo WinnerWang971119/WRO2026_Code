@@ -351,6 +351,8 @@ namespace ctps
         rec.hasProfiled   = p.hasProfiled;
         rec.brake         = p.brake;
         rec.hasBrake      = p.hasBrake;
+        rec.lineFollowOffset    = p.lineFollowOffset;
+        rec.hasLineFollowOffset = p.hasLineFollowOffset;
         push(std::move(rec));
     }
 
@@ -587,6 +589,18 @@ namespace ctps
                     {
                         out += ", \"brake\": ";
                         out += (rec.brake ? "true" : "false");
+                    }
+                    // Line-follow lateral hug bias (issue #156) — emitted only for
+                    // a lineFollowDist whose enable builder chained
+                    // setLineFollowOffset (hasLineFollowOffset). The recorder
+                    // captures the signed offset FACT (centroid units); the CTPS
+                    // Python layer maps it to an on-screen lateral nudge via its
+                    // own display constant. A follow with no offset stays
+                    // byte-identical to the pre-#156 output.
+                    if (rec.hasLineFollowOffset)
+                    {
+                        out += ", \"follow_offset\": ";
+                        out += floatToJson(rec.lineFollowOffset);
                     }
                     break;
             }
