@@ -1415,9 +1415,11 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     at a fixed keyframe index — it is located via the emitted ``pivots``
     segment's ``[t0, t1]`` bracket. Each arc sample matches the documented
     Contracts formula; heading rotates through the full 90 deg; the arc spans
-    exactly ``resolve_turn_profile(theta, is_pivot=True).duration_s()`` seconds,
-    split into a fast cruise group then a slower slow-zone group (the two-stage
-    turn, AC3); the running clock stays strictly monotonic.
+    exactly ``resolve_turn_profile(theta, is_pivot=True).duration_s()`` seconds
+    at a SINGLE constant rate, with the final sub-keyframe alone carrying the
+    fixed nominal settle-allowance tail (ADR-068 T8's display-only model — a
+    stand-in for the PD's creep-and-brake phase, not a second swept-angle
+    stage); the running clock stays strictly monotonic.
     """
     from tools.path_planner.ctps.profile import resolve_turn_profile
 
@@ -1455,23 +1457,17 @@ def test_tc2_arc_subkeyframes_trace_rotation_evenly_timed():
     assert approach_end["h"] == pytest.approx(90.0, abs=_POSE_TOL)
     assert arc[-1]["h"] == pytest.approx(0.0, abs=_POSE_TOL)
 
-    # Two-stage timing across the N uniform-ANGLE sub-keyframes: the cruise-band
-    # degrees sweep at the fast (50) rate and the final TURN_SLOW_ZONE_DEG degrees
-    # at the snapped floor (35), so the per-step durations split into a short
-    # cruise group then a longer slow group, in the inverse PWM ratio 50 / 35.
-    turn = resolve_turn_profile(-90.0, is_pivot=True)
-    n_slow = round(turn.slow_deg / ARC_STEP_DEG)
-    n_cruise = n - n_slow
-    assert 0 < n_cruise < n
+    # Constant-rate timing across the N uniform-ANGLE sub-keyframes (ADR-068,
+    # T8's display-only model): every step sweeps the same delta-angle at the
+    # same rate EXCEPT the last, which also carries the fixed nominal settle
+    # allowance (:data:`~tools.path_planner.ctps.config.TURN_SETTLE_ALLOWANCE_S`)
+    # and so is strictly longer than the rest — never a second, slower
+    # swept-angle stage.
     times = [approach_end["t"]] + [kf["t"] for kf in arc]
     steps = [b - a for a, b in zip(times, times[1:])]
-    cruise_steps = steps[:n_cruise]
-    slow_steps = steps[n_cruise:]
-    for step in cruise_steps:
-        assert step == pytest.approx(cruise_steps[0], abs=1e-9)
-    for step in slow_steps:
-        assert step == pytest.approx(slow_steps[0], abs=1e-9)
-    assert slow_steps[0] / cruise_steps[0] == pytest.approx(50.0 / 35.0, rel=1e-6)
+    for step in steps[:-1]:
+        assert step == pytest.approx(steps[0], abs=1e-9)
+    assert steps[-1] > steps[0]
 
     # Total arc duration: the firmware pivot-turn profile duration.
     expected_dur = resolve_turn_profile(-90.0, is_pivot=True).duration_s()

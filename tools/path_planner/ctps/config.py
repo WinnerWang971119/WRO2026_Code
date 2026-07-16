@@ -27,6 +27,16 @@ here and mirrored as JS constants in ``assets/cargo.js``.
 #: a fixed nominal duration is used instead.
 MANIP_NOMINAL_S: float = 0.5
 
+#: Nominal settle-allowance tail appended to a rendered turn's duration
+#: (seconds), standing in for the real PD turn executor's (ADR-068) final
+#: creep-to-tolerance-and-brake phase. The real settle time is
+#: PLANT-dependent (chassis inertia, battery voltage, floor friction) and has
+#: no closed-form solution, so this is NOT a physical prediction — same
+#: "fixed nominal duration" posture as :data:`MANIP_NOMINAL_S` above, and the
+#: same render-layer-only posture ADR-061 took for ``Config::HOP_SETTLE_MS``.
+#: Do NOT use to estimate real turn settling time.
+TURN_SETTLE_ALLOWANCE_S: float = 0.2
+
 # ---------------------------------------------------------------------------
 # Firmware-derived motion profile — visual scale (issue #130)
 # ---------------------------------------------------------------------------

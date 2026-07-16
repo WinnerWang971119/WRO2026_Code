@@ -24,15 +24,18 @@ Covered cases:
   floor-crawl tail at ``PWM_MIN_MAGNITUDE`` before the terminal brake (AC2).
 * **TC5** — ``resolve_effective_speed`` on a ``.setBrake(false)`` command
   defaults ``end`` to ``cruise``, not 0 (no phantom decel-to-zero).
-* **TC6** — the config-derived TWO-STAGE turn profile. (a) Under the DEFAULT
-  Config both stages deadband-snap to ``|PWM| = 50`` (``TURN_CRUISE_PWM = 50``,
-  ``TURN_SLOW_SPEED_PWM = 20``), so a turn/pivot renders CONSTANT-RATE — the
-  cruise and slow segments have equal per-degree timing and ``sample_turn``
-  produces evenly-timed sub-keyframes (unchanged from the pre-two-stage render).
+* **TC6** — the DISPLAY-ONLY constant-rate + settle-allowance turn profile
+  (ADR-068 T8; the two-stage slow-zone-angle / slow-stage-PWM knobs it used to
+  mirror no longer exist, AC7). (a) Under the DEFAULT Config a turn/pivot
+  sweeps at a SINGLE constant rate derived from ``TURN_CRUISE_PWM = 50``
+  (unsnapped — the real firmware turn path no longer applies ``deadbandSnap``
+  to any turn command, AC3), so every ``sample_turn`` sub-keyframe interval is
+  evenly timed EXCEPT the last, which also carries the fixed nominal
+  ``TURN_SETTLE_ALLOWANCE_S`` tail and therefore renders strictly slower — a
+  stand-in for the PD's creep-and-brake phase, not a second swept-angle stage.
   (b) A perturbed config (``TURN_CRUISE_PWM = 80`` via the ``config_path``
-  temp-header seam) makes the snapped cruise stage (80) outrun the snapped slow
-  stage (50), so the cruise segment sweeps more degrees per unit time than the
-  final ``TURN_SLOW_ZONE_DEG`` degrees — a genuine two-stage ramp (AC3).
+  temp-header seam) raises the constant rate in exact proportion to the PWM
+  ratio; the fixed settle allowance is unaffected by Config (TC19).
 * **W1** — ``resolve_effective_speed`` on a raw ``driveDist`` with a NEGATIVE
   ``.setPower`` keeps the sign: cruise resolves negative and the start seed
   follows sign-by-cruise (a reverse ramp), NOT ``abs()``-ed to forward. A
@@ -53,6 +56,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from math import degrees
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -60,6 +64,7 @@ import numpy as np
 import pytest
 
 from tools.path_planner.config_parse import DEFAULT_CONFIG_H_PATH
+from tools.path_planner.ctps.config import TURN_SETTLE_ALLOWANCE_S
 from tools.path_planner.ctps.profile import (
     SCALE_CM_S_PER_PWM,
     ProfileConfig,
@@ -637,16 +642,33 @@ def test_negative_power_wins_over_reverse_flag_no_double_negate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TC6 — config-derived two-stage turn / pivot re-timing (AC3)
+# TC6 — display-only constant-rate + settle-allowance turn / pivot (AC7, T8)
 # ---------------------------------------------------------------------------
 #
-# A turn renders a two-stage cruise->slow profile: a CRUISE segment (all but the
-# final ``TURN_SLOW_ZONE_DEG`` degrees) at the snapped ``TURN_CRUISE_PWM`` and a
-# SLOW segment (the final ``TURN_SLOW_ZONE_DEG``) at the snapped
-# ``TURN_SLOW_SPEED_PWM``. Under the DEFAULT config both stages snap to
-# ``|PWM| = 50`` so the two rates are equal -> constant-rate (the pre-two-stage
-# render, byte-unchanged). A perturbed config that lifts the cruise stage above
-# the ``50`` floor produces two DISTINCT per-degree rates.
+# ADR-068 replaced the firmware's two-stage bang-bang turn executor with a
+# per-tick PD controller whose true settling time is plant-dependent and has
+# no closed-form solution (T8). The two-stage slow-zone-angle / slow-stage-PWM
+# knobs it mirrored no longer exist (AC7). CTPS instead renders a NOMINAL
+# model: a single constant angular rate derived from TURN_CRUISE_PWM (the
+# PD's authority clamp), plus a fixed TURN_SETTLE_ALLOWANCE_S tail folded onto
+# the final sub-keyframe only — a stand-in for the PD's creep-and-brake phase,
+# not a second swept-angle stage (the render-layer-only posture ADR-061 took
+# for HOP_SETTLE_MS).
+
+
+def _expected_omega_deg_s(pwm: int, track_cm: float, is_pivot: bool) -> float:
+    """Independently recompute the documented turn-rate formula for cross-checks.
+
+    Mirrors :func:`tools.path_planner.ctps.profile._turn_omega`'s documented
+    contract (a wheel at ``|pwm|`` moves ``SCALE_CM_S_PER_PWM * |pwm|`` cm/s; a
+    counter-rotation spins both wheels; a pivot halves the rate) using only the
+    PUBLIC :data:`SCALE_CM_S_PER_PWM` constant, so this test independently
+    verifies the production formula rather than re-asserting its own output.
+    """
+    wheel_cm_s = SCALE_CM_S_PER_PWM * abs(pwm)
+    omega = degrees(2.0 * wheel_cm_s / track_cm)
+    return omega * 0.5 if is_pivot else omega
+
 
 # A representative pure-heading in-place turn pose pair (90 deg CCW at a point).
 _TURN_START_POSE = (10.0, 20.0, 0.0)
@@ -658,8 +680,9 @@ def _sub_keyframe_rates(keyframes: list[dict]) -> list[float]:
 
     ``sample_turn`` emits keyframes evenly spaced in swept ANGLE, so the
     per-step rate = (angle swept in the step) / (time elapsed in the step). A
-    constant-rate turn yields equal rates; a two-stage turn yields a fast group
-    (cruise) then a slower group (the final slow-zone band).
+    constant-rate turn yields equal rates for every interval EXCEPT the last,
+    which also carries the fixed settle-allowance tail and so renders with a
+    strictly LOWER effective rate (same angle, more time).
 
     :param keyframes: an ordered turn keyframe list ``[{"t","x","y","h"}, ...]``.
     :return: one rate per interval; empty if fewer than two keyframes.
@@ -674,53 +697,57 @@ def _sub_keyframe_rates(keyframes: list[dict]) -> list[float]:
 
 
 @pytest.mark.parametrize("is_pivot", [False, True])
-def test_tc6_default_config_turn_renders_two_stage(is_pivot: bool) -> None:
-    """TC6(a): with the default Config a turn/pivot renders TWO-STAGE.
+def test_tc6_default_config_turn_renders_constant_rate_with_settle_tail(
+    is_pivot: bool,
+) -> None:
+    """TC6(a): with the default Config a turn/pivot renders CONSTANT-RATE.
 
-    ``TURN_CRUISE_PWM = 50`` stays above the ``PWM_MIN_MAGNITUDE = 35`` deadband
-    floor, while ``TURN_SLOW_SPEED_PWM = 20`` snaps UP to that floor (35). The
-    snapped cruise stage (50) therefore outruns the snapped slow stage (35), so
-    the final ``TURN_SLOW_ZONE_DEG`` degrees sweep slower than the cruise band —
-    a genuine two-stage ramp at the default config. (Before the PWM-floor retune
-    both stages snapped to the shared 50 floor and the render was constant-rate.)
+    ``TURN_CRUISE_PWM = 50`` is read directly, unsnapped (the real firmware
+    turn path no longer applies ``deadbandSnap`` to any turn command, AC3), and
+    drives a SINGLE angular rate for the whole sweep. ``duration_s()`` is
+    exactly the sweep time at that rate plus the fixed nominal settle
+    allowance, and only the sampled sub-keyframes' FINAL interval carries that
+    allowance (a longer last step into the target pose), never a second
+    swept-angle stage.
     """
+    cfg = load_profile_config()
     profile = resolve_turn_profile(90.0, is_pivot=is_pivot)
 
-    # Cruise stays above the floor; the slow stage snaps up to it -> distinct rates.
-    assert profile.fast_pwm == 50
-    assert profile.slow_pwm == 35
-    assert profile.omega_cruise_deg_s > profile.omega_slow_deg_s
+    assert profile.cruise_pwm == cfg.turn_cruise_pwm == 50
+    assert profile.settle_s == pytest.approx(TURN_SETTLE_ALLOWANCE_S)
 
-    # Per-degree timing: the final slow-zone degrees take proportionally LONGER
-    # than the cruise degrees (the two-stage signature). Rate is linear in |PWM|,
-    # so the ratio of per-degree times is 50 / 35.
-    t_cruise = profile.time_at_angle(profile.cruise_deg)
-    t_total = profile.time_at_angle(90.0)
-    cruise_sec_per_deg = t_cruise / profile.cruise_deg
-    slow_sec_per_deg = (t_total - t_cruise) / profile.slow_deg
-    assert slow_sec_per_deg > cruise_sec_per_deg
-    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(50.0 / 35.0)
-    assert t_total == pytest.approx(profile.duration_s())
+    expected_omega = _expected_omega_deg_s(cfg.turn_cruise_pwm, cfg.track_cm, is_pivot)
+    assert profile.omega_deg_s == pytest.approx(expected_omega)
 
-    # The sampled sub-keyframes split into a faster cruise group then a slower
-    # slow-band group: the first interval strictly outruns the last.
+    # duration_s() == sweep time at the constant rate + the fixed settle tail.
+    assert profile.duration_s() == pytest.approx(90.0 / profile.omega_deg_s + profile.settle_s)
+    # time_at_angle at the full sweep agrees exactly with duration_s() (the
+    # settle allowance is folded onto phi == |theta|, not bookkept separately).
+    assert profile.time_at_angle(90.0) == pytest.approx(profile.duration_s())
+    # Interior sub-sweeps never see the settle tail.
+    assert profile.time_at_angle(45.0) == pytest.approx(45.0 / profile.omega_deg_s)
+
+    # The sampled sub-keyframes: every interval but the last has the SAME rate;
+    # the last is strictly slower (the settle allowance stretches it).
     kfs = sample_turn(profile, _TURN_START_POSE, _TURN_END_POSE, t0=0.0)
     rates = _sub_keyframe_rates(kfs)
     assert len(rates) >= 2
-    assert rates[0] > rates[-1]
-    assert max(rates) / min(rates) == pytest.approx(50.0 / 35.0, rel=1e-6)
+    for rate in rates[:-1]:
+        assert rate == pytest.approx(rates[0], rel=1e-6)
+    assert rates[-1] < rates[0]
+    # The whole arc occupies exactly duration_s() seconds.
+    assert kfs[-1]["t"] == pytest.approx(profile.duration_s())
 
 
-def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path) -> None:
-    """TC6(b): raising ``TURN_CRUISE_PWM`` above the floor yields TWO rates.
+def test_tc6_perturbed_cruise_pwm_scales_the_constant_rate(tmp_path: Path) -> None:
+    """TC6(b): raising ``TURN_CRUISE_PWM`` scales the single constant rate.
 
     Via the ``config_path`` temp-header seam (the same seam TC2 uses), set
-    ``TURN_CRUISE_PWM = 80`` (> the ``PWM_MIN_MAGNITUDE = 35`` floor). Now the
-    snapped cruise stage (80) outruns the snapped slow stage (``TURN_SLOW_SPEED_PWM
-    = 20`` -> snaps to 35), so the CRUISE segment (all but the final
-    ``TURN_SLOW_ZONE_DEG`` degrees) sweeps more degrees per unit time than the
-    final slow band. This is the genuine two-stage ramp the plan's TC6 calls for,
-    now driven by Config instead of the deferred per-turn override.
+    ``TURN_CRUISE_PWM = 80``. The display-only model derives its single rate
+    directly from this constant, so the rate — and the sweep-only portion of
+    ``duration_s()`` — scale in exact (inverse) proportion to the PWM ratio.
+    The fixed nominal settle allowance is untouched by Config (it is NOT a
+    parsed constant, ADR-061 posture) and so is identical before and after.
     """
     perturbed_dir = tmp_path / "perturbed_turn_config"
     perturbed_dir.mkdir()
@@ -737,41 +764,33 @@ def test_tc6_perturbed_cruise_override_yields_two_distinct_rates(tmp_path: Path)
     )
     perturbed_drive_h.write_text(lifted_text, encoding="utf-8")
 
-    cfg = load_profile_config(perturbed_drive_h)
-    assert cfg.turn_cruise_pwm == 80
-    assert cfg.turn_slow_pwm == 20
-    assert cfg.turn_slow_zone_deg == pytest.approx(30.0)
+    baseline_cfg = load_profile_config()
+    perturbed_cfg = load_profile_config(perturbed_drive_h)
+    assert baseline_cfg.turn_cruise_pwm == 50
+    assert perturbed_cfg.turn_cruise_pwm == 80
 
-    # Sweep 90 deg: 60 deg cruise (fast) then the final 30 deg slow (TURN_SLOW_ZONE_DEG).
-    profile = resolve_turn_profile(90.0, is_pivot=False, cfg=cfg)
-    assert profile.fast_pwm == 80          # 80 > floor -> stays 80
-    assert profile.slow_pwm == 35          # 20 snaps UP to the 35 floor
-    assert profile.cruise_deg == pytest.approx(60.0)
-    assert profile.slow_deg == pytest.approx(30.0)
-    # Distinct stage rates: the cruise stage is strictly faster than the slow one.
-    assert profile.omega_cruise_deg_s > profile.omega_slow_deg_s
+    baseline = resolve_turn_profile(90.0, is_pivot=False, cfg=baseline_cfg)
+    perturbed = resolve_turn_profile(90.0, is_pivot=False, cfg=perturbed_cfg)
 
-    # Per-degree timing: the final slow-zone degrees take proportionally LONGER
-    # than the cruise degrees (the two-stage signature).
-    t_cruise = profile.time_at_angle(profile.cruise_deg)
-    t_total = profile.time_at_angle(90.0)
-    cruise_sec_per_deg = t_cruise / profile.cruise_deg
-    slow_sec_per_deg = (t_total - t_cruise) / profile.slow_deg
-    assert slow_sec_per_deg > cruise_sec_per_deg
-    # The ratio of per-degree times equals the inverse ratio of the snapped PWMs
-    # (rate is linear in |PWM|): 80 / 35.
-    assert slow_sec_per_deg / cruise_sec_per_deg == pytest.approx(80.0 / 35.0)
+    assert perturbed.cruise_pwm == 80
+    assert perturbed.omega_deg_s == pytest.approx(baseline.omega_deg_s * 80.0 / 50.0)
 
-    # And the sampled sub-keyframes split into a fast group then a slow group:
-    # the last interval (deep in the slow band) is strictly slower than the first
-    # (in the cruise band).
-    kfs = sample_turn(profile, _TURN_START_POSE, _TURN_END_POSE, t0=0.0)
+    baseline_sweep_s = baseline.duration_s() - baseline.settle_s
+    perturbed_sweep_s = perturbed.duration_s() - perturbed.settle_s
+    assert perturbed_sweep_s == pytest.approx(baseline_sweep_s * 50.0 / 80.0)
+
+    # The settle allowance is a fixed nominal display constant, not Config-derived.
+    assert perturbed.settle_s == pytest.approx(baseline.settle_s)
+    assert perturbed.settle_s == pytest.approx(TURN_SETTLE_ALLOWANCE_S)
+
+    # The sampled sub-keyframes: still one constant rate + a strictly slower
+    # final (settle-tailed) interval — never a second swept-angle stage.
+    kfs = sample_turn(profile=perturbed, start_pose=_TURN_START_POSE, end_pose=_TURN_END_POSE, t0=0.0)
     rates = _sub_keyframe_rates(kfs)
     assert len(rates) >= 2
-    assert rates[0] > rates[-1]
-    fast_rate = max(rates)
-    slow_rate = min(rates)
-    assert fast_rate / slow_rate == pytest.approx(80.0 / 35.0, rel=1e-6)
+    for rate in rates[:-1]:
+        assert rate == pytest.approx(rates[0], rel=1e-6)
+    assert rates[-1] < rates[0]
 
 
 # ---------------------------------------------------------------------------
