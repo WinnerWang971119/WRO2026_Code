@@ -66,7 +66,7 @@ namespace Config
     constexpr int16_t PWM_MIN_MAGNITUDE = 35;
 
 #ifndef PWM_MOVING_MIN_DEFAULT
-#define PWM_MOVING_MIN_DEFAULT 25
+#define PWM_MOVING_MIN_DEFAULT 30
 #endif
     /** @brief Kinetic (moving) deadband floor for the tShape/line-stop decel tail.
      *  @warning Load-bearing: consumed by Drive::_updateProfile decel, Drive::setSpeed,
