@@ -6,11 +6,12 @@
  *
  * @details
  * The chassis's heavy left side means a symmetric turn floor moves only the light right wheel; the
- * heavy left wheel stalls and the robot pivots instead of rotating about center. This probe drives
- * one wheel at a time through the turn's actuation (`MiniR4.DriveDC.Move`) and reads that wheel's
- * encoder (`MiniR4.M2/M3.getDegrees()`) to measure each wheel's OWN breakaway + creep floor,
- * automatically. The measurement + confirmation logic lives in `WheelFloorHarness.cpp` — see that
- * file's header for the full contract.
+ * heavy left wheel stalls and the robot pivots instead of rotating about center. This probe sweeps
+ * a symmetric counter-rotation (`MiniR4.DriveDC.Move(+p, -p)`) in the REAL turn geometry and reads
+ * BOTH wheel encoders (M3=left, M2=right — the channels are swapped), reporting the lowest PWM
+ * where both wheels actually turn. (An earlier cut swept one wheel at a time, but the idle wheel
+ * freewheels like a caster and read the floor far too low — see the harness header.) The
+ * measurement logic lives in `WheelFloorHarness.cpp` — see that file's header for the full contract.
  *
  * `Drive.begin()` here configures `MiniR4.DriveDC` with `Config::MOTOR_LEFT_ID/RIGHT_ID` and the
  * reverse flags, so `DriveDC.Move` maps the wheels EXACTLY as the real turn does — that is why the
