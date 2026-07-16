@@ -933,12 +933,11 @@ def _validate_edges_field(field_data) -> None:
     PIPELINE_CONFIG.speed"). An unknown name is rejected with a precise
     diagnostic.
 
-    ``mode`` is type-switched. On a LINE edge it takes the Python-only
-    :class:`LineFollowMode` vocabulary -- only ``MIDDLE`` is authorable this PR
-    (it validates and emits nothing), while ``LEFT`` / ``RIGHT`` are rejected
-    until LineFollower offset-follow lands (issue #156). On a BLIND edge it
-    takes :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto the
-    ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT`` (== absence); a
+    ``mode`` is type-switched. On a LINE edge it takes the
+    :class:`LineFollowMode` vocabulary minus ``DEFAULT`` (== absence) --
+    ``MIDDLE``, ``LEFT``, and ``RIGHT`` are all authorable (issue #156). On a
+    BLIND edge it takes :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto
+    the ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT`` (== absence); a
     ``STOP_AT_LINE`` mode is rejected with a pointer to ``stop_at_line: on``.
 
     An anti-ambiguity cross-check rejects an entry whose unordered pair
@@ -1009,6 +1008,12 @@ def _validate_edges_field(field_data) -> None:
         member.name
         for member in BlindMode
         if member not in (BlindMode.DEFAULT, BlindMode.STOP_AT_LINE)
+    ]
+    # The LINE ``mode`` vocabulary is LineFollowMode minus its one
+    # unauthorable member: DEFAULT (== absence / inherit). Computed once for
+    # the per-entry reject diagnostics below.
+    valid_line_mode_tags = [
+        member.name for member in LineFollowMode if member is not LineFollowMode.DEFAULT
     ]
     nodes = getattr(field_data, "NODES", {})
     node_types = getattr(field_data, "NODE_TYPES", {})
@@ -1239,16 +1244,17 @@ def _validate_edges_field(field_data) -> None:
 
         # Optional: mode (type-switched) ----------------------------------
         # LINE and BLIND edges carry DIFFERENT ``mode`` vocabularies:
-        #   * LINE  -> :class:`LineFollowMode`. Only ``MIDDLE`` is authorable
-        #     this PR (it validates and emits nothing -- there is no EdgeInfo
-        #     field). ``LEFT`` / ``RIGHT`` are reserved until LineFollower
-        #     offset-follow lands (issue #156).
+        #   * LINE  -> :class:`LineFollowMode` minus ``DEFAULT``
+        #     (== absence) -- ``MIDDLE``, ``LEFT``, ``RIGHT`` (issue #156).
         #   * BLIND -> :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto
         #     the ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT``
         #     (== absence).
         # Each accepts the matching enum INSTANCE or the bare member NAME; a
         # wrong-type tag (a BlindMode tag on a LINE edge or vice versa) is a
-        # category error naming the valid tags for the derived edge type.
+        # category error naming the valid tags for the derived edge type. The
+        # DEFAULT sentinel is rejected on both axes -- mirroring the ``speed``
+        # DEFAULT guard above -- because DEFAULT means "inherit", which is
+        # what absence already encodes.
         if "mode" in entry:
             mode = entry["mode"]
             if edge_type == EDGE_LINE:
@@ -1259,23 +1265,24 @@ def _validate_edges_field(field_data) -> None:
                 else:
                     raise FieldDataError(
                         f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes a "
-                        "LineFollowMode tag (currently only 'MIDDLE'); got a "
-                        "value that is neither a LineFollowMode instance nor a "
-                        "member-name string"
+                        f"LineFollowMode tag (one of {valid_line_mode_tags}); "
+                        "got a value that is neither a LineFollowMode "
+                        "instance nor a member-name string"
                     )
-                # TODO(issue #156): remove this LEFT/RIGHT guard when the
-                # LineFollower lateral offset-follow behavior lands.
-                if mode_name in ("LEFT", "RIGHT"):
+                if mode_name == LineFollowMode.DEFAULT.name:
                     raise FieldDataError(
-                        f"EDGES[{i}].mode = {mode_name!r} -- LineFollower "
-                        "offset-follow not yet implemented (issue #156); remove "
-                        "this guard when it lands"
+                        f"EDGES[{i}].mode = 'DEFAULT' -- DEFAULT means "
+                        "'inherit' (== MIDDLE today), which is what absence "
+                        "already encodes; omit the override or pick a "
+                        f"concrete LineFollowMode tag (one of "
+                        f"{valid_line_mode_tags})"
                     )
-                if mode_name != LineFollowMode.MIDDLE.name:
+                if mode_name not in valid_line_mode_tags:
                     raise FieldDataError(
-                        f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes only "
-                        "'MIDDLE' this PR (LineFollowMode); a BlindMode tag such "
-                        "as 'SYNC_TSHAPE' is legal only on a BLIND edge"
+                        f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes a "
+                        f"LineFollowMode tag (one of {valid_line_mode_tags}); "
+                        "the name is unknown, and a BlindMode tag such as "
+                        "'SYNC_TSHAPE' is legal only on a BLIND edge"
                     )
             else:  # EDGE_BLIND
                 if isinstance(mode, BlindMode):
