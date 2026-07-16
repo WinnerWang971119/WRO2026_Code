@@ -33,19 +33,19 @@ namespace Routes {
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         { // from PassA (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::LINE, 40.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            makeEdge(EdgeType::NONE), // to PassA
+            makeEdge(EdgeType::LINE, 40.000000f), // to PassResetB
+            makeEdge(EdgeType::NONE), // to PassC
         },
         { // from PassResetB (index 1)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::LINE, 40.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            makeEdge(EdgeType::NONE), // to PassA
+            makeEdge(EdgeType::NONE), // to PassResetB
+            makeEdge(EdgeType::LINE, 40.000000f), // to PassC
         },
         { // from PassC (index 2)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassA
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassResetB
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to PassC
+            makeEdge(EdgeType::NONE), // to PassA
+            makeEdge(EdgeType::NONE), // to PassResetB
+            makeEdge(EdgeType::NONE), // to PassC
         },
     };
 
