@@ -25,7 +25,10 @@
  * `Drive.begin()` with `Config::MOTOR_LEFT_ID/RIGHT_ID` and the reverse flags), NOT per-motor
  * `setPower`. So a floor measured here is the floor the real turn will see. Because
  * `MOTOR_LEFT_REVERSE == true`, the left encoder counts DOWN for a forward-chassis command, so
- * every comparison here is on the encoder-delta MAGNITUDE.
+ * every comparison here is on the encoder-delta MAGNITUDE. The encoder CABLES are also swapped
+ * relative to the motor-power cables (bench-verified via `inoTest/enc_check`): the left wheel's
+ * encoder reports on channel M3 and the right wheel's on M2, so `readWheelDeg` reads the crossed
+ * channel for each wheel — see its comment.
  *
  * WHAT IT DOES, per wheel (LEFT = M2 driven via `Move(pwm, 0)`, RIGHT = M3 via `Move(0, pwm)`):
  *   (1) Breakaway sweep, from rest: raise PWM until the wheel's encoder shows real rotation over a
@@ -113,22 +116,34 @@ namespace
         }
     }
 
-    /// @brief Read one wheel's accumulated encoder degrees (raw; may be negative — compare |.|).
+    // HARDWARE QUIRK (bench-verified 2026-07 via inoTest/enc_check): the encoder cables on this
+    // chassis are SWAPPED relative to the motor-power cables. Motor power is correct (M2 drives the
+    // LEFT wheel, M3 the RIGHT), but the LEFT wheel's ENCODER reports on channel M3 and the RIGHT
+    // wheel's on channel M2. So to read the wheel we DRIVE, we read the OTHER channel. enc_check
+    // proved it four ways: Move(50,0) spins the left wheel and ONLY M3 counts (M2 stays 0);
+    // Move(0,50) spins the right wheel and ONLY M2 counts. The read itself is clean; the fault was
+    // reading the wrong channel. (This same swap crosses the STM32's per-motor encoder feedback —
+    // see the memory note; it can affect the encoder-based SYNC/GYRO drive modes, but NOT the turn,
+    // which is IMU-based.)
+
+    /// @brief Read one wheel's accumulated encoder degrees, from its ACTUAL (swapped) channel.
+    /// Raw value may be negative (MOTOR_LEFT_REVERSE) — always compare magnitudes.
     int32_t readWheelDeg(Side s)
     {
-        return (s == LEFT) ? MiniR4.M2.getDegrees() : MiniR4.M3.getDegrees();
+        return (s == LEFT) ? MiniR4.M3.getDegrees() : MiniR4.M2.getDegrees();
     }
 
-    /// @brief Zero one wheel's encoder accumulator so the next read is a clean delta.
+    /// @brief Zero one wheel's encoder accumulator (its swapped channel) so the next read is a
+    /// clean delta.
     void resetWheel(Side s)
     {
         if (s == LEFT)
         {
-            MiniR4.M2.resetCounter();
+            MiniR4.M3.resetCounter();    // left wheel's encoder is on channel M3 (swapped)
         }
         else
         {
-            MiniR4.M3.resetCounter();
+            MiniR4.M2.resetCounter();    // right wheel's encoder is on channel M2 (swapped)
         }
     }
 
