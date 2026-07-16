@@ -133,6 +133,9 @@ public:
     /** @brief Record the brake-on-gate override (`lastBrakeOnGate`). @return `*this`. */
     LineFollowerEnableBuilder& setBrakeOnGate(bool on);
 
+    /** @brief No-op stub for the lateral-offset override (see issue #156). @return `*this`. */
+    LineFollowerEnableBuilder& setLineFollowOffset(float offset);
+
 private:
     LineFollowerClass& _owner;    ///< Owner whose capture fields each setter records into.
 };
@@ -388,6 +391,11 @@ inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setOvershootMode(bo
 inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setBrakeOnGate(bool on)
 {
     _owner.lastBrakeOnGate = on;
+    return *this;
+}
+
+inline LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float /*offset*/)
+{
     return *this;
 }
 

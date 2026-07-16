@@ -58,6 +58,7 @@ public:
     LineFollowerEnableBuilder& setDistanceTarget(float) { return *this; }
     LineFollowerEnableBuilder& setOvershootMode(bool) { return *this; }
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }
+    LineFollowerEnableBuilder& setLineFollowOffset(float) { return *this; }
 };
 
 /**
