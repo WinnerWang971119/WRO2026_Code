@@ -57,6 +57,7 @@
 #include "Tasks.h"
 #include "src/perception/Vision.h"
 #include "src/perception/WROLineArray.h"
+#include "src/nav/YawSource.h"
 
 namespace
 {
@@ -132,7 +133,7 @@ void renderCalMenu()
  * `LineArray.update()` runs every iteration when `LINE_ARRAY_TICK_CACHE_ENABLED`
  * is flipped on, instead of freezing to whatever was cached on entry.
  *
- * Order: LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
+ * Order: YawSource -> LineArray -> Drive -> LineFollower -> Intersection -> Manipulator
  *     -> Tasks -> PathTracker -> Localization -> Mission -> EventTrace.
  */
 void cooperativeTick()
@@ -141,6 +142,12 @@ void cooperativeTick()
     // inoTest/tick_bench/tick_bench.ino (the addSegment() + benchTick() lists
     // AND the SEGMENT_COUNT constant) so the loop-time benchmark stays
     // representative (issue #123).
+
+    // YawSource.update() refreshes the tick-scoped gyro yaw cache FIRST, with one
+    // gated device read, so every consumer that calls readYawDeg later in this same
+    // tick (Drive, Localization) serves the freshly-cached value from a single
+    // device transaction instead of each triggering its own inline re-read (AC-5).
+    YawSource.update();
 
     // LineArray.update() refreshes the sensor cache for the rest of the tick
     // WHEN Config::LINE_ARRAY_TICK_CACHE_ENABLED is true. When false, this is
@@ -208,6 +215,7 @@ void setup()
     const bool battOk = (battVoltage >= Config::BATT_MIN_VOLTAGE_V);
 
     const bool arrayOk = LineArray.begin();
+    const bool yawOk   = YawSource.begin();    // MUST run before Drive/Localization — both read yaw through YawSource
     const bool driveOk = Drive.begin();
     const bool lineOk  = LineFollower.begin();
     const bool intOk   = Intersection.begin();
@@ -226,7 +234,7 @@ void setup()
     Tasks.setTickCallback(cooperativeTick);
     Vision.setTickCallback(cooperativeTick);
 
-    _setupFailed = !(battOk && arrayOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
+    _setupFailed = !(battOk && arrayOk && yawOk && driveOk && lineOk && intOk && manipOk && locOk && pathOk && missOk && tasksOk && visionOk && traceOk);
 
     if (_setupFailed)
     {
@@ -241,6 +249,7 @@ void setup()
             EventTrace.pushEvent("BATT LOW");
         }
         if (!arrayOk)  { Serial.println(F("  - LineArray"));    EventTrace.pushEvent("FAIL ARR"); }
+        if (!yawOk)    { Serial.println(F("  - YawSource"));    EventTrace.pushEvent("FAIL YAW"); }
         if (!driveOk)  { Serial.println(F("  - Drive"));        EventTrace.pushEvent("FAIL DRIVE"); }
         if (!lineOk)   { Serial.println(F("  - LineFollower")); EventTrace.pushEvent("FAIL LINE"); }
         if (!intOk)    { Serial.println(F("  - Intersection")); EventTrace.pushEvent("FAIL INT"); }
