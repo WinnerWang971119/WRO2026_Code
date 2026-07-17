@@ -40,6 +40,8 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
+from tools.path_planner.ctps import mosaic
+
 # ---------------------------------------------------------------------------
 # Schema contract
 # ---------------------------------------------------------------------------
@@ -113,6 +115,16 @@ _KNOWN_DRIVE_PRESETS: frozenset[str] = frozenset(
     }
 )
 
+#: Whitelist for a top-level ``mosaic.cells`` entry: the five real colour
+#: names (:data:`mosaic.COLOR_NAMES`) plus the AIR/empty-cell sentinel
+#: (:data:`mosaic.AIR_NAME`). A cell string NOT in this set means the whole
+#: ``mosaic`` block is malformed and is skipped (see :func:`_parse_mosaic`) —
+#: never a partial 11-cell mosaic, to preserve the fixed 12-cell index
+#: contract.
+_VALID_MOSAIC_CELL_NAMES: frozenset[str] = frozenset(mosaic.COLOR_NAMES) | {
+    mosaic.AIR_NAME
+}
+
 
 # ---------------------------------------------------------------------------
 # Public dataclasses
@@ -168,6 +180,11 @@ class Command:
         the builder default (tShape on for ``driveDist``).
     :param brake: ``.setBrake`` flag; set for ``drive`` commands. ``None``
         when unset — the resolver defaults to ``True``.
+    :param follow_offset: ``.setLineFollowOffset`` signed lateral hug bias (in
+        firmware centroid-index units, ``+LEFT`` / ``-RIGHT``); set for
+        ``drive`` ``lineFollowDist`` commands when the enable builder chained
+        ``setLineFollowOffset``. ``None`` when the key is absent (a centered /
+        MIDDLE follow) — the renderer then draws no lateral nudge.
     :param node: Node name; set for ``declare_position`` commands.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.
     :param r: Red channel (0–255); set for ``led`` commands.
@@ -210,6 +227,7 @@ class Command:
     end_speed:   Optional[int]   = None   # drive: .setEndSpeed override (PWM)
     profiled:    Optional[bool]  = None   # drive: true=.tShape, false=.flat
     brake:       Optional[bool]  = None   # drive: .setBrake flag
+    follow_offset: Optional[float] = None # drive: .setLineFollowOffset signed hug bias (centroid units)
     node:        Optional[str]   = None   # declare_position
     freq_hz:     Optional[int]   = None   # beep
     r:           Optional[int]   = None   # led
@@ -233,9 +251,12 @@ class MosaicTrace:
     warning).
 
     :param cells: Exactly 12 color-name strings, cell-index order
-        (``i = row*cols + col``). Not validated against the color palette
-        here — the loader is tolerant; a bad name is a rendering concern, not
-        a load-time error.
+        (``i = row*cols + col``). Each entry is validated against
+        :data:`mosaic.COLOR_NAMES` plus the AIR sentinel
+        (:data:`mosaic.AIR_NAME`) — a single unknown name is enough to
+        reject the whole block (see :func:`_parse_mosaic`), so a
+        :class:`MosaicTrace` that reaches this dataclass always carries 12
+        whitelisted names.
     :param seed: The seed used to roll the mosaic, if one was echoed
         (``--mosaic-seed`` was passed to the dump). ``None`` when absent —
         this is a normal, unwarned case (the dump omits the key when no seed
@@ -335,6 +356,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "method", "arg", "cm", "deg",
         "mode", "heading", "reverse",
         "power", "preset", "start_speed", "end_speed", "profiled", "brake",
+        "follow_offset",
         "node",
         "freq_hz", "r", "g", "b", "result",
         "success",
@@ -559,6 +581,28 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                 )
                 cmd.brake = None
 
+        # follow_offset: the LineFollower lateral hug-side bias (issue #156;
+        # centroid-index units, +LEFT / -RIGHT) recorded by the ctps_mocks
+        # enable-builder's setLineFollowOffset. Accept only a real int/float —
+        # bool is EXCLUDED (it subclasses int, so a stray true/false must not
+        # coerce to 1.0/0.0 and draw a phantom nudge), matching the `cm` /
+        # `heading` guards. A non-numeric value warns and is treated as unset
+        # (no nudge). Absent → leave None (a centered / MIDDLE follow).
+        if "follow_offset" in raw:
+            raw_follow_offset = raw["follow_offset"]
+            if isinstance(raw_follow_offset, (int, float)) and not isinstance(
+                raw_follow_offset, bool
+            ):
+                cmd.follow_offset = raw_follow_offset
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.follow_offset "
+                    f"{raw_follow_offset!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.follow_offset = None
+
     # ----- declare_position: validate node -----------------------------------
     if op == "declare_position":
         raw_node = raw.get("node")
@@ -602,7 +646,11 @@ def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
 
     Tolerant like the rest of this loader: an absent block is normal (no
     warning, returns ``None``); a present-but-malformed block skips with a
-    :class:`UserWarning` and also returns ``None``. Never raises.
+    :class:`UserWarning` and also returns ``None``. This includes a
+    ``cells`` entry outside the :data:`_VALID_MOSAIC_CELL_NAMES` whitelist —
+    a single unknown colour name rejects the WHOLE block (never a partial
+    11-cell mosaic) to preserve the fixed 12-cell index contract. Never
+    raises.
 
     :param raw: The value at the top-level ``"mosaic"`` key (``None`` if the
         key was absent from the trace JSON).
@@ -630,6 +678,18 @@ def _parse_mosaic(raw: object) -> Optional[MosaicTrace]:
         warnings.warn(
             f"ctps.trace_loader: malformed 'mosaic.cells' {raw_cells!r} "
             f"(expected a list of 12 color-name strings) — 'mosaic' block skipped.",
+            UserWarning,
+            stacklevel=4,
+        )
+        return None
+
+    if not all(c in _VALID_MOSAIC_CELL_NAMES for c in raw_cells):
+        # Reject the WHOLE block on any unknown cell name — never a partial
+        # 11-cell mosaic, so the fixed 12-cell index contract always holds.
+        warnings.warn(
+            f"ctps.trace_loader: 'mosaic.cells' {raw_cells!r} contains a "
+            f"colour name outside the whitelist (expected one of "
+            f"{sorted(_VALID_MOSAIC_CELL_NAMES)!r}) — 'mosaic' block skipped.",
             UserWarning,
             stacklevel=4,
         )

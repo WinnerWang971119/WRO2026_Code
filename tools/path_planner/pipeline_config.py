@@ -34,17 +34,18 @@ class SpeedTier(IntEnum):
 
 
 class LineFollowMode(IntEnum):
-    """LINE-edge follow lateral offset — PYTHON-ONLY (validator vocabulary).
+    """LINE-edge follow lateral offset — emitted to C++ as ``Routes::LineFollowMode``.
 
-    Not emitted to C++ this PR: it exists only so the validator can accept the
-    JSON ``mode`` key on a LINE edge. Only ``MIDDLE`` is authorable today;
-    ``LEFT`` / ``RIGHT`` are validator-rejected until LineFollower offset-follow
-    lands (issue #156).
+    Authorable on a LINE edge via the JSON ``mode`` key: ``MIDDLE`` (centered),
+    ``LEFT`` / ``RIGHT`` (chassis rides that side of the line). ``DEFAULT`` means
+    inherit (== MIDDLE) and is encoded by absence, so the validator rejects an
+    explicit ``mode: DEFAULT``. LINE ``mode`` is directional (per-directed-edge),
+    unlike the bidirectional BLIND ``mode`` (issue #156 / ADR-069).
     """
-    DEFAULT = 0  # inherit (== MIDDLE today)
-    MIDDLE  = 1  # centered follow (only authorable value this PR)
-    LEFT    = 2  # RESERVED — validator-rejected until offset-follow lands (issue #156)
-    RIGHT   = 3  # RESERVED — validator-rejected until offset-follow lands (issue #156)
+    DEFAULT = 0  # inherit (== MIDDLE); encoded by absence
+    MIDDLE  = 1  # centered follow (offset 0)
+    LEFT    = 2  # chassis rides left of line  (offset = +LINE_FOLLOW_OFFSET_ERROR)
+    RIGHT   = 3  # chassis rides right of line (offset = -LINE_FOLLOW_OFFSET_ERROR)
 
 
 class BlindMode(IntEnum):

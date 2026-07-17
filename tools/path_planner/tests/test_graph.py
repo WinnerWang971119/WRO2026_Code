@@ -20,6 +20,7 @@ from tools.path_planner.graph_builder import (
     build_graph,
     directed_edge_heading,
 )
+from tools.path_planner.pipeline_config import BlindMode, LineFollowMode
 
 _FIELD_ATTRS = (
     "NODES",
@@ -340,3 +341,77 @@ def test_edges_override_only_entry_derives_geometry_from_coords() -> None:
     assert g.edges["B", "A"]["distance_cm"] == pytest.approx(190.0, abs=1e-6)
     assert g.edges["B", "A"]["heading_deg"] == pytest.approx(180.0, abs=1e-6)
     assert g.edges["A", "B"]["speed"] == "FAST"
+
+
+# ---------------------------------------------------------------------------
+# TC7 (issue #156 / ADR-069): the `mode` key's symmetry is now edge-type
+# conditional. A LINE edge's `mode` (the lateral offset-follow bias) is
+# DIRECTIONAL -- authored on the forward u->v edge only, NOT mirrored to v->u,
+# because LEFT/RIGHT is asymmetric under reversal (like `direction` /
+# `stop_at_line`). A BLIND edge's `mode` stays BIDIRECTIONAL (a symmetric
+# dead-reckon behavior), copied onto both directions like `speed`.
+# ---------------------------------------------------------------------------
+
+
+def test_line_mode_is_directional_not_mirrored() -> None:
+    """A LINE `mode` override lands on u->v only; v->u carries no `mode`."""
+    fd = _clone_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "LEFT",  # LINE lateral-bias tag -- forward only
+        }
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] == "LEFT"
+    # Directional: the reverse traversal is NOT biased (must author a companion
+    # reverse edge to bias v->u).
+    assert "mode" not in g.edges["B", "A"]
+
+
+def test_line_mode_enum_instance_is_directional() -> None:
+    """A LINE `mode` enum instance is forwarded verbatim, forward-only."""
+    fd = _clone_field_data()
+    fd.LINE_SEGMENTS = [e for e in fd.LINE_SEGMENTS if set(e) != {"A", "B"}]
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": LineFollowMode.RIGHT,
+        }
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] is LineFollowMode.RIGHT
+    assert "mode" not in g.edges["B", "A"]
+
+
+def test_blind_mode_stays_bidirectional() -> None:
+    """A BLIND `mode` override is mirrored onto both directions (symmetric).
+
+    ('B','G') is the toy field's BLIND_EDGES pair; a same-type BLIND override
+    with `mode: GYRO_TSHAPE` must appear on BOTH B->G and G->B -- the
+    edge-type-conditional split leaves BLIND `mode` bidirectional (unlike the
+    directional LINE `mode`).
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "mode": BlindMode.GYRO_TSHAPE,
+        }
+    ]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        g = build_graph(fd)
+    assert g.edges["B", "G"]["mode"] is BlindMode.GYRO_TSHAPE
+    assert g.edges["G", "B"]["mode"] is BlindMode.GYRO_TSHAPE

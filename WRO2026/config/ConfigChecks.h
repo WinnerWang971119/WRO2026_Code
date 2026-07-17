@@ -55,6 +55,10 @@ namespace Config
                   "Config::CRAWL_PWM must be in [PWM_MIN_MAGNITUDE, PWM_MAX] so the CRAWL "
                   "recovery branch never hits the deadband floor or saturation cap silently.");
 
+    static_assert(LINE_FOLLOW_OFFSET_ERROR >= 0.0f && LINE_FOLLOW_OFFSET_ERROR <= 2.5f,
+                  "Config::LINE_FOLLOW_OFFSET_ERROR must stay in [0,2.5] error units (>=1 unit "
+                  "margin before the outer channel; LINE_KP*offset stays under LINE_MAX_CORR=40).");
+
     // PWM_MOVING_MIN is the kinetic decel-tail floor; it must never exceed the static breakaway
     // floor (PWM_MIN_MAGNITUDE) it substitutes for. Equal to PWM_MIN_MAGNITUDE disables the
     // feature (identity passthrough) — see the @warning on PWM_MOVING_MIN in ConfigGlobal.h.
@@ -157,6 +161,33 @@ namespace Config
                   "Config::TURN_BREAKAWAY_MOTION_DEG must be >= TURN_MIN_RESOLVABLE_DEG — the "
                   "breakaway->creep hand-off distance must exceed one per-tick step, else the turn "
                   "never latches 'moving' and kicks at the breakaway floor for its whole travel.");
+
+    // Line-junction predicate checks (ConfigLine.h, issue #152).
+    //
+    // COUPLED SITE: WROLineArrayClass::getJunctionType() classifies against these three knobs
+    // over the fixed 8-channel line array (valid channel indices 0..7). An out-of-range knob
+    // would either reference a channel that does not exist or make a junction predicate
+    // permanently unsatisfiable / trivially always-true. Each knob got an `#ifndef *_DEFAULT`
+    // override hook in ConfigLine.h precisely so a compile-fail probe can trip these asserts.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(LINE_JUNCTION_LEFT_HI <= 7,
+                  "Config::LINE_JUNCTION_LEFT_HI must be <= 7 -- it is an inclusive upper channel "
+                  "index into the fixed 8-channel line array (valid indices run 0 through 7); a "
+                  "higher value would test a channel that does not exist.");
+
+    static_assert(LINE_JUNCTION_RIGHT_LO >= 1 && LINE_JUNCTION_RIGHT_LO <= 7,
+                  "Config::LINE_JUNCTION_RIGHT_LO must be between 1 and 7 inclusive -- it is a "
+                  "lower channel index into the fixed 8-channel line array, and the RIGHT "
+                  "junction predicate treats ch[0..RIGHT_LO-1] as the required OFF-LINE side, so "
+                  "0 would leave no off-line channel to check and a value above 7 would index "
+                  "past the array.");
+
+    static_assert(LINE_JUNCTION_T_MIN_ON >= 1 && LINE_JUNCTION_T_MIN_ON <= 8,
+                  "Config::LINE_JUNCTION_T_MIN_ON must be between 1 and 8 inclusive -- it is a "
+                  "channel-lit COUNT over the fixed 8-channel line array; 0 would declare a "
+                  "T_OR_CROSS junction with zero channels lit and a count above 8 could never be "
+                  "satisfied by an 8-channel array.");
 
     // -----------------------------------------------------------------------------------------
     // Manipulator checks (ConfigManipulator.h)

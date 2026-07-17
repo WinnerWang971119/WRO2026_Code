@@ -26,6 +26,12 @@ Covered cases:
   unsets; a JSON bool masquerading in an int slot is rejected (``bool``
   subclasses ``int`` in Python); the new ``declare_position`` op parses its
   ``node`` field and a malformed/missing ``node`` warns and is skipped.
+* **TC20 (#154-20, this task)** — a top-level ``mosaic.cells`` entry outside
+  the :data:`mosaic.COLOR_NAMES` ``∪`` {:data:`mosaic.AIR_NAME`}
+  whitelist rejects the WHOLE block (``trace.mosaic is None``) with exactly
+  one :class:`UserWarning`, never a partial 11-cell mosaic; a block whose
+  cells are all real colours or the AIR sentinel loads untouched with no
+  warning.
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from pathlib import Path
 
 import pytest
 
+from tools.path_planner.ctps import mosaic
 from tools.path_planner.ctps.trace_loader import load
 
 _FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -858,3 +865,60 @@ def test_tc11_loader_never_raises_on_any_malformed_mosaic_input():
     assert trace.mosaic is None
     assert len(trace.commands) == 1
     assert trace.commands[0].success is None
+
+
+# ---------------------------------------------------------------------------
+# TC20 (#154-20) — mosaic loader colour-name whitelist
+# ---------------------------------------------------------------------------
+
+
+def test_tc20_unknown_cell_color_warns_once_and_rejects_whole_block():
+    """TC20: a ``mosaic.cells`` entry with one unknown colour name warns
+    exactly once and sets ``trace.mosaic`` to ``None`` — never a partial
+    11-cell mosaic, preserving the fixed 12-cell index contract.
+    """
+    bad_cells = list(_VALID_MOSAIC_CELLS)
+    bad_cells[5] = "MAGENTA"  # not in COLOR_NAMES or AIR_NAME
+    data = _mosaic_trace(
+        {
+            "cells": bad_cells,
+            "geom_hash": "ab12cd34",
+            "injected": True,
+        }
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        trace = load(data)
+
+    mosaic_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
+    assert len(mosaic_warnings) == 1
+    assert "mosaic.cells" in str(mosaic_warnings[0].message)
+    assert trace.mosaic is None
+
+
+def test_tc20_valid_block_with_air_sentinel_cells_passes_untouched():
+    """TC20 (valid variant): a ``mosaic.cells`` block mixing real colour
+    names with the AIR sentinel (:data:`mosaic.AIR_NAME`) is a fully valid
+    block — it loads with NO warning and ``trace.mosaic`` populated
+    unchanged.
+    """
+    cells_with_air = [
+        "YELLOW", "BLUE", "GREEN", "WHITE",
+        mosaic.AIR_NAME, mosaic.AIR_NAME, "RED", "YELLOW",
+        "BLUE", "GREEN", "WHITE", mosaic.AIR_NAME,
+    ]
+    data = _mosaic_trace(
+        {
+            "cells": cells_with_air,
+            "geom_hash": "ab12cd34",
+            "injected": True,
+        }
+    )
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # promote any UserWarning to a failure
+        trace = load(data)
+
+    assert trace.mosaic is not None
+    assert trace.mosaic.cells == cells_with_air

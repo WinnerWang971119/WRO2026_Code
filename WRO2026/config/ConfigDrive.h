@@ -482,9 +482,16 @@ namespace Config
      *      applied. A clamped P term already IS the deceleration ramp — there is no
      *      separate slow zone or terminal stage.
      *
+     * @note **Compile-time override:** guarded by `#ifndef TURN_CRUISE_PWM_DEFAULT` so a
+     *       host test can pin it target-wide via `-DTURN_CRUISE_PWM_DEFAULT=...` without
+     *       editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT` (`ConfigNav.h`).
+     *       Guarded by the turn-ladder invariant in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real chassis.
      */
-    constexpr int16_t TURN_CRUISE_PWM = 50;
+#ifndef TURN_CRUISE_PWM_DEFAULT
+#define TURN_CRUISE_PWM_DEFAULT 50
+#endif
+    constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;
 
     /**
      * @brief Proportional gain for the per-tick turn PD controller (ADR-068), in PWM per degree.

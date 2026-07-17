@@ -29,6 +29,9 @@
  *   - `stopAtLineStalled`      — no-progress watchdog timeout for the seek (Drive seek + host test).
  *   - `turnImuReadStalled`     — persistent-IMU-fault watchdog timeout for the turn profile
  *                                (Drive `_updateTurnProfile` + host test).
+ *   - `lineFollowModeToSetpoint` — `Routes::LineFollowMode` (per-edge, generated) -> signed
+ *                                   forward-frame lateral setpoint offset (PathTracker edge
+ *                                   dispatch, issue #156).
  *
  * @note The stopAtLine predicates are extracted from `Drive::_updateStopAtLine()` purely so the
  *       arm-window, detection-debounce, max-distance, and stall-watchdog DECISIONS are
@@ -375,6 +378,45 @@ inline bool stopAtLineStalled(uint32_t nowMs, uint32_t lastProgressMs, uint32_t 
 inline bool turnImuReadStalled(uint32_t nowMs, uint32_t lastGoodReadMs, uint32_t stallTimeoutMs)
 {
     return (uint32_t) (nowMs - lastGoodReadMs) >= stallTimeoutMs;
+}
+
+// =============================================================================================
+// Lateral line-follow offset resolution (issue #156)
+// =============================================================================================
+
+/**
+ * @brief Map a per-edge `Routes::LineFollowMode` to its signed FORWARD-frame lateral setpoint
+ *        offset.
+ *
+ * Single source of truth for the LEFT/RIGHT/MIDDLE/DEFAULT -> setpoint magnitude mapping. The
+ * sign returned here is for a hop driven in the forward direction; `PathTracker` composes the
+ * reverse-hop sign flip on top of this value (this function stays direction-unaware on purpose —
+ * see `Routes::LineFollowMode` and the direction-override precedent in `NavTypes.h`).
+ *
+ * @param mode Per-edge line-follow mode resolved for the current hop.
+ * @return `+Config::LINE_FOLLOW_OFFSET_ERROR` for `LineFollowMode::LEFT`;
+ *         `-Config::LINE_FOLLOW_OFFSET_ERROR` for `LineFollowMode::RIGHT`;
+ *         `0.0f` for `LineFollowMode::MIDDLE`, `LineFollowMode::DEFAULT`, or any unrecognised
+ *         value (defensive default, mirroring `presetToPwm` / `speedTierToPreset`).
+ *
+ * @note Consumed by `PathTracker` edge dispatch via
+ *       `.setLineFollowOffset(sign * lineFollowModeToSetpoint(mode))`, where `sign` carries the
+ *       reverse-hop flip.
+ */
+inline float lineFollowModeToSetpoint(Routes::LineFollowMode mode)
+{
+    switch (mode)
+    {
+    case Routes::LineFollowMode::LEFT:
+        return Config::LINE_FOLLOW_OFFSET_ERROR;
+    case Routes::LineFollowMode::RIGHT:
+        return -Config::LINE_FOLLOW_OFFSET_ERROR;
+    case Routes::LineFollowMode::MIDDLE:
+        return 0.0f;
+    case Routes::LineFollowMode::DEFAULT:
+        return 0.0f;
+    }
+    return 0.0f;
 }
 
 #endif    // WRO_MATH_H

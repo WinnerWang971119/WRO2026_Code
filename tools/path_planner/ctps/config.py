@@ -143,6 +143,29 @@ ARC_STEP_DEG: float = 10.0
 ROBOT_FRAME_CM: float = 25.0
 
 # ---------------------------------------------------------------------------
+# Line-follow lateral hug-side offset — display scale (issue #156)
+# ---------------------------------------------------------------------------
+
+#: CTPS-only display scale: on-screen lateral chassis nudge (cm) per unit of the
+#: recorded LineFollower offset. A biased ``lineFollowDist`` records the signed
+#: ``setLineFollowOffset`` bias in firmware CENTROID-INDEX units (``follow_offset``
+#: on the ``drive`` op; LEFT records ``+Config::LINE_FOLLOW_OFFSET_ERROR`` = +1.5
+#: by default, RIGHT the negative), and the renderer nudges the chassis marker
+#: ``LINE_FOLLOW_OFFSET_DISPLAY_CM * follow_offset`` cm to that side for the whole
+#: follow leg (≈ 1.0 cm per error unit → ≈ 1.5 cm at the default seed).
+#:
+#: This is a VISUALIZATION-ONLY constant OWNED BY the CTPS layer (ADR-069, ADR-054
+#: chassis-nudge precedent). It is deliberately DISTINCT from the firmware
+#: ``Config::LINE_FOLLOW_OFFSET_ERROR`` — error units do NOT map to a fixed cm
+#: without sensor pitch / height / line-width, so this is a display pace, not a
+#: physical calibration. It is applied in the render / ``track_builder`` layer
+#: only: the parity-locked ``LocalizationSim`` pose is never touched — the
+#: keyframes stay on the centerline and the nudge is applied at DRAW time from the
+#: ``Track.lateral_offsets`` overlay, exactly like the pivot wheel-arc overlay. Do
+#: NOT use to estimate a real lateral displacement.
+LINE_FOLLOW_OFFSET_DISPLAY_CM: float = 1.0
+
+# ---------------------------------------------------------------------------
 # Manipulator cargo-model player constants (object/cargo plan, issue #57)
 # ---------------------------------------------------------------------------
 #

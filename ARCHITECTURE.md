@@ -52,6 +52,7 @@ WRO2026_Code/
 │   │   │   └── ManipBelt.h           # belt actuator class behind Manipulator
 │   │   │
 │   │   └── util/
+│   │       ├── EncoderSource.h / .cpp # sole owner of lower-MCU encoder + drive task-done I/O (ADR-066)
 │   │       ├── EventTrace.h / .cpp   # OLED ring buffer + 500 ms Serial heartbeat
 │   │       ├── WROMath.h             # free helpers (cmToEncDeg, presetToPwm, ...)
 │   │       ├── StateMachine.h        # generic FSM template (defined, currently unused)
@@ -105,6 +106,12 @@ WRO2026.ino
   YawSource ────── (sole owner of raw IMU yaw I/O; applies Config::IMU_YAW_SIGN to bridge
                     the hardware CW-positive raw yaw and the app CCW-positive frame; read by
                     Drive — turn loop + gyro-straight writes — and Localization — heading; ADR-045)
+  EncoderSource ── (util layer, sits BELOW Drive / LineFollower / ManipBelt; sole owner of
+                    lower-MCU per-motor encoder + drive task-done reads, surfacing the MMLower
+                    RESULT the vendor read paths discard; readDegrees (surfacing) / readDegreesOr
+                    (last-good) / resetCache / isPrevTaskDone; read by Drive — profile / seek /
+                    wall-push / calibration / getEncL/R / task-done — and ManipBelt — belt
+                    position; LineFollower reaches it through Drive.getEncL/getEncR; ADR-066)
 ```
 
 `cooperativeTick()` order (from `WRO2026.ino`):
@@ -139,6 +146,7 @@ writer module does not.
 | `Intersection` | edge-triggered node arrival | `isAtIntersection()` (read-and-clear), `getEdgeCount()`, `getLastType() → JunctionType` |
 | `WROLineArray` | 8-ch reflectance array hardware | `getError() → int`, `isOnline() → bool`, `getJunctionType() → uint8_t`, `calibrate()`, `setReverseActive(bool)` |
 | `YawSource` | sole owner of raw lower-MCU IMU yaw I/O; applies `Config::IMU_YAW_SIGN` to convert the hardware CW-positive raw yaw to the app CCW-positive frame on read, and app headings back to raw for STM32 gyro-PID writes (ADR-045); read by `Drive` + `Localization` | `readYawDeg(double&) → bool`, `readYawDegOr(fallback) → double`, `toHwHeading(appDeg) → int16_t` |
+| `EncoderSource` | sole owner of lower-MCU per-motor encoder + drive task-done reads; surfaces the `MMLower` RESULT the vendor read paths discard (ADR-066); surfacing vs last-good policy + per-motor last-good cache; read by `Drive` (profile / seek / wall-push / calibration / `getEncL`/`getEncR` / task-done) + `ManipBelt` (belt position); `LineFollower` reaches it via `Drive.getEncL`/`getEncR` | `readDegrees(id,int32_t&) → bool`, `readDegreesOr(id,fallback) → int32_t`, `resetCache(id)`, `isPrevTaskDone() → bool` |
 | `Localization` | current node + IMU-yaw offset (single writer); reads its raw yaw through `YawSource` | `zeroHeadingFromCurrent()`, `getCurrentNode()`, `getHeadingDeg()`, `toImuYaw(world)`, `onIntersection(advanceTo)`, `onDeadReckonedAdvance(advanceTo)`, `reanchorAtWall(axis,coord,heading)` (wall-zero re-anchor, ADR-043) |
 | `FieldMap` | accessors over `Routes::*` constant tables | `getNextHop(from,goal)`, `getEdge(from,to)`, `getEdgeType(from,to)`, `getNode(id)`, `findNodeByName(name)` |
 | `routes` | **auto-generated** graph data | `Routes::NODES[N]`, `Routes::NEXT_HOP[N][N]`, `Routes::EDGES[N][N]`, `Routes::PIPELINE_CONFIG` |

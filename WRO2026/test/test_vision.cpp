@@ -817,14 +817,59 @@ static void test_TC17_getters_pre_read_and_out_of_range()
     for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
     {
         ASSERT_TRUE(Vision.getColor(cell) == Config::Color::UNKNOWN);
-        ASSERT_EQ(Vision.getRawHue(cell), (uint8_t) 0);
+        ASSERT_EQ(Vision.getRawHue(cell), Config::VISION_RAW_HUE_NONE);
     }
 
     // Out-of-range indices (== count, and well past) -> sentinel, no OOB access (ASan-clean).
     ASSERT_TRUE(Vision.getColor(Config::VISION_CELL_COUNT) == Config::Color::UNKNOWN);
-    ASSERT_EQ(Vision.getRawHue(Config::VISION_CELL_COUNT), (uint8_t) 0);
+    ASSERT_EQ(Vision.getRawHue(Config::VISION_CELL_COUNT), Config::VISION_RAW_HUE_NONE);
     ASSERT_TRUE(Vision.getColor(200) == Config::Color::UNKNOWN);
-    ASSERT_EQ(Vision.getRawHue(255), (uint8_t) 0);
+    ASSERT_EQ(Vision.getRawHue(255), Config::VISION_RAW_HUE_NONE);
+}
+
+// ===========================================================================
+// T14 (#154-18) — getRawHue() no-data sentinel: named Config::VISION_RAW_HUE_NONE (0xFF),
+// distinct from a genuine hue-0 reading, returned for both the pre-read and out-of-range-cell
+// cases (TC17 already drives those two paths against the sentinel above; this test additionally
+// pins the sentinel's VALUE and proves it cannot be confused with an actual hue-0 cell).
+// ===========================================================================
+
+static void test_T14_getRawHue_sentinel_distinct_from_hue_zero()
+{
+    TEST_SCOPE("T14 (#154-18): getRawHue sentinel distinct from hue 0, returned on no-read");
+
+    // The sentinel itself must never equal a real hue-0 reading.
+    ASSERT_EQ(Config::VISION_RAW_HUE_NONE, (uint8_t) 0xFF);
+    ASSERT_TRUE(Config::VISION_RAW_HUE_NONE != (uint8_t) 0);
+
+    resetWorld();    // begin() clears _hasRead -> pre-read state, no fault
+
+    // Pre-read (no successful readMosaic() yet): every cell reads the sentinel, not 0.
+    for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
+    {
+        ASSERT_EQ(Vision.getRawHue(cell), Config::VISION_RAW_HUE_NONE);
+    }
+
+    // A genuine successful read with an actual hue-0-adjacent chromatic value must NOT be
+    // confused with the sentinel: latch a real frame, then confirm the in-range cells read
+    // back their real (non-sentinel) hue while an out-of-range index still reads the sentinel.
+    const std::vector<uint8_t> frame = buildUniformFrame(kHueGreen, kStaHigh);
+    std::vector<uint8_t> twoFrames(frame);
+    twoFrames.insert(twoFrames.end(), frame.begin(), frame.end());
+    stageInjection(twoFrames);
+    Vision.setTickCallback(injectTickCallback);
+    ASSERT_TRUE(Vision.readMosaic());
+    Vision.setTickCallback(nullptr);
+
+    for (uint8_t cell = 0; cell < Config::VISION_CELL_COUNT; ++cell)
+    {
+        ASSERT_EQ(Vision.getRawHue(cell), kHueGreen);
+        ASSERT_TRUE(Vision.getRawHue(cell) != Config::VISION_RAW_HUE_NONE);
+    }
+
+    // Out-of-range cell index still returns the sentinel even after a successful read.
+    ASSERT_EQ(Vision.getRawHue(Config::VISION_CELL_COUNT), Config::VISION_RAW_HUE_NONE);
+    ASSERT_EQ(Vision.getRawHue(255), Config::VISION_RAW_HUE_NONE);
 }
 
 // ===========================================================================
@@ -1021,6 +1066,7 @@ int main()
     test_TC14_readmosaic_bad_cell_preserves_latch();
     test_TC15_bad_checksum_then_good_retries();
     test_TC17_getters_pre_read_and_out_of_range();
+    test_T14_getRawHue_sentinel_distinct_from_hue_zero();
     test_TC18_tick_callback_invoked_during_wait();
     test_TC19_cell_to_slot_direction();
     test_TC20_no_callback_warns_once();    // MUST precede TC16 (shared one-time-warning static)

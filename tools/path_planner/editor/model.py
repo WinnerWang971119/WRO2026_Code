@@ -90,7 +90,11 @@ class FieldModel:
         leave to ``w``). The editor has no GUI control for these; the field
         is carried verbatim so an open -> save round-trip preserves any
         pivots authored directly in ``field_data.json``. Defaults to an empty
-        list when the JSON omits the optional ``pivot_turns`` key.
+        list when the JSON omits the optional ``pivot_turns`` key. An
+        explicitly-authored empty list (``"pivot_turns": []`` present in the
+        source) is distinguished from a merely-absent key (see
+        ``_pivot_turns_authored``) so :meth:`to_json_dict` does not silently
+        drop it (issue #154-19).
     :param reset_nodes: Wall-zero reset nodes, a sparse table keyed by node
         name mapping each ``"reset"``-typed node to its
         ``{"axis", "wall_coord", "facing"}`` re-localization spec. Like
@@ -122,6 +126,14 @@ class FieldModel:
     :param pipeline_direction_mode: Field-sourced ``PIPELINE_CONFIG`` default
         for the direction mode, as a ``DirectionMode`` member name or ``None``
         (inherit). Absent-stays-absent like ``pipeline_speed``.
+
+    Two internal, non-schema fields track whether ``pivot_turns`` /
+    ``blind_projection_auto_seek`` were explicitly present in the source JSON
+    even when their value equals the emit-time default (an empty list /
+    ``True``) that :meth:`to_json_dict` would otherwise omit -- see
+    ``_pivot_turns_authored`` and ``_blind_projection_auto_seek_authored``
+    below. They carry no ``field_data.json`` key of their own and are excluded
+    from equality comparisons.
     """
 
     # Ordered list of top-level JSON keys.  ``to_json_dict`` produces keys in
@@ -201,6 +213,30 @@ class FieldModel:
     pipeline_turn_mode: str | None = None
     pipeline_direction_mode: str | None = None
 
+    # Internal, not a field_data.json key. True iff the source JSON that built
+    # this model (via from_json_dict) explicitly carried a "pivot_turns" key --
+    # even an empty ``[]`` -- so to_json_dict can tell "the field never
+    # authored pivots" apart from "the field authored an empty pivot list"
+    # (both look identical as plain ``[]`` in memory). Without this,
+    # to_json_dict's "omit when empty" rule would silently drop an
+    # explicitly-authored empty list on every Save (issue #154-19). Set only by
+    # from_json_dict; editor commands that mutate ``pivot_turns`` (AddPivotTurn
+    # / RemovePivotTurn) never touch this flag, so an operator adding then
+    # removing every pivot in a session still round-trips the field's original
+    # authored-or-not intent. Excluded from equality (compare=False) so the
+    # from_json_dict(to_json_dict()) == model invariant still holds for models
+    # built by hand with a non-empty pivot_turns but this flag left at its
+    # default (to_json_dict already emits a non-empty list regardless of this
+    # flag, so the flag's value cannot change round-trip behavior in that case).
+    _pivot_turns_authored: bool = field(default=False, compare=False, repr=False)
+    # Internal, not a field_data.json key. Same rationale as
+    # _pivot_turns_authored, for "blind_projection_auto_seek": True iff the
+    # source JSON explicitly carried the key, even when its value is the True
+    # default to_json_dict would otherwise treat as "never authored, omit."
+    _blind_projection_auto_seek_authored: bool = field(
+        default=False, compare=False, repr=False
+    )
+
     # ------------------------------------------------------------------
     # Snapshot / restore (used by the undo/redo stack)
     # ------------------------------------------------------------------
@@ -255,6 +291,14 @@ class FieldModel:
         self.pipeline_blind_mode = snap.pipeline_blind_mode
         self.pipeline_turn_mode = snap.pipeline_turn_mode
         self.pipeline_direction_mode = snap.pipeline_direction_mode
+        # Internal authored-tracking flags (bool, immutable) -- plain
+        # assignment, mirroring blind_projection_auto_seek. Restoring these
+        # keeps an undo past a pivot/flag edit from losing track of whether
+        # the ORIGINAL source JSON explicitly authored the key.
+        self._pivot_turns_authored = snap._pivot_turns_authored
+        self._blind_projection_auto_seek_authored = (
+            snap._blind_projection_auto_seek_authored
+        )
 
     # ------------------------------------------------------------------
     # JSON round-trip
@@ -302,7 +346,11 @@ class FieldModel:
 
         ``pivot_turns`` is optional (older JSON files predate it): an absent
         key maps to an empty list, and each present 3-array becomes a
-        ``(u, v, w)`` tuple, mirroring the ``LINE_SEGMENTS`` treatment.
+        ``(u, v, w)`` tuple, mirroring the ``LINE_SEGMENTS`` treatment. Key
+        *presence* is also recorded (``_pivot_turns_authored``) so an
+        explicitly-authored ``"pivot_turns": []`` round-trips back out of
+        :meth:`to_json_dict` instead of being indistinguishable from an absent
+        key (issue #154-19).
 
         ``RESET_NODES`` is optional too (older JSON files predate it): an
         absent key maps to an empty dict, and each present per-node spec is
@@ -319,6 +367,13 @@ class FieldModel:
         The four ``pipeline_*`` keys are optional too (absent stays absent):
         an absent key maps to ``None``; a present value is a mode member NAME
         (string tag) stored as-is.
+
+        ``blind_projection_auto_seek`` is optional (absent maps to the ``True``
+        default). Like ``pivot_turns``, key *presence* is also recorded
+        (``_blind_projection_auto_seek_authored``) so an explicitly-authored
+        ``"blind_projection_auto_seek": true`` (matching the default) round-trips
+        back out of :meth:`to_json_dict` instead of looking identical to an
+        absent key (issue #154-19).
 
         :param data: Dict as returned by
             :func:`~tools.path_planner.editor.loader.load_field_json`.
@@ -360,6 +415,13 @@ class FieldModel:
             pipeline_blind_mode=data.get("pipeline_blind_mode"),
             pipeline_turn_mode=data.get("pipeline_turn_mode"),
             pipeline_direction_mode=data.get("pipeline_direction_mode"),
+            # Source-presence tracking (issue #154-19): record whether the
+            # source JSON explicitly carried these keys, even when the value
+            # equals the default to_json_dict would otherwise omit.
+            _pivot_turns_authored="pivot_turns" in data,
+            _blind_projection_auto_seek_authored=(
+                "blind_projection_auto_seek" in data
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -481,10 +543,14 @@ class FieldModel:
         - ``RESET_NODES`` dict keys are sorted alphabetically (like ``NODES``
           / ``NODE_TYPES``) so the dump is byte-deterministic.
         - ``pivot_turns`` is OPTIONAL: it is emitted (in its canonical slot,
-          between ``BLIND_EDGES`` and ``RESET_NODES``) only when non-empty. A
-          pivot-free field omits the key entirely, matching the loader's
-          ``dump_field_json`` "absent stays absent" round-trip so a save
-          through the model produces no spurious ``pivot_turns: []`` diff.
+          between ``BLIND_EDGES`` and ``RESET_NODES``) when non-empty, OR when
+          the source JSON explicitly authored the key (``_pivot_turns_authored``,
+          set by :meth:`from_json_dict`) -- so an authored ``"pivot_turns": []``
+          survives an open -> save round-trip instead of being silently dropped
+          (issue #154-19). A model that never saw the key (never loaded, or
+          built by hand) and has an empty list omits it entirely, matching the
+          loader's ``dump_field_json`` "absent stays absent" round-trip so a
+          save through the model produces no spurious ``pivot_turns: []`` diff.
         - ``RESET_NODES`` is OPTIONAL too: it is emitted (in its canonical
           slot, between ``pivot_turns`` and ``OBSTACLES``) only when non-empty.
           A reset-free field omits the key entirely, matching the same
@@ -494,6 +560,14 @@ class FieldModel:
           canonical slot, before ``EDGES``) only when not ``None``. A field
           that never authored a pipeline default omits the key entirely
           (absent stays absent) so a save produces no spurious ``null`` diff.
+        - ``blind_projection_auto_seek`` is OPTIONAL: it is emitted when it
+          differs from the loader default (``True``), OR when the source JSON
+          explicitly authored the key (``_blind_projection_auto_seek_authored``,
+          set by :meth:`from_json_dict`) -- so an authored
+          ``"blind_projection_auto_seek": true`` (matching the default) survives
+          an open -> save round-trip instead of being silently dropped (issue
+          #154-19). A model that never saw the key and holds the default
+          ``True`` omits it entirely, matching ``pivot_turns`` / ``RESET_NODES``.
         - ``EDGES`` is OPTIONAL: it is emitted (in its canonical slot, between
           the ``pipeline_*`` keys and ``OBSTACLES``) only when non-empty. Each
           entry is emitted VERBATIM (deep-copied so the caller cannot alias the
@@ -526,18 +600,27 @@ class FieldModel:
             "LINE_SEGMENTS": [list(seg) for seg in self.line_segments],
             "BLIND_EDGES": [list(edge) for edge in self.blind_edges],
         }
-        if self.pivot_turns:
+        # Emit when non-empty, OR when the source JSON explicitly authored the
+        # key (issue #154-19) -- an authored `"pivot_turns": []` must survive
+        # the round-trip, not just a non-empty list.
+        if self.pivot_turns or self._pivot_turns_authored:
             result["pivot_turns"] = [list(turn) for turn in self.pivot_turns]
         if self.reset_nodes:
             result["RESET_NODES"] = {
                 name: dict(self.reset_nodes[name])
                 for name in sorted(self.reset_nodes)
             }
-        # OPTIONAL: emit only when it differs from the loader default (True), so
-        # a field that never authored the key round-trips byte-identically
-        # (absent stays absent), matching pivot_turns / RESET_NODES.
-        if not self.blind_projection_auto_seek:
-            result["blind_projection_auto_seek"] = False
+        # OPTIONAL: emit when it differs from the loader default (True), OR
+        # when the source JSON explicitly authored the key (issue #154-19) --
+        # an authored `"blind_projection_auto_seek": true` must survive the
+        # round-trip even though it matches the default. Otherwise a field
+        # that never authored the key round-trips byte-identically (absent
+        # stays absent), matching pivot_turns / RESET_NODES.
+        if (
+            not self.blind_projection_auto_seek
+            or self._blind_projection_auto_seek_authored
+        ):
+            result["blind_projection_auto_seek"] = self.blind_projection_auto_seek
         # OPTIONAL pipeline defaults: emit each only when authored (not None),
         # in canonical key order, so an unauthored field omits the key entirely
         # (absent stays absent) -- no spurious null diff.

@@ -40,7 +40,7 @@ import argparse
 import sys
 import warnings
 from pathlib import Path
-from typing import Optional
+from typing import List, Mapping, Optional
 
 # When invoked as ``python tools/path_planner/build_routes.py`` (i.e.
 # the file is the top-level script, NOT imported as a module via
@@ -58,14 +58,17 @@ if __name__ == "__main__" and __package__ in (None, ""):
         sys.path.insert(0, str(_REPO_ROOT))
 
 from tools.path_planner import field_data  # noqa: E402
-from tools.path_planner.graph_builder import build_graph  # noqa: E402
+from tools.path_planner.graph_builder import EDGE_LINE, build_graph  # noqa: E402
 from tools.path_planner.header_writer import (  # noqa: E402
     DEFAULT_HEADER_PATH,
     DEFAULT_SOURCE_PATH,
     FIELD_DATA_JSON_PATH,
     emit_routes,
 )
-from tools.path_planner.pipeline_config import PIPELINE_CONFIG  # noqa: F401 -- baked into routes.cpp by header_writer
+from tools.path_planner.pipeline_config import (  # noqa: E402
+    PIPELINE_CONFIG,  # noqa: F401 -- baked into routes.cpp by header_writer
+    LineFollowMode,
+)
 from tools.path_planner.planner import (  # noqa: E402
     BlindDecayParams,
     build_pivot_turns,
@@ -77,6 +80,111 @@ from tools.path_planner.visualizer import (  # noqa: E402
     DEFAULT_OUTPUT as DEFAULT_MAP_PNG,
 )
 from tools.path_planner.visualizer import render_map  # noqa: E402
+
+# The two LineFollowMode members that actually bias the follow (issue #156);
+# MIDDLE is the centered no-op and DEFAULT (== absence) never reaches a graph
+# edge's ``mode`` attribute -- the validator rejects an explicit
+# ``mode: DEFAULT`` on a LINE edge, so a graph edge's resolved mode is always
+# one of MIDDLE/LEFT/RIGHT. Only LEFT/RIGHT are worth warning about below.
+_BIASED_LINE_FOLLOW_MODE_NAMES = (LineFollowMode.LEFT.name, LineFollowMode.RIGHT.name)
+
+
+def _resolve_line_follow_mode_name(mode_tag) -> Optional[str]:
+    """Best-effort resolve an authored LINE-edge ``mode`` tag to its member name.
+
+    ``field_data.EDGES[i].mode`` is forwarded onto the directed graph edge
+    verbatim by :func:`graph_builder._extract_directional_attrs` -- it may be
+    a :class:`LineFollowMode` instance (programmatic/Python authoring) or the
+    bare member-name string (JSON authoring, e.g. ``"LEFT"``). This mirrors
+    the tolerance of :func:`header_writer._override_enum_value`: an absent,
+    unresolvable, or wrong-type tag resolves to ``None`` rather than raising.
+    The validator (``validator.py``) already owns strict rejection of a bad
+    ``mode`` value before the graph is ever built, so in practice this always
+    resolves cleanly for a validated field -- the ``None`` fallback only
+    guards a lint pass invoked directly against an unvalidated/hand-built
+    graph in a test.
+
+    :param mode_tag: the raw value stored under a graph edge's ``"mode"``
+        attribute (``None`` when the edge carries no authored override).
+    :return: the resolved member name (``"MIDDLE"`` / ``"LEFT"`` /
+        ``"RIGHT"``), or ``None`` when absent/unresolvable.
+    """
+    if isinstance(mode_tag, LineFollowMode):
+        return mode_tag.name
+    if isinstance(mode_tag, str):
+        try:
+            return LineFollowMode[mode_tag].name
+        except KeyError:
+            return None
+    return None
+
+
+def find_unpaired_biased_line_reversals(
+    graph,
+    next_hop: Mapping[str, Mapping[str, Optional[str]]],
+) -> List[str]:
+    """Return one warning message per used-but-unpaired biased LINE reversal.
+
+    LINE ``mode`` (``LEFT`` / ``RIGHT``) is directional (issue #156 / T-graph):
+    authoring it on the directed edge ``u -> v`` does NOT mirror it onto the
+    reverse edge ``v -> u`` -- a companion ``EDGES`` entry authored the other
+    way round is required to bias the reverse hop too (see
+    :func:`graph_builder._extract_directional_attrs`). If the planner's
+    precomputed ``NEXT_HOP`` table ever actually drives ``v -> u`` (i.e. some
+    destination resolves that hop) and no companion entry authored a ``mode``
+    on ``v -> u``, that hop silently falls back to centered (``MIDDLE``)
+    follow at runtime -- an easy authoring gap to miss, since nothing rejects
+    it at validation time (a lone directional override is legal by design).
+
+    This is a lint, not a validation rule: the caller is expected to print
+    the returned messages as loud warnings and let the build continue --
+    the biased edge and its (absent) companion are both individually legal;
+    only the *combination* of "used in reverse" + "no reverse override" is
+    the authoring smell being surfaced.
+
+    :param graph: the directed graph from :func:`graph_builder.build_graph`.
+        Every edge carries a ``"type"`` attribute (:data:`EDGE_LINE` /
+        ``graph_builder.EDGE_BLIND``) and, on an authored biased LINE edge,
+        a ``"mode"`` attribute (verbatim, forward-only per T-graph).
+    :param next_hop: the all-pairs next-hop table from
+        :func:`planner.compute_all_pairs_next_hop` -- ``next_hop[v][t]`` is
+        the node the router steps to from ``v`` when the final destination is
+        ``t`` (or ``None``/``v`` itself when unreachable/at-goal).
+    :return: one human-readable warning string per offending ``(u, v)`` pair,
+        in graph edge-iteration order; empty when the field has no such gap
+        (the common case -- e.g. the current test/placeholder field, which
+        authors no LINE ``mode`` overrides at all).
+    """
+    messages: List[str] = []
+    for u, v, data in graph.edges(data=True):
+        if data.get("type") != EDGE_LINE:
+            continue
+        mode_name = _resolve_line_follow_mode_name(data.get("mode"))
+        if mode_name not in _BIASED_LINE_FOLLOW_MODE_NAMES:
+            continue
+
+        # Companion check: does the reverse directed edge v -> u carry its
+        # OWN authored `mode`? LINE `mode` never mirrors (T-graph), so only
+        # a SEPARATE EDGES entry authored u/v-swapped puts one there.
+        reverse_data = graph.get_edge_data(v, u)
+        if reverse_data is not None and reverse_data.get("mode") is not None:
+            continue
+
+        # Usage check: does the planner's routing ever actually step from v
+        # to u -- i.e. is u among the resolved next-hops out of v, for ANY
+        # possible final destination a mission might goTo()?
+        reverse_row = next_hop.get(v)
+        if not reverse_row or u not in reverse_row.values():
+            continue
+
+        messages.append(
+            f"LINE edge '{u}' -> '{v}' is authored mode={mode_name}, but its "
+            f"reverse traversal '{v}' -> '{u}' is driven by a NEXT_HOP route "
+            "with no companion authored entry -- that hop will silently "
+            "follow centered (MIDDLE). Author a companion EDGES entry "
+            f"(type=LINE, u='{v}', v='{u}', mode=...) to bias it too."
+        )
+    return messages
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -216,6 +324,14 @@ def _run(
     #     edge distances.
     log("building pivot-turn records ...")
     pivot_records = build_pivot_turns(graph, track_cm)
+
+    # 3c. Lint: warn (never fail the build) about a biased LINE edge whose
+    #     reverse traversal is actually driven by NEXT_HOP with no companion
+    #     authored entry (issue #156 / AC12) -- an authoring smell, since
+    #     that hop would silently follow centered (MIDDLE) on the real robot.
+    log("checking for unpaired biased LINE reversals ...")
+    for msg in find_unpaired_biased_line_reversals(graph, next_hop):
+        print(f"WARN: {msg}", file=sys.stderr)
 
     # 4. Resolve output paths. The DEFAULT_* names below are this
     #    module's own bindings (imported at module load time). Tests

@@ -40,15 +40,7 @@ namespace FieldMap
      */
     inline const Routes::EdgeInfo& noEdge()
     {
-        static const Routes::EdgeInfo kNoEdge = {
-            Routes::EdgeType::NONE,         // type
-            0.0f,                           // distance_cm
-            0.0f,                           // heading_deg
-            Routes::SpeedTier::DEFAULT,     // speed_override
-            Routes::BlindMode::DEFAULT,     // blind_mode_override
-            Routes::DirectionMode::DEFAULT, // direction_override
-            Routes::StopAtLineMode::DEFAULT // stop_at_line_override
-        };
+        static const Routes::EdgeInfo kNoEdge = Routes::makeEdge(Routes::EdgeType::NONE);
         return kNoEdge;
     }
 

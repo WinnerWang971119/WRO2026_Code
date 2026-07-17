@@ -20,6 +20,10 @@
  *      two renderModes: `box` (rotated chassis rectangle + heading nose) and
  *      `wheel-arc` (#55 — the same box plus a transient planted-wheel pin +
  *      faint arc guide while the playhead is inside a `TRACK.pivots[i]` span).
+ *      Independent of the mode, the actors layer nudges the drawn pose laterally
+ *      while the playhead is inside a `TRACK.lateral_offsets[i]` span (#156 — the
+ *      biased line-follow hug side; a DRAW-time overlay that never mutates the
+ *      sim-authoritative keyframe pose).
  *   4. Exposes CTPS.renderer = { resize, hitTest } — `hitTest` for T8 (canvas
  *      selection); `resize` as the public re-measure entry (the renderer also
  *      self-wires resize via its own ResizeObserver + window listener).
@@ -541,7 +545,12 @@
      * full-view HUD is a DOM element owned by T9 — not drawn here.
      */
     function _drawActors(ctx, view, state) {
-        var pose = CTPS.engine.poseAt(state.t);
+        // Visualization-only lateral hug-side nudge (issue #156): shift the drawn
+        // pose perpendicular to its heading while the playhead is inside a
+        // `lateral_offsets` span. Applied on a COPY here, so every render mode
+        // (box + wheel-arc) draws the biased marker while the engine's
+        // sim-authoritative pose stays untouched.
+        var pose = _applyLateralOffset(CTPS.engine.poseAt(state.t), state.t);
         _drawSelectionHalo(ctx, view, state, pose);
         var mode = CTPS.renderModes.get(_renderModeId);
         if (!mode || typeof mode.draw !== "function") {
@@ -842,6 +851,76 @@
             return null;
         }
         return (t >= seg.t0 && t <= seg.t1) ? seg : null;
+    }
+
+    /**
+     * Find the `TRACK.lateral_offsets` entry whose `[t0, t1]` span contains `t`,
+     * or null when there is no active span (issue #156). Same bounded
+     * bisect-for-rightmost-`t0 <= t` idiom as `_activePivotSegment`
+     * (`lateral_offsets` is sorted by `t0` — the Data Model guarantee). Degrades
+     * to null — never throws — when there is no list, `t` isn't a number, or the
+     * matched segment is missing `t0` / `t1` / `offset_cm`; the caller then draws
+     * the robot at its un-nudged pose (the non-fatal overlay contract).
+     */
+    function _activeLateralSegment(t) {
+        if (typeof t !== "number") {
+            return null;
+        }
+        var track = CTPS.engine.track;
+        var segs = track && track.lateral_offsets;
+        var n = segs ? segs.length : 0;
+        if (n === 0 || !segs[0] || typeof segs[0].t0 !== "number" || t < segs[0].t0) {
+            return null;
+        }
+        var lo = 0;
+        var hi = n - 1;
+        while (hi > lo) {
+            var mid = lo + Math.ceil((hi - lo) / 2);
+            if (segs[mid] && typeof segs[mid].t0 === "number" && segs[mid].t0 <= t) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        var seg = segs[lo];
+        if (!seg || typeof seg.t0 !== "number" || typeof seg.t1 !== "number" ||
+            typeof seg.offset_cm !== "number") {
+            return null;
+        }
+        return (t >= seg.t0 && t <= seg.t1) ? seg : null;
+    }
+
+    /**
+     * Return `pose` shifted laterally (perpendicular to its heading) by the
+     * active `lateral_offsets` segment's `offset_cm`, or `pose` unchanged when no
+     * span is active (issue #156, ADR-054 chassis-nudge precedent). A pure
+     * DRAW-time nudge: the robot marker rides `offset_cm` cm to its LEFT (the `+`
+     * / LEFT bias; RIGHT is negative) of the sim-authoritative keyframe pose, so
+     * the operator SEES the hug-side offset without any keyframe / sim mutation.
+     * Robot heading is CCW-from-+x, so the robot-LEFT unit vector is
+     * `(cos(h+90), sin(h+90)) = (-sin h, cos h)`. Returns a shallow COPY so the
+     * engine's cached pose object is never mutated; passes non-number poses
+     * through untouched (the non-fatal overlay contract).
+     */
+    function _applyLateralOffset(pose, t) {
+        if (!pose || typeof pose.x !== "number" || typeof pose.y !== "number" ||
+            typeof pose.h !== "number") {
+            return pose;
+        }
+        var seg = _activeLateralSegment(t);
+        if (!seg) {
+            return pose;
+        }
+        var rad = pose.h * Math.PI / 180;
+        var out = {};
+        for (var k in pose) {
+            if (Object.prototype.hasOwnProperty.call(pose, k)) {
+                out[k] = pose[k];
+            }
+        }
+        out.x = pose.x - seg.offset_cm * Math.sin(rad);
+        out.y = pose.y + seg.offset_cm * Math.cos(rad);
+        return out;
     }
 
     /**

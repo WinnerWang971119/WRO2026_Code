@@ -50,6 +50,30 @@ namespace Config
     constexpr uint32_t PATH_DRAIN_TIMEOUT_MS_PER_GOAL = 60000;
 
     /**
+     * @brief Grace window (ms) of CONTINUOUS lost-line before PathTracker escalates to
+     *        `PathTrackerClass::Fault::LINE_LOST` (issue #146).
+     *
+     * While the FSM is line-following (`State::LINE_FOLLOW`), PathTracker polls
+     * `LineFollower.isLineLost()` each tick. A loss that persists for at least this many
+     * milliseconds — measured from the first tick the line drops and reset the instant it
+     * reacquires — is treated as the chassis having wandered off the line, and PathTracker
+     * latches `Fault::LINE_LOST`. A shorter, transient loss (a scuffed segment, a junction
+     * saturation) never trips the fault.
+     *
+     * @note This is a BOUNDED fault ESCALATION only, not the deferred ADR-009 lost-line
+     *       sweep/reacquire/resume recovery (see docs/decisions/009-*.md). The poll runs
+     *       ONLY in `State::LINE_FOLLOW`; `State::LINE_OVERSHOOT` is a deliberate dead-reckon
+     *       past the line and is not polled, and the poll is suppressed during a
+     *       PathTracker-owned pass-through window (`_passThrough` / `_projPassThrough`).
+     * @note TODO bench-tune. 500 ms is a placeholder: long enough to ride out a saturated
+     *       junction or a brief scuff at cruise, short enough to catch a genuine departure
+     *       before the chassis drives far off-map. Retune once the real segment quality and
+     *       cruise speed are measured.
+     * @note Consumer: `PathTracker`'s `LINE_FOLLOW` lost-line escalation (issue #146).
+     */
+    constexpr uint32_t LINE_LOST_FAULT_MS = 500;   // TODO bench-tune
+
+    /**
      * @brief Settle dwell (ms) held after a stopped hop before the next maneuver.
      *
      * After the chassis brakes to rest at a node, `PathTracker` holds the FSM idle in

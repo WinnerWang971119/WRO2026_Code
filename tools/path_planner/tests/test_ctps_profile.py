@@ -755,7 +755,7 @@ def test_tc6_perturbed_cruise_pwm_scales_the_constant_rate(tmp_path: Path) -> No
 
     original_text = perturbed_drive_h.read_text(encoding="utf-8")
     lifted_text = original_text.replace(
-        "constexpr int16_t TURN_CRUISE_PWM = 50;",
+        "constexpr int16_t TURN_CRUISE_PWM = TURN_CRUISE_PWM_DEFAULT;",
         "constexpr int16_t TURN_CRUISE_PWM = 80;",
     )
     assert lifted_text != original_text, (

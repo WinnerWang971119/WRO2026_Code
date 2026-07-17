@@ -12,6 +12,9 @@
                              // transitively brings this in, but binding to `&LineArray` and
                              // dereferencing `WROLineArrayClass*` makes the dependency
                              // explicit at the use site.
+#include "../util/WROMath.h"    // `lineFollowModeToSetpoint(...)` — maps the per-edge follow mode to
+                             // a signed offset. Pulls the full `Routes::LineFollowMode` definition
+                             // (the header only opaque-forward-declares it) into this TU.
 
 /**
  * @brief Single global instance referenced by every other module.
@@ -53,7 +56,9 @@ LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                                _hasOvershootModeOverride,
                                _overshootModeOverride,
                                _hasBrakeOnGateOverride,
-                               _brakeOnGateOverride);
+                               _brakeOnGateOverride,
+                               _hasLineFollowOffsetOverride,
+                               _lineFollowOffsetOverride);
     _executed = true;
 }
 
@@ -151,6 +156,27 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setBrakeOnGate(bool on)
     _brakeOnGateOverride    = on;
     _hasBrakeOnGateOverride = true;
     return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float offset)
+{
+    // Mirrors the setOvershootMode / setBrakeOnGate override-pair pattern: stage the value
+    // plus a "has-override" marker so the owner's existing offset is preserved across a re-arm
+    // when the setter is not chained. Unlike setPreset / setReverse, the owner RESETS this to
+    // 0.0f on disable (see _applyEnableBuilder's disable branch), so a later followDistance() /
+    // followUntilIntersection() never inherits a stale bias. See issue #156.
+    _lineFollowOffsetOverride    = offset;
+    _hasLineFollowOffsetOverride = true;
+    return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowMode(Routes::LineFollowMode mode)
+{
+    // Ergonomic sugar over setLineFollowOffset: map the per-edge mode to the same signed offset the
+    // float knob takes, then delegate — so the staging, reset-on-disable lifecycle, and P+D maths
+    // are byte-identical to the float path. FORWARD-frame only; the reverse-hop sign flip stays in
+    // PathTracker's float call (ADR-069). DEFAULT resolves to MIDDLE (offset 0) in the mapper.
+    return setLineFollowOffset(lineFollowModeToSetpoint(mode));
 }
 
 // =========================================================================================
@@ -491,7 +517,16 @@ void LineFollowerClass::update()
             const float dErr = err - _lastErr;
             _lastErr         = err;
 
-            float corr = (Config::LINE_KP * err) + (Config::LINE_KD * dErr);
+            // Bias the proportional term by the staged signed lateral offset (issue #156).
+            // ONLY the P setpoint shifts: `_lastErr` / `dErr` above stay the RAW centroid, so
+            // `getRawError()` telemetry is intact and a mid-follow offset change injects no
+            // derivative kick — just a bounded P-step of ≈ LINE_KP*_lineFollowOffset.
+            // `_lineFollowOffset` is 0.0f on a centred follow, making this byte-identical to
+            // the pre-#156 steering. The biased P term is reached ONLY on this online,
+            // non-junction path, so a zero-weight offline read (runOnlinePath == false above)
+            // never sees it and no extra dropout guard is needed. See issue #156 / ADR-069.
+            float corr =
+                (Config::LINE_KP * (err - _lineFollowOffset)) + (Config::LINE_KD * dErr);
 
             // Clamp the correction to the configured maximum.
             if (corr > Config::LINE_MAX_CORR)
@@ -560,7 +595,9 @@ void LineFollowerClass::update()
                                     /*hasOvershootModeOverride=*/false,
                                     /*overshootMode=*/false,
                                     /*hasBrakeOnGateOverride=*/false,
-                                    /*brakeOnGate=*/true);
+                                    /*brakeOnGate=*/true,
+                                    /*hasLineFollowOffsetOverride=*/false,
+                                    /*lineFollowOffset=*/0.0f);
             }
             else
             {
@@ -615,7 +652,9 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
                                             bool                hasOvershootModeOverride,
                                             bool                overshootMode,
                                             bool                hasBrakeOnGateOverride,
-                                            bool                brakeOnGate)
+                                            bool                brakeOnGate,
+                                            bool                hasLineFollowOffsetOverride,
+                                            float               lineFollowOffset)
 {
     // Apply preset and reverse first so that, if anyone ever extends this to react
     // synchronously to the enable transition, they see the freshly chosen cruise + direction.
@@ -648,6 +687,16 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
     if (hasBrakeOnGateOverride)
     {
         _brakeOnGate = brakeOnGate;
+    }
+
+    // Apply the lateral-offset override if set. Default 0.0f on the owner preserves centred
+    // following when no caller has staged a bias; absent → the owner's current offset is
+    // preserved so a re-arm on an already-enabled follower keeps its bias. Unlike the
+    // preset / reverse overrides, the disable path below RESETS this to 0.0f. See issue #156.
+    if (hasLineFollowOffsetOverride)
+    {
+        _lineFollowOffset            = lineFollowOffset;
+        _hasLineFollowOffsetOverride = true;
     }
 
     if (targetEnabled)
@@ -763,6 +812,12 @@ void LineFollowerClass::_applyEnableBuilder(bool                targetEnabled,
         _brakeOnGate          = true;     // Restore owner default so a re-enable without an
                                           // explicit setBrakeOnGate(...) starts with the
                                           // self-disable-with-brake behavior. See ADR-023.
+        _lineFollowOffset            = 0.0f;   // Restore centred following so a later
+                                               // followDistance()/followUntilIntersection()
+                                               // never inherits a stale lateral bias — mirrors
+                                               // the overshoot/brake-on-gate reset-on-disable
+                                               // (NOT the persistent preset/reverse). See #156.
+        _hasLineFollowOffsetOverride = false; // Clear the owner override marker on disable.
 
         if (brake)
         {
