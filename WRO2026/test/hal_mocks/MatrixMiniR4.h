@@ -1387,6 +1387,17 @@ inline uint8_t MatrixColor::getColor(ColorType color)
         return 0;    // the gyro read path only ever asks for G / R / K
     }
 
+    // Honor the legacy IMU-failure injection. The FSM suites simulate a FAILED yaw read via
+    // `mmL.mockResult = MMLower::RESULT::ERROR`; the retired STM32 read path made readYawDeg fail
+    // on that. Mirror it: a non-OK result bridges to the all-zero (dead) pattern, so
+    // `gyroBytesDead` trips and `readYawDeg` returns false with the out-param untouched — exactly
+    // the old semantics the 17 suites assert. (Raw-bytes mode is unaffected: TC14/TC15 inject
+    // dead/torn bytes explicitly and do not set mockResult.)
+    if (mmL.mockResult != MMLower::RESULT::OK)
+    {
+        return 0;
+    }
+
     // Bridge from mmL.mockYawDeg (see the class @note). `biased` reverses the production decode
     // so that decode(G, R) == mmL.mockYawDeg * IMU_YAW_SIGN. Quantizes to whole degrees.
     const long     biased = lround((double)mmL.mockYawDeg * (double)kBridgeImuSign /
