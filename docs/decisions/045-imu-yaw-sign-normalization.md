@@ -70,3 +70,6 @@ header-only policy that the host harness can reach directly.
   header-only host-test-extraction pattern that `TurnSignPolicy.h` follows.
 - [ADR-031](./031-config-split-per-domain.md) — per-domain Config split; `IMU_YAW_SIGN` lives in
   `config/ConfigNav.h`; the `±1` tripwire is in `ConfigChecks.h` (cross-module guard).
+- [ADR-070](./070-external-gyro-yaw-provider.md) — the "third frame crossing" this ADR's *Trigger to
+  revisit* anticipated: `YawSource`'s read provider moves to an external gyro board, adding a second,
+  independent frame-crossing sign (`GYRO_YAW_SIGN`) alongside the unchanged `IMU_YAW_SIGN` write.

@@ -12,7 +12,7 @@ R4-side modules in `WRO2026/`:
 - `Drive` — fluent builders, FIFO command queue, T-shape velocity profile, motor-bias calibration, fault state. Also `stopAtLine` (forward + reverse on a 2-board chassis) and `wallStop` re-anchor moves, a seek drive mode with a stall watchdog, and header-only resolver policies (`StopAtLinePolicy` / `DirectionPolicy` / `PivotTrimPolicy` / `TurnSignPolicy` / `ReturnToNodePolicy`).
 - `LineFollower` — outer P+D over `WROLineArray`, fluent enable builder, distance-gated stops, sync helpers, junction-PID freeze.
 - `Intersection` — rising-edge detector with debounce, `JunctionType` classification, edge counter for multi-observer reads.
-- `YawSource` — sole owner of raw lower-MCU IMU-yaw I/O; applies `Config::IMU_YAW_SIGN` once on read and once on the STM32 gyro-heading write (ADR-045). Read by `Drive` and `Localization`.
+- `YawSource` — sole owner of the external-gyro yaw read (MXColor board on I2C3, decoded via `GyroDecodePolicy.h`, `Config::GYRO_YAW_SIGN` applied once) and the STM32 gyro-PID heading write (`Config::IMU_YAW_SIGN` applied once, unchanged); no longer reads the STM32 IMU for yaw (ADR-045, extended by ADR-070). Read by `Drive` and `Localization`.
 - `Localization` — single-writer current node + IMU-yaw offset + 2D operator-offset delta; world↔IMU frame conversion; `reanchorAtWall()` wall-zero re-anchor (ADR-042/043).
 - `FieldMap` — header-only namespace over `Routes::*`.
 - `routes.h` / `routes.cpp` — **auto-generated** by the Python pipeline; holds `NODES`, `NEXT_HOP[N][N]`, `EDGES[N][N]`, `PipelineConfig`.
