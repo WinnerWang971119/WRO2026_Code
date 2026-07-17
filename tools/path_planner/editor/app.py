@@ -42,7 +42,7 @@ from tkinter import messagebox, simpledialog
 from tools.path_planner.editor.dialogs import AddNodeDialog, ShortcutsDialog
 from typing import Optional
 
-from tools.path_planner.editor import auto_edges, loader, projection_edges
+from tools.path_planner.editor import align, auto_edges, loader, projection_edges
 from tools.path_planner.editor.canvas import FieldCanvas
 from tools.path_planner.editor.commands import (
     AddBlindEdge,
@@ -313,6 +313,21 @@ _STATUS_LINE_INTO_RESET: str = (
     "reached by dead reckoning -- press B for a blind edge instead."
 )
 
+#: ALIGN section (make-straight) readout labels. The Auto radio's label reveals
+#: the resolved axis ("Auto — X") only while AUTO is the live axis choice; it
+#: reads the plain "Auto" otherwise (a manual axis, or the disabled state below
+#: two selected nodes). The em dash matches the shipped UI/UX spec.
+_ALIGN_AUTO_LABEL: str = "Auto"
+_ALIGN_AUTO_LABEL_X: str = "Auto — X"
+_ALIGN_AUTO_LABEL_Y: str = "Auto — Y"
+
+#: Target-coordinate readout forms. ``align.align_points`` already rounds the
+#: aligned scalar to 4 dp, so these just name it. ``FIT`` has no single aligned
+#: scalar (every node projects to its own point), so it names the line instead.
+_ALIGN_TARGET_X_FORMAT: str = "x = %.4f"
+_ALIGN_TARGET_Y_FORMAT: str = "y = %.4f"
+_ALIGN_TARGET_FIT_LABEL: str = "best-fit line"
+
 #: Path to the field JSON the Save handler writes. Save is pure-JSON now -- the
 #: EDGES table lives in the model and round-trips through this file, so there is
 #: no longer a sibling ``field_data.py`` rewrite (issue #79).
@@ -476,6 +491,12 @@ class EditorApp:
         # Obstacle mode: live (x, y) of the drag cursor, used by the
         # preview overlay. ``None`` when no drag is in progress.
         self._obstacle_cursor: Optional[tuple[float, float]] = None
+        # Select mode: anchor + live cursor of the in-progress marquee
+        # rubber-band (mirrors ``_obstacle_anchor`` / ``_obstacle_cursor``).
+        # ``None`` when no marquee drag is active. T4 only declares + clears
+        # these; the marquee event logic lands in T5.
+        self._marquee_anchor: Optional[tuple[float, float]] = None
+        self._marquee_cursor: Optional[tuple[float, float]] = None
         # Auto-create preview state (T8). ``None`` when no preview is active.
         # When non-None, the canvas renders the list as a dashed cyan overlay
         # and the SidePanels show Accept / Reject instead of Auto-create.
@@ -485,6 +506,18 @@ class EditorApp:
         # _on_panel_node_select and consumed by the arrow-key nudge (AC4) so a
         # nudge knows which node to move without re-reading the panel widget.
         self._selected_node: Optional[str] = None
+        # The full multi-node selection (ordered, deduped). Written ONLY by
+        # :meth:`_set_selection`, which keeps the invariant
+        # ``_selected_node == _selected_nodes[-1] or None``. Consumed by the
+        # render highlight union (AC3) and the ALIGN readout / overlay (AC4).
+        self._selected_nodes: list[str] = []
+        # The operator's current alignment axis (the ALIGN section radio).
+        # ``AUTO`` until the radio is flipped; read by :meth:`_compute_align_state`.
+        self._align_axis: align.AlignAxis = align.AlignAxis.AUTO
+        # The live make-straight preview (guide line + ghost targets), or
+        # ``None`` below two selected nodes. Recomputed by
+        # :meth:`_compute_align_state` and drawn at the single render call site.
+        self._align_preview: Optional[align.AlignPreview] = None
 
         # ---- 8. Spinbox de-dup guard (reviewer note T11 W1) ----
         # SidePanels' Spinbox <FocusOut> may spuriously fire with the
@@ -580,6 +613,13 @@ class EditorApp:
     def _wire_panel_callbacks(self) -> None:
         """Hook every :class:`SidePanels` callback slot to a method on self."""
         self._panels.on_node_select = self._on_panel_node_select
+        # The EXTENDED listbox fires ``on_nodes_select`` (the full selection)
+        # since T3; ``on_node_select`` above survives only for back-compat.
+        self._panels.on_nodes_select = self._on_panel_nodes_select
+        # ALIGN axis radio flip: recompute the readout / preview for the new
+        # axis without running an alignment (the Make-straight dispatch and its
+        # ``on_align_request`` wiring land in T5).
+        self._panels.on_axis_change = self._handle_axis_change
         self._panels.on_node_type_change = self._on_panel_node_type_change
         self._panels.on_node_coords_change = self._on_panel_node_coords_change
         self._panels.on_node_rename = self._on_panel_node_rename
@@ -853,7 +893,7 @@ class EditorApp:
         # than dispatch a MoveNode against a missing node.
         current = self._model.nodes.get(node)
         if current is None:
-            self._selected_node = None
+            self._set_selection([])
             self._set_status(_STATUS_NUDGE_NO_SELECTION)
             return
 
@@ -904,15 +944,26 @@ class EditorApp:
     def _refresh_view(self) -> None:
         """Re-render canvas + side panels + button enable states + title.
 
-        Ends with a :meth:`_revalidate` so the validation badge + message slot
-        track the model after every mutation (dispatch / undo / redo all funnel
-        through here) -- "per move" validation, not just at Save.
+        Recomputes the ALIGN readout + make-straight overlay FIRST (via
+        :meth:`_compute_align_state`) so a stale post-alignment residual never
+        survives an undo / redo / delete (AC14), then renders the canvas with
+        the union of the edge-mode endpoints and the node selection highlighted
+        (AC3) plus the live align preview. Ends with a :meth:`_revalidate` so
+        the validation badge + message slot track the model after every
+        mutation (dispatch / undo / redo all funnel through here) -- "per move"
+        validation, not just at Save.
         """
-        highlighted = list(self._edge_selection)
+        self._compute_align_state()
+        highlighted = list(
+            dict.fromkeys(
+                [*self._edge_selection, *getattr(self, "_selected_nodes", [])]
+            )
+        )
         self._canvas.render(
             self._model,
             highlighted_nodes=highlighted,
             proposed_edges=self._proposed_edges,
+            align_preview=getattr(self, "_align_preview", None),
         )
         self._panels.refresh(self._model)
         self._panels.set_undo_enabled(self._history.can_undo)
@@ -1035,21 +1086,47 @@ class EditorApp:
     # Panel callback handlers
     # ------------------------------------------------------------------
 
-    def _on_panel_node_select(self, node_name: Optional[str]) -> None:
-        """Called when the listbox selection changes.  Updates the status bar
-        and triggers a full view refresh so the inspector (driven by
-        SidePanels.refresh) reflects the new selection.
+    def _on_panel_nodes_select(self, names: list[str]) -> None:
+        """Panel -> app: adopt the full listbox selection (EXTENDED listbox).
 
-        :param node_name: Selected node name, or ``None`` if cleared.
+        The listbox fires this with every selected node name in listbox order;
+        it funnels straight through the single :meth:`_set_selection` writer, so
+        the latch, the anchor var, the selection line, and the ALIGN readout all
+        update through one path. The status line names the anchor (last-selected)
+        node, matching the ``_selected_node == _selected_nodes[-1]`` invariant.
+
+        :param names: Selected node names, in listbox order (may be empty).
         """
-        # Track the selection so the arrow-key nudge (AC4) knows which node to
-        # move; ``None`` clears it.
-        self._selected_node = node_name
-        if node_name is None:
+        self._set_selection(names)
+        if self._selected_node is None:
             self._set_status("Selection cleared.")
         else:
-            self._set_status(f"Selected node {node_name!r}.")
-        self._update_selection_display(node_name)
+            self._set_status(f"Selected node {self._selected_node!r}.")
+
+    def _on_panel_node_select(self, node_name: Optional[str]) -> None:
+        """Back-compat single-node select slot -- funnels through the list path.
+
+        ``SidePanels`` fires :attr:`on_nodes_select` for listbox changes since
+        T3; this slot survives only for callers that still deliver a single
+        optional name (it routes straight into :meth:`_on_panel_nodes_select`).
+
+        :param node_name: Selected node name, or ``None`` to clear.
+        """
+        self._on_panel_nodes_select([node_name] if node_name else [])
+
+    def _handle_axis_change(self, axis_value: str) -> None:
+        """Panel -> app: adopt a new alignment axis; refresh readout + preview.
+
+        Fired by the ALIGN axis radios. It never runs an alignment: it sets
+        :attr:`_align_axis` from the wire value string and re-renders, which
+        recomputes the ALIGN readout, the ``Auto -- <resolved>`` label, the
+        guide line, and the ghost dots for the newly chosen axis via
+        :meth:`_compute_align_state`.
+
+        :param axis_value: An :class:`~tools.path_planner.editor.align.AlignAxis`
+            value string (``"auto"`` / ``"x"`` / ``"y"`` / ``"fit"``).
+        """
+        self._align_axis = align.AlignAxis(axis_value)
         self._refresh_view()
 
     def _on_panel_node_type_change(self, node_name: str, new_type: str) -> None:
@@ -1787,6 +1864,8 @@ class EditorApp:
         * MOVE-mode drag latch (``_drag_target``, ``_drag_origin_xy``).
         * OBSTACLE-mode rubber-band rectangle anchor + cursor
           (``_obstacle_anchor``, ``_obstacle_cursor``).
+        * SELECT-mode marquee rubber-band anchor + cursor
+          (``_marquee_anchor``, ``_marquee_cursor``).
         * EDGE-mode two-click endpoint queue (``_edge_selection``).
         * Auto-create preview state (``_proposed_edges``) -- mode change
           kills any in-progress proposal so the Accept/Reject buttons do
@@ -1794,12 +1873,15 @@ class EditorApp:
 
         Called whenever the user switches mode so a half-finished drag
         or partial edge selection does not bleed into the next mode.
-        Does **not** touch model state or the dirty flag.
+        Does **not** touch model state, the dirty flag, or the node
+        selection (a mode switch keeps the current ``_selected_nodes``).
         """
         self._drag_target = None
         self._drag_origin_xy = None
         self._obstacle_anchor = None
         self._obstacle_cursor = None
+        self._marquee_anchor = None
+        self._marquee_cursor = None
         self._edge_selection = []
         if self._proposed_edges is not None:
             self._proposed_edges = None
@@ -1840,12 +1922,142 @@ class EditorApp:
             f"{_SELECTION_DISPLAY_PREFIX}{shown}"
         )
 
-    def _on_canvas_click(self, x: float, y: float, button: int) -> None:
+    def _set_selection(self, names: list[str]) -> None:
+        """Set the node selection -- the SINGLE writer of selection state.
+
+        Filters *names* against the live model, dedupes preserving first-seen
+        order, then updates every downstream surface in lock-step:
+        ``_selected_nodes`` (the ordered list), ``_selected_node`` (the
+        inspector anchor, always the last survivor or ``None``), the panel's
+        ``_selected_node_var`` mirror, the node-listbox highlight, the
+        status-strip selection line, and a full :meth:`_refresh_view` (which in
+        turn recomputes the ALIGN readout + canvas overlay via
+        :meth:`_compute_align_state`). No other code path assigns
+        ``_selected_node`` directly.
+
+        :param names: Candidate node names, in the order they were selected.
+            Names absent from the model and later duplicates are dropped.
+        """
+        model = getattr(self, "_model", None)
+        valid = model.nodes if model is not None else None
+        seen: set[str] = set()
+        filtered: list[str] = []
+        for name in names:
+            if name in seen:
+                continue
+            if valid is not None and name not in valid:
+                continue
+            seen.add(name)
+            filtered.append(name)
+
+        self._selected_nodes = filtered
+        self._selected_node = filtered[-1] if filtered else None
+
+        # Mirror the single-node inspector anchor: the panel keys its
+        # listbox-restore + inspector-populate off ``_selected_node_var``.
+        anchor_var = getattr(self._panels, "_selected_node_var", None)
+        if anchor_var is not None:
+            anchor_var.set(self._selected_node or "")
+        self._reflect_listbox_selection()
+        self._update_selection_display(self._selected_node)
+        self._refresh_view()
+
+    def _reflect_listbox_selection(self) -> None:
+        """Mirror ``_selected_nodes`` into the panel's node listbox.
+
+        ``_set_selection`` can be driven from the canvas (marquee / click),
+        where the listbox does not yet reflect the new selection. Clearing the
+        listbox and re-selecting exactly ``_selected_nodes`` keeps its
+        highlight in step -- and because :meth:`SidePanels.refresh` preserves
+        the listbox's own selection across its rebuild, it also stops a stale
+        multi-highlight from a prior listbox selection surviving a
+        canvas-driven change.
+
+        A safe no-op when the panel is a lightweight test double that exposes
+        no ``_node_listbox`` (the handler tests inject a ``SimpleNamespace``
+        panel). Programmatic ``selection_set`` / ``selection_clear`` do not
+        fire ``<<ListboxSelect>>``, so this never re-enters ``_set_selection``.
+        """
+        listbox = getattr(self._panels, "_node_listbox", None)
+        if listbox is None:
+            return
+        try:
+            rows = list(listbox.get(0, tk.END))
+            index_by_name = {name: index for index, name in enumerate(rows)}
+            listbox.selection_clear(0, tk.END)
+            for name in self._selected_nodes:
+                index = index_by_name.get(name)
+                if index is not None:
+                    listbox.selection_set(index)
+        except tk.TclError:  # pragma: no cover -- defensive against a torn-down widget
+            return
+
+    def _compute_align_state(self) -> None:
+        """Recompute the ALIGN readout + make-straight preview from live state.
+
+        Reads the current ``_selected_nodes`` and ``_align_axis`` and pushes
+        the result to :meth:`SidePanels.set_align_state` plus ``_align_preview``
+        (the guide line + ghost targets the render call site draws). Called
+        from :meth:`_refresh_view`, so undo / redo / delete and every other
+        model change keep the readout and overlay in step with the model
+        (AC14 -- no stale post-alignment residual survives an undo).
+
+        Guarded so it is a safe no-op during early construction (before the
+        selection list / panel exist) and against lightweight test doubles
+        whose injected panel exposes no ``set_align_state``. Selected names
+        that no longer exist in the model (e.g. undone into non-existence) are
+        dropped before the geometry runs, so a stale selection never raises.
+        """
+        selected = getattr(self, "_selected_nodes", None)
+        panels = getattr(self, "_panels", None)
+        if selected is None or panels is None:
+            return
+        set_align_state = getattr(panels, "set_align_state", None)
+        if set_align_state is None:
+            return
+
+        present = [name for name in selected if name in self._model.nodes]
+        if len(present) < 2:
+            set_align_state(len(present), _ALIGN_AUTO_LABEL, None, "", False)
+            self._align_preview = None
+            return
+
+        points = {name: self._model.nodes[name] for name in present}
+        resolved = align.resolve_axis(points, self._align_axis)
+        residual = align.max_residual_cm(points, self._align_axis)
+        targets = align.align_points(points, self._align_axis)
+
+        if resolved is align.AlignAxis.X:
+            target_label = _ALIGN_TARGET_X_FORMAT % next(iter(targets.values()))[0]
+        elif resolved is align.AlignAxis.Y:
+            target_label = _ALIGN_TARGET_Y_FORMAT % next(iter(targets.values()))[1]
+        else:  # FIT -- every node projects to its own point; name the line.
+            target_label = _ALIGN_TARGET_FIT_LABEL
+
+        if self._align_axis is align.AlignAxis.AUTO:
+            axis_label = (
+                _ALIGN_AUTO_LABEL_X
+                if resolved is align.AlignAxis.X
+                else _ALIGN_AUTO_LABEL_Y
+            )
+        else:
+            axis_label = _ALIGN_AUTO_LABEL
+
+        set_align_state(len(present), axis_label, residual, target_label, True)
+        self._align_preview = align.build_preview(points, self._align_axis)
+
+    def _on_canvas_click(
+        self, x: float, y: float, button: int, key: Optional[str] = None
+    ) -> None:
         """Route a press event to the per-mode handler.
 
         :param x: World x coordinate (centimetres).
         :param y: World y coordinate (centimetres).
         :param button: Matplotlib button number (1 = left, 3 = right).
+        :param key: The modifier key held during the event (matplotlib's
+            ``event.key``: ``None`` / ``"shift"`` / ``"control"`` / ...).
+            Accepted here for the widened canvas contract; the modifier
+            selection logic lands in T5.
         """
         if button == _MOUSE_BUTTON_RIGHT:
             self._show_context_menu(x, y)
@@ -1894,12 +2106,17 @@ class EditorApp:
             ax_anchor, ay_anchor = self._obstacle_anchor
             self._canvas.update_obstacle_preview(ax_anchor, ay_anchor, x, y)
 
-    def _on_canvas_release(self, x: float, y: float, button: int) -> None:
+    def _on_canvas_release(
+        self, x: float, y: float, button: int, key: Optional[str] = None
+    ) -> None:
         """Route a release event to the per-mode handler.
 
         :param x: World x coordinate at release.
         :param y: World y coordinate at release.
         :param button: Matplotlib button number.
+        :param key: The modifier key held during the event (matplotlib's
+            ``event.key``). Accepted here for the widened canvas contract; the
+            marquee-release selection logic lands in T5.
         """
         if button != _MOUSE_BUTTON_LEFT:
             return
@@ -1991,20 +2208,16 @@ class EditorApp:
         self._reveal_reset_spec_section()
 
     def _select_node(self, name: str) -> None:
-        """Latch *name* as the selected node and sync the selection surfaces.
+        """Programmatically select *name* through the single selection writer.
 
-        Mirrors what :meth:`_on_panel_node_select` does for a user click, but
-        is driven programmatically (e.g. right after a node is created): it
-        updates the arrow-nudge latch and the status-strip selection line.
-        :meth:`SidePanels.refresh` (run by the caller's :meth:`_refresh_view`
-        or directly) reselects the listbox row and populates the inspector.
+        Driven programmatically (e.g. right after a node is created or
+        renamed). Delegates to :meth:`_set_selection` so the latch, the panel
+        anchor var, the listbox highlight, the selection line, the ALIGN
+        readout, and a full refresh all update through one path.
 
         :param name: Name of the node to select.
         """
-        self._selected_node = name
-        # The panel keys its listbox-restore + inspector-populate off this var.
-        self._panels._selected_node_var.set(name)
-        self._update_selection_display(name)
+        self._set_selection([name])
 
     def _reveal_reset_spec_section(self) -> None:
         """Open the inspector's collapsible Reset-spec section if it is closed.
@@ -2154,28 +2367,22 @@ class EditorApp:
     def _handle_select_click(self, x: float, y: float) -> None:
         """Select the node under the cursor (or clear the selection on a miss).
 
-        Mirrors clicking the node's row in the right-hand node list: the hit
-        branch reuses :meth:`_select_node` + :meth:`_refresh_view` (the same
-        programmatic-selection path used after node creation); the miss branch
-        clears the selection by pre-blanking ``_selected_node_var`` and routing
-        through the existing :meth:`_on_panel_node_select` deselect handler so the
-        listbox highlight and inspector both drop. Does NOT call
-        ``self._panels.on_node_select`` (that is the panel->app inbound edge).
+        Both branches funnel through the single :meth:`_set_selection` writer so
+        canvas-driven selection stays in step with ``_selected_nodes``, the
+        listbox highlight, and the ALIGN readout / overlay. A hit replaces the
+        selection with just that node; an empty-canvas miss clears it. (T5
+        layers the shift / ctrl modifier semantics on top of this.)
 
         :param x: World x coordinate (centimetres).
         :param y: World y coordinate (centimetres).
         """
         hit = self._canvas.find_node_at(x, y)
         if hit is None:
-            # Empty-canvas click clears the selection. Pre-blank the var so
-            # SidePanels.refresh sees no previously-selected node and drops the
-            # listbox highlight + inspector (it restores from _selected_node_var).
-            self._panels._selected_node_var.set("")
-            self._on_panel_node_select(None)
+            self._set_selection([])
+            self._set_status("Selection cleared.")
             return
-        self._select_node(hit)
+        self._set_selection([hit])
         self._set_status(f"Selected node {hit!r}.")
-        self._refresh_view()
 
     # ------------------------------------------------------------------
     # Drag completion
@@ -2670,10 +2877,10 @@ class EditorApp:
             return
 
         if self._dispatch(DeleteNode(target)) and self._selected_node == target:
-            # The selected node is gone; drop the stale latch (AC4) so an arrow
-            # nudge no longer targets it, and clear the selection line.
-            self._selected_node = None
-            self._update_selection_display(None)
+            # The selected node is gone; clear the selection through the single
+            # writer (AC4) so an arrow nudge no longer targets it and the
+            # selection line + ALIGN readout drop with it.
+            self._set_selection([])
 
     # ------------------------------------------------------------------
     # Save / Save & Build
