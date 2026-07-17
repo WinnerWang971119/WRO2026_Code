@@ -1575,6 +1575,60 @@ target_include_directories(test_turn_sign_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME turn_sign_policy COMMAND test_turn_sign_policy)
 
 # =========================================================================================
+# Test executable — GyroDecodePolicy math (ADR-070, T6, TC1-TC12).
+#
+# `gyroRawBiased` / `gyroWrap180` / `decodeGyroYawDeg` / `gyroBytesDead` /
+# `gyroShortestDelta` / `gyroReadPlausible` are header-only inline policies
+# (`GyroDecodePolicy.h`) with NO Arduino / Config surface (only `<stdint.h>` +
+# `<math.h>`) -- the same `TurnSignPolicy.h` / `PivotTrimPolicy.h` precedent.
+#
+# Pure math with zero Arduino / Config.h surface, so this target needs no mocks /
+# SUT sources -- just the sketch include dir for the self-contained header (mirrors
+# `test_turn_sign_policy` immediately above, for the same reason).
+# =========================================================================================
+add_executable(test_gyro_decode_policy
+    ${TEST_DIR}/test_gyro_decode_policy.cpp
+)
+target_include_directories(test_gyro_decode_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME gyro_decode_policy COMMAND test_gyro_decode_policy)
+
+# =========================================================================================
+# Test executable — GYRO_YAW_SIGN tripwire negative (ADR-070, TC22 / AC9, compile-fail).
+#
+# Proves the `static_assert` in `ConfigChecks.h` fires when `Config::GYRO_YAW_SIGN` is not
+# exactly +/-1. Built with `-DGYRO_YAW_SIGN_DEFAULT=0.5f` (the `#ifndef`-guarded override
+# hook in `config/ConfigNav.h`), so `GYRO_YAW_SIGN == 0.5f` -- a value that would silently
+# scale rather than mirror the decoded gyro heading. The build is expected to FAIL; ctest
+# uses PASS_REGULAR_EXPRESSION on the metacharacter-free substring
+# `GYRO_YAW_SIGN must be exactly`. When PASS_REGULAR_EXPRESSION is set, ctest decides
+# pass/fail purely on whether the regex matches the captured build output and IGNORES the
+# process exit code -- so the test PASSES only when the intended assert fires, and FAILS if
+# the build broke for any unrelated reason.
+#
+# Mirrors `test_imu_yaw_sign_zero` EXACTLY: `EXCLUDE_FROM_ALL` +
+# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, and NO
+# `add_mock_force_includes(...)` so a typo in a mock header cannot mask the intended
+# diagnostic. Include dirs = sketch + mocks (via `COMMON_INCLUDES`) so the quoted
+# `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# =========================================================================================
+add_executable(test_gyro_config_fail
+    ${TEST_DIR}/test_gyro_config_fail.cpp
+)
+set_target_properties(test_gyro_config_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_gyro_config_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_config_fail PRIVATE GYRO_YAW_SIGN_DEFAULT=0.5f)
+
+add_test(NAME gyro_config_fail_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_gyro_config_fail --config $<CONFIG>
+)
+set_tests_properties(gyro_config_fail_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_YAW_SIGN must be exactly")
+
+# =========================================================================================
 # Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-045, TC7 / AC4, compile-fail).
 #
 # Proves the `static_assert` in `ConfigChecks.h` fires when `Config::IMU_YAW_SIGN` is not
