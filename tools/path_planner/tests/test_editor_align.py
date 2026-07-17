@@ -3,7 +3,8 @@
 Covers TC1-TC10 from the plan's Testing Strategy
 (docs/plans/2026-07-17-161-editor-multiselect-make-straight.md). TC12
 (``find_nodes_in_rect`` with an inverted box) belongs to the canvas, not
-``align.py``, and is deliberately not tested here.
+``align.py``, and is deliberately not tested here -- it lives in
+``test_editor_marquee_blit.py`` alongside TC11.
 
 ``align.py`` imports neither Tk nor matplotlib, so this module needs none of
 the Agg-backend import dance the GUI-adjacent test files require -- see

@@ -1,7 +1,14 @@
 """Real-Tk smoke tests for the multi-select marquee + ALIGN panel (issue #161, T8).
 
-Covers TC33-TC36 from the plan's Testing Strategy:
+Covers TC11 and TC33-TC36 from the plan's Testing Strategy:
 
+* TC11 -- :meth:`FieldCanvas.find_nodes_in_rect` (the box hit-test the
+  marquee release resolves through) returns exactly the nodes whose
+  coordinate falls inside a known box, in the model's dict iteration
+  order; returns ``[]`` before :meth:`~FieldCanvas.render` has ever run;
+  and normalizes an "inverted" box (``x1 < x0`` and/or ``y1 < y0``) to the
+  same result as the equivalent normalized box, inclusive on all four
+  edges.
 * TC33 -- the node-selection marquee blit fast-path (:meth:`FieldCanvas.
   begin_marquee_drag` / :meth:`~FieldCanvas.update_marquee_preview` /
   :meth:`~FieldCanvas.end_marquee_drag`) is a parallel clone of the obstacle
@@ -127,6 +134,105 @@ def _install_composite_spies(canvas: FieldCanvas):
     canvas._canvas.restore_region = restore_spy
     canvas._canvas.blit = blit_spy
     return restore_spy, blit_spy
+
+
+def _make_nodes_model(nodes: dict[str, tuple[float, float]]) -> FieldModel:
+    """Build a minimal but fully-valid :class:`FieldModel` over *nodes*.
+
+    Mirrors ``_make_field_model`` in ``test_editor_align.py``: every node is
+    a plain ``"line"`` type, no edges/obstacles/pivots -- enough for
+    :meth:`FieldCanvas.render` without needing a fixture file, so the TC11
+    tests below can pick exact, known node coordinates.
+
+    :param nodes: Node name -> ``(x_cm, y_cm)`` to seed ``model.nodes`` with.
+    :return: A fully-constructed :class:`FieldModel` on a 300cm x 200cm field.
+    """
+    return FieldModel(
+        field_mm=(3000.0, 2000.0),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node=next(iter(nodes)),
+        start_heading_deg=0.0,
+        nodes=dict(nodes),
+        node_types={name: "line" for name in nodes},
+        line_segments=[],
+        blind_edges=[],
+        obstacles=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# TC11 -- FieldCanvas.find_nodes_in_rect: the marquee's box hit-test.
+# ---------------------------------------------------------------------------
+
+
+def test_find_nodes_in_rect_returns_matches_in_dict_order_and_empty_before_render(
+    field_canvas,
+):
+    """TC11a: before ``render`` has ever run, ``find_nodes_in_rect`` returns
+    ``[]`` rather than raising (mirrors ``find_node_at``'s pre-render guard).
+
+    After ``render(model)``, a box covering exactly 3 of 6 known nodes
+    returns exactly those 3 names, in the model's dict iteration order (not
+    sorted, not click order -- the order ``model.nodes.items()`` yields).
+    """
+    # No render() has happened yet on this fresh canvas -- must be a no-op.
+    assert field_canvas.find_nodes_in_rect(0.0, 0.0, 20.0, 20.0) == []
+
+    nodes = {
+        "A": (0.0, 0.0),
+        "B": (10.0, 10.0),
+        "C": (5.0, 15.0),
+        "D": (100.0, 100.0),
+        "E": (110.0, 90.0),
+        "F": (150.0, 120.0),
+    }
+    field_canvas.render(_make_nodes_model(nodes))
+
+    # The box [0, 20] x [0, 20] covers A, B, C; D/E/F sit far outside it.
+    result = field_canvas.find_nodes_in_rect(0.0, 0.0, 20.0, 20.0)
+
+    assert result == ["A", "B", "C"]
+
+
+def test_find_nodes_in_rect_normalizes_inverted_box_with_inclusive_edges(
+    field_canvas,
+):
+    """TC12: an "inverted" box (``x1 < x0`` and/or ``y1 < y0`` -- what a
+    marquee dragged up-and-left naturally produces) returns the exact same
+    set as the equivalent normalized box, in every combination of inverted
+    axis (both, x-only, y-only).
+
+    The fixture also pins inclusive-edge semantics: node ``A`` sits exactly
+    on the box's bottom-left corner, ``B`` on its top-right corner, and ``C``
+    on its bottom edge only (interior x, boundary y) -- all three must be
+    included, not just the strictly-interior ``D``.
+    """
+    nodes = {
+        "A": (0.0, 0.0),  # on both the x_min and y_min edges
+        "B": (20.0, 20.0),  # on both the x_max and y_max edges
+        "C": (15.0, 0.0),  # on the y_min edge only; x is strictly interior
+        "D": (10.0, 10.0),  # strictly interior
+        "E": (250.0, 150.0),  # well outside the box
+        "F": (280.0, 190.0),  # well outside the box
+    }
+    field_canvas.render(_make_nodes_model(nodes))
+
+    expected = ["A", "B", "C", "D"]
+
+    normalized = field_canvas.find_nodes_in_rect(0.0, 0.0, 20.0, 20.0)
+    both_inverted = field_canvas.find_nodes_in_rect(20.0, 20.0, 0.0, 0.0)
+    x_inverted = field_canvas.find_nodes_in_rect(20.0, 0.0, 0.0, 20.0)
+    y_inverted = field_canvas.find_nodes_in_rect(0.0, 20.0, 20.0, 0.0)
+
+    assert normalized == expected
+    assert both_inverted == expected
+    assert x_inverted == expected
+    assert y_inverted == expected
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@ editor's multi-node select + "Make straight" alignment feature (issue #161,
 T7 of the plan).
 
 Covers TC13-TC32 and TC37 from the plan's Testing Strategy table (TC11 is a
-pure canvas ``find_nodes_in_rect`` test and is covered in T8's
+pure canvas ``find_nodes_in_rect`` test and lives in T8's
 ``test_editor_marquee_blit.py`` -- it is intentionally NOT duplicated here):
 
 * **TC13-TC16** -- ``_set_selection``, the single writer of selection state:
