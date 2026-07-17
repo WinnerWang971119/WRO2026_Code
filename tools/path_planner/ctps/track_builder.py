@@ -1215,14 +1215,14 @@ def _build_pivot_arc(
     where ``Rot(a)*(dx, dy) = (dx*cos a - dy*sin a, dx*sin a + dy*cos a)``.
 
     The arc GEOMETRY (``N`` sub-keyframe centres + headings) is unchanged from
-    the pre-#130 builder; only the TIMING now comes from the firmware turn
-    profile. The ``N`` samples are re-timed by
-    :func:`tools.path_planner.ctps.profile.sample_turn` (the ``arc_keyframes``
-    re-time path): the whole arc occupies ``resolve_turn_profile(theta).duration_s()``
-    at the snapped constant rate, its sub-keyframes pinned to ``t0 + k/N *
-    duration`` (uniform grid, never accumulated) so the running clock stays
-    exactly monotonic. With the current Config both turn stages snap to
-    ``|PWM| = 50`` -> a constant-rate arc (AC3).
+    the pre-#130 builder; only the TIMING now comes from the CTPS turn profile
+    (ADR-068 T8: display-only, not a physics sim). The ``N`` samples are
+    re-timed by :func:`tools.path_planner.ctps.profile.sample_turn` (the
+    ``arc_keyframes`` re-time path): the whole arc occupies
+    ``resolve_turn_profile(theta).duration_s()`` seconds at a SINGLE constant
+    rate, with the final sub-keyframe alone also carrying the fixed nominal
+    settle-allowance tail — so the running clock stays monotonic
+    non-decreasing.
 
     The first sample is ``k = 1`` (NOT ``k = 0``): the arc-start pose is the
     already-present previous keyframe at ``(x0, y0, h0)``, so these ``N`` samples

@@ -108,6 +108,17 @@ public:
      */
     void clear();
 
+    /**
+     * @brief Enable or disable the periodic Serial heartbeat line.
+     *
+     * @param enabled `true` (the default) emits the `HB t=... yaw=... node=...` liveness line
+     *        every `Config::MISSION_HEARTBEAT_MS`; `false` suppresses it. Event-ring pushes and
+     *        OLED rendering are unaffected — only the Serial heartbeat is gated.
+     * @note For bench/diagnostic runs whose own Serial output would otherwise be interleaved with
+     *       heartbeat lines. Runtime-only, not persisted: a reset restores the default (enabled).
+     */
+    void setHeartbeatEnabled(bool enabled) { _heartbeatEnabled = enabled; }
+
 private:
     /**
      * @brief Ring buffer of fixed-width NUL-terminated event strings.
@@ -144,6 +155,9 @@ private:
      * state transition has fired. Period: `Config::MISSION_HEARTBEAT_MS`.
      */
     uint32_t _lastHeartbeat_ms = 0;
+
+    /** @brief When false, `_emitHeartbeat()` suppresses the periodic Serial line. Default true. */
+    bool _heartbeatEnabled = true;
 
     /**
      * @brief Last offset magnitude (whole cm) pushed to the OLED ring, used for change-throttled

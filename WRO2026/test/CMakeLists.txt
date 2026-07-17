@@ -2445,6 +2445,44 @@ target_compile_definitions(test_drive_decel_floor_identity
     PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
 
+# =========================================================================================
+# Test executable #30 — TurnPDPolicy unit tests (ADR-068, T5 / TC1–TC8).
+#
+# Pure decision math for the per-tick PD turn executor. `TurnPDPolicy.h` is deliberately
+# self-contained (`<math.h>` + `<stdint.h>` only — zero Arduino / Config.h surface), so this
+# target needs NO mocks and NO MOCK_SOURCES, exactly like `test_turn_sign_policy` /
+# `test_pivot_trim_policy`. Every tunable is injected as a parameter, which is what makes the
+# control law testable in isolation from the Drive FSM.
+# =========================================================================================
+add_executable(test_turn_pd_policy
+    ${TEST_DIR}/test_turn_pd_policy.cpp
+)
+target_include_directories(test_turn_pd_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME turn_pd_policy COMMAND test_turn_pd_policy)
+
+# =========================================================================================
+# Test executable #31 — Turn PD controller stateful integration (ADR-068, T6, TC9-TC17).
+#
+# First stateful test of the turn FSM: links the REAL Drive.cpp + YawSource.cpp per the
+# issue-#106 host-link recipe (SKETCH_DIR FIRST, path_mocks.cpp NOT hal_mocks.cpp, NO
+# force-included hal_mocks/Drive.h) so the dispatched MiniR4.DriveDC PWM is observable
+# end-to-end, post-creep-floor, post-slew-limit — not just the pure TurnPDPolicy.h math
+# (already covered in isolation by test_turn_pd_policy). PathTracker/Localization/routes are
+# NOT linked — Drive.cpp does not touch any of them, so this target stays the minimal
+# three-file link.
+# =========================================================================================
+add_executable(test_turn_pd_integration
+    ${TEST_DIR}/test_turn_pd_integration.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_turn_pd_integration PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks peripherals — no routes needed.
+add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
+
 # ===== Drive-lane hardening test (T2 #150; T3/T4 append TC8/TC9 to this same target) =====
 set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
 add_executable(test_drive_hardening
@@ -2522,59 +2560,6 @@ add_test(NAME config_junction_t_min_on_compile_fail
 )
 set_tests_properties(config_junction_t_min_on_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "LINE_JUNCTION_T_MIN_ON must be between 1 and 8 inclusive")
-
-# TC10d — TURN_CRUISE_PWM (100) > PWM_MAX (95): only the turn-ladder ordering assert fires.
-add_executable(test_config_turn_ladder_fail_tc10d
-    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
-)
-set_target_properties(test_config_turn_ladder_fail_tc10d PROPERTIES
-    EXCLUDE_FROM_ALL TRUE
-    EXCLUDE_FROM_DEFAULT_BUILD TRUE
-)
-target_include_directories(test_config_turn_ladder_fail_tc10d PRIVATE ${COMMON_INCLUDES})
-target_compile_definitions(test_config_turn_ladder_fail_tc10d PRIVATE TURN_CRUISE_PWM_DEFAULT=100)
-add_test(NAME config_turn_ladder_ordering_compile_fail
-    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
-            --target test_config_turn_ladder_fail_tc10d --config $<CONFIG>
-)
-set_tests_properties(config_turn_ladder_ordering_compile_fail PROPERTIES
-    PASS_REGULAR_EXPRESSION "TURN_SLOW_SPEED_PWM/TURN_CRUISE_PWM/PWM_MAX turn-ladder ordering violated")
-
-# TC10e — TURN_CRUISE_PWM (10) < PWM_MIN_MAGNITUDE (35), slow paired down to 5 so ordering
-#         still holds: only the cruise-floor assert fires.
-add_executable(test_config_turn_ladder_fail_tc10e
-    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
-)
-set_target_properties(test_config_turn_ladder_fail_tc10e PROPERTIES
-    EXCLUDE_FROM_ALL TRUE
-    EXCLUDE_FROM_DEFAULT_BUILD TRUE
-)
-target_include_directories(test_config_turn_ladder_fail_tc10e PRIVATE ${COMMON_INCLUDES})
-target_compile_definitions(test_config_turn_ladder_fail_tc10e PRIVATE
-    TURN_CRUISE_PWM_DEFAULT=10 TURN_SLOW_SPEED_PWM_DEFAULT=5)
-add_test(NAME config_turn_cruise_floor_compile_fail
-    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
-            --target test_config_turn_ladder_fail_tc10e --config $<CONFIG>
-)
-set_tests_properties(config_turn_cruise_floor_compile_fail PROPERTIES
-    PASS_REGULAR_EXPRESSION "TURN_CRUISE_PWM must be >= PWM_MIN_MAGNITUDE")
-
-# TC10f — TURN_TOLERANCE_DEG (35.0) >= TURN_SLOW_ZONE_DEG (30.0): slow zone not strictly wider.
-add_executable(test_config_turn_ladder_fail_tc10f
-    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
-)
-set_target_properties(test_config_turn_ladder_fail_tc10f PROPERTIES
-    EXCLUDE_FROM_ALL TRUE
-    EXCLUDE_FROM_DEFAULT_BUILD TRUE
-)
-target_include_directories(test_config_turn_ladder_fail_tc10f PRIVATE ${COMMON_INCLUDES})
-target_compile_definitions(test_config_turn_ladder_fail_tc10f PRIVATE TURN_TOLERANCE_DEG_DEFAULT=35.0f)
-add_test(NAME config_turn_tolerance_zone_compile_fail
-    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
-            --target test_config_turn_ladder_fail_tc10f --config $<CONFIG>
-)
-set_tests_properties(config_turn_tolerance_zone_compile_fail PROPERTIES
-    PASS_REGULAR_EXPRESSION "TURN_TOLERANCE_DEG must be < TURN_SLOW_ZONE_DEG")
 
 # --- PathTracker lost-line fault escalation test (T7 #146), real-linked ---
 add_executable(test_path_tracker_lost_line

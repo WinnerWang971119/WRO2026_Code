@@ -290,9 +290,10 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    Drive.holdYaw();
-    Drive.driveDist(50).setMode(DriveMode::GYRO);
-    //Drive.driveDist(50).setMode(DriveMode::SYNC); 
+    // T1's bench-probe harness (turn creep-floor / tick-period / IMU-noise measurement)
+    // was extracted to the standalone `inoTest/turn_probe` diagnostic sketch per the
+    // operator's amendment to T10 (docs/plans/2026-07-16-turn-pd-controller.md) — run it
+    // via `uv run inoTest/turn_probe/build.py` instead of dispatching this task.
     return true;
 }
 

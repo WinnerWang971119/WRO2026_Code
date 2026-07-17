@@ -194,7 +194,7 @@ No `new` for system objects. No passing `Drive&` into every constructor. One ins
 | Motor position → speed | **STM32 firmware (vendor).** Not ours. |
 | Sync mode (left vs right encoder match) | STM32 firmware (`MoveSync`). Gains in `Config::SYNC_PID_*`. |
 | Gyro mode (yaw lock during straights) | STM32 firmware (`MoveGyro`). Gains in `Config::GYRO_PID_*`. |
-| Turn (IMU yaw → wheel diff) | STM32 firmware (`TurnGyro`). Gains in `Config::TURN_PID_*`. |
+| Turn (IMU yaw → wheel diff) | **App code**, in `Drive::_updateTurnProfile` (per-tick PD, ADR-068). Gains in `Config::TURN_KP` / `TURN_KD`, plus the `TURN_CREEP_PWM` / `TURN_BREAKAWAY_PWM` / `TURN_SLEW_PWM_PER_TICK` floors. |
 | Line offset → wheel-speed difference | **App code**, in `LineFollower::update()`. |
 
 When `Drive.setSpeed(L, R)` is called, the STM32 ensures the wheels actually hit those speeds. The application's job is to compute *what* those speeds should be.
