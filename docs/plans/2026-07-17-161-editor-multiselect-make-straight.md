@@ -218,7 +218,7 @@ class AlignPreview:
 - `AlignAxis` values: `"auto"`, `"x"`, `"y"`, `"fit"` — the wire form between `panels` and `app` (both `on_align_request` and `on_axis_change`).
 - `EditorApp._selected_nodes` (list), `EditorApp._selected_node` (primary), `EditorApp._set_selection`, `EditorApp._align_axis`, `EditorApp._compute_align_state`.
 - `EditorApp._marquee_anchor`, `EditorApp._marquee_cursor` — mirroring `_obstacle_anchor` / `_obstacle_cursor`; both **must** be registered in `_clear_transient_state` (`app.py:1782-1806`).
-- Status strings, verbatim: `Made {n} nodes straight on {axis} = {value}.` / `Already straight. Nothing moved.` / `Make straight: alignment would leave the field. Nothing moved.` / `Select 2 or more nodes to align them.`
+- Status strings, verbatim: `Made {n} nodes straight on {axis} = {value}.` / `Made {n} nodes straight on the best-fit line.` (FIT — no single aligned scalar to substitute into the `{axis} = {value}` form) / `Already straight. Nothing moved.` / `Make straight: alignment would leave the field. Nothing moved.` / `Select 2 or more nodes to align them.`
 
 ## Error Handling
 
