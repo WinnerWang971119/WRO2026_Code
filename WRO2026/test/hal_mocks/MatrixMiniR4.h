@@ -60,6 +60,7 @@
 #define MATRIXMINIR4_H
 
 #include <stdint.h>
+#include <math.h>    // lround() for the MatrixColor mmL.mockYawDeg -> gyro-bytes bridge (T3)
 
 // ===========================================================================
 // MockRC — single RC servo channel. Mirror of `MiniR4RC<ID>` (vendor MiniR4RC.h).
@@ -1209,6 +1210,192 @@ public:
 /// vendor's `extern MMLower mmL;`, but inline so no mock source file changes). Carried
 /// verbatim from `mocks/MatrixMiniR4.h`.
 inline MockMMLower mmL;
+
+// ===========================================================================
+// External gyro board (MatrixColor) — host mock + `mmL.mockYawDeg` bridge (T3, ADR-070).
+//
+// T4 re-points `YawSource::readYawDeg` off the STM32 IMU onto an external MXColor-protocol
+// gyro read through the vendor `MatrixColor` class (a real board at I2C addr 0x22). The host
+// mock world has no such class, no `TwoWire`, and no `Wire1`, so this block adds exactly the
+// surface T4 (and its test T7) bind to — nothing more. It models NO board behaviour, drift, or
+// physics: a mock that evolves its own state produces false greens (the repo's THIN-mock rule).
+// Scripted bytes + a `mmL.mockYawDeg` bridge, full stop. The vendor `begin()` really ID-checks
+// `Device_ID == 0x43` and writes a CONFIG reset; this mock deliberately does NOT simulate that —
+// it just returns `mockBeginOk`.
+//
+// !! NAMESPACE HAZARD: the vendor `ColorType` enum (carried byte-for-byte below) injects the
+//    UNSCOPED single-letter names `R, G, B, C, M, Y, K` into the global namespace of EVERY host
+//    target that includes this header — the same collision class as the known `WHITE`-macro-vs-
+//    enum gotcha. They cannot be renamed (production code and the vendor header use them). If a
+//    target suddenly fails to compile on one of those identifiers, this is why.
+// ===========================================================================
+
+/**
+ * @brief Host mock of the Arduino-core `TwoWire` I2C bus object.
+ *
+ * The real `MatrixColor::_pWire` points at a `TwoWire`; T4 does `_pWire = &Wire1`. Only
+ * `begin()` is part of the surface the SUT touches, and it is a no-op here (the host has no
+ * physical bus). Added because `TwoWire`/`Wire1` exist nowhere else in the mock world.
+ */
+class TwoWire
+{
+public:
+    /** @brief No-op bus init — the host has no physical I2C. */
+    void begin() {}
+};
+
+/// The `Wire1` bus instance T4 binds `MatrixColor::_pWire` to. C++17 `inline` so it has ONE
+/// definition across every TU that includes this header without any `.cpp` edit (mirrors
+/// `inline MockMMLower mmL;`).
+inline TwoWire Wire1;
+
+/// Vendor `ColorType` enum, carried byte-for-byte from
+/// `MatrixMiniR4/src/Modules/Sensors/MiniR4ColorSensorExt.h`. See the NAMESPACE HAZARD note above.
+typedef enum __ColorType
+{
+    R = 4,
+    G,
+    B,
+    C,
+    M,
+    Y,
+    K
+} ColorType;
+
+/**
+ * @brief Host mock of the vendor `MatrixColor` external-gyro driver (I2C addr 0x22).
+ *
+ * THIN record-and-script mock. `getColor` either returns test-injected raw bytes
+ * (`mockUseRawBytes == true`, used by TC14/TC15 to inject dead/torn reads) or BRIDGES from
+ * `mmL.mockYawDeg` (the default) so the 17 legacy suites that drive yaw through `mmL.mockYawDeg`
+ * survive T4's read-path migration untouched. See the class-level HAZARD + bridge notes.
+ *
+ * @note THE BRIDGE (load-bearing). Because `mmL` is an inline global in this same header,
+ *       `getColor` synthesizes the board's two bytes from `mmL.mockYawDeg` so that the
+ *       production decode `GYRO_YAW_SIGN * GYRO_SCALE * (raw16 - 32768)` (wrapped) yields
+ *       exactly `mmL.mockYawDeg * IMU_YAW_SIGN` — what `test_path_tracker_harness.h` documents.
+ *       The scale/sign cancel by construction, so the bridge stays correct for any pinned
+ *       constants.
+ * @note ACCEPTED RESOLUTION LIMIT. The bridge quantizes to whole degrees (1 raw count ~= 1 deg,
+ *       the device's real resolution), so a parked non-integer heading round-trips within
+ *       +/-0.5 deg. If a suite ever proves tighter than that, RAISE that suite's tolerance —
+ *       never fake sub-degree precision in the mock.
+ */
+class MatrixColor
+{
+public:
+    /// Mux channel (`Config::GYRO_I2C_PORT - 1`); T4 records it, the host never acts on it.
+    uint8_t  _ch    = 0;
+    /// Bus pointer T4 sets to `&Wire1`; recorded, never dereferenced on the host.
+    TwoWire* _pWire = nullptr;
+
+    // ---- test-settable state (static inline: no .cpp edit, no duplicate symbols) ---------
+    /// Value `begin()` returns.
+    static inline bool     mockBeginOk     = true;
+    /// false => `getColor` bridges from `mmL.mockYawDeg`; true => returns `mockG`/`mockR` raw.
+    static inline bool     mockUseRawBytes = false;
+    /// Raw high byte returned for `G` when `mockUseRawBytes` (TC14/TC15 dead/torn injection).
+    static inline uint8_t  mockG           = 0;
+    /// Raw low byte returned for `R` when `mockUseRawBytes`.
+    static inline uint8_t  mockR           = 0;
+    /// Count of `getColor(K)` calls — proves `zeroHardware()` fired (AC-7 / TC20).
+    static inline uint32_t mockKReadCount  = 0;
+    /// Logical device-sample count. Incremented ONCE PER G-REGISTER READ (see `getColor`), NOT
+    /// once per call: a sample is a G+R pair, so per-call counting would read 2 and break TC17's
+    /// `mockDeviceReads == 1` across 3 consumer reads in one tick. CROSS-TASK SEAM (AC-5).
+    static inline uint32_t mockDeviceReads = 0;
+
+    /// Restore every `mock*` field above to its constructed default. Call in test setup.
+    static inline void resetMock();
+
+    /** @brief Mirrors `MatrixColor::begin()`; returns the scripted flag — no ID-check, no reset. */
+    bool    begin() { return mockBeginOk; }
+
+    /** @brief Mirrors `MatrixColor::setLight(bool,bool,uint8_t)`; a no-op on the host. */
+    void    setLight(bool, bool, uint8_t) {}
+
+    /**
+     * @brief Mirrors `MatrixColor::getColor(ColorType)`.
+     * @param color Register to read (`G` = high byte, `R` = low byte, `K` = zero side-effect).
+     * @return The scripted or bridged byte (0 for `K` and for channels the gyro path never asks).
+     */
+    uint8_t getColor(ColorType color);
+
+private:
+    // ---- Bridge scale/sign ---------------------------------------------------------------
+    // These MUST equal the constants YawSource.cpp's decode uses, or the synthesized bytes will
+    // not round-trip to `mmL.mockYawDeg * IMU_YAW_SIGN`. We read the Config `*_DEFAULT` macro
+    // hooks DIRECTLY rather than `#include "Config.h"`: dragging project Config into the HAL mock
+    // would invert the HAL<-project layering and pull all of Config.h (+ its ConfigChecks
+    // static_asserts) into all 47 mock-including TUs. Reading the same `#ifndef X_DEFAULT` hooks
+    // Config uses keeps the mock HONEST — a target-wide `target_compile_definitions(... X=v)`
+    // reaches this mock and Config.h identically. T3b pins `GYRO_SCALE_DEFAULT=1.0f` and
+    // `GYRO_YAW_SIGN_DEFAULT=<IMU_YAW_SIGN value>` on the 32 YawSource targets, making the
+    // round-trip exact there.
+    //
+    // COUPLING: the fallback literals below are kept BYTE-IDENTICAL to `config/ConfigNav.h`'s own
+    // `#ifndef` fallbacks (IMU_YAW_SIGN -1.0f, GYRO_YAW_SIGN -1.0f, GYRO_SCALE 0.997f) so an
+    // UNpinned target still agrees with production. Change ConfigNav.h's defaults => change these.
+#if defined(IMU_YAW_SIGN_DEFAULT)
+    static constexpr float kBridgeImuSign  = IMU_YAW_SIGN_DEFAULT;
+#else
+    static constexpr float kBridgeImuSign  = -1.0f;
+#endif
+#if defined(GYRO_YAW_SIGN_DEFAULT)
+    static constexpr float kBridgeGyroSign = GYRO_YAW_SIGN_DEFAULT;
+#else
+    static constexpr float kBridgeGyroSign = -1.0f;
+#endif
+#if defined(GYRO_SCALE_DEFAULT)
+    static constexpr float kBridgeScale    = GYRO_SCALE_DEFAULT;
+#else
+    static constexpr float kBridgeScale    = 0.997f;
+#endif
+};
+
+inline void MatrixColor::resetMock()
+{
+    mockBeginOk     = true;
+    mockUseRawBytes = false;
+    mockG           = 0;
+    mockR           = 0;
+    mockKReadCount  = 0;
+    mockDeviceReads = 0;
+}
+
+inline uint8_t MatrixColor::getColor(ColorType color)
+{
+    // K is the gyro's zero-trigger side-effect read: count it, return a discarded byte, and do
+    // NOT count it as a device sample.
+    if (color == K)
+    {
+        mockKReadCount++;
+        return 0;
+    }
+
+    // One logical device sample == a G(high) + R(low) pair. Count once, on the G read, so a full
+    // sample registers as exactly ONE device read regardless of how many consumers serve from it.
+    if (color == G)
+    {
+        mockDeviceReads++;
+    }
+
+    if (mockUseRawBytes)
+    {
+        if (color == G) return mockG;
+        if (color == R) return mockR;
+        return 0;    // the gyro read path only ever asks for G / R / K
+    }
+
+    // Bridge from mmL.mockYawDeg (see the class @note). `biased` reverses the production decode
+    // so that decode(G, R) == mmL.mockYawDeg * IMU_YAW_SIGN. Quantizes to whole degrees.
+    const long     biased = lround((double)mmL.mockYawDeg * (double)kBridgeImuSign /
+                                   ((double)kBridgeGyroSign * (double)kBridgeScale));
+    const uint16_t raw16  = (uint16_t)(biased + 32768);
+    if (color == G) return (uint8_t)(raw16 >> 8);
+    if (color == R) return (uint8_t)(raw16 & 0xFF);
+    return 0;
+}
 
 // ===========================================================================
 // MatrixMiniR4 — top-level facade. Mirror of the vendor `MatrixMiniR4`.
