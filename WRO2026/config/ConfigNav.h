@@ -302,14 +302,16 @@ namespace Config
     /**
      * @brief Plausibility rate bound (deg/s) for the gyro's torn-read gate.
      *
-     * `GyroDecodePolicy.h::gyroReadPlausible` rejects a new reading whose time-normalized
-     * angular step from the last good read exceeds this rate — a defence against a torn I2C
-     * read decoding to a wildly-wrong-but-in-range heading.
+     * The rate `GyroDecodePolicy.h::gyroReadPlausible` would use to reject a new reading whose
+     * time-normalized angular step from the last good read exceeds it — a defence against a torn
+     * I2C read decoding to a wildly-wrong-but-in-range heading.
      *
      * @note Default `1000.0f` deg/s is roughly 8 deg per ~8 ms cooperative tick — well above any
-     *       rotation rate this chassis can physically achieve, so the gate only trips on a
-     *       genuinely torn/corrupt read, never on real motion.
-     * @note Consumer: `GyroDecodePolicy.h::gyroReadPlausible`, via `YawSource::update`.
+     *       rotation rate this chassis can physically achieve.
+     * @warning **Currently UNCONSUMED at runtime.** The plausibility gate was deferred to bench
+     *          (issue #170); `YawSource` gates reads by dead-byte detection only. `gyroReadPlausible`
+     *          remains as pure, unit-tested code, and this constant is reserved for re-adding the
+     *          gate if the bench shows a real torn read.
      */
 #ifndef GYRO_MAX_STEP_DEG_PER_S_DEFAULT
 #define GYRO_MAX_STEP_DEG_PER_S_DEFAULT 1000.0f

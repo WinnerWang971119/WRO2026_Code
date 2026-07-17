@@ -78,6 +78,7 @@ void setup() {
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);  // MUST match physical battery
 
     LineArray.begin();      // BEFORE LineFollower — LineFollower binds onto it
+    YawSource.begin();      // BEFORE Drive/Localization — both read yaw through it
     Drive.begin();
     LineFollower.begin();
     Intersection.begin();
