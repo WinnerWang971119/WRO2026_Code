@@ -2656,3 +2656,60 @@ add_executable(test_encoder_source
 )
 target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
+
+# =========================================================================================
+# External-gyro bridge pins (T3b, issue #163 / ADR-070).
+#
+# Every host target that links `src/nav/YawSource.cpp` also pulls the `MatrixColor` gyro mock,
+# whose `getColor` bridge synthesizes bytes from `mmL.mockYawDeg` so `readYawDeg` round-trips to
+# `mmL.mockYawDeg * IMU_YAW_SIGN`. That round-trip is EXACT only when the mock's bridge scale/sign
+# and production's `Config::GYRO_SCALE` / `GYRO_YAW_SIGN` are pinned to the same values. At the
+# shipped default `GYRO_SCALE = 0.997f` the bridge quantizes ~0.27 deg at 90 deg, which truncates
+# past the 0.5 deg turn tolerance and fails the turn-gated FSM suites. A target-wide
+# `target_compile_definitions` of `GYRO_SCALE_DEFAULT=1.0f` (and `GYRO_YAW_SIGN_DEFAULT=-1.0f`,
+# matching `IMU_YAW_SIGN`'s default) reaches BOTH the mock (`kBridge*`) and `Config.h` identically,
+# making the round-trip integer-exact. REQUIRED, not an optimization (proven while landing T4).
+#
+# KEEP IN SYNC: every target that links `${SKETCH_DIR}/src/nav/YawSource.cpp` must be listed here.
+# A new YawSource-linked target that omits these pins will fail the turn-tolerance FSM asserts.
+# `test_gyro_config_fail` is intentionally ABSENT: it does not link YawSource.cpp and carries its
+# own `GYRO_YAW_SIGN_DEFAULT=0.5f` compile-fail pin.
+# =========================================================================================
+foreach(_yawsrc_target IN ITEMS
+    test_path_tracker_passthrough_on
+    test_path_tracker_passthrough_off
+    test_path_tracker_bidirectional_on
+    test_path_tracker_bidirectional_off
+    test_path_tracker_stop_at_line
+    test_path_tracker_projection
+    test_path_tracker_pass_through_projection
+    test_path_tracker_parity_dump
+    test_localization_offset
+    test_return_to_node_dispatch
+    test_reanchor_at_wall
+    test_reanchor_at_wall_strict
+    test_path_tracker_reset_arrival
+    test_path_tracker_reset_arrival_strict
+    test_yaw_source
+    test_reanchor_heading
+    test_reanchor_heading_strict_off
+    test_path_tracker_heading_reset
+    test_path_tracker_heading_reset_junction_on
+    test_path_tracker_heading_reset_forced_reset
+    test_path_tracker_heading_reset_parity
+    test_path_tracker_blind_chain
+    test_path_tracker_blind_chain_disabled
+    test_path_tracker_blind_chain_hop_cap
+    test_path_tracker_blind_chain_distance_cap
+    test_path_tracker_speed_chain
+    test_path_tracker_settle
+    test_line_follower_real_setspeed
+    test_drive_decel_floor
+    test_drive_decel_floor_identity
+    test_drive_hardening
+    test_path_tracker_lost_line
+)
+    target_compile_definitions(${_yawsrc_target} PRIVATE
+        GYRO_SCALE_DEFAULT=1.0f
+        GYRO_YAW_SIGN_DEFAULT=-1.0f)
+endforeach()
