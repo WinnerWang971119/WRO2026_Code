@@ -265,6 +265,46 @@ namespace Config
                   "not a scale factor. See config/ConfigNav.h.");
 
     // -----------------------------------------------------------------------------------------
+    // External gyro checks (ConfigNav.h, ADR-070)
+    //
+    // COUPLED SITES: Config::GYRO_YAW_SIGN and Config::GYRO_SCALE are applied together, exactly
+    // once, inside GyroDecodePolicy.h::decodeGyroYawDeg (called from YawSource) to convert the
+    // external gyro's raw decoded heading into the app CCW-positive frame. GYRO_YAW_SIGN is a
+    // PURE SIGN (mirrors the IMU_YAW_SIGN assert above); GYRO_SCALE is a magnitude only sane
+    // near 1.0 -- a value outside that band indicates a units/decode error, not a real
+    // calibration. GYRO_I2C_PORT is a physical mux-port label that must not collide with either
+    // line board's port, else the gyro read would silently address a line sensor instead.
+    // -----------------------------------------------------------------------------------------
+
+    static_assert(GYRO_YAW_SIGN == 1.0f || GYRO_YAW_SIGN == -1.0f,
+                  "Config::GYRO_YAW_SIGN must be exactly 1.0f or -1.0f -- it is the pure "
+                  "raw-gyro-to-app CCW sign applied by GyroDecodePolicy.h::decodeGyroYawDeg, "
+                  "not a scale factor. See config/ConfigNav.h.");
+
+    static_assert(GYRO_SCALE > 0.9f && GYRO_SCALE < 1.1f,
+                  "Config::GYRO_SCALE must be in (0.9, 1.1) -- this is a sane-band sanity check "
+                  "on the raw-count-to-degree calibration, not a value pin (unlike a tuned drive "
+                  "constant, GYRO_SCALE is MEANT to be overwritten by the gyro_calib bench "
+                  "output). A value this far from 1.0 indicates a units or decode error rather "
+                  "than a real per-board calibration. See config/ConfigNav.h.");
+
+    static_assert(GYRO_I2C_PORT >= 1 && GYRO_I2C_PORT <= 4,
+                  "Config::GYRO_I2C_PORT must be in [1, 4] -- matches the physical I2C1..I2C4 "
+                  "port labels on the MiniR4 board. YawSource converts to the 0-based PCA9548A "
+                  "mux channel internally; do NOT pre-convert in Config.");
+
+    static_assert(GYRO_I2C_PORT != LINE_FRONT_I2C_PORT,
+                  "Config::GYRO_I2C_PORT must not collide with Config::LINE_FRONT_I2C_PORT -- a "
+                  "shared port would make the gyro read silently address the front line board "
+                  "(or vice versa) even though both pass their own runtime ID check.");
+
+    static_assert(LINE_BOARD_COUNT != 2 || GYRO_I2C_PORT != LINE_REAR_I2C_PORT,
+                  "Config::GYRO_I2C_PORT must not collide with Config::LINE_REAR_I2C_PORT when "
+                  "Config::LINE_BOARD_COUNT == 2 -- a shared port would make the gyro read "
+                  "silently address the rear line board (or vice versa) even though both pass "
+                  "their own runtime ID check.");
+
+    // -----------------------------------------------------------------------------------------
     // Line-arrival heading reset checks (ConfigNav.h, ADR-052)
     // -----------------------------------------------------------------------------------------
     static_assert(LINE_HEADING_RESET_TOLERANCE_DEG > 0.0f && LINE_HEADING_RESET_TOLERANCE_DEG < 180.0f,
