@@ -25,8 +25,14 @@
 //     - yaw = 90            -> diff 0     -> ACCEPT (on-normal).
 //     - yaw = 100           -> diff 10    -> ACCEPT (exactly at tolerance; inclusive).
 //     - yaw = 80            -> diff 10    -> ACCEPT (exactly at tolerance, other side).
-//     - yaw = 99.5          -> diff 9.5   -> ACCEPT (just inside).
-//     - yaw = 100.5         -> diff 10.5  -> REJECT, no mutation (just outside).
+//     - yaw = 99            -> diff 9     -> ACCEPT (just inside).
+//     - yaw = 101           -> diff 11    -> REJECT, no mutation (just outside).
+//
+//   Boundary values are WHOLE degrees: the host `MatrixColor` mock bridge (hal_mocks/
+//   MatrixMiniR4.h) that now backs `YawSource::readYawDeg` quantizes to 1 raw count ~= 1 deg, so
+//   a sub-degree literal (e.g. 99.5) lands on an ambiguous rounding boundary and the accept/
+//   reject decision can flip. Per the mock's own doc: raise the suite's granularity to whole
+//   degrees — never fake sub-degree precision in the mock.
 //     - yaw = 70 / 130 etc. -> diff 20    -> REJECT, no mutation (FAR off-normal, AC11 core).
 //
 // Float-tolerance checks use a local `approx`/`check` pair (same rationale as the sibling tests).
@@ -177,9 +183,10 @@ int main()
         // Exactly at the tolerance, low side: diff == 10 -> ACCEPT.
         check(attemptReanchorAtYaw(-80.0),
               "TC12 (ON): diff exactly == tolerance (low side) re-anchors (inclusive boundary)");
-        // Just inside: diff 9.5 -> ACCEPT.
-        check(attemptReanchorAtYaw(-99.5),
-              "TC12 (ON): diff just inside the tolerance (9.5 < 10) re-anchors");
+        // Just inside: diff 9 -> ACCEPT. (Whole degrees — the mock bridge's real resolution;
+        // see the file-header note.)
+        check(attemptReanchorAtYaw(-99.0),
+              "TC12 (ON): diff just inside the tolerance (9 < 10) re-anchors");
     }
 
     // -------------------------------------------------------------------------------------
@@ -187,10 +194,11 @@ int main()
     // NO mutation (atomic reject).
     // -------------------------------------------------------------------------------------
     {
-        // Just outside, high side: diff 10.5 > 10 -> REJECT.
-        expectRejectNoMutation(-100.5, "TC12 (ON): diff just outside (10.5 > 10) REJECTS the reanchor");
-        // Just outside, low side: diff 10.5 -> REJECT.
-        expectRejectNoMutation(-79.5, "TC12 (ON): diff just outside (low side) REJECTS the reanchor");
+        // Just outside, high side: diff 11 > 10 -> REJECT. (Whole degrees — see the file-header
+        // note on the mock bridge's resolution.)
+        expectRejectNoMutation(-101.0, "TC12 (ON): diff just outside (11 > 10) REJECTS the reanchor");
+        // Just outside, low side: diff 11 -> REJECT.
+        expectRejectNoMutation(-79.0, "TC12 (ON): diff just outside (low side) REJECTS the reanchor");
         // Far off-normal (AC11 core): chassis stopped against a corner/obstacle, not the wall.
         expectRejectNoMutation(-70.0, "TC12 (ON): far off-normal (diff 20) REJECTS the reanchor");
         expectRejectNoMutation(-130.0, "TC12 (ON): far off-normal (diff 40) REJECTS the reanchor");
