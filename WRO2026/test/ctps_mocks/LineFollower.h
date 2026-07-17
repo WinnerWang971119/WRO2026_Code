@@ -46,6 +46,15 @@
 
 class LineFollowerClass;
 
+// Opaque forward declaration mirroring the real `LineFollower.h`: names the enum for the
+// `setLineFollowMode(...)` conformance shadow without including a `Routes` header. A real include
+// would double-define `namespace Routes` against the force-included `routes_fixture.h` in the
+// conformance TU. Underlying type MUST match `routes.h`.
+namespace Routes
+{
+enum class LineFollowMode : uint8_t;
+}
+
 /**
  * @brief Map a `Config::SpeedPreset` to its command-stream `preset` string.
  *
@@ -76,8 +85,8 @@ inline const char* lineFollowerPresetToStr(Config::SpeedPreset p)
  *
  * Move-only like the real builder. Most setters are no-ops
  * returning `*this`; `setDistanceTarget` / `setReverse` / `setPreset` /
- * `setBrake` / `tShape` / `flat` capture the state the `lineFollowDist`
- * record needs. The captured state is emitted exactly once from the
+ * `setBrake` / `tShape` / `flat` / `setLineFollowOffset` capture the state the
+ * `lineFollowDist` record needs. The captured state is emitted exactly once from the
  * `_executed`-guarded destructor, and only when the transition both enables
  * the follower and arms a distance gate. When `setReverse` is not chained,
  * the record's direction falls back to the facade's persistent `_reverse` —
@@ -197,6 +206,39 @@ public:
         return *this;
     }
 
+    /**
+     * @brief Capture the signed lateral hug-side bias for this follow's record
+     *        (issue #156).
+     *
+     * This is the CTPS-SPECIFIC recording variant: unlike the path/task/mission
+     * mocks — whose `setLineFollowOffset(float)` is a no-op that would silently
+     * DROP the builder knob — this one stores the offset so the destructor emits
+     * it as the `lineFollowDist` record's `follow_offset`. The offset is the
+     * nav-agnostic signed centroid-index bias PathTracker composes
+     * (`sign * lineFollowModeToSetpoint(mode)`); the CTPS Python layer maps it to
+     * an on-screen lateral nudge via its own display constant, never touching the
+     * parity-locked sim pose.
+     */
+    LineFollowerEnableBuilder& setLineFollowOffset(float offset)
+    {
+        _lineFollowOffset    = offset;
+        _hasLineFollowOffset = true;
+        return *this;
+    }
+
+    /**
+     * @brief Conformance shadow of the real `setLineFollowMode(...)` sugar (issue #156).
+     *
+     * A no-op that only keeps the mock builder a superset of the real one for the two drift
+     * guards (the C++ `test_ctps_mock_conformance` chain + the Python name-superset test). It does
+     * NOT record: every CTPS-rendered biased follow reaches the recorder through
+     * `setLineFollowOffset(...)` — PathTracker composes `sign * lineFollowModeToSetpoint(mode)` and
+     * calls the float knob — so nothing dispatches the mode enum through this mock. Mapping it here
+     * would need the full `Routes::LineFollowMode` definition, which cannot be included without
+     * double-defining `namespace Routes` in the conformance TU.
+     */
+    LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode) { return *this; }
+
     LineFollowerEnableBuilder& setOvershootMode(bool) { return *this; }
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }
 
@@ -212,6 +254,8 @@ private:
     bool  _hasBrake       = false;  ///< True iff setBrake() was called.
     bool  _profiled       = false;  ///< true=.tShape(), false=.flat(); valid iff _hasProfiled.
     bool  _hasProfiled    = false;  ///< True iff .tShape() or .flat() was called.
+    float _lineFollowOffset    = 0.0f;   ///< Signed lateral hug bias from setLineFollowOffset(); valid iff _hasLineFollowOffset.
+    bool  _hasLineFollowOffset = false;  ///< True iff setLineFollowOffset() was chained on this builder.
     bool  _executed       = false;  ///< Guards the destructor emit against a double-record.
 };
 
@@ -339,10 +383,10 @@ private:
  * back to the facade's persistent preset (`_owner.getPreset()`) — mirroring the
  * real `_applyEnableBuilder` keeping `_preset` when `hasPresetOverride` is false
  * (LineFollower.cpp:606-609), so a prior `LineFollower.setPreset(FAST)` survives
- * an enable that does not re-chain it. `brake` / `profiled` are this builder's
- * OWN captured state (no builder-vs-facade pairing) — power/startSpeed/endSpeed
- * stay unset since `LineFollowerEnableBuilder` has no such setters on the real
- * header.
+ * an enable that does not re-chain it. `brake` / `profiled` / `lineFollowOffset`
+ * are this builder's OWN captured state (no builder-vs-facade pairing; the real
+ * `setLineFollowOffset` is a builder-only knob) — power/startSpeed/endSpeed stay
+ * unset since `LineFollowerEnableBuilder` has no such setters on the real header.
  */
 inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
 {
@@ -379,7 +423,9 @@ inline LineFollowerEnableBuilder::~LineFollowerEnableBuilder()
                 _profiled,               // profiled
                 _hasProfiled,            // hasProfiled
                 _brake,                  // brake
-                _hasBrake                // hasBrake
+                _hasBrake,               // hasBrake
+                _lineFollowOffset,       // lineFollowOffset (issue #156 hug bias)
+                _hasLineFollowOffset     // hasLineFollowOffset
             });
     }
 }

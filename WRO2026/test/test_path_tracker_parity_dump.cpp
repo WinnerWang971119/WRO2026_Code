@@ -88,7 +88,7 @@ namespace
 using State = PathTrackerClass::State;
 
 #ifndef PARITY_SCHEMA_VERSION
-#define PARITY_SCHEMA_VERSION 2    // defensive default; the CMake target defines it to 2.
+#define PARITY_SCHEMA_VERSION 3    // defensive default; the CMake target defines it to 3.
 #endif
 
 // ===========================================================================================

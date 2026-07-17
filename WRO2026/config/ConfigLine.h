@@ -42,6 +42,17 @@ namespace Config
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
     constexpr int16_t LINE_MAX_CORR = 40;
 
+    /**
+     * @brief Signed lateral-offset setpoint bias for LINE follow, in sensor-centroid index units.
+     *
+     * Shifts the P-term setpoint so the line settles off-center under the array, riding the
+     * chassis LEFT (+) or RIGHT (-) of the line. Mapped from the per-edge LineFollowMode by
+     * PathTracker via WROMath::lineFollowModeToSetpoint. NOT centimeters — error units don't map
+     * to a fixed distance without sensor pitch/height/line-width; measured on the mat.
+     * @note TODO: bench-tune. LEFT = +, RIGHT = -.
+     */
+    constexpr float LINE_FOLLOW_OFFSET_ERROR = 1.5f;
+
     // ---------------------------------------------------------------------------------------
     // 8-channel custom line sensor (WROLineArray)
     //

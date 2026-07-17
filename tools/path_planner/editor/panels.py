@@ -234,12 +234,18 @@ _SPEED_TAGS: tuple[str, ...] = tuple(
 _SPEED_VALUES: tuple[str, ...] = (_INHERIT_OVERRIDE_LABEL, *_SPEED_TAGS)
 
 # ``mode`` tag vocabularies -- type-switched, single-sourced from the planner
-# enums.  LINE only authors ``MIDDLE`` (``LEFT`` / ``RIGHT`` are reserved
-# until LineFollower lateral offset-follow lands -- the validator rejects
-# them, so the GUI must never offer them).  BLIND authors every ``BlindMode``
-# tag except ``DEFAULT`` (== absence) and ``STOP_AT_LINE`` (folded onto the
+# enums.  LINE authors ``MIDDLE`` / ``LEFT`` / ``RIGHT`` (lateral offset-follow,
+# issue #156 / ADR-069).  LINE ``mode`` is DIRECTIONAL (per-directed-edge) --
+# unlike BLIND ``mode``, it does NOT mirror to the reverse hop; the operator
+# must author a companion reverse edge for the reverse traversal (see the hint
+# label packed below the Mode row).  BLIND authors every ``BlindMode`` tag
+# except ``DEFAULT`` (== absence) and ``STOP_AT_LINE`` (folded onto the
 # ``stop_at_line`` axis -- ADR-064).
-_LINE_MODE_TAGS: tuple[str, ...] = (LineFollowMode.MIDDLE.name,)
+_LINE_MODE_TAGS: tuple[str, ...] = (
+    LineFollowMode.MIDDLE.name,
+    LineFollowMode.LEFT.name,
+    LineFollowMode.RIGHT.name,
+)
 _BLIND_MODE_TAGS: tuple[str, ...] = tuple(
     member.name
     for member in BlindMode
@@ -335,6 +341,13 @@ _OVERRIDE_DELETE_GLYPH: str = "✕"  # multiplication x as a delete glyph
 _OVERRIDE_ARROW: str = "->"
 # Empty-state hint shown when no overrides exist.
 _OVERRIDE_EMPTY_HINT: str = "no edge overrides"
+# Hint shown below the Mode row: LINE mode is directional (per-directed-edge)
+# and does NOT mirror to the reverse hop like BLIND mode does -- authoring a
+# reverse traversal requires a companion reverse edge (issue #156 / ADR-069).
+_LINE_MODE_DIRECTIONAL_HINT: str = (
+    "LINE mode is directional (u->v only) -- unlike BLIND, it does not mirror"
+    " to the reverse hop; author a companion reverse edge for v->u"
+)
 
 # Default mode-display text before the app sets anything.
 _DEFAULT_MODE_TEXT: str = "Mode: --"
@@ -1940,6 +1953,19 @@ class SidePanels(tk.Frame):
             side="right", fill="x", expand=True
         )
 
+        # A muted hint, shown only while the derived type is LINE, that LINE
+        # mode is directional -- it does NOT mirror to the reverse hop like
+        # BLIND mode does (issue #156 / ADR-069).  Visibility is toggled by
+        # :meth:`_set_override_mode_values` alongside the combobox VALUES.
+        self._edge_override_mode_hint_label = self._themed_label(
+            self._edge_override_editor,
+            text=_LINE_MODE_DIRECTIONAL_HINT,
+            anchor="w",
+            foreground=theme.INK_MUTED,
+            font=self._font_hint,
+        )
+        self._edge_override_mode_hint_label.pack(side="top", fill="x")
+
         # Direction row.
         direction_row = self._themed_frame(self._edge_override_editor)
         direction_row.pack(side="top", fill="x")
@@ -2991,18 +3017,28 @@ class SidePanels(tk.Frame):
     def _set_override_mode_values(self, edge_type: str) -> None:
         """Switch the Mode combobox VALUES for the derived edge type.
 
-        ``LineFollowMode`` tags (``MIDDLE`` only) for a LINE edge, ``BlindMode``
-        tags for a BLIND edge (each led by the inherit sentinel).  An unknown /
-        empty derived type falls back to the LINE list so the combobox is never
-        value-less.  The Speed combobox is uniform across edge types, so it is
-        never re-configured here.
+        ``LineFollowMode`` tags (``MIDDLE`` / ``LEFT`` / ``RIGHT``) for a LINE
+        edge, ``BlindMode`` tags for a BLIND edge (each led by the inherit
+        sentinel).  An unknown / empty derived type falls back to the LINE
+        list so the combobox is never value-less.  The Speed combobox is
+        uniform across edge types, so it is never re-configured here.
+
+        Also toggles the directional-mode hint label
+        (:data:`_LINE_MODE_DIRECTIONAL_HINT`): shown only for a LINE edge,
+        since LINE ``mode`` does not mirror to the reverse hop the way BLIND
+        ``mode`` does (issue #156 / ADR-069).
 
         :param edge_type: The derived edge type (``"LINE"`` / ``"BLIND"``).
         """
-        values = _MODE_VALUES_BY_TYPE.get(
-            edge_type, _MODE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]
-        )
+        resolved_type = edge_type if edge_type in _MODE_VALUES_BY_TYPE else _EDGE_TYPE_LINE
+        values = _MODE_VALUES_BY_TYPE[resolved_type]
         self._edge_override_mode_combo.configure(values=list(values))
+        if resolved_type == _EDGE_TYPE_LINE:
+            self._edge_override_mode_hint_label.pack(
+                side="top", fill="x", after=self._edge_override_mode_combo.master
+            )
+        else:
+            self._edge_override_mode_hint_label.pack_forget()
 
     def _set_override_form(self, entry: Optional[dict]) -> None:
         """Populate the inline-editor override controls from *entry*.

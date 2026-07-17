@@ -37,103 +37,103 @@ namespace Routes {
 
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         { // from Q0 (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::BLIND, 25.000000f, 0.000000f, SpeedTier::NORMAL, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::BLIND, 25.000000f, 0.000000f, SpeedTier::NORMAL), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Q1 (index 1)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::NORMAL, BlindMode::GYRO_TSHAPE, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::NORMAL, BlindMode::GYRO_TSHAPE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Q2 (index 2)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::SLOW, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::SLOW), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Q3 (index 3)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Sk0 (index 4)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::BLIND, 30.000000f, 0.000000f, SpeedTier::SLOW, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::ON }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::BLIND, 30.000000f, 0.000000f, SpeedTier::SLOW, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::ON), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from SkL (index 5)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Ln0 (index 6)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::LINE, 30.000000f, 0.000000f, SpeedTier::FAST, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::LINE, 30.000000f, 0.000000f, SpeedTier::FAST, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT, LineFollowMode::LEFT), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
         { // from Ln1 (index 7)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::SLOW, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::BLIND, 20.000000f, 0.000000f, SpeedTier::SLOW), // to Lb2
         },
         { // from Lb2 (index 8)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q2
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Q3
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Sk0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to SkL
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln0
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Ln1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to Lb2
+            makeEdge(EdgeType::NONE), // to Q0
+            makeEdge(EdgeType::NONE), // to Q1
+            makeEdge(EdgeType::NONE), // to Q2
+            makeEdge(EdgeType::NONE), // to Q3
+            makeEdge(EdgeType::NONE), // to Sk0
+            makeEdge(EdgeType::NONE), // to SkL
+            makeEdge(EdgeType::NONE), // to Ln0
+            makeEdge(EdgeType::NONE), // to Ln1
+            makeEdge(EdgeType::NONE), // to Lb2
         },
     };
 

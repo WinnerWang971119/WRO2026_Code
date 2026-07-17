@@ -11,7 +11,7 @@
  * this header is empty there and every trace call site in PathTracker.cpp compiles
  * to nothing — the binary is byte-for-byte behaviorally identical. Only the
  * dedicated parity-dump target defines `PT_PARITY_TRACE` (with
- * `PARITY_SCHEMA_VERSION=2`).
+ * `PARITY_SCHEMA_VERSION=3`).
  *
  * When enabled, `pt_parity::emit(line)` writes one NDJSON record line to stdout.
  * PathTracker.cpp builds the per-hop records and calls it at each FSM commit point;
@@ -56,6 +56,39 @@
  *    NO pass record. Exact serialization (`_ptEmitBlindPass`, PathTracker.cpp):
  *
  *      {"kind":"blind_pass","node":"<node name>"}
+ *
+ * ===========================================================================================
+ * issue #156 / parity v3 wire schema — the two LINE-follow records gain a lateral `follow_mode`
+ * field and RENAME the historically-misnamed `line_mode` (which has always held the resolved
+ * SPEED tier, never a follow mode) to `speed`. Both changes land in ONE field-set bump.
+ * `sim/parity.py` mirrors these field sets byte-for-byte in `TRACE_RECORD_FIELDS` (STRICT: an
+ * unknown OR missing field of a known kind raises `ParitySchemaError`), so both sides must land
+ * the bump together — the coordinated `PARITY_SCHEMA_VERSION` stamp is owned by the host-test /
+ * dump surfaces, not this header.
+ *
+ * 3. `line_follow` — field-set BUMP (`line_mode`→`speed` rename + new `follow_mode`). Exact
+ *    serialization (`_ptEmitLineFollow`, PathTracker.cpp):
+ *
+ *      {"kind":"line_follow","reverse":<bool>,"speed":"<SLOW|NORMAL|FAST>",
+ *       "follow_mode":"<MIDDLE|LEFT|RIGHT>"}
+ *
+ *    - `speed`       : the resolved `Routes::SpeedTier` member name (`_ptLineModeName`) — same
+ *                      value as the old `line_mode`, corrected key.
+ *    - `follow_mode` : the RESOLVED `Routes::LineFollowMode` member name (`_ptFollowModeName`),
+ *                      one of MIDDLE/LEFT/RIGHT — never "DEFAULT" (`_resolveLineFollowMode`
+ *                      resolves DEFAULT→MIDDLE upstream). It is the MODE, recorded PRE-reverse-
+ *                      sign: the reverse-hop sign flip only affects the actual float offset
+ *                      handed to `LineFollower.setLineFollowOffset(...)`, never this record.
+ *
+ * 4. `projection_follow` — field-set BUMP (same `line_mode`→`speed` rename + new `follow_mode`).
+ *    Exact serialization (`_ptEmitProjectionFollow`, PathTracker.cpp):
+ *
+ *      {"kind":"projection_follow","reverse":<bool>,"speed":"<SLOW|NORMAL|FAST>",
+ *       "follow_mode":"<MIDDLE|LEFT|RIGHT>","dist_cm":<%.6f>,"pass_through":<bool>,
+ *       "reanchor":"ON_DEAD_RECKONED_ADVANCE"}
+ *
+ *    `speed`/`follow_mode` carry the same meaning as on `line_follow`; the remaining fields
+ *    (`dist_cm`, `pass_through`, `reanchor`) are unchanged from v2.
  */
 
 #ifdef PT_PARITY_TRACE

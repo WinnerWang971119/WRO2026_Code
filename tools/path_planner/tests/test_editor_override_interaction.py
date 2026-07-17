@@ -54,12 +54,19 @@ import pytest  # noqa: E402
 from tools.path_planner.editor.history import History  # noqa: E402
 from tools.path_planner.editor.model import FieldModel  # noqa: E402
 from tools.path_planner.editor.panels import (  # noqa: E402
+    _EDGE_TYPE_LINE,
     _INHERIT_OVERRIDE_LABEL,
+    _LINE_MODE_DIRECTIONAL_HINT,
+    _LINE_MODE_TAGS,
+    _MODE_VALUES_BY_TYPE,
     _PIPELINE_DIRECTION_VALUES,
     _PIPELINE_UNSET_LABEL,
     SidePanels,
 )
-from tools.path_planner.pipeline_config import DirectionMode  # noqa: E402
+from tools.path_planner.pipeline_config import (  # noqa: E402
+    DirectionMode,
+    LineFollowMode,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -408,3 +415,77 @@ def test_pipeline_direction_values_drop_default(tk_root):
             panels.destroy()
         except Exception:  # noqa: BLE001 -- teardown best-effort
             pass
+
+
+# ---------------------------------------------------------------------------
+# TC14 (issue #156 / ADR-069 / AC11) -- the LINE Mode bar offers LEFT/RIGHT +
+# the directional help note; a LEFT LINE edge round-trips clean through the
+# model's to_json_dict / validate / to_module_proxy path.
+# ---------------------------------------------------------------------------
+
+
+def test_tc14_line_mode_bar_offers_left_right() -> None:
+    """The LINE Mode combobox vocabulary offers MIDDLE / LEFT / RIGHT.
+
+    Single-sourced from ``LineFollowMode`` (minus DEFAULT == absence): the
+    lateral offset-follow bias tags are now first-class editor choices, with the
+    inherit sentinel leading the type-switched combobox values.
+    """
+    assert _LINE_MODE_TAGS == (
+        LineFollowMode.MIDDLE.name,
+        LineFollowMode.LEFT.name,
+        LineFollowMode.RIGHT.name,
+    )
+    line_values = _MODE_VALUES_BY_TYPE[_EDGE_TYPE_LINE]
+    # The inherit sentinel leads, then the three lateral-bias tags.
+    assert line_values[0] == _INHERIT_OVERRIDE_LABEL
+    assert "LEFT" in line_values
+    assert "RIGHT" in line_values
+    assert "MIDDLE" in line_values
+    # DEFAULT (== absence / the inherit sentinel) is never offered as a tag.
+    assert LineFollowMode.DEFAULT.name not in set(line_values[1:])
+
+
+def test_tc14_line_mode_directional_hint_present() -> None:
+    """The Mode bar carries a note that LINE mode is directional (not mirrored)."""
+    assert "directional" in _LINE_MODE_DIRECTIONAL_HINT
+    # Names the forward-only semantics so the operator knows to author a
+    # companion reverse edge.
+    assert "u->v" in _LINE_MODE_DIRECTIONAL_HINT
+
+
+def test_tc14_left_line_edge_round_trips_clean() -> None:
+    """A LEFT LINE edge round-trips through to_json_dict / validate / to_module_proxy.
+
+    The editor persists per-edge overrides via ``to_json_dict``; a LEFT LINE
+    override must survive that serialization AND pass ``validate()`` (which wraps
+    the model through ``to_module_proxy``), so authoring a biased edge in the
+    editor and saving it produces a field the validator accepts.
+    """
+    model = FieldModel(
+        field_mm=(3000, 2000),
+        map_png="maps/map.png",
+        robot_radius_cm=8.0,
+        blind_decay_enabled=True,
+        blind_decay_k=0.05,
+        blind_decay_exponent=2.0,
+        blind_decay_d_ref=50.0,
+        start_node="S",
+        start_heading_deg=0.0,
+        nodes={"S": (10.0, -40.0), "A": (10.0, 10.0), "B": (200.0, 10.0)},
+        node_types={"S": "blind", "A": "line", "B": "line"},
+        line_segments=[("A", "B")],
+        blind_edges=[("S", "A")],
+        obstacles=[],
+        edges=[{"type": "LINE", "u": "A", "v": "B", "mode": "LEFT"}],
+    )
+    # validate() wraps the model via to_module_proxy internally -> clean.
+    model.validate()
+
+    # The LEFT override survives to_json_dict, and the reloaded model still
+    # validates (a full editor save/reopen round-trip on a biased edge).
+    dumped = model.to_json_dict()
+    assert dumped["EDGES"] == [{"type": "LINE", "u": "A", "v": "B", "mode": "LEFT"}]
+    restored = FieldModel.from_json_dict(dumped)
+    restored.validate()
+    assert restored.edges[0]["mode"] == "LEFT"

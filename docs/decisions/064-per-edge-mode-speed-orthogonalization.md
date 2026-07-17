@@ -3,6 +3,8 @@
 **Status:** Implemented
 **Date decided:** 2026-07 (phase)
 
+> **LINE Mode "surface-only, no field" clause superseded by [ADR-069](./069-line-follow-lateral-offset.md).** The Speed axis and the `STOP_AT_LINE` fold below all still stand; only the sub-clause that kept LINE `mode` to `MIDDLE`-validates-and-emits-nothing is retired. `LEFT`/`RIGHT` are now authorable and emit a `line_follow_mode_override` `EdgeInfo` field (see ADR-069).
+
 ## Rule
 
 The `EDGES` override key `primitive_mode` (ADR-047) is retired and its two conflated
@@ -44,9 +46,11 @@ fork is fully unauthorable.
 
 LINE Mode is **surface-only this PR**: `mode: MIDDLE` validates and emits nothing (no
 `EdgeInfo` field, no C++ enum); `LEFT`/`RIGHT` are validator-rejected pending the
-lateral-follow PR (issue #156). Blind-chain eligibility gains a resolved-**speed-tier**
-compare only — a differing tier breaks the chain, but a SYNC↔GYRO mode boundary still
-chains exactly as it did before this ADR.
+lateral-follow PR (issue #156). **Superseded by ADR-069** — `LEFT`/`RIGHT` are now
+authorable and emit a `line_follow_mode_override` `EdgeInfo` field; see ADR-069 for the
+control law and the directional/travel-relative semantics. Blind-chain eligibility gains
+a resolved-**speed-tier** compare only — a differing tier breaks the chain, but a
+SYNC↔GYRO mode boundary still chains exactly as it did before this ADR.
 
 ## Why
 
@@ -73,14 +77,18 @@ now — only fixtures author `EDGES`, the real field has none — so the migrati
 
 ## Trigger to revisit
 
-- LineFollower lateral offset-follow lands (issue #156) — `LEFT`/`RIGHT` become
+- ~~LineFollower lateral offset-follow lands (issue #156) — `LEFT`/`RIGHT` become
   authorable, adding a `line_follow_mode_override` `EdgeInfo` field; this ADR's
-  "surface-only, no field" clause for LINE Mode is superseded at that point.
+  "surface-only, no field" clause for LINE Mode is superseded at that point.~~ **Fired —
+  see ADR-069.**
 - Per-edge numeric PWM authoring (`speed_pwm`) is requested — today's tiers keep field
   data chassis-agnostic (TT vs Lofaix); a numeric override would need its own ADR.
 
 ## See also
 
+- [ADR-069 — LineFollower lateral offset-follow](./069-line-follow-lateral-offset.md) —
+  supersedes this ADR's "LINE Mode is surface-only" clause; adds `LEFT`/`RIGHT` and the
+  `line_follow_mode_override` field this ADR reserved but left inert.
 - [ADR-047 — JSON-native EDGES overrides + field-sourced PIPELINE_CONFIG](./047-json-edges-overrides-and-pipeline-config.md) — the override overlay this ADR re-shapes; its `primitive_mode` string-tag ENCODING clause is superseded here, the rest (JSON-native `EDGES`, field-sourced `PIPELINE_CONFIG`, optional geometry) stands.
 - [ADR-048 — Reset nodes are blind-incident only; STOP_AT_LINE contradiction](./048-reset-blind-incidence-and-stop-at-line-contradiction.md) — its `STOP_AT_LINE` + `stop_at_line='off'` contradiction rule is dissolved here (inexpressible once `STOP_AT_LINE` cannot be a Mode); the reset-incidence rule stands.
 - [ADR-038 — Blind→projection auto stop-at-line](./038-blind-projection-auto-stop-at-line.md) / [ADR-039](./039-stop-at-line-normal-seek-no-soft-fallback.md) — `StopAtLinePolicy::resolveStopAtLine`, whose degrade path this ADR pins to SYNC.

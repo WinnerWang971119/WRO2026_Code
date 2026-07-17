@@ -59,6 +59,17 @@
 // Forward declaration so the builder can hold a reference to the owner type.
 class LineFollowerClass;
 
+// Opaque forward declaration of the generated per-edge follow mode (issue #156). Declaring it
+// here — rather than including the generated `nav/routes.h` — lets `setLineFollowMode(...)` name
+// the enum without dragging `namespace Routes` into every translation unit that sees this widely
+// included header (several host targets shadow `Routes` with a fixture; a real include would
+// double-define it). The underlying type MUST match `routes.h`; the mapping is defined in
+// `LineFollower.cpp`, which pulls the full definition via `WROMath.h`.
+namespace Routes
+{
+enum class LineFollowMode : uint8_t;
+}
+
 /**
  * @brief RAII builder returned by `LineFollowerClass::setEnabled(bool)` for fluent
  *        configuration of the enable transition.
@@ -317,6 +328,49 @@ public:
      */
     LineFollowerEnableBuilder& setBrakeOnGate(bool on);
 
+    /**
+     * @brief Stage a signed lateral-offset bias for the P+D setpoint on this enable session.
+     *
+     * @param offset Signed error-unit bias in centroid-index units — the same scale as
+     *               `WROLineArrayClass::getError()`'s `[-3.5, +3.5]` range. A positive value
+     *               holds the line RIGHT of the sensor centre (chassis rides LEFT of the line);
+     *               a negative value mirrors it; `0.0f` follows centred. The bias is applied to
+     *               the proportional term ONLY on the online, non-junction P+D tick:
+     *               `corr = LINE_KP*(err - offset) + LINE_KD*(err - _lastErr)`. The derivative
+     *               history (`_lastErr`) stays the RAW centroid, so `getRawError()` is intact
+     *               and a mid-follow offset change injects a bounded P-step of ≈ `LINE_KP*offset`
+     *               with NO derivative kick.
+     * @return       `*this` for fluent chaining.
+     * @note LineFollower stays nav-agnostic: this is a plain signed `float`, NOT a
+     *       `Routes::LineFollowMode` enum. `PathTracker` owns the mode→offset mapping (and the
+     *       reverse-frame sign) and passes the resolved float in here.
+     * @note **Unlike `setPreset(...)` / `setReverse(...)`, the offset is RESET to `0.0f` on
+     *       every `setEnabled(false)` transition** — it follows the `setOvershootMode(...)` /
+     *       `setBrakeOnGate(...)` reset-on-disable lifecycle (ADR-023) so a later
+     *       `followDistance()` / `followUntilIntersection()` never inherits a stale bias. If
+     *       this method is NOT chained on a re-arm of an already-enabled follower, the owner's
+     *       current offset is preserved. Has no effect on a `setEnabled(false)` transition.
+     */
+    LineFollowerEnableBuilder& setLineFollowOffset(float offset);
+
+    /**
+     * @brief Stage the lateral bias from a per-edge follow MODE instead of a raw offset.
+     *
+     * @param mode `Routes::LineFollowMode` — `MIDDLE`/`DEFAULT` follow centred, `LEFT`/`RIGHT`
+     *             bias to that side. Convenience sugar over `setLineFollowOffset(...)`: it maps the
+     *             mode to a signed offset via `lineFollowModeToSetpoint(mode)` (LEFT →
+     *             `+Config::LINE_FOLLOW_OFFSET_ERROR`, RIGHT → the negative, MIDDLE/DEFAULT → 0)
+     *             and stages that, so the P+D behaviour, reset-on-disable lifecycle, and
+     *             `getRawError()` contract are identical to the float knob. Prefer this at bench /
+     *             direct call sites; the raw float stays for fine offset sweeps.
+     * @return    `*this` for fluent chaining.
+     * @note This is the FORWARD-frame mapping — it does NOT apply the reverse-hop sign flip. On a
+     *       rear-board hop `PathTracker` keeps composing `sign * lineFollowModeToSetpoint(mode)`
+     *       through the float knob so the bias stays left-of-TRAVEL; a hand call that reverses must
+     *       negate itself (or pass the mirrored mode). See ADR-069.
+     */
+    LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode mode);
+
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.
     bool                _targetEnabled;        ///< Final value of `_owner._enabled`.
@@ -337,6 +391,8 @@ private:
     bool                _overshootModeOverride    = false;  ///< Pending overshoot-mode flag; only honored when override flag set.
     bool                _hasBrakeOnGateOverride   = false;  ///< True iff `_brakeOnGateOverride` is meaningful.
     bool                _brakeOnGateOverride      = true;   ///< Pending brake-on-gate flag; only honored when override flag set. Default true matches owner default.
+    bool                _hasLineFollowOffsetOverride = false; ///< True iff `_lineFollowOffsetOverride` is meaningful.
+    float               _lineFollowOffsetOverride    = 0.0f;  ///< Pending signed lateral-offset bias; only honored when override flag set. See issue #156.
     bool                _executed            = false;  ///< Guards against repeated apply.
 };
 
@@ -394,8 +450,10 @@ public:
      *    `isPidFrozen()` exposes this state. On the first non-frozen tick after a freeze,
      *    `_lastErr` is reset to 0 to prevent a derivative kick. Otherwise (no junction),
      *    samples `_array->getError()` (range `[-3.5, +3.5]` for the 8-channel array), runs
-     *    a P+D controller `corr = LINE_KP*err + LINE_KD*(err - _lastErr)`, clamps `corr` to
-     *    `[-LINE_MAX_CORR, +LINE_MAX_CORR]`, then commands
+     *    a P+D controller `corr = LINE_KP*(err - offset) + LINE_KD*(err - _lastErr)` — where
+     *    `offset` is the signed lateral-offset bias staged via `setLineFollowOffset(...)`
+     *    (`0` = centred) applied to the P term ONLY, so `_lastErr` stays the raw centroid —
+     *    clamps `corr` to `[-LINE_MAX_CORR, +LINE_MAX_CORR]`, then commands
      *    `Drive.setSpeed(cruise + corr, cruise - corr)` with each channel re-clamped to
      *    `[-100, +100]` (the DriveDC PWM range). `cruise` is sourced from
      *    `_presetToPwm(_preset)`, NOT the historical hardcoded `Config::CRUISE_SPEED`.
@@ -711,6 +769,15 @@ public:
      *                            is armed, the gate trip latches `_distanceReached` without
      *                            self-disabling the controller or calling `Drive.stop`.
      *                            See ADR-023.
+     * @param hasLineFollowOffsetOverride  `true` if `lineFollowOffset` should overwrite the
+     *                            owner's `_lineFollowOffset`. Absent → owner value preserved
+     *                            across re-enables (mirrors the overshoot / brake-on-gate
+     *                            override pattern); the disable path resets it to `0.0f`
+     *                            regardless. See issue #156.
+     * @param lineFollowOffset    New signed lateral-offset bias (centroid-index units); honored
+     *                            only when `hasLineFollowOffsetOverride`. Applied to the P term
+     *                            on the online, non-junction P+D tick — `_lastErr` stays the raw
+     *                            centroid. See issue #156.
      */
     void _applyEnableBuilder(bool                targetEnabled,
                              bool                brake,
@@ -726,7 +793,9 @@ public:
                              bool                hasOvershootModeOverride,
                              bool                overshootMode,
                              bool                hasBrakeOnGateOverride,
-                             bool                brakeOnGate);
+                             bool                brakeOnGate,
+                             bool                hasLineFollowOffsetOverride,
+                             float               lineFollowOffset);
 
 private:
     // `presetToPwm` lives in `WROMath.h` — see Drive.h's matching note. Internal callers
@@ -752,6 +821,17 @@ private:
     bool                _reverse  = false;                        ///< When true, `update()` negates cruise to follow line in reverse.
     bool                _overshootMode = false;                   ///< When true, isOnline()==false dead-reckons symmetric cruise (no LOST_LINE_ACTION). See ADR-023.
     bool                _brakeOnGate   = true;                    ///< When false, distance-gate trip latches _distanceReached without self-disabling. See ADR-023.
+    /// @brief Signed lateral-offset bias (centroid-index units) applied to the P term ONLY on
+    ///        the online, non-junction P+D tick — `corr = LINE_KP*(err - _lineFollowOffset) +
+    ///        LINE_KD*(err - _lastErr)`. `0.0f` (the default) follows centred, byte-identical
+    ///        to pre-#156 steering. RESET to `0.0f` on every disable (mirrors `_overshootMode`
+    ///        / `_brakeOnGate` reset-on-disable, NOT the persistent `_preset` / `_reverse`), so
+    ///        a later `followDistance()` / `followUntilIntersection()` never inherits a stale
+    ///        bias. See issue #156.
+    float               _lineFollowOffset = 0.0f;
+    /// @brief True while an explicit lateral-offset override is active this enable session;
+    ///        set when `_applyEnableBuilder` honors an override, cleared on disable.
+    bool                _hasLineFollowOffsetOverride = false;
 
     // Trapezoidal cruise-ramp state (`.tShape()` on the enable builder).
     bool    _useTShape       = false;    ///< If true, cruise PWM ramps over distance after enable.

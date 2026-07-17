@@ -180,6 +180,11 @@ class Command:
         the builder default (tShape on for ``driveDist``).
     :param brake: ``.setBrake`` flag; set for ``drive`` commands. ``None``
         when unset — the resolver defaults to ``True``.
+    :param follow_offset: ``.setLineFollowOffset`` signed lateral hug bias (in
+        firmware centroid-index units, ``+LEFT`` / ``-RIGHT``); set for
+        ``drive`` ``lineFollowDist`` commands when the enable builder chained
+        ``setLineFollowOffset``. ``None`` when the key is absent (a centered /
+        MIDDLE follow) — the renderer then draws no lateral nudge.
     :param node: Node name; set for ``declare_position`` commands.
     :param freq_hz: Tone frequency in Hz; set for ``beep`` commands.
     :param r: Red channel (0–255); set for ``led`` commands.
@@ -222,6 +227,7 @@ class Command:
     end_speed:   Optional[int]   = None   # drive: .setEndSpeed override (PWM)
     profiled:    Optional[bool]  = None   # drive: true=.tShape, false=.flat
     brake:       Optional[bool]  = None   # drive: .setBrake flag
+    follow_offset: Optional[float] = None # drive: .setLineFollowOffset signed hug bias (centroid units)
     node:        Optional[str]   = None   # declare_position
     freq_hz:     Optional[int]   = None   # beep
     r:           Optional[int]   = None   # led
@@ -350,6 +356,7 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
         "method", "arg", "cm", "deg",
         "mode", "heading", "reverse",
         "power", "preset", "start_speed", "end_speed", "profiled", "brake",
+        "follow_offset",
         "node",
         "freq_hz", "r", "g", "b", "result",
         "success",
@@ -573,6 +580,28 @@ def _parse_command(raw: object, index: int) -> Optional[Command]:
                     stacklevel=4,
                 )
                 cmd.brake = None
+
+        # follow_offset: the LineFollower lateral hug-side bias (issue #156;
+        # centroid-index units, +LEFT / -RIGHT) recorded by the ctps_mocks
+        # enable-builder's setLineFollowOffset. Accept only a real int/float —
+        # bool is EXCLUDED (it subclasses int, so a stray true/false must not
+        # coerce to 1.0/0.0 and draw a phantom nudge), matching the `cm` /
+        # `heading` guards. A non-numeric value warns and is treated as unset
+        # (no nudge). Absent → leave None (a centered / MIDDLE follow).
+        if "follow_offset" in raw:
+            raw_follow_offset = raw["follow_offset"]
+            if isinstance(raw_follow_offset, (int, float)) and not isinstance(
+                raw_follow_offset, bool
+            ):
+                cmd.follow_offset = raw_follow_offset
+            else:
+                warnings.warn(
+                    f"ctps.trace_loader: non-numeric drive.follow_offset "
+                    f"{raw_follow_offset!r} at seq={seq} — treated as unset.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                cmd.follow_offset = None
 
     # ----- declare_position: validate node -----------------------------------
     if op == "declare_position":

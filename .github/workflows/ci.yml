@@ -73,8 +73,26 @@ jobs:
           arduino-cli lib update-index
           arduino-cli lib install MatrixMiniR4 ArduinoBLE PubSubClient
 
-      - name: Compile WRO2026 sketch
-        run: arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026
+      - name: Compile WRO2026 sketch (with SRAM ceiling gate)
+        run: |
+          set -o pipefail
+          arduino-cli compile --fqbn arduino:renesas_uno:unor4wifi WRO2026 2>&1 | tee /tmp/arduino_compile.log
+          # Flash-size gate (issue #156 / ADR-069): the ~30 KB `const EDGES[N][N]`
+          # array must stay in flash .rodata. A flash->RAM demotion (e.g. a non-
+          # constexpr makeEdge) would spike "Global variables" toward the 32 KB SRAM
+          # budget. Pin a ceiling well below that -- baseline is ~18.7 KB, so 24000 B
+          # leaves normal-growth headroom while a demotion of even a fraction of the
+          # 30 KB array trips it. The constexpr canary in routes.h is the other guard.
+          sram=$(grep -oE 'Global variables use [0-9]+ bytes' /tmp/arduino_compile.log | grep -oE '[0-9]+' | head -1)
+          echo "SRAM (global variables) = ${sram:-<unparsed>} bytes (ceiling 24000)"
+          if [ -z "$sram" ]; then
+            echo "ERROR: could not parse the 'Global variables use N bytes' figure from the compile output."
+            exit 1
+          fi
+          if [ "$sram" -gt 24000 ]; then
+            echo "ERROR: SRAM ${sram} B exceeds the 24000 B ceiling -- the const EDGES array may have been demoted from flash .rodata to RAM (issue #156 flash-size gate)."
+            exit 1
+          fi
 
   host-tests:
     name: Host tests

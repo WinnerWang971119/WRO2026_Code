@@ -938,15 +938,17 @@ def test_tc13_blind_mode_default_string_rejected() -> None:
 
 # -- TC6/TC7/TC8: LINE `mode` surface + the retired `primitive_mode` key ------
 #
-# LINE Mode is surface-only this PR (ADR-064): only ``MIDDLE`` is authorable
-# (validates and emits nothing -- no ``EdgeInfo`` field); ``LEFT``/``RIGHT`` are
-# reserved until the LineFollower lateral offset-follow lands (issue #156). The
-# retired ``primitive_mode`` key is rejected wherever it appears, with a
-# targeted migration message naming ``mode``/``speed`` and ADR-064.
+# LINE Mode is fully authorable now (ADR-069, issue #156): ``MIDDLE``,
+# ``LEFT``, and ``RIGHT`` all validate and each resolves to an
+# ``EdgeInfo.line_follow_mode_override`` slot (the LineFollower lateral
+# offset-follow the reserved surface finally drives). ``LEFT`` / ``RIGHT`` stay
+# rejected on a BLIND edge (a cross-type category error). The retired
+# ``primitive_mode`` key is rejected wherever it appears, with a targeted
+# migration message naming ``mode``/``speed`` and ADR-064.
 
 
 def test_tc6_line_mode_middle_validates() -> None:
-    """TC6: mode='MIDDLE' on a LINE edge validates (emit-side is header_writer)."""
+    """TC6: mode='MIDDLE' on a LINE edge validates and survives onto the graph."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
@@ -957,8 +959,9 @@ def test_tc6_line_mode_middle_validates() -> None:
         }
     ]
     assert validate(fd) is None
-    # The overlay attribute survives onto the graph (the emitter is what drops
-    # it -- LINE `mode` has no EdgeInfo field this PR).
+    # The overlay attribute survives onto the forward directed edge; the emitter
+    # resolves it to EdgeInfo.line_follow_mode_override (emit-side is
+    # test_header_writer). LINE `mode` is directional, so it lands on A->B only.
     g = build_graph(fd)
     assert g.edges["A", "B"]["mode"] == "MIDDLE"
 
@@ -977,8 +980,14 @@ def test_tc6_line_mode_middle_enum_instance_validates() -> None:
     assert validate(fd) is None
 
 
-def test_tc7_line_mode_left_rejected() -> None:
-    """TC7: mode='LEFT' on a LINE edge is rejected (issue #156, not yet implemented)."""
+def test_tc7_line_mode_left_validates() -> None:
+    """TC7: mode='LEFT' on a LINE edge validates (issue #156 implemented, ADR-069).
+
+    The issue-#156 reject guard is gone: LEFT is now a first-class LINE
+    lateral-bias tag. It validates and survives verbatim onto the forward
+    directed edge, where header_writer resolves it to
+    ``EdgeInfo.line_follow_mode_override = LineFollowMode::LEFT``.
+    """
     fd = _clone_field_data()
     fd.EDGES = [
         {
@@ -988,12 +997,13 @@ def test_tc7_line_mode_left_rejected() -> None:
             "mode": "LEFT",
         }
     ]
-    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
-        validate(fd)
+    assert validate(fd) is None
+    g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] == "LEFT"
 
 
-def test_tc7_line_mode_right_rejected() -> None:
-    """TC7 (mirror): mode='RIGHT' on a LINE edge is rejected the same way."""
+def test_tc7_line_mode_right_validates() -> None:
+    """TC7 (mirror): mode='RIGHT' on a LINE edge validates the same way."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
@@ -1003,12 +1013,13 @@ def test_tc7_line_mode_right_rejected() -> None:
             "mode": "RIGHT",
         }
     ]
-    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
-        validate(fd)
+    assert validate(fd) is None
+    g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] == "RIGHT"
 
 
-def test_tc7_line_mode_left_enum_instance_rejected() -> None:
-    """TC7 (enum form): mode=LineFollowMode.LEFT is rejected too."""
+def test_tc7_line_mode_left_enum_instance_validates() -> None:
+    """TC7 (enum form): mode=LineFollowMode.LEFT validates too."""
     fd = _clone_field_data()
     fd.EDGES = [
         {
@@ -1018,8 +1029,115 @@ def test_tc7_line_mode_left_enum_instance_rejected() -> None:
             "mode": LineFollowMode.LEFT,
         }
     ]
-    with pytest.raises(FieldDataError, match=r"not yet implemented.*#156"):
+    assert validate(fd) is None
+    g = build_graph(fd)
+    assert g.edges["A", "B"]["mode"] is LineFollowMode.LEFT
+
+
+def test_tc7_line_mode_left_on_blind_edge_rejected() -> None:
+    """TC7 (cross-type): mode='LEFT' on a BLIND edge is still rejected.
+
+    LEFT / RIGHT are LINE-only lateral-bias tags. On a BLIND edge a
+    ``LineFollowMode`` tag is a category error and must be rejected naming the
+    valid ``BlindMode`` vocabulary -- the LINE-side guard was removed, not the
+    edge-type cross-check. ('B','G') is the toy field's BLIND_EDGES pair.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "mode": "LEFT",
+        }
+    ]
+    with pytest.raises(FieldDataError, match="BlindMode"):
         validate(fd)
+
+
+def test_tc7_line_mode_default_rejected_with_omit_message() -> None:
+    """TC5/TC6: explicit mode='DEFAULT' on a LINE edge is rejected (DEFAULT == absence).
+
+    ``LineFollowMode["DEFAULT"]`` resolves (DEFAULT is a real member), so the
+    unknown-name guard would miss it -- the validator rejects the literal
+    ``"DEFAULT"`` explicitly with the "omit the override" diagnostic, mirroring
+    the ``speed: DEFAULT`` guard, since DEFAULT already means "inherit" (==
+    MIDDLE today) which absence encodes.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "DEFAULT",
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"omit the override"):
+        validate(fd)
+
+
+def test_tc7_line_mode_default_enum_instance_rejected() -> None:
+    """TC5/TC6 (enum form): mode=LineFollowMode.DEFAULT is rejected the same way."""
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": LineFollowMode.DEFAULT,
+        }
+    ]
+    with pytest.raises(FieldDataError, match=r"omit the override"):
+        validate(fd)
+
+
+def test_tc6_line_mode_unknown_tag_rejected_names_vocabulary() -> None:
+    """TC6 (negative content): an unknown LINE mode tag is rejected naming MIDDLE|LEFT|RIGHT.
+
+    The diagnostic must LIST the valid LINE lateral-bias vocabulary so the
+    author can self-correct -- asserting the message content, not merely that a
+    rejection happened.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_LINE,
+            "u": "A",
+            "v": "B",
+            "mode": "SIDEWAYS",  # not a LineFollowMode member
+        }
+    ]
+    with pytest.raises(FieldDataError) as excinfo:
+        validate(fd)
+    message = str(excinfo.value)
+    assert "MIDDLE" in message
+    assert "LEFT" in message
+    assert "RIGHT" in message
+
+
+def test_tc6_line_mode_left_on_blind_edge_names_blind_vocabulary() -> None:
+    """TC6 (negative content): mode='LEFT' on a BLIND edge names the valid BlindMode tags.
+
+    The cross-type rejection must name the BlindMode vocabulary the author
+    should use instead (e.g. ``GYRO_TSHAPE``), not just say ``BlindMode`` -- so
+    the message content is asserted directly.
+    """
+    fd = _clone_field_data()
+    fd.EDGES = [
+        {
+            "type": EDGE_BLIND,
+            "u": "B",
+            "v": "G",
+            "mode": "LEFT",
+        }
+    ]
+    with pytest.raises(FieldDataError) as excinfo:
+        validate(fd)
+    message = str(excinfo.value)
+    assert "BlindMode" in message
+    # Names at least one concrete, still-authorable BlindMode tag.
+    assert "GYRO_TSHAPE" in message
 
 
 def test_tc8_primitive_mode_anywhere_rejected() -> None:

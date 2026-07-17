@@ -113,6 +113,7 @@ from tools.path_planner.sim.runtime import (
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
     KEYFRAME_COUNT_CEILING,
+    LINE_FOLLOW_OFFSET_DISPLAY_CM,
     MANIP_NOMINAL_S,
     ROBOT_FRAME_CM,
 )
@@ -275,6 +276,19 @@ class Track:
         field). The dense arc keyframes between ``t0`` and ``t1`` already trace
         the swing through the player's lerp; this segment just tells the
         ``wheel-arc`` render mode WHEN a pivot is active and WHERE its wheel is.
+    :param lateral_offsets: Optional visualization-only lateral hug-side overlay
+        segments (issue #156), one per biased ``lineFollowDist`` leg the trace
+        renders, in chronological (``t0``-increasing) order. Each entry is
+        ``{"t0": float, "t1": float, "offset_cm": float}`` — the span the follow
+        is biased and the signed on-screen lateral nudge (cm; ``+`` = robot-left,
+        the LEFT bias), mapped from the recorded ``follow_offset`` via
+        :data:`~tools.path_planner.ctps.config.LINE_FOLLOW_OFFSET_DISPLAY_CM`. The
+        player nudges the chassis marker perpendicular to its heading by
+        ``offset_cm`` while the playhead is inside a span — a pure DRAW-time
+        overlay (ADR-054 pivot-arc precedent): the keyframes stay on the
+        centerline and the parity-locked :class:`LocalizationSim` pose is never
+        touched. Empty (and omitted from :meth:`to_dict`) for every centered /
+        MIDDLE trace, so ``schema_version`` stays ``1`` (additive optional field).
     :param mosaic: The trace's top-level ``mosaic`` echo
         (:class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`), carried
         through UNCHANGED from :attr:`Trace.mosaic` — a non-geometry,
@@ -293,6 +307,7 @@ class Track:
     keyframes: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
     pivots: List[Dict[str, Any]] = dc_field(default_factory=list)
+    lateral_offsets: List[Dict[str, Any]] = dc_field(default_factory=list)
     mosaic: Optional[MosaicTrace] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -304,10 +319,13 @@ class Track:
 
         The ``"pivots"`` key is included **only when non-empty**: a pivot-free
         trace emits exactly the pre-#55 dict (same keys, same order), so its
-        Track JSON is byte-identical to before this change (AC6). Likewise
-        ``"mosaic"`` is included **only when set**: a mosaic-free trace emits
-        exactly the pre-mosaic dict, so its Track JSON stays byte-identical
-        (AC12). When present, ``"mosaic"`` is the plain field-value dict
+        Track JSON is byte-identical to before this change (AC6). The
+        ``"lateral_offsets"`` key (issue #156) is likewise included **only when
+        non-empty**: a centered / MIDDLE trace emits no such key and stays
+        byte-identical. Likewise ``"mosaic"`` is included **only when set**: a
+        mosaic-free trace emits exactly the pre-mosaic dict, so its Track JSON
+        stays byte-identical (AC12). When present, ``"mosaic"`` is the plain
+        field-value dict
         (``{"cells", "seed", "geom_hash", "injected"}``, ``seed`` omitted when
         unset) — the same shape :class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`
         carries, JSON-serialisable via ``dataclasses.asdict``-equivalent
@@ -327,6 +345,8 @@ class Track:
         }
         if self.pivots:
             result["pivots"] = self.pivots
+        if self.lateral_offsets:
+            result["lateral_offsets"] = self.lateral_offsets
         if self.mosaic is not None:
             mosaic_dict: Dict[str, Any] = {
                 "cells": list(self.mosaic.cells),
@@ -1309,6 +1329,11 @@ def _drive_label(cmd: Command) -> str:
             label += f" heading={cmd.heading}"
         if cmd.reverse:
             label += " reverse"
+        # Line-follow lateral hug bias (issue #156) — shown only when the follow
+        # recorded a non-zero setLineFollowOffset (lineFollowDist only), so a
+        # centered / MIDDLE follow keeps its exact base label.
+        if cmd.follow_offset:
+            label += f" offset={cmd.follow_offset}"
         return label
     if method == "turnDeg":
         return f"turnDeg({cmd.deg})"
@@ -1422,6 +1447,14 @@ def build(trace: Trace, field_data) -> Track:
     # every pivot-free trace, so a ``PIVOT_TURNS``-empty field is byte-identical
     # to before this change (AC6).
     pivots: List[Dict[str, Any]] = []
+    # Optional visualization-only lateral hug-side overlay segments (issue #156).
+    # Appended in chronological (t0-increasing) order as each biased
+    # ``lineFollowDist`` leg renders; stays empty — and the ``lateral_offsets``
+    # key is omitted from the Track — for every centered / MIDDLE trace, so a
+    # bias-free trace's Track JSON is byte-identical. The nudge is a DRAW-time
+    # overlay (ADR-054 pivot-arc precedent): the keyframes below stay on the
+    # centerline and the sim / LocalizationSim pose is never touched.
+    lateral_offsets: List[Dict[str, Any]] = []
     # Chassis track width (cm), parsed LAZILY from ConfigDrive.h on the FIRST
     # detected pivot only. A pivot-free build never reads the firmware header
     # (issue #44 fail-loud parse), preserving the byte-identical guarantee.
@@ -2476,6 +2509,36 @@ def build(trace: Trace, field_data) -> Track:
                         wrap_pm180(float(cmd.deg) - chassis.heading_deg)
                     )
             # else: stop / unknown -> no geometry change, nothing to integrate.
+
+            # Visualization-only lateral hug-side nudge (issue #156, ADR-054
+            # chassis-nudge precedent): a biased ``lineFollowDist`` carries the
+            # signed LineFollower offset (``follow_offset``, centroid-index units)
+            # recorded by the ctps_mocks setLineFollowOffset seam. Register the
+            # [event_t, t] follow span with an on-screen lateral cm mapped through
+            # the CTPS-layer display constant so the renderer draws the chassis
+            # marker biased to that side for the whole leg. This is a DRAW-time
+            # overlay ONLY — the keyframes above already integrated on the shared
+            # sim (centerline), and nothing here writes an x/y back to the sim /
+            # LocalizationSim (the pivot-arc invariant). Guarded on a real advance
+            # (``t > event_t``) and a set, non-zero offset, so a centered / MIDDLE
+            # follow — or any non-lineFollowDist move — appends nothing and stays
+            # byte-identical.
+            if (
+                method == "lineFollowDist"
+                and cmd.follow_offset is not None
+                and cmd.follow_offset != 0.0
+                and t > event_t
+            ):
+                lateral_offsets.append(
+                    {
+                        "t0": event_t,
+                        "t1": t,
+                        "offset_cm": (
+                            LINE_FOLLOW_OFFSET_DISPLAY_CM * float(cmd.follow_offset)
+                        ),
+                    }
+                )
+
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )
@@ -2627,5 +2690,6 @@ def build(trace: Trace, field_data) -> Track:
         keyframes=keyframes,
         events=events,
         pivots=pivots,
+        lateral_offsets=lateral_offsets,
         mosaic=trace.mosaic,
     )
