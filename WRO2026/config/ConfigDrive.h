@@ -247,7 +247,7 @@ namespace Config
      *
      * @note TODO: measure on real chassis.
      */
-    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 0.1f;
+    constexpr float LINE_SENSOR_AXLE_OFFSET_CM = 12.02f;
 
     /**
      * @brief Distance from the REAR line-sensor board's centerline to the wheel-axle line,

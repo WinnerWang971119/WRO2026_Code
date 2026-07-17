@@ -122,9 +122,9 @@ namespace Config
     /** @brief Belt free-run speed spec (RPM). TODO confirm. */
     constexpr uint16_t BELT_RPM             = 300;    // TODO confirm
     /** @brief Magnitude of a POSITION-mode belt move (PWM). TODO. */
-    constexpr int16_t  BELT_MOVE_SPEED      = 50;     // POSITION-move magnitude; TODO
+    constexpr int16_t  BELT_MOVE_SPEED      = 55;     // POSITION-move magnitude; TODO
     /** @brief Magnitude of the stall-home drive toward HOME (PWM). TODO. */
-    constexpr int16_t  BELT_STALL_SPEED      = 25;     // stall-home magnitude (toward HOME); TODO
+    constexpr int16_t  BELT_STALL_SPEED      = 15;     // stall-home magnitude (toward HOME); TODO
     /** @brief Timed run length of the stall-home maneuver (ms). TODO. */
     constexpr uint32_t BELT_RESET_MS         = 2000;   // stall-home timed run; TODO
     /**
@@ -142,7 +142,7 @@ namespace Config
      *        `setSpeed()` drive into the `rotateFor()` position move — mirroring how ordinary
      *        back-to-back moves are separated across ticks. TODO tune at bring-up.
      */
-    constexpr uint32_t BELT_HOME_SETTLE_MS = 150;   // dwell after the stall before the MID rotate; TODO
+    constexpr uint32_t BELT_HOME_SETTLE_MS = 200;   // dwell after the stall before the MID rotate; TODO
     /**
      * @brief Wall-clock ceiling for the FULL `home()` sequence: stall into the LEFT/HOME
      *        end-stop, re-zero the encoder, settle, then drive to the MID rest position.
@@ -191,10 +191,10 @@ namespace Config
     /** @brief Per-station belt command table, indexed by `BeltStation`. TODO. */
     constexpr BeltStationCfg BELT_STATIONS[BELT_STATION_COUNT] = {
         { BeltMode::TIMED,    0,   BELT_RESET_MS, -BELT_STALL_SPEED },  // LEFT  (timed into near/HOME end); TODO
-        { BeltMode::POSITION, 100, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
+        { BeltMode::POSITION, 700, 0,             BELT_MOVE_SPEED },  // MID   (absolute 400); TODO
         { BeltMode::TIMED,    0,   1500,          BELT_STALL_SPEED },  // FAR_END (stalls -> timed); TODO
-        { BeltMode::POSITION,    200,   0,          BELT_STALL_SPEED },  // REAR_BOX_OPEN (pos); TODO
-        { BeltMode::POSITION,    100,   0,          BELT_STALL_SPEED },  // REAR_BOX_CLOSE (pos); TODO
+        { BeltMode::POSITION,    200,   0,          BELT_MOVE_SPEED },  // REAR_BOX_OPEN (pos); TODO
+        { BeltMode::POSITION,    100,   0,          BELT_MOVE_SPEED },  // REAR_BOX_CLOSE (pos); TODO
     };
 }    // namespace Config
 
