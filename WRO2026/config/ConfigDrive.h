@@ -489,14 +489,16 @@ namespace Config
     /**
      * @brief Proportional gain for the per-tick turn PD controller (ADR-068), in PWM per degree.
      *
-     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 1`. This is the
-     * mentor's TT-verified STARTING point, not a Lofaix-bench-measured value — `TurnPDPolicy.h::
-     * turnPdStep` computes `Kp * errNew` before the D term, clamp, slew, and creep floor.
+     * Ported from the mentor's competition-verified `M_Turn_angle`: `Kp = 2` (the 2026-07
+     * screenshot revision the mentor confirmed working on THIS chassis; an earlier revision used
+     * `Kp = 1`). Kp maps a degree error straight to a PWM, so it ports DIRECTLY — no loop-rate
+     * conversion, unlike TURN_KD below. `TurnPDPolicy.h::turnPdStep` computes `Kp * errNew` before
+     * the D term, clamp, slew, and creep floor.
      *
-     * @note TODO: bench-tune (T11) — Lofaix is heavier than the mentor's TT rover.
+     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KP_DEFAULT
-#define TURN_KP_DEFAULT 1.0f
+#define TURN_KP_DEFAULT 2.0f
 #endif
     constexpr float TURN_KP = TURN_KP_DEFAULT;
 
@@ -505,18 +507,21 @@ namespace Config
      *        (deg/s) — NOT the mentor's raw per-iteration gain.
      *
      * The mentor's `M_Turn_angle` computes a raw per-ITERATION difference (`errNew - errOld`,
-     * no division), so his effective damping is implicitly `Kd * omega * loop_period` — correct
-     * only at his fixed ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters to
-     * ~11.5 ms (`inoTest/tick_bench`, 2026-07-16), so porting the raw `Kd = 3` would silently
-     * re-scale every time the tick jitters. `TurnPDPolicy.h::turnPdStep` instead divides by the
-     * MEASURED per-step `dtSec`, so this gain carries real units of PWM per (deg/s):
-     * `0.018 ~= 3 * 0.006 s` reproduces the mentor's damping at any loop rate (sanity check: at
-     * omega=90 deg/s, `0.018 * 90 ~= 1.6`, matching his per-iteration `3 * 0.54 ~= 1.6`).
+     * no division), so his continuous damping is `Kd_raw * loop_period` — correct only at his
+     * fixed ~6 ms loop. Our cooperative tick is a MEASURED ~8 ms that jitters to ~11.5 ms
+     * (`inoTest/tick_bench`, 2026-07-16), so porting the raw gain verbatim would silently re-scale
+     * every time the tick jitters. `TurnPDPolicy.h::turnPdStep` instead divides by the MEASURED
+     * per-step `dtSec`, so this gain carries real units of PWM per (deg/s) and reproduces the
+     * mentor's CONTINUOUS damping at any loop rate: `TURN_KD = Kd_raw * mentor_loop_period`.
      *
-     * @note TODO: bench-tune (T11).
+     * The mentor's 2026-07 revision uses `Kd_raw = 10` (an earlier revision used 3), so
+     * `0.06 ~= 10 * 0.006 s`. Sanity check: at omega=90 deg/s our D term is `0.06 * 90 = 5.4`,
+     * matching his per-iteration `10 * (90 * 0.006) = 5.4`.
+     *
+     * @note Verify on the robot via `inoTest/turn_tune` (T11) before committing.
      */
 #ifndef TURN_KD_DEFAULT
-#define TURN_KD_DEFAULT 0.018f
+#define TURN_KD_DEFAULT 0.06f
 #endif
     constexpr float TURN_KD = TURN_KD_DEFAULT;
 
@@ -524,14 +529,15 @@ namespace Config
      * @brief Threshold (PWM magnitude) below which the turn PD stops modulating and emits the
      *        fixed kinetic creep floor instead (ADR-068, `TurnPDPolicy.h::turnCreepFloor`).
      *
-     * Bench-measured on Lofaix (T1, 2026-07-16): `TURN_CREEP_PWM` plus a 5-PWM headroom margin,
-     * so a command handing off to the creep floor has a small band to land in instead of
-     * chattering across the boundary tick-to-tick.
+     * `TURN_CREEP_PWM` plus a 5-PWM headroom margin, so a command handing off to the creep floor
+     * has a small band to land in instead of chattering across the boundary tick-to-tick.
      *
-     * @note TODO: bench-tune (T11) if the measured headroom proves too tight/loose.
+     * Robot-verified 2026-07: the bench-measured 43 (over a 38 creep) collapsed the whole final
+     * ~21 deg of a turn to a flat, fast creep and overshot a 90 deg turn to ~120. Lowered to the
+     * mentor's proven tail (creep 20 + 5) so the PD keeps modulating far closer to the target.
      */
 #ifndef TURN_CREEP_THRESH_PWM_DEFAULT
-#define TURN_CREEP_THRESH_PWM_DEFAULT 43
+#define TURN_CREEP_THRESH_PWM_DEFAULT 25
 #endif
     constexpr int16_t TURN_CREEP_THRESH_PWM = TURN_CREEP_THRESH_PWM_DEFAULT;
 
@@ -539,17 +545,18 @@ namespace Config
      * @brief KINETIC creep floor (PWM magnitude) the turn PD emits once it loses authority
      *        (`|cmd| < TURN_CREEP_THRESH_PWM`), ADR-068.
      *
-     * Bench-measured on Lofaix (T1, 2026-07-16, phase a2): the lowest PWM that reliably SUSTAINS
-     * rotation once the chassis is already turning — NOT the static breakaway floor
-     * (`TURN_BREAKAWAY_PWM`, the higher PWM needed to START an in-place spin from rest, measured
-     * HIGHER than this because a spin scrubs the tires sideways). Do not reuse `deadbandSnap` /
-     * `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the creep floor is not
-     * deadbandSnap").
+     * The lowest PWM that reliably SUSTAINS rotation once the chassis is already turning — NOT the
+     * static breakaway floor (`TURN_BREAKAWAY_PWM`, the higher PWM needed to START an in-place spin
+     * from rest, measured HIGHER than this because a spin scrubs the tires sideways). Do not reuse
+     * `deadbandSnap` / `PWM_MIN_MAGNITUDE` here; see `TurnPDPolicy.h`'s file docblock ("Why the
+     * creep floor is not deadbandSnap").
      *
-     * @note TODO: bench-tune (T11).
+     * Robot-verified 2026-07: the bench sweep's 38 approached the target too fast and coasted a
+     * 90 deg turn out to ~120. Set to the mentor's competition-proven kinetic tail floor of 20,
+     * which lands on target on this chassis.
      */
 #ifndef TURN_CREEP_PWM_DEFAULT
-#define TURN_CREEP_PWM_DEFAULT 38
+#define TURN_CREEP_PWM_DEFAULT 20
 #endif
     constexpr int16_t TURN_CREEP_PWM = TURN_CREEP_PWM_DEFAULT;
 

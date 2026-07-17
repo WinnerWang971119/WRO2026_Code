@@ -299,19 +299,22 @@ static void test_slew_limit_binds_on_later_ramp_ticks_of_elevated_power_turn()
 // ===========================================================================================
 // Breakaway hand-off: every dispatched floor is the STATIC breakaway (46) while the chassis
 // has moved < Config::TURN_BREAKAWAY_MOTION_DEG from the turn's start yaw; the FIRST tick the
-// cumulative motion reaches that threshold, the floor drops to the KINETIC creep (38) and
+// cumulative motion reaches that threshold, the floor drops to the KINETIC creep (20) and
 // stays there (latched) even if the yaw regresses back under the threshold afterward.
 // ===========================================================================================
 static void test_breakaway_handoff_latches_static_to_kinetic_floor()
 {
     TEST_SCOPE("breakaway hand-off: floor is 46 (static) below TURN_BREAKAWAY_MOTION_DEG of "
-               "motion, drops to 38 (kinetic) the FIRST tick motion reaches it, then latches");
+               "motion, drops to 20 (kinetic) the FIRST tick motion reaches it, then latches");
     turn_harness::resetWorld();
 
     const float   startYaw = 0.0f;
-    const int16_t deg      = 20;    // Kp*err stays well under BOTH floor thresholds throughout,
-                                    // so the ONLY thing that can change the dispatched magnitude
-                                    // is which floor is selected.
+    // A SMALL turn on purpose: with Kp=2 and the 5 ms mock tick (Kd's D term ~= 12x the per-tick
+    // yaw delta), a 6 deg turn keeps `Kp*err` under BOTH floor thresholds at every hand-off tick
+    // below, so the ONLY thing that can change the dispatched magnitude is which floor is selected
+    // (a 20 deg turn's command now clears the lowered creep threshold and would read the raw PD
+    // value, not the floor).
+    const int16_t deg      = 6;
 
     turn_harness::enqueueTurnDeg(deg);
     turn_harness::tickAtYaw(startYaw);    // dispatch.
@@ -337,19 +340,21 @@ static void test_breakaway_handoff_latches_static_to_kinetic_floor()
 }
 
 // ===========================================================================================
-// Small turn does not stall: a ~20 deg turn keeps dispatching the STATIC breakaway floor (46)
-// until the chassis is demonstrably rotating — a single static 38 kick (below the 46 measured
+// Small turn does not stall: a ~6 deg turn keeps dispatching the STATIC breakaway floor (46)
+// until the chassis is demonstrably rotating — a single static 20 kick (below the 46 measured
 // breakaway) would never start the spin at all. Once moving, hand off to the kinetic floor and
 // converge to a clean settle (not a hunt-to-timeout).
 // ===========================================================================================
 static void test_small_turn_breaks_away_then_settles_cleanly()
 {
-    TEST_SCOPE("small turn (~20deg): floors at breakaway (>=46) until moving, "
+    TEST_SCOPE("small turn (~6deg): floors at breakaway (>=46) until moving, "
                "then converges via TURN_SETTLE_SAMPLES in-band ticks");
     turn_harness::resetWorld();
 
     const float   startYaw  = 0.0f;
-    const int16_t deg       = 20;
+    // Small (see the breakaway hand-off case above) so the dispatched magnitude reflects the
+    // floor SELECTION under the stiffer Kp=2 gains, not the raw PD command.
+    const int16_t deg       = 6;
     const float   targetYaw = startYaw + (float) deg;
 
     turn_harness::enqueueTurnDeg(deg);
@@ -360,12 +365,14 @@ static void test_small_turn_breaks_away_then_settles_cleanly()
     ASSERT_TRUE(turn_harness::magOf(MiniR4.DriveDC.lastMoveR) >= Config::TURN_BREAKAWAY_PWM);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
-    // Still not (yet) demonstrably rotating — the floor stays at the static breakaway value.
-    turn_harness::tickAtYaw(startYaw);
+    // Moved a little but still UNDER TURN_BREAKAWAY_MOTION_DEG — the floor stays at the static
+    // breakaway value. (A gentle step keeps the D term small so the command stays sub-threshold
+    // and the assertion reads the floor, not the PD value.)
+    turn_harness::tickAtYaw(startYaw + 0.6f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_BREAKAWAY_PWM);
 
-    // Now let the chassis actually move past the breakaway-motion threshold.
-    turn_harness::tickAtYaw(startYaw + 5.0f);
+    // Now let the chassis move PAST the breakaway-motion threshold — the floor drops to kinetic.
+    turn_harness::tickAtYaw(startYaw + 1.2f);
     ASSERT_EQ(turn_harness::magOf(MiniR4.DriveDC.lastMoveR), Config::TURN_CREEP_PWM);
 
     // Drive the rest of the way to the target and confirm a clean settle (not a hunt).
