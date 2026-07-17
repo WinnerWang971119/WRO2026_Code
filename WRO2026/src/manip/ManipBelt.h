@@ -97,10 +97,12 @@ public:
      * Sequence:
      *   1. `setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM)` — encoder resolution + RPM
      *      ceiling for the lower-MCU speed/position loops.
-     *   2. `setReverse(false)` — keep the vendor hardware direction FORWARD. Belt direction
-     *      is carried entirely by `Config::BELT_DIR_SIGN` at the driver boundary; do NOT flip
-     *      this to reverse the belt, since the vendor `setReverse` leaves the encoder
-     *      direction untouched (encoder-dir call commented out) and would desync `rotateFor`.
+     *   2. `setReverse(Config::BELT_MOTOR_REVERSE)` — reverse the motor power if it disagrees
+     *      with the encoder, so the closed-loop `rotateFor` (POSITION moves) completes on the
+     *      encoder instead of running away to the watchdog. Flipping the MOTOR realigns it
+     *      with a reversed encoder; the encoder-side `SetEncoderDir` does NOT work (the STM32
+     *      rotate controller ignores it — why the vendor left it commented out of setReverse).
+     *      The logical drive direction is carried separately by `Config::BELT_DIR_SIGN`.
      *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, `resetCounter()`,
      *      settle, then drive to MID), polled by `update()` + `delay(2)` until `isDone()`
      *      or the `Config::BELT_HOME_TIMEOUT_MS` ceiling.
@@ -117,7 +119,10 @@ public:
     bool begin()
     {
         bool ok = _setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM);
-        ok = _setReverse(false) && ok;    // placeholder HW direction; sign carries direction
+        // Reverse the motor power if it disagrees with the encoder, so the closed-loop
+        // rotateFor completes on ChkRotateEnd instead of running away to the watchdog. The
+        // logical drive direction is then carried by BELT_DIR_SIGN.
+        ok = _setReverse(Config::BELT_MOTOR_REVERSE) && ok;
 
         // Full home (stall to LEFT/HOME, reset, drive to MID), blocking-bounded. begin() runs
         // before any tick callback is registered, so we cannot rely on Drive-style _drain —

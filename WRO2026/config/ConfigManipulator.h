@@ -96,14 +96,26 @@ namespace Config
      *        driver boundary — the `_setSpeed` / `_rotateFor` speed argument and the
      *        `_getDegrees` read — so the sign convention above holds no matter how the
      *        belt motor is wired (ADR-045 style single-point sign, like `IMU_YAW_SIGN`).
-     * @note  Reverse the belt with THIS, not the vendor `setReverse(true)`: MatrixMiniR4's
-     *        `MiniR4DC::setReverse` flips only the motor power — the encoder-direction call
-     *        is commented out in the library — so `setReverse(true)` would desync the
-     *        closed-loop `rotateFor` (POSITION moves) into a runaway. Flipping speed AND the
-     *        encoder read together keeps motor + encoder consistent.
-     * @note  `-1` on the current belt: `reset()` was stalling toward FAR_END instead of HOME.
+     * @note  This is the LOGICAL-direction knob (which physical end is FAR_END). It is a
+     *        different axis from `BELT_MOTOR_REVERSE`, which fixes motor/encoder AGREEMENT so
+     *        the closed-loop `rotateFor` can complete. On this build both come out such that
+     *        `BELT_DIR_SIGN = +1` and `BELT_MOTOR_REVERSE = true` home the belt correctly.
      */
-    constexpr int8_t   BELT_DIR_SIGN        = -1;    // motor wired opposite the convention
+    constexpr int8_t   BELT_DIR_SIGN        = +1;    // logical +speed = FAR_END on this build
+
+    /**
+     * @brief Reverse the belt motor's power direction (`setReverse` / `SetDCMotorDir`).
+     *
+     * The belt encoder counts OPPOSITE to the motor's power on this build, so the lower MCU's
+     * closed-loop `rotateFor` (POSITION moves) saw the count run away from target and hung to
+     * the `BELT_MOVE_TIMEOUT_MS` watchdog. Reversing the MOTOR (the working `SetDCMotorDir`
+     * half of `setReverse`) brings motor + encoder back into agreement so `rotateFor`
+     * completes — verified on hardware via `inoTest/belt_encoder_probe`. `SetEncoderDir`
+     * (flip the encoder instead) does NOT work: the STM32 rotate controller ignores it, which
+     * is why the vendor left it commented out of `setReverse`.
+     * @note `true` on the current belt (measured: +motor command drove the count negative).
+     */
+    constexpr bool     BELT_MOTOR_REVERSE   = true;    // flip motor to agree with the encoder
 
     /** @brief Belt encoder pulses per revolution (LEGO EV3). TODO confirm. */
     constexpr uint16_t BELT_PPR             = 360;    // LEGO EV3; TODO confirm
