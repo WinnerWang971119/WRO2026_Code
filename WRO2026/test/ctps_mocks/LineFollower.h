@@ -46,6 +46,15 @@
 
 class LineFollowerClass;
 
+// Opaque forward declaration mirroring the real `LineFollower.h`: names the enum for the
+// `setLineFollowMode(...)` conformance shadow without including a `Routes` header. A real include
+// would double-define `namespace Routes` against the force-included `routes_fixture.h` in the
+// conformance TU. Underlying type MUST match `routes.h`.
+namespace Routes
+{
+enum class LineFollowMode : uint8_t;
+}
+
 /**
  * @brief Map a `Config::SpeedPreset` to its command-stream `preset` string.
  *
@@ -216,6 +225,19 @@ public:
         _hasLineFollowOffset = true;
         return *this;
     }
+
+    /**
+     * @brief Conformance shadow of the real `setLineFollowMode(...)` sugar (issue #156).
+     *
+     * A no-op that only keeps the mock builder a superset of the real one for the two drift
+     * guards (the C++ `test_ctps_mock_conformance` chain + the Python name-superset test). It does
+     * NOT record: every CTPS-rendered biased follow reaches the recorder through
+     * `setLineFollowOffset(...)` — PathTracker composes `sign * lineFollowModeToSetpoint(mode)` and
+     * calls the float knob — so nothing dispatches the mode enum through this mock. Mapping it here
+     * would need the full `Routes::LineFollowMode` definition, which cannot be included without
+     * double-defining `namespace Routes` in the conformance TU.
+     */
+    LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode) { return *this; }
 
     LineFollowerEnableBuilder& setOvershootMode(bool) { return *this; }
     LineFollowerEnableBuilder& setBrakeOnGate(bool) { return *this; }

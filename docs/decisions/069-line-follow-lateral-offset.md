@@ -37,11 +37,21 @@ zero, so junction-freeze, the distance gate, and lost-line handling are untouche
   units, LEFT=+/RIGHT=-) with a `static_assert(0.0f <= x <= 2.5f)` in `ConfigChecks.h` —
   the cap sits above the seed so a bench retune upward doesn't trip it, and still keeps
   `LINE_KP*offset` under `LINE_MAX_CORR`.
-- `LineFollower::setLineFollowOffset(float)` is a nav-agnostic float builder knob (no
-  `Routes::` dependency in the drive layer). Lifecycle follows the `setOvershootMode`/
-  `setBrakeOnGate` (ADR-023) reset-on-disable pattern, not `setPreset`/`setReverse`: cold
-  `setEnabled(true)` with no override is 0, a re-arm on an already-enabled follower
-  preserves the current offset, `setEnabled(false)` resets it to 0.
+- `LineFollower::setLineFollowOffset(float)` is the primitive builder knob (signed
+  centroid-index bias). Lifecycle follows the `setOvershootMode`/`setBrakeOnGate` (ADR-023)
+  reset-on-disable pattern, not `setPreset`/`setReverse`: cold `setEnabled(true)` with no
+  override is 0, a re-arm on an already-enabled follower preserves the current offset,
+  `setEnabled(false)` resets it to 0.
+- `LineFollower::setLineFollowMode(Routes::LineFollowMode)` is ergonomic sugar over that
+  knob for bench / direct call sites — it delegates to `setLineFollowOffset(
+  lineFollowModeToSetpoint(mode))`, so lifecycle and the P+D / `getRawError()` contracts are
+  identical. It is the FORWARD-frame mapping only (no reverse sign). This is the one place the
+  drive layer takes a dependency on the generated `Routes::LineFollowMode` enum: the header
+  opaque-forward-declares it (no `nav/routes.h` include, so shadow-routes host targets do not
+  double-define `Routes`); `LineFollower.cpp` pulls the full definition via `WROMath.h`. The
+  CTPS recording mock carries a no-op `setLineFollowMode` shadow to satisfy the ADR-051
+  conformance guards — every rendered biased follow still reaches the recorder through
+  `setLineFollowOffset`, since `PathTracker` dispatches the float, not the enum.
 - `PathTracker::_resolveLineFollowMode(edge)` maps `DEFAULT`→`MIDDLE`; `WROMath::
   lineFollowModeToSetpoint(mode)` converts to a signed float; `PathTracker` composes
   `sign = decision.reverse ? -1 : +1` and chains `.setLineFollowOffset(sign * setpoint)`

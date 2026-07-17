@@ -59,6 +59,17 @@
 // Forward declaration so the builder can hold a reference to the owner type.
 class LineFollowerClass;
 
+// Opaque forward declaration of the generated per-edge follow mode (issue #156). Declaring it
+// here — rather than including the generated `nav/routes.h` — lets `setLineFollowMode(...)` name
+// the enum without dragging `namespace Routes` into every translation unit that sees this widely
+// included header (several host targets shadow `Routes` with a fixture; a real include would
+// double-define it). The underlying type MUST match `routes.h`; the mapping is defined in
+// `LineFollower.cpp`, which pulls the full definition via `WROMath.h`.
+namespace Routes
+{
+enum class LineFollowMode : uint8_t;
+}
+
 /**
  * @brief RAII builder returned by `LineFollowerClass::setEnabled(bool)` for fluent
  *        configuration of the enable transition.
@@ -341,6 +352,24 @@ public:
      *       current offset is preserved. Has no effect on a `setEnabled(false)` transition.
      */
     LineFollowerEnableBuilder& setLineFollowOffset(float offset);
+
+    /**
+     * @brief Stage the lateral bias from a per-edge follow MODE instead of a raw offset.
+     *
+     * @param mode `Routes::LineFollowMode` — `MIDDLE`/`DEFAULT` follow centred, `LEFT`/`RIGHT`
+     *             bias to that side. Convenience sugar over `setLineFollowOffset(...)`: it maps the
+     *             mode to a signed offset via `lineFollowModeToSetpoint(mode)` (LEFT →
+     *             `+Config::LINE_FOLLOW_OFFSET_ERROR`, RIGHT → the negative, MIDDLE/DEFAULT → 0)
+     *             and stages that, so the P+D behaviour, reset-on-disable lifecycle, and
+     *             `getRawError()` contract are identical to the float knob. Prefer this at bench /
+     *             direct call sites; the raw float stays for fine offset sweeps.
+     * @return    `*this` for fluent chaining.
+     * @note This is the FORWARD-frame mapping — it does NOT apply the reverse-hop sign flip. On a
+     *       rear-board hop `PathTracker` keeps composing `sign * lineFollowModeToSetpoint(mode)`
+     *       through the float knob so the bias stays left-of-TRAVEL; a hand call that reverses must
+     *       negate itself (or pass the mirrored mode). See ADR-069.
+     */
+    LineFollowerEnableBuilder& setLineFollowMode(Routes::LineFollowMode mode);
 
 private:
     LineFollowerClass&  _owner;                ///< Owner whose state is mutated on destruction.

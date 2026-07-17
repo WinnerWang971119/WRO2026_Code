@@ -311,6 +311,74 @@ static void test_tc4_offset_lifecycle_reset_on_disable()
 }
 
 // ===========================================================================
+// TC5 — setLineFollowMode(mode) sugar == setLineFollowOffset(lineFollowModeToSetpoint(mode)).
+// ===========================================================================
+
+/// @brief Same as driveSteady, but arms the follow through the ENUM sugar `setLineFollowMode(mode)`
+///        instead of the raw `setLineFollowOffset(float)` knob, so the two entry points can be
+///        compared for byte-identical steering.
+static void driveSteadyMode(Routes::LineFollowMode mode, float err, int16_t& outL, int16_t& outR)
+{
+    resetWorld();
+    LineArray.mockSetOnline(true);
+    LineArray.mockSetJunctionType(JunctionType::NONE);
+    LineArray.mockSetError(err);
+
+    LineFollower.setEnabled(true)
+                .setPreset(Config::SpeedPreset::NORMAL)
+                .setTShapeRampUp(false)
+                .setTShapeRampDown(false)
+                .setLineFollowMode(mode);
+    LineFollower.update();    // tick 1 — seeds _lastErr = err
+    LineFollower.update();    // tick 2 — steady (dErr == 0)
+
+    outL = Drive.mockRecord().lastSetSpeedL;
+    outR = Drive.mockRecord().lastSetSpeedR;
+}
+
+static void test_tc5_mode_sugar_matches_offset_knob()
+{
+    TEST_SCOPE("TC5: setLineFollowMode(MIDDLE/LEFT/RIGHT/DEFAULT) steers identically to the mapped offset");
+
+    const Routes::LineFollowMode modes[] = {
+        Routes::LineFollowMode::DEFAULT,
+        Routes::LineFollowMode::MIDDLE,
+        Routes::LineFollowMode::LEFT,
+        Routes::LineFollowMode::RIGHT,
+    };
+    const float errs[] = {-1.0f, 0.0f, 1.0f};
+
+    for (Routes::LineFollowMode mode : modes)
+    {
+        // The sugar delegates through the SAME free function PathTracker uses; DEFAULT and MIDDLE
+        // both resolve to 0 (centred). The enum path must produce byte-identical steering to arming
+        // the float knob with that resolved offset.
+        const float offset = lineFollowModeToSetpoint(mode);
+
+        for (float err : errs)
+        {
+            int16_t modeL, modeR;
+            driveSteadyMode(mode, err, modeL, modeR);
+
+            int16_t offL, offR;
+            driveSteady(offset, err, offL, offR);
+            ASSERT_EQ(modeL, offL);
+            ASSERT_EQ(modeR, offR);
+
+            // ...and both match the closed-form expectation for that offset.
+            int16_t expL, expR;
+            expectedSteadyLR(offset, err, expL, expR);
+            ASSERT_EQ(modeL, expL);
+            ASSERT_EQ(modeR, expR);
+        }
+    }
+
+    // DEFAULT and MIDDLE are both centred (offset 0) — pin that the sugar treats them identically.
+    ASSERT_TRUE(nearf(lineFollowModeToSetpoint(Routes::LineFollowMode::DEFAULT), 0.0f));
+    ASSERT_TRUE(nearf(lineFollowModeToSetpoint(Routes::LineFollowMode::MIDDLE), 0.0f));
+}
+
+// ===========================================================================
 // Entry.
 // ===========================================================================
 
@@ -320,5 +388,6 @@ int main()
     test_tc2_mid_follow_mode_change_bounded_p_step_no_d_kick();
     test_tc3_reverse_hop_composition_negates_offset();
     test_tc4_offset_lifecycle_reset_on_disable();
+    test_tc5_mode_sugar_matches_offset_knob();
     TEST_REPORT();
 }

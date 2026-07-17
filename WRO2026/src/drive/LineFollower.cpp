@@ -12,6 +12,9 @@
                              // transitively brings this in, but binding to `&LineArray` and
                              // dereferencing `WROLineArrayClass*` makes the dependency
                              // explicit at the use site.
+#include "../util/WROMath.h"    // `lineFollowModeToSetpoint(...)` — maps the per-edge follow mode to
+                             // a signed offset. Pulls the full `Routes::LineFollowMode` definition
+                             // (the header only opaque-forward-declares it) into this TU.
 
 /**
  * @brief Single global instance referenced by every other module.
@@ -165,6 +168,15 @@ LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowOffset(float 
     _lineFollowOffsetOverride    = offset;
     _hasLineFollowOffsetOverride = true;
     return *this;
+}
+
+LineFollowerEnableBuilder& LineFollowerEnableBuilder::setLineFollowMode(Routes::LineFollowMode mode)
+{
+    // Ergonomic sugar over setLineFollowOffset: map the per-edge mode to the same signed offset the
+    // float knob takes, then delegate — so the staging, reset-on-disable lifecycle, and P+D maths
+    // are byte-identical to the float path. FORWARD-frame only; the reverse-hop sign flip stays in
+    // PathTracker's float call (ADR-069). DEFAULT resolves to MIDDLE (offset 0) in the mapper.
+    return setLineFollowOffset(lineFollowModeToSetpoint(mode));
 }
 
 // =========================================================================================
