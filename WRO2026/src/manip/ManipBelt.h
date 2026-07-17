@@ -97,8 +97,10 @@ public:
      * Sequence:
      *   1. `setPPR_RPM(Config::BELT_PPR, Config::BELT_RPM)` — encoder resolution + RPM
      *      ceiling for the lower-MCU speed/position loops.
-     *   2. `setReverse(false)` — placeholder hardware direction (the sign convention is
-     *      carried by speed; flip this at bring-up if the motor wiring is reversed).
+     *   2. `setReverse(false)` — keep the vendor hardware direction FORWARD. Belt direction
+     *      is carried entirely by `Config::BELT_DIR_SIGN` at the driver boundary; do NOT flip
+     *      this to reverse the belt, since the vendor `setReverse` leaves the encoder
+     *      direction untouched (encoder-dir call commented out) and would desync `rotateFor`.
      *   3. A BLOCKING, wall-clock-bounded `home()` (stall toward HOME, `resetCounter()`,
      *      settle, then drive to MID), polled by `update()` + `delay(2)` until `isDone()`
      *      or the `Config::BELT_HOME_TIMEOUT_MS` ceiling.
@@ -444,21 +446,24 @@ private:
      */
     bool _rotateFor(int16_t speed, uint16_t degree)
     {
-        bool ok = false;
+        // Apply the belt direction sign once here so the caller's logical convention
+        // (+ toward FAR_END) holds regardless of motor wiring (see Config::BELT_DIR_SIGN).
+        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
+        bool          ok = false;
         switch (_motorId) {
-            case 1: ok = MiniR4.M1.rotateFor(speed, degree); break;
-            case 2: ok = MiniR4.M2.rotateFor(speed, degree); break;
-            case 3: ok = MiniR4.M3.rotateFor(speed, degree); break;
-            case 4: ok = MiniR4.M4.rotateFor(speed, degree); break;
+            case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
+            case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
+            case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
+            case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
             default: return false;
         }
         if (!ok) {
             delay(1);
             switch (_motorId) {
-                case 1: ok = MiniR4.M1.rotateFor(speed, degree); break;
-                case 2: ok = MiniR4.M2.rotateFor(speed, degree); break;
-                case 3: ok = MiniR4.M3.rotateFor(speed, degree); break;
-                case 4: ok = MiniR4.M4.rotateFor(speed, degree); break;
+                case 1: ok = MiniR4.M1.rotateFor(s, degree); break;
+                case 2: ok = MiniR4.M2.rotateFor(s, degree); break;
+                case 3: ok = MiniR4.M3.rotateFor(s, degree); break;
+                case 4: ok = MiniR4.M4.rotateFor(s, degree); break;
                 default: return false;
             }
         }
@@ -493,13 +498,18 @@ private:
      */
     int32_t _getDegrees()
     {
+        // Fold the belt direction sign into the read so getDegrees() is in the same logical
+        // frame as the speed commands (see Config::BELT_DIR_SIGN) — absolute POSITION math
+        // in beltTo() then stays correct no matter how the motor + encoder are wired.
+        int32_t raw = 0;
         switch (_motorId) {
-            case 1: return MiniR4.M1.getDegrees();
-            case 2: return MiniR4.M2.getDegrees();
-            case 3: return MiniR4.M3.getDegrees();
-            case 4: return MiniR4.M4.getDegrees();
+            case 1: raw = MiniR4.M1.getDegrees(); break;
+            case 2: raw = MiniR4.M2.getDegrees(); break;
+            case 3: raw = MiniR4.M3.getDegrees(); break;
+            case 4: raw = MiniR4.M4.getDegrees(); break;
             default: return 0;
         }
+        return (int32_t)(Config::BELT_DIR_SIGN * raw);
     }
 
     /**
@@ -509,21 +519,24 @@ private:
      */
     bool _setSpeed(int16_t speed)
     {
-        bool ok = false;
+        // Apply the belt direction sign once here (see Config::BELT_DIR_SIGN) so a negative
+        // speed always drives toward HOME and a positive toward FAR_END, whatever the wiring.
+        const int16_t s = (int16_t)(Config::BELT_DIR_SIGN * speed);
+        bool          ok = false;
         switch (_motorId) {
-            case 1: ok = MiniR4.M1.setSpeed(speed); break;
-            case 2: ok = MiniR4.M2.setSpeed(speed); break;
-            case 3: ok = MiniR4.M3.setSpeed(speed); break;
-            case 4: ok = MiniR4.M4.setSpeed(speed); break;
+            case 1: ok = MiniR4.M1.setSpeed(s); break;
+            case 2: ok = MiniR4.M2.setSpeed(s); break;
+            case 3: ok = MiniR4.M3.setSpeed(s); break;
+            case 4: ok = MiniR4.M4.setSpeed(s); break;
             default: return false;
         }
         if (!ok) {
             delay(1);
             switch (_motorId) {
-                case 1: ok = MiniR4.M1.setSpeed(speed); break;
-                case 2: ok = MiniR4.M2.setSpeed(speed); break;
-                case 3: ok = MiniR4.M3.setSpeed(speed); break;
-                case 4: ok = MiniR4.M4.setSpeed(speed); break;
+                case 1: ok = MiniR4.M1.setSpeed(s); break;
+                case 2: ok = MiniR4.M2.setSpeed(s); break;
+                case 3: ok = MiniR4.M3.setSpeed(s); break;
+                case 4: ok = MiniR4.M4.setSpeed(s); break;
                 default: return false;
             }
         }

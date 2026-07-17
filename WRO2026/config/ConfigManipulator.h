@@ -91,6 +91,20 @@ namespace Config
 
     // Belt sign convention: +speed drives toward FAR_END, -speed drives toward HOME.
 
+    /**
+     * @brief Belt motor direction sign (`+1` or `-1`). Applied ONCE at the `ManipBelt`
+     *        driver boundary — the `_setSpeed` / `_rotateFor` speed argument and the
+     *        `_getDegrees` read — so the sign convention above holds no matter how the
+     *        belt motor is wired (ADR-045 style single-point sign, like `IMU_YAW_SIGN`).
+     * @note  Reverse the belt with THIS, not the vendor `setReverse(true)`: MatrixMiniR4's
+     *        `MiniR4DC::setReverse` flips only the motor power — the encoder-direction call
+     *        is commented out in the library — so `setReverse(true)` would desync the
+     *        closed-loop `rotateFor` (POSITION moves) into a runaway. Flipping speed AND the
+     *        encoder read together keeps motor + encoder consistent.
+     * @note  `-1` on the current belt: `reset()` was stalling toward FAR_END instead of HOME.
+     */
+    constexpr int8_t   BELT_DIR_SIGN        = -1;    // motor wired opposite the convention
+
     /** @brief Belt encoder pulses per revolution (LEGO EV3). TODO confirm. */
     constexpr uint16_t BELT_PPR             = 360;    // LEGO EV3; TODO confirm
     /** @brief Belt free-run speed spec (RPM). TODO confirm. */
