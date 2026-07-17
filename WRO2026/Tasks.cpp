@@ -290,8 +290,8 @@ bool TasksClass::servoTest(const TaskArgs& pos)
 
 bool TasksClass::testOne(const TaskArgs& /*args*/)
 {
-    PathTracker.goTo("i1");
-    //Drive.driveDist(50).setPower(-70).setMode(DriveMode::GYRO);
+    //PathTracker.goTo("i1");
+    Drive.driveDist(50).setPower(60).setMode(DriveMode::RAW);
     return true;
 }
 
