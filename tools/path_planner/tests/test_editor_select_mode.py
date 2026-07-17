@@ -277,9 +277,9 @@ def test_right_click_opens_context_menu_not_select() -> None:
     ctx: list[tuple[float, float]] = []
     app._show_context_menu = lambda x, y: ctx.append((x, y))
     sel: list[tuple[float, float]] = []
-    app._handle_select_click = lambda x, y: sel.append((x, y))
+    app._handle_select_press = lambda x, y, key=None: sel.append((x, y))
 
-    app._on_canvas_click(3.0, 4.0, button=3)
+    app._on_canvas_click(3.0, 4.0, button=3, key=None)
 
     assert ctx == [(3.0, 4.0)]
     assert sel == []

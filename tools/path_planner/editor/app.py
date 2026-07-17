@@ -328,6 +328,23 @@ _ALIGN_TARGET_X_FORMAT: str = "x = %.4f"
 _ALIGN_TARGET_Y_FORMAT: str = "y = %.4f"
 _ALIGN_TARGET_FIT_LABEL: str = "best-fit line"
 
+#: Bare 4-dp form of the aligned scalar for the success status ``{value}``
+#: slot -- same precision as the readout target formats above, without the
+#: leading ``x = `` / ``y = `` (the status template supplies the axis name).
+_ALIGN_VALUE_FORMAT: str = "%.4f"
+
+#: Make-straight status strings, verbatim from the plan's Contracts -> Naming.
+#: ``{axis}`` is the resolved ``x`` / ``y`` and ``{value}`` the 4-dp aligned
+#: scalar; ``{n}`` is the number of selected nodes made collinear. ``FIT`` has
+#: no single scalar, so it names the line.
+_STATUS_ALIGN_SUCCESS: str = "Made {n} nodes straight on {axis} = {value}."
+_STATUS_ALIGN_SUCCESS_FIT: str = "Made {n} nodes straight on the best-fit line."
+_STATUS_ALIGN_NOOP: str = "Already straight. Nothing moved."
+_STATUS_ALIGN_OUT_OF_BOUNDS: str = (
+    "Make straight: alignment would leave the field. Nothing moved."
+)
+_STATUS_ALIGN_NEED_TWO: str = "Select 2 or more nodes to align them."
+
 #: Path to the field JSON the Save handler writes. Save is pure-JSON now -- the
 #: EDGES table lives in the model and round-trips through this file, so there is
 #: no longer a sibling ``field_data.py`` rewrite (issue #79).
@@ -617,9 +634,11 @@ class EditorApp:
         # since T3; ``on_node_select`` above survives only for back-compat.
         self._panels.on_nodes_select = self._on_panel_nodes_select
         # ALIGN axis radio flip: recompute the readout / preview for the new
-        # axis without running an alignment (the Make-straight dispatch and its
-        # ``on_align_request`` wiring land in T5).
+        # axis without running an alignment. The ``Make straight`` button fires
+        # ``on_align_request`` with the current axis value string, which runs
+        # the alignment and dispatches the MoveNode macro (single undo entry).
         self._panels.on_axis_change = self._handle_axis_change
+        self._panels.on_align_request = self._handle_align_request
         self._panels.on_node_type_change = self._on_panel_node_type_change
         self._panels.on_node_coords_change = self._on_panel_node_coords_change
         self._panels.on_node_rename = self._on_panel_node_rename
@@ -872,27 +891,38 @@ class EditorApp:
         self._panels.mode_var.set(mode.value)
 
     def _nudge_selected(self, dx_cm: float, dy_cm: float) -> None:
-        """Move the selected node by *(dx_cm, dy_cm)*, clamped to the field (AC4).
+        """Move the whole selection by *(dx_cm, dy_cm)* as a rigid body (AC9).
 
-        Acts only when a node is selected (tracked in :attr:`_selected_node`).
-        The new position is the current coordinates plus the delta, clamped to
-        the field bounds ``[0, width_cm] x [0, height_cm]`` derived from
-        ``model.field_mm``. A nudge that leaves the node unmoved -- already
-        sitting on the clamped bound -- is a no-op (no dispatch, no empty undo
-        entry), mirroring the inspector's "skip if unchanged" coords guard.
+        Zero selected -> no-op with the no-selection status. Exactly one
+        selected -> the single-node path unchanged (back-compat, TC30): clamp
+        the node's own move to the field bounds and skip an unmoved nudge.
+
+        Two or more selected -> a RIGID multi-nudge. The desired delta is
+        clamped ONCE against the selection's bounding box
+        (``dx_eff = clamp(dx, -min(x_i), width - max(x_i))``, same for y) so the
+        whole set stays inside ``[0, width_cm] x [0, height_cm]`` while relative
+        geometry is preserved -- a single node hitting a wall shifts the entire
+        run by the same reduced delta rather than shearing it (the load-bearing
+        no-shear guarantee that make-straight relies on). A delta that clamps to
+        zero burns no undo entry; otherwise every node moves in ONE
+        :class:`MacroCommand` (single undo).
 
         :param dx_cm: Signed x displacement in centimetres (Left -, Right +).
         :param dy_cm: Signed y displacement in centimetres (Down -, Up +).
         """
-        node = self._selected_node
-        if node is None:
+        # Resolve the working selection. ``_selected_nodes`` is authoritative
+        # in production; fall back to the single ``_selected_node`` latch so a
+        # caller that set only the latch still nudges one node.
+        selected = list(getattr(self, "_selected_nodes", []) or [])
+        if not selected and self._selected_node is not None:
+            selected = [self._selected_node]
+        if not selected:
             self._set_status(_STATUS_NUDGE_NO_SELECTION)
             return
-        # Defensive: the selection latch may name a node that was deleted or
-        # renamed since it was last set. Drop the stale latch and bail rather
-        # than dispatch a MoveNode against a missing node.
-        current = self._model.nodes.get(node)
-        if current is None:
+
+        # Drop stale names (deleted / renamed since selection) before moving.
+        present = [name for name in selected if name in self._model.nodes]
+        if not present:
             self._set_selection([])
             self._set_status(_STATUS_NUDGE_NO_SELECTION)
             return
@@ -901,16 +931,43 @@ class EditorApp:
         width_cm = float(width_mm) / _MM_PER_CM
         height_cm = float(height_mm) / _MM_PER_CM
 
-        cx, cy = float(current[0]), float(current[1])
-        new_x = self._clamp(cx + dx_cm, _FIELD_ORIGIN_CM, width_cm)
-        new_y = self._clamp(cy + dy_cm, _FIELD_ORIGIN_CM, height_cm)
-
-        # No-op shortcut: a nudge that would not move the node (already on the
-        # clamped bound) should not burn an undo entry.
-        if new_x == cx and new_y == cy:
+        if len(present) == 1:
+            node = present[0]
+            cx = float(self._model.nodes[node][0])
+            cy = float(self._model.nodes[node][1])
+            new_x = self._clamp(cx + dx_cm, _FIELD_ORIGIN_CM, width_cm)
+            new_y = self._clamp(cy + dy_cm, _FIELD_ORIGIN_CM, height_cm)
+            # Skip a nudge that would not move the node (already on the bound).
+            if new_x == cx and new_y == cy:
+                return
+            self._dispatch(MoveNode(node, (new_x, new_y)))
             return
 
-        self._dispatch(MoveNode(node, (new_x, new_y)))
+        # Rigid multi-nudge: clamp the delta ONCE against the selection's bbox.
+        xs = [float(self._model.nodes[name][0]) for name in present]
+        ys = [float(self._model.nodes[name][1]) for name in present]
+        dx_eff = self._clamp(
+            dx_cm, _FIELD_ORIGIN_CM - min(xs), width_cm - max(xs)
+        )
+        dy_eff = self._clamp(
+            dy_cm, _FIELD_ORIGIN_CM - min(ys), height_cm - max(ys)
+        )
+        # A delta clamped to zero (selection flush against the wall) moves
+        # nothing -- do not burn an empty undo entry.
+        if dx_eff == 0.0 and dy_eff == 0.0:
+            return
+
+        steps = [
+            MoveNode(
+                name,
+                (
+                    float(self._model.nodes[name][0]) + dx_eff,
+                    float(self._model.nodes[name][1]) + dy_eff,
+                ),
+            )
+            for name in present
+        ]
+        self._dispatch(MacroCommand(steps))
 
     @staticmethod
     def _clamp(value: float, low: float, high: float) -> float:
@@ -1128,6 +1185,89 @@ class EditorApp:
         """
         self._align_axis = align.AlignAxis(axis_value)
         self._refresh_view()
+
+    def _handle_align_request(self, axis_value: str) -> None:
+        """Panel -> app: run "Make straight" on the current selection (AC5-AC7, AC10).
+
+        Fired by the ALIGN section's ``Make straight`` button. Computes each
+        selected node's target with :func:`align.align_points`, keeps only the
+        nodes that actually move, and dispatches them as ONE
+        :class:`MacroCommand` of :class:`MoveNode` steps so the whole
+        straighten is a single undo entry (AC6). Three guarded exits leave the
+        model untouched and set an exact status string:
+
+        * fewer than two selected nodes -> ``Select 2 or more nodes to align
+          them.`` (the ALIGN button is disabled below two, so this is a belt-
+          and-braces guard);
+        * nothing to move (already collinear, or ``FIT`` on 2 nodes) ->
+          ``Already straight. Nothing moved.`` with no dispatch (AC7);
+        * any target would land outside the field bounds (only ``FIT`` can) ->
+          ``Make straight: alignment would leave the field. Nothing moved.``
+          The whole operation aborts -- never a partial clamp, which would
+          shear the run (AC10).
+
+        On success the status names the resolved axis and 4-dp target scalar
+        (``FIT`` names the best-fit line); ``_dispatch`` refreshes the view,
+        which recomputes the ALIGN readout to a zero residual.
+
+        :param axis_value: An :class:`~tools.path_planner.editor.align.AlignAxis`
+            value string (``"auto"`` / ``"x"`` / ``"y"`` / ``"fit"``).
+        """
+        axis = align.AlignAxis(axis_value)
+        selected = getattr(self, "_selected_nodes", [])
+        points = {
+            name: self._model.nodes[name]
+            for name in selected
+            if name in self._model.nodes
+        }
+        if len(points) < 2:
+            self._set_status(_STATUS_ALIGN_NEED_TWO)
+            return
+
+        targets = align.align_points(points, axis)
+        moves = [
+            (name, xy) for name, xy in targets.items() if xy != points[name]
+        ]
+        if not moves:
+            self._set_status(_STATUS_ALIGN_NOOP)
+            return
+
+        # Out-of-bounds guard: only FIT can push a projected node past a wall.
+        # If ANY mover's target leaves the field, refuse the whole op -- a
+        # partial clamp would break the exact-collinearity guarantee.
+        width_mm, height_mm = self._model.field_mm
+        width_cm = float(width_mm) / _MM_PER_CM
+        height_cm = float(height_mm) / _MM_PER_CM
+        for _name, (target_x, target_y) in moves:
+            in_x = _FIELD_ORIGIN_CM <= target_x <= width_cm
+            in_y = _FIELD_ORIGIN_CM <= target_y <= height_cm
+            if not (in_x and in_y):
+                self._set_status(_STATUS_ALIGN_OUT_OF_BOUNDS)
+                return
+
+        steps = [MoveNode(name, xy) for name, xy in moves]
+        command = MacroCommand(steps) if len(steps) > 1 else steps[0]
+        if not self._dispatch(command):
+            return
+
+        resolved = align.resolve_axis(points, axis)
+        count = len(points)
+        if resolved is align.AlignAxis.X:
+            aligned = next(iter(targets.values()))[0]
+            self._set_status(
+                _STATUS_ALIGN_SUCCESS.format(
+                    n=count, axis="x", value=_ALIGN_VALUE_FORMAT % aligned
+                )
+            )
+        elif resolved is align.AlignAxis.Y:
+            aligned = next(iter(targets.values()))[1]
+            self._set_status(
+                _STATUS_ALIGN_SUCCESS.format(
+                    n=count, axis="y", value=_ALIGN_VALUE_FORMAT % aligned
+                )
+            )
+        else:  # FIT -- no single aligned scalar; name the line.
+            self._set_status(_STATUS_ALIGN_SUCCESS_FIT.format(n=count))
 
     def _on_panel_node_type_change(self, node_name: str, new_type: str) -> None:
         """Route an inspector type-combobox change to the correct command.
@@ -2056,8 +2196,8 @@ class EditorApp:
         :param button: Matplotlib button number (1 = left, 3 = right).
         :param key: The modifier key held during the event (matplotlib's
             ``event.key``: ``None`` / ``"shift"`` / ``"control"`` / ...).
-            Accepted here for the widened canvas contract; the modifier
-            selection logic lands in T5.
+            In SELECT mode it drives the add / toggle / replace semantics of
+            :meth:`_handle_select_press`.
         """
         if button == _MOUSE_BUTTON_RIGHT:
             self._show_context_menu(x, y)
@@ -2072,7 +2212,7 @@ class EditorApp:
         elif mode is Mode.MOVE:
             self._handle_move_click(x, y)
         elif mode is Mode.SELECT:
-            self._handle_select_click(x, y)
+            self._handle_select_press(x, y, key)
         elif mode is Mode.EDGE:
             self._handle_edge_click(x, y)
         elif mode is Mode.OBSTACLE:
@@ -2083,13 +2223,21 @@ class EditorApp:
     def _on_canvas_drag(self, x: float, y: float) -> None:
         """Route a drag event to the per-mode handler.
 
-        Only MOVE (live node drag) and OBSTACLE (rubber-band rectangle)
-        consume drags; other modes drop them silently.
+        MOVE (live node drag), OBSTACLE (rubber-band rectangle), and SELECT
+        (marquee rubber-band) consume drags; other modes drop them silently.
 
         :param x: World x coordinate.
         :param y: World y coordinate.
         """
         mode = self._current_mode()
+        if mode is Mode.SELECT and self._marquee_anchor is not None:
+            # De-lagged marquee: slide the dotted selection rectangle through
+            # the canvas blit fast-path (no full render), mirroring the
+            # OBSTACLE rubber-band. Selection only changes on release.
+            self._marquee_cursor = (x, y)
+            mx_anchor, my_anchor = self._marquee_anchor
+            self._canvas.update_marquee_preview(mx_anchor, my_anchor, x, y)
+            return
         if mode is Mode.MOVE and self._drag_target is not None:
             # Route the live drag through the canvas blit fast-path armed by
             # _handle_move_click's begin_node_drag: it animates ONLY the
@@ -2115,8 +2263,9 @@ class EditorApp:
         :param y: World y coordinate at release.
         :param button: Matplotlib button number.
         :param key: The modifier key held during the event (matplotlib's
-            ``event.key``). Accepted here for the widened canvas contract; the
-            marquee-release selection logic lands in T5.
+            ``event.key``). In SELECT mode it drives whether the boxed nodes
+            replace / union / toggle the current selection (see
+            :meth:`_finish_marquee`).
         """
         if button != _MOUSE_BUTTON_LEFT:
             return
@@ -2126,6 +2275,8 @@ class EditorApp:
             self._finish_move(x, y)
         elif mode is Mode.OBSTACLE and self._obstacle_anchor is not None:
             self._finish_obstacle(x, y)
+        elif mode is Mode.SELECT and self._marquee_anchor is not None:
+            self._finish_marquee(x, y, key)
 
     # ------------------------------------------------------------------
     # Per-mode click handlers
@@ -2364,14 +2515,122 @@ class EditorApp:
             return
         self._dispatch(SetStart(hit))
 
+    @staticmethod
+    def _key_has_shift(key: Optional[str]) -> bool:
+        """Return ``True`` when *key* names the Shift modifier.
+
+        Matplotlib reports the modifier held during a mouse event as a string
+        such as ``"shift"`` or a combo like ``"ctrl+shift"``; a substring test
+        covers both. ``None`` (no modifier) is ``False``.
+
+        :param key: The event's modifier string, or ``None``.
+        :return: ``True`` if Shift was held.
+        """
+        return bool(key) and "shift" in key
+
+    @staticmethod
+    def _key_has_ctrl(key: Optional[str]) -> bool:
+        """Return ``True`` when *key* names the Control modifier.
+
+        Matplotlib spells the Control modifier either ``"control"`` (bare) or
+        ``"ctrl"`` (in combos); both are accepted. ``None`` is ``False``.
+
+        :param key: The event's modifier string, or ``None``.
+        :return: ``True`` if Control was held.
+        """
+        return bool(key) and ("control" in key or "ctrl" in key)
+
+    def _handle_select_press(
+        self, x: float, y: float, key: Optional[str] = None
+    ) -> None:
+        """Route a SELECT-mode press: node click (with modifier) or marquee arm.
+
+        A press ON a node keeps today's single-select latch, honouring the
+        modifier (Shift adds, Ctrl toggles, plain replaces -- see
+        :meth:`_apply_modifier_selection`). A press on EMPTY canvas arms the
+        marquee rubber-band (:meth:`FieldCanvas.begin_marquee_drag`) and stores
+        the anchor; the selection is only decided on release
+        (:meth:`_finish_marquee`), so a plain empty click that never drags
+        still clears via the release's empty box, and a modifier empty click is
+        a no-op.
+
+        :param x: World x coordinate of the press (centimetres).
+        :param y: World y coordinate of the press (centimetres).
+        :param key: The modifier held (matplotlib ``event.key``; ``None`` /
+            ``"shift"`` / ``"control"`` / ...).
+        """
+        hit = self._canvas.find_node_at(x, y)
+        if hit is None:
+            # Empty press arms the marquee; selection changes on release.
+            self._canvas.begin_marquee_drag()
+            self._marquee_anchor = (x, y)
+            self._marquee_cursor = (x, y)
+            return
+        if self._key_has_shift(key) or self._key_has_ctrl(key):
+            self._apply_modifier_selection([hit], key)
+            self._report_selection_status()
+            return
+        # Plain on-node press: today's single-select latch (+ status).
+        self._handle_select_click(x, y)
+
+    def _apply_modifier_selection(
+        self, names: list[str], key: Optional[str]
+    ) -> None:
+        """Fold *names* into the current selection per the held modifier.
+
+        Shared by the on-node modifier click (a one-element *names*) and the
+        marquee release (the boxed set):
+
+        * Shift -> ADD (union with the current selection, order preserved);
+        * Ctrl  -> TOGGLE each name (remove if present, else append);
+        * plain -> REPLACE the selection with exactly *names*.
+
+        Dedup / model-filtering happen in the single :meth:`_set_selection`
+        writer, so this only decides the candidate list.
+
+        :param names: The node names the gesture touched (node click or box).
+        :param key: The modifier held (matplotlib ``event.key``, or ``None``).
+        """
+        if self._key_has_shift(key):
+            self._set_selection(self._selected_nodes + list(names))
+            return
+        if self._key_has_ctrl(key):
+            current = list(self._selected_nodes)
+            for name in names:
+                if name in current:
+                    current.remove(name)
+                else:
+                    current.append(name)
+            self._set_selection(current)
+            return
+        self._set_selection(list(names))
+
+    def _report_selection_status(self) -> None:
+        """Push a count-aware selection summary onto the status line.
+
+        Mirrors :meth:`_on_panel_nodes_select`'s single-node wording, extended
+        with an ``"N nodes selected."`` form for a multi-node selection. Read
+        after :meth:`_set_selection` so ``_selected_nodes`` is already final.
+        """
+        count = len(self._selected_nodes)
+        if count == 0:
+            self._set_status("Selection cleared.")
+        elif count == 1:
+            self._set_status(f"Selected node {self._selected_nodes[0]!r}.")
+        else:
+            self._set_status(f"{count} nodes selected.")
+
     def _handle_select_click(self, x: float, y: float) -> None:
         """Select the node under the cursor (or clear the selection on a miss).
 
-        Both branches funnel through the single :meth:`_set_selection` writer so
-        canvas-driven selection stays in step with ``_selected_nodes``, the
-        listbox highlight, and the ALIGN readout / overlay. A hit replaces the
-        selection with just that node; an empty-canvas miss clears it. (T5
-        layers the shift / ctrl modifier semantics on top of this.)
+        The single-node latch behind :meth:`_handle_select_press`'s plain
+        on-node branch (and the empty-canvas clear reached when this is invoked
+        directly). Both branches funnel through the single :meth:`_set_selection`
+        writer so canvas-driven selection stays in step with ``_selected_nodes``,
+        the listbox highlight, and the ALIGN readout / overlay. A hit replaces
+        the selection with just that node; an empty-canvas miss clears it. The
+        shift / ctrl modifier semantics are layered on top in
+        :meth:`_apply_modifier_selection`.
 
         :param x: World x coordinate (centimetres).
         :param y: World y coordinate (centimetres).
@@ -2478,6 +2737,41 @@ class EditorApp:
         kind = kind.strip() or _DEFAULT_OBSTACLE_KIND
 
         self._dispatch(AddObstacle(xmin, ymin, xmax, ymax, kind))
+
+    def _finish_marquee(
+        self, x: float, y: float, key: Optional[str] = None
+    ) -> None:
+        """Commit the marquee selection on release (AC1, AC2).
+
+        Tears down the marquee blit fast-path
+        (:meth:`FieldCanvas.end_marquee_drag`), boxes every node inside the
+        anchor -> release rectangle
+        (:meth:`FieldCanvas.find_nodes_in_rect`, which normalizes an inverted
+        box), and folds that set into the selection per the held modifier via
+        :meth:`_apply_modifier_selection` (plain replaces, Shift unions, Ctrl
+        toggles each boxed node). A plain release with an empty box clears the
+        selection; a modifier release with an empty box is a no-op. The marquee
+        anchor / cursor are cleared up front so any early return leaves the app
+        ready for the next gesture.
+
+        :param x: World x coordinate at release (centimetres).
+        :param y: World y coordinate at release (centimetres).
+        :param key: The modifier held (matplotlib ``event.key``, or ``None``).
+        """
+        anchor = self._marquee_anchor
+        # Clear transient state up front (mirrors _finish_obstacle).
+        self._marquee_anchor = None
+        self._marquee_cursor = None
+        # Tear down the blit fast-path (remove the marquee rect, re-bake the
+        # static scene). No-op-safe even if begin_marquee_drag never armed.
+        self._canvas.end_marquee_drag()
+        if anchor is None:
+            return
+
+        ax, ay = anchor
+        names = self._canvas.find_nodes_in_rect(ax, ay, x, y)
+        self._apply_modifier_selection(names, key)
+        self._report_selection_status()
 
     # ------------------------------------------------------------------
     # Keyboard shortcut handlers
