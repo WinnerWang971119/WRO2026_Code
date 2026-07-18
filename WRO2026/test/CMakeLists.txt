@@ -1629,40 +1629,56 @@ set_tests_properties(gyro_config_fail_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "GYRO_YAW_SIGN must be exactly")
 
 # =========================================================================================
-# Test executable #19 — IMU_YAW_SIGN tripwire negative (ADR-045, TC7 / AC4, compile-fail).
-#
-# Proves the `static_assert` in `ConfigChecks.h` fires when `Config::IMU_YAW_SIGN` is not
-# exactly +/-1. Built with `-DIMU_YAW_SIGN_DEFAULT=0.0f` (the `#ifndef`-guarded override
-# hook in `config/ConfigNav.h`), so `IMU_YAW_SIGN == 0.0f` — a value that would silently
-# zero all heading math. The build is expected to FAIL; ctest uses PASS_REGULAR_EXPRESSION
-# on the metacharacter-free substring `IMU_YAW_SIGN must be exactly`. When
-# PASS_REGULAR_EXPRESSION is set, ctest decides pass/fail purely on whether the regex
-# matches the captured build output and IGNORES the process exit code — so the test PASSES
-# only when the intended assert fires, and FAILS if the build broke for any unrelated
-# reason.
-#
-# Mirrors `test_manipulator_belt_collision` EXACTLY: `EXCLUDE_FROM_ALL` +
-# `EXCLUDE_FROM_DEFAULT_BUILD` keep it out of the default build, and NO
-# `add_mock_force_includes(...)` so a typo in a mock header cannot mask the intended
-# diagnostic. Include dirs = sketch + mocks (via `COMMON_INCLUDES`) so the quoted
-# `"Config.h"` chain resolves and its `<Arduino.h>` picks the mock.
+# GYRO_HOLD_* tripwire negatives (ADR-072, TC12, compile-fail) — four independent knobs, one
+# probe TU (test_gyro_hold_config_fail.cpp) compiled with one -D..._DEFAULT override each.
+# Mirrors test_gyro_config_fail EXACTLY (EXCLUDE_FROM_ALL/DEFAULT_BUILD, COMMON_INCLUDES, NO
+# mock force-includes). PASS_REGULAR_EXPRESSION uses a metacharacter-free substring of each
+# ConfigChecks.h message so each entry passes only when ITS OWN assert fires.
+# (The retired test_imu_yaw_sign_zero target lived here; IMU_YAW_SIGN is removed in #169/T2b.)
 # =========================================================================================
-add_executable(test_imu_yaw_sign_zero
-    ${TEST_DIR}/test_imu_yaw_sign_fail.cpp
-)
-set_target_properties(test_imu_yaw_sign_zero PROPERTIES
-    EXCLUDE_FROM_ALL TRUE
-    EXCLUDE_FROM_DEFAULT_BUILD TRUE
-)
-target_include_directories(test_imu_yaw_sign_zero PRIVATE ${COMMON_INCLUDES})
-target_compile_definitions(test_imu_yaw_sign_zero PRIVATE IMU_YAW_SIGN_DEFAULT=0.0f)
-
-add_test(NAME imu_yaw_sign_zero_compile_fail
+add_executable(test_gyro_hold_kp_fail ${TEST_DIR}/test_gyro_hold_config_fail.cpp)
+set_target_properties(test_gyro_hold_kp_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_include_directories(test_gyro_hold_kp_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_hold_kp_fail PRIVATE GYRO_HOLD_KP_DEFAULT=0.0f)
+add_test(NAME gyro_hold_kp_compile_fail
     COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
-            --target test_imu_yaw_sign_zero --config $<CONFIG>
-)
-set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
-    PASS_REGULAR_EXPRESSION "IMU_YAW_SIGN must be exactly")
+            --target test_gyro_hold_kp_fail --config $<CONFIG>)
+set_tests_properties(gyro_hold_kp_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_HOLD_KP must be > 0")
+
+add_executable(test_gyro_hold_kd_fail ${TEST_DIR}/test_gyro_hold_config_fail.cpp)
+set_target_properties(test_gyro_hold_kd_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_include_directories(test_gyro_hold_kd_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_hold_kd_fail PRIVATE GYRO_HOLD_KD_DEFAULT=-0.01f)
+add_test(NAME gyro_hold_kd_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_gyro_hold_kd_fail --config $<CONFIG>)
+set_tests_properties(gyro_hold_kd_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_HOLD_KD must be >= 0")
+
+add_executable(test_gyro_hold_maxcorr_fail ${TEST_DIR}/test_gyro_hold_config_fail.cpp)
+set_target_properties(test_gyro_hold_maxcorr_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_include_directories(test_gyro_hold_maxcorr_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_hold_maxcorr_fail PRIVATE GYRO_HOLD_MAX_CORR_PWM_DEFAULT=0)
+add_test(NAME gyro_hold_maxcorr_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_gyro_hold_maxcorr_fail --config $<CONFIG>)
+set_tests_properties(gyro_hold_maxcorr_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_HOLD_MAX_CORR_PWM must be in")
+
+add_executable(test_gyro_hold_stale_fail ${TEST_DIR}/test_gyro_hold_config_fail.cpp)
+set_target_properties(test_gyro_hold_stale_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_include_directories(test_gyro_hold_stale_fail PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_gyro_hold_stale_fail PRIVATE GYRO_HOLD_STALE_MS_DEFAULT=0)
+add_test(NAME gyro_hold_stale_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_gyro_hold_stale_fail --config $<CONFIG>)
+set_tests_properties(gyro_hold_stale_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "GYRO_HOLD_STALE_MS must be > 0")
 
 # =========================================================================================
 # Test executable #19b — makeEdge() constexpr canary negative (issue #156, TC-canary / AC8,
@@ -2537,6 +2553,35 @@ target_include_directories(test_turn_pd_integration PRIVATE
 add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks peripherals — no routes needed.
 add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
 
+# =========================================================================================
+# GYRO straight heading-hold PD — pure decision math (GyroHoldPolicy.h, ADR-072, T7, TC1-6).
+# Self-contained header (only TurnPDPolicy.h / TurnSignPolicy.h, <math.h>/<stdint.h>), so NO
+# mocks — exactly like test_turn_pd_policy. Every tunable is injected as a parameter.
+# =========================================================================================
+add_executable(test_gyro_hold_policy
+    ${TEST_DIR}/test_gyro_hold_policy.cpp
+)
+target_include_directories(test_gyro_hold_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME gyro_hold_policy COMMAND test_gyro_hold_policy)
+
+# =========================================================================================
+# GYRO straight heading-hold PD — stateful integration (ADR-072, T7, TC7-TC11 + hitch).
+# Mirrors test_turn_pd_integration: links the REAL Drive.cpp + EncoderSource.cpp +
+# YawSource.cpp + path_mocks.cpp so the dispatched MiniR4.DriveDC.Move(L,R) is observable
+# end-to-end. Added to the GYRO_SCALE/YAW_SIGN pinning foreach below (YawSource-linked).
+# =========================================================================================
+add_executable(test_gyro_hold_integration
+    ${TEST_DIR}/test_gyro_hold_integration.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_gyro_hold_integration PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_gyro_hold_integration)
+add_test(NAME gyro_hold_integration COMMAND test_gyro_hold_integration)
+
 # ===== Drive-lane hardening test (T2 #150; T3/T4 append TC8/TC9 to this same target) =====
 set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
 add_executable(test_drive_hardening
@@ -2694,6 +2739,7 @@ foreach(_yawsrc_target IN ITEMS
     test_drive_hardening
     test_path_tracker_lost_line
     test_turn_pd_integration
+    test_gyro_hold_integration
 )
     target_compile_definitions(${_yawsrc_target} PRIVATE
         GYRO_SCALE_DEFAULT=1.0f
