@@ -3,12 +3,11 @@
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 3)
 
-> **Number-collision note:** several sibling feature branches were mid-flight when this ADR was
-> written (`feat/163-external-gyro-yaw` claims 070, `feat/turn-pd-controller` claims 068,
-> `feat/156-lateral-offset-line-follow` claims 067/069). 071 was free across every reachable
-> worktree at the time of writing, but re-verify against `main` before merge and renumber this
-> file (not the other branches') if a collision has since landed — see the ADR-number-collision
-> gotcha.
+> **Number-collision note:** verified against `main` (2026-07): ADR-067/068/069 have since merged
+> (fault-clear cascade, in-place turn PD, lateral offset-follow); `feat/163-external-gyro-yaw`
+> holds 070 (unmerged, PR #172); 071 is free and unique to this branch, and 072 is the next open
+> number — no live collision. Re-verify against `main` at merge and renumber this file (never a
+> merged ADR's) only if a new branch has since taken 071 — see the ADR-number-collision gotcha.
 
 ## Rule
 
@@ -44,7 +43,10 @@ overrun bound at all.
   partial ramp.
 - LineFollower gains `setApproachTarget(cm)` / `approachPhase()`; Drive's seek feeds
   `approachSpeedAt(...)` into SEEK/ARMED using `_stopExpectedCm − axleOffsetCm` as the sensor-frame
-  prediction.
+  prediction. The seek's `driveContinuous` snaps to the kinetic floor `PWM_MOVING_MIN` (not the
+  static breakaway floor), so the seek's arrival speed matches the LineFollower hop's — one arrival
+  speed across both reactive-stop paths. Byte-identical when the ramp is off: `_stopCruise` and the
+  OVERSHOOT ramp's own math both stay at or above the static floor, so the lower floor is a no-op.
 - **Monotonic detect handoff:** the `LINE_OVERSHOOT` re-arm and the seek's `OVERSHOOT` leg both
   seed from the *last commanded* (floor) magnitude, not full preset / `_stopCruise` — PWM never
   jolts back up on the tick detection fires.
@@ -63,9 +65,6 @@ overrun bound at all.
   threshold at ~28–29 cm axle-frame. Hops shorter than that run flat today (documented known
   limit). If the real mat carries many short junction hops left unimproved, add a reduced-cruise
   or triangle-profile fallback.
-- The seek reaches its arrival floor via the deadband floor (35) while the LineFollower path uses
-  the kinetic floor `PWM_MOVING_MIN` (30) — unify the two if bench tuning wants one arrival speed
-  across both paths.
 
 ## See also
 

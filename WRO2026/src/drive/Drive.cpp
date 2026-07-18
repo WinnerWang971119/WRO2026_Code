@@ -1348,7 +1348,13 @@ void DriveClass::_updateStopAtLine()
     auto driveContinuous = [&](int16_t mag)
     {
         const int16_t pwm = (int16_t) (_stopReverse ? -mag : mag);
-        _emitContinuous(_stopMode, pwm, _stopHeading);
+        // Floor at the KINETIC deadband (`PWM_MOVING_MIN`), not the static breakaway floor: the
+        // seek is always already moving here, so the anticipatory approach ramp's arrival speed and
+        // the OVERSHOOT roll settle to the same kinetic floor the LineFollower hop reaches — one
+        // arrival speed across both reactive-stop paths (ADR-071). Byte-identical when the ramp is
+        // off: `_stopCruise` and the OVERSHOOT ramp's own math both stay >= the static floor, so the
+        // lower floor is a no-op there.
+        _emitContinuous(_stopMode, pwm, _stopHeading, Config::PWM_MOVING_MIN);
     };
 
     // SEEK/ARMED drive with the anticipatory approach ramp (T7). When the ramp is enabled and the
