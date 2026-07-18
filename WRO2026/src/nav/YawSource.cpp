@@ -180,11 +180,3 @@ double YawSourceClass::readYawDegOr(double fallback) const
     double y = 0.0;
     return readYawDeg(y) ? y : fallback;
 }
-
-int16_t YawSourceClass::toHwHeading(int16_t appHeadingDeg)
-{
-    // Pure sign flip: app CCW-positive heading -> STM32 raw CW-positive gyro-PID target.
-    // app<->raw differ by sign alone (the Localization offset is already folded into the
-    // app-frame value reaching here), so no offset term. Float multiply before the cast.
-    return (int16_t) (Config::IMU_YAW_SIGN * (float) appHeadingDeg);
-}
