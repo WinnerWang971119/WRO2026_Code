@@ -37,7 +37,7 @@
 - **Short hops below the engage threshold run flat (known limit)** — with `TSHAPE_ACCEL_PWM_PER_CM=4`, cruise ~80→floor 30 needs a ~12.5 cm ramp; plus `LINE_APPROACH_MARGIN_CM` (4) + front offset (12.02) the *forward* engage threshold is ~28-29 cm axle-frame. Hops shorter than that degrade to today's flat behavior (`ApproachSchedule.active=false`). The user confirmed flat-fallback for short hops; this decision only makes the threshold explicit and documented (ADR trigger-to-revisit: if short junction spacing on the real mat leaves too many hops unimproved, add a reduced-cruise/triangle fallback). (User-confirmed assumption + critic.)
 - **Shared header-only policy composing the pinned T-shape kernel** — one source of truth across firmware + sim + CTPS, matching the `TShapeProfilePolicy.h` / golden-vector convention (ADR-058). (User pick + Fable endorse.)
 - **Resolve-once schedule POD + speed-at pair** (not a monolithic per-tick function) — the schedule POD is the artifact CTPS renders and the parity trace records. (Fable amendment.)
-- **Parity records the PLAN *and* a host test asserts the DISPATCH** — the parity trace records the resolved `ApproachSchedule` (a new record `kind`); a host integration test additionally asserts the per-tick *dispatched* magnitude matches, so a green parity run can't mask a wrong commanded PWM (record-plan-vs-dispatch gotcha). (Critic W3.)
+- **Approach ramp is sub-FSM; the parity trace is NOT extended** — the anticipatory ramp shapes the LineFollower's per-tick speed *below* the FSM parity layer, so the ADR-050 dispatch trace (states + primitives) is byte-identical and parity stays green with **no new record `kind`** (this also keeps the T8→T9 ordering clean — T8 can't emit a kind T9 defines). The per-tick *dispatched* magnitude is verified by a host integration test (T11), and `PathTrackerSim` (T9) mirrors the deceleration in its motion/pose model via `profile.py`'s `approach_speed_at` for CTPS rendering only — matching ADR-058 (CTPS renders the profile from `profile.py`, not from trace records). (Critic W3, resolved.)
 - **Prediction source is `_pivotTrimDistance(edge)`, not `commandedDistanceCm`** — `commandedDistanceCm` is `0.0f` by design for `LINE_FOLLOW_INTERSECTION` (`EdgeDispatchPolicy.h:169`; it is sensor-terminated), so it cannot seed the prediction. Use the pivot-trimmed edge length (the same value `PROJECTION_FOLLOW` drives). (Critic C1.)
 - **Do NOT re-parameterize the existing gate ramp-down** — the approach ramp is a *parallel* branch; `PROJECTION_FOLLOW` and seek `OVERSHOOT` stay byte-identical. (Fable amendment F4.)
 - **Config knobs live in `ConfigDrive.h`** — co-located with `TSHAPE_*`, `LINE_SENSOR_AXLE_OFFSET_CM`, and the `stopAtLine` seek block this feature extends.
@@ -55,7 +55,7 @@
 - [ ] **AC8 — Toggle-off is byte-identical.** Forcing `LINE_APPROACH_RAMP_ENABLED = false` leaves both paths running today's flat + reactive behavior — asserted by the existing suites passing unchanged with the toggle off (no separate golden capture). (TC8.)
 - [ ] **AC9 — Direction-aware prediction.** Forward hops use `LINE_SENSOR_AXLE_OFFSET_CM` (12.02); reverse hops use `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68), via the `axleOffsetCm` PathTracker already resolves. (TC9 — integration through dispatch.)
 - [ ] **AC10 — Cross-language parity.** `profile.py`'s `approach_speed_at` / `resolve_approach_schedule` match the C++ `ApproachRampPolicy` golden vectors bit-for-bit (float32 contract). (TC13.)
-- [ ] **AC11 — Sim FSM parity green.** The ADR-050 sim↔firmware parity job stays green — `PathTrackerSim` arms + records the same approach schedule the firmware does. (TC14.)
+- [ ] **AC11 — Sim FSM parity green.** The ADR-050 sim↔firmware parity job stays green — the FSM dispatch trace is unchanged (approach ramp is sub-FSM); `PathTrackerSim` mirrors the approach deceleration in its motion/pose model for CTPS. (TC14.)
 - [ ] **AC12 — CTPS renders the ramp.** The CTPS player shows the anticipatory deceleration segment on a line→line hop. (Manual eyeball + TC15.)
 - [ ] **AC13 — Existing tuned paths unchanged.** `PROJECTION_FOLLOW`, `LINE_OVERSHOOT`, seek `OVERSHOOT`, wall-stop, and blind-chain behavior are byte-identical (their golden/host tests still pass with no golden regeneration). (Full ctest + pytest.)
 
@@ -89,10 +89,12 @@ struct ApproachSpeed {
 };
 
 // Composes resolveTShapeRampCm(cruiseMag, floorMag, accel, rampMin, rampMax, noRampEps) for rampLenCm.
+// NOTE (impl): the header takes no Config surface, so TSHAPE_MIN_MOVE_CM is passed in as the trailing
+// `minMoveCm` parameter (10 params total). Every consumer (Python mirror, golden dump, callers) passes it.
 inline ApproachSchedule resolveApproachSchedule(
     float predictedCm, float marginCm, float maxMarginCm,
     int16_t cruiseMag, int16_t floorMag,
-    float accel, float rampMin, float rampMax, int16_t noRampEps);
+    float accel, float rampMin, float rampMax, int16_t noRampEps, float minMoveCm);
 
 inline ApproachSpeed approachSpeedAt(const ApproachSchedule& s, float traveledCm);
 ```
@@ -132,7 +134,7 @@ constexpr float LINE_APPROACH_MAX_MARGIN_CM = 15.0f; // LineFollower overrun bou
 - **Dispatch-time pass-through latch:** hoist the LINE-hop collinear peek to dispatch (mirror the `_projPassThrough` arm-time latch pattern at PathTracker.cpp:~1130 and the shared `_passThroughHeadingOk` predicate at ~2261), latch it, and consume the same latch at detection (LINE_FOLLOW, ~948-993) — evaluate once, consume twice.
 - `LINE_FOLLOW_INTERSECTION` dispatch (~2665-2690): when NOT pass-through and `LINE_APPROACH_RAMP_ENABLED`, chain `.setApproachTarget(_pivotTrimDistance(edge) − axleOffsetCm)` onto the existing `setEnabled(true)…` arm. **Prediction source is `_pivotTrimDistance(edge)` (the pivot-trimmed edge length, as `PROJECTION_FOLLOW` uses at ~2711) — NOT `commandedDistanceCm`, which is `0.0f` for this primitive (C1).** `axleOffsetCm` is the direction-aware offset already resolved at ~2596-2597.
 - `State::LINE_FOLLOW`: continue to stop on `isAtIntersection()` (authoritative); additionally, poll `LineFollower.approachPhase() == OVERRUN` → enter the existing fault path.
-- **Parity emit:** at the arm site, record the resolved `ApproachSchedule` into the parity trace via a new record `kind` (mirrored by `PathTrackerSim`, T9).
+- **No parity-trace change:** the LINE_FOLLOW FSM dispatch record stays byte-identical — the approach ramp is a LineFollower internal detail below the parity layer. Do NOT add a `PathTrackerParityTrace.h` field/kind.
 
 ### Host-test mock headers (owner: T13) — the four `LineFollower.h` mocks
 
@@ -143,7 +145,7 @@ constexpr float LINE_APPROACH_MAX_MARGIN_CM = 15.0f; // LineFollower overrun bou
 - `profile.py` (owner T4): `resolve_approach_schedule` + `approach_speed_at` — same field names/order as the POD, float32 mirror.
 - Golden dump TU (owner T3): `WRO2026/test/approach_ramp_dump/` (or extend `tshape_profile_dump/`) + freshness `.cmake` — emits the golden vectors.
 - Cross-language test (owner T5): `tools/path_planner/tests/test_ctps_profile.py` — pins T4 to the golden.
-- Parity trace (owner: firmware emit in PathTracker is T8; sim mirror is T9): a **new** `PathTrackerParityTrace.h` record `kind` carrying the `ApproachSchedule` fields (never reuse an existing `kind`). Parity asserts the schedule *plan*; a host integration test (T11) asserts the *dispatched* per-tick magnitude so the plan-vs-dispatch gap can't hide.
+- Parity: **no** new `PathTrackerParityTrace.h` record kind. The FSM dispatch trace is unchanged (approach ramp is sub-FSM), so ADR-050 parity stays green; `PathTrackerSim` (T9) mirrors the approach deceleration in its motion/pose model only. The dispatched per-tick magnitude is asserted by a host test (T11).
 - CTPS renderer (owner T10): `track_builder.py` / player assets render the approach ramp segment (display-only, ADR-058 layer).
 
 ### File ownership
@@ -159,7 +161,7 @@ constexpr float LINE_APPROACH_MAX_MARGIN_CM = 15.0f; // LineFollower overrun bou
 | `WRO2026/test/**` (dump TU, CMake, integration tests) | T3, T11 | — |
 | `tools/path_planner/ctps/profile.py` | T4 | T5, T10 |
 | `tools/path_planner/tests/test_ctps_profile.py` + golden | T5 | — |
-| `tools/path_planner/sim/**`, `PathTrackerParityTrace.h` | T9 | T10 |
+| `tools/path_planner/sim/**` | T9 | T10 |
 | `tools/path_planner/ctps/track_builder.py` + player assets | T10 | — |
 | `docs/decisions/067-*.md`, `DECISIONS.md` | T12 | — |
 
@@ -218,8 +220,8 @@ constexpr float LINE_APPROACH_MAX_MARGIN_CM = 15.0f; // LineFollower overrun bou
 | T6 | LineFollower approach-ramp consumer | T1, T2 | high | `WRO2026/src/drive/LineFollower.h/.cpp` | Add `setApproachTarget(cm)` builder knob + `approachPhase()` query; disarm the schedule on a plain `setEnabled(true)` apply; run the approach branch **alongside** `_useTShapeRampDown` (precedence: approach when armed); implement the AC3 detect-handoff seed (LINE_OVERSHOOT seeds from last commanded magnitude). Do NOT alter the existing `_useTShapeRampDown` math (F4). Satisfies AC1, AC3, AC6-signal, AC9. |
 | T7 | Drive.stopAtLine seek consumer | T1, T2 | high | `WRO2026/src/drive/Drive.h/.cpp` | Feed `approachSpeedAt(...)` to `driveContinuous` in SEEK/ARMED using `predictedCm = _stopExpectedCm − axleOffsetCm`; seed the `OVERSHOOT` ramp from the last commanded magnitude (== `_stopCruise` when disabled, AC3). Leave arm-window / detect-debounce / `_stopMaxCm` fault / wall-stop untouched (F4). Satisfies AC2, AC3(seek), AC13(seek). |
 | T13 | Update the four LineFollower host-test mocks | T6 | med | `WRO2026/test/{mission_mocks,path_mocks,ctps_mocks,task_mocks}/LineFollower.h` | Mirror the new builder surface: recording `setApproachTarget(float)` (stage the value) + scriptable `approachPhase()`. Must NOT be a no-op stub (false-green + drops the `ctps_dump` knob). Unblocks T8 compilation + T10/T11. |
-| T8 | PathTracker dispatch + pass-through hoist + overrun fault | T6, T13 | high | `WRO2026/src/mission/PathTracker.cpp/.h` | Hoist the LINE-hop collinear pass-through peek to dispatch, latch, consume at both dispatch and detect (F3, evaluate-once); arm `setApproachTarget(_pivotTrimDistance(edge) − axleOffsetCm)` on terminating LINE hops when enabled (NOT `commandedDistanceCm`, C1); poll `OVERRUN` → existing fault path; record the `ApproachSchedule` to the parity trace; keep detection authoritative. Satisfies AC4, AC5, AC6, AC11(emit). |
-| T9 | Sim parity (`PathTrackerSim`) | T8, T4 | high | `tools/path_planner/sim/*`, `WRO2026/src/mission/PathTrackerParityTrace.h` | Add a new parity-trace record `kind` for the `ApproachSchedule` (never reuse a `kind`); mirror the firmware arm in `PathTrackerSim` so the ADR-050 parity job stays green. Satisfies AC11, TC14. |
+| T8 | PathTracker dispatch + pass-through hoist + overrun fault | T6, T13 | high | `WRO2026/src/mission/PathTracker.cpp/.h` | Hoist the LINE-hop collinear pass-through peek to dispatch, latch, consume at both dispatch and detect (F3, evaluate-once); arm `setApproachTarget(_pivotTrimDistance(edge) − axleOffsetCm)` on terminating LINE hops when enabled (NOT `commandedDistanceCm`, C1); poll `approachPhase() == OVERRUN` → existing fault path; keep the LINE_FOLLOW FSM dispatch trace byte-identical (no parity-trace change); keep detection authoritative. Satisfies AC4, AC5, AC6. |
+| T9 | Sim parity (`PathTrackerSim`) | T8, T4 | high | `tools/path_planner/sim/*` | Confirm the ADR-050 parity job stays GREEN (the FSM dispatch trace is unchanged — the approach ramp is sub-FSM). Mirror the approach deceleration in `PathTrackerSim`'s motion/pose model via `profile.py`'s `approach_speed_at` so CTPS (T10) can render it. Do NOT add a `PathTrackerParityTrace.h` record kind. Satisfies AC11, TC14. |
 | T10 | CTPS ramp rendering | T4, T9, T13 | med | `tools/path_planner/ctps/track_builder.py`, player assets | Render the anticipatory approach ramp segment (display-only, ADR-058 layer); reuse the profile mirror. Satisfies AC12, TC15. |
 | T11 | Host integration + regression tests | T6, T7, T8, T13 | med | `WRO2026/test/test_path_tracker_*.cpp`, `test_line_follower_overshoot.cpp`, `test_path_tracker_stop_at_line.cpp`, CMake | Extend integration tests for AC2-AC9/AC13: monotonic handoff (per-tick PWM already asserted in `test_line_follower_overshoot.cpp:117,292`), pass-through exclusion, overrun→fault, toggle-off, seek ramp (sensor frame), forward-vs-reverse offset (TC9), dispatched-magnitude assertion (TC14 host half), no regression on tuned paths. Orchestrator owns CMakeLists appends. Satisfies TC2-TC12, TC16. |
 | T12 | ADR-067 + DECISIONS.md | T8 | low | `docs/decisions/067-anticipatory-line-approach-ramp.md`, `DECISIONS.md` | Write the ADR (rule/why/how/trigger/status); **verify the next free ADR number** against the uncommitted `2026-07-17-external-gyro-yaw-source` plan / other open worktrees (collision gotcha); include the short-hop engage-threshold as the trigger-to-revisit; update the DECISIONS.md index + status table. |
