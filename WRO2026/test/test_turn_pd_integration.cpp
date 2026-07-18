@@ -123,22 +123,26 @@ inline void resetWorld()
     Drive.clearFault();
 }
 
+/// @brief Test-local yaw sign the mock IMU bridge round-trips through `readYawDeg`, byte-identical
+///        to the retired production `Config::IMU_YAW_SIGN` (-1.0f) but INDEPENDENT of it — so this
+///        target survives issue #169's removal of `IMU_YAW_SIGN` from Config.
+static constexpr float kTurnYawReadSign = -1.0f;
+
 /**
  * @brief Convert an APP-frame yaw (any float magnitude, including sub-degree residuals) to the
- *        raw hw-frame value `mmL.mockYawDeg` expects.
+ *        raw-frame value `mmL.mockYawDeg` expects.
  *
  * @details
- * Deliberately NOT `YawSource::toHwHeading` — that helper only takes/returns `int16_t` and
- * would truncate the sub-degree residuals several cases below script (TC11's 0.3 deg, TC11b's
- * exact `Config::TURN_TOLERANCE_DEG` boundary, the breakaway hand-off's fractions of
- * `Config::TURN_BREAKAWAY_MOTION_DEG`). This applies the SAME formula `YawSource` does
- * internally (`hwHeading = appHeading * IMU_YAW_SIGN`) at full `float` precision; since
- * `IMU_YAW_SIGN` is exactly +/-1.0f, the round trip through `YawSource::readYawDeg` (which
- * multiplies back by the same sign) recovers the scripted app value exactly.
+ * Applies the mock yaw bridge's fixed sign at full `float` precision (an int16_t helper would
+ * truncate the sub-degree residuals several cases below script — TC11's 0.3 deg, TC11b's exact
+ * `Config::TURN_TOLERANCE_DEG` boundary, the breakaway hand-off's fractions of
+ * `Config::TURN_BREAKAWAY_MOTION_DEG`). Since `kTurnYawReadSign` is exactly +/-1.0f, the round
+ * trip through `YawSource::readYawDeg` (which applies the same -1.0f bridge sign) recovers the
+ * scripted app value exactly.
  */
 inline double hwYawF(float appYawDeg)
 {
-    return (double) (appYawDeg * Config::IMU_YAW_SIGN);
+    return (double) (appYawDeg * kTurnYawReadSign);
 }
 
 /**
