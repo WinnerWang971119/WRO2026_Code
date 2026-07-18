@@ -10,6 +10,9 @@ __pycache__/
 *.egg-info/
 toclaude.md
 
+# clangd background-index cache — machine-generated, developer-local.
+.cache/
+
 # Host-compile harness build output (WRO2026/test — see ADR-023 / issue #19).
 build/
 # MSVC debug database emitted by cl.exe when a build runs from the repo root.
