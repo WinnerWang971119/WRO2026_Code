@@ -1276,6 +1276,27 @@ target_include_directories(test_sensor_overshoot_policy PRIVATE ${SKETCH_DIR})
 add_test(NAME sensor_overshoot_policy COMMAND test_sensor_overshoot_policy)
 
 # =========================================================================================
+# Test executable #9c — ApproachRampPolicy pure-math (2026-07-17
+# anticipatory-line-approach-ramp plan, T3; TC1, TC7, TC17).
+#
+# `resolveApproachSchedule` / `approachSpeedAt` are the header-only inline policy
+# (`ApproachRampPolicy.h`, T2) that resolves the anticipatory line-approach ramp schedule and
+# looks up the commanded magnitude for a traveled distance. It composes
+# `TShapeProfilePolicy.h`'s `resolveTShapeRampCm` for the ramp length, so this target only
+# needs `${SKETCH_DIR}` to resolve BOTH sibling headers via their relative quoted includes.
+#
+# Pure float / int16_t math with no Arduino surface, no Config.h dependency (the real
+# Config::* knobs are mirrored as local literals in the test, same convention as
+# `test_pivot_trim_policy` / `test_sensor_overshoot_policy`): no mocks, no SUT sources — just
+# the sketch include dir for the header.
+# =========================================================================================
+add_executable(test_approach_ramp_policy
+    ${TEST_DIR}/test_approach_ramp_policy.cpp
+)
+target_include_directories(test_approach_ramp_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME approach_ramp_policy COMMAND test_approach_ramp_policy)
+
+# =========================================================================================
 # Test executable #11 — ReturnToNodePolicy pure-math (issue #36, PR1b, T8/T10).
 #
 # `resolveReturnAction` is a header-only inline policy (`ReturnToNodePolicy.h`) — the
@@ -2587,3 +2608,44 @@ add_executable(test_encoder_source
 )
 target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
 add_test(NAME encoder_source COMMAND test_encoder_source)
+
+# Test executable #32 — `approach_ramp_dump` + freshness gate (2026-07-17
+# anticipatory-line-approach-ramp plan, T3).
+#
+# Host golden-vector dump for the header-only, Arduino-free `ApproachRampPolicy.h` (T2), which
+# itself composes `TShapeProfilePolicy.h`'s `resolveTShapeRampCm`. Includes ONLY the policy
+# header plus the REAL `Config::TSHAPE_*` / `Config::PWM_MOVING_MIN` / `Config::LINE_APPROACH_*`
+# / `Config::SPEED_*` constants via `config/ConfigGlobal.h` + `config/ConfigDrive.h` directly —
+# both are pure `<stdint.h>`-only `constexpr` headers with ZERO Arduino/MatrixMiniR4 surface, so
+# they are host-includable as-is with no mock indirection (unlike the `Config.h` umbrella, which
+# pulls in `<Arduino.h>`). No SUT `.cpp`, no `MOCK_SOURCES`, no force-includes needed — the dump
+# TU is entirely self-contained.
+#
+# This is DELIBERATELY not a self-asserting ctest target on its own — the executable just
+# prints JSON to stdout. The actual ctest is `approach_ramp_freshness` below, which drives
+# `approach_ramp_freshness.cmake`: it re-runs this binary fresh into a build-tree temp file
+# and BYTE-COMPARES it against the committed
+# `tools/path_planner/tests/fixtures/approach_ramp_goldens.json` (the `routes.h` /
+# `tshape_profile` / `chain_speed` regenerate-then-diff freshness-gate pattern, ctest-native so
+# it also runs locally, not just in a dedicated CI job). A firmware retune that changes
+# `Config::TSHAPE_*` / `Config::LINE_APPROACH_*` — or any change to the policy's arithmetic —
+# changes this binary's stdout and fails the ctest until the fixture is regenerated and
+# recommitted. Consumed by the Python cross-language test (T5 / TC13).
+# =========================================================================================
+set(APPROACH_RAMP_DUMP_DIR ${TEST_DIR}/approach_ramp_dump)
+
+add_executable(approach_ramp_dump
+    ${APPROACH_RAMP_DUMP_DIR}/approach_ramp_dump.cpp
+)
+target_include_directories(approach_ramp_dump PRIVATE ${SKETCH_DIR})
+
+set(APPROACH_RAMP_GOLDEN_FIXTURE
+    ${SKETCH_DIR}/../tools/path_planner/tests/fixtures/approach_ramp_goldens.json)
+
+add_test(NAME approach_ramp_freshness
+    COMMAND ${CMAKE_COMMAND}
+            -DDUMP_EXE=$<TARGET_FILE:approach_ramp_dump>
+            -DGOLDEN_FILE=${APPROACH_RAMP_GOLDEN_FIXTURE}
+            -DOUT_FILE=${CMAKE_CURRENT_BINARY_DIR}/approach_ramp_goldens.fresh.json
+            -P ${APPROACH_RAMP_DUMP_DIR}/approach_ramp_freshness.cmake
+)
