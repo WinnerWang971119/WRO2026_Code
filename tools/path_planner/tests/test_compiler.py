@@ -41,6 +41,7 @@ from tools.path_planner.sim.runtime import (
     ACT_PROJECTION_REVERSE,
     ACT_STOP_AT_LINE_REVERSE,
     LINE_SENSOR_AXLE_OFFSET_CM,
+    NAV_TURN_TOLERANCE_DEG,
     Direction,
     resolve_direction,
 )
@@ -454,11 +455,13 @@ def _walk_expected_headings(
             body_target = (edge_heading + 180.0) % 360.0
         else:
             body_target = edge_heading % 360.0
-        # Only advance the running heading when the turn delta would
-        # actually be emitted (mirror compile_path's epsilon guard).
-        body_delta = normalize_turn(body_target - current)
-        if abs(body_delta) > 1e-6:
-            current = body_target
+        # One logical-heading rule (#147): advance the running heading onto the
+        # hop's body-target UNCONDITIONALLY, mirroring compile_path. The
+        # sub-tolerance micro-turns are absorbed (never emitted as a primitive)
+        # but the logical heading still tracks the edge, so this walk reports the
+        # true logical heading compile_path drives -- not the lossy sum of the
+        # emitted turns alone.
+        current = body_target
         headings.append(current)
     return headings
 
@@ -521,13 +524,33 @@ def test_property_random_paths() -> None:
 
         start_heading = round(rng.uniform(0.0, 359.999), 4)
         primitives = compile_path(path, start_heading, graph, fake_field)
-        expected = _walk_expected_headings(path, start_heading, graph)
-        replayed = _replay_primitives(primitives, start_heading)
+        # #147 contract: the compiler advances the logical heading onto every
+        # edge UNCONDITIONALLY, but emits an ACT_TURN_REL ONLY for a per-hop
+        # delta exceeding NAV_TURN_TOLERANCE_DEG -- sub-tolerance heading changes
+        # are absorbed (line-follow re-aligns the chassis; a blind hop's <=0.5deg
+        # drift is negligible) and never surface as a primitive. So the emitted
+        # turns are exactly the sequence of >tolerance per-hop deltas from the
+        # logical-heading walk; replaying the emitted turns alone can no longer
+        # reconstruct the (silently-advanced) logical heading, so the parity is
+        # checked at the turn-emission level instead.
+        expected_headings = _walk_expected_headings(path, start_heading, graph)
+        expected_turns: List[float] = []
+        prev = start_heading
+        for heading in expected_headings:
+            delta = normalize_turn(heading - prev)
+            if abs(delta) > NAV_TURN_TOLERANCE_DEG:
+                expected_turns.append(delta)
+            prev = heading
+        emitted_turns = [prim[1] for prim in primitives if prim[0] == ACT_TURN_REL]
 
-        assert len(replayed) == len(expected) == len(path) - 1
-        for got, want in zip(replayed, expected):
-            delta = normalize_turn(got - want)
-            assert abs(delta) == pytest.approx(0.0, abs=1e-6)
+        assert len(expected_headings) == len(path) - 1
+        assert len(emitted_turns) == len(expected_turns)
+        for got, want in zip(emitted_turns, expected_turns):
+            assert normalize_turn(got - want) == pytest.approx(0.0, abs=1e-6)
+        # final_heading_after mirrors the SAME unconditional logical walk.
+        assert normalize_turn(
+            final_heading_after(path, start_heading, graph) - expected_headings[-1]
+        ) == pytest.approx(0.0, abs=1e-6)
         runs += 1
 
     assert runs == 100

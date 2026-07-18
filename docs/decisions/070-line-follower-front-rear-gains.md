@@ -1,4 +1,4 @@
-# ADR-066: LineFollower uses a separate P+D gain set per board (front vs rear)
+# ADR-070: LineFollower uses a separate P+D gain set per board (front vs rear)
 
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 3 bring-up / tuning)
@@ -37,5 +37,7 @@ revisit if an integral term is ever added — Ki would need the same per-board t
 ## See also
 - ADR-062 (dark-line polarity; the rear board needs no `getError()` negation, only its own gains).
 - ADR-024 (bidirectional line-following / rear board).
+- ADR-069 (lateral-offset line-follow); shares the same `corr` line — the board-selected gains
+  here multiply both the offset-biased P term and the D term.
 - `WRO2026/src/drive/LineFollower.cpp` P+D block; `WRO2026/config/ConfigLine.h` gain constants;
   `inoTest/line_pid_tune/line_pid_tune.ino` (the per-direction tuner).

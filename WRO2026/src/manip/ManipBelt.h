@@ -61,6 +61,7 @@
 #include <MatrixMiniR4.h>
 
 #include "../../config/ConfigManipulator.h"
+#include "../util/EncoderSource.h"    // Single owner of lower-MCU encoder reads (ADR-066).
 
 /**
  * @brief Encoder-DC-motor conveyor-belt actuator with POSITION + TIMED move modes.
@@ -448,10 +449,11 @@ private:
     // Vendor dispatch helpers.
     //
     // MiniR4.M1..M4 are distinct template instances (MiniR4DC<1>..MiniR4DC<4>), i.e. four
-    // different *types* — they cannot be indexed by a runtime id, so each call is a small
-    // switch over `_motorId`. Every vendor method returns `bool` except getDegrees()
-    // (int32_t). Per the project return convention, a `false` is retried once after a 1 ms
-    // delay before being reported up.
+    // different *types* — they cannot be indexed by a runtime id, so each command helper is a
+    // small switch over `_motorId`. Every such vendor method returns `bool`; per the project
+    // return convention, a `false` is retried once after a 1 ms delay before being reported up.
+    // The encoder READ is the exception — it is delegated to `EncoderSource.readDegreesOr`
+    // (ADR-066), which owns the RESULT-surfacing + last-good policy centrally.
     // -------------------------------------------------------------------------------------
 
     /**
@@ -510,21 +512,23 @@ private:
 
     /**
      * @brief Read cumulative encoder degrees for the bound motor.
-     * @return Encoder degrees (signed); `0` for an invalid motor id.
+     *
+     * Routes through EncoderSource (ADR-066): the bare vendor `getDegrees()` silently returns
+     * `0` on a lower-MCU comms timeout, which would corrupt the `beltTo` position delta. The
+     * last-good cache returns the previous reading on a transient miss instead. Fallback `0`
+     * matches the post-`resetCounter()` physical zero (the belt homes to 0 at `begin()`, so the
+     * cache is warm in normal operation).
+     *
+     * @return Encoder degrees (signed); `0` for an invalid motor id or a cold-cache read miss.
      */
     int32_t _getDegrees()
     {
-        // Fold the belt direction sign into the read so getDegrees() is in the same logical
-        // frame as the speed commands (see Config::BELT_DIR_SIGN) — absolute POSITION math
-        // in beltTo() then stays correct no matter how the motor + encoder are wired.
-        int32_t raw = 0;
-        switch (_motorId) {
-            case 1: raw = MiniR4.M1.getDegrees(); break;
-            case 2: raw = MiniR4.M2.getDegrees(); break;
-            case 3: raw = MiniR4.M3.getDegrees(); break;
-            case 4: raw = MiniR4.M4.getDegrees(); break;
-            default: return 0;
-        }
+        // Route through EncoderSource for the last-good read (ADR-066), then fold the belt
+        // direction sign so getDegrees() is in the same logical frame as the speed commands
+        // (see Config::BELT_DIR_SIGN) — absolute POSITION math in beltTo() stays correct no
+        // matter how the motor + encoder are wired. An invalid id / cold-cache miss reads 0,
+        // and BELT_DIR_SIGN * 0 == 0, so the fallback is unchanged.
+        const int32_t raw = EncoderSource.readDegreesOr(_motorId, 0);
         return (int32_t)(Config::BELT_DIR_SIGN * raw);
     }
 
@@ -612,6 +616,9 @@ private:
                 default: return false;
             }
         }
+        // Invalidate the last-good cache after re-zeroing (ADR-066): a post-reset read that
+        // fails must not serve the pre-reset position through `readDegreesOr`.
+        EncoderSource.resetCache(_motorId);
         return ok;
     }
 

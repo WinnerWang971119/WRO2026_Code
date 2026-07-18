@@ -37,84 +37,84 @@ namespace Routes {
     const EdgeInfo EDGES[N_NODES][N_NODES] = {
         // [from][to]; type=NONE if no direct edge
         { // from A (index 0)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 190.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 140.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 114.017543f, 37.874984f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::LINE, 45.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::BLIND, 67.268120f, 311.987212f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::NONE), // to A
+            makeEdge(EdgeType::LINE, 190.000000f), // to B
+            makeEdge(EdgeType::NONE), // to C
+            makeEdge(EdgeType::LINE, 140.000000f, 90.000000f), // to D
+            makeEdge(EdgeType::LINE, 114.017543f, 37.874984f), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::LINE, 45.000000f), // to P1
+            makeEdge(EdgeType::BLIND, 67.268120f, 311.987212f), // to S
         },
         { // from B (index 1)
-            { EdgeType::LINE, 190.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 140.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 122.065556f, 145.007980f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::BLIND, 86.023253f, 54.462322f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::LINE, 145.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::LINE, 190.000000f, 180.000000f), // to A
+            makeEdge(EdgeType::NONE), // to B
+            makeEdge(EdgeType::LINE, 140.000000f, 90.000000f), // to C
+            makeEdge(EdgeType::NONE), // to D
+            makeEdge(EdgeType::LINE, 122.065556f, 145.007980f), // to E
+            makeEdge(EdgeType::BLIND, 86.023253f, 54.462322f), // to G
+            makeEdge(EdgeType::LINE, 145.000000f, 180.000000f), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
         { // from C (index 2)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 140.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 190.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 122.065556f, 214.992020f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::NONE), // to A
+            makeEdge(EdgeType::LINE, 140.000000f, 270.000000f), // to B
+            makeEdge(EdgeType::NONE), // to C
+            makeEdge(EdgeType::LINE, 190.000000f, 180.000000f), // to D
+            makeEdge(EdgeType::LINE, 122.065556f, 214.992020f), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::NONE), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
         { // from D (index 3)
-            { EdgeType::LINE, 140.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 190.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::LINE, 114.017543f, 322.125016f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::LINE, 140.000000f, 270.000000f), // to A
+            makeEdge(EdgeType::NONE), // to B
+            makeEdge(EdgeType::LINE, 190.000000f), // to C
+            makeEdge(EdgeType::NONE), // to D
+            makeEdge(EdgeType::LINE, 114.017543f, 322.125016f), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::NONE), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
         { // from E (index 4)
-            { EdgeType::LINE, 114.017543f, 217.874984f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 122.065556f, 325.007980f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::LINE, 122.065556f, 34.992020f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::LINE, 114.017543f, 142.125016f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::LINE, 114.017543f, 217.874984f), // to A
+            makeEdge(EdgeType::LINE, 122.065556f, 325.007980f), // to B
+            makeEdge(EdgeType::LINE, 122.065556f, 34.992020f), // to C
+            makeEdge(EdgeType::LINE, 114.017543f, 142.125016f), // to D
+            makeEdge(EdgeType::NONE), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::NONE), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
         { // from G (index 5)
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::BLIND, 86.023253f, 234.462322f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::NONE), // to A
+            makeEdge(EdgeType::BLIND, 86.023253f, 234.462322f), // to B
+            makeEdge(EdgeType::NONE), // to C
+            makeEdge(EdgeType::NONE), // to D
+            makeEdge(EdgeType::NONE), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::NONE), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
         { // from P1 (index 6)
-            { EdgeType::LINE, 45.000000f, 180.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::LINE, 145.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::BLIND, 50.000000f, 270.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::LINE, 45.000000f, 180.000000f), // to A
+            makeEdge(EdgeType::LINE, 145.000000f), // to B
+            makeEdge(EdgeType::NONE), // to C
+            makeEdge(EdgeType::NONE), // to D
+            makeEdge(EdgeType::NONE), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::NONE), // to P1
+            makeEdge(EdgeType::BLIND, 50.000000f, 270.000000f), // to S
         },
         { // from S (index 7)
-            { EdgeType::BLIND, 67.268120f, 131.987212f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to A
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to B
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to C
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to D
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to E
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to G
-            { EdgeType::BLIND, 50.000000f, 90.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to P1
-            { EdgeType::NONE, 0.000000f, 0.000000f, SpeedTier::DEFAULT, BlindMode::DEFAULT, DirectionMode::DEFAULT, StopAtLineMode::DEFAULT }, // to S
+            makeEdge(EdgeType::BLIND, 67.268120f, 131.987212f), // to A
+            makeEdge(EdgeType::NONE), // to B
+            makeEdge(EdgeType::NONE), // to C
+            makeEdge(EdgeType::NONE), // to D
+            makeEdge(EdgeType::NONE), // to E
+            makeEdge(EdgeType::NONE), // to G
+            makeEdge(EdgeType::BLIND, 50.000000f, 90.000000f), // to P1
+            makeEdge(EdgeType::NONE), // to S
         },
     };
 

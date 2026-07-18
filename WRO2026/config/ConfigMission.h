@@ -32,19 +32,25 @@ namespace Config
      * @brief Bench-test switch: re-fire the mission with a fresh BTN_UP press
      *        instead of one run per power cycle.
      *
-     * Production / competition default is ``false`` — BTN_UP arms the hand-authored
-     * mission exactly once (see WRO2026.ino), so a stray press cannot restart the
-     * route. When ``true`` (bench), once the mission returns to idle (a clean finish
-     * or a cleared fault, never mid-run) a fresh BTN_UP rising edge re-arms and
-     * re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so the
-     * BTN_DOWN calibration menu stays suppressed after the first arm exactly as in
-     * production.
+     * Ships ``true`` on this branch — a deliberate bench convenience so a developer
+     * can re-run ``buildMission()`` with a fresh BTN_UP press instead of a full power
+     * cycle between test runs. When ``true``, once the mission returns to idle (a
+     * clean finish or a cleared fault, never mid-run) a fresh BTN_UP rising edge
+     * re-arms and re-runs ``buildMission()``. The ``_missionArmed`` latch is kept, so
+     * the BTN_DOWN calibration menu stays suppressed after the first arm exactly as
+     * in the one-shot (``false``) behavior.
      *
-     * @note Override-hook: guarded by ``#ifndef MISSION_ALLOW_REARM_DEFAULT`` so the
-     *       SHIPPED source default is the competition-safe ``false`` — merging this
-     *       branch can never silently ship the bench value. Enable on the bench with
-     *       ``-DMISSION_ALLOW_REARM_DEFAULT=true`` (arduino-cli:
-     *       ``--build-property build.extra_flags=-DMISSION_ALLOW_REARM_DEFAULT=true``).
+     * @warning **MUST be flipped to ``false`` before the competition run.** At the
+     *          regional, a stray BTN_UP press must never be able to restart the route
+     *          mid-field — BTN_UP should arm the hand-authored mission exactly once
+     *          per power cycle. `WRO2026.ino::setup()` prints a self-silencing boot
+     *          ``[WARN]`` banner once whenever this constant is ``true``, precisely
+     *          so this flip is never forgotten silently on flash day.
+     * @note Override-hook: guarded by ``#ifndef MISSION_ALLOW_REARM_DEFAULT`` so a
+     *       build can flip it without editing this file. Flip to the competition-safe
+     *       value with ``-DMISSION_ALLOW_REARM_DEFAULT=false`` (arduino-cli:
+     *       ``--build-property build.extra_flags=-DMISSION_ALLOW_REARM_DEFAULT=false``),
+     *       or simply change the literal below and reflash before the regional.
      */
 #ifndef MISSION_ALLOW_REARM_DEFAULT
 #define MISSION_ALLOW_REARM_DEFAULT true

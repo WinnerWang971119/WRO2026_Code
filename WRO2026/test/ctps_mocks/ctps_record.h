@@ -65,8 +65,9 @@ namespace ctps
         TASK_END,          ///< Task dispatch end. Fields: `name`, `result`.
         MANIP,             ///< Manipulator command. Fields: `method`, `arg`.
         DRIVE,             ///< Raw drive move: `method`, `cm`/`deg`, `mode`/`heading`/`reverse`,
-                           ///< plus the optional per-command speed knobs (`power`/`preset`/
-                           ///< `start_speed`/`end_speed`/`profiled`/`brake`).
+                           ///< the optional per-command speed knobs (`power`/`preset`/
+                           ///< `start_speed`/`end_speed`/`profiled`/`brake`), plus the
+                           ///< optional `follow_offset` lateral hug bias (lineFollowDist only).
         WAIT,              ///< Mission wait. Field: `ms`.
         PRINT,             ///< Mission print. Field: `text`.
         BEEP,              ///< Mission beep. Fields: `freq_hz`, `ms`.
@@ -134,6 +135,8 @@ namespace ctps
         bool        hasProfiled   = false;   ///< DRIVE: true iff .tShape() or .flat() was called.
         bool        brake         = false;   ///< DRIVE: .setBrake() flag; valid iff hasBrake.
         bool        hasBrake      = false;   ///< DRIVE: true iff setBrake() was called.
+        float       lineFollowOffset    = 0.0f;   ///< DRIVE: .setLineFollowOffset() signed lateral hug bias (centroid units, +LEFT/-RIGHT); valid iff hasLineFollowOffset.
+        bool        hasLineFollowOffset = false;   ///< DRIVE: true iff setLineFollowOffset() was called (gates follow_offset emission).
 
         // TASK_START: the raw 16-byte packed TaskArgs blob, captured verbatim
         // so the loader can decode per-task structs later. Always exactly
@@ -307,6 +310,16 @@ namespace ctps
         bool        hasProfiled;   ///< true iff .tShape() or .flat() was called on the builder.
         bool        brake;         ///< .setBrake() flag; valid iff hasBrake.
         bool        hasBrake;      ///< true iff setBrake() was called on the builder.
+
+        // Line-follow lateral hug-side bias (issue #156) — the CTPS-specific
+        // recording seam. Only the recording ctps_mocks LineFollower enable
+        // builder fills these (the path/task/mission mocks are no-ops); the Drive
+        // mocks never set an offset. Default member initializers keep every
+        // existing 16-field positional aggregate init (Drive.h / the
+        // followDistance path) warning-clean under -Wmissing-field-initializers —
+        // an omitted trailing member with a default initializer is not "missing".
+        float       lineFollowOffset    = 0.0f;   ///< .setLineFollowOffset() signed lateral hug bias (centroid units, +LEFT/-RIGHT); valid iff hasLineFollowOffset.
+        bool        hasLineFollowOffset = false;  ///< true iff setLineFollowOffset() was called on the builder.
     };
 
     /**

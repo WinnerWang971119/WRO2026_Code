@@ -118,6 +118,19 @@ namespace Config
 #pragma pop_macro("WHITE")
 
     /**
+     * @brief Sentinel raw-hue byte `Vision::getRawHue()` returns for "no data" — before the
+     *        first successful `readMosaic()`, or for an out-of-range cell index.
+     *
+     * @note Never collides with a genuinely latched hue. The raw-hue axis is 0..239
+     *       (chromatic) / 240..245 (device White) / 246..250 (device Black) / 255 (device
+     *       "no detection"). `VisionFrame::classifyHue()` maps device NONE (255) to
+     *       `Color::UNKNOWN`, which trips `VisionClass::_classifyCandidate()`'s strict guard
+     *       and rejects the WHOLE candidate frame before `_rawHue` is ever committed — so
+     *       `0xFF` can never appear as a genuinely-latched value.
+     */
+    constexpr uint8_t VISION_RAW_HUE_NONE = 0xFF;   // getRawHue() no-data / out-of-range sentinel
+
+    /**
      * @brief Saturation threshold below which a chromatic hue reading is re-classified as White.
      *
      * The HUE12 outputs a saturation (sta) value in the range [0..15]. When `sta < VISION_WHITE_STA_MAX`

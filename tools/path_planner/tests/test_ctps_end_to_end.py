@@ -552,7 +552,7 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 #: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
 #: content must fail this test loudly rather than silently pass.
 _PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
-_RENDERER_JS_SHA256: str = "e3652fc5b8beea5c5aeb48db214711e2fa7e6f9bd8c22941685b36549ada17e8"
+_RENDERER_JS_SHA256: str = "c3995d0f964a4d5b79a7cfd89975c1286c4bd0fd1f1b127a0bc485be7bac0338"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:
@@ -702,14 +702,16 @@ def test_t14_rendered_player_embeds_full_seam_track(tmp_path) -> None:
 
 
 def test_t14_player_and_renderer_js_byte_unchanged() -> None:
-    """AC10: ``player.js`` / ``renderer.js`` are untouched by this feature.
+    """Pin ``player.js`` / ``renderer.js`` so any edit forces a reviewed decision.
 
-    The whole motion-profile feature (issue #130) is Python-side; the seek +
-    lerp engine in ``player.js`` and the render-mode dispatch in
-    ``renderer.js`` must stay byte-for-byte identical — dense keyframes need
-    zero player changes (Decisions). This hashes the CURRENT on-disk assets
-    and pins them so ANY future edit to either file fails this test loudly,
-    exactly mirroring the review-enforced AC10 rule.
+    ``player.js`` (the seek + lerp engine) has stayed byte-for-byte identical
+    since the issue-#130 motion-profile feature — dense keyframes need zero
+    player changes. ``renderer.js`` was frozen the same way, then issue #156
+    deliberately extended it with the parity-safe lateral hug-side render and
+    the pin was re-frozen against that #156 content. Both files are legitimate
+    co-owners of this freeze now (#130 for player.js, #130 + #156 for
+    renderer.js). This hashes the CURRENT on-disk assets and pins them so ANY
+    future edit fails this test loudly, forcing an explicit, reviewed pin update.
     """
     assets_dir = player_html.PLAYER_JS_PATH.parent
     # Normalize CRLF -> LF before hashing: the assets are stored LF in git but a
@@ -730,6 +732,7 @@ def test_t14_player_and_renderer_js_byte_unchanged() -> None:
         "must NOT touch the seek/lerp engine (AC10)."
     )
     assert renderer_hash == _RENDERER_JS_SHA256, (
-        "renderer.js changed — the CTPS motion-profile feature (issue #130) "
-        "must NOT touch the render-mode dispatch engine (AC10)."
+        "renderer.js changed — this file is pinned (it carries the #130 render "
+        "engine and the #156 lateral-offset render). If the edit is intentional, "
+        "update _RENDERER_JS_SHA256 in a reviewed change."
     )

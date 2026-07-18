@@ -75,6 +75,7 @@ from tools.path_planner.sim.runtime import (
     NAV_TURN_TOLERANCE_DEG,
     Direction,
     PathTrackerSim,
+    wrap_pm180,
 )
 from tools.path_planner.tests.fixtures import collinear_4node, toy_field_data
 
@@ -345,26 +346,40 @@ def test_tc2_collinear_line_chain_renders_one_trapezoid():
 
 
 def test_subtolerance_alignment_turn_keeps_collinear_run_grouped():
-    """A near-collinear pass-through's tiny alignment turn must NOT split the run.
+    """A near-collinear pass-through must NOT split the run into two ramps.
 
-    Real field nodes are never perfectly axis-aligned, so the sim emits a small
-    ``turn_relative`` (a few hundredths of a degree) to align onto each next
-    edge's exact heading at a pass-through — a turn it already deemed a
-    pass-through (a ``line_pass``, NOT a braked stop) because the delta is below
-    ``NAV_TURN_TOLERANCE_DEG``. The CTPS run-grouper must gate its run-break on
-    the SAME tolerance; a hard ``1e-9`` threshold instead treated that alignment
-    turn as a real turn and split the whole-run trapezoid into two ramps with a
-    dip at the pass-through node (the ``C -> CG2`` two-ramp render on the real
-    field). The perfectly-collinear ``collinear_4node`` fixture cannot surface
-    this — the ``_skewed`` variant nudges node ``C`` off-axis so ``B`` and ``C``
-    emit genuine sub-tolerance alignment turns.
+    Real field nodes are never perfectly axis-aligned, so at a near-collinear
+    pass-through the chassis heading shifts a few hundredths of a degree to align
+    onto the next edge's exact heading. Post-#147 the sim SUPPRESSES that
+    sub-tolerance alignment turn at the source: it emits no ``turn_relative``
+    below ``NAV_TURN_TOLERANCE_DEG`` (matching the firmware), and instead advances
+    the logical heading straight onto the next edge (the one logical-heading rule),
+    so the shift now shows up only as a sub-tolerance change in the follow legs'
+    snapshot poses -- never as a discrete zero-motion turn primitive. The
+    run-grouper therefore receives a turn-free near-collinear chain and must hold
+    ONE cruise trapezoid across both pass-throughs.
+
+    Before #147 the sim (wrongly) emitted the tiny ``turn_relative`` on a ``1e-6``
+    gate, and a hard ``1e-9`` run-break threshold then split the whole-run
+    trapezoid into two ramps with a dip at the pass-through node (the ``C -> CG2``
+    two-ramp render on the real field); the run-grouper's ``NAV_TURN_TOLERANCE_DEG``
+    gate repaired that. #147 removes the micro-turn upstream, so this test now pins
+    the post-#147 behaviour: no sub-tolerance turn is emitted, yet the near-collinear
+    geometry is genuinely present and the run still renders as one trapezoid. The
+    perfectly-collinear ``collinear_4node`` fixture cannot surface this -- the
+    ``_skewed`` variant nudges node ``C`` off-axis so ``B`` and ``C`` are genuine
+    sub-tolerance (not exact) pass-throughs.
     """
     field_data = collinear_4node.make_ctps_field_data_skewed()
 
-    # Guard: the skewed fixture genuinely emits a NON-ZERO, sub-tolerance
-    # ``turn_relative`` at an intermediate node — otherwise this test would pass
-    # trivially (a perfectly-collinear chain has no turn to be transparent to)
-    # and stop guarding the regression.
+    # Guard: the skewed fixture genuinely exercises a NEAR-collinear (not
+    # perfectly axis-aligned) pass-through, otherwise this test would pass
+    # trivially and stop guarding the regression. Post-#147 that no longer shows
+    # up as a discrete ``turn_relative`` -- the sim suppresses the sub-tolerance
+    # micro-turn and carries the heading shift in the follow legs' snapshot poses.
+    # So assert BOTH: (a) #147 emits NO sub-tolerance ``ACT_TURN_REL``, and (b) the
+    # snapshot heading still shifts by a non-zero, sub-tolerance amount across the
+    # run (proving the fixture is near-collinear, not perfectly collinear).
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         graph = build_graph(field_data)
@@ -375,13 +390,23 @@ def test_subtolerance_alignment_turn_keeps_collinear_run_grouped():
     sim = PathTrackerSim(field_data, graph, next_hop, chassis)
     sim.localization.zero_heading_from_current()
     align_turns = []
+    snapshot_headings = []
     for target in ("A", "D"):
-        for primitive, _snap in sim.step_through(target):
+        for primitive, snap in sim.step_through(target):
             if primitive[0] == ACT_TURN_REL:
                 align_turns.append(abs(float(primitive[1])))
-    assert any(0.0 < t < NAV_TURN_TOLERANCE_DEG for t in align_turns), (
-        "skewed fixture emitted no sub-tolerance alignment turn — the regression "
-        f"is not exercised (turns seen: {align_turns})"
+            snapshot_headings.append(float(snap.heading_deg))
+    assert not any(t <= NAV_TURN_TOLERANCE_DEG for t in align_turns), (
+        "#147 should suppress the sub-tolerance alignment turn, but the sim still "
+        f"emitted one (turns seen: {align_turns})"
+    )
+    heading_shifts = [
+        abs(wrap_pm180(later - earlier))
+        for earlier, later in zip(snapshot_headings, snapshot_headings[1:])
+    ]
+    assert any(0.0 < s < NAV_TURN_TOLERANCE_DEG for s in heading_shifts), (
+        "skewed fixture produced no sub-tolerance heading shift — the "
+        f"near-collinear regression is not exercised (shifts seen: {heading_shifts})"
     )
 
     trace = load(

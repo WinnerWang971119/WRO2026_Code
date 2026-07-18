@@ -441,6 +441,25 @@ add_mock_force_includes(test_line_follower_overshoot)
 add_test(NAME line_follower_overshoot COMMAND test_line_follower_overshoot)
 
 # =========================================================================================
+# Test executable #1b — LineFollower lateral-offset setpoint bias (issue #156, TC1..TC4).
+#
+# Same recipe as `test_line_follower_overshoot`: links the REAL `LineFollower.cpp`
+# (`SUT_SOURCES`) against the `mocks/` Drive / WROLineArray / Intersection surface + the mock
+# facade globals (`MOCK_SOURCES`), with `add_mock_force_includes` shadowing the real peripheral
+# headers. Exercises the actual P+D controller so the commanded differential PWM is the observable
+# for the `corr = LINE_KP*(err - offset) + LINE_KD*(err - _lastErr)` bias (AC1/AC2/AC4) and the
+# reverse-hop composition PathTracker passes (AC3, via `WROMath::lineFollowModeToSetpoint`).
+# =========================================================================================
+add_executable(test_line_follower_offset
+    ${TEST_DIR}/test_line_follower_offset.cpp
+    ${SUT_SOURCES}
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_line_follower_offset PRIVATE ${COMMON_INCLUDES})
+add_mock_force_includes(test_line_follower_offset)
+add_test(NAME line_follower_offset COMMAND test_line_follower_offset)
+
+# =========================================================================================
 # Test executables #2/#3 — the FIVE PathTracker mirror tests, re-wired to host-link the
 # REAL `PathTracker.cpp` + `Drive.cpp` (issue #106, closing the last gap in ADR-030).
 #
@@ -492,6 +511,7 @@ add_executable(test_path_tracker_passthrough_on
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -514,6 +534,7 @@ add_executable(test_path_tracker_passthrough_off
     ${TEST_DIR}/test_path_tracker_passthrough.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -539,6 +560,7 @@ add_executable(test_path_tracker_bidirectional_on
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -562,6 +584,7 @@ add_executable(test_path_tracker_bidirectional_off
     ${TEST_DIR}/test_path_tracker_bidirectional.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -588,6 +611,7 @@ add_executable(test_path_tracker_stop_at_line
     ${TEST_DIR}/test_path_tracker_stop_at_line.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -618,6 +642,7 @@ add_executable(test_path_tracker_projection
     ${TEST_DIR}/test_path_tracker_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -647,6 +672,7 @@ add_executable(test_path_tracker_pass_through_projection
     ${TEST_DIR}/test_path_tracker_pass_through_projection.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -672,7 +698,7 @@ add_test(NAME path_tracker_pass_through_projection COMMAND test_path_tracker_pas
 # dirs (THE INVERSION, so the real `Drive.h` / `PathTracker.h` win).
 #
 # It compiles with `PT_PARITY_TRACE` (turns on PathTracker.cpp's in-FSM trace hook +
-# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=2`. It does NOT
+# PathTrackerParityTrace.h's `pt_parity::emit`) and `PARITY_SCHEMA_VERSION=3`. It does NOT
 # define `LINE_BOARD_COUNT`: `ConfigLine.h` has a bare `constexpr uint8_t LINE_BOARD_COUNT = 2;`
 # with no `_DEFAULT` override hook, so `-D` would rewrite that line to `constexpr uint8_t 2 = 2;`
 # and break the build — and it is redundant (REAR/reverse is already reachable at the default 2,
@@ -686,6 +712,7 @@ add_executable(test_path_tracker_parity_dump
     ${TEST_DIR}/test_path_tracker_parity_dump.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -696,7 +723,7 @@ target_include_directories(test_path_tracker_parity_dump PRIVATE
 add_fixture_routes_force_include(test_path_tracker_parity_dump)   # FIRST (ROUTES_H)
 add_path_force_includes(test_path_tracker_parity_dump)            # EventTrace + path_mocks peripherals
 target_compile_definitions(test_path_tracker_parity_dump
-    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=2)
+    PRIVATE PT_PARITY_TRACE PARITY_SCHEMA_VERSION=3)
 
 # =========================================================================================
 # Test executable #3d — stopAtLine arm-window + debounce pure-math (TC11, T16).
@@ -858,6 +885,7 @@ set_tests_properties(tasks_overflow_compile_fail PROPERTIES
 add_executable(test_manipulator
     ${TEST_DIR}/test_manipulator.cpp
     ${SKETCH_DIR}/src/manip/Manipulator.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${MOCK_SOURCES}
 )
 target_include_directories(test_manipulator PRIVATE ${COMMON_INCLUDES})
@@ -1299,6 +1327,7 @@ add_executable(test_return_to_node_dispatch
     ${TEST_DIR}/test_return_to_node_dispatch.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1439,6 +1468,7 @@ add_executable(test_path_tracker_reset_arrival
     ${TEST_DIR}/test_path_tracker_reset_arrival.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1479,6 +1509,7 @@ add_executable(test_path_tracker_reset_arrival_strict
     ${TEST_DIR}/test_path_tracker_reset_arrival_strict.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1578,6 +1609,41 @@ add_test(NAME imu_yaw_sign_zero_compile_fail
 )
 set_tests_properties(imu_yaw_sign_zero_compile_fail PROPERTIES
     PASS_REGULAR_EXPRESSION "IMU_YAW_SIGN must be exactly")
+
+# =========================================================================================
+# Test executable #19b — makeEdge() constexpr canary negative (issue #156, TC-canary / AC8,
+# compile-fail target).
+#
+# Proves the emitted `makeEdge(...)` constexpr canary `static_assert` FIRES with its own message
+# when the factory contract is broken. The canary keeps the ~30 KB `const EDGES` array in flash
+# `.rodata`; a factory not usable in a constant expression demotes it to RAM (blowing the 32 KB
+# SRAM budget), so the build MUST fail loudly. The TU (self-contained, only `<stdint.h>`)
+# reproduces the emitted factory + canary verbatim against a deliberately value-broken body so the
+# canary is a constant `false` and fires WITH its message on both clang and g++ — see the file
+# docblock for why a value break (not a dropped `constexpr`) is used to exercise the message path.
+#
+# Mirrors `test_imu_yaw_sign_zero` EXACTLY: `EXCLUDE_FROM_ALL` + `EXCLUDE_FROM_DEFAULT_BUILD` keep
+# it out of the default build, and NO `add_mock_force_includes(...)` (nor any include dir) so an
+# unrelated header typo cannot mask the intended diagnostic. When `PASS_REGULAR_EXPRESSION` is set,
+# ctest decides pass/fail purely on whether the regex matches the captured build output and IGNORES
+# the exit code — so the test PASSES only when the canary message is emitted. NEVER `WILL_FAIL`
+# (memory `gotcha_ctest_compile_fail_assertion`): `WILL_FAIL` false-PASSes on any non-zero exit and
+# cannot coexist with `PASS_REGULAR_EXPRESSION`.
+# =========================================================================================
+add_executable(test_makeedge_canary_fail
+    ${TEST_DIR}/test_makeedge_canary_fail.cpp
+)
+set_target_properties(test_makeedge_canary_fail PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+
+add_test(NAME makeedge_canary_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_makeedge_canary_fail --config $<CONFIG>
+)
+set_tests_properties(makeedge_canary_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "makeEdge must be constexpr-evaluable")
 
 # =========================================================================================
 # Test executable #20 — shared host-test mock HAL signature conformance (issue #105).
@@ -1867,6 +1933,7 @@ add_executable(test_path_tracker_heading_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1886,6 +1953,7 @@ add_executable(test_path_tracker_heading_reset_junction_on
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -1910,6 +1978,7 @@ add_executable(test_path_tracker_heading_reset_forced_reset
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_reset_passthrough_forced.cpp
@@ -1937,6 +2006,7 @@ add_executable(test_path_tracker_heading_reset_parity
     ${TEST_DIR}/test_path_tracker_heading_reset.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2078,6 +2148,7 @@ add_executable(test_path_tracker_blind_chain
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2097,6 +2168,7 @@ add_executable(test_path_tracker_blind_chain_disabled
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2117,6 +2189,7 @@ add_executable(test_path_tracker_blind_chain_hop_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2137,6 +2210,7 @@ add_executable(test_path_tracker_blind_chain_distance_cap
     ${TEST_DIR}/test_path_tracker_blind_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2170,6 +2244,7 @@ add_executable(test_path_tracker_speed_chain
     ${TEST_DIR}/test_path_tracker_speed_chain.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_speed_chain.cpp
@@ -2203,6 +2278,7 @@ add_executable(test_path_tracker_settle
     ${TEST_DIR}/test_path_tracker_settle.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -2291,6 +2367,7 @@ add_executable(test_line_follower_real_setspeed
     ${TEST_DIR}/line_follower_real_setspeed/test_line_follower_real_setspeed.cpp
     ${SKETCH_DIR}/src/drive/LineFollower.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2342,6 +2419,7 @@ set(DRIVE_DECEL_FLOOR_DIR ${TEST_DIR}/drive_decel_floor)
 add_executable(test_drive_decel_floor
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2354,6 +2432,7 @@ add_test(NAME drive_decel_floor COMMAND test_drive_decel_floor)
 add_executable(test_drive_decel_floor_identity
     ${DRIVE_DECEL_FLOOR_DIR}/test_drive_decel_floor_identity.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${PATH_MOCKS_DIR}/path_mocks.cpp
 )
@@ -2365,3 +2444,146 @@ add_path_force_includes(test_drive_decel_floor_identity)
 target_compile_definitions(test_drive_decel_floor_identity
     PRIVATE PWM_MOVING_MIN_DEFAULT=PWM_MIN_MAGNITUDE)
 add_test(NAME drive_decel_floor_identity COMMAND test_drive_decel_floor_identity)
+
+# =========================================================================================
+# Test executable #30 — TurnPDPolicy unit tests (ADR-068, T5 / TC1–TC8).
+#
+# Pure decision math for the per-tick PD turn executor. `TurnPDPolicy.h` is deliberately
+# self-contained (`<math.h>` + `<stdint.h>` only — zero Arduino / Config.h surface), so this
+# target needs NO mocks and NO MOCK_SOURCES, exactly like `test_turn_sign_policy` /
+# `test_pivot_trim_policy`. Every tunable is injected as a parameter, which is what makes the
+# control law testable in isolation from the Drive FSM.
+# =========================================================================================
+add_executable(test_turn_pd_policy
+    ${TEST_DIR}/test_turn_pd_policy.cpp
+)
+target_include_directories(test_turn_pd_policy PRIVATE ${SKETCH_DIR})
+add_test(NAME turn_pd_policy COMMAND test_turn_pd_policy)
+
+# =========================================================================================
+# Test executable #31 — Turn PD controller stateful integration (ADR-068, T6, TC9-TC17).
+#
+# First stateful test of the turn FSM: links the REAL Drive.cpp + YawSource.cpp per the
+# issue-#106 host-link recipe (SKETCH_DIR FIRST, path_mocks.cpp NOT hal_mocks.cpp, NO
+# force-included hal_mocks/Drive.h) so the dispatched MiniR4.DriveDC PWM is observable
+# end-to-end, post-creep-floor, post-slew-limit — not just the pure TurnPDPolicy.h math
+# (already covered in isolation by test_turn_pd_policy). PathTracker/Localization/routes are
+# NOT linked — Drive.cpp does not touch any of them, so this target stays the minimal
+# three-file link.
+# =========================================================================================
+add_executable(test_turn_pd_integration
+    ${TEST_DIR}/test_turn_pd_integration.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_turn_pd_integration PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_turn_pd_integration)   # EventTrace + path_mocks peripherals — no routes needed.
+add_test(NAME turn_pd_integration COMMAND test_turn_pd_integration)
+
+# ===== Drive-lane hardening test (T2 #150; T3/T4 append TC8/TC9 to this same target) =====
+set(DRIVE_HARDENING_DIR ${TEST_DIR}/drive_hardening)
+add_executable(test_drive_hardening
+    ${DRIVE_HARDENING_DIR}/test_drive_hardening.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_drive_hardening PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR})
+add_path_force_includes(test_drive_hardening)
+add_test(NAME drive_hardening COMMAND test_drive_hardening)
+
+# =========================================================================================
+# Compile-fail probes — ConfigChecks.h junction-knob range + turn-ladder invariant asserts
+# (issue #152 config hardening). TC10a-TC10f each compile the SAME minimal TU
+# (test_config_junction_turn_ladder_fail.cpp) with one -D..._DEFAULT override that trips
+# exactly one static_assert. Builds are EXPECTED to fail; ctest decides pass/fail via
+# PASS_REGULAR_EXPRESSION on a metacharacter-free substring of the intended diagnostic and
+# IGNORES the exit code — so each test passes ONLY when its own assert fires. NEVER WILL_FAIL
+# (gotcha_ctest_compile_fail_assertion). No add_mock_force_includes so a mock typo cannot mask
+# the diagnostic; COMMON_INCLUDES gives the quoted "Config.h" chain + its <Arduino.h> mock.
+# Overrides go through target_compile_definitions, never an in-file #define
+# (gotcha-cross-tu-config-override-compile-def).
+# =========================================================================================
+
+# TC10a — LINE_JUNCTION_LEFT_HI past the 8-channel last valid index (7).
+add_executable(test_config_turn_ladder_fail_tc10a
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10a PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10a PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10a PRIVATE LINE_JUNCTION_LEFT_HI_DEFAULT=8)
+add_test(NAME config_junction_left_hi_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10a --config $<CONFIG>
+)
+set_tests_properties(config_junction_left_hi_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_LEFT_HI must be <= 7")
+
+# TC10b — LINE_JUNCTION_RIGHT_LO below the [1, 7] floor.
+add_executable(test_config_turn_ladder_fail_tc10b
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10b PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10b PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10b PRIVATE LINE_JUNCTION_RIGHT_LO_DEFAULT=0)
+add_test(NAME config_junction_right_lo_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10b --config $<CONFIG>
+)
+set_tests_properties(config_junction_right_lo_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_RIGHT_LO must be between 1 and 7 inclusive")
+
+# TC10c — LINE_JUNCTION_T_MIN_ON past the 8-channel channel-lit ceiling.
+add_executable(test_config_turn_ladder_fail_tc10c
+    ${TEST_DIR}/test_config_junction_turn_ladder_fail.cpp
+)
+set_target_properties(test_config_turn_ladder_fail_tc10c PROPERTIES
+    EXCLUDE_FROM_ALL TRUE
+    EXCLUDE_FROM_DEFAULT_BUILD TRUE
+)
+target_include_directories(test_config_turn_ladder_fail_tc10c PRIVATE ${COMMON_INCLUDES})
+target_compile_definitions(test_config_turn_ladder_fail_tc10c PRIVATE LINE_JUNCTION_T_MIN_ON_DEFAULT=9)
+add_test(NAME config_junction_t_min_on_compile_fail
+    COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}"
+            --target test_config_turn_ladder_fail_tc10c --config $<CONFIG>
+)
+set_tests_properties(config_junction_t_min_on_compile_fail PROPERTIES
+    PASS_REGULAR_EXPRESSION "LINE_JUNCTION_T_MIN_ON must be between 1 and 8 inclusive")
+
+# --- PathTracker lost-line fault escalation test (T7 #146), real-linked ---
+add_executable(test_path_tracker_lost_line
+    ${TEST_DIR}/test_path_tracker_lost_line.cpp
+    ${SKETCH_DIR}/src/mission/PathTracker.cpp
+    ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${SKETCH_DIR}/src/nav/Localization.cpp
+    ${SKETCH_DIR}/src/nav/YawSource.cpp
+    ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
+    ${PATH_MOCKS_DIR}/path_mocks.cpp
+)
+target_include_directories(test_path_tracker_lost_line PRIVATE
+    ${SKETCH_DIR} ${HAL_MOCKS_DIR} ${PATH_MOCKS_DIR} ${TEST_DIR} ${FIXTURE_ROUTES_DIR})
+target_compile_definitions(test_path_tracker_lost_line PRIVATE HOP_SETTLE_MS_DEFAULT=0)
+add_fixture_routes_force_include(test_path_tracker_lost_line)
+add_path_force_includes(test_path_tracker_lost_line)
+add_test(NAME path_tracker_lost_line COMMAND test_path_tracker_lost_line)
+
+# --- EncoderSource lower-MCU encoder / task-done adapter test (T5 #141), real-linked ---
+add_executable(test_encoder_source
+    ${TEST_DIR}/test_encoder_source.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
+    ${MOCK_SOURCES}
+)
+target_include_directories(test_encoder_source PRIVATE ${COMMON_INCLUDES})
+add_test(NAME encoder_source COMMAND test_encoder_source)

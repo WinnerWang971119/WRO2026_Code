@@ -181,6 +181,17 @@ void setup()
     MiniR4.begin();
 
     Serial.begin(115200);
+
+    // Issue #152: self-silencing boot warning — prints once, only when the bench
+    // mission re-arm switch (Config::MISSION_ALLOW_REARM, ConfigMission.h) is left on.
+    // It ships `true` for bench convenience; this is the loud reminder to flip it to
+    // `false` before the competition run so a stray BTN_UP cannot restart the route
+    // mid-field. When the constant is already `false` this block prints nothing.
+    if (Config::MISSION_ALLOW_REARM)
+    {
+        Serial.println(F("[WARN] MISSION_ALLOW_REARM=true (bench re-arm ON) — flip to false before competition!"));
+    }
+
     MiniR4.PWR.setBattCell(Config::BATT_CELLS);
 
     // Boot-time battery gate. getBattVoltage() returns the measured pack voltage,

@@ -27,7 +27,7 @@ namespace Config
     constexpr float LINE_KD = 1.4f;
 
     // ---------------------------------------------------------------------------------------
-    // Rear-board (reverse follow) gains — ADR-066.
+    // Rear-board (reverse follow) gains — ADR-070.
     //
     // The front line sensor sits `LINE_SENSOR_AXLE_OFFSET_CM` (12.02 cm) ahead of the axle;
     // the rear sits `LINE_SENSOR_AXLE_OFFSET_REAR_CM` (7.68 cm). That distance is the
@@ -62,6 +62,17 @@ namespace Config
 
     /** @brief Maximum left/right correction added to / subtracted from cruise speed. */
     constexpr int16_t LINE_MAX_CORR = 20;
+
+    /**
+     * @brief Signed lateral-offset setpoint bias for LINE follow, in sensor-centroid index units.
+     *
+     * Shifts the P-term setpoint so the line settles off-center under the array, riding the
+     * chassis LEFT (+) or RIGHT (-) of the line. Mapped from the per-edge LineFollowMode by
+     * PathTracker via WROMath::lineFollowModeToSetpoint. NOT centimeters — error units don't map
+     * to a fixed distance without sensor pitch/height/line-width; measured on the mat.
+     * @note TODO: bench-tune. LEFT = +, RIGHT = -.
+     */
+    constexpr float LINE_FOLLOW_OFFSET_ERROR = 1.5f;
 
     // ---------------------------------------------------------------------------------------
     // 8-channel custom line sensor (WROLineArray)
@@ -185,9 +196,16 @@ namespace Config
      * marker. Lower values risk false triggers on debris or sensor variation;
      * higher values may miss junctions under partial occlusion.
      *
+     * @note **Compile-time override:** guarded by `#ifndef LINE_JUNCTION_T_MIN_ON_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_JUNCTION_T_MIN_ON_DEFAULT=...`
+     *       without editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT`
+     *       (`ConfigNav.h`). Range-guarded in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real mat after per-channel calibration is complete.
      */
-    constexpr uint8_t LINE_JUNCTION_T_MIN_ON = 7;
+#ifndef LINE_JUNCTION_T_MIN_ON_DEFAULT
+#define LINE_JUNCTION_T_MIN_ON_DEFAULT 7
+#endif
+    constexpr uint8_t LINE_JUNCTION_T_MIN_ON = LINE_JUNCTION_T_MIN_ON_DEFAULT;
 
     /**
      * @brief Upper inclusive channel index for the LEFT junction predicate.
@@ -196,9 +214,16 @@ namespace Config
      * AND all channels ch[LINE_JUNCTION_LEFT_HI+1..7] are OFF-LINE. Adjust to match
      * the physical width of the left-branch marker relative to the sensor array.
      *
+     * @note **Compile-time override:** guarded by `#ifndef LINE_JUNCTION_LEFT_HI_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_JUNCTION_LEFT_HI_DEFAULT=...`
+     *       without editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT`
+     *       (`ConfigNav.h`). Range-guarded in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real mat.
      */
-    constexpr uint8_t LINE_JUNCTION_LEFT_HI = 5;
+#ifndef LINE_JUNCTION_LEFT_HI_DEFAULT
+#define LINE_JUNCTION_LEFT_HI_DEFAULT 5
+#endif
+    constexpr uint8_t LINE_JUNCTION_LEFT_HI = LINE_JUNCTION_LEFT_HI_DEFAULT;
 
     /**
      * @brief Lower inclusive channel index for the RIGHT junction predicate.
@@ -207,9 +232,16 @@ namespace Config
      * AND all channels ch[0..LINE_JUNCTION_RIGHT_LO-1] are OFF-LINE. Adjust to match
      * the physical width of the right-branch marker relative to the sensor array.
      *
+     * @note **Compile-time override:** guarded by `#ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT`
+     *       so a host test can pin it target-wide via `-DLINE_JUNCTION_RIGHT_LO_DEFAULT=...`
+     *       without editing this file — same idiom as `HOP_SETTLE_MS_DEFAULT`
+     *       (`ConfigNav.h`). Range-guarded in `ConfigChecks.h` (issue #152).
      * @note TODO: tune on real mat.
      */
-    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = 2;
+#ifndef LINE_JUNCTION_RIGHT_LO_DEFAULT
+#define LINE_JUNCTION_RIGHT_LO_DEFAULT 2
+#endif
+    constexpr uint8_t LINE_JUNCTION_RIGHT_LO = LINE_JUNCTION_RIGHT_LO_DEFAULT;
 
     /**
      * @brief On-board LED brightness level applied by WROLineArray::begin() via the
@@ -272,12 +304,17 @@ namespace Config
      * @brief Deliberate lost-line creep PWM used by the CRAWL recovery branch, in [-100, 100].
      *
      * Intentionally decoupled from the active SpeedPreset so that changing cruise speed never
-     * silently alters the CRAWL behavior. The original design intent was ~half of NORMAL cruise
-     * (SPEED_NORMAL = 50 → 25). Choosing 25 directly avoids the cruise/2-vs-PWM_MIN_MAGNITUDE
-     * floor ambiguity: with SPEED_SLOW = 30, cruise/2 = 15 falls below PWM_MIN_MAGNITUDE = 20
-     * and would be snapped up to 20 (67% of SLOW cruise), not the intended 50%. This constant
-     * sidesteps that by stating the creep PWM explicitly.
+     * silently alters the CRAWL behavior. At 60 the creep sits just below the NORMAL cruise of 70
+     * and comfortably above the `PWM_MIN_MAGNITUDE = 35` deadband floor — a deliberately chosen
+     * absolute PWM, not a fraction of cruise. Deriving it as e.g. `SPEED_NORMAL / 2` at compile
+     * time would re-introduce exactly the coupling this constant exists to avoid, and could land
+     * below `PWM_MIN_MAGNITUDE` for a slower active motor profile — silently snapped UP to the
+     * floor by `deadbandSnap`. Stating the creep PWM explicitly sidesteps both problems.
      *
+     * @note Current values (`ConfigDrive.h` / `ConfigGlobal.h`): SPEED_NORMAL = 70,
+     *       SPEED_SLOW = 60, PWM_MIN_MAGNITUDE = 35 — 60 sits just below NORMAL cruise and
+     *       comfortably above the floor for both presets today. Re-derive this note if any of
+     *       those three constants are retuned.
      * @note Must satisfy PWM_MIN_MAGNITUDE ≤ CRAWL_PWM ≤ PWM_MAX so the value is never
      *       silently floored or capped by deadbandSnap. The static_assert below enforces this.
      */

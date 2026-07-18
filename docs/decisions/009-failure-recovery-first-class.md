@@ -25,6 +25,10 @@ The bound matters as much as the recovery itself. An unbounded sweep or unbounde
 - Each recovery has a hard timeout in `Config`. On timeout, escalate to the scheduler.
 - Recoveries do not retry indefinitely — at most one retry, then yield.
 
+## Status note (2026-07, issue #146)
+
+The lost-line branch shipped so far is a **bounded fault ESCALATION, not the sweep/reacquire/resume recovery** this ADR describes. `PathTracker` polls `LineFollower.isLineLost()` while line-following (`State::LINE_FOLLOW` only) and, after `Config::LINE_LOST_FAULT_MS` of continuous loss outside a deliberate pass-through dead-reckon, latches `PathTrackerClass::Fault::LINE_LOST` (the scheduler-visible escalation this ADR calls for). It does **not** pause-sweep-resume: the "sweep slowly left/right, resume if reacquired" recovery in rule 1 above stays **deferred**. Wire the sweep/resume in front of the escalation when it lands; the fault is the bounded fallback for a loss the sweep cannot recover.
+
 ## Trigger to revisit
 
 A new failure mode that turns up on the practice field — e.g., the chassis lifts off the floor on an obstacle and the encoders read garbage. Add a fourth named recovery rather than overloading an existing one.

@@ -113,6 +113,7 @@ from tools.path_planner.sim.runtime import (
 from tools.path_planner.ctps.config import (
     ARC_STEP_DEG,
     KEYFRAME_COUNT_CEILING,
+    LINE_FOLLOW_OFFSET_DISPLAY_CM,
     MANIP_NOMINAL_S,
     ROBOT_FRAME_CM,
 )
@@ -275,6 +276,19 @@ class Track:
         field). The dense arc keyframes between ``t0`` and ``t1`` already trace
         the swing through the player's lerp; this segment just tells the
         ``wheel-arc`` render mode WHEN a pivot is active and WHERE its wheel is.
+    :param lateral_offsets: Optional visualization-only lateral hug-side overlay
+        segments (issue #156), one per biased ``lineFollowDist`` leg the trace
+        renders, in chronological (``t0``-increasing) order. Each entry is
+        ``{"t0": float, "t1": float, "offset_cm": float}`` — the span the follow
+        is biased and the signed on-screen lateral nudge (cm; ``+`` = robot-left,
+        the LEFT bias), mapped from the recorded ``follow_offset`` via
+        :data:`~tools.path_planner.ctps.config.LINE_FOLLOW_OFFSET_DISPLAY_CM`. The
+        player nudges the chassis marker perpendicular to its heading by
+        ``offset_cm`` while the playhead is inside a span — a pure DRAW-time
+        overlay (ADR-054 pivot-arc precedent): the keyframes stay on the
+        centerline and the parity-locked :class:`LocalizationSim` pose is never
+        touched. Empty (and omitted from :meth:`to_dict`) for every centered /
+        MIDDLE trace, so ``schema_version`` stays ``1`` (additive optional field).
     :param mosaic: The trace's top-level ``mosaic`` echo
         (:class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`), carried
         through UNCHANGED from :attr:`Trace.mosaic` — a non-geometry,
@@ -293,6 +307,7 @@ class Track:
     keyframes: List[Dict[str, Any]]
     events: List[Dict[str, Any]]
     pivots: List[Dict[str, Any]] = dc_field(default_factory=list)
+    lateral_offsets: List[Dict[str, Any]] = dc_field(default_factory=list)
     mosaic: Optional[MosaicTrace] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -304,10 +319,13 @@ class Track:
 
         The ``"pivots"`` key is included **only when non-empty**: a pivot-free
         trace emits exactly the pre-#55 dict (same keys, same order), so its
-        Track JSON is byte-identical to before this change (AC6). Likewise
-        ``"mosaic"`` is included **only when set**: a mosaic-free trace emits
-        exactly the pre-mosaic dict, so its Track JSON stays byte-identical
-        (AC12). When present, ``"mosaic"`` is the plain field-value dict
+        Track JSON is byte-identical to before this change (AC6). The
+        ``"lateral_offsets"`` key (issue #156) is likewise included **only when
+        non-empty**: a centered / MIDDLE trace emits no such key and stays
+        byte-identical. Likewise ``"mosaic"`` is included **only when set**: a
+        mosaic-free trace emits exactly the pre-mosaic dict, so its Track JSON
+        stays byte-identical (AC12). When present, ``"mosaic"`` is the plain
+        field-value dict
         (``{"cells", "seed", "geom_hash", "injected"}``, ``seed`` omitted when
         unset) — the same shape :class:`~tools.path_planner.ctps.trace_loader.MosaicTrace`
         carries, JSON-serialisable via ``dataclasses.asdict``-equivalent
@@ -327,6 +345,8 @@ class Track:
         }
         if self.pivots:
             result["pivots"] = self.pivots
+        if self.lateral_offsets:
+            result["lateral_offsets"] = self.lateral_offsets
         if self.mosaic is not None:
             mosaic_dict: Dict[str, Any] = {
                 "cells": list(self.mosaic.cells),
@@ -412,10 +432,13 @@ _RESIDUAL_DRIFT_EPS_CM: float = 1e-6
 
 #: Goto-hop primitive tags that render as a LINE-follow advance — cruise
 #: defaults to ``ConfigLine::CRUISE_SPEED`` (the follow-phase speed). Covers the
-#: forward follows, both pass-through variants, the REAR line/projection
-#: follows, and the line-backed return seek. (``ACT_LINE_OVERSHOOT`` /
-#: ``ACT_LINE_PASS`` are the roll-onto-node step handled with the distance-gated
-#: stop family below.)
+#: forward follows, both pass-through variants, and the REAR line/projection
+#: follows. (``ACT_LINE_OVERSHOOT`` / ``ACT_LINE_PASS`` are the roll-onto-node
+#: step handled with the distance-gated stop family below. ``ACT_RETURN_STOP_AT_LINE``
+#: — the line-backed return seek — is deliberately EXCLUDED: issue #157 renders it
+#: at ``PIPELINE_CONFIG.speed`` via :data:`_RETURN_DRIVE_TAGS` instead, matching
+#: firmware's ``_dispatchReturnMoveAfterTurn`` rather than the un-tiered line
+#: cruise.)
 _LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
     {
         ACT_FOLLOW_INT,
@@ -424,7 +447,6 @@ _LINE_FOLLOW_TAGS: frozenset[str] = frozenset(
         ACT_LINE_REVERSE,
         ACT_PROJECTION_REVERSE,
         ACT_PROJECTION_REVERSE_PASS,
-        ACT_RETURN_STOP_AT_LINE,
     }
 )
 
@@ -500,14 +522,25 @@ _BLIND_TAGS: frozenset[str] = frozenset(
 #: :class:`SpeedTier` (ADR-064, issue #97) — the forward / reverse blind
 #: dead-reckon nav hops and the forward / rear line seeks. These are the ONLY
 #: tags for which a LONE (non-chain) hop's cruise is tier-resolved from the edge
-#: (:func:`_primitive_drive_speed`'s ``speed_tier``). Deliberately EXCLUDES:
+#: (:func:`_primitive_drive_speed`'s ``speed_tier``). Deliberately EXCLUDES three
+#: families, each rendered a different way (issue #157):
 #:   * ``ACT_LINE_OVERSHOOT`` — a LINE-family roll-past; the CTPS models the LINE
 #:     follow itself at ``ConfigLine::CRUISE_SPEED`` (un-tiered, a pre-existing sim
 #:     limitation), so tier-adjusting only the overshoot would desync it from its
 #:     own follow leg. (Both stay at the ``SPEED_NORMAL``-valued line cruise.)
-#:   * ``ACT_RETURN_FORWARD`` / ``ACT_WALL_DEPART`` — return / recovery moves the
-#:     firmware drives at ``PIPELINE_CONFIG.speed`` (no ``EdgeInfo`` to resolve),
-#:     not a per-edge tier.
+#:   * ``ACT_RETURN_FORWARD`` / ``ACT_RETURN_STOP_AT_LINE`` — the return-to-node
+#:     prologue's dead-reckon / line-seek moves (:data:`_RETURN_DRIVE_TAGS`). The
+#:     firmware's ``_dispatchReturnMoveAfterTurn`` drives BOTH at
+#:     ``PIPELINE_CONFIG.speed`` — the MISSION-WIDE tier, since a synthetic return
+#:     hop has no ``EdgeInfo`` to per-edge-resolve. :func:`_primitive_drive_speed`
+#:     intercepts these directly via ``pipeline_cfg.speed``, bypassing this
+#:     per-edge set entirely.
+#:   * ``ACT_WALL_DEPART`` — the wall-departure recovery move. Unlike the return
+#:     moves above, the firmware drives this at the Drive ``NORMAL`` default with
+#:     NO ``.setPower`` call at all — neither per-edge NOR
+#:     ``PIPELINE_CONFIG.speed``. CTPS mirrors that by leaving it out of every
+#:     speed set: it falls through :func:`_primitive_drive_speed` to the
+#:     ``SPEED_NORMAL`` fallback, unaffected by ``pipeline_cfg``.
 #: A chained hop never uses this path (it consumes the recorded per-hop suffix via
 #: ``_resolve_blind_run_profile``), so only cold-start lone hops / seeks resolve here.
 _PER_EDGE_SPEED_TAGS: frozenset[str] = frozenset(
@@ -596,7 +629,7 @@ def _blind_cruise_pwm(cfg, speed_tier: Optional[SpeedTier]) -> int:
 
 
 def _primitive_drive_speed(
-    tag: str, speed_tier: Optional[SpeedTier] = None
+    tag: str, pipeline_cfg: PipelineConfig, speed_tier: Optional[SpeedTier] = None
 ) -> Tuple[int, int, int, bool]:
     """Resolve a goto-hop primitive's effective ``(cruise, start, end, profiled)``.
 
@@ -604,6 +637,16 @@ def _primitive_drive_speed(
     its cruise from the parsed firmware Config (plan Decisions, the per-kind
     cruise table):
 
+    * the return-to-node prologue (:data:`_RETURN_DRIVE_TAGS` —
+      ``ACT_RETURN_FORWARD`` / ``ACT_RETURN_STOP_AT_LINE``) -> ``pipeline_cfg``'s
+      MISSION-WIDE :class:`SpeedTier` PWM (issue #157 — matches firmware
+      ``_dispatchReturnMoveAfterTurn``'s ``PIPELINE_CONFIG.speed`` dispatch; a
+      synthetic return hop has no ``EdgeInfo`` to per-edge-resolve), ramping
+      cruise -> ``PWM_MIN_MAGNITUDE`` then braking (``end == 0``).
+      ``ACT_WALL_DEPART`` is deliberately NOT in this family — the firmware
+      drives it at the Drive ``NORMAL`` default with no ``.setPower`` call at
+      all, so it falls through to the generic ``SPEED_NORMAL`` branch below,
+      unaffected by ``pipeline_cfg``.
     * collinear PASS (:data:`_PASS_TAGS`) -> the follow cruise
       (``ConfigLine::CRUISE_SPEED``) held THROUGH the node: ``end == cruise``,
       NO brake. A pass-through is a non-braking boundary (the firmware holds
@@ -624,7 +667,9 @@ def _primitive_drive_speed(
       :class:`SpeedTier` PWM (``speed_tier``; ADR-064 — the firmware blind cruise
       ``presetToPwm(speedTierToPreset(_resolveSpeed(edge)))``) T-shape.
       ``NORMAL`` / absent stays the ``SPEED_NORMAL`` default (70), byte-identical
-      to the pre-ADR-064 render.
+      to the pre-ADR-064 render. (``ACT_RETURN_FORWARD`` is nominally a member of
+      :data:`_BLIND_TAGS` too, but the return-tag branch above intercepts it
+      first, so it never reaches this generic per-edge-tier path.)
 
     ``start`` is the sign-by-direction ``TSHAPE_START_SPEED`` seed (the sign of
     ``cruise`` carries the drive direction into the ramp); ``end`` is 0 (brake to
@@ -643,6 +688,10 @@ def _primitive_drive_speed(
     forward — the visible ramp shape is identical either way.
 
     :param tag: the primitive action tag (``primitive[0]``).
+    :param pipeline_cfg: the field-sourced :class:`PipelineConfig` resolved ONCE
+        in :func:`build` (``PipelineConfig.from_field_data``). Consumed ONLY by
+        the return-to-node branch (:data:`_RETURN_DRIVE_TAGS`); every other
+        branch — including ``ACT_WALL_DEPART`` — is unaffected by it.
     :param speed_tier: this hop edge's resolved :class:`SpeedTier` (ADR-064), or
         ``None`` when no per-edge tier applies. Consumed ONLY by the BLIND /
         stop-gated seek branches (the two families that carried the hardcoded
@@ -654,6 +703,18 @@ def _primitive_drive_speed(
     cfg = default_config()
     start = int(cfg.start_speed)
 
+    if tag in _RETURN_DRIVE_TAGS:
+        # Return-to-node prologue (issue #157): the firmware's
+        # _dispatchReturnMoveAfterTurn drives BOTH the dead-reckon
+        # (ACT_RETURN_FORWARD) and line-seek (ACT_RETURN_STOP_AT_LINE) return
+        # moves at PIPELINE_CONFIG.speed — the mission-wide tier, not a
+        # per-edge resolution (a synthetic return hop has no EdgeInfo).
+        # ACT_WALL_DEPART is intentionally excluded from _RETURN_DRIVE_TAGS:
+        # the firmware drives it at the Drive NORMAL default with no
+        # .setPower call, so it falls through to the generic SPEED_NORMAL
+        # path below instead.
+        cruise = _blind_cruise_pwm(cfg, pipeline_cfg.speed)
+        return cruise, start, 0, True
     if tag == ACT_WALL_STOP:
         # Constant-push wall seek: a flat crawl at WALL_STOP_PUSH_PWM, no ramp.
         return int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), int(cfg.wall_push_pwm), False
@@ -1154,14 +1215,14 @@ def _build_pivot_arc(
     where ``Rot(a)*(dx, dy) = (dx*cos a - dy*sin a, dx*sin a + dy*cos a)``.
 
     The arc GEOMETRY (``N`` sub-keyframe centres + headings) is unchanged from
-    the pre-#130 builder; only the TIMING now comes from the firmware turn
-    profile. The ``N`` samples are re-timed by
-    :func:`tools.path_planner.ctps.profile.sample_turn` (the ``arc_keyframes``
-    re-time path): the whole arc occupies ``resolve_turn_profile(theta).duration_s()``
-    at the snapped constant rate, its sub-keyframes pinned to ``t0 + k/N *
-    duration`` (uniform grid, never accumulated) so the running clock stays
-    exactly monotonic. With the current Config both turn stages snap to
-    ``|PWM| = 50`` -> a constant-rate arc (AC3).
+    the pre-#130 builder; only the TIMING now comes from the CTPS turn profile
+    (ADR-068 T8: display-only, not a physics sim). The ``N`` samples are
+    re-timed by :func:`tools.path_planner.ctps.profile.sample_turn` (the
+    ``arc_keyframes`` re-time path): the whole arc occupies
+    ``resolve_turn_profile(theta).duration_s()`` seconds at a SINGLE constant
+    rate, with the final sub-keyframe alone also carrying the fixed nominal
+    settle-allowance tail — so the running clock stays monotonic
+    non-decreasing.
 
     The first sample is ``k = 1`` (NOT ``k = 0``): the arc-start pose is the
     already-present previous keyframe at ``(x0, y0, h0)``, so these ``N`` samples
@@ -1268,6 +1329,11 @@ def _drive_label(cmd: Command) -> str:
             label += f" heading={cmd.heading}"
         if cmd.reverse:
             label += " reverse"
+        # Line-follow lateral hug bias (issue #156) — shown only when the follow
+        # recorded a non-zero setLineFollowOffset (lineFollowDist only), so a
+        # centered / MIDDLE follow keeps its exact base label.
+        if cmd.follow_offset:
+            label += f" offset={cmd.follow_offset}"
         return label
     if method == "turnDeg":
         return f"turnDeg({cmd.deg})"
@@ -1381,6 +1447,14 @@ def build(trace: Trace, field_data) -> Track:
     # every pivot-free trace, so a ``PIVOT_TURNS``-empty field is byte-identical
     # to before this change (AC6).
     pivots: List[Dict[str, Any]] = []
+    # Optional visualization-only lateral hug-side overlay segments (issue #156).
+    # Appended in chronological (t0-increasing) order as each biased
+    # ``lineFollowDist`` leg renders; stays empty — and the ``lateral_offsets``
+    # key is omitted from the Track — for every centered / MIDDLE trace, so a
+    # bias-free trace's Track JSON is byte-identical. The nudge is a DRAW-time
+    # overlay (ADR-054 pivot-arc precedent): the keyframes below stay on the
+    # centerline and the sim / LocalizationSim pose is never touched.
+    lateral_offsets: List[Dict[str, Any]] = []
     # Chassis track width (cm), parsed LAZILY from ConfigDrive.h on the FIRST
     # detected pivot only. A pivot-free build never reads the firmware header
     # (issue #44 fail-loud parse), preserving the byte-identical guarantee.
@@ -2087,7 +2161,7 @@ def build(trace: Trace, field_data) -> Track:
                                     snap.x_cm,
                                     snap.y_cm,
                                     snap.heading_deg,
-                                    _primitive_drive_speed(tag),
+                                    _primitive_drive_speed(tag, pipeline_cfg),
                                     braked,
                                     chain_speeds=(start_pwm, end_pwm),
                                 )
@@ -2157,7 +2231,7 @@ def build(trace: Trace, field_data) -> Track:
                                     snap.x_cm,
                                     snap.y_cm,
                                     snap.heading_deg,
-                                    _primitive_drive_speed(tag, hop_speed_tier),
+                                    _primitive_drive_speed(tag, pipeline_cfg, hop_speed_tier),
                                     braked,
                                     rear_led=tag in _REAR_LED_STOP_TAGS,
                                 )
@@ -2435,6 +2509,36 @@ def build(trace: Trace, field_data) -> Track:
                         wrap_pm180(float(cmd.deg) - chassis.heading_deg)
                     )
             # else: stop / unknown -> no geometry change, nothing to integrate.
+
+            # Visualization-only lateral hug-side nudge (issue #156, ADR-054
+            # chassis-nudge precedent): a biased ``lineFollowDist`` carries the
+            # signed LineFollower offset (``follow_offset``, centroid-index units)
+            # recorded by the ctps_mocks setLineFollowOffset seam. Register the
+            # [event_t, t] follow span with an on-screen lateral cm mapped through
+            # the CTPS-layer display constant so the renderer draws the chassis
+            # marker biased to that side for the whole leg. This is a DRAW-time
+            # overlay ONLY — the keyframes above already integrated on the shared
+            # sim (centerline), and nothing here writes an x/y back to the sim /
+            # LocalizationSim (the pivot-arc invariant). Guarded on a real advance
+            # (``t > event_t``) and a set, non-zero offset, so a centered / MIDDLE
+            # follow — or any non-lineFollowDist move — appends nothing and stays
+            # byte-identical.
+            if (
+                method == "lineFollowDist"
+                and cmd.follow_offset is not None
+                and cmd.follow_offset != 0.0
+                and t > event_t
+            ):
+                lateral_offsets.append(
+                    {
+                        "t0": event_t,
+                        "t1": t,
+                        "offset_cm": (
+                            LINE_FOLLOW_OFFSET_DISPLAY_CM * float(cmd.follow_offset)
+                        ),
+                    }
+                )
+
             events.append(
                 {"t": event_t, "type": "drive", "label": _drive_label(cmd)}
             )
@@ -2586,5 +2690,6 @@ def build(trace: Trace, field_data) -> Track:
         keyframes=keyframes,
         events=events,
         pivots=pivots,
+        lateral_offsets=lateral_offsets,
         mosaic=trace.mosaic,
     )

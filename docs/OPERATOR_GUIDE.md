@@ -665,9 +665,12 @@ The ones you'll change most:
 
 ### Mission & Tasks (`ConfigMission.h`)
 - `MAX_MISSION_STEPS = 64`, `MAX_TASKS = 16`, `MAX_TASK_ARG_BYTES = 16`.
-- `MISSION_ALLOW_REARM = false` — production arms once per power cycle. Bench: build with
-  `-DMISSION_ALLOW_REARM_DEFAULT=true` to re-fire with a fresh BTN_UP after the mission
-  goes idle.
+- `MISSION_ALLOW_REARM = true` — ships `true` for bench convenience (a fresh BTN_UP
+  re-fires the mission once it goes idle, no power cycle needed between test runs).
+  **MUST be flipped to `false` before the competition run** (edit the literal in
+  `ConfigMission.h` or build with `-DMISSION_ALLOW_REARM_DEFAULT=false`) so a stray
+  BTN_UP cannot restart the route mid-field. A self-silencing boot `[WARN]` banner
+  prints once at startup whenever this is `true`, as a reminder.
 - Fault beep sequence (`MISSION_FAULT_BEEPS = 5`, `MISSION_FAULT_BEEP_HZ = 1000`, …).
 
 ### Manipulator (`ConfigManipulator.h`)

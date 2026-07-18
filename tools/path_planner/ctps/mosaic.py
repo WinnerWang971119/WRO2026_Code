@@ -13,8 +13,9 @@ downstream consumer reads from here and never re-hardcodes any of it:
 * :mod:`tools.path_planner.ctps.layout` (T2) reuses the validators (wrapping the
   raised :class:`ValueError` as a ``LayoutError`` with a key path) and the
   colour vocabulary — it never re-implements a mosaic rule.
-* :mod:`tools.path_planner.ctps.trace_loader` (T8) whitelists the trace mosaic
-  block against :data:`COLOR_NAMES`.
+* :mod:`tools.path_planner.ctps.trace_loader` (T8, whitelist hardened T17)
+  whitelists the trace mosaic block against :data:`COLOR_NAMES` **plus**
+  :data:`AIR_NAME` — an unknown cell name rejects the whole 12-cell block.
 * The orchestrator + ``player_html`` (T10) roll via :func:`roll_mosaic`, resolve
   cells via :func:`resolve_cells`, and fingerprint via :func:`geom_hash`.
 * ``test_ctps_color_enum_parity`` (T3) regex-parses ``enum class Color`` out of

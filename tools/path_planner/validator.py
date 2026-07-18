@@ -132,6 +132,14 @@ WALL_PIVOT_CLEARANCE_CM = 14.0
 # top-level list.
 _OBSOLETE_EDGE_KEYS = ("pivot", "pre_turn_mode")
 
+# Wrap-aware equality floor for the swapped-pair heading-clobber guard
+# (issue #151, :func:`_validate_edges_field`). Two headings that differ by
+# no more than this many degrees (after wrapping across the 0/360 seam) are
+# treated as the same physical direction -- floating-point noise from a
+# hand-typed value or an ``atan2``-derived one, never a real authoring
+# conflict.
+_HEADING_CLOBBER_EPS_DEG = 1e-6
+
 
 class FieldDataError(Exception):
     """Raised by :func:`validate` when the field-data module is malformed.
@@ -160,6 +168,19 @@ def _is_number(value: Any) -> bool:
 def _segment_key(a: str, b: str) -> frozenset:
     """Order-independent identity for an undirected segment."""
     return frozenset((a, b))
+
+
+def _heading_delta_deg(a: float, b: float) -> float:
+    """Return the smallest wrap-aware absolute difference between two headings.
+
+    Both inputs are degrees; the result is in ``[0, 180]``. A naive
+    ``abs(a - b)`` treats ``359.9999999`` and ``0.0`` as ~360 degrees apart
+    even though they are the same physical direction to within float noise --
+    this wraps the difference across the 0/360 seam first so callers get the
+    true angular distance.
+    """
+    diff = abs(a - b) % 360.0
+    return min(diff, 360.0 - diff)
 
 
 # -- per-turn pivot validation (issue #44 per-turn model, T5) -----------------
@@ -912,12 +933,11 @@ def _validate_edges_field(field_data) -> None:
     PIPELINE_CONFIG.speed"). An unknown name is rejected with a precise
     diagnostic.
 
-    ``mode`` is type-switched. On a LINE edge it takes the Python-only
-    :class:`LineFollowMode` vocabulary -- only ``MIDDLE`` is authorable this PR
-    (it validates and emits nothing), while ``LEFT`` / ``RIGHT`` are rejected
-    until LineFollower offset-follow lands (issue #156). On a BLIND edge it
-    takes :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto the
-    ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT`` (== absence); a
+    ``mode`` is type-switched. On a LINE edge it takes the
+    :class:`LineFollowMode` vocabulary minus ``DEFAULT`` (== absence) --
+    ``MIDDLE``, ``LEFT``, and ``RIGHT`` are all authorable (issue #156). On a
+    BLIND edge it takes :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto
+    the ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT`` (== absence); a
     ``STOP_AT_LINE`` mode is rejected with a pointer to ``stop_at_line: on``.
 
     An anti-ambiguity cross-check rejects an entry whose unordered pair
@@ -988,6 +1008,12 @@ def _validate_edges_field(field_data) -> None:
         member.name
         for member in BlindMode
         if member not in (BlindMode.DEFAULT, BlindMode.STOP_AT_LINE)
+    ]
+    # The LINE ``mode`` vocabulary is LineFollowMode minus its one
+    # unauthorable member: DEFAULT (== absence / inherit). Computed once for
+    # the per-entry reject diagnostics below.
+    valid_line_mode_tags = [
+        member.name for member in LineFollowMode if member is not LineFollowMode.DEFAULT
     ]
     nodes = getattr(field_data, "NODES", {})
     node_types = getattr(field_data, "NODE_TYPES", {})
@@ -1218,16 +1244,17 @@ def _validate_edges_field(field_data) -> None:
 
         # Optional: mode (type-switched) ----------------------------------
         # LINE and BLIND edges carry DIFFERENT ``mode`` vocabularies:
-        #   * LINE  -> :class:`LineFollowMode`. Only ``MIDDLE`` is authorable
-        #     this PR (it validates and emits nothing -- there is no EdgeInfo
-        #     field). ``LEFT`` / ``RIGHT`` are reserved until LineFollower
-        #     offset-follow lands (issue #156).
+        #   * LINE  -> :class:`LineFollowMode` minus ``DEFAULT``
+        #     (== absence) -- ``MIDDLE``, ``LEFT``, ``RIGHT`` (issue #156).
         #   * BLIND -> :class:`BlindMode` minus ``STOP_AT_LINE`` (folded onto
         #     the ``stop_at_line`` axis, ADR-064) and minus ``DEFAULT``
         #     (== absence).
         # Each accepts the matching enum INSTANCE or the bare member NAME; a
         # wrong-type tag (a BlindMode tag on a LINE edge or vice versa) is a
-        # category error naming the valid tags for the derived edge type.
+        # category error naming the valid tags for the derived edge type. The
+        # DEFAULT sentinel is rejected on both axes -- mirroring the ``speed``
+        # DEFAULT guard above -- because DEFAULT means "inherit", which is
+        # what absence already encodes.
         if "mode" in entry:
             mode = entry["mode"]
             if edge_type == EDGE_LINE:
@@ -1238,23 +1265,24 @@ def _validate_edges_field(field_data) -> None:
                 else:
                     raise FieldDataError(
                         f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes a "
-                        "LineFollowMode tag (currently only 'MIDDLE'); got a "
-                        "value that is neither a LineFollowMode instance nor a "
-                        "member-name string"
+                        f"LineFollowMode tag (one of {valid_line_mode_tags}); "
+                        "got a value that is neither a LineFollowMode "
+                        "instance nor a member-name string"
                     )
-                # TODO(issue #156): remove this LEFT/RIGHT guard when the
-                # LineFollower lateral offset-follow behavior lands.
-                if mode_name in ("LEFT", "RIGHT"):
+                if mode_name == LineFollowMode.DEFAULT.name:
                     raise FieldDataError(
-                        f"EDGES[{i}].mode = {mode_name!r} -- LineFollower "
-                        "offset-follow not yet implemented (issue #156); remove "
-                        "this guard when it lands"
+                        f"EDGES[{i}].mode = 'DEFAULT' -- DEFAULT means "
+                        "'inherit' (== MIDDLE today), which is what absence "
+                        "already encodes; omit the override or pick a "
+                        f"concrete LineFollowMode tag (one of "
+                        f"{valid_line_mode_tags})"
                     )
-                if mode_name != LineFollowMode.MIDDLE.name:
+                if mode_name not in valid_line_mode_tags:
                     raise FieldDataError(
-                        f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes only "
-                        "'MIDDLE' this PR (LineFollowMode); a BlindMode tag such "
-                        "as 'SYNC_TSHAPE' is legal only on a BLIND edge"
+                        f"EDGES[{i}].mode = {mode!r} -- a LINE edge takes a "
+                        f"LineFollowMode tag (one of {valid_line_mode_tags}); "
+                        "the name is unknown, and a BlindMode tag such as "
+                        "'SYNC_TSHAPE' is legal only on a BLIND edge"
                     )
             else:  # EDGE_BLIND
                 if isinstance(mode, BlindMode):
@@ -1319,6 +1347,57 @@ def _validate_edges_field(field_data) -> None:
                     f"EDGES[{i}].stop_at_line must be a StopAtLineMode member "
                     "(DEFAULT, ON, OFF), the string 'on' / 'off' "
                     f"(case-insensitive), or absent; got {stop_at_line!r}"
+                )
+
+    # Swapped-pair heading-clobber guard (issue #151) ---------------------
+    # ``graph_builder._emit_directed_pair`` writes BOTH directed edges of a
+    # {u, v} pair on every call it makes for one EDGES entry: an entry
+    # ``(u, v)`` writes u->v verbatim (its explicit ``heading_deg``, or the
+    # coord-derived heading when the key is absent -- issue #79) and writes
+    # v->u as ``_reverse_heading`` of that SAME value. If a second entry
+    # authors the SWAPPED pair ``(v, u)``, its own call re-writes BOTH
+    # directions again -- an inconsistent swapped pair does not merge;
+    # whichever entry ``_build_authored_graph`` / the real planner graph
+    # (``graph_builder.build_graph``) processes LAST silently clobbers the
+    # other's heading on both directions, with no warning. Both of those
+    # graph builds run only through :func:`validate`, and this function runs
+    # first inside it (see ``validate``'s call order) -- so catching the
+    # conflict HERE, before either graph is built, is the single gate that
+    # protects both. Compare each entry's effective u->v heading (explicit
+    # if authored, else the same coord-derived ``atan2`` every downstream
+    # graph build uses) against ``_reverse_heading`` of its swapped
+    # partner's effective heading -- wrap-aware, so a value differing only
+    # by floating-point noise across the 0/360 seam is never a false
+    # positive.
+    from tools.path_planner.graph_builder import _heading_deg, _reverse_heading
+
+    def _effective_heading_deg(candidate: dict) -> float:
+        if "heading_deg" in candidate:
+            return float(candidate["heading_deg"])
+        return _heading_deg(nodes[candidate["u"]], nodes[candidate["v"]])
+
+    for i, entry in enumerate(edges):
+        for j in range(i + 1, len(edges)):
+            other = edges[j]
+            if other["u"] != entry["v"] or other["v"] != entry["u"]:
+                continue  # not this entry's swapped (u, v) partner.
+            heading_i = _effective_heading_deg(entry)
+            heading_j = _effective_heading_deg(other)
+            expected_i = _reverse_heading(heading_j)
+            if _heading_delta_deg(heading_i, expected_i) > _HEADING_CLOBBER_EPS_DEG:
+                raise FieldDataError(
+                    f"EDGES[{i}] ('{entry['u']}'->'{entry['v']}', effective "
+                    f"heading_deg={heading_i:.6f}) and EDGES[{j}] "
+                    f"('{other['u']}'->'{other['v']}', effective heading_deg="
+                    f"{heading_j:.6f}) are a swapped (u, v) pair whose "
+                    "headings are not reciprocal -- graph_builder rewrites "
+                    "BOTH directed edges of a {u, v} pair on every EDGES "
+                    "entry it processes, so whichever of these two entries is "
+                    "processed last silently clobbers the other's "
+                    f"heading_deg on both directions. Set EDGES[{j}]."
+                    f"heading_deg to {expected_i:.6f} (EDGES[{i}]'s effective "
+                    f"heading + 180 deg, wrapped), or drop EDGES[{j}]'s "
+                    "heading_deg and let it derive from the node coordinates"
                 )
 
 

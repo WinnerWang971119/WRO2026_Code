@@ -121,7 +121,7 @@ _BUCKET_DIST: str = "DIST"
 _BUCKET_HEAD: str = "HEAD"
 
 #: Fields compared by exact string/enum/bool/int equality (zero tolerance). The
-#: enums (`primitive`/`drive_mode`/`line_mode`/`wheel`/`mode`), bools
+#: enums (`primitive`/`drive_mode`/`speed`/`follow_mode`/`wheel`/`mode`), bools
 #: (`reverse`/`pass_through`/`brake_on_gate`), node names
 #: (`node`/`start`/`goal`/`final`), `reanchor`, `axis_idx`, and the framing
 #: metadata. Any continuous field falls through to the suffix rule below.
@@ -130,7 +130,14 @@ _EXACT_FIELDS: frozenset = frozenset(
         # enums
         "primitive",
         "drive_mode",
-        "line_mode",
+        # `speed` is the parity v3 rename of the historically-misnamed
+        # `line_mode` (it always held the resolved SpeedTier tier name), on
+        # both line_follow and projection_follow records.
+        "speed",
+        # `follow_mode` is the parity v3 LINE lateral-bias tag (issue #156):
+        # the resolved LineFollowMode member NAME (MIDDLE|LEFT|RIGHT), on
+        # both line_follow and projection_follow records.
+        "follow_mode",
         "wheel",
         "mode",
         "reanchor",
@@ -808,7 +815,7 @@ def _goal_start_obj(
     goal: str,
     realized_offset_cm: float,
 ) -> Dict[str, Any]:
-    """Build a complete, schema-v2 ``goal_start`` JSON object (dict) for a test."""
+    """Build a complete, schema-v3 ``goal_start`` JSON object (dict) for a test."""
     return {
         "schema_version": PARITY_SCHEMA_VERSION,
         "kind": "goal_start",
@@ -822,15 +829,19 @@ def _goal_start_obj(
 
 
 def test_goal_start_requires_realized_offset_cm() -> None:
-    """A ``goal_start`` record must carry ``realized_offset_cm`` (TC6, schema v2).
+    """A ``goal_start`` record must carry ``realized_offset_cm`` (TC6, schema v3).
 
     Pure unit test (no dump binary): :func:`_record_from_obj` validates the
     ``goal_start`` field set for EXACT equality, so the realized-offset field
     finding 1 added is REQUIRED, not optional. A ``goal_start`` missing it raises
-    :class:`ParitySchemaError`; one carrying it (with ``schema_version == 2`` and
-    every other ``goal_start`` field) parses into a :class:`TraceRecord`.
+    :class:`ParitySchemaError`; one carrying it (with ``schema_version == 3`` and
+    every other ``goal_start`` field) parses into a :class:`TraceRecord`. The
+    schema is now v3 (issue #156 added ``follow_mode`` + renamed ``line_mode`` ->
+    ``speed`` on the follow records); ``goal_start``'s own field set is unchanged.
     """
-    assert PARITY_SCHEMA_VERSION == 2, "finding 1 bumps the parity schema to v2"
+    assert PARITY_SCHEMA_VERSION == 3, (
+        "issue #156 bumps the parity schema to v3 (follow_mode + line_mode->speed)"
+    )
 
     full = _goal_start_obj("Inter2__Inter3__off_n14_h0", "Inter2", "Inter3", 14.0)
 
@@ -839,7 +850,7 @@ def test_goal_start_requires_realized_offset_cm() -> None:
     with pytest.raises(ParitySchemaError):
         _record_from_obj(without_field)
 
-    # With the field (+ schema_version 2 + every other goal_start field) -> parses.
+    # With the field (+ schema_version 3 + every other goal_start field) -> parses.
     record = _record_from_obj(full)
     assert record.kind == "goal_start"
     assert record.fields["realized_offset_cm"] == pytest.approx(14.0)

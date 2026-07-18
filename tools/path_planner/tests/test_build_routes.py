@@ -7,11 +7,13 @@ import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
+import networkx as nx
 import pytest
 
 from tools.path_planner import build_routes
 from tools.path_planner import field_data as real_field_data
 from tools.path_planner import header_writer
+from tools.path_planner.graph_builder import EDGE_LINE
 from tools.path_planner.tests.fixtures import toy_field_data
 
 _FIELD_ATTRS = (
@@ -236,3 +238,77 @@ def test_run_disconnected_node_warns_but_succeeds(tmp_path, monkeypatch, capsys)
     # The isolation of "G" must be the cause -- guard against the warning
     # coming only from an unrelated incidental isolated node.
     assert "'G'" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# TC12 (issue #156 / ADR-069 / AC12): the reverse-traversal lint. A biased LINE
+# edge (mode=LEFT|RIGHT) whose reverse traversal is actually driven by a
+# NEXT_HOP route, with NO companion authored entry biasing that reverse hop,
+# is an authoring smell -- `find_unpaired_biased_line_reversals` returns one
+# loud warning per such gap; it is silent when the reverse is paired (its own
+# authored `mode`), unused (never in NEXT_HOP), or the edge is centered.
+# ---------------------------------------------------------------------------
+
+
+def _line_reversal_graph(fwd_mode, rev_mode) -> nx.DiGraph:
+    """Build a 2-node directed graph A<->B with LINE edges carrying the given modes.
+
+    ``fwd_mode`` / ``rev_mode`` are the raw ``mode`` attribute for A->B / B->A
+    (a bare tag string, or ``None`` for an unbiased edge that carries no
+    ``mode`` key at all -- mirroring how graph_builder omits the key).
+    """
+    g = nx.DiGraph()
+    fwd_attrs = {"type": EDGE_LINE}
+    if fwd_mode is not None:
+        fwd_attrs["mode"] = fwd_mode
+    rev_attrs = {"type": EDGE_LINE}
+    if rev_mode is not None:
+        rev_attrs["mode"] = rev_mode
+    g.add_edge("A", "B", **fwd_attrs)
+    g.add_edge("B", "A", **rev_attrs)
+    return g
+
+
+def test_tc12_lint_warns_for_used_unpaired_biased_reverse() -> None:
+    """A biased A->B whose reverse B->A is NEXT_HOP-driven + uncompanioned warns."""
+    graph = _line_reversal_graph(fwd_mode="LEFT", rev_mode=None)
+    # From B, routing to destination A steps to A -> the reverse hop B->A IS used.
+    next_hop = {"B": {"A": "A"}, "A": {"B": "B"}}
+    messages = build_routes.find_unpaired_biased_line_reversals(graph, next_hop)
+    assert len(messages) == 1, messages
+    msg = messages[0]
+    assert "'A' -> 'B'" in msg
+    assert "LEFT" in msg
+    assert "'B' -> 'A'" in msg
+
+
+def test_tc12_lint_silent_when_reverse_is_paired() -> None:
+    """A companion reverse override (B->A carries its own mode) suppresses the warning."""
+    graph = _line_reversal_graph(fwd_mode="LEFT", rev_mode="RIGHT")
+    next_hop = {"B": {"A": "A"}, "A": {"B": "B"}}
+    assert build_routes.find_unpaired_biased_line_reversals(graph, next_hop) == []
+
+
+def test_tc12_lint_silent_when_reverse_unused() -> None:
+    """An uncompanioned biased reverse that no NEXT_HOP route drives is silent."""
+    graph = _line_reversal_graph(fwd_mode="LEFT", rev_mode=None)
+    # B never steps to A for any destination -> the reverse hop is unused.
+    next_hop = {"B": {}, "A": {"B": "B"}}
+    assert build_routes.find_unpaired_biased_line_reversals(graph, next_hop) == []
+
+
+def test_tc12_lint_silent_for_centered_edge() -> None:
+    """A centered (MIDDLE) or unbiased forward edge is never a lint target."""
+    # Explicit MIDDLE forward -> not a biased mode, so no warning even when used.
+    graph_middle = _line_reversal_graph(fwd_mode="MIDDLE", rev_mode=None)
+    next_hop = {"B": {"A": "A"}, "A": {"B": "B"}}
+    assert (
+        build_routes.find_unpaired_biased_line_reversals(graph_middle, next_hop)
+        == []
+    )
+    # No mode at all -> likewise silent.
+    graph_none = _line_reversal_graph(fwd_mode=None, rev_mode=None)
+    assert (
+        build_routes.find_unpaired_biased_line_reversals(graph_none, next_hop)
+        == []
+    )

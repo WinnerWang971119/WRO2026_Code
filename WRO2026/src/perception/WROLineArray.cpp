@@ -250,7 +250,35 @@ void WROLineArrayClass::setReverseActive(bool reverse)
     {
         return;
     }
-    _activeBoard = reverse ? (uint8_t) 1 : (uint8_t) 0;
+
+    const uint8_t newActiveBoard = reverse ? (uint8_t) 1 : (uint8_t) 0;
+    if (newActiveBoard == _activeBoard)
+    {
+        // Direction unchanged (e.g. a redundant `setReverse(true)` while already
+        // reversed) — skip the refresh below so a no-op flip never issues an
+        // extra I2C transaction outside the cooperative tick's `update()`
+        // chokepoint.
+        return;
+    }
+    _activeBoard = newActiveBoard;
+
+    // -----------------------------------------------------------------------------------
+    // Stale-cache-on-flip fix (#149). When `Config::LINE_ARRAY_TICK_CACHE_ENABLED` is
+    // `true`, `getError()` / `isOnline()` / `getJunctionType()` are pure cache readers for
+    // the remainder of the tick — they do NOT re-sample the active board (see `update()`
+    // doxygen). Without this refresh, a same-tick read taken right after this flip would
+    // return `_lastChannels` / `_lastOnline` as latched from the board that was active
+    // BEFORE the flip, silently reporting the OLD board's line state under the NEW
+    // board's identity. Refreshing immediately here closes that window so any getter
+    // called later in the same tick observes the NEW board's sample.
+    //
+    // When the toggle is `false` (legacy path), every getter already refreshes inline on
+    // each call, so this refresh would be redundant I2C traffic — skip it.
+    // -----------------------------------------------------------------------------------
+    if (Config::LINE_ARRAY_TICK_CACHE_ENABLED)
+    {
+        _refreshCache();
+    }
 }
 
 bool WROLineArrayClass::getReverseActive() const
