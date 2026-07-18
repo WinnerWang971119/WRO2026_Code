@@ -3,11 +3,11 @@
 **Status:** Implemented
 **Date decided:** 2026-07 (Phase 3)
 
-> **Number-collision note:** verified against `main` (2026-07): ADR-067/068/069 have since merged
-> (fault-clear cascade, in-place turn PD, lateral offset-follow); `feat/163-external-gyro-yaw`
-> holds 070 (unmerged, PR #172); 071 is free and unique to this branch, and 072 is the next open
-> number — no live collision. Re-verify against `main` at merge and renumber this file (never a
-> merged ADR's) only if a new branch has since taken 071 — see the ADR-number-collision gotcha.
+> **Number note:** this branch is rebased onto `main`, which carries ADR-066 through 070
+> (EncoderSource, fault-clear cascade, turn PD, lateral offset-follow, front/rear gains). 071 is the
+> next free number and 072 is unclaimed — no live collision. The sibling `feat/163-external-gyro-yaw`
+> also labels its ADR 070, which now collides with main's merged ADR-070; that is that branch's file
+> to renumber, not this one's. Re-verify at merge only if another branch lands a 071 first.
 
 ## Rule
 

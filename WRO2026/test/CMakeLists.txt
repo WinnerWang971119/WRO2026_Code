@@ -636,6 +636,7 @@ add_executable(test_path_tracker_approach_ramp
     ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
@@ -653,6 +654,7 @@ add_executable(test_path_tracker_approach_ramp_disabled
     ${TEST_DIR}/test_path_tracker_approach_ramp.cpp
     ${SKETCH_DIR}/src/mission/PathTracker.cpp
     ${SKETCH_DIR}/src/drive/Drive.cpp
+    ${SKETCH_DIR}/src/util/EncoderSource.cpp
     ${SKETCH_DIR}/src/nav/Localization.cpp
     ${SKETCH_DIR}/src/nav/YawSource.cpp
     ${FIXTURE_ROUTES_DIR}/routes_fixture.cpp
