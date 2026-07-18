@@ -211,6 +211,17 @@ public:
         const int16_t  speed  = (delta >= 0) ? mag : (int16_t)(-mag);
         const uint16_t degree = (uint16_t)labs(delta);
 
+        // TEMP bring-up telemetry: shows the actual encoder frame at move time so we can tell
+        // a sign-frame bug (current reads the wrong sign) from a stale-position one.
+        Serial.print(F("[ManipBelt] beltTo cur="));
+        Serial.print((long)current);
+        Serial.print(F(" tgt="));
+        Serial.print((long)absDeg);
+        Serial.print(F(" delta="));
+        Serial.print((long)delta);
+        Serial.print(F(" spd="));
+        Serial.println((int)speed);
+
         if (!_rotateFor(speed, degree)) {
             Serial.println(F("[ManipBelt] beltTo: rotateFor failed"));
             _state = State::IDLE;    // treat as done so a blocking drain does not hang
