@@ -205,9 +205,11 @@ def _direction_from_tag(tag) -> "Direction":
 #: approach trim SHORT of it when the destination is itself a chained pivot
 #: the route turns at. Any OTHER landing tag is distance-terminated and lands
 #: on-node natively via the sim's delta-trimmed leg, so it needs no
-#: correction. (Pivots are FRONT-only in v1 (#54), so the REAR reverse tags
-#: never actually fire on a pivot departure; they are listed for a complete
-#: on_intersection-landing set.)
+#: correction. Since #54 / ADR-072 a REAR pivot can depart over a sensor-
+#: terminated leg, so the REAR reverse tags (``ACT_STOP_AT_LINE_REVERSE`` and
+#: the following ``ACT_LINE_OVERSHOOT``) now genuinely fire on a pivot
+#: departure; the arming site flips the residual ray into the travel frame for
+#: REAR (see ``pending_pivot_land``).
 _SENSOR_LANDING_TAGS: frozenset[str] = frozenset(
     {
         ACT_LINE_OVERSHOOT,
@@ -273,13 +275,19 @@ class Track:
     :param pivots: Optional single-wheel pivot-arc overlay segments (issue #55),
         one per pivot the trace's routes actually take, sorted by ``t0``. Each
         entry is ``{"t0": float, "t1": float, "cx": float, "cy": float,
-        "theta_deg": float, "wheel": "left"|"right"}`` — the arc-span
-        timestamps, the planted-wheel world centre (rotation centre), the signed
-        swing angle (CCW positive, the ``ACT_TURN_REL`` delta), and the pivot
-        wheel side. Empty (and omitted from :meth:`to_dict`) for every
-        pivot-free trace, so ``schema_version`` stays ``1`` (additive optional
-        field). The dense arc keyframes between ``t0`` and ``t1`` already trace
-        the swing through the player's lerp; this segment just tells the
+        "theta_deg": float, "wheel": "left"|"right", "direction":
+        "front"|"rear"}`` — the arc-span timestamps, the planted-wheel world
+        centre (rotation centre), the signed swing angle (CCW positive, the
+        ``ACT_TURN_REL`` delta), the PLANTED (post-flip) pivot wheel side, and
+        the sim-derived pivot direction. ``wheel`` and ``direction`` both come
+        from the sim's taken-pivot surface (#54 / ADR-072): on a REAR pivot the
+        wheel is the L<->R flip of the stored forward wheel, and ``cx``/``cy``
+        already sit on the flipped (correct world / travel) side, so the player
+        needs no direction logic to pin the wheel. Empty (and omitted from
+        :meth:`to_dict`) for every pivot-free trace, so ``schema_version`` stays
+        ``1`` (additive optional fields, all INSIDE the non-empty-gated list).
+        The dense arc keyframes between ``t0`` and ``t1`` already trace the
+        swing through the player's lerp; this segment just tells the
         ``wheel-arc`` render mode WHEN a pivot is active and WHERE its wheel is.
     :param lateral_offsets: Optional visualization-only lateral hug-side overlay
         segments (issue #156), one per biased ``lineFollowDist`` leg the trace
@@ -2295,8 +2303,37 @@ def build(trace: Trace, field_data) -> Track:
                                 track_cm = parse_track_cm_from_config()
                             theta_deg = float(primitive[1])
                             start_kf = keyframes[-1]
+                            # REAR pivots (#54 / ADR-072): consume the sim's
+                            # DERIVED taken-pivot surface -- the direction
+                            # force-SAME committed the pivot to and the PLANTED
+                            # (post-flip) wheel. The direction is NOT recorded in
+                            # the command stream (recorder / trace_loader are
+                            # untouched, ADR-054); it is derived by the sim, so we
+                            # read it here rather than re-deriving. The departure
+                            # hop is where the pivot is TAKEN, so ``_taken_pivots``
+                            # is already populated by the time this pre-edge
+                            # ``ACT_TURN_REL`` is yielded. A miss (defensive only:
+                            # the pivot was not taken by the walk) falls back to
+                            # the direction-agnostic record's FORWARD wheel + a
+                            # FRONT direction -- byte-identical to the pre-#54
+                            # FRONT-only path.
+                            taken = sim.taken_pivot(prev_node, cur_node, w)
+                            if taken is not None:
+                                planted_wheel = taken.wheel
+                                pivot_dir = taken.direction
+                            else:
+                                planted_wheel = record.wheel
+                                pivot_dir = Direction.FRONT
+                            is_rear = pivot_dir == Direction.REAR
+                            # The planted-wheel side comes from the PLANTED
+                            # (post-flip) wheel; ``start_kf["h"]`` already carries
+                            # the +180 body-heading for a REAR approach (the sim
+                            # records the reverse-facing body pose), so the L<->R
+                            # flip + the +180 keep the wheel on the SAME world /
+                            # travel side as the forward pivot (Data / geometry
+                            # model, ADR-072).
                             wheel_sign = (
-                                1 if record.wheel == TurnMode.PIVOT_LEFT else -1
+                                1 if planted_wheel == TurnMode.PIVOT_LEFT else -1
                             )
                             arc, (wx, wy), (cx_end, cy_end), t = _build_pivot_arc(
                                 start_kf["x"],
@@ -2312,6 +2349,11 @@ def build(trace: Trace, field_data) -> Track:
                             keyframes.extend(arc)
                             # One overlay segment per taken pivot, appended in
                             # chronological (t0-increasing) order — already sorted.
+                            # ``wheel`` is the PLANTED (post-flip) wheel and
+                            # ``direction`` is the sim-derived pivot direction;
+                            # both live INSIDE the non-empty-gated ``pivots`` list,
+                            # so ``schema_version`` stays 1 and a pivot-free
+                            # trace's Track JSON is byte-identical (ADR-072 / AC9).
                             pivots.append(
                                 {
                                     "t0": start_kf["t"],
@@ -2321,9 +2363,10 @@ def build(trace: Trace, field_data) -> Track:
                                     "theta_deg": theta_deg,
                                     "wheel": (
                                         "left"
-                                        if record.wheel == TurnMode.PIVOT_LEFT
+                                        if planted_wheel == TurnMode.PIVOT_LEFT
                                         else "right"
                                     ),
+                                    "direction": "rear" if is_rear else "front",
                                 }
                             )
                             # Chassis nudge: land the shared chassis on the arc
@@ -2343,11 +2386,18 @@ def build(trace: Trace, field_data) -> Track:
                             chassis.x_cm = cx_end
                             chassis.y_cm = cy_end
                             # Arm the sensor-departure landing correction: the
-                            # arc-end heading IS the departure-edge heading
-                            # (the pre-edge turn faces the edge exactly), so
-                            # its unit vector is the ray any sensor-landing
-                            # residual lies along.
-                            depart_rad = radians(arc[-1]["h"])
+                            # residual over-travel lies along the TRAVEL-frame
+                            # departure ray. For a FRONT pivot the arc-end BODY
+                            # heading IS the travel direction (the pre-edge turn
+                            # faces the edge exactly). For a REAR pivot the body
+                            # faces OPPOSITE travel (rear sensor leads), so the
+                            # arc-end body heading points backward along the edge
+                            # -- flip it 180 deg to recover the travel ray, or the
+                            # correction would pull the landing the WRONG way
+                            # (ADR-072 / spec item 4).
+                            depart_rad = radians(
+                                arc[-1]["h"] + (180.0 if is_rear else 0.0)
+                            )
                             pending_pivot_land = (
                                 w,
                                 record.trim_cm,

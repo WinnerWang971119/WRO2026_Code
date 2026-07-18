@@ -552,7 +552,7 @@ _FIXTURES_DIR: Path = Path(__file__).resolve().parent / "fixtures"
 #: (CRLF checkout), macOS, and Linux/CI; a future edit to either file's actual
 #: content must fail this test loudly rather than silently pass.
 _PLAYER_JS_SHA256: str = "0bbace38c37f5f82fe0b752de6087b02cf5aaea7ad80800f7957ca10cfbaf997"
-_RENDERER_JS_SHA256: str = "c3995d0f964a4d5b79a7cfd89975c1286c4bd0fd1f1b127a0bc485be7bac0338"
+_RENDERER_JS_SHA256: str = "e6106aa37bc5568981a840a50e634308d1f67d94570fe80ee821fafbfb6f2dde"
 
 
 def test_t14_new_drive_fields_survive_loader(full_seam_trace: trace_loader.Trace) -> None:
@@ -708,10 +708,14 @@ def test_t14_player_and_renderer_js_byte_unchanged() -> None:
     since the issue-#130 motion-profile feature — dense keyframes need zero
     player changes. ``renderer.js`` was frozen the same way, then issue #156
     deliberately extended it with the parity-safe lateral hug-side render and
-    the pin was re-frozen against that #156 content. Both files are legitimate
-    co-owners of this freeze now (#130 for player.js, #130 + #156 for
-    renderer.js). This hashes the CURRENT on-disk assets and pins them so ANY
-    future edit fails this test loudly, forcing an explicit, reviewed pin update.
+    the pin was re-frozen against that #156 content; issue #54 (ADR-072) then
+    updated the ``wheel-arc`` mode docstring to record that ``seg.cx``/``seg.cy``
+    already carries the REAR-flipped planted-wheel side (the pin needs no
+    player-side direction logic — the render engine itself is unchanged) and the
+    pin was re-frozen again. All three are legitimate co-owners of this freeze
+    now (#130 for player.js, #130 + #156 + #54 for renderer.js). This hashes the
+    CURRENT on-disk assets and pins them so ANY future edit fails this test
+    loudly, forcing an explicit, reviewed pin update.
     """
     assets_dir = player_html.PLAYER_JS_PATH.parent
     # Normalize CRLF -> LF before hashing: the assets are stored LF in git but a
