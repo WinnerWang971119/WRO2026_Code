@@ -545,12 +545,19 @@
      * full-view HUD is a DOM element owned by T9 — not drawn here.
      */
     function _drawActors(ctx, view, state) {
+        // Axle->body offset (issue #165) FIRST: shift the drawn pose from the
+        // rotation axle to the true body centre before any further draw-time
+        // nudge. Guarded on window.CTPS_OBJ so a missing global falls back to
+        // the raw axle pose (non-fatal — draw runs post-boot in practice).
+        var bodyPose = (window.CTPS_OBJ && CTPS_OBJ.axleToBodyPose)
+            ? CTPS_OBJ.axleToBodyPose(CTPS.engine.poseAt(state.t), CTPS.store.robotCfg)
+            : CTPS.engine.poseAt(state.t);
         // Visualization-only lateral hug-side nudge (issue #156): shift the drawn
         // pose perpendicular to its heading while the playhead is inside a
         // `lateral_offsets` span. Applied on a COPY here, so every render mode
         // (box + wheel-arc) draws the biased marker while the engine's
         // sim-authoritative pose stays untouched.
-        var pose = _applyLateralOffset(CTPS.engine.poseAt(state.t), state.t);
+        var pose = _applyLateralOffset(bodyPose, state.t);
         _drawSelectionHalo(ctx, view, state, pose);
         var mode = CTPS.renderModes.get(_renderModeId);
         if (!mode || typeof mode.draw !== "function") {
@@ -662,7 +669,9 @@
         if (!_view) {
             return null;
         }
-        var pose = CTPS.engine.poseAt(CTPS.store.t);
+        var pose = (window.CTPS_OBJ && CTPS_OBJ.axleToBodyPose)
+            ? CTPS_OBJ.axleToBodyPose(CTPS.engine.poseAt(CTPS.store.t), CTPS.store.robotCfg)
+            : CTPS.engine.poseAt(CTPS.store.t);
         var rp = _project(_view, pose.x, pose.y);
         if (Math.hypot(px - rp.px, py - rp.py) <= HIT_ROBOT_RADIUS) {
             return { kind: "robot" };
